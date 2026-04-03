@@ -271,7 +271,7 @@ Examples:
         from .encoder_cross_kv import add_cross_kv_to_encoder
 
         add_cross_kv_to_encoder(
-            encoder_path=args.input,
+            model_path=args.input,
             output_path=args.output,
             hf_model_id=args.model_id,
             hidden_state_output_name=args.hidden_state_name,
@@ -288,7 +288,7 @@ Examples:
         from .utils.dtype_conversion import convert_fp16_to_bf16
 
         convert_fp16_to_bf16(
-            input_path=args.input,
+            model_path=args.input,
             output_path=args.output,
             external_data=not args.no_external_data,
             verbose=not args.quiet,

@@ -643,7 +643,7 @@ def get_model(
                 auto_model_module = getattr(transformers, architecture)
                 from_config = auto_model_module._from_config
 
-            with init_empty_weights():
+            with init_empty_weights(include_buffers=True):
                 # When computing the device_map, assuming bfloat16 precision by default,
                 # unless specified by the hf_config.
                 torch_dtype = getattr(hf_config, "torch_dtype", torch.bfloat16)

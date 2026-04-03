@@ -229,32 +229,34 @@ def megatron_preprocess_data(
     # Other arguments
     output_dir: str | Path,
     tokenizer_name_or_path: str,
-    json_keys: list[str] = ["text"],
+    json_keys: str | list[str] = ["text"],
     append_eod: bool = False,
     max_sequence_length: int | None = None,
     workers: int = 1,
-    log_interval: int = 1000,
+    log_interval: int = 100000,
 ):
     """Process large data for pretraining.
 
     Exactly one of ``input_dir``, ``jsonl_paths``, or ``hf_dataset`` must be provided.
 
     Args:
-        input_dir (str | Path, optional): Directory containing JSONL files to tokenize.
-        jsonl_paths (str | Path | list, optional): One or more paths to JSONL files.
-        hf_dataset (str, optional): Hugging Face Hub dataset name or path to download and tokenize.
-        hf_name (str, optional): Hugging Face Hub dataset subset name. Downloads all subsets if None.
-        hf_split (str, optional): Hugging Face Hub dataset split. Defaults to "train".
-        hf_max_samples_per_split (int, optional): Maximum number of samples to download per split from Hugging Face Hub.
+        input_dir: Directory containing JSONL files to tokenize.
+        jsonl_paths: One or more paths to JSONL files.
+        hf_dataset: Hugging Face Hub dataset name or path to download and tokenize.
+        hf_name: Hugging Face Hub dataset subset name. Downloads all subsets if None.
+        hf_split: Hugging Face Hub dataset split. Defaults to "train".
+        hf_max_samples_per_split: Maximum number of samples to download per split from Hugging Face Hub.
             Skip to download all samples.
-        output_dir (str | Path): Path to directory to save binary output files.
-        tokenizer_name_or_path (str): Name or path of the Hugging Face tokenizer to use.
-        json_keys (list, optional): List of keys to extract from json. Defaults to ["text"].
-        append_eod (bool, optional): Append an <eod> token to the end of a document. Defaults to False.
-        max_sequence_length (int, optional): Maximum tokenized sequence length. Defaults to None.
-        workers (int, optional): Number of worker processes to launch. Defaults to 1.
-        log_interval (int, optional): Interval between progress updates. Defaults to 100000.
+        output_dir: Path to directory to save binary output files.
+        tokenizer_name_or_path: Name or path of the Hugging Face tokenizer to use.
+        json_keys: Key or list of keys to extract from json. Defaults to ["text"].
+        append_eod: Append an <eod> token to the end of a document. Defaults to False.
+        max_sequence_length: Maximum tokenized sequence length. Defaults to None.
+        workers: Number of worker processes to launch. Defaults to 1.
+        log_interval: Interval between progress updates. Defaults to 100000.
     """
+    if isinstance(json_keys, str):
+        json_keys = [json_keys]
     num_sources = sum(x is not None for x in (input_dir, jsonl_paths, hf_dataset))
     if num_sources != 1:
         raise ValueError(
@@ -269,6 +271,7 @@ def megatron_preprocess_data(
             name=hf_name,
             split=hf_split,
             max_samples_per_split=hf_max_samples_per_split,
+            num_proc=workers,
         )
         print(f"\n\nTokenizing downloaded JSONL files: {jsonl_paths}\n")
 

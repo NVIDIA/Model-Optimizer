@@ -43,6 +43,7 @@ jobs:
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
+          flags: unit
           fail_ci_if_error: true
           verbose: true
   windows:

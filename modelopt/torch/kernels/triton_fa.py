@@ -23,6 +23,8 @@ Input format: flat packed [total_tokens, num_heads, head_dim] with per-sequence
 metadata (b_start_loc, b_seq_len). Supports causal masking and autograd.
 """
 
+import math
+
 import torch
 import triton
 import triton.language as tl
@@ -43,6 +45,145 @@ _FWD_CONFIGS = [
 # Use a single config in testing for reproducibility
 if "PYTEST_VERSION" in __import__("os").environ:
     _FWD_CONFIGS = [triton.Config({"BLOCK_M": 128, "BLOCK_N": 64}, num_stages=1, num_warps=4)]
+
+
+# ---------------------------------------------------------------------------
+# N:M sparse softmax helpers
+# ---------------------------------------------------------------------------
+@triton.jit
+def _sparse_nm_masks_m4(x0, x1, x2, x3, N: tl.constexpr):
+    """Top-N of 4 selection via pure boolean logic (6 comparisons, no int casts).
+
+    Uses ``>=`` so that ties are broken by index (lower index wins).
+    Guarantees exactly N masks are True for any input including all-equal.
+
+    Boolean formulas for "at least K of 3 wins":
+      K=3 (N=1): AND of all   — must beat all 3 others
+      K=2 (N=2): majority     — must beat at least 2 (sorting network)
+      K=1 (N=3): OR of all    — must beat at least 1
+    """
+    c01 = x0 >= x1
+    c02 = x0 >= x2
+    c03 = x0 >= x3
+    c12 = x1 >= x2
+    c13 = x1 >= x3
+    c23 = x2 >= x3
+
+    nc01 = ~c01
+    nc02 = ~c02
+    nc03 = ~c03
+    nc12 = ~c12
+    nc13 = ~c13
+    nc23 = ~c23
+
+    if N == 1:
+        # Keep max only: must beat all 3
+        m0 = c01 & c02 & c03
+        m1 = nc01 & c12 & c13
+        m2 = nc02 & nc12 & c23
+        m3 = nc03 & nc13 & nc23
+    elif N == 2:
+        # Majority vote: must beat at least 2 of 3
+        m0 = (c01 & c02) | (c01 & c03) | (c02 & c03)
+        m1 = (nc01 & c12) | (nc01 & c13) | (c12 & c13)
+        m2 = (nc02 & nc12) | (nc02 & c23) | (nc12 & c23)
+        m3 = (nc03 & nc13) | (nc03 & nc23) | (nc13 & nc23)
+    elif N == 3:
+        # Keep all but min: must beat at least 1
+        m0 = c01 | c02 | c03
+        m1 = nc01 | c12 | c13
+        m2 = nc02 | nc12 | c23
+        m3 = nc03 | nc13 | nc23
+    else:
+        tl.static_assert(False, "N must be 1, 2, or 3 for M=4")
+
+    return m0, m1, m2, m3
+
+
+@triton.jit
+def _apply_sparse_nm_to_qk_tile(
+    qk,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    SPARSITY_N: tl.constexpr,
+    SPARSITY_M: tl.constexpr,
+):
+    """Apply N:M sparse softmax to a QK score tile.
+
+    For every ``SPARSITY_M`` consecutive elements along the N (key) dimension,
+    keeps the top ``SPARSITY_N`` values and sets the rest to ``-inf``.
+    ``BLOCK_N`` must be divisible by ``SPARSITY_M``.
+
+    For M=4, exactly N values are retained (ties broken by position).
+    For M=8, a threshold-based approach (``tl.sort``) may retain more
+    than N values when ties straddle the threshold boundary.
+    """
+    tl.static_assert(SPARSITY_M == 4 or SPARSITY_M == 8, "SPARSITY_M must be 4 or 8")  # noqa: PLR1714
+    MASK_VAL: tl.constexpr = float("-inf")
+
+    if SPARSITY_M == 4:
+        tl.static_assert(BLOCK_N % 4 == 0, "BLOCK_N must be divisible by 4")
+        reshaped = tl.reshape(qk, (BLOCK_M, BLOCK_N // 4, 4))
+        cols = tl.arange(0, 4)[None, None, :]
+        x0 = tl.sum(tl.where(cols == 0, reshaped, 0.0), axis=2)
+        x1 = tl.sum(tl.where(cols == 1, reshaped, 0.0), axis=2)
+        x2 = tl.sum(tl.where(cols == 2, reshaped, 0.0), axis=2)
+        x3 = tl.sum(tl.where(cols == 3, reshaped, 0.0), axis=2)
+
+        m0, m1, m2, m3 = _sparse_nm_masks_m4(x0, x1, x2, x3, SPARSITY_N)
+
+        out = tl.full((BLOCK_M, BLOCK_N // 4, 4), 0.0, dtype=qk.dtype)
+        out = tl.where(cols == 0, tl.expand_dims(tl.where(m0, x0, MASK_VAL), 2), out)
+        out = tl.where(cols == 1, tl.expand_dims(tl.where(m1, x1, MASK_VAL), 2), out)
+        out = tl.where(cols == 2, tl.expand_dims(tl.where(m2, x2, MASK_VAL), 2), out)
+        out = tl.where(cols == 3, tl.expand_dims(tl.where(m3, x3, MASK_VAL), 2), out)
+        return tl.reshape(out, (BLOCK_M, BLOCK_N))
+
+    else:  # SPARSITY_M == 8
+        tl.static_assert(BLOCK_N % 8 == 0, "BLOCK_N must be divisible by 8")
+        reshaped = tl.reshape(qk, (BLOCK_M, BLOCK_N // 8, 8))
+
+        # Sort each group of 8 ascending; N-th largest is at index (8 - N)
+        sorted_vals = tl.sort(reshaped, dim=2)
+        KTH_IDX: tl.constexpr = SPARSITY_M - SPARSITY_N  # index of N-th largest in ascending order
+
+        # Extract the threshold value at KTH_IDX via masked sum
+        # Use 0.0 as fill (not -inf) so sum equals just the KTH element
+        cols = tl.arange(0, 8)[None, None, :]
+        threshold = tl.sum(tl.where(cols == KTH_IDX, sorted_vals, 0.0), axis=2)
+
+        # Mask: keep elements >= threshold (may keep >N on ties — acceptable)
+        mask = reshaped >= tl.expand_dims(threshold, 2)
+        return tl.reshape(tl.where(mask, reshaped, MASK_VAL), (BLOCK_M, BLOCK_N))
+
+
+# ---------------------------------------------------------------------------
+# Sink/window dense-region check
+# ---------------------------------------------------------------------------
+@triton.jit
+def _is_dense_region(
+    kv_start,
+    tile_q,
+    seq_len_q,
+    seq_len_kv,
+    BLOCK_M: tl.constexpr,
+    NUM_SINK_TOKENS: tl.constexpr,
+    DENSE_WINDOW_SIZE: tl.constexpr,
+):
+    """Check if a KV tile falls in a dense region (sink tokens or local window).
+
+    Uses absolute token positions so the result is BLOCK_N-independent,
+    ensuring forward and backward (which may use different BLOCK_N) agree.
+
+    Returns:
+        True if the tile should be kept dense (skip N:M sparsification).
+    """
+    is_sink = kv_start < NUM_SINK_TOKENS
+    causal_offset = seq_len_kv - seq_len_q
+    q_abs_pos = tile_q * BLOCK_M + causal_offset
+    token_distance = q_abs_pos - kv_start
+    is_local = (token_distance >= 0) and (token_distance < DENSE_WINDOW_SIZE)
+    return is_sink or is_local
 
 
 # ---------------------------------------------------------------------------
@@ -105,6 +246,12 @@ def _attn_fwd(
     IS_CAUSAL: tl.constexpr,  # Whether to apply causal mask
     HEAD_DIM: tl.constexpr,  # Actual head dimension (for d_mask)
     STORE_LSE: tl.constexpr,  # Whether to save LSE for backward pass
+    SPARSITY_N: tl.constexpr = 0,  # N:M sparsity — keep top-N of every M elements (0 = disabled)
+    SPARSITY_M: tl.constexpr = 4,  # N:M sparsity — group size (4 or 8)
+    NUM_SINK_TOKENS: tl.constexpr = 0,  # KV positions before this are kept dense (attention sinks)
+    DENSE_WINDOW_SIZE: tl.constexpr = 64,  # Tokens near diagonal kept dense (absolute, BLOCK_N-independent)
+    APPLY_SKIP_SOFTMAX: tl.constexpr = False,  # Skip KV tiles with negligible scores
+    SKIP_THRESHOLD_LOG2: tl.constexpr = 0.0,  # log2(lambda) * sm_scale, pre-scaled for comparison on scaled scores
 ):
     # --- Grid: (batch, num_q_heads, num_q_tiles) ---
     # Example: batch=2, num_q_heads=32, seq_len=256, BLOCK_M=128
@@ -162,26 +309,80 @@ def _attn_fwd(
         scores = tl.dot(q, k) * qk_scale
         scores = _apply_mask(scores, q_pos, kv_pos, seq_len_q, seq_len_kv, kv_start, IS_CAUSAL)
 
-        # --- Online softmax update ---
-        # 1. Update running max
-        m_new = tl.maximum(row_max, tl.max(scores, 1))
-        # 2. Compute unnormalized attention weights
-        p = tl.math.exp2(scores - m_new[:, None])
-        l_new = tl.sum(p, 1)
-        # 3. Correction factor: rescale previous tiles when max changes
-        correction = tl.math.exp2(row_max - m_new)
-        row_sum = row_sum * correction + l_new
-        acc = acc * correction[:, None]
+        # --- Optional N:M sparse softmax ---
+        if SPARSITY_N > 0:
+            if not _is_dense_region(
+                kv_start,
+                tile_q,
+                seq_len_q,
+                seq_len_kv,
+                BLOCK_M,
+                NUM_SINK_TOKENS,
+                DENSE_WINDOW_SIZE,
+            ):
+                scores = _apply_sparse_nm_to_qk_tile(
+                    scores, BLOCK_M, BLOCK_N, SPARSITY_N, SPARSITY_M
+                )
 
-        # Load V [BLOCK_N, BLOCK_D] and accumulate: acc += attn_weights @ V
-        v_offs = (kv_offset + kv_start + kv_pos[:, None]) * stride_vbs + dim_pos[None, :]
-        v = tl.load(
-            v_base + v_offs,
-            mask=((kv_start + kv_pos[:, None]) < seq_len_kv) & d_mask[None, :],
-            other=0.0,
-        )
-        acc = tl.dot(p.to(v.dtype), v, acc)
-        row_max = m_new
+        if APPLY_SKIP_SOFTMAX:
+            # --- Skip-softmax (BLASST, https://arxiv.org/pdf/2512.12087) ---
+            #
+            # Algorithm: During FlashAttention's block-wise computation, we
+            # maintain a running maximum m_i^(j) across blocks. If a block's
+            # local maximum ~m_i^(j) is significantly smaller than the running
+            # maximum m_i^(j):
+            #
+            #   ~m_i^(j) - m_i^(j) < ln(lambda)
+            #
+            # then exp(~m_i^(j) - m_i^(j)) < lambda ≈ 0, meaning the block's
+            # contribution to the final output is negligible. We skip the
+            # softmax computation, V load, and BMM2 computation entirely.
+            #
+            # The threshold is pre-scaled by qk_scale in the Python wrapper so
+            # it can be compared directly against scaled scores (matching the
+            # BLASST reference semantics on unscaled scores).
+            tile_row_max = tl.max(scores, 1)  # [BLOCK_M] — ~m_i^(j) (scaled)
+            # Per-row: True if row's tile max is negligible vs running max
+            can_skip = tile_row_max < (row_max + SKIP_THRESHOLD_LOG2)
+            # Per-tile: skip entire tile only if ALL rows are negligible
+            skip_tile = tl.min(can_skip.to(tl.int32)) == 1
+
+            if not skip_tile:
+                m_new = tl.maximum(row_max, tile_row_max)
+                p = tl.math.exp2(scores - m_new[:, None])
+                l_new = tl.sum(p, 1)
+                correction = tl.math.exp2(row_max - m_new)
+                row_sum = row_sum * correction + l_new
+                acc = acc * correction[:, None]
+
+                v_offs = (kv_offset + kv_start + kv_pos[:, None]) * stride_vbs + dim_pos[None, :]
+                v = tl.load(
+                    v_base + v_offs,
+                    mask=((kv_start + kv_pos[:, None]) < seq_len_kv) & d_mask[None, :],
+                    other=0.0,
+                )
+                acc = tl.dot(p.to(v.dtype), v, acc)
+                row_max = m_new
+            # else: tile skipped: no softmax computation, V load, and BMM2 computation
+        else:
+            # --- Standard path: no skip check ---
+            # Online softmax update
+            m_new = tl.maximum(row_max, tl.max(scores, 1))
+            p = tl.math.exp2(scores - m_new[:, None])
+            l_new = tl.sum(p, 1)
+            correction = tl.math.exp2(row_max - m_new)
+            row_sum = row_sum * correction + l_new
+            acc = acc * correction[:, None]
+
+            # Load V and accumulate
+            v_offs = (kv_offset + kv_start + kv_pos[:, None]) * stride_vbs + dim_pos[None, :]
+            v = tl.load(
+                v_base + v_offs,
+                mask=((kv_start + kv_pos[:, None]) < seq_len_kv) & d_mask[None, :],
+                other=0.0,
+            )
+            acc = tl.dot(p.to(v.dtype), v, acc)
+            row_max = m_new
 
     # --- Final normalization: output = acc / row_sum ---
     acc = acc / row_sum[:, None]
@@ -278,6 +479,12 @@ def _attn_bwd_dq(
     BLOCK_N: tl.constexpr,
     IS_CAUSAL: tl.constexpr,
     HEAD_DIM: tl.constexpr,
+    SPARSITY_N: tl.constexpr = 0,
+    SPARSITY_M: tl.constexpr = 4,
+    NUM_SINK_TOKENS: tl.constexpr = 0,
+    DENSE_WINDOW_SIZE: tl.constexpr = 64,
+    APPLY_SKIP_SOFTMAX: tl.constexpr = False,
+    SKIP_THRESHOLD_LOG2: tl.constexpr = 0.0,
 ):
     """Phase 3 of backward: compute dQ for one Q tile, looping over KV tiles.
 
@@ -343,7 +550,33 @@ def _attn_bwd_dq(
         # Recompute attention: S = Q @ K^T, P = exp2(S - LSE)
         scores = tl.dot(q, kT) * qk_scale
         scores = _apply_mask(scores, q_pos, kv_pos, seq_len_q, seq_len_kv, kv_start, IS_CAUSAL)
+
+        # Re-apply N:M sparse softmax to match forward pass
+        if SPARSITY_N > 0:
+            if not _is_dense_region(
+                kv_start,
+                tile_q,
+                seq_len_q,
+                seq_len_kv,
+                BLOCK_M,
+                NUM_SINK_TOKENS,
+                DENSE_WINDOW_SIZE,
+            ):
+                scores = _apply_sparse_nm_to_qk_tile(
+                    scores, BLOCK_M, BLOCK_N, SPARSITY_N, SPARSITY_M
+                )
+
         p = tl.math.exp2(scores - lse[:, None])
+
+        # Skip-softmax backward: zero out P for rows with negligible contribution.
+        # Per-row using final LSE because forward/backward tile sizes may differ
+        # (forward autotunes BLOCK_N; backward uses a fixed size), so per-tile
+        # skip masks from forward wouldn't align. LSE >= any intermediate running
+        # max, so this conservatively zeros out at least what forward skipped.
+        if APPLY_SKIP_SOFTMAX:
+            tile_row_max = tl.max(scores, 1)
+            can_skip = tile_row_max < (lse + SKIP_THRESHOLD_LOG2)
+            p = tl.where(can_skip[:, None], 0.0, p)
 
         # dP = dO @ V^T, dS = P * (dP - delta), dQ += dS @ K
         dp = tl.dot(do, tl.trans(v))
@@ -392,6 +625,12 @@ def _attn_bwd_dkdv(
     BLOCK_N: tl.constexpr,
     IS_CAUSAL: tl.constexpr,
     HEAD_DIM: tl.constexpr,
+    SPARSITY_N: tl.constexpr = 0,
+    SPARSITY_M: tl.constexpr = 4,
+    NUM_SINK_TOKENS: tl.constexpr = 0,
+    DENSE_WINDOW_SIZE: tl.constexpr = 64,
+    APPLY_SKIP_SOFTMAX: tl.constexpr = False,
+    SKIP_THRESHOLD_LOG2: tl.constexpr = 0.0,
 ):
     """Phase 2 of backward: compute dK, dV for one KV tile.
 
@@ -465,7 +704,33 @@ def _attn_bwd_dkdv(
             # Recompute attention: S = Q @ K^T, P = exp2(S - LSE)
             scores = tl.dot(q_tile, kT) * qk_scale
             scores = _apply_mask(scores, q_pos, kv_pos, seq_len_q, seq_len_kv, kv_start, IS_CAUSAL)
+
+            # Re-apply N:M sparse softmax to match forward pass
+            if SPARSITY_N > 0:
+                if not _is_dense_region(
+                    kv_start,
+                    qi,
+                    seq_len_q,
+                    seq_len_kv,
+                    BLOCK_M,
+                    NUM_SINK_TOKENS,
+                    DENSE_WINDOW_SIZE,
+                ):
+                    scores = _apply_sparse_nm_to_qk_tile(
+                        scores, BLOCK_M, BLOCK_N, SPARSITY_N, SPARSITY_M
+                    )
+
             p = tl.math.exp2(scores - lse[:, None])
+
+            # Skip-softmax backward: zero out P for rows with negligible contribution.
+            # Per-row using final LSE because forward/backward tile sizes may differ
+            # (forward autotunes BLOCK_N; backward uses a fixed size), so per-tile
+            # skip masks from forward wouldn't align. LSE >= any intermediate running
+            # max, so this conservatively zeros out at least what forward skipped.
+            if APPLY_SKIP_SOFTMAX:
+                tile_row_max = tl.max(scores, 1)
+                can_skip = tile_row_max < (lse + SKIP_THRESHOLD_LOG2)
+                p = tl.where(can_skip[:, None], 0.0, p)
 
             # dV += P^T @ dO
             dv += tl.dot(tl.trans(p.to(do_tile.dtype)), do_tile)
@@ -498,6 +763,11 @@ class _Attention(torch.autograd.Function):
         b_start_loc_k,
         b_seq_len_k,
         max_input_len_k,
+        sparsity_n,
+        sparsity_m,
+        num_sink_tokens,
+        dense_window_size,
+        skip_softmax_threshold,
     ):
         HEAD_DIM = q.shape[2]
         num_q_heads = q.shape[1]
@@ -517,6 +787,17 @@ class _Attention(torch.autograd.Function):
         qk_scale = sm_scale * LOG2E
         # Triton tiles must be powers of 2; pad head dim
         BLOCK_D = triton.next_power_of_2(HEAD_DIM)
+
+        # Skip-softmax: convert threshold to scaled log2 space for the kernel.
+        # The BLASST reference (https://arxiv.org/pdf/2512.12087) checks
+        # ln(lambda) on unscaled scores. Our kernel works in log2-scaled space
+        # (scores pre-multiplied by qk_scale = sm_scale * LOG2E), so we
+        # pre-scale: threshold_scaled = log2(lambda) * sm_scale.
+        apply_skip = skip_softmax_threshold is not None and skip_softmax_threshold > 0.0
+        if apply_skip:
+            skip_threshold_log2 = math.log2(skip_softmax_threshold) * sm_scale
+        else:
+            skip_threshold_log2 = 0.0
 
         o = torch.empty_like(q)
         lse = torch.empty(q.shape[0], num_q_heads, device=q.device, dtype=torch.float32)
@@ -552,6 +833,12 @@ class _Attention(torch.autograd.Function):
             IS_CAUSAL=is_causal,
             HEAD_DIM=HEAD_DIM,
             STORE_LSE=True,
+            SPARSITY_N=sparsity_n,
+            SPARSITY_M=sparsity_m,
+            NUM_SINK_TOKENS=num_sink_tokens,
+            DENSE_WINDOW_SIZE=dense_window_size,
+            APPLY_SKIP_SOFTMAX=apply_skip,
+            SKIP_THRESHOLD_LOG2=skip_threshold_log2,
             # BLOCK_M, BLOCK_N, num_warps, num_stages chosen by autotune
         )
 
@@ -566,6 +853,12 @@ class _Attention(torch.autograd.Function):
         ctx.num_q_heads = num_q_heads
         ctx.num_kv_heads = num_kv_heads
         ctx.batch = batch
+        ctx.sparsity_n = sparsity_n
+        ctx.sparsity_m = sparsity_m
+        ctx.num_sink_tokens = num_sink_tokens
+        ctx.dense_window_size = dense_window_size
+        ctx.apply_skip = apply_skip
+        ctx.skip_threshold_log2 = skip_threshold_log2
         return o
 
     @staticmethod
@@ -640,6 +933,12 @@ class _Attention(torch.autograd.Function):
             BLOCK_N=BLOCK,
             IS_CAUSAL=ctx.is_causal,
             HEAD_DIM=HEAD_DIM,
+            SPARSITY_N=ctx.sparsity_n,
+            SPARSITY_M=ctx.sparsity_m,
+            NUM_SINK_TOKENS=ctx.num_sink_tokens,
+            DENSE_WINDOW_SIZE=ctx.dense_window_size,
+            APPLY_SKIP_SOFTMAX=ctx.apply_skip,
+            SKIP_THRESHOLD_LOG2=ctx.skip_threshold_log2,
             num_warps=num_warps,
             num_stages=1,
         )
@@ -659,11 +958,34 @@ class _Attention(torch.autograd.Function):
             BLOCK_N=BLOCK,
             IS_CAUSAL=ctx.is_causal,
             HEAD_DIM=HEAD_DIM,
+            SPARSITY_N=ctx.sparsity_n,
+            SPARSITY_M=ctx.sparsity_m,
+            NUM_SINK_TOKENS=ctx.num_sink_tokens,
+            DENSE_WINDOW_SIZE=ctx.dense_window_size,
+            APPLY_SKIP_SOFTMAX=ctx.apply_skip,
+            SKIP_THRESHOLD_LOG2=ctx.skip_threshold_log2,
             num_warps=num_warps,
             num_stages=1,
         )
 
-        return dq, dk, dv, None, None, None, None, None, None, None, None
+        return (
+            dq,
+            dk,
+            dv,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
 
 
 def attention(
@@ -678,8 +1000,14 @@ def attention(
     b_start_loc_k: torch.Tensor | None = None,
     b_seq_len_k: torch.Tensor | None = None,
     max_input_len_k: int | None = None,
+    *,
+    sparsity_n: int = 0,
+    sparsity_m: int = 4,
+    num_sink_tokens: int = 0,
+    dense_window_size: int = 64,
+    skip_softmax_threshold: float | None = None,
 ) -> torch.Tensor:
-    """Variable-length flash attention with GQA and autograd support.
+    """Variable-length flash attention with GQA, autograd, and optional N:M sparse softmax and skip-softmax.
 
     Args:
         q: [total_q_tokens, num_q_heads, head_dim]
@@ -693,6 +1021,22 @@ def attention(
         b_start_loc_k: [batch] start offset for K/V (None = same as Q).
         b_seq_len_k: [batch] length for K/V (None = same as Q).
         max_input_len_k: Maximum K/V sequence length (None = same as Q).
+        sparsity_n: N:M sparsity — keep top-N of every M attention scores
+            along the key dimension. Set to 0 to disable. Examples:
+            ``sparsity_n=2, sparsity_m=4`` for 2:4 sparsity;
+            ``sparsity_n=4, sparsity_m=8`` for 4:8 sparsity.
+        sparsity_m: N:M sparsity — group size (4 or 8).
+        num_sink_tokens: KV positions before this token index are kept dense
+            (attention sinks). Absolute token count, BLOCK_N-independent.
+        dense_window_size: Tokens near the query diagonal kept dense (local
+            attention window). Absolute token count, BLOCK_N-independent.
+            Default 64 (one reference block).
+        skip_softmax_threshold: BLASST threshold lambda
+            (https://arxiv.org/pdf/2512.12087). Skip KV tiles where
+            ``exp(tile_max - running_max) < lambda``, meaning the tile's
+            softmax contribution is negligible. Tiles are skipped entirely
+            (no softmax, V load, or BMM2). The threshold is applied on
+            unscaled scores. Set to ``None`` or ``0`` to disable.
 
     Returns:
         Output tensor [total_q_tokens, num_q_heads, head_dim].
@@ -710,6 +1054,11 @@ def attention(
         b_start_loc_k,
         b_seq_len_k,
         max_input_len_k,
+        sparsity_n,
+        sparsity_m,
+        num_sink_tokens,
+        dense_window_size,
+        skip_softmax_threshold,
     )
 
 

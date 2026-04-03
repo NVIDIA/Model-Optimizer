@@ -311,7 +311,7 @@ The exported checkpoint can be deployed using TensorRT-LLM/ vLLM/ SGLang. For mo
 
 ### TensorRT-LLM Validation
 
-A list of accuracy validation benchmarks are provided in the [llm_eval](../llm_eval/README.md) directory. Right now MMLU, and MTbench are supported in this example by specifying the `--tasks` flag running the scripts mentioned above. For MTBench, the task only runs the answer generation stage. Please follow [fastchat](https://github.com/lm-sys/FastChat/tree/main/fastchat/llm_judge) to get the evaluation judge score.
+A list of accuracy validation benchmarks are provided in the [llm_eval](../llm_eval/README.md) directory. Right now MMLU is supported in this example by specifying the `--tasks` flag running the scripts mentioned above.
 
 The `benchmark_suite.py` script is used as a fast performance benchmark. For details, please refer to the [TensorRT-LLM documentation](https://github.com/NVIDIA/TensorRT-LLM/blob/main/benchmarks/)
 
@@ -345,6 +345,8 @@ with torch.inference_mode():
 ```bash
 python hf_ptq.py --pyt_ckpt_path <huggingface_model_card> --qformat fp8 --export_path <quantized_ckpt_path> --trust_remote_code
 ```
+
+> *For exporting fake-quantized models for vLLM serving (e.g., for research or kernels not yet supported in real-quant), use the `--vllm_fakequant_export` flag. See [vllm_serve/README.md](../vllm_serve/README.md) for details.*
 
 ### Hugging Face framework [Script](./scripts/huggingface_example.sh)
 

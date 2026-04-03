@@ -557,8 +557,13 @@ class _QuantSparseMoe(QuantModule):
         """Sync input_quantizer amax across experts so all share the same amax per quantizer.
 
         Skipped when _moe_calib_experts_ratio is set, as each expert is calibrated independently.
+        Also skipped when experts is a fused module (e.g. Llama4TextExperts) with shared quantizers.
         """
         if self._moe_calib_experts_ratio is not None:
+            return
+        try:
+            iter(self.experts)
+        except TypeError:
             return
         sync_moe_expert_amax(self.experts)
 

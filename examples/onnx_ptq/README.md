@@ -172,53 +172,39 @@ python -m modelopt.onnx.quantization \
 
 This feature requires `TensorRT 10+` and `ORT>=1.20`. For proper usage, please make sure that the paths to `libcudnn*.so` and TensorRT `lib/` are in the `LD_LIBRARY_PATH` env variable and that the `tensorrt` python package is installed.
 
-Please see the sample example below.
+A self-contained example is provided in the [`custom_op_plugin/`](./custom_op_plugin/) subfolder, based on [leimao/TensorRT-Custom-Plugin-Example](https://github.com/leimao/TensorRT-Custom-Plugin-Example). Please see the steps below.
 
-**Step 1**: Obtain the sample ONNX model and TensorRT plugin from [TensorRT-Custom-Plugin-Example](https://github.com/leimao/TensorRT-Custom-Plugin-Example).
+**Step 1**: Build the TensorRT plugin and create the sample ONNX model.
 
-&#160; **1.1.** Change directory to `TensorRT-Custom-Plugin-Example`:
-
-```bash
-cd /path/to/TensorRT-Custom-Plugin-Example
-```
-
-&#160; **1.2.** Compile the TensorRT plugin:
+&#160; **1.1.** Compile the TensorRT plugin:
 
 ```bash
-cmake -B build \
-    -DNVINFER_LIB=$TRT_LIBPATH/libnvinfer.so.10 \
-    -DNVINFER_PLUGIN_LIB=$TRT_LIBPATH/libnvinfer_plugin.so.10 \
-    -DNVONNXPARSER_LIB=$TRT_LIBPATH/libnvonnxparser.so.10 \
-    -DCMAKE_CXX_STANDARD_INCLUDE_DIRECTORIES=/usr/include/x86_64-linux-gnu
+cmake -S custom_op_plugin/plugin -B /tmp/plugin_build
+cmake --build /tmp/plugin_build --config Release --parallel
 ```
+
+This generates `/tmp/plugin_build/libidentity_conv_plugin.so`.
+
+&#160; **1.2.** Create the ONNX model with a custom `IdentityConv` operator:
 
 ```bash
-cmake --build build --config Release --parallel
+python custom_op_plugin/create_identity_neural_network.py \
+    --output_path=/tmp/identity_neural_network.onnx
 ```
 
-This generates a plugin in `TensorRT-Custom-Plugin-Example/build/src/plugins/IdentityConvIPluginV2IOExt/libidentity_conv_iplugin_v2_io_ext.so`
-
-&#160; **1.3.** Create the ONNX file.
-
-```bash
-python scripts/create_identity_neural_network.py
-```
-
-This generates the identity_neural_network.onnx model in `TensorRT-Custom-Plugin-Example/data/identity_neural_network.onnx`
-
-**Step 2**: Quantize the ONNX model. We will be using the `libidentity_conv_iplugin_v2_io_ext.so` plugin for this example.
+**Step 2**: Quantize the ONNX model using the compiled plugin.
 
 ```bash
 python -m modelopt.onnx.quantization \
-    --onnx_path=/path/to/identity_neural_network.onnx \
-    --trt_plugins=/path/to/libidentity_conv_iplugin_v2_io_ext.so
+    --onnx_path=/tmp/identity_neural_network.onnx \
+    --trt_plugins=/tmp/plugin_build/libidentity_conv_plugin.so
 ```
 
 **Step 3**: Deploy the quantized model with TensorRT.
 
 ```bash
-trtexec --onnx=/path/to/identity_neural_network.quant.onnx \
-    --staticPlugins=/path/to/libidentity_conv_iplugin_v2_io_ext.so
+trtexec --onnx=/tmp/identity_neural_network.quant.onnx \
+    --staticPlugins=/tmp/plugin_build/libidentity_conv_plugin.so
 ```
 
 ### Optimize Q/DQ node placement with Autotune

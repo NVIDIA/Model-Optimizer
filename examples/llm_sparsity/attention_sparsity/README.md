@@ -1,6 +1,11 @@
 # Attention Sparsity for HuggingFace Models
 
-In this tutorial, we demonstrate how to use NVIDIA Model Optimizer to apply attention sparsity to HuggingFace models. Attention sparsity reduces computational cost by skipping near-zero attention scores during the softmax computation. Two attention backends are supported:
+In this tutorial, we demonstrate how to use NVIDIA Model Optimizer to apply attention sparsity to HuggingFace models. Two sparsity methods are supported:
+
+- **Skip-softmax** (`flash_skip_softmax`): Skips attention tiles whose contribution is negligible, based on a threshold. Based on the [BLASST](https://arxiv.org/pdf/2512.12087) algorithm.
+- **N:M sparse softmax** (`triton_sparse_softmax`): For every M consecutive key positions, keeps the top-N attention scores and sets the rest to -inf before softmax.
+
+Two attention backends are available:
 
 - **pytorch** (default): Patches `F.softmax` to apply skip-softmax sparsity (requires `attn_implementation="eager"`)
 - **triton**: Uses a fused Triton Flash Attention kernel with in-kernel sparsity (uses `attn_implementation="modelopt_triton"`)
@@ -29,9 +34,9 @@ model = mtsa.sparsify(model, config=SKIP_SOFTMAX_DEFAULT)
 
 ## Configuration Options
 
-Two pre-defined configurations are available:
+### Skip-Softmax
 
-### 1. Fixed Threshold (SKIP_SOFTMAX_DEFAULT)
+#### 1. Fixed Threshold (SKIP_SOFTMAX_DEFAULT)
 
 Uses a fixed threshold value. Simple but may not be optimal for all sequence lengths.
 
@@ -41,7 +46,7 @@ from modelopt.torch.sparsity.attention_sparsity.config import SKIP_SOFTMAX_DEFAU
 model = mtsa.sparsify(model, config=SKIP_SOFTMAX_DEFAULT)
 ```
 
-### 2. Calibrated Threshold (SKIP_SOFTMAX_CALIB)
+#### 2. Calibrated Threshold (SKIP_SOFTMAX_CALIB)
 
 Uses RULER-based calibration to determine an optimal dynamic threshold that adapts to sequence length. Recommended for production use.
 
@@ -50,6 +55,46 @@ from modelopt.torch.sparsity.attention_sparsity.config import SKIP_SOFTMAX_CALIB
 
 model = mtsa.sparsify(model, config=SKIP_SOFTMAX_CALIB)
 ```
+
+### N:M Sparse Softmax (SPARSE_SOFTMAX_DEFAULT)
+
+Applies N:M structured sparsity to attention scores using the Triton backend. For every M consecutive key positions, keeps only the top-N scores and sets the rest to -inf. Supports M=4 (N=1,2,3) and M=8 (N=1..7). Attention sinks and a local dense window can be configured to preserve important positions.
+
+```python
+from modelopt.torch.sparsity.attention_sparsity.config import SPARSE_SOFTMAX_DEFAULT
+
+model = AutoModelForCausalLM.from_pretrained(
+    "meta-llama/Llama-3.1-8B",
+    torch_dtype=torch.bfloat16,
+    device_map="cuda",
+)
+
+model = mtsa.sparsify(model, config=SPARSE_SOFTMAX_DEFAULT)
+```
+
+Custom N:M configuration:
+
+```python
+sparse_cfg = {
+    "sparse_cfg": {
+        "*attn*": {
+            "method": "triton_sparse_softmax",
+            "sparsity_n": 2,            # Keep top-2 of every 4
+            "sparsity_m": 4,            # Group size
+            "num_sink_tokens": 4,       # Keep first 4 tokens dense (attention sinks)
+            "dense_window_size": 128,   # Keep tokens within distance 128 dense
+            "backend": "triton",
+            "enable": True,
+        },
+        "default": {"enable": False},
+    },
+}
+
+model = mtsa.sparsify(model, config=sparse_cfg)
+```
+
+> [!Note]
+> N:M sparse softmax requires the Triton backend (`backend="triton"`). The `attn_implementation` is automatically set to `"modelopt_triton"` by `mtsa.sparsify()`. N:M sparsity is applied during prefill only — decode tokens are not sparsified.
 
 ## Prerequisites
 
@@ -104,8 +149,8 @@ The calibration process:
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `--pyt_ckpt_path` | Required | HuggingFace model path or name |
-| `--sparse_attn` | `skip_softmax` | Configuration: `skip_softmax` or `skip_softmax_calib` |
-| `--backend` | `pytorch` | Backend: `pytorch` (only supported backend) |
+| `--sparse_attn` | `skip_softmax` | Configuration: `skip_softmax`, `skip_softmax_calib`, or `sparse_softmax` |
+| `--backend` | `pytorch` | Backend: `pytorch` (skip-softmax) or `triton` (N:M sparse softmax) |
 | `--seq_len` | `2048` | Maximum sequence length for input prompts |
 | `--export_dir` | `None` | Directory to export the sparsified model |
 
@@ -166,3 +211,4 @@ model = mtsa.sparsify(model, config=custom_config)
 
 - [Model Optimizer Documentation](https://nvidia.github.io/Model-Optimizer/)
 - [RULER: What's the Real Context Size of Your Long-Context Language Models?](https://github.com/NVIDIA/RULER)
+- [BLASST: Block-Level Adaptive Structured Sparse Training](https://arxiv.org/pdf/2512.12087) — skip-softmax algorithm
