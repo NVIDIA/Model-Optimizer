@@ -702,7 +702,7 @@ class HFDFlashModel(DFlashModel):
         # Valid block
         valid_block = block_keep_mask.view(bsz, 1, n_blocks, 1).repeat_interleave(block_size, dim=2)
 
-        final_mask = ((mask_ctx | mask_draft) & valid_block).unsqueeze(1)  # [B, 1, Q, KV]
+        final_mask = (mask_ctx | mask_draft) & valid_block  # [B, 1, Q, KV]
 
         # Convert bool mask to float additive mask for SDPA
         dtype = target_hidden.dtype
