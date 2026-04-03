@@ -347,16 +347,22 @@ class WanSparseAttentionModule(SparseAttentionModule):
         self.set_processor(proc)
 
     def forward(self, *args, **kwargs):
-        """Forward that bypasses SparseAttentionModule's context manager.
+        """Forward that calls ModelOptWanAttnProcessor directly.
 
-        The Triton kernel is called directly inside ModelOptWanAttnProcessor,
-        so no HuggingFace softmax-patching context is needed.  We just sync the
-        enabled flag into the processor and call the underlying WanAttention.
+        WanAttention is a new-style diffusers AttentionModuleMixin that uses
+        dispatch_attention_fn internally — it does NOT call self.processor().
+        So we intercept here and call the processor directly, bypassing the
+        original WanAttention.forward().
+
+        The processor's __call__ handles both paths:
+          - enabled=True  → _wan_forward_triton (ModelOpt Triton kernel)
+          - enabled=False → _wan_forward_sdpa   (dispatch_attention_fn fallback)
         """
         proc = getattr(self, "processor", None)
         if isinstance(proc, ModelOptWanAttnProcessor):
             proc._enabled = self.is_enabled
-        # Skip SparseAttentionModule.forward() and go straight to DynamicModule.forward()
+            return proc(self, *args, **kwargs)
+        # Fallback: original WanAttention.forward() via DynamicModule
         return super(SparseAttentionModule, self).forward(*args, **kwargs)
 
 
