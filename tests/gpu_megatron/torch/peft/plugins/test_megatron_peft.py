@@ -33,6 +33,8 @@ from modelopt.torch.peft.lora.config import MOE_LORA_CFG, MOE_LORA_RANDOM_INIT_C
 from modelopt.torch.peft.lora.layer import LoRAModule
 from modelopt.torch.utils.plugins import megatron_prefill
 
+from modelopt.torch.peft.lora.config import MOE_LORA_CFG
+
 if HAS_TE:
     from megatron.core.extensions.transformer_engine import (
         TEColumnParallelLinear,
@@ -131,6 +133,7 @@ DEFAULT_LORA_CFG_RANDOM_INIT_SMALL_RANK_TEST = {
         "*output_layer*": {"enable": False},
     },
 }
+
 
 SELECTIVE_LAYER_LORA_CFG = {
     "adapter_type": "lora",
