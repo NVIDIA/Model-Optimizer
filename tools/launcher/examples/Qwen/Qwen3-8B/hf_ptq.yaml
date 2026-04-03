@@ -20,7 +20,7 @@
 # Override model/quant via CLI:
 #   uv run launch.py --yaml examples/llm_ptq/hf_ptq.yaml \
 #       pipeline.global_vars.hf_model=Qwen/Qwen3-8B \
-#       pipeline.task_0.args='[--model,<<global_vars.hf_local>>Qwen/Qwen3-8B,--quant,nvfp4]' \
+#       pipeline.task_0.args='[--model,<<global_vars.hf_local>>Qwen/Qwen3-8B,--,--quant,nvfp4]' \
 #       --yes
 
 job_name: hf_ptq_nvfp4
