@@ -176,8 +176,8 @@ class SparseAttentionModule(DynamicModule):
     def forward(self, *args, **kwargs):
         """Forward with selected sparse attention method.
 
-        - VSA: dispatched by HF via ``ALL_ATTENTION_FUNCTIONS["modelopt_vsa"]``
-          inside the original forward — just pass through.
+        - VSA: patches ``F.scaled_dot_product_attention`` to intercept the SDPA
+          call inside the original forward. Cross-attention is skipped.
         - Softmax-patching methods (e.g. ``flash_skip_softmax``): use the
           context manager path below.
         """
@@ -185,12 +185,13 @@ class SparseAttentionModule(DynamicModule):
         if not self.is_enabled:
             return super().forward(*args, **kwargs)
 
-        # VSA is dispatched by HF via ALL_ATTENTION_FUNCTIONS["modelopt_vsa"]
-        # inside the original forward — pass through and let HF call our
-        # registered vsa_attention_forward().
+        # VSA: patch F.scaled_dot_product_attention so the VSA kernel intercepts
+        # the SDPA call inside the original forward. This works for diffusers models
+        # since SDPA is the common attention primitive.
+        # Only self-attention is replaced. Cross-attention (Q/K have different seq_len) is skipped.
         if self._method == "vsa":
-            result = super().forward(*args, **kwargs)
-            # Collect stats set by vsa_attention_forward
+            result = self._forward_with_vsa_sdpa_patch(args, kwargs)
+
             if self._stats_manager is not None and self._last_stats is not None:
                 self._stats_manager.collect(self._last_stats)
                 self._last_stats = None
@@ -207,6 +208,61 @@ class SparseAttentionModule(DynamicModule):
         if self._stats_manager is not None and self._last_stats is not None:
             self._stats_manager.collect(self._last_stats)
             self._last_stats = None  # Clear after collection
+
+        return result
+
+    def _forward_with_vsa_sdpa_patch(self, args, kwargs):
+        """Run forward with F.scaled_dot_product_attention patched for VSA.
+
+        Replaces SDPA with the VSA kernel for self-attention calls (Q and K/V
+        have the same seq_len).  Cross-attention calls fall through to the
+        original SDPA.  Warns if SDPA was never called.
+        """
+        import torch.nn.functional as F
+
+        from modelopt.torch.quantization.utils import replace_function
+
+        vsa = self._sparse_method_instance
+        original_sdpa = F.scaled_dot_product_attention
+        self._vsa_sdpa_called = False
+
+        def _patched_sdpa(query, key, value, attn_mask=None, dropout_p=0.0, is_causal=False, **kw):
+            self._vsa_sdpa_called = True
+
+            # Fall back to original SDPA when VSA cannot handle this call:
+            # - Cross-attention: Q and K/V have different seq_len
+            # - video_shape not set: VSA cannot compute tile metadata
+            # - seq_len mismatch: input doesn't match the configured video shape
+            can_apply_vsa = (
+                vsa.video_shape is not None
+                and query.shape[2] == key.shape[2]
+                and query.shape[2] == vsa.video_shape[0] * vsa.video_shape[1] * vsa.video_shape[2]
+            )
+            if not can_apply_vsa:
+                return original_sdpa(
+                    query,
+                    key,
+                    value,
+                    attn_mask=attn_mask,
+                    dropout_p=dropout_p,
+                    is_causal=is_causal,
+                    **kw,
+                )
+            output, stats = vsa.forward_attention(query, key, value)
+            self._last_stats = stats
+            return output
+
+        with replace_function(F, "scaled_dot_product_attention", _patched_sdpa):
+            result = super().forward(*args, **kwargs)
+
+        if not self._vsa_sdpa_called:
+            import warnings
+
+            warnings.warn(
+                f"VSA: F.scaled_dot_product_attention was not called during "
+                f"{type(self).__name__}.forward(). The attention layer may use a "
+                f"custom kernel that bypasses SDPA. VSA had no effect on this layer.",
+            )
 
         return result
 

@@ -35,14 +35,14 @@ from .utils import get_named_sparse_attention_modules, get_sparse_attention_modu
 def _set_attn_implementation(model: nn.Module, config: SparseAttentionConfig) -> None:
     """Set the correct attn_implementation based on the sparse attention method/backend.
 
-    - ``method="vsa"``: registers the VSA kernel with HF and sets
-      ``attn_implementation="modelopt_vsa"``.  HF calls VSA directly via the
-      registered attention function — no monkey-patching needed.
     - ``backend="triton"``: registers the Triton kernel with HF and sets
       ``attn_implementation="modelopt_triton"``.
     - ``backend="pytorch"`` (default): sets ``attn_implementation="eager"`` so that
       softmax-patching methods (e.g. skip-softmax) work correctly.  FlashAttention
       and SDPA bypass ``F.softmax``, so eager is required.
+    - ``method="vsa"``: no-op. VSA patches ``F.scaled_dot_product_attention``
+      directly in ``SparseAttentionModule.forward()``, so no ``attn_implementation``
+      change is needed.
 
     This is called automatically during ``mtsa.sparsify()`` so users never need
     to manually set ``attn_implementation``.
@@ -55,30 +55,22 @@ def _set_attn_implementation(model: nn.Module, config: SparseAttentionConfig) ->
     methods = {v.get("method") for v in layer_cfgs}
     backends = {v.get("backend", "pytorch") for v in layer_cfgs}
 
-    # VSA uses attn_implementation="modelopt_vsa", which is incompatible
-    # with softmax-patching methods that need "eager" or triton methods that need
-    # "modelopt_triton". Reject mixed configs.
+    # VSA patches F.scaled_dot_product_attention directly — it does not change
+    # attn_implementation.  Skip the rest for VSA-only configs.
+    if methods == {"vsa"}:
+        return
+
+    # Reject mixed VSA + non-VSA configs (VSA patches SDPA globally per-module,
+    # while softmax-patching methods need attn_implementation="eager").
     non_vsa_methods = methods - {"vsa"}
     if "vsa" in methods and non_vsa_methods:
         raise ValueError(
             f"Cannot mix VSA with other sparse attention methods ({non_vsa_methods}). "
-            f"VSA sets attn_implementation='modelopt_vsa' model-wide, which is incompatible "
+            f"VSA patches F.scaled_dot_product_attention, which is incompatible "
             f"with softmax-patching or triton methods."
         )
 
     model_config = getattr(model, "config", None)
-
-    if "vsa" in methods:
-        from .kernels import register_vsa_attention
-
-        if not register_vsa_attention():
-            raise RuntimeError(
-                "Failed to register VSA attention with HuggingFace. "
-                "Check that your transformers version supports ALL_ATTENTION_FUNCTIONS."
-            )
-        if model_config is not None:
-            model_config._attn_implementation = "modelopt_vsa"
-        return
 
     if "triton" in backends and "pytorch" in backends:
         raise ValueError(

@@ -22,18 +22,10 @@ VSA implements a two-branch sparse attention architecture:
 Uses the optimized Triton kernel from fastvideo_kernel.
 
 Integration:
-    For HuggingFace models, VSA registers as ``attn_implementation="modelopt_vsa"``
-    via ``ALL_ATTENTION_FUNCTIONS`` (same pattern as the Triton FA backend).  HF
-    dispatches Q, K, V directly to the VSA kernel — no monkey-patching needed.
-    This is set up automatically by ``mtsa.sparsify()``.
-
-    For non-HF models, call ``forward_attention(q, k, v, ...)`` directly::
-
-        for module in model.modules():
-            if isinstance(module, SparseAttentionModule):
-                vsa = module._sparse_method_instance
-                vsa.set_video_shape((T, H, W))
-                output, stats = vsa.forward_attention(q, k, v)
+    After ``mtsa.sparsify(model, VSA_DEFAULT)``, each attention layer's
+    ``F.scaled_dot_product_attention`` call is intercepted and replaced by the VSA
+    kernel.  Cross-attention (Q/K have different seq_len) is automatically skipped.
+    This works with HF transformers and diffusers.
 """
 
 import math
@@ -302,11 +294,11 @@ class VSA(SparseAttentionMethod):
         # Kernel operates on tiled tensors in [batch, heads, padded_seq, dim] format
         try:
             from fastvideo_kernel import video_sparse_attn as triton_vsa_kernel
-        except ModuleNotFoundError:
-            raise ModuleNotFoundError(
+        except ImportError as e:
+            raise ImportError(
                 "VSA requires the 'fastvideo_kernel' package for its Triton sparse attention "
-                "kernel. Install it with: pip install fastvideo_kernel"
-            ) from None
+                f"kernel. Install it with: pip install fastvideo_kernel (error: {e})"
+            ) from e
         output_tiled = triton_vsa_kernel(
             query_tiled,
             key_tiled,

@@ -251,7 +251,7 @@ class TestVSAForwardAttention:
     """Tests for VSA.forward_attention."""
 
     def test_missing_kernel_raises(self):
-        """forward_attention raises ModuleNotFoundError when fastvideo_kernel is missing."""
+        """forward_attention raises ImportError when fastvideo_kernel is missing."""
         vsa = VSA({"video_shape": (4, 4, 4), "top_k_ratio": 0.5})
         seq_len = 4 * 4 * 4
         q = torch.randn(1, 2, seq_len, 16)
@@ -259,7 +259,7 @@ class TestVSAForwardAttention:
         v = torch.randn(1, 2, seq_len, 16)
         with (
             patch.dict(sys.modules, {"fastvideo_kernel": None}),
-            pytest.raises(ModuleNotFoundError, match="fastvideo_kernel"),
+            pytest.raises(ImportError, match="fastvideo_kernel"),
         ):
             vsa.forward_attention(q, k, v)
 
@@ -271,7 +271,7 @@ class TestVSAForwardAttention:
         q = torch.randn(1, 2, seq_len, 16)
         with (
             patch.dict(sys.modules, {"fastvideo_kernel": None}),
-            pytest.raises(ModuleNotFoundError),
+            pytest.raises(ImportError),
         ):
             vsa.forward_attention(q, q, q, video_shape=new_shape)
         assert vsa.video_shape == new_shape
@@ -423,25 +423,24 @@ class TestVSASparsifyIntegration:
             if isinstance(module, SparseAttentionModule):
                 assert not module.is_enabled
 
-    def test_non_hf_forward_passes_through(self):
-        """For non-HF models, VSA forward passes through to original attention.
+    def test_forward_patches_sdpa(self):
+        """VSA patches F.scaled_dot_product_attention during forward.
 
-        SimpleAttentionModel uses nn.MultiheadAttention (not HF), so VSA
-        pass-through runs the original attention unchanged.
+        SimpleAttentionModel uses nn.MultiheadAttention which calls SDPA.
+        VSA intercepts the SDPA call. Without fastvideo_kernel, this raises
+        ImportError — proving the interception works.
         """
         model = SimpleAttentionModel()
         sparse_model = sparse_attn.sparsify(model, VSA_TEST_CFG)
 
-        output = sparse_model(torch.randn(1, 64, 256))
-        assert output.shape == (1, 64, 256)
+        # Set video_shape so metadata can be computed.
+        # seq_len=64, video_shape (4,4,4) -> T*H*W=64
+        for module in sparse_model.modules():
+            if isinstance(module, SparseAttentionModule) and module.is_enabled:
+                module._sparse_method_instance.set_video_shape((4, 4, 4))
 
-    def test_hf_vsa_registration(self):
-        """VSA registers modelopt_vsa in HF ALL_ATTENTION_FUNCTIONS."""
-        from modelopt.torch.sparsity.attention_sparsity.kernels import register_vsa_attention
-
-        result = register_vsa_attention()
-        assert result is True
-
-        from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
-
-        assert "modelopt_vsa" in ALL_ATTENTION_FUNCTIONS
+        with (
+            patch.dict(sys.modules, {"fastvideo_kernel": None}),
+            pytest.raises(ImportError, match="fastvideo_kernel"),
+        ):
+            sparse_model(torch.randn(1, 64, 256))

@@ -39,11 +39,8 @@ if torch.cuda.is_available():
 
         register_triton_attention = _register_triton_attention
 
-from .hf_vsa_attention import register_vsa_attention  # noqa: E402
-
 __all__ = [
     "IS_AVAILABLE",
     "attention",
     "register_triton_attention",
-    "register_vsa_attention",
 ]
