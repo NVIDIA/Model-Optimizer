@@ -175,11 +175,50 @@ class LanguageDataCollator:
         )
 
     # Simplified chat templates with {% generation %} tags for answer_only_loss.
-    # These drop complex features (tool_calls, thinking parsing) but correctly mark
-    # assistant content for loss masking. The training data should already contain
-    # the full assistant response including <think> blocks.
+    #
+    # PURPOSE:
+    #   HuggingFace's return_assistant_tokens_mask requires {% generation %} /
+    #   {% endgeneration %} tags in the Jinja chat template to identify which tokens
+    #   belong to assistant responses. Many models (Qwen3, Llama3) ship without these
+    #   tags. These simplified templates add them so that answer_only_loss works
+    #   reliably without regex fallbacks.
+    #
+    # HOW IT WORKS:
+    #   When answer_only_loss=True, _ensure_generation_tags() detects the model's
+    #   template style (ChatML, Llama3) and replaces the tokenizer's chat_template
+    #   with one of these simplified versions. The {% generation %} tags tell HF
+    #   exactly which tokens are assistant content for loss masking.
+    #
+    # WHAT IS PRESERVED:
+    #   - System / user / assistant role formatting (exact token match)
+    #   - Multi-turn conversation structure
+    #   - <think> block injection on last assistant turn (Qwen3-style, chatml_think)
+    #   - Content is output as-is — training data with <think> blocks is handled correctly
+    #
+    # WHAT IS DROPPED (vs original model templates):
+    #   - Tool call formatting (tool_call XML tags, function signatures)
+    #   - Multi-step tool response handling
+    #   - reasoning_content vs content splitting logic
+    #   - enable_thinking parameter support
+    #   - VLM/multimodal content handling
+    #
+    # LIMITATIONS:
+    #   - Training data with tool_call messages will not be formatted correctly.
+    #     Use the original template with manually added {% generation %} tags for
+    #     tool-use training data.
+    #   - The chatml_think variant adds <think>\n\n</think>\n\n only to the last
+    #     assistant turn (matching Qwen3 behavior). Non-last turns without <think>
+    #     in their content will differ from the original template which also
+    #     conditionally adds think wrappers based on multi-step reasoning context.
+    #   - Only ChatML (<|im_start|>/<|im_end|>) and Llama3
+    #     (<|start_header_id|>/<|eot_id|>) styles are supported. Other template
+    #     styles fall back to regex-based assistant span detection.
+    #
+    # TO USE A CUSTOM TEMPLATE INSTEAD:
+    #   Pass chat_template= to LanguageDataCollator with your own template that
+    #   includes {% generation %}...{% endgeneration %} around assistant content.
     _GENERATION_TEMPLATES = {
-        # Basic ChatML without <think> injection
+        # Basic ChatML without <think> injection (Phi, older Qwen, generic ChatML)
         "chatml": (
             "{% for message in messages %}"
             "{% if message['role'] == 'system' %}"
