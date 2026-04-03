@@ -1,11 +1,15 @@
+import argparse
 import json
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+import torch
 from omegaconf import DictConfig
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer, LlamaConfig, LlamaForCausalLM
+from vllm.benchmarks.latency import add_cli_args
+from vllm.benchmarks.latency import main as vllm_main
 
 from modelopt.torch.puzzletron.anymodel.converter import Converter
 from modelopt.torch.puzzletron.anymodel.models.llama import LlamaConverter, LlamaModelDescriptor
@@ -16,12 +20,15 @@ from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.block_config import (
     FFNConfig,
     SubblockConfig,
 )
+from modelopt.torch.puzzletron.tools.logger import mprint
 
 
 def create_benchmark_model(
     vocab_size: int,
     hidden_size: int,
     num_attention_heads: int,
+    prefill_seq_len: int,
+    generation_seq_len: int,
     block_config: BlockConfig | None,
     repeat_block_n_times: int = 10,
 ) -> LlamaForCausalLM:
@@ -40,6 +47,7 @@ def create_benchmark_model(
         block_configs.extend([block_config] * repeat_block_n_times)
 
     model_config = LlamaConfig(
+        max_position_embeddings=prefill_seq_len + generation_seq_len,
         vocab_size=vocab_size,
         hidden_size=hidden_size,
         num_attention_heads=num_attention_heads,
@@ -87,7 +95,7 @@ def save_model_as_anymodel(model, output_dir: Path, descriptor, num_hidden_layer
             json.dump(config_data, f, indent=2)
 
 
-def _save_model(
+def save_model(
     model: LlamaForCausalLM, tokenizer_path: Path, output_path: Path, num_hidden_layers: int
 ) -> None:
 
@@ -106,10 +114,38 @@ class RuntimeConfig:
     master_puzzle_dir: str
     tokenizer_path: str
     synth_dataset_num_requests: int
-    repeat_block_n_times: int = 10
-    prefill_seq_len: int = 100
-    generation_seq_len: int = 100
-    batch_size: int = 1
+    repeat_block_n_times: int
+    prefill_seq_len: int
+    generation_seq_len: int
+    batch_size: int
+
+
+def run_vllm_latency_benchmark(model_path: Path, runtime_config: RuntimeConfig):
+
+    output_json_path = model_path / "vllm_latency_benchmark.json"
+    parser = argparse.ArgumentParser()
+    add_cli_args(parser)
+
+    args = parser.parse_args(
+        [
+            "--model",
+            str(model_path),
+            "--input-len",
+            str(runtime_config.prefill_seq_len),
+            "--output-len",
+            str(runtime_config.generation_seq_len),
+            "--batch-size",
+            str(runtime_config.batch_size),
+            "--output-json",
+            str(output_json_path),
+            "--max-model-len",
+            str(runtime_config.prefill_seq_len + runtime_config.generation_seq_len),
+        ]
+    )
+    vllm_main(args)
+    with open(output_json_path) as f:
+        vllm_results = json.load(f)
+    return vllm_results["avg_latency"]
 
 
 def calc_subblock_runtime(
@@ -126,41 +162,20 @@ def calc_subblock_runtime(
         runtime_config.vocab_size,
         runtime_config.hidden_size,
         runtime_config.num_attention_heads,
+        runtime_config.prefill_seq_len,
+        runtime_config.generation_seq_len,
         block_config=subblock_config.to_blockconfig(),
         repeat_block_n_times=runtime_config.repeat_block_n_times,
     )
-    model_tmpdir = Path(tempfile.mkdtemp())
-    _save_model(
-        model,
-        Path(runtime_config.tokenizer_path),
-        model_tmpdir,
-        num_hidden_layers=runtime_config.repeat_block_n_times + 1,
-    )
-
-    def run_vllm_latency_benchmark():
-
-        import argparse
-
-        from vllm.benchmarks.latency import add_cli_args
-        from vllm.benchmarks.latency import main as vllm_main
-
-        parser = argparse.ArgumentParser()
-        add_cli_args(parser)
-        args = parser.parse_args(
-            [
-                "--model",
-                str(model_tmpdir),
-                "--input-len",
-                "100",
-                "--output-len",
-                "100",
-            ]
+    with tempfile.TemporaryDirectory() as model_tmpdir:
+        save_model(
+            model,
+            Path(runtime_config.tokenizer_path),
+            Path(model_tmpdir),
+            num_hidden_layers=runtime_config.repeat_block_n_times + 1,
         )
-        vllm_main(args)
 
-    run_vllm_latency_benchmark()
-
-    subblock_total_runtime_ms = 0.0
+        subblock_total_runtime_ms = run_vllm_latency_benchmark(Path(model_tmpdir), runtime_config)
 
     return subblock_total_runtime_ms
 
@@ -211,6 +226,9 @@ def calc_runtime_for_subblocks(
             subblock_total_runtime_ms = calc_subblock_runtime(runtime_config, subblock_config)
             baseline_runtime_ms = calc_baseline_runtime(runtime_config, subblock_config)
             total_runtime_ms = subblock_total_runtime_ms - baseline_runtime_ms
+            mprint(
+                f"|||| {subblock_config=} {subblock_total_runtime_ms=} {baseline_runtime_ms=} {total_runtime_ms=}"
+            )
 
         runtime_by_subblock_dict[subblock_config] = total_runtime_ms
 
