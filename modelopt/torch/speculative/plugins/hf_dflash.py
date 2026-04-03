@@ -655,11 +655,9 @@ class HFDFlashModel(DFlashModel):
         n_blocks = anchor_positions.shape[1]
 
         if n_blocks == 0 or not block_keep_mask.any():
-            loss = (
-                self._base_model_lm_head(target_hidden[:, :1, : self.config.hidden_size]).sum()
-                * 0.0
-            )
-            return ModelOutput(loss=loss, logits=base_outputs.logits, train_acc=[[0.0]])
+            # Zero loss that still flows through dflash_module for DDP gradient sync
+            dummy = self.dflash_module.fc.weight.sum() * 0.0
+            return ModelOutput(loss=dummy, logits=base_outputs.logits, train_acc=[[0.0]])
 
         # 4. Create noise embeddings: anchor token at block start, mask_token elsewhere
         noise_ids = torch.full(
