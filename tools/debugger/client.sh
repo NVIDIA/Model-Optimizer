@@ -88,15 +88,22 @@ case "$SUBCOMMAND" in
             exit 1
         fi
 
-        # Generate a unique command ID
-        cmd_id="$(date +%s%N)"
+        # Generate a unique command ID (timestamp + PID to avoid collisions)
+        cmd_id="$(date +%s%N)_$$"
 
-        # Write the command file
-        echo "$*" > "$CMD_DIR/$cmd_id.sh"
+        # Write the command file atomically (tmp + mv)
+        echo "$*" > "$CMD_DIR/$cmd_id.sh.tmp"
+        mv "$CMD_DIR/$cmd_id.sh.tmp" "$CMD_DIR/$cmd_id.sh"
 
         # Wait for result
         elapsed=0
         while [[ ! -f "$RESULT_DIR/$cmd_id.exit" ]]; do
+            # Check if server is still alive
+            if [[ ! -f "$RELAY_DIR/server.ready" ]]; then
+                echo "ERROR: Server appears to have stopped."
+                rm -f "$CMD_DIR/$cmd_id.sh"
+                exit 1
+            fi
             sleep "$POLL_INTERVAL"
             elapsed=$((elapsed + POLL_INTERVAL))
             if [[ $elapsed -ge $TIMEOUT ]]; then
@@ -132,7 +139,11 @@ case "$SUBCOMMAND" in
         else
             echo "Handshake: not started"
         fi
-        pending=$(ls "$CMD_DIR"/*.sh 2>/dev/null | wc -l || echo 0)
+        if [[ -d "$CMD_DIR" ]]; then
+            pending=$(ls "$CMD_DIR"/*.sh 2>/dev/null | wc -l)
+        else
+            pending=0
+        fi
         echo "Pending commands: $pending"
         ;;
 

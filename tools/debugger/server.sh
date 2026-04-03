@@ -63,6 +63,8 @@ RESULT_DIR="$RELAY_DIR/result"
 
 cleanup() {
     echo "[server] Shutting down..."
+    # Kill any child processes in our process group
+    kill -- -$$ 2>/dev/null || true
     rm -f "$RELAY_DIR/server.ready"
     rm -f "$RELAY_DIR/handshake.done"
     exit 0
@@ -71,6 +73,15 @@ trap cleanup SIGINT SIGTERM
 
 # Set environment
 export PYTHONPATH="$WORKDIR"
+
+# Check for an already-running server
+if [[ -f "$RELAY_DIR/server.ready" ]]; then
+    old_pid=$(cut -d: -f2 "$RELAY_DIR/server.ready")
+    if kill -0 "$old_pid" 2>/dev/null; then
+        echo "[server] ERROR: Another server (PID $old_pid) is already running."
+        exit 1
+    fi
+fi
 
 # Initialize relay directories
 rm -rf "$RELAY_DIR"
@@ -100,21 +111,20 @@ echo "$(hostname):$$:$(date -Iseconds)" > "$RELAY_DIR/handshake.done"
 echo "[server] Handshake complete. Listening for commands..."
 
 # Main loop: watch for command files
+shopt -s nullglob
 while true; do
     for cmd_file in "$CMD_DIR"/*.sh; do
-        [[ -e "$cmd_file" ]] || continue
-
         cmd_id="$(basename "$cmd_file" .sh)"
         echo "[server] Executing command $cmd_id..."
 
         # Execute the command, tee stdout+stderr to console and result file
-        set +e
-        (cd "$WORKDIR" && bash "$cmd_file" 2>&1) | tee "$RESULT_DIR/$cmd_id.log"
+        (cd "$WORKDIR" && bash "$cmd_file" 2>&1) | tee "$RESULT_DIR/$cmd_id.log" || true
         exit_code=${PIPESTATUS[0]}
-        set -e
 
-        # Write exit code
-        echo "$exit_code" > "$RESULT_DIR/$cmd_id.exit"
+        # Atomic write of exit code (signal to client that result is ready)
+        sync "$RESULT_DIR/$cmd_id.log" 2>/dev/null || true
+        echo "$exit_code" > "$RESULT_DIR/$cmd_id.exit.tmp"
+        mv "$RESULT_DIR/$cmd_id.exit.tmp" "$RESULT_DIR/$cmd_id.exit"
 
         # Remove the command file to mark it as processed
         rm -f "$cmd_file"
