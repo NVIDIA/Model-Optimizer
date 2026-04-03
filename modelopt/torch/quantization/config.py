@@ -151,6 +151,7 @@ the layer named ``lm_head``,  you can create a custom config and quantize your m
 """
 
 import copy
+import warnings
 from typing import Any, Literal, cast
 
 from pydantic import ValidationInfo, field_validator, model_validator
@@ -1577,8 +1578,20 @@ def normalize_quant_cfg_list(v: dict | list) -> list[QuantizerCfgEntry]:
         ValueError: If any entry has only ``quantizer_path`` with neither ``cfg`` nor ``enable``,
             or if the entry format is not recognized.
     """
+
+    def _warn_legacy():
+        warnings.warn(
+            "Passing quant_cfg in the legacy dict format is deprecated and will be removed in "
+            "a future release. Use the list-of-dicts format with explicit 'quantizer_path' "
+            "keys instead. See the quant_cfg documentation for the new format and migration "
+            "guide.",
+            DeprecationWarning,
+            stacklevel=4,
+        )
+
     # Legacy flat-dict format: {"*": {...}, "*weight_quantizer": {...}} → list of single-key dicts.
     if isinstance(v, dict):
+        _warn_legacy()
         v = [{k: val} for k, val in v.items()]
 
     def _dict_to_entry(key: str, value) -> list[QuantizerCfgEntry]:
@@ -1618,17 +1631,24 @@ def normalize_quant_cfg_list(v: dict | list) -> list[QuantizerCfgEntry]:
             return [entry]
 
     result: list[QuantizerCfgEntry] = []
+    _warned_legacy = False
     for raw in v:
         if isinstance(raw, dict) and "quantizer_path" in raw:
             entries = [dict(raw)]  # copy to avoid mutating caller's data
         elif isinstance(raw, dict) and len(raw) == 1:
             key, val = next(iter(raw.items()))
             entries = [dict(e) for e in _dict_to_entry(key, val)]
+            if not _warned_legacy:
+                _warn_legacy()
+                _warned_legacy = True
         elif isinstance(raw, dict) and len(raw) > 1 and any(k.startswith("nn.") for k in raw):
             # Legacy flat dict with nn.*-scoped keys mixed with other keys — expand all pairs.
             entries = []
             for k, val in raw.items():
                 entries.extend(dict(e) for e in _dict_to_entry(k, val))
+            if not _warned_legacy:
+                _warn_legacy()
+                _warned_legacy = True
         else:
             raise ValueError(f"Invalid quant_cfg entry: {raw!r}.")
 

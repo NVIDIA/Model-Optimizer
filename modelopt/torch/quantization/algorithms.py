@@ -1329,23 +1329,44 @@ def get_auto_quantize_config(search_state, constraints=None, verbose=False):
         return v
 
     quant_cfg: list[dict] = [{"quantizer_path": "*", "enable": False}]
+    _per_module_attrs = ("input_quantizer", "weight_quantizer", "output_quantizer")
+    # Track global (non per-module) recipe entries.  Last recipe wins for each pattern.
+    global_entries: dict[str, dict] = {}
+
     for hparam_name, recipe in best_recipe.items():
         if recipe == QuantRecipe(quant_cfg=None):
             continue
         module_names = search_state["candidate_stats"][hparam_name]["module_names"]
         for module_name in module_names:
-            for quantizer_attr in ("input_quantizer", "weight_quantizer"):
+            for quantizer_attr in _per_module_attrs:
                 matched_cfg, matched_enable = _match_quantizer_cfg(
                     recipe.config.quant_cfg, quantizer_attr
                 )
-                if matched_cfg is not None:
-                    quant_cfg.append(
-                        {
-                            "quantizer_path": f"{module_name}.{quantizer_attr}",
-                            "cfg": _cfg_to_dict(matched_cfg),
-                            "enable": matched_enable,
-                        }
-                    )
+                if matched_enable is not None:
+                    entry: dict[str, Any] = {
+                        "quantizer_path": f"{module_name}.{quantizer_attr}",
+                        "enable": matched_enable,
+                    }
+                    if matched_cfg is not None:
+                        entry["cfg"] = _cfg_to_dict(matched_cfg)
+                    quant_cfg.append(entry)
+
+        # Collect non-per-module entries (e.g. *[kv]_bmm_quantizer) from winning recipes.
+        for recipe_entry in recipe.config.quant_cfg:
+            pattern = recipe_entry["quantizer_path"]
+            if pattern == "*" or any(
+                fnmatch.fnmatch(attr, pattern) or pattern.endswith(attr)
+                for attr in _per_module_attrs
+            ):
+                continue
+            cfg = recipe_entry.get("cfg")
+            enable = recipe_entry.get("enable", True)
+            ge: dict[str, Any] = {"quantizer_path": pattern, "enable": enable}
+            if cfg is not None:
+                ge["cfg"] = _cfg_to_dict(cfg)
+            global_entries[pattern] = ge
+
+    quant_cfg.extend(global_entries.values())
     warnings.warn(
         "get_auto_quantize_config: returned config uses algorithm='max'. "
         "Per-recipe calibration algorithms (e.g. smoothquant, awq) are not preserved. "

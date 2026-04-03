@@ -87,13 +87,7 @@ def _set_kv_cache_constant_amax(quant_cfg: list) -> None:
         if entry.get("quantizer_path") != "*[kv]_bmm_quantizer":
             continue
         assert isinstance(entry.get("cfg", {}), dict)
-        new_entry = {
-            "quantizer_path": "*[kv]_bmm_quantizer",
-            "cfg": {**entry.get("cfg", {}), "use_constant_amax": True},
-        }
-        if entry.get("enable") is not None:
-            new_entry["enable"] = entry["enable"]
-        quant_cfg[i] = new_entry
+        quant_cfg[i] = {**entry, "cfg": {**entry.get("cfg", {}), "use_constant_amax": True}}
         break
 
 
