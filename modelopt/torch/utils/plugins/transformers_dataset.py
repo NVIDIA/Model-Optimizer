@@ -350,24 +350,18 @@ class LanguageDataCollator:
             labels = input_ids.new_full(input_ids.shape, IGNORE_TOKEN_ID)
             labels[..., :-1] = input_ids[..., 1:]
             if self.answer_only_loss:
-                # Try tokenizer's assistant_masks first
                 if "assistant_masks" in tokenized_examples:
                     assistant_mask = tokenized_examples["assistant_masks"]
                     if isinstance(assistant_mask, torch.Tensor) and assistant_mask.any():
                         labels[assistant_mask == 0] = IGNORE_TOKEN_ID
                     else:
-                        raise ValueError(
-                            "answer_only_loss requires {% generation %} tags in the chat "
-                            "template but assistant_masks is empty. Either add "
-                            "{% generation %}...{% endgeneration %} tags to your chat "
-                            "template or pass a chat_template with generation tags."
-                        )
+                        # All assistant content truncated or no assistant in batch — mask all
+                        labels[:] = IGNORE_TOKEN_ID
                 else:
                     raise ValueError(
                         "answer_only_loss requires {% generation %} tags in the chat "
                         "template but assistant_masks was not returned by the tokenizer. "
-                        "Either add {% generation %}...{% endgeneration %} tags to your "
-                        "chat template or pass a chat_template with generation tags."
+                        "Ensure _ensure_generation_tags() ran successfully."
                     )
             tokenized_examples["labels"] = labels
         return tokenized_examples
@@ -401,22 +395,28 @@ class LanguageDataCollator:
                 elif conversations:
                     converted = _sharegpt_to_openai_messages(conversations)
                     if not any(m.get("role") == "assistant" for m in converted):
-                        raise ValueError(
-                            "Conversation has no assistant turn. Each sample must contain "
-                            "at least one assistant message for training."
+                        print_rank_0(
+                            "=== WARNING === Skipping sample with no assistant turn in conversations."
                         )
+                        continue
                     batch.append(converted)
                 elif messages:
                     if not any(m.get("role") == "assistant" for m in messages):
-                        raise ValueError(
-                            "Conversation has no assistant turn. Each sample must contain "
-                            "at least one assistant message for training."
+                        print_rank_0(
+                            "=== WARNING === Skipping sample with no assistant turn in messages."
                         )
+                        continue
                     batch.append(messages)
                 else:
                     raise ValueError(
                         "The sample must in either OpenAI messages format or ShareGPT conversations format."
                     )
+
+        if not batch:
+            raise ValueError(
+                "All samples in batch were skipped (no assistant turns). "
+                "Check that your training data contains assistant responses."
+            )
 
         return self._process_chat_sample(batch)
 
