@@ -72,8 +72,8 @@ case "$SUBCOMMAND" in
         while [[ ! -f "$RELAY_DIR/handshake.done" ]]; do
             sleep "$POLL_INTERVAL"
             elapsed=$((elapsed + POLL_INTERVAL))
-            if [[ $elapsed -ge 30 ]]; then
-                echo "ERROR: Handshake timed out after 30s."
+            if [[ $elapsed -ge 120 ]]; then
+                echo "ERROR: Handshake timed out after 120s."
                 exit 1
             fi
         done
@@ -149,8 +149,11 @@ case "$SUBCOMMAND" in
 
     flush)
         if [[ -d "$RELAY_DIR" ]]; then
-            rm -rf "$RELAY_DIR"
-            echo "Relay directory cleared: $RELAY_DIR"
+            # Clear handshake and command/result files, but keep server.ready
+            rm -f "$RELAY_DIR/client.ready" "$RELAY_DIR/handshake.done"
+            rm -rf "$CMD_DIR" "$RESULT_DIR"
+            mkdir -p "$CMD_DIR" "$RESULT_DIR"
+            echo "Relay state cleared (server.ready preserved): $RELAY_DIR"
         else
             echo "Relay directory does not exist: $RELAY_DIR"
         fi

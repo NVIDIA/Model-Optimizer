@@ -117,9 +117,17 @@ echo "[server] Client connected: $CLIENT_INFO"
 echo "$(hostname):$$:$(date -Iseconds)" > "$RELAY_DIR/handshake.done"
 echo "[server] Handshake complete. Listening for commands..."
 
-# Main loop: watch for command files
+# Main loop: watch for command files and re-handshake requests
 shopt -s nullglob
 while true; do
+    # Detect re-handshake (client flushed and reconnected)
+    if [[ -f "$RELAY_DIR/client.ready" && ! -f "$RELAY_DIR/handshake.done" ]]; then
+        CLIENT_INFO=$(cat "$RELAY_DIR/client.ready")
+        echo "[server] Client re-connected: $CLIENT_INFO"
+        echo "$(hostname):$$:$(date -Iseconds)" > "$RELAY_DIR/handshake.done"
+        echo "[server] Re-handshake complete."
+    fi
+
     for cmd_file in "$CMD_DIR"/*.sh; do
         cmd_id="$(basename "$cmd_file" .sh)"
         echo "[server] Executing command $cmd_id..."
