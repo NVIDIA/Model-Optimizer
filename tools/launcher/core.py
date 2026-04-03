@@ -322,7 +322,7 @@ def build_docker_executor(
         ipc_mode="host",
         container_image=slurm_config.container,
         volumes=container_mounts,
-        additional_kwargs={"user": f"{os.getuid()}:{os.getgid()}"},
+        additional_kwargs={"user": f"{os.getuid()}:{os.getgid()}", "entrypoint": ""},
         packager=packager,
     )
     return executor

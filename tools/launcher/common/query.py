@@ -44,16 +44,30 @@ def _strip_thinking(content: str) -> str:
 class LLM:
     def __init__(self, args):
         self.args = args
+        self._pid = os.getpid()
         self.client = OpenAI(base_url=args.base_url)
         self.generate(messages=[{"role": "user", "content": "Hello! /no_think"}], verbose=True)
 
+    def _ensure_client(self):
+        """Reinitialize the HTTP client if we've been forked into a new process.
+
+        datasets.map(num_proc>1) forks worker processes that inherit the parent's
+        connection pool.  Reusing inherited sockets across processes causes
+        "Invalid HTTP request" errors.  Creating a fresh client per-process avoids this.
+        """
+        if os.getpid() != self._pid:
+            self._pid = os.getpid()
+            self.client = OpenAI(base_url=self.args.base_url)
+
     def generate(self, messages, verbose=False, **chat_template_kwargs):
         global early_termination
+        self._ensure_client()
         try:
             completion = self.client.chat.completions.create(
                 model=self.args.model,
                 messages=messages,
                 temperature=self.args.temperature,
+                max_tokens=self.args.max_tokens,
             )
             new_message = completion.choices[0].message.content
             if verbose:
@@ -88,6 +102,7 @@ parser.add_argument(
 )
 parser.add_argument("--num-proc", type=int, default=32, help="number of processes (concurrency).")
 parser.add_argument("--temperature", type=float, default=0.0, help="temperature.")
+parser.add_argument("--max-tokens", type=int, default=None, help="maximum tokens to generate per response.")
 args = parser.parse_args()
 
 llm = LLM(args)
@@ -162,7 +177,11 @@ def synthesize(data):
     return {"conversations": current_messages}
 
 
-dataset = load_dataset(args.data, split=args.data_split)
+# Support both HF Hub repo IDs and local file paths (.jsonl, .json, .parquet, etc.)
+if os.path.isfile(args.data):
+    dataset = load_dataset("json", data_files=args.data, split=args.data_split)
+else:
+    dataset = load_dataset(args.data, split=args.data_split)
 
 if args.num_shards * 100 > len(dataset):
     args.num_shards = min(16, len(dataset) // 100)
