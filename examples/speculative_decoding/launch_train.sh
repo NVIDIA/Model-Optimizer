@@ -317,6 +317,8 @@ CMD="accelerate launch $MULTI_NODE_ARGS --mixed_precision bf16 ${SCRIPT_DIR}/mai
     --warmup_steps 100 \
     --lr_scheduler_type linear \
     --logging_steps $LOG_STEPS \
+    --report_to tensorboard \
+    --logging_dir $OUTPUT_DIR/tensorboard \
     --tf32 True \
     $DATA_ARGS \
     --disable_tqdm $DISABLE_TQDM \

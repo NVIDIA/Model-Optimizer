@@ -225,18 +225,18 @@ class EagleTrainingPlot(TrainerCallback):
                 est_ar += acc_cumprod
             print_rank_0(f"Step {state.global_step} Estimated Training AR: {est_ar:.4f}")
 
+        # Log accuracy to HF Trainer's logs dict (picked up by TensorBoard)
+        logs = kwargs.get("logs") or {}
+        for i, draft_acc in enumerate(average_acc):
+            for j, step_acc in enumerate(draft_acc):
+                logs[f"train_acc/parallel_{i}_step_{j}"] = float(step_acc)
+        if self.estimate_ar:
+            logs["estimated_training_ar"] = est_ar
+
         # log to wandb
         if wandb and is_master():
-            logs = kwargs.get("logs") or {}
             if logs:
                 wandb.log({k: v for k, v in logs.items() if v is not None}, step=state.global_step)
-            for i, draft_acc in enumerate(average_acc):
-                for j, step_acc in enumerate(draft_acc):
-                    wandb.log(
-                        {f"parallel_{i}_step_{j}_train_acc": step_acc}, step=state.global_step
-                    )
-            if self.estimate_ar:
-                wandb.log({"estimated_training_ar": est_ar}, step=state.global_step)
 
         # reset training_accs
         state.training_accs = []
