@@ -241,8 +241,9 @@ elif [[ "$MODE" == "dflash" ]]; then
   if [[ "$DFLASH_USE_LOGIT_DISTILLATION" == "True" ]]; then
     SPECULATIVE_ARGS="$SPECULATIVE_ARGS --dflash_use_logit_distillation"
   fi
-  # DFlash uses DDP instead of FSDP
+  # DFlash uses DDP instead of FSDP — force dp_shard_size=1
   FSDP_ARGS="--ddp_find_unused_parameters True --ddp_timeout 1800"
+  DP_SHARD_SIZE=1
 else
   echo "Unsupported mode: $MODE. Supported: eagle3, dflash"
   exit 1
