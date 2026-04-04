@@ -39,8 +39,15 @@ export PATH=$PATH:/workspace/.local/bin
 trap 'error_handler $0 $LINENO' ERR
 
 # Auto-detect head node IP for multi-node training
-if [ -n "$SLURM_NODELIST" ] && [ -z "$HEAD_NODE_IP" ]; then
-    HEAD_NODE_IP=$(scontrol show hostnames "$SLURM_NODELIST" | head -1)
+if [ -n "$SLURM_JOB_NODELIST" ] && [ -z "$HEAD_NODE_IP" ]; then
+    # Try scontrol first (works outside container), then parse SLURM env directly
+    HEAD_NODE_IP=$(scontrol show hostnames "$SLURM_JOB_NODELIST" 2>/dev/null | head -1)
+    if [ -z "$HEAD_NODE_IP" ]; then
+        # Parse nodelist directly: "node[001-002]" → "node001"
+        HEAD_NODE_IP=$(echo "$SLURM_JOB_NODELIST" | sed 's/\[.*//; s/,.*//; s/ .*//')
+        # Resolve to IP
+        HEAD_NODE_IP=$(getent hosts "$HEAD_NODE_IP" 2>/dev/null | awk '{print $1}' || echo "$HEAD_NODE_IP")
+    fi
     export HEAD_NODE_IP
     echo "Auto-detected HEAD_NODE_IP: ${HEAD_NODE_IP}"
 fi
