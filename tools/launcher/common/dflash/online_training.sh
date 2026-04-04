@@ -39,14 +39,29 @@ export PATH=$PATH:/workspace/.local/bin
 trap 'error_handler $0 $LINENO' ERR
 
 # Auto-detect head node IP for multi-node training
-if [ -n "$SLURM_JOB_NODELIST" ] && [ -z "$HEAD_NODE_IP" ]; then
-    # Try scontrol first (works outside container), then parse SLURM env directly
+if [ -z "$HEAD_NODE_IP" ]; then
+    # Method 1: scontrol (works outside container)
     HEAD_NODE_IP=$(scontrol show hostnames "$SLURM_JOB_NODELIST" 2>/dev/null | head -1)
-    if [ -z "$HEAD_NODE_IP" ]; then
-        # Parse nodelist directly: "node[001-002]" → "node001"
-        HEAD_NODE_IP=$(echo "$SLURM_JOB_NODELIST" | sed 's/\[.*//; s/,.*//; s/ .*//')
-        # Resolve to IP
-        HEAD_NODE_IP=$(getent hosts "$HEAD_NODE_IP" 2>/dev/null | awk '{print $1}' || echo "$HEAD_NODE_IP")
+    # Method 2: SLURM_LAUNCH_NODE_IPADDR (some Slurm versions)
+    HEAD_NODE_IP=${HEAD_NODE_IP:-$SLURM_LAUNCH_NODE_IPADDR}
+    # Method 3: Parse SLURM_NODELIST and resolve via Python
+    if [ -z "$HEAD_NODE_IP" ] && [ -n "$SLURM_JOB_NODELIST" ]; then
+        HEAD_NODE_IP=$(python3 -c "
+import socket, re, os
+nl = os.environ.get('SLURM_JOB_NODELIST', '')
+# Extract first hostname: 'node[001-002]' -> 'node001', 'node001,node002' -> 'node001'
+m = re.match(r'([a-zA-Z0-9-]+?)(?:\[(\d+))?', nl)
+if m:
+    host = m.group(1) + (m.group(2) or '')
+    try:
+        print(socket.gethostbyname(host))
+    except:
+        print(host)
+" 2>/dev/null)
+    fi
+    # Method 4: Use rank 0's hostname
+    if [ -z "$HEAD_NODE_IP" ] && [ "${SLURM_PROCID:-0}" = "0" ]; then
+        HEAD_NODE_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
     fi
     export HEAD_NODE_IP
     echo "Auto-detected HEAD_NODE_IP: ${HEAD_NODE_IP}"
