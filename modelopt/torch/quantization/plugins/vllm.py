@@ -33,6 +33,7 @@ from vllm.distributed.parallel_state import get_dp_group, get_ep_group, get_tp_g
 
 from ...utils.distributed import ParallelState
 from ..nn import QuantLinearConvBase, QuantModule, QuantModuleRegistry, TensorQuantizer
+from ..utils import replace_function
 from .custom import CUSTOM_MODEL_PLUGINS
 
 # Try multiple import paths for vLLM compatibility across versions
@@ -85,6 +86,20 @@ _ATTENTION_TYPES = tuple(
 )
 
 vllm_fused_moe_package = importlib.import_module("vllm.model_executor.layers.fused_moe.fused_moe")
+
+_vllm_fused_moe_invoke_name_cache: str | None = None
+
+
+def _vllm_fused_moe_invoke_name() -> str:
+    """Return the vLLM public fused_moe entrypoint (renamed across versions)."""
+    global _vllm_fused_moe_invoke_name_cache
+    if _vllm_fused_moe_invoke_name_cache is not None:
+        return _vllm_fused_moe_invoke_name_cache
+    for name in ("invoke_fused_moe_kernel", "invoke_fused_moe_triton_kernel"):
+        if hasattr(vllm_fused_moe_package, name):
+            _vllm_fused_moe_invoke_name_cache = name
+            return name
+    raise ValueError("fused_moe_kernel is not found")
 
 
 @contextmanager
@@ -346,9 +361,12 @@ class _QuantFusedMoEBase(QuantModule):
             # First layer of expert
             A = self.w13_input_quantizer(A)  # noqa: N806
             if self.w13_weight_quantizer.is_enabled:
-                orig, self.w13_weight = self.w13_weight, self.w13_weight_quantizer(self.w13_weight)
+                original_weight, self.w13_weight = (
+                    self.w13_weight,
+                    self.w13_weight_quantizer(self.w13_weight),
+                )
                 vllm_fused_moe_package._invoke_fused_moe_kernel(A, B, C, *args, **kwargs)
-                self.w13_weight = orig
+                self.w13_weight = original_weight
             else:
                 vllm_fused_moe_package._invoke_fused_moe_kernel(A, B, C, *args, **kwargs)
             if self.w13_output_quantizer.is_enabled:
@@ -356,9 +374,12 @@ class _QuantFusedMoEBase(QuantModule):
         elif B is self.w2_weight:
             A = self.w2_input_quantizer(A)  # noqa: N806
             if self.w2_weight_quantizer.is_enabled:
-                orig, self.w2_weight = self.w2_weight, self.w2_weight_quantizer(self.w2_weight)
+                original_weight, self.w2_weight = (
+                    self.w2_weight,
+                    self.w2_weight_quantizer(self.w2_weight),
+                )
                 vllm_fused_moe_package._invoke_fused_moe_kernel(A, B, C, *args, **kwargs)
-                self.w2_weight = orig
+                self.w2_weight = original_weight
             else:
                 vllm_fused_moe_package._invoke_fused_moe_kernel(A, B, C, *args, **kwargs)
             if self.w2_output_quantizer.is_enabled:
@@ -366,25 +387,13 @@ class _QuantFusedMoEBase(QuantModule):
         else:
             raise ValueError("Cannot determine first or second layer of expert")
 
-    @contextmanager
-    def _patch_moe_kernel(self):
-        """Temporarily replace vLLM fused_moe kernel with quantized version."""
-        # `invoke_fused_moe_kernel` was used through v0.14.0rc0; it was renamed
-        # to `invoke_fused_moe_triton_kernel` starting from v0.14.0rc1.
-        for attr in ["invoke_fused_moe_kernel", "invoke_fused_moe_triton_kernel"]:
-            if hasattr(vllm_fused_moe_package, attr):
-                orig = getattr(vllm_fused_moe_package, attr)
-                setattr(vllm_fused_moe_package, "_invoke_fused_moe_kernel", orig)
-                setattr(vllm_fused_moe_package, attr, self.invoke_fused_moe_quantized)
-                try:
-                    yield
-                finally:
-                    setattr(vllm_fused_moe_package, attr, orig)
-                return
-        raise ValueError("fused_moe_kernel is not found")
-
     def forward(self, hidden_states: torch.Tensor, router_logits: torch.Tensor):
-        with self._patch_moe_kernel():
+        with replace_function(
+            vllm_fused_moe_package,
+            _vllm_fused_moe_invoke_name(),
+            self.invoke_fused_moe_quantized,
+            og_func_cache_name="_invoke_fused_moe_kernel",
+        ):
             return super().forward(hidden_states, router_logits)
 
     @torch.no_grad()
