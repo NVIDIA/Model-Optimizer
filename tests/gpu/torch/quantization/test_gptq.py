@@ -21,8 +21,9 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.unified_export_hf import _export_quantized_weight
-from modelopt.torch.quantization.model_calib import gptq, update_hessian
+from modelopt.torch.quantization.model_calib import gptq
 from modelopt.torch.quantization.qtensor.nvfp4_tensor import NVFP4QTensor
+from modelopt.torch.quantization.utils.calib_utils import update_hessian
 from modelopt.torch.utils.dataset_utils import create_forward_loop, get_dataset_dataloader
 
 RAND_SEED = 42
