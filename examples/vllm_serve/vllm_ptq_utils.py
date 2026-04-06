@@ -121,17 +121,17 @@ def update_kv_cfg_for_mla(model: torch.nn.Module, kv_quant_cfg: list) -> list:
         (
             e
             for e in kv_quant_cfg
-            if isinstance(e, dict) and e.get("quantizer_path") == "*[kv]_bmm_quantizer"
+            if isinstance(e, dict) and e.get("quantizer_name") == "*[kv]_bmm_quantizer"
         ),
         None,
     )
     if kv_entry is not None:
         kv_config = kv_entry.get("cfg", {})
         kv_quant_cfg.append(
-            {"quantizer_path": "*kv_c_bmm_quantizer", "cfg": kv_config, "enable": True}
+            {"quantizer_name": "*kv_c_bmm_quantizer", "cfg": kv_config, "enable": True}
         )
         kv_quant_cfg.append(
-            {"quantizer_path": "*k_pe_bmm_quantizer", "cfg": kv_config, "enable": True}
+            {"quantizer_name": "*k_pe_bmm_quantizer", "cfg": kv_config, "enable": True}
         )
         print("MLA detected: added *kv_c_bmm_quantizer and k_pe_bmm_quantizer config")
 

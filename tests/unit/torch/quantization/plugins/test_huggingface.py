@@ -197,7 +197,7 @@ def test_quantized_transformers_save_restore(tmp_path, model_cls, quant_config):
 
         quant_config = copy.deepcopy(quant_config)
         for entry in quant_config["quant_cfg"]:
-            if entry["quantizer_path"] == "*weight_quantizer":
+            if entry["quantizer_name"] == "*weight_quantizer":
                 entry.setdefault("cfg", {})["block_sizes"] = {-1: 16}
                 break
     else:

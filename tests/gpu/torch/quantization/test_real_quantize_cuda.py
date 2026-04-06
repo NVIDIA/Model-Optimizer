@@ -50,7 +50,7 @@ def test_real_quantize(model_cls, config):
         # reduce block sizes for simple testing models
         config = copy.deepcopy(config)
         for entry in config["quant_cfg"]:
-            if entry.get("quantizer_path") == "*weight_quantizer":
+            if entry.get("quantizer_name") == "*weight_quantizer":
                 entry.setdefault("cfg", {})["block_sizes"] = {
                     -1: 16,
                     "scale_bits": 8,
@@ -108,7 +108,7 @@ def test_save_restore(model_cls, config):
         # reduce block sizes for simple testing models
         config = copy.deepcopy(config)
         for entry in config["quant_cfg"]:
-            if entry.get("quantizer_path") == "*weight_quantizer":
+            if entry.get("quantizer_name") == "*weight_quantizer":
                 entry.setdefault("cfg", {})["block_sizes"] = {
                     -1: 16,
                     "scale_bits": 8,

@@ -311,22 +311,22 @@ def ptq(
     mtq_cfg = copy.deepcopy(getattr(mtq, quant_cfg))
 
     # disable head that corresponds to lm_head (for the huggingface checkpoint)
-    mtq_cfg["quant_cfg"].append({"quantizer_path": "*head*", "enable": False})
+    mtq_cfg["quant_cfg"].append({"quantizer_name": "*head*", "enable": False})
 
     allowed_mla_quant = [None, "per_tensor_fp8", "nvfp4"]
     assert mla_quant in allowed_mla_quant, f"mla_quant must be {allowed_mla_quant}"
 
     if not mla_quant:
-        mtq_cfg["quant_cfg"].append({"quantizer_path": "*attn*", "enable": False})
+        mtq_cfg["quant_cfg"].append({"quantizer_name": "*attn*", "enable": False})
     elif mla_quant == "per_tensor_fp8":
         mtq_cfg["quant_cfg"].extend(
             [
                 {
-                    "quantizer_path": "*attn*weight_quantizer",
+                    "quantizer_name": "*attn*weight_quantizer",
                     "cfg": {"num_bits": (4, 3), "axis": None},
                 },
                 {
-                    "quantizer_path": "*attn*input_quantizer",
+                    "quantizer_name": "*attn*input_quantizer",
                     "cfg": {"num_bits": (4, 3), "axis": None},
                 },
             ]
@@ -339,7 +339,7 @@ def ptq(
                 # wq_a, wkv_a, wq_b, wo use NVFP4 quantization
                 mtq_cfg["quant_cfg"].append(
                     {
-                        "quantizer_path": layer + "_quantizer",
+                        "quantizer_name": layer + "_quantizer",
                         "cfg": {
                             "num_bits": (2, 1),
                             "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
@@ -350,14 +350,14 @@ def ptq(
                 )
             else:
                 mtq_cfg["quant_cfg"].append(
-                    {"quantizer_path": layer + "_quantizer", "enable": False}
+                    {"quantizer_name": layer + "_quantizer", "enable": False}
                 )
 
         # Disable BMM quantizers
         mtq_cfg["quant_cfg"].extend(
             [
-                {"quantizer_path": "*attn.kv_bmm_quantizer*", "enable": False},
-                {"quantizer_path": "*attn.pe_bmm_quantizer*", "enable": False},
+                {"quantizer_name": "*attn.kv_bmm_quantizer*", "enable": False},
+                {"quantizer_name": "*attn.pe_bmm_quantizer*", "enable": False},
             ]
         )
 
@@ -376,8 +376,8 @@ def ptq(
             weight_cfg = weight_cfg[0]
         mtq_cfg["quant_cfg"].extend(
             [
-                {"quantizer_path": "*wo*weight_quantizer", "cfg": input_cfg},
-                {"quantizer_path": "*wo*input_quantizer", "cfg": weight_cfg},
+                {"quantizer_name": "*wo*weight_quantizer", "cfg": input_cfg},
+                {"quantizer_name": "*wo*input_quantizer", "cfg": weight_cfg},
             ]
         )
 

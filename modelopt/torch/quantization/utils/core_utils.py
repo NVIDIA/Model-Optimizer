@@ -311,14 +311,14 @@ def calibrate_with_adapters(model, args):
 
 def disable_lora_quantizers_in_config(config, layers):
     """Turns off input, weight, and output quantizers for LoRA weights and LoRALinear layers in config."""
-    config["quant_cfg"].append({"quantizer_path": "*lora*", "enable": False})
+    config["quant_cfg"].append({"quantizer_name": "*lora*", "enable": False})
     for layer in layers:
-        config["quant_cfg"].append({"quantizer_path": f"*{layer}.input_quantizer", "enable": False})
+        config["quant_cfg"].append({"quantizer_name": f"*{layer}.input_quantizer", "enable": False})
         config["quant_cfg"].append(
-            {"quantizer_path": f"*{layer}.weight_quantizer", "enable": False}
+            {"quantizer_name": f"*{layer}.weight_quantizer", "enable": False}
         )
         config["quant_cfg"].append(
-            {"quantizer_path": f"*{layer}.output_quantizer", "enable": False}
+            {"quantizer_name": f"*{layer}.output_quantizer", "enable": False}
         )
     return config
 
@@ -844,7 +844,7 @@ def update_quant_cfg_with_kv_cache_quant(
     # If quant_cfg["quant_cfg"] is None, it corresponds to only kv cache quantization case
     quant_cfg = copy.deepcopy(quant_cfg)
     inner: list[QuantizerCfgEntry] = quant_cfg.get("quant_cfg") or [
-        {"quantizer_path": "*", "enable": False}
+        {"quantizer_name": "*", "enable": False}
     ]
     quant_cfg["quant_cfg"] = inner + list(kv_cache_quant_cfg)
 

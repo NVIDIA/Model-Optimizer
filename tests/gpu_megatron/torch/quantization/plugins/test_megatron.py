@@ -304,7 +304,7 @@ def _test_sharded_state_dict(
 ):
     # Must disable output_layer quantization since output_layer amax cannot be restore via
     # sharded_state_dict. All output_layer quantizers state are removed.
-    config["quant_cfg"].append({"quantizer_path": "*output_layer*", "enable": False})
+    config["quant_cfg"].append({"quantizer_name": "*output_layer*", "enable": False})
 
     if modelopt_version is not None:
         mto.conversion.__version__ = modelopt_version
@@ -385,12 +385,12 @@ def _test_sharded_state_dict(
 mixed_precision_config = copy.deepcopy(mtq.W4A8_AWQ_BETA_CFG)
 mixed_precision_config["quant_cfg"].extend(
     [
-        {"quantizer_path": "*.1.*", "enable": False},
-        {"quantizer_path": "*.2.*weight_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
-        {"quantizer_path": "*.2.*input_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
-        {"quantizer_path": "*.3.*weight_quantizer.0", "cfg": {"num_bits": 8, "axis": 0}},
-        {"quantizer_path": "*.3.*weight_quantizer.1", "enable": False},
-        {"quantizer_path": "*.3.*input_quantizer", "cfg": {"num_bits": 8, "axis": None}},
+        {"quantizer_name": "*.1.*", "enable": False},
+        {"quantizer_name": "*.2.*weight_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
+        {"quantizer_name": "*.2.*input_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
+        {"quantizer_name": "*.3.*weight_quantizer.0", "cfg": {"num_bits": 8, "axis": 0}},
+        {"quantizer_name": "*.3.*weight_quantizer.1", "enable": False},
+        {"quantizer_name": "*.3.*input_quantizer", "cfg": {"num_bits": 8, "axis": None}},
     ]
 )
 
@@ -398,19 +398,19 @@ mixed_precision_config["quant_cfg"].extend(
 mixed_block_size_config = copy.deepcopy(mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG)
 mixed_block_size_config["quant_cfg"].extend(
     [
-        {"quantizer_path": "*.1.*", "enable": False},
+        {"quantizer_name": "*.1.*", "enable": False},
         {
-            "quantizer_path": "*.2.*weight_quantizer",
+            "quantizer_name": "*.2.*weight_quantizer",
             "cfg": {"num_bits": 4, "block_sizes": {-1: 64}},
             "enable": True,
         },
-        {"quantizer_path": "*.2.*input_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
+        {"quantizer_name": "*.2.*input_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
         {
-            "quantizer_path": "*.3.*weight_quantizer",
+            "quantizer_name": "*.3.*weight_quantizer",
             "cfg": {"num_bits": 4, "block_sizes": {-1: 128, -2: 64}},
             "enable": True,
         },
-        {"quantizer_path": "*.3.*input_quantizer", "cfg": {"num_bits": 8, "axis": None}},
+        {"quantizer_name": "*.3.*input_quantizer", "cfg": {"num_bits": 8, "axis": None}},
     ]
 )
 

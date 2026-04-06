@@ -263,11 +263,11 @@ def build_quant_config(
         "axis": None,
     }
     quant_cfg = [
-        {"quantizer_path": "*weight_quantizer", "cfg": _nvfp4_cfg, "enable": True},
-        {"quantizer_path": "*input_quantizer", "cfg": _nvfp4_cfg, "enable": True},
-        *[{"quantizer_path": pattern, "enable": False} for pattern in SENSITIVE_LAYER_PATTERNS],
+        {"quantizer_name": "*weight_quantizer", "cfg": _nvfp4_cfg, "enable": True},
+        {"quantizer_name": "*input_quantizer", "cfg": _nvfp4_cfg, "enable": True},
+        *[{"quantizer_name": pattern, "enable": False} for pattern in SENSITIVE_LAYER_PATTERNS],
         *[
-            {"quantizer_path": f"*transformer_blocks.{i}.*", "enable": False}
+            {"quantizer_name": f"*transformer_blocks.{i}.*", "enable": False}
             for i in exclude_blocks
         ],
     ]

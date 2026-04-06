@@ -77,7 +77,7 @@ def test_kv_rotate(rotate_fp32):
     model = nn.Sequential(SDPAAttention())
     mtq.replace_quant_module(model)
 
-    set_quantizer_by_cfg(model, [{"quantizer_path": "*", "enable": False}])
+    set_quantizer_by_cfg(model, [{"quantizer_name": "*", "enable": False}])
     dummy_input = SDPAAttention.get_input(device="cuda")
     output_ref = model(dummy_input)
     if rotate_fp32:
@@ -87,7 +87,7 @@ def test_kv_rotate(rotate_fp32):
     with set_quantizer_by_cfg_context(
         model,
         [
-            {"quantizer_path": "*[qk]_bmm_quantizer", "cfg": {"rotate": rotate}},
+            {"quantizer_name": "*[qk]_bmm_quantizer", "cfg": {"rotate": rotate}},
         ],
     ):
         output_test = model(dummy_input)
@@ -97,7 +97,7 @@ def test_kv_rotate(rotate_fp32):
     with set_quantizer_by_cfg_context(
         model,
         [
-            {"quantizer_path": "*k_bmm_quantizer", "cfg": {"rotate": rotate}},
+            {"quantizer_name": "*k_bmm_quantizer", "cfg": {"rotate": rotate}},
         ],
     ):
         output_test1 = model(dummy_input)

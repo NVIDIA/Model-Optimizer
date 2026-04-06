@@ -18,30 +18,30 @@ from calib.plugin_calib import PercentileCalibrator
 
 FP8_DEFAULT_CONFIG = {
     "quant_cfg": [
-        {"quantizer_path": "*", "enable": False},
-        {"quantizer_path": "*weight_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
-        {"quantizer_path": "*input_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
-        {"quantizer_path": "*output_quantizer", "enable": False},
-        {"quantizer_path": "*softmax_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
+        {"quantizer_name": "*", "enable": False},
+        {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
+        {"quantizer_name": "*input_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
+        {"quantizer_name": "*output_quantizer", "enable": False},
+        {"quantizer_name": "*softmax_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
     ],
     "algorithm": "max",
 }
 
 INT8_DEFAULT_CONFIG = {
     "quant_cfg": [
-        {"quantizer_path": "*", "enable": False},
-        {"quantizer_path": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
-        {"quantizer_path": "*input_quantizer", "cfg": {"num_bits": 8, "axis": None}},
-        {"quantizer_path": "*output_quantizer", "enable": False},
+        {"quantizer_name": "*", "enable": False},
+        {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+        {"quantizer_name": "*input_quantizer", "cfg": {"num_bits": 8, "axis": None}},
+        {"quantizer_name": "*output_quantizer", "enable": False},
     ],
     "algorithm": "max",
 }
 
 NVFP4_DEFAULT_CONFIG = {
     "quant_cfg": [
-        {"quantizer_path": "*", "enable": False},
+        {"quantizer_name": "*", "enable": False},
         {
-            "quantizer_path": "*weight_quantizer",
+            "quantizer_name": "*weight_quantizer",
             "cfg": {
                 "num_bits": (2, 1),
                 "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
@@ -50,7 +50,7 @@ NVFP4_DEFAULT_CONFIG = {
             "enable": True,
         },
         {
-            "quantizer_path": "*input_quantizer",
+            "quantizer_name": "*input_quantizer",
             "cfg": {
                 "num_bits": (2, 1),
                 "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
@@ -58,17 +58,17 @@ NVFP4_DEFAULT_CONFIG = {
             },
             "enable": True,
         },
-        {"quantizer_path": "*output_quantizer", "enable": False},
-        {"quantizer_path": "*softmax_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
+        {"quantizer_name": "*output_quantizer", "enable": False},
+        {"quantizer_name": "*softmax_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
     ],
     "algorithm": "max",
 }
 
 NVFP4_FP8_MHA_CONFIG = {
     "quant_cfg": [
-        {"quantizer_path": "*", "enable": False},
+        {"quantizer_name": "*", "enable": False},
         {
-            "quantizer_path": "**weight_quantizer",
+            "quantizer_name": "**weight_quantizer",
             "cfg": {
                 "num_bits": (2, 1),
                 "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
@@ -77,7 +77,7 @@ NVFP4_FP8_MHA_CONFIG = {
             "enable": True,
         },
         {
-            "quantizer_path": "**input_quantizer",
+            "quantizer_name": "**input_quantizer",
             "cfg": {
                 "num_bits": (2, 1),
                 "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
@@ -85,10 +85,10 @@ NVFP4_FP8_MHA_CONFIG = {
             },
             "enable": True,
         },
-        {"quantizer_path": "*output_quantizer", "enable": False},
-        {"quantizer_path": "*[qkv]_bmm_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
-        {"quantizer_path": "*softmax_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
-        {"quantizer_path": "*bmm2_output_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
+        {"quantizer_name": "*output_quantizer", "enable": False},
+        {"quantizer_name": "*[qkv]_bmm_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
+        {"quantizer_name": "*softmax_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
+        {"quantizer_name": "*bmm2_output_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
     ],
     "algorithm": {"method": "svdquant", "lowrank": 32},
 }
@@ -127,7 +127,7 @@ def reset_set_int8_config(quant_config, percentile, n_steps, collect_method, bac
             aq_name = f"*{name}*input_quantizer*"
             quant_config["quant_cfg"].append(
                 {
-                    "quantizer_path": aq_name,
+                    "quantizer_name": aq_name,
                     "cfg": {
                         "num_bits": 8,
                         "axis": None,

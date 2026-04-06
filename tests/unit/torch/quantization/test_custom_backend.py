@@ -43,9 +43,9 @@ def test_custom_backend_via_quantize():
 
     cfg = {
         "quant_cfg": [
-            {"quantizer_path": "*", "enable": False},
+            {"quantizer_name": "*", "enable": False},
             {
-                "quantizer_path": "*weight_quantizer",
+                "quantizer_name": "*weight_quantizer",
                 "cfg": {
                     "num_bits": 8,
                     "axis": None,
@@ -92,9 +92,9 @@ def test_custom_backend_with_quantizer_cache():
     model = torch.nn.Linear(16, 16, bias=False)
     cfg = {
         "quant_cfg": [
-            {"quantizer_path": "*", "enable": False},
+            {"quantizer_name": "*", "enable": False},
             {
-                "quantizer_path": "*weight_quantizer",
+                "quantizer_name": "*weight_quantizer",
                 "cfg": {"backend": "cached_backend"},
                 "enable": True,
             },

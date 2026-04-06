@@ -36,12 +36,12 @@ CUSTOM_CONFIG = {
         "quant_cfg": [
             *mtq.config._base_disable_all,
             {
-                "quantizer_path": "*weight_quantizer",
+                "quantizer_name": "*weight_quantizer",
                 "cfg": {"num_bits": 4, "block_sizes": {-1: 128}},
                 "enable": True,
             },
             {
-                "quantizer_path": "*input_quantizer",
+                "quantizer_name": "*input_quantizer",
                 "cfg": {"num_bits": 8, "type": "dynamic", "block_sizes": {-1: None}},
             },
             # Disable sensitive layers such as `lm_head`, gate layers in MoE etc.

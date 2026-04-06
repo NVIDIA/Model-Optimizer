@@ -241,10 +241,10 @@ def build_quant_cfg(
 
     if model_type == "phi4mm":
         # Only quantize the language model
-        quant_cfg["quant_cfg"].append({"quantizer_path": "*speech*", "enable": False})
-        quant_cfg["quant_cfg"].append({"quantizer_path": "*audio*", "enable": False})
-        quant_cfg["quant_cfg"].append({"quantizer_path": "*image*", "enable": False})
-        quant_cfg["quant_cfg"].append({"quantizer_path": "*vision*", "enable": False})
+        quant_cfg["quant_cfg"].append({"quantizer_name": "*speech*", "enable": False})
+        quant_cfg["quant_cfg"].append({"quantizer_name": "*audio*", "enable": False})
+        quant_cfg["quant_cfg"].append({"quantizer_name": "*image*", "enable": False})
+        quant_cfg["quant_cfg"].append({"quantizer_name": "*vision*", "enable": False})
 
     return quant_cfg
 

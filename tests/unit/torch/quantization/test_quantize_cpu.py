@@ -43,7 +43,7 @@ from modelopt.torch.quantization.nn.modules.tensor_quantizer import (
 WINT4INT8_CFG = {
     "quant_cfg": [
         {
-            "quantizer_path": "*weight_quantizer",
+            "quantizer_name": "*weight_quantizer",
             "cfg": [
                 {"num_bits": 4, "block_sizes": {-1: 128, "type": "static"}},
                 {"num_bits": 8, "axis": 0},
@@ -51,7 +51,7 @@ WINT4INT8_CFG = {
             "enable": True,
         },
         {
-            "quantizer_path": "*input_quantizer",
+            "quantizer_name": "*input_quantizer",
             "cfg": {"num_bits": 8, "axis": None},
             "enable": True,
         },
@@ -62,21 +62,21 @@ WINT4INT8_CFG = {
 # Test configs for per channel MSE calibration
 INT8_MSE_CFG = {
     "quant_cfg": [
-        {"quantizer_path": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
-        {"quantizer_path": "*input_quantizer", "cfg": {"num_bits": 8, "axis": None}},
+        {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+        {"quantizer_name": "*input_quantizer", "cfg": {"num_bits": 8, "axis": None}},
     ],
     "algorithm": "mse",
 }
 
 STATIC_WEIGHT_DYNAMIC_ACTIVATION_CFG = {
     "quant_cfg": [
-        {"quantizer_path": "*", "enable": False},
+        {"quantizer_name": "*", "enable": False},
         {
-            "quantizer_path": "*weight_quantizer",
+            "quantizer_name": "*weight_quantizer",
             "cfg": {"num_bits": 8, "axis": 0},
         },  # Per-channel quantization
         {
-            "quantizer_path": "*input_quantizer",
+            "quantizer_name": "*input_quantizer",
             "cfg": {"num_bits": 8, "axis": (0, 1), "type": "dynamic"},
         },  # Dynamic per-token quantization
     ],
@@ -92,7 +92,7 @@ class NewMaxCalibrator(MaxCalibrator):
 quant_cfg_custom_calib = {
     "quant_cfg": [
         {
-            "quantizer_path": "*",
+            "quantizer_name": "*",
             "cfg": {
                 "num_bits": 4,
                 "axis": None,
@@ -148,7 +148,7 @@ def test_quantize_invalid_cfg():
     model = SimpleLinear()
     config_invalid = {
         "quant_cfg": [
-            {"quantizer_path": "*", "cfg": {"num_bits": 4, "axis": 0, "block_sizes": {-1: 128}}}
+            {"quantizer_name": "*", "cfg": {"num_bits": 4, "axis": 0, "block_sizes": {-1: 128}}}
         ],
         "algorithm": "max",
     }
@@ -191,18 +191,18 @@ def test_class_wise_config():
         "quant_cfg": [
             {
                 "parent_class": "nn.Linear",
-                "quantizer_path": "*",
+                "quantizer_name": "*",
                 "cfg": {"num_bits": 4, "axis": -1},
                 "enable": True,
             },
             {
                 "parent_class": "nn.Conv2d",
-                "quantizer_path": "*",
+                "quantizer_name": "*",
                 "cfg": {"num_bits": 8},
                 "enable": True,
             },
-            {"parent_class": "nn.BatchNorm2d", "quantizer_path": "*", "enable": False},
-            {"quantizer_path": "*output_quantizer", "cfg": {"num_bits": 8}, "enable": True},
+            {"parent_class": "nn.BatchNorm2d", "quantizer_name": "*", "enable": False},
+            {"quantizer_name": "*output_quantizer", "cfg": {"num_bits": 8}, "enable": True},
         ],
         "algorithm": "max",
     }
@@ -251,10 +251,10 @@ def test_static_weight_dynamic_activations():
 def test_block_sizes_axis_model():
     REF_QUANT_CFG = {  # noqa: N806
         "quant_cfg": [
-            {"quantizer_path": "*", "enable": False},
-            {"quantizer_path": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+            {"quantizer_name": "*", "enable": False},
+            {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
             {
-                "quantizer_path": "*input_quantizer",
+                "quantizer_name": "*input_quantizer",
                 "cfg": {"num_bits": 8, "axis": None, "type": "dynamic"},
             },
         ],
@@ -262,13 +262,13 @@ def test_block_sizes_axis_model():
     }
     QUANT_CFG = {  # noqa: N806
         "quant_cfg": [
-            {"quantizer_path": "*", "enable": False},
+            {"quantizer_name": "*", "enable": False},
             {
-                "quantizer_path": "*weight_quantizer",
+                "quantizer_name": "*weight_quantizer",
                 "cfg": {"num_bits": 8, "block_sizes": {1: None}},
             },
             {
-                "quantizer_path": "*input_quantizer",
+                "quantizer_name": "*input_quantizer",
                 "cfg": {"num_bits": 8, "block_sizes": {0: None, 1: None}, "type": "dynamic"},
             },
         ],
@@ -407,9 +407,9 @@ def test_ordering_later_entry_overrides_earlier():
     model = SimpleLinear()
     config = {
         "quant_cfg": [
-            {"quantizer_path": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
-            {"quantizer_path": "*weight_quantizer", "cfg": {"num_bits": 4, "axis": 0}},
-            {"quantizer_path": "*input_quantizer", "cfg": {"num_bits": 8, "axis": None}},
+            {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+            {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 4, "axis": 0}},
+            {"quantizer_name": "*input_quantizer", "cfg": {"num_bits": 8, "axis": None}},
         ],
         "algorithm": "max",
     }
@@ -426,10 +426,10 @@ def test_enable_only_entry_preserves_attributes():
     model = SimpleLinear()
     config = {
         "quant_cfg": [
-            {"quantizer_path": "*weight_quantizer", "cfg": {"num_bits": 4, "axis": 0}},
-            {"quantizer_path": "*input_quantizer", "cfg": {"num_bits": 8, "axis": None}},
+            {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 4, "axis": 0}},
+            {"quantizer_name": "*input_quantizer", "cfg": {"num_bits": 8, "axis": None}},
             # This enable-only entry should disable without resetting num_bits/axis
-            {"quantizer_path": "*weight_quantizer", "enable": False},
+            {"quantizer_name": "*weight_quantizer", "enable": False},
         ],
         "algorithm": "max",
     }
@@ -447,10 +447,10 @@ def test_atomicity_later_cfg_entry_does_not_inherit_earlier():
     config = {
         "quant_cfg": [
             # Entry 1: set axis=0
-            {"quantizer_path": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+            {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
             # Entry 2: only set num_bits=4, no axis — axis should revert to default (None), not 0
-            {"quantizer_path": "*weight_quantizer", "cfg": {"num_bits": 4}},
-            {"quantizer_path": "*input_quantizer", "cfg": {"num_bits": 8, "axis": None}},
+            {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 4}},
+            {"quantizer_name": "*input_quantizer", "cfg": {"num_bits": 8, "axis": None}},
         ],
         "algorithm": "max",
     }
@@ -483,7 +483,7 @@ def test_legacy_dict_format_end_to_end():
                 assert module.is_enabled
                 assert module.num_bits == 8
             elif name.endswith("output_quantizer"):
-                # "default" key → quantizer_path="*" with enable=False disables everything,
+                # "default" key → quantizer_name="*" with enable=False disables everything,
                 # but weight/input quantizers are re-enabled by subsequent entries.
                 # output_quantizer is NOT re-enabled so it stays disabled.
                 assert not module.is_enabled

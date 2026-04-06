@@ -220,20 +220,20 @@ def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: QuantizeQuantCfgType
     ``quant_cfg`` is an **ordered list** of :class:`QuantizerCfgEntry <.config.QuantizerCfgEntry>`
     dicts. Each entry has the following fields:
 
-    - ``quantizer_path`` *(required)*: wildcard matched against quantizer module names via
+    - ``quantizer_name`` *(required)*: wildcard matched against quantizer module names via
       :func:`fnmatch`.
     - ``cfg`` *(optional)*: a dict of :class:`QuantizerAttributeConfig <.config.QuantizerAttributeConfig>`
       fields, or a list of such dicts for sequential quantization.
     - ``enable`` *(optional)*: ``True`` or ``False`` to toggle matched quantizers on or off.
       When omitted but ``cfg`` is present, defaults to ``True``.  Every entry must specify at
-      least one of ``cfg`` or ``enable`` — an entry with only ``quantizer_path`` is invalid.
+      least one of ``cfg`` or ``enable`` — an entry with only ``quantizer_name`` is invalid.
     - ``parent_class`` *(optional)*: restricts matching to quantizers whose immediate parent
       module is of this PyTorch class name.
 
     **Ordering and atomicity:** entries are applied in list order; later entries override earlier
     ones for any quantizer they match. Each entry with a ``cfg`` is a **complete replacement** —
     unspecified attributes revert to their defaults rather than inheriting from a prior entry.
-    The typical pattern is to deny all first (``{"quantizer_path": "*", "enable": False}``), then
+    The typical pattern is to deny all first (``{"quantizer_name": "*", "enable": False}``), then
     selectively enable and configure target quantizers in subsequent entries.
 
     **``enable`` and ``cfg`` are independent:**
@@ -250,7 +250,7 @@ def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: QuantizeQuantCfgType
     quant_cfg = normalize_quant_cfg_list(quant_cfg)
 
     for entry in quant_cfg:
-        quantizer_path: str = entry["quantizer_path"]
+        quantizer_name: str = entry["quantizer_name"]
         cfg = entry["cfg"]  # None, dict, or list — always explicit after normalization
         enable: bool = entry["enable"]  # always explicit after normalization
         parent_class_name = entry.get("parent_class")
@@ -268,7 +268,7 @@ def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: QuantizeQuantCfgType
         if cfg is None:
             # No cfg: only toggle the enable state, leave all other attributes unchanged.
             set_quantizer_attributes_partial(
-                quant_model, quantizer_path, {"enable": enable}, parent_class
+                quant_model, quantizer_name, {"enable": enable}, parent_class
             )
         else:
             # Has cfg: apply full replacement with the explicit enable value.
@@ -283,7 +283,7 @@ def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: QuantizeQuantCfgType
                     else QuantizerAttributeConfig(**c, enable=enable)
                     for c in cfg
                 ]
-            set_quantizer_attributes_full(quant_model, quantizer_path, attributes, parent_class)
+            set_quantizer_attributes_full(quant_model, quantizer_name, attributes, parent_class)
 
 
 def _match_quantizer(

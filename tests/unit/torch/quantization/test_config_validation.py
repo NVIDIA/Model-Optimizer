@@ -47,7 +47,7 @@ def test_need_calibration_with_list_cfg():
     cfg_static = {
         "quant_cfg": [
             {
-                "quantizer_path": "*input_quantizer",
+                "quantizer_name": "*input_quantizer",
                 "cfg": [
                     {"num_bits": 4, "block_sizes": {-1: 128, "type": "static"}},
                     {"num_bits": (4, 3)},
@@ -63,7 +63,7 @@ def test_need_calibration_with_list_cfg():
     cfg_dynamic = {
         "quant_cfg": [
             {
-                "quantizer_path": "*input_quantizer",
+                "quantizer_name": "*input_quantizer",
                 "cfg": [{"num_bits": (4, 3), "type": "dynamic"}],
                 "enable": True,
             },
@@ -76,23 +76,23 @@ def test_need_calibration_with_list_cfg():
 class TestNormalizeQuantCfgList:
     def test_new_format_passthrough(self):
         """New-format entries are returned unchanged (only canonical defaults added)."""
-        raw = [{"quantizer_path": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}}]
+        raw = [{"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}}]
         result = normalize_quant_cfg_list(raw)
         assert len(result) == 1
-        assert result[0]["quantizer_path"] == "*weight_quantizer"
+        assert result[0]["quantizer_name"] == "*weight_quantizer"
         assert result[0]["cfg"] == {"num_bits": 8, "axis": 0}
         assert result[0]["enable"] is True  # defaulted
 
     def test_new_format_enable_false(self):
         """Explicit enable=False is preserved."""
-        raw = [{"quantizer_path": "*", "enable": False}]
+        raw = [{"quantizer_name": "*", "enable": False}]
         result = normalize_quant_cfg_list(raw)
         assert result[0]["enable"] is False
         assert result[0]["cfg"] is None  # defaulted
 
     def test_new_format_explicit_enable_true_no_cfg(self):
         """Explicit enable=True with no cfg is valid and cfg defaults to None."""
-        raw = [{"quantizer_path": "*", "enable": True}]
+        raw = [{"quantizer_name": "*", "enable": True}]
         result = normalize_quant_cfg_list(raw)
         assert result[0]["enable"] is True
         assert result[0]["cfg"] is None
@@ -101,7 +101,7 @@ class TestNormalizeQuantCfgList:
         """Legacy {'*path': {attrs}} is converted to new format."""
         raw = [{"*weight_quantizer": {"num_bits": 8, "axis": 0}}]
         result = normalize_quant_cfg_list(raw)
-        assert result[0]["quantizer_path"] == "*weight_quantizer"
+        assert result[0]["quantizer_name"] == "*weight_quantizer"
         assert result[0]["cfg"] == {"num_bits": 8, "axis": 0}
         assert result[0]["enable"] is True  # defaulted
 
@@ -109,7 +109,7 @@ class TestNormalizeQuantCfgList:
         """Legacy {'*path': {'enable': False}} splits enable out from cfg."""
         raw = [{"*input_quantizer": {"enable": False}}]
         result = normalize_quant_cfg_list(raw)
-        assert result[0]["quantizer_path"] == "*input_quantizer"
+        assert result[0]["quantizer_name"] == "*input_quantizer"
         assert result[0]["enable"] is False
         assert result[0]["cfg"] is None
 
@@ -118,19 +118,19 @@ class TestNormalizeQuantCfgList:
         raw = [{"nn.Linear": {"*": {"enable": False}}}]
         result = normalize_quant_cfg_list(raw)
         assert result[0]["parent_class"] == "nn.Linear"
-        assert result[0]["quantizer_path"] == "*"
+        assert result[0]["quantizer_name"] == "*"
         assert result[0]["enable"] is False
 
     def test_normalization_cfg_defaults_to_none(self):
         """Entries without cfg get cfg=None after normalization."""
-        raw = [{"quantizer_path": "*lm_head*", "enable": False}]
+        raw = [{"quantizer_name": "*lm_head*", "enable": False}]
         result = normalize_quant_cfg_list(raw)
         assert "cfg" in result[0]
         assert result[0]["cfg"] is None
 
     def test_normalization_enable_defaults_to_true(self):
         """Entries with cfg but no enable get enable=True after normalization."""
-        raw = [{"quantizer_path": "*", "cfg": {"num_bits": 4}}]
+        raw = [{"quantizer_name": "*", "cfg": {"num_bits": 4}}]
         result = normalize_quant_cfg_list(raw)
         assert result[0]["enable"] is True
 
@@ -141,17 +141,17 @@ class TestNormalizeQuantCfgList:
     def test_multiple_entries_order_preserved(self):
         """The order of entries is preserved."""
         raw = [
-            {"quantizer_path": "*", "enable": False},
-            {"quantizer_path": "*weight_quantizer", "cfg": {"num_bits": 8}},
+            {"quantizer_name": "*", "enable": False},
+            {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8}},
         ]
         result = normalize_quant_cfg_list(raw)
-        assert result[0]["quantizer_path"] == "*"
-        assert result[1]["quantizer_path"] == "*weight_quantizer"
+        assert result[0]["quantizer_name"] == "*"
+        assert result[1]["quantizer_name"] == "*weight_quantizer"
 
-    def test_error_on_quantizer_path_only(self):
-        """Entry with only quantizer_path and no cfg or enable is rejected."""
+    def test_error_on_quantizer_name_only(self):
+        """Entry with only quantizer_name and no cfg or enable is rejected."""
         with pytest.raises(ValueError, match="must specify 'cfg', 'enable'"):
-            normalize_quant_cfg_list([{"quantizer_path": "*"}])
+            normalize_quant_cfg_list([{"quantizer_name": "*"}])
 
     def test_error_on_empty_dict(self):
         """An empty dict entry is rejected."""
@@ -159,7 +159,7 @@ class TestNormalizeQuantCfgList:
             normalize_quant_cfg_list([{}])
 
     def test_error_on_multi_key_legacy_dict(self):
-        """A multi-key legacy dict (no quantizer_path, no nn.* keys) is rejected."""
+        """A multi-key legacy dict (no quantizer_name, no nn.* keys) is rejected."""
         with pytest.raises(ValueError):
             normalize_quant_cfg_list([{"*weight_quantizer": {}, "*input_quantizer": {}}])
 
@@ -167,7 +167,7 @@ class TestNormalizeQuantCfgList:
         """cfg can be a list of dicts for SequentialQuantizer."""
         raw = [
             {
-                "quantizer_path": "*weight_quantizer",
+                "quantizer_name": "*weight_quantizer",
                 "cfg": [
                     {"num_bits": 4, "block_sizes": {-1: 128, "type": "static"}},
                     {"num_bits": (4, 3)},
@@ -184,10 +184,10 @@ class TestNormalizeQuantCfgList:
         raw = {"*": {"enable": False}, "*weight_quantizer": {"num_bits": 8, "axis": 0}}
         result = normalize_quant_cfg_list(raw)
         assert len(result) == 2
-        assert result[0]["quantizer_path"] == "*"
+        assert result[0]["quantizer_name"] == "*"
         assert result[0]["enable"] is False
         assert result[0]["cfg"] is None
-        assert result[1]["quantizer_path"] == "*weight_quantizer"
+        assert result[1]["quantizer_name"] == "*weight_quantizer"
         assert result[1]["cfg"] == {"num_bits": 8, "axis": 0}
         assert result[1]["enable"] is True
 
@@ -207,10 +207,10 @@ class TestNormalizeQuantCfgList:
         assert result[0]["parent_class"] == "nn.Linear"
 
     def test_legacy_default_key(self):
-        """Legacy 'default' key is converted to quantizer_path='*'."""
+        """Legacy 'default' key is converted to quantizer_name='*'."""
         raw = [{"default": {"enable": False}}]
         result = normalize_quant_cfg_list(raw)
-        assert result[0]["quantizer_path"] == "*"
+        assert result[0]["quantizer_name"] == "*"
         assert result[0]["enable"] is False
         assert result[0]["cfg"] is None
 
@@ -218,7 +218,7 @@ class TestNormalizeQuantCfgList:
         """Legacy 'default' key with cfg attributes maps to '*'."""
         raw = [{"default": {"num_bits": 8, "axis": None}}]
         result = normalize_quant_cfg_list(raw)
-        assert result[0]["quantizer_path"] == "*"
+        assert result[0]["quantizer_name"] == "*"
         assert result[0]["cfg"] == {"num_bits": 8, "axis": None}
         assert result[0]["enable"] is True
 
@@ -226,7 +226,7 @@ class TestNormalizeQuantCfgList:
         """Legacy flat dict containing 'default' key converts it to '*'."""
         raw = {"default": {"enable": False}, "*weight_quantizer": {"num_bits": 8}}
         result = normalize_quant_cfg_list(raw)
-        default_entries = [e for e in result if e["quantizer_path"] == "*"]
+        default_entries = [e for e in result if e["quantizer_name"] == "*"]
         assert len(default_entries) == 1
         assert default_entries[0]["enable"] is False
 
@@ -242,7 +242,7 @@ class TestNormalizeQuantCfgList:
         ]
         result = normalize_quant_cfg_list(raw)
         assert len(result) == 2
-        paths = {e["quantizer_path"] for e in result}
+        paths = {e["quantizer_name"] for e in result}
         assert paths == {"*input_quantizer", "*weight_quantizer"}
         for e in result:
             assert e["parent_class"] == "nn.Linear"
@@ -253,7 +253,7 @@ class TestNormalizeQuantCfgList:
         result = normalize_quant_cfg_list(raw)
         assert len(result) == 1
         assert result[0]["parent_class"] == "nn.Linear"
-        assert result[0]["quantizer_path"] == "*weight_quantizer"
+        assert result[0]["quantizer_name"] == "*weight_quantizer"
         assert result[0]["cfg"] == {"num_bits": 4, "axis": 0}
         assert result[0]["enable"] is True
 
@@ -269,7 +269,7 @@ class TestNormalizeQuantCfgList:
         ]
         result = normalize_quant_cfg_list(raw)
         assert len(result) == 1
-        assert result[0]["quantizer_path"] == "*weight_quantizer"
+        assert result[0]["quantizer_name"] == "*weight_quantizer"
         assert isinstance(result[0]["cfg"], list)
         assert len(result[0]["cfg"]) == 2
         assert result[0]["cfg"][0]["num_bits"] == 4
@@ -279,21 +279,21 @@ class TestNormalizeQuantCfgList:
 
 class TestFindQuantCfgEntry:
     def test_finds_last_match(self):
-        """When multiple entries share the same quantizer_path, returns the last one."""
+        """When multiple entries share the same quantizer_name, returns the last one."""
         entries = normalize_quant_cfg_list(
             [
-                {"quantizer_path": "*weight_quantizer", "cfg": {"num_bits": 8}},
-                {"quantizer_path": "*input_quantizer", "cfg": {"num_bits": 4}},
-                {"quantizer_path": "*weight_quantizer", "cfg": {"num_bits": 4}},
+                {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8}},
+                {"quantizer_name": "*input_quantizer", "cfg": {"num_bits": 4}},
+                {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 4}},
             ]
         )
         result = find_quant_cfg_entry_by_path(entries, "*weight_quantizer")
         assert result["cfg"] == {"num_bits": 4}
 
     def test_exact_match_only(self):
-        """Does not do fnmatch — only exact string equality on quantizer_path."""
+        """Does not do fnmatch — only exact string equality on quantizer_name."""
         entries = normalize_quant_cfg_list(
-            [{"quantizer_path": "*weight_quantizer", "cfg": {"num_bits": 8}}]
+            [{"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8}}]
         )
         with pytest.raises(KeyError):
             find_quant_cfg_entry_by_path(entries, "model.layer.weight_quantizer")
@@ -301,13 +301,13 @@ class TestFindQuantCfgEntry:
     def test_raises_on_missing(self):
         """Raises KeyError when no entry matches."""
         entries = normalize_quant_cfg_list(
-            [{"quantizer_path": "*weight_quantizer", "cfg": {"num_bits": 8}}]
+            [{"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8}}]
         )
         with pytest.raises(KeyError):
             find_quant_cfg_entry_by_path(entries, "*input_quantizer")
 
     def test_single_entry(self):
-        entries = normalize_quant_cfg_list([{"quantizer_path": "*", "enable": False}])
+        entries = normalize_quant_cfg_list([{"quantizer_name": "*", "enable": False}])
         result = find_quant_cfg_entry_by_path(entries, "*")
         assert result["enable"] is False
 
@@ -342,7 +342,7 @@ class TestMatchQuantizerCfg:
         from modelopt.torch.quantization.algorithms import _match_quantizer_cfg
 
         quant_cfg = normalize_quant_cfg_list(
-            [{"quantizer_path": "*weight_quantizer", "cfg": {"num_bits": 8}}]
+            [{"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8}}]
         )
         matched, enable = _match_quantizer_cfg(quant_cfg, "weight_quantizer")
         assert matched == {"num_bits": 8}
@@ -352,7 +352,7 @@ class TestMatchQuantizerCfg:
         """'*' matches any bare quantizer name."""
         from modelopt.torch.quantization.algorithms import _match_quantizer_cfg
 
-        quant_cfg = normalize_quant_cfg_list([{"quantizer_path": "*", "enable": False}])
+        quant_cfg = normalize_quant_cfg_list([{"quantizer_name": "*", "enable": False}])
         matched, enable = _match_quantizer_cfg(quant_cfg, "weight_quantizer")
         assert matched is None  # enable-only entry has cfg=None
         assert enable is False
@@ -362,7 +362,7 @@ class TestMatchQuantizerCfg:
         from modelopt.torch.quantization.algorithms import _match_quantizer_cfg
 
         quant_cfg = normalize_quant_cfg_list(
-            [{"quantizer_path": "*mlp*weight_quantizer", "cfg": {"num_bits": 4}}]
+            [{"quantizer_name": "*mlp*weight_quantizer", "cfg": {"num_bits": 4}}]
         )
         matched, enable = _match_quantizer_cfg(quant_cfg, "weight_quantizer")
         assert matched == {"num_bits": 4}
@@ -372,7 +372,7 @@ class TestMatchQuantizerCfg:
         from modelopt.torch.quantization.algorithms import _match_quantizer_cfg
 
         quant_cfg = normalize_quant_cfg_list(
-            [{"quantizer_path": "*mlp*weight_quantizer", "cfg": {"num_bits": 4}}]
+            [{"quantizer_name": "*mlp*weight_quantizer", "cfg": {"num_bits": 4}}]
         )
         matched, enable = _match_quantizer_cfg(quant_cfg, "input_quantizer")
         assert matched is None
@@ -384,8 +384,8 @@ class TestMatchQuantizerCfg:
 
         quant_cfg = normalize_quant_cfg_list(
             [
-                {"quantizer_path": "*weight_quantizer", "cfg": {"num_bits": 8}},
-                {"quantizer_path": "*weight_quantizer", "cfg": {"num_bits": 4}},
+                {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8}},
+                {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 4}},
             ]
         )
         matched, _ = _match_quantizer_cfg(quant_cfg, "weight_quantizer")
@@ -396,7 +396,7 @@ class TestMatchQuantizerCfg:
         from modelopt.torch.quantization.algorithms import _match_quantizer_cfg
 
         quant_cfg = normalize_quant_cfg_list(
-            [{"quantizer_path": "*weight_quantizer", "cfg": {"num_bits": 8}}]
+            [{"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8}}]
         )
         matched, enable = _match_quantizer_cfg(quant_cfg, "output_quantizer")
         assert matched is None
@@ -407,7 +407,7 @@ class TestMatchQuantizerCfg:
         from modelopt.torch.quantization.algorithms import _match_quantizer_cfg
 
         quant_cfg = normalize_quant_cfg_list(
-            [{"quantizer_path": "*[kv]_bmm_quantizer", "cfg": {"num_bits": (4, 3)}}]
+            [{"quantizer_name": "*[kv]_bmm_quantizer", "cfg": {"num_bits": (4, 3)}}]
         )
         matched_k, _ = _match_quantizer_cfg(quant_cfg, "k_bmm_quantizer")
         matched_v, _ = _match_quantizer_cfg(quant_cfg, "v_bmm_quantizer")
@@ -426,8 +426,8 @@ class TestMatchQuantizerCfg:
 
         quant_cfg = normalize_quant_cfg_list(
             [
-                {"quantizer_path": "*", "enable": False},
-                {"quantizer_path": "*mixer*weight_quantizer", "cfg": {"num_bits": 4}},
+                {"quantizer_name": "*", "enable": False},
+                {"quantizer_name": "*mixer*weight_quantizer", "cfg": {"num_bits": 4}},
             ]
         )
         # input_quantizer should only match the disable-all, not the mixer pattern
@@ -446,7 +446,7 @@ class TestQuantizeConfigValidators:
             algorithm="max",
         )
         assert isinstance(cfg.quant_cfg, list)
-        assert all("quantizer_path" in e for e in cfg.quant_cfg)
+        assert all("quantizer_name" in e for e in cfg.quant_cfg)
 
     def test_validate_quant_cfg_entries_catches_invalid_cfg(self):
         """The 'after' validator surfaces QuantizerAttributeConfig errors early."""
@@ -454,7 +454,7 @@ class TestQuantizeConfigValidators:
             QuantizeConfig(
                 quant_cfg=[
                     {
-                        "quantizer_path": "*weight_quantizer",
+                        "quantizer_name": "*weight_quantizer",
                         "cfg": {"num_bits": 8, "axis": 0, "block_sizes": {-1: 128}},
                     }
                 ],
@@ -465,8 +465,8 @@ class TestQuantizeConfigValidators:
         """The 'after' validator passes for valid configs."""
         cfg = QuantizeConfig(
             quant_cfg=[
-                {"quantizer_path": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
-                {"quantizer_path": "*input_quantizer", "enable": False},
+                {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+                {"quantizer_name": "*input_quantizer", "enable": False},
             ],
             algorithm="max",
         )

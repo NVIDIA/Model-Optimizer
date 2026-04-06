@@ -38,10 +38,10 @@ key: val
 CFG_RECIPE_MISSING_TYPE = """\
 metadata:
   description: Missing recipe_type.
-ptq_cfg: {}
+quantize: {}
 """
 
-CFG_RECIPE_MISSING_PTQ_CFG = """\
+CFG_RECIPE_MISSING_quantize = """\
 metadata:
   recipe_type: ptq
 """
@@ -88,7 +88,7 @@ def test_load_recipe_builtin_with_suffix():
     recipe = load_recipe("general/ptq/fp8_default-fp8_kv.yml")
     assert recipe.recipe_type == RecipeType.PTQ
     assert isinstance(recipe, ModelOptPTQRecipe)
-    assert recipe.ptq_cfg
+    assert recipe.quantize
 
 
 def test_load_recipe_builtin_without_suffix():
@@ -114,11 +114,11 @@ _BUILTIN_PTQ_RECIPES = [
 
 @pytest.mark.parametrize("recipe_path", _BUILTIN_PTQ_RECIPES)
 def test_load_recipe_all_builtins(recipe_path):
-    """Smoke-test: every built-in PTQ recipe loads without error and has ptq_cfg."""
+    """Smoke-test: every built-in PTQ recipe loads without error and has quantize."""
     recipe = load_recipe(recipe_path)
     assert recipe.recipe_type == RecipeType.PTQ
     assert isinstance(recipe, ModelOptPTQRecipe)
-    assert recipe.ptq_cfg
+    assert recipe.quantize
 
 
 # ---------------------------------------------------------------------------
@@ -140,11 +140,11 @@ def test_load_recipe_missing_recipe_type_raises(tmp_path):
         load_recipe(bad)
 
 
-def test_load_recipe_missing_ptq_cfg_raises(tmp_path):
-    """load_recipe raises ValueError when ptq_cfg is absent for a PTQ recipe."""
+def test_load_recipe_missing_quantize_raises(tmp_path):
+    """load_recipe raises ValueError when quantize is absent for a PTQ recipe."""
     bad = tmp_path / "bad.yml"
-    bad.write_text(CFG_RECIPE_MISSING_PTQ_CFG)
-    with pytest.raises(ValueError, match="ptq_cfg"):
+    bad.write_text(CFG_RECIPE_MISSING_quantize)
+    with pytest.raises(ValueError, match="quantize"):
         load_recipe(bad)
 
 
@@ -162,28 +162,28 @@ def test_load_recipe_unsupported_type_raises(tmp_path):
 
 
 def test_load_recipe_dir(tmp_path):
-    """load_recipe loads a recipe from a directory with recipe.yml + ptq_cfg.yml."""
+    """load_recipe loads a recipe from a directory with recipe.yml + quantize.yml."""
     (tmp_path / "recipe.yml").write_text(
         "metadata:\n  recipe_type: ptq\n  description: Dir test.\n"
     )
-    (tmp_path / "ptq_cfg.yml").write_text("algorithm: max\nquant_cfg: []\n")
+    (tmp_path / "quantize.yml").write_text("algorithm: max\nquant_cfg: []\n")
     recipe = load_recipe(tmp_path)
     assert recipe.recipe_type == RecipeType.PTQ
     assert recipe.description == "Dir test."
-    assert recipe.ptq_cfg == {"algorithm": "max", "quant_cfg": []}
+    assert recipe.quantize == {"algorithm": "max", "quant_cfg": []}
 
 
 def test_load_recipe_dir_missing_recipe_raises(tmp_path):
     """load_recipe raises ValueError when recipe.yml is absent from the directory."""
-    (tmp_path / "ptq_cfg.yml").write_text("algorithm: max\nquant_cfg: {}\n")
+    (tmp_path / "quantize.yml").write_text("algorithm: max\nquant_cfg: {}\n")
     with pytest.raises(ValueError, match="recipe descriptor"):
         load_recipe(tmp_path)
 
 
-def test_load_recipe_dir_missing_ptq_cfg_raises(tmp_path):
-    """load_recipe raises ValueError when ptq_cfg.yml is absent from the directory."""
+def test_load_recipe_dir_missing_quantize_raises(tmp_path):
+    """load_recipe raises ValueError when quantize.yml is absent from the directory."""
     (tmp_path / "recipe.yml").write_text("metadata:\n  recipe_type: ptq\n")
-    with pytest.raises(ValueError, match="ptq_cfg"):
+    with pytest.raises(ValueError, match="quantize"):
         load_recipe(tmp_path)
 
 
@@ -244,7 +244,7 @@ def test_general_ptq_yaml_matches_config_dicts(yaml_path, model_cfg_name, kv_cfg
         return json.dumps(entry, sort_keys=True, default=str)
 
     python_entries = _normalize_entries(model_cfg["quant_cfg"] + kv_cfg["quant_cfg"])
-    yaml_entries = _normalize_entries(yaml_data["ptq_cfg"]["quant_cfg"])
+    yaml_entries = _normalize_entries(yaml_data["quantize"]["quant_cfg"])
 
     assert sorted(python_entries, key=_sort_key) == sorted(yaml_entries, key=_sort_key)
-    assert model_cfg["algorithm"] == yaml_data["ptq_cfg"]["algorithm"]
+    assert model_cfg["algorithm"] == yaml_data["quantize"]["algorithm"]

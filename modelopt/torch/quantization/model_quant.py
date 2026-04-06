@@ -166,7 +166,7 @@ def quantize(
             The ``"algorithm"`` key specifies the ``algorithm`` argument to
             :meth:`calibrate <modelopt.torch.quantization.model_quant.calibrate>`.
 
-            Each entry in the ``"quant_cfg"`` list has a ``"quantizer_path"`` wildcard matched
+            Each entry in the ``"quant_cfg"`` list has a ``"quantizer_name"`` wildcard matched
             against quantizer module names, an optional ``"cfg"`` dict of quantizer attributes,
             and an optional ``"enable"`` toggle. Entries are applied in list order; later entries
             override earlier ones. The quantizer modules have names ending with
@@ -184,11 +184,11 @@ def quantize(
                 config = {
                     "quant_cfg": [
                         # Disable all quantizers by default
-                        {"quantizer_path": "*", "enable": False},
+                        {"quantizer_name": "*", "enable": False},
                         # "num_bits" specifies the number of bits for quantization
                         # "axis" specifies the axis for quantization
-                        {"quantizer_path": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
-                        {"quantizer_path": "*input_quantizer", "cfg": {"num_bits": 8, "axis": -1}},
+                        {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+                        {"quantizer_name": "*input_quantizer", "cfg": {"num_bits": 8, "axis": -1}},
                     ],
                     "algorithm": "max",
                 }
@@ -326,9 +326,9 @@ def auto_quantize(
 
                 INT8_CUSTOM_QUANT_CFG = {
                     "quant_cfg": [
-                        {"quantizer_path": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+                        {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
                         {
-                            "quantizer_path": "*input_quantizer",
+                            "quantizer_name": "*input_quantizer",
                             "cfg": {"num_bits": 8, "axis": None},
                         },
                     ],
@@ -532,7 +532,7 @@ def auto_quantize(
         "checkpoint": checkpoint,
     }
     # Disable all quantizers; AutoQuantize will enable the needed ones
-    set_quantizer_by_cfg(model, [{"quantizer_path": "*", "enable": False}])
+    set_quantizer_by_cfg(model, [{"quantizer_name": "*", "enable": False}])
     searcher.search(model, constraints, config=search_config)  # type: ignore[arg-type]
 
     return model, searcher.state_dict()

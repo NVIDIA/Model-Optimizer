@@ -33,7 +33,7 @@ from modelopt.torch.quantization.extensions import get_cuda_ext_mx
 NVFP4_WEIGHT_ACT_MSE_CFG = {
     "quant_cfg": [
         {
-            "quantizer_path": "*weight_quantizer",
+            "quantizer_name": "*weight_quantizer",
             "cfg": {
                 "num_bits": (2, 1),
                 "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
@@ -42,7 +42,7 @@ NVFP4_WEIGHT_ACT_MSE_CFG = {
             "enable": True,
         },
         {
-            "quantizer_path": "*input_quantizer",
+            "quantizer_name": "*input_quantizer",
             "cfg": {
                 "num_bits": (2, 1),
                 "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
@@ -62,7 +62,7 @@ NVFP4_WEIGHT_ACT_MSE_CFG = {
 NVFP4_WEIGHT_MSE_FP8_SWEEP_CFG = {
     "quant_cfg": [
         {
-            "quantizer_path": "*weight_quantizer",
+            "quantizer_name": "*weight_quantizer",
             "cfg": {
                 "num_bits": (2, 1),
                 "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
@@ -70,7 +70,7 @@ NVFP4_WEIGHT_MSE_FP8_SWEEP_CFG = {
             },
             "enable": True,
         },
-        {"quantizer_path": "*input_quantizer", "enable": False},
+        {"quantizer_name": "*input_quantizer", "enable": False},
     ],
     "algorithm": {
         "method": "mse",
@@ -134,7 +134,7 @@ def test_quantize(model_cls, config):
         # reduce block sizes for simple testing models
         config = copy.deepcopy(config)
         for entry in config["quant_cfg"]:
-            if entry.get("quantizer_path") == "*weight_quantizer":
+            if entry.get("quantizer_name") == "*weight_quantizer":
                 entry.setdefault("cfg", {})["block_sizes"] = {-1: 8, -2: 8}
     model = model_cls().cuda()
     calib_data = [model.get_input().cuda() for _ in range(8)]

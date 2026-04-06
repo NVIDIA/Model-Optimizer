@@ -34,9 +34,9 @@ from modelopt.torch.utils.plugins import megatron_prefill
 
 NVFP4_DEFAULT_CONFIG = {
     "quant_cfg": [
-        {"quantizer_path": "*", "enable": False},
+        {"quantizer_name": "*", "enable": False},
         {
-            "quantizer_path": "*weight_quantizer",
+            "quantizer_name": "*weight_quantizer",
             "cfg": {
                 "num_bits": (2, 1),
                 "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
@@ -45,7 +45,7 @@ NVFP4_DEFAULT_CONFIG = {
             "enable": True,
         },
         {
-            "quantizer_path": "*input_quantizer",
+            "quantizer_name": "*input_quantizer",
             "cfg": {
                 "num_bits": (2, 1),
                 "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
@@ -53,9 +53,9 @@ NVFP4_DEFAULT_CONFIG = {
             },
             "enable": True,
         },
-        {"quantizer_path": "*output_quantizer", "enable": False},
+        {"quantizer_name": "*output_quantizer", "enable": False},
         {
-            "quantizer_path": "*output_layer*",
+            "quantizer_name": "*output_layer*",
             "enable": False,
         },  # Note: only output_layer is disabled.
     ],

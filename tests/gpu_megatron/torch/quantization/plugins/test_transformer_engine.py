@@ -77,7 +77,7 @@ def test_quantize(model_cls, config):
         # reduce block sizes for simple testing models
         config = copy.deepcopy(config)
         for entry in config["quant_cfg"]:
-            if entry.get("quantizer_path") == "*weight_quantizer":
+            if entry.get("quantizer_name") == "*weight_quantizer":
                 entry["cfg"]["block_sizes"] = {-1: 8, -2: 8}
                 break
     model = model_cls().cuda()

@@ -70,26 +70,26 @@ def get_quant_config(precision, lm_head_precision="fp16"):
         raise ValueError(f"Unsupported precision: {precision}")
 
     quant_cfg_list: list = [
-        e for e in quant_cfg["quant_cfg"] if isinstance(e, dict) and "quantizer_path" in e
+        e for e in quant_cfg["quant_cfg"] if isinstance(e, dict) and "quantizer_name" in e
     ]
 
     if lm_head_precision == "fp8":
         quant_cfg_list.append(
             {
-                "quantizer_path": "*lm_head.input_quantizer",
+                "quantizer_name": "*lm_head.input_quantizer",
                 "cfg": {"num_bits": (4, 3), "axis": None},
             }
         )
         quant_cfg_list.append(
             {
-                "quantizer_path": "*lm_head.weight_quantizer",
+                "quantizer_name": "*lm_head.weight_quantizer",
                 "cfg": {"num_bits": (4, 3), "axis": None},
             }
         )
     elif lm_head_precision == "nvfp4":
         quant_cfg_list.append(
             {
-                "quantizer_path": "*lm_head.input_quantizer",
+                "quantizer_name": "*lm_head.input_quantizer",
                 "cfg": {
                     "num_bits": (2, 1),
                     "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
@@ -100,7 +100,7 @@ def get_quant_config(precision, lm_head_precision="fp16"):
         )
         quant_cfg_list.append(
             {
-                "quantizer_path": "*lm_head.weight_quantizer",
+                "quantizer_name": "*lm_head.weight_quantizer",
                 "cfg": {
                     "num_bits": (2, 1),
                     "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},

@@ -139,7 +139,7 @@ class Quantizer:
         if self.config.quantize_mha:
             quant_config["quant_cfg"].append(
                 {
-                    "quantizer_path": "*[qkv]_bmm_quantizer",
+                    "quantizer_name": "*[qkv]_bmm_quantizer",
                     "cfg": {"num_bits": (4, 3), "axis": None},
                 }
             )

@@ -45,7 +45,7 @@ Each entry in the list is a dictionary with the following fields:
    * - Field
      - Required
      - Description
-   * - ``quantizer_path``
+   * - ``quantizer_name``
      - Yes
      - Wildcard string matched against quantizer module names (e.g. ``"*weight_quantizer"``).
        Uses :func:`fnmatch` rules.
@@ -69,9 +69,9 @@ Each entry in the list is a dictionary with the following fields:
 .. note::
 
     Every entry must specify at least one of ``cfg`` or ``enable`` in addition to
-    ``quantizer_path``.  An entry with only ``quantizer_path`` and no other keys is **invalid**
+    ``quantizer_name``.  An entry with only ``quantizer_name`` and no other keys is **invalid**
     and will raise a ``ValueError`` at config-processing time.  This prevents subtle bugs where
-    a bare ``{"quantizer_path": "*"}`` would silently behave as ``enable=True`` for all
+    a bare ``{"quantizer_name": "*"}`` would silently behave as ``enable=True`` for all
     quantizers.
 
 ----------
@@ -126,11 +126,11 @@ The recommended pattern used by all built-in configs is:
 
     "quant_cfg": [
         # 1. Deny all quantizers by default
-        {"quantizer_path": "*", "enable": False},
+        {"quantizer_name": "*", "enable": False},
 
         # 2. Enable and configure the target quantizers
-        {"quantizer_path": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
-        {"quantizer_path": "*input_quantizer", "cfg": {"num_bits": 8, "axis": None}},
+        {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+        {"quantizer_name": "*input_quantizer", "cfg": {"num_bits": 8, "axis": None}},
 
         # 3. Apply standard exclusions last (BatchNorm, LM head, MoE routers, etc.)
         *mtq.config._default_disabled_quantizer_cfg,
@@ -138,7 +138,7 @@ The recommended pattern used by all built-in configs is:
 
 .. note::
 
-    The deny-all entry ``{"quantizer_path": "*", "enable": False}`` is available as
+    The deny-all entry ``{"quantizer_name": "*", "enable": False}`` is available as
     :data:`modelopt.torch.quantization.config._base_disable_all` and is prepended to every
     built-in config. This ensures quantizers not explicitly targeted remain disabled.
 
@@ -172,9 +172,9 @@ This means:
 full replacement — it solely flips the on/off state of matched quantizers, leaving all other
 attributes unchanged:
 
-- ``{"quantizer_path": "*", "enable": False}`` disables all quantizers without touching their
+- ``{"quantizer_name": "*", "enable": False}`` disables all quantizers without touching their
   configured attributes. Use this as the first step in a deny-all-then-configure pattern.
-- ``{"quantizer_path": "*weight_quantizer", "enable": True}`` (no ``cfg``) re-enables weight
+- ``{"quantizer_name": "*weight_quantizer", "enable": True}`` (no ``cfg``) re-enables weight
   quantizers using whatever attributes they currently carry (or their defaults if they were never
   configured by a ``cfg`` entry).
 
@@ -183,10 +183,10 @@ For example, given the following two entries both matching ``*weight_quantizer``
 .. code-block:: python
 
     # Entry 1 — sets FP8 per-channel
-    {"quantizer_path": "*weight_quantizer", "cfg": {"num_bits": (4, 3), "axis": 0}},
+    {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": (4, 3), "axis": 0}},
 
     # Entry 2 — sets INT4 blockwise (axis is NOT inherited from Entry 1)
-    {"quantizer_path": "*weight_quantizer", "cfg": {"num_bits": 4, "block_sizes": {-1: 128}}},
+    {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 4, "block_sizes": {-1: 128}}},
 
 After Entry 2 is applied, the quantizer has ``num_bits=4``, ``block_sizes={-1: 128}``, and
 ``axis=None`` (the default). The ``axis=0`` set by Entry 1 is gone.
@@ -194,7 +194,7 @@ After Entry 2 is applied, the quantizer has ``num_bits=4``, ``block_sizes={-1: 1
 .. note::
 
     The deny-all-then-configure pattern is safe and predictable precisely because
-    ``{"quantizer_path": "*", "enable": False}`` **only** disables quantizers without resetting
+    ``{"quantizer_name": "*", "enable": False}`` **only** disables quantizers without resetting
     their attributes. Subsequent ``cfg`` entries then configure targets from a known default state.
 
 ----------
@@ -216,7 +216,7 @@ Because it is appended last, it takes precedence over all earlier entries:
     config = copy.deepcopy(mtq.FP8_DEFAULT_CFG)
 
     # Skip the final projection layer
-    config["quant_cfg"].append({"quantizer_path": "*lm_head*", "enable": False})
+    config["quant_cfg"].append({"quantizer_name": "*lm_head*", "enable": False})
 
     model = mtq.quantize(model, config, forward_loop)
 
@@ -229,7 +229,7 @@ same quantizer path in other layer types unaffected:
 .. code-block:: python
 
     config["quant_cfg"].append({
-        "quantizer_path": "*input_quantizer",
+        "quantizer_name": "*input_quantizer",
         "parent_class": "nn.LayerNorm",
         "enable": False,
     })
@@ -237,7 +237,7 @@ same quantizer path in other layer types unaffected:
 Overriding Quantizer Precision for Specific Layers
 ---------------------------------------------------
 
-A later entry with a matching ``quantizer_path`` replaces the configuration set by an earlier
+A later entry with a matching ``quantizer_name`` replaces the configuration set by an earlier
 entry. This allows per-layer precision overrides without restructuring the entire config:
 
 .. code-block:: python
@@ -246,7 +246,7 @@ entry. This allows per-layer precision overrides without restructuring the entir
 
     # Quantize attention output projections in higher-precision INT8 instead of FP8
     config["quant_cfg"].append({
-        "quantizer_path": "*o_proj*weight_quantizer",
+        "quantizer_name": "*o_proj*weight_quantizer",
         "cfg": {"num_bits": 8, "axis": 0},
     })
 
@@ -262,8 +262,8 @@ For entirely custom recipes, compose the list directly:
     MY_CUSTOM_CFG = {
         "quant_cfg": [
             *_base_disable_all,
-            {"quantizer_path": "*weight_quantizer", "cfg": {"num_bits": 4, "block_sizes": {-1: 128}}},
-            {"quantizer_path": "*input_quantizer", "cfg": {"num_bits": 8, "axis": None}},
+            {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 4, "block_sizes": {-1: 128}}},
+            {"quantizer_name": "*input_quantizer", "cfg": {"num_bits": 8, "axis": None}},
             *_default_disabled_quantizer_cfg,
         ],
         "algorithm": "max",
@@ -288,7 +288,7 @@ are quantized first in INT4 and then in FP8:
 .. code-block:: python
 
     {
-        "quantizer_path": "*weight_quantizer",
+        "quantizer_name": "*weight_quantizer",
         "cfg": [
             {"num_bits": 4, "block_sizes": {-1: 128, "type": "static"}},
             {"num_bits": (4, 3)},  # FP8
@@ -332,11 +332,11 @@ The table below shows common patterns and their list equivalents:
      - .. code-block:: python
 
           "quant_cfg": [
-              {"quantizer_path": "*",
+              {"quantizer_name": "*",
                "enable": False},
-              {"quantizer_path": "*weight_quantizer",
+              {"quantizer_name": "*weight_quantizer",
                "cfg": {"num_bits": 8, "axis": 0}},
-              {"quantizer_path": "*input_quantizer",
+              {"quantizer_name": "*input_quantizer",
                "cfg": {"num_bits": 8, "axis": None}},
           ]
 
@@ -351,7 +351,7 @@ The table below shows common patterns and their list equivalents:
 
           # Append to the end (last entry wins)
           config["quant_cfg"].append(
-              {"quantizer_path": "*lm_head*",
+              {"quantizer_name": "*lm_head*",
                "enable": False}
           )
 
@@ -369,14 +369,14 @@ The table below shows common patterns and their list equivalents:
      - .. code-block:: python
 
           "quant_cfg": [
-              {"quantizer_path": "*input_quantizer",
+              {"quantizer_name": "*input_quantizer",
                "parent_class": "nn.Linear",
                "enable": False},
           ]
 
 Key differences to keep in mind:
 
-- The ``"default"`` key becomes ``{"quantizer_path": "*", "enable": False}`` placed at the
+- The ``"default"`` key becomes ``{"quantizer_name": "*", "enable": False}`` placed at the
   **start** of the list (deny-all-then-configure pattern).
 - Dict key assignment (``config["quant_cfg"]["*lm_head*"] = ...``) becomes ``list.append()``.
   Because later entries override earlier ones, appending achieves the same override effect.

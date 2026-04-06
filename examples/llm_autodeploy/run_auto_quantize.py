@@ -102,7 +102,7 @@ def auto_quantize(
             model,
             quant_cfg=[
                 {
-                    "quantizer_path": "*output_quantizer",
+                    "quantizer_name": "*output_quantizer",
                     "cfg": {"num_bits": (4, 3), "axis": None},
                     "enable": True,
                 }
@@ -112,8 +112,8 @@ def auto_quantize(
         with mtq.set_quantizer_by_cfg_context(
             model,
             [
-                {"quantizer_path": "*", "enable": False},
-                {"quantizer_path": "*output_quantizer", "enable": True},
+                {"quantizer_name": "*", "enable": False},
+                {"quantizer_name": "*output_quantizer", "enable": True},
             ],
         ):
             mtq.calibrate(model, algorithm="max", forward_loop=calibrate_loop)

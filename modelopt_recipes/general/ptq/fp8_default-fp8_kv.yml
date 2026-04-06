@@ -16,52 +16,52 @@
 metadata:
   recipe_type: ptq
   description: FP8 per-tensor weight and activation (W8A8), FP8 KV cache, max calibration.
-ptq_cfg:
+quantize:
   algorithm: max
   quant_cfg:
-    - quantizer_path: '*'
+    - quantizer_name: '*'
       enable: false
-    - quantizer_path: '*input_quantizer'
+    - quantizer_name: '*input_quantizer'
       cfg:
         num_bits: e4m3
         axis:
-    - quantizer_path: '*weight_quantizer'
+    - quantizer_name: '*weight_quantizer'
       cfg:
         num_bits: e4m3
         axis:
-    - quantizer_path: '*[kv]_bmm_quantizer'
+    - quantizer_name: '*[kv]_bmm_quantizer'
       enable: true
       cfg:
         num_bits: e4m3
-    - quantizer_path: '*block_sparse_moe.gate*'
+    - quantizer_name: '*block_sparse_moe.gate*'
       enable: false
-    - quantizer_path: '*linear_attn.conv1d*'
+    - quantizer_name: '*linear_attn.conv1d*'
       enable: false
-    - quantizer_path: '*lm_head*'
+    - quantizer_name: '*lm_head*'
       enable: false
-    - quantizer_path: '*mixer.conv1d*'
+    - quantizer_name: '*mixer.conv1d*'
       enable: false
-    - quantizer_path: '*mlp.gate.*'
+    - quantizer_name: '*mlp.gate.*'
       enable: false
-    - quantizer_path: '*mlp.shared_expert_gate.*'
+    - quantizer_name: '*mlp.shared_expert_gate.*'
       enable: false
-    - quantizer_path: '*output_layer*'
+    - quantizer_name: '*output_layer*'
       enable: false
-    - quantizer_path: '*proj_out.*'
+    - quantizer_name: '*proj_out.*'
       enable: false
-    - quantizer_path: '*router*'
+    - quantizer_name: '*router*'
       enable: false
-    - quantizer_path: 'output.*'
+    - quantizer_name: 'output.*'
       enable: false
     - parent_class: 'nn.BatchNorm1d'
-      quantizer_path: '*'
+      quantizer_name: '*'
       enable: false
     - parent_class: 'nn.BatchNorm2d'
-      quantizer_path: '*'
+      quantizer_name: '*'
       enable: false
     - parent_class: 'nn.BatchNorm3d'
-      quantizer_path: '*'
+      quantizer_name: '*'
       enable: false
     - parent_class: 'nn.LeakyReLU'
-      quantizer_path: '*'
+      quantizer_name: '*'
       enable: false
