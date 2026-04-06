@@ -36,6 +36,7 @@ Usage:
 """
 
 import argparse
+import hashlib
 import json
 import logging
 import os
@@ -66,6 +67,7 @@ BATCH_SIZE = 8
 VIDEO_EXTS = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".m4v"}
 
 WEIGHTS_URL = "https://github.com/piergiaj/pytorch-i3d/raw/master/models/rgb_imagenet.pt"
+WEIGHTS_SHA256 = "2609088c2e8c868187c9921c50bc225329a9057ed75e76120e0b4a397a2c7538"
 DEFAULT_CACHE = Path.home() / ".cache" / "fvd" / "rgb_imagenet.pt"
 
 
@@ -235,17 +237,26 @@ def compute_fvd(feats_ref: np.ndarray, feats_gen: np.ndarray) -> float:
             f"(got ref={feats_ref.shape[0]}, gen={feats_gen.shape[0]})"
         )
     mu_r = feats_ref.mean(axis=0)
-    sigma_r = np.cov(feats_ref, rowvar=False)
+    sigma_r = np.atleast_2d(np.cov(feats_ref, rowvar=False))
     mu_g = feats_gen.mean(axis=0)
-    sigma_g = np.cov(feats_gen, rowvar=False)
+    sigma_g = np.atleast_2d(np.cov(feats_gen, rowvar=False))
     return frechet_distance(mu_r, sigma_r, mu_g, sigma_g)
 
 
 # ─── Weight download ─────────────────────────────────────────────────────────
 
 
+def _sha256(path: Path) -> str:
+    """Compute SHA-256 hex digest of a file."""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def resolve_weights(weights_arg: str | None) -> Path:
-    """Return path to weights file, downloading if necessary."""
+    """Return path to weights file, downloading and verifying if necessary."""
     if weights_arg:
         p = Path(weights_arg)
         if not p.exists():
@@ -258,7 +269,17 @@ def resolve_weights(weights_arg: str | None) -> Path:
     log.info(f"Downloading I3D weights to {DEFAULT_CACHE} …")
     DEFAULT_CACHE.parent.mkdir(parents=True, exist_ok=True)
     urllib.request.urlretrieve(WEIGHTS_URL, DEFAULT_CACHE)
-    log.info("Download complete.")
+
+    digest = _sha256(DEFAULT_CACHE)
+    if digest != WEIGHTS_SHA256:
+        DEFAULT_CACHE.unlink()
+        raise RuntimeError(
+            f"SHA-256 mismatch for downloaded I3D weights "
+            f"(got {digest[:16]}…, expected {WEIGHTS_SHA256[:16]}…). "
+            f"File deleted. Please retry or download manually."
+        )
+
+    log.info("Download complete (SHA-256 verified).")
     return DEFAULT_CACHE
 
 
