@@ -21,7 +21,6 @@ from typing import Any
 
 import torch
 import torch.nn as nn
-from transformers import AutoTokenizer
 
 from modelopt.torch.utils import get_module_device
 
@@ -32,8 +31,10 @@ from .calibrator import DynamicThresholdCalibrator
 from .ruler_dataset import RulerDatasetBuilder
 
 
-def _load_tokenizer(tokenizer_name_or_path: str) -> "AutoTokenizer":
+def _load_tokenizer(tokenizer_name_or_path: str):
     """Load tokenizer and ensure pad_token is set."""
+    from transformers import AutoTokenizer
+
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_name_or_path)
     if not tokenizer.pad_token:
         tokenizer.pad_token = tokenizer.eos_token
