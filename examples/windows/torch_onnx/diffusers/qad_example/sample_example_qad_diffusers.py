@@ -65,6 +65,7 @@ import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.distill.distillation_model import DistillationModel
 from modelopt.torch.quantization.config import NVFP4_DEFAULT_CFG
+from modelopt.torch.utils import safe_load
 
 logger = logging.getLogger(__name__)
 
@@ -131,13 +132,13 @@ def detect_format(path: str) -> str:
     return "safetensors"
 
 
-def load_state_dict_any_format(path: str, label: str = "") -> tuple[dict, dict | None]:
+def load_state_dict_any_format(path: str, label: str = "", **kwargs) -> tuple[dict, dict | None]:
     """Load state dict from either torch pickle or safetensors."""
     fmt = detect_format(path)
     logger.info(f"[{label}] Detected format: {fmt} for {path}")
 
     if fmt == "torch":
-        raw = torch.load(path, map_location="cpu", weights_only=False)
+        raw = safe_load(path, map_location="cpu", **kwargs)
         if isinstance(raw, dict) and "state_dict" in raw:
             return raw["state_dict"], None
         return raw, None
