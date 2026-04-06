@@ -75,11 +75,6 @@ ENABLE_CP_TTT_PATCH = False
 CACHED_SHARD_TTT_MASKS = {}
 
 
-def _get_empty_cache(config):
-    """Return an empty cache. Handle different versions of transformers for unit tests."""
-    return DynamicCache(config=config)
-
-
 @MedusaDMRegistry.register({PreTrainedModel: "hf.PreTrainedModel"})
 class HFMedusaModel(MedusaModel):
     """Medusa Model Class for huggingface models."""
@@ -565,7 +560,20 @@ class HFEagleModel(EagleModel):
         elif self.eagle_decoder_type == "kimik2":
             decoder_cls = _setup_kimi_k2_decoder()
 
-        self.eagle_config = PretrainedConfig.from_dict(config.eagle_architecture_config)
+        arch_config = config.eagle_architecture_config
+
+        # Populate base-model-dependent fields before constructing PretrainedConfig,
+        # since transformers >=5.4 validates rope_scaling during __init__.
+        arch_config.setdefault("hidden_size", self._base_llm_config.hidden_size)
+        arch_config.setdefault("vocab_size", self._base_llm_config.vocab_size)
+        arch_config.setdefault(
+            "max_position_embeddings", self._base_llm_config.max_position_embeddings
+        )
+        rope_scaling = arch_config.get("rope_scaling")
+        if rope_scaling and "rope_theta" not in rope_scaling and "rope_theta" in arch_config:
+            rope_scaling["rope_theta"] = arch_config["rope_theta"]
+
+        self.eagle_config = PretrainedConfig.from_dict(arch_config)
         self.eagle_config.eagle_decoder_type = self.eagle_decoder_type
         self.eagle_config.draft_vocab_size = getattr(
             self.eagle_config, "draft_vocab_size", self.eagle_config.vocab_size
@@ -909,9 +917,9 @@ class HFEagleModel(EagleModel):
                 )
 
         if not isinstance(past_key_values, Cache):
-            past_key_values = _get_empty_cache(self._base_llm_config)
+            past_key_values = DynamicCache(config=self._base_llm_config)
         if not isinstance(eagle_cache, Cache):
-            eagle_cache = _get_empty_cache(self.eagle_module.config)
+            eagle_cache = DynamicCache(config=self.eagle_module.config)
         past_key_values.eagle_cache = eagle_cache
 
         # ====Prepare inputs for the first eagle forward pass====
