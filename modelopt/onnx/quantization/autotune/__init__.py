@@ -45,6 +45,9 @@ from .insertion_points import (
 )
 from .region_pattern import RegionPattern
 from .region_search import CombinedRegionSearch
+
+# Subgraph-based workflow
+from .subgraph_workflow import subgraph_autotuning_workflow
 from .utils import StoreWithExplicitFlag, get_node_filter_list
 
 __all__ = [
@@ -69,4 +72,5 @@ __all__ = [
     "TensorRTPyBenchmark",
     "TrtExecBenchmark",
     "get_node_filter_list",
+    "subgraph_autotuning_workflow",
 ]

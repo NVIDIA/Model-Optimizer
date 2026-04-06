@@ -36,7 +36,12 @@ _benchmark_instance = None
 
 
 def benchmark_onnx_model(
-    model_path: str | bytes, log_file: str | None = None, flush_timing_cache: bool = False
+    model_path: str | bytes,
+    log_file: str | None = None,
+    flush_timing_cache: bool = False,
+    strip_shape_args: bool = False,
+    extra_run_args: list[str] | None = None,
+    export_profile_path: str | None = None,
 ) -> float:
     """Benchmark ONNX model inference latency using TensorRT Python API.
 
@@ -62,7 +67,12 @@ def benchmark_onnx_model(
 
     try:
         latency = _benchmark_instance.run(
-            model_path, log_file=log_file, flush_timing_cache=flush_timing_cache
+            model_path,
+            log_file=log_file,
+            flush_timing_cache=flush_timing_cache,
+            strip_shape_args=strip_shape_args,
+            extra_run_args=extra_run_args,
+            export_profile_path=export_profile_path,
         )
 
         if latency == float("inf"):

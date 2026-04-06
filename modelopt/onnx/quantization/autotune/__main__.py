@@ -26,6 +26,9 @@ from modelopt.onnx.quantization.autotune.utils import (
     get_node_filter_list,
     validate_file_path,
 )
+from modelopt.onnx.quantization.autotune.subgraph_workflow import (
+    subgraph_autotuning_workflow,
+)
 from modelopt.onnx.quantization.autotune.workflows import (
     init_benchmark_instance,
     region_pattern_autotuning_workflow,
@@ -47,6 +50,26 @@ MODE_PRESETS = {
     },
     "extensive": {"schemes_per_region": 200, "warmup_runs": 50, "timing_runs": 200},
 }
+
+
+def _load_calibration_data(path: str | None):
+    """Load calibration data from .npy or .npz file, or return None."""
+    if path is None:
+        return None
+    import numpy as np
+
+    path_str = str(path)
+    if path_str.endswith(".npz"):
+        data = np.load(path_str)
+        return dict(data)
+    elif path_str.endswith(".npy"):
+        return np.load(path_str)
+    else:
+        logger.warning(
+            f"Unsupported calibration data format: {path_str}. "
+            "Expected .npy or .npz. Using random calibration."
+        )
+        return None
 
 
 def apply_mode_presets(args) -> None:
@@ -86,12 +109,12 @@ def log_benchmark_config(args):
 
 
 def run_autotune() -> int:
-    """Execute the complete pattern-based Q/DQ autotuning workflow.
+    """Execute the Q/DQ autotuning workflow (region or subgraph).
 
     Parses command-line arguments, then:
     1. Validates input paths (model, baseline, output directory)
     2. Initializes TensorRT benchmark instance
-    3. Runs pattern-based region autotuning workflow
+    3. Runs the selected autotuning workflow
     4. Handles interruptions gracefully with state preservation
 
     Returns:
@@ -106,12 +129,15 @@ def run_autotune() -> int:
     validate_file_path(args.qdq_baseline, "QDQ baseline model")
     output_dir = Path(args.output_dir)
 
+    workflow = getattr(args, "workflow", "region")
+    use_trtexec = workflow == "subgraph"
+
     log_benchmark_config(args)
     trtexec_args = getattr(args, "trtexec_benchmark_args", None)
     if trtexec_args and isinstance(trtexec_args, str):
         trtexec_args = trtexec_args.split()
     benchmark_instance = init_benchmark_instance(
-        use_trtexec=args.use_trtexec,
+        use_trtexec=use_trtexec,
         plugin_libraries=args.plugin_libraries,
         timing_cache_file=args.timing_cache,
         warmup_runs=args.warmup_runs,
@@ -123,24 +149,60 @@ def run_autotune() -> int:
         logger.error("Failed to initialize TensorRT benchmark")
         return 1
 
+    logger.info(f"Autotuning workflow: {workflow}")
+
+    custom_quantizable_ops = getattr(args, "quantizable_ops", None)
+    if custom_quantizable_ops:
+        custom_quantizable_ops = set(custom_quantizable_ops)
+        logger.info(f"Custom quantizable ops: {custom_quantizable_ops}")
+
+    calibration_data = _load_calibration_data(
+        getattr(args, "calibration_data_path", None)
+    )
+
     try:
-        node_filter_list = get_node_filter_list(args.node_filter_list)
-        region_pattern_autotuning_workflow(
-            model_or_path=str(model_path),
-            output_dir=output_dir,
-            num_schemes_per_region=args.num_schemes,
-            pattern_cache_file=args.pattern_cache_file,
-            state_file=args.state_file,
-            quant_type=args.quant_type,
-            default_dq_dtype=args.default_dq_dtype,
-            qdq_baseline_model=args.qdq_baseline,
-            node_filter_list=node_filter_list,
-            verbose=args.verbose,
-        )
+        if workflow == "subgraph":
+            graph_json = getattr(args, "graph_json", None)
+            if graph_json:
+                validate_file_path(graph_json, "graph.json file")
+
+            subgraph_autotuning_workflow(
+                model_path=str(model_path),
+                output_dir=output_dir,
+                graph_json_path=graph_json,
+                quant_type=args.quant_type,
+                plugin_libraries=args.plugin_libraries,
+                schemes_per_group=args.num_schemes,
+                strongly_typed=args.strongly_typed,
+                extra_trtexec_args=trtexec_args,
+                incremental_validation=args.incremental_validation,
+                quantizable_ops=custom_quantizable_ops,
+                calibration_data=calibration_data,
+                calibration_method=args.calibration_method,
+                calibration_shapes=args.calibration_shapes,
+                calibration_eps=args.calibration_eps,
+                high_precision_dtype=args.high_precision_dtype,
+                use_external_data_format=args.use_external_data_format,
+                skip_calibration=args.skip_calibration,
+            )
+        else:
+            node_filter_list = get_node_filter_list(args.node_filter_list)
+            region_pattern_autotuning_workflow(
+                model_or_path=str(model_path),
+                output_dir=output_dir,
+                num_schemes_per_region=args.num_schemes,
+                pattern_cache_file=args.pattern_cache_file,
+                state_file=args.state_file,
+                quant_type=args.quant_type,
+                default_dq_dtype=args.default_dq_dtype,
+                qdq_baseline_model=args.qdq_baseline,
+                node_filter_list=node_filter_list,
+                verbose=args.verbose,
+            )
 
         logger.info("\n" + "=" * 70)
-        logger.info("✓ Autotuning completed successfully!")
-        logger.info(f"✓ Results: {output_dir}")
+        logger.info("Autotuning completed successfully!")
+        logger.info(f"Results: {output_dir}")
         logger.info("=" * 70)
         return 0
 
@@ -182,11 +244,19 @@ Examples:
   # Use pattern cache for warm-start
   python -m modelopt.onnx.quantization.autotune --onnx_path model.onnx --pattern_cache cache.yaml
 
-  # Full example with all options
+  # Full example with all options (region workflow)
   python -m modelopt.onnx.quantization.autotune \\
       --onnx_path model.onnx --schemes_per_region 50 \\
       --pattern_cache cache.yaml --qdq_baseline baseline.onnx \\
       --quant_type int8 --verbose
+
+  # Subgraph workflow (faster, fusion-aware)
+  python -m modelopt.onnx.quantization.autotune \\
+      --onnx_path model.onnx --workflow subgraph
+
+  # Subgraph workflow with pre-generated graph.json
+  python -m modelopt.onnx.quantization.autotune \\
+      --onnx_path model.onnx --workflow subgraph --graph_json model.fp16.graph.json
         """,
     )
 
@@ -202,6 +272,30 @@ Examples:
         default=DEFAULT_OUTPUT_DIR,
         dest="output_dir",
         help=f"Output directory for results (default: {DEFAULT_OUTPUT_DIR})",
+    )
+
+    # Workflow Selection
+    workflow_group = parser.add_argument_group("Workflow Selection")
+    workflow_group.add_argument(
+        "--workflow",
+        type=str,
+        default="region",
+        choices=["region", "subgraph"],
+        help="Autotuning workflow: 'region' (pattern-based, default) or 'subgraph' (fusion-aware, faster)",
+    )
+    workflow_group.add_argument(
+        "--graph_json",
+        type=str,
+        default=None,
+        help="Path to TRT graph.json for subgraph workflow. If omitted, one is generated via trtexec FP16.",
+    )
+    workflow_group.add_argument(
+        "--incremental_validation",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        dest="incremental_validation",
+        help="Enable/disable per-group incremental validation in subgraph workflow "
+        "(default: enabled). Use --no-incremental_validation to disable.",
     )
 
     # Autotuning Strategy
@@ -270,15 +364,77 @@ Examples:
         choices=["float16", "float32", "bfloat16"],
         help="Default DQ output dtype if cannot be deduced (optional)",
     )
+    quant_group.add_argument(
+        "--quantizable_ops",
+        type=str,
+        nargs="+",
+        default=None,
+        help="ONNX op types to treat as quantizable (default: Conv ConvTranspose MatMul Gemm). "
+        "Example: --quantizable_ops Conv MatMul Einsum",
+    )
+
+    # Calibration (Phase 4)
+    calib_group = parser.add_argument_group("Calibration (Final Export)")
+    calib_group.add_argument(
+        "--calibration_data_path",
+        type=str,
+        default=None,
+        help="Path to calibration data (.npy or .npz file). "
+        "If omitted, random calibration data is used.",
+    )
+    calib_group.add_argument(
+        "--calibration_method",
+        type=str,
+        default="entropy",
+        choices=["entropy", "minmax", "percentile"],
+        help="ORT calibration method (default: entropy)",
+    )
+    calib_group.add_argument(
+        "--calibration_shapes",
+        type=str,
+        default=None,
+        help="Input shape spec for calibration, e.g. 'input:1x3x224x224'",
+    )
+    calib_group.add_argument(
+        "--calibration_eps",
+        type=str,
+        nargs="+",
+        default=None,
+        help="Execution providers for calibration (default: cpu cuda:0 trt)",
+    )
+    calib_group.add_argument(
+        "--high_precision_dtype",
+        type=str,
+        default="fp16",
+        choices=["fp16", "fp32"],
+        help="Non-quantized precision for the final model (default: fp16)",
+    )
+    calib_group.add_argument(
+        "--skip_calibration",
+        action="store_true",
+        default=False,
+        help="Skip Phase 4 calibration; output only placeholder Q/DQ model "
+        "(for latency-only analysis)",
+    )
+
+    # Model Options
+    model_group = parser.add_argument_group("Model Options")
+    model_group.add_argument(
+        "--strongly_typed",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Use --stronglyTyped for trtexec graph.json generation in subgraph workflow "
+        "(default: enabled). Use --no-strongly_typed to disable.",
+    )
+    model_group.add_argument(
+        "--use_external_data_format",
+        action="store_true",
+        default=False,
+        help="Use ONNX external data format for large models (>2GB)",
+    )
 
     # TensorRT Benchmark
     trt_group = parser.add_argument_group("TensorRT Benchmark")
-    trt_group.add_argument(
-        "--use_trtexec",
-        action="store_true",
-        help="Use trtexec for benchmarking (default: False)",
-        default=False,
-    )
     trt_group.add_argument(
         "--timing_cache",
         type=str,
