@@ -282,7 +282,12 @@ class EagleModule(nn.Module):
                 num_layers=self.config.parallel_draft_heads_num_layers,
             )
 
+<<<<<<< HEAD
     def _maybe_init_rope(self, device=None):
+=======
+    def _maybe_init_rope(self, device):
+        # Lazily init rope since rope buffers are not saved with state dict
+>>>>>>> 1b448cf93 (squash: speculative decoding recipe lib)
         if self.config.eagle_decoder_type == "llama" and not hasattr(self, "rotary_emb"):
             self.rotary_emb = LlamaRotaryEmbedding(config=self.config, device=device)
 

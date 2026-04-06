@@ -295,7 +295,7 @@ def build_docker_executor(
     container_mounts += [f"{hf_local}:/hf-local"]
 
     scratch_dst = "/scratchspace"
-    scratch_src = os.path.join(job_dir, experiment_title, experiment_id, task_name)
+    scratch_src = os.path.join(job_dir, experiment_title, experiment_id)
     os.makedirs(scratch_src, exist_ok=True)
     modelopt_dst = slurm_config.modelopt_install_path
     if modelopt_src_path is None:

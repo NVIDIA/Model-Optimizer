@@ -27,7 +27,6 @@ export PATH=$PATH:/workspace/.local/bin
 trap 'error_handler $0 $LINENO' ERR # ERROR HANDLER
 
 bash modules/Model-Optimizer/examples/speculative_decoding/launch_train.sh \
-    --model ${HF_MODEL_CKPT} \
     ${@}
 
 python modules/Model-Optimizer/examples/speculative_decoding/scripts/export_hf_checkpoint.py \
