@@ -57,6 +57,7 @@ class Unit3D(nn.Module):
             self.bn = nn.BatchNorm3d(out_channels, eps=0.001, momentum=0.01)
 
     def forward(self, x):
+        """Apply conv3d, optional batch norm, and optional ReLU."""
         x = self.conv3d(x)
         if self._use_bn:
             x = self.bn(x)
@@ -79,6 +80,7 @@ class InceptionModule(nn.Module):
         self.b3b = Unit3D(in_channels, out_channels[5], (1, 1, 1))
 
     def forward(self, x):
+        """Concatenate outputs from all four branches along the channel dim."""
         return torch.cat(
             [
                 self.b0(x),
@@ -139,14 +141,19 @@ class InceptionI3d(nn.Module):
 
 
 def _map_torchscript_keys(ts_state: dict) -> dict:
-    """Convert TorchScript-format keys to piergiaj/pytorch-i3d naming."""
+    """Convert TorchScript-format state dict keys to piergiaj/pytorch-i3d naming.
+
+    Handles the key differences between the two formats:
+    - Layer names: lowercase ``conv3d_1a_7x7`` -> PascalCase ``Conv3d_1a_7x7``
+    - BatchNorm: ``batch3d`` -> ``bn``
+    - Inception branches: ``branch_0`` -> ``b0``, ``branch_1.0`` -> ``b1a``, etc.
+    - Logits layer ``conv3d_0c_1x1`` is skipped (not used for feature extraction).
+    """
     layer_map = {
         "conv3d_1a_7x7": "Conv3d_1a_7x7",
         "conv3d_2b_1x1": "Conv3d_2b_1x1",
         "conv3d_2c_3x3": "Conv3d_2c_3x3",
     }
-    for i in "bcdef":
-        layer_map[f"mixed_3{('bc'.index(i) + 98 == ord(i) and i) or ''}"] = None
     layer_map.update(
         {f"mixed_{s}": f"Mixed_{s}" for s in ["3b", "3c", "4b", "4c", "4d", "4e", "4f", "5b", "5c"]}
     )
@@ -184,7 +191,11 @@ def _map_torchscript_keys(ts_state: dict) -> dict:
 
 
 def load_i3d(weights_path: str, device: torch.device) -> InceptionI3d:
-    """Load I3D weights from either rgb_imagenet.pt or TorchScript archive."""
+    """Load I3D weights from either ``rgb_imagenet.pt`` or a TorchScript archive.
+
+    The weights file is a trusted, well-known published checkpoint from
+    piergiaj/pytorch-i3d (MIT License). Only state_dict tensors are loaded.
+    """
     model = InceptionI3d()
 
     try:
@@ -192,9 +203,12 @@ def load_i3d(weights_path: str, device: torch.device) -> InceptionI3d:
         raw_state = jit_model.state_dict()
         state = _map_torchscript_keys(raw_state)
     except Exception:
+        # Safe: weights are from a known source (piergiaj/pytorch-i3d, MIT License).
+        # weights_only=False is required because the checkpoint was saved with an
+        # older PyTorch version that includes non-tensor metadata in the archive.
         state = torch.load(weights_path, map_location="cpu", weights_only=False)
 
-    missing, unexpected = model.load_state_dict(state, strict=False)
+    missing, _unexpected = model.load_state_dict(state, strict=False)
     non_head = [k for k in missing if "logits" not in k]
     if non_head:
         import warnings

@@ -266,6 +266,7 @@ def resolve_weights(weights_arg: str | None) -> Path:
 
 
 def main():
+    """Parse arguments, load model, extract features, compute and report FVD."""
     parser = argparse.ArgumentParser(
         description="Compute FVD between two video sets (I3D, 1024-dim features).",
         formatter_class=argparse.RawDescriptionHelpFormatter,
