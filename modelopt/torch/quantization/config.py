@@ -1334,15 +1334,6 @@ class GPTQConfig(QuantizeAlgorithmConfig):
         description="""The block size for GPTQ weight update, which must be a multiple of the
         group_size used in the quantization.""",
     )
-    skip_layers: list[int] = ModeloptField(
-        default=[],
-        title="Decoder layer indices to skip GPTQ weight update.",
-        description=(
-            "List of decoder layer indices (0-based) for which GPTQ weight update is skipped. "
-            "These layers still receive max calibration (QDQ amax) but no Hessian-based weight "
-            "adjustment. Only effective with use_sequential=True."
-        ),
-    )
 
 
 QuantizeQuantCfgType = dict[

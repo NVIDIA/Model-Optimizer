@@ -1609,7 +1609,7 @@ def _promote_nvfp4_static_quantizers(model: nn.Module) -> int:
     Returns the number of quantizers converted.
     """
     converted = 0
-    for _name, module in list(model.named_modules()):
+    for module in model.modules():
         if isinstance(module, TensorQuantizer) and not module._disabled:
             if module._calibrator is not None and not module._dynamic and hasattr(module, "_amax"):
                 is_nvfp4_static = (
@@ -1632,7 +1632,6 @@ def gptq(
     forward_loop: ForwardLoop,
     percdamp: float = 0.01,
     block_size: int = 128,
-    skip_layers: list[int] | None = None,
 ):
     """GPTQ quantization.
 
@@ -1696,16 +1695,11 @@ def gptq(
             def hessian_forward(self, input, *args, **kwargs):
                 inp = input.to_local() if hasattr(input, "to_local") else input
                 if self.input_quantizer is not None and self.input_quantizer.is_enabled:
-                    hessian_input = self.input_quantizer(inp)
-                else:
-                    hessian_input = inp
+                    inp = self.input_quantizer(inp)
                 gptq_helper.hessian, gptq_helper.n_samples = update_hessian(
-                    hessian_input, gptq_helper.hessian, gptq_helper.n_samples
+                    inp, gptq_helper.hessian, gptq_helper.n_samples
                 )
-
-                out = self._forward_no_gptq_hessian(input, *args, **kwargs)
-
-                return out
+                return self._forward_no_gptq_hessian(input, *args, **kwargs)
 
             bind_forward_method(self.module, hessian_forward, self.CACHE_NAME)
 
@@ -1879,7 +1873,7 @@ def gptq(
             Follows the 3-loop structure from the VQ GPTQ reference
             (adaptive_rounding.py: gptq_quantize_scaled_vq).
             """
-            print_rank_0(f"  [{self.name}] Using PSX LUTS GPTQ path (v2)")
+            print_rank_0(f"  [{self.name}] Using PSX LUTS GPTQ path")
             extra_args = quantizer.backend_extra_args
             encode_format = quantizer.num_bits
             encode_path = extra_args.get("encode_path", "")
@@ -1887,7 +1881,9 @@ def gptq(
                 encode_path += "/"
             quant_block_size = extra_args.get("block_sizes", 16)
             scale_type = extra_args.get("scale_type", "e4m3")
-            print(f"[GPTQ psx_luts] quant_block_size={quant_block_size}, scale_type={scale_type}")
+            print_rank_0(
+                f"[GPTQ psx_luts] quant_block_size={quant_block_size}, scale_type={scale_type}"
+            )
 
             # Load the vector LUT codebook
             import luts
@@ -1902,7 +1898,9 @@ def gptq(
 
             values = values.to(torch.float)
             vector_size = values.shape[1]
-            print(f"[GPTQ psx_luts] vector_size={vector_size}, codebook_shape={values.shape}")
+            print_rank_0(
+                f"[GPTQ psx_luts] vector_size={vector_size}, codebook_shape={values.shape}"
+            )
             assert self.weight is not None and self.h_inv is not None
             out_features, num_cols = self.weight.shape
 
@@ -1942,7 +1940,7 @@ def gptq(
                     if d == vector_size:
                         q_sub = self._static_blockwise_vector_quantization(sub_vec, values, s)
                     else:
-                        padded = torch.nn.functional.pad(sub_vec, (0, vector_size - d))
+                        padded = F.pad(sub_vec, (0, vector_size - d))
                         q_sub = self._static_blockwise_vector_quantization(padded, values, s)[:, :d]
 
                     q[:, j : j + d] = q_sub
@@ -1962,7 +1960,7 @@ def gptq(
             """Log Hessian-weighted relative MSE between ``self.weight`` and original weights."""
             w_orig = self.module.weight.float()
             delta = self.weight - w_orig
-            mse = (delta).mm(hessian).mul(delta).mean() / (
+            mse = delta.mm(hessian).mul(delta).mean() / (
                 w_orig.mm(hessian).mul(w_orig).mean() + 1e-6
             )
             suffix = f", n_hessian_samples: {self.n_samples}" if self.n_samples else ""
@@ -1972,29 +1970,6 @@ def gptq(
 
     max_calibrate(model, forward_loop=forward_loop)
     _promote_nvfp4_static_quantizers(model)
-
-    # Skip GPTQ weight update for specified layers — fold weights via QDQ instead.
-    layer_idx = getattr(model, "_seq_calib_layer_idx", None)
-    if skip_layers and layer_idx is not None and layer_idx in skip_layers:
-        print_rank_0(
-            f"[Layer {layer_idx}] In skip_layers {skip_layers} → using RTN path (no GPTQ weight update)"
-        )
-        rtn_count = 0
-        for name, module in model.named_modules():
-            if is_quantized_linear(module) and module.weight_quantizer.is_enabled:
-                wq = module.weight_quantizer
-                with torch.no_grad():
-                    module.weight.data = wq(module.weight).to(module.weight.dtype)
-                backend = getattr(wq, "backend", None)
-                if backend == "psx_luts":
-                    wq.disable()
-                rtn_count += 1
-                print_rank_0(f"  [RTN] {name} — QDQ-folded (backend={backend})")
-        print_rank_0(f"[Layer {layer_idx}] RTN path complete: {rtn_count} layers folded via QDQ")
-        return
-
-    if layer_idx is not None:
-        print_rank_0(f"[Layer {layer_idx}] Not in skip_layers → using GPTQ path")
 
     quantized_layers = [
         (n, m)

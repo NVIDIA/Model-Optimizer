@@ -15,7 +15,6 @@
 
 import argparse
 import copy
-import os
 import random
 import time
 import warnings
@@ -248,88 +247,34 @@ def make_calib_dataloader(
     return calib_dataloader, first_text_speech_dataset
 
 
-def make_mse_holdout_dataloader(
-    args: argparse.Namespace,
-    tokenizer: PreTrainedTokenizerBase,
-    device: torch.device,
-) -> DataLoader:
-    """Create a hold-out dataloader for activation MSE from the same dataset as calibration.
-
-    Samples are drawn from the same dataset/splits but starting *after* the calibration
-    region, so there is zero overlap.  The skip count per split equals
-    ``calib_size // num_splits`` (matching how ``get_dataset_samples`` divides samples).
-    """
+def _make_mse_holdout_dataloader(args, tokenizer, device):
+    """Create a hold-out dataloader for activation MSE, skipping calibration samples."""
     from modelopt.torch.utils.dataset_utils import SUPPORTED_DATASET_CONFIG
 
-    dataset_names = args.dataset
-    calib_sizes = args.calib_size
-    n_mse = getattr(args, "activation_mse_max_samples", 16)
+    dataset_names, calib_sizes = args.dataset, args.calib_size
+    n_mse = args.activation_mse_max_samples
 
-    # Compute per-split skip: calib samples per dataset / number of splits for that dataset
+    # Per-split skip = calib samples / number of splits for that dataset
     skip_per_dataset = []
     for ds_name, cs in zip(dataset_names, calib_sizes):
-        if ds_name in SUPPORTED_DATASET_CONFIG:
-            n_splits = len(SUPPORTED_DATASET_CONFIG[ds_name]["config"].get("split", [None]))
-        else:
-            n_splits = 1
+        n_splits = len(
+            SUPPORTED_DATASET_CONFIG.get(ds_name, {}).get("config", {}).get("split", [None])
+        )
         skip_per_dataset.append(cs // max(n_splits, 1))
-
-    # Use the max skip across datasets (all datasets share the same skip_samples param)
     skip = max(skip_per_dataset)
 
-    # Number of hold-out samples per dataset, proportional to calib_size
+    # Distribute hold-out samples proportionally across datasets
     total_calib = sum(calib_sizes)
     holdout_sizes = [max(1, int(n_mse * cs / total_calib)) for cs in calib_sizes]
-    # Ensure we get exactly n_mse total
     holdout_sizes[-1] = n_mse - sum(holdout_sizes[:-1])
 
-    print(
-        f"Creating MSE hold-out dataloader: skip_per_split={skip}, "
-        f"holdout_sizes={dict(zip(dataset_names, holdout_sizes))}"
-    )
-
-    holdout_dataloader = get_dataset_dataloader(
+    return get_dataset_dataloader(
         dataset_name=dataset_names,
         tokenizer=tokenizer,
         batch_size=args.batch_size,
         num_samples=holdout_sizes,
         device=device,
         skip_samples=skip,
-    )
-    return holdout_dataloader
-
-
-def verify_no_overlap(
-    calib_dataloader: DataLoader,
-    holdout_dataloader: DataLoader,
-) -> None:
-    """Verify that calibration and hold-out dataloaders have no overlapping samples.
-
-    Compares SHA-256 hashes of each row of input_ids across both dataloaders.
-    Raises AssertionError if any overlap is found.
-    """
-    import hashlib
-
-    def _collect_hashes(dataloader: DataLoader) -> set[str]:
-        hashes = set()
-        for batch in dataloader:
-            ids = batch["input_ids"] if isinstance(batch, dict) else batch
-            for row in ids:
-                h = hashlib.sha256(row.cpu().numpy().tobytes()).hexdigest()
-                hashes.add(h)
-        return hashes
-
-    calib_hashes = _collect_hashes(calib_dataloader)
-    holdout_hashes = _collect_hashes(holdout_dataloader)
-    overlap = calib_hashes & holdout_hashes
-
-    assert len(overlap) == 0, (
-        f"Found {len(overlap)} overlapping samples between calibration and MSE hold-out data! "
-        f"This invalidates the MSE measurement. Check dataset/calib_size configuration."
-    )
-    print(
-        f"[MSE hold-out] Overlap check passed: "
-        f"{len(calib_hashes)} calib vs {len(holdout_hashes)} hold-out, 0 overlap."
     )
 
 
@@ -1085,73 +1030,19 @@ def quantize_main(
             _set_kv_cache_constant_amax(quant_cfg["quant_cfg"])
 
         # Collect original (unquantized) activations before quantization modifies the model
-        if getattr(args, "measure_activation_mse", False):
-            n_mse = getattr(args, "activation_mse_max_samples", 16)
-            mse_save_dir = getattr(args, "activation_mse_save_dir", None)
-            mse_input_path = getattr(args, "activation_mse_input_path", None)
-
-            # Resolve MSE input data: frozen file (raw text or tokenized), or hold-out set
-            mse_data = None
-            if mse_input_path is not None:
-                if mse_input_path.endswith(".json"):
-                    if os.path.isfile(mse_input_path):
-                        print(f"Loading MSE input data from existing .json file: {mse_input_path}")
-                        texts = ActivationMSELogger.load_raw_text(mse_input_path)
-                        mse_data = ActivationMSELogger.tokenize_raw_text(
-                            texts,
-                            tokenizer,
-                            max_length=args.calib_seq,
-                        )
-                    else:
-                        assert tokenizer is not None, (
-                            "--activation_mse_input_path with .json requires a tokenizer to decode"
-                        )
-                        print(
-                            f"Creating MSE input data .json file from hold-out set: {mse_input_path}"
-                        )
-                        holdout_dl = make_mse_holdout_dataloader(args, tokenizer, device)
-                        verify_no_overlap(calib_dataloader, holdout_dl)
-                        texts = ActivationMSELogger.materialize_raw_text(
-                            holdout_dl,
-                            mse_input_path,
-                            tokenizer=tokenizer,
-                            max_samples=n_mse,
-                        )
-                        mse_data = ActivationMSELogger.tokenize_raw_text(
-                            texts,
-                            tokenizer,
-                            max_length=args.calib_seq,
-                        )
-                elif mse_input_path.endswith(".pt"):
-                    if os.path.isfile(mse_input_path):
-                        print(f"Loading MSE input data from existing .pt file: {mse_input_path}")
-                        mse_data = ActivationMSELogger.load_data(mse_input_path)
-                        verify_no_overlap(calib_dataloader, mse_data)
-                    else:
-                        print(
-                            f"Creating MSE input data .pt file from hold-out set: {mse_input_path}"
-                        )
-                        holdout_dl = make_mse_holdout_dataloader(args, tokenizer, device)
-                        verify_no_overlap(calib_dataloader, holdout_dl)
-                        mse_data = ActivationMSELogger.materialize_data(
-                            holdout_dl,
-                            mse_input_path,
-                            max_samples=n_mse,
-                        )
-                else:
-                    raise ValueError(
-                        f"--activation_mse_input_path must end with .json or .pt, got: {mse_input_path}"
-                    )
-
-            if mse_data is None:
-                # Default: create a hold-out set from the same dataset, skipping
-                # the calibration region to avoid overlap.
-                print("Creating MSE hold-out dataloader (non-overlapping with calibration)...")
-                mse_data = make_mse_holdout_dataloader(args, tokenizer, device)
-                verify_no_overlap(calib_dataloader, mse_data)
-
-            mse_logger = ActivationMSELogger(max_samples=n_mse, save_dir=mse_save_dir)
-            print(f"Collecting original (unquantized) activations for MSE over {n_mse} samples...")
+        if args.measure_activation_mse:
+            mse_logger = ActivationMSELogger(
+                max_samples=args.activation_mse_max_samples,
+                save_dir=args.activation_mse_save_dir,
+            )
+            mse_data = ActivationMSELogger.resolve_data(
+                input_path=args.activation_mse_input_path,
+                calib_dataloader=calib_dataloader,
+                tokenizer=tokenizer,
+                max_samples=args.activation_mse_max_samples,
+                max_length=args.calib_seq,
+                make_holdout_fn=lambda: _make_mse_holdout_dataloader(args, tokenizer, device),
+            )
             mse_logger.collect(language_model, mse_data, phase="original")
 
         if args.qformat in QUANT_CFG_CHOICES or hasattr(mtq, args.qformat):
@@ -1182,29 +1073,17 @@ def quantize_main(
     )
 
     if mse_logger is not None:
-        import gc
-
-        print("Collecting quantized activations for MSE...")
-        mse_logger.collect(language_model, mse_data, phase="quantized")
-
-        mse_logger.compute_mse()
-        print(mse_logger.summary())
-
-        if getattr(args, "activation_mse_save_dir", None):
-            mse_logger.save()
-
+        mse_logger.finish(language_model, mse_data)
         del mse_logger, mse_data
-        gc.collect()
         torch.cuda.empty_cache()
 
-    if getattr(args, "eval_perplexity", False) and tokenizer is not None:
-        if getattr(args, "fold_weights", False):
+    if args.eval_perplexity and tokenizer is not None:
+        if args.fold_weights:
             print("Folding weights before perplexity evaluation...")
             mtq.fold_weight(language_model)
-        seq_len = getattr(args, "eval_perplexity_seq_len", 2048)
-        eval_data = get_wikitext2(tokenizer, seq_len)
+        eval_data = get_wikitext2(tokenizer, args.eval_perplexity_seq_len)
         ppl = compute_perplexity(full_model, eval_data)
-        print(f"Wikitext-2 perplexity: {round(ppl, 2):.2f}")
+        print(f"Wikitext-2 perplexity: {ppl:.2f}")
 
     # Plugin-registered configs (e.g. PSX LUTS from modelopt-internal) are not exportable
     # via the standard TRT-LLM / HF export paths. Fall back to save_pretrained().
