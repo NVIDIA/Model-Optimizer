@@ -36,6 +36,7 @@ from vllm.distributed.parallel_state import get_dp_group, get_ep_group, get_tp_g
 
 from ...utils.distributed import ParallelState
 from ..nn import QuantLinearConvBase, QuantModule, QuantModuleRegistry, TensorQuantizer
+from ..utils import replace_function
 from .custom import CUSTOM_MODEL_PLUGINS
 
 # Try multiple import paths for vLLM compatibility across versions
