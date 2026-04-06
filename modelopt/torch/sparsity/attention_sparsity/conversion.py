@@ -402,45 +402,31 @@ def export_sparse_attention_config(model: nn.Module) -> dict[str, Any] | None:
     if calibration_params is None:
         return None
 
-    # Detect calibration type from params
-    sample_params = next(iter(calibration_params.values()))
-    is_percentile = "threshold" in sample_params
+    # Build threshold_scale_factor with model parameters
+    threshold_scale_factor: dict[str, Any] = {
+        "formula": "a * exp(b * target_sparsity)",
+    }
+    for phase in ["prefill", "decode"]:
+        if phase in calibration_params:
+            threshold_scale_factor[phase] = {
+                "a": calibration_params[phase]["a"],
+                "b": calibration_params[phase]["b"],
+            }
 
     # Build the export config
     export_config: dict[str, Any] = {
         "config_groups": {
             "group_0": {
-                "sparse_algo": "softmax_skip_diffusion" if is_percentile else "softmax_skip",
+                "sparse_algo": "softmax_skip",
                 "targets": sorted(target_classes) if target_classes else ["Attention"],
             }
         },
+        "threshold_scale_factor": threshold_scale_factor,
         "producer": {
             "name": "modelopt",
             "version": mo_version,
         },
     }
-
-    if is_percentile:
-        threshold_config: dict[str, Any] = {
-            "formula": "skip if gap >= threshold * log(seq_k)",
-        }
-        for phase in ["prefill", "decode"]:
-            if phase in calibration_params:
-                threshold_config[phase] = {
-                    "threshold": calibration_params[phase]["threshold"],
-                }
-        export_config["threshold_config"] = threshold_config
-    else:
-        threshold_scale_factor: dict[str, Any] = {
-            "formula": "a * exp(b * target_sparsity)",
-        }
-        for phase in ["prefill", "decode"]:
-            if phase in calibration_params:
-                threshold_scale_factor[phase] = {
-                    "a": calibration_params[phase]["a"],
-                    "b": calibration_params[phase]["b"],
-                }
-        export_config["threshold_scale_factor"] = threshold_scale_factor
 
     return export_config
 
@@ -513,16 +499,6 @@ def _format_threshold(info: dict) -> str:
                 s = target.get(phase, 0.5)
                 parts.append(f"{phase}: a={a:.4f}, b={b:.2f}, target={s:.0%}")
         return f"calibrated({', '.join(parts)})"
-    if t == "dynamic_calibrated_percentile":
-        params = info.get("calibration_params", {})
-        target = info.get("target_sparse_ratio", {})
-        parts = []
-        for phase in ["prefill", "decode"]:
-            if phase in params and "threshold" in params[phase]:
-                th = params[phase]["threshold"]
-                s = target.get(phase, 0.2)
-                parts.append(f"{phase}: threshold={th:.4f}, target={s:.0%}")
-        return f"percentile({', '.join(parts)})"
     if t == "static":
         v = info.get("value")
         if isinstance(v, dict):
