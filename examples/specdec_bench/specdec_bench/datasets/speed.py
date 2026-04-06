@@ -718,7 +718,7 @@ her fear and anger)."""
                 data_files = {"test": [str(config_name_or_dataset_path_path)]}
             try:
                 dataset = load_dataset("parquet", data_files=data_files, split="test")
-            except TypeError:
+            except (TypeError, ValueError):
                 # Fallback: parquet metadata may be incompatible with the installed
                 # ``datasets`` version.  Read via PyArrow and convert directly.
                 import pyarrow
