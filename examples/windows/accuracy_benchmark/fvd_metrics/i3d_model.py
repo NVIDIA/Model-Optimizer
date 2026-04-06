@@ -1,3 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """
 Inception-v1 Inflated 3D ConvNet (I3D) — feature extractor for FVD.
 
@@ -16,15 +31,27 @@ import torch.nn.functional as F
 class Unit3D(nn.Module):
     """Conv3d + BatchNorm + ReLU with fixed padding."""
 
-    def __init__(self, in_channels, out_channels, kernel_shape=(1, 1, 1),
-                 stride=(1, 1, 1), padding=0, use_bias=False,
-                 use_bn=True, activation=True):
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        kernel_shape=(1, 1, 1),
+        stride=(1, 1, 1),
+        padding=0,
+        use_bias=False,
+        use_bn=True,
+        activation=True,
+    ):
         super().__init__()
         self._use_bn = use_bn
         self._activation = activation
         self.conv3d = nn.Conv3d(
-            in_channels, out_channels, kernel_shape,
-            stride=stride, padding=padding, bias=use_bias,
+            in_channels,
+            out_channels,
+            kernel_shape,
+            stride=stride,
+            padding=padding,
+            bias=use_bias,
         )
         if use_bn:
             self.bn = nn.BatchNorm3d(out_channels, eps=0.001, momentum=0.01)
@@ -52,12 +79,15 @@ class InceptionModule(nn.Module):
         self.b3b = Unit3D(in_channels, out_channels[5], (1, 1, 1))
 
     def forward(self, x):
-        return torch.cat([
-            self.b0(x),
-            self.b1b(self.b1a(x)),
-            self.b2b(self.b2a(x)),
-            self.b3b(self.b3a(x)),
-        ], dim=1)
+        return torch.cat(
+            [
+                self.b0(x),
+                self.b1b(self.b1a(x)),
+                self.b2b(self.b2a(x)),
+                self.b3b(self.b3a(x)),
+            ],
+            dim=1,
+        )
 
 
 class InceptionI3d(nn.Module):
@@ -110,22 +140,23 @@ class InceptionI3d(nn.Module):
 
 def _map_torchscript_keys(ts_state: dict) -> dict:
     """Convert TorchScript-format keys to piergiaj/pytorch-i3d naming."""
-    LAYER_MAP = {
+    layer_map = {
         "conv3d_1a_7x7": "Conv3d_1a_7x7",
         "conv3d_2b_1x1": "Conv3d_2b_1x1",
         "conv3d_2c_3x3": "Conv3d_2c_3x3",
     }
     for i in "bcdef":
-        LAYER_MAP[f"mixed_3{'bc'.index(i) + 98 == ord(i) and i or ''}"] = None
-    LAYER_MAP.update({
-        f"mixed_{s}": f"Mixed_{s}"
-        for s in ["3b", "3c", "4b", "4c", "4d", "4e", "4f", "5b", "5c"]
-    })
+        layer_map[f"mixed_3{('bc'.index(i) + 98 == ord(i) and i) or ''}"] = None
+    layer_map.update(
+        {f"mixed_{s}": f"Mixed_{s}" for s in ["3b", "3c", "4b", "4c", "4d", "4e", "4f", "5b", "5c"]}
+    )
 
-    BRANCH_MAP = {
+    branch_map = {
         "branch_0": "b0",
-        "branch_1.0": "b1a", "branch_1.1": "b1b",
-        "branch_2.0": "b2a", "branch_2.1": "b2b",
+        "branch_1.0": "b1a",
+        "branch_1.1": "b1b",
+        "branch_2.0": "b2a",
+        "branch_2.1": "b2b",
         "branch_3.1": "b3b",
     }
 
@@ -137,12 +168,12 @@ def _map_torchscript_keys(ts_state: dict) -> dict:
         new_key = key
         new_key = new_key.replace(".batch3d.", ".bn.")
 
-        for old_prefix, new_prefix in LAYER_MAP.items():
+        for old_prefix, new_prefix in layer_map.items():
             if new_key.startswith(old_prefix + "."):
-                new_key = new_prefix + new_key[len(old_prefix):]
+                new_key = new_prefix + new_key[len(old_prefix) :]
                 break
 
-        for old_branch, new_branch in BRANCH_MAP.items():
+        for old_branch, new_branch in branch_map.items():
             old_dot = "." + old_branch + "."
             if old_dot in new_key:
                 new_key = new_key.replace(old_dot, "." + new_branch + ".")
@@ -167,6 +198,7 @@ def load_i3d(weights_path: str, device: torch.device) -> InceptionI3d:
     non_head = [k for k in missing if "logits" not in k]
     if non_head:
         import warnings
+
         warnings.warn(f"Missing keys in I3D checkpoint: {non_head}")
 
     model.eval().to(device)

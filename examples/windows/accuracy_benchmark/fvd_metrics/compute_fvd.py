@@ -1,3 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """
 Compute FVD (Fréchet Video Distance) between two sets of videos.
 
@@ -50,9 +65,7 @@ SPATIAL_SIZE = 224
 BATCH_SIZE = 8
 VIDEO_EXTS = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".m4v"}
 
-WEIGHTS_URL = (
-    "https://github.com/piergiaj/pytorch-i3d/raw/master/models/rgb_imagenet.pt"
-)
+WEIGHTS_URL = "https://github.com/piergiaj/pytorch-i3d/raw/master/models/rgb_imagenet.pt"
 DEFAULT_CACHE = Path.home() / ".cache" / "fvd" / "rgb_imagenet.pt"
 
 
@@ -61,17 +74,13 @@ DEFAULT_CACHE = Path.home() / ".cache" / "fvd" / "rgb_imagenet.pt"
 
 def list_videos(folder: str) -> list:
     """Find all video files recursively under *folder*."""
-    paths = sorted(
-        p for p in Path(folder).rglob("*") if p.suffix.lower() in VIDEO_EXTS
-    )
+    paths = sorted(p for p in Path(folder).rglob("*") if p.suffix.lower() in VIDEO_EXTS)
     if not paths:
         raise ValueError(f"No video files found in {folder}")
     return paths
 
 
-def load_video_clip(
-    path: Path, clip_length: int, start_frame: int = 0
-) -> np.ndarray | None:
+def load_video_clip(path: Path, clip_length: int, start_frame: int = 0) -> np.ndarray | None:
     """Read *clip_length* consecutive frames starting at *start_frame*.
 
     Returns (T, H, W, 3) uint8 RGB or None on failure.
@@ -98,25 +107,26 @@ def load_video_clip(
     return np.stack(frames, axis=0)
 
 
-def preprocess_clip(
-    frames: np.ndarray, spatial_size: int = SPATIAL_SIZE
-) -> torch.Tensor:
+def preprocess_clip(frames: np.ndarray, spatial_size: int = SPATIAL_SIZE) -> torch.Tensor:
     """Resize shortest side to 256, center-crop, normalize to [-1, 1].
 
     Returns (3, T, H, W) float32.
     """
-    T, H, W, _ = frames.shape
+    n_frames, h, w, _ = frames.shape
 
-    scale = 256 / min(H, W)
-    new_h, new_w = int(round(H * scale)), int(round(W * scale))
-    resized = np.stack([
-        cv2.resize(frames[t], (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-        for t in range(T)
-    ], axis=0)
+    scale = 256 / min(h, w)
+    new_h, new_w = round(h * scale), round(w * scale)
+    resized = np.stack(
+        [
+            cv2.resize(frames[t], (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+            for t in range(n_frames)
+        ],
+        axis=0,
+    )
 
     cy, cx = resized.shape[1] // 2, resized.shape[2] // 2
     h2, w2 = spatial_size // 2, spatial_size // 2
-    cropped = resized[:, cy - h2: cy + h2, cx - w2: cx + w2, :]
+    cropped = resized[:, cy - h2 : cy + h2, cx - w2 : cx + w2, :]
 
     tensor = torch.from_numpy(cropped).permute(3, 0, 1, 2).float()
     tensor = tensor / 127.5 - 1.0
@@ -140,10 +150,7 @@ def get_clips(
             starts = [0] * clips_per_video
         else:
             max_start = max(0, total - clip_length)
-            starts = [
-                int(i * max_start / clips_per_video)
-                for i in range(clips_per_video)
-            ]
+            starts = [int(i * max_start / clips_per_video) for i in range(clips_per_video)]
 
         for start in starts:
             raw = load_video_clip(path, clip_length, start_frame=start)
@@ -174,7 +181,7 @@ def extract_features(
         range(0, len(clips), batch_size),
         desc=f"Extracting {label} features",
     ):
-        batch = torch.stack(clips[i: i + batch_size]).to(device)
+        batch = torch.stack(clips[i : i + batch_size]).to(device)
         feats.append(model(batch).cpu().numpy())
     return np.concatenate(feats, axis=0)
 
@@ -182,20 +189,16 @@ def extract_features(
 # ─── PCA & Fréchet distance ──────────────────────────────────────────────────
 
 
-def apply_pca(
-    feats_a: np.ndarray, feats_b: np.ndarray, n_components: int
-) -> tuple:
+def apply_pca(feats_a: np.ndarray, feats_b: np.ndarray, n_components: int) -> tuple:
     """Fit PCA on combined features, project both sets.
 
     Avoids rank-deficient covariance when n_samples < n_features.
     """
-    n_components = min(
-        n_components, feats_a.shape[0] - 1, feats_b.shape[0] - 1, feats_a.shape[1]
-    )
+    n_components = min(n_components, feats_a.shape[0] - 1, feats_b.shape[0] - 1, feats_a.shape[1])
     combined = np.concatenate([feats_a, feats_b], axis=0)
     mu = combined.mean(axis=0)
-    _, _, Vt = svd(combined - mu, full_matrices=False)
-    components = Vt[:n_components]
+    _, _, vt = svd(combined - mu, full_matrices=False)
+    components = vt[:n_components]
     return (feats_a - mu) @ components.T, (feats_b - mu) @ components.T
 
 
@@ -221,9 +224,7 @@ def frechet_distance(
             log.warning(f"Large imaginary component in sqrtm: {max_imag:.4f}")
         covmean = covmean.real
 
-    return float(
-        diff @ diff + np.trace(sigma1) + np.trace(sigma2) - 2 * np.trace(covmean)
-    )
+    return float(diff @ diff + np.trace(sigma1) + np.trace(sigma2) - 2 * np.trace(covmean))
 
 
 def compute_fvd(feats_ref: np.ndarray, feats_gen: np.ndarray) -> float:
@@ -271,25 +272,33 @@ def main():
     )
     parser.add_argument("--ref-dir", required=True, help="Reference videos directory")
     parser.add_argument("--gen-dir", required=True, help="Generated videos directory")
-    parser.add_argument("--weights", default=None,
-                        help="Path to I3D weights (auto-downloaded if omitted)")
-    parser.add_argument("--device", default=None,
-                        help="torch device (auto-detected if omitted)")
-    parser.add_argument("--clip-length", type=int, default=CLIP_LENGTH,
-                        help="Frames per clip (default: 16)")
-    parser.add_argument("--clips-per-video", type=int, default=1,
-                        help="Clips sampled per video (default: 1)")
-    parser.add_argument("--batch-size", type=int, default=BATCH_SIZE,
-                        help="Batch size for I3D inference (default: 8)")
-    parser.add_argument("--pca-dim", type=int, default=None,
-                        help="PCA dimension (auto-selected when n_clips < 1024; 0 to disable)")
-    parser.add_argument("--output", default=None,
-                        help="Path to save JSON results")
+    parser.add_argument(
+        "--weights", default=None, help="Path to I3D weights (auto-downloaded if omitted)"
+    )
+    parser.add_argument("--device", default=None, help="torch device (auto-detected if omitted)")
+    parser.add_argument(
+        "--clip-length", type=int, default=CLIP_LENGTH, help="Frames per clip (default: 16)"
+    )
+    parser.add_argument(
+        "--clips-per-video", type=int, default=1, help="Clips sampled per video (default: 1)"
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=BATCH_SIZE,
+        help="Batch size for I3D inference (default: 8)",
+    )
+    parser.add_argument(
+        "--pca-dim",
+        type=int,
+        default=None,
+        help="PCA dimension (auto-selected when n_clips < 1024; 0 to disable)",
+    )
+    parser.add_argument("--output", default=None, help="Path to save JSON results")
     args = parser.parse_args()
 
     device = torch.device(
-        args.device if args.device
-        else ("cuda" if torch.cuda.is_available() else "cpu")
+        args.device if args.device else ("cuda" if torch.cuda.is_available() else "cpu")
     )
     log.info(f"Device: {device}")
 
