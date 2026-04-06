@@ -61,9 +61,26 @@ class SparseAttentionModule(DynamicModule):
         Args:
             attribute_cfg: Sparse attention attribute configuration.
         """
+        from .config import VSAAttributeConfig
+
+        # Determine which config class to use based on method
+        config_dict = attribute_cfg or {}
+        if isinstance(attribute_cfg, dict):
+            method = config_dict.get("method", "flash_skip_softmax")
+        elif attribute_cfg is not None and hasattr(attribute_cfg, "method"):
+            method = attribute_cfg.method
+        else:
+            method = "flash_skip_softmax"
+
+        # Select appropriate config class based on method
+        if method == "vsa":
+            config_class = VSAAttributeConfig
+        else:
+            config_class = SparseAttentionAttributeConfig
+
         # Ensure config is validated through Pydantic
-        if not isinstance(attribute_cfg, SparseAttentionAttributeConfig):
-            attribute_cfg = SparseAttentionAttributeConfig(**(attribute_cfg or {}))
+        if not isinstance(attribute_cfg, (SparseAttentionAttributeConfig, VSAAttributeConfig)):
+            attribute_cfg = config_class(**(config_dict))
 
         # Store raw config for method initialization
         self._method_config = {}
@@ -80,10 +97,10 @@ class SparseAttentionModule(DynamicModule):
 
         # Process each attribute from validated config
         for attribute, val in attribute_cfg.model_dump().items():
-            # Validate attribute if using config class
-            if hasattr(SparseAttentionAttributeConfig, "model_fields"):
-                assert attribute in SparseAttentionAttributeConfig.model_fields, (
-                    f"{attribute} is not a valid SparseAttentionModule attribute"
+            # Validate attribute against the appropriate config class
+            if hasattr(config_class, "model_fields"):
+                assert attribute in config_class.model_fields, (
+                    f"{attribute} is not a valid {config_class.__name__} attribute"
                 )
 
             if attribute in _module_attributes:
@@ -159,14 +176,28 @@ class SparseAttentionModule(DynamicModule):
     def forward(self, *args, **kwargs):
         """Forward with selected sparse attention method.
 
-        This method dispatches to the appropriate sparse attention implementation
-        based on the configured method and backend.
+        - VSA: patches ``F.scaled_dot_product_attention`` to intercept the SDPA
+          call inside the original forward. Cross-attention is skipped.
+        - Softmax-patching methods (e.g. ``flash_skip_softmax``): use the
+          context manager path below.
         """
         # Pass through if sparse attention is disabled
         if not self.is_enabled:
             return super().forward(*args, **kwargs)
 
-        # Get the appropriate context manager for this configuration
+        # VSA: patch F.scaled_dot_product_attention so the VSA kernel intercepts
+        # the SDPA call inside the original forward. This works for diffusers models
+        # since SDPA is the common attention primitive.
+        # Only self-attention is replaced. Cross-attention (Q/K have different seq_len) is skipped.
+        if self._method == "vsa":
+            result = self._forward_with_vsa_sdpa_patch(args, kwargs)
+
+            if self._stats_manager is not None and self._last_stats is not None:
+                self._stats_manager.collect(self._last_stats)
+                self._last_stats = None
+            return result
+
+        # Standard path: softmax patching
         context = self._get_sparse_context()
 
         # Apply sparse attention through the context
@@ -177,6 +208,61 @@ class SparseAttentionModule(DynamicModule):
         if self._stats_manager is not None and self._last_stats is not None:
             self._stats_manager.collect(self._last_stats)
             self._last_stats = None  # Clear after collection
+
+        return result
+
+    def _forward_with_vsa_sdpa_patch(self, args, kwargs):
+        """Run forward with F.scaled_dot_product_attention patched for VSA.
+
+        Replaces SDPA with the VSA kernel for self-attention calls (Q and K/V
+        have the same seq_len).  Cross-attention calls fall through to the
+        original SDPA.  Warns if SDPA was never called.
+        """
+        import torch.nn.functional as F
+
+        from modelopt.torch.quantization.utils import replace_function
+
+        vsa = self._sparse_method_instance
+        original_sdpa = F.scaled_dot_product_attention
+        self._vsa_sdpa_called = False
+
+        def _patched_sdpa(query, key, value, attn_mask=None, dropout_p=0.0, is_causal=False, **kw):
+            self._vsa_sdpa_called = True
+
+            # Fall back to original SDPA when VSA cannot handle this call:
+            # - Cross-attention: Q and K/V have different seq_len
+            # - video_shape not set: VSA cannot compute tile metadata
+            # - seq_len mismatch: input doesn't match the configured video shape
+            can_apply_vsa = (
+                vsa.video_shape is not None
+                and query.shape[2] == key.shape[2]
+                and query.shape[2] == vsa.video_shape[0] * vsa.video_shape[1] * vsa.video_shape[2]
+            )
+            if not can_apply_vsa:
+                return original_sdpa(
+                    query,
+                    key,
+                    value,
+                    attn_mask=attn_mask,
+                    dropout_p=dropout_p,
+                    is_causal=is_causal,
+                    **kw,
+                )
+            output, stats = vsa.forward_attention(query, key, value)
+            self._last_stats = stats
+            return output
+
+        with replace_function(F, "scaled_dot_product_attention", _patched_sdpa):
+            result = super().forward(*args, **kwargs)
+
+        if not self._vsa_sdpa_called:
+            import warnings
+
+            warnings.warn(
+                f"VSA: F.scaled_dot_product_attention was not called during "
+                f"{type(self).__name__}.forward(). The attention layer may use a "
+                f"custom kernel that bypasses SDPA. VSA had no effect on this layer.",
+            )
 
         return result
 
