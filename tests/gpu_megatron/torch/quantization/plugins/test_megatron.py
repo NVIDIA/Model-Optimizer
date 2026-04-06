@@ -687,11 +687,8 @@ def test_te_grouped_vs_sequential_quantize(dist_workers_size_4, quant_cfg):
 
 
 @pytest.mark.parametrize("ep_size", [1, 2])
-@pytest.mark.parametrize("moe_grouped_gemm", [True, False])
 @pytest.mark.parametrize("sync_weight_amax", [True, False])
-def test_layer_sync_moe_local_experts_amax(
-    dist_workers, ep_size, moe_grouped_gemm, sync_weight_amax
-):
+def test_layer_sync_moe_local_experts_amax(dist_workers, ep_size, sync_weight_amax):
     """Test expert model parallel synchronization."""
     if torch.cuda.device_count() < ep_size:
         pytest.skip(f"Requires at least {ep_size} GPUs for expert model parallel test")
@@ -700,15 +697,12 @@ def test_layer_sync_moe_local_experts_amax(
         partial(
             _test_layer_sync_moe_local_experts_amax,
             ep_size,
-            moe_grouped_gemm,
             sync_weight_amax,
         ),
     )
 
 
-def _test_layer_sync_moe_local_experts_amax(
-    ep_size, moe_grouped_gemm, sync_weight_amax, rank, size
-):
+def _test_layer_sync_moe_local_experts_amax(ep_size, sync_weight_amax, rank, size):
     initialize_for_megatron(
         tensor_model_parallel_size=1,
         pipeline_model_parallel_size=1,
@@ -721,16 +715,14 @@ def _test_layer_sync_moe_local_experts_amax(
         ep_size=ep_size,
         etp_size=1,
         hidden_size=256,
-        moe_grouped_gemm=moe_grouped_gemm,
         num_moe_experts=8,
         transformer_impl="modelopt",
     )
-    if not moe_grouped_gemm:
-        # Make weight initialization different across experts, otherwise experts will have similar amax values
-        for layer in model.decoder.layers:
-            for i, expert in enumerate(layer.mlp.experts.local_experts):
-                expert.linear_fc1.weight.data.fill_(0.1 + i * 0.05)
-                expert.linear_fc2.weight.data.fill_(0.2 + i * 0.05)
+    # Make weight initialization different across experts, otherwise experts will have similar amax values
+    for layer in model.decoder.layers:
+        for i, expert in enumerate(layer.mlp.experts.local_experts):
+            expert.linear_fc1.weight.data.fill_(0.1 + i * 0.05)
+            expert.linear_fc2.weight.data.fill_(0.2 + i * 0.05)
 
     quant_cfg = mtq.FP8_DEFAULT_CFG
     model = mtq.quantize(model, quant_cfg, get_forward(model))
