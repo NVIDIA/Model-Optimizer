@@ -6,6 +6,7 @@
   - [MMLU (Massive Multitask Language Understanding)](#mmlu-massive-multitask-language-understanding)
     - [Setup](#setup)
     - [Evaluation Methods](#evaluation-methods)
+- [Additional Metrics](#additional-metrics)
 - [API changes in ONNX Runtime GenAI v0.6](#api-changes-in-onnx-runtime-genai-v06)
 - [Troubleshoot](#troubleshoot)
 
@@ -182,6 +183,16 @@ To evaluate the PyTorch Hugging Face (HF) model, use the `--ep pt` argument.
      ```
 
 </details>
+
+## Additional Metrics
+
+| Metric | Directory | Description |
+|--------|-----------|-------------|
+| **KL Divergence** | [`kl_divergence_metrics/`](kl_divergence_metrics/) | Measures output similarity between two models using KL divergence |
+| **Perplexity** | [`perplexity_metrics/`](perplexity_metrics/) | Evaluates language model quality using WikiText-2 perplexity |
+| **FVD** | [`fvd_metrics/`](fvd_metrics/) | Computes Fréchet Video Distance between two sets of videos using I3D features |
+
+Each sub-directory contains its own `README.md` with detailed setup and usage instructions.
 
 ## API changes in ONNX Runtime GenAI v0.6
 
