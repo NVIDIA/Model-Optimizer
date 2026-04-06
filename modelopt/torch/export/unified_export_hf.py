@@ -385,7 +385,16 @@ def requantize_resmooth_fused_llm_layers(
             model(fake_input, decoder_input_ids=decoder_fake_input)
         elif offline_specdec_input is not None:
             # For offline SpecDec models, we need to pass the specific input format used during training
-            model(**offline_specdec_input)
+            target_device = next(model.parameters()).device
+
+            def _to_device(value):
+                if isinstance(value, torch.Tensor):
+                    return value.to(target_device)
+                if isinstance(value, dict):
+                    return {k: _to_device(v) for k, v in value.items()}
+                return value
+
+            model(**_to_device(offline_specdec_input))
         else:
             model(fake_input)
 

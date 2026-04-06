@@ -96,6 +96,10 @@ class DataArguments:
         metadata={"help": "Number of samples to use for training. Use -1 to use all samples."},
     )
 
+    def __post_init__(self):
+        if self.sample_size == 0 or self.sample_size < -1:
+            raise ValueError("sample_size must be -1 (use all samples) or a positive integer")
+
 
 @dataclass
 class TrainingArguments(transformers.TrainingArguments):

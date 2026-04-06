@@ -361,10 +361,11 @@ def load_model(args: argparse.Namespace):
     # If low memory mode is enabled, we compress the model while loading the HF checkpoint.
     calibration_only = False
     if args.specdec_offline_dataset is not None:
-        full_model = AutoModelForCausalLM.from_pretrained(
-            args.pyt_ckpt_path,
-            trust_remote_code=args.trust_remote_code,
-        )
+        model_kwargs = {"trust_remote_code": args.trust_remote_code}
+        if args.attn_implementation is not None:
+            model_kwargs["attn_implementation"] = args.attn_implementation
+        full_model = AutoModelForCausalLM.from_pretrained(args.pyt_ckpt_path, **model_kwargs)
+        full_model = full_model.to(args.device)
     elif not args.low_memory_mode:
         full_model = get_model(
             args.pyt_ckpt_path,
@@ -972,6 +973,7 @@ def quantize_main(
             offline_data_path=args.specdec_offline_dataset,
             lazy_preprocess=True,
             sample_size=args.calib_size[0],
+            device=device,
         )
         data_module = make_eagle_supervised_data_module(
             tokenizer, data_args, train_len=args.calib_seq

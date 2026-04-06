@@ -99,8 +99,9 @@ class OfflineSupervisedDataset(Dataset):
 class EagleOfflineDataCollator:
     """Data collator that truncate or pads data for offline training."""
 
-    def __init__(self, train_len):
+    def __init__(self, train_len, device=None):
         self.train_len = train_len
+        self.device = device
 
     def _pad_or_truncate(self, x: torch.Tensor, length: int, dim: int = 0):
         """Pad or truncate a tensor to length along a given dimension."""
@@ -134,6 +135,15 @@ class EagleOfflineDataCollator:
             **base_batch,
             "base_model_outputs": base_model_outputs,
         }
+        if self.device is not None:
+            batch = {
+                k: v.to(self.device)
+                if isinstance(v, torch.Tensor)
+                else {kk: vv.to(self.device) for kk, vv in v.items()}
+                if isinstance(v, dict)
+                else v
+                for k, v in batch.items()
+            }
         return batch
 
 
@@ -168,11 +178,15 @@ def make_eagle_supervised_data_module(
         if not dumped_files:
             raise ValueError(f"No .pt files found in {data_args.offline_data_path}")
 
-        # sample_size=-1 (or any non-positive value) means use all samples
+        # sample_size=-1 means use all samples; positive integer selects that many
+        if data_args.sample_size == 0 or data_args.sample_size < -1:
+            raise ValueError("sample_size must be -1 (use all samples) or a positive integer")
         if data_args.sample_size > 0:
             dumped_files = dumped_files[: data_args.sample_size]
         train_dataset = OfflineSupervisedDataset(dumped_files)
-        data_collator = EagleOfflineDataCollator(train_len=train_len)
+        data_collator = EagleOfflineDataCollator(
+            train_len=train_len, device=getattr(data_args, "device", None)
+        )
 
     return {
         "train_dataset": train_dataset,
