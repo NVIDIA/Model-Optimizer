@@ -24,7 +24,6 @@ __all__ = [
     "convert_quantization_axis_to_reduce_axis",
     "export_torch_mode",
     "is_quantized",
-    "is_quantized_bmm",
     "is_quantized_column_parallel_linear",
     "is_quantized_linear",
     "is_quantized_row_parallel_linear",

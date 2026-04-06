@@ -278,16 +278,6 @@ def is_quantized_linear(module):
     )
 
 
-def is_quantized_bmm(module):
-    """Check if a module is a quantized module with bmm quantizers."""
-    from ..nn import TensorQuantizer
-
-    return any(
-        attr_name.endswith("_bmm_quantizer") and isinstance(child, TensorQuantizer)
-        for attr_name, child in module._modules.items()
-    )
-
-
 def is_quantized_column_parallel_linear(module):
     """Check if a module is a quantized column parallel linear module."""
     return is_quantized_linear(module) and getattr(module, "_is_column_parallel", False)

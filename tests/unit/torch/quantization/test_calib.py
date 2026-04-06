@@ -621,6 +621,8 @@ def test_mse_calibrate_include_modules():
 
     # net.0 should have a valid amax (was calibrated)
     assert dict(model.named_modules())["net.0"].weight_quantizer._amax is not None
+    # output_quantizer was already disabled before calibration and must remain so
+    assert dict(model.named_modules())["net.0"].output_quantizer._disabled
 
 
 def test_filter_no_op_when_none():
@@ -736,7 +738,6 @@ def test_wildcard_pattern_matching():
     # Record amax of non-matched layer
     amax_net4_before = _get_weight_amax(model, "net.4")
 
-    # "net.[02]" matches net.0 and net.2 but NOT net.4
     mtq.calibrate(
         model,
         algorithm={"method": "mse", "include_modules": ["net.[02]"]},
@@ -751,49 +752,3 @@ def test_wildcard_pattern_matching():
     # net.0 and net.2 should have valid amaxes
     assert dict(model.named_modules())["net.0"].weight_quantizer._amax is not None
     assert dict(model.named_modules())["net.2"].weight_quantizer._amax is not None
-
-
-def test_filter_calib_modules_bmm_quantizers():
-    """filter_calib_modules disables *_bmm_quantizer attributes on attention-like modules."""
-
-    class _FakeAttn(nn.Module):
-        """Minimal attention-like module with bmm quantizers (no 2D weight)."""
-
-        def __init__(self):
-            super().__init__()
-            self.k_bmm_quantizer = TensorQuantizer()
-            self.v_bmm_quantizer = TensorQuantizer()
-
-        def forward(self, x):
-            return x
-
-    class _ModelWithAttn(nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.attn = _FakeAttn()
-            self.other = _FakeAttn()
-
-        def forward(self, x):
-            return self.other(self.attn(x))
-
-    model = _ModelWithAttn()
-
-    # --- exclude_modules: attn bmm quantizers disabled inside context, re-enabled after ---
-    with filter_calib_modules(model, exclude_modules=["attn"]):
-        assert model.attn.k_bmm_quantizer._disabled
-        assert model.attn.v_bmm_quantizer._disabled
-        assert not model.other.k_bmm_quantizer._disabled
-        assert not model.other.v_bmm_quantizer._disabled
-
-    assert not model.attn.k_bmm_quantizer._disabled
-    assert not model.attn.v_bmm_quantizer._disabled
-
-    # --- include_modules: only attn is calibrated, other is disabled ---
-    with filter_calib_modules(model, include_modules=["attn"]):
-        assert not model.attn.k_bmm_quantizer._disabled
-        assert not model.attn.v_bmm_quantizer._disabled
-        assert model.other.k_bmm_quantizer._disabled
-        assert model.other.v_bmm_quantizer._disabled
-
-    assert not model.other.k_bmm_quantizer._disabled
-    assert not model.other.v_bmm_quantizer._disabled

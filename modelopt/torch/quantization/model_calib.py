@@ -44,7 +44,6 @@ from .utils import (
     enable_fake_quant,
     enable_quant,
     enable_weight_access_and_writeback,
-    is_quantized_bmm,
     is_quantized_column_parallel_linear,
     is_quantized_linear,
     is_quantized_row_parallel_linear,
@@ -76,13 +75,6 @@ def filter_calib_modules(
     Disabled quantizers retain their pre-existing ``_amax`` values because
     :meth:`TensorQuantizer.disable` does not clear ``_amax``.
 
-    Supported module types:
-
-    * Quantized linear modules (identified by :func:`is_quantized_linear`): all child
-      TensorQuantizers are disabled.
-    * Quantized attention modules (identified by :func:`is_quantized_bmm`): only the direct
-      bmm TensorQuantizer attributes are disabled.
-
     Args:
         model: The quantized model.
         include_modules: If provided, only modules whose names match at least one fnmatch pattern
@@ -105,30 +97,23 @@ def filter_calib_modules(
         return
 
     def _should_calibrate(name: str) -> bool:
+        # Match against the quantizer's direct parent module name
+        parent_name = ".".join(name.split(".")[:-1])
         if include_modules is not None:
-            return any(fnmatch.fnmatch(name, p) for p in include_modules)
+            return any(fnmatch.fnmatch(parent_name, p) for p in include_modules)
         if exclude_modules is not None:
-            return not any(fnmatch.fnmatch(name, p) for p in exclude_modules)
+            return not any(fnmatch.fnmatch(parent_name, p) for p in exclude_modules)
         return True
 
     disabled = []
     for name, module in model.named_modules():
+        if not isinstance(module, TensorQuantizer):
+            continue
         if _should_calibrate(name):
             continue
-        if is_quantized_linear(module):
-            for _, child in module.named_modules():
-                if isinstance(child, TensorQuantizer) and not child._disabled:
-                    child.disable()
-                    disabled.append(child)
-        elif is_quantized_bmm(module):
-            for attr_name, child in module._modules.items():
-                if (
-                    attr_name.endswith("_bmm_quantizer")
-                    and isinstance(child, TensorQuantizer)
-                    and not child._disabled
-                ):
-                    child.disable()
-                    disabled.append(child)
+        if not module._disabled:
+            module.disable()
+            disabled.append(module)
     try:
         yield
     finally:
