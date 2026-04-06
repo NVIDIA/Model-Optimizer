@@ -96,8 +96,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--skip-first-last",
         type=int,
-        default=0,
-        help="Number of first/last transformer layers to keep dense (default: 0)",
+        default=2,
+        help="Number of first/last transformer layers to keep dense (default: 2)",
     )
 
     # Calibration options

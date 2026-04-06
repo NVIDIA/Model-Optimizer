@@ -13,6 +13,7 @@ Cache Diffusion is a technique that reuses cached outputs from previous diffusio
 | Pre-Requisites | Required & optional packages to use this technique | \[[Link](#pre-requisites)\] | |
 | Getting Started | Learn how to optimize your models using quantization/cache diffusion to reduce precision and improve inference efficiency | \[[Link](#getting-started)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/1_quantization.html)\] |
 | Support Matrix | View the support matrix to see quantization/cahce diffusion compatibility and feature availability across different models | \[[Link](#support-matrix)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/1_quantization.html)\] |
+| Sparse Attention (Skip-Softmax) | Skip-softmax sparse attention for diffusion models | \[[Link](#sparse-attention-skip-softmax)\] | |
 | Cache Diffusion | Caching technique to accelerate inference without compromising quality | \[[Link](#cache-diffusion)\] | |
 | Post Training Quantization (PTQ) | Example scripts on how to run PTQ on diffusion models | \[[Link](#post-training-quantization-ptq)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/1_quantization.html)\] |
 | Quantization Aware Training (QAT) | Example scripts on how to run QAT on diffusion models | \[[Link](#quantization-aware-training-qat)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/1_quantization.html)\] |
@@ -275,6 +276,66 @@ mto.restore(pipe.unet, your_quantized_ckpt)
 ```
 
 By following these steps, your PEFT LoRA model should be efficiently quantized using ModelOpt, ready for deployment while maximizing performance.
+
+## Sparse Attention (Skip-Softmax)
+
+Skip-softmax sparse attention skips KV tiles whose attention scores are negligible during the softmax computation, reducing FLOPs without retraining. An exponential model (`scale_factor = a * exp(b * target_sparsity)`) is calibrated once, then the target sparsity can be adjusted at runtime without recalibration.
+
+### Getting Started
+
+```python
+import modelopt.torch.sparsity.attention_sparsity as mtsa
+
+# 1. Define config with calibration
+config = {
+    "sparse_cfg": {
+        "calibration": {
+            "target_sparse_ratio": {"prefill": 0.25},
+            "threshold_trials": [1e-6, 5e-6, 1e-5, 5e-5, 1e-4, 5e-4, 1e-3, 5e-3,
+                                 1e-2, 2e-2, 5e-2, 1e-1, 2e-1, 3e-1, 5e-1, 7e-1],
+        },
+        "*.attn1": {
+            "method": "flash_skip_softmax",
+            "thresholds": {"prefill": [1e-3]},
+            "br": 128, "bc": 128,
+            "backend": "pytorch",
+            "is_causal": False,
+            "collect_stats": True,
+            "enable": True,
+        },
+        "*.attn2": {"enable": False},
+        "default": {"enable": False},
+    },
+}
+
+# 2. Provide a calibration forward loop
+def forward_loop(model):
+    pipeline(prompt="a cat", num_frames=81, num_inference_steps=40, ...)
+
+# 3. Sparsify + calibrate
+mtsa.sparsify(transformer, config, forward_loop=forward_loop)
+
+# 4. Generate as usual — sparsity is applied automatically
+output = pipeline(prompt="a dog on the beach", ...)
+```
+
+### Example Scripts
+
+#### LTX-2 [Script](./sparsity/ltx2_skip_softmax.py)
+
+```bash
+python sparsity/ltx2_skip_softmax.py \
+    --prompt "A cat playing piano" --output out.mp4 \
+    --calibrate --target-sparsity 0.25 --skip-first-last 3
+```
+
+#### Wan 2.2 [Script](./sparsity/wan22_skip_softmax.py)
+
+```bash
+python sparsity/wan22_skip_softmax.py \
+    --prompt "A sunset over mountains" --output out.mp4 \
+    --calibrate --target-sparsity 0.25 --skip-first-last 2
+```
 
 ## Cache Diffusion
 
