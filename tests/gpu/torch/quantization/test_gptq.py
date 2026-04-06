@@ -17,7 +17,8 @@ import copy
 
 import pytest
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from _test_utils.torch.transformers_models import get_tiny_llama
+from transformers import AutoTokenizer
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.unified_export_hf import _export_quantized_weight
@@ -216,17 +217,12 @@ def test_gptq_export_roundtrip():
     "quant_cfg", [mtq.NVFP4_DEFAULT_CFG, mtq.FP8_DEFAULT_CFG, mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG]
 )
 def test_gptq_e2e_flow(quant_cfg):
-    model = AutoModelForCausalLM.from_pretrained(
-        "TinyLlama/TinyLlama-1.1B-Chat-v1.0", device_map="auto"
-    )
-    tokenizer = AutoTokenizer.from_pretrained("TinyLlama/TinyLlama-1.1B-Chat-v1.0")
+    tokenizer = AutoTokenizer.from_pretrained("hf-internal-testing/tiny-random-LlamaForCausalLM")
+    model = get_tiny_llama(vocab_size=tokenizer.vocab_size).to("cuda")
 
-    # can't set attribute 'pad_token' for "<unk>"
-    # We skip this step for Nemo models
-    if tokenizer.pad_token != "<unk>" or tokenizer.pad_token is None:
+    if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    # Left padding usually provides better calibration result.
     tokenizer.padding_side = "left"
 
     assert tokenizer.pad_token is not None, "Pad token cannot be set!"
@@ -234,31 +230,14 @@ def test_gptq_e2e_flow(quant_cfg):
 
     quant_cfg = copy.deepcopy(quant_cfg)
     quant_cfg["algorithm"] = {"method": "gptq", "use_sequential": True}
-    # Define quantizer/dataloader
     calib_dataloader = get_dataset_dataloader(
         dataset_name="cnn_dailymail",
         tokenizer=tokenizer,
-        batch_size=32,
-        num_samples=512,
+        batch_size=2,
+        num_samples=8,
         device="cuda",
         include_labels=False,
     )
-    # Only run single sample for preview
-    prompt = "Where is New York city?"
-    input_ids = tokenizer(prompt, return_tensors="pt")
-    print(f"Input ids: {input_ids}")
-    generated_ids_before_ptq = model.generate(
-        input_ids["input_ids"].to("cuda"), max_new_tokens=100, do_sample=False, temperature=0.0
-    )
 
-    print(
-        f"Generated ids before quantization: {tokenizer.decode(generated_ids_before_ptq[0], skip_special_tokens=True)}"
-    )
     calibrate_loop = create_forward_loop(dataloader=calib_dataloader)
     model = mtq.quantize(model, quant_cfg, forward_loop=calibrate_loop)
-    generated_ids_after_ptq = model.generate(
-        input_ids["input_ids"].to("cuda"), max_new_tokens=100, do_sample=False, temperature=0.0
-    )
-    print(
-        f"Generated ids after quantization: {tokenizer.decode(generated_ids_after_ptq[0], skip_special_tokens=True)}"
-    )

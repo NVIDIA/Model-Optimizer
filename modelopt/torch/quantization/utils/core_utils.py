@@ -717,21 +717,6 @@ def disable_calib(quantizer):
 
 
 @contextmanager
-def disabled_weight_quantizers(model: nn.Module):
-    """Disable weight quantizers during hessian collection."""
-    disabled_modules = []
-    for module in model.modules():
-        if is_quantized_linear(module) and module.weight_quantizer.is_enabled:
-            module.weight_quantizer.disable()
-            disabled_modules.append(module)
-    try:
-        yield
-    finally:
-        for module in disabled_modules:
-            module.weight_quantizer.enable()
-
-
-@contextmanager
 def fsdp2_aware_weight_update(root_model, modules_to_update, reshard=True):
     """Context manager to update the FSDPParam list if an update is made to a submodule of an FSDPModule.
 

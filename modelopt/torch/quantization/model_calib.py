@@ -38,7 +38,6 @@ from .conversion import create_and_replace_svdquant_linear_on_the_fly, set_quant
 from .nn import NVFP4StaticQuantizer, QuantModule, SequentialQuantizer, TensorQuantizer
 from .utils import (
     disable_calib,
-    disabled_weight_quantizers,
     enable_fake_quant,
     enable_quant,
     enable_weight_access_and_writeback,
@@ -1652,7 +1651,7 @@ def _promote_nvfp4_static_quantizers(model: nn.Module) -> int:
 def gptq(
     model: nn.Module,
     forward_loop: ForwardLoop,
-    percdamp: float = 0.01,
+    perc_damp: float = 0.01,
     block_size: int = 128,
 ):
     """GPTQ quantization.
@@ -1682,6 +1681,7 @@ def gptq(
     """
     total_start = time.time()
 
+    # TODO: Add support for other scale setting strateiges like weight-mse or local-hessian
     max_calibrate(model, forward_loop=forward_loop)
     _promote_nvfp4_static_quantizers(model)
 
@@ -1700,7 +1700,7 @@ def gptq(
 
     print_rank_0(f"Computing Hessians for {len(gptq_handles)} linear layers...")
 
-    with disabled_weight_quantizers(model):
+    with set_quantizer_by_cfg_context(model, {"*weight_quantizer": {"enable": False}}):
         forward_loop(model)
 
     for handle in gptq_handles.values():
@@ -1708,7 +1708,7 @@ def gptq(
 
     print_rank_0("Updating weights using GPTQ algorithm...")
     for handle in gptq_handles.values():
-        handle.update_weights(block_size, percdamp)
+        handle.update_weights(block_size, perc_damp)
         handle.free()
     del gptq_handles
 
