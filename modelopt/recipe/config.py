@@ -66,7 +66,7 @@ class ModelOptRecipeBase(ModeloptBaseConfig):
 class ModelOptPTQRecipe(ModelOptRecipeBase):
     """Our config class for PTQ recipes."""
 
-    ptq_cfg: dict[str, Any] = ModeloptField(
+    quantize: dict[str, Any] = ModeloptField(
         default={},
         title="PTQ config",
         description="PTQ config containing quant_cfg and algorithm.",

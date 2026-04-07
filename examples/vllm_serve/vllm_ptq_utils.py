@@ -102,7 +102,7 @@ def calibrate_fun(calib_dataloader: DataLoader, self: Any) -> Callable[[Any], No
     return calibrate_loop
 
 
-def update_kv_cfg_for_mla(model: torch.nn.Module, kv_quant_cfg: dict[str, Any]) -> dict[str, Any]:
+def update_kv_cfg_for_mla(model: torch.nn.Module, kv_quant_cfg: list) -> list:
     """Update KV cache quantization config for MLA models.
 
     MLA uses `kv_c_bmm_quantizer` (compressed KV) instead of separate
@@ -117,18 +117,37 @@ def update_kv_cfg_for_mla(model: torch.nn.Module, kv_quant_cfg: dict[str, Any]) 
     if not any(isinstance(m, MLAAttention) for m in model.modules()):
         return kv_quant_cfg
 
-    if kv_config := kv_quant_cfg.get("*[kv]_bmm_quantizer"):
-        kv_quant_cfg["*kv_c_bmm_quantizer"] = kv_config
-        kv_quant_cfg["*k_pe_bmm_quantizer"] = kv_config
+    kv_entry = next(
+        (
+            e
+            for e in kv_quant_cfg
+            if isinstance(e, dict) and e.get("quantizer_name") == "*[kv]_bmm_quantizer"
+        ),
+        None,
+    )
+    if kv_entry is not None:
+        kv_config = kv_entry.get("cfg", {})
+        kv_quant_cfg.append(
+            {"quantizer_name": "*kv_c_bmm_quantizer", "cfg": kv_config, "enable": True}
+        )
+        kv_quant_cfg.append(
+            {"quantizer_name": "*k_pe_bmm_quantizer", "cfg": kv_config, "enable": True}
+        )
         print("MLA detected: added *kv_c_bmm_quantizer and k_pe_bmm_quantizer config")
 
     return kv_quant_cfg
 
 
 def get_quant_config(quant_config: dict[str, Any], model: Any) -> dict[str, Any]:
-    quant_cfg = getattr(mtq, quant_config["quant_cfg"]) if quant_config["quant_cfg"] else {}
+    import copy
+
+    quant_cfg = (
+        copy.deepcopy(getattr(mtq, quant_config["quant_cfg"])) if quant_config["quant_cfg"] else {}
+    )
     quant_kv_cfg = (
-        getattr(mtq, quant_config["kv_quant_cfg"]) if quant_config["kv_quant_cfg"] else {}
+        copy.deepcopy(getattr(mtq, quant_config["kv_quant_cfg"]))
+        if quant_config["kv_quant_cfg"]
+        else {}
     )
 
     # Check if model has MLA and update KV config accordingly

@@ -28,7 +28,7 @@ from modelopt.torch.quantization.algorithms import (
     QuantRecipeHparam,
     estimate_quant_compression,
 )
-from modelopt.torch.quantization.config import _default_disabled_quantizer_cfg
+from modelopt.torch.quantization.config import _base_disable_all, _default_disabled_quantizer_cfg
 from modelopt.torch.utils.distributed import DistributedProcessGroup
 
 
@@ -110,11 +110,12 @@ def test_quant_recipe_hparam():
 
 # use this config to test custom quantization config
 INT8_CUSTOM_QUANT_TEST_CFG = {
-    "quant_cfg": {
-        "*weight_quantizer": {"num_bits": 8, "axis": 0},
-        "*input_quantizer": {"num_bits": 8, "axis": None},
-        **_default_disabled_quantizer_cfg,
-    },
+    "quant_cfg": [
+        *_base_disable_all,
+        {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+        {"quantizer_name": "*input_quantizer", "cfg": {"num_bits": 8, "axis": None}},
+        *_default_disabled_quantizer_cfg,
+    ],
     "algorithm": "smoothquant",
 }
 
@@ -230,14 +231,22 @@ def test_auto_quantize_disabled_layers_no_poison():
 
 
 INT4INT8_AWQ_CFG = {
-    "quant_cfg": {
-        "*weight_quantizer": [
-            {"num_bits": 4, "block_sizes": {-1: 128, "type": "static"}, "enable": True},
-            {"num_bits": 8, "axis": None, "enable": True},
-        ],
-        "*input_quantizer": {"num_bits": 8, "axis": None, "enable": True},
-        "default": {"enable": False},
-    },
+    "quant_cfg": [
+        {"quantizer_name": "*", "enable": False},
+        {
+            "quantizer_name": "*weight_quantizer",
+            "cfg": [
+                {"num_bits": 4, "block_sizes": {-1: 128, "type": "static"}},
+                {"num_bits": 8, "axis": None},
+            ],
+            "enable": True,
+        },
+        {
+            "quantizer_name": "*input_quantizer",
+            "cfg": {"num_bits": 8, "axis": None},
+            "enable": True,
+        },
+    ],
     "algorithm": "awq_lite",
 }
 
@@ -480,7 +489,11 @@ def test_get_auto_quantize_config(method):
     # Use stored best recipe
     config = mtq.get_auto_quantize_config(search_state)
     assert "quant_cfg" in config
-    assert config["quant_cfg"]["*"] == {"enable": False}
+    assert isinstance(config["quant_cfg"], list)
+    assert any(
+        entry["quantizer_name"] == "*" and entry.get("enable") is False
+        for entry in config["quant_cfg"]
+    )
     assert config["algorithm"] == "max"
 
     # Re-solve with different constraints

@@ -27,6 +27,7 @@ from torch.distributed.fsdp import FSDPModule, MixedPrecisionPolicy, fully_shard
 from torch.distributed.fsdp._fully_shard._fsdp_param import FSDPParam
 from torch.distributed.tensor import Replicate
 
+from modelopt.torch.quantization.config import QuantizerCfgEntry
 from modelopt.torch.utils import get_unwrapped_name, print_rank_0
 
 if TYPE_CHECKING:
@@ -310,11 +311,15 @@ def calibrate_with_adapters(model, args):
 
 def disable_lora_quantizers_in_config(config, layers):
     """Turns off input, weight, and output quantizers for LoRA weights and LoRALinear layers in config."""
-    config["quant_cfg"]["*lora*"] = {"enable": False}
+    config["quant_cfg"].append({"quantizer_name": "*lora*", "enable": False})
     for layer in layers:
-        config["quant_cfg"][f"*{layer}.input_quantizer"] = {"enable": False}
-        config["quant_cfg"][f"*{layer}.weight_quantizer"] = {"enable": False}
-        config["quant_cfg"][f"*{layer}.output_quantizer"] = {"enable": False}
+        config["quant_cfg"].append({"quantizer_name": f"*{layer}.input_quantizer", "enable": False})
+        config["quant_cfg"].append(
+            {"quantizer_name": f"*{layer}.weight_quantizer", "enable": False}
+        )
+        config["quant_cfg"].append(
+            {"quantizer_name": f"*{layer}.output_quantizer", "enable": False}
+        )
     return config
 
 
@@ -823,13 +828,25 @@ def fsdp2_aware_weight_update(root_model, modules_to_update, reshard=True):
 
 
 def update_quant_cfg_with_kv_cache_quant(
-    quant_cfg: dict[str, Any], kv_cache_quant_cfg: dict[str, Any]
+    quant_cfg: dict[str, Any], kv_cache_quant_cfg: list[QuantizerCfgEntry]
 ) -> dict[str, Any]:
-    """Update the quant_cfg with the kv cache quant_cfg."""
+    """Update the quant_cfg with the kv cache quant_cfg.
+
+    Args:
+        quant_cfg: The outer quantization config dict (with ``"quant_cfg"`` and ``"algorithm"`` keys).
+        kv_cache_quant_cfg: A list of :class:`QuantizerCfgEntry
+            <modelopt.torch.quantization.config.QuantizerCfgEntry>` dicts for KV cache quantization,
+            typically ``some_kv_cfg["quant_cfg"]``.
+
+    Returns:
+        A deep copy of ``quant_cfg`` with the KV cache entries appended to ``quant_cfg["quant_cfg"]``.
+    """
     # If quant_cfg["quant_cfg"] is None, it corresponds to only kv cache quantization case
     quant_cfg = copy.deepcopy(quant_cfg)
-    quant_cfg["quant_cfg"] = quant_cfg.get("quant_cfg") or {"default": {"enable": False}}
-    quant_cfg["quant_cfg"].update(kv_cache_quant_cfg)
+    inner: list[QuantizerCfgEntry] = quant_cfg.get("quant_cfg") or [
+        {"quantizer_name": "*", "enable": False}
+    ]
+    quant_cfg["quant_cfg"] = inner + list(kv_cache_quant_cfg)
 
     # Set default algorithm for kv cache quantization if not provided.
     if not quant_cfg.get("algorithm"):

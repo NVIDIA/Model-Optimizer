@@ -77,7 +77,7 @@ def test_kv_rotate(rotate_fp32):
     model = nn.Sequential(SDPAAttention())
     mtq.replace_quant_module(model)
 
-    set_quantizer_by_cfg(model, {"*": {"enable": False}})
+    set_quantizer_by_cfg(model, [{"quantizer_name": "*", "enable": False}])
     dummy_input = SDPAAttention.get_input(device="cuda")
     output_ref = model(dummy_input)
     if rotate_fp32:
@@ -86,11 +86,9 @@ def test_kv_rotate(rotate_fp32):
         rotate = True
     with set_quantizer_by_cfg_context(
         model,
-        {
-            "*[qk]_bmm_quantizer": {
-                "rotate": rotate,
-            },
-        },
+        [
+            {"quantizer_name": "*[qk]_bmm_quantizer", "cfg": {"rotate": rotate}},
+        ],
     ):
         output_test = model(dummy_input)
     assert torch.allclose(output_ref, output_test, atol=0.05)
@@ -98,11 +96,9 @@ def test_kv_rotate(rotate_fp32):
     # Test the rotation is actually applied by turning on only one of the query, key quantizers
     with set_quantizer_by_cfg_context(
         model,
-        {
-            "*k_bmm_quantizer": {
-                "rotate": rotate,
-            },
-        },
+        [
+            {"quantizer_name": "*k_bmm_quantizer", "cfg": {"rotate": rotate}},
+        ],
     ):
         output_test1 = model(dummy_input)
     assert not torch.allclose(output_ref, output_test1, atol=0.05)

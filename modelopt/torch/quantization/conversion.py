@@ -19,7 +19,7 @@ import fnmatch
 import warnings
 from collections.abc import Callable
 from contextlib import contextmanager
-from typing import Any
+from typing import Any, cast
 
 import torch.nn as nn
 
@@ -33,6 +33,7 @@ from .config import (
     QuantizeQuantCfgType,
     QuantizerAttributeConfig,
     _QuantizeExportConfig,
+    normalize_quant_cfg_list,
 )
 from .nn import (
     NVFP4StaticQuantizer,
@@ -48,6 +49,8 @@ __all__ = [
     "register",
     "replace_quant_module",
     "set_quantizer_attribute",
+    "set_quantizer_attributes_full",
+    "set_quantizer_attributes_partial",
     "set_quantizer_by_cfg",
     "set_quantizer_by_cfg_context",
     "unregister",
@@ -60,7 +63,7 @@ def convert_to_quantized_model(model: ModelLikeModule, config: QuantizeConfig) -
     model = model.init_modellike() if isinstance(model, ModelLikeModule) else model
 
     replace_quant_module(model, version=ModeloptStateManager(model).state_version)
-    set_quantizer_by_cfg(model, config.get("quant_cfg", {}))
+    set_quantizer_by_cfg(model, config.get("quant_cfg", []))
 
     metadata = {}
     update_quantize_metadata(model, config, metadata)
@@ -76,7 +79,7 @@ def convert_to_quantized_model_svdquant(
     model = model.init_modellike() if isinstance(model, ModelLikeModule) else model
 
     create_and_replace_svdquant_linear_on_the_fly(model)
-    set_quantizer_by_cfg(model, config.get("quant_cfg", {}))
+    set_quantizer_by_cfg(model, config.get("quant_cfg", []))
 
     metadata = {}
     update_quantize_metadata(model, config, metadata)
@@ -211,127 +214,330 @@ def _replace_quant_module(model: nn.Module, version=None, registry=QuantModuleRe
         _replace_quant_module(getattr(model, name), version=version, registry=registry)
 
 
-def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: QuantizeQuantCfgType | dict):
-    """Update the quantizer attributes based on the specified `quant_cfg`.
+def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: QuantizeQuantCfgType):
+    """Apply a quantization config list to the quantizers in ``quant_model``.
 
-    `quant_cfg` is a dictionary mapping wildcards or filter functions
-    to its quantizer attributes which are defined in
-    :class:`QuantizerAttributeConfig <.config.QuantizerAttributeConfig>`.
-    The wildcards or filter functions  are matched against the quantizer module names.
-    The specified quantizer attributes of the matched quantizer modules are set accordingly.
-    The key ``"default"`` is a special key that sets the quantizer attributes of all the quantizers for which
-    no other wildcard or filter functions match the quantizer module name.
+    ``quant_cfg`` is an **ordered list** of :class:`QuantizerCfgEntry <.config.QuantizerCfgEntry>`
+    dicts. Each entry has the following fields:
 
-    In addition, the dictionary entries could also be pytorch module class names mapping the class specific
-    quantization configuration. The pytorch modules should have a quantized equivalent.
+    - ``quantizer_name`` *(required)*: wildcard matched against quantizer module names via
+      :func:`fnmatch`.
+    - ``cfg`` *(optional)*: a dict of :class:`QuantizerAttributeConfig <.config.QuantizerAttributeConfig>`
+      fields, or a list of such dicts for sequential quantization.
+    - ``enable`` *(optional)*: ``True`` or ``False`` to toggle matched quantizers on or off.
+      When omitted but ``cfg`` is present, defaults to ``True``.  Every entry must specify at
+      least one of ``cfg`` or ``enable`` — an entry with only ``quantizer_name`` is invalid.
+    - ``parent_class`` *(optional)*: restricts matching to quantizers whose immediate parent
+      module is of this PyTorch class name.
 
-    See :meth:`set_quantizer_attribute <modelopt.torch.quantization.conversion.set_quantizer_attribute>`
-    for more details.
+    **Ordering and atomicity:** entries are applied in list order; later entries override earlier
+    ones for any quantizer they match. Each entry with a ``cfg`` is a **complete replacement** —
+    unspecified attributes revert to their defaults rather than inheriting from a prior entry.
+    The typical pattern is to deny all first (``{"quantizer_name": "*", "enable": False}``), then
+    selectively enable and configure target quantizers in subsequent entries.
+
+    **``enable`` and ``cfg`` are independent:**
+
+    - An entry with ``cfg`` (and optionally ``enable``) fully replaces the matched quantizer's
+      attributes. If ``enable`` is omitted, the quantizer is implicitly enabled.
+    - ``{"enable": False}`` without ``cfg`` **only** toggles the matched quantizers off, leaving
+      all other attributes unchanged.
+    - ``{"enable": True}`` without ``cfg`` **only** toggles the matched quantizers on, using
+      whatever attributes they currently have (or their defaults if never configured).
+
+    See :ref:`quant-cfg` for the full format reference and common patterns.
     """
-    quant_cfg = quant_cfg.copy()
-    if "default" in quant_cfg:
-        set_quantizer_attribute(quant_model, "*", quant_cfg["default"])
-        quant_cfg.pop("default")
+    quant_cfg = normalize_quant_cfg_list(quant_cfg)
 
-    for pattern, cfg in quant_cfg.items():
-        if str(pattern) in QuantModuleRegistry:
-            parent_class = QuantModuleRegistry[str(pattern)]
-            assert isinstance(cfg, dict), (
-                f"Expected a dictionary for quantizer configuration for child tensor quantizers of {parent_class}."
+    for entry in quant_cfg:
+        quantizer_name: str = entry["quantizer_name"]
+        cfg = entry["cfg"]  # None, dict, or list — always explicit after normalization
+        enable: bool = entry["enable"]  # always explicit after normalization
+        parent_class_name = entry.get("parent_class")
+        if parent_class_name:
+            try:
+                parent_class = QuantModuleRegistry[parent_class_name]
+            except KeyError:
+                raise ValueError(
+                    f"parent_class {parent_class_name!r} not found in QuantModuleRegistry. "
+                    "Make sure the class has a registered quantized equivalent."
+                ) from None
+        else:
+            parent_class = None
+
+        if cfg is None:
+            # No cfg: only toggle the enable state, leave all other attributes unchanged.
+            set_quantizer_attributes_partial(
+                quant_model, quantizer_name, {"enable": enable}, parent_class
             )
-            for sub_pattern, sub_cfg in cfg.items():
-                set_quantizer_attribute(quant_model, sub_pattern, sub_cfg, parent_class)
+        else:
+            # Has cfg: apply full replacement with the explicit enable value.
+            if isinstance(cfg, QuantizerAttributeConfig):
+                attributes = cfg.model_copy(update={"enable": enable})
+            elif isinstance(cfg, dict):
+                attributes = QuantizerAttributeConfig(**cfg, enable=enable)
+            else:
+                attributes = [
+                    c.model_copy(update={"enable": enable})
+                    if isinstance(c, QuantizerAttributeConfig)
+                    else QuantizerAttributeConfig(**c, enable=enable)
+                    for c in cfg
+                ]
+            set_quantizer_attributes_full(quant_model, quantizer_name, attributes, parent_class)
+
+
+def _match_quantizer(
+    wildcard_or_filter_func: str | Callable,
+    name: str,
+    module: nn.Module,
+    parent_class: type[nn.Module] | None,
+    full_model: nn.Module,
+):
+    if not isinstance(module, (TensorQuantizer, SequentialQuantizer)):
+        return False
+    if isinstance(wildcard_or_filter_func, str):
+        if not fnmatch.fnmatch(name, wildcard_or_filter_func):
+            return False
+    elif callable(wildcard_or_filter_func):
+        if not wildcard_or_filter_func(name):
+            return False
+    else:
+        raise NotImplementedError(f"Unsupported type {type(wildcard_or_filter_func)}")
+
+    # Get the parent module of this quantizer. When name has no dots (root-level quantizer),
+    # ".".join([]) == "" and get_submodule("") returns the model itself (PyTorch convention).
+    return parent_class is None or isinstance(
+        full_model.get_submodule(".".join(name.split(".")[:-1])), parent_class
+    )
+
+
+def set_quantizer_attributes_full(
+    quant_model: nn.Module,
+    wildcard_or_filter_func: str | Callable,
+    attributes: QuantizerAttributeConfig | list[QuantizerAttributeConfig],
+    parent_class: type[nn.Module] | None = None,
+):
+    """Set quantizer attributes by wildcard or filter function, fully overwriting existing attributes.
+
+    Unlike :func:`set_quantizer_attributes_partial`, this function requires a complete
+    :class:`QuantizerAttributeConfig <.config.QuantizerAttributeConfig>` and **replaces** the
+    matched quantizer's attributes entirely rather than merging with existing ones.
+
+    Args:
+        quant_model: A pytorch model.
+        wildcard_or_filter_func: A wildcard string or a filter function. The wildcard string is
+            matched against the quantizer module names. The quantizer modules are instances of
+            :class:`TensorQuantizer <modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer>`.
+            The filter function takes a quantizer module name as input and returns ``True`` if the
+            quantizer should be adjusted and ``False`` otherwise.
+        attributes: A :class:`QuantizerAttributeConfig <.config.QuantizerAttributeConfig>` (or a
+            list of them) that **fully replaces** the matched quantizer's current attributes. All
+            fields of the config are applied — unspecified fields revert to their defaults.
+            If ``attributes`` is a list, the matched
+            :class:`TensorQuantizer <nn.modules.tensor_quantizer.TensorQuantizer>`
+            modules will be replaced with
+            :class:`SequentialQuantizer <nn.modules.tensor_quantizer.SequentialQuantizer>`
+            modules having one quantizer per attribute instance in the list.
+            See
+            :meth:`set_from_attribute_config() <nn.modules.tensor_quantizer.TensorQuantizer.set_from_attribute_config>`
+            for details on supported attributes and their types.
+        parent_class: (Optional) Restrict matching to quantizers whose immediate parent module is
+            an instance of this class. If ``None``, all quantizers matching
+            ``wildcard_or_filter_func`` are adjusted.
+    """
+    if not isinstance(attributes, (QuantizerAttributeConfig, list)):
+        raise ValueError(
+            f"Invalid type for attributes: {type(attributes)}, "
+            "expected QuantizerAttributeConfig or list of QuantizerAttributeConfig."
+        )
+    if isinstance(attributes, list) and not all(
+        isinstance(attr, QuantizerAttributeConfig) for attr in attributes
+    ):
+        raise ValueError(
+            "All elements in attributes list must be of type QuantizerAttributeConfig."
+        )
+    for name, module in quant_model.named_modules():
+        if _match_quantizer(wildcard_or_filter_func, name, module, parent_class, quant_model):
+            if isinstance(attributes, list):
+                if not isinstance(module, SequentialQuantizer):
+                    parent_module = quant_model.get_submodule(name.rpartition(".")[0])
+                    module = SequentialQuantizer(
+                        *(TensorQuantizer() for _ in range(len(attributes)))
+                    )
+                    setattr(parent_module, name.split(".")[-1], module)
+                elif len(attributes) != len(module):
+                    warnings.warn(
+                        f"The number of attributes ({len(attributes)}) does not match the number of "
+                        f"quantizers of {module} leading to partial assignment.",
+                    )
+                module.set_from_attribute_config(attributes)
+            else:
+                if isinstance(module, SequentialQuantizer):
+                    # Downgrade SequentialQuantizer back to TensorQuantizer when the
+                    # new entry provides a single (non-list) config.
+                    parent_module = quant_model.get_submodule(name.rpartition(".")[0])
+                    module = TensorQuantizer()
+                    setattr(parent_module, name.split(".")[-1], module)
+                cast("TensorQuantizer", module).set_from_attribute_config(attributes)
+
+
+def set_quantizer_attributes_partial(
+    quant_model: nn.Module,
+    wildcard_or_filter_func: str | Callable,
+    partial_attributes: dict[str, Any] | list[dict[str, Any]],
+    parent_class: type[nn.Module] | None = None,
+):
+    """Update a subset of quantizer attributes by wildcard or filter function, merging with existing attributes.
+
+    Unlike :func:`set_quantizer_attributes_full`, this function accepts an arbitrary subset of
+    quantizer attributes as a plain ``dict`` and **merges** them into the matched quantizer's
+    current attributes, leaving unspecified attributes unchanged.
+
+    Args:
+        quant_model: A pytorch model.
+        wildcard_or_filter_func: A wildcard string or a filter function. The wildcard string is
+            matched against the quantizer module names. The quantizer modules are instances of
+            :class:`TensorQuantizer <modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer>`.
+            The filter function takes a quantizer module name as input and returns ``True`` if the
+            quantizer should be adjusted and ``False`` otherwise.
+        partial_attributes: A ``dict`` (or a list of ``dict``) containing only the attributes to
+            update. Keys must be valid fields of
+            :class:`QuantizerAttributeConfig <.config.QuantizerAttributeConfig>`. Only the
+            specified keys are written; all other attributes on the quantizer remain unchanged.
+            When a ``dict`` is passed and the matched module is a
+            :class:`SequentialQuantizer <nn.modules.tensor_quantizer.SequentialQuantizer>`,
+            the dict is broadcast to every sub-quantizer.
+            When a ``list`` is passed, the matched module must already be a
+            :class:`SequentialQuantizer <nn.modules.tensor_quantizer.SequentialQuantizer>` —
+            unlike :func:`set_quantizer_attributes_full`, this function will **not** replace a
+            :class:`TensorQuantizer <nn.modules.tensor_quantizer.TensorQuantizer>` with a
+            ``SequentialQuantizer``.
+            See
+            :meth:`set_from_attribute_config() <nn.modules.tensor_quantizer.TensorQuantizer.set_from_attribute_config>`
+            for details on supported attributes and their types.
+        parent_class: (Optional) Restrict matching to quantizers whose immediate parent module is
+            an instance of this class. If ``None``, all quantizers matching
+            ``wildcard_or_filter_func`` are adjusted.
+    """
+    if not isinstance(partial_attributes, (dict, list)):
+        raise ValueError(
+            f"Invalid type for attributes: {type(partial_attributes)}, expected dictionary or list of dict."
+        )
+    if isinstance(partial_attributes, list) and not all(
+        isinstance(attr, dict) for attr in partial_attributes
+    ):
+        raise ValueError("All elements in attributes list must be of type dict.")
+
+    for name, module in quant_model.named_modules():
+        if _match_quantizer(wildcard_or_filter_func, name, module, parent_class, quant_model):
+            module = cast("TensorQuantizer | SequentialQuantizer", module)  # for type checker
+            if isinstance(partial_attributes, list):
+                if not isinstance(module, SequentialQuantizer):
+                    raise ValueError(
+                        f"Attributes is a list but {module} is not a SequentialQuantizer."
+                    )
+                module.set_from_attribute_config(partial_attributes)
+            elif isinstance(module, SequentialQuantizer):
+                # Broadcast the dict to all sub-quantizers.
+                module.set_from_attribute_config([partial_attributes] * len(module))
+            else:
+                module.set_from_attribute_config(partial_attributes)
+
+
+@contextmanager
+def set_quantizer_by_cfg_context(quant_model: nn.Module, quant_cfg: QuantizeQuantCfgType):
+    """Context manager that temporarily applies a quantization config and restores the original state on exit.
+
+    Calls :func:`set_quantizer_by_cfg` on entry and reverts every
+    :class:`TensorQuantizer <nn.modules.tensor_quantizer.TensorQuantizer>` in
+    ``quant_model`` to its original attributes on exit.
+
+    .. caution::
+        Changing stateful attributes such as ``calibrator`` inside this context may produce
+        unexpected behavior because those objects are not deep-copied during save/restore.
+
+    Args:
+        quant_model: A quantized PyTorch model whose quantizers will be temporarily reconfigured.
+        quant_cfg: A quantization config (or list of
+            :class:`QuantizerCfgEntry <.config.QuantizerCfgEntry>` dicts) passed directly to
+            :func:`set_quantizer_by_cfg`.  Sequential ``cfg`` lists are not allowed.
+
+    Yields:
+        None — the context body runs with the new quantizer attributes active.
+    """
+    quant_cfg = normalize_quant_cfg_list(quant_cfg)
+
+    for entry in quant_cfg:
+        if isinstance(entry.get("cfg"), list):
+            raise ValueError(
+                "Sequential cfg lists are not allowed in set_quantizer_by_cfg_context. "
+                "Use only single-dict cfg entries."
+            )
+
+    original_attributes: dict[str, dict] = {}
+    original_types: dict[str, type] = {}
+    for name, module in quant_model.named_modules():
+        if isinstance(module, SequentialQuantizer):
+            # SequentialQuantizer.get_modelopt_state does not support properties_only;
+            # save per-sub-quantizer state so we can fully reconstruct on restore.
+            original_attributes[name] = {
+                "is_sequential_quantizer": True,
+                "sub_states": [tq.get_modelopt_state(properties_only=True) for tq in module],
+            }
+            original_types[name] = SequentialQuantizer
+        elif isinstance(module, TensorQuantizer):
+            original_attributes[name] = module.get_modelopt_state(properties_only=True)
+            original_types[name] = TensorQuantizer
+
+    set_quantizer_by_cfg(quant_model, quant_cfg)
+    yield
+
+    # Restore original quantizer types and attributes. If set_quantizer_by_cfg downgraded a
+    # SequentialQuantizer to a TensorQuantizer (or vice-versa), we need to re-create the
+    # original module type before restoring attributes.
+    for name, module in list(quant_model.named_modules()):
+        if name not in original_attributes:
             continue
-        set_quantizer_attribute(quant_model, pattern, cfg)
+        orig_type = original_types[name]
+        if orig_type is SequentialQuantizer and not isinstance(module, SequentialQuantizer):
+            # Restore the SequentialQuantizer that was downgraded
+            saved = original_attributes[name]
+            parent_name, _, attr_name = name.rpartition(".")
+            parent_module = quant_model.get_submodule(parent_name) if parent_name else quant_model
+            module = SequentialQuantizer(*(TensorQuantizer() for _ in saved["sub_states"]))
+            setattr(parent_module, attr_name, module)
+            for tq, sub_state in zip(module, saved["sub_states"]):
+                tq.set_from_modelopt_state(sub_state, properties_only=True)
+        elif orig_type is TensorQuantizer and not isinstance(module, TensorQuantizer):
+            parent_name, _, attr_name = name.rpartition(".")
+            parent_module = quant_model.get_submodule(parent_name) if parent_name else quant_model
+            module = TensorQuantizer()
+            setattr(parent_module, attr_name, module)
+            module.set_from_modelopt_state(original_attributes[name], properties_only=True)
+        elif orig_type is TensorQuantizer:
+            module.set_from_modelopt_state(original_attributes[name], properties_only=True)
+        elif orig_type is SequentialQuantizer:
+            saved = original_attributes[name]
+            for tq, sub_state in zip(module, saved["sub_states"]):
+                tq.set_from_modelopt_state(sub_state, properties_only=True)
 
 
 def set_quantizer_attribute(
     quant_model: nn.Module,
     wildcard_or_filter_func: str | Callable,
-    attribute: QuantizerAttributeConfig
-    | list[QuantizerAttributeConfig]
-    | dict[
-        str | Callable,
-        QuantizerAttributeConfig | list[QuantizerAttributeConfig],
-    ]
-    | dict
-    | list[dict],
-    parent_class: type | None = None,
+    attribute: Any,
+    parent_class: type[nn.Module] | None = None,
 ):
-    """Finegrained adjustment of quantizer attribute by wildcard or filter function.
-
-    Args:
-        quant_model: A pytorch model
-        wildcard_or_filter_func: a wildcard string or a filter function. The wildcard string is matched
-            against the quantizer module names. The quantizer modules are
-            instances of
-            :class:`TensorQuantizer <modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer>`.
-            The filter function takes a quantized module name as input and returns ``True`` if the
-            quantizer should be adjusted and ``False`` otherwise.
-        attribute:  An instance of :class:`QuantizerAttributeConfig <.config.QuantizerAttributeConfig>` or an equivalent
-            dictionary or a list of these two types.
-            If ``attribute`` is a list, the matched
-            :class:`TensorQuantizer <nn.modules.tensor_quantizer.TensorQuantizer>`
-            modules will be replaced with :class:`SequentialQuantizer <nn.modules.tensor_quantizer.SequentialQuantizer>`
-            modules having one quantizer for each attribute instance from the list.
-            See
-            :meth:`set_from_attribute_config() <nn.modules.tensor_quantizer.TensorQuantizer.set_from_attribute_config>`
-            for more details on the supported attributes and their types.
-        parent_class: (Optional) The parent class of the quantizer modules matching ``wildcard_or_filter_func`` which
-            should be adjusted. If ``None``, all the matching quantizer modules will be adjusted.
-    """
-    for name, module in quant_model.named_modules():
-        if isinstance(module, (TensorQuantizer, SequentialQuantizer)):
-            if isinstance(wildcard_or_filter_func, str):
-                if not fnmatch.fnmatch(name, wildcard_or_filter_func):
-                    continue
-            elif callable(wildcard_or_filter_func):
-                if not wildcard_or_filter_func(name):
-                    continue
-            else:
-                raise NotImplementedError(f"Unsupported type {type(wildcard_or_filter_func)}")
-
-            if parent_class is not None and not isinstance(
-                quant_model.get_submodule(".".join(name.split(".")[:-1])), parent_class
-            ):
-                continue
-
-            if isinstance(attribute, list) and not isinstance(module, SequentialQuantizer):
-                parent_module = quant_model.get_submodule(name.rpartition(".")[0])
-                module = SequentialQuantizer(*(TensorQuantizer() for _ in range(len(attribute))))
-                setattr(parent_module, name.split(".")[-1], module)
-            elif isinstance(attribute, list) and len(attribute) != len(module):
-                warnings.warn(
-                    f"The number of attributes ({len(attribute)}) does not match the number of "
-                    f"quantizers of {module} leading to partial assignment.",
-                )
-            module.set_from_attribute_config(attribute)
-
-
-@contextmanager
-def set_quantizer_by_cfg_context(quant_model: nn.Module, quant_cfg: QuantizeQuantCfgType | dict):
-    """Context manager for setting quantizer attributes using `quant_cfg`.
-
-    The set attributes will be reset to the original attributes after exiting the context manager.
-    See :meth:`set_quantizer_by_cfg` for more details.
-
-    Use this context manager with caution. Changing certain attributes of the quantizer such as
-    `calibrator` can lead to unexpected behavior.
-    """
-    assert not any(cfg for cfg in quant_cfg.values() if isinstance(cfg, (list, tuple))), (
-        "list of config not support."
+    """Deprecated: use :func:`set_quantizer_attributes_partial` instead."""
+    warnings.warn(
+        "set_quantizer_attribute is deprecated, use set_quantizer_attributes_partial "
+        "or set_quantizer_attributes_full instead.",
+        DeprecationWarning,
+        stacklevel=2,
     )
-
-    original_attributes = {}
-    for name, module in quant_model.named_modules():
-        if isinstance(module, TensorQuantizer):
-            original_attributes[name] = module.get_modelopt_state(properties_only=True)
-
-    set_quantizer_by_cfg(quant_model, quant_cfg)
-    yield
-    for name, module in quant_model.named_modules():
-        if isinstance(module, TensorQuantizer):
-            module.set_from_modelopt_state(original_attributes[name], properties_only=True)
+    return set_quantizer_attributes_partial(
+        quant_model, wildcard_or_filter_func, attribute, parent_class
+    )
 
 
 def register(original_cls: nn.Module, quantized_cls: nn.Module):

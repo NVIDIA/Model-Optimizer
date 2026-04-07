@@ -208,7 +208,7 @@ def set_sparse_attention_attribute(
 ):
     """Set sparse attention attributes for modules matching pattern.
 
-    Similar to quantization's set_quantizer_attribute.
+    Similar to quantization's set_quantizer_attributes_partial.
 
     Args:
         model: Model to configure

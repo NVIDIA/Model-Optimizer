@@ -30,13 +30,15 @@ from modelopt.torch.opt import apply_mode
 from modelopt.torch.opt.searcher import ForwardLoop
 from modelopt.torch.opt.utils import forward_with_reshard
 from modelopt.torch.quantization.config import QuantizeConfig
-from modelopt.torch.quantization.conversion import set_quantizer_by_cfg
+from modelopt.torch.quantization.conversion import (
+    set_quantizer_attributes_partial,
+    set_quantizer_by_cfg,
+)
 from modelopt.torch.utils import atomic_print
 
 from .algorithms import AutoQuantizeGradientSearcher, AutoQuantizeKLDivSearcher, QuantRecipe
 from .algorithms import get_auto_quantize_config as _get_auto_quantize_config
 from .config import QuantizeAlgoCfgType
-from .conversion import set_quantizer_attribute
 from .mode import QuantizeModeRegistry, get_modelike_from_algo_cfg
 from .nn import QuantModule, TensorQuantizer
 from .utils import is_quantized
@@ -159,13 +161,15 @@ def quantize(
             :class:`QuantizeConfig <modelopt.torch.quantization.config.QuantizeConfig>` specifying the
             values for keys ``"quant_cfg"`` and ``"algorithm"``.
             It is basically a dictionary specifying the values for keys ``"quant_cfg"`` and ``"algorithm"``.
-            The ``"quant_cfg"`` key specifies the quantization configurations.
+            The ``"quant_cfg"`` key specifies the quantization configurations as an ordered list of
+            :class:`QuantizerCfgEntry <modelopt.torch.quantization.config.QuantizerCfgEntry>` dicts.
             The ``"algorithm"`` key specifies the ``algorithm`` argument to
             :meth:`calibrate <modelopt.torch.quantization.model_quant.calibrate>`.
 
-            Quantization configurations is a dictionary mapping wildcards or filter functions
-            to its quantizer attributes. The wildcards or filter functions  are matched
-            against the quantizer module names. The quantizer modules have names ending with
+            Each entry in the ``"quant_cfg"`` list has a ``"quantizer_name"`` wildcard matched
+            against quantizer module names, an optional ``"cfg"`` dict of quantizer attributes,
+            and an optional ``"enable"`` toggle. Entries are applied in list order; later entries
+            override earlier ones. The quantizer modules have names ending with
             ``weight_quantizer`` and ``input_quantizer`` and they perform weight quantization and
             input quantization (or activation quantization) respectively. The quantizer modules
             are instances of
@@ -178,17 +182,15 @@ def quantize(
             .. code-block::python
 
                 config = {
-
-                    "quant_cfg": {
+                    "quant_cfg": [
+                        # Disable all quantizers by default
+                        {"quantizer_name": "*", "enable": False},
                         # "num_bits" specifies the number of bits for quantization
                         # "axis" specifies the axis for quantization
-                        "*weight_quantizer": {"num_bits": 8, "axis": 0},
-                        "*input_quantizer": {"num_bits": 8, "axis": -1},
-
-                        # Default quantization settings
-                        "default": {"num_bits": 8, "axis": None},
-                    }
-                    "algorithm": "max"
+                        {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+                        {"quantizer_name": "*input_quantizer", "cfg": {"num_bits": 8, "axis": -1}},
+                    ],
+                    "algorithm": "max",
                 }
 
             See :ref:`Quantization Formats <quantization-formats>` to learn more about the supported
@@ -323,10 +325,13 @@ def auto_quantize(
             .. code-block:: python
 
                 INT8_CUSTOM_QUANT_CFG = {
-                    "quant_cfg": {
-                        "*weight_quantizer": {"num_bits": 8, "axis": 0},
-                        "*input_quantizer": {"num_bits": 8, "axis": None},
-                    },
+                    "quant_cfg": [
+                        {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+                        {
+                            "quantizer_name": "*input_quantizer",
+                            "cfg": {"num_bits": 8, "axis": None},
+                        },
+                    ],
                     "algorithm": "smoothquant",
                 }
 
@@ -527,7 +532,7 @@ def auto_quantize(
         "checkpoint": checkpoint,
     }
     # Disable all quantizers; AutoQuantize will enable the needed ones
-    set_quantizer_by_cfg(model, {"*": {"enable": False}})
+    set_quantizer_by_cfg(model, [{"quantizer_name": "*", "enable": False}])
     searcher.search(model, constraints, config=search_config)  # type: ignore[arg-type]
 
     return model, searcher.state_dict()
@@ -574,12 +579,12 @@ def get_auto_quantize_config(search_state, constraints=None, verbose=False):
 
 def disable_quantizer(model: nn.Module, wildcard_or_filter_func: str | Callable):
     """Disable quantizer by wildcard or filter function."""
-    set_quantizer_attribute(model, wildcard_or_filter_func, {"enable": False})
+    set_quantizer_attributes_partial(model, wildcard_or_filter_func, {"enable": False})
 
 
 def enable_quantizer(model: nn.Module, wildcard_or_filter_func: str | Callable):
     """Enable quantizer by wildcard or filter function."""
-    set_quantizer_attribute(model, wildcard_or_filter_func, {"enable": True})
+    set_quantizer_attributes_partial(model, wildcard_or_filter_func, {"enable": True})
 
 
 @atomic_print

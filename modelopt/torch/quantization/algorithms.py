@@ -62,9 +62,22 @@ def estimate_quant_compression(quant_cfg: QuantizeConfig) -> float:
 
     def estimate_quant_compression_for_quantizer(quantizer_attr_cfg):
         if isinstance(quantizer_attr_cfg, list):
+            if not quantizer_attr_cfg:
+                return 1.0
             return min(estimate_quant_compression_for_quantizer(q) for q in quantizer_attr_cfg)
         if isinstance(quantizer_attr_cfg, dict):
-            return estimate_quant_compression_for_quantizer(list(quantizer_attr_cfg.values()))
+            # Handle raw quantizer cfg dicts (e.g. {"num_bits": (4, 3), "axis": None})
+            if not quantizer_attr_cfg.get("enable", True):
+                return 1.0
+            num_bits = quantizer_attr_cfg.get("num_bits")
+            if num_bits is None:
+                return 1.0
+            if isinstance(num_bits, tuple):
+                return (sum(num_bits) + 1) / 16
+            elif isinstance(num_bits, int):
+                return num_bits / 16
+            else:
+                raise ValueError(f"Unknown quantization config {num_bits}")
 
         if isinstance(quantizer_attr_cfg, QuantizerAttributeConfig):
             if not quantizer_attr_cfg.enable:
@@ -80,7 +93,14 @@ def estimate_quant_compression(quant_cfg: QuantizeConfig) -> float:
 
         raise ValueError(f"Unknown type {type(quantizer_attr_cfg)}, {quantizer_attr_cfg}")
 
-    return estimate_quant_compression_for_quantizer(list(quant_cfg.quant_cfg.values()))
+    cfgs = []
+    for e in quant_cfg.quant_cfg:
+        if e.get("enable", True) is False:
+            continue
+        c = e.get("cfg")
+        if c is not None:
+            cfgs.append(c)
+    return estimate_quant_compression_for_quantizer(cfgs) if cfgs else 1.0
 
 
 class QuantRecipe(CustomHPType):
@@ -97,7 +117,7 @@ class QuantRecipe(CustomHPType):
         name = self.get_auto_name_for_config(quant_cfg) or name
 
         if quant_cfg is None:
-            quant_cfg = {"quant_cfg": {"*": {"enable": False}}}
+            quant_cfg = {"quant_cfg": [{"quantizer_name": "*", "enable": False}]}
         elif isinstance(quant_cfg, str):
             assert hasattr(mtq_config, quant_cfg), f"Unknown quantization format {quant_cfg}"
             quant_cfg = getattr(mtq_config, quant_cfg)
@@ -109,9 +129,7 @@ class QuantRecipe(CustomHPType):
         # Disable KV Cache quantization
         # Currently KV Cache quantization is enabled for some quantization formats and disabled for others
         # This breaks the monotonicity of the quantization formats in terms of weight compression Vs accuracy
-        self.config.quant_cfg["*output_quantizer"] = mtq_config.QuantizerAttributeConfig(
-            enable=False
-        )
+        self.config.quant_cfg.append({"quantizer_name": "*output_quantizer", "enable": False})
 
         self.compression = estimate_quant_compression(self.config)
 
@@ -1300,21 +1318,9 @@ def get_auto_quantize_config(search_state, constraints=None, verbose=False):
     else:
         best_recipe = search_state["best"]["recipe"]
 
-    quant_cfg: dict[str, Any] = {"*": {"enable": False}}
-    for hparam_name, recipe in best_recipe.items():
-        if recipe == QuantRecipe(quant_cfg=None):
-            continue
-        module_names = search_state["candidate_stats"][hparam_name]["module_names"]
-        for module_name in module_names:
-            for quantizer_attr in ("input_quantizer", "weight_quantizer"):
-                matched_cfg = _match_quantizer_cfg(recipe.config.quant_cfg, quantizer_attr)
-                if matched_cfg is not None:
-                    quant_cfg[f"{module_name}.{quantizer_attr}"] = matched_cfg
-
     def _cfg_to_dict(v):
         if isinstance(v, mtq_config.QuantizerAttributeConfig):
             return {
-                "enable": v.enable,
                 "num_bits": v.num_bits,
                 **v.model_dump(exclude_defaults=True),
             }
@@ -1322,7 +1328,45 @@ def get_auto_quantize_config(search_state, constraints=None, verbose=False):
             return [_cfg_to_dict(c) for c in v]
         return v
 
-    quant_cfg = {k: _cfg_to_dict(v) for k, v in quant_cfg.items()}
+    quant_cfg: list[dict] = [{"quantizer_name": "*", "enable": False}]
+    _per_module_attrs = ("input_quantizer", "weight_quantizer", "output_quantizer")
+    # Track global (non per-module) recipe entries.  Last recipe wins for each pattern.
+    global_entries: dict[str, dict] = {}
+
+    for hparam_name, recipe in best_recipe.items():
+        if recipe == QuantRecipe(quant_cfg=None):
+            continue
+        module_names = search_state["candidate_stats"][hparam_name]["module_names"]
+        for module_name in module_names:
+            for quantizer_attr in _per_module_attrs:
+                matched_cfg, matched_enable = _match_quantizer_cfg(
+                    recipe.config.quant_cfg, quantizer_attr
+                )
+                if matched_enable is not None:
+                    entry: dict[str, Any] = {
+                        "quantizer_name": f"{module_name}.{quantizer_attr}",
+                        "enable": matched_enable,
+                    }
+                    if matched_cfg is not None:
+                        entry["cfg"] = _cfg_to_dict(matched_cfg)
+                    quant_cfg.append(entry)
+
+        # Collect non-per-module entries (e.g. *[kv]_bmm_quantizer) from winning recipes.
+        for recipe_entry in recipe.config.quant_cfg:
+            pattern = recipe_entry["quantizer_name"]
+            if pattern == "*" or any(
+                fnmatch.fnmatch(attr, pattern) or pattern.endswith(attr)
+                for attr in _per_module_attrs
+            ):
+                continue
+            cfg = recipe_entry.get("cfg")
+            enable = recipe_entry.get("enable", True)
+            ge: dict[str, Any] = {"quantizer_name": pattern, "enable": enable}
+            if cfg is not None:
+                ge["cfg"] = _cfg_to_dict(cfg)
+            global_entries[pattern] = ge
+
+    quant_cfg.extend(global_entries.values())
     warnings.warn(
         "get_auto_quantize_config: returned config uses algorithm='max'. "
         "Per-recipe calibration algorithms (e.g. smoothquant, awq) are not preserved. "
@@ -1362,9 +1406,19 @@ def _resolve_best_recipe(search_state, constraints, verbose=False):
 
 
 def _match_quantizer_cfg(quant_cfg, quantizer_attr):
-    # Last-match-wins to mirror set_quantizer_by_cfg behavior
+    # Last-match-wins to mirror set_quantizer_by_cfg behavior.
+    # Patterns may be path-scoped (e.g. "*mlp*weight_quantizer") while quantizer_attr
+    # is a bare name like "weight_quantizer".  We match if the bare name matches directly
+    # OR if the pattern ends with the bare quantizer_attr (path-scoped match).
     matched = None
-    for pattern, cfg in quant_cfg.items():
-        if fnmatch.fnmatch(quantizer_attr, pattern):
+    matched_enable = None
+    for entry in quant_cfg:
+        pattern = entry["quantizer_name"]
+        cfg = entry.get("cfg")
+        enable = entry.get("enable", True)
+        # Direct match: the bare quantizer_attr matches the whole pattern (e.g. "*weight_quantizer")
+        if fnmatch.fnmatch(quantizer_attr, pattern) or pattern.endswith(quantizer_attr):
             matched = cfg
-    return matched
+            matched_enable = enable
+
+    return matched, matched_enable

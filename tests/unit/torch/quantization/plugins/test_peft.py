@@ -48,7 +48,7 @@ def test_convert_loralinear():
             assert hasattr(module, "weight_quantizer")
             assert hasattr(module, "output_quantizer")
 
-    mtq.set_quantizer_attribute(model_test, "*", {"enable": False})
+    mtq.set_quantizer_attributes_partial(model_test, "*", {"enable": False})
 
     tf_output_tester(model_ref, model_test)
 
