@@ -24,9 +24,9 @@ pytest.importorskip("transformers")
 
 from modelopt.torch.quantization.nn import QuantModuleRegistry
 from modelopt.torch.quantization.plugins.huggingface import (
-    _QuantFusedExperts,
     _is_fused_experts_module,
     _is_sparse_moe_block,
+    _QuantFusedExperts,
     register_fused_experts_on_the_fly,
     register_sparse_moe_on_the_fly,
 )
@@ -51,9 +51,7 @@ class _SyntheticFusedExperts(nn.Module):
         self.gate_up_proj = nn.Parameter(
             torch.randn(NUM_EXPERTS, 2 * INTERMEDIATE_DIM, HIDDEN_DIM) * 0.02
         )
-        self.down_proj = nn.Parameter(
-            torch.randn(NUM_EXPERTS, HIDDEN_DIM, INTERMEDIATE_DIM) * 0.02
-        )
+        self.down_proj = nn.Parameter(torch.randn(NUM_EXPERTS, HIDDEN_DIM, INTERMEDIATE_DIM) * 0.02)
         self.act_fn = nn.SiLU()
 
     def forward(self, hidden_states, top_k_index, top_k_weights):
@@ -70,7 +68,9 @@ class _SyntheticFusedExperts(nn.Module):
             gate, up = F.linear(current_state, self.gate_up_proj[expert_idx]).chunk(2, dim=-1)
             current_hidden_states = self.act_fn(gate) * up
             current_hidden_states = F.linear(current_hidden_states, self.down_proj[expert_idx])
-            current_hidden_states = current_hidden_states * top_k_weights[token_idx, top_k_pos, None]
+            current_hidden_states = (
+                current_hidden_states * top_k_weights[token_idx, top_k_pos, None]
+            )
             final_hidden_states.index_add_(
                 0, token_idx, current_hidden_states.to(final_hidden_states.dtype)
             )
@@ -254,9 +254,6 @@ class TestExportFusedExperts:
     def test_export_creates_per_expert_submodules(self):
         """_export_fused_experts should create per-expert submodules with standard naming."""
         from modelopt.torch.export.moe_utils import _export_fused_experts
-        from modelopt.torch.quantization.plugins.huggingface import (
-            _get_fused_expert_intermediate_dim,
-        )
 
         experts = _SyntheticFusedExperts()
         expert_type = type(experts)
