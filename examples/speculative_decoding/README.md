@@ -82,7 +82,7 @@ For small base models that fit in GPU memory, we can collocate them with draft m
 
 All default training settings live in `eagle3.yaml`; override any field via OmegaConf dotlist arguments on the command line.
 
-To enable context parallelism for long-context training, add `training.cp_size=<N>` to the overrides.
+To enable context parallelism for long-context training, add `training.cp_size=<N>`.
 The saved modelopt checkpoint is similar in architecture to HF models. It can be further optimized through **ModelOpt**, e.g., PTQ and QAT.
 
 ## Training Draft Model with Offline Base Model
