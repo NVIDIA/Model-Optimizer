@@ -87,12 +87,12 @@ def test_sample_size_minus_one_uses_all(tmp_path):
     assert len(module["train_dataset"]) == 5
 
 
-def test_sample_size_zero_uses_all(tmp_path):
-    """sample_size=0 (non-positive) should use all samples."""
+def test_sample_size_zero_raises(tmp_path):
+    """sample_size=0 should raise ValueError."""
     data_args = _make_data_args(sample_size=0, tmp_path=tmp_path, n_files=5)
     tokenizer = MagicMock()
-    module = make_eagle_supervised_data_module(tokenizer, data_args, train_len=8)
-    assert len(module["train_dataset"]) == 5
+    with pytest.raises(ValueError, match="sample_size must be -1"):
+        make_eagle_supervised_data_module(tokenizer, data_args, train_len=8)
 
 
 def test_sample_size_larger_than_dataset_uses_all(tmp_path):
