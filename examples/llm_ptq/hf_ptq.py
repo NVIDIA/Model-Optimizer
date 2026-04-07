@@ -410,11 +410,13 @@ def load_model(args: argparse.Namespace):
     # If low memory mode is enabled, we compress the model while loading the HF checkpoint.
     calibration_only = False
     if args.specdec_offline_dataset is not None:
-        model_kwargs = {"trust_remote_code": args.trust_remote_code}
+        model_kwargs = {"trust_remote_code": args.trust_remote_code, "torch_dtype": "auto"}
         if args.attn_implementation is not None:
             model_kwargs["attn_implementation"] = args.attn_implementation
-        full_model = AutoModelForCausalLM.from_pretrained(args.pyt_ckpt_path, **model_kwargs)
-        full_model = full_model.to(args.device)
+        device_map = "cpu" if args.device == "cpu" else "auto"
+        full_model = AutoModelForCausalLM.from_pretrained(
+            args.pyt_ckpt_path, device_map=device_map, **model_kwargs
+        )
     elif not args.low_memory_mode:
         full_model = get_model(
             args.pyt_ckpt_path,
