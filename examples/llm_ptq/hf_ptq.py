@@ -807,7 +807,7 @@ def pre_quantize(
     full_model: torch.nn.Module,
     model_type: str | None,
     tokenizer: PreTrainedTokenizerBase | None,
-    calib_dataloader: DataLoader,
+    calib_dataloader: DataLoader | None,
     is_nemotron_vl_model: bool,
 ):
     """
@@ -817,6 +817,10 @@ def pre_quantize(
     post-quantize generation.
 
     """
+    # Offline specdec models skip pre-quantize preview (no tokenizer or standard dataloader)
+    if args.specdec_offline_dataset is not None:
+        return None, None
+
     # Only run single sample for preview
     preview_input_ids = next(iter(calib_dataloader))[
         "input_features" if model_type == "whisper" else "input_ids"
@@ -1042,12 +1046,9 @@ def quantize_main(
     # Detect if this is a Nemotron VL model using architecture-based detection
     is_nemotron_vl_model = is_nemotron_vl(full_model)
 
-    preview_input_ids = None
-    generated_ids_before_ptq = None
-    if args.specdec_offline_dataset is None:
-        preview_input_ids, generated_ids_before_ptq = pre_quantize(
-            args, full_model, model_type, tokenizer, calib_dataloader, is_nemotron_vl_model
-        )
+    preview_input_ids, generated_ids_before_ptq = pre_quantize(
+        args, full_model, model_type, tokenizer, calib_dataloader, is_nemotron_vl_model
+    )
 
     if args.auto_quantize_bits:
         assert len(args.qformat.split(",")) > 1, (
@@ -1373,6 +1374,9 @@ def parse_args() -> argparse.Namespace:
 
     if args.specdec_offline_dataset is not None and args.sparsity_fmt != "dense":
         parser.error("--specdec_offline_dataset is only supported with --sparsity_fmt dense (PTQ).")
+
+    if args.specdec_offline_dataset is not None and args.low_memory_mode:
+        parser.error("--specdec_offline_dataset is not compatible with --low_memory_mode.")
 
     return args
 
