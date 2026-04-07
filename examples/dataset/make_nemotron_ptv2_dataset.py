@@ -110,7 +110,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--output-dir",
-        default="/tmp/specdec_data",
+        default="/tmp/ptv2_gen",
         help="Directory where output JSONL files will be written.",
     )
     parser.add_argument(
@@ -231,7 +231,7 @@ def main() -> None:
 
     full_path = output_dir / "default.jsonl"
     logger.info("Writing %d rows to %s", len(combined), full_path)
-    combined.to_json(str(full_path))
+    combined.to_json(str(full_path), num_proc=args.num_proc)
 
     if not args.no_subsets:
         for n, name in [(1_000, "1K"), (10_000, "10K"), (100_000, "100K")]:
@@ -240,7 +240,7 @@ def main() -> None:
                 continue
             subset_path = output_dir / f"sample-{name}.jsonl"
             logger.info("Writing %s subset to %s", name, subset_path)
-            combined.select(range(n)).to_json(str(subset_path))
+            combined.select(range(n)).to_json(str(subset_path), num_proc=args.num_proc)
 
     logger.info("Done. Output files are in %s", output_dir)
 
