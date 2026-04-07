@@ -677,7 +677,6 @@ def export_quantized(
     tokenizer: PreTrainedTokenizerBase | None,
     default_padding_side,
     default_pad_token,
-    offline_specdec_input: dict | None = None,
 ):
     with torch.inference_mode():
         if model_type is None:
@@ -689,9 +688,7 @@ def export_quantized(
         # Early exit for speculative decoding checkpoints
         # No tokenizer saving needed for spec ckpts
         if has_spec_opt(full_model):
-            export_speculative_decoding(
-                full_model, export_dir=export_path, offline_specdec_input=offline_specdec_input
-            )
+            export_speculative_decoding(full_model, export_dir=export_path)
             print(f"Quantized speculative decoding checkpoint exported to: {export_path}")
             return
 
@@ -877,10 +874,8 @@ def post_quantize(
 
     """
     # Early exit for offline speculative decoding: skip generation comparison and export directly.
+    # The model's get_dummy_inputs() provides the right input format for the export forward pass.
     if args.specdec_offline_dataset is not None:
-        # Offline specdec models require a real sample from the dataset as the dummy input
-        # for the export forward pass (shape/type inference), since their input format
-        # (base_model_outputs, etc.) differs from standard models.
         export_quantized(
             args,
             full_model,
@@ -889,7 +884,6 @@ def post_quantize(
             tokenizer,
             default_padding_side,
             default_pad_token,
-            offline_specdec_input=next(iter(calib_dataloader), None),
         )
         return
 

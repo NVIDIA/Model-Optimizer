@@ -96,7 +96,6 @@ class SpeculativeDecodingExporter(ABC):
         self,
         export_dir: Path | str,
         dtype: torch.dtype | None = None,
-        offline_specdec_input: dict | None = None,
     ):
         """Export the model to the deployment format."""
         raise NotImplementedError("Subclasses must implement this method.")
@@ -194,7 +193,6 @@ class EagleExporter(SpeculativeDecodingExporter):
         self,
         export_dir: Path | str,
         dtype: torch.dtype | None = None,
-        offline_specdec_input: dict | None = None,
     ):
         """Export the model to the deployment format."""
         # Make export dir
@@ -205,9 +203,7 @@ class EagleExporter(SpeculativeDecodingExporter):
         if has_quant_opt(self.model):
             from ..unified_export_hf import _export_transformers_checkpoint
 
-            full_sd, hf_quant_config = _export_transformers_checkpoint(
-                self.model, dtype, offline_specdec_input=offline_specdec_input
-            )
+            full_sd, hf_quant_config = _export_transformers_checkpoint(self.model, dtype)
         else:
             full_sd, hf_quant_config = self.model.state_dict(), None
 

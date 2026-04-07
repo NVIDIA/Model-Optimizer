@@ -118,7 +118,7 @@ def test_sample_size_no_pt_files_raises(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# offline_specdec_input propagation through export path
+# get_dummy_inputs() for export forward pass
 # ---------------------------------------------------------------------------
 
 TINY_EAGLE_ARCH_CFG = {
@@ -144,42 +144,20 @@ def eagle_model():
     return model
 
 
-def test_export_offline_specdec_input_propagated(eagle_model, tmp_path):
-    """offline_specdec_input should be forwarded through export_speculative_decoding."""
-    from modelopt.torch.export import export_speculative_decoding
-
-    offline_input = {"input_ids": torch.ones(1, 4, dtype=torch.long)}
-    captured = {}
-
-    mock_exporter = MagicMock()
-
-    def capture_export(export_dir, dtype=None, offline_specdec_input=None):
-        captured["offline_specdec_input"] = offline_specdec_input
-
-    mock_exporter.export.side_effect = capture_export
-
-    with patch.object(eagle_model, "get_exporter", return_value=mock_exporter):
-        export_speculative_decoding(
-            eagle_model, export_dir=tmp_path, offline_specdec_input=offline_input
-        )
-
-    assert captured.get("offline_specdec_input") is offline_input
+def test_get_dummy_inputs_online(eagle_model):
+    """Online EAGLE model returns input_ids only (no base_model_outputs)."""
+    eagle_model.eagle_offline = False
+    dummy = eagle_model.get_dummy_inputs()
+    assert "input_ids" in dummy
+    assert "base_model_outputs" not in dummy
 
 
-def test_export_offline_specdec_input_none_by_default(eagle_model, tmp_path):
-    """When offline_specdec_input is not provided, it defaults to None."""
-    from modelopt.torch.export import export_speculative_decoding
-
-    captured = {}
-
-    mock_exporter = MagicMock()
-
-    def capture_export(export_dir, dtype=None, offline_specdec_input=None):
-        captured["offline_specdec_input"] = offline_specdec_input
-
-    mock_exporter.export.side_effect = capture_export
-
-    with patch.object(eagle_model, "get_exporter", return_value=mock_exporter):
-        export_speculative_decoding(eagle_model, export_dir=tmp_path)
-
-    assert captured.get("offline_specdec_input") is None
+def test_get_dummy_inputs_offline(eagle_model):
+    """Offline EAGLE model returns input_ids and base_model_outputs with correct shapes."""
+    eagle_model.eagle_offline = True
+    dummy = eagle_model.get_dummy_inputs()
+    assert "input_ids" in dummy
+    assert "base_model_outputs" in dummy
+    hidden_size = eagle_model.config.hidden_size
+    assert dummy["base_model_outputs"]["base_model_hidden_states"].shape[-1] == hidden_size
+    assert dummy["base_model_outputs"]["base_model_input_embeds"].shape[-1] == hidden_size

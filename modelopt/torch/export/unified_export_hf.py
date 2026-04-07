@@ -313,9 +313,7 @@ def _fuse_shared_input_modules(
     return fused_linears
 
 
-def requantize_resmooth_fused_llm_layers(
-    model: torch.nn.Module, offline_specdec_input: dict | None = None
-):
+def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
     """Group modules that take the same input and register shared parameters in module."""
     # TODO: Handle DBRX MoE
     quantization_format = get_quantization_format(model)
@@ -383,18 +381,9 @@ def requantize_resmooth_fused_llm_layers(
         elif getattr(model.config, "is_encoder_decoder", False):
             # For other encoder-decoder models (non-VL), pass both encoder and decoder input ids
             model(fake_input, decoder_input_ids=decoder_fake_input)
-        elif offline_specdec_input is not None:
-            # For offline SpecDec models, we need to pass the specific input format used during training
-            target_device = next(model.parameters()).device
-
-            def _to_device(value):
-                if isinstance(value, torch.Tensor):
-                    return value.to(target_device)
-                if isinstance(value, dict):
-                    return {k: _to_device(v) for k, v in value.items()}
-                return value
-
-            model(**_to_device(offline_specdec_input))
+        elif hasattr(model, "get_dummy_inputs"):
+            # For speculative decoding models (EAGLE, etc.), use model-provided dummy inputs
+            model(**model.get_dummy_inputs())
         else:
             model(fake_input)
 
@@ -773,7 +762,7 @@ def _export_transformers_checkpoint(
     # Resmooth and requantize fused layers
     # TODO: Handle mixed precision
     requantize_resmooth_fused_llm_layers(
-        model, offline_specdec_input=kwargs.get("offline_specdec_input")
+        model
     )
 
     # Remove all hooks from the model
@@ -1130,13 +1119,12 @@ def export_speculative_decoding(
     model: torch.nn.Module,
     dtype: torch.dtype | None = None,
     export_dir: Path | str = tempfile.gettempdir(),
-    offline_specdec_input: dict | None = None,
 ) -> None:
     """Export speculative decoding HuggingFace model checkpoint."""
     assert has_spec_opt(model), "Model is not optimized for speculative decoding."
 
     exporter: SpeculativeDecodingExporter = model.get_exporter()
-    exporter.export(export_dir, dtype, offline_specdec_input)
+    exporter.export(export_dir, dtype)
 
 
 def export_hf_checkpoint(
