@@ -143,6 +143,16 @@ def _replace_attention_impl(worker, config: dict):
         if layer_cfg is None or not layer_cfg.get("enable", True):
             continue
 
+        method = layer_cfg.get("method", "triton_sparse_softmax")
+        backend = layer_cfg.get("backend", "triton")
+        if backend != "triton" or method not in {"triton_sparse_softmax", "triton_skip_softmax"}:
+            raise ValueError(
+                f"{name}: unsupported sparse config for vLLM worker "
+                f"(backend={backend!r}, method={method!r}). "
+                "Only backend='triton' with method='triton_sparse_softmax' or "
+                "'triton_skip_softmax' is supported."
+            )
+
         # Build per-layer sparse kwargs
         sparse_kw = {}
         sparsity_n = layer_cfg.get("sparsity_n", 0)

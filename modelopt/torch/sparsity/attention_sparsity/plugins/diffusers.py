@@ -208,6 +208,18 @@ class ModelOptWanAttnProcessor:
         rotary_emb: tuple[torch.Tensor, torch.Tensor] | None,
     ) -> torch.Tensor:
         """Triton-backed WAN attention (self-attention and I2V cross-attention)."""
+        if attention_mask is not None:
+            from diffusers.models.attention_dispatch import dispatch_attention_fn
+
+            return self._wan_forward_sdpa(
+                attn,
+                hidden_states,
+                encoder_hidden_states,
+                attention_mask,
+                rotary_emb,
+                dispatch_fn=dispatch_attention_fn,
+            )
+
         encoder_hidden_states_img = None
         if attn.add_k_proj is not None:
             # 512 is the text-encoder context length (WAN hardcoded constant)

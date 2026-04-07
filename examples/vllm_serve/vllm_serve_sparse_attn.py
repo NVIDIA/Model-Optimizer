@@ -72,7 +72,9 @@ def main():
     repo_root = str(Path(__file__).resolve().parent)
     if repo_root not in sys.path:
         sys.path.insert(0, repo_root)
-    os.environ["PYTHONPATH"] = os.environ.get("PYTHONPATH", "") + ":" + f"{repo_root}"
+    existing = os.environ.get("PYTHONPATH")
+    parts = [p for p in [existing, repo_root] if p]
+    os.environ["PYTHONPATH"] = os.pathsep.join(parts)
 
     # Select worker based on env vars
     has_quant = os.environ.get("QUANT_CFG") or os.environ.get("KV_QUANT_CFG")

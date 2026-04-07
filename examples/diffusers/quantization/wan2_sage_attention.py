@@ -794,8 +794,9 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Override skip_softmax_threshold for triton-skip / triton-skip-nvfp4 kernels. "
             f"Default: {_TRITON_SKIP_DEFAULT_THRESHOLD}. "
-            "A tile is skipped when its max attention score is less than LAMBDA times the "
-            "running maximum (BLASST criterion).  Lower = better quality, less speedup. "
+            "A tile is skipped when exp(tile_max - running_max) < LAMBDA "
+            "(equivalently: tile_max < running_max + log(LAMBDA)). "
+            "Lower = better quality, less speedup. "
             "Typical sweep: 0.1 (aggressive), 0.01 (moderate), 0.001 (conservative)."
         ),
     )
@@ -830,14 +831,14 @@ def main() -> None:
             disable_attention_kernel()
 
         # --- CLIP scores (per-video semantic alignment with prompt) ---
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        # Use CPU to avoid OOM: the WAN pipeline already occupies GPU memory.
         print("\nComputing CLIP scores (prompt-video semantic alignment)...")
         try:
             clip_base = compute_clip_score(
-                frames_base, args.prompt, clip_model_id=args.clip_model, device=device
+                frames_base, args.prompt, clip_model_id=args.clip_model, device="cpu"
             )
             clip_quant = compute_clip_score(
-                frames_quant, args.prompt, clip_model_id=args.clip_model, device=device
+                frames_quant, args.prompt, clip_model_id=args.clip_model, device="cpu"
             )
             print(f"  baseline CLIP:  {clip_base:.4f}")
             print(f"  {args.kernel} CLIP:  {clip_quant:.4f}  (delta {clip_quant - clip_base:+.4f})")
@@ -847,7 +848,7 @@ def main() -> None:
             print(
                 "  Tip: set HF_TOKEN env var or use --clip-model <local-path> to avoid rate limits"
             )
-        except OSError as e:
+        except (OSError, RuntimeError) as e:
             print(f"  WARNING: CLIP scoring failed ({e})")
             print("  To fix: set HF_TOKEN env var or pass --clip-model <local-path-to-clip>")
 
