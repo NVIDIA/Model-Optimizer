@@ -1674,7 +1674,9 @@ def gptq(
 
     print_rank_0(f"Computing Hessians for {len(gptq_handles)} linear layers...")
 
-    with set_quantizer_by_cfg_context(model, {"*weight_quantizer": {"enable": False}}):
+    with set_quantizer_by_cfg_context(
+        model, [{"quantizer_name": "*weight_quantizer", "enable": False}]
+    ):
         forward_loop(model)
 
     for handle in gptq_handles.values():

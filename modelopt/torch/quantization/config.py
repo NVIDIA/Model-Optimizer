@@ -1372,34 +1372,6 @@ class LocalHessianCalibConfig(QuantizeAlgorithmConfig):
         description="If True, module's local Hessian metadata will be kept as a module attribute.",
     )
 
-class GPTQConfig(QuantizeAlgorithmConfig):
-    """The config for GPTQ quantization.
-
-    GPTQ minimizes the layer-wise quantization error by using second-order (Hessian) information
-    to perform blockwise weight updates that compensate for rounding loss. Layers are quantized
-    sequentially so that each layer's Hessian is computed from activations that already reflect
-    the quantization of preceding layers.
-
-    The default values are taken from the official GPTQ implementation:
-    https://github.com/IST-DASLab/FP-Quant/blob/d2e3092f968262c4de5fb050e1aef568a280dadd/src/quantization/gptq.py#L35
-    """
-
-    method: Literal["gptq"] = ModeloptField("gptq")
-    percdamp: float | None = ModeloptField(
-        default=0.01,
-        gt=0.0,
-        le=1.0,
-        title="Percentage damping factor.",
-        description="The percentage of average Hessian diagonal used for damping.",
-    )
-    block_size: int | None = ModeloptField(
-        default=128,
-        title="Block size for GPTQ weight update.",
-        description="""The block size for GPTQ weight update, which must be a multiple of the
-        group_size used in the quantization.""",
-    )
-
-
 
 class SmoothQuantCalibConfig(QuantizeAlgorithmConfig):
     """The config for ``smoothquant`` algorithm (SmoothQuant).
@@ -1544,26 +1516,22 @@ class GPTQConfig(QuantizeAlgorithmConfig):
     """
 
     method: Literal["gptq"] = ModeloptField("gptq")
-    perc_damp: float = ModeloptField(
+    percdamp: float | None = ModeloptField(
         default=0.01,
         gt=0.0,
         le=1.0,
         title="Percentage damping factor.",
         description="The percentage of average Hessian diagonal used for damping.",
     )
-    block_size: int = ModeloptField(
+    block_size: int | None = ModeloptField(
         default=128,
         title="Block size for GPTQ weight update.",
         description="""The block size for GPTQ weight update, which must be a multiple of the
         group_size used in the quantization.""",
     )
 
-QuantizeQuantCfgType = dict[
-    str | Callable,
-    QuantizerAttributeConfig
-    | list[QuantizerAttributeConfig]
-    | dict[str | Callable, QuantizerAttributeConfig | list[QuantizerAttributeConfig]],
-]
+
+QuantizeQuantCfgType = list[QuantizerCfgEntry]
 
 _QuantizeAlgoCfgType = str | dict | QuantizeAlgorithmConfig | None
 
