@@ -60,7 +60,7 @@ def update_hessian(input, hessian, n_samples):
     Note: input must be non-empty (batch_size > 0); a zero-sized input causes division by zero.
     """
     # Flatten to 2D (total_tokens, features) first, so batch_size counts tokens
-    input_flat = input.reshape(-1, input.shape[-1]).t().float()
+    input_flat = input.reshape(-1, input.shape[-1]).t()
     batch_size = input_flat.shape[1]
 
     # Incremental averaging: scale down old hessian
@@ -98,7 +98,9 @@ class GPTQHelper:
         device = module.weight.device
         if offload_to_cpu and get_used_gpu_mem_fraction(device) > 0.65:
             device = "cpu"
-        self.hessian = torch.zeros(in_features, in_features, dtype=torch.float32, device=device)
+        self.hessian = torch.zeros(
+            in_features, in_features, dtype=module.weight.dtype, device=device
+        )
         self.n_samples = 0
         # Set by update_weights(); listed here for documentation.
         self.weight: torch.Tensor | None = None
@@ -141,15 +143,13 @@ class GPTQHelper:
         logs MSE, and writes the result back to the module.
         """
         hessian = self.hessian.to(self.module.weight.device)
-        self.weight = self.module.weight.data.float().clone()
+        self.weight = self.module.weight.data.clone()
         self._prepare_hessian_inverse(hessian, perc_damp)
 
         self._blockwise_update(block_size)
 
         self._print_mse_error(hessian)
-        self.module.weight.data = self.weight.reshape(self.module.weight.shape).to(
-            self.module.weight.data.dtype
-        )
+        self.module.weight.data = self.weight.reshape(self.module.weight.shape)
 
     # ------------------------------------------------------------------
     # Quantize helpers — all read from self.module, self.weight, self.h_inv
@@ -226,8 +226,8 @@ class GPTQHelper:
 
     def _print_mse_error(self, hessian):
         """Log Hessian-weighted relative MSE between ``self.weight`` and original weights."""
-        w_orig = self.module.weight.float()
+        w_orig = self.module.weight.data
         delta = self.weight - w_orig
-        mse = (delta).mm(hessian).mul(delta).mean() / (w_orig.mm(hessian).mul(w_orig).mean() + 1e-6)
+        mse = delta.mm(hessian).mul(delta).mean() / (w_orig.mm(hessian).mul(w_orig).mean() + 1e-6)
         suffix = f", n_hessian_samples: {self.n_samples}" if self.n_samples else ""
         print_rank_0(f"[{self.name}] Relative MSE error: {mse.item():.2e}{suffix}")

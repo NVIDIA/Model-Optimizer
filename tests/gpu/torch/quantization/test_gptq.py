@@ -198,7 +198,7 @@ def test_gptq_export_roundtrip():
     assert deq_weight.shape == qdq_ref.shape, (
         f"Shape mismatch: dequantized {deq_weight.shape} vs QDQ ref {qdq_ref.shape}"
     )
-    assert torch.allclose(deq_weight, qdq_ref, atol=1e-2), (
+    assert torch.equal(deq_weight, qdq_ref), (
         f"Dequantized weight does not match QDQ reference. "
         f"Max diff: {(deq_weight - qdq_ref).abs().max().item()}"
     )
