@@ -20,6 +20,7 @@ import torch
 import torch.nn as nn
 
 import modelopt.torch.opt as mto
+from modelopt.torch.export.unified_export_hf import requantize_resmooth_fused_llm_layers
 from modelopt.torch.quantization.config import RotateConfig
 from modelopt.torch.quantization.conversion import quantizer_state
 from modelopt.torch.quantization.nn import QuantModule, TensorQuantizer
@@ -128,6 +129,8 @@ def export_hf_vllm_fq_checkpoint(
     """
     export_dir = Path(export_dir)
     export_dir.mkdir(parents=True, exist_ok=True)
+
+    requantize_resmooth_fused_llm_layers(model)
 
     # Step 1: Build the folded HF state dict.
     fakequant_weights = set()

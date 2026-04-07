@@ -26,6 +26,7 @@ from vllm_reload_utils import (
     convert_modelopt_state_to_vllm,
     load_state_dict_from_path,
     restore_from_modelopt_state_vllm,
+    shard_pre_quant_scale_for_tp,
 )
 
 import modelopt.torch.quantization as mtq
@@ -64,7 +65,7 @@ def _fakequant_run_prolog_worker(self) -> None:
         # Load on CPU to avoid failures when the checkpoint was saved from a different
         # GPU mapping
         modelopt_state = torch.load(
-            quant_config["modelopt_state_path"], weights_only=True, map_location="cpu"
+            quant_config["modelopt_state_path"], weights_only=False, map_location="cpu"
         )
         modelopt_weights = modelopt_state.pop("modelopt_state_weights", None)
         map_fun = (
@@ -81,8 +82,33 @@ def _fakequant_run_prolog_worker(self) -> None:
             # convert quantizer state values to vllm format
             modelopt_weights = convert_dict_to_vllm(modelopt_weights, map_fun=map_fun)
             mtq.utils.set_quantizer_state_dict(model, modelopt_weights)
+            # Log any pqs keys in modelopt_weights that were not loaded (key mismatch).
+            if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
+                from modelopt.torch.quantization.nn import TensorQuantizer
+                from modelopt.torch.utils import get_unwrapped_name
+
+                loaded_keys = {
+                    get_unwrapped_name(n, model)
+                    for n, m in model.named_modules()
+                    if isinstance(m, TensorQuantizer)
+                }
+                pqs_in_weights = {
+                    k for k, v in modelopt_weights.items()
+                    if isinstance(v, dict) and "_pre_quant_scale" in v
+                }
+                unmatched_pqs = pqs_in_weights - loaded_keys
+                if unmatched_pqs:
+                    print(
+                        f"[fakequant_worker] WARNING: {len(unmatched_pqs)} pqs key(s) in "
+                        f"modelopt_weights have no matching quantizer in the model:\n"
+                        + "\n".join(f"  {k}" for k in sorted(unmatched_pqs)[:20])
+                    )
             # set_quantizer_state_dict does not invoke modelopt_post_restore (unlike restore_quantizer_state).
             post_restore_vllm_parallel_linears(model)
+            # For RowParallelLinear layers, pqs was saved at full H_in width (single-GPU
+            # export). Slice it to [H_in / tp_world_size] so it matches the local shard.
+            _debug_pqs = os.environ.get("MODELOPT_DEBUG_PQS", "0").lower() in ("1", "true")
+            shard_pre_quant_scale_for_tp(model, debug=_debug_pqs)
 
     else:
         if quant_config["quant_file_path"]:

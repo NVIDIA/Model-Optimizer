@@ -218,6 +218,44 @@ def _merge_values_require_identical(merged_key: str, key_value_pairs: list[tuple
     return first_value
 
 
+def _infer_prefix_remap(
+    quantizer_keys: dict[str, Any],
+    map_fun: Callable[[dict[str, Any]], dict[str, Any]],
+) -> dict[str, str]:
+    """Infer root-prefix renames (e.g. ``backbone`` → ``model``) by probing map_fun.
+
+    Some HF models use a different top-level module name than vLLM (e.g.
+    NemotronH uses ``backbone.layers`` in HF but ``model.layers`` in vLLM).
+    Quantizer keys are not run through map_fun (which transforms tensor values),
+    so the prefix rename is never applied to them.  This function discovers the
+    rename by sending a synthetic weight key derived from each unseen root prefix
+    through map_fun and comparing the first path component of the result.
+    """
+    prefix_remap: dict[str, str] = {}
+    # Use a 2-D dummy so the mapper can handle ops like transpose/chunk without
+    # shape errors (1-D tensors fail for many weight-transform operations).
+    _DUMMY = torch.empty(16, 16)
+    for key in quantizer_keys:
+        first_component = key.split(".")[0]
+        if first_component in prefix_remap:
+            continue  # already found a mapping for this prefix
+        last_dot = key.rfind(".")
+        if last_dot == -1:
+            continue
+        module_path = key[:last_dot]
+        probe_key = module_path + ".weight"
+        try:
+            result = map_fun({probe_key: _DUMMY})
+            if result:
+                new_key = next(iter(result))
+                new_first = new_key.split(".")[0]
+                if new_first != first_component:
+                    prefix_remap[first_component] = new_first
+        except Exception:
+            pass  # mapper doesn't know this layer type; try the next key
+    return prefix_remap
+
+
 def convert_dict_to_vllm(
     state_dict: dict[str, Any],
     max_or_concat: bool = True,
@@ -231,6 +269,25 @@ def convert_dict_to_vllm(
         max_or_concat: Whether to merge grouped values by taking max/concatenate or require identical
         map_fun: Function to map the state dict to vLLM format
     """
+    # If map_fun is provided, pre-transform quantizer key module-path prefixes so that
+    # HF→vLLM model renames (e.g. backbone.layers → model.layers) are applied before
+    # key grouping (q/k/v → qkv, experts.N.up_proj → experts.w13, etc.).
+    # This is necessary for models where the HF root module differs from vLLM's (e.g.
+    # NemotronH uses backbone.layers in HF but model.layers in vLLM), and for
+    # modelopt_state_weights where ALL keys are quantizer keys so map_fun is never
+    # invoked on non-quantizer keys.
+    if map_fun is not None:
+        q_only = {k: v for k, v in state_dict.items() if "_quantizer" in k}
+        prefix_remap = _infer_prefix_remap(q_only, map_fun)
+        if prefix_remap:
+            renamed = {}
+            for k, v in state_dict.items():
+                if "_quantizer" in k:
+                    first = k.split(".")[0]
+                    k = prefix_remap.get(first, first) + k[len(first) :]
+                renamed[k] = v
+            state_dict = renamed
+
     vllm_state_dict, merge_groups = _group_keys_for_vllm(state_dict)
 
     merge_fn = _merge_values_by_max_or_concat if max_or_concat else _merge_values_require_identical
@@ -381,6 +438,87 @@ def restore_from_modelopt_state_vllm(
         model = model.init_modellike()
     assert not isinstance(model, ModelLikeModule), "Model must be a regular Module now!"
     return model
+
+
+def shard_pre_quant_scale_for_tp(model: Any) -> None:
+    """Shard ``_pre_quant_scale`` tensors in-place for the local TP rank.
+
+    After ``set_quantizer_state_dict`` loads full-size pqs from the HF export
+    (which was saved from a single-GPU run), RowParallelLinear layers need the
+    input-channel pqs sliced down to ``H_in / tp_world_size``.  Column-parallel
+    layers share the full input across ranks and don't need sharding.
+
+    The heuristic: compare the pqs channel count against the corresponding
+    weight tensor's input dimension.  If they differ by exactly ``tp_world_size``
+    the tensor is sliced; otherwise it is left unchanged.
+    """
+    from modelopt.torch.quantization.nn import TensorQuantizer
+
+    tp_group = get_tp_group()
+    tp_rank = tp_group.rank_in_group
+    tp_world_size = tp_group.world_size
+    if tp_world_size == 1:
+        return
+
+    # Iterate over TensorQuantizer modules directly. Submodules live in
+    # module._modules, not in vars(module).__dict__, so iterating vars() misses them.
+    for quantizer_name, quantizer in model.named_modules():
+        if not isinstance(quantizer, TensorQuantizer):
+            continue
+        pqs = getattr(quantizer, "_pre_quant_scale", None)
+        if pqs is None:
+            continue
+
+        # Resolve the parent module and quantizer attribute name.
+        # quantizer_name: "model.layers.0.o_proj.input_quantizer"
+        #              or "model.layers.1.mixer.experts.w13_input_quantizer"
+        last_dot = quantizer_name.rfind(".")
+        if last_dot == -1:
+            continue
+        parent_path = quantizer_name[:last_dot]
+        attr_name = quantizer_name[last_dot + 1 :]  # "input_quantizer" or "w13_input_quantizer"
+
+        if not attr_name.endswith("input_quantizer"):
+            continue
+
+        try:
+            parent = model.get_submodule(parent_path)
+        except AttributeError:
+            continue
+
+        # Derive the weight attribute name from the quantizer attribute name.
+        #   "input_quantizer"     -> "weight"        (regular QuantLinear)
+        #   "w13_input_quantizer" -> "w13_weight"    (FusedMoE gate+up)
+        #   "w2_input_quantizer"  -> "w2_weight"     (FusedMoE down)
+        stem = attr_name[: -len("_input_quantizer")]  # "" / "w13" / "w2"
+        weight_attr = (stem + "_weight") if stem else "weight"
+        w = getattr(parent, weight_attr, None)
+        if w is None or not isinstance(w, torch.Tensor) or w.is_meta:
+            continue
+
+        # Input dim: last dim for 3D [E, H_out, H_in] (FusedMoE), dim 1 for 2D.
+        expected_size = w.shape[-1] if w.ndim == 3 else w.shape[1]
+
+        # Support both [H_in] (1-D) and [1, H_in] (2-D broadcast) layouts.
+        if pqs.ndim == 1:
+            shard_dim, full_size = 0, pqs.shape[0]
+        elif pqs.ndim == 2 and pqs.shape[0] == 1:
+            shard_dim, full_size = 1, pqs.shape[1]
+        else:
+            continue
+
+        if full_size == expected_size:
+            continue  # already the right size (column-parallel or TP=1)
+        if full_size != expected_size * tp_world_size:
+            warnings.warn(
+                f"{quantizer_name}._pre_quant_scale: "
+                f"size {full_size} does not equal expected_size {expected_size} × "
+                f"tp_world_size {tp_world_size}. Skipping shard."
+            )
+            continue
+
+        start = tp_rank * expected_size
+        quantizer._pre_quant_scale = pqs.narrow(shard_dim, start, expected_size).contiguous()
 
 
 def process_state_dict_for_tp(saved_qstate_dict, current_state_dict):
