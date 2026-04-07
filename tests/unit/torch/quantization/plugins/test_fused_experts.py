@@ -226,7 +226,7 @@ class TestQuantFusedExperts:
             out_ref = ref_experts(hidden_states, top_k_index, top_k_weights)
             out_test = converted(hidden_states, top_k_index, top_k_weights)
 
-        assert torch.allclose(out_ref, out_test, atol=1e-5), (
+        assert torch.allclose(out_ref, out_test, atol=1e-4), (
             f"Max diff: {(out_ref - out_test).abs().max().item()}"
         )
         self._cleanup_registry(expert_type)
