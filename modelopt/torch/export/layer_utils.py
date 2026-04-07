@@ -965,6 +965,12 @@ def get_expert_linear_names(module: nn.Module) -> list[str]:
         """
         return any(name.lower() in type(module).__name__.lower() for name in name_list)
 
+    # Structural detection: after _export_fused_experts, fused expert modules
+    # have per-expert submodules with gate_proj/up_proj/down_proj.
+    # Also handles models that originally used this naming (Qwen, DeepSeek, etc.).
+    if hasattr(module, "experts") and hasattr(module.experts, "gate_up_proj_weight_quantizers"):
+        return ["gate_up_proj", "down_proj"]
+
     if module_match_name_list(
         module,
         [
@@ -973,15 +979,16 @@ def get_expert_linear_names(module: nn.Module) -> list[str]:
             "Qwen3NextSparseMoeBlock",
             "Qwen3_5MoeSparseMoeBlock",
             "DeepseekMoE",
+            "MixtralSparseMoeBlock",
         ],
     ):
         return ["gate_proj", "down_proj", "up_proj"]
     elif module_match_name_list(module, ["MixtralMoeSparseMoeBlock"]):
+        # Older transformers naming for Mixtral
         return ["linear_fc1", "linear_fc2"]
     elif module_match_name_list(module, ["DBRXMoeSparseMoeBlock"]):
         return ["w1_linear", "w2_linear", "v1_linear"]
     elif module_match_name_list(module, ["GptOssMoE"]):
-        # GPT-OSS MoE modules use gate_up_proj and down_proj
         return ["gate_up_proj", "down_proj"]
     else:
         # assuming w1, w2, w3 by default
