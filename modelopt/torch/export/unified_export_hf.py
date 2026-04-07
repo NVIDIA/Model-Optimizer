@@ -761,9 +761,7 @@ def _export_transformers_checkpoint(
 
     # Resmooth and requantize fused layers
     # TODO: Handle mixed precision
-    requantize_resmooth_fused_llm_layers(
-        model
-    )
+    requantize_resmooth_fused_llm_layers(model)
 
     # Remove all hooks from the model
     try:
