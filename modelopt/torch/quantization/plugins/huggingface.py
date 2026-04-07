@@ -452,8 +452,11 @@ class _TransposedQuantization(torch.autograd.Function):
 _transposed_quantize = _TransposedQuantization.apply
 
 
-class _QuantSparseMoe(QuantModule):
+class _QuantSparseSequentialMoe(QuantModule):
     """Quantization wrapper for HuggingFace sparse MoE blocks.
+
+    This base class is for Sequential MoEs (i.e each experts are implemented as standalone modules).
+    Transformers>=5.0 has batched experts, no per-expert quantizers.
 
     Supports ``layer_sync_moe_local_experts_amax`` to sync input quantizer amax across experts.
 
@@ -571,10 +574,6 @@ class _QuantSparseMoe(QuantModule):
         Also skipped when experts is a fused module (e.g. Llama4TextExperts) with shared quantizers.
         """
         if self._moe_calib_experts_ratio is not None:
-            return
-        try:
-            iter(self.experts)
-        except TypeError:
             return
         sync_moe_expert_amax(self.experts)
 
@@ -884,7 +883,7 @@ class _QuantQwen35MoeExperts(QuantModule):
         return final_hidden_states
 
 
-class _QuantDbrxFFN(_QuantSparseMoe):
+class _QuantDbrxFFN(_QuantSparseSequentialMoe):
     @property
     def num_experts(self):
         return self.router.moe_num_experts
@@ -1325,8 +1324,8 @@ def _has_num_experts(obj):
     return hasattr(obj, "num_experts") or hasattr(obj, "n_routed_experts")
 
 
-def _is_sparse_moe_block(module):
-    """Check if a module is structurally a sparse MoE block compatible with _QuantSparseMoe.
+def _is_sparse_sequaential_moe_block(module):
+    """Check if a module is structurally a sparse sequential MoE block compatible with _QuantSparseSequentialMoe.
 
     All HuggingFace MoE blocks (Mixtral, Qwen3Moe, Qwen2Moe, Qwen3Next, Llama4, MiniMax,
     NemotronH, etc.) share a common structural pattern: a ``gate`` (TopKRouter) sub-module with
@@ -1337,6 +1336,10 @@ def _is_sparse_moe_block(module):
     with new MoE architectures.
     """
     if not hasattr(module, "experts"):
+        return False
+
+    if not hasattr(module.experts, "__iter__"):
+        # transformers>=5.0 has batched experts, no per-expert quantizers
         return False
 
     # Primary: gate sub-module has topk/top_k + num_experts (standard TopKRouter pattern)
@@ -1355,10 +1358,10 @@ def _is_sparse_moe_block(module):
 
 
 def register_sparse_moe_on_the_fly(model):
-    """Auto-detect and register MOE modules as _QuantSparseMoe.
+    """Auto-detect and register MOE modules as _QuantSparseSequentialMoe.
 
     Walks the model tree, identifies MoE blocks by their structural attributes
-    (``gate`` + ``experts``), and registers unregistered ones with ``_QuantSparseMoe``.
+    (``gate`` + ``experts``), and registers unregistered ones with ``_QuantSparseSequentialMoe``.
     """
     visited_types = set()
     for name, module in model.named_modules():
@@ -1371,12 +1374,14 @@ def register_sparse_moe_on_the_fly(model):
 
         visited_types.add(mod_type)
 
-        if _is_sparse_moe_block(module):
+        if _is_sparse_sequaential_moe_block(module):
             print(
                 f"\033[1mDetected MOE module '{name}' of type {mod_type.__name__}, "
-                f"registering with _QuantSparseMoe.\033[0m"
+                f"registering with _QuantSparseSequentialMoe.\033[0m"
             )
-            QuantModuleRegistry.register({mod_type: f"hf.{mod_type.__name__}"})(_QuantSparseMoe)
+            QuantModuleRegistry.register({mod_type: f"hf.{mod_type.__name__}"})(
+                _QuantSparseSequentialMoe
+            )
 
 
 def _is_supported_hf_model(model):
