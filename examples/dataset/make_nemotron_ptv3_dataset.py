@@ -78,14 +78,19 @@ Usage
 import argparse
 import logging
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import yaml
+from conversation_utils import (
+    has_tool_turns,
+    load_augmentations,
+    make_augment_fn,
+    normalize_messages,
+    strip_assistant_turns,
+)
 from datasets import concatenate_datasets, load_dataset
-
-from conversation_utils import has_tool_turns, load_augmentations, make_augment_fn, normalize_messages, strip_assistant_turns
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s", datefmt="%H:%M:%S"
@@ -238,17 +243,14 @@ def main() -> None:
     for spec in dataset_specs:
         logger.info("Loading %s  (augment=%s)", spec.repo_id, spec.augment)
         for split in spec.splits:
-            ds = load_split(spec.repo_id, split, spec.cap_per_split, args.num_proc,
-                            args.mode)
+            ds = load_split(spec.repo_id, split, spec.cap_per_split, args.num_proc, args.mode)
             if args.mode == "generate" and not spec.augment:
                 non_augmentable_parts.append(ds)
             else:
                 augmentable_parts.append(ds)
 
     augmentable = concatenate_datasets(augmentable_parts) if augmentable_parts else None
-    non_augmentable = (
-        concatenate_datasets(non_augmentable_parts) if non_augmentable_parts else None
-    )
+    non_augmentable = concatenate_datasets(non_augmentable_parts) if non_augmentable_parts else None
     if augmentable is not None:
         logger.info("Augmentable rows: %d", len(augmentable))
     if non_augmentable is not None:

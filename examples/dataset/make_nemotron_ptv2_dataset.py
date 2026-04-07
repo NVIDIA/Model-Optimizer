@@ -59,8 +59,6 @@ import logging
 import os
 from pathlib import Path
 
-from datasets import concatenate_datasets, load_dataset
-
 from conversation_utils import (
     has_tool_turns,
     load_augmentations,
@@ -68,6 +66,7 @@ from conversation_utils import (
     normalize_messages,
     strip_assistant_turns,
 )
+from datasets import concatenate_datasets, load_dataset
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s", datefmt="%H:%M:%S"

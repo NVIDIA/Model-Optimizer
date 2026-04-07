@@ -186,11 +186,13 @@ def normalize_messages(example: dict[str, Any], idx: int) -> dict[str, Any]:
                 msg["tool_calls"] = m["tool_calls"]
             normalized.append(msg)
         elif role == "tool":
-            normalized.append({
-                "role": "tool",
-                "content": m.get("content") or "",
-                "tool_call_id": m.get("tool_call_id", ""),
-            })
+            normalized.append(
+                {
+                    "role": "tool",
+                    "content": m.get("content") or "",
+                    "tool_call_id": m.get("tool_call_id", ""),
+                }
+            )
         elif role == "developer":
             # Map developer-role messages to system per OpenAI schema conventions.
             normalized.append({"role": "system", "content": m.get("content") or ""})
