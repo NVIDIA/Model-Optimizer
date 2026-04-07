@@ -53,8 +53,10 @@ try:
         init_benchmark_instance,
         region_pattern_autotuning_workflow,
     )
-except ImportError:
-    logger.warning("Failed to import Autotune dependencies")
+except ImportError as e:
+    logger.warning(
+        f"Failed to import Autotune dependencies with '{e}' error. Ignore if Autotune is not being used."
+    )
 from modelopt.onnx.quantization.calib_utils import (
     CalibrationDataProvider,
     CalibrationDataType,
@@ -287,14 +289,20 @@ def _find_nodes_to_quantize_autotune(
     """Extracts quantization information from Autotune to provide ORT quantization."""
     logger.info("Running Auto Q/DQ with TensorRT")
 
-    benchmark_instance = init_benchmark_instance(
-        use_trtexec=use_trtexec,
-        plugin_libraries=trt_plugins,
-        timing_cache_file=timing_cache_file,
-        warmup_runs=warmup_runs,
-        timing_runs=timing_runs,
-        trtexec_args=trtexec_args.split() if trtexec_args else None,
-    )
+    try:
+        benchmark_instance = init_benchmark_instance(
+            use_trtexec=use_trtexec,
+            plugin_libraries=trt_plugins,
+            timing_cache_file=timing_cache_file,
+            warmup_runs=warmup_runs,
+            timing_runs=timing_runs,
+            trtexec_args=trtexec_args.split() if trtexec_args else None,
+        )
+    except Exception:
+        raise RuntimeError(
+            "Failed to initialize benchmark. Make sure that all Autotune requirements are installed (i.e., TensorRT)."
+        )
+
     if benchmark_instance is None:
         raise RuntimeError("Failed to initialize TensorRT benchmark")
 
