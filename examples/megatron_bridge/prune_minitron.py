@@ -373,7 +373,7 @@ def main(args: argparse.Namespace):
         print_rank_0(f"Saving pruned model to {args.output_hf_path} in HF checkpoint format")
 
         # [WAR] Hacky way to save pruned HF model until Megatron-Bridge natively supports it
-        
+
         gen_cfg = bridge.hf_pretrained.generation_config
         gen_cfg.top_p = None
         bridge.hf_pretrained.generation_config = gen_cfg
