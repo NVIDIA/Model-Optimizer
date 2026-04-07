@@ -372,11 +372,11 @@ Here is an example of creating custom calibration mode:
 .. code-block:: python
 
     from modelopt.torch.opt.config import ModeloptField
-    from modelopt.torch.quantization.config import QuantizeAlgorithmConfig
+    from modelopt.torch.quantization.config import CalibrationConfig
     from modelopt.torch.quantization.mode import CalibrateModeRegistry, BaseCalibrateModeDescriptor
     # custom configuration comprising of method name and
     # any other parameters required by custom calibration function
-    class CustomConfig(QuantizeAlgorithmConfig):
+    class CustomConfig(CalibrationConfig):
         method: Literal["custom_calib"] = ModeloptField("custom_calib")
         ...
 
@@ -384,7 +384,7 @@ Here is an example of creating custom calibration mode:
     @CalibrateModeRegistry.register_mode
     class CustomCalibrateModeDescriptor(BaseCalibrateModeDescriptor):
         @property
-        def config_class(self) -> QuantizeAlgorithmConfig:
+        def config_class(self) -> CalibrationConfig:
             """Specifies the config class."""
             return CustomConfig
 

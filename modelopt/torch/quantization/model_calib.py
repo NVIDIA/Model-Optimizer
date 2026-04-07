@@ -15,6 +15,8 @@
 
 """Calibration utilities."""
 
+import contextlib
+import fnmatch
 import math
 import os
 import warnings
@@ -52,12 +54,71 @@ from .utils import (
 
 __all__ = [
     "awq",
+    "filter_calib_modules",
     "local_hessian_calibrate",
     "max_calibrate",
     "sequential_calibrate",
     "smoothquant",
     "svdquant",
 ]
+
+
+@contextlib.contextmanager
+def filter_calib_modules(
+    model: nn.Module,
+    include_modules: list[str] | None = None,
+    exclude_modules: list[str] | None = None,
+):
+    """Context manager to restrict calibration to a subset of the model's modules.
+
+    Temporarily disables quantizers in modules that do not pass the include/exclude filters.
+    Disabled quantizers retain their pre-existing ``_amax`` values because
+    :meth:`TensorQuantizer.disable` does not clear ``_amax``.
+
+    Args:
+        model: The quantized model.
+        include_modules: If provided, only modules whose names match at least one fnmatch pattern
+            are calibrated.  All others are skipped.
+        exclude_modules: If provided, modules whose names match at least one fnmatch pattern are
+            skipped.  Mutually exclusive with ``include_modules``.
+
+    Example::
+
+        with filter_calib_modules(model, exclude_modules=["*lm_head*"]):
+            mse_calibrate(model, forward_loop)
+    """
+    if include_modules is not None and exclude_modules is not None:
+        raise ValueError(
+            "include_modules and exclude_modules are mutually exclusive; specify only one."
+        )
+
+    if include_modules is None and exclude_modules is None:
+        yield
+        return
+
+    def _should_calibrate(name: str) -> bool:
+        # Match against the quantizer's direct parent module name
+        parent_name = ".".join(name.split(".")[:-1])
+        if include_modules is not None:
+            return any(fnmatch.fnmatch(parent_name, p) for p in include_modules)
+        if exclude_modules is not None:
+            return not any(fnmatch.fnmatch(parent_name, p) for p in exclude_modules)
+        return True
+
+    disabled = []
+    for name, module in model.named_modules():
+        if not isinstance(module, TensorQuantizer):
+            continue
+        if _should_calibrate(name):
+            continue
+        if not module._disabled:
+            module.disable()
+            disabled.append(module)
+    try:
+        yield
+    finally:
+        for q in disabled:
+            q.enable()
 
 
 def weight_only_quantize(model: nn.Module):
