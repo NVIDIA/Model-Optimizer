@@ -15,11 +15,10 @@
 
 import argparse
 import copy
-import importlib.util
-import os
 import random
 import time
 import warnings
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -66,6 +65,10 @@ from modelopt.torch.export.model_utils import get_language_model_from_vl, is_mul
 from modelopt.torch.quantization.config import _default_disabled_quantizer_cfg, need_calibration
 from modelopt.torch.quantization.plugins.accelerate import init_quantized_weights
 from modelopt.torch.quantization.utils import is_quantized
+from modelopt.torch.speculative.eagle.utils import (
+    EagleOfflineDataCollator,
+    OfflineSupervisedDataset,
+)
 from modelopt.torch.utils.dataset_utils import (
     create_forward_loop,
     get_dataset_dataloader,
@@ -165,6 +168,34 @@ def extract_and_prepare_language_model_from_vl(full_model):
     return None, None
 
 
+class _DeviceDataLoader:
+    """Wrapper around a DataLoader that moves each batch to a target device."""
+
+    def __init__(self, dataloader: DataLoader, device: torch.device):
+        self.dataloader = dataloader
+        self.device = device
+
+    def __iter__(self):
+        for batch in self.dataloader:
+            yield _move_batch_to_device(batch, self.device)
+
+    def __len__(self):
+        return len(self.dataloader)
+
+
+def _move_batch_to_device(batch: dict, device: torch.device) -> dict:
+    """Recursively move all tensors in a batch dict to the given device."""
+
+    def _to_device(value):
+        if isinstance(value, torch.Tensor):
+            return value.to(device)
+        if isinstance(value, dict):
+            return {k: _to_device(v) for k, v in value.items()}
+        return value
+
+    return {k: _to_device(v) for k, v in batch.items()}
+
+
 def make_calib_dataloader(
     args: argparse.Namespace,
     language_model: torch.nn.Module,
@@ -172,10 +203,28 @@ def make_calib_dataloader(
     tokenizer: PreTrainedTokenizerBase | None,
     device: torch.device,
     model_type: str | None,
-) -> tuple[DataLoader, str | None]:
+) -> tuple[DataLoader | _DeviceDataLoader, str | None]:
     calib_dataloader = None
     first_text_speech_dataset = None
-    if args.calib_with_images:
+    if args.specdec_offline_dataset is not None:
+        offline_data_path = Path(args.specdec_offline_dataset)
+        dumped_files = sorted(str(p) for p in offline_data_path.glob("*.pt"))
+        if not dumped_files:
+            raise ValueError(f"No .pt files found in {args.specdec_offline_dataset}")
+        if args.calib_size[0] > 0:
+            dumped_files = dumped_files[: args.calib_size[0]]
+        dataset = OfflineSupervisedDataset(dumped_files)
+        collator = EagleOfflineDataCollator(train_len=args.calib_seq)
+        raw_loader = DataLoader(
+            dataset,
+            batch_size=args.batch_size,
+            shuffle=False,
+            collate_fn=collator,
+        )
+        # Wrap to move batches to the target device; device-transfer logic is kept
+        # out of the data collator to avoid interference with dataloader prefetching.
+        calib_dataloader = _DeviceDataLoader(raw_loader, device)
+    elif args.calib_with_images:
         # VLM image-text calibration path: assume Nemotron VLM dataset by default.
         assert processor is not None, (
             "Please provide a processor (e.g., AutoProcessor) for image calibration."
@@ -803,6 +852,7 @@ def pre_quantize(
 def post_quantize(
     args: argparse.Namespace,
     full_model: torch.nn.Module,
+    language_model: torch.nn.Module,
     model_type: str | None,
     tokenizer: PreTrainedTokenizerBase | None,
     processor: BaseImageProcessor | ProcessorMixin | None,
@@ -810,14 +860,34 @@ def post_quantize(
     generated_ids_before_ptq,
     is_nemotron_vl_model,
     first_text_speech_dataset,
+    default_padding_side,
+    default_pad_token,
+    calib_dataloader: DataLoader,
 ):
     """
-    Processing after the quantization.
+    Processing after the quantization, then export.
 
-    Currently we run one round of generation using the quantized model for a sample prompt,
-    and compare it with pre-quantize generation.
+    For offline speculative decoding models, skip generation comparison and proceed
+    directly to export.  For standard models, run one round of generation using the
+    quantized model for a sample prompt and compare it with pre-quantize generation.
 
     """
+    # Early exit for offline speculative decoding: skip generation comparison and export directly.
+    if args.specdec_offline_dataset is not None:
+        # Offline specdec models require a real sample from the dataset as the dummy input
+        # for the export forward pass (shape/type inference), since their input format
+        # (base_model_outputs, etc.) differs from standard models.
+        export_quantized(
+            args,
+            full_model,
+            language_model,
+            model_type,
+            tokenizer,
+            default_padding_side,
+            default_pad_token,
+            offline_specdec_input=next(iter(calib_dataloader), None),
+        )
+        return
 
     if args.verbose:
         try:
@@ -895,6 +965,16 @@ def post_quantize(
                 f"example outputs after ptq: {output_decode(generated_ids_after_ptq, preview_input_ids.shape[1])}"
             )
 
+    export_quantized(
+        args,
+        full_model,
+        language_model,
+        model_type,
+        tokenizer,
+        default_padding_side,
+        default_pad_token,
+    )
+
 
 def quantize_main(
     args: argparse.Namespace,
@@ -955,43 +1035,15 @@ def quantize_main(
 
     print(f"Use calib batch_size {args.batch_size}")
 
-    if args.specdec_offline_dataset is not None:
-        _eagle_utils_path = os.path.join(
-            os.path.dirname(__file__), "../speculative_decoding/eagle_utils.py"
-        )
-        _spec = importlib.util.spec_from_file_location("eagle_utils", _eagle_utils_path)
-        assert _spec is not None and _spec.loader is not None, (
-            f"Could not load eagle_utils from {_eagle_utils_path}"
-        )
-        _eagle_utils = importlib.util.module_from_spec(_spec)
-        _spec.loader.exec_module(_eagle_utils)
-        make_eagle_supervised_data_module = _eagle_utils.make_eagle_supervised_data_module
-
-        data_args = argparse.Namespace(
-            vlm_processor=None,
-            vlm_img_dir=None,
-            offline_data_path=args.specdec_offline_dataset,
-            lazy_preprocess=True,
-            sample_size=args.calib_size[0],
-            device=device,
-        )
-        data_module = make_eagle_supervised_data_module(
-            tokenizer, data_args, train_len=args.calib_seq
-        )
-        calib_dataloader = DataLoader(
-            data_module["train_dataset"],
-            batch_size=args.batch_size,
-            shuffle=False,
-            collate_fn=data_module["data_collator"],
-        )
-    else:
-        calib_dataloader, first_text_speech_dataset = make_calib_dataloader(
-            args, language_model, processor, tokenizer, device, model_type
-        )
+    calib_dataloader, first_text_speech_dataset = make_calib_dataloader(
+        args, language_model, processor, tokenizer, device, model_type
+    )
 
     # Detect if this is a Nemotron VL model using architecture-based detection
     is_nemotron_vl_model = is_nemotron_vl(full_model)
 
+    preview_input_ids = None
+    generated_ids_before_ptq = None
     if args.specdec_offline_dataset is None:
         preview_input_ids, generated_ids_before_ptq = pre_quantize(
             args, full_model, model_type, tokenizer, calib_dataloader, is_nemotron_vl_model
@@ -1077,32 +1129,20 @@ def quantize_main(
             assert model_type != "dbrx", f"Does not support export {model_type} without quantizaton"
             print(f"qformat: {args.qformat}. No quantization applied, export {device} model")
 
-    if args.specdec_offline_dataset is None:
-        post_quantize(
-            args,
-            full_model,
-            model_type,
-            tokenizer,
-            processor,
-            preview_input_ids,
-            generated_ids_before_ptq,
-            is_nemotron_vl_model,
-            first_text_speech_dataset,
-        )
-    export_quantized(
+    post_quantize(
         args,
         full_model,
         language_model,
         model_type,
         tokenizer,
+        processor,
+        preview_input_ids,
+        generated_ids_before_ptq,
+        is_nemotron_vl_model,
+        first_text_speech_dataset,
         default_padding_side,
         default_pad_token,
-        # Offline speculative decoding models require a real sample from the dataset
-        # as the dummy input for the export forward pass (shape/type inference), since
-        # their input format (base_model_outputs, etc.) differs from standard models.
-        offline_specdec_input=next(iter(calib_dataloader), None)
-        if args.specdec_offline_dataset is not None
-        else None,
+        calib_dataloader,
     )
 
 
