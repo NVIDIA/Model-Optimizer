@@ -16,6 +16,24 @@
 import torch
 
 
+def resolve_torch_dtype(dtype: str | torch.dtype) -> torch.dtype:
+    """Resolve a dtype that may be a string (e.g. from Hydra/OmegaConf config) to torch.dtype.
+
+    Accepts ``torch.dtype`` objects (returned as-is) and strings like
+    ``"torch.bfloat16"`` or ``"bfloat16"``.
+    """
+    if isinstance(dtype, torch.dtype):
+        return dtype
+    name = dtype.removeprefix("torch.")
+    try:
+        result = getattr(torch, name)
+    except AttributeError:
+        raise ValueError(f"Unknown torch dtype: {dtype!r}") from None
+    if not isinstance(result, torch.dtype):
+        raise ValueError(f"torch.{name} is not a dtype (got {type(result).__name__})")
+    return result
+
+
 def infer_weights_dtype(state_dict: dict[str, torch.Tensor]) -> torch.dtype:
     weights_dtype = [p.dtype for p in state_dict.values() if torch.is_floating_point(p)]
     weights_dtype = weights_dtype[0] if len(weights_dtype) > 0 else torch.get_default_dtype()

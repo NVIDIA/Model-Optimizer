@@ -43,6 +43,7 @@ from modelopt.torch.puzzletron.tools.checkpoint_utils import (
     copy_tokenizer,
 )
 from modelopt.torch.puzzletron.tools.checkpoint_utils_hf import save_checkpoint
+from modelopt.torch.puzzletron.tools.common import resolve_torch_dtype
 from modelopt.torch.puzzletron.tools.sharded_checkpoint_utils import load_and_shard_model
 from modelopt.torch.puzzletron.tools.validation_utils import (
     validate_model_and_extract_hidden_states,
@@ -182,7 +183,7 @@ def validate_puzzle_solutions(args: DictConfig) -> None:
                 / f"solution_{i_solution}"
             )
 
-            model_config.dtype = getattr(args, "model_dtype", "torch.bfloat16")
+            model_config.dtype = resolve_torch_dtype(getattr(args, "model_dtype", "torch.bfloat16"))
             Converter.copy_checkpoint_files(args.teacher_dir, checkpoint_dir)
             if realizable_as_symlinks:
                 if dist.is_master():

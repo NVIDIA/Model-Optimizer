@@ -42,6 +42,7 @@ from modelopt.torch.puzzletron.anymodel.model_descriptor import (
     ModelDescriptorFactory,
 )
 from modelopt.torch.puzzletron.anymodel.puzzformer.no_op import Same
+from modelopt.torch.puzzletron.tools.common import resolve_torch_dtype
 from modelopt.torch.puzzletron.tools.logger import aprint, mprint
 from modelopt.torch.puzzletron.tools.sharded_checkpoint_utils import (
     load_and_shard_model,
@@ -189,9 +190,7 @@ def validate_model(
         calc_on_cpu=args.calc_losses_on_cpu,
         just_model_forward=just_model_forward,
         checkpoint_manager=checkpoint_manager,
-        autocast_dtype=getattr(
-            torch, getattr(args, "autocast_dtype", "torch.bfloat16").strip("torch.")
-        ),
+        autocast_dtype=resolve_torch_dtype(getattr(args, "autocast_dtype", "torch.bfloat16")),
         descriptor=descriptor,
         use_autocast=descriptor.uses_autocast(),
     )
