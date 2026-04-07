@@ -46,11 +46,16 @@ try:
     )
     from .region_pattern import RegionPattern
     from .region_search import CombinedRegionSearch
-except ImportError:
-    pass
+except ImportError as e:
+    from modelopt.onnx.logging_config import logger
 
-__all__ = [
-    "MODE_PRESETS",
+    logger.warning(
+        f"Failed to import Autotune dependencies: '{e}'. Ignore if Autotune is not being used."
+    )
+
+__all__ = ["MODE_PRESETS", "StoreWithExplicitFlag", "get_node_filter_list"]
+
+_OPTIONAL_EXPORTS = [
     "AutotunerError",
     "AutotunerNotInitializedError",
     "ChildRegionInputInsertionPoint",
@@ -67,8 +72,7 @@ __all__ = [
     "RegionPattern",
     "RegionType",
     "ResolvedInsertionPoint",
-    "StoreWithExplicitFlag",
     "TensorRTPyBenchmark",
     "TrtExecBenchmark",
-    "get_node_filter_list",
 ]
+__all__.extend(name for name in _OPTIONAL_EXPORTS if name in globals())
