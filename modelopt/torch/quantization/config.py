@@ -1244,6 +1244,17 @@ class MaxCalibConfig(QuantizeAlgorithmConfig):
         description="If True, the amax will be synced across the distributed processes.",
     )
 
+    sync_expert_weight_amax: bool = ModeloptField(
+        default=False,
+        title="Sync weight quantizer amax across MoE experts",
+        description=(
+            "If True, the weight quantizer amax values are synchronized (max) across "
+            "local experts in SequentialMLP layers during calibration. This matches "
+            "TEGroupedMLP behavior where all experts share a single weight quantizer. "
+            "Only affects MoE models with SequentialMLP experts."
+        ),
+    )
+
 
 class MseCalibConfig(QuantizeAlgorithmConfig):
     """Configuration for per-tensor MSE calibration.

@@ -567,15 +567,19 @@ class _QuantSparseSequentialMoe(QuantModule):
         self._count_expert_tokens = False
         return output
 
-    def layer_sync_moe_local_experts_amax(self):
+    def layer_sync_moe_local_experts_amax(self, sync_weight_amax=False):
         """Sync input_quantizer amax across experts so all share the same amax per quantizer.
 
         Skipped when _moe_calib_experts_ratio is set, as each expert is calibrated independently.
         Also skipped when experts is a fused module (e.g. Llama4TextExperts) with shared quantizers.
+
+        Args:
+            sync_weight_amax: If True, also sync weight quantizer amax across experts.
+
         """
         if self._moe_calib_experts_ratio is not None:
             return
-        sync_moe_expert_amax(self.experts)
+        sync_moe_expert_amax(self.experts, sync_weight_amax=sync_weight_amax)
 
 
 class _QuantLlama4TextExperts(QuantModule):
