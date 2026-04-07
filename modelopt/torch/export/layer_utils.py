@@ -81,9 +81,22 @@ with import_plugin("megatron", verbose=False):
     has_mcore = True
 
 
-def get_experts_list(module: torch.nn.Module, model_type: str):
-    """Returns list of grouped experts by linear name for given module."""
+def get_experts_list(
+    module: torch.nn.Module,
+    model_type: str,
+    hf_config_model_type: str | None = None,
+):
+    """Returns list of grouped experts by linear name for given module.
+
+    Args:
+        module: MoE block (e.g. MixtralSparseMoeBlock, NemotronHMOE).
+        model_type: `type(root_model).__name__.lower()` (may change after ModelOpt quantize).
+        hf_config_model_type: Optional `model.config.model_type` (e.g. `nemotron_h`) when
+            the root class name no longer contains the HF architecture string after wrapping.
+    """
     experts_list = []
+
+    hf_mt = (hf_config_model_type or "").lower()
 
     # Define linear layer names for different model types
     if "mixtralforcausallm" in model_type:
@@ -98,6 +111,9 @@ def get_experts_list(module: torch.nn.Module, model_type: str):
         ]
     ):
         linear_names = ["gate_proj", "down_proj", "up_proj"]
+    elif hf_mt == "nemotron_h" or "nemotronhforcausallm" in model_type:
+        # Nemotron-3-Nano (NemotronHMOE experts use NemotronHMLP: up_proj, down_proj only)
+        linear_names = ["up_proj", "down_proj"]
     else:
         raise NotImplementedError(f" {model_type} not supported")
 
@@ -304,8 +320,8 @@ def is_moe(module: nn.Module) -> bool:
     # Auto-detect common MoE patterns
     if name.endswith("sparsemoeblock") or "moelayer" in name:
         return True
-    # Explicit matches for non-standard naming
-    return any(key in name for key in ["arcticmoe", "deepseekmoe", "dbrxffn"])
+    # Explicit matches for non-standard naming (e.g. Nemotron-3-Nano / nemotron_h uses NemotronHMOE)
+    return any(key in name for key in ["arcticmoe", "deepseekmoe", "dbrxffn", "nemotronhmoe"])
 
 
 def is_quantlinear(module: nn.Module) -> bool:

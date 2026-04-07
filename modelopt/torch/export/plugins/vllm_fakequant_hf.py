@@ -15,12 +15,12 @@
 """Export HuggingFace model to vLLM fakequant checkpoint."""
 
 from pathlib import Path
+from typing import Any
 
 import torch
 import torch.nn as nn
 
 import modelopt.torch.opt as mto
-from modelopt.torch.export.unified_export_hf import requantize_resmooth_fused_llm_layers
 from modelopt.torch.quantization.config import RotateConfig
 from modelopt.torch.quantization.conversion import quantizer_state
 from modelopt.torch.quantization.nn import QuantModule, TensorQuantizer
@@ -28,6 +28,9 @@ from modelopt.torch.quantization.utils import get_quantizer_state_dict
 from modelopt.torch.quantization.utils.core_utils import enable_weight_access_and_writeback
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 from modelopt.torch.utils import get_unwrapped_name
+
+from ..layer_utils import get_experts_list, is_moe
+from ..quant_utils import get_quantization_format
 
 __all__ = ["export_hf_vllm_fq_checkpoint"]
 
@@ -104,6 +107,68 @@ def _fakequant_module_weights(
             assert state_dict is not None
             state_dict[sd_key] = w_quant.cpu()
         fakequant_weights.add(sd_key)
+def _resmooth_experts_for_export(
+    model: nn.Module,
+    state_dict: dict[str, Any],
+) -> dict[str, tuple[torch.Tensor, torch.Tensor | None]]:
+    """Average pqs and unify input amax across MoE experts for AWQ formats (no-op otherwise).
+
+    Adjusts expert weights in ``state_dict`` to preserve correctness under the new averaged pqs
+    (W' = W * old_pqs / avg_pqs), without touching the model. Returns input-quantizer overrides
+    for patching ``modelopt_state_weights`` on save.
+    """
+    qfmt = get_quantization_format(model)
+    if qfmt is None or "awq" not in qfmt.lower():
+        return {}
+
+    model_type = type(model).__name__.lower()
+    hf_mt = getattr(getattr(model, "config", None), "model_type", None)
+    id_to_name: dict[int, str] = {id(m): n for n, m in model.named_modules()}
+    out: dict[str, tuple[torch.Tensor, torch.Tensor | None]] = {}
+
+    for _, module in model.named_modules():
+        if not is_moe(module):
+            continue
+        # get_experts_list raises NotImplementedError for MoE types it does not support
+        # (e.g. DBRX, ArcticMoE). is_moe detects those, but only AWQ-quantized variants
+        # would reach here, so a loud failure is the right behavior.
+        expert_groups = get_experts_list(module, model_type, hf_config_model_type=hf_mt)
+
+        for experts in expert_groups:
+            if not experts:
+                continue
+            iq0 = getattr(experts[0], "input_quantizer", None)
+            # Skip when pqs is absent or the input quantizer is disabled (pqs already folded
+            # into the weight by the export loop; overwriting it here would undo that fold).
+            if iq0 is None or iq0.pre_quant_scale is None or iq0._disabled:
+                continue
+
+            avg_pqs = torch.stack([e.input_quantizer.pre_quant_scale for e in experts]).mean(0)
+
+            # Rescale each expert weight: W' = W * (old_pqs / avg_pqs) per output column.
+            for ex in experts:
+                nm = id_to_name.get(id(ex))
+                if nm is None or f"{nm}.weight" not in state_dict:
+                    continue
+                old_pqs = ex.input_quantizer._pre_quant_scale
+                if torch.equal(old_pqs, avg_pqs):
+                    continue
+                w = state_dict[f"{nm}.weight"]
+                ratio = (old_pqs / avg_pqs).to(dtype=torch.float32, device=w.device)
+                state_dict[f"{nm}.weight"] = (w.float() * ratio[None, :]).to(w.dtype)
+
+            # Max amax across experts; vLLM uses a single input quantizer per expert group.
+            max_in_amax: torch.Tensor | None = None
+            if iq0.amax is not None:
+                max_in_amax = torch.stack([e.input_quantizer.amax for e in experts]).max()
+
+            for ex in experts:
+                nm = id_to_name.get(id(ex))
+                if nm is None:
+                    continue
+                out[get_unwrapped_name(f"{nm}.input_quantizer", model)] = (avg_pqs, max_in_amax)
+
+    return out
 
 
 def export_hf_vllm_fq_checkpoint(
@@ -116,8 +181,14 @@ def export_hf_vllm_fq_checkpoint(
     Folds fake-quant weights into a ``state_dict()`` copy (optional
     ``pre_quant_scale`` into weight when input fake-quant is off), drops quantizer
     keys from the HF save, briefly disables weight quantizers to snapshot
-    ModelOpt/quantizer state, then re-enables them. Writes ``export_dir`` via
-    ``save_pretrained(..., save_modelopt_state=False)``.
+    ModelOpt/quantizer state, then re-enables them. Weight files are written with an
+    explicit ``state_dict`` (and ``hf_quantizer`` cleared during save) so safetensors
+    do not pick up live quantizer buffers.
+
+    For MoE models with AWQ quantization, pre_quant_scale is averaged across experts
+    and input amax is unified — required because vLLM uses a single input quantizer
+    per expert group. This averaging is performed non-mutingly on a detached state_dict
+    copy; the original model is never modified.
 
     Args:
         model: In-memory quantized model.
@@ -130,11 +201,20 @@ def export_hf_vllm_fq_checkpoint(
     export_dir = Path(export_dir)
     export_dir.mkdir(parents=True, exist_ok=True)
 
-    requantize_resmooth_fused_llm_layers(model)
-
     # Step 1: Build the folded HF state dict.
+    # model.state_dict() returns detached copies of all tensors, so model
+    # parameters are never modified. Apply each weight quantizer's fake-quant
+    # to the corresponding weight tensor in the copy.
+    state_dict = model.state_dict()
+
+    # Non-mutating MoE expert resmooth: average pqs and adjust state_dict weights.
+    # Must run before the fakequant loop so that the adjusted weights are fakequanted
+    # with the correct per-block scales.
+    expert_pqs_overrides = _resmooth_experts_for_export(model, state_dict)
+
     fakequant_weights = set()
-    input_quantizers_folded_pqs = set()
+    # Input quantizer keys whose _pre_quant_scale was folded into the weight above.
+    input_quantizers_folded_pqs: set[str] = set()
     with torch.inference_mode():
         if inplace_mem_efficient:
             # Inplace path: iterate decoder layers, one offload<->onload per layer.
@@ -219,6 +299,18 @@ def export_hf_vllm_fq_checkpoint(
                 quantizer_state_dict[key]["_pre_quant_scale"] = torch.ones_like(
                     qstate_val["_pre_quant_scale"]
                 )
+
+    # Patch expert input quantizers with averaged pqs and unified amax so that
+    # vLLM's single per-group input quantizer sees consistent values across experts.
+    for iq_key, (avg_pqs, max_input_amax) in expert_pqs_overrides.items():
+        if iq_key in quantizer_state_dict:
+            qstate_val = quantizer_state_dict[iq_key]
+            if isinstance(qstate_val, dict):
+                if "_pre_quant_scale" in qstate_val:
+                    qstate_val["_pre_quant_scale"] = avg_pqs
+                if max_input_amax is not None and "_amax" in qstate_val:
+                    qstate_val["_amax"] = max_input_amax
+
     modelopt_state = mto.modelopt_state(model)
     # ``modelopt_state`` may be stale if another mode (e.g. calibrate) ran last. Rebuild
     # ``quantizer_state`` and drop disabled weight quantizer entries (weights already folded).

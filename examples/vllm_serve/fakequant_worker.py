@@ -15,6 +15,7 @@
 
 
 import os
+import warnings
 from typing import Any
 
 import torch
@@ -62,8 +63,11 @@ def _fakequant_run_prolog_worker(self) -> None:
         model = model.unwrap()
     if quant_config["modelopt_state_path"]:
         print(f"Loading modelopt state from {quant_config['modelopt_state_path']}")
-        # Load on CPU to avoid failures when the checkpoint was saved from a different
-        # GPU mapping
+        # map_location="cpu": load tensors on CPU so device ids in the file need not match this worker.
+        # weights_only=False: ``vllm_fq_modelopt_state.pth`` is a full ModelOpt pickle (metadata,
+        # nested dicts, dtypes, etc.); PyTorch's ``weights_only=True`` rejects that and only
+        # allows tensor-only checkpoints. Loading arbitrary pickles can execute stored code—use
+        # paths you trust (your own exports or verified checkpoints).
         modelopt_state = torch.load(
             quant_config["modelopt_state_path"], weights_only=False, map_location="cpu"
         )
@@ -73,16 +77,12 @@ def _fakequant_run_prolog_worker(self) -> None:
             if hasattr(self.model_runner.model, "hf_to_vllm_mapper")
             else None
         )
-        # convert modelopt state to vllm format
         modelopt_state = convert_modelopt_state_to_vllm(modelopt_state, map_fun=map_fun)
-        # restore model from modelopt state
         restore_from_modelopt_state_vllm(model, modelopt_state)
 
         if modelopt_weights is not None:
-            # convert quantizer state values to vllm format
             modelopt_weights = convert_dict_to_vllm(modelopt_weights, map_fun=map_fun)
             mtq.utils.set_quantizer_state_dict(model, modelopt_weights)
-            # Log any pqs keys in modelopt_weights that were not loaded (key mismatch).
             if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
                 from modelopt.torch.quantization.nn import TensorQuantizer
                 from modelopt.torch.utils import get_unwrapped_name
@@ -93,22 +93,22 @@ def _fakequant_run_prolog_worker(self) -> None:
                     if isinstance(m, TensorQuantizer)
                 }
                 pqs_in_weights = {
-                    k for k, v in modelopt_weights.items()
+                    k
+                    for k, v in modelopt_weights.items()
                     if isinstance(v, dict) and "_pre_quant_scale" in v
                 }
                 unmatched_pqs = pqs_in_weights - loaded_keys
                 if unmatched_pqs:
-                    print(
-                        f"[fakequant_worker] WARNING: {len(unmatched_pqs)} pqs key(s) in "
-                        f"modelopt_weights have no matching quantizer in the model:\n"
-                        + "\n".join(f"  {k}" for k in sorted(unmatched_pqs)[:20])
+                    sample = sorted(unmatched_pqs)[:20]
+                    warnings.warn(
+                        f"{len(unmatched_pqs)} checkpoint pre_quant_scale key(s) have no "
+                        f"matching TensorQuantizer in the model (showing up to 20): {sample}",
+                        stacklevel=2,
                     )
-            # set_quantizer_state_dict does not invoke modelopt_post_restore (unlike restore_quantizer_state).
+            # set_quantizer_state_dict does not run modelopt_post_restore (unlike restore_quantizer_state).
             post_restore_vllm_parallel_linears(model)
-            # For RowParallelLinear layers, pqs was saved at full H_in width (single-GPU
-            # export). Slice it to [H_in / tp_world_size] so it matches the local shard.
-            _debug_pqs = os.environ.get("MODELOPT_DEBUG_PQS", "0").lower() in ("1", "true")
-            shard_pre_quant_scale_for_tp(model, debug=_debug_pqs)
+            # Row-parallel: slice full-width exported pre_quant_scale to this TP rank.
+            shard_pre_quant_scale_for_tp(model)
 
     else:
         if quant_config["quant_file_path"]:
@@ -127,15 +127,13 @@ def _fakequant_run_prolog_worker(self) -> None:
 
         quant_cfg = get_quant_config(quant_config, model)
 
-        # quantize model
         with disable_compilation(model):
             print("Quantizing model...")
             mtq.quantize(model, quant_cfg, forward_loop=calibrate_loop)
 
         quantizer_file_path = quant_config["quant_file_path"]
         if quantizer_file_path:
-            # Get amax and other quantizer state from the quantizer file
-            # this can be used with Megatron-LM exported model using export_mcore_gpt_to_hf_vllm_fq
+            self.model_runner._dummy_run(1)
             current_state_dict = load_state_dict_from_path(self, quantizer_file_path, model)
             model.load_state_dict(current_state_dict)
 
