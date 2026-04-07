@@ -950,7 +950,7 @@ def quantize_main(
 
     else:
         # mono quantization
-        
+
         if args.recipe is not None:
             print(f"Use recipe {args.recipe} for quantization")
             recipe = load_recipe(args.recipe)
@@ -1251,7 +1251,7 @@ def parse_args() -> argparse.Namespace:
         help="Export as vLLM fake-quant checkpoint (produces vllm_fq_modelopt_state.pth "
         "for use with vllm_serve_fakequant.py).",
     )
-    
+
     args = parser.parse_args()
     if args.moe_calib_experts_ratio is not None and not (0.0 < args.moe_calib_experts_ratio <= 1.0):
         parser.error("--moe_calib_experts_ratio must be in the range (0.0, 1.0].")

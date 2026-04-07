@@ -1503,7 +1503,7 @@ class SVDQuantConfig(QuantizeAlgorithmConfig):
     )
 
 
-class GPTQConfig(QuantizeAlgorithmConfig):
+class GPTQCalibConfig(QuantizeAlgorithmConfig):
     """The config for GPTQ quantization.
 
     GPTQ minimizes the layer-wise quantization error by using second-order (Hessian) information
