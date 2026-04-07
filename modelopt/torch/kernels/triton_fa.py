@@ -985,10 +985,16 @@ class _Attention(torch.autograd.Function):
             b_start_loc_k = b_start_loc
             max_input_len_k = max_input_len
 
-        # Paged mode: b_start_loc_k may be None (KV is in paged cache, not contiguous).
-        # Provide a dummy tensor so Triton can compile the tl.load (it won't be used).
-        if b_start_loc_k is None:
-            b_start_loc_k = torch.zeros_like(b_start_loc)
+        if is_paged:
+            if v_cache is None or block_table is None:
+                raise ValueError("k_cache, v_cache, and block_table must all be provided together")
+            # Paged mode: b_start_loc_k is never dereferenced, but Triton still needs a tensor.
+            if b_start_loc_k is None:
+                b_start_loc_k = torch.zeros_like(b_start_loc)
+        elif b_start_loc_k is None and b_seq_len_k is not None:
+            raise ValueError(
+                "b_start_loc_k is required when K/V are passed as a separate packed tensor"
+            )
 
         # Pre-multiply scale by log2(e) so the kernel can use exp2()
         # exp(score * sm_scale) = exp2(score * sm_scale * log2(e))
@@ -1012,6 +1018,11 @@ class _Attention(torch.autograd.Function):
         # Therefore the threshold in kernel (log2) space is simply log2(lambda).
         # Do NOT multiply by sm_scale — that factor is already absorbed into the
         # log2(e) conversion above.
+        if quantize_p and (q.requires_grad or k.requires_grad or v.requires_grad):
+            raise NotImplementedError(
+                "quantize_p supports inference only; backward does not model the quantized P path"
+            )
+
         apply_skip = skip_softmax_threshold is not None and skip_softmax_threshold > 0.0
         if apply_skip:
             skip_threshold_log2 = math.log2(skip_softmax_threshold)
