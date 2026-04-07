@@ -1,7 +1,6 @@
 # Dataset mix for make_nemotron_ptv3_dataset.py
 #
-# Each entry defines one HuggingFace dataset to include in the speculative-decoding
-# training mix.  Fields:
+# Each entry defines one HuggingFace dataset to include in the training mix.  Fields:
 #
 #   repo_id        — HuggingFace repo ID or local path.
 #   splits         — List of splits to load.  All splits are concatenated before capping.
