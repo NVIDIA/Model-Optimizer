@@ -227,6 +227,12 @@ def train():
     else:
         # To avoid OOM for large models, we load and convert model on CPU first.
         # Model will be moved to GPU during HF trainer.init().
+        # Load config first to preserve original num_hidden_layers before
+        # load_vlm_or_llm may reduce layers for offline space savings.
+        model_config = transformers.AutoConfig.from_pretrained(
+            model_args.model_name_or_path,
+            trust_remote_code=model_args.trust_remote_code,
+        )
         model = load_vlm_or_llm(
             model_args.model_name_or_path,
             use_fake_base=model_args.use_fake_base_for_offline,

@@ -813,6 +813,7 @@ def pre_quantize(
         return None, None
 
     # Only run single sample for preview
+    assert calib_dataloader is not None, "calib_dataloader is required for pre-quantize preview"
     preview_input_ids = next(iter(calib_dataloader))[
         "input_features" if model_type == "whisper" else "input_ids"
     ][0:1]
