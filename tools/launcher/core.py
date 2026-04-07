@@ -268,7 +268,7 @@ def build_slurm_executor(
         container_image=slurm_config.container,
         container_mounts=container_mounts,
         array=slurm_config.array,
-        time="04:00:00",
+        time=slurm_config.time,
         mem="0",
         retries=0,
         packager=packager,

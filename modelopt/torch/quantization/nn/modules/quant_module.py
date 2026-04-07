@@ -119,6 +119,14 @@ class QuantModule(DynamicModule):
             if isinstance(module, TensorQuantizer):
                 module.to(non_tq_param_or_buffer.device)
 
+    def iter_weights_for_calibration(self):
+        """Yield ``(weight, weight_quantizer)`` pairs for weight-only calibration."""
+        from modelopt.torch.quantization.utils import quantizer_attr_names, weight_attr_names
+
+        for weight_name in weight_attr_names(self):
+            weight_quantizer = getattr(self, quantizer_attr_names(weight_name).weight_quantizer)
+            yield getattr(self, weight_name), weight_quantizer
+
     def fold_weight(self, keep_attrs: bool = False):
         """Fold the weight for faster eval."""
         # Handle all attributes that end with _weight_quantizer

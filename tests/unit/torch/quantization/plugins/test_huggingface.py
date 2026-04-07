@@ -87,7 +87,7 @@ def test_convert_conv1d():
             assert hasattr(module, "weight_quantizer")
             assert hasattr(module, "output_quantizer")
 
-    mtq.set_quantizer_attribute(model_test, "*", {"enable": False})
+    mtq.set_quantizer_attributes_partial(model_test, "*", {"enable": False})
 
     x = torch.randn(2, 3)
     out_1 = model_ref(x)
@@ -95,8 +95,8 @@ def test_convert_conv1d():
 
     assert torch.allclose(out_1, out_2)
 
-    mtq.set_quantizer_attribute(model_test, "*input_quantizer", {"enable": True})
-    mtq.set_quantizer_attribute(model_test, "*weight_quantizer", {"enable": True})
+    mtq.set_quantizer_attributes_partial(model_test, "*input_quantizer", {"enable": True})
+    mtq.set_quantizer_attributes_partial(model_test, "*weight_quantizer", {"enable": True})
     model_ref = PytorchModel()
     model_ref.load_state_dict(model_test.state_dict())
 
@@ -136,7 +136,7 @@ def test_dbrx():
         expertglu_ref.w1,
     )
 
-    mtq.set_quantizer_attribute(model_test, "*", {"enable": False})
+    mtq.set_quantizer_attributes_partial(model_test, "*", {"enable": False})
 
     x = torch.randn(1, 4, 32)
     out_1 = model_ref(x)
@@ -193,7 +193,13 @@ def test_quantized_transformers_save_restore(tmp_path, model_cls, quant_config):
     tiny_llama_dir = create_tiny_llama_dir(tmp_path)
     # update config to fit test cases
     if quant_config == mtq.INT4_AWQ_CFG:
-        quant_config["quant_cfg"]["*weight_quantizer"]["block_sizes"] = {-1: 16}
+        import copy
+
+        quant_config = copy.deepcopy(quant_config)
+        for entry in quant_config["quant_cfg"]:
+            if entry["quantizer_name"] == "*weight_quantizer":
+                entry.setdefault("cfg", {})["block_sizes"] = {-1: 16}
+                break
     else:
         raise ValueError(f"Unsupported quant_config: {quant_config}")
 

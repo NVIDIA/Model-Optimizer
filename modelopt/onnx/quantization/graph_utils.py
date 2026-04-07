@@ -1142,12 +1142,17 @@ def find_nodes_from_matmul_to_exclude(
     return [*set(nodes_to_exclude)]
 
 
+_MIN_CHANNELS_FP8 = 16
+
+
 def find_nodes_from_convs_to_exclude(graph: Graph, quantize_mode: str = "int8"):
     """Find unsupported Conv nodes to exclude from quantization.
 
     - The input and output channels should be >= 16. The exception is for Conv layers in INT8 quantization mode,
       which supports it if the input or output channel % 8.
     - The filter size for FP8 conv kernels should be less than 32.
+    - For FP8 mode, Conv nodes with input or output channels <= _MIN_CHANNELS_FP8 are excluded.
+      Small-channel convolutions do not benefit from FP8 quantization.
 
     Args:
         graph: Onnx model graph.
@@ -1206,6 +1211,20 @@ def find_nodes_from_convs_to_exclude(graph: Graph, quantize_mode: str = "int8"):
             filter_size = reduce(lambda x, y: x * y, weight.shape[2:])
             if quantize_mode == "fp8" and filter_size > 32:
                 logger.debug(f"Found large filter conv for FP8: {node.name}")
+                unsupported_conv_nodes.append(node.name)
+                # skip the small-channel check below; already excluded
+                continue
+
+            # For FP8, exclude small-channel convolutions. These layers do not benefit from
+            # FP8 quantization and cause perf regressions on GPUs where the FP8 conv kernels
+            # are slower than FP16 CASK kernels for small channels.
+            if quantize_mode == "fp8" and (
+                output_channel <= _MIN_CHANNELS_FP8 or input_channel <= _MIN_CHANNELS_FP8
+            ):
+                logger.debug(
+                    f"Excluding small-channel Conv from FP8 quantization: {node.name} "
+                    f"(IC={input_channel}, OC={output_channel}, threshold={_MIN_CHANNELS_FP8})"
+                )
                 unsupported_conv_nodes.append(node.name)
 
     logger.info(f"Found {len(unsupported_conv_nodes)} unsupported Conv nodes for quantization")

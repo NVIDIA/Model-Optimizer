@@ -2,5 +2,4 @@ fire>=0.5.0
 lm_eval[api,ifeval]==0.4.8
 peft>=0.5.0
 rwkv>=0.7.3
-tiktoken
 torchvision

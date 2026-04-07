@@ -32,41 +32,54 @@ from pydantic import ValidationError
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.calib import MaxCalibrator
+from modelopt.torch.quantization.config import QuantizerAttributeConfig
+from modelopt.torch.quantization.conversion import set_quantizer_attributes_full
+from modelopt.torch.quantization.nn.modules.tensor_quantizer import (
+    SequentialQuantizer,
+    TensorQuantizer,
+)
 
 # A test config with double-quant (using `SequentialQuantizers`)
 WINT4INT8_CFG = {
-    "quant_cfg": {
-        "*weight_quantizer": [
-            {"num_bits": 4, "block_sizes": {-1: 128, "type": "static"}, "enable": True},
-            {"num_bits": 8, "axis": 0, "enable": True},
-        ],
-        "*input_quantizer": {"num_bits": 8, "axis": None, "enable": True},
-    },
+    "quant_cfg": [
+        {
+            "quantizer_name": "*weight_quantizer",
+            "cfg": [
+                {"num_bits": 4, "block_sizes": {-1: 128, "type": "static"}},
+                {"num_bits": 8, "axis": 0},
+            ],
+            "enable": True,
+        },
+        {
+            "quantizer_name": "*input_quantizer",
+            "cfg": {"num_bits": 8, "axis": None},
+            "enable": True,
+        },
+    ],
     "algorithm": "awq_lite",
 }
 
 # Test configs for per channel MSE calibration
 INT8_MSE_CFG = {
-    "quant_cfg": {
-        "*weight_quantizer": {"num_bits": 8, "axis": 0},
-        "*input_quantizer": {"num_bits": 8, "axis": None},
-    },
+    "quant_cfg": [
+        {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+        {"quantizer_name": "*input_quantizer", "cfg": {"num_bits": 8, "axis": None}},
+    ],
     "algorithm": "mse",
 }
 
 STATIC_WEIGHT_DYNAMIC_ACTIVATION_CFG = {
-    "quant_cfg": {
-        "*weight_quantizer": {
-            "num_bits": 8,
-            "axis": 0,
+    "quant_cfg": [
+        {"quantizer_name": "*", "enable": False},
+        {
+            "quantizer_name": "*weight_quantizer",
+            "cfg": {"num_bits": 8, "axis": 0},
         },  # Per-channel quantization
-        "*input_quantizer": {
-            "num_bits": 8,
-            "axis": (0, 1),
-            "type": "dynamic",
+        {
+            "quantizer_name": "*input_quantizer",
+            "cfg": {"num_bits": 8, "axis": (0, 1), "type": "dynamic"},
         },  # Dynamic per-token quantization
-        "default": {"enable": False},
-    },
+    ],
     "algorithm": "max",
 }
 
@@ -77,14 +90,17 @@ class NewMaxCalibrator(MaxCalibrator):
 
 
 quant_cfg_custom_calib = {
-    "quant_cfg": {
-        "*": {
-            "num_bits": 4,
-            "axis": None,
+    "quant_cfg": [
+        {
+            "quantizer_name": "*",
+            "cfg": {
+                "num_bits": 4,
+                "axis": None,
+                "calibrator": (NewMaxCalibrator, (4, None, False)),
+            },
             "enable": True,
-            "calibrator": (NewMaxCalibrator, (4, None, False)),
         }
-    },
+    ],
     "algorithm": "max",
 }
 
@@ -131,7 +147,9 @@ def test_save_restore(model_cls, quant_config):
 def test_quantize_invalid_cfg():
     model = SimpleLinear()
     config_invalid = {
-        "quant_cfg": {"*": {"num_bits": 4, "axis": 0, "block_sizes": {-1: 128}}},
+        "quant_cfg": [
+            {"quantizer_name": "*", "cfg": {"num_bits": 4, "axis": 0, "block_sizes": {-1: 128}}}
+        ],
         "algorithm": "max",
     }
     with pytest.raises(ValidationError, match="axis must be None when block_sizes is not None."):
@@ -170,12 +188,22 @@ def test_custom_calib_config():
 def test_class_wise_config():
     model = SimpleConvLinear()
     config = {
-        "quant_cfg": {
-            "nn.Linear": {"*": {"num_bits": 4, "axis": -1, "enable": True}},
-            "nn.Conv2d": {"*": {"num_bits": 8, "enable": True}},
-            "nn.BatchNorm2d": {"*": {"enable": False}},
-            "*output_quantizer": {"num_bits": 8, "enable": True},
-        },
+        "quant_cfg": [
+            {
+                "parent_class": "nn.Linear",
+                "quantizer_name": "*",
+                "cfg": {"num_bits": 4, "axis": -1},
+                "enable": True,
+            },
+            {
+                "parent_class": "nn.Conv2d",
+                "quantizer_name": "*",
+                "cfg": {"num_bits": 8},
+                "enable": True,
+            },
+            {"parent_class": "nn.BatchNorm2d", "quantizer_name": "*", "enable": False},
+            {"quantizer_name": "*output_quantizer", "cfg": {"num_bits": 8}, "enable": True},
+        ],
         "algorithm": "max",
     }
 
@@ -222,33 +250,28 @@ def test_static_weight_dynamic_activations():
 
 def test_block_sizes_axis_model():
     REF_QUANT_CFG = {  # noqa: N806
-        "quant_cfg": {
-            "*weight_quantizer": {
-                "num_bits": 8,
-                "axis": 0,
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+            {
+                "quantizer_name": "*input_quantizer",
+                "cfg": {"num_bits": 8, "axis": None, "type": "dynamic"},
             },
-            "*input_quantizer": {
-                "num_bits": 8,
-                "axis": None,
-                "type": "dynamic",
-            },
-            "default": {"enable": False},
-        },
+        ],
         "algorithm": "max",
     }
     QUANT_CFG = {  # noqa: N806
-        "quant_cfg": {
-            "*weight_quantizer": {
-                "num_bits": 8,
-                "block_sizes": {1: None},
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {
+                "quantizer_name": "*weight_quantizer",
+                "cfg": {"num_bits": 8, "block_sizes": {1: None}},
             },
-            "*input_quantizer": {
-                "num_bits": 8,
-                "block_sizes": {0: None, 1: None},
-                "type": "dynamic",
+            {
+                "quantizer_name": "*input_quantizer",
+                "cfg": {"num_bits": 8, "block_sizes": {0: None, 1: None}, "type": "dynamic"},
             },
-            "default": {"enable": False},
-        },
+        ],
         "algorithm": "max",
     }
     model_ref = SimpleLinear()
@@ -283,3 +306,184 @@ def test_quantize_twice():
     out2 = model(inputs)
 
     assert torch.allclose(out1, out2), "Re-quantization with same config should be idempotent"
+
+
+class TestSetQuantizerAttributesFull:
+    """Tests for set_quantizer_attributes_full and its atomicity semantics."""
+
+    def _quantize(self, model):
+        return mtq.quantize(model, mtq.INT8_DEFAULT_CFG, lambda m: m(m.get_input()))
+
+    def test_basic_full_replacement(self):
+        """set_quantizer_attributes_full replaces all attributes on matched quantizers."""
+        model = self._quantize(SimpleLinear())
+        attrs = QuantizerAttributeConfig(num_bits=4, axis=0)
+        set_quantizer_attributes_full(model, "*weight_quantizer", attrs)
+        for name, module in model.named_modules():
+            if name.endswith("weight_quantizer"):
+                assert isinstance(module, TensorQuantizer)
+                assert module.num_bits == 4
+                assert module.axis == 0
+
+    def test_atomicity_unset_fields_revert_to_defaults(self):
+        """A full replacement reverts unspecified fields to QuantizerAttributeConfig defaults."""
+        model = self._quantize(SimpleLinear())
+        # First configure with axis=0 (non-default)
+        set_quantizer_attributes_full(
+            model, "*weight_quantizer", QuantizerAttributeConfig(num_bits=8, axis=0)
+        )
+        for name, module in model.named_modules():
+            if name.endswith("weight_quantizer"):
+                assert module.axis == 0
+
+        # Now replace with only num_bits=4; axis should revert to default (None)
+        set_quantizer_attributes_full(
+            model, "*weight_quantizer", QuantizerAttributeConfig(num_bits=4)
+        )
+        default_axis = QuantizerAttributeConfig().axis
+        for name, module in model.named_modules():
+            if name.endswith("weight_quantizer"):
+                assert module.num_bits == 4
+                assert module.axis == default_axis
+
+    def test_parent_class_filter(self):
+        """parent_class restricts which quantizers are affected."""
+        model = self._quantize(SimpleConvLinear())
+        # Only set num_bits=4 for quantizers inside nn.Linear modules
+        set_quantizer_attributes_full(
+            model,
+            "*weight_quantizer",
+            QuantizerAttributeConfig(num_bits=4),
+            parent_class=torch.nn.Linear,
+        )
+        for name, module in model.named_modules():
+            if not name.endswith("weight_quantizer"):
+                continue
+            parent_name = name.rpartition(".")[0]
+            parent = model.get_submodule(parent_name)
+            if isinstance(parent, torch.nn.Linear):
+                assert module.num_bits == 4
+            else:
+                # Conv2d weight_quantizers should be unchanged (still 8-bit from INT8_DEFAULT_CFG)
+                assert module.num_bits == 8
+
+    def test_wildcard_no_match_is_noop(self):
+        """A wildcard that matches nothing silently does nothing."""
+        model = self._quantize(SimpleLinear())
+        # Record state before
+        bits_before = {
+            n: m.num_bits for n, m in model.named_modules() if isinstance(m, TensorQuantizer)
+        }
+        set_quantizer_attributes_full(
+            model, "*nonexistent_quantizer*", QuantizerAttributeConfig(num_bits=4)
+        )
+        bits_after = {
+            n: m.num_bits for n, m in model.named_modules() if isinstance(m, TensorQuantizer)
+        }
+        assert bits_before == bits_after
+
+    def test_invalid_attributes_type_raises(self):
+        """Passing a plain dict instead of QuantizerAttributeConfig raises ValueError."""
+        model = self._quantize(SimpleLinear())
+        with pytest.raises((ValueError, AttributeError)):
+            set_quantizer_attributes_full(model, "*weight_quantizer", {"num_bits": 4})  # type: ignore[arg-type]
+
+    def test_list_attributes_creates_sequential_quantizer(self):
+        """A list of QuantizerAttributeConfig replaces TensorQuantizer with SequentialQuantizer."""
+        model = self._quantize(SimpleLinear())
+        attrs = [
+            QuantizerAttributeConfig(num_bits=4, block_sizes={-1: 128}),
+            QuantizerAttributeConfig(num_bits=8, axis=0),
+        ]
+        set_quantizer_attributes_full(model, "*weight_quantizer", attrs)
+        for name, module in model.named_modules():
+            if name.endswith("weight_quantizer"):
+                assert isinstance(module, SequentialQuantizer)
+                assert len(module) == 2
+
+
+def test_ordering_later_entry_overrides_earlier():
+    """Later entries in quant_cfg override earlier ones for the same quantizer."""
+    model = SimpleLinear()
+    config = {
+        "quant_cfg": [
+            {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+            {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 4, "axis": 0}},
+            {"quantizer_name": "*input_quantizer", "cfg": {"num_bits": 8, "axis": None}},
+        ],
+        "algorithm": "max",
+    }
+    model = mtq.quantize(model, config, lambda m: m(m.get_input()))
+    for name, module in model.named_modules():
+        if name.endswith("weight_quantizer"):
+            assert module.num_bits == 4, "Later entry (num_bits=4) should override earlier (8)"
+        if name.endswith("input_quantizer"):
+            assert module.num_bits == 8
+
+
+def test_enable_only_entry_preserves_attributes():
+    """An enable-only entry toggles the quantizer without resetting its attributes."""
+    model = SimpleLinear()
+    config = {
+        "quant_cfg": [
+            {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 4, "axis": 0}},
+            {"quantizer_name": "*input_quantizer", "cfg": {"num_bits": 8, "axis": None}},
+            # This enable-only entry should disable without resetting num_bits/axis
+            {"quantizer_name": "*weight_quantizer", "enable": False},
+        ],
+        "algorithm": "max",
+    }
+    model = mtq.quantize(model, config, lambda m: m(m.get_input()))
+    for name, module in model.named_modules():
+        if name.endswith("weight_quantizer"):
+            assert not module.is_enabled, "weight_quantizer should be disabled"
+            assert module.num_bits == 4, "num_bits should be preserved by enable-only entry"
+            assert module.axis == 0, "axis should be preserved by enable-only entry"
+
+
+def test_atomicity_later_cfg_entry_does_not_inherit_earlier():
+    """When two cfg-bearing entries match the same quantizer, the second fully replaces the first."""
+    model = SimpleLinear()
+    config = {
+        "quant_cfg": [
+            # Entry 1: set axis=0
+            {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+            # Entry 2: only set num_bits=4, no axis — axis should revert to default (None), not 0
+            {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 4}},
+            {"quantizer_name": "*input_quantizer", "cfg": {"num_bits": 8, "axis": None}},
+        ],
+        "algorithm": "max",
+    }
+    model = mtq.quantize(model, config, lambda m: m(m.get_input()))
+    default_axis = QuantizerAttributeConfig().axis
+    for name, module in model.named_modules():
+        if name.endswith("weight_quantizer"):
+            assert module.num_bits == 4
+            assert module.axis == default_axis, (
+                f"axis should revert to default ({default_axis}), not inherit 0 from earlier entry"
+            )
+
+
+def test_legacy_dict_format_end_to_end():
+    """Old dict-format quant_cfg works end-to-end through mtq.quantize via normalization."""
+    model = SimpleLinear()
+    # Old-style dict config with "default" key and wildcard keys
+    old_config = {
+        "quant_cfg": {
+            "default": {"enable": False},
+            "*weight_quantizer": {"num_bits": 8, "axis": 0},
+            "*input_quantizer": {"num_bits": 8, "axis": None},
+        },
+        "algorithm": "max",
+    }
+    model = mtq.quantize(model, old_config, lambda m: m(m.get_input()))
+    for name, module in model.named_modules():
+        if isinstance(module, TensorQuantizer):
+            if name.endswith(("weight_quantizer", "input_quantizer")):
+                assert module.is_enabled
+                assert module.num_bits == 8
+            elif name.endswith("output_quantizer"):
+                # "default" key → quantizer_name="*" with enable=False disables everything,
+                # but weight/input quantizers are re-enabled by subsequent entries.
+                # output_quantizer is NOT re-enabled so it stays disabled.
+                assert not module.is_enabled

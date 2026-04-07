@@ -1,0 +1,18 @@
+# ModelOpt Remote Cluster Configuration
+# Copy to ~/.config/modelopt/clusters.yaml (user-level, recommended)
+# or .claude/clusters.yaml (project-level, can be committed).
+
+clusters:
+  # GPU workstation or SLURM login node
+  my-cluster:
+    login_node: cluster-login.example.com
+    user: myusername
+    ssh_key: ~/.ssh/id_rsa
+    # ssh_proxy: "socat - PROXY:localhost:%h:%p,proxyport=3128"  # optional
+    workspace: /path/to/remote/workdir
+    gpu_type: H100   # used for quantization format recommendation
+    # slurm:
+    #   default_account: my_account
+    #   default_partition: batch_short
+
+default_cluster: my-cluster

@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
+
 import pytest
 import torch
 import torch.nn as nn
@@ -73,7 +75,11 @@ def test_quantize(model_cls, config):
 
     if config == mtq.FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG:
         # reduce block sizes for simple testing models
-        config["quant_cfg"]["*weight_quantizer"]["block_sizes"] = {-1: 8, -2: 8}
+        config = copy.deepcopy(config)
+        for entry in config["quant_cfg"]:
+            if entry.get("quantizer_name") == "*weight_quantizer":
+                entry["cfg"]["block_sizes"] = {-1: 8, -2: 8}
+                break
     model = model_cls().cuda()
     calib_data = [model.get_input().cuda() for _ in range(1)]
     quantize_model_and_forward(model, config, calib_data)

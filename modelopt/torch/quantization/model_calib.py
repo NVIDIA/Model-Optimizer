@@ -67,12 +67,11 @@ def weight_only_quantize(model: nn.Module):
     for module in name_to_module.values():
         if module in seen_modules:
             continue
-        for weight_name in weight_attr_names(module):
+
+        if isinstance(module, QuantModule):
             with enable_weight_access_and_writeback(module, model, name_to_module):
-                weight_quantizer = getattr(
-                    module, quantizer_attr_names(weight_name).weight_quantizer
-                )
-                weight_quantizer(getattr(module, weight_name))
+                for weight, weight_quantizer in module.iter_weights_for_calibration():
+                    weight_quantizer(weight)
         seen_modules.add(module)
 
 
@@ -1103,7 +1102,9 @@ def awq_lite(
             self.awq_lite.num_cache_steps += 1
             self.awq_lite.num_tokens += input.numel() / input.shape[-1]
             if self.awq_lite.is_input_quantized:
-                with set_quantizer_by_cfg_context(self.input_quantizer, {"*": {"enable": True}}):
+                with set_quantizer_by_cfg_context(
+                    self.input_quantizer, [{"quantizer_name": "*", "enable": True}]
+                ):
                     max_calibrate(self.input_quantizer, lambda quantizer: quantizer(input), False)
             return out_actual
 

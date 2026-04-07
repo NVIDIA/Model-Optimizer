@@ -257,26 +257,20 @@ def build_quant_config(
     if exclude_blocks is None:
         exclude_blocks = [0, 1, 46, 47]
 
-    quant_cfg = {
-        "*weight_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
-            "axis": None,
-            "enable": True,
-        },
-        "*input_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
-            "axis": None,
-            "enable": True,
-        },
+    _nvfp4_cfg = {
+        "num_bits": (2, 1),
+        "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+        "axis": None,
     }
-
-    for pattern in SENSITIVE_LAYER_PATTERNS:
-        quant_cfg[pattern] = {"enable": False}
-
-    for block_idx in exclude_blocks:
-        quant_cfg[f"*transformer_blocks.{block_idx}.*"] = {"enable": False}
+    quant_cfg = [
+        {"quantizer_name": "*weight_quantizer", "cfg": _nvfp4_cfg, "enable": True},
+        {"quantizer_name": "*input_quantizer", "cfg": _nvfp4_cfg, "enable": True},
+        *[{"quantizer_name": pattern, "enable": False} for pattern in SENSITIVE_LAYER_PATTERNS],
+        *[
+            {"quantizer_name": f"*transformer_blocks.{i}.*", "enable": False}
+            for i in exclude_blocks
+        ],
+    ]
 
     return {
         "quant_cfg": quant_cfg,
