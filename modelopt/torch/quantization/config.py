@@ -1516,7 +1516,7 @@ class GPTQCalibConfig(QuantizeAlgorithmConfig):
     """
 
     method: Literal["gptq"] = ModeloptField("gptq")
-    percdamp: float | None = ModeloptField(
+    perc_damp: float | None = ModeloptField(
         default=0.01,
         gt=0.0,
         le=1.0,
