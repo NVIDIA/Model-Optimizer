@@ -78,12 +78,9 @@ class LLM:
             new_message = {"role": "assistant", "content": new_message}
         except Exception as e:
             print(e)
-
             if "Connection error" in str(e):
                 early_termination = True
-                raise  # propagate so datasets.map() halts the shard
-
-            new_message = None
+            raise  # always propagate so datasets.map() halts the shard
 
         return new_message
 
@@ -168,10 +165,11 @@ def synthesize(data):
         elif role == "assistant":
             # Original assistant messages are not used — the model generates fresh responses.
             pass
-        else:
-            # Skip unknown roles (e.g. tool) — agentic datasets include tool turns
-            # that are not sent to the generation model.
+        elif role == "tool":
+            # Tool turns are not sent to the generation model — skip them.
             pass
+        else:
+            raise ValueError(f"Unexpected message role {role!r} in conversation.")
 
     # Restore the full reasoning trace for the last generated assistant turn.
     if enable_thinking and last_full_message is not None:
@@ -185,7 +183,9 @@ def synthesize(data):
 
 # Support both HF Hub repo IDs and local file paths (.jsonl, .json, .parquet, etc.)
 if os.path.isfile(args.data):
-    dataset = load_dataset("json", data_files=args.data, split=args.data_split)
+    ext = os.path.splitext(args.data)[1].lower()
+    fmt = "parquet" if ext == ".parquet" else "json"
+    dataset = load_dataset(fmt, data_files={"train": args.data}, split=args.data_split)
 else:
     dataset = load_dataset(args.data, split=args.data_split)
 

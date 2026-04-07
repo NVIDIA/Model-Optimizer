@@ -271,8 +271,7 @@ def main() -> None:
         parts_to_combine.append(non_augmentable)
 
     if not parts_to_combine:
-        logger.warning("No data to combine — all rows were filtered out. Exiting.")
-        return
+        raise ValueError("No data to combine — all rows were filtered out.")
 
     combined = concatenate_datasets(parts_to_combine)
     logger.info("Combined (pre-shuffle): %d rows", len(combined))

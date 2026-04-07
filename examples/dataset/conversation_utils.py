@@ -29,8 +29,9 @@ assistant turns are removed.  The downstream generation pipeline (query.py) feed
 skeleton to the target model turn-by-turn, appending each generated response before
 sending the next user turn, so the model produces coherent multi-turn continuations.
 
-Augmentations are applied only to the *last* user message (the new prompt), not to
-earlier user turns that are already part of the established context.
+Augmentations (``user_suffix``) are applied to *all* user messages so that the
+language or style instruction is present at every turn — important for multi-turn
+synthetic generation where the model must maintain the requested style throughout.
 """
 
 import logging
@@ -190,5 +191,8 @@ def normalize_messages(example: dict[str, Any], idx: int) -> dict[str, Any]:
                 "content": m.get("content") or "",
                 "tool_call_id": m.get("tool_call_id", ""),
             })
+        elif role == "developer":
+            # Map developer-role messages to system per OpenAI schema conventions.
+            normalized.append({"role": "system", "content": m.get("content") or ""})
         # other roles (e.g. function, unknown) are dropped
     return {"messages": normalized}

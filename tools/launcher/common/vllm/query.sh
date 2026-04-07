@@ -119,9 +119,8 @@ while true; do
 done
 
 pip3 install -q datasets openai 2>/dev/null || true
-cmd="python3 common/query.py http://localhost:8000/v1 ${MODEL} ${QUERY_ARGS[*]}"
-echo "Running command: $cmd"
-eval $cmd
+echo "Running: python3 common/query.py http://localhost:8000/v1 ${MODEL} ${QUERY_ARGS[*]}"
+python3 common/query.py http://localhost:8000/v1 "${MODEL}" "${QUERY_ARGS[@]}"
 echo "Main process exit"
 
 kill $SERVER_PID
