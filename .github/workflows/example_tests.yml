@@ -72,7 +72,7 @@ jobs:
     with:
       docker_image: "nvcr.io/nvidia/pytorch:${{ matrix.docker_image || '26.03' }}-py3"
       example: ${{ matrix.example }}
-      timeout_minutes: 45
+      timeout_minutes: 30
       pip_install_extras: "[hf,dev-test]"
       runner: linux-amd64-gpu-h100-latest-1
 
@@ -84,7 +84,7 @@ jobs:
     with:
       docker_image: "nvcr.io/nvidia/pytorch:${{ matrix.docker_image || '26.03' }}-py3"
       example: ${{ matrix.example }}
-      timeout_minutes: 45
+      timeout_minutes: 30
       pip_install_extras: "[hf,dev-test]"
       runner: linux-amd64-gpu-rtxpro6000-latest-2
 
