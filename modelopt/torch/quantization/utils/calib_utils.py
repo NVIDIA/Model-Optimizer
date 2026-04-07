@@ -134,7 +134,7 @@ class GPTQHelper:
         self.weight = None
         self.h_inv = None
 
-    def update_weights(self, block_size, percdamp):
+    def update_weights(self, block_size, perc_damp):
         """Run GPTQ blockwise weight update on this module.
 
         Populates ``self.weight`` and ``self.h_inv``, runs the blockwise update,
@@ -142,7 +142,7 @@ class GPTQHelper:
         """
         hessian = self.hessian.to(self.module.weight.device)
         self.weight = self.module.weight.data.float().clone()
-        self._prepare_hessian_inverse(hessian, percdamp)
+        self._prepare_hessian_inverse(hessian, perc_damp)
 
         self._blockwise_update(block_size)
 
@@ -155,7 +155,7 @@ class GPTQHelper:
     # Quantize helpers — all read from self.module, self.weight, self.h_inv
     # ------------------------------------------------------------------
 
-    def _prepare_hessian_inverse(self, hessian, percdamp):
+    def _prepare_hessian_inverse(self, hessian, perc_damp):
         """Compute damped inverse Hessian and store as ``self.h_inv``.
 
         Dead-neuron columns (all-zero in ``self.weight``) are zeroed in the
@@ -170,7 +170,7 @@ class GPTQHelper:
         h[:, zero_cols] = 0
         h[zero_cols, zero_cols] = 1
 
-        damp = percdamp * torch.mean(torch.diag(h))
+        damp = perc_damp * torch.mean(torch.diag(h))
         diag_indices = torch.arange(h.shape[0], device=h.device)
         h[diag_indices, diag_indices] += damp
 

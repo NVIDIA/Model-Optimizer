@@ -1650,7 +1650,7 @@ def gptq(
         model: The module to quantize — either the full model or a single decoder
             layer when invoked by ``sequential_calibrate``.
         forward_loop: Callable that replays calibration inputs through *model*.
-        percdamp: Percentage of avg Hessian diagonal for damping (default: 0.01).
+        perc_damp: Percentage of avg Hessian diagonal for damping (default: 0.01).
         block_size: Block size for GPTQ weight update.
     """
     total_start = time.time()

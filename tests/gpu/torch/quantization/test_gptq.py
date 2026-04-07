@@ -117,11 +117,11 @@ def test_update_hessian():
 @pytest.mark.parametrize(
     ("block_size", "dim", "model_weight", "expect_weight_change"),
     [
-        (4, 16, torch.randn(16, 16).to("cuda"), True),  # random weight
+        (16, 128, torch.randn(128, 128).to("cuda"), True),  # random weight
         (
-            4,
             16,
-            torch.ones(16, 16).to("cuda"),
+            128,
+            torch.ones(128, 128).to("cuda"),
             False,
         ),  # all same weight -> no quantization error -> no GPTQ update
     ],
@@ -142,7 +142,7 @@ def test_gptq_updates(block_size, dim, model_weight, expect_weight_change):
     model.weight.data = original_weight.clone()
 
     # Run GPTQ through the public API
-    gptq(model, forward_loop=lambda m: m(input_tensor), percdamp=0.1, block_size=block_size)
+    gptq(model, forward_loop=lambda m: m(input_tensor), perc_damp=0.1, block_size=block_size)
     if expect_weight_change:
         # Weight must change as GPTQ updates weights to adjust for quantization error
         assert not torch.allclose(model.weight.data, q_dq_weight), "Weight should not be equal"
@@ -154,12 +154,12 @@ def test_gptq_export_roundtrip():
     """Test that GPTQ export + dequantize produces weights matching in-memory QDQ."""
     torch.manual_seed(RAND_SEED)
     dim = 128
-    block_size = 4
+    block_size = 16
 
     # Step 1: Create a simple linear model and quantize to install NVFP4 quantizers
-    model = torch.nn.Linear(dim, dim).to("cuda")
+    model = torch.nn.Linear(dim, dim, dtype=torch.bfloat16).to("cuda")
     original_weight = model.weight.data.clone()
-    input_tensor = torch.randn(2, 16, dim).to("cuda")
+    input_tensor = torch.randn(2, 16, dim, dtype=torch.bfloat16).to("cuda")
     quant_cfg = mtq.NVFP4_DEFAULT_CFG
 
     mtq.quantize(model, quant_cfg, forward_loop=lambda m: m(input_tensor))
@@ -168,7 +168,7 @@ def test_gptq_export_roundtrip():
     model.weight.data = original_weight.clone()
 
     # Step 2: Perform GPTQ — compute Hessian and update weights
-    gptq(model, forward_loop=lambda m: m(input_tensor), percdamp=0.1, block_size=block_size)
+    gptq(model, forward_loop=lambda m: m(input_tensor), perc_damp=0.1, block_size=block_size)
 
     # Save the QDQ reference from the quantizer applied to GPTQ'd weights
     gptq_weight_shape = model.weight.data.shape
@@ -198,18 +198,9 @@ def test_gptq_export_roundtrip():
     assert deq_weight.shape == qdq_ref.shape, (
         f"Shape mismatch: dequantized {deq_weight.shape} vs QDQ ref {qdq_ref.shape}"
     )
-    diff = (deq_weight - qdq_ref.to(torch.bfloat16)).abs()
-    max_diff = diff.max().item()
-    max_diff_idx = diff.argmax().item()
-    max_diff_row = max_diff_idx // deq_weight.shape[1]
-    max_diff_col = max_diff_idx % deq_weight.shape[1]
-    num_mismatched = (diff > 1e-3).sum().item()
-    total_elements = diff.numel()
-
-    assert torch.allclose(deq_weight, qdq_ref.to(torch.bfloat16), atol=1e-2), (
+    assert torch.allclose(deq_weight, qdq_ref, atol=1e-2), (
         f"Dequantized weight does not match QDQ reference. "
-        f"Max diff: {max_diff} at [{max_diff_row}, {max_diff_col}], "
-        f"mismatched (>1e-3): {num_mismatched}/{total_elements}"
+        f"Max diff: {(deq_weight - qdq_ref).abs().max().item()}"
     )
 
 
