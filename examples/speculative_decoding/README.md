@@ -80,7 +80,7 @@ For small base models that fit in GPU memory, we can collocate them with draft m
     training.output_dir=ckpts/llama-3.2-1b-online
 ```
 
-All default training settings live in `eagle3.yaml`; override any field via OmegaConf dotlist arguments on the command line.
+All default training settings are in `eagle3.yaml`. You can adjust them by editing the YAML file or by specifying command-line overrides with OmegaConf dotlist arguments.
 
 To enable context parallelism for long-context training, add `training.cp_size=<N>`.
 The saved modelopt checkpoint is similar in architecture to HF models. It can be further optimized through **ModelOpt**, e.g., PTQ and QAT.
