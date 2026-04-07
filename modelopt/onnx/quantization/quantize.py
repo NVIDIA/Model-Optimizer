@@ -47,16 +47,6 @@ from onnxruntime.quantization.calibrate import CalibrationDataReader
 
 from modelopt.onnx.logging_config import configure_logging, logger
 from modelopt.onnx.op_types import is_data_dependent_shape_op
-
-try:
-    from modelopt.onnx.quantization.autotune.workflows import (
-        init_benchmark_instance,
-        region_pattern_autotuning_workflow,
-    )
-except ImportError as e:
-    logger.warning(
-        f"Failed to import Autotune dependencies with '{e}' error. Ignore if Autotune is not being used."
-    )
 from modelopt.onnx.quantization.calib_utils import (
     CalibrationDataProvider,
     CalibrationDataType,
@@ -290,18 +280,24 @@ def _find_nodes_to_quantize_autotune(
     logger.info("Running Auto Q/DQ with TensorRT")
 
     try:
-        benchmark_instance = init_benchmark_instance(
-            use_trtexec=use_trtexec,
-            plugin_libraries=trt_plugins,
-            timing_cache_file=timing_cache_file,
-            warmup_runs=warmup_runs,
-            timing_runs=timing_runs,
-            trtexec_args=trtexec_args.split() if trtexec_args else None,
+        from modelopt.onnx.quantization.autotune.workflows import (
+            init_benchmark_instance,
+            region_pattern_autotuning_workflow,
         )
-    except Exception:
+    except ImportError as e:
         raise RuntimeError(
-            "Failed to initialize benchmark. Make sure that all Autotune requirements are installed (i.e., TensorRT)."
+            f"Failed to import Autotune dependencies: '{e}'."
+            "Make sure that all Autotune requirements are installed (i.e., TensorRT)."
         )
+
+    benchmark_instance = init_benchmark_instance(
+        use_trtexec=use_trtexec,
+        plugin_libraries=trt_plugins,
+        timing_cache_file=timing_cache_file,
+        warmup_runs=warmup_runs,
+        timing_runs=timing_runs,
+        trtexec_args=trtexec_args.split() if trtexec_args else None,
+    )
 
     if benchmark_instance is None:
         raise RuntimeError("Failed to initialize TensorRT benchmark")
