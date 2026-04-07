@@ -93,7 +93,11 @@ def _export_fused_experts(module: nn.Module, dtype: torch.dtype) -> None:
 
             # For per-channel amax (dim >= 1), proportionally slice dim-0
             # to match the split weight.
-            if hasattr(w_quantizer, "_amax") and w_quantizer._amax is not None and w_quantizer._amax.dim() >= 1:
+            if (
+                hasattr(w_quantizer, "_amax")
+                and w_quantizer._amax is not None
+                and w_quantizer._amax.dim() >= 1
+            ):
                 amax = w_quantizer._amax
                 amax_dim0 = amax.shape[0]
                 if fused_total % amax_dim0 == 0:

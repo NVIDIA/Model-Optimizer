@@ -1533,9 +1533,7 @@ def register_fused_experts_on_the_fly(model):
                 f"\033[1mDetected fused MoE experts '{name}' of type {mod_type.__name__}, "
                 f"registering with _QuantFusedExperts.\033[0m"
             )
-            QuantModuleRegistry.register({mod_type: f"hf.{mod_type.__name__}"})(
-                _QuantFusedExperts
-            )
+            QuantModuleRegistry.register({mod_type: f"hf.{mod_type.__name__}"})(_QuantFusedExperts)
 
 
 def _is_supported_hf_model(model):
