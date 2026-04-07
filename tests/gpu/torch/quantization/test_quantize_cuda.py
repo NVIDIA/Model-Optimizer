@@ -15,6 +15,8 @@
 
 """High-level tests for quantization."""
 
+import copy
+
 import pytest
 from _test_utils.torch.quantization.models import SimpleConv, SimpleConvLinear, SimpleLinear
 from _test_utils.torch.quantization.quantize_common import (
@@ -29,20 +31,26 @@ import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.extensions import get_cuda_ext_mx
 
 NVFP4_WEIGHT_ACT_MSE_CFG = {
-    "quant_cfg": {
-        "*weight_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
-            "axis": None,
+    "quant_cfg": [
+        {
+            "quantizer_name": "*weight_quantizer",
+            "cfg": {
+                "num_bits": (2, 1),
+                "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
+                "axis": None,
+            },
             "enable": True,
         },
-        "*input_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
-            "axis": None,
+        {
+            "quantizer_name": "*input_quantizer",
+            "cfg": {
+                "num_bits": (2, 1),
+                "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+                "axis": None,
+            },
             "enable": True,
         },
-    },
+    ],
     "algorithm": {
         "method": "mse",
         "step_size": 0.25,
@@ -52,17 +60,18 @@ NVFP4_WEIGHT_ACT_MSE_CFG = {
 }
 
 NVFP4_WEIGHT_MSE_FP8_SWEEP_CFG = {
-    "quant_cfg": {
-        "*weight_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
-            "axis": None,
+    "quant_cfg": [
+        {
+            "quantizer_name": "*weight_quantizer",
+            "cfg": {
+                "num_bits": (2, 1),
+                "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
+                "axis": None,
+            },
             "enable": True,
         },
-        "*input_quantizer": {
-            "enable": False,
-        },
-    },
+        {"quantizer_name": "*input_quantizer", "enable": False},
+    ],
     "algorithm": {
         "method": "mse",
         "fp8_scale_sweep": True,
@@ -123,7 +132,10 @@ def test_quantize(model_cls, config):
 
     if config == mtq.FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG:
         # reduce block sizes for simple testing models
-        config["quant_cfg"]["*weight_quantizer"]["block_sizes"] = {-1: 8, -2: 8}
+        config = copy.deepcopy(config)
+        for entry in config["quant_cfg"]:
+            if entry.get("quantizer_name") == "*weight_quantizer":
+                entry.setdefault("cfg", {})["block_sizes"] = {-1: 8, -2: 8}
     model = model_cls().cuda()
     calib_data = [model.get_input().cuda() for _ in range(8)]
     quantize_model_and_forward(model, config, calib_data)

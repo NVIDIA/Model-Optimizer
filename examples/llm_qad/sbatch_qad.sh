@@ -58,18 +58,7 @@ if [[ -n "$CONFIG_FILE" ]]; then
     fi
 fi
 
-# === Default Paths (override in config) ===
-MLM_DIR="${MLM_DIR:-/lustre/fs1/portfolios/coreai/projects/coreai_dlalgo_modelopt/users/weimingc/workspace/Megatron-LM}"
-MODELOPT_DIR="${MODELOPT_DIR:-/lustre/fs1/portfolios/coreai/projects/coreai_dlalgo_modelopt/users/weimingc/workspace/TensorRT-Model-Optimizer}"
-MODELS_ROOT="${MODELS_ROOT:-/lustre/fs1/portfolios/coreai/projects/coreai_dlalgo_modelopt/users/weimingc/models}"
-QAD_CHECKPOINT_ROOT="${QAD_CHECKPOINT_ROOT:-/lustre/fs1/portfolios/coreai/projects/coreai_dlalgo_modelopt/users/weimingc/checkpoints}"
-DATACACHE_DIR="${DATACACHE_DIR:-/lustre/fs1/portfolios/coreai/projects/coreai_dlalgo_modelopt/users/weimingc/data_cache}"
 LOG_DIR="${LOG_DIR:-${QAD_CHECKPOINT_ROOT}/logs_slurm}"
-
-# Container settings
-CONTAINER_IMAGE="${CONTAINER_IMAGE:-/lustre/fs1/portfolios/coreai/projects/coreai_dlalgo_modelopt/users/weimingc/containers/pytorch_25.06-py3.sqsh}"
-CONTAINER_MOUNTS="${CONTAINER_MOUNTS:-/lustre/fs1:/lustre/fs1}"
-CONTAINER_WORKDIR="${CONTAINER_WORKDIR:-/lustre/fs1/portfolios/coreai/projects/coreai_dlalgo_modelopt/users/weimingc/workspace/TensorRT-Model-Optimizer/examples/llm_qad}"
 
 # Parallelism (required from config)
 TP_SIZE="${TP_SIZE:?ERROR: TP_SIZE must be set in config}"

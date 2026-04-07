@@ -168,6 +168,7 @@ class TestBuildSlurmExecutor:
             ntasks_per_node=8,
             gpus_per_node=8,
             array="0-3",
+            time="04:00:00",
         )
 
         packager = MagicMock()

@@ -203,8 +203,8 @@ class TensorQuantizer(nn.Module):
         # Optional quantizer cache for caching quantizer related encoding or tensors.
         self._quantizer_cache = None
 
-    def set_from_attribute_config(self, attribute_cfg: QuantizerAttributeConfig | dict):
-        """Set quantizer attributes from attribute_dict.
+    def set_from_attribute_config(self, attribute_cfg: QuantizerAttributeConfig | dict[str, Any]):
+        """Set quantizer attributes from attribute_cfg.
 
         The attributes are defined in
         :class:`QuantizerAttributeConfig <modelopt.torch.quantization.config.QuantizerAttributeConfig>`.
@@ -218,12 +218,27 @@ class TensorQuantizer(nn.Module):
                 calib_cls, args, kwargs = standardize_constructor_args(val)
             return calib_cls(*args, **kwargs)
 
+        def _axis_setter(val):
+            if getattr(self, "_calibrator", None) is not None:
+                self._calibrator._axis = val
+            return val
+
+        def _block_sizes_setter(val):
+            if val is not None:
+                # block_sizes and axis are mutually exclusive; clear axis when block_sizes is set
+                setattr(self, "_axis", None)
+                if getattr(self, "_calibrator", None) is not None:
+                    self._calibrator._axis = None
+            return val
+
         # Some attributes need custom handling.
         # By default, attributes from config are mapped to a name ``f"_{attribute}"``
         _custom_setters: dict[str, tuple[str, Callable]] = {
             "enable": ("_disabled", lambda val: val is False),
             "type": ("_dynamic", lambda val: val == "dynamic"),
             "calibrator": ("_calibrator", _calibrator_setter),
+            "axis": ("_axis", _axis_setter),
+            "block_sizes": ("_block_sizes", _block_sizes_setter),
             "backend": ("backend", lambda val: val),
             "backend_extra_args": ("backend_extra_args", lambda val: val or {}),
             "use_constant_amax": ("_use_constant_amax", lambda val: val),
@@ -1408,10 +1423,7 @@ class SequentialQuantizer(nn.Sequential):
         return {"num_quantizers": len(self), "is_sequential_quantizer": True}
 
     def set_from_attribute_config(
-        self,
-        attributes: list[dict[str, Any] | QuantizerAttributeConfig]
-        | dict[str, Any]
-        | QuantizerAttributeConfig,
+        self, attributes: list[QuantizerAttributeConfig] | list[dict[str, Any]]
     ):
         """Set the attributes of contained quantizers from a list of attribute_dicts."""
         if not isinstance(attributes, (list, tuple)):

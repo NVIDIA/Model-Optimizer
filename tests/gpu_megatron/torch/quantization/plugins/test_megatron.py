@@ -82,15 +82,15 @@ def test_convert_megatron_parallel_linear(distributed_setup_size_1):
             assert hasattr(module, "weight_quantizer")
             assert hasattr(module, "output_quantizer")
 
-    mtq.set_quantizer_attribute(model_test, "*", {"enable": False})
+    mtq.set_quantizer_attributes_partial(model_test, "*", {"enable": False})
 
     x = model_ref.get_dummy_input().cuda()
     out_1 = model_ref(x)
     out_2 = model_test(x)
     assert torch.allclose(out_1, out_2)
 
-    mtq.set_quantizer_attribute(model_test, "*input_quantizer", {"enable": True})
-    mtq.set_quantizer_attribute(model_test, "*weight_quantizer", {"enable": True})
+    mtq.set_quantizer_attributes_partial(model_test, "*input_quantizer", {"enable": True})
+    mtq.set_quantizer_attributes_partial(model_test, "*weight_quantizer", {"enable": True})
     model_ref = RegularQuantModelForTP().cuda()
     model_ref.load_state_dict(model_test.state_dict(), strict=False)
 
@@ -304,7 +304,7 @@ def _test_sharded_state_dict(
 ):
     # Must disable output_layer quantization since output_layer amax cannot be restore via
     # sharded_state_dict. All output_layer quantizers state are removed.
-    config["quant_cfg"]["*output_layer*"] = {"enable": False}
+    config["quant_cfg"].append({"quantizer_name": "*output_layer*", "enable": False})
 
     if modelopt_version is not None:
         mto.conversion.__version__ = modelopt_version
@@ -383,36 +383,44 @@ def _test_sharded_state_dict(
 
 
 mixed_precision_config = copy.deepcopy(mtq.W4A8_AWQ_BETA_CFG)
-mixed_precision_config["quant_cfg"].update(
-    {
-        "*.1.*": {"enable": False},
-        "*.2.*weight_quantizer": {"num_bits": (4, 3), "axis": None},
-        "*.2.*input_quantizer": {"num_bits": (4, 3), "axis": None},
-        "*.3.*weight_quantizer.0": {"num_bits": 8, "axis": 0},
-        "*.3.*weight_quantizer.1": {"enable": False},
-        "*.3.*input_quantizer": {"num_bits": 8, "axis": None},
-    }
+mixed_precision_config["quant_cfg"].extend(
+    [
+        {"quantizer_name": "*.1.*", "enable": False},
+        {"quantizer_name": "*.2.*weight_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
+        {"quantizer_name": "*.2.*input_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
+        {"quantizer_name": "*.3.*weight_quantizer.0", "cfg": {"num_bits": 8, "axis": 0}},
+        {"quantizer_name": "*.3.*weight_quantizer.1", "enable": False},
+        {"quantizer_name": "*.3.*input_quantizer", "cfg": {"num_bits": 8, "axis": None}},
+    ]
 )
 
 
 mixed_block_size_config = copy.deepcopy(mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG)
-mixed_block_size_config["quant_cfg"].update(
-    {
-        "*.1.*": {"enable": False},
-        "*.2.*weight_quantizer": {"num_bits": 4, "block_sizes": {-1: 64}, "enable": True},
-        "*.2.*input_quantizer": {"num_bits": (4, 3), "axis": None},
-        "*.3.*weight_quantizer": {"num_bits": 4, "block_sizes": {-1: 128, -2: 64}, "enable": True},
-        "*.3.*input_quantizer": {"num_bits": 8, "axis": None},
-    }
+mixed_block_size_config["quant_cfg"].extend(
+    [
+        {"quantizer_name": "*.1.*", "enable": False},
+        {
+            "quantizer_name": "*.2.*weight_quantizer",
+            "cfg": {"num_bits": 4, "block_sizes": {-1: 64}},
+            "enable": True,
+        },
+        {"quantizer_name": "*.2.*input_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
+        {
+            "quantizer_name": "*.3.*weight_quantizer",
+            "cfg": {"num_bits": 4, "block_sizes": {-1: 128, -2: 64}},
+            "enable": True,
+        },
+        {"quantizer_name": "*.3.*input_quantizer", "cfg": {"num_bits": 8, "axis": None}},
+    ]
 )
 
 # Combined NVFP4 GEMM + KV cache quantization config
 NVFP4_GEMM_KV_CFG = copy.deepcopy(mtq.NVFP4_DEFAULT_CFG)
-NVFP4_GEMM_KV_CFG["quant_cfg"].update(mtq.NVFP4_KV_CFG["quant_cfg"])
+NVFP4_GEMM_KV_CFG["quant_cfg"].extend(mtq.NVFP4_KV_CFG["quant_cfg"])
 
 # Combined FP8 GEMM + KV cache quantization config
 FP8_GEMM_KV_CFG = copy.deepcopy(mtq.FP8_DEFAULT_CFG)
-FP8_GEMM_KV_CFG["quant_cfg"].update(mtq.FP8_KV_CFG["quant_cfg"])
+FP8_GEMM_KV_CFG["quant_cfg"].extend(mtq.FP8_KV_CFG["quant_cfg"])
 
 
 @pytest.mark.parametrize(

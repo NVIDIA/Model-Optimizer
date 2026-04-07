@@ -50,40 +50,52 @@ INT4-FP8 AWQ (W4A8)                 ``W4A8_AWQ_BETA_CFG``
 Quantization Configs
 ================================
 
-Quantization config is dictionary specifying the values for keys ``"quant_cfg"`` and
-``"algorithm"``. The ``"quant_cfg"`` key specifies the quantization configurations. The
-``"algorithm"`` key specifies the ``algorithm`` argument to
-:meth:`calibrate <modelopt.torch.quantization.model_calib.calibrate>`. Please see :class:`QuantizeConfig`
-for the quantization config definition.
+Quantization config is a dictionary with two top-level keys:
 
-'Quantization configurations' is a dictionary mapping wildcards or filter functions
-to its 'quantizer attributes'. The wildcards or filter functions  are matched
-against the quantizer module names. The quantizer modules have names ending with
-``weight_quantizer`` and ``input_quantizer`` and they perform weight quantization and
-input quantization (or activation quantization) respectively. The quantizer modules are generally
-instances of
-:class:`TensorQuantizer <modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer>`.
-The quantizer attributes are defined by :class:`QuantizerAttributeConfig`. See :class:`QuantizerAttributeConfig`
-for details on the quantizer attributes and their values.
+- ``"quant_cfg"``: an ordered list of :class:`QuantizerCfgEntry` dicts that specify which
+  quantizers to configure and how.
+- ``"algorithm"``: the calibration algorithm passed to
+  :meth:`calibrate <modelopt.torch.quantization.model_calib.calibrate>`.
 
-The key `"default"` from the quantization configuration dictionary is applied if no other wildcard or filter functions
-match the quantizer module name.
+Please see :class:`QuantizeConfig` for the full config schema.
 
-The quantizer attributes are applied in the order they are specified. For the missing attributes, the default attributes
-as defined by :class:`QuantizerAttributeConfig` are used.
+``quant_cfg`` — Entry Format
+-----------------------------
 
-Quantizer attributes can also be a list of dictionaries. In this case, the matched quantizer module
-is replaced with a
-:class:`SequentialQuantizer <modelopt.torch.quantization.nn.modules.tensor_quantizer.SequentialQuantizer>`
-module which is used to quantize a tensor in multiple formats sequentially. Each quantizer attribute
-dictionary in the list specifies the quantization formats for each quantization step of the
-sequential quantizer. For example, `SequentialQuantizer` is used in 'INT4 Weights, FP8 Activations'
-quantization in which the weights are quantized in INT4 followed by FP8.
+Each entry in the ``quant_cfg`` list is a :class:`QuantizerCfgEntry` with the following fields:
 
-In addition, the dictionary entries could also be pytorch module class names mapping the class specific
-quantization configurations. The pytorch modules should have a quantized equivalent.
+- ``quantizer_name`` *(required)*: a wildcard string matched against quantizer module names.
+  Quantizer modules are instances of
+  :class:`TensorQuantizer <modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer>`
+  and have names ending with ``weight_quantizer``, ``input_quantizer``, etc.
+- ``parent_class`` *(optional)*: restricts matching to quantizers whose immediate parent module is
+  of this PyTorch class (e.g. ``"nn.Linear"``). If omitted, all matching quantizers are targeted
+  regardless of their parent class.
+- ``cfg`` *(optional)*: a dict of quantizer attributes as defined by
+  :class:`QuantizerAttributeConfig`, or a list of such dicts. When a list is given, the matched
+  :class:`TensorQuantizer <modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer>`
+  is replaced with a
+  :class:`SequentialQuantizer <modelopt.torch.quantization.nn.modules.tensor_quantizer.SequentialQuantizer>`
+  that applies each format in sequence. This is used for example in W4A8 quantization where weights
+  are quantized first in INT4 and then in FP8.
+- ``enable`` *(optional)*: toggles matched quantizers on (``True``) or off (``False``),
+  independently of ``cfg``. When ``cfg`` is present and ``enable`` is absent, the quantizer is
+  implicitly enabled. When ``enable`` is the only field (no ``cfg``), it only flips the on/off
+  state — all other attributes remain unchanged.
 
-To get the string representation of a module class, do:
+``quant_cfg`` — Ordering and Precedence
+-----------------------------------------
+
+Entries are applied **in list order**; later entries override earlier ones for any quantizer they
+match. The recommended pattern is:
+
+1. Start with a deny-all entry ``{"quantizer_name": "*", "enable": False}`` (provided as
+   :data:`_base_disable_all`) to disable every quantizer by default.
+2. Follow with format-specific entries that selectively enable and configure the desired quantizers.
+3. Append :data:`_default_disabled_quantizer_cfg` to enforce standard exclusions (e.g. BatchNorm
+   layers, LM head, MoE routers).
+
+To get the string representation of a module class for use in ``parent_class``, do:
 
 .. code-block::
 
@@ -97,15 +109,17 @@ Here is an example of a quantization config:
 .. code-block::
 
     MY_QUANT_CFG = {
-        "quant_cfg": {
-            # Quantizer wildcard strings mapping to quantizer attributes
-            "*weight_quantizer": {"num_bits": 8, "axis": 0},
-            "*input_quantizer": {"num_bits": 8, "axis": None},
+        "quant_cfg": [
+            # Deny all quantizers by default
+            {"quantizer_name": "*", "enable": False},
 
-            # Module class names mapping to quantizer configurations
-            "nn.LeakyReLU": {"*input_quantizer": {"enable": False}},
+            # Enable and configure weight and input quantizers
+            {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+            {"quantizer_name": "*input_quantizer", "cfg": {"num_bits": 8, "axis": None}},
 
-        }
+            # Disable input quantizers specifically for LeakyReLU layers
+            {"quantizer_name": "*input_quantizer", "parent_class": "nn.LeakyReLU", "enable": False},
+        ]
     }
 
 .. _example-quantization-configs:
@@ -129,157 +143,251 @@ the layer named ``lm_head``,  you can create a custom config and quantize your m
 
     # Create custom config
     CUSTOM_INT4_AWQ_CFG = copy.deepcopy(mtq.INT4_AWQ_CFG)
-    CUSTOM_INT4_AWQ_CFG["quant_cfg"]["*lm_head*"] = {"enable": False}
+    CUSTOM_INT4_AWQ_CFG["quant_cfg"].append({"quantizer_name": "*lm_head*", "enable": False})
 
     # quantize model
     model = mtq.quantize(model, CUSTOM_INT4_AWQ_CFG, forward_loop)
 
 """
 
-from collections.abc import Callable
-from typing import Literal
+import copy
+import warnings
+from typing import Any, Literal, cast
 
 from pydantic import ValidationInfo, field_validator, model_validator
+from typing_extensions import Required, TypedDict
 
 from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
 from modelopt.torch.utils.network import ConstructorLike
 
-_default_disabled_quantizer_cfg = {
-    "nn.BatchNorm1d": {"*": {"enable": False}},
-    "nn.BatchNorm2d": {"*": {"enable": False}},
-    "nn.BatchNorm3d": {"*": {"enable": False}},
-    "nn.LeakyReLU": {"*": {"enable": False}},
-    "*lm_head*": {"enable": False},
-    "*proj_out.*": {"enable": False},  # In Whisper model, lm_head has key name proj_out
-    "*block_sparse_moe.gate*": {"enable": False},  # Skip the MOE router
-    "*router*": {"enable": False},  # Skip the MOE router
-    "*mlp.gate.*": {"enable": False},  # Skip the MOE router
-    "*mlp.shared_expert_gate.*": {"enable": False},  # Skip the MOE router
-    "*linear_attn.conv1d*": {"enable": False},
-    "*mixer.conv1d*": {"enable": False},  # Skip mamba conv1d
-    "*output_layer*": {"enable": False},
-    "output.*": {"enable": False},
-    "default": {"enable": False},
-}
 
-_mamba_moe_disabled_quantizer_cfg = {
-    "*fc1_latent_proj*": {"enable": False},  # Skip Latent MOE
-    "*fc2_latent_proj*": {"enable": False},  # Skip Latent MOE
-    "*q_proj*": {"enable": False},  # Skip QKV Linear
-    "*k_proj*": {"enable": False},  # Skip QKV Linear
-    "*v_proj*": {"enable": False},  # Skip QKV Linear
-    "*o_proj*": {"enable": False},  # Skip QKV Output Projection
-}
+class QuantizerCfgEntry(TypedDict, total=False):
+    """A single entry in a ``quant_cfg`` list."""
+
+    quantizer_name: Required[str]  # matched against quantizer module names
+    parent_class: str | None  # optional; filters by pytorch module class name (e.g. "nn.Linear")
+    cfg: dict[str, Any] | list[dict[str, Any]] | None  # quantizer attribute config(s)
+    enable: bool | None  # toggles matched quantizers on/off; independent of cfg
+
+
+def find_quant_cfg_entry_by_path(
+    quant_cfg_list: list[QuantizerCfgEntry], quantizer_name: str
+) -> QuantizerCfgEntry:
+    """Find the last entry in a ``quant_cfg`` list whose ``quantizer_name`` key equals the query.
+
+    This performs an **exact string comparison** against the ``quantizer_name`` field of each
+    entry — it does *not* apply ``fnmatch`` pattern matching.  For example, passing
+    ``"*input_quantizer"`` will only match entries whose ``quantizer_name`` is literally
+    ``"*input_quantizer"``, not entries with a different wildcard that would match the same
+    module names at apply time.
+
+    Returns the *last* match because entries are applied in list order and later entries
+    override earlier ones, so the last match represents the effective configuration.
+
+    Args:
+        quant_cfg_list: A list of :class:`QuantizerCfgEntry` dicts.
+        quantizer_name: The exact ``quantizer_name`` string to search for.
+
+    Returns:
+        The last entry whose ``quantizer_name`` equals *quantizer_name*.
+
+    Raises:
+        KeyError: If no entry with the given ``quantizer_name`` is found.
+    """
+    result = None
+    for entry in quant_cfg_list:
+        if isinstance(entry, dict) and entry.get("quantizer_name") == quantizer_name:
+            result = entry
+    if result is None:
+        raise KeyError(f"No quant_cfg entry with quantizer_name={quantizer_name!r}")
+    return result
+
+
+_base_disable_all: list[QuantizerCfgEntry] = [
+    {"quantizer_name": "*", "enable": False},
+]
+
+_default_disabled_quantizer_cfg: list[QuantizerCfgEntry] = [
+    {"parent_class": "nn.BatchNorm1d", "quantizer_name": "*", "enable": False},
+    {"parent_class": "nn.BatchNorm2d", "quantizer_name": "*", "enable": False},
+    {"parent_class": "nn.BatchNorm3d", "quantizer_name": "*", "enable": False},
+    {"parent_class": "nn.LeakyReLU", "quantizer_name": "*", "enable": False},
+    {"quantizer_name": "*lm_head*", "enable": False},
+    {
+        "quantizer_name": "*proj_out.*",
+        "enable": False,
+    },  # In Whisper model, lm_head has key name proj_out
+    {
+        "quantizer_name": "*block_sparse_moe.gate*",
+        "enable": False,
+    },  # Skip the MOE router
+    {"quantizer_name": "*router*", "enable": False},  # Skip the MOE router
+    {"quantizer_name": "*mlp.gate.*", "enable": False},  # Skip the MOE router
+    {
+        "quantizer_name": "*mlp.shared_expert_gate.*",
+        "enable": False,
+    },  # Skip the MOE router
+    {"quantizer_name": "*linear_attn.conv1d*", "enable": False},
+    {"quantizer_name": "*mixer.conv1d*", "enable": False},  # Skip mamba conv1d
+    {"quantizer_name": "*output_layer*", "enable": False},
+    {"quantizer_name": "output.*", "enable": False},
+]
+
+_mamba_moe_disabled_quantizer_cfg: list[QuantizerCfgEntry] = [
+    {"quantizer_name": "*fc1_latent_proj*", "enable": False},  # Skip Latent MOE
+    {"quantizer_name": "*fc2_latent_proj*", "enable": False},  # Skip Latent MOE
+    {"quantizer_name": "*q_proj*", "enable": False},  # Skip QKV Linear
+    {"quantizer_name": "*k_proj*", "enable": False},  # Skip QKV Linear
+    {"quantizer_name": "*v_proj*", "enable": False},  # Skip QKV Linear
+    {"quantizer_name": "*o_proj*", "enable": False},  # Skip QKV Output Projection
+]
 
 INT8_DEFAULT_CFG = {
-    "quant_cfg": {
-        "*weight_quantizer": {"num_bits": 8, "axis": 0},
-        "*input_quantizer": {"num_bits": 8, "axis": None},
-        **_default_disabled_quantizer_cfg,
-    },
+    "quant_cfg": [
+        *_base_disable_all,
+        {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+        {"quantizer_name": "*input_quantizer", "cfg": {"num_bits": 8, "axis": None}},
+        *_default_disabled_quantizer_cfg,
+    ],
     "algorithm": "max",
 }
 
 INT8_SMOOTHQUANT_CFG = {
-    "quant_cfg": {
-        "*weight_quantizer": {"num_bits": 8, "axis": 0},
-        "*input_quantizer": {"num_bits": 8, "axis": None},
-        **_default_disabled_quantizer_cfg,
-    },
+    "quant_cfg": [
+        *_base_disable_all,
+        {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+        {"quantizer_name": "*input_quantizer", "cfg": {"num_bits": 8, "axis": None}},
+        *_default_disabled_quantizer_cfg,
+    ],
     "algorithm": "smoothquant",
 }
 
 INT8_WEIGHT_ONLY_CFG = {
-    "quant_cfg": {
-        "*weight_quantizer": {"num_bits": 8, "axis": 0},
-        "*input_quantizer": {"enable": False},
-        **_default_disabled_quantizer_cfg,
-    },
+    "quant_cfg": [
+        *_base_disable_all,
+        {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+        {"quantizer_name": "*input_quantizer", "enable": False},
+        *_default_disabled_quantizer_cfg,
+    ],
     "algorithm": "max",
 }
 
 FP8_DEFAULT_CFG = {
-    "quant_cfg": {
-        "*weight_quantizer": {"num_bits": (4, 3), "axis": None},
-        "*input_quantizer": {"num_bits": (4, 3), "axis": None},
-        **_default_disabled_quantizer_cfg,
-    },
+    "quant_cfg": [
+        *_base_disable_all,
+        {
+            "quantizer_name": "*weight_quantizer",
+            "cfg": {"num_bits": (4, 3), "axis": None},
+        },
+        {
+            "quantizer_name": "*input_quantizer",
+            "cfg": {"num_bits": (4, 3), "axis": None},
+        },
+        *_default_disabled_quantizer_cfg,
+    ],
     "algorithm": "max",
 }
 
 MAMBA_MOE_FP8_AGGRESSIVE_CFG = {
-    "quant_cfg": {
-        "*weight_quantizer": {"num_bits": (4, 3), "axis": None},
-        "*input_quantizer": {"num_bits": (4, 3), "axis": None},
-        **_default_disabled_quantizer_cfg,
-        **_mamba_moe_disabled_quantizer_cfg,
-    },
+    "quant_cfg": [
+        *_base_disable_all,
+        {
+            "quantizer_name": "*weight_quantizer",
+            "cfg": {"num_bits": (4, 3), "axis": None},
+        },
+        {
+            "quantizer_name": "*input_quantizer",
+            "cfg": {"num_bits": (4, 3), "axis": None},
+        },
+        *_default_disabled_quantizer_cfg,
+        *_mamba_moe_disabled_quantizer_cfg,
+    ],
     "algorithm": "max",
 }
 
 MAMBA_MOE_FP8_CONSERVATIVE_CFG = {
-    "quant_cfg": {
-        "*weight_quantizer": {"num_bits": (4, 3), "axis": None},
-        "*input_quantizer": {"num_bits": (4, 3), "axis": None},
-        **_default_disabled_quantizer_cfg,
-        **_mamba_moe_disabled_quantizer_cfg,
-        "*mixer.in_proj*": {"enable": False},  # Skip mamba linear
-        "*mixer.out_proj*": {"enable": False},  # Skip mamba linear
-    },
+    "quant_cfg": [
+        *_base_disable_all,
+        {
+            "quantizer_name": "*weight_quantizer",
+            "cfg": {"num_bits": (4, 3), "axis": None},
+        },
+        {
+            "quantizer_name": "*input_quantizer",
+            "cfg": {"num_bits": (4, 3), "axis": None},
+        },
+        *_default_disabled_quantizer_cfg,
+        *_mamba_moe_disabled_quantizer_cfg,
+        {"quantizer_name": "*mixer.in_proj*", "enable": False},  # Skip mamba linear
+        {"quantizer_name": "*mixer.out_proj*", "enable": False},  # Skip mamba linear
+    ],
     "algorithm": "max",
 }
 
 FP8_PER_CHANNEL_PER_TOKEN_CFG = {
-    "quant_cfg": {
-        "*weight_quantizer": {"num_bits": (4, 3), "axis": 0},
-        "*input_quantizer": {
-            "num_bits": (4, 3),
-            "type": "dynamic",
-            "block_sizes": {-1: None},
+    "quant_cfg": [
+        *_base_disable_all,
+        {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": (4, 3), "axis": 0}},
+        {
+            "quantizer_name": "*input_quantizer",
+            "cfg": {
+                "num_bits": (4, 3),
+                "type": "dynamic",
+                "block_sizes": {-1: None},
+            },
         },
-        **_default_disabled_quantizer_cfg,
-    },
+        *_default_disabled_quantizer_cfg,
+    ],
     "algorithm": "max",
 }
 
 # FP8 2D blockwise fake quantization config for deepseek models
 FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG = {
-    "quant_cfg": {
-        "*weight_quantizer": {
-            "num_bits": (4, 3),
-            "block_sizes": {-1: 128, -2: 128},
-            "enable": True,
+    "quant_cfg": [
+        *_base_disable_all,
+        {
+            "quantizer_name": "*weight_quantizer",
+            "cfg": {
+                "num_bits": (4, 3),
+                "block_sizes": {-1: 128, -2: 128},
+            },
         },
-        "*input_quantizer": {"enable": False},
-        **_default_disabled_quantizer_cfg,
-    },
+        {"quantizer_name": "*input_quantizer", "enable": False},
+        *_default_disabled_quantizer_cfg,
+    ],
     "algorithm": "max",
 }
 
 INT4_BLOCKWISE_WEIGHT_ONLY_CFG = {
-    "quant_cfg": {
-        "*weight_quantizer": {
-            "num_bits": 4,
-            "block_sizes": {-1: 128},
-            "enable": True,
+    "quant_cfg": [
+        *_base_disable_all,
+        {
+            "quantizer_name": "*weight_quantizer",
+            "cfg": {
+                "num_bits": 4,
+                "block_sizes": {-1: 128},
+            },
         },
-        "*input_quantizer": {"enable": False},
-        **_default_disabled_quantizer_cfg,
-    },
+        {"quantizer_name": "*input_quantizer", "enable": False},
+        *_default_disabled_quantizer_cfg,
+    ],
     "algorithm": "max",
 }
 
 
 INT4_AWQ_CFG = {
-    "quant_cfg": {
-        "*weight_quantizer": {
-            "num_bits": 4,
-            "block_sizes": {-1: 128, "type": "static"},
-            "enable": True,
+    "quant_cfg": [
+        *_base_disable_all,
+        {
+            "quantizer_name": "*weight_quantizer",
+            "cfg": {
+                "num_bits": 4,
+                "block_sizes": {-1: 128, "type": "static"},
+            },
         },
-        "*input_quantizer": {"enable": False},
-        **_default_disabled_quantizer_cfg,
-    },
+        {"quantizer_name": "*input_quantizer", "enable": False},
+        *_default_disabled_quantizer_cfg,
+    ],
     "algorithm": {"method": "awq_lite", "alpha_step": 0.1},
     # "algorithm": {"method": "awq_full", "alpha_step": 0.1, "max_co_batch_size": 1024},
     # "algorithm": {"method": "awq_clip", "max_co_batch_size": 2048},
@@ -288,172 +396,211 @@ INT4_AWQ_CFG = {
 # W4A8 currently uses INT4 blockwise quantization (block size = 128) followed by FP8 quantization
 # for weights. This could change in the future
 W4A8_AWQ_BETA_CFG = {
-    "quant_cfg": {
-        "*weight_quantizer": [
-            {
-                "num_bits": 4,
-                "block_sizes": {-1: 128, "type": "static"},
-                "enable": True,
-            },
-            {
-                "num_bits": (4, 3),
-                "enable": True,
-            },
-        ],
-        "*input_quantizer": {
-            "num_bits": (4, 3),
-            "enable": True,
+    "quant_cfg": [
+        *_base_disable_all,
+        {
+            "quantizer_name": "*weight_quantizer",
+            "cfg": [
+                {
+                    "num_bits": 4,
+                    "block_sizes": {-1: 128, "type": "static"},
+                },
+                {
+                    "num_bits": (4, 3),
+                },
+            ],
         },
-        **_default_disabled_quantizer_cfg,
-    },
+        {
+            "quantizer_name": "*input_quantizer",
+            "cfg": {
+                "num_bits": (4, 3),
+            },
+        },
+        *_default_disabled_quantizer_cfg,
+    ],
     "algorithm": "awq_lite",
 }
 
 MXFP8_DEFAULT_CFG = {
-    "quant_cfg": {
-        "*weight_quantizer": {
-            "num_bits": (4, 3),
-            "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
-            "enable": True,
+    "quant_cfg": [
+        *_base_disable_all,
+        {
+            "quantizer_name": "*weight_quantizer",
+            "cfg": {
+                "num_bits": (4, 3),
+                "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
+            },
         },
-        "*input_quantizer": {
-            "num_bits": (4, 3),
-            "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
-            "enable": True,
+        {
+            "quantizer_name": "*input_quantizer",
+            "cfg": {
+                "num_bits": (4, 3),
+                "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
+            },
         },
-        **_default_disabled_quantizer_cfg,
-    },
+        *_default_disabled_quantizer_cfg,
+    ],
     "algorithm": None,
 }
 
 MXFP6_DEFAULT_CFG = {
-    "quant_cfg": {
-        "*weight_quantizer": {
-            "num_bits": (3, 2),
-            "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
-            "enable": True,
+    "quant_cfg": [
+        *_base_disable_all,
+        {
+            "quantizer_name": "*weight_quantizer",
+            "cfg": {
+                "num_bits": (3, 2),
+                "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
+            },
         },
-        "*input_quantizer": {
-            "num_bits": (3, 2),
-            "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
-            "enable": True,
+        {
+            "quantizer_name": "*input_quantizer",
+            "cfg": {
+                "num_bits": (3, 2),
+                "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
+            },
         },
-        **_default_disabled_quantizer_cfg,
-    },
+        *_default_disabled_quantizer_cfg,
+    ],
     "algorithm": None,
 }
 
 MXFP4_DEFAULT_CFG = {
-    "quant_cfg": {
-        "*weight_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
-            "enable": True,
+    "quant_cfg": [
+        *_base_disable_all,
+        {
+            "quantizer_name": "*weight_quantizer",
+            "cfg": {
+                "num_bits": (2, 1),
+                "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
+            },
         },
-        "*input_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
-            "enable": True,
+        {
+            "quantizer_name": "*input_quantizer",
+            "cfg": {
+                "num_bits": (2, 1),
+                "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
+            },
         },
-        **_default_disabled_quantizer_cfg,
-    },
+        *_default_disabled_quantizer_cfg,
+    ],
     "algorithm": None,
 }
 
 W4A8_MXFP4_FP8_CFG = {
-    "quant_cfg": {
-        "*weight_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
-            "enable": True,
+    "quant_cfg": [
+        *_base_disable_all,
+        {
+            "quantizer_name": "*weight_quantizer",
+            "cfg": {
+                "num_bits": (2, 1),
+                "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
+            },
         },
-        "*input_quantizer": {"num_bits": (4, 3), "axis": None},
-        **_default_disabled_quantizer_cfg,
-    },
+        {
+            "quantizer_name": "*input_quantizer",
+            "cfg": {"num_bits": (4, 3), "axis": None},
+        },
+        *_default_disabled_quantizer_cfg,
+    ],
     "algorithm": None,
 }
 
 MXINT8_DEFAULT_CFG = {
-    "quant_cfg": {
-        "*weight_quantizer": {
-            "num_bits": 8,
-            "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
-            "enable": True,
+    "quant_cfg": [
+        *_base_disable_all,
+        {
+            "quantizer_name": "*weight_quantizer",
+            "cfg": {
+                "num_bits": 8,
+                "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
+            },
         },
-        "*input_quantizer": {
-            "num_bits": 8,
-            "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
-            "enable": True,
+        {
+            "quantizer_name": "*input_quantizer",
+            "cfg": {
+                "num_bits": 8,
+                "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
+            },
         },
-        **_default_disabled_quantizer_cfg,
-    },
+        *_default_disabled_quantizer_cfg,
+    ],
     "algorithm": None,
 }
 
+# KV-cache configs are designed to be merged with a primary quantization config (e.g.
+# FP8_DEFAULT_CFG) that already contains _base_disable_all.  They intentionally omit both
+# _base_disable_all and "algorithm" because these are provided by the primary config.
 FP8_KV_CFG = {
-    "quant_cfg": {
-        "*[kv]_bmm_quantizer": {
-            "num_bits": (4, 3),
-            "enable": True,
+    "quant_cfg": [
+        {
+            "quantizer_name": "*[kv]_bmm_quantizer",
+            "cfg": {"num_bits": (4, 3)},
         },
-        "default": {"enable": False},
-    },
-    "algorithm": "max",
+    ]
 }
 
 FP8_AFFINE_KV_CFG = {
-    "quant_cfg": {
-        "*[kv]_bmm_quantizer": {
-            "num_bits": (4, 3),
-            "bias": {-2: None, -4: None, "type": "static"},
+    "quant_cfg": [
+        {
+            "quantizer_name": "*[kv]_bmm_quantizer",
+            "cfg": {
+                "num_bits": (4, 3),
+                "bias": {-2: None, -4: None, "type": "static"},
+            },
         },
-        "default": {"enable": False},
-    },
-    "algorithm": "max",
+    ]
 }
 
-_nvfp4_quantizer = {
+_nvfp4_cfg = {
     "num_bits": (2, 1),
     "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
-    "enable": True,
 }
 
-_nvfp4_quantizer_bs32 = {
+_nvfp4_cfg_bs32 = {
     "num_bits": (2, 1),
     "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (4, 3)},
-    "enable": True,
 }
 
 
 def _nvfp4_selective_quant_cfg(
     layer_patterns: list[str],
     *,
-    quantizer: dict = _nvfp4_quantizer,
+    quantizer: dict = _nvfp4_cfg,
     weight_only: bool = False,
     algorithm: str | dict = "max",
 ) -> dict:
     """Build an NVFP4 config that quantizes only the specified layer patterns."""
-    quant_cfg: dict[str, object] = {}
+    quant_cfg: list[QuantizerCfgEntry] = []
+    quant_cfg.extend(_base_disable_all)
     for pattern in layer_patterns:
-        quant_cfg[f"{pattern}weight_quantizer"] = quantizer
+        # Deep-copy the quantizer dict so each config constant gets its own instance.
+        quant_cfg.append(
+            {"quantizer_name": f"{pattern}weight_quantizer", "cfg": copy.deepcopy(quantizer)}
+        )
         if not weight_only:
-            quant_cfg[f"{pattern}input_quantizer"] = quantizer
-    quant_cfg.update(_default_disabled_quantizer_cfg)
+            quant_cfg.append(
+                {"quantizer_name": f"{pattern}input_quantizer", "cfg": copy.deepcopy(quantizer)}
+            )
+    quant_cfg.extend(_default_disabled_quantizer_cfg)
     return {"quant_cfg": quant_cfg, "algorithm": algorithm}
 
 
 NVFP4_DEFAULT_CFG = _nvfp4_selective_quant_cfg(["*"])
 
 NVFP4_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG = {
-    "quant_cfg": {
-        "*weight_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
-            "enable": True,
+    "quant_cfg": [
+        *_base_disable_all,
+        {
+            "quantizer_name": "*weight_quantizer",
+            "cfg": {
+                "num_bits": (2, 1),
+                "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
+            },
         },
-        "*input_quantizer": _nvfp4_quantizer,
-        **_default_disabled_quantizer_cfg,
-    },
+        {"quantizer_name": "*input_quantizer", "cfg": _nvfp4_cfg},
+        *_default_disabled_quantizer_cfg,
+    ],
     "algorithm": {
         "method": "mse",
         "fp8_scale_sweep": True,
@@ -461,15 +608,18 @@ NVFP4_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG = {
 }
 
 NVFP4_W4A4_WEIGHT_LOCAL_HESSIAN_CFG = {
-    "quant_cfg": {
-        "*weight_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
-            "enable": True,
+    "quant_cfg": [
+        *_base_disable_all,
+        {
+            "quantizer_name": "*weight_quantizer",
+            "cfg": {
+                "num_bits": (2, 1),
+                "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
+            },
         },
-        "*input_quantizer": _nvfp4_quantizer,
-        **_default_disabled_quantizer_cfg,
-    },
+        {"quantizer_name": "*input_quantizer", "cfg": _nvfp4_cfg},
+        *_default_disabled_quantizer_cfg,
+    ],
     "algorithm": {
         "method": "local_hessian",
         "fp8_scale_sweep": True,
@@ -477,26 +627,27 @@ NVFP4_W4A4_WEIGHT_LOCAL_HESSIAN_CFG = {
 }
 
 MAMBA_MOE_NVFP4_AGGRESSIVE_CFG = {
-    "quant_cfg": {
-        "*weight_quantizer": _nvfp4_quantizer,
-        "*input_quantizer": _nvfp4_quantizer,
-        **_default_disabled_quantizer_cfg,
-        **_mamba_moe_disabled_quantizer_cfg,
-    },
+    "quant_cfg": [
+        *_base_disable_all,
+        {"quantizer_name": "*weight_quantizer", "cfg": _nvfp4_cfg},
+        {"quantizer_name": "*input_quantizer", "cfg": _nvfp4_cfg},
+        *_default_disabled_quantizer_cfg,
+        *_mamba_moe_disabled_quantizer_cfg,
+    ],
     "algorithm": "max",
 }
 MAMBA_MOE_NVFP4_CONSERVATIVE_CFG = {
-    "quant_cfg": {
-        "*weight_quantizer": _nvfp4_quantizer,
-        "*input_quantizer": _nvfp4_quantizer,
-        **_default_disabled_quantizer_cfg,
-        **_mamba_moe_disabled_quantizer_cfg,
-        "*mixer.in_proj*": {"enable": False},  # Skip mamba linear
-        "*mixer.out_proj*": {"enable": False},  # Skip mamba linear
-    },
+    "quant_cfg": [
+        *_base_disable_all,
+        {"quantizer_name": "*weight_quantizer", "cfg": _nvfp4_cfg},
+        {"quantizer_name": "*input_quantizer", "cfg": _nvfp4_cfg},
+        *_default_disabled_quantizer_cfg,
+        *_mamba_moe_disabled_quantizer_cfg,
+        {"quantizer_name": "*mixer.in_proj*", "enable": False},  # Skip mamba linear
+        {"quantizer_name": "*mixer.out_proj*", "enable": False},  # Skip mamba linear
+    ],
     "algorithm": "max",
 }
-
 
 NVFP4_AWQ_LITE_CFG = _nvfp4_selective_quant_cfg(["*"], algorithm="awq_lite")
 
@@ -506,64 +657,87 @@ NVFP4_AWQ_FULL_CFG = _nvfp4_selective_quant_cfg(
     ["*"], algorithm={"method": "awq_full", "alpha_step": 0.1}
 )
 
-
+# See comment above FP8_KV_CFG — KV-cache configs omit _base_disable_all and "algorithm".
 NVFP4_AFFINE_KV_CFG = {
-    "quant_cfg": {
-        "*[kv]_bmm_quantizer": {
-            **_nvfp4_quantizer,
-            "bias": {-2: None, -4: None, "type": "static"},
+    "quant_cfg": [
+        {
+            "quantizer_name": "*[kv]_bmm_quantizer",
+            "cfg": {
+                **_nvfp4_cfg,
+                "bias": {-2: None, -4: None, "type": "static"},
+            },
         },
-        "default": {"enable": False},
-    },
-    "algorithm": "max",
+    ]
 }
 
 NVFP4_KV_CFG = {
-    "quant_cfg": {
-        "*[kv]_bmm_quantizer": _nvfp4_quantizer,
-        "default": {"enable": False},
-    },
-    "algorithm": "max",
+    "quant_cfg": [
+        {"quantizer_name": "*[kv]_bmm_quantizer", "cfg": _nvfp4_cfg},
+    ]
 }
 
 # Moved from examples/diffusers/quantization/config.py to here
 NVFP4_FP8_MHA_CONFIG = {
-    "quant_cfg": {
-        "*weight_quantizer": _nvfp4_quantizer,
-        "*input_quantizer": _nvfp4_quantizer,
-        "*output_quantizer": {"enable": False},
-        "*q_bmm_quantizer": {
-            "num_bits": (4, 3),
+    "quant_cfg": [
+        *_base_disable_all,
+        {"quantizer_name": "*weight_quantizer", "cfg": _nvfp4_cfg},
+        {"quantizer_name": "*input_quantizer", "cfg": _nvfp4_cfg},
+        {"quantizer_name": "*output_quantizer", "enable": False},
+        {
+            "quantizer_name": "*q_bmm_quantizer",
+            "cfg": {
+                "num_bits": (4, 3),
+            },
         },
-        "*k_bmm_quantizer": {
-            "num_bits": (4, 3),
+        {
+            "quantizer_name": "*k_bmm_quantizer",
+            "cfg": {
+                "num_bits": (4, 3),
+            },
         },
-        "*v_bmm_quantizer": {
-            "num_bits": (4, 3),
+        {
+            "quantizer_name": "*v_bmm_quantizer",
+            "cfg": {
+                "num_bits": (4, 3),
+            },
         },
-        "*softmax_quantizer": {
-            "num_bits": (4, 3),
+        {
+            "quantizer_name": "*softmax_quantizer",
+            "cfg": {
+                "num_bits": (4, 3),
+            },
         },
-        "transformer_blocks*bmm2_output_quantizer": {
-            "num_bits": (4, 3),
+        {
+            "quantizer_name": "transformer_blocks*bmm2_output_quantizer",
+            "cfg": {
+                "num_bits": (4, 3),
+            },
         },
-        "default": {"enable": False},
-    },
+    ],
     "algorithm": "max",
 }
 
+# See comment above FP8_KV_CFG — KV-cache configs omit _base_disable_all and "algorithm".
 NVFP4_KV_ROTATE_CFG = {
-    "quant_cfg": {
-        "*q_bmm_quantizer": {
+    "quant_cfg": [
+        {
+            # q_bmm is disabled but pre-configured with rotate=True so that downstream
+            # code can inspect the rotate flag even while the quantizer is off.
+            "quantizer_name": "*q_bmm_quantizer",
+            "cfg": {
+                "rotate": True,
+            },
             "enable": False,
-            "rotate": True,
         },
-        "*k_bmm_quantizer": {
-            **_nvfp4_quantizer,
-            "rotate": True,
+        {
+            "quantizer_name": "*k_bmm_quantizer",
+            "cfg": {
+                **_nvfp4_cfg,
+                "rotate": True,
+            },
         },
-        "*v_bmm_quantizer": _nvfp4_quantizer,
-    },
+        {"quantizer_name": "*v_bmm_quantizer", "cfg": _nvfp4_cfg},
+    ],
     "algorithm": "max",
 }
 
@@ -572,40 +746,50 @@ NVFP4_SVDQUANT_DEFAULT_CFG = _nvfp4_selective_quant_cfg(
 )
 
 W4A8_NVFP4_FP8_CFG = {
-    "quant_cfg": {
-        "*weight_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (4, 3)},
-            "enable": True,
+    "quant_cfg": [
+        *_base_disable_all,
+        {
+            "quantizer_name": "*weight_quantizer",
+            "cfg": {
+                "num_bits": (2, 1),
+                "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (4, 3)},
+            },
         },
-        "*input_quantizer": {
-            "num_bits": (4, 3),
-            "enable": True,
+        {
+            "quantizer_name": "*input_quantizer",
+            "cfg": {
+                "num_bits": (4, 3),
+            },
         },
-        **_default_disabled_quantizer_cfg,
-    },
+        *_default_disabled_quantizer_cfg,
+    ],
     "algorithm": "max",
 }
 
 MXFP4_MLP_WEIGHT_ONLY_CFG = {
-    "quant_cfg": {
-        "*mlp*weight_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
-            "enable": True,
+    "quant_cfg": [
+        *_base_disable_all,
+        {
+            "quantizer_name": "*mlp*weight_quantizer",
+            "cfg": {
+                "num_bits": (2, 1),
+                "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
+            },
         },
-        "*block_sparse_moe*weight_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
-            "enable": True,
+        {
+            "quantizer_name": "*block_sparse_moe*weight_quantizer",
+            "cfg": {
+                "num_bits": (2, 1),
+                "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
+            },
         },
-        **_default_disabled_quantizer_cfg,
-    },
+        *_default_disabled_quantizer_cfg,
+    ],
     "algorithm": None,
 }
 
 NVFP4_MLP_WEIGHT_ONLY_CFG = _nvfp4_selective_quant_cfg(
-    ["*mlp*", "*block_sparse_moe*"], quantizer=_nvfp4_quantizer_bs32, weight_only=True
+    ["*mlp*", "*block_sparse_moe*"], quantizer=_nvfp4_cfg_bs32, weight_only=True
 )
 NVFP4_EXPERTS_ONLY_CFG = _nvfp4_selective_quant_cfg(["*mlp.experts*", "*block_sparse_moe*"])
 NVFP4_MLP_ONLY_CFG = _nvfp4_selective_quant_cfg(["*mlp*", "*block_sparse_moe*"])
@@ -1346,23 +1530,150 @@ class GPTQLiteConfig(QuantizeAlgorithmConfig):
     )
 
 
-QuantizeQuantCfgType = dict[
-    str | Callable,
-    QuantizerAttributeConfig
-    | list[QuantizerAttributeConfig]
-    | dict[str | Callable, QuantizerAttributeConfig | list[QuantizerAttributeConfig]],
-]
+QuantizeQuantCfgType = list[QuantizerCfgEntry]
 
 _QuantizeAlgoCfgType = str | dict | QuantizeAlgorithmConfig | None
 
 QuantizeAlgoCfgType = _QuantizeAlgoCfgType | list[_QuantizeAlgoCfgType] | None
 
 
+def normalize_quant_cfg_list(v: dict | list) -> list[QuantizerCfgEntry]:
+    """Normalize a raw quant_cfg into a list of :class:`QuantizerCfgEntry` dicts.
+
+    Supports the following input forms:
+
+    - A ``list`` of entries in any of the per-entry forms below.
+    - A legacy flat ``dict`` (``{"*": ..., "*weight_quantizer": ...}``) — each key/value pair is
+      converted to a single-key dict entry and then normalized.
+
+    Per-entry forms (when input is a list):
+
+    - New format: ``{"quantizer_name": ..., "enable": ..., "cfg": ...}`` — passed through.
+    - Legacy single-key format: ``{"<quantizer_name>": <cfg_or_dict>}`` — converted to new format.
+    - Legacy ``nn.*``-scoped format: ``{"nn.<Class>": {"<quantizer_name>": <cfg>}}`` — converted
+      to a new-format entry with ``parent_class`` set.
+
+    **Validation** — an entry is rejected if it carries no instruction, i.e. it specifies neither
+    ``cfg`` nor ``enable``.  Concretely, the following are invalid:
+
+    - An empty entry ``{}``.
+    - An entry with only ``quantizer_name`` and no other keys — the only effect would be an
+      implicit ``enable=True``, which must be stated explicitly.
+
+    **Normalization** — after conversion and validation every entry is put into canonical form:
+
+    - ``enable`` is set to ``True`` if not explicitly specified.
+    - ``cfg`` is set to ``None`` if not present in the entry.
+
+    Every returned entry is therefore guaranteed to have the keys ``quantizer_name``, ``enable``,
+    and ``cfg`` (plus optionally ``parent_class``).
+
+    Args:
+        v: A list of raw quant_cfg entries in any supported format, or a legacy flat dict.
+
+    Returns:
+        A list of :class:`QuantizerCfgEntry` dicts in canonical normalized form.
+
+    Raises:
+        ValueError: If any entry has only ``quantizer_name`` with neither ``cfg`` nor ``enable``,
+            or if the entry format is not recognized.
+    """
+
+    def _warn_legacy():
+        warnings.warn(
+            "Passing quant_cfg in the legacy dict format is deprecated and will be removed in "
+            "a future release. Use the list-of-dicts format with explicit 'quantizer_name' "
+            "keys instead. See the quant_cfg documentation for the new format and migration "
+            "guide.",
+            DeprecationWarning,
+            stacklevel=4,
+        )
+
+    # Legacy flat-dict format: {"*": {...}, "*weight_quantizer": {...}} → list of single-key dicts.
+    if isinstance(v, dict):
+        _warn_legacy()
+        v = [{k: val} for k, val in v.items()]
+
+    def _dict_to_entry(key: str, value) -> list[QuantizerCfgEntry]:
+        """Convert a single legacy key-value pair to one or more QuantizerCfgEntry dicts."""
+        # Legacy "default" key was a catch-all applied as "*" in the old conversion code.
+        if key == "default":
+            key = "*"
+
+        if isinstance(key, str) and key.startswith("nn."):
+            if not isinstance(value, dict):
+                raise ValueError(f"For 'nn.*' scoped format, value must be a dict, got {value!r}")
+            # Support multi-key nn.*-scoped dicts by emitting one entry per sub-key.
+            entries: list[QuantizerCfgEntry] = []
+            for q_path, sub_cfg in value.items():
+                sub_cfg = dict(sub_cfg)
+                enable = sub_cfg.pop("enable", None)
+                cfg = sub_cfg or None
+                entry: QuantizerCfgEntry = {
+                    "parent_class": key,
+                    "quantizer_name": q_path,
+                    "cfg": cfg,
+                }
+                if enable is not None:
+                    entry["enable"] = enable
+                entries.append(entry)
+            return entries
+        else:
+            if isinstance(value, dict):
+                cfg = {k: val for k, val in value.items() if k != "enable"} or None
+                enable = value.get("enable")
+            else:
+                cfg = value
+                enable = None
+            entry = {"quantizer_name": key, "cfg": cfg}
+            if enable is not None:
+                entry["enable"] = enable
+            return [entry]
+
+    result: list[QuantizerCfgEntry] = []
+    _warned_legacy = False
+    for raw in v:
+        if isinstance(raw, dict) and "quantizer_name" in raw:
+            entries = [dict(raw)]  # copy to avoid mutating caller's data
+        elif isinstance(raw, dict) and len(raw) == 1:
+            key, val = next(iter(raw.items()))
+            entries = [dict(e) for e in _dict_to_entry(key, val)]
+            if not _warned_legacy:
+                _warn_legacy()
+                _warned_legacy = True
+        elif isinstance(raw, dict) and len(raw) > 1 and any(k.startswith("nn.") for k in raw):
+            # Legacy flat dict with nn.*-scoped keys mixed with other keys — expand all pairs.
+            entries = []
+            for k, val in raw.items():
+                entries.extend(dict(e) for e in _dict_to_entry(k, val))
+            if not _warned_legacy:
+                _warn_legacy()
+                _warned_legacy = True
+        else:
+            raise ValueError(f"Invalid quant_cfg entry: {raw!r}.")
+
+        for entry in entries:
+            # Validate: must carry at least one instruction beyond the path selector.
+            if "cfg" not in entry and "enable" not in entry:
+                raise ValueError(
+                    f"Invalid quant_cfg entry: {raw!r} — each entry must specify 'cfg', 'enable', "
+                    "or both. An entry with only 'quantizer_name' has no effect (implicit "
+                    "enable=True is not allowed; set it explicitly)."
+                )
+
+            # Normalize: make enable and cfg always explicit.
+            entry.setdefault("enable", True)
+            entry.setdefault("cfg", None)
+
+            result.append(cast("QuantizerCfgEntry", entry))
+    return result
+
+
 class QuantizeConfig(ModeloptBaseConfig):
     """Default configuration for ``quantize`` mode."""
 
     quant_cfg: QuantizeQuantCfgType = ModeloptField(
-        default={"default": {"num_bits": 8, "axis": None}},
+        default=[{"quantizer_name": "*", "cfg": {"num_bits": 8, "axis": None}}],
         title="Quantization configuration",
         validate_default=True,
     )
@@ -1373,6 +1684,29 @@ class QuantizeConfig(ModeloptBaseConfig):
         "for more details.",
         validate_default=True,
     )
+
+    @field_validator("quant_cfg", mode="before")
+    @classmethod
+    def normalize_quant_cfg(cls, v):
+        """Normalize quant_cfg entries: convert dict and tuple forms to QuantizerCfgEntry dicts."""
+        if not isinstance(v, (list, dict)):
+            return v
+        return normalize_quant_cfg_list(v)
+
+    @field_validator("quant_cfg", mode="after")
+    @classmethod
+    def validate_quant_cfg_entries(cls, v):
+        """Validate quantizer attribute configs to surface errors (e.g. invalid axis/block_sizes)."""
+        qac_fields = set(QuantizerAttributeConfig.model_fields.keys())
+        for entry in v:
+            cfg = entry.get("cfg")
+            if cfg is None:
+                continue
+            cfgs = cfg if isinstance(cfg, list) else [cfg]
+            for c in cfgs:
+                if isinstance(c, dict) and qac_fields & set(c.keys()):
+                    QuantizerAttributeConfig.model_validate(c)
+        return v
 
 
 class CompressConfig(ModeloptBaseConfig):
@@ -1404,24 +1738,26 @@ def need_calibration(config):
         return True
 
     def _not_dynamic(cfg):
-        return (
-            cfg.get("enable", True)
-            and cfg.get("type", "") != "dynamic"
-            and cfg.get("*", {}).get("enable", True)
-        )
+        return cfg.get("enable", True) and cfg.get("type", "") != "dynamic"
 
-    for name, cfg in config.get("quant_cfg", {}).items():
+    quant_cfg: list = config.get("quant_cfg") or []
+    quant_cfg = normalize_quant_cfg_list(quant_cfg)
+    for entry in quant_cfg:
+        name = entry["quantizer_name"]
+        raw_cfg = entry.get("cfg")
         if "weight_quantizer" in name:
             # We don't calibrate weight quantizer
             continue
-        # quantization like W4A8 has a list of weight quantizers
-        if isinstance(cfg, list):
-            for _config in cfg:
+        # Sequential quantizers (e.g. W4A8) have a list of cfg dicts
+        if isinstance(raw_cfg, list):
+            for _config in raw_cfg:
                 if _not_dynamic(_config):
-                    print(f"{cfg}: True")
                     return True
-        elif _not_dynamic(cfg):
-            print(f"{cfg}: True")
+            continue
+        cfg = dict(raw_cfg or {})
+        if "enable" in entry:
+            cfg["enable"] = entry["enable"]
+        if _not_dynamic(cfg):
             return True
 
     return False

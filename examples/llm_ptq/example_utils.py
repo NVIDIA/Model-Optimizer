@@ -211,7 +211,12 @@ def build_quant_cfg(
 ) -> dict[str, Any]:
     quant_cfg = copy.deepcopy(quant_cfg)
     if "awq" in str(quant_cfg.get("algorithm")):
-        weight_quantizer = quant_cfg["quant_cfg"]["*weight_quantizer"]
+        from modelopt.torch.quantization.config import find_quant_cfg_entry_by_path
+
+        weight_quantizer_entry = find_quant_cfg_entry_by_path(
+            quant_cfg["quant_cfg"], "*weight_quantizer"
+        )
+        weight_quantizer = weight_quantizer_entry.get("cfg") or {}
         if isinstance(weight_quantizer, list):
             weight_quantizer = weight_quantizer[0]
         # If awq_block_size argument is provided, update weight_quantizer
@@ -242,10 +247,10 @@ def build_quant_cfg(
 
     if model_type == "phi4mm":
         # Only quantize the language model
-        quant_cfg["quant_cfg"]["*speech*"] = {"enable": False}
-        quant_cfg["quant_cfg"]["*audio*"] = {"enable": False}
-        quant_cfg["quant_cfg"]["*image*"] = {"enable": False}
-        quant_cfg["quant_cfg"]["*vision*"] = {"enable": False}
+        quant_cfg["quant_cfg"].append({"quantizer_name": "*speech*", "enable": False})
+        quant_cfg["quant_cfg"].append({"quantizer_name": "*audio*", "enable": False})
+        quant_cfg["quant_cfg"].append({"quantizer_name": "*image*", "enable": False})
+        quant_cfg["quant_cfg"].append({"quantizer_name": "*vision*", "enable": False})
 
     return quant_cfg
 
@@ -370,6 +375,11 @@ def load_mtp_weights(
         mtp_layer_prefixes = set()
         for key in keys:
             parts = key.split(".")
+            # Capture the top-level MTP module prefix (e.g., "mtp" from "mtp.fc.weight")
+            # so that non-layer MTP weights like mtp.fc, mtp.norm are also excluded
+            if parts:
+                mtp_layer_prefixes.add(parts[0])
+            # Also capture specific layer prefixes (e.g., "mtp.layers.0")
             for i, part in enumerate(parts):
                 if part == "layers" and i + 1 < len(parts) and parts[i + 1].isdigit():
                     prefix = ".".join(parts[: i + 2])
@@ -649,7 +659,7 @@ def get_model(
                 auto_model_module = getattr(transformers, architecture)
                 from_config = auto_model_module._from_config
 
-            with init_empty_weights():
+            with init_empty_weights(include_buffers=True):
                 # When computing the device_map, assuming bfloat16 precision by default,
                 # unless specified by the hf_config.
                 torch_dtype = getattr(hf_config, "torch_dtype", torch.bfloat16)

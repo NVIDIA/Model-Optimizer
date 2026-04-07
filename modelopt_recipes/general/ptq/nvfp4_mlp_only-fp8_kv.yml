@@ -16,71 +16,76 @@
 metadata:
   recipe_type: ptq
   description: NVFP4 static weight and dynamic activation for all linear layers (W4A4), FP8 KV cache, max calibration.
-ptq_cfg:
+quantize:
   algorithm: max
   quant_cfg:
-    '*mlp*weight_quantizer':
-      block_sizes:
-        -1: 16
-        type: dynamic
-        scale_bits: e4m3
-      num_bits: e2m1
+    - quantizer_name: '*'
+      enable: false
+    - quantizer_name: '*mlp*weight_quantizer'
       enable: true
-    '*mlp*input_quantizer':
-      block_sizes:
-        -1: 16
-        type: dynamic
-        scale_bits: e4m3
-      num_bits: e2m1
+      cfg:
+        block_sizes:
+          -1: 16
+          type: dynamic
+          scale_bits: e4m3
+        num_bits: e2m1
+    - quantizer_name: '*mlp*input_quantizer'
       enable: true
-    '*block_sparse_moe*weight_quantizer':
-      block_sizes:
-        -1: 16
-        type: dynamic
-        scale_bits: e4m3
-      num_bits: e2m1
+      cfg:
+        block_sizes:
+          -1: 16
+          type: dynamic
+          scale_bits: e4m3
+        num_bits: e2m1
+    - quantizer_name: '*block_sparse_moe*weight_quantizer'
       enable: true
-    '*block_sparse_moe*input_quantizer':
-      block_sizes:
-        -1: 16
-        type: dynamic
-        scale_bits: e4m3
-      num_bits: e2m1
+      cfg:
+        block_sizes:
+          -1: 16
+          type: dynamic
+          scale_bits: e4m3
+        num_bits: e2m1
+    - quantizer_name: '*block_sparse_moe*input_quantizer'
       enable: true
-    default:
-      enable: false
-    '*block_sparse_moe.gate*':
-      enable: false
-    '*linear_attn.conv1d*':
-      enable: false
-    '*lm_head*':
-      enable: false
-    '*mixer.conv1d*':
-      enable: false
-    '*mlp.gate.*':
-      enable: false
-    '*mlp.shared_expert_gate.*':
-      enable: false
-    '*output_layer*':
-      enable: false
-    '*proj_out.*':
-      enable: false
-    '*router*':
-      enable: false
-    output.*:
-      enable: false
-    nn.BatchNorm1d:
-      '*':
-        enable: false
-    nn.BatchNorm2d:
-      '*':
-        enable: false
-    nn.BatchNorm3d:
-      '*':
-        enable: false
-    nn.LeakyReLU:
-      '*':
-        enable: false
-    '*[kv]_bmm_quantizer':
-      num_bits: e4m3
+      cfg:
+        block_sizes:
+          -1: 16
+          type: dynamic
+          scale_bits: e4m3
+        num_bits: e2m1
+    - quantizer_name: '*[kv]_bmm_quantizer'
       enable: true
+      cfg:
+        num_bits: e4m3
+    - quantizer_name: '*block_sparse_moe.gate*'
+      enable: false
+    - quantizer_name: '*linear_attn.conv1d*'
+      enable: false
+    - quantizer_name: '*lm_head*'
+      enable: false
+    - quantizer_name: '*mixer.conv1d*'
+      enable: false
+    - quantizer_name: '*mlp.gate.*'
+      enable: false
+    - quantizer_name: '*mlp.shared_expert_gate.*'
+      enable: false
+    - quantizer_name: '*output_layer*'
+      enable: false
+    - quantizer_name: '*proj_out.*'
+      enable: false
+    - quantizer_name: '*router*'
+      enable: false
+    - quantizer_name: 'output.*'
+      enable: false
+    - parent_class: 'nn.BatchNorm1d'
+      quantizer_name: '*'
+      enable: false
+    - parent_class: 'nn.BatchNorm2d'
+      quantizer_name: '*'
+      enable: false
+    - parent_class: 'nn.BatchNorm3d'
+      quantizer_name: '*'
+      enable: false
+    - parent_class: 'nn.LeakyReLU'
+      quantizer_name: '*'
+      enable: false

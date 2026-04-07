@@ -564,11 +564,9 @@ class HFEagleModel(EagleModel):
 
         # Populate base-model-dependent fields before constructing PretrainedConfig,
         # since transformers >=5.4 validates rope_scaling during __init__.
-        arch_config.setdefault("hidden_size", self._base_llm_config.hidden_size)
-        arch_config.setdefault("vocab_size", self._base_llm_config.vocab_size)
-        arch_config.setdefault(
-            "max_position_embeddings", self._base_llm_config.max_position_embeddings
-        )
+        arch_config["hidden_size"] = self._base_llm_config.hidden_size
+        arch_config["vocab_size"] = self._base_llm_config.vocab_size
+        arch_config["max_position_embeddings"] = self._base_llm_config.max_position_embeddings
         rope_scaling = arch_config.get("rope_scaling")
         if rope_scaling and "rope_theta" not in rope_scaling and "rope_theta" in arch_config:
             rope_scaling["rope_theta"] = arch_config["rope_theta"]
@@ -944,7 +942,7 @@ class HFEagleModel(EagleModel):
                 base_outputs,
             )
 
-        self.eagle_module._maybe_init_rope(device=input_ids.device)
+        self.eagle_module._maybe_init_rope(device=eagle_input_hiddens.device)
 
         # ====Run eagle forward with extra training-time-test steps====
         for ttt_step in range(self.eagle_ttt_steps):
