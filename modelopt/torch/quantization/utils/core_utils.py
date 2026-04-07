@@ -28,7 +28,7 @@ from torch.distributed.fsdp._fully_shard._fsdp_param import FSDPParam
 from torch.distributed.tensor import Replicate
 
 from modelopt.torch.quantization.config import QuantizerCfgEntry
-from modelopt.torch.quantization.nn import NVFP4StaticQuantizer, TensorQuantizer
+from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.utils import get_unwrapped_name, print_rank_0
 
 if TYPE_CHECKING:
@@ -866,6 +866,8 @@ def promote_nvfp4_static_quantizers(model: nn.Module) -> int:
 
     Returns the number of quantizers converted.
     """
+    from modelopt.torch.quantization.nn import NVFP4StaticQuantizer
+
     converted = 0
     for _name, module in list(model.named_modules()):
         if isinstance(module, TensorQuantizer) and not module._disabled:
