@@ -31,6 +31,7 @@ from megatron.core.transformer.module import Float16Module
 import modelopt
 import modelopt.torch.opt as mto
 import modelopt.torch.utils.distributed as dist
+from modelopt.torch.utils import safe_load
 from modelopt.torch.utils.network import SUPPORTED_WRAPPERS
 
 SUPPORTED_WRAPPERS[Float16Module] = "module"
@@ -203,10 +204,7 @@ def restore_sharded_modelopt_state(
         return
 
     # Loading the common modelopt_state (replicated on all ranks)
-    # Security NOTE: weights_only=False is used here on NVIDIA-generated file, not on untrusted user input
-    common_modelopt_state = torch.load(
-        modelopt_checkpoint_name + "/" + COMMON_STATE_FNAME, weights_only=False
-    )
+    common_modelopt_state = safe_load(modelopt_checkpoint_name + "/" + COMMON_STATE_FNAME)
 
     modelopt_load_version = common_modelopt_state["modelopt_version"]
 

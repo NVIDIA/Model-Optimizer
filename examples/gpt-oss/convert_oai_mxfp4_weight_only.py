@@ -98,9 +98,8 @@ def create_parser():
     parser.add_argument("--model_path", type=str, help="path to the fake-quantized model from QAT.")
     parser.add_argument(
         "--trust_remote_code",
-        help="Set trust_remote_code for Huggingface models and tokenizers",
-        default=False,
         action="store_true",
+        help="Set trust_remote_code for Huggingface models and tokenizers",
     )
     parser.add_argument(
         "--lora_path",

@@ -161,9 +161,8 @@ def main():
     )
     p.add_argument(
         "--trust_remote_code",
-        help="Set trust_remote_code for Huggingface models and tokenizers",
-        default=False,
         action="store_true",
+        help="Set trust_remote_code for Huggingface models and tokenizers",
     )
     args = p.parse_args()
 

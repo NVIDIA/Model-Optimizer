@@ -57,9 +57,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--trust_remote_code",
-        help="Set trust_remote_code for Huggingface models and tokenizers",
-        default=False,
         action="store_true",
+        help="Set trust_remote_code for Huggingface models and tokenizers",
     )
     ## Client Parameters ##
     parser.add_argument(
