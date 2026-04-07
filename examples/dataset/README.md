@@ -69,7 +69,7 @@ The `generate` mode produces conversation skeletons that are fed to a target mod
 via `tools/launcher/common/query.py` (vLLM or TRT-LLM).  The output becomes training
 data for a draft model (e.g. EAGLE3 speculative decoding) or a distilled student:
 
-```
+```text
 make_nemotron_ptv3_dataset.py --mode generate  →  skeleton.jsonl
         ↓
 query.py  (target model generates responses turn-by-turn)
