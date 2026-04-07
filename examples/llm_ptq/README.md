@@ -180,7 +180,7 @@ python hf_ptq.py \
   --export_path <quantized_ckpt_path>
 ```
 
-Built-in recipes are located in `modelopt_recipes/general/ptq/`. See the [recipe documentation](https://nvidia.github.io/Model-Optimizer) for details on the YAML schema and available recipes.
+Built-in recipes are located in `modelopt_recipes/general/ptq/`. You can also provide a path to your own custom YAML recipe file or directory. See the [recipe documentation](https://nvidia.github.io/Model-Optimizer) for details on the YAML schema and available recipes.
 
 > *When `--recipe` is specified, `--qformat` and `--kv_cache_qformat` are ignored. The recipe fully defines the quantization configuration.*
 
