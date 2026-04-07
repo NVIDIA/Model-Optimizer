@@ -22,6 +22,7 @@ import safetensors.torch
 import torch
 from _test_utils.examples.run_command import run_example_command
 from packaging.version import Version
+from transformers import AutoConfig
 
 from modelopt.torch.export.plugins.hf_spec_export import LLAMA_EAGLE_SINGLE_LAYER
 
@@ -105,11 +106,11 @@ def test_llama_eagle3(tiny_llama_path,
                       tiny_daring_anteater_path,
                       tmp_path, eagle_output_dir,
                       cp_size,
-                      mix_hidden_states):
+                      mix_hidden_states,
+                      num_gpus):
     """Test Eagle3 training with a tiny llama model, using different cp_size values."""
-    available_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
-    if cp_size == 2 and available_gpus < 2:
-        pytest.skip("cp_size=2 requires at least 2 GPUs, but only {} found.".format(available_gpus))
+    if cp_size == 2 and num_gpus < 2:
+        pytest.skip("cp_size=2 requires at least 2 GPUs, but only {} found.".format(num_gpus))
     if cp_size == 2 and not Version(torch.__version__) >= Version("2.10.0"):
         pytest.skip("cp_size=2 requires torch 2.10.0")
     # Create an ultra-tiny EAGLE config for testing to reduce memory usage
@@ -210,8 +211,14 @@ def test_convert_to_vllm_ckpt(tiny_llama_path, eagle_output_dir):
     [
         (None, False),                       # tiny_llama (from fixture), no FakeBase
         ("moonshotai/Kimi-K2.5", True),      # remote HF repo, FakeBaseModel
-        ("moonshotai/Kimi-K2-Thinking", True),     # remote HF repo, no FakeBaseModel
-        ("MiniMaxAI/MiniMax-M2.5", True),
+        pytest.param(
+            "moonshotai/Kimi-K2-Thinking", True,   # remote HF repo, no FakeBaseModel
+            marks=pytest.mark.manual(reason="skip redundand test, too slow"),
+        ),
+        pytest.param(
+            "MiniMaxAI/MiniMax-M2.5", True,
+            marks=pytest.mark.manual(reason="skip redundand test, too slow"),
+        ),
     ],
     ids=["tinyllama", "kimi-k2.5","kimi-k2-thinking","minimax-m2.5"],
 )
@@ -220,16 +227,12 @@ def test_offline_eagle3_training(
     model_source, use_fake_base,
 ):
     """Test Eagle3 training with pre-computed hidden states (offline mode / FakeBaseModel)."""
-    import transformers
-
     model_path = tiny_llama_path if model_source is None else model_source
     model_id = "tinyllama" if model_source is None else model_source.split("/")[-1]
     output_subdir = eagle_output_dir / f"eagle-{model_id}-offline"
 
-    cfg = transformers.AutoConfig.from_pretrained(model_path, trust_remote_code=True)
-
-    if model_source=="moonshotai/Kimi-K2.5":
-        #vlm, get text config
+    cfg = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+    if hasattr(cfg, "text_config"):  # vlm: get text_config
         cfg = cfg.text_config
 
     offline_data_dir = generate_offline_pt_data(
@@ -277,10 +280,8 @@ def test_offline_resume_training_kimi(tiny_daring_anteater_path, tmp_path, eagle
     Depends on test_offline_eagle3_training["kimi-k2.5"] having run first.
     Exercises AutoModelForCausalLM.from_pretrained with model_type='fake_base_model'.
     """
-    import transformers
-
     checkpoint_dir = eagle_output_dir / "eagle-Kimi-K2.5-offline"
-    config = transformers.AutoConfig.from_pretrained(checkpoint_dir, trust_remote_code=True)
+    config = AutoConfig.from_pretrained(checkpoint_dir, trust_remote_code=True)
 
     offline_data_dir = generate_offline_pt_data(
         tmp_path / "offline_data_resume",

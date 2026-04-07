@@ -38,6 +38,7 @@
 # limitations under the License.
 import warnings
 
+import datasets
 from lm_eval import utils
 from lm_eval.__main__ import cli_evaluate, parse_eval_args, setup_parser
 from lm_eval.api.model import T
@@ -180,8 +181,6 @@ if __name__ == "__main__":
     model_args = utils.simple_parse_args_string(args.model_args)
 
     if args.trust_remote_code:
-        import datasets
-
         datasets.config.HF_DATASETS_TRUST_REMOTE_CODE = True
         model_args["trust_remote_code"] = True
         args.trust_remote_code = None

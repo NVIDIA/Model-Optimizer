@@ -245,7 +245,6 @@ def _gpt_model_provider(
     meta_device=False,
     ep_size=1,
     etp_size=None,
-    use_te=False,
     transformer_impl="local",
     # Hybrid mamba MOE parameters
     is_hybrid=False,
@@ -291,7 +290,6 @@ def _gpt_model_provider(
                 use_cpu_initialization=meta_device,
                 num_moe_experts=num_moe_experts,
                 moe_grouped_gemm=moe_grouped_gemm,
-                use_te=use_te,
             )
 
     if not meta_device:
@@ -315,7 +313,6 @@ def _test_sharded_state_dict(
     etp_size = model_config.get("etp_size", None)
     num_moe_experts = model_config.get("num_moe_experts", None)
     moe_grouped_gemm = model_config.get("moe_grouped_gemm", False)
-    use_te = model_config.get("use_te", False)
     transformer_impl = model_config.get("transformer_impl", "local")
     # Hybrid mamba MOE parameters
     is_hybrid = model_config.get("is_hybrid", False)
@@ -334,7 +331,6 @@ def _test_sharded_state_dict(
         vocab_size=256,
         num_moe_experts=num_moe_experts,
         moe_grouped_gemm=moe_grouped_gemm,
-        use_te=use_te,
         ep_size=ep_size,
         etp_size=etp_size,
         transformer_impl=transformer_impl,
@@ -347,7 +343,6 @@ def _test_sharded_state_dict(
         vocab_size=256,
         num_moe_experts=num_moe_experts,
         moe_grouped_gemm=moe_grouped_gemm,
-        use_te=use_te,
         meta_device=meta_device,
         ep_size=ep_size,
         etp_size=etp_size,
@@ -453,8 +448,6 @@ def test_homogeneous_sharded_state_dict(
             )
 
     model_config = {"transformer_impl": transformer_impl}
-    if transformer_impl == "modelopt":
-        model_config["use_te"] = True
     dist_workers.run(
         partial(
             _test_sharded_state_dict,
@@ -589,25 +582,27 @@ def test_fp8_real_quantize(dist_workers):
     dist_workers.run(_test_fp8_real_quantize_helper)
 
 
-@pytest.mark.skip(reason="TODO: etp requires sequence parallelism now in Megatron due to a bug;")
+# TODO: etp requires sequence parallelism now in Megatron due to a bug
 @pytest.mark.parametrize(
     "config",
     [mtq.FP8_DEFAULT_CFG, mtq.NVFP4_DEFAULT_CFG, mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG],
 )
 @pytest.mark.parametrize("moe_grouped_gemm", [True, False])
 def test_moe_sharded_state_dict(dist_workers, need_4_gpus, tmp_path, config, moe_grouped_gemm):
-    if moe_grouped_gemm:
-        pytest.skip("TEGroupedMLP is not enabled in Megatron-LM currently")
+    if config == mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG and moe_grouped_gemm:
+        pytest.skip("TEGroupedMLP only supports per-tensor quantization.")
+
     # TODO: Add support for compress=True for TEGroupedMLP
     moe_config = {
         "tp_size": 2,
         "ep_size": 2,
-        "etp_size": 2,
+        "etp_size": 1,
         "num_moe_experts": 4,
         "moe_grouped_gemm": moe_grouped_gemm,
-        "use_te": moe_grouped_gemm,
-        "transformer_impl": "modelopt",
+        "transformer_impl": "transformer_engine" if moe_grouped_gemm else "modelopt",
     }
+    if not moe_grouped_gemm:
+        moe_config["tp_size"] = 1  # TODO: TP+EP is not supported by QuantSequentialMLP
     dist_workers.run(
         partial(
             _test_sharded_state_dict,
@@ -622,12 +617,11 @@ def test_moe_sharded_state_dict(dist_workers, need_4_gpus, tmp_path, config, moe
     )
 
 
-def _test_te_grouped_vs_sequential_quantize_helper(tp_size, ep_size, etp_size, rank, size):
+def _test_te_grouped_vs_sequential_quantize_helper(tp_size, ep_size, quant_cfg, rank, size):
     """Test that TEGrouped and sequential MoE models produce similar amax values."""
     initialize_for_megatron(
         tensor_model_parallel_size=tp_size,
         expert_model_parallel_size=ep_size,
-        expert_tensor_parallel_size=etp_size,
         seed=SEED,
     )
 
@@ -635,28 +629,26 @@ def _test_te_grouped_vs_sequential_quantize_helper(tp_size, ep_size, etp_size, r
     te_grouped_moe_model = _gpt_model_provider(
         tp_size=tp_size,
         ep_size=ep_size,
-        etp_size=etp_size,
         hidden_size=32,
         moe_grouped_gemm=True,
-        use_te=True,
+        transformer_impl="transformer_engine",
         num_moe_experts=4,
     )
 
     # Create forward function with cached inputs
-    forward = get_forward(te_grouped_moe_model)
+    forward = get_forward(te_grouped_moe_model, batch_size=8)
 
     num_te_grouped_mlp = sum(
         isinstance(module, TEGroupedMLP) for module in te_grouped_moe_model.modules()
     )
     assert num_te_grouped_mlp == 4, (
-        f"TEGrupedMoEModel has {num_te_grouped_mlp} TEGroupedMLP modules, it should have 4"
+        f"TEGroupedMoEModel has {num_te_grouped_mlp} TEGroupedMLP modules, it should have 4"
     )
 
     # Create sequential MoE model
     sequential_moe_model = _gpt_model_provider(
         tp_size=tp_size,
         ep_size=ep_size,
-        etp_size=etp_size,
         hidden_size=32,
         moe_grouped_gemm=False,
         num_moe_experts=4,
@@ -677,28 +669,34 @@ def _test_te_grouped_vs_sequential_quantize_helper(tp_size, ep_size, etp_size, r
     assert torch.allclose(te_grouped_moe_output, sequential_moe_output, atol=1e-6, rtol=1e-6)
 
     # Quantize grouped model
-    mtq.quantize(te_grouped_moe_model, mtq.FP8_DEFAULT_CFG, forward)
+    mtq.quantize(te_grouped_moe_model, quant_cfg, forward)
 
-    # Quantize non-grouped model
-    mtq.quantize(sequential_moe_model, mtq.FP8_DEFAULT_CFG, forward)
+    # Quantize non-grouped model with synced weight amax to match TEGroupedMLP behavior
+    seq_quant_cfg = copy.deepcopy(quant_cfg)
+    seq_quant_cfg["algorithm"] = {"method": "max", "sync_expert_weight_amax": True}
+    mtq.quantize(sequential_moe_model, seq_quant_cfg, forward)
 
     # Compare model outputs after quantization
     te_grouped_moe_quant_output = forward(te_grouped_moe_model)
     sequential_moe_quant_output = forward(sequential_moe_model)
+
     assert torch.allclose(
         te_grouped_moe_quant_output, sequential_moe_quant_output, atol=1e-6, rtol=1e-6
     )
 
 
-def test_te_grouped_vs_sequential_quantize(dist_workers_size_4):
+# TODO SequentialMLP local spec doesn't support EP and TP simultaneously yet
+@pytest.mark.parametrize("quant_cfg", [mtq.FP8_DEFAULT_CFG, mtq.NVFP4_DEFAULT_CFG])
+def test_te_grouped_vs_sequential_quantize(dist_workers_size_4, quant_cfg):
     """Test that TEGrouped and sequential MoE models produce similar quantized models."""
-    pytest.skip("TEGroupedMLP is not enabled in Megatron-LM currently")
-    dist_workers_size_4.run(partial(_test_te_grouped_vs_sequential_quantize_helper, 1, 2, 2))
+    dist_workers_size_4.run(
+        partial(_test_te_grouped_vs_sequential_quantize_helper, 1, 2, quant_cfg)
+    )
 
 
 @pytest.mark.parametrize("ep_size", [1, 2])
-@pytest.mark.parametrize("moe_grouped_gemm", [True, False])
-def test_layer_sync_moe_local_experts_amax(dist_workers, ep_size, moe_grouped_gemm):
+@pytest.mark.parametrize("sync_weight_amax", [True, False])
+def test_layer_sync_moe_local_experts_amax(dist_workers, ep_size, sync_weight_amax):
     """Test expert model parallel synchronization."""
     if torch.cuda.device_count() < ep_size:
         pytest.skip(f"Requires at least {ep_size} GPUs for expert model parallel test")
@@ -707,12 +705,12 @@ def test_layer_sync_moe_local_experts_amax(dist_workers, ep_size, moe_grouped_ge
         partial(
             _test_layer_sync_moe_local_experts_amax,
             ep_size,
-            moe_grouped_gemm,
+            sync_weight_amax,
         ),
     )
 
 
-def _test_layer_sync_moe_local_experts_amax(ep_size, moe_grouped_gemm, rank, size):
+def _test_layer_sync_moe_local_experts_amax(ep_size, sync_weight_amax, rank, size):
     initialize_for_megatron(
         tensor_model_parallel_size=1,
         pipeline_model_parallel_size=1,
@@ -725,8 +723,6 @@ def _test_layer_sync_moe_local_experts_amax(ep_size, moe_grouped_gemm, rank, siz
         ep_size=ep_size,
         etp_size=1,
         hidden_size=256,
-        moe_grouped_gemm=moe_grouped_gemm,
-        use_te=moe_grouped_gemm,
         num_moe_experts=8,
         transformer_impl="modelopt",
     )
@@ -740,7 +736,7 @@ def _test_layer_sync_moe_local_experts_amax(ep_size, moe_grouped_gemm, rank, siz
     model = mtq.quantize(model, quant_cfg, get_forward(model))
 
     for layer in model.decoder.layers:
-        layer.mlp.experts.layer_sync_moe_local_experts_amax()
+        layer.mlp.experts.layer_sync_moe_local_experts_amax(sync_weight_amax=sync_weight_amax)
 
     for layer in model.decoder.layers:
         # Check input quantizer amax is synced across local experts
@@ -758,7 +754,7 @@ def _test_layer_sync_moe_local_experts_amax(ep_size, moe_grouped_gemm, rank, siz
             else:
                 assert torch.allclose(fc2_amax, expert.linear_fc2.input_quantizer.amax)
 
-        # Check weight quantizer amax is different across local experts
+        # Check weight quantizer amax
         fc1_amax = None
         fc2_amax = None
         for expert in layer.mlp.experts.local_experts:
@@ -766,10 +762,14 @@ def _test_layer_sync_moe_local_experts_amax(ep_size, moe_grouped_gemm, rank, siz
             assert expert.linear_fc2.weight_quantizer.amax is not None
             if fc1_amax is None:
                 fc1_amax = expert.linear_fc1.weight_quantizer.amax
+            elif sync_weight_amax:
+                assert torch.allclose(fc1_amax, expert.linear_fc1.weight_quantizer.amax)
             else:
                 assert not torch.allclose(fc1_amax, expert.linear_fc1.weight_quantizer.amax)
             if fc2_amax is None:
                 fc2_amax = expert.linear_fc2.weight_quantizer.amax
+            elif sync_weight_amax:
+                assert torch.allclose(fc2_amax, expert.linear_fc2.weight_quantizer.amax)
             else:
                 assert not torch.allclose(fc2_amax, expert.linear_fc2.weight_quantizer.amax)
 
@@ -793,7 +793,6 @@ def _test_expert_model_parallel_amax_sync(
         etp_size=etp_size,
         hidden_size=256,
         moe_grouped_gemm=moe_grouped_gemm,
-        use_te=moe_grouped_gemm,
         num_moe_experts=8,
         transformer_impl="modelopt",
     )

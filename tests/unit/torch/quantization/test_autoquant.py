@@ -29,6 +29,7 @@ from modelopt.torch.quantization.algorithms import (
     estimate_quant_compression,
 )
 from modelopt.torch.quantization.config import _base_disable_all, _default_disabled_quantizer_cfg
+from modelopt.torch.utils import safe_load
 from modelopt.torch.utils.distributed import DistributedProcessGroup
 
 
@@ -421,7 +422,7 @@ def test_auto_quantize_checkpoint_resume(method, tmp_path, capsys):
     )
 
     # Verify method is correctly persisted in checkpoint and state dicts
-    saved = torch.load(checkpoint_path, weights_only=False)
+    saved = safe_load(checkpoint_path)
     assert saved["method"] == method
     assert state_dict_1["method"] == method
     assert state_dict_2["method"] == method
