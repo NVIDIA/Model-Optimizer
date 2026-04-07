@@ -169,7 +169,7 @@ def test_ar_validate(eagle_output_dir):
     run_example_command(
         [
             "python", "./scripts/ar_validate.py",
-            "--model_path", eagle_output_dir / "eagle-tinyllama-cp1",
+            "--model_path", eagle_output_dir / "eagle-tinyllama-cp1-mixFalse",
             "--osl", "10",
             "--num_samples", "5",
             "--steps", "3"
@@ -183,7 +183,7 @@ def test_export_hf_checkpoint(eagle_output_dir):
     run_example_command(
         [
             "python", "./scripts/export_hf_checkpoint.py",
-            "--model_path", eagle_output_dir / "eagle-tinyllama-cp1",
+            "--model_path", eagle_output_dir / "eagle-tinyllama-cp1-mixFalse",
             "--export_path", eagle_output_dir / "eagle-tinyllama-export",
         ],
         "speculative_decoding",
