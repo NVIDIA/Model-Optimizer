@@ -19,7 +19,7 @@ import sys
 import pytest
 
 
-def quantization_cli_parser_imports_without_tensorrt():
+def test_quantization_cli_parser_imports_without_tensorrt():
     """Verify the CLI parser can be constructed without TensorRT installed."""
     with pytest.MonkeyPatch.context() as mp:
         # Force tensorrt import to fail, even if it's actually installed
