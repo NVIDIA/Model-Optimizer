@@ -15,6 +15,7 @@
 
 """This module contains the mode descriptor for the quantization mode."""
 
+import warnings
 from abc import abstractmethod
 from collections.abc import Callable
 
@@ -228,6 +229,15 @@ def wrapped_calib_func(
         kwargs["algorithm"] = method
 
     moe_calib_experts_ratio = kwargs.pop("moe_calib_experts_ratio", None)
+    checkpoint_dir = kwargs.pop("sequential_checkpoint_dir", None)
+    checkpoint_interval = kwargs.pop("sequential_checkpoint_interval", None)
+
+    if not sequential and (checkpoint_dir is not None or checkpoint_interval is not None):
+        warnings.warn(
+            "sequential_checkpoint_dir/sequential_checkpoint_interval are set but "
+            "use_sequential is False. Checkpoint settings will be ignored."
+        )
+
     if moe_calib_experts_ratio is not None:
         assert (
             isinstance(moe_calib_experts_ratio, (int, float)) and 0 < moe_calib_experts_ratio <= 1
@@ -248,6 +258,8 @@ def wrapped_calib_func(
                 model,
                 forward_loop=forward_loop,
                 calib_func=func,
+                checkpoint_dir=checkpoint_dir,
+                checkpoint_interval=checkpoint_interval,
                 **kwargs,
             )
         else:

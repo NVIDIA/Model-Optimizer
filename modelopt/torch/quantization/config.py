@@ -1227,6 +1227,28 @@ class QuantizeAlgorithmConfig(ModeloptBaseConfig):
         ),
     )
 
+    sequential_checkpoint_dir: str | None = ModeloptField(
+        default=None,
+        title="Directory for sequential calibration checkpoints.",
+        description=(
+            "If set (together with sequential_checkpoint_interval), sequential calibration "
+            "will save intermediate checkpoints to this directory. On resume, if a checkpoint "
+            "with seq_calib_progress metadata is found, calibration resumes from the last "
+            "completed layer. Uses a rolling checkpoint (overwrites on each save)."
+        ),
+    )
+
+    sequential_checkpoint_interval: int | None = ModeloptField(
+        default=None,
+        gt=0,
+        title="Checkpoint interval for sequential calibration (in layers).",
+        description=(
+            "Save a checkpoint every N layers during sequential calibration. "
+            "Requires sequential_checkpoint_dir to also be set. "
+            "If None, no checkpoints are saved."
+        ),
+    )
+
 
 class MaxCalibConfig(QuantizeAlgorithmConfig):
     """The config for max calibration algorithm.

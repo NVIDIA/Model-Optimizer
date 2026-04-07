@@ -49,6 +49,12 @@ from .utils import (
     reduce_amax,
     weight_attr_names,
 )
+from .utils.checkpoint import (
+    SEQ_CALIB_PROGRESS_ATTR,
+    detect_sequential_resume_layer,
+    save_sequential_checkpoint,
+    should_save_seq_calib_checkpoint,
+)
 
 __all__ = [
     "awq",
@@ -1873,6 +1879,8 @@ def sequential_calibrate(
     model: nn.Module,
     forward_loop: ForwardLoop,
     calib_func: Callable,
+    checkpoint_dir: str | None = None,
+    checkpoint_interval: int | None = None,
     **calib_kwargs,
 ):
     """Sequential calibration - a sequential layer-by-layer calibration algorithm.
@@ -1880,6 +1888,18 @@ def sequential_calibrate(
     Runs the full model forward per layer but patches decoder layers with a
     skip / run / capture strategy so that inter-layer logic in parent modules
     (e.g. mask construction) executes naturally without model-specific hooks.
+
+    Args:
+        model: The model to calibrate.
+        forward_loop: Callable that runs calibration data through the model.
+        calib_func: Per-layer calibration function (e.g. ``max_calibrate``).
+        checkpoint_dir: If set (with *checkpoint_interval*), save a rolling
+            checkpoint every *checkpoint_interval* layers.  On re-run with a
+            model restored from such a checkpoint, calibration resumes
+            automatically from the last completed layer.
+        checkpoint_interval: Save a checkpoint every N layers.  Requires
+            *checkpoint_dir* to also be set.
+        **calib_kwargs: Extra arguments forwarded to *calib_func*.
     """
     if forward_loop is None:
         raise ValueError(
@@ -1894,14 +1914,23 @@ def sequential_calibrate(
             "Sequential calibration requires a model with identifiable transformer layers."
         )
 
-    print_rank_0(f"Sequential calibration: Found {len(transformer_layers)} transformer layers")
+    num_layers = len(transformer_layers)
+    print_rank_0(f"Sequential calibration: Found {num_layers} transformer layers")
+
+    resume_from_layer, layer_output_metas = detect_sequential_resume_layer(model, num_layers)
 
     input_getter = LayerActivationCollector(model)
-    input_getter._patch_all_layers(decoder_layers=transformer_layers)
+    input_getter._patch_all_layers(
+        decoder_layers=transformer_layers, layer_output_metas=layer_output_metas
+    )
 
     try:
-        for layer_idx, layer in enumerate(transformer_layers):
-            print_rank_0(f"Calibrating layer {layer_idx + 1}/{len(transformer_layers)}")
+        if resume_from_layer > 0:
+            input_getter.prepare_for_resume(resume_from_layer, forward_loop)
+
+        for layer_idx in range(resume_from_layer, num_layers):
+            layer = transformer_layers[layer_idx]
+            print_rank_0(f"Calibrating layer {layer_idx + 1}/{num_layers}")
             layer_inputs = input_getter.get_input_activations(layer, forward_loop)
 
             def _layer_forward_loop(m, _inputs=layer_inputs):
@@ -1912,5 +1941,19 @@ def sequential_calibrate(
 
             del layer_inputs
             torch.cuda.empty_cache()
+
+            if should_save_seq_calib_checkpoint(
+                layer_idx, num_layers, checkpoint_dir, checkpoint_interval
+            ):
+                assert checkpoint_dir is not None  # narrowed by should_save_seq_calib_checkpoint
+                layer_output_metas = input_getter.get_layer_output_metas(layer_idx)
+                save_sequential_checkpoint(
+                    model, layer_idx, num_layers, checkpoint_dir, layer_output_metas
+                )
     finally:
+        # Sole owner of _seq_calib_progress cleanup.  The attribute may be set
+        # by save_sequential_checkpoint (save path) or restore_quantizer_state
+        # (resume path); neither deletes it — this is the single cleanup point.
+        if hasattr(model, SEQ_CALIB_PROGRESS_ATTR):
+            delattr(model, SEQ_CALIB_PROGRESS_ATTR)
         input_getter._unpatch_all_layers()

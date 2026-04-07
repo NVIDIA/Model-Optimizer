@@ -15,14 +15,25 @@
 
 """Unit tests for sequential_calibrate and LayerActivationCollector."""
 
+import io
+import warnings
 from collections import deque
+from unittest.mock import MagicMock
 
 import pytest
 import torch
 import torch.nn as nn
 
+from modelopt.torch.quantization.config import MaxCalibConfig
+from modelopt.torch.quantization.mode import wrapped_calib_func
 from modelopt.torch.quantization.model_calib import sequential_calibrate
 from modelopt.torch.quantization.utils.activation_collector import LayerActivationCollector
+from modelopt.torch.quantization.utils.checkpoint import (
+    _CHECKPOINT_SAVE_SUPPORT,
+    SEQ_CALIB_PROGRESS_ATTR,
+    get_checkpoint_saver,
+    register_seq_calib_checkpoint_saver,
+)
 
 
 class _DecoderBlock(nn.Module):
@@ -533,3 +544,537 @@ def test_skip_output_meta_not_shared_across_heterogeneous_layers(monkeypatch):
         assert len(meta_1[1]) == 1
     finally:
         collector._unpatch_all_layers()
+
+
+# ---------------------------------------------------------------------------
+# Checkpoint save / resume tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def _clean_checkpoint_registry():
+    """Isolate the checkpoint saver registry for a single test."""
+    old = _CHECKPOINT_SAVE_SUPPORT.copy()
+    _CHECKPOINT_SAVE_SUPPORT.clear()
+    yield
+    _CHECKPOINT_SAVE_SUPPORT.clear()
+    _CHECKPOINT_SAVE_SUPPORT.extend(old)
+
+
+@pytest.fixture
+def _register_discoverer(monkeypatch, _clean_checkpoint_registry):
+    """Register a simple discoverer and clear checkpoint saver registry."""
+    monkeypatch.setattr(
+        LayerActivationCollector,
+        "_decoder_layer_support",
+        [(lambda m: hasattr(m, "layers"), lambda m: m.layers)],
+    )
+
+
+def _make_forward_loop(tokens):
+    def forward_loop(m):
+        for t in tokens:
+            m(t)
+
+    return forward_loop
+
+
+def _noop_calib(layer, forward_loop, **kwargs):
+    """No-op calibration: just run the forward loop."""
+    forward_loop(layer)
+
+
+@pytest.mark.usefixtures("_clean_checkpoint_registry")
+class TestCheckpointSaveRegistry:
+    def test_register_and_get_saver(self):
+        saver = MagicMock()
+        register_seq_calib_checkpoint_saver(lambda m: True, saver)
+        model = nn.Linear(4, 4)
+        assert get_checkpoint_saver(model) is saver
+
+    def test_get_saver_returns_none_when_empty(self):
+        assert get_checkpoint_saver(nn.Linear(4, 4)) is None
+
+    def test_dedup_registration(self):
+        pred = lambda m: True  # noqa: E731
+        saver = lambda m, d: None  # noqa: E731
+        register_seq_calib_checkpoint_saver(pred, saver)
+        register_seq_calib_checkpoint_saver(pred, saver)
+        assert len(_CHECKPOINT_SAVE_SUPPORT) == 1
+
+
+@pytest.mark.usefixtures("_register_discoverer")
+class TestCheckpointSave:
+    def test_no_save_when_dir_is_none(self):
+        """Default behavior: no checkpoint saving when checkpoint_dir is None."""
+        model, tokens = _make_model_and_data(n_layers=4)
+        calibrated_layers = []
+
+        def tracking_calib(layer, fwd, **kwargs):
+            fwd(layer)
+            calibrated_layers.append(layer)
+
+        sequential_calibrate(
+            model,
+            forward_loop=_make_forward_loop(tokens),
+            calib_func=tracking_calib,
+            checkpoint_dir=None,
+            checkpoint_interval=2,
+        )
+        assert len(calibrated_layers) == 4
+        assert not hasattr(model, SEQ_CALIB_PROGRESS_ATTR)
+
+    def test_checkpoint_triggers_saver_at_interval(self):
+        """Saver should be called at the correct layer intervals."""
+        model, tokens = _make_model_and_data(n_layers=5)
+        save_calls = []
+
+        def mock_saver(m, d):
+            progress = getattr(m, SEQ_CALIB_PROGRESS_ATTR)
+            save_calls.append(progress["completed_layer_idx"])
+
+        register_seq_calib_checkpoint_saver(lambda m: True, mock_saver)
+
+        sequential_calibrate(
+            model,
+            forward_loop=_make_forward_loop(tokens),
+            calib_func=_noop_calib,
+            checkpoint_dir="/tmp/test_ckpt",
+            checkpoint_interval=2,
+        )
+        # interval=2: save after layers 1 (idx 1), 3 (idx 3), skip last (idx 4)
+        assert save_calls == [1, 3]
+
+    def test_checkpoint_skips_final_layer(self):
+        """No checkpoint is saved after the final layer."""
+        model, tokens = _make_model_and_data(n_layers=3)
+        save_calls = []
+
+        def mock_saver(m, d):
+            progress = getattr(m, SEQ_CALIB_PROGRESS_ATTR)
+            save_calls.append(progress["completed_layer_idx"])
+
+        register_seq_calib_checkpoint_saver(lambda m: True, mock_saver)
+
+        # interval=1 would save every layer, but should still skip the last
+        sequential_calibrate(
+            model,
+            forward_loop=_make_forward_loop(tokens),
+            calib_func=_noop_calib,
+            checkpoint_dir="/tmp/test_ckpt",
+            checkpoint_interval=1,
+        )
+        assert 2 not in save_calls  # layer index 2 (last) should not trigger save
+
+    def test_checkpoint_warns_when_no_saver_registered(self, capsys):
+        """Should print a warning when checkpoint_dir is set but no saver is registered."""
+        model, tokens = _make_model_and_data(n_layers=3)
+
+        sequential_calibrate(
+            model,
+            forward_loop=_make_forward_loop(tokens),
+            calib_func=_noop_calib,
+            checkpoint_dir="/tmp/test_ckpt",
+            checkpoint_interval=1,
+        )
+        # No error raised — just a warning printed
+        assert not hasattr(model, SEQ_CALIB_PROGRESS_ATTR)
+
+    def test_progress_attr_cleaned_up_after_save(self):
+        """The _seq_calib_progress attribute should be cleaned up after save."""
+        model, tokens = _make_model_and_data(n_layers=4)
+
+        def mock_saver(m, d):
+            # During save, the attribute should be set
+            assert hasattr(m, SEQ_CALIB_PROGRESS_ATTR)
+
+        register_seq_calib_checkpoint_saver(lambda m: True, mock_saver)
+
+        sequential_calibrate(
+            model,
+            forward_loop=_make_forward_loop(tokens),
+            calib_func=_noop_calib,
+            checkpoint_dir="/tmp/test_ckpt",
+            checkpoint_interval=2,
+        )
+        # After completion, attribute should be gone
+        assert not hasattr(model, SEQ_CALIB_PROGRESS_ATTR)
+
+    def test_checkpoint_progress_contains_output_metas(self):
+        """Saved progress should include layer_output_metas."""
+        model, tokens = _make_model_and_data(n_layers=4)
+        saved_progress = {}
+
+        def mock_saver(m, d):
+            progress = getattr(m, SEQ_CALIB_PROGRESS_ATTR)
+            saved_progress.update(progress)
+
+        register_seq_calib_checkpoint_saver(lambda m: True, mock_saver)
+
+        sequential_calibrate(
+            model,
+            forward_loop=_make_forward_loop(tokens),
+            calib_func=_noop_calib,
+            checkpoint_dir="/tmp/test_ckpt",
+            checkpoint_interval=2,
+        )
+        assert "layer_output_metas" in saved_progress
+        assert "completed_layer_idx" in saved_progress
+        assert "total_layers" in saved_progress
+
+
+@pytest.mark.usefixtures("_register_discoverer")
+class TestPrepareForResume:
+    def test_basic_resume_from_layer_2(self):
+        """After prepare_for_resume(2), layers 0 should be skip, layer 1 should
+        have collected_inputs, and get_input_activations(layer_2) should work."""
+        model, tokens = _make_model_and_data(n_layers=4)
+        fwd = _make_forward_loop(tokens)
+
+        # First, do a full run to get output_metas
+        collector = LayerActivationCollector(model)
+        collector._patch_all_layers()
+        try:
+            for layer in model.layers:
+                collector.get_input_activations(layer, fwd)
+            output_metas = {
+                i: model.layers[i]._seq_calib.output_meta
+                for i in range(len(model.layers))
+                if model.layers[i]._seq_calib.output_meta is not None
+            }
+        finally:
+            collector._unpatch_all_layers()
+
+        # Now simulate resume from layer 2
+        collector2 = LayerActivationCollector(model)
+        collector2._patch_all_layers(layer_output_metas=output_metas)
+        try:
+            collector2.prepare_for_resume(2, fwd)
+
+            # Layer 0 should be in skip mode
+            assert model.layers[0]._seq_calib.mode == "skip"
+            assert model.layers[0]._seq_calib.output_meta is not None
+
+            # Layer 1 should have collected_inputs from warm-up
+            assert len(model.layers[1]._seq_calib.collected_inputs) > 0
+
+            # get_input_activations for layer 2 should work
+            inputs = collector2.get_input_activations(model.layers[2], fwd)
+            assert len(inputs) == len(tokens)
+        finally:
+            collector2._unpatch_all_layers()
+
+    def test_resume_from_layer_1(self):
+        """Edge case: resume from layer 1 (only layer 0 was calibrated)."""
+        model, tokens = _make_model_and_data(n_layers=3)
+        fwd = _make_forward_loop(tokens)
+
+        # Get output_metas from a full run
+        collector = LayerActivationCollector(model)
+        collector._patch_all_layers()
+        try:
+            for layer in model.layers:
+                collector.get_input_activations(layer, fwd)
+            output_metas = {
+                i: model.layers[i]._seq_calib.output_meta
+                for i in range(len(model.layers))
+                if model.layers[i]._seq_calib.output_meta is not None
+            }
+        finally:
+            collector._unpatch_all_layers()
+
+        # Resume from layer 1
+        collector2 = LayerActivationCollector(model)
+        collector2._patch_all_layers(layer_output_metas=output_metas)
+        try:
+            collector2.prepare_for_resume(1, fwd)
+
+            # Layer 0 should have collected_inputs from warm-up capture
+            assert len(model.layers[0]._seq_calib.collected_inputs) > 0
+
+            # get_input_activations for layer 1 should work
+            inputs = collector2.get_input_activations(model.layers[1], fwd)
+            assert len(inputs) == len(tokens)
+        finally:
+            collector2._unpatch_all_layers()
+
+    def test_resume_from_layer_0_is_noop(self):
+        """prepare_for_resume(0) should be a no-op."""
+        model, tokens = _make_model_and_data(n_layers=3)
+        fwd = _make_forward_loop(tokens)
+
+        collector = LayerActivationCollector(model)
+        collector._patch_all_layers()
+        try:
+            collector.prepare_for_resume(0, fwd)
+            # All layers should still be in original mode
+            for layer in model.layers:
+                assert layer._seq_calib.mode == "original"
+        finally:
+            collector._unpatch_all_layers()
+
+    def test_resume_requires_patched_state(self):
+        """prepare_for_resume should raise if layers aren't patched."""
+        model, tokens = _make_model_and_data(n_layers=3)
+        fwd = _make_forward_loop(tokens)
+        collector = LayerActivationCollector(model)
+        with pytest.raises(RuntimeError, match="requires _patch_all_layers"):
+            collector.prepare_for_resume(1, fwd)
+
+    def test_resume_missing_output_meta_raises(self):
+        """If a layer needs skip mode but has no output_meta, should raise."""
+        model, tokens = _make_model_and_data(n_layers=4)
+        fwd = _make_forward_loop(tokens)
+
+        collector = LayerActivationCollector(model)
+        collector._patch_all_layers()
+        try:
+            # Try to resume from layer 3 with no saved output_metas
+            with pytest.raises(RuntimeError, match="no output_meta"):
+                collector.prepare_for_resume(3, fwd)
+        finally:
+            collector._unpatch_all_layers()
+
+
+@pytest.mark.usefixtures("_register_discoverer")
+class TestResumeDetection:
+    def test_resume_starts_from_correct_layer(self):
+        """sequential_calibrate should skip already-calibrated layers on resume."""
+        model, tokens = _make_model_and_data(n_layers=4)
+        calibrated_layers = []
+
+        def tracking_calib(layer, fwd, **kwargs):
+            fwd(layer)
+            calibrated_layers.append(id(layer))
+
+        # First run to get output_metas
+        full_run_collector = LayerActivationCollector(model)
+        full_run_collector._patch_all_layers()
+        fwd = _make_forward_loop(tokens)
+        try:
+            for layer in model.layers:
+                full_run_collector.get_input_activations(layer, fwd)
+            output_metas = {
+                i: model.layers[i]._seq_calib.output_meta
+                for i in range(len(model.layers))
+                if model.layers[i]._seq_calib.output_meta is not None
+            }
+        finally:
+            full_run_collector._unpatch_all_layers()
+
+        # Set up resume from layer 2
+        setattr(
+            model,
+            SEQ_CALIB_PROGRESS_ATTR,
+            {
+                "completed_layer_idx": 1,
+                "total_layers": 4,
+                "layer_output_metas": output_metas,
+            },
+        )
+
+        sequential_calibrate(
+            model,
+            forward_loop=_make_forward_loop(tokens),
+            calib_func=tracking_calib,
+        )
+
+        # Should only calibrate layers 2 and 3 (not 0 and 1)
+        assert len(calibrated_layers) == 2
+        assert calibrated_layers[0] == id(model.layers[2])
+        assert calibrated_layers[1] == id(model.layers[3])
+
+    def test_resume_mismatched_layer_count_raises(self):
+        """Should raise ValueError when checkpoint layer count doesn't match."""
+        model, tokens = _make_model_and_data(n_layers=3)
+
+        setattr(
+            model,
+            SEQ_CALIB_PROGRESS_ATTR,
+            {
+                "completed_layer_idx": 1,
+                "total_layers": 10,  # Mismatch!
+                "layer_output_metas": {},
+            },
+        )
+
+        with pytest.raises(ValueError, match="10 layers but model has 3"):
+            sequential_calibrate(
+                model,
+                forward_loop=_make_forward_loop(tokens),
+                calib_func=_noop_calib,
+            )
+
+    def test_progress_attr_cleaned_up_after_resume(self):
+        """_seq_calib_progress should be deleted after calibration completes."""
+        model, tokens = _make_model_and_data(n_layers=3)
+
+        # Get output_metas
+        collector = LayerActivationCollector(model)
+        collector._patch_all_layers()
+        fwd = _make_forward_loop(tokens)
+        try:
+            for layer in model.layers:
+                collector.get_input_activations(layer, fwd)
+            output_metas = {
+                i: model.layers[i]._seq_calib.output_meta
+                for i in range(len(model.layers))
+                if model.layers[i]._seq_calib.output_meta is not None
+            }
+        finally:
+            collector._unpatch_all_layers()
+
+        setattr(
+            model,
+            SEQ_CALIB_PROGRESS_ATTR,
+            {
+                "completed_layer_idx": 0,
+                "total_layers": 3,
+                "layer_output_metas": output_metas,
+            },
+        )
+
+        sequential_calibrate(
+            model,
+            forward_loop=_make_forward_loop(tokens),
+            calib_func=_noop_calib,
+        )
+        assert not hasattr(model, SEQ_CALIB_PROGRESS_ATTR)
+
+
+@pytest.mark.usefixtures("_register_discoverer")
+class TestMetadataIntegration:
+    def test_update_quantize_metadata_includes_progress(self):
+        """update_quantize_metadata should pick up _seq_calib_progress."""
+        from modelopt.torch.quantization.config import QuantizeConfig
+        from modelopt.torch.quantization.conversion import update_quantize_metadata
+
+        model = nn.Linear(4, 4)
+        progress = {"completed_layer_idx": 5, "total_layers": 10}
+        setattr(model, SEQ_CALIB_PROGRESS_ATTR, progress)
+
+        metadata = {}
+        update_quantize_metadata(model, QuantizeConfig(), metadata)
+
+        assert metadata["seq_calib_progress"] == progress
+        delattr(model, SEQ_CALIB_PROGRESS_ATTR)
+
+    def test_output_meta_serialization_roundtrip(self):
+        """layer_output_metas should survive torch.save/load roundtrip."""
+        output_metas = {
+            0: ("tensor", torch.Size([2, 16]), torch.float32, torch.device("cpu")),
+            1: (
+                "tuple",
+                (
+                    ("tensor", torch.Size([2, 16]), torch.float32, torch.device("cpu")),
+                    ("other", None),
+                ),
+            ),
+        }
+        progress = {
+            "completed_layer_idx": 1,
+            "total_layers": 4,
+            "layer_output_metas": output_metas,
+        }
+
+        buf = io.BytesIO()
+        torch.save(progress, buf)
+        buf.seek(0)
+        loaded = torch.load(buf, weights_only=False)
+
+        assert loaded["layer_output_metas"][0] == output_metas[0]
+        assert loaded["layer_output_metas"][1] == output_metas[1]
+        assert loaded["completed_layer_idx"] == 1
+
+
+@pytest.mark.usefixtures("_register_discoverer")
+class TestFullCheckpointResumeRoundtrip:
+    def test_resume_produces_same_calibration_order(self):
+        """Full roundtrip: run with checkpoint, simulate resume, verify all layers calibrated."""
+        torch.manual_seed(42)
+        n_layers = 5
+        model, tokens = _make_model_and_data(n_layers=n_layers)
+
+        # Track calibration order in a full uninterrupted run
+        full_run_layers = []
+
+        def tracking_calib_full(layer, fwd, **kwargs):
+            fwd(layer)
+            full_run_layers.append(id(layer))
+
+        sequential_calibrate(
+            model, forward_loop=_make_forward_loop(tokens), calib_func=tracking_calib_full
+        )
+        assert len(full_run_layers) == n_layers
+
+        # Now simulate a checkpointed run that "resumes" from layer 3
+        torch.manual_seed(42)
+        model2, tokens2 = _make_model_and_data(n_layers=n_layers)
+
+        # First, partially calibrate layers 0-2 to get output_metas
+        partial_collector = LayerActivationCollector(model2)
+        partial_collector._patch_all_layers()
+        fwd = _make_forward_loop(tokens2)
+        try:
+            for i in range(3):
+                inputs = partial_collector.get_input_activations(model2.layers[i], fwd)
+
+                def _fwd(m, _inputs=inputs):
+                    for args, kw in _inputs:
+                        m(*args, **kw)
+
+                _noop_calib(model2.layers[i], _fwd)
+                del inputs
+
+            output_metas = {
+                i: model2.layers[i]._seq_calib.output_meta
+                for i in range(len(model2.layers))
+                if model2.layers[i]._seq_calib.output_meta is not None
+            }
+        finally:
+            partial_collector._unpatch_all_layers()
+
+        # Set progress for resume
+        setattr(
+            model2,
+            SEQ_CALIB_PROGRESS_ATTR,
+            {
+                "completed_layer_idx": 2,
+                "total_layers": n_layers,
+                "layer_output_metas": output_metas,
+            },
+        )
+
+        resumed_layers = []
+
+        def tracking_calib_resume(layer, fwd, **kwargs):
+            fwd(layer)
+            resumed_layers.append(id(layer))
+
+        sequential_calibrate(
+            model2,
+            forward_loop=_make_forward_loop(tokens2),
+            calib_func=tracking_calib_resume,
+        )
+
+        # Should only calibrate layers 3 and 4
+        assert len(resumed_layers) == 2
+        assert resumed_layers[0] == id(model2.layers[3])
+        assert resumed_layers[1] == id(model2.layers[4])
+
+
+class TestWrappedCalibFuncWarning:
+    def test_checkpoint_config_without_sequential_warns(self):
+        """Setting checkpoint config without use_sequential=True should warn."""
+        config = MaxCalibConfig(
+            sequential_checkpoint_dir="/tmp/test",
+            sequential_checkpoint_interval=2,
+            use_sequential=False,
+        )
+        model = nn.Linear(4, 4)
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            wrapped_calib_func(model, config, forward_loop=None, func=None)
+            assert len(w) == 1
+            assert "use_sequential is False" in str(w[0].message)

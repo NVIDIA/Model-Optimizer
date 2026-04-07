@@ -44,6 +44,7 @@ from .nn import (
     TensorQuantizer,
 )
 from .utils import is_quantized, is_quantized_linear
+from .utils.checkpoint import SEQ_CALIB_PROGRESS_ATTR
 
 __all__ = [
     "register",
@@ -111,6 +112,12 @@ def restore_quantizer_state(model: nn.Module, config: QuantizeConfig, metadata: 
     details regarding how MCore sharded checkpoint is restored,
     see modelopt.torch.opt.plugins.mcore_dist_checkpointing.restore_sharded_modelopt_state.
     """
+    # Propagate sequential calibration progress to the model for resume.
+    # This is global metadata (not per-module), so it must run before the
+    # MCore early return — it applies to both HF and MCore checkpoint paths.
+    if "seq_calib_progress" in metadata:
+        setattr(model, SEQ_CALIB_PROGRESS_ATTR, metadata["seq_calib_progress"])
+
     if "quantizer_state" not in metadata:
         # MCore sharded checkpoint (`torch-dist`) has its quantizer_state stored as the
         # extra_state of `QuantModule`. The quantizer_state is resumed with
@@ -172,6 +179,11 @@ def update_quantize_metadata(
 ) -> None:
     """Update the quantizer state in the metadata dict."""
     metadata["quantizer_state"] = quantizer_state(model)
+
+    # Propagate sequential calibration progress if present (for checkpoint save)
+    progress = getattr(model, SEQ_CALIB_PROGRESS_ATTR, None)
+    if progress is not None:
+        metadata["seq_calib_progress"] = progress
 
 
 def quantizer_state(model: nn.Module) -> dict[str, Any]:

@@ -40,6 +40,7 @@ from ..nn.modules.quant_linear import _QuantLinear
 from ..triton import IS_AVAILABLE as IS_TRITON_AVAILABLE
 from ..utils import replace_function, sync_moe_expert_amax
 from ..utils.activation_collector import LayerActivationCollector
+from ..utils.checkpoint import register_seq_calib_checkpoint_saver
 from .attention import register_attention_for_kv_quant
 from .custom import CUSTOM_MODEL_PLUGINS, _ParallelLinear, _QuantFunctionalMixin
 
@@ -1474,6 +1475,14 @@ LayerActivationCollector.register_decoder_layer_support(
 LayerActivationCollector.register_decoder_layer_support(
     is_homogeneous_hf_model, get_homogeneous_hf_decoder_layers
 )
+
+
+def _save_hf_checkpoint(model: nn.Module, checkpoint_dir: str) -> None:
+    """Save a HuggingFace model checkpoint using ``save_pretrained``."""
+    model.save_pretrained(checkpoint_dir)
+
+
+register_seq_calib_checkpoint_saver(_is_supported_hf_model, _save_hf_checkpoint)
 
 
 class _QuantMoELinear(QuantModule):
