@@ -99,7 +99,7 @@ class OfflineSupervisedDataset(Dataset):
         return len(self.dumped_files)
 
     def __getitem__(self, i) -> dict[str, torch.Tensor]:
-        offline_data = torch.load(self.dumped_files[i])
+        offline_data = torch.load(self.dumped_files[i], weights_only=True)
 
         labels = torch.full_like(offline_data["input_ids"], IGNORE_TOKEN_ID)
         labels[..., :-1] = offline_data["input_ids"][..., 1:]
