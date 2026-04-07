@@ -1504,9 +1504,7 @@ def _is_fused_experts_module(module):
     down = getattr(module, "down_proj")
     if not isinstance(gate_up, (nn.Parameter, Tensor)) or gate_up.dim() != 3:
         return False
-    if not isinstance(down, (nn.Parameter, Tensor)) or down.dim() != 3:
-        return False
-    return True
+    return isinstance(down, (nn.Parameter, Tensor)) and down.dim() == 3
 
 
 def register_fused_experts_on_the_fly(model):

@@ -64,7 +64,7 @@ def _export_fused_experts(module: nn.Module, dtype: torch.dtype) -> None:
     gate_up = module.gate_up_proj.data
     down = module.down_proj.data
 
-    # 2–3. Split + export each per-expert projection.
+    # 2-3. Split + export each per-expert projection.
     fused_dim0 = gate_up.shape[1]  # 2 * expert_dim
 
     for idx in range(n):
