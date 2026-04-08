@@ -71,7 +71,7 @@ Custom patches are required when:
 - **Fused/batched expert weights** — experts stored as a single parameter (e.g., 3D `[num_experts, in, out]`) rather than separate `nn.Linear` modules → Pattern 1 + 3
 - **Self-defined weight parameters** (`nn.Parameter` used directly instead of `nn.Linear`) — common in non-HF or research models → Pattern 1 + 3
 - **VLM structure** (vision encoder that should be excluded) → Pattern 4
-- **FP8 checkpoint** that needs dequantization before re-quantizing → Pattern 5
+- **FP8 checkpoint with non-standard parameter names** (standard `FP8Linear` is handled automatically by the `_QuantFP8Linear` plugin) → Pattern 5
 
 ## Step D — Check weight names against ModelOpt's config patterns
 
