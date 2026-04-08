@@ -43,7 +43,6 @@ def _export_fused_experts(module: nn.Module, dtype: torch.dtype) -> None:
            {E}.up_proj.weight, {E}.up_proj.weight_scale, ...
            {E}.down_proj.weight, {E}.down_proj.weight_scale, ...
     """
-    from modelopt.torch.export.layer_utils import set_expert_quantizer_amax
     from modelopt.torch.export.unified_export_hf import _export_quantized_weight
     from modelopt.torch.quantization.plugins.huggingface import _get_fused_expert_intermediate_dim
 
