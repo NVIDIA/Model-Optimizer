@@ -206,9 +206,10 @@ def main(args: argparse.Namespace) -> None:
                 continue
 
             # Tokenize and check length
-            input_ids = tokenizer.apply_chat_template(
+            tokenized = tokenizer.apply_chat_template(
                 conversations, return_tensors="pt", add_generation_template=False
-            )["input_ids"]
+            )
+            input_ids = tokenized["input_ids"] if isinstance(tokenized, dict) else tokenized
             num_input_tokens = input_ids.shape[1]
             if num_input_tokens <= 10 or num_input_tokens > args.max_seq_len:
                 num_skipped_too_long += 1
