@@ -23,7 +23,7 @@ source ${SCRIPT_DIR}/../service_utils.sh
 
 trap 'error_handler $0 $LINENO' ERR # ERROR HANDLER
 
-python modules/Model-Optimizer/examples/speculative_decoding/prepare_input_conversations/make_dataset.py \
+python modules/Model-Optimizer/examples/dataset/make_dataset.py \
     ${@}
 
 mkdir -p /scratchspace/data

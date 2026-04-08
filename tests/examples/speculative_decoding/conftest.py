@@ -36,8 +36,7 @@ def tiny_daring_anteater_path(tmp_path_factory):
     config_path.write_text(yaml.dump(config))
 
     run_example_command(
-        ["python", "../dataset/make_dataset.py", "-f", str(config_path), "--full-conversations"],
-        "speculative_decoding",
+        ["python", "make_dataset.py", "-f", str(config_path), "--full-conversations"], "dataset"
     )
 
     return output_file
