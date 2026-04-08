@@ -468,14 +468,19 @@ class HFEagleModel(EagleModel):
         pipeline doesn't need to thread real calibration data through multiple layers.
         """
         device = self.device
+        dtype = next(self.parameters()).dtype
         hidden_size = self._base_llm_config.hidden_size
         dummy_inputs = {
             "input_ids": torch.ones(1, 2, dtype=torch.long, device=device),
         }
         if self.eagle_offline:
             dummy_inputs["base_model_outputs"] = {
-                "base_model_hidden_states": torch.zeros(1, 2, hidden_size, device=device),
-                "base_model_input_embeds": torch.zeros(1, 2, hidden_size, device=device),
+                "base_model_hidden_states": torch.zeros(
+                    1, 2, hidden_size, dtype=dtype, device=device
+                ),
+                "base_model_input_embeds": torch.zeros(
+                    1, 2, hidden_size, dtype=dtype, device=device
+                ),
             }
         return dummy_inputs
 
