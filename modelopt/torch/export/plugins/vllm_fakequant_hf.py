@@ -72,7 +72,7 @@ def _materialize_offloaded_weights(
         for prefix, (module, hook) in hook_map.items():
             if not key.startswith(prefix):
                 continue
-            local_key = key[len(prefix):]
+            local_key = key[len(prefix) :]
             wmap = hook.weights_map
             if hasattr(wmap, "dataset"):
                 lookup_key = wmap.prefix + local_key
@@ -122,9 +122,7 @@ def _save_clean_checkpoint(
             "metadata": state_dict_split.metadata,
             "weight_map": state_dict_split.tensor_to_filename,
         }
-        (export_dir / "model.safetensors.index.json").write_text(
-            json.dumps(index, indent=2)
-        )
+        (export_dir / "model.safetensors.index.json").write_text(json.dumps(index, indent=2))
 
     if hasattr(model, "config"):
         model.config.save_pretrained(export_dir)
