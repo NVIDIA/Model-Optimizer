@@ -16,7 +16,6 @@
 """Tests for NVFP4 utility functions (pad, swizzle, metadata) and _postprocess_safetensors."""
 
 import json
-from pathlib import Path
 
 import pytest
 import torch
