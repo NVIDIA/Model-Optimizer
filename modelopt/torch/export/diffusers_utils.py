@@ -126,6 +126,11 @@ def generate_diffusion_dummy_inputs(
         "UNet2DConditionModel",
         "unet" in model_class_name.lower(),
     )
+    is_zimage = _is_model_type(
+        "diffusers.models.transformers",
+        "ZImageTransformer2DModel",
+        model_class_name == "ZImageTransformer2DModel",
+    )
 
     cfg = getattr(model, "config", None)
 
@@ -274,6 +279,31 @@ def generate_diffusion_dummy_inputs(
             "return_dict": False,
         }
 
+    def _zimage_inputs() -> dict[str, torch.Tensor]:
+        """Build dummy inputs for ZImageTransformer2DModel (NextDiT backbone)."""
+        # ZImageTransformer2DModel (NextDiT): 3D hidden_states (batch, seq_len, in_channels)
+        # Requires: hidden_states, timestep, encoder_hidden_states
+        in_channels = getattr(cfg, "in_channels", 16)
+        # Qwen3-4B encoder hidden size; fall back to caption_channels if present
+        encoder_hidden_size = getattr(
+            cfg, "encoder_hidden_size", getattr(cfg, "caption_channels", 2560)
+        )
+
+        # Small seq_len: 4x4 patch grid
+        img_seq_len = 16
+        text_seq_len = 8
+
+        return {
+            "hidden_states": torch.randn(
+                batch_size, img_seq_len, in_channels, device=device, dtype=dtype
+            ),
+            "timestep": torch.tensor([0.5], device=device, dtype=dtype).expand(batch_size),
+            "encoder_hidden_states": torch.randn(
+                batch_size, text_seq_len, encoder_hidden_size, device=device, dtype=dtype
+            ),
+            "return_dict": False,
+        }
+
     def _generic_transformer_inputs() -> dict[str, torch.Tensor] | None:
         # Try generic transformer handling for other model types
         # Check if model has common transformer attributes
@@ -318,6 +348,7 @@ def generate_diffusion_dummy_inputs(
         ("dit", is_dit, _dit_inputs),
         ("wan", is_wan, _wan_inputs),
         ("unet", is_unet, _unet_inputs),
+        ("zimage", is_zimage, _zimage_inputs),
     ]
 
     for _, matches, build_inputs in model_input_builders:

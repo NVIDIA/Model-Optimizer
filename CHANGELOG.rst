@@ -7,9 +7,17 @@ NVIDIA Model Optimizer Changelog
 **Bug Fixes**
 
 - ONNX Runtime dependency upgraded to 1.24 to solve missing graph outputs when using the TensorRT Execution Provider.
+- Fix broken ``AttentionModuleMixin`` import in the diffusers quantization example (path changed from
+  ``modelopt.torch.quantization.plugins.diffusers`` to ``modelopt.torch.quantization.plugins.diffusion.diffusers``
+  in 0.42.0).
 
 **New Features**
 
+- Add Z-Image (``Tongyi-MAI/Z-Image``) and Z-Image-Turbo quantization support in the diffusers quantization
+  example. Supports FP8, INT8, and INT4 PTQ on the NextDiT/Lumina2 transformer backbone via the new
+  ``--model zimage`` and ``--model zimage-turbo`` CLI options.
+- Add ``ZImageTransformer2DModel`` dummy input generation in ``generate_diffusion_dummy_inputs()``, resolving
+  a QKV fusion warning during HF checkpoint export for Z-Image.
 - User does not need to manually register MOE modules to cover experts calibration coverage in PTQ workflow.
 - ``hf_ptq.py`` now saves the quantization summary and moe expert token count table to the export directory.
 - Add ``--moe_calib_experts_ratio`` flag in ``hf_ptq.py`` to specify the ratio of experts to calibrate during forward pass to improve expert coverage during calibration. Default to all the experts.

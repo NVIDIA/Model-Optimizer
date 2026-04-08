@@ -24,12 +24,14 @@ from diffusers import (
     LTXConditionPipeline,
     StableDiffusion3Pipeline,
     WanPipeline,
+    ZImagePipeline,
 )
 from utils import (
     filter_func_default,
     filter_func_flux_dev,
     filter_func_ltx_video,
     filter_func_wan_video,
+    filter_func_zimage,
 )
 
 
@@ -46,6 +48,8 @@ class ModelType(str, Enum):
     LTX2 = "ltx-2"
     WAN22_T2V_14b = "wan2.2-t2v-14b"
     WAN22_T2V_5b = "wan2.2-t2v-5b"
+    ZIMAGE = "zimage"
+    ZIMAGE_TURBO = "zimage-turbo"
 
 
 def get_model_filter_func(model_type: ModelType) -> Callable[[str], bool]:
@@ -69,6 +73,8 @@ def get_model_filter_func(model_type: ModelType) -> Callable[[str], bool]:
         ModelType.LTX2: filter_func_ltx_video,
         ModelType.WAN22_T2V_14b: filter_func_wan_video,
         ModelType.WAN22_T2V_5b: filter_func_wan_video,
+        ModelType.ZIMAGE: filter_func_zimage,
+        ModelType.ZIMAGE_TURBO: filter_func_zimage,
     }
 
     return filter_func_map.get(model_type, filter_func_default)
@@ -86,6 +92,8 @@ MODEL_REGISTRY: dict[ModelType, str] = {
     ModelType.LTX2: "Lightricks/LTX-2",
     ModelType.WAN22_T2V_14b: "Wan-AI/Wan2.2-T2V-A14B-Diffusers",
     ModelType.WAN22_T2V_5b: "Wan-AI/Wan2.2-TI2V-5B-Diffusers",
+    ModelType.ZIMAGE: "Tongyi-MAI/Z-Image",
+    ModelType.ZIMAGE_TURBO: "Tongyi-MAI/Z-Image-Turbo",
 }
 
 MODEL_PIPELINE: dict[ModelType, type[DiffusionPipeline] | None] = {
@@ -99,6 +107,8 @@ MODEL_PIPELINE: dict[ModelType, type[DiffusionPipeline] | None] = {
     ModelType.LTX2: None,
     ModelType.WAN22_T2V_14b: WanPipeline,
     ModelType.WAN22_T2V_5b: WanPipeline,
+    ModelType.ZIMAGE: ZImagePipeline,
+    ModelType.ZIMAGE_TURBO: ZImagePipeline,
 }
 
 # Shared dataset configurations
@@ -139,6 +149,17 @@ _FLUX_BASE_CONFIG: dict[str, Any] = {
 _WAN_BASE_CONFIG: dict[str, Any] = {
     "backbone": "transformer",
     "dataset": _OPENVID_DATASET,
+}
+
+_ZIMAGE_BASE_CONFIG: dict[str, Any] = {
+    "backbone": "transformer",
+    "dataset": _SD_PROMPTS_DATASET,
+    "inference_extra_args": {
+        "height": 512,
+        "width": 512,
+        "guidance_scale": 4.0,
+        "cfg_normalization": False,
+    },
 }
 
 # Model-specific default arguments for calibration
@@ -205,6 +226,15 @@ MODEL_DEFAULTS: dict[ModelType, dict[str, Any]] = {
                 "，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，"  # noqa: RUF001
                 "手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走"  # noqa: RUF001
             ),
+        },
+    },
+    ModelType.ZIMAGE: _ZIMAGE_BASE_CONFIG,
+    ModelType.ZIMAGE_TURBO: {
+        **_ZIMAGE_BASE_CONFIG,
+        "inference_extra_args": {
+            **_ZIMAGE_BASE_CONFIG["inference_extra_args"],
+            "guidance_scale": 1.0,
+            # num_inference_steps intentionally omitted — pass --n-steps 8 on the CLI
         },
     },
 }

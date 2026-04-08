@@ -187,3 +187,63 @@ def test_diffusion_trt_torch(
     if torch_compile:
         cmd_args.append("--torch-compile")
     run_example_command(cmd_args, "diffusers/quantization")
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        # Layers that should be skipped (filter returns True)
+        ("transformer.x_embedder.weight", True),
+        ("transformer.final_layer.linear.weight", True),
+        ("transformer.time_caption_embed.mlp.0.weight", True),
+        ("transformer.cap_embedder.weight", True),
+        ("transformer.layers.0.norm1.weight", True),
+        ("transformer.pos_embed", True),
+        # Boundary layers (first/last 2) — skipped for quality
+        ("transformer.layers.0.attention.wq.weight", True),
+        ("transformer.layers.1.feed_forward.w1.weight", True),
+        ("transformer.layers.28.attention.wo.weight", True),
+        ("transformer.layers.29.feed_forward.w3.weight", True),
+        # Interior layers that should be quantized (filter returns False)
+        ("transformer.layers.2.attention.wq.weight", False),
+        ("transformer.layers.2.attention.wk.weight", False),
+        ("transformer.layers.2.attention.wv.weight", False),
+        ("transformer.layers.2.attention.wo.weight", False),
+        ("transformer.layers.2.feed_forward.w1.weight", False),
+        ("transformer.layers.2.feed_forward.w2.weight", False),
+        ("transformer.layers.2.feed_forward.w3.weight", False),
+        ("transformer.layers.15.feed_forward.w1.weight", False),
+    ],
+    ids=[
+        "skip_x_embedder",
+        "skip_final_layer",
+        "skip_time_caption_embed",
+        "skip_cap_embedder",
+        "skip_norm",
+        "skip_pos_embed",
+        "skip_boundary_layer0_attn",
+        "skip_boundary_layer1_ffn",
+        "skip_boundary_layer28_attn",
+        "skip_boundary_layer29_ffn",
+        "quant_attn_wq",
+        "quant_attn_wk",
+        "quant_attn_wv",
+        "quant_attn_wo",
+        "quant_ffn_w1",
+        "quant_ffn_w2",
+        "quant_ffn_w3",
+        "quant_ffn_w1_mid_layer",
+    ],
+)
+def test_filter_func_zimage(name: str, expected: bool) -> None:
+    """filter_func_zimage must skip conditioning/norm/boundary layers and quantize interior linears."""
+    import sys
+
+    example_path = str(Path(__file__).parents[3] / "examples/diffusers/quantization")
+    sys.path.insert(0, example_path)
+    try:
+        from utils import filter_func_zimage
+
+        assert filter_func_zimage(name) == expected
+    finally:
+        sys.path.remove(example_path)

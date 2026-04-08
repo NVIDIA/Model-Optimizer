@@ -89,6 +89,29 @@ def filter_func_wan_video(name: str) -> bool:
     return pattern.match(name) is not None
 
 
+def filter_func_zimage(name: str) -> bool:
+    """Filter function for Z-Image (NextDiT / S3-DiT backbone).
+
+    Returns True for layers that should NOT be quantized.
+    Skips: patch embedder, timestep/caption embedding, final projection, norms,
+    and the first/last 2 transformer layers (boundary protection for quality).
+    Quantizes: all JointAttention (qkv, out) and FFN (w1, w2, w3) linears in
+    layers 2–27.
+    """
+    pattern = re.compile(
+        r".*("
+        r"x_embedder"
+        r"|final_layer"
+        r"|time_caption_embed"
+        r"|cap_embedder"
+        r"|norm"
+        r"|pos_embed"
+        r"|layers\.(0|1|28|29)\."
+        r").*"
+    )
+    return pattern.match(name) is not None
+
+
 def load_calib_prompts(
     batch_size,
     calib_data_path: str | Path = "Gustavosta/Stable-Diffusion-Prompts",
