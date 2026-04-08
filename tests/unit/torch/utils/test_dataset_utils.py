@@ -103,6 +103,48 @@ def test_batch_contents_preserved():
     assert processed_values == [0, 1, 2, 3]
 
 
+def test_process_batch_allowed_non_tensor_keys_accepted():
+    """Non-tensor values under allowed_non_tensor_keys should not raise."""
+    batch_data = {
+        "input_ids": torch.ones((2, 8), dtype=torch.long),
+        "base_model_outputs": [{"hidden_states": torch.zeros(2, 8, 16)}],  # non-tensor
+    }
+
+    def mock_infer(**kwargs):
+        pass
+
+    # Should not raise
+    _process_batch(batch_data, mock_infer, allowed_non_tensor_keys={"base_model_outputs"})
+
+
+def test_process_batch_non_tensor_without_allowlist_raises():
+    """Non-tensor values without allowlist should raise AssertionError."""
+    batch_data = {
+        "input_ids": torch.ones((2, 8), dtype=torch.long),
+        "base_model_outputs": [{"hidden_states": torch.zeros(2, 8, 16)}],
+    }
+
+    def mock_infer(**kwargs):
+        pass
+
+    with pytest.raises(AssertionError):
+        _process_batch(batch_data, mock_infer)
+
+
+def test_process_batch_other_keys_still_validated():
+    """Non-tensor values under non-allowed keys should still raise even with allowlist set."""
+    batch_data = {
+        "input_ids": torch.ones((2, 8), dtype=torch.long),
+        "unexpected_key": "some_string",  # not in allowed list
+    }
+
+    def mock_infer(**kwargs):
+        pass
+
+    with pytest.raises(AssertionError):
+        _process_batch(batch_data, mock_infer, allowed_non_tensor_keys={"base_model_outputs"})
+
+
 @pytest.mark.parametrize("test_local_path", [True, False])
 def test_get_dataset_samples_with_unsupported_minipile_dataset(tmp_path, test_local_path):
     pytest.importorskip("datasets")

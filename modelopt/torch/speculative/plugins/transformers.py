@@ -460,6 +460,36 @@ class HFEagleModel(EagleModel):
             print(f"Failed to create NVTX range {name}: {e}")
             return contextlib.nullcontext()
 
+    def get_dummy_inputs(self) -> dict:
+        """Construct dummy inputs for export forward pass.
+
+        Returns a dict of kwargs that can be passed to forward(). For offline EAGLE models,
+        this includes dummy base_model_outputs with the right tensor shapes so the export
+        pipeline doesn't need to thread real calibration data through multiple layers.
+        """
+        device = self.device
+        dtype = next(self.parameters()).dtype
+        hidden_size = self._base_llm_config.hidden_size
+        dummy_inputs = {
+            "input_ids": torch.ones(1, 2, dtype=torch.long, device=device),
+        }
+        if self.eagle_offline:
+            base_model_outputs = {
+                "base_model_hidden_states": torch.zeros(
+                    1, 2, hidden_size, dtype=dtype, device=device
+                ),
+                "base_model_input_embeds": torch.zeros(
+                    1, 2, hidden_size, dtype=dtype, device=device
+                ),
+            }
+            if self.eagle_config.use_aux_hidden_state:
+                num_aux = len(self.eagle_config.eagle_aux_hidden_state_layer_ids)
+                base_model_outputs["aux_hidden_states"] = torch.zeros(
+                    1, 2, hidden_size * num_aux, dtype=dtype, device=device
+                )
+            dummy_inputs["base_model_outputs"] = base_model_outputs
+        return dummy_inputs
+
     def get_exporter(self) -> SpeculativeDecodingExporter:
         """Get the exporter for the draft model."""
         exporter_cls = (
