@@ -74,6 +74,48 @@ include a multi-node-capable partition as the last fallback.
 
 Only submit the full job after the smoke test exits cleanly.
 
+### Docker (non-pyxis) variant
+
+Some clusters don't have pyxis/enroot installed and instead use plain `docker run` on compute nodes. In this case, replace the `srun --container-image` pattern with `docker run` inside the job script:
+
+```bash
+#!/bin/bash
+#SBATCH --job-name=<name>
+#SBATCH --account=<account>
+#SBATCH --partition=<partition>
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --gpus-per-node=<N>
+#SBATCH --time=<HH:MM:SS>
+#SBATCH --output=<log_dir>/<name>_%j.log
+
+docker run --rm \
+    --gpus all \
+    --shm-size=32g \
+    --ulimit memlock=-1 \
+    --network host \
+    --runtime=nvidia \
+    -v <data_root>:<data_root> \
+    -e CALIB_SIZE="${CALIB_SIZE:-512}" \
+    <container_image> \
+    bash <path/to/run_script.sh>
+```
+
+**Key differences from pyxis**:
+
+- No `srun` wrapper needed — SLURM just allocates the node, Docker runs the container
+- Mount paths with `-v` instead of `--container-mounts`
+- Pass env vars with `-e` instead of relying on SLURM env propagation
+- Use the two-script pattern: SLURM wrapper (sbatch directives + `docker run`) and inner runner (the actual work). The inner runner should unset SLURM env vars and set `HF_HOME`/`HF_DATASETS_OFFLINE` as needed
+- **NFS root_squash**: Docker runs as root by default, which NFS squashes to `nobody`. Run `chmod -R a+rwX` on all output/cache directories before submitting, or use `--user $(id -u):$(id -g)` in the `docker run` command
+
+**How to detect which pattern to use**: Ask the user how they normally run containers, or check:
+
+```bash
+which enroot 2>/dev/null && echo "pyxis/enroot available"
+which docker 2>/dev/null && echo "docker available"
+```
+
 ---
 
 ## 3. Monitor Until Completion

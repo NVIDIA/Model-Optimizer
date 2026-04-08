@@ -118,9 +118,15 @@ Report the path and size to the user.
 - `mtq.register()` classes **must** define `_setup()` and call it from `__init__`
 - Call `mto.enable_huggingface_checkpointing()` **before** quantization
 - Wildcard `*gate*` matches too broadly — use `*mlp.gate*` or `*router*`
-- VLMs need `AutoModel`, not `AutoModelForCausalLM`
-- FP8 loading: `FineGrainedFP8Config(dequantize=True)`, not a dict
+- VLMs: `hf_ptq.py` auto-extracts the language model via `extract_and_prepare_language_model_from_vl()` — no manual VLM handling needed in most cases
+- FP8 checkpoints: ModelOpt's `_QuantFP8Linear` plugin (in `modelopt/torch/quantization/plugins/huggingface.py`) handles `FP8Linear` modules automatically — it keeps weights compact in FP8 and dequantizes lazily during calibration. Do **not** use `FineGrainedFP8Config(dequantize=True)` as it expands the entire model to BF16 upfront, wasting ~2x memory
 - Custom quantizer names must end with `_input_quantizer` or `_weight_quantizer`
+
+## Common Pitfalls
+
+- **Transformers version**: Newer models (e.g., Devstral/ministral3) may require a transformers version not yet in the container. Check `config.json` for `transformers_version` and upgrade if needed. Install ModelOpt first, then upgrade transformers **with** deps (not `--no-deps`) to pull compatible `huggingface_hub`
+- **SLURM compute nodes offline**: Many clusters block internet from compute nodes. Pre-cache calibration datasets on the login node and use `HF_HOME=<cache_path> HF_DATASETS_OFFLINE=1` in the job script. See `references/slurm-setup-ptq.md` section 4
+- **NFS root_squash + Docker**: Docker runs as root, but NFS squashes root to `nobody`. Run `chmod -R a+rwX` on workspace/cache directories before submitting jobs, or use `docker run --user $(id -u):$(id -g)`. See `references/slurm-setup-ptq.md` section 5
 
 ## References
 

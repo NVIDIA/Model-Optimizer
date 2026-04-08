@@ -68,3 +68,66 @@ This catches script errors cheaply before using GPU quota on a real run.
 See `skills/common/slurm-setup.md` section 2 for the smoke test partition pattern.
 
 Only submit the full calibration job after the smoke test exits cleanly.
+
+---
+
+## 4. Dataset Caching for Offline Compute Nodes
+
+Many SLURM clusters block internet access from compute nodes. Calibration datasets (e.g., `cnn_dailymail`, `nemotron-post-training-dataset-v2`) must be pre-cached on the **login node** (which has internet), then accessed offline from jobs.
+
+**Pre-cache on the login node:**
+
+```bash
+# Install datasets library if not available
+pip install --user datasets huggingface_hub
+
+# Download to a shared filesystem path
+HF_HOME=/path/to/shared/.hf_cache python3 -c "
+from datasets import load_dataset
+load_dataset('abisee/cnn_dailymail', '3.0.0', split='train', streaming=False)
+print('cnn_dailymail cached')
+"
+```
+
+> **Gated datasets** (e.g., `nvidia/Nemotron-Post-Training-Dataset-v2`) require HF authentication. Either set `HF_TOKEN` before downloading, or use `--dataset cnn_dailymail` to skip the gated dataset.
+
+**Fix permissions** (required for Docker — see section 5):
+
+```bash
+chmod -R a+rwX /path/to/shared/.hf_cache/
+```
+
+**Use in the job script:**
+
+```bash
+export HF_HOME="/path/to/shared/.hf_cache"
+export HF_DATASETS_OFFLINE=1
+export HF_HUB_OFFLINE=1
+```
+
+Then pass `--dataset cnn_dailymail` to `hf_ptq.py` to avoid attempting to download uncached datasets.
+
+---
+
+## 5. NFS root_squash and Docker Permissions
+
+Docker containers typically run as root, but NFS filesystems with `root_squash` (the default) map root to `nobody`, blocking writes to directories owned by the user. This causes `PermissionError` when:
+
+- Creating dataset cache lock files
+- Writing quantized checkpoint output
+- Saving quant summaries or logs
+
+**Fix**: run `chmod -R a+rwX` on all directories the job will write to, **before** submitting the job:
+
+```bash
+chmod -R a+rwX /path/to/workspace/
+chmod -R a+rwX /path/to/.hf_cache/
+```
+
+Alternatively, run Docker with the host user's UID/GID to match NFS ownership:
+
+```bash
+docker run --user $(id -u):$(id -g) ...
+```
+
+> Note: `--user` may cause issues if the container expects root for package installation. In that case, prefer the `chmod` approach.
