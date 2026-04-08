@@ -81,15 +81,14 @@ repos:
               modelopt/torch/export/transformer_engine.py|
               modelopt/torch/quantization/export_onnx.py|
               modelopt/torch/quantization/plugins/attention.py|
+              modelopt/torch/sparsity/attention_sparsity/methods/vsa_utils.py|
               modelopt/torch/speculative/eagle/utils.py|
               modelopt/torch/speculative/plugins/transformers.py|
               modelopt/torch/utils/plugins/megatron_mmlu.py|
               examples/chained_optimizations/bert_prune_distill_quantize.py|
               examples/deepseek/quantize_to_nvfp4.py|
               examples/deepseek/ptq.py|
-              examples/diffusers/cache_diffusion/pipeline/models/sdxl.py|
               examples/diffusers/quantization/onnx_utils/export.py|
-              examples/llm_eval/humaneval.py|
               examples/llm_eval/lm_eval_hf.py|
               examples/llm_eval/mmlu.py|
               examples/llm_eval/modeling.py|
@@ -98,10 +97,9 @@ repos:
               examples/specdec_bench/specdec_bench/models/specbench_medusa.py|
               examples/speculative_decoding/main.py|
               examples/speculative_decoding/medusa_utils.py|
-              examples/speculative_decoding/server_generate.py|
+              examples/speculative_decoding/scripts/server_generate.py|
               experimental/dms/models/qwen3/configuration_qwen3_dms.py|
               experimental/dms/models/qwen3/modeling_qwen3_dms.py|
-              modelopt/torch/sparsity/attention_sparsity/methods/vsa_utils.py|
           )$
 
       # Default hook for Apache 2.0 in c/c++/cuda files
