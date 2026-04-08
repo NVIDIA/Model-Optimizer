@@ -1,4 +1,3 @@
 datasets>=2.14.5
-onnx
 torch==2.9.0
 transformers==4.57.3

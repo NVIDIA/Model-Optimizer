@@ -58,7 +58,7 @@ onnx = [
     "lief",
     "ml_dtypes",
     "onnx-graphsurgeon",
-    "onnx~=1.19.0",
+    "onnx~=1.21.0",
     "onnxconverter-common~=1.16.0",
     # ORT for Windows
     "onnxruntime-gpu==1.22.0; platform_system == 'Windows'",

@@ -18,17 +18,8 @@
 import sys
 import warnings
 
-import onnx.helper
-
-if not hasattr(onnx.helper, "float32_to_bfloat16"):
-    import ml_dtypes
-    import numpy as np
-
-    def _float32_to_bfloat16(value):
-        arr = np.array(value, dtype=np.float32)
-        return int(arr.astype(ml_dtypes.bfloat16).view(np.uint16))
-
-    onnx.helper.float32_to_bfloat16 = _float32_to_bfloat16
+# Apply ONNX compatibility shim before any onnx_graphsurgeon imports.
+from modelopt.onnx._onnx_compat import patch_onnx_helper_removed_apis
 
 MIN_PYTHON_VERSION = (3, 10)
 
