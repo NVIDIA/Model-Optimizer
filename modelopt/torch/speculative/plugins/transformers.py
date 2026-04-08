@@ -474,7 +474,7 @@ class HFEagleModel(EagleModel):
             "input_ids": torch.ones(1, 2, dtype=torch.long, device=device),
         }
         if self.eagle_offline:
-            dummy_inputs["base_model_outputs"] = {
+            base_model_outputs = {
                 "base_model_hidden_states": torch.zeros(
                     1, 2, hidden_size, dtype=dtype, device=device
                 ),
@@ -482,6 +482,12 @@ class HFEagleModel(EagleModel):
                     1, 2, hidden_size, dtype=dtype, device=device
                 ),
             }
+            if self.eagle_config.use_aux_hidden_state:
+                num_aux = len(self.eagle_config.eagle_aux_hidden_state_layer_ids)
+                base_model_outputs["aux_hidden_states"] = torch.zeros(
+                    1, 2, hidden_size * num_aux, dtype=dtype, device=device
+                )
+            dummy_inputs["base_model_outputs"] = base_model_outputs
         return dummy_inputs
 
     def get_exporter(self) -> SpeculativeDecodingExporter:
