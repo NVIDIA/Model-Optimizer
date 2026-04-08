@@ -854,3 +854,32 @@ def update_quant_cfg_with_kv_cache_quant(
         quant_cfg["algorithm"] = "max"
     print_rank_0(f"Updated quant_cfg with KV cache quantization: {quant_cfg}")
     return quant_cfg
+
+
+def promote_nvfp4_static_quantizers(model: nn.Module) -> int:
+    """Convert eligible TensorQuantizers to NVFP4StaticQuantizer in-place.
+
+    After max calibration sets per-block amax values, NVFP4 static quantizers
+    need to be promoted so they use the two-level scaling path (global amax +
+    per-block amax) instead of the generic E4M3 path.
+
+    Returns the number of quantizers converted.
+    """
+    from modelopt.torch.quantization.nn import NVFP4StaticQuantizer, TensorQuantizer
+
+    converted = 0
+    for _name, module in list(model.named_modules()):
+        if isinstance(module, TensorQuantizer) and not module._disabled:
+            if module._calibrator is not None and not module._dynamic and hasattr(module, "_amax"):
+                is_nvfp4_static = (
+                    module.is_static_block_quant
+                    and module._num_bits == (2, 1)
+                    and module._block_sizes is not None
+                    and module._block_sizes.get("scale_bits") == (4, 3)
+                )
+                if is_nvfp4_static:
+                    initial_amax = module._amax.clone().detach()
+                    global_amax = reduce_amax(initial_amax, axis=None)
+                    NVFP4StaticQuantizer.from_tensor_quantizer(module, global_amax=global_amax)
+                    converted += 1
+    return converted
