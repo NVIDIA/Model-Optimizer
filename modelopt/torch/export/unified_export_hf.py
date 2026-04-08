@@ -127,7 +127,6 @@ def _save_component_state_dict_safetensors(
 ) -> None:
     """Save component state dict as a plain safetensors file.
 
-
     Args:
         component: The nn.Module to save.
         component_export_dir: Directory to save model.safetensors and config.json.
