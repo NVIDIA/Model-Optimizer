@@ -82,6 +82,7 @@ def non_negative_int(value: str) -> int:
         raise argparse.ArgumentTypeError("must be >= 0")
     return ivalue
 
+
 WEIGHTS_URL = "https://github.com/piergiaj/pytorch-i3d/raw/master/models/rgb_imagenet.pt"
 WEIGHTS_SHA256 = "2609088c2e8c868187c9921c50bc225329a9057ed75e76120e0b4a397a2c7538"
 DEFAULT_CACHE = Path.home() / ".cache" / "fvd" / "rgb_imagenet.pt"
@@ -348,9 +349,7 @@ def main():
 
     weights_path = resolve_weights(args.weights)
     user_supplied_weights = args.weights is not None
-    model = load_i3d(
-        str(weights_path), device, allow_unsafe_pickle=not user_supplied_weights
-    )
+    model = load_i3d(str(weights_path), device, allow_unsafe_pickle=not user_supplied_weights)
     log.info(f"I3D model loaded from {weights_path.name} (1024-dim features)")
 
     ref_paths = list_videos(args.ref_dir)
