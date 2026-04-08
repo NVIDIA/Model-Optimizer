@@ -165,28 +165,42 @@ class TestNormalizeQuantCfgList:
 
     def test_error_on_empty_cfg_dict_implicit_enable(self):
         """Entry with cfg={} and implicit enable=True is rejected."""
-        with pytest.raises(ValueError, match="non-empty dict or list"):
+        with pytest.raises(ValueError, match="non-empty dict"):
             normalize_quant_cfg_list([{"quantizer_name": "*weight_quantizer", "cfg": {}}])
 
     def test_error_on_empty_cfg_dict_explicit_enable_true(self):
         """Entry with cfg={} and explicit enable=True is rejected."""
-        with pytest.raises(ValueError, match="non-empty dict or list"):
+        with pytest.raises(ValueError, match="non-empty dict"):
             normalize_quant_cfg_list(
                 [{"quantizer_name": "*weight_quantizer", "cfg": {}, "enable": True}]
             )
 
     def test_error_on_empty_cfg_list_enable_true(self):
         """Entry with cfg=[] and enable=True is rejected."""
-        with pytest.raises(ValueError, match="non-empty dict or list"):
+        with pytest.raises(ValueError, match="non-empty dict"):
             normalize_quant_cfg_list(
                 [{"quantizer_name": "*weight_quantizer", "cfg": [], "enable": True}]
             )
 
     def test_error_on_non_dict_non_list_cfg_enable_true(self):
         """Entry with cfg of invalid type (e.g. int) and enable=True is rejected."""
-        with pytest.raises(ValueError, match="non-empty dict or list"):
+        with pytest.raises(ValueError, match="non-empty dict"):
             normalize_quant_cfg_list(
                 [{"quantizer_name": "*weight_quantizer", "cfg": 42, "enable": True}]
+            )
+
+    def test_error_on_cfg_list_with_empty_dict_enable_true(self):
+        """Entry with cfg=[{}] and enable=True is rejected (empty dict element)."""
+        with pytest.raises(ValueError, match="non-empty dict"):
+            normalize_quant_cfg_list(
+                [{"quantizer_name": "*weight_quantizer", "cfg": [{}], "enable": True}]
+            )
+
+    def test_error_on_cfg_list_with_non_dict_element_enable_true(self):
+        """Entry with cfg=[42] and enable=True is rejected (non-dict element)."""
+        with pytest.raises(ValueError, match="non-empty dict"):
+            normalize_quant_cfg_list(
+                [{"quantizer_name": "*weight_quantizer", "cfg": [42], "enable": True}]
             )
 
     def test_empty_cfg_dict_enable_false_accepted(self):

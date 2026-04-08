@@ -1673,10 +1673,19 @@ def normalize_quant_cfg_list(v: dict | list) -> list[QuantizerCfgEntry]:
             cfg = entry.get("cfg")
             enable = entry.get("enable", True)
             if enable and cfg is not None:
-                if not isinstance(cfg, (dict, list)) or len(cfg) == 0:
+                if isinstance(cfg, dict):
+                    is_invalid = len(cfg) == 0
+                elif isinstance(cfg, list):
+                    is_invalid = len(cfg) == 0 or any(
+                        not isinstance(item, dict) or len(item) == 0 for item in cfg
+                    )
+                else:
+                    is_invalid = True
+                if is_invalid:
                     raise ValueError(
                         f"Invalid quant_cfg entry: {raw!r} — 'cfg' must be a non-empty dict "
-                        "or list when enabling a quantizer. Either provide quantizer "
+                        f"or a non-empty list of non-empty dicts when enabling a quantizer "
+                        f"(got {type(cfg).__name__}: {cfg!r}). Either provide quantizer "
                         "attributes in 'cfg' or remove 'cfg' and set 'enable' explicitly."
                     )
 
