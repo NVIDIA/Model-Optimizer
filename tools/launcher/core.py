@@ -157,6 +157,8 @@ class SandboxPipeline:
     task_4: SandboxTask4 = None
     tasks: list[SandboxTask] = None
 
+    assets: list[str] = None  # HF repo paths (relative to hf_local) to verify before submission
+
     test_level: int = 0
     allow_to_fail: bool = False
     skip: bool = False
@@ -252,7 +254,7 @@ def build_slurm_executor(
 
     tunnel = run.SSHTunnel(
         host=slurm_config.host,
-        user=getpass.getuser() if user is None else user,
+        user=user or getattr(slurm_config, "user", None) or getpass.getuser(),
         port=slurm_config.port,
         job_dir=job_dir,
         identity=identity,
@@ -320,7 +322,7 @@ def build_docker_executor(
         ipc_mode="host",
         container_image=slurm_config.container,
         volumes=container_mounts,
-        additional_kwargs={"user": f"{os.getuid()}:{os.getgid()}"},
+        additional_kwargs={"user": f"{os.getuid()}:{os.getgid()}", "entrypoint": ""},
         packager=packager,
     )
     return executor
