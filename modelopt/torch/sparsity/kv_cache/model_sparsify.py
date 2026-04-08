@@ -80,11 +80,19 @@ def calibrate(
         model: Model with TriAttention mode applied.
         config: Optional config override.
         forward_loop: Callable that runs forward passes on calibration data.
+            If None, calibration is skipped (no-op).
 
     Returns:
         The model with calibration data stored in metadata.
     """
-    # Full GPU calibration with model forward passes will be implemented
-    # when engine integration is designed. For now, calibrate is a no-op
-    # that can be called safely after sparsify().
+    if forward_loop is None:
+        return model
+
+    from .triattention.calibration import run_calibration
+
+    calib_data = run_calibration(model, forward_loop=forward_loop)
+
+    # Store calibration data in model attribute for later export
+    model._triattention_calibration = calib_data
+
     return model
