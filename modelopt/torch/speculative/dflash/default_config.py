@@ -13,24 +13,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Handles speculative plugins for third-party modules.
+"""Default DFlash architecture config.
 
-Please check out the source code of this module for examples of how plugins work and how you can
-write your own one. Currently, we support plugins for
-
-- :meth:`transformers<modelopt.torch.speculative.plugins.transformers>`
+Model-specific settings (hidden_size, num_attention_heads, rope_*, etc.)
+are inherited from the base model in HFDFlashModel.modify(). Only
+DFlash-specific defaults are set here.
 """
 
-from modelopt.torch.utils import import_plugin
-
-with import_plugin("megatron_eagle"):
-    from .megatron_eagle import *
-
-with import_plugin("megatron_medusa"):
-    from .megatron_medusa import *
-
-with import_plugin("transformers"):
-    from .transformers import *
-
-with import_plugin("hf_dflash"):
-    from .hf_dflash import *
+default_dflash_config = {
+    "num_hidden_layers": 5,
+    "rms_norm_eps": 1e-06,
+    "attention_bias": False,
+    "attention_dropout": 0.0,
+}

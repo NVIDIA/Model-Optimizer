@@ -57,6 +57,7 @@ def make_eagle_supervised_data_module(
     tokenizer: transformers.PreTrainedTokenizer,
     data_args,
     train_len=None,
+    answer_only_loss=False,
 ) -> dict:
     if data_args.offline_data_path is None:
         train_dataset = ShardedDataset("json", data_files=data_args.data_path)
@@ -66,6 +67,7 @@ def make_eagle_supervised_data_module(
                 tokenizer=tokenizer,
                 train_len=train_len,
                 return_labels=True,
+                answer_only_loss=answer_only_loss,
             )
         else:
             data_collator = VisionLanguageDataCollator(
@@ -126,6 +128,12 @@ class EagleTrainingPlot(TrainerCallback):
         if not hasattr(state, "training_accs") or len(state.training_accs) == 0:
             return control
         average_acc = np.mean(state.training_accs, axis=0)
+        # Always print accuracy to console
+        try:
+            acc_str = ", ".join(f"{a:.4f}" for a in np.array(average_acc).flatten())
+            print_rank_0(f"Step {state.global_step} Training Acc: [{acc_str}]")
+        except Exception:
+            print_rank_0(f"Step {state.global_step} Training Acc: {average_acc}")
         if self.estimate_ar:
             # Calculate mean training AR since last log
             # NOTE: This is only an estimate of the real AR.
@@ -140,41 +148,64 @@ class EagleTrainingPlot(TrainerCallback):
                 est_ar += acc_cumprod
             print_rank_0(f"Step {state.global_step} Estimated Training AR: {est_ar:.4f}")
 
+        # Log accuracy to HF Trainer's logs dict (picked up by TensorBoard)
+        logs = kwargs.get("logs") or {}
+        for i, draft_acc in enumerate(average_acc):
+            for j, step_acc in enumerate(draft_acc):
+                logs[f"train_acc/parallel_{i}_step_{j}"] = float(step_acc)
+        if self.estimate_ar:
+            logs["estimated_training_ar"] = est_ar
+
         # log to wandb
-        if wandb and is_master():
-            logs = kwargs.get("logs") or {}
+        if hasattr(wandb, "init") and is_master():
             if logs:
                 wandb.log({k: v for k, v in logs.items() if v is not None}, step=state.global_step)
-            for i, draft_acc in enumerate(average_acc):
-                for j, step_acc in enumerate(draft_acc):
-                    wandb.log(
-                        {f"parallel_{i}_step_{j}_train_acc": step_acc}, step=state.global_step
-                    )
-            if self.estimate_ar:
-                wandb.log({"estimated_training_ar": est_ar}, step=state.global_step)
 
         # reset training_accs
         state.training_accs = []
         return control
 
     def on_step_end(self, args, state, control, **kwargs):
-        """Run AR validation periodically, if available."""
+        """Run AR validation periodically (single-GPU only).
+
+        AR validation with DDP is not supported because pseudo_speculative_generate
+        runs only on rank 0 while other ranks deadlock waiting for collective ops.
+        When world_size > 1, AR validation is skipped with a one-time warning.
+        Use post-training AR validation instead (online_training.sh runs it after training).
+        """
         if self.ar_validate_steps <= 0:
             return control
         if state.global_step % self.ar_validate_steps == 0 and state.global_step > 0:
+            if torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1:
+                if not hasattr(self, "_ar_ddp_warned"):
+                    self._ar_ddp_warned = True
+                    print_rank_0(
+                        "=== WARNING === AR validation during training is not supported with "
+                        "DDP (world_size > 1). Skipping. Use post-training AR validation."
+                    )
+                return control
+
+            model = kwargs["model"]
+            raw_model = model.module if hasattr(model, "module") else model
+            was_training = raw_model.training
+            raw_model.eval()
             print_rank_0("Running AR validation...")
             try:
-                ars = validate_ar(
-                    model=kwargs["model"],
-                    tokenizer=kwargs["processing_class"],
-                    ds=load_dataset("HuggingFaceH4/mt_bench_prompts")["train"],
-                    device=kwargs["model"].device,
-                )
+                with torch.no_grad():
+                    ars = validate_ar(
+                        model=raw_model,
+                        tokenizer=kwargs["processing_class"],
+                        ds=load_dataset("/hf-local/HuggingFaceH4/mt_bench_prompts")["train"],
+                        device=next(raw_model.parameters()).device,
+                        num_samples=8,
+                    )
                 print_rank_0(f"Step {state.global_step} AR: {sum(ars) / len(ars):.4f}")
-                if wandb and is_master():
+                if wandb:
                     wandb.log({"validate_ar": sum(ars) / len(ars)}, step=state.global_step)
-            except Exception:
-                print_rank_0("AR validation not available.")
+            except Exception as e:
+                print_rank_0(f"AR validation failed: {e}")
+            if was_training:
+                raw_model.train()
         return control
 
 

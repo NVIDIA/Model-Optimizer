@@ -112,7 +112,7 @@ class TrainingArguments(transformers.TrainingArguments):
             )
         },
     )
-    mode: Literal["eagle3", "medusa"] = "eagle3"
+    mode: Literal["eagle3", "medusa", "dflash"] = "eagle3"
     estimate_ar: bool = field(
         default=False, metadata={"help": "Whether to estimate AR using training accuracy to log."}
     )
@@ -142,8 +142,8 @@ def _parse_cli() -> tuple[str, list[str]]:
     return args.config, overrides
 
 
-def _load_config(config_path: str, overrides: list[str] = ()) -> tuple[dict, dict]:
-    """Load training config from a YAML file with sections: model, data, training, eagle.
+def _load_config(config_path: str, overrides: list[str] = ()) -> tuple[dict, dict, dict]:
+    """Load training config from a YAML file with sections: model, data, training, eagle/dflash.
 
     *overrides* are OmegaConf dotlist entries (e.g. ``["model.model_name_or_path=xxx"]``)
     applied on top of the YAML.
@@ -151,15 +151,16 @@ def _load_config(config_path: str, overrides: list[str] = ()) -> tuple[dict, dic
     Returns:
         hf_cfg: Flat dict from model/data/training sections, for HfArgumentParser.parse_dict()
         eagle_cfg: Eagle section dict (EagleConfig fields), passed directly to mtsp.convert()
+        dflash_cfg: DFlash section dict (DFlashConfig fields), passed directly to mtsp.convert()
     """
     merged = OmegaConf.load(config_path)
     if overrides:
         merged = OmegaConf.merge(merged, OmegaConf.from_dotlist(list(overrides)))
     cfg = OmegaConf.to_container(merged, resolve=True)
 
-    # Eagle section maps directly to EagleConfig fields — no field enumeration needed.
-    # eagle_architecture_config is a nested dict and is included as-is.
+    # Eagle/DFlash sections map directly to config fields — no field enumeration needed.
     eagle_cfg = cfg.get("eagle", {})
+    dflash_cfg = cfg.get("dflash", {})
 
     hf_cfg = {
         **cfg.get("model", {}),
@@ -171,12 +172,14 @@ def _load_config(config_path: str, overrides: list[str] = ()) -> tuple[dict, dic
         cp_size = hf_cfg.get("cp_size", 1)
         hf_cfg["dp_shard_size"] = torch.cuda.device_count() // cp_size
 
-    return hf_cfg, eagle_cfg
+    return hf_cfg, eagle_cfg, dflash_cfg
 
 
 def train():
+    import json
+
     config_path, overrides = _parse_cli()
-    hf_cfg, eagle_cfg = _load_config(config_path, overrides)
+    hf_cfg, eagle_cfg, dflash_cfg = _load_config(config_path, overrides)
 
     parser = transformers.HfArgumentParser(
         (
@@ -202,7 +205,10 @@ def train():
         patch_ring_attention_for_ttt()
         # Specific patch to accelerate 1.12.0. Removable after move to 1.13.0
         training_args.parallelism_config.sp_backend = None
-    print_rank_0(f"arguments: {model_args}, {training_args}, {medusa_args}, eagle_cfg={eagle_cfg}")
+    print_rank_0(
+        f"arguments: {model_args}, {training_args}, {medusa_args}, "
+        f"eagle_cfg={eagle_cfg}, dflash_cfg={dflash_cfg}"
+    )
 
     # Detect checkpoint to resume from
     last_checkpoint = (
@@ -218,12 +224,30 @@ def train():
     use_offline_training = data_args.offline_data_path is not None
 
     if checkpoint:
+        # Prefer top-level output_dir, fall back to checkpoint subdir
+        model_load_path = training_args.output_dir
+        if not os.path.isfile(os.path.join(model_load_path, "model.safetensors")):
+            model_load_path = checkpoint
+            print_rank_0(
+                f"No model.safetensors in {training_args.output_dir}, "
+                f"loading from checkpoint: {model_load_path}"
+            )
         with patch_transformers5_params_loading():
             model = load_vlm_or_llm(
                 checkpoint, dtype="auto", trust_remote_code=model_args.trust_remote_code
             )
+        # DFlash: re-create rotary embeddings with meta-tensor buffers on CPU.
+        # inv_freq is computed (not saved in checkpoints), stays on meta after restore.
+        if training_args.mode == "dflash":
+            for mod in model.modules():
+                if hasattr(mod, "rotary_emb"):
+                    rotary = mod.rotary_emb
+                    if any(b.is_meta for b in rotary.buffers()):
+                        cfg = getattr(rotary, "config", None)
+                        if cfg is not None:
+                            mod.rotary_emb = type(rotary)(config=cfg, device="cpu")
         tokenizer = transformers.AutoTokenizer.from_pretrained(
-            checkpoint, trust_remote_code=model_args.trust_remote_code
+            model_load_path, trust_remote_code=model_args.trust_remote_code
         )
     else:
         # To avoid OOM for large models, we load and convert model on CPU first.
@@ -282,13 +306,19 @@ def train():
                     )
                 model.eagle_module.d2t = torch.load(data_args.draft_vocab_cache, weights_only=True)
                 print_rank_0(f"Loaded draft vocab cache from {data_args.draft_vocab_cache}.")
+        elif training_args.mode == "dflash":
+            # dflash_cfg maps directly to DFlashConfig fields.
+            mtsp.convert(model, [("dflash", dflash_cfg)])
         else:
             raise Exception(f"{training_args.mode} is not supported!")
 
     print_rank_0("Loading dataset...")
-    if training_args.mode == "eagle3":
+    if training_args.mode in ("eagle3", "dflash"):
         data_module = make_eagle_supervised_data_module(
-            tokenizer, data_args, train_len=training_args.training_seq_len
+            tokenizer,
+            data_args,
+            train_len=training_args.training_seq_len,
+            answer_only_loss=(training_args.mode == "dflash"),
         )
 
     trainer = EagleTrainerWithAccLog(
@@ -307,7 +337,34 @@ def train():
     )
 
     print_rank_0("Start training...")
-    trainer.train(resume_from_checkpoint=checkpoint)
+    if checkpoint and not os.path.isfile(
+        os.path.join(training_args.output_dir, "model.safetensors")
+    ):
+        # Resume from checkpoint subdir: try full resume first, fall back to
+        # partial resume (model weights + trainer state, fresh optimizer) if
+        # the optimizer state doesn't match.
+        try:
+            trainer.train(resume_from_checkpoint=checkpoint)
+        except ValueError as e:
+            if "parameter group" in str(e):
+                print_rank_0(
+                    f"Optimizer state mismatch: {e}\n"
+                    f"Resuming with fresh optimizer from {checkpoint}"
+                )
+                state_file = os.path.join(checkpoint, "trainer_state.json")
+                if os.path.isfile(state_file):
+                    state = json.load(open(state_file))
+                    resumed_step = state.get("global_step", 0)
+                    resumed_max_steps = state.get("max_steps", -1)
+                    print_rank_0(f"Resuming from step {resumed_step}/{resumed_max_steps}")
+                    if resumed_max_steps > 0:
+                        training_args.max_steps = resumed_max_steps
+                    trainer.state = trainer.state.load_from_json(state_file)
+                trainer.train()
+            else:
+                raise
+    else:
+        trainer.train(resume_from_checkpoint=checkpoint)
     trainer.save_state()
     trainer.save_model(training_args.output_dir)
 

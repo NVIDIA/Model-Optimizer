@@ -27,7 +27,7 @@ from safetensors.torch import save_file
 
 from .hf_spec_configs import kimik2_eagle_template_config, llama_eagle_template_config
 
-ALL_SPEC_MODES = ["eagle"]
+ALL_SPEC_MODES = ["eagle", "dflash"]
 
 LLAMA_EAGLE_SINGLE_LAYER = {
     "required": {
@@ -263,3 +263,107 @@ class EagleMedusaExporter(EagleExporter):
                         export_sd.pop(f"parallel_draft_heads.medusa_heads.{i}.{j}.linear.bias")
                     )
         return export_sd
+
+
+class DFlashExporter(SpeculativeDecodingExporter):
+    """Draft model exporter for DFlash.
+
+    Exports in z-lab compatible format:
+    - model.safetensors: draft module weights (no prefix)
+    - config.json: Qwen3-style config with dflash_config field
+    """
+
+    def __init__(self, model: nn.Module):
+        """Initialize the DFlashExporter."""
+        super().__init__(model)
+
+    def _extract_state_dict(self, full_state_dict: dict):
+        """Extract DFlash module weights, stripping the dflash_module prefix."""
+        export_sd = {}
+        for key, value in full_state_dict.items():
+            if "dflash_module." in key:
+                export_key = key.split("dflash_module.", 1)[1]
+                # Skip rotary embedding buffers (not needed, recomputed)
+                if "rotary_emb" in export_key:
+                    continue
+                export_sd[export_key] = value.clone()
+        return export_sd
+
+    def _export_config(self):
+        """Build config.json matching z-lab DFlash format."""
+        model = self.model
+        base_config = (
+            getattr(model.config, "text_config", None)
+            or getattr(model.config, "llm_config", None)
+            or model.config
+        )
+        draft_config = model.dflash_config
+
+        config = {
+            "architectures": ["DFlashDraftModel"],
+            "model_type": getattr(base_config, "model_type", "qwen3"),
+            "block_size": model.dflash_block_size,
+            "dflash_config": {
+                "mask_token_id": model.mask_token_id,
+                "target_layer_ids": list(model.target_layer_ids),
+            },
+            # Architecture dimensions
+            "hidden_size": getattr(draft_config, "hidden_size", base_config.hidden_size),
+            "num_hidden_layers": draft_config.num_hidden_layers,
+            "num_attention_heads": getattr(
+                draft_config, "num_attention_heads", base_config.num_attention_heads
+            ),
+            "num_key_value_heads": getattr(
+                draft_config, "num_key_value_heads", base_config.num_key_value_heads
+            ),
+            "head_dim": getattr(
+                draft_config,
+                "head_dim",
+                base_config.hidden_size // base_config.num_attention_heads,
+            ),
+            "intermediate_size": getattr(
+                draft_config, "intermediate_size", base_config.intermediate_size
+            ),
+            "hidden_act": getattr(draft_config, "hidden_act", "silu"),
+            "rms_norm_eps": getattr(draft_config, "rms_norm_eps", 1e-6),
+            "vocab_size": base_config.vocab_size,
+            "max_position_embeddings": getattr(base_config, "max_position_embeddings", 32768),
+            "initializer_range": getattr(base_config, "initializer_range", 0.02),
+            "attention_bias": getattr(draft_config, "attention_bias", False),
+            "attention_dropout": getattr(draft_config, "attention_dropout", 0.0),
+            "rope_theta": getattr(base_config, "rope_theta", 1000000.0),
+            "rope_scaling": getattr(base_config, "rope_scaling", None),
+            "tie_word_embeddings": False,
+            "torch_dtype": "bfloat16",
+            "num_target_layers": getattr(base_config, "num_hidden_layers", 36),
+        }
+
+        # Add layer_types if present (Qwen3-style)
+        if hasattr(draft_config, "layer_types"):
+            config["layer_types"] = draft_config.layer_types
+        else:
+            config["layer_types"] = ["full_attention"] * draft_config.num_hidden_layers
+
+        return config
+
+    def export(self, export_dir: Path | str, dtype: torch.dtype | None = None):
+        """Export the DFlash draft model to deployment format."""
+        export_dir = Path(export_dir)
+        export_dir.mkdir(parents=True, exist_ok=True)
+
+        # Export state dict
+        full_sd = self.model.state_dict()
+        drafter_sd = self._extract_state_dict(full_sd)
+        if dtype is not None:
+            drafter_sd = {k: v.to(dtype) for k, v in drafter_sd.items()}
+        save_file(drafter_sd, f"{export_dir}/model.safetensors")
+
+        # Export config
+        drafter_config = self._export_config()
+        with open(f"{export_dir}/config.json", "w") as f:
+            json.dump(drafter_config, f, indent=2)
+
+        print(
+            f"Exported DFlash draft model: {len(drafter_sd)} tensors, "
+            f"config keys: {list(drafter_config.keys())[:5]}..."
+        )

@@ -1,0 +1,63 @@
+# DFlash online speculative decoding training for Qwen3-8B.
+#
+# Trains a DFlash draft model (block diffusion) using the frozen target model
+# to extract multi-layer hidden states on the fly, then evaluates AR on MT-Bench.
+#
+# 2-step pipeline:
+#   task_0: Online DFlash training (8 nodes, 64 GPUs)
+#   task_1: MT-Bench per-category AR evaluation (1 GPU)
+#
+# Reference: "DFlash: Block Diffusion for Flash Speculative Decoding" (arXiv:2602.06036)
+#
+# Usage:
+#   uv run launch.py --yaml examples/Qwen/Qwen3-8B/hf_online_dflash.yaml --yes
+#   uv run slurm.py --yaml modules/Model-Optimizer/tools/launcher/examples/Qwen/Qwen3-8B/hf_online_dflash.yaml --yes
+
+job_name: Qwen3-8B_DFlash_online
+pipeline:
+  # Step 1: Online DFlash training
+  task_0:
+    script: common/dflash/online_training.sh
+    args:
+      - --data /hf-local/modelopt/Speculative-Decoding-Dataset-v1-Qwen3-8B/default.jsonl
+      - --output_dir /scratchspace/dflash_bs16
+      - --num_epochs 5
+      - --lr 6e-4
+      - --training_seq_len 4096
+      - --save_steps 5000
+      - --log_steps 1000
+      - --disable_tqdm True
+      - --ar_validate_steps 0
+      - --dflash_block_size 16
+      - --dflash_num_layers 5
+      - --dflash_mask_token_id 151669
+      - --dflash_num_anchors 512
+      - --dflash_loss_decay_gamma 7
+      - --num_nodes 8
+    environment:
+      - HF_MODEL_CKPT: /hf-local/Qwen/Qwen3-8B
+      - NUM_AR_SAMPLES: "0"
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 8
+      ntasks_per_node: 1
+      gpus_per_node: 8
+
+  # Step 2: MT-Bench per-category AR evaluation (ModelOpt online validation)
+  task_1:
+    script: common/dflash/ar_eval_mtbench.sh
+    args:
+      - --ckpt_dir /scratchspace/dflash_bs16
+      - --block_size 16
+      - --num_layers 5
+      - --mask_token_id 151669
+      - --osl 512
+      - --steps 15
+      - --online true
+    environment:
+      - HF_MODEL_CKPT: /hf-local/Qwen/Qwen3-8B
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 1

@@ -350,3 +350,41 @@ More models coming soon!
 - 💡 [Release Notes](https://nvidia.github.io/Model-Optimizer/reference/0_changelog.html)
 - 🐛 [File a bug](https://github.com/NVIDIA/Model-Optimizer/issues/new?template=1_bug_report.md)
 - ✨ [File a Feature Request](https://github.com/NVIDIA/Model-Optimizer/issues/new?template=2_feature_request.md)
+
+## DFlash (Block Diffusion for Speculative Decoding)
+
+DFlash is a parallel speculative decoding method based on [Block Diffusion](https://arxiv.org/abs/2602.06036).
+Unlike autoregressive draft models (EAGLE3), DFlash predicts an entire block of tokens in a single forward pass
+using masked parallel prediction with KV injection from the target model's hidden states.
+
+### Quick Start
+
+```bash
+./launch_train.sh --config ../../modelopt_recipes/general/speculative_decoding/dflash.yaml \
+    model.model_name_or_path=/path/to/Qwen3-8B \
+    data.data_path=/path/to/train.jsonl \
+    training.output_dir=/path/to/output
+```
+
+### Key Configuration (dflash.yaml)
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `dflash.dflash_block_size` | 8 | Block size for parallel prediction |
+| `dflash.dflash_num_anchors` | 512 | Number of anchor positions per sample |
+| `dflash.dflash_loss_decay_factor` | 4.0 | Exponential decay gamma (0 disables) |
+| `dflash.dflash_self_logit_distillation` | true | Use logit distillation from target |
+| `dflash.dflash_architecture_config.num_hidden_layers` | 5 | Draft decoder layers |
+| `dflash.dflash_architecture_config.mask_token_id` | auto | Token ID for masked positions |
+
+### Export
+
+```bash
+python scripts/export_hf_checkpoint.py \
+    --model_path /path/to/training/output \
+    --export_path /path/to/exported/model
+```
+
+### Results
+
+See [doc/dflash_results.md](doc/dflash_results.md) for benchmark results on Qwen3-8B.

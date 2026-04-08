@@ -153,6 +153,9 @@ class LanguageDataCollator:
         if self.tokenizer.chat_template is None:
             raise ValueError("No valid chat template!")
 
+        if self.answer_only_loss:
+            self._ensure_generation_tags()
+
     def _post_process_tokenizer(self):
         if self.tokenizer.pad_token_id is None:
             print_rank_0("The tokenizer has no pad_token_id, using eos_token_id instead.")
@@ -171,6 +174,166 @@ class LanguageDataCollator:
             REMOVE_THINK_CHAT_TEMPLATE, ""
         )
 
+    # Simplified chat templates with {% generation %} tags for answer_only_loss.
+    #
+    # PURPOSE:
+    #   HuggingFace's return_assistant_tokens_mask requires {% generation %} /
+    #   {% endgeneration %} tags in the Jinja chat template to identify which tokens
+    #   belong to assistant responses. Many models (Qwen3, Llama3) ship without these
+    #   tags. These simplified templates add them so that answer_only_loss works
+    #   reliably without regex fallbacks.
+    #
+    # HOW IT WORKS:
+    #   When answer_only_loss=True, _ensure_generation_tags() detects the model's
+    #   template style (ChatML, Llama3) and replaces the tokenizer's chat_template
+    #   with one of these simplified versions. The {% generation %} tags tell HF
+    #   exactly which tokens are assistant content for loss masking.
+    #
+    # WHAT IS PRESERVED:
+    #   - System / user / assistant role formatting (exact token match)
+    #   - Multi-turn conversation structure
+    #   - <think> block injection on last assistant turn (Qwen3-style, chatml_think)
+    #   - Content is output as-is — training data with <think> blocks is handled correctly
+    #
+    # WHAT IS DROPPED (vs original model templates):
+    #   - Tool call formatting (tool_call XML tags, function signatures)
+    #   - Multi-step tool response handling
+    #   - reasoning_content vs content splitting logic
+    #   - enable_thinking parameter support
+    #   - VLM/multimodal content handling
+    #
+    # LIMITATIONS:
+    #   - Training data with tool_call messages will not be formatted correctly.
+    #     Use the original template with manually added {% generation %} tags for
+    #     tool-use training data.
+    #   - The chatml_think variant adds <think>\n\n</think>\n\n only to the last
+    #     assistant turn (matching Qwen3 behavior). Non-last turns without <think>
+    #     in their content will differ from the original template which also
+    #     conditionally adds think wrappers based on multi-step reasoning context.
+    #   - Only ChatML (<|im_start|>/<|im_end|>) and Llama3
+    #     (<|start_header_id|>/<|eot_id|>) styles are supported. Other template
+    #     styles fall back to regex-based assistant span detection.
+    #
+    # TO USE A CUSTOM TEMPLATE INSTEAD:
+    #   Pass chat_template= to LanguageDataCollator with your own template that
+    #   includes {% generation %}...{% endgeneration %} around assistant content.
+    _GENERATION_TEMPLATES = {
+        # Basic ChatML without <think> injection (Phi, older Qwen, generic ChatML)
+        "chatml": (
+            "{% for message in messages %}"
+            "{% if message['role'] == 'system' %}"
+            "{{ '<|im_start|>system\n' + message['content'] + '<|im_end|>\n' }}"
+            "{% elif message['role'] == 'user' %}"
+            "{{ '<|im_start|>user\n' + message['content'] + '<|im_end|>\n' }}"
+            "{% elif message['role'] == 'assistant' %}"
+            "{{ '<|im_start|>assistant\n' }}"
+            "{% generation %}"
+            "{{ message['content'] }}"
+            "{% endgeneration %}"
+            "{{ '<|im_end|>\n' }}"
+            "{% endif %}"
+            "{% endfor %}"
+            "{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %}"
+        ),
+        # ChatML with <think> wrapper on last assistant turn (Qwen3-style)
+        "chatml_think": (
+            "{% for message in messages %}"
+            "{% if message['role'] == 'system' %}"
+            "{{ '<|im_start|>system\n' + message['content'] + '<|im_end|>\n' }}"
+            "{% elif message['role'] == 'user' %}"
+            "{{ '<|im_start|>user\n' + message['content'] + '<|im_end|>\n' }}"
+            "{% elif message['role'] == 'assistant' %}"
+            "{{ '<|im_start|>assistant\n' }}"
+            "{% generation %}"
+            "{% if loop.last and not message['content'].startswith('<think>') %}"
+            "{{ '<think>\n\n</think>\n\n' }}"
+            "{% endif %}"
+            "{{ message['content'] }}"
+            "{% endgeneration %}"
+            "{{ '<|im_end|>\n' }}"
+            "{% endif %}"
+            "{% endfor %}"
+            "{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %}"
+        ),
+        "llama3": (
+            "{% for message in messages %}"
+            "{% if message['role'] == 'system' %}"
+            "{{ '<|start_header_id|>system<|end_header_id|>\n\n' + message['content'] + '<|eot_id|>' }}"
+            "{% elif message['role'] == 'user' %}"
+            "{{ '<|start_header_id|>user<|end_header_id|>\n\n' + message['content'] + '<|eot_id|>' }}"
+            "{% elif message['role'] == 'assistant' %}"
+            "{{ '<|start_header_id|>assistant<|end_header_id|>\n\n' }}{% generation %}"
+            "{{ message['content'] }}{% endgeneration %}{{ '<|eot_id|>' }}"
+            "{% endif %}"
+            "{% endfor %}"
+            "{% if add_generation_prompt %}{{ '<|start_header_id|>assistant<|end_header_id|>\n\n' }}{% endif %}"
+        ),
+    }
+
+    def _ensure_generation_tags(self):
+        """Ensure chat template has {% generation %} tags for answer_only_loss.
+
+        If the template already has generation tags, no action taken.
+        Otherwise, detect the template style and replace with a simplified
+        version that includes proper generation tags.
+        """
+        template = self.tokenizer.chat_template
+        if template is None:
+            return
+
+        if "{% generation %}" in template or "{%generation%}" in template:
+            return
+
+        # Detect template style and replace with generation-tagged version
+        old_template = template
+        if "<|im_start|>" in template and "<|im_end|>" in template:
+            # Check if original template injects <think> (Qwen3-style)
+            style = "chatml_think" if "<think>" in template else "chatml"
+        elif "<|start_header_id|>" in template and "<|eot_id|>" in template:
+            style = "llama3"
+        else:
+            print_rank_0(
+                "=== WARNING === Cannot auto-inject {% generation %} tags for this chat "
+                "template. answer_only_loss will not work correctly. Provide a template "
+                "with {% generation %} tags via the chat_template parameter."
+            )
+            return
+
+        new_template = self._GENERATION_TEMPLATES[style]
+        self.tokenizer.chat_template = new_template
+
+        # Verify
+        try:
+            test_msgs = [
+                [
+                    {"role": "user", "content": "hi"},
+                    {"role": "assistant", "content": "hello"},
+                ]
+            ]
+            result = self.tokenizer.apply_chat_template(
+                test_msgs,
+                return_dict=True,
+                return_assistant_tokens_mask=True,
+                padding=True,
+                return_tensors="pt",
+            )
+            mask = result.get("assistant_masks", None)
+            if mask is not None and mask.any():
+                print_rank_0(
+                    f"Replaced chat template with {style} generation-tagged version "
+                    f"for answer_only_loss."
+                )
+                return
+        except Exception:
+            pass
+
+        # Revert on failure
+        self.tokenizer.chat_template = old_template
+        print_rank_0(
+            f"=== WARNING === Failed to apply {style} generation template. "
+            "answer_only_loss will not work correctly."
+        )
+
     def _process_chat_sample(self, examples: list):
         tokenized_examples = self.tokenizer.apply_chat_template(
             examples,
@@ -186,6 +349,20 @@ class LanguageDataCollator:
             input_ids = tokenized_examples["input_ids"]
             labels = input_ids.new_full(input_ids.shape, IGNORE_TOKEN_ID)
             labels[..., :-1] = input_ids[..., 1:]
+            if self.answer_only_loss:
+                if "assistant_masks" in tokenized_examples:
+                    assistant_mask = tokenized_examples["assistant_masks"]
+                    if isinstance(assistant_mask, torch.Tensor) and assistant_mask.any():
+                        labels[assistant_mask == 0] = IGNORE_TOKEN_ID
+                    else:
+                        # All assistant content truncated or no assistant in batch — mask all
+                        labels[:] = IGNORE_TOKEN_ID
+                else:
+                    raise ValueError(
+                        "answer_only_loss requires {% generation %} tags in the chat "
+                        "template but assistant_masks was not returned by the tokenizer. "
+                        "Ensure _ensure_generation_tags() ran successfully."
+                    )
             tokenized_examples["labels"] = labels
         return tokenized_examples
 
@@ -211,15 +388,34 @@ class LanguageDataCollator:
                 batch.append(text)
             else:
                 messages = example.get("messages", None)
-                if messages is None:
-                    conversations = example.get("conversations", None)
-                    if conversations is None:
-                        raise ValueError(
-                            "The sample must in either OpenAI messages format or ShareGPT conversations format."
+                conversations = example.get("conversations", None)
+                # Prefer whichever has an assistant turn for training
+                if messages and any(m.get("role") == "assistant" for m in messages):
+                    batch.append(messages)
+                elif conversations:
+                    converted = _sharegpt_to_openai_messages(conversations)
+                    if not any(m.get("role") == "assistant" for m in converted):
+                        print_rank_0(
+                            "=== WARNING === Skipping sample with no assistant turn in conversations."
                         )
-                    else:
-                        messages = _sharegpt_to_openai_messages(conversations)
-                batch.append(messages)
+                        continue
+                    batch.append(converted)
+                elif messages:
+                    if not any(m.get("role") == "assistant" for m in messages):
+                        print_rank_0(
+                            "=== WARNING === Skipping sample with no assistant turn in messages."
+                        )
+                        continue
+                    batch.append(messages)
+                else:
+                    raise ValueError(
+                        "The sample must in either OpenAI messages format or ShareGPT conversations format."
+                    )
+
+        if not batch:
+            # All samples skipped — create a dummy batch with all-masked labels
+            # so the training step produces zero loss without crashing DDP
+            batch = [[{"role": "user", "content": ""}, {"role": "assistant", "content": ""}]]  # type: ignore[list-item]
 
         return self._process_chat_sample(batch)
 

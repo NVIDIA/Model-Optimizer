@@ -1,0 +1,886 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""DFlash speculative decoding plugin for HuggingFace models.
+
+Matches the reference SpecForge implementation (github.com/sgl-project/SpecForge PR #415).
+
+Architecture:
+- Feature Fusion: multi-layer target hidden states → FC + RMSNorm
+- KV Injection: fused features as K/V in every draft layer with QK-norm
+- Parallel Drafting: mask_token_id for unknown positions, causal within blocks
+- Loss: hard CE on input_ids[i] (position i predicts token i)
+
+Reference: "DFlash: Block Diffusion for Flash Speculative Decoding" (arXiv:2602.06036)
+"""
+
+import importlib
+
+import torch
+import torch.nn.functional as F
+from torch import nn
+from transformers import PretrainedConfig, PreTrainedModel
+from transformers.utils import ModelOutput
+
+from ..dflash.conversion import DFlashDMRegistry
+from ..dflash.dflash_model import DFlashModel
+
+
+def _resolve_model_components(model_type):
+    """Resolve MLP, RMSNorm, RotaryEmbedding from the base model's transformers module.
+
+    Falls back to Llama components if the model type is unknown.
+    """
+    fallback = "llama"
+    model_type = model_type or fallback
+    try:
+        mod = importlib.import_module(f"transformers.models.{model_type}.modeling_{model_type}")
+    except (ImportError, ModuleNotFoundError):
+        mod = importlib.import_module(f"transformers.models.{fallback}.modeling_{fallback}")
+        model_type = fallback
+
+    prefix = model_type.capitalize()
+    # Handle multi-word model types (e.g., "qwen3" -> "Qwen3")
+    for attr in dir(mod):
+        if attr.lower() == f"{model_type}mlp":
+            prefix = attr.replace("MLP", "")
+            break
+
+    mlp_cls = getattr(mod, f"{prefix}MLP", None)
+    norm_cls = getattr(mod, f"{prefix}RMSNorm", None)
+    rotary_cls = getattr(mod, f"{prefix}RotaryEmbedding", None)
+    rotate_half_fn = getattr(mod, "rotate_half", None)
+
+    # Fallback to Llama if any component is missing
+    if not all([mlp_cls, norm_cls, rotary_cls, rotate_half_fn]):
+        from transformers.models.llama.modeling_llama import (
+            LlamaMLP,
+            LlamaRMSNorm,
+            LlamaRotaryEmbedding,
+        )
+        from transformers.models.llama.modeling_llama import rotate_half as _rotate_half
+
+        mlp_cls = mlp_cls or LlamaMLP
+        norm_cls = norm_cls or LlamaRMSNorm
+        rotary_cls = rotary_cls or LlamaRotaryEmbedding
+        rotate_half_fn = rotate_half_fn or _rotate_half
+
+    return mlp_cls, norm_cls, rotary_cls, rotate_half_fn
+
+
+# Default to Llama components; overridden per-model during convert()
+_MLP_CLS, _NORM_CLS, _ROTARY_CLS, _rotate_half = _resolve_model_components("llama")
+
+__all__ = ["HFDFlashModel"]
+
+
+def build_target_layer_ids(num_target_layers, num_draft_layers):
+    """Select layers uniformly from the target model for feature extraction."""
+    if num_draft_layers == 1:
+        return [num_target_layers // 2]
+    start = 1
+    end = num_target_layers - 3
+    span = end - start
+    return [round(start + (i * span) / (num_draft_layers - 1)) for i in range(num_draft_layers)]
+
+
+def apply_rotary_pos_emb(q, k, cos, sin):
+    """Apply RoPE. Q uses last q_len positions, K uses all positions."""
+    cos = cos.unsqueeze(1)  # [B, 1, seq, dim]
+    sin = sin.unsqueeze(1)
+    q_len = q.size(2)
+    q_embed = (q * cos[:, :, -q_len:, :]) + (_rotate_half(q) * sin[:, :, -q_len:, :])
+    k_embed = (k * cos) + (_rotate_half(k) * sin)
+    return q_embed, k_embed
+
+
+class DFlashAttention(nn.Module):
+    """Attention with KV injection, using HF's attention dispatch for exact SpecForge parity."""
+
+    def __init__(self, config, layer_idx):
+        """Initialize DFlash attention with KV injection projections and QK-norm."""
+        super().__init__()
+        self.config = config
+        self.layer_idx = layer_idx
+        self.head_dim = getattr(
+            config, "head_dim", config.hidden_size // config.num_attention_heads
+        )
+        self.num_heads = config.num_attention_heads
+        self.num_kv_heads = config.num_key_value_heads
+        self.num_key_value_groups = self.num_heads // self.num_kv_heads
+        self.scaling = self.head_dim**-0.5
+        self.attention_dropout = getattr(config, "attention_dropout", 0.0)
+        self.is_causal = False
+
+        attn_bias = getattr(config, "attention_bias", False)
+        self.q_proj = nn.Linear(config.hidden_size, self.num_heads * self.head_dim, bias=attn_bias)
+        self.k_proj = nn.Linear(
+            config.hidden_size, self.num_kv_heads * self.head_dim, bias=attn_bias
+        )
+        self.v_proj = nn.Linear(
+            config.hidden_size, self.num_kv_heads * self.head_dim, bias=attn_bias
+        )
+        self.o_proj = nn.Linear(self.num_heads * self.head_dim, config.hidden_size, bias=attn_bias)
+
+        self.q_norm = _NORM_CLS(self.head_dim, eps=config.rms_norm_eps)
+        self.k_norm = _NORM_CLS(self.head_dim, eps=config.rms_norm_eps)
+
+        # Resolve HF attention function matching SpecForge's dispatch
+        self._attn_fn = None
+        self.sliding_window = None
+
+    def _get_attn_fn(self):
+        """Lazily resolve the HF attention function."""
+        if self._attn_fn is not None:
+            return self._attn_fn
+        try:
+            from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+
+            impl = getattr(self.config, "_attn_implementation", "eager")
+            if impl and impl != "eager" and impl in ALL_ATTENTION_FUNCTIONS:
+                self._attn_fn = ALL_ATTENTION_FUNCTIONS[impl]
+            else:
+                self._attn_fn = self._eager_attention
+        except (ImportError, AttributeError):
+            self._attn_fn = self._eager_attention
+        return self._attn_fn
+
+    def _eager_attention(self, module, q, k, v, attention_mask, **kwargs):
+        """Eager attention matching HF's eager_attention_forward."""
+        scaling = kwargs.get("scaling", self.scaling)
+        n_rep = self.num_key_value_groups
+        if n_rep > 1:
+            k = k.repeat_interleave(n_rep, dim=1)
+            v = v.repeat_interleave(n_rep, dim=1)
+        attn_weights = torch.matmul(q, k.transpose(2, 3)) * scaling
+        if attention_mask is not None:
+            attn_weights = attn_weights + attention_mask
+        attn_weights = torch.nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(
+            q.dtype
+        )
+        attn_output = torch.matmul(attn_weights, v)
+        attn_output = attn_output.transpose(1, 2).contiguous()
+        return attn_output, None
+
+    def forward(self, hidden_states, target_hidden, position_embeddings, attention_mask=None):
+        """Forward with KV injection: Q from noise, K/V from context+noise."""
+        bsz, q_len, _ = hidden_states.shape
+        ctx_len = target_hidden.shape[1]
+
+        # Q from noise only, with QK-norm
+        q = self.q_proj(hidden_states).view(bsz, q_len, -1, self.head_dim)
+        q = self.q_norm(q).transpose(1, 2)
+
+        # K from context + noise, with QK-norm
+        k_ctx = self.k_proj(target_hidden)
+        k_noise = self.k_proj(hidden_states)
+        k = torch.cat([k_ctx, k_noise], dim=1).view(bsz, ctx_len + q_len, -1, self.head_dim)
+        k = self.k_norm(k).transpose(1, 2)
+
+        # V from context + noise (no norm)
+        v_ctx = self.v_proj(target_hidden)
+        v_noise = self.v_proj(hidden_states)
+        v = (
+            torch.cat([v_ctx, v_noise], dim=1)
+            .view(bsz, ctx_len + q_len, -1, self.head_dim)
+            .transpose(1, 2)
+        )
+
+        # RoPE
+        cos, sin = position_embeddings
+        q, k = apply_rotary_pos_emb(q, k, cos, sin)
+
+        # Use HF's attention dispatch (handles GQA internally)
+        attn_fn = self._get_attn_fn()
+        attn_output, _ = attn_fn(
+            self,
+            q,
+            k,
+            v,
+            attention_mask,
+            dropout=0.0 if not self.training else self.attention_dropout,
+            scaling=self.scaling,
+            sliding_window=self.sliding_window,
+        )
+        attn_output = attn_output.reshape(bsz, q_len, -1)
+        return self.o_proj(attn_output)
+
+
+class DFlashDecoderLayer(nn.Module):
+    """Draft decoder layer with KV injection."""
+
+    def __init__(self, config, layer_idx):
+        """Initialize decoder layer with attention, MLP, and layer norms."""
+        super().__init__()
+        self.self_attn = DFlashAttention(config, layer_idx)
+        self.mlp = _MLP_CLS(config)
+        self.input_layernorm = _NORM_CLS(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = _NORM_CLS(config.hidden_size, eps=config.rms_norm_eps)
+
+    def forward(self, hidden_states, target_hidden, position_embeddings, attention_mask=None):
+        """Forward pass with residual connections."""
+        residual = hidden_states
+        hidden_states = self.input_layernorm(hidden_states)
+        hidden_states = self.self_attn(
+            hidden_states, target_hidden, position_embeddings, attention_mask
+        )
+        hidden_states = residual + hidden_states
+
+        residual = hidden_states
+        hidden_states = self.post_attention_layernorm(hidden_states)
+        hidden_states = self.mlp(hidden_states)
+        hidden_states = residual + hidden_states
+        return hidden_states
+
+
+class DFlashModule(nn.Module):
+    """DFlash draft module matching SpecForge DFlashDraftModel."""
+
+    def __init__(self, config):
+        """Initialize DFlash module with feature fusion, decoder layers, and rotary embeddings."""
+        super().__init__()
+        self.config = config
+        self.block_size = config.block_size
+
+        # Feature fusion
+        num_fused_layers = len(config.target_layer_ids)
+        self.fc = nn.Linear(num_fused_layers * config.hidden_size, config.hidden_size, bias=False)
+        self.hidden_norm = _NORM_CLS(config.hidden_size, eps=config.rms_norm_eps)
+
+        # Decoder layers
+        self.layers = nn.ModuleList(
+            [DFlashDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
+        )
+        self.norm = _NORM_CLS(config.hidden_size, eps=config.rms_norm_eps)
+        self.rotary_emb = _ROTARY_CLS(config=config)
+        self._rotary_config = config  # Stored for re-creating rotary_emb on resume
+
+        # Initialize weights matching HF PreTrainedModel (normal_ with initializer_range)
+        # SpecForge's DFlashDraftModel uses Qwen3PreTrainedModel.post_init() which does this.
+        self._init_weights(config)
+
+    def _init_weights(self, config):
+        """Initialize weights matching HF PreTrainedModel._init_weights."""
+        std = getattr(config, "initializer_range", 0.02)
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                nn.init.normal_(module.weight, mean=0.0, std=std)
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+
+    def forward(self, noise_embedding, target_hidden, position_ids, attention_mask=None):
+        """Forward matching SpecForge DFlashDraftModel.forward."""
+        hidden_states = noise_embedding
+        target_hidden = self.hidden_norm(self.fc(target_hidden))
+        # Re-create rotary_emb on correct device if buffers are on meta (checkpoint resume)
+        if any(b.is_meta for b in self.rotary_emb.buffers()):
+            self.rotary_emb = _ROTARY_CLS(config=self._rotary_config, device=hidden_states.device)
+        position_embeddings = self.rotary_emb(hidden_states, position_ids)
+
+        for layer in self.layers:
+            hidden_states = layer(hidden_states, target_hidden, position_embeddings, attention_mask)
+
+        return self.norm(hidden_states)
+
+
+def create_dflash_attention_mask(
+    seq_len, block_size, device, dtype
+):  # Legacy: used for inference only
+    """Create [L, 2L] attention mask matching SpecForge.
+
+    Context (cols 0..L-1): Block B sees blocks 0..B-1 (strictly previous).
+    Noise (cols L..2L-1): causal within same block only.
+    """
+    indices = torch.arange(seq_len, device=device)
+    block_ids = indices // block_size
+
+    q_block_ids = block_ids.unsqueeze(1)  # [L, 1]
+    k_block_ids = block_ids.unsqueeze(0)  # [1, L]
+
+    ctx_mask = k_block_ids < q_block_ids
+    same_block = q_block_ids == k_block_ids
+    causal = indices.unsqueeze(0) >= indices.unsqueeze(1)  # matching SpecForge: j >= i
+    noise_mask = same_block & causal
+
+    full_mask_bool = torch.cat([ctx_mask, noise_mask], dim=1)
+
+    # Create in f32 then cast, matching SpecForge. This ensures masked
+    # positions get -inf in bf16 (f32 min overflows to -inf when cast),
+    # not the largest finite negative bf16 value.
+    full_mask = torch.zeros(seq_len, 2 * seq_len, device=device, dtype=torch.float32)
+    full_mask.masked_fill_(~full_mask_bool, torch.finfo(torch.float32).min)
+    full_mask = full_mask.to(dtype=dtype)
+
+    return full_mask.unsqueeze(0).unsqueeze(0)  # [1, 1, L, 2L]
+
+
+def create_dflash_loss_mask(seq_len, block_size, device):  # Legacy: used for inference only
+    """Create loss mask: exclude Block 0 and block starts."""
+    positions = torch.arange(seq_len, device=device)
+    block_ids = positions // block_size
+    is_block_0 = block_ids == 0
+    is_block_start = (positions % block_size) == 0
+    return (~is_block_0 & ~is_block_start).float()
+
+
+@DFlashDMRegistry.register({PreTrainedModel: "hf.PreTrainedModel"})
+class HFDFlashModel(DFlashModel):
+    """DFlash Model matching SpecForge OnlineDFlashModel."""
+
+    @property
+    def _base_model(self):
+        return self.get_submodule(self.base_model_path)
+
+    @property
+    def _base_model_embeddings(self):
+        return self.get_submodule(self.base_model_embeddings_path)
+
+    @property
+    def _base_model_lm_head(self):
+        return self.get_submodule(self.base_model_lm_head_path)
+
+    @property
+    def _base_llm_config(self):
+        return (
+            getattr(self.config, "text_config", None)
+            or getattr(self.config, "llm_config", None)
+            or self.config
+        )
+
+    @staticmethod
+    def _auto_detect_mask_token_id(base_config):
+        """Auto-detect an appropriate mask token ID for DFlash.
+
+        Different model families use different strategies:
+        - Qwen3/3.5: built-in [MASK] token in vocabulary
+        - Llama3: reserved special tokens (128002 = reserved_special_token_0)
+        - Others: try tokenizer.mask_token_id, then fall back to pad/eos
+        """
+        model_type = getattr(base_config, "model_type", "")
+        vocab_size = getattr(base_config, "vocab_size", 0)
+
+        # Qwen3/3.5: known mask token positions
+        if "qwen3" in model_type.lower() or "qwen" in model_type.lower():
+            # Qwen3 vocab has dedicated mask tokens
+            # Qwen3.5-4B: 248070, Qwen3-8B: similar range
+            # Heuristic: eos_token_id + some offset, or check known values
+            eos = getattr(base_config, "eos_token_id", None)
+            if isinstance(eos, list):
+                eos = eos[0]
+            if eos and vocab_size > 200000:
+                # Large Qwen vocab — mask token is typically near end of special tokens
+                # Known: Qwen3.5 eos=248044, mask=248070 (offset ~26)
+                # Try common offsets
+                for offset in [26, 25, 24]:
+                    candidate = eos + offset
+                    if candidate < vocab_size:
+                        return candidate
+            # Fallback for smaller Qwen models
+            if vocab_size > 150000:
+                return vocab_size - 250  # heuristic for Qwen special token region
+
+        # Llama3: use reserved_special_token_0 (128002)
+        if "llama" in model_type.lower():
+            if vocab_size >= 128256:  # Llama3 vocab size
+                return 128002  # <|reserved_special_token_0|>
+
+        # Generic: try pad_token_id, then eos
+        pad_id = getattr(base_config, "pad_token_id", None)
+        eos_id = getattr(base_config, "eos_token_id", None)
+        if isinstance(eos_id, list):
+            eos_id = eos_id[0]
+
+        # Prefer pad over eos (pad is less likely to interfere)
+        if pad_id is not None and pad_id != eos_id:
+            return pad_id
+
+        # Last resort
+        return eos_id or 0
+
+    def _find_base_model_parts(self):
+        """Locate base model submodules (backbone, embeddings, lm_head) by probing known paths."""
+        for name, paths in {
+            "base_model_path": ["model.language_model", "model", "backbone"],
+            "base_model_embeddings_path": [
+                "model.embed_tokens",
+                "backbone.embeddings",
+                "model.language_model.embed_tokens",
+            ],
+            "base_model_lm_head_path": ["lm_head", "language_model.lm_head"],
+        }.items():
+            for path in paths:
+                try:
+                    submodule = self.get_submodule(path)
+                    assert isinstance(submodule, torch.nn.Module)
+                    setattr(self, name, path)
+                    break
+                except Exception:
+                    continue
+            else:
+                raise ValueError(f"Part {name} not found in model")
+
+    def modify(self, config):
+        """Initialize DFlash draft module."""
+        super().modify(config)
+
+        base_config = self._base_llm_config
+        self.dflash_config = PretrainedConfig.from_dict(config.dflash_architecture_config)
+
+        # Inherit settings from base model, but only those NOT already in the user config.
+        # hidden_size and vocab_size MUST match. Others (heads, intermediate_size) can differ.
+        # This allows the draft model to have a different architecture than the base model.
+        self.dflash_config.hidden_size = base_config.hidden_size
+        self.dflash_config.vocab_size = base_config.vocab_size
+
+        # These use base model defaults if not specified in dflash_architecture_config
+        for attr, default_from_base in [
+            ("max_position_embeddings", True),
+            ("intermediate_size", True),
+            ("num_attention_heads", True),
+            ("num_key_value_heads", True),
+            ("hidden_act", True),
+            ("rope_theta", True),
+            ("rope_scaling", True),
+            ("rope_type", False),
+            ("position_embedding_type", False),
+            ("rope_interleaved", False),
+            ("rms_norm_eps", True),
+            ("attention_bias", False),
+            ("tie_word_embeddings", False),
+        ]:
+            if not hasattr(self.dflash_config, attr) or getattr(self.dflash_config, attr) is None:
+                if default_from_base and hasattr(base_config, attr):
+                    setattr(self.dflash_config, attr, getattr(base_config, attr))
+
+        # Ensure required attrs have defaults
+        if not hasattr(self.dflash_config, "mlp_bias") or self.dflash_config.mlp_bias is None:
+            self.dflash_config.mlp_bias = False
+
+        self.dflash_config.head_dim = getattr(
+            self.dflash_config,
+            "head_dim",
+            self.dflash_config.hidden_size // self.dflash_config.num_attention_heads,
+        )
+        self.dflash_config.block_size = self.dflash_block_size
+        # Default to sdpa, matching SpecForge's DFlashDraftModel(Qwen3PreTrainedModel)
+        # which resolves to sdpa via post_init()
+        if self.dflash_config._attn_implementation is None:
+            self.dflash_config._attn_implementation = "sdpa"
+
+        # Target layer IDs
+        num_target_layers = base_config.num_hidden_layers
+        num_draft_layers = self.dflash_config.num_hidden_layers
+        self.target_layer_ids = build_target_layer_ids(num_target_layers, num_draft_layers)
+        self.dflash_config.target_layer_ids = self.target_layer_ids
+
+        # mask_token_id resolution order:
+        # 1. Explicit in dflash_architecture_config (user override)
+        # 2. Auto-detect from model vocabulary:
+        #    - Qwen3/3.5: built-in [MASK] token
+        #    - Llama3: reserved_special_token_0 (128002)
+        #    - Others: tokenizer.mask_token_id
+        # 3. Fallback to pad_token_id or eos_token_id (suboptimal)
+        mask_id = config.dflash_architecture_config.get("mask_token_id", None)
+        if mask_id is None:
+            mask_id = self._auto_detect_mask_token_id(base_config)
+        self.mask_token_id = mask_id[0] if isinstance(mask_id, list) else mask_id
+        print(f"DFlash mask_token_id: {self.mask_token_id}")
+
+        # Freeze base model
+        if self.dflash_freeze_base_model:
+            for param in self.parameters():
+                param.requires_grad = False
+
+        self._find_base_model_parts()
+
+        # Resolve model-specific components (MLP, RMSNorm, RotaryEmbedding)
+        # from the base model's architecture for weight compatibility
+        global _MLP_CLS, _NORM_CLS, _ROTARY_CLS, _rotate_half
+        _MLP_CLS, _NORM_CLS, _ROTARY_CLS, _rotate_half = _resolve_model_components(
+            getattr(base_config, "model_type", "llama")
+        )
+        self.dflash_module = DFlashModule(self.dflash_config)
+        self.dflash_module.to(self._base_model.dtype).to(
+            next(self._base_model.layers[-1].parameters()).device
+        )
+
+        self.is_quantized = False
+        self._num_anchors = self.dflash_num_anchors
+
+        # Store bound reference to the original model class's forward.
+        # DynamicModule changes type(self) but the original class is in _original_cls.
+        # Find the original HF model class (e.g., Qwen3_5ForConditionalGeneration)
+        # by walking MRO and skipping DFlash/DynamicModule classes
+        skip_names = {
+            "HFDFlashModel",
+            "DFlashModel",
+            "DynamicModule",
+            "DFlashPreTrainedModel",
+            "DFlashDraftModel",
+        }
+        original_cls = None
+        for cls in type(self).__mro__:
+            if (
+                hasattr(cls, "forward")
+                and cls.__name__ not in skip_names
+                and cls is not type(self)
+                and issubclass(cls, PreTrainedModel)
+                and cls is not PreTrainedModel
+            ):
+                original_cls = cls
+                break
+        if original_cls is None:
+            # Last resort: use the class two levels up (skip DFlash wrapper + DynamicModule)
+            original_cls = type(self).__mro__[2]
+        self._original_forward_cls = original_cls
+        print(f"DFlash: using {original_cls.__name__}.forward as base forward")
+
+    def get_exporter(self):
+        """Get the exporter for the DFlash draft model."""
+        from modelopt.torch.export.plugins.hf_spec_export import DFlashExporter
+
+        return DFlashExporter(self)
+
+    def _base_forward(self, **kwargs):
+        """Call the original model's forward, bypassing DFlash wrapper."""
+        return self._original_forward_cls.forward(self, **kwargs)
+
+    def _sample_anchor_positions(self, seq_len, loss_mask, device):
+        """Randomly sample anchor positions per sample, matching SpecForge PR #473.
+
+        Returns (anchor_positions [B, N], block_keep_mask [B, N]).
+        """
+        bs = self.dflash_block_size
+        bsz = loss_mask.shape[0]
+        max_anchor = max(seq_len - bs, 0)
+        num_anchors = getattr(self, "_num_anchors", 512)
+
+        valid = loss_mask[:, : max_anchor + 1] > 0.5
+        valid_counts = valid.sum(dim=1)
+        max_n = min(num_anchors, int(valid_counts.max().item()) - 1)
+
+        if max_n <= 0:
+            # No valid anchors — return empty
+            anchors = torch.zeros(bsz, 1, dtype=torch.long, device=device)
+            keep = torch.zeros(bsz, 1, dtype=torch.bool, device=device)
+            return anchors, keep
+
+        indices = torch.arange(max_anchor + 1, device=device).unsqueeze(0).expand(bsz, -1)
+        masked_indices = torch.where(valid, indices, torch.tensor(seq_len + 1, device=device))
+
+        random_vals = torch.rand(bsz, max_anchor + 1, device=device)
+        random_vals = torch.where(valid, random_vals, torch.tensor(2.0, device=device))
+
+        _, sorted_idx = random_vals.sort(dim=1)
+        gathered = torch.gather(masked_indices, 1, sorted_idx)
+        anchors = gathered[:, :max_n].sort(dim=1).values
+
+        keep = torch.arange(max_n, device=device).unsqueeze(0) < valid_counts.unsqueeze(1).clamp(
+            max=max_n
+        )
+        anchors = torch.where(keep, anchors, torch.tensor(0, dtype=torch.long, device=device))
+        return anchors, keep
+
+    def forward(
+        self,
+        input_ids=None,
+        attention_mask=None,
+        position_ids=None,
+        past_key_values=None,
+        inputs_embeds=None,
+        labels=None,
+        use_cache=None,
+        output_attentions=None,
+        output_hidden_states=None,
+        cache_position=None,
+        **kwargs,
+    ):
+        """Training forward matching SpecForge latest (post-PR #473).
+
+        Key changes from original PR #415:
+        - Random anchor sampling instead of uniform block division
+        - Bidirectional intra-block attention (no causal constraint)
+        - Context sees strictly before anchor position
+        - Label alignment: position k predicts token at anchor+k
+        - Optional loss decay weighting
+        """
+        if not self.training:
+            return super().forward(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_values=past_key_values,
+                inputs_embeds=inputs_embeds,
+                labels=labels,
+                use_cache=use_cache,
+                output_attentions=output_attentions,
+                output_hidden_states=output_hidden_states,
+                cache_position=cache_position,
+                **kwargs,
+            )
+
+        bsz, seq_len = input_ids.shape
+        block_size = self.dflash_block_size
+        device = input_ids.device
+
+        # 1. Run base model → hidden states
+        with torch.no_grad():
+            base_outputs = super().forward(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                output_hidden_states=True,
+            )
+
+        offset = 1
+        selected = [base_outputs.hidden_states[lid + offset] for lid in self.target_layer_ids]
+        target_hidden = torch.cat(selected, dim=-1)  # [B, seq, num_layers * H]
+
+        # 2. Build loss mask from labels or attention_mask
+        if labels is not None:
+            loss_mask = (labels != -100).float()
+        elif attention_mask is not None:
+            loss_mask = attention_mask.float()
+        else:
+            loss_mask = torch.ones(bsz, seq_len, device=device)
+
+        # 3. Random anchor sampling (SpecForge PR #463/#473)
+        anchor_positions, block_keep_mask = self._sample_anchor_positions(
+            seq_len, loss_mask, device
+        )
+        n_blocks = anchor_positions.shape[1]
+
+        if n_blocks == 0 or not block_keep_mask.any():
+            # Zero loss that still flows through dflash_module for DDP gradient sync
+            dummy = self.dflash_module.fc.weight.sum() * 0.0
+            return ModelOutput(loss=dummy, logits=base_outputs.logits, train_acc=[[0.0]])
+
+        # 4. Create noise embeddings: anchor token at block start, mask_token elsewhere
+        noise_ids = torch.full(
+            (bsz, n_blocks * block_size), self.mask_token_id, dtype=torch.long, device=device
+        )
+        block_starts = torch.arange(n_blocks, device=device) * block_size
+        block_starts_exp = block_starts.unsqueeze(0).expand(bsz, -1)
+        valid_anchors = anchor_positions.clamp(0, seq_len - 1)
+        anchor_tokens = torch.gather(input_ids, 1, valid_anchors)
+        batch_idx = torch.arange(bsz, device=device).unsqueeze(1).expand(bsz, n_blocks)
+        noise_ids[batch_idx, block_starts_exp] = torch.where(
+            block_keep_mask,
+            anchor_tokens,
+            torch.tensor(self.mask_token_id, dtype=torch.long, device=device),
+        )
+        noise_embedding = self._base_model_embeddings(noise_ids)
+
+        # 5. Position IDs: context [0..S-1], draft blocks [anchor+0..anchor+B-1]
+        ctx_pos = torch.arange(seq_len, device=device).unsqueeze(0).expand(bsz, -1)
+        offsets = torch.arange(block_size, device=device).view(1, 1, -1)
+        draft_pos = (anchor_positions.unsqueeze(-1) + offsets).view(bsz, -1)
+        full_pos = torch.cat([ctx_pos, draft_pos], dim=1)
+
+        # 6. Attention mask: SDPA bool mask [B, 1, Q_LEN, KV_LEN]
+        q_len = n_blocks * block_size
+        kv_len = seq_len + q_len
+
+        q_indices = torch.arange(q_len, device=device).view(1, 1, -1, 1)
+        kv_indices = torch.arange(kv_len, device=device).view(1, 1, 1, -1)
+        q_block_ids = q_indices // block_size
+
+        anchor_exp = anchor_positions.view(bsz, 1, n_blocks, 1).repeat_interleave(block_size, dim=2)
+
+        # Context: kv < S and kv < anchor
+        mask_ctx = (kv_indices < seq_len) & (kv_indices < anchor_exp)
+        # Draft: kv >= S and same block
+        is_draft = kv_indices >= seq_len
+        kv_block_ids = (kv_indices - seq_len) // block_size
+        mask_draft = is_draft & (q_block_ids == kv_block_ids)
+        # Valid block
+        valid_block = block_keep_mask.view(bsz, 1, n_blocks, 1).repeat_interleave(block_size, dim=2)
+
+        final_mask = (mask_ctx | mask_draft) & valid_block  # [B, 1, Q, KV]
+
+        # Convert bool mask to float additive mask for SDPA
+        dtype = target_hidden.dtype
+        attn_mask = torch.zeros(bsz, 1, q_len, kv_len, device=device, dtype=torch.float32)
+        attn_mask.masked_fill_(~final_mask, torch.finfo(torch.float32).min)
+        attn_mask = attn_mask.to(dtype=dtype)
+
+        # 7. Draft forward
+        hidden = self.dflash_module(
+            noise_embedding=noise_embedding,
+            target_hidden=target_hidden,
+            position_ids=full_pos,
+            attention_mask=attn_mask,
+        )
+
+        # 8. Loss: same-position prediction (position k predicts token at anchor+k)
+        logits = self._base_model_lm_head(hidden)
+
+        label_offsets = torch.arange(0, block_size, device=device).view(1, 1, -1)
+        label_indices = anchor_positions.unsqueeze(-1) + label_offsets
+        valid_label = label_indices < seq_len
+        safe_label_indices = label_indices.clamp(max=seq_len - 1)
+
+        target_ids = torch.gather(
+            input_ids.unsqueeze(1).expand(-1, n_blocks, -1), 2, safe_label_indices
+        )
+
+        # Weight mask: valid block * in bounds * exclude anchor (pos 0) * loss_mask
+        weight_mask = block_keep_mask.unsqueeze(-1).expand(-1, -1, block_size).float()
+        weight_mask = weight_mask * valid_label.float()
+        pos_in_block = torch.arange(block_size, device=device).view(1, 1, -1)
+        weight_mask = weight_mask * (pos_in_block > 0).float()
+
+        orig_loss_mask = torch.gather(
+            loss_mask.unsqueeze(1).expand(-1, n_blocks, -1), 2, safe_label_indices
+        )
+        weight_mask = weight_mask * orig_loss_mask
+
+        binary_eval_mask = weight_mask.view(-1)
+
+        # Optional loss decay
+        if self.dflash_loss_decay_factor > 0:
+            k = torch.arange(block_size, device=device).view(1, 1, -1)
+            decay = torch.exp(-(k - 1).clamp(min=0).float() / self.dflash_loss_decay_factor)
+            weight_mask = weight_mask * decay
+
+        # Cross entropy or logit distillation
+        flat_logits = logits.view(-1, logits.size(-1))
+        flat_targets = target_ids.view(-1)
+        flat_weights = weight_mask.view(-1)
+
+        valid_count = flat_weights.sum() + 1e-6
+
+        if valid_count > 1.0:
+            if self.dflash_self_logit_distillation:
+                # Teacher logits at position p predict token p+1 (autoregressive).
+                # Draft position k predicts token at anchor+k (same position).
+                # So teacher logits for token anchor+k are at position anchor+k-1.
+                base_logits = base_outputs.logits  # [B, seq, vocab]
+                teacher_indices = (safe_label_indices - 1).clamp(min=0)
+                teacher_logits = torch.gather(
+                    base_logits.unsqueeze(1).expand(-1, n_blocks, -1, -1),
+                    2,
+                    teacher_indices.unsqueeze(-1).expand(-1, -1, -1, base_logits.size(-1)),
+                )  # [B, N, block_size, vocab]
+                flat_teacher = teacher_logits.reshape(-1, base_logits.size(-1)).detach()
+                target_soft = torch.softmax(flat_teacher, dim=-1)
+                draft_logsoft = torch.log_softmax(flat_logits, dim=-1)
+                kd_loss = -(target_soft * draft_logsoft).sum(dim=-1)
+                loss = (kd_loss * flat_weights).sum() / valid_count
+            else:
+                loss_per_token = F.cross_entropy(flat_logits, flat_targets, reduction="none")
+                loss = (loss_per_token * flat_weights).sum() / valid_count
+
+            with torch.no_grad():
+                preds = flat_logits.argmax(dim=-1)
+                correct = (preds == flat_targets) & (binary_eval_mask > 0.5)
+                accuracy = correct.sum().float() / (binary_eval_mask.sum() + 1e-6)
+                accuracy = accuracy.item()
+        else:
+            loss = flat_logits.sum() * 0.0
+            accuracy = 0.0
+
+        return ModelOutput(
+            loss=loss,
+            logits=base_outputs.logits,
+            train_acc=[[accuracy]],
+        )
+
+    @torch.no_grad()
+    def pseudo_speculative_generate(self, input_ids, steps=1):
+        """Generate draft tokens using one DFlash block.
+
+        DFlash generates block_size-1 draft tokens in a single forward pass.
+        The `steps` parameter is used as the number of tokens to return
+        (capped at block_size-1).
+
+        Returns:
+            base_token: Next token from base model [B, 1].
+            draft_tokens: Draft tokens [B, min(steps, block_size-1)] or None.
+        """
+        # Call the base model's inner model directly (avoids DynamicModule dispatch)
+        model_output = self._base_model(
+            input_ids=input_ids,
+            output_hidden_states=True,
+        )
+        # Compute logits via lm_head
+        base_logits = self._base_model_lm_head(model_output.last_hidden_state)
+        # Build output with hidden_states
+        base_outputs = ModelOutput(
+            logits=base_logits,
+            hidden_states=model_output.hidden_states,
+        )
+        base_logits = base_outputs.logits
+        base_token = base_logits[:, -1:, :].argmax(dim=-1).to(input_ids.device)
+
+        if steps < 1:
+            return base_token, None
+
+        # Extract target hidden states (raw, before FC projection)
+        hid_offset = 1
+        if not hasattr(self, "_psg_debug"):
+            self._psg_debug = True
+            sel = [base_outputs.hidden_states[lid + hid_offset] for lid in self.target_layer_ids]
+            th_dbg = torch.cat(sel, dim=-1)
+            n_layers = len(base_outputs.hidden_states)
+            th_norm = th_dbg.norm().item()
+            print(
+                f"[psg] hidden layers: {n_layers}, target_hidden: {th_dbg.shape}, norm: {th_norm:.2f}"
+            )
+            print(f"[psg] base_token: {base_token.item()}, mask_token_id: {self.mask_token_id}")
+            seq_len = input_ids.shape[1]
+            blk = self.dflash_block_size
+            print(f"[psg] pos: ctx=[0..{seq_len - 1}], blk=[{seq_len}..{seq_len + blk - 1}]")
+        selected = [base_outputs.hidden_states[lid + hid_offset] for lid in self.target_layer_ids]
+        target_hidden = torch.cat(selected, dim=-1)
+
+        block_size = self.dflash_block_size
+        bsz = input_ids.shape[0]
+        seq_len = input_ids.shape[1]
+        device = input_ids.device
+
+        # Block: first token is base_token (anchor), rest are mask
+        block_ids = torch.full(
+            (bsz, block_size), self.mask_token_id, dtype=torch.long, device=device
+        )
+        block_ids[:, 0] = base_token.squeeze(-1)
+        noise_embedding = self._base_model_embeddings(block_ids)
+
+        # Position IDs: training uses [0..L-1, 0..L-1] where noise positions
+        # mirror context positions. At inference, block predicts tokens at
+        # seq_len..seq_len+B-1, so noise positions continue from ctx_len.
+        ctx_len = target_hidden.shape[1]
+        ctx_positions = torch.arange(ctx_len, device=device)
+        block_positions = torch.arange(ctx_len, ctx_len + block_size, device=device)
+        pos_ids = torch.cat([ctx_positions, block_positions]).unsqueeze(0).expand(bsz, -1)
+
+        # No attention mask at inference — matching SpecForge's spec_generate
+        # which uses KV cache with no mask. All positions attend freely to
+        # context and each other within the block.
+
+        # Draft forward
+        draft_hidden = self.dflash_module(
+            noise_embedding=noise_embedding,
+            target_hidden=target_hidden,
+            position_ids=pos_ids,
+            attention_mask=None,
+        )
+
+        # Logits on positions 1..block_size-1 (skip anchor at position 0)
+        draft_logits = self._base_model_lm_head(draft_hidden[:, 1:, :])
+        draft_tokens = draft_logits.argmax(dim=-1)  # [B, block_size-1]
+
+        # Return up to `steps` tokens
+        num_tokens = min(steps, block_size - 1)
+        return base_token, draft_tokens[:, :num_tokens]
