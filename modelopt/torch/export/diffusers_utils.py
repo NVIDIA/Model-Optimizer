@@ -847,7 +847,10 @@ def _find_nvfp4_layers(state_dict: dict[str, torch.Tensor]) -> set[str]:
             s_key = f"{layer}.weight_scale"
             if s_key not in state_dict or w_key not in state_dict:
                 continue
-            if state_dict[w_key].dtype == torch.uint8 and state_dict[s_key].dtype == torch.float8_e4m3fn:
+            if (
+                state_dict[w_key].dtype == torch.uint8
+                and state_dict[s_key].dtype == torch.float8_e4m3fn
+            ):
                 layers.add(layer)
     return layers
 
@@ -882,7 +885,9 @@ def pad_nvfp4_weights(
         rows, cols_w = weight.shape
         pad_r = _roundup(rows, 16) - rows
         pad_c_w = (_roundup(cols_w, 16) - cols_w) if padding_strategy == "row_col" else 0
-        pad_c_s = (_roundup(scale.shape[1], 16) - scale.shape[1]) if padding_strategy == "row_col" else 0
+        pad_c_s = (
+            (_roundup(scale.shape[1], 16) - scale.shape[1]) if padding_strategy == "row_col" else 0
+        )
 
         if pad_r > 0 or pad_c_w > 0:
             state_dict[w_key] = torch.nn.functional.pad(weight, (0, pad_c_w, 0, pad_r))
@@ -922,7 +927,9 @@ def swizzle_nvfp4_scales(
         padded = input_matrix
         if (rows, cols) != (padded_rows, padded_cols):
             padded = torch.zeros(
-                (padded_rows, padded_cols), device=input_matrix.device, dtype=input_matrix.dtype,
+                (padded_rows, padded_cols),
+                device=input_matrix.device,
+                dtype=input_matrix.dtype,
             )
             padded[:rows, :cols] = input_matrix
         blocks = padded.view(n_row_blocks, 128, n_col_blocks, 4).permute(0, 2, 1, 3)
@@ -934,7 +941,6 @@ def swizzle_nvfp4_scales(
     for layer in sorted(nvfp4_layers):
         s_key = f"{layer}.weight_scale"
         state_dict[s_key] = _to_blocked(state_dict[s_key].to(torch.float8_e4m3fn))
-
 
     return state_dict
 

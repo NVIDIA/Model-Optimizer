@@ -34,13 +34,13 @@ try:
     import diffusers
 
     from .diffusers_utils import (
+        build_layerwise_quant_metadata,
         generate_diffusion_dummy_forward_fn,
         get_diffusion_components,
         get_diffusion_model_type,
         get_qkv_group_key,
         hide_quantizers_from_state_dict,
         infer_dtype_from_model,
-        build_layerwise_quant_metadata,
         is_diffusers_object,
         is_qkv_projection,
         merge_diffusion_checkpoint,
@@ -195,6 +195,10 @@ def _postprocess_safetensors(
             header_size = struct.unpack("<Q", f.read(8))[0]
             header = json.loads(f.read(header_size))
         metadata = header.get("__metadata__", None) or {}
+
+        # Clone tensors so the memory-mapped file handle from load_file is
+        # released before we overwrite the same path (required on Windows).
+        sd = {k: v.clone() for k, v in sd.items()}
 
         if merged_base_safetensor_path is not None and model_type is not None:
             sd, base_metadata = merge_diffusion_checkpoint(
@@ -1237,7 +1241,7 @@ def export_hf_checkpoint(
     merged_base_safetensor_path: str | None = kwargs.get("merged_base_safetensor_path")
     enable_layerwise_quant_metadata: bool = kwargs.get("enable_layerwise_quant_metadata", True)
     enable_swizzle_layout: bool = kwargs.get("enable_swizzle_layout", False)
-    padding_strategy: str | None = kwargs.get("padding_strategy", None)
+    padding_strategy: str | None = kwargs.get("padding_strategy")
     export_dir = Path(export_dir)
     export_dir.mkdir(parents=True, exist_ok=True)
 

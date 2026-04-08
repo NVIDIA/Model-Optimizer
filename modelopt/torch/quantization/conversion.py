@@ -503,14 +503,18 @@ def set_quantizer_by_cfg_context(quant_model: nn.Module, quant_cfg: QuantizeQuan
             if orig_type is SequentialQuantizer and not isinstance(module, SequentialQuantizer):
                 saved = original_attributes[name]
                 parent_name, _, attr_name = name.rpartition(".")
-                parent_module = quant_model.get_submodule(parent_name) if parent_name else quant_model
+                parent_module = (
+                    quant_model.get_submodule(parent_name) if parent_name else quant_model
+                )
                 module = SequentialQuantizer(*(TensorQuantizer() for _ in saved["sub_states"]))
                 setattr(parent_module, attr_name, module)
                 for tq, sub_state in zip(module, saved["sub_states"]):
                     tq.set_from_modelopt_state(sub_state, properties_only=True)
             elif orig_type is TensorQuantizer and not isinstance(module, TensorQuantizer):
                 parent_name, _, attr_name = name.rpartition(".")
-                parent_module = quant_model.get_submodule(parent_name) if parent_name else quant_model
+                parent_module = (
+                    quant_model.get_submodule(parent_name) if parent_name else quant_model
+                )
                 module = TensorQuantizer()
                 setattr(parent_module, attr_name, module)
                 module.set_from_modelopt_state(original_attributes[name], properties_only=True)
