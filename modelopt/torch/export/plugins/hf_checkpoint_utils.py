@@ -21,6 +21,7 @@ import shutil
 from pathlib import Path
 
 import torch
+from huggingface_hub import hf_hub_download, list_repo_files
 from safetensors.torch import safe_open
 from tqdm import tqdm
 
@@ -35,24 +36,27 @@ def copy_remote_code(
     we need to copy them to the export directory for seamless integration with inference
     frameworks.
 
-    Args:
-        pretrained_model_path: Path to the pretrained model.
-        save_directory: Path to the save directory.
+    If ``pretrained_model_path`` is a local directory, Python files are copied directly.
+    If it is a HuggingFace Hub model ID, Python files are downloaded from the Hub first.
 
-    Raises:
-        ValueError: If the pretrained model path is not a directory.
+    Args:
+        pretrained_model_path: Local path to the pretrained model or HuggingFace Hub model ID.
+        save_directory: Path to the save directory.
     """
     hf_checkpoint_path = Path(pretrained_model_path)
     save_dir = Path(save_directory)
 
-    if not hf_checkpoint_path.is_dir():
-        raise ValueError(
-            f"Invalid pretrained model path: {pretrained_model_path}. It should be a directory."
-        )
-
-    for py_file in hf_checkpoint_path.glob("*.py"):
-        if py_file.is_file():
-            shutil.copy(py_file, save_dir / py_file.name)
+    if hf_checkpoint_path.is_dir():
+        for py_file in hf_checkpoint_path.glob("*.py"):
+            if py_file.is_file():
+                shutil.copy(py_file, save_dir / py_file.name)
+    else:
+        # Hub model ID: download any top-level .py files (custom modeling code)
+        repo_id = str(pretrained_model_path)
+        for filename in list_repo_files(repo_id):
+            if "/" not in filename and filename.endswith(".py"):
+                local_path = hf_hub_download(repo_id=repo_id, filename=filename)
+                shutil.copy(local_path, save_dir / filename)
 
 
 def load_multimodal_components(
