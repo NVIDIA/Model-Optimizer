@@ -68,19 +68,23 @@ def create_and_save_small_hf_model(
     tokenizer: PreTrainedTokenizerBase,
     hf_model_name: str,
     hybrid_override_pattern: str | None = None,
+    vocab_size: int | None = None,
 ):
-    """
-    Create and save a small HuggingFace model for testing the conversion pipeline.
+    """Create and save a small HuggingFace model for testing the conversion pipeline.
+
     Uses real HuggingFace config to preserve model-specific settings (like tie_word_embeddings),
     but shrinks size parameters for fast testing.
 
     Args:
-        output_path: Where to save the model
-        tokenizer: Tokenizer to save alongside the model
-        hf_model_name: HuggingFace model card name (e.g., "meta-llama/Llama-3.1-8B-Instruct")
-        hybrid_override_pattern: For NemotronH models, the layer type pattern (e.g., "*-" for Attention+MLP,
-                                 "M-" for Mamba+MLP). Must match num_hidden_layers. None for non-NemotronH models.
+        output_path: Where to save the model.
+        tokenizer: Tokenizer to save alongside the model.
+        hf_model_name: HuggingFace model card name (e.g., "meta-llama/Llama-3.1-8B-Instruct").
+        hybrid_override_pattern: For NemotronH models, the layer type pattern (e.g., "*-" for
+            Attention+MLP, "M-" for Mamba+MLP). Must match num_hidden_layers.
+        vocab_size: Override vocab size. Defaults to tokenizer.vocab_size.
     """
+    if vocab_size is None:
+        vocab_size = tokenizer.vocab_size
     # Load real HuggingFace config (preserves tie_word_embeddings, rope_scaling, etc.)
     config = AutoConfig.from_pretrained(hf_model_name, trust_remote_code=True)
 
@@ -90,7 +94,7 @@ def create_and_save_small_hf_model(
 
     # VL models have nested configs (text_config, vision_config)
     if hasattr(config, "text_config") and hasattr(config, "vision_config"):
-        config.text_config.vocab_size = tokenizer.vocab_size
+        config.text_config.vocab_size = vocab_size
         config.text_config.hidden_size = 256
         config.text_config.intermediate_size = 512
         config.text_config.num_hidden_layers = 2
@@ -108,7 +112,7 @@ def create_and_save_small_hf_model(
         config.num_hidden_layers = config.text_config.num_hidden_layers
     else:
         # Regular models have flat config
-        config.vocab_size = tokenizer.vocab_size
+        config.vocab_size = vocab_size
         config.hidden_size = 256
         config.intermediate_size = 512
         config.num_hidden_layers = max(2, dist.size())
@@ -129,10 +133,7 @@ def create_and_save_small_hf_model(
             config.hybrid_override_pattern = hybrid_override_pattern
 
         # Ensure pad_token_id is within vocab_size (nn.Embedding requires padding_idx < num_embeddings)
-        if (
-            getattr(config, "pad_token_id", None) is not None
-            and config.pad_token_id >= tokenizer.vocab_size
-        ):
+        if getattr(config, "pad_token_id", None) is not None and config.pad_token_id >= vocab_size:
             config.pad_token_id = 0
 
     # Set seed for reproducible weight initialization

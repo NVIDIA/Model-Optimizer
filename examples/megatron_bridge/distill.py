@@ -21,7 +21,9 @@ See `README.md` in this directory for example usage and data preparation instruc
 """
 
 import argparse
+import contextlib
 import os
+import shutil
 
 import torch
 from megatron.bridge import AutoBridge
@@ -43,6 +45,9 @@ from megatron.bridge.training.distill import distill
 from megatron.bridge.training.post_training.distillation import ModelOptDistillConfig
 from megatron.core.datasets.utils import get_blend_from_list
 from megatron.core.distributed import DistributedDataParallelConfig
+
+with contextlib.suppress(ImportError):
+    import modelopt.torch.puzzletron.export.mbridge  # noqa: F401
 
 import modelopt.torch.utils.distributed as dist
 from modelopt.torch.utils import print_rank_0
@@ -124,11 +129,32 @@ def get_args():
     )
     parser.add_argument("--wandb_entity", type=str, help="Wandb entity name (optional)")
     parser.add_argument("--wandb_exp_name", type=str, help="Wandb experiment name (optional)")
+    # Export arguments
+    parser.add_argument(
+        "--hf_export_path",
+        type=str,
+        default=None,
+        help=(
+            "Path where to save the HuggingFace export. "
+            "If provided, exports last iteration checkpoint to HF format after distillation."
+        ),
+    )
+    parser.add_argument(
+        "--student_hf_model",
+        type=str,
+        required=False,
+        default=None,
+        help="HuggingFace model ID to use as template for export (e.g., Qwen/Qwen3-0.6B). "
+        "Should match the base architecture of the student model if --hf_export_path is provided.",
+    )
     args = parser.parse_args()
 
     # Sanity checks
     if not args.use_mock_data and not args.data_paths:
         raise ValueError("Must provide either --data_paths or set --use_mock_data.")
+
+    if args.hf_export_path and not args.student_hf_model:
+        raise ValueError("Must provide --student_hf_model if --hf_export_path is provided.")
 
     print_rank_0("\n==================== Arguments ====================")
     for k, v in args.__dict__.items():
@@ -252,8 +278,30 @@ def main(args: argparse.Namespace):
     print_rank_0("\nStarting distillation...")
     distill(config)
     print_rank_0(
-        f"\nDistillation done! Saved checkpoint to {checkpoint_dir} in megatron distributed checkpoint format.\n"
+        f"\nDistillation done! Saved checkpoint to {checkpoint_dir}"
+        " in megatron distributed checkpoint format.\n"
     )
+
+    if args.hf_export_path:
+        print_rank_0(f"Exporting final distilled ckpt to HF format to {args.hf_export_path}")
+        # Save rank before destroying process group (dist.rank() won't work after destruction)
+        is_rank_0 = dist.rank() == 0
+
+        # Destroy process group on all ranks -- export_ckpt will create its own temporary one.
+        # This prevents cleanup from hanging (cleanup tries to barrier, but rank 0 would be gone).
+        dist.cleanup()
+
+        if is_rank_0:
+            export_bridge = AutoBridge.from_hf_pretrained(
+                args.student_hf_model, trust_remote_code=args.trust_remote_code
+            )
+            export_bridge.export_ckpt(
+                megatron_path=f"{checkpoint_dir}/iter_{args.train_iters:07d}",
+                hf_path=args.hf_export_path,
+                show_progress=True,
+                strict=True,
+            )
+            shutil.copy(f"{args.student_hf_path}/config.json", f"{args.hf_export_path}/config.json")
 
 
 if __name__ == "__main__":

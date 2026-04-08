@@ -92,7 +92,7 @@ This section shows how to distill a student model from a teacher model in the Me
 
 This can be used stand-alone or after [Pruning](#pruning) / [Post-Training Quantization](#post-training-quantization) to recover accuracy of the model by distilling from the original model (teacher).
 
-The [distill.py](distill.py) script loads student and teacher models from HuggingFace checkpoints and saves the distilled model to `<output_dir>/checkpoints` in Megatron distributed checkpoint format.
+The [distill.py](distill.py) script supports both standard HuggingFace checkpoints and [Puzzletron AnyModel](../puzzletron/README.md) checkpoints as student/teacher inputs. Just pass the checkpoint path via `--student_hf_path` / `--teacher_hf_path`. The distilled model is saved to `<output_dir>/checkpoints` in Megatron distributed checkpoint format.
 
 ### Data Preparation
 
@@ -194,9 +194,22 @@ torchrun --nproc_per_node 8 distill.py \
 
 To run the distillation script on a Slurm cluster for multi-node training, you just need use `python` instead of `torchrun` and set the number of nodes using `#SBATCH --nodes=<num_nodes>` clause in your Slurm script.
 
-### Convert Megatron checkpoint to Hugging Face format
+### Converting to Hugging Face format (optional)
 
-To convert the Megatron checkpoint from last iteration (or any intermediate iteration) to Hugging Face format, you need the pruned model config (`--output_hf_path` from `prune_minitron.py` script) and the distilled megatron checkpoint dir (`<distill_output_dir>/checkpoints/iter_<iter_number>`) to run the following command:
+The distilled checkpoint is saved in Megatron distributed format. If you need a HuggingFace checkpoint, there are two ways to convert it:
+
+**Inline** -- add `--hf_export_path` and `--student_hf_model` to the `distill.py` command to automatically convert the final checkpoint after distillation:
+
+```bash
+torchrun --nnodes 1 --nproc_per_node 8 distill.py \
+    ... \
+    --hf_export_path /path/to/save/distilled_hf_ckpt \
+    --student_hf_model Qwen/Qwen3-4B
+```
+
+`--student_hf_model` should match the base architecture of the student (used as a template for export).
+
+**Separate conversion** -- convert any saved iteration using the Megatron-Bridge conversion script:
 
 ```bash
 uv run python /opt/Megatron-Bridge/examples/conversion/convert_checkpoints.py export \
@@ -205,7 +218,52 @@ uv run python /opt/Megatron-Bridge/examples/conversion/convert_checkpoints.py ex
     --hf-path <path_to_save_distilled_hf_ckpt>
 ```
 
-For more details, you can refer to the checkpoint conversion scripts in the [Megatron-Bridge README](https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/main/examples/conversion).
+For more details, see the [Megatron-Bridge conversion README](https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/main/examples/conversion).
+
+> **Known limitation:** HF export does not yet work for Puzzletron AnyModel (heterogeneous) checkpoints -- Megatron-Bridge cannot reload heterogeneous configs from saved checkpoints. Standard models export correctly with both methods.
+
+### Distillation Results
+
+The following MMLU results demonstrate knowledge distillation on student models that were first compressed using [Puzzletron](../puzzletron/README.md). The original (uncompressed) model serves as the teacher, and distillation recovers accuracy lost during compression.
+
+#### Qwen3-8B compressed to 80% of original
+
+The student was created by compressing Qwen3-8B to 80% of its original size using Puzzletron.
+
+| Model | MMLU | Humanities | Other | Social Sci | STEM |
+|-------|------|------------|-------|------------|------|
+| Student (before distillation) | 0.5910 | 0.5046 | 0.6363 | 0.6831 | 0.5855 |
+| Student (after distillation) | 0.6921 | 0.5906 | 0.7316 | 0.7975 | 0.7016 |
+| Teacher (original Qwen3-8B) | 0.7493 | 0.6648 | 0.7856 | 0.8385 | 0.7526 |
+
+MMLU accuracy improved from 59.10% to 69.21% (+10.11 pp) after distillation with just 100 iterations on WikiText-103, recovering 64% of the gap to the teacher model.
+
+#### Llama-3.1-8B-Instruct compressed to 50% of original
+
+The student was created by compressing Llama-3.1-8B-Instruct to 50% of its original size using Puzzletron.
+
+| Model | MMLU | Humanities | Other | Social Sciences | STEM |
+|-------|------|------------|-------|-----------------|------|
+| Student (before distillation) | 0.2316 | 0.2462 | 0.2292 | 0.2250 | 0.2274 |
+| Student (after distillation) | 0.2960 | 0.3146 | 0.3085 | 0.2925 | 0.2768 |
+| Teacher (original Llama-3.1-8B-Instruct) | 0.6839 | 0.7231 | 0.7038 | 0.7667 | 0.5911 |
+
+#### Llama-3.1-8B-Instruct compressed to 69% of original (regression)
+
+The student was created by compressing Llama-3.1-8B-Instruct to ~69% of its original size using Puzzletron. This example shows regression due to overfitting on the small WikiText-103 dataset (100 iterations). MMLU was evaluated on a subset of 100 samples per task:
+
+| Model | MMLU | Humanities | Other | Social Sciences | STEM |
+|-------|------|------------|-------|-----------------|------|
+| Student (before distillation) | 0.6626 | 0.7069 | 0.6892 | 0.7525 | 0.5574 |
+| Student (after distillation) | 0.6496 | 0.6862 | 0.6677 | 0.7433 | 0.5532 |
+| Teacher (original Llama-3.1-8B-Instruct) | 0.6839 | 0.7231 | 0.7038 | 0.7667 | 0.5911 |
+
+MMLU decreased from 66.26% to 64.96% (-1.30 pp) -- the model overfitted to WikiText-103. This highlights the importance of using larger, more diverse datasets for distillation.
+
+#### Recommendations
+
+- **Use larger datasets** for production distillation (e.g., [Nemotron-Pretraining-SFT-v1](https://huggingface.co/datasets/nvidia/Nemotron-Pretraining-SFT-v1)) to avoid overfitting as shown in the regression case above.
+- **Train for more iterations** to ensure proper convergence.
 
 ## Post-Training Quantization
 
