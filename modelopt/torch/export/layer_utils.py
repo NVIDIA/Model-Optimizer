@@ -98,6 +98,8 @@ def get_experts_list(module: torch.nn.Module, model_type: str):
         ]
     ):
         linear_names = ["gate_proj", "down_proj", "up_proj"]
+    elif "deepseek" in model_type:
+        linear_names = ["gate_proj", "down_proj", "up_proj"]
     else:
         raise NotImplementedError(f" {model_type} not supported")
 
@@ -150,6 +152,33 @@ def check_model_compatibility(module_list: list[nn.Module]) -> tuple[bool, bool,
 
 def get_transformer_layers(model: nn.Module) -> list[nn.Module]:
     """Returns the root module of the transformer model."""
+    if "Megatron" in type(model).__name__:
+        if hasattr(model, "model") and "GPTModel" in type(model.model).__name__:
+            # NEMO mcore models can be handled with the following branch.
+            model = model.model
+
+        # NEMO non mcore models, we need to find the language_model module first.
+        children = [model]
+        language_model = None
+        while children and not language_model:
+            next_children = []
+            for child in children:
+                if type(child).__name__ == "TransformerLanguageModel":
+                    language_model = child
+                    break
+                next_children.extend(list(child.children()))
+            children = next_children
+        if language_model:
+            warn("Warning: this is an old NEMO checkpoint format and will be deprecated soon.")
+            layers = list(language_model.embedding.children()) + list(
+                language_model.encoder.children()
+            )
+
+            if hasattr(language_model, "output_layer"):
+                layers.append(language_model.output_layer)
+
+            return layers
+
     if "GPTModel" in type(model).__name__:
         # mcore models
         layers = []
@@ -298,14 +327,20 @@ def is_mlp(module: nn.Module) -> bool:
     return any(key in type(module).__name__.upper() for key in ("MLP", "T5DENSE"))
 
 
+def _is_deepseek_moe_name(module_name: str) -> bool:
+    return "deepseek" in module_name and "moe" in module_name
+
+
 def is_moe(module: nn.Module) -> bool:
     """Returns whether the module is an MOE layer."""
     name = type(module).__name__.lower()
     # Auto-detect common MoE patterns
     if name.endswith("sparsemoeblock") or "moelayer" in name:
         return True
+    if _is_deepseek_moe_name(name) and hasattr(module, "gate") and hasattr(module, "experts"):
+        return True
     # Explicit matches for non-standard naming
-    return any(key in name for key in ["arcticmoe", "deepseekmoe", "dbrxffn"])
+    return any(key in name for key in ["arcticmoe", "dbrxffn", "gptossmoe"])
 
 
 def is_quantlinear(module: nn.Module) -> bool:
@@ -358,7 +393,7 @@ def build_qkv(
         num_kv_heads = ext_config.num_kv_heads
 
         if "ColumnParallelLinear" in type(qkv_module).__name__:
-            # For Megatron-core model, num_kv_heads/num_attention_heads is the first dimension of QKV
+            # For NEMO model, num_kv_heads/num_attention_heads is the first dimension of QKV
             model_metadata_config["head_is_first_dim"] = True
 
         qkv_weight = qkv_module.weight
@@ -965,14 +1000,17 @@ def get_expert_linear_names(module: nn.Module) -> list[str]:
         """
         return any(name.lower() in type(module).__name__.lower() for name in name_list)
 
-    if module_match_name_list(
+    module_name = type(module).__name__.lower()
+
+    if _is_deepseek_moe_name(module_name):
+        return ["gate_proj", "down_proj", "up_proj"]
+    elif module_match_name_list(
         module,
         [
             "Qwen2MoeSparseMoeBlock",
             "Qwen3MoeSparseMoeBlock",
             "Qwen3NextSparseMoeBlock",
             "Qwen3_5MoeSparseMoeBlock",
-            "DeepseekMoE",
         ],
     ):
         return ["gate_proj", "down_proj", "up_proj"]
@@ -1467,7 +1505,7 @@ def _set_layer_config_from_metaconfig(layer_config, metaconfig):
             if k in metaconfig:
                 setattr(layer_config, name, metaconfig[k])
 
-    # MCore use "rope" as an alias for "rope_gpt_neox"
+    # MCore / NeMo use "rope" as an alias for "rope_gpt_neox"
     if layer_config.position_embedding_type == "rope":
         layer_config.position_embedding_type = "rope_gpt_neox"
 

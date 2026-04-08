@@ -64,9 +64,9 @@ HF_CONFIG_MAP = [
     (["dense_attention_every_n_layers"], "dense_attention_every_n_layers"),  # Phi3-small
     (["gegelu_limit"], "gegelu_limit"),  # Phi3-small
     (
-        ["num_local_experts", "moe_num_experts"],
+        ["num_local_experts", "moe_num_experts", "n_routed_experts"],
         "moe_num_experts",
-    ),  # Mixture of Experts (Mixtral, DBRX)
+    ),  # Mixture of Experts (Mixtral, DBRX, DeepSeek)
     (["num_experts_per_tok", "moe_top_k"], "moe_top_k"),  # Mixture of Experts (Mixtral, DBRX)
     (["model_type"], "qwen_type"),  # qwen
     (["lru_width"], "rnn_hidden_size"),  # Recurrent Gemma
