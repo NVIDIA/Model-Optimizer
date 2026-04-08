@@ -22,3 +22,6 @@ For backward compatibility, weight sparsity APIs are re-exported at the module l
 # Import weight sparsity for backward compatibility
 from .weight_sparsity import mode, module, plugins
 from .weight_sparsity.sparsification import *
+
+# Import kv_cache to register KV cache sparsity modes
+from . import kv_cache
