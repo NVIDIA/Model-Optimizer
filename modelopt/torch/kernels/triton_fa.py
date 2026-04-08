@@ -1003,21 +1003,9 @@ class _Attention(torch.autograd.Function):
         BLOCK_D = triton.next_power_of_2(HEAD_DIM)
 
         # Skip-softmax: convert lambda threshold to log2 space for the kernel.
-        #
-        # BLASST (https://arxiv.org/pdf/2512.12087) checks the criterion on the
-        # sm_scale-SCALED attention logits a_ij = q·k / sqrt(d):
-        #
-        #   tile_max_a < running_max_a + ln(lambda)
-        #
-        # The Triton kernel stores scores as x = a * log2(e) (for exp2 efficiency),
-        # so a = x * ln(2).  Substituting:
-        #
-        #   tile_max_x * ln(2) < running_max_x * ln(2) + ln(lambda)
-        #   tile_max_x         < running_max_x + log2(lambda)
-        #
-        # Therefore the threshold in kernel (log2) space is simply log2(lambda).
-        # Do NOT multiply by sm_scale — that factor is already absorbed into the
-        # log2(e) conversion above.
+        # The threshold is scaled by sm_scale to control sparsity relative to
+        # head dimension: larger head_dim → smaller sm_scale → more aggressive
+        # skipping for the same lambda value.
         if quantize_p and (q.requires_grad or k.requires_grad or v.requires_grad):
             raise NotImplementedError(
                 "quantize_p supports inference only; backward does not model the quantized P path"
@@ -1025,7 +1013,7 @@ class _Attention(torch.autograd.Function):
 
         apply_skip = skip_softmax_threshold is not None and skip_softmax_threshold > 0.0
         if apply_skip:
-            skip_threshold_log2 = math.log2(skip_softmax_threshold)
+            skip_threshold_log2 = math.log2(skip_softmax_threshold) * sm_scale
         else:
             skip_threshold_log2 = 0.0
 
