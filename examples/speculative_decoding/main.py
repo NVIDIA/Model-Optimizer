@@ -29,7 +29,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import json
+import argparse
 import os
 from dataclasses import dataclass, field
 from typing import Literal
@@ -43,6 +43,7 @@ from eagle_utils import (
     make_eagle_supervised_data_module,
     patch_ring_attention_for_ttt,
 )
+from omegaconf import OmegaConf
 from transformers.trainer_utils import get_last_checkpoint
 
 import modelopt.torch.opt as mto
@@ -56,12 +57,18 @@ mto.enable_huggingface_checkpointing()
 
 @dataclass
 class ModelArguments:
-    model_name_or_path: str | None = field(default="TinyLlama/TinyLlama-1.1B-Chat-v1.0")
+    model_name_or_path: str | None = field(
+        default="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+        metadata={"help": "HuggingFace model ID or local path to the base model."},
+    )
     use_fake_base_for_offline: bool = field(
-        default=False, metadata={"help": "Whether to use fake base for offline training."}
+        default=False,
+        metadata={
+            "help": "Load model architecture without real base weights. Offline training only."
+        },
     )
     trust_remote_code: bool = field(
-        default=False, metadata={"help": "Whether to trust remote code."}
+        default=False, metadata={"help": "Trust remote code when loading model."}
     )
 
 
@@ -69,23 +76,18 @@ class ModelArguments:
 class DataArguments:
     data_path: str = field(
         default=None,
-        metadata={"help": "Path to the training data."},
+        metadata={"help": "Path to the online training data."},
     )
-    eval_data_path: str = field(default=None, metadata={"help": "Path to the evaluation data."})
     offline_data_path: str = field(
         default=None,
         metadata={
-            "help": """Path to the offline training data. Providing this flag sets
-                  `eagle_offline` in the EagleConfig and enables offline training.
-                  The directory should contain many `.pt` files, each containing a pre-processed
-                  data sample. `data_path` should still point to the original conversations file.
-                  """
+            "help": "Path to offline training data directory (.pt files). This argument enables offline mode.",
         },
     )
     lazy_preprocess: bool = True
     draft_vocab_cache: str | None = field(
         default=None,
-        metadata={"help": "Path to d2t.pt cache file."},
+        metadata={"help": "Path to draft vocabulary cache file."},
     )
     vlm_img_dir: str = field(default=None, metadata={"help": "Path to the VLM image directory."})
     vlm_processor: str = field(default=None, metadata={"help": "Path to the VLM processor."})
@@ -93,28 +95,24 @@ class DataArguments:
 
 @dataclass
 class TrainingArguments(transformers.TrainingArguments):
-    cache_dir: str | None = field(default=None)
     training_seq_len: int = field(
         default=2048,
         metadata={
             "help": (
-                "Maximum sequence length. Sequences will be right padded (and possibly truncated)."
+                "Training sequence length. Sequences will be right padded or truncated to this length."
             )
         },
     )
-    dataloader_drop_last: bool = field(default=True)
-    bf16: bool = field(default=True)
     mode: Literal["eagle3", "medusa"] = "eagle3"
     estimate_ar: bool = field(
-        default=False, metadata={"help": "Whether to estimate AR during training for logging."}
+        default=False, metadata={"help": "Whether to estimate AR using training accuracy to log."}
     )
-    ar_validate_steps: int = field(default=1000, metadata={"help": "Steps between AR validation."})
-    disable_tqdm: bool = field(default=False, metadata={"help": "Disable tqdm progress bar."})
-    remove_unused_columns: bool = field(
-        default=False, metadata={"help": "Set to False to keep extra args for VLM."}
-    )
+    ar_validate_steps: int = field(default=1000, metadata={"help": "AR validation interval."})
     cp_size: int = field(default=1, metadata={"help": "Context parallelism size."})
-    dp_shard_size: int = field(default=1, metadata={"help": "Data parallelism shard size."})
+    dp_shard_size: int | None = field(
+        default=None,
+        metadata={"help": "Data parallelism shard size. None = auto (total_gpu / cp_size)."},
+    )
 
 
 @dataclass
@@ -123,42 +121,70 @@ class MedusaArguments:
     medusa_num_layers: int | None = field(default=1)
 
 
-@dataclass
-class EagleArguments:
-    eagle_config: str = field(default=None, metadata={"help": "Path to eagle_config.json"})
-    eagle_decoder_type: str = field(
-        default="llama",
-        metadata={"help": "The class of eagle decoder to use. Available options: llama, kimik2"},
-    )
-    mix_hidden_states: bool = field(
-        default=False,
-        metadata={"help": "Whether to mix hidden states from previous TTT step."},
-    )
-    disable_torch_compile: bool = field(
-        default=False,
-        metadata={"help": "Disable torch.compile on eagle forward/loss methods."},
-    )
-    num_ttt_steps: int = field(
-        default=3,
-        metadata={"help": "Number of train-time-test steps to use during training."},
-    )
+def _parse_cli() -> tuple[str, list[str]]:
+    """Parse --config (required) from argv; return remaining args as config overrides.
+
+    Extra arguments use OmegaConf dotlist syntax, e.g.
+    ``model.model_name_or_path=meta-llama/Llama-3.2-1B training.output_dir=ckpts/test``.
+    """
+    p = argparse.ArgumentParser(add_help=False)
+    p.add_argument("--config", required=True, help="Path to the YAML config file.")
+    args, overrides = p.parse_known_args()
+    return args.config, overrides
+
+
+def _load_config(config_path: str, overrides: list[str] = ()) -> tuple[dict, dict]:
+    """Load training config from a YAML file with sections: model, data, training, eagle.
+
+    *overrides* are OmegaConf dotlist entries (e.g. ``["model.model_name_or_path=xxx"]``)
+    applied on top of the YAML.
+
+    Returns:
+        hf_cfg: Flat dict from model/data/training sections, for HfArgumentParser.parse_dict()
+        eagle_cfg: Eagle section dict (EagleConfig fields), passed directly to mtsp.convert()
+    """
+    merged = OmegaConf.load(config_path)
+    if overrides:
+        merged = OmegaConf.merge(merged, OmegaConf.from_dotlist(list(overrides)))
+    cfg = OmegaConf.to_container(merged, resolve=True)
+
+    # Eagle section maps directly to EagleConfig fields — no field enumeration needed.
+    # eagle_architecture_config is a nested dict and is included as-is.
+    eagle_cfg = cfg.get("eagle", {})
+
+    hf_cfg = {
+        **cfg.get("model", {}),
+        **cfg.get("data", {}),
+        **cfg.get("training", {}),
+    }
+
+    if hf_cfg.get("dp_shard_size") is None:
+        cp_size = hf_cfg.get("cp_size", 1)
+        hf_cfg["dp_shard_size"] = torch.cuda.device_count() // cp_size
+
+    return hf_cfg, eagle_cfg
 
 
 def train():
+    config_path, overrides = _parse_cli()
+    hf_cfg, eagle_cfg = _load_config(config_path, overrides)
+
     parser = transformers.HfArgumentParser(
         (
             ModelArguments,
             DataArguments,
             TrainingArguments,
             MedusaArguments,
-            EagleArguments,
         )
     )
-    model_args, data_args, training_args, medusa_args, eagle_args = (
-        parser.parse_args_into_dataclasses()
+    model_args, data_args, training_args, medusa_args = parser.parse_dict(
+        hf_cfg, allow_extra_keys=True
     )
+
     if not data_args.data_path and not data_args.offline_data_path:
-        raise ValueError("Either data_path or offline_data_path must be provided.")
+        raise ValueError(
+            "Either data.data_path or data.offline_data_path must be set in the config."
+        )
     if training_args.cp_size > 1 or training_args.dp_shard_size > 1:
         training_args.parallelism_config = ParallelismConfig(
             cp_size=training_args.cp_size, dp_shard_size=training_args.dp_shard_size
@@ -167,7 +193,7 @@ def train():
         patch_ring_attention_for_ttt()
         # Specific patch to accelerate 1.12.0. Removable after move to 1.13.0
         training_args.parallelism_config.sp_backend = None
-    print_rank_0(f"arguments: {model_args}, {training_args}, {medusa_args}, {eagle_args}")
+    print_rank_0(f"arguments: {model_args}, {training_args}, {medusa_args}, eagle_cfg={eagle_cfg}")
 
     # Detect checkpoint to resume from
     last_checkpoint = (
@@ -213,28 +239,17 @@ def train():
             }
             mtsp.convert(model, [("medusa", config)])
         elif training_args.mode == "eagle3":
-            custom_config = (
-                json.load(open(eagle_args.eagle_config)) if eagle_args.eagle_config else {}
-            )
+            # eagle_cfg maps directly to EagleConfig fields; eagle_offline is derived here.
+            eagle_cfg["eagle_offline"] = use_offline_training
+            mtsp.convert(model, [("eagle", eagle_cfg)])
 
-            config = {
-                "eagle_decoder_type": eagle_args.eagle_decoder_type,
-                "eagle_offline": use_offline_training,
-                "eagle_mix_hidden_states": eagle_args.mix_hidden_states,
-                "eagle_use_torch_compile": not eagle_args.disable_torch_compile,
-                "eagle_ttt_steps": eagle_args.num_ttt_steps,
-                "eagle_architecture_config": custom_config,
-            }
-
-            mtsp.convert(model, [("eagle", config)])
-
-            # read draft vocab cache
+            # Load draft vocab cache if the draft model uses a compressed vocabulary
             if model.eagle_config.draft_vocab_size < model.eagle_config.vocab_size:
                 if not os.path.isfile(data_args.draft_vocab_cache):
                     raise FileNotFoundError(
                         f"Draft vocab cache provided but not found: {data_args.draft_vocab_cache}"
                     )
-                model.eagle_module.d2t = torch.load(data_args.draft_vocab_cache)
+                model.eagle_module.d2t = torch.load(data_args.draft_vocab_cache, weights_only=True)
                 print_rank_0(f"Loaded draft vocab cache from {data_args.draft_vocab_cache}.")
         else:
             raise Exception(f"{training_args.mode} is not supported!")

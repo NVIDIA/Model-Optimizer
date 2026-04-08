@@ -65,6 +65,7 @@ import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.distill.distillation_model import DistillationModel
 from modelopt.torch.quantization.config import NVFP4_DEFAULT_CFG
+from modelopt.torch.utils import safe_load
 
 logger = logging.getLogger(__name__)
 
@@ -131,13 +132,13 @@ def detect_format(path: str) -> str:
     return "safetensors"
 
 
-def load_state_dict_any_format(path: str, label: str = "") -> tuple[dict, dict | None]:
+def load_state_dict_any_format(path: str, label: str = "", **kwargs) -> tuple[dict, dict | None]:
     """Load state dict from either torch pickle or safetensors."""
     fmt = detect_format(path)
     logger.info(f"[{label}] Detected format: {fmt} for {path}")
 
     if fmt == "torch":
-        raw = torch.load(path, map_location="cpu", weights_only=False)
+        raw = safe_load(path, map_location="cpu", **kwargs)
         if isinstance(raw, dict) and "state_dict" in raw:
             return raw["state_dict"], None
         return raw, None
@@ -257,26 +258,20 @@ def build_quant_config(
     if exclude_blocks is None:
         exclude_blocks = [0, 1, 46, 47]
 
-    quant_cfg = {
-        "*weight_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
-            "axis": None,
-            "enable": True,
-        },
-        "*input_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
-            "axis": None,
-            "enable": True,
-        },
+    _nvfp4_cfg = {
+        "num_bits": (2, 1),
+        "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+        "axis": None,
     }
-
-    for pattern in SENSITIVE_LAYER_PATTERNS:
-        quant_cfg[pattern] = {"enable": False}
-
-    for block_idx in exclude_blocks:
-        quant_cfg[f"*transformer_blocks.{block_idx}.*"] = {"enable": False}
+    quant_cfg = [
+        {"quantizer_name": "*weight_quantizer", "cfg": _nvfp4_cfg, "enable": True},
+        {"quantizer_name": "*input_quantizer", "cfg": _nvfp4_cfg, "enable": True},
+        *[{"quantizer_name": pattern, "enable": False} for pattern in SENSITIVE_LAYER_PATTERNS],
+        *[
+            {"quantizer_name": f"*transformer_blocks.{i}.*", "enable": False}
+            for i in exclude_blocks
+        ],
+    ]
 
     return {
         "quant_cfg": quant_cfg,

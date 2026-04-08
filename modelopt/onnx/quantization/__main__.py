@@ -20,7 +20,7 @@ import os
 
 import numpy as np
 
-from modelopt.onnx.quantization.autotune import (
+from modelopt.onnx.quantization.autotune.utils import (
     MODE_PRESETS,
     StoreWithExplicitFlag,
     get_node_filter_list,

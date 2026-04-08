@@ -55,6 +55,11 @@ def parse_args() -> argparse.Namespace:
             "the local serving engine. This should match the value used by the server."
         ),
     )
+    parser.add_argument(
+        "--trust_remote_code",
+        action="store_true",
+        help="Set trust_remote_code for Huggingface models and tokenizers",
+    )
     ## Client Parameters ##
     parser.add_argument(
         "--base-url",
@@ -133,7 +138,9 @@ async def main(args: argparse.Namespace) -> None:
             base_url=args.base_url,
         )
 
-        tokenizer = AutoTokenizer.from_pretrained(args.model_card, trust_remote_code=True)
+        tokenizer = AutoTokenizer.from_pretrained(
+            args.model_card, trust_remote_code=args.trust_remote_code
+        )
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
         bos_token_id = tokenizer.bos_token_id

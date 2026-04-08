@@ -15,6 +15,7 @@
 
 """Quantization utilities for LLM models."""
 
+import copy
 import time
 
 import modelopt.torch.quantization as mtq
@@ -57,35 +58,58 @@ def _quantize_model(model, quant_config, calib_dataloader=None):
 def get_quant_config(precision, lm_head_precision="fp16"):
     """Get the quantization configuration."""
     if precision == "fp8":
-        quant_cfg = mtq.FP8_DEFAULT_CFG
+        quant_cfg = copy.deepcopy(mtq.FP8_DEFAULT_CFG)
 
     elif precision == "nvfp4":
-        quant_cfg = mtq.NVFP4_DEFAULT_CFG
+        quant_cfg = copy.deepcopy(mtq.NVFP4_DEFAULT_CFG)
 
     elif precision == "int4_awq":
-        quant_cfg = mtq.INT4_AWQ_CFG
+        quant_cfg = copy.deepcopy(mtq.INT4_AWQ_CFG)  # type: ignore[arg-type]
 
     else:
         raise ValueError(f"Unsupported precision: {precision}")
 
-    config_dict = quant_cfg["quant_cfg"]  # type: dict
+    quant_cfg_list: list = [
+        e for e in quant_cfg["quant_cfg"] if isinstance(e, dict) and "quantizer_name" in e
+    ]
 
     if lm_head_precision == "fp8":
-        config_dict["*lm_head.input_quantizer"] = {"num_bits": (4, 3), "axis": None}
-        config_dict["*lm_head.weight_quantizer"] = {"num_bits": (4, 3), "axis": None}
+        quant_cfg_list.append(
+            {
+                "quantizer_name": "*lm_head.input_quantizer",
+                "cfg": {"num_bits": (4, 3), "axis": None},
+            }
+        )
+        quant_cfg_list.append(
+            {
+                "quantizer_name": "*lm_head.weight_quantizer",
+                "cfg": {"num_bits": (4, 3), "axis": None},
+            }
+        )
     elif lm_head_precision == "nvfp4":
-        config_dict["*lm_head.input_quantizer"] = {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
-            "axis": None,
-            "enable": True,
-        }
-        config_dict["*lm_head.weight_quantizer"] = {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
-            "axis": None,
-            "enable": True,
-        }
+        quant_cfg_list.append(
+            {
+                "quantizer_name": "*lm_head.input_quantizer",
+                "cfg": {
+                    "num_bits": (2, 1),
+                    "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+                    "axis": None,
+                },
+                "enable": True,
+            }
+        )
+        quant_cfg_list.append(
+            {
+                "quantizer_name": "*lm_head.weight_quantizer",
+                "cfg": {
+                    "num_bits": (2, 1),
+                    "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+                    "axis": None,
+                },
+                "enable": True,
+            }
+        )
+    quant_cfg["quant_cfg"] = quant_cfg_list
     return quant_cfg
 
 

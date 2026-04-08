@@ -20,35 +20,42 @@ in ONNX computation graphs to minimize TensorRT inference latency. It uses patte
 region analysis to efficiently explore and optimize Q/DQ insertion strategies.
 """
 
-# Expose Autotune modes
-from .__main__ import MODE_PRESETS
+# Expose Autotune modes and CLI utilities
+from .utils import MODE_PRESETS, StoreWithExplicitFlag, get_node_filter_list
 
-# Core data structures
-from .autotuner import QDQAutotuner
-from .benchmark import TensorRTPyBenchmark, TrtExecBenchmark
-from .common import (
-    AutotunerError,
-    AutotunerNotInitializedError,
-    Config,
-    InsertionScheme,
-    InvalidSchemeError,
-    PatternCache,
-    PatternSchemes,
-    Region,
-    RegionType,
-)
-from .insertion_points import (
-    ChildRegionInputInsertionPoint,
-    ChildRegionOutputInsertionPoint,
-    NodeInputInsertionPoint,
-    ResolvedInsertionPoint,
-)
-from .region_pattern import RegionPattern
-from .region_search import CombinedRegionSearch
-from .utils import StoreWithExplicitFlag, get_node_filter_list
+# Core data structures (requires TensorRT)
+try:
+    from .autotuner import QDQAutotuner
+    from .benchmark import TensorRTPyBenchmark, TrtExecBenchmark
+    from .common import (
+        AutotunerError,
+        AutotunerNotInitializedError,
+        Config,
+        InsertionScheme,
+        InvalidSchemeError,
+        PatternCache,
+        PatternSchemes,
+        Region,
+        RegionType,
+    )
+    from .insertion_points import (
+        ChildRegionInputInsertionPoint,
+        ChildRegionOutputInsertionPoint,
+        NodeInputInsertionPoint,
+        ResolvedInsertionPoint,
+    )
+    from .region_pattern import RegionPattern
+    from .region_search import CombinedRegionSearch
+except ImportError as e:
+    from modelopt.onnx.logging_config import logger
 
-__all__ = [
-    "MODE_PRESETS",
+    logger.warning(
+        f"Failed to import Autotune dependencies: '{e}'. Ignore if Autotune is not being used."
+    )
+
+__all__ = ["MODE_PRESETS", "StoreWithExplicitFlag", "get_node_filter_list"]
+
+_OPTIONAL_EXPORTS = [
     "AutotunerError",
     "AutotunerNotInitializedError",
     "ChildRegionInputInsertionPoint",
@@ -65,8 +72,7 @@ __all__ = [
     "RegionPattern",
     "RegionType",
     "ResolvedInsertionPoint",
-    "StoreWithExplicitFlag",
     "TensorRTPyBenchmark",
     "TrtExecBenchmark",
-    "get_node_filter_list",
 ]
+__all__.extend(name for name in _OPTIONAL_EXPORTS if name in globals())

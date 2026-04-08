@@ -22,6 +22,7 @@ from transformers import AutoModelForCausalLM
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export import export_hf_vllm_fq_checkpoint
 from modelopt.torch.quantization.model_quant import fold_weight
+from modelopt.torch.utils import safe_load
 
 
 @pytest.mark.parametrize("quant_cfg", [mtq.FP8_DEFAULT_CFG])
@@ -99,8 +100,7 @@ def test_hf_vllm_export(tmp_path, quant_cfg):
         )
 
     # Verify quantizer state dict: same keys, weight quantizer amaxes cleared, input amaxes kept
-    # weights_only=False required: modelopt_state contains Python objects (dicts, strings, etc.)
-    quantizer_state_dict = torch.load(modelopt_state_file)["modelopt_state_weights"]
+    quantizer_state_dict = safe_load(modelopt_state_file)["modelopt_state_weights"]
     assert len(quantizer_state_dict) > 0, (
         f"modelopt_state_weights should not be empty in {modelopt_state_file}"
     )

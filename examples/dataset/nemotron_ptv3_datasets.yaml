@@ -1,0 +1,193 @@
+# Dataset mix for make_nemotron_ptv3_dataset.py
+#
+# Each entry defines one HuggingFace dataset to include in the training mix.  Fields:
+#
+#   repo_id        — HuggingFace repo ID or local path.
+#   splits         — List of splits to load.  All splits are concatenated before capping.
+#   cap_per_split  — Maximum rows taken from each split (omit or leave empty = no cap).
+#   augment        — Whether to include this dataset in the augmented copy.
+#                    Set to false for already-multilingual splits so language-redirect
+#                    augmentations are not applied on top of existing non-English content.
+#
+# Edit this file to add, remove, or re-weight datasets without touching the script.
+# After editing, re-run make_nemotron_ptv3_dataset.py to regenerate the dataset.
+
+datasets:
+
+  # ---------------------------------------------------------------------------
+  # Math
+  # ---------------------------------------------------------------------------
+
+  # Nemotron-Math-v2: 7 M rows across quality tiers.  Cap each split to avoid
+  # math dominating the mix.
+  - repo_id: nvidia/Nemotron-Math-v2
+    splits:
+      - high_part00
+      - high_part01
+      - high_part02
+      - medium
+      - low
+    cap_per_split: 40000   # 200 K total across 5 splits
+    augment: true
+
+  # Nemotron-SFT-Math-v3: 1.24 M rows, curated SFT math with tool use.
+  - repo_id: nvidia/Nemotron-SFT-Math-v3
+    splits:
+      - train
+    cap_per_split: 200000
+    augment: true
+
+  # Nemotron-Math-Proofs-v1: formal Lean 4 proofs — specialized but useful for
+  # diversity.  Cap to avoid over-representing this narrow domain.
+  - repo_id: nvidia/Nemotron-Math-Proofs-v1
+    splits:
+      - lean
+    cap_per_split: 50000
+    augment: true
+
+  # ---------------------------------------------------------------------------
+  # Code / Software Engineering
+  # ---------------------------------------------------------------------------
+
+  - repo_id: nvidia/Nemotron-SWE-v1
+    splits:
+      - r2e_gym
+    cap_per_split:
+    augment: true
+
+  - repo_id: nvidia/Nemotron-SFT-SWE-v2
+    splits:
+      - agentless
+      - openhands_swe
+    cap_per_split:
+    augment: true
+
+  # Competitive-Programming-v1 has ~3.93M rows across 6 splits (cpp ×2, python ×2,
+  # infinibyte ×2). Capped to prevent code from dominating the mix.
+  - repo_id: nvidia/Nemotron-Competitive-Programming-v1
+    splits:
+      - competitive_coding_cpp_part00
+      - competitive_coding_cpp_part01
+      - competitive_coding_python_part00
+      - competitive_coding_python_part01
+      - infinibyte_part00
+      - infinibyte_part01
+    cap_per_split: 50000   # 300K total across 6 splits
+    augment: true
+
+  # SFT-Competitive-Programming-v2 has ~845K rows across 4 splits. Also capped.
+  - repo_id: nvidia/Nemotron-SFT-Competitive-Programming-v2
+    splits:
+      - exercism
+      - competitive_coding_python
+      - competitive_coding_cpp
+      - text_to_sql
+    cap_per_split: 50000   # 200K total across 4 splits
+    augment: true
+
+  - repo_id: nvidia/Nemotron-SFT-OpenCode-v1
+    splits:
+      - general
+      - bash_only_tool
+      - bash_only_tool_skills
+      - question_tool
+      - agent_skills
+      - agent_skills_question_tool
+    cap_per_split:
+    augment: true
+
+  # ---------------------------------------------------------------------------
+  # Science
+  # ---------------------------------------------------------------------------
+
+  - repo_id: nvidia/Nemotron-Science-v1
+    splits:
+      - MCQ
+      - RQA
+    cap_per_split:         # ~226 K total
+    augment: true
+
+  # ---------------------------------------------------------------------------
+  # Chat / Instruction Following
+  # ---------------------------------------------------------------------------
+
+  - repo_id: nvidia/Nemotron-Instruction-Following-Chat-v1
+    splits:
+      - chat_if
+      - structured_outputs
+    cap_per_split:         # ~288 K total
+    augment: true
+
+  - repo_id: nvidia/Nemotron-SFT-Instruction-Following-Chat-v2
+    splits:
+      - reasoning_off
+      - reasoning_on
+    cap_per_split:
+    augment: true
+
+  # ---------------------------------------------------------------------------
+  # Agentic
+  # ---------------------------------------------------------------------------
+
+  - repo_id: nvidia/Nemotron-Agentic-v1
+    splits:
+      - interactive_agent
+      - tool_calling
+    cap_per_split:
+    augment: true
+
+  - repo_id: nvidia/Nemotron-SFT-Agentic-v2
+    splits:
+      - interactive_agent
+      - search
+      - tool_calling
+    cap_per_split:
+    augment: true
+
+  # ---------------------------------------------------------------------------
+  # Safety
+  # ---------------------------------------------------------------------------
+
+  - repo_id: nvidia/Nemotron-SFT-Safety-v1
+    splits:
+      - train
+    cap_per_split:         # ~45 K
+    augment: true
+
+  # ---------------------------------------------------------------------------
+  # Finance (specialized domain)
+  # ---------------------------------------------------------------------------
+
+  - repo_id: nvidia/Nemotron-SpecializedDomains-Finance-v1
+    splits:
+      - train
+    cap_per_split: 100000
+    augment: true
+
+  # ---------------------------------------------------------------------------
+  # Multilingual — augment: false because content is already non-English.
+  # Language-redirect augmentations would be meaningless or contradictory.
+  # ---------------------------------------------------------------------------
+
+  - repo_id: nvidia/Nemotron-SFT-Multilingual-v1
+    splits:
+      - code_de
+      - code_es
+      - code_fr
+      - code_it
+      - code_ja
+      - code_zh
+      - math_de
+      - math_es
+      - math_fr
+      - math_it
+      - math_ja
+      - math_zh
+      - stem_de
+      - stem_es
+      - stem_fr
+      - stem_it
+      - stem_ja
+      - stem_zh
+    cap_per_split: 10000   # 180 K total across 18 splits
+    augment: false

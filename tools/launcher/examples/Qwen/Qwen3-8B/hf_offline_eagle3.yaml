@@ -65,22 +65,15 @@ pipeline:
 
   # Step 3: Train EAGLE3 draft head (offline, single task)
   task_2:
-    script: common/eagle3/offline_training.sh
+    script: common/eagle3/train_eagle.sh
     args:
-      - --offline-data /scratchspace/offline_hidden_states
-      - --data_path None
-      - --mode eagle3
-      - --num_epochs 1
-      - --lr 3e-4
-      - --save_steps 500000
-      - --output_dir /scratchspace/eagle3
-      - --train_bs 8
-      - --training_seq_len 4096
-      - --eagle_config modules/Model-Optimizer/examples/speculative_decoding/eagle_config.json
-      - --disable_tqdm True
-      - --ar_validate_steps 500000
-    environment:
-      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+      - --config modules/Model-Optimizer/modelopt_recipes/general/speculative_decoding/eagle3.yaml
+      - model.model_name_or_path=<<global_vars.hf_model>>
+      - data.offline_data_path=/scratchspace/offline_hidden_states
+      - training.output_dir=/scratchspace/eagle3
+      - training.training_seq_len=4096
+      - training.disable_tqdm=true
+      - training.ar_validate_steps=500000
     slurm_config:
       _factory_: "slurm_factory"
       nodes: 1

@@ -84,15 +84,15 @@ def test_convert_apex_parallel_linear(distributed_setup_size_1):
             assert hasattr(module, "weight_quantizer")
             assert hasattr(module, "output_quantizer")
 
-    mtq.set_quantizer_attribute(model_test, "*", {"enable": False})
+    mtq.set_quantizer_attributes_partial(model_test, "*", {"enable": False})
 
     x = model_ref.get_dummy_input().cuda()
     out_1 = model_ref(x)
     out_2 = model_test(x)
     assert torch.allclose(out_1, out_2)
 
-    mtq.set_quantizer_attribute(model_test, "*input_quantizer", {"enable": True})
-    mtq.set_quantizer_attribute(model_test, "*weight_quantizer", {"enable": True})
+    mtq.set_quantizer_attributes_partial(model_test, "*input_quantizer", {"enable": True})
+    mtq.set_quantizer_attributes_partial(model_test, "*weight_quantizer", {"enable": True})
     model_ref = RegularQuantModelForTP().cuda()
     model_ref.load_state_dict(model_test.state_dict())
 

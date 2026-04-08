@@ -89,14 +89,18 @@ class TestQuantizerAttributeConfig:
 
 
 WINT4INT8_CFG = {
-    "quant_cfg": {
-        "*weight_quantizer": [
-            {"num_bits": 4, "block_sizes": {-1: 128, "type": "static"}, "enable": True},
-            {"num_bits": 8, "axis": 0, "enable": True},
-        ],
-        "*input_quantizer": {"num_bits": 8, "enable": True},
-        "default": {"enable": False},
-    },
+    "quant_cfg": [
+        {"quantizer_name": "*", "enable": False},
+        {
+            "quantizer_name": "*weight_quantizer",
+            "cfg": [
+                {"num_bits": 4, "block_sizes": {-1: 128, "type": "static"}},
+                {"num_bits": 8, "axis": 0},
+            ],
+            "enable": True,
+        },
+        {"quantizer_name": "*input_quantizer", "cfg": {"num_bits": 8}, "enable": True},
+    ],
     "algorithm": "awq_full",
 }
 
@@ -109,10 +113,14 @@ def test_set_quantizer_cxt():
     state_dict = model.state_dict()
     output_ref = model(inputs)
 
-    mtq.set_quantizer_by_cfg(model, {"*output_quantizer": {"enable": True}})
+    mtq.set_quantizer_by_cfg(model, [{"quantizer_name": "*output_quantizer", "enable": True}])
 
     with mtq.set_quantizer_by_cfg_context(
-        model, {"*": {"enable": False}, "*output_quantizer": {"enable": True}}
+        model,
+        [
+            {"quantizer_name": "*", "enable": False},
+            {"quantizer_name": "*output_quantizer", "enable": True},
+        ],
     ):
         for name, module in model.named_modules():
             if not isinstance(module, TensorQuantizer):
@@ -123,7 +131,7 @@ def test_set_quantizer_cxt():
                 assert not module.is_enabled
         mtq.calibrate(model, "max", lambda model: model(inputs * 10))
 
-    mtq.set_quantizer_by_cfg(model, {"*output_quantizer": {"enable": False}})
+    mtq.set_quantizer_by_cfg(model, [{"quantizer_name": "*output_quantizer", "enable": False}])
 
     output_test = model(inputs)
     assert torch.allclose(output_ref, output_test)

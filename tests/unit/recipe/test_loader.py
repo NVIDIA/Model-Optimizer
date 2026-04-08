@@ -15,6 +15,8 @@
 
 """Unit tests for modelopt.recipe.loader and modelopt.recipe.loader.load_config."""
 
+import re
+
 import pytest
 
 from modelopt.recipe.config import ModelOptPTQRecipe, RecipeType
@@ -36,10 +38,10 @@ key: val
 CFG_RECIPE_MISSING_TYPE = """\
 metadata:
   description: Missing recipe_type.
-ptq_cfg: {}
+quantize: {}
 """
 
-CFG_RECIPE_MISSING_PTQ_CFG = """\
+CFG_RECIPE_MISSING_quantize = """\
 metadata:
   recipe_type: ptq
 """
@@ -86,7 +88,7 @@ def test_load_recipe_builtin_with_suffix():
     recipe = load_recipe("general/ptq/fp8_default-fp8_kv.yml")
     assert recipe.recipe_type == RecipeType.PTQ
     assert isinstance(recipe, ModelOptPTQRecipe)
-    assert recipe.ptq_cfg
+    assert recipe.quantize
 
 
 def test_load_recipe_builtin_without_suffix():
@@ -112,11 +114,11 @@ _BUILTIN_PTQ_RECIPES = [
 
 @pytest.mark.parametrize("recipe_path", _BUILTIN_PTQ_RECIPES)
 def test_load_recipe_all_builtins(recipe_path):
-    """Smoke-test: every built-in PTQ recipe loads without error and has ptq_cfg."""
+    """Smoke-test: every built-in PTQ recipe loads without error and has quantize."""
     recipe = load_recipe(recipe_path)
     assert recipe.recipe_type == RecipeType.PTQ
     assert isinstance(recipe, ModelOptPTQRecipe)
-    assert recipe.ptq_cfg
+    assert recipe.quantize
 
 
 # ---------------------------------------------------------------------------
@@ -138,11 +140,11 @@ def test_load_recipe_missing_recipe_type_raises(tmp_path):
         load_recipe(bad)
 
 
-def test_load_recipe_missing_ptq_cfg_raises(tmp_path):
-    """load_recipe raises ValueError when ptq_cfg is absent for a PTQ recipe."""
+def test_load_recipe_missing_quantize_raises(tmp_path):
+    """load_recipe raises ValueError when quantize is absent for a PTQ recipe."""
     bad = tmp_path / "bad.yml"
-    bad.write_text(CFG_RECIPE_MISSING_PTQ_CFG)
-    with pytest.raises(ValueError, match="ptq_cfg"):
+    bad.write_text(CFG_RECIPE_MISSING_quantize)
+    with pytest.raises(ValueError, match="quantize"):
         load_recipe(bad)
 
 
@@ -160,28 +162,28 @@ def test_load_recipe_unsupported_type_raises(tmp_path):
 
 
 def test_load_recipe_dir(tmp_path):
-    """load_recipe loads a recipe from a directory with recipe.yml + ptq_cfg.yml."""
+    """load_recipe loads a recipe from a directory with recipe.yml + quantize.yml."""
     (tmp_path / "recipe.yml").write_text(
         "metadata:\n  recipe_type: ptq\n  description: Dir test.\n"
     )
-    (tmp_path / "ptq_cfg.yml").write_text("algorithm: max\nquant_cfg: {}\n")
+    (tmp_path / "quantize.yml").write_text("algorithm: max\nquant_cfg: []\n")
     recipe = load_recipe(tmp_path)
     assert recipe.recipe_type == RecipeType.PTQ
     assert recipe.description == "Dir test."
-    assert recipe.ptq_cfg == {"algorithm": "max", "quant_cfg": {}}
+    assert recipe.quantize == {"algorithm": "max", "quant_cfg": []}
 
 
 def test_load_recipe_dir_missing_recipe_raises(tmp_path):
     """load_recipe raises ValueError when recipe.yml is absent from the directory."""
-    (tmp_path / "ptq_cfg.yml").write_text("algorithm: max\nquant_cfg: {}\n")
+    (tmp_path / "quantize.yml").write_text("algorithm: max\nquant_cfg: {}\n")
     with pytest.raises(ValueError, match="recipe descriptor"):
         load_recipe(tmp_path)
 
 
-def test_load_recipe_dir_missing_ptq_cfg_raises(tmp_path):
-    """load_recipe raises ValueError when ptq_cfg.yml is absent from the directory."""
+def test_load_recipe_dir_missing_quantize_raises(tmp_path):
+    """load_recipe raises ValueError when quantize.yml is absent from the directory."""
     (tmp_path / "recipe.yml").write_text("metadata:\n  recipe_type: ptq\n")
-    with pytest.raises(ValueError, match="ptq_cfg"):
+    with pytest.raises(ValueError, match="quantize"):
         load_recipe(tmp_path)
 
 
@@ -200,13 +202,49 @@ def test_load_recipe_dir_missing_ptq_cfg_raises(tmp_path):
     ],
 )
 def test_general_ptq_yaml_matches_config_dicts(yaml_path, model_cfg_name, kv_cfg_name):
-    """Each general/ptq YAML's merged quant_cfg matches the corresponding config.py dicts."""
+    """Each general/ptq YAML's quant_cfg list matches the merged Python config dicts."""
+    import json
+
     import modelopt.torch.quantization.config as qcfg
+    from modelopt.torch.quantization.config import normalize_quant_cfg_list
 
     model_cfg = getattr(qcfg, model_cfg_name)
     kv_cfg = getattr(qcfg, kv_cfg_name)
     yaml_data = load_config(yaml_path)
 
-    ptq = yaml_data["ptq_cfg"]
-    assert {**model_cfg["quant_cfg"], **kv_cfg["quant_cfg"]} == ptq["quant_cfg"]
-    assert model_cfg["algorithm"] == ptq["algorithm"]
+    def _normalize_fpx(val):
+        """Normalize FPx representations to a canonical ``[E, M]`` list.
+
+        Python configs may use tuple form ``(E, M)`` or string alias ``"eEmM"``;
+        YAML always uses the string form.  Both are converted to ``[E, M]`` so the
+        comparison is representation-agnostic.
+        """
+        if isinstance(val, str):
+            m = re.fullmatch(r"e(\d+)m(\d+)", val)
+            if m:
+                return [int(m.group(1)), int(m.group(2))]
+        if isinstance(val, tuple) and len(val) == 2 and all(isinstance(x, int) for x in val):
+            return list(val)
+        if isinstance(val, dict):
+            return {str(k): _normalize_fpx(v) for k, v in val.items()}
+        return val
+
+    def _normalize_entries(raw_entries):
+        """Normalize a raw quant_cfg list to a canonical, JSON-serialisable form."""
+        entries = normalize_quant_cfg_list(list(raw_entries))
+        result = []
+        for entry in entries:
+            e = {k: v for k, v in entry.items() if v is not None}
+            if "cfg" in e and e["cfg"] is not None:
+                e["cfg"] = _normalize_fpx(e["cfg"])
+            result.append(e)
+        return result
+
+    def _sort_key(entry):
+        return json.dumps(entry, sort_keys=True, default=str)
+
+    python_entries = _normalize_entries(model_cfg["quant_cfg"] + kv_cfg["quant_cfg"])
+    yaml_entries = _normalize_entries(yaml_data["quantize"]["quant_cfg"])
+
+    assert sorted(python_entries, key=_sort_key) == sorted(yaml_entries, key=_sort_key)
+    assert model_cfg["algorithm"] == yaml_data["quantize"]["algorithm"]

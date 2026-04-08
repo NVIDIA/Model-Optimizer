@@ -15,13 +15,11 @@
 
 """This module provides a GEMM function for fp8 per tensor quantization."""
 
-from typing import Any
-
 import torch
 from torch.autograd import Function
 
 from modelopt.torch.quantization.backends.gemm_registry import gemm_registry
-from modelopt.torch.quantization.config import FP8_DEFAULT_CFG
+from modelopt.torch.quantization.config import FP8_DEFAULT_CFG, find_quant_cfg_entry_by_path
 from modelopt.torch.quantization.nn.modules.quant_linear import RealQuantLinear
 from modelopt.torch.quantization.qtensor import FP8QTensor, QTensorWrapper
 from modelopt.torch.quantization.utils import reduce_amax
@@ -99,9 +97,16 @@ def fp8_per_tensor_gemm(quant_module, input, bias=None):
 def _fp8_availability_check(module, input, args, kwargs):
     """Comprehensive check for FP8 GEMM availability."""
     # Quantizer configs
-    quant_cfg: dict[str, Any] = FP8_DEFAULT_CFG["quant_cfg"]
-    input_cfg = quant_cfg["*input_quantizer"]
-    weight_cfg = quant_cfg["*weight_quantizer"]
+    quant_cfg_list: list = FP8_DEFAULT_CFG["quant_cfg"]
+    input_cfg = find_quant_cfg_entry_by_path(quant_cfg_list, "*input_quantizer").get("cfg", {})
+    weight_cfg = find_quant_cfg_entry_by_path(quant_cfg_list, "*weight_quantizer").get("cfg", {})
+    # cfg may be a list (SequentialQuantizer); fall back to the first element.
+    if isinstance(input_cfg, list):
+        input_cfg = input_cfg[0]
+    if isinstance(weight_cfg, list):
+        weight_cfg = weight_cfg[0]
+    if not isinstance(input_cfg, dict) or not isinstance(weight_cfg, dict):
+        return False
 
     # Check hardware support
     if not torch.cuda.is_available() or not fp8_compatible():

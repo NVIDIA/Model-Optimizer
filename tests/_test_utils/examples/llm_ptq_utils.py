@@ -16,12 +16,10 @@
 import importlib.metadata as metadata
 import subprocess
 from dataclasses import asdict, dataclass
-from pathlib import Path
 
 import pytest
 import torch
-
-PTQ_EXAMPLE_DIR = Path(__file__).parents[3] / "examples" / "llm_ptq"
+from _test_utils.examples.run_command import run_llm_ptq_command
 
 
 @dataclass
@@ -32,6 +30,7 @@ class PTQCommand:
     sparsity: str | None = None
     kv_cache_quant: str | None = None
     trust_remote_code: bool = False
+    calib_dataset: str = "cnn_dailymail"
     calib_batch_size: int | None = None
     auto_quantize_bits: float | None = None
     tp: int | None = None
@@ -47,37 +46,23 @@ class PTQCommand:
             self.min_sm % 10,
         ):
             pytest.skip(reason=f"Requires sm{self.min_sm} or higher")
-            return
 
         if self.max_sm and torch.cuda.get_device_capability() > (
             self.max_sm // 10,
             self.max_sm % 10,
         ):
             pytest.skip(reason=f"Requires sm{self.max_sm} or lower")
-            return
 
         if self.min_gpu and torch.cuda.device_count() < self.min_gpu:
             pytest.skip(reason=f"Requires at least {self.min_gpu} GPUs")
-            return
 
         param_dict = asdict(self)
-
         param_dict.pop("min_sm", None)
+        param_dict.pop("max_sm", None)
         param_dict.pop("min_gpu", None)
 
-        trust_remote_code = param_dict.pop("trust_remote_code", False)
-
-        args = ["--model", model_path]
-        for key, value in param_dict.items():
-            if value is not None:
-                args.append(f"--{key}")
-                args.append(f"{value}")
-
-        if trust_remote_code:
-            args.append("--trust_remote_code")
-
-        self.command = ["scripts/huggingface_example.sh", "--no-verbose", *args]
-        subprocess.run(self.command, cwd=PTQ_EXAMPLE_DIR, check=True)
+        quant = param_dict.pop("quant")
+        run_llm_ptq_command(model=model_path, quant=quant, **param_dict)
 
     def param_str(self):
         param_dict = asdict(self)
