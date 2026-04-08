@@ -34,7 +34,10 @@ from _test_utils.torch.transformers_models import get_tiny_llama
 
 import modelopt.torch.speculative as mtsp
 from modelopt.torch.speculative.eagle.default_config import default_eagle_config
-from modelopt.torch.speculative.eagle.utils import EagleOfflineDataCollator, OfflineSupervisedDataset
+from modelopt.torch.speculative.eagle.utils import (
+    EagleOfflineDataCollator,
+    OfflineSupervisedDataset,
+)
 
 _mock_scripts = types.ModuleType("scripts")
 _mock_ar = types.ModuleType("scripts.ar_validate")
