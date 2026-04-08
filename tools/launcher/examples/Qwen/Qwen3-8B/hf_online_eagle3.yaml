@@ -12,7 +12,7 @@
 #   uv run launch.py --yaml examples/Qwen/Qwen3-8B/hf_offline_eagle3.yaml --yes
 #   uv run slurm.py --yaml modules/Model-Optimizer/tools/launcher/examples/Qwen/Qwen3-8B/hf_offline_eagle3.yaml --yes
 
-job_name: Qwen3-8B_EAGLE3_offline
+job_name: Qwen3-8B_EAGLE3_online
 pipeline:
   allow_to_fail: false
   skip: false
@@ -21,84 +21,58 @@ pipeline:
   global_vars:
     hf_model: /hf-local/Qwen/Qwen3-8B
 
-  # Step 1: Data synthesis via TRT-LLM server
-  # Args before "--" go to trtllm-serve; args after "--" go to tools/query.py.
   task_0:
-    script: common/tensorrt_llm/query.sh
+    script: common/eagle3/make_dataset.sh
     args:
-      - --model <<global_vars.hf_model>>
-      - --tp_size 4
-      - --ep_size 4
-      - --max_num_tokens 32000
-      - --port 8000
-      - --host 0.0.0.0
-      - --trust_remote_code
-      - --
-      - --data /hf-local/modelopt/Speculative-Decoding-Prompt-Samples
-      - --save /scratchspace/data
-    environment:
-      - HF_LOCAL: /hf-local
-    slurm_config:
-      _factory_: "slurm_factory"
-      nodes: 1
-      ntasks_per_node: 4
-      gpus_per_node: 4
-      container: nvcr.io/nvidia/tensorrt-llm/release:1.2.0
-
-  # Step 2: Dump hidden states from target model
-  task_1:
-    script: common/eagle3/dump_offline_data.sh
-    args:
-      - --input-data /scratchspace/data
-      - --output-dir /scratchspace/offline_hidden_states
-      - --max-seq-len 8192
-      - --tp 4
-      - --moe-ep 4
-    environment:
-      - HF_MODEL_CKPT: <<global_vars.hf_model>>
-    slurm_config:
-      _factory_: "slurm_factory"
-      nodes: 1
-      ntasks_per_node: 4
-      gpus_per_node: 4
-      container: nvcr.io/nvidia/tensorrt-llm/release:1.2.0
-
-  # Step 3: Train EAGLE3 draft head (offline, single task)
-  task_2:
-    script: common/eagle3/train_eagle.sh
-    args:
-      - --config modules/Model-Optimizer/modelopt_recipes/general/speculative_decoding/eagle3.yaml
-      - model.model_name_or_path=<<global_vars.hf_model>>
-      - data.offline_data_path=/scratchspace/offline_hidden_states
-      - training.output_dir=/scratchspace/eagle3
-      - training.training_seq_len=4096
-      - training.disable_tqdm=true
-      - training.ar_validate_steps=500000
+      - -f modules/Model-Optimizer/examples/speculative_decoding/prepare_input_conversations/example_data_config.yaml
+      - --full-conversations
     slurm_config:
       _factory_: "slurm_factory"
       nodes: 1
       ntasks_per_node: 1
-      gpus_per_node: 4
-      container: nvcr.io/nvidia/tensorrt-llm/release:1.2.0
+      gpus_per_node: 1
+      container: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc10
 
-  # Step 4: Benchmark speculative decoding (VLLM backend)
-  task_3:
+  task_1:
+    script: common/eagle3/train_eagle.sh
+    args:
+      - --config modules/Model-Optimizer/modelopt_recipes/general/speculative_decoding/eagle3.yaml
+      - model.model_name_or_path=<<global_vars.hf_model>>
+      - data.data_path=/scratchspace/data/train.jsonl
+      - training.output_dir=/scratchspace/eagle3
+      - training.training_seq_len=4096
+      - training.disable_tqdm=true
+      - training.ar_validate_steps=500000
+      - training.num_train_epochs=1
+    environment:
+      - HOME: /tmp
+      - TORCHINDUCTOR_CACHE_DIR: /tmp/torch_cache
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 8
+      container: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc10
+
+  task_2:
     script: common/specdec_bench/quick_check.sh
     args:
       - --draft_model_dir /scratchspace/export
       - --draft_length 3
       - --output_length 4096
       - --engine VLLM
-      - --tp_size 4
+      - --tp_size 1
       - --ep_size 1
       - --speculative_algorithm EAGLE3
       - --mtbench /hf-local/HuggingFaceH4/mt_bench_prompts/raw/question.jsonl
       - --concurrency 1
     environment:
       - HF_MODEL_CKPT: <<global_vars.hf_model>>
+      - HOME: /tmp
+      - TORCHINDUCTOR_CACHE_DIR: /tmp/torch_cache
     slurm_config:
       _factory_: "slurm_factory"
       nodes: 1
       ntasks_per_node: 1
-      gpus_per_node: 4
+      gpus_per_node: 1
       container: vllm/vllm-openai:latest

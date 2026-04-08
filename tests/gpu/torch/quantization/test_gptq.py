@@ -17,10 +17,14 @@ import copy
 
 import pytest
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from _test_utils.torch.transformers_models import get_tiny_llama
+from transformers import AutoTokenizer
 
 import modelopt.torch.quantization as mtq
-from modelopt.torch.quantization.model_calib import blockwise_weight_update, update_hessian
+from modelopt.torch.export.unified_export_hf import _export_quantized_weight
+from modelopt.torch.quantization.model_calib import gptq
+from modelopt.torch.quantization.qtensor.nvfp4_tensor import NVFP4QTensor
+from modelopt.torch.quantization.utils.calib_utils import update_hessian
 from modelopt.torch.utils.dataset_utils import create_forward_loop, get_dataset_dataloader
 
 RAND_SEED = 42
@@ -46,8 +50,11 @@ def test_update_hessian():
         f"Expected hessian shape ({features}, {features}), got {updated_hessian.shape}"
     )
 
-    # Verify sample count is updated correctly (incremented by batch_size)
-    assert new_n_samples == batch_size, f"Expected n_samples={batch_size}, got {new_n_samples}"
+    # Verify sample count is updated correctly (incremented by total tokens = batch * seq_len)
+    expected_n_samples = batch_size * seq_len
+    assert new_n_samples == expected_n_samples, (
+        f"Expected n_samples={expected_n_samples}, got {new_n_samples}"
+    )
 
     # Verify hessian is not all zeros after update
     assert not torch.allclose(updated_hessian, torch.zeros_like(updated_hessian)), (
@@ -70,22 +77,23 @@ def test_update_hessian():
 
     # Manual calculation:
     # input_flat shape: (features, batch*seq) = (2, 12), all ones
-    # scaled_input = sqrt(2/6) * input_flat = sqrt(1/3) * ones(2, 12)
-    # outer_product = scaled_input @ scaled_input.t() = (2/6) * ones(2,12) @ ones(12,2) = [[4,4], [4,4]]
-    # Note: The scaling factor is (2/n_samples), so with n_samples=6 and 12 tokens: (2/6)*12 = 4
-    expected_hessian = torch.ones(features, features, dtype=torch.float32) * 4.0
+    # n_samples = batch * seq = 12 (token count after flattening)
+    # scaled_input = sqrt(2/12) * ones(2, 12)
+    # outer_product = (2/12) * ones(2,12) @ ones(12,2) = [[2,2], [2,2]]
+    expected_n_samples = batch_size * seq_len  # 12 tokens
+    expected_hessian = torch.ones(features, features, dtype=torch.float32) * 2.0
 
     assert torch.allclose(updated_hessian, expected_hessian, atol=1e-5), (
         f"Expected hessian {expected_hessian}, got {updated_hessian}"
     )
-    assert new_n_samples == batch_size
+    assert new_n_samples == expected_n_samples
 
     # Test 3: Accumulated hessians - verify equivalence
     # Processing [6,2,2] in one step should equal processing [2,2,2] three times
     seq_len = 2
     features = 2
 
-    # Process in 3 steps of batch_size=2
+    # Process in 3 steps of batch_size=2 (4 tokens each, 12 total)
     hessian_accumulated = torch.zeros(features, features, dtype=torch.float32)
     n_samples_accumulated = 0
 
@@ -102,17 +110,18 @@ def test_update_hessian():
     assert torch.allclose(hessian_accumulated, expected_hessian, atol=1e-5), (
         f"Accumulated hessian should match expected: expected {expected_hessian}, got {hessian_accumulated}"
     )
-    assert n_samples_accumulated == 6, f"Expected n_samples=6, got {n_samples_accumulated}"
+    # 3 batches * 2 batch_size * 2 seq_len = 12 tokens
+    assert n_samples_accumulated == 12, f"Expected n_samples=12, got {n_samples_accumulated}"
 
 
 @pytest.mark.parametrize(
     ("block_size", "dim", "model_weight", "expect_weight_change"),
     [
-        (4, 16, torch.randn(16, 16).to("cuda"), True),  # random weight
+        (16, 128, torch.randn(128, 128).to("cuda"), True),  # random weight
         (
-            4,
             16,
-            torch.ones(16, 16).to("cuda"),
+            128,
+            torch.ones(128, 128).to("cuda"),
             False,
         ),  # all same weight -> no quantization error -> no GPTQ update
     ],
@@ -120,35 +129,20 @@ def test_update_hessian():
 def test_gptq_updates(block_size, dim, model_weight, expect_weight_change):
     model = torch.nn.Linear(dim, dim).to("cuda")
     model.weight.data = model_weight
-    model.name = "linear"
     original_weight = model_weight.clone()
-    input = torch.randn(2, 16, dim).to("cuda")
-    hessian = torch.zeros(dim, dim).to("cpu")
-    n_samples = 0
+    input_tensor = torch.randn(2, 16, dim).to("cuda")
     quant_cfg = mtq.NVFP4_DEFAULT_CFG
 
-    mtq.quantize(model, quant_cfg, forward_loop=lambda model: model(input))
+    mtq.quantize(model, quant_cfg, forward_loop=lambda model: model(input_tensor))
 
     # Get qdq weight
     q_dq_weight = model.weight_quantizer(model.weight.data)
 
-    # Restore original weight
+    # Restore original weight before GPTQ
     model.weight.data = original_weight.clone()
 
-    hessian, n_samples = update_hessian(input, hessian, n_samples)
-
-    # Verify n_samples is update using hessian matrix
-    assert n_samples == input.shape[0], "n_samples should be equal to input.shape[0]"
-
-    # Perform another forward pass to update hessian matrix
-    input_2 = torch.randn(3, 16, dim).to("cuda")
-    hessian, n_samples = update_hessian(input_2, hessian, n_samples)
-    assert n_samples == input.shape[0] + input_2.shape[0], (
-        "n_samples should be equal to input.shape[0] + input_2.shape[0]"
-    )
-
-    hessian = hessian.to(input.device)
-    blockwise_weight_update(model, hessian, block_size, 0.1)
+    # Run GPTQ through the public API
+    gptq(model, forward_loop=lambda m: m(input_tensor), perc_damp=0.1, block_size=block_size)
     if expect_weight_change:
         # Weight must change as GPTQ updates weights to adjust for quantization error
         assert not torch.allclose(model.weight.data, q_dq_weight), "Weight should not be equal"
@@ -156,53 +150,85 @@ def test_gptq_updates(block_size, dim, model_weight, expect_weight_change):
         assert torch.allclose(model.weight.data, q_dq_weight), "Weight should be equal"
 
 
+def test_gptq_export_roundtrip():
+    """Test that GPTQ export + dequantize produces weights matching in-memory QDQ."""
+    torch.manual_seed(RAND_SEED)
+    dim = 128
+    block_size = 16
+
+    # Step 1: Create a simple linear model and quantize to install NVFP4 quantizers
+    model = torch.nn.Linear(dim, dim, dtype=torch.bfloat16).to("cuda")
+    original_weight = model.weight.data.clone()
+    input_tensor = torch.randn(2, 16, dim, dtype=torch.bfloat16).to("cuda")
+    quant_cfg = mtq.NVFP4_DEFAULT_CFG
+
+    mtq.quantize(model, quant_cfg, forward_loop=lambda m: m(input_tensor))
+
+    # Restore original weight before GPTQ
+    model.weight.data = original_weight.clone()
+
+    # Step 2: Perform GPTQ — compute Hessian and update weights
+    gptq(model, forward_loop=lambda m: m(input_tensor), perc_damp=0.1, block_size=block_size)
+
+    # Save the QDQ reference from the quantizer applied to GPTQ'd weights
+    gptq_weight_shape = model.weight.data.shape
+    gptq_weight_dtype = model.weight.data.dtype
+    qdq_ref = model.weight.data.clone()
+
+    # Step 3: Export — converts weight to packed NVFP4 and registers scale buffers
+    _export_quantized_weight(model, torch.bfloat16)
+
+    # Verify export produced the expected buffers
+    assert hasattr(model, "weight_scale"), "Export should register weight_scale buffer"
+    assert hasattr(model, "weight_scale_2"), "Export should register weight_scale_2 buffer"
+
+    # Step 4: Dequantize the exported packed weight and compare with QDQ reference
+    packed_weight = model.weight.data
+    weight_scale = model.weight_scale
+    weight_scale_2 = model.weight_scale_2
+
+    nvfp4_qtensor = NVFP4QTensor(gptq_weight_shape, gptq_weight_dtype, packed_weight)
+    deq_weight = nvfp4_qtensor.dequantize(
+        dtype=torch.bfloat16,
+        scale=weight_scale,
+        double_scale=weight_scale_2,
+        block_sizes={-1: 16},
+    )
+
+    assert deq_weight.shape == qdq_ref.shape, (
+        f"Shape mismatch: dequantized {deq_weight.shape} vs QDQ ref {qdq_ref.shape}"
+    )
+    assert torch.allclose(deq_weight, qdq_ref, atol=1e-2), (
+        f"Dequantized weight does not match QDQ reference. "
+        f"Max diff: {(deq_weight - qdq_ref).abs().max().item()}"
+    )
+
+
 @pytest.mark.parametrize(
     "quant_cfg", [mtq.NVFP4_DEFAULT_CFG, mtq.FP8_DEFAULT_CFG, mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG]
 )
 def test_gptq_e2e_flow(quant_cfg):
-    model = AutoModelForCausalLM.from_pretrained(
-        "TinyLlama/TinyLlama-1.1B-Chat-v1.0", device_map="auto"
-    )
-    tokenizer = AutoTokenizer.from_pretrained("TinyLlama/TinyLlama-1.1B-Chat-v1.0")
+    tokenizer = AutoTokenizer.from_pretrained("hf-internal-testing/tiny-random-LlamaForCausalLM")
+    model = get_tiny_llama(vocab_size=tokenizer.vocab_size).to("cuda")
 
-    # can't set attribute 'pad_token' for "<unk>"
-    # We skip this step for Nemo models
-    if tokenizer.pad_token != "<unk>" or tokenizer.pad_token is None:
+    if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    # Left padding usually provides better calibration result.
     tokenizer.padding_side = "left"
 
     assert tokenizer.pad_token is not None, "Pad token cannot be set!"
     model.eval()
 
     quant_cfg = copy.deepcopy(quant_cfg)
-    quant_cfg["algorithm"] = "gptq_lite"
-    # Define quantizer/dataloader
+    quant_cfg["algorithm"] = {"method": "gptq", "use_sequential": True}
     calib_dataloader = get_dataset_dataloader(
         dataset_name="cnn_dailymail",
         tokenizer=tokenizer,
-        batch_size=32,
-        num_samples=512,
+        batch_size=2,
+        num_samples=8,
         device="cuda",
         include_labels=False,
     )
-    # Only run single sample for preview
-    prompt = "Where is New York city?"
-    input_ids = tokenizer(prompt, return_tensors="pt")
-    print(f"Input ids: {input_ids}")
-    generated_ids_before_ptq = model.generate(
-        input_ids["input_ids"].to("cuda"), max_new_tokens=100, do_sample=False, temperature=0.0
-    )
 
-    print(
-        f"Generated ids before quantization: {tokenizer.decode(generated_ids_before_ptq[0], skip_special_tokens=True)}"
-    )
     calibrate_loop = create_forward_loop(dataloader=calib_dataloader)
     model = mtq.quantize(model, quant_cfg, forward_loop=calibrate_loop)
-    generated_ids_after_ptq = model.generate(
-        input_ids["input_ids"].to("cuda"), max_new_tokens=100, do_sample=False, temperature=0.0
-    )
-    print(
-        f"Generated ids after quantization: {tokenizer.decode(generated_ids_after_ptq[0], skip_special_tokens=True)}"
-    )

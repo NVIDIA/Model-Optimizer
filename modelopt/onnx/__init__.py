@@ -18,6 +18,18 @@
 import sys
 import warnings
 
+import onnx.helper
+
+if not hasattr(onnx.helper, "float32_to_bfloat16"):
+    import ml_dtypes
+    import numpy as np
+
+    def _float32_to_bfloat16(value):
+        arr = np.array(value, dtype=np.float32)
+        return int(arr.astype(ml_dtypes.bfloat16).view(np.uint16))
+
+    onnx.helper.float32_to_bfloat16 = _float32_to_bfloat16
+
 MIN_PYTHON_VERSION = (3, 10)
 
 try:
