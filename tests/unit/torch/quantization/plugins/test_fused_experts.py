@@ -25,7 +25,7 @@ pytest.importorskip("transformers")
 from modelopt.torch.quantization.nn import QuantModuleRegistry
 from modelopt.torch.quantization.plugins.huggingface import (
     _is_fused_experts_module,
-    _is_sparse_moe_block,
+    _is_sparse_sequaential_moe_block,
     _QuantFusedExperts,
     register_fused_experts_on_the_fly,
     register_sparse_moe_on_the_fly,
@@ -149,9 +149,10 @@ class TestIsFusedExpertsModule:
         block = _SyntheticSparseMoeBlock()
         assert _is_fused_experts_module(block) is False
 
-    def test_sparse_moe_block_detected_as_sparse(self):
+    def test_fused_moe_block_not_detected_as_sequential(self):
+        """Fused MoE blocks (non-iterable experts) should not be detected as sequential."""
         block = _SyntheticSparseMoeBlock()
-        assert _is_sparse_moe_block(block) is True
+        assert _is_sparse_sequaential_moe_block(block) is False
 
 
 # ---------------------------------------------------------------------------
@@ -173,8 +174,8 @@ class TestQuantFusedExperts:
         assert QuantModuleRegistry.get(expert_type) is not None
         self._cleanup_registry(expert_type)
 
-    def test_two_level_registration(self):
-        """Both fused experts and the MoE block should be registered."""
+    def test_fused_experts_only_registration(self):
+        """Fused MoE: only the expert module is registered, not the block (non-iterable experts)."""
         model = _TinyMoEModel()
         expert_type = type(model.moe.experts)
         block_type = type(model.moe)
@@ -184,9 +185,9 @@ class TestQuantFusedExperts:
         register_fused_experts_on_the_fly(model)
         register_sparse_moe_on_the_fly(model)
         assert QuantModuleRegistry.get(expert_type) is not None
-        assert QuantModuleRegistry.get(block_type) is not None
+        # Block is NOT registered because fused experts are not iterable
+        assert QuantModuleRegistry.get(block_type) is None
         self._cleanup_registry(expert_type)
-        self._cleanup_registry(block_type)
 
     def test_convert_creates_quantizers(self):
         """After conversion, fused experts should have shared input and per-expert weight quantizers."""
