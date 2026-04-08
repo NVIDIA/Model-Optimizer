@@ -324,9 +324,23 @@ class ExportManager:
             for key in ("enable_swizzle_layout", "enable_layerwise_quant_metadata"):
                 val = model_config.extra_params.get(key)
                 if val is not None:
-                    kwargs[key] = str(val).lower() in ("true", "1", "yes")
+                    normalized = str(val).strip().lower()
+                    if normalized in ("true", "1", "yes"):
+                        kwargs[key] = True
+                    elif normalized in ("false", "0", "no"):
+                        kwargs[key] = False
+                    else:
+                        raise ValueError(
+                            f"Invalid value for {key}: {val!r}. "
+                            "Expected true/false, 1/0, or yes/no."
+                        )
             padding = model_config.extra_params.get("padding_strategy")
-            if padding:
+            if padding is not None:
+                padding = str(padding).strip().lower()
+                if padding not in ("row", "row_col"):
+                    raise ValueError(
+                        f"Invalid padding_strategy: {padding!r}. Expected 'row' or 'row_col'."
+                    )
                 kwargs["padding_strategy"] = padding
         export_hf_checkpoint(pipe, export_dir=self.config.hf_ckpt_dir, **kwargs)
         self.logger.info("HuggingFace checkpoint export completed successfully")

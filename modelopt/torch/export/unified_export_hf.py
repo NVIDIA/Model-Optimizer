@@ -187,6 +187,14 @@ def _postprocess_safetensors(
     if not safetensor_files:
         return
 
+    if list(export_dir.glob("*.safetensors.index.json")) and (
+        merged_base_safetensor_path is not None or enable_layerwise_quant_metadata
+    ):
+        raise NotImplementedError(
+            "Post-processing sharded safetensors is not supported. "
+            "Export with a larger max_shard_size or disable merge/metadata options."
+        )
+
     for sf_path in safetensor_files:
         sd = load_file(str(sf_path))
 
