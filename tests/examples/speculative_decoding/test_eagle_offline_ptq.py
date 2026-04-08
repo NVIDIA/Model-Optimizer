@@ -111,15 +111,13 @@ def test_offline_ptq(offline_ptq_dirs):
     """Stage 3: run PTQ on the offline EAGLE checkpoint using the hidden state dataset."""
     run_example_command(
         [
-            "scripts/huggingface_example.sh",
-            "--no-verbose",
-            "--model",
+            "python",
+            "hf_ptq.py",
+            "--pyt_ckpt_path",
             str(offline_ptq_dirs["eagle_ckpt"] / "trained"),
-            "--quant",
+            "--qformat",
             "fp8",
-            "--tasks",
-            "quant",
-            "--calib",
+            "--calib_size",
             "2",
             "--batch_size",
             "1",
