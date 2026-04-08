@@ -1,4 +1,6 @@
-# SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#!/bin/bash
+
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,4 +15,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Scripts to add various datasets to a prompt dataset file."""
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+
+source ${SCRIPT_DIR}/../service_utils.sh
+
+###################################################################################################
+
+trap 'error_handler $0 $LINENO' ERR # ERROR HANDLER
+
+python modules/Model-Optimizer/examples/speculative_decoding/prepare_input_conversations/make_dataset.py \
+    ${@}
+
+mkdir -p /scratchspace/data
+mv input_conversations/train.jsonl /scratchspace/data/train.jsonl
+
+
