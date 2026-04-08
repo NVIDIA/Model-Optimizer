@@ -841,6 +841,7 @@ class TensorQuantizer(nn.Module):
                 self._pass_through_bwd,
                 self.block_sizes.get(-1) if self.block_sizes else None,
                 self.axis[0] if isinstance(self.axis, tuple) else self.axis,
+                getattr(self, "_onnx_quantizer_type", None),
             )
         return outputs
 

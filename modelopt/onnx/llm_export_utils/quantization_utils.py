@@ -66,6 +66,9 @@ def get_quant_config(precision, lm_head_precision="fp16"):
     elif precision == "int4_awq":
         quant_cfg = copy.deepcopy(mtq.INT4_AWQ_CFG)  # type: ignore[arg-type]
 
+    elif precision == "int8_sq":
+        quant_cfg = mtq.INT8_SMOOTHQUANT_CFG
+
     else:
         raise ValueError(f"Unsupported precision: {precision}")
 
@@ -120,9 +123,11 @@ def quantize(
     assert precision in [
         "fp8",
         "int4_awq",
+        "int8_sq",
         "nvfp4",
     ], (
-        f"Only fp8(W8A8), int4_awq(W4A16), nvfp4(W4A4) is supported. You passed an unsupported precision: {precision}."
+        "Only fp8(W8A8), int4_awq(W4A16), int8_sq(W8A8 SmoothQuant), nvfp4(W4A4) is supported."
+        f" You passed an unsupported precision: {precision}."
     )
 
     assert lm_head_precision in ["fp16"], (

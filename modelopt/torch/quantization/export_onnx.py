@@ -137,8 +137,14 @@ def export_int8(
     unsigned: bool,
     narrow_range: bool,
     trt_high_precision_dtype: str | None,
+    onnx_quantizer_type: str | None = None,
 ):
-    """Export quantized model to INT8 ONNX."""
+    """Export quantized model to INT8 ONNX.
+
+    When onnx_quantizer_type is "static" (weight quantizer), emits DQ-only
+    (DequantizeLinear without QuantizeLinear), matching INT4 behavior.
+    When None or "dynamic" (activation quantizer), emits Q+DQ as before.
+    """
     assert num_bits == 8, "Number of bits must be 8 for INT8 ONNX export."
     output_shape = sym_help._get_tensor_sizes(inputs)
     maxbound = (1 << (num_bits - 1 + int(unsigned))) - 1
@@ -169,19 +175,32 @@ def export_int8(
     scale.masked_fill_(scale == 0, 1.0)
     scale = g.op("Constant", value_t=scale)
 
-    assert trt_high_precision_dtype in (input_type, "Float", "BFloat16"), (
-        "TRT StronglyType requires both weights and amax to be in the BF16/FP16, or the QDQ in Float."
+    assert trt_high_precision_dtype in (input_type, "Float", "Half", "BFloat16"), (
+        "TRT StronglyType requires both weights and amax to be in the BF16/FP16, or the QDQ in Float/Half."
     )
 
-    # custom ops, so cast the input if needed.
+    # Cast the input if needed.
     if trt_high_precision_dtype != input_type:
         inputs = g.op("Cast", inputs, to_i=onnx_dtype_map[trt_high_precision_dtype])
-    quantized = g.op("QuantizeLinear", inputs, scale, zero_point, axis_i=axis)
-    out = g.op("DequantizeLinear", quantized, scale, zero_point, axis_i=axis).setType(
-        inputs.type().with_dtype(torch_dtype_map[trt_high_precision_dtype]).with_sizes(output_shape)
-    )
 
-    # custom ops, so cast the output if needed.
+    if onnx_quantizer_type == "static":
+        # DQ-only for weight quantizers (same pattern as INT4).
+        # Weight stays FP16 in the ONNX; post-processing packs to INT8.
+        out = g.op("DequantizeLinear", inputs, scale, zero_point, axis_i=axis).setType(
+            inputs.type()
+            .with_dtype(torch_dtype_map[trt_high_precision_dtype])
+            .with_sizes(output_shape)
+        )
+    else:
+        # Q+DQ for activation quantizers (standard fake-quant pattern).
+        quantized = g.op("QuantizeLinear", inputs, scale, zero_point, axis_i=axis)
+        out = g.op("DequantizeLinear", quantized, scale, zero_point, axis_i=axis).setType(
+            inputs.type()
+            .with_dtype(torch_dtype_map[trt_high_precision_dtype])
+            .with_sizes(output_shape)
+        )
+
+    # Cast the output back if needed.
     if trt_high_precision_dtype != input_type:
         inputs = g.op("Cast", inputs, to_i=onnx_dtype_map[input_type])
 
@@ -527,9 +546,10 @@ def _fp4_dynamic_quantize(
     if trt_high_precision_dtype != input_type:
         inputs = g.op("Cast", inputs, to_i=onnx_dtype_map[trt_high_precision_dtype])
 
+    scale_dtype = trt_high_precision_dtype if trt_high_precision_dtype else "Float"
     scale = g.op(
         "Constant",
-        value_t=torch.tensor(scale).to(torch_dtype_map["Float"]),
+        value_t=torch.tensor(scale).to(torch_dtype_map[scale_dtype]),
     )
     # This is a TensorRT local function, it dynamically quantizes the input tensor to FP4.
     xf4, sx_f8 = g.op(
@@ -553,9 +573,10 @@ def _fp4_dequantize(
 ):
     """Helper Function for Dequantization."""
     if isinstance(scale, float):
+        scale_dtype = trt_high_precision_dtype if trt_high_precision_dtype else "Float"
         scale = g.op(
             "Constant",
-            value_t=torch.tensor(scale, dtype=torch_dtype_map["Float"]),
+            value_t=torch.tensor(scale, dtype=torch_dtype_map[scale_dtype]),
         )
     return g.op("DequantizeLinear", inputs, scale)
 
