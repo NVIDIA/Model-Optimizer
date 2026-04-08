@@ -89,6 +89,13 @@ class TestPadNvfp4Weights:
         assert s.shape[0] % 16 == 0
         assert s.shape[1] % 16 == 0
 
+    def test_row_col_padding_scale_only(self):
+        sd = _make_nvfp4_state_dict(rows=32, cols=48)
+        result = pad_nvfp4_weights(sd, "row_col")
+
+        assert result["layer0.weight"].shape == (32, 48)
+        assert result["layer0.weight_scale"].shape == (32, 16)
+
     def test_already_aligned(self):
         sd = _make_nvfp4_state_dict(rows=32, cols=64)
         orig_w_shape = sd["layer0.weight"].shape
