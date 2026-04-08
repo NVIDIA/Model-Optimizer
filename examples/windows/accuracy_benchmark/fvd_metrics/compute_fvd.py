@@ -66,6 +66,22 @@ SPATIAL_SIZE = 224
 BATCH_SIZE = 8
 VIDEO_EXTS = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".m4v"}
 
+
+def positive_int(value: str) -> int:
+    """Argparse type that enforces strictly positive integers."""
+    ivalue = int(value)
+    if ivalue <= 0:
+        raise argparse.ArgumentTypeError("must be > 0")
+    return ivalue
+
+
+def non_negative_int(value: str) -> int:
+    """Argparse type that enforces non-negative integers."""
+    ivalue = int(value)
+    if ivalue < 0:
+        raise argparse.ArgumentTypeError("must be >= 0")
+    return ivalue
+
 WEIGHTS_URL = "https://github.com/piergiaj/pytorch-i3d/raw/master/models/rgb_imagenet.pt"
 WEIGHTS_SHA256 = "2609088c2e8c868187c9921c50bc225329a9057ed75e76120e0b4a397a2c7538"
 DEFAULT_CACHE = Path.home() / ".cache" / "fvd" / "rgb_imagenet.pt"
@@ -152,7 +168,7 @@ def get_clips(
             starts = [0] * clips_per_video
         else:
             max_start = max(0, total - clip_length)
-            starts = [int(i * max_start / clips_per_video) for i in range(clips_per_video)]
+            starts = np.linspace(0, max_start, num=clips_per_video, dtype=int).tolist()
 
         for start in starts:
             raw = load_video_clip(path, clip_length, start_frame=start)
@@ -299,20 +315,26 @@ def main():
     )
     parser.add_argument("--device", default=None, help="torch device (auto-detected if omitted)")
     parser.add_argument(
-        "--clip-length", type=int, default=CLIP_LENGTH, help="Frames per clip (default: 16)"
+        "--clip-length",
+        type=positive_int,
+        default=CLIP_LENGTH,
+        help="Frames per clip (default: 16)",
     )
     parser.add_argument(
-        "--clips-per-video", type=int, default=1, help="Clips sampled per video (default: 1)"
+        "--clips-per-video",
+        type=positive_int,
+        default=1,
+        help="Clips sampled per video (default: 1)",
     )
     parser.add_argument(
         "--batch-size",
-        type=int,
+        type=positive_int,
         default=BATCH_SIZE,
         help="Batch size for I3D inference (default: 8)",
     )
     parser.add_argument(
         "--pca-dim",
-        type=int,
+        type=non_negative_int,
         default=None,
         help="PCA dimension (auto-selected when n_clips < 1024; 0 to disable)",
     )
@@ -325,7 +347,10 @@ def main():
     log.info(f"Device: {device}")
 
     weights_path = resolve_weights(args.weights)
-    model = load_i3d(str(weights_path), device)
+    user_supplied_weights = args.weights is not None
+    model = load_i3d(
+        str(weights_path), device, allow_unsafe_pickle=not user_supplied_weights
+    )
     log.info(f"I3D model loaded from {weights_path.name} (1024-dim features)")
 
     ref_paths = list_videos(args.ref_dir)

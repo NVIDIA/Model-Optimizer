@@ -190,11 +190,21 @@ def _map_torchscript_keys(ts_state: dict) -> dict:
     return new_state
 
 
-def load_i3d(weights_path: str, device: torch.device) -> InceptionI3d:
+def load_i3d(
+    weights_path: str,
+    device: torch.device,
+    *,
+    allow_unsafe_pickle: bool = False,
+) -> InceptionI3d:
     """Load I3D weights from either ``rgb_imagenet.pt`` or a TorchScript archive.
 
     The weights file is a trusted, well-known published checkpoint from
     piergiaj/pytorch-i3d (MIT License). Only state_dict tensors are loaded.
+
+    Args:
+        allow_unsafe_pickle: permit ``weights_only=False`` fallback for legacy
+            checkpoints. Only enable this for internally-managed or
+            checksum-verified files — never for user-supplied paths.
     """
     model = InceptionI3d()
 
@@ -202,18 +212,30 @@ def load_i3d(weights_path: str, device: torch.device) -> InceptionI3d:
         jit_model = torch.jit.load(weights_path, map_location="cpu")
         raw_state = jit_model.state_dict()
         state = _map_torchscript_keys(raw_state)
-    except Exception:
-        # Safe: weights are from a known source (piergiaj/pytorch-i3d, MIT License).
-        # weights_only=False is required because the checkpoint was saved with an
-        # older PyTorch version that includes non-tensor metadata in the archive.
-        state = torch.load(weights_path, map_location="cpu", weights_only=False)
+    except Exception as exc:
+        try:
+            state = torch.load(weights_path, map_location="cpu", weights_only=True)
+        except Exception:
+            if not allow_unsafe_pickle:
+                raise RuntimeError(
+                    "Checkpoint requires unsafe pickle deserialization. "
+                    "Only enable this for trusted, verified weights."
+                ) from exc
+            # Safe: caller has verified this is an internally-managed checkpoint
+            # (e.g. auto-downloaded with SHA-256 verification).
+            # weights_only=False is required because the checkpoint was saved
+            # with an older PyTorch version that includes non-tensor metadata.
+            state = torch.load(weights_path, map_location="cpu", weights_only=False)
 
-    missing, _unexpected = model.load_state_dict(state, strict=False)
-    non_head = [k for k in missing if "logits" not in k]
-    if non_head:
-        import warnings
-
-        warnings.warn(f"Missing keys in I3D checkpoint: {non_head}")
+    state = {k: v for k, v in state.items() if not k.startswith("conv3d_0c_1x1")}
+    missing, unexpected = model.load_state_dict(state, strict=False)
+    non_head_missing = [k for k in missing if not k.startswith("logits")]
+    non_head_unexpected = [k for k in unexpected if not k.startswith("conv3d_0c_1x1")]
+    if non_head_missing or non_head_unexpected:
+        raise RuntimeError(
+            "Checkpoint does not match the I3D backbone: "
+            f"missing={non_head_missing}, unexpected={non_head_unexpected}"
+        )
 
     model.eval().to(device)
     return model
