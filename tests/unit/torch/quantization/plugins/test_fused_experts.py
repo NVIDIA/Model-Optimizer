@@ -189,7 +189,7 @@ class TestQuantFusedExperts:
         self._cleanup_registry(block_type)
 
     def test_convert_creates_quantizers(self):
-        """After conversion, fused experts should have per-expert quantizer ModuleLists."""
+        """After conversion, fused experts should have shared input and per-expert weight quantizers."""
         model = _TinyMoEModel()
         expert_type = type(model.moe.experts)
         self._cleanup_registry(expert_type)
@@ -197,11 +197,13 @@ class TestQuantFusedExperts:
         register_fused_experts_on_the_fly(model)
         converted = QuantModuleRegistry.convert(model.moe.experts)
 
-        assert hasattr(converted, "gate_up_proj_input_quantizers")
+        # Shared input quantizers (single TensorQuantizer, not ModuleList)
+        assert hasattr(converted, "gate_up_proj_input_quantizer")
+        assert hasattr(converted, "down_proj_input_quantizer")
+        # Per-expert weight quantizers (ModuleList)
         assert hasattr(converted, "gate_up_proj_weight_quantizers")
-        assert hasattr(converted, "down_proj_input_quantizers")
         assert hasattr(converted, "down_proj_weight_quantizers")
-        assert len(converted.gate_up_proj_input_quantizers) == NUM_EXPERTS
+        assert len(converted.gate_up_proj_weight_quantizers) == NUM_EXPERTS
         assert len(converted.down_proj_weight_quantizers) == NUM_EXPERTS
         self._cleanup_registry(expert_type)
 

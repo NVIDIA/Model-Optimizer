@@ -979,10 +979,14 @@ def get_expert_linear_names(module: nn.Module) -> list[str]:
             "Qwen3NextSparseMoeBlock",
             "Qwen3_5MoeSparseMoeBlock",
             "DeepseekMoE",
-            "MixtralSparseMoeBlock",
         ],
     ):
         return ["gate_proj", "down_proj", "up_proj"]
+    elif module_match_name_list(module, ["MixtralSparseMoeBlock"]):
+        # Old-style Mixtral (iterable experts) uses w1/w2/w3.
+        # Fused Mixtral (transformers 5.0+) is already handled by the
+        # structural gate_up_proj_weight_quantizers check above.
+        return ["w1", "w2", "w3"]
     elif module_match_name_list(module, ["MixtralMoeSparseMoeBlock"]):
         # Older transformers naming for Mixtral
         return ["linear_fc1", "linear_fc2"]

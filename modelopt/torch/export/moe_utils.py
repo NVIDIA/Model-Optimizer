@@ -16,6 +16,7 @@
 """Utilities for Mixture-of-Experts (MoE) model export."""
 
 import copy
+import warnings
 from pathlib import Path
 
 import torch
@@ -49,17 +50,9 @@ def _export_fused_experts(module: nn.Module, dtype: torch.dtype) -> None:
     n = module.num_experts
     expert_dim = _get_fused_expert_intermediate_dim(module)
 
-    # 1. Input amax fallback — borrow from calibrated peers.
-    for quantizer_list in [
-        module.gate_up_proj_input_quantizers,
-        module.down_proj_input_quantizers,
-    ]:
-        wrappers = []
-        for q in quantizer_list:
-            w = nn.Module()
-            w.input_quantizer = q
-            wrappers.append(w)
-        set_expert_quantizer_amax(modules=wrappers, quantizer_attrs=["input_quantizer"])
+    # 1. Shared input quantizers — one per projection type, shared across all experts.
+    gate_up_input_q = module.gate_up_proj_input_quantizer
+    down_input_q = module.down_proj_input_quantizer
 
     gate_up = module.gate_up_proj.data
     down = module.down_proj.data
@@ -82,11 +75,7 @@ def _export_fused_experts(module: nn.Module, dtype: torch.dtype) -> None:
                 if is_gate_up
                 else module.down_proj_weight_quantizers[idx]
             )
-            i_quantizer = (
-                module.gate_up_proj_input_quantizers[idx]
-                if is_gate_up
-                else module.down_proj_input_quantizers[idx]
-            )
+            i_quantizer = gate_up_input_q if is_gate_up else down_input_q
 
             # gate/up share a weight quantizer — clone so each gets independent amax.
             w_quantizer = copy.deepcopy(w_quantizer_src) if is_gate_up else w_quantizer_src
@@ -116,6 +105,12 @@ def _export_fused_experts(module: nn.Module, dtype: torch.dtype) -> None:
                 )
             ):
                 w_quantizer.amax = weight_slice.abs().amax().to(torch.float32)
+                warnings.warn(
+                    f"Expert {idx} {proj_name} weight quantizer was not calibrated "
+                    f"(amax missing or zero). Using weight-derived amax as fallback. "
+                    f"Consider using more calibration data to activate all experts.",
+                    stacklevel=2,
+                )
 
             wrapper = nn.Module()
             wrapper.weight = nn.Parameter(weight_slice.contiguous(), requires_grad=False)
@@ -139,9 +134,9 @@ def _export_fused_experts(module: nn.Module, dtype: torch.dtype) -> None:
         "gate_up_proj",
         "down_proj",
         "gate_up_proj_weight_quantizers",
-        "gate_up_proj_input_quantizers",
+        "gate_up_proj_input_quantizer",
         "down_proj_weight_quantizers",
-        "down_proj_input_quantizers",
+        "down_proj_input_quantizer",
     ):
         if hasattr(module, attr):
             delattr(module, attr)
