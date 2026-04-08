@@ -33,7 +33,7 @@ def patch_onnx_helper_removed_apis():
             import ml_dtypes
             import numpy as np
 
-            def _float32_to_bfloat16(value):
+            def _float32_to_bfloat16(value, truncate=False):
                 return int.from_bytes(
                     np.float32(value).astype(ml_dtypes.bfloat16).tobytes(), "little"
                 )
@@ -44,7 +44,7 @@ def patch_onnx_helper_removed_apis():
             import ml_dtypes
             import numpy as np
 
-            def _float32_to_float8e4m3(value, fn=True, uz=False):
+            def _float32_to_float8e4m3(value, scale=1.0, fn=True, uz=False, saturate=True):
                 if fn and not uz:
                     dtype = ml_dtypes.float8_e4m3fn
                 elif fn and uz:

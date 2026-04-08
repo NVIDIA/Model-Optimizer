@@ -82,6 +82,11 @@ class TestPatchOnnxHelperRemovedApis:
             {},
             int.from_bytes(np.float32(1.0).astype(ml_dtypes.bfloat16).tobytes(), "little"),
         ),
+        (
+            1.0,
+            {"truncate": True},
+            int.from_bytes(np.float32(1.0).astype(ml_dtypes.bfloat16).tobytes(), "little"),
+        ),
     ],
 )
 def test_bfloat16_conversion(value, kwargs, expected):
@@ -105,6 +110,16 @@ def test_bfloat16_conversion(value, kwargs, expected):
             0.5,
             {"fn": True, "uz": True},
             int(np.float32(0.5).astype(ml_dtypes.float8_e4m3fnuz).view(np.uint8)),
+        ),
+        (
+            1.0,
+            {"scale": 2.0, "saturate": False},
+            int(np.float32(1.0).astype(ml_dtypes.float8_e4m3fn).view(np.uint8)),
+        ),
+        (
+            1.0,
+            {"fn": False},
+            int(np.float32(1.0).astype(ml_dtypes.float8_e4m3fn).view(np.uint8)),
         ),
     ],
 )
