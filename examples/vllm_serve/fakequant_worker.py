@@ -134,11 +134,11 @@ class FakeQuantWorker(BaseWorker):
         with disable_compilation(model):
             return super().determine_available_memory()
 
-    def compile_or_warm_up_model(self) -> None:
+    def compile_or_warm_up_model(self) -> float:
         if (
             quant_config["quant_cfg"]
             or quant_config["kv_quant_cfg"]
             or quant_config["modelopt_state_path"]
         ):
             _fakequant_run_prolog_worker(self)
-        super().compile_or_warm_up_model()
+        return super().compile_or_warm_up_model()
