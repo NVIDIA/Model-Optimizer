@@ -107,66 +107,86 @@ def _fakequant_module_weights(
             assert state_dict is not None
             state_dict[sd_key] = w_quant.cpu()
         fakequant_weights.add(sd_key)
+
+
+def _collect_expert_pre_quant_scales(
+    experts: list[nn.Module],
+) -> list[torch.Tensor] | None:
+    """Return per-expert ``pre_quant_scale`` tensors if every expert can be averaged; else None.
+
+    Skips groups where any expert has no input quantizer, no pqs (e.g. weight-only AWQ INT4),
+    or a disabled input quantizer (pqs already folded / not used).
+    """
+    pqs_list: list[torch.Tensor] = []
+    for ex in experts:
+        iq = getattr(ex, "input_quantizer", None)
+        if iq is None or getattr(iq, "_disabled", False) or iq.pre_quant_scale is None:
+            return None
+        pqs_list.append(iq.pre_quant_scale)
+    return pqs_list
+
+
 def _resmooth_experts_for_export(
     model: nn.Module,
     state_dict: dict[str, Any],
 ) -> dict[str, tuple[torch.Tensor, torch.Tensor | None]]:
-    """Average pqs and unify input amax across MoE experts for AWQ formats (no-op otherwise).
+    """Average pqs and unify input amax across MoE experts when AWQ smoothing applies (no-op otherwise).
 
-    Adjusts expert weights in ``state_dict`` to preserve correctness under the new averaged pqs
-    (W' = W * old_pqs / avg_pqs), without touching the model. Returns input-quantizer overrides
-    for patching ``modelopt_state_weights`` on save.
+    Adjusts expert weights in ``state_dict`` as ``W' = W * old_pqs / avg_pqs`` and returns
+    input-quantizer overrides for ``modelopt_state_weights``. **Does nothing** for weight-only
+    MoE (no ``pre_quant_scale`` on experts) or unsupported MoE layouts — same as skipping the
+    MoE branch in :func:`requantize_resmooth_fused_llm_layers`.
     """
     qfmt = get_quantization_format(model)
     if qfmt is None or "awq" not in qfmt.lower():
         return {}
 
     model_type = type(model).__name__.lower()
-    hf_mt = getattr(getattr(model, "config", None), "model_type", None)
     id_to_name: dict[int, str] = {id(m): n for n, m in model.named_modules()}
     out: dict[str, tuple[torch.Tensor, torch.Tensor | None]] = {}
 
     for _, module in model.named_modules():
-        if not is_moe(module):
+        if not (is_moe(module) or "nemotronhmoe" in model_type):
             continue
-        # get_experts_list raises NotImplementedError for MoE types it does not support
-        # (e.g. DBRX, ArcticMoE). is_moe detects those, but only AWQ-quantized variants
-        # would reach here, so a loud failure is the right behavior.
-        expert_groups = get_experts_list(module, model_type, hf_config_model_type=hf_mt)
+        try:
+            expert_groups = get_experts_list(module, model_type)
+        except NotImplementedError:
+            continue
 
         for experts in expert_groups:
             if not experts:
                 continue
-            iq0 = getattr(experts[0], "input_quantizer", None)
-            # Skip when pqs is absent or the input quantizer is disabled (pqs already folded
-            # into the weight by the export loop; overwriting it here would undo that fold).
-            if iq0 is None or iq0.pre_quant_scale is None or iq0._disabled:
+            pqs_list = _collect_expert_pre_quant_scales(experts)
+            if pqs_list is None:
                 continue
 
-            avg_pqs = torch.stack([e.input_quantizer.pre_quant_scale for e in experts]).mean(0)
+            avg_pqs = torch.stack(pqs_list).mean(0)
 
-            # Rescale each expert weight: W' = W * (old_pqs / avg_pqs) per output column.
             for ex in experts:
                 nm = id_to_name.get(id(ex))
                 if nm is None or f"{nm}.weight" not in state_dict:
                     continue
                 old_pqs = ex.input_quantizer._pre_quant_scale
-                if torch.equal(old_pqs, avg_pqs):
+                avg_on_dev = avg_pqs.to(device=old_pqs.device, dtype=old_pqs.dtype)
+                if torch.equal(old_pqs, avg_on_dev):
                     continue
                 w = state_dict[f"{nm}.weight"]
                 ratio = (old_pqs / avg_pqs).to(dtype=torch.float32, device=w.device)
                 state_dict[f"{nm}.weight"] = (w.float() * ratio[None, :]).to(w.dtype)
 
-            # Max amax across experts; vLLM uses a single input quantizer per expert group.
+            iq0 = experts[0].input_quantizer
             max_in_amax: torch.Tensor | None = None
-            if iq0.amax is not None:
-                max_in_amax = torch.stack([e.input_quantizer.amax for e in experts]).max()
+            if iq0.is_enabled:
+                amaxes = [e.input_quantizer.amax for e in experts]
+                if all(a is not None for a in amaxes):
+                    max_in_amax = torch.stack(amaxes).max()
 
+            avg_out = avg_pqs.detach().clone()
             for ex in experts:
                 nm = id_to_name.get(id(ex))
                 if nm is None:
                     continue
-                out[get_unwrapped_name(f"{nm}.input_quantizer", model)] = (avg_pqs, max_in_amax)
+                out[get_unwrapped_name(f"{nm}.input_quantizer", model)] = (avg_out, max_in_amax)
 
     return out
 

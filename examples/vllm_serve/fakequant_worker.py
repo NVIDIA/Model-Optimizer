@@ -92,8 +92,10 @@ def _fakequant_run_prolog_worker(self) -> None:
                     for n, m in model.named_modules()
                     if isinstance(m, TensorQuantizer)
                 }
+                # Same namespace as ``loaded_keys``: checkpoint keys may include DDP/FSDP
+                # prefixes that ``convert_dict_to_vllm`` does not strip.
                 pqs_in_weights = {
-                    k
+                    get_unwrapped_name(k, model)
                     for k, v in modelopt_weights.items()
                     if isinstance(v, dict) and "_pre_quant_scale" in v
                 }
@@ -107,7 +109,7 @@ def _fakequant_run_prolog_worker(self) -> None:
                     )
             # set_quantizer_state_dict does not run modelopt_post_restore (unlike restore_quantizer_state).
             post_restore_vllm_parallel_linears(model)
-            # Row-parallel: slice full-width exported pre_quant_scale to this TP rank.
+            # Must follow post_restore: shard_pre_quant_scale_for_tp uses weight H_in vs pqs length.
             shard_pre_quant_scale_for_tp(model)
 
     else:

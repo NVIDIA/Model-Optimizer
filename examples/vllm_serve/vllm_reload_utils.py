@@ -221,10 +221,12 @@ def _infer_prefix_remap(
 ) -> dict[str, str]:
     """Map HF root name → vLLM root (e.g. ``backbone`` → ``model``) using ``map_fun`` on ``*.weight`` keys.
 
-    Quantizer keys skip ``map_fun`` later, so we learn renames by probing with a small 2-D tensor
-    (many mappers assume 2-D weights; 1-D probes can raise).
+    Quantizer keys never go through ``map_fun`` later, so we probe with a tiny CPU placeholder.
+    It must be **2-D** (mappers expect matrix weights; 1-D often errors). Only the returned key
+    path is used; values are ignored. A CPU tensor is enough for typical HF↔vLLM name mapping.
     """
     prefix_remap: dict[str, str] = {}
+    probe_weight = torch.empty((1, 1))
     for key in quantizer_keys:
         first_component = key.split(".")[0]
         if first_component in prefix_remap:
@@ -234,7 +236,7 @@ def _infer_prefix_remap(
             continue
         probe_key = key[:last_dot] + ".weight"
         try:
-            result = map_fun({probe_key: torch.empty(16, 16)})
+            result = map_fun({probe_key: probe_weight})
             if result:
                 new_key = next(iter(result))
                 new_first = new_key.split(".")[0]
@@ -388,7 +390,14 @@ def filter_modelopt_state_quantizer_state_for_model(
             }
             # Add state for quantizers in model but not in metadata (e.g. disabled/excluded)
             for k in model_keys - filtered.keys():
-                filtered[k] = model_qstate[k]
+                state = model_qstate[k]
+                # Weight quantizers absent from exported metadata were disabled during export
+                # (weights are already fake-quantized and pre_quant_scale is folded in).
+                # Keep them disabled on reload so fold_weight does not re-quantize the
+                # already-folded weights (re-quantizing distorts the pqs-scaled values).
+                if k.endswith("weight_quantizer") and not state.get("_disabled"):
+                    state = {**state, "_disabled": True}
+                filtered[k] = state
             metadata["quantizer_state"] = filtered
 
 
@@ -499,6 +508,11 @@ def shard_pre_quant_scale_for_tp(model: Any) -> None:
 
     HF exports often store full (unsharded) scales; after load, row-parallel layers need
     ``pqs`` narrowed to ``H_in / tp`` when ``len(pqs) == H_in * tp_world_size``.
+
+    Call after parallel linear modules expose TP-sharded weight shapes (e.g.
+    ``post_restore_vllm_parallel_linears``). If run earlier, ``expected_in`` inferred from
+    weights can match an unsharded checkpoint and a second call becomes a no-op even when
+    pqs should still be narrowed.
 
     Args:
         model: vLLM model with ``TensorQuantizer`` submodules.
