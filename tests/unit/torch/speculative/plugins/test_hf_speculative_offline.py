@@ -265,4 +265,8 @@ def test_collator_batches_multiple(tmp_path):
     collator = EagleOfflineDataCollator(train_len=train_len)
     batch = collator([ds[i] for i in range(4)])
     assert batch["input_ids"].shape == (4, train_len)
-    assert batch["base_model_outputs"]["base_model_hidden_states"].shape == (4, train_len, HIDDEN_SIZE)
+    assert batch["base_model_outputs"]["base_model_hidden_states"].shape == (
+        4,
+        train_len,
+        HIDDEN_SIZE,
+    )
