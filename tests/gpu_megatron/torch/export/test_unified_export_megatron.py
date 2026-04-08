@@ -341,7 +341,7 @@ def test_mtp_state_dict_no_mtp_keys(tmp_path):
 
 
 def test_mtp_state_dict_index_file(tmp_path):
-    """Bug 6058198: MTP weights are collected from a sharded checkpoint (index file path)."""
+    """MTP weights are collected from a sharded checkpoint (index file path)."""
     model_dir = tmp_path / "fake_hf_model"
     model_dir.mkdir()
 
