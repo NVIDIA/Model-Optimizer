@@ -44,7 +44,9 @@ from modelopt.torch.utils.plugins.transformers_dataset import (
 
 try:
     import wandb
-except ImportError:
+
+    wandb.log  # Verify wandb is functional (not a stub module).
+except (ImportError, AttributeError):
     wandb = None
 
 IGNORE_TOKEN_ID = LabelSmoother.ignore_index
@@ -194,7 +196,7 @@ class EagleTrainingPlot(TrainerCallback):
 
     def __init__(self, ar_validate_steps: int = 1000, estimate_ar: bool = False):
         self.ar_validate_steps = ar_validate_steps
-        if wandb and is_master():
+        if hasattr(wandb, "init") and is_master():
             wandb.init()
         self.estimate_ar = estimate_ar
 
