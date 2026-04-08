@@ -95,21 +95,22 @@ def convert_and_save(model, tokenizer, output_path: str):
 
 def create_parser():
     parser = argparse.ArgumentParser(description=__doc__)
-
     parser.add_argument("--model_path", type=str, help="path to the fake-quantized model from QAT.")
-
+    parser.add_argument(
+        "--trust_remote_code",
+        action="store_true",
+        help="Set trust_remote_code for Huggingface models and tokenizers",
+    )
     parser.add_argument(
         "--lora_path",
         type=str,
         help="path to the LoRA-QAT adapter weights. You can only specify lora_path or model_path, not both.",
     )
-
     parser.add_argument(
         "--base_path",
         type=str,
         help="path to the base model used for LoRA-QAT. Only used if lora_path is specified.",
     )
-
     parser.add_argument(
         "--output_path", type=str, required=True, help="location to save converted model."
     )
@@ -121,7 +122,11 @@ if __name__ == "__main__":
     parser = create_parser()
     args = parser.parse_args()
 
-    kwargs = {"device_map": "auto", "torch_dtype": "auto", "trust_remote_code": True}
+    kwargs = {
+        "device_map": "auto",
+        "torch_dtype": "auto",
+        "trust_remote_code": args.trust_remote_code,
+    }
     if args.lora_path:
         assert args.model_path is None, "You can only specify lora_path or model_path, not both."
         model_path = args.base_path
@@ -140,7 +145,7 @@ if __name__ == "__main__":
         gc.collect()
 
     # Load tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=args.trust_remote_code)
 
     # Quantize and save model
     convert_and_save(model, tokenizer, args.output_path)

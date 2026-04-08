@@ -521,12 +521,15 @@ def set_quantizer_state_dict(model: nn.Module, quantizer_state_dict: dict):
             module.load_state_dict(quantizer_state_dict[key])
 
 
-def sync_moe_expert_amax(experts):
-    """Sync input_quantizer amax across MoE experts and fix missing weight amax.
+def sync_moe_expert_amax(experts, sync_weight_amax=False):
+    """Sync quantizer amax across MoE experts and fix missing weight amax.
 
     1. Takes the element-wise max of each ``input_quantizer`` amax across all experts
        and writes it back, so every expert shares the same input amax.
-    2. For any ``weight_quantizer`` that is enabled but has ``amax is None`` (expert
+    2. If ``sync_weight_amax`` is True, also syncs ``weight_quantizer`` amax across
+       experts (max across experts). This matches TEGroupedMLP behavior where all
+       experts share a single weight quantizer.
+    3. For any ``weight_quantizer`` that is enabled but has ``amax is None`` (expert
        received no tokens during calibration), runs a weight-only ``max_calibrate``
        to populate the missing amax.
     """
@@ -535,11 +538,9 @@ def sync_moe_expert_amax(experts):
     amax_dict: dict[str, torch.Tensor] = {}
     for expert in experts:
         for name, module in expert.named_modules():
-            if (
-                isinstance(module, TensorQuantizer)
-                and module.amax is not None
-                and "input_quantizer" in name
-            ):
+            if not isinstance(module, TensorQuantizer) or module.amax is None:
+                continue
+            if "input_quantizer" in name or (sync_weight_amax and "weight_quantizer" in name):
                 stored_amax = amax_dict.get(name)
                 amax_tensor = module.amax.detach().clone()
                 amax_dict[name] = (

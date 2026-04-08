@@ -163,9 +163,7 @@ def test_gptq_e2e_flow(quant_cfg):
     model = AutoModelForCausalLM.from_pretrained(
         "TinyLlama/TinyLlama-1.1B-Chat-v1.0", device_map="auto"
     )
-    tokenizer = AutoTokenizer.from_pretrained(
-        "TinyLlama/TinyLlama-1.1B-Chat-v1.0", trust_remote_code=True
-    )
+    tokenizer = AutoTokenizer.from_pretrained("TinyLlama/TinyLlama-1.1B-Chat-v1.0")
 
     # can't set attribute 'pad_token' for "<unk>"
     # We skip this step for Nemo models

@@ -501,7 +501,11 @@ def main(
         tokenizer = get_tokenizer(model_ckpt_path, trust_remote_code=trust_remote_code)
 
         model = select_model(
-            max_input_length=MAX_SEQ_LEN, max_output_length=2, dtype=dtype, **kwargs
+            max_input_length=MAX_SEQ_LEN,
+            max_output_length=2,
+            dtype=dtype,
+            trust_remote_code=trust_remote_code,
+            **kwargs,
         )
         assert isinstance(model, EvalModel)
         if quant_cfg:

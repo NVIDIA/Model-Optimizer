@@ -29,6 +29,7 @@ def parse_args():
         description="Export a HF checkpoint (with ModelOpt state) for deployment."
     )
     parser.add_argument("--model_path", type=str, default="Path of the trained checkpoint.")
+    parser.add_argument("--trust_remote_code", action="store_true", help="Trust remote code")
     parser.add_argument(
         "--export_path", type=str, default="Destination directory for exported files."
     )
@@ -38,11 +39,10 @@ def parse_args():
 mto.enable_huggingface_checkpointing()
 
 args = parse_args()
-model = load_vlm_or_llm(args.model_path, torch_dtype="auto")
+model = load_vlm_or_llm(
+    args.model_path, torch_dtype="auto", trust_remote_code=args.trust_remote_code
+)
 model.eval()
 with torch.inference_mode():
-    export_speculative_decoding(
-        model,
-        export_dir=args.export_path,
-    )
+    export_speculative_decoding(model, export_dir=args.export_path)
 print(f"Exported checkpoint to {args.export_path}")
