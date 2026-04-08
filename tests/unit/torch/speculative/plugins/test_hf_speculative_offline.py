@@ -34,6 +34,7 @@ from _test_utils.torch.transformers_models import get_tiny_llama
 
 import modelopt.torch.speculative as mtsp
 from modelopt.torch.speculative.eagle.default_config import default_eagle_config
+from modelopt.torch.speculative.eagle.utils import EagleOfflineDataCollator, OfflineSupervisedDataset
 
 _mock_scripts = types.ModuleType("scripts")
 _mock_ar = types.ModuleType("scripts.ar_validate")
@@ -161,3 +162,104 @@ def test_get_dummy_inputs_offline(eagle_model):
     hidden_size = eagle_model.config.hidden_size
     assert dummy["base_model_outputs"]["base_model_hidden_states"].shape[-1] == hidden_size
     assert dummy["base_model_outputs"]["base_model_input_embeds"].shape[-1] == hidden_size
+
+
+# ---------------------------------------------------------------------------
+# OfflineSupervisedDataset tests
+# ---------------------------------------------------------------------------
+
+SEQ_LEN = 16
+HIDDEN_SIZE = 8
+
+
+def _make_offline_pt(path, seq_len=SEQ_LEN, hidden_size=HIDDEN_SIZE):
+    """Write a realistic .pt file matching the format expected by OfflineSupervisedDataset."""
+    data = {
+        "input_ids": torch.randint(0, 100, (seq_len,)),
+        "hidden_states": torch.randn(seq_len, hidden_size),
+        "aux_hidden_states": torch.randn(seq_len, hidden_size),
+        "base_model_input_embeds": torch.randn(seq_len, hidden_size),
+    }
+    torch.save(data, path)
+    return data
+
+
+def test_offline_dataset_len_and_getitem(tmp_path):
+    """OfflineSupervisedDataset should load .pt files and return proper keys."""
+    n = 3
+    files = []
+    for i in range(n):
+        p = tmp_path / f"sample_{i}.pt"
+        _make_offline_pt(p)
+        files.append(str(p))
+
+    ds = OfflineSupervisedDataset(files)
+    assert len(ds) == n
+
+    item = ds[0]
+    assert set(item.keys()) == {
+        "input_ids",
+        "base_model_hidden_states",
+        "aux_hidden_states",
+        "attention_mask",
+        "loss_mask",
+        "labels",
+    }
+    assert item["input_ids"].shape == (SEQ_LEN,)
+    assert item["attention_mask"].shape == (SEQ_LEN,)
+    assert item["labels"].shape == (SEQ_LEN,)
+
+
+def test_offline_dataset_labels_shift(tmp_path):
+    """Labels should be input_ids shifted left by 1."""
+    p = tmp_path / "sample.pt"
+    orig = _make_offline_pt(p)
+    ds = OfflineSupervisedDataset([str(p)])
+    item = ds[0]
+    # labels[:-1] should equal input_ids[1:]
+    assert torch.equal(item["labels"][:-1], orig["input_ids"][1:])
+
+
+# ---------------------------------------------------------------------------
+# EagleOfflineDataCollator tests
+# ---------------------------------------------------------------------------
+
+
+def test_collator_truncates(tmp_path):
+    """Collator should truncate sequences longer than train_len."""
+    train_len = 8
+    p = tmp_path / "sample.pt"
+    _make_offline_pt(p, seq_len=SEQ_LEN)  # SEQ_LEN > train_len
+    ds = OfflineSupervisedDataset([str(p)])
+    collator = EagleOfflineDataCollator(train_len=train_len)
+    batch = collator([ds[0]])
+    assert batch["input_ids"].shape == (1, train_len)
+    assert batch["base_model_outputs"]["base_model_hidden_states"].shape[1] == train_len
+
+
+def test_collator_pads(tmp_path):
+    """Collator should pad sequences shorter than train_len."""
+    train_len = 32
+    p = tmp_path / "sample.pt"
+    _make_offline_pt(p, seq_len=SEQ_LEN)  # SEQ_LEN < train_len
+    ds = OfflineSupervisedDataset([str(p)])
+    collator = EagleOfflineDataCollator(train_len=train_len)
+    batch = collator([ds[0]])
+    assert batch["input_ids"].shape == (1, train_len)
+    # Padded region should be zeros
+    assert (batch["input_ids"][0, SEQ_LEN:] == 0).all()
+
+
+def test_collator_batches_multiple(tmp_path):
+    """Collator should stack multiple samples into a batch."""
+    train_len = SEQ_LEN
+    files = []
+    for i in range(4):
+        p = tmp_path / f"sample_{i}.pt"
+        _make_offline_pt(p)
+        files.append(str(p))
+    ds = OfflineSupervisedDataset(files)
+    collator = EagleOfflineDataCollator(train_len=train_len)
+    batch = collator([ds[i] for i in range(4)])
+    assert batch["input_ids"].shape == (4, train_len)
+    assert batch["base_model_outputs"]["base_model_hidden_states"].shape == (4, train_len, HIDDEN_SIZE)
