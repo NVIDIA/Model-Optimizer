@@ -354,7 +354,7 @@ class _QuantFusedMoEBase(QuantModule):
         self.parallel_state = create_parallel_state()
 
         if getattr(self, "invoke_fused_moe_kernel_func", None) is None:  # pragma: no cover
-            for name in ("invoke_fused_moe_kernel", "invoke_fused_moe_triton_kernel"):
+            for name in ("invoke_fused_moe_kernel", "dispatch_fused_moe_kernel"):
                 if hasattr(vllm_fused_moe_package, name):
                     self.invoke_fused_moe_kernel_func = name
                     break
