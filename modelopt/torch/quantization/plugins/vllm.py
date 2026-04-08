@@ -87,20 +87,6 @@ _ATTENTION_TYPES = tuple(
 
 vllm_fused_moe_package = importlib.import_module("vllm.model_executor.layers.fused_moe.fused_moe")
 
-_vllm_fused_moe_invoke_name_cache: str | None = None
-
-
-def _vllm_fused_moe_invoke_name() -> str:
-    """Return the vLLM public fused_moe entrypoint (renamed across versions)."""
-    global _vllm_fused_moe_invoke_name_cache
-    if _vllm_fused_moe_invoke_name_cache is not None:
-        return _vllm_fused_moe_invoke_name_cache
-    for name in ("invoke_fused_moe_kernel", "invoke_fused_moe_triton_kernel"):
-        if hasattr(vllm_fused_moe_package, name):
-            _vllm_fused_moe_invoke_name_cache = name
-            return name
-    raise ValueError("fused_moe_kernel is not found")
-
 
 @contextmanager
 def disable_compilation(model):
@@ -349,6 +335,15 @@ class _QuantFusedMoEBase(QuantModule):
         )
         self.parallel_state = create_parallel_state()
 
+        if getattr(self, "invoke_fused_moe_kernel_func", None) is None:  # pragma: no cover
+            for name in ("invoke_fused_moe_kernel", "invoke_fused_moe_triton_kernel"):
+                if hasattr(vllm_fused_moe_package, name):
+                    self.invoke_fused_moe_kernel_func = name
+                    break
+        assert (  # pragma: no cover
+            getattr(self, "invoke_fused_moe_kernel_func", None) is not None
+        ), "fused_moe_kernel is not found"
+
     def invoke_fused_moe_quantized(
         self,
         A: torch.Tensor,  # noqa: N803
@@ -360,11 +355,14 @@ class _QuantFusedMoEBase(QuantModule):
         if B is self.w13_weight:
             # First layer of expert
             A = self.w13_input_quantizer(A)  # noqa: N806
-            if self.w13_weight_quantizer.is_enabled:
+            if self.w13_weight_quantizer.is_enabled:  # pragma: no cover
                 original_weight, self.w13_weight = (
                     self.w13_weight,
                     self.w13_weight_quantizer(self.w13_weight),
                 )
+                # In case the weight quantizer isn't folded yet in vllm_serve_fakequant, pass the
+                # quantized weight to the kernel.
+                B = self.w13_weight  # noqa: N806
                 vllm_fused_moe_package._invoke_fused_moe_kernel(A, B, C, *args, **kwargs)
                 self.w13_weight = original_weight
             else:
@@ -373,11 +371,14 @@ class _QuantFusedMoEBase(QuantModule):
                 C[:] = self.w13_output_quantizer(C)
         elif B is self.w2_weight:
             A = self.w2_input_quantizer(A)  # noqa: N806
-            if self.w2_weight_quantizer.is_enabled:
+            if self.w2_weight_quantizer.is_enabled:  # pragma: no cover
                 original_weight, self.w2_weight = (
                     self.w2_weight,
                     self.w2_weight_quantizer(self.w2_weight),
                 )
+                # In case the weight quantizer isn't folded yet in vllm_serve_fakequant, pass the
+                # quantized weight to the kernel.
+                B = self.w2_weight  # noqa: N806
                 vllm_fused_moe_package._invoke_fused_moe_kernel(A, B, C, *args, **kwargs)
                 self.w2_weight = original_weight
             else:
@@ -388,9 +389,9 @@ class _QuantFusedMoEBase(QuantModule):
             raise ValueError("Cannot determine first or second layer of expert")
 
     def forward(self, hidden_states: torch.Tensor, router_logits: torch.Tensor):
-        with replace_function(
+        with replace_function(  # pragma: no cover
             vllm_fused_moe_package,
-            _vllm_fused_moe_invoke_name(),
+            self.invoke_fused_moe_kernel_func,
             self.invoke_fused_moe_quantized,
             og_func_cache_name="_invoke_fused_moe_kernel",
         ):
