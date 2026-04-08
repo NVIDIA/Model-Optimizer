@@ -236,16 +236,6 @@ def train():
             model = load_vlm_or_llm(
                 checkpoint, dtype="auto", trust_remote_code=model_args.trust_remote_code
             )
-        # DFlash: re-create rotary embeddings with meta-tensor buffers on CPU.
-        # inv_freq is computed (not saved in checkpoints), stays on meta after restore.
-        if training_args.mode == "dflash":
-            for mod in model.modules():
-                if hasattr(mod, "rotary_emb"):
-                    rotary = mod.rotary_emb
-                    if any(b.is_meta for b in rotary.buffers()):
-                        cfg = getattr(rotary, "config", None)
-                        if cfg is not None:
-                            mod.rotary_emb = type(rotary)(config=cfg, device="cpu")
         tokenizer = transformers.AutoTokenizer.from_pretrained(
             model_load_path, trust_remote_code=model_args.trust_remote_code
         )

@@ -26,62 +26,21 @@ Architecture:
 Reference: "DFlash: Block Diffusion for Flash Speculative Decoding" (arXiv:2602.06036)
 """
 
-import importlib
-
 import torch
 import torch.nn.functional as F
 from torch import nn
 from transformers import PretrainedConfig, PreTrainedModel
+
+# DFlash draft model uses Qwen3 components regardless of the target model.
+# This matches z-lab's implementation which inherits from Qwen3PreTrainedModel.
+from transformers.models.qwen3.modeling_qwen3 import Qwen3MLP as _MLP_CLS
+from transformers.models.qwen3.modeling_qwen3 import Qwen3RMSNorm as _NORM_CLS
+from transformers.models.qwen3.modeling_qwen3 import Qwen3RotaryEmbedding as _ROTARY_CLS
+from transformers.models.qwen3.modeling_qwen3 import rotate_half as _rotate_half
 from transformers.utils import ModelOutput
 
 from ..dflash.conversion import DFlashDMRegistry
 from ..dflash.dflash_model import DFlashModel
-
-
-def _resolve_model_components(model_type):
-    """Resolve MLP, RMSNorm, RotaryEmbedding from the base model's transformers module.
-
-    Falls back to Llama components if the model type is unknown.
-    """
-    fallback = "llama"
-    model_type = model_type or fallback
-    try:
-        mod = importlib.import_module(f"transformers.models.{model_type}.modeling_{model_type}")
-    except (ImportError, ModuleNotFoundError):
-        mod = importlib.import_module(f"transformers.models.{fallback}.modeling_{fallback}")
-        model_type = fallback
-
-    prefix = model_type.capitalize()
-    # Handle multi-word model types (e.g., "qwen3" -> "Qwen3")
-    for attr in dir(mod):
-        if attr.lower() == f"{model_type}mlp":
-            prefix = attr.replace("MLP", "")
-            break
-
-    mlp_cls = getattr(mod, f"{prefix}MLP", None)
-    norm_cls = getattr(mod, f"{prefix}RMSNorm", None)
-    rotary_cls = getattr(mod, f"{prefix}RotaryEmbedding", None)
-    rotate_half_fn = getattr(mod, "rotate_half", None)
-
-    # Fallback to Llama if any component is missing
-    if not all([mlp_cls, norm_cls, rotary_cls, rotate_half_fn]):
-        from transformers.models.llama.modeling_llama import (
-            LlamaMLP,
-            LlamaRMSNorm,
-            LlamaRotaryEmbedding,
-        )
-        from transformers.models.llama.modeling_llama import rotate_half as _rotate_half
-
-        mlp_cls = mlp_cls or LlamaMLP
-        norm_cls = norm_cls or LlamaRMSNorm
-        rotary_cls = rotary_cls or LlamaRotaryEmbedding
-        rotate_half_fn = rotate_half_fn or _rotate_half
-
-    return mlp_cls, norm_cls, rotary_cls, rotate_half_fn
-
-
-# Default to Llama components; overridden per-model during convert()
-_MLP_CLS, _NORM_CLS, _ROTARY_CLS, _rotate_half = _resolve_model_components("llama")
 
 __all__ = ["HFDFlashModel"]
 
@@ -271,6 +230,17 @@ class DFlashModule(nn.Module):
         # SpecForge's DFlashDraftModel uses Qwen3PreTrainedModel.post_init() which does this.
         self._init_weights(config)
 
+    def _apply(self, fn, recurse=True):
+        """Override _apply to handle meta-tensor rotary buffers during .to(device).
+
+        After checkpoint restore, rotary inv_freq buffers may be on meta device
+        (they are computed, not saved). Re-create rotary_emb before applying the
+        device/dtype transfer to avoid 'Cannot copy out of meta tensor' errors.
+        """
+        if hasattr(self, "rotary_emb") and any(b.is_meta for b in self.rotary_emb.buffers()):
+            self.rotary_emb = _ROTARY_CLS(config=self._rotary_config, device="cpu")
+        return super()._apply(fn, recurse)
+
     def _init_weights(self, config):
         """Initialize weights matching HF PreTrainedModel._init_weights."""
         std = getattr(config, "initializer_range", 0.02)
@@ -284,9 +254,6 @@ class DFlashModule(nn.Module):
         """Forward matching SpecForge DFlashDraftModel.forward."""
         hidden_states = noise_embedding
         target_hidden = self.hidden_norm(self.fc(target_hidden))
-        # Re-create rotary_emb on correct device if buffers are on meta (checkpoint resume)
-        if any(b.is_meta for b in self.rotary_emb.buffers()):
-            self.rotary_emb = _ROTARY_CLS(config=self._rotary_config, device=hidden_states.device)
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
         for layer in self.layers:
@@ -505,12 +472,6 @@ class HFDFlashModel(DFlashModel):
 
         self._find_base_model_parts()
 
-        # Resolve model-specific components (MLP, RMSNorm, RotaryEmbedding)
-        # from the base model's architecture for weight compatibility
-        global _MLP_CLS, _NORM_CLS, _ROTARY_CLS, _rotate_half
-        _MLP_CLS, _NORM_CLS, _ROTARY_CLS, _rotate_half = _resolve_model_components(
-            getattr(base_config, "model_type", "llama")
-        )
         self.dflash_module = DFlashModule(self.dflash_config)
         self.dflash_module.to(self._base_model.dtype).to(
             next(self._base_model.layers[-1].parameters()).device
