@@ -116,39 +116,31 @@ def is_attn_sparsified(model: nn.Module) -> bool:
 
 
 def _register_diffusers_backends_if_needed(model: nn.Module) -> None:
-    """Register diffusers/LTX attention backends if the model needs them.
+    """Register diffusers/LTX Triton attention backends if the model needs them.
 
     Called before plugin registration so that the backends are available
     when ``SparseAttentionModule.forward()`` activates the skip-softmax context.
     """
-    # Register the diffusers eager and Triton backends if the model is a diffusers ModelMixin
+    import contextlib
+
+    # Register the diffusers Triton backend if the model is a diffusers ModelMixin
     try:
         from diffusers.models.modeling_utils import ModelMixin
 
         if isinstance(model, ModelMixin):
-            from .kernels import (
-                register_diffusers_eager_attention,
-                register_diffusers_triton_attention,
-            )
+            from .kernels import register_diffusers_triton_attention
 
-            if register_diffusers_eager_attention is not None:
-                register_diffusers_eager_attention()
             if register_diffusers_triton_attention is not None:
                 register_diffusers_triton_attention()
     except (ImportError, Exception):
         pass
 
     # Patch ltx_core Attention modules if present (independent of diffusers)
-    import contextlib
-
     try:
-        from .kernels import register_ltx_eager_attention, register_ltx_triton_attention
+        from .kernels import register_ltx_triton_attention
     except (ImportError, RuntimeError):
         return
 
-    if register_ltx_eager_attention is not None:
-        with contextlib.suppress(Exception):
-            register_ltx_eager_attention(model)
     if register_ltx_triton_attention is not None:
         with contextlib.suppress(Exception):
             register_ltx_triton_attention(model)
