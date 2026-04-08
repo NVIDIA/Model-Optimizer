@@ -25,12 +25,24 @@ by stage 1 is correctly consumed by stage 2 and that the checkpoint produced
 by stage 2 is correctly quantized in stage 3.
 """
 
-import json
-
 import pytest
 import safetensors.torch
 import torch
-from _test_utils.examples.run_command import run_example_command
+from _test_utils.examples.run_command import MODELOPT_ROOT, run_example_command
+
+EAGLE3_YAML = str(
+    MODELOPT_ROOT / "modelopt_recipes" / "general" / "speculative_decoding" / "eagle3.yaml"
+)
+
+# Tiny EAGLE architecture overrides (dotlist entries)
+_TINY_EAGLE_ARCH = [
+    "eagle.eagle_architecture_config.max_position_embeddings=128",
+    "eagle.eagle_architecture_config.num_hidden_layers=1",
+    "eagle.eagle_architecture_config.intermediate_size=64",
+    "eagle.eagle_architecture_config.num_attention_heads=2",
+    "eagle.eagle_architecture_config.num_key_value_heads=2",
+    "eagle.eagle_architecture_config.head_dim=64",
+]
 
 
 @pytest.fixture(scope="module")
@@ -72,49 +84,27 @@ def test_collect_hidden_states(tiny_llama_path, tiny_daring_anteater_path, offli
 
 def test_offline_eagle_training(tiny_llama_path, tiny_daring_anteater_path, offline_ptq_dirs):
     """Stage 2: train an EAGLE3 draft model using the offline hidden states."""
-    tiny_eagle_config = {
-        "max_position_embeddings": 128,
-        "num_hidden_layers": 1,
-        "intermediate_size": 64,
-        "num_attention_heads": 2,
-        "num_key_value_heads": 2,
-        "head_dim": 64,
-    }
-    config_file = offline_ptq_dirs["eagle_ckpt"] / "tiny_eagle_config.json"
-    with open(config_file, "w") as f:
-        json.dump(tiny_eagle_config, f)
+    output_dir = offline_ptq_dirs["eagle_ckpt"] / "trained"
+
+    overrides = [
+        f"model.model_name_or_path={tiny_llama_path}",
+        f"data.data_path={tiny_daring_anteater_path}",
+        f"data.offline_data_path={offline_ptq_dirs['hidden_states']}",
+        f"training.output_dir={output_dir}",
+        "training.num_train_epochs=1",
+        "training.learning_rate=1e-5",
+        "training.training_seq_len=64",
+        "training.save_steps=1",
+        *_TINY_EAGLE_ARCH,
+    ]
 
     run_example_command(
-        [
-            "./launch_train.sh",
-            "--model",
-            tiny_llama_path,
-            "--data",
-            str(tiny_daring_anteater_path),
-            "--offline-data",
-            str(offline_ptq_dirs["hidden_states"]),
-            "--num_epochs",
-            "1",
-            "--lr",
-            "1e-5",
-            "--mode",
-            "eagle3",
-            "--eagle_config",
-            str(config_file),
-            "--output_dir",
-            str(offline_ptq_dirs["eagle_ckpt"] / "trained"),
-            "--training_seq_len",
-            "64",
-            "--save_steps",
-            "1",
-        ],
+        ["./launch_train.sh", "--config", EAGLE3_YAML, *overrides],
         "speculative_decoding",
         setup_free_port=True,
     )
 
-    assert (offline_ptq_dirs["eagle_ckpt"] / "trained").exists(), (
-        "EAGLE training did not produce an output directory"
-    )
+    assert output_dir.exists(), "EAGLE training did not produce an output directory"
 
 
 def test_offline_ptq(offline_ptq_dirs):
