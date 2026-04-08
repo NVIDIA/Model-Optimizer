@@ -1257,12 +1257,15 @@ class MaxCalibConfig(QuantizeAlgorithmConfig):
 
 
 class MseCalibConfig(QuantizeAlgorithmConfig):
-    """Configuration for per-tensor MSE calibration.
+    """Configuration for per-tensor MSE calibration (weight quantizers only).
 
-    Finds a scale s (via amax a, with s = a / q_max) that minimizes the
-    reconstruction error of a tensor after uniform Q→DQ:
+    The MSE search is applied only to weight quantizers. Activation quantizers
+    keep their max-calibration amax.
 
-        s* = argmin_s  E[(X - DQ(Q(X; s)))^2],   X ∈ {weights | activations}
+    For weights, finds a scale s (via amax a, with s = a / q_max) that minimizes
+    the reconstruction error after uniform Q→DQ:
+
+        s* = argmin_s  E[(X - DQ(Q(X; s)))^2],   X = weights
 
     When fp8_scale_sweep is enabled, step_size is ignored.
     """
@@ -1307,11 +1310,13 @@ class MseCalibConfig(QuantizeAlgorithmConfig):
 
 
 class LocalHessianCalibConfig(QuantizeAlgorithmConfig):
-    """Configuration for local Hessian-weighted MSE calibration.
+    """Configuration for local Hessian-weighted MSE calibration (weight quantizers only).
 
-    This algorithm uses activation information to optimize per-block scales for weight
-    quantization. It minimizes the output reconstruction error by weighting the loss
-    with the local Hessian matrix computed from input activations.
+    Only weight quantizers are calibrated with this algorithm; activation quantizers
+    keep their max-calibration amax. This algorithm uses activation information to
+    optimize per-block scales for weight quantization. It minimizes the output
+    reconstruction error by weighting the loss with the local Hessian matrix
+    computed from input activations.
 
     The local Hessian loss for each block is: ``(dw @ H @ dw.T)`` where:
     - ``dw = weight - quantized_weight`` (weight reconstruction error per block)

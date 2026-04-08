@@ -46,8 +46,9 @@ def test_update_hessian():
         f"Expected hessian shape ({features}, {features}), got {updated_hessian.shape}"
     )
 
-    # Verify sample count is updated correctly (incremented by batch_size)
-    assert new_n_samples == batch_size, f"Expected n_samples={batch_size}, got {new_n_samples}"
+    # Verify sample count is updated correctly (incremented by total tokens = batch * seq)
+    num_tokens = batch_size * seq_len
+    assert new_n_samples == num_tokens, f"Expected n_samples={num_tokens}, got {new_n_samples}"
 
     # Verify hessian is not all zeros after update
     assert not torch.allclose(updated_hessian, torch.zeros_like(updated_hessian)), (
@@ -70,15 +71,16 @@ def test_update_hessian():
 
     # Manual calculation:
     # input_flat shape: (features, batch*seq) = (2, 12), all ones
-    # scaled_input = sqrt(2/6) * input_flat = sqrt(1/3) * ones(2, 12)
-    # outer_product = scaled_input @ scaled_input.t() = (2/6) * ones(2,12) @ ones(12,2) = [[4,4], [4,4]]
-    # Note: The scaling factor is (2/n_samples), so with n_samples=6 and 12 tokens: (2/6)*12 = 4
-    expected_hessian = torch.ones(features, features, dtype=torch.float32) * 4.0
+    # X @ X^T = ones(2,12) @ ones(12,2) = 12 * ones(2,2)
+    # n_samples = batch*seq = 12, scaling = 2/12 = 1/6
+    # hessian = (2/12) * 12 * ones(2,2) = 2 * ones(2,2)
+    num_tokens = batch_size * seq_len  # 12
+    expected_hessian = torch.ones(features, features, dtype=torch.float32) * 2.0
 
     assert torch.allclose(updated_hessian, expected_hessian, atol=1e-5), (
         f"Expected hessian {expected_hessian}, got {updated_hessian}"
     )
-    assert new_n_samples == batch_size
+    assert new_n_samples == num_tokens
 
     # Test 3: Accumulated hessians - verify equivalence
     # Processing [6,2,2] in one step should equal processing [2,2,2] three times
@@ -102,7 +104,7 @@ def test_update_hessian():
     assert torch.allclose(hessian_accumulated, expected_hessian, atol=1e-5), (
         f"Accumulated hessian should match expected: expected {expected_hessian}, got {hessian_accumulated}"
     )
-    assert n_samples_accumulated == 6, f"Expected n_samples=6, got {n_samples_accumulated}"
+    assert n_samples_accumulated == 12, f"Expected n_samples=12, got {n_samples_accumulated}"
 
 
 @pytest.mark.parametrize(
@@ -137,14 +139,16 @@ def test_gptq_updates(block_size, dim, model_weight, expect_weight_change):
 
     hessian, n_samples = update_hessian(input, hessian, n_samples)
 
-    # Verify n_samples is update using hessian matrix
-    assert n_samples == input.shape[0], "n_samples should be equal to input.shape[0]"
+    # Verify n_samples counts total tokens (batch * seq)
+    expected_tokens = input.shape[0] * input.shape[1]
+    assert n_samples == expected_tokens, f"n_samples should be {expected_tokens}, got {n_samples}"
 
     # Perform another forward pass to update hessian matrix
     input_2 = torch.randn(3, 16, dim).to("cuda")
     hessian, n_samples = update_hessian(input_2, hessian, n_samples)
-    assert n_samples == input.shape[0] + input_2.shape[0], (
-        "n_samples should be equal to input.shape[0] + input_2.shape[0]"
+    expected_tokens_2 = expected_tokens + input_2.shape[0] * input_2.shape[1]
+    assert n_samples == expected_tokens_2, (
+        f"n_samples should be {expected_tokens_2}, got {n_samples}"
     )
 
     hessian = hessian.to(input.device)
