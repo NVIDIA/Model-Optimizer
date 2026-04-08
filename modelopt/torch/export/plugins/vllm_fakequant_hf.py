@@ -82,6 +82,7 @@ def _collect_quant_work(
                     hasattr(candidate, "_pre_quant_scale")
                     and candidate._pre_quant_scale is not None
                     and candidate._disabled
+                    and getattr(candidate, "_enable_pre_quant_scale", True)
                 ):
                     inp_q = candidate
                     inp_q_key = get_unwrapped_name(
@@ -179,22 +180,28 @@ def export_hf_vllm_fq_checkpoint(
                 num_cuda_devices,
                 ", ".join(f"{d}: {len(items)} weights" for d, items in device_groups.items()),
             )
-            all_results: list[tuple[str, torch.Tensor, str | None]] = []
             with ThreadPoolExecutor(max_workers=num_cuda_devices) as pool:
-                futures = []
+                # Submit GPU batches first (non-blocking)
+                futures = [
+                    pool.submit(_process_device_batch, items, device)
+                    for device, items in device_groups.items()
+                    if device.type == "cuda"
+                ]
+                # Process CPU weights inline while GPU futures run
                 for device, items in device_groups.items():
-                    if device.type == "cuda":
-                        futures.append(pool.submit(_process_device_batch, items, device))
-                    else:
-                        # CPU weights: process inline (no thread needed).
-                        all_results.extend([_process_weight(item) for item in items])
+                    if device.type != "cuda":
+                        for sd_key, w_quant, inp_q_key in map(_process_weight, items):
+                            state_dict[sd_key] = w_quant
+                            fakequant_weights.add(sd_key)
+                            if inp_q_key is not None:
+                                input_quantizers_folded_pqs.add(inp_q_key)
+                # Collect GPU results
                 for future in futures:
-                    all_results.extend(future.result())
-            for sd_key, w_quant, inp_q_key in all_results:
-                state_dict[sd_key] = w_quant
-                fakequant_weights.add(sd_key)
-                if inp_q_key is not None:
-                    input_quantizers_folded_pqs.add(inp_q_key)
+                    for sd_key, w_quant, inp_q_key in future.result():
+                        state_dict[sd_key] = w_quant
+                        fakequant_weights.add(sd_key)
+                        if inp_q_key is not None:
+                            input_quantizers_folded_pqs.add(inp_q_key)
         else:
             # Sequential fallback (single GPU, CPU, or parallel=False).
             for item in work_items:
