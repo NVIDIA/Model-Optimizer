@@ -1,5 +1,19 @@
 # LTX-2 QAD Example (Quantization-Aware Distillation)
 
+> [!WARNING]
+> **Third-Party License Notice — LTX-2**
+>
+> LTX-2 is a third-party model and set of packages developed and provided by Lightricks. LTX-2
+> is **not** covered by the Apache 2.0 license that governs NVIDIA Model Optimizer.
+>
+> By installing and using LTX-2 packages (`ltx-core`, `ltx-pipelines`, `ltx-trainer`) with
+> NVIDIA Model Optimizer, you **must** comply with the
+> [LTX Community License Agreement](https://github.com/Lightricks/LTX-2/blob/main/LICENSE).
+>
+> Any derivative models or fine-tuned weights produced from LTX-2 using NVIDIA Model Optimizer
+> (including quantized or distilled checkpoints) remain subject to the LTX Community License
+> Agreement and are **not** covered by Apache 2.0.
+
 **Note:** This is a **sample script for illustrating the QAD pipeline**. It has been verified to run on a **Linux RTX 5090** system, but runs into **OOM (Out of Memory)** on that configuration.
 
 This example demonstrates **Quantization-Aware Distillation (QAD)** for [LTX-2](https://github.com/Lightricks/LTX-2) using the native LTX training loop and [NVIDIA ModelOpt](https://github.com/NVIDIA/Model-Optimizer). It combines:

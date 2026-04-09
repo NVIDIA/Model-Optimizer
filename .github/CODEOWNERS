@@ -55,3 +55,6 @@ modelopt_recipes @NVIDIA/modelopt-recipes-codeowners
 /examples/vlm_ptq @NVIDIA/modelopt-examples-vlm-codeowners
 /examples/vllm_serve @NVIDIA/modelopt-examples-llm_ptq-codeowners
 /examples/windows @NVIDIA/modelopt-windows-codeowners
+
+# Requirements files are owned by the setup team regardless of location
+requirements*.txt @NVIDIA/modelopt-setup-codeowners
