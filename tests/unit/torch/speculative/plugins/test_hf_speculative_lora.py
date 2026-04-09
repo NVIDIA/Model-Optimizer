@@ -96,5 +96,5 @@ def test_export_lora_artifacts(lora_eagle_model, tmp_path):
     lora_eagle_model.get_exporter().export(export_dir)
 
     assert (export_dir / "model.safetensors").exists(), "Eagle model weights missing"
-    assert (export_dir / "lora_adapter_model.safetensors").exists(), "LoRA weights missing"
-    assert (export_dir / "lora_adapter_config.json").exists(), "LoRA config missing"
+    assert (export_dir / "adapter_model.safetensors").exists(), "LoRA weights missing"
+    assert (export_dir / "adapter_config.json").exists(), "LoRA config missing"
