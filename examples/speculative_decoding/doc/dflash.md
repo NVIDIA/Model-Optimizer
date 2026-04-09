@@ -200,16 +200,22 @@ quantized weights transparently. No DFlash-specific quantization code is needed.
 
 TODO: Add a quantization recipe/script and validate FP8/NVFP4 AR impact.
 
-### vLLM Integration
+### vLLM Deployment
 
-vLLM has a `DFlashProposer` in `v1/spec_decode/dflash.py`, but the model loader
-does not yet recognize the `DFlashDraftModel` architecture from z-lab checkpoints.
-The `specdec_bench` tool with `--speculative_algorithm EAGLE3` does not work for DFlash.
+DFlash speculative decoding is supported in vLLM nightly (v0.19.1+):
 
-Possible paths:
-- Wait for vLLM to add `DFlashDraftModel` to their model registry
-- Use vLLM's Python API directly with the DFlash proposer
-- Convert checkpoint to a format vLLM recognizes (e.g., register as a custom model)
+```bash
+vllm serve Qwen/Qwen3-8B \
+    --speculative-config '{"method": "dflash", "model": "z-lab/Qwen3-8B-DFlash-b16", "num_speculative_tokens": 15}' \
+    --attention-backend flash_attn \
+    --max-num-batched-tokens 32768
+```
+
+Validated: **386 tok/s** on single H100 with Qwen3-8B + DFlash-b16 (15 spec tokens).
+
+Note: requires `vllm/vllm-openai:nightly` — the `latest` tag (v0.19.0) does not include DFlash.
+See [`tools/launcher/common/dflash/vllm_serve.sh`](../../../tools/launcher/common/dflash/vllm_serve.sh)
+for a complete serve + benchmark script.
 
 ### Docker Local Testing
 
