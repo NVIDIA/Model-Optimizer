@@ -63,6 +63,31 @@ During training, anchor positions are sampled randomly from valid (assistant res
 tokens in each batch, rather than dividing the sequence into fixed blocks. Each anchor
 starts a block of `block_size` tokens where the draft model predicts positions 1..B-1.
 
+```
+Sequence:  [SYS] You helpful [USR] What 2+3? [AST] The answer is 5
+Position:    0    1     2      3     4    5     6    7    8    9  10
+loss_mask:   0    0     0      0     0    0     0    1    1    1   1
+                                                   ^^^^^^^^^^^^^^^^
+                                                   assistant response
+
+Fixed blocks (block_size=4):
+Block 0: pos [0,1,2,3]   anchor=0  → predict 1,2,3   → loss_mask=0,0,0   → ZERO LOSS
+Block 1: pos [4,5,6,7]   anchor=4  → predict 5,6,7   → loss_mask=0,0,1   → 1/3 useful
+Block 2: pos [8,9,10,—]  anchor=8  → predict 9,10,—  → loss_mask=1,1,—   → 2/2 useful
+
+Efficiency: 3/8 = 38%
+
+Random anchors (num_anchors=3, sampled from loss_mask=1):
+Anchor 7:  pos [7,8,9,10]   → predict 8,9,10   → loss_mask=1,1,1   → 3/3 useful
+Anchor 9:  pos [9,10,—,—]   → predict 10,—,—   → loss_mask=1,—,—   → 1/1 useful
+Anchor 8:  pos [8,9,10,—]   → predict 9,10,—   → loss_mask=1,1,—   → 2/2 useful
+
+Efficiency: 6/6 = 100%
+```
+
+Random anchors guarantee every prediction is on assistant tokens.
+Fixed blocks waste compute on prompt tokens where loss_mask=0.
+
 **Tradeoff:** Higher `num_anchors` = more training signal per sample but more compute.
 Lower = faster iteration but less data efficiency. With `seq_len=4096` and `block_size=8`,
 `num_anchors=512` means the model sees ~512 blocks per sample (covering ~4096 positions).
