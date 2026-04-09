@@ -24,7 +24,6 @@ quantize:
     - quantizer_name: '*'
       enable: false
     - quantizer_name: '*weight_quantizer'
-      enable: true
       cfg:
         block_sizes:
           -1: 16
@@ -32,7 +31,6 @@ quantize:
           scale_bits: e4m3
         num_bits: e2m1
     - quantizer_name: '*input_quantizer'
-      enable: true
       cfg:
         block_sizes:
           -1: 16
