@@ -315,7 +315,14 @@ def is_moe(module: nn.Module) -> bool:
     if name.endswith("sparsemoeblock") or "moelayer" in name:
         return True
     # Explicit matches for non-standard naming
-    return any(key in name for key in ["arcticmoe", "deepseekmoe", "dbrxffn", "nemotronhmoe"])
+    if any(key in name for key in ["arcticmoe", "deepseekmoe", "dbrxffn", "nemotronhmoe"]):
+        return True
+    # Structural detection: modules with router + experts (e.g. Gemma4TextDecoderLayer)
+    return (
+        hasattr(module, "router")
+        and hasattr(module, "experts")
+        and isinstance(module.experts, nn.Module)
+    )
 
 
 def is_quantlinear(module: nn.Module) -> bool:
@@ -1007,6 +1014,9 @@ def get_expert_linear_names(module: nn.Module) -> list[str]:
     elif module_match_name_list(module, ["NemotronHMOE"]):
         # NemotronHMOE experts (NemotronHMLP) use up_proj and down_proj only (no gate).
         return ["up_proj", "down_proj"]
+    elif module_match_name_list(module, ["Gemma4TextDecoderLayer"]):
+        # Gemma4 MoE experts are unfused into per-expert nn.Linear layers
+        return ["gate_proj", "down_proj", "up_proj"]
     else:
         # assuming w1, w2, w3 by default
         return ["w1", "w2", "w3"]
