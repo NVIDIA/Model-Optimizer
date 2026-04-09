@@ -53,7 +53,7 @@ class ModelLoader:
         """Load HuggingFace model based on model type."""
         print(f"Loading HF model from {self.hf_model_path} with model type {self.model_type}")
         self.hf_model = AutoModelForCausalLM.from_pretrained(
-            self.hf_model_path, torch_dtype=torch.float16, trust_remote_code=trust_remote_code
+            self.hf_model_path, dtype=torch.float16, trust_remote_code=trust_remote_code
         )
 
         return self.hf_model.eval().cuda()  # type: ignore[attr-defined]
@@ -76,7 +76,7 @@ class WrapperModelForCausalLM(torch.nn.Module):
         self.lm_head = model.lm_head
         self.config = model.config
 
-    def forward(self, input_ids: torch.Tensor | None, past_key_values: tuple):
+    def forward(self, input_ids: torch.Tensor, past_key_values: tuple):
         """Forward pass."""
         # Convert tuple cache to DynamicCache for models that require it (e.g., Qwen3)
         cache = DynamicCache(config=self.config)
@@ -84,9 +84,30 @@ class WrapperModelForCausalLM(torch.nn.Module):
         cache.value_cache = [kv[1] for kv in past_key_values]
         past_key_values = cache
 
-        outputs = self.model(input_ids=input_ids, past_key_values=past_key_values, use_cache=True)
+        # Pre-compute a 4D causal mask so that transformers' internal mask creation
+        # (which relies on Python-int shapes) is bypassed entirely. During ONNX/JIT tracing,
+        # tensor.shape[N] can return a 0-dim scalar tensor instead of a Python int, which breaks
+        # the masking code in transformers>=5.4
+        seq_len = input_ids.shape[1]
+        past_len = past_key_values.get_seq_length()  # type: ignore[attr-defined]
+        causal_mask = (
+            torch.tril(
+                torch.ones(seq_len, past_len + seq_len, dtype=torch.bool, device=input_ids.device),
+                diagonal=past_len,
+            )
+            .unsqueeze(0)
+            .unsqueeze(0)
+        )
+
+        outputs = self.model(
+            input_ids=input_ids,
+            attention_mask=causal_mask,
+            past_key_values=past_key_values,
+            use_cache=True,
+        )
         hidden_states = outputs[0]
-        past_key_values = outputs.past_key_values.to_legacy_cache()
+        cache = outputs.past_key_values
+        past_key_values = tuple(zip(cache.key_cache, cache.value_cache))
         logits = self.lm_head(hidden_states)
         return logits, past_key_values
 

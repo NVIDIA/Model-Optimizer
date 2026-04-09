@@ -381,6 +381,9 @@ def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
         elif getattr(model.config, "is_encoder_decoder", False):
             # For other encoder-decoder models (non-VL), pass both encoder and decoder input ids
             model(fake_input, decoder_input_ids=decoder_fake_input)
+        elif hasattr(model, "get_dummy_inputs"):
+            # For speculative decoding models (EAGLE, etc.), use model-provided dummy inputs
+            model(**model.get_dummy_inputs())
         else:
             model(fake_input)
 

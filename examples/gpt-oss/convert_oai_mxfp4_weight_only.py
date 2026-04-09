@@ -122,11 +122,7 @@ if __name__ == "__main__":
     parser = create_parser()
     args = parser.parse_args()
 
-    kwargs = {
-        "device_map": "auto",
-        "torch_dtype": "auto",
-        "trust_remote_code": args.trust_remote_code,
-    }
+    kwargs = {"device_map": "auto", "dtype": "auto", "trust_remote_code": args.trust_remote_code}
     if args.lora_path:
         assert args.model_path is None, "You can only specify lora_path or model_path, not both."
         model_path = args.base_path

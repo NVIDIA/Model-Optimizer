@@ -1,5 +1,6 @@
-NVIDIA Model Optimizer Changelog
-================================
+Changelog
+=========
+
 0.44 (2026-05-xx)
 ^^^^^^^^^^^^^^^^^
 
@@ -25,6 +26,8 @@ NVIDIA Model Optimizer Changelog
 **Misc**
 
 - [Security] Changed the default of ``weights_only`` to ``True`` in ``torch.load`` for secure checkpoint loading. If you need to load a checkpoint that requires unpickling arbitrary objects, first register the class in ``torch.serialization.add_safe_globals([cls])`` before loading. Added :meth:`safe_save <modelopt.torch.utils.serialization.safe_save>` and :meth:`safe_load <modelopt.torch.utils.serialization.safe_load>` API to save and load checkpoints securely.
+- Bump minimum required PyTorch version to 2.8.
+- [Experimental] Add support for transformers>=5.0. Unified Hugging Face checkpoint export for quantized checkpoints may not work for MoE models with transformers>=5.0 yet.
 
 0.43 (2026-04-09)
 ^^^^^^^^^^^^^^^^^

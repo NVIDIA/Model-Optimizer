@@ -22,20 +22,24 @@ from torch import __version__ as _torch_version
 
 from . import distill, nas, opt, peft, prune, quantization, sparsity, speculative, utils
 
-if _Version(_torch_version) < _Version("2.7"):
+if _Version(_torch_version) < _Version("2.9"):
     _warnings.warn(
-        "nvidia-modelopt will drop torch<2.7 support in a future release.", DeprecationWarning
+        "nvidia-modelopt will drop torch<2.9 support in a future release.", DeprecationWarning
     )
 
-# Since `hf` dependencies are optional and users have pre-installed transformers, we need to ensure
-# correct version is installed to avoid incompatibility issues.
+
 try:
     from transformers import __version__ as _transformers_version
 
-    if not (_Version("4.56") <= _Version(_transformers_version) < _Version("5.0")):
+    if _Version(_transformers_version) < _Version("4.56"):
         _warnings.warn(
-            f"transformers version {_transformers_version} is not tested with nvidia-modelopt and may cause issues. "
-            "Please install recommended version with `pip install nvidia-modelopt[hf]` if working with HF models.",
+            f"transformers {_transformers_version} is not tested with current version of modelopt and may cause issues."
+            " Please install recommended version with `pip install -U nvidia-modelopt[hf]` if working with HF models.",
+        )
+    elif _Version(_transformers_version) >= _Version("5.0"):
+        _warnings.warn(
+            "transformers>=5.0 support is experimental. Unified Hugging Face checkpoint export for quantized "
+            "checkpoints may not work for some models yet.",
         )
 except ImportError:
     pass

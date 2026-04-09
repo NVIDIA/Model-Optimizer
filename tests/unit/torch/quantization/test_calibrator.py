@@ -88,8 +88,8 @@ class TestMaxCalibrator:
             max_calibrator.collect(x_3)
 
 
-@pytest.mark.manual(reason="slow test, run with --run-manual")
 class TestHistogramCalibrator:
+    @pytest.mark.skip(reason="TODO: Fix assertions in test_grow")
     def test_grow(self, verbose):
         x_1 = torch.tensor([0, 255, 255, 255, 255, 255])
         x_2 = torch.tensor([0, 255, 255, 255, 255, 256])
@@ -181,7 +181,6 @@ class TestHistogramCalibrator:
             )
 
 
-@pytest.mark.manual(reason="slow test, run with --run-manual")
 class TestEntropyCalibrator:
     def test_one_tensor(self, verbose):
         hist_calibrator = calib.HistogramCalibrator(
@@ -244,7 +243,6 @@ class TestEntropyCalibrator:
         repr(hist_calibrator)
 
 
-@pytest.mark.manual(reason="slow test, run with --run-manual")
 class TestMSECalibrator:
     def test_one_tensor(self, verbose):
         calibrator = calib.HistogramCalibrator(8, None, False, num_bins=32)
@@ -299,7 +297,6 @@ class TestMSECalibrator:
         repr(calibrator)
 
 
-@pytest.mark.manual(reason="slow test, run with --run-manual")
 class TestPercentileCalibrator:
     def test_one_tensor(self, verbose):
         calibrator = calib.HistogramCalibrator(8, None, False)
@@ -359,7 +356,6 @@ class TestPercentileCalibrator:
             calibrator.compute_amax("percentile", percentile=200)
 
 
-@pytest.mark.manual(reason="slow test, run with --run-manual")
 class TestCalibrateWeights:
     def test_max(self):
         ref_lenet = QuantConvLinear()

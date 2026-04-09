@@ -180,7 +180,7 @@ def get_initial_inputs(
     """
     # tokenizer.pad_token = "[PAD]"
     tokenizer.pad_token = tokenizer.eos_token
-    encodings_dict = tokenizer.batch_encode_plus(prompt, padding=True)
+    encodings_dict = tokenizer(prompt, padding=True)
 
     # max_length = model.config.max_position_embeddings
     # input_ids = tokenizer.encode(text, truncation=True, padding='max_length', max_length=max_length)
@@ -242,7 +242,7 @@ def get_calib_inputs(
 
     # dataset2 = dataset2.shuffle(seed=42)
     dataset2 = dataset2[column][:calib_size]
-    batch_encoded = tokenizer.batch_encode_plus(
+    batch_encoded = tokenizer(
         dataset2, return_tensors="pt", padding=True, truncation=True, max_length=block_size
     )  # return_tensors="pt",
     batch_encoded = batch_encoded.to(device)

@@ -20,19 +20,19 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from types import FrameType
-from typing import Any
-
 import numpy as np
 import torch
 import transformers
 from datasets import load_dataset
 from packaging.version import Version
 from scripts.ar_validate import validate_ar
-from torch.utils.data import Dataset
 from transformers import Trainer, TrainerCallback
-from transformers.trainer_pt_utils import LabelSmoother
 
 import modelopt
+from modelopt.torch.speculative.eagle.utils import (
+    EagleOfflineDataCollator,
+    OfflineSupervisedDataset,
+)
 from modelopt.torch.speculative.utils import get_ttt_msk_func
 from modelopt.torch.utils import print_rank_0
 from modelopt.torch.utils.distributed import is_master
@@ -49,92 +49,8 @@ try:
 except (ImportError, AttributeError):
     wandb = None
 
-IGNORE_TOKEN_ID = LabelSmoother.ignore_index
-
-
-class OfflineSupervisedDataset(Dataset):
-    """Offline dataset for supervised fine-tuning.
-
-    This dataset loads data on-the-fly from pre-processed .pt data files.
-
-    Args:
-        dumped_files (list): A list of file paths to the dumped .pt files.
-    """
-
-    def __init__(
-        self,
-        dumped_files,
-    ):
-        super().__init__()
-        self.dumped_files = dumped_files
-
-    def __len__(self):
-        return len(self.dumped_files)
-
-    def __getitem__(self, i) -> dict[str, torch.Tensor]:
-        try:
-            offline_data = torch.load(self.dumped_files[i])
-        except Exception as e:
-            print(
-                f"[ERROR] Failed to load file at index={i}, "
-                f"path='{self.dumped_files[i]}', error={e}. "
-                "Reusing data from previous index (i-1)."
-            )
-            return self.__getitem__(i - 1)
-
-        labels = torch.full_like(offline_data["input_ids"], IGNORE_TOKEN_ID)
-        labels[..., :-1] = offline_data["input_ids"][..., 1:]
-
-        ret = {
-            "input_ids": offline_data["input_ids"],
-            "base_model_hidden_states": offline_data["hidden_states"],
-            "aux_hidden_states": offline_data["aux_hidden_states"],
-            "attention_mask": torch.ones_like(offline_data["input_ids"]),
-            "loss_mask": torch.ones_like(offline_data["input_ids"]),
-            "labels": labels,
-        }
-        return ret
-
-
-class EagleOfflineDataCollator:
-    """Data collator that truncate or pads data for offline training."""
-
-    def __init__(self, train_len):
-        self.train_len = train_len
-
-    def _pad_or_truncate(self, x: torch.Tensor, length: int, dim: int = 0):
-        """Pad or truncate a tensor to length along a given dimension."""
-        dim = dim % x.ndim  # support negative dimension
-
-        # allocate output tensor
-        out_shape = list(x.shape)
-        out_shape[dim] = length
-        out = x.new_zeros(out_shape)
-
-        # consturct copy slice
-        slc = [slice(None)] * x.ndim
-        slc[dim] = slice(0, min(length, x.size(dim)))
-
-        # populate output tensor
-        out[tuple(slc)] = x[tuple(slc)]
-        return out
-
-    def __call__(self, features: list[dict[str, Any]]) -> dict[str, Any]:
-        base_batch = {
-            k: torch.stack([self._pad_or_truncate(item[k], self.train_len) for item in features])
-            for k in ["input_ids", "attention_mask", "loss_mask", "labels"]
-        }
-
-        base_model_outputs = {
-            k: torch.stack([self._pad_or_truncate(item[k], self.train_len) for item in features])
-            for k in ["base_model_hidden_states", "aux_hidden_states"]
-        }
-
-        batch = {
-            **base_batch,
-            "base_model_outputs": base_model_outputs,
-        }
-        return batch
+# Re-export for backward compatibility
+__all__ = ["EagleOfflineDataCollator", "OfflineSupervisedDataset"]
 
 
 def make_eagle_supervised_data_module(
@@ -168,6 +84,11 @@ def make_eagle_supervised_data_module(
         if not dumped_files:
             raise ValueError(f"No .pt files found in {data_args.offline_data_path}")
 
+        # sample_size=-1 means use all samples; positive integer selects that many
+        if data_args.sample_size == 0 or data_args.sample_size < -1:
+            raise ValueError("sample_size must be -1 (use all samples) or a positive integer")
+        if data_args.sample_size > 0:
+            dumped_files = dumped_files[: data_args.sample_size]
         train_dataset = OfflineSupervisedDataset(dumped_files)
         data_collator = EagleOfflineDataCollator(train_len=train_len)
 

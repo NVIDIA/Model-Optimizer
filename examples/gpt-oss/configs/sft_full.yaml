@@ -16,7 +16,7 @@ per_device_train_batch_size: 2
 per_device_eval_batch_size: 2
 gradient_accumulation_steps: 2
 max_length: 4096
-warmup_ratio: 0.03
+warmup_steps: 0.03 # use warmup_ratio if using transformers<5.0
 lr_scheduler_type: cosine_with_min_lr
 lr_scheduler_kwargs:
   min_lr_rate: 0.1
@@ -30,6 +30,6 @@ eval_steps: 8
 dataset_test_split: test
 
 # ModelOpt Quantization Parameters
-quant_cfg:  # Examples: MXFP4_MLP_WEIGHT_ONLY_CFG, NVFP4_MLP_WEIGHT_ONLY_CFG, NVFP4_MLP_ONLY_CFG
-            # For the full list of supported configs, do: mtq.config.choices
+quant_cfg: # Examples: MXFP4_MLP_WEIGHT_ONLY_CFG, NVFP4_MLP_WEIGHT_ONLY_CFG, NVFP4_MLP_ONLY_CFG
+  # For the full list of supported configs, do: mtq.config.choices
 calib_size: 128

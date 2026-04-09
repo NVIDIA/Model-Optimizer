@@ -1,3 +1,5 @@
+#!/bin/bash
+
 # SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -13,8 +15,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Nvidia Model Optimizer (modelopt)."""
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+source ${SCRIPT_DIR}/../service_utils.sh
 
-from importlib.metadata import version as _version
+trap 'error_handler $0 $LINENO' ERR
 
-__version__ = _version("nvidia-modelopt")
+###################################################################################################
+
+python modules/Model-Optimizer/examples/llm_ptq/hf_ptq.py \
+    --model ${HF_MODEL_CKPT} \
+    ${@}

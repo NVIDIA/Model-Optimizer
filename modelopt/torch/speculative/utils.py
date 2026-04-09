@@ -488,7 +488,7 @@ def load_vlm_or_llm(
     model_name_or_path: str,
     use_fake_base: bool = False,
     use_offline_training: bool = False,
-    torch_dtype: str | torch.dtype | None = None,
+    dtype: str | torch.dtype | None = None,
     device_map: str | None = None,
     trust_remote_code: bool = False,
 ):
@@ -502,7 +502,7 @@ def load_vlm_or_llm(
     Args:
         model_name_or_path: Local path or HuggingFace repo ID of the model.
         use_offline_training: Whether to load a memory-efficient model for offline training.
-        torch_dtype: dtype to use when loading the model.
+        dtype: dtype to use when loading the model.
         device_map: Device map passed to ``from_pretrained``.
         trust_remote_code: Whether to trust remote code.
     """
@@ -528,7 +528,7 @@ def load_vlm_or_llm(
     model = model_cls.from_pretrained(
         model_name_or_path,
         trust_remote_code=trust_remote_code,
-        torch_dtype=torch_dtype,
+        dtype=dtype,
         device_map=device_map,
         **extra,
     )
