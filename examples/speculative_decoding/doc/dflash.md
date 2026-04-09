@@ -22,13 +22,22 @@ Target Model (frozen)
 ```
 
 **Key components:**
-- **Feature Fusion**: Multi-layer hidden states → Linear(num_layers × hidden_size, hidden_size) + RMSNorm
-- **KV Injection**: In each draft decoder layer, K/V = concat(k_proj(target_hidden), k_proj(noise))
-  with QK-norm. Q comes from noise only.
-- **Parallel Drafting**: Position 0 is the anchor (known token), positions 1..B-1 are mask tokens
-  predicted in parallel. Bidirectional attention within the block.
-- **Random Anchor Sampling**: During training, anchor positions are sampled randomly from
-  valid (assistant response) positions, not uniformly spaced.
+- **Feature Fusion**: Multi-layer hidden states → Linear(num_layers × hidden_size, hidden_size) + RMSNorm.
+  Unlike EAGLE3 which uses a single layer's hidden state, DFlash concatenates hidden states from
+  multiple target layers (e.g., layers 1, 9, 17, 25, 33) to give the draft model richer context.
+- **KV Injection**: In each draft decoder layer, K and V are projected from the concatenation of
+  target hidden states and the block's own embeddings. Q is projected from the block embeddings only
+  (the `[anchor, mask, mask, ...]` token embeddings). This lets the draft model attend to the
+  full target context while generating all block positions in parallel.
+- **Parallel Drafting**: Position 0 is the anchor (the last accepted token — known and correct),
+  positions 1..B-1 are filled with a special mask token (similar to BERT's `[MASK]`). The draft
+  model predicts all B-1 unknown positions in a single forward pass, unlike autoregressive drafters
+  (EAGLE3) which predict one token at a time. Benefit: one forward pass produces B-1 draft tokens.
+- **Random Anchor Sampling**: During training, anchors are sampled randomly from assistant response
+  positions (where `loss_mask=1`), not placed at fixed intervals. The anchor is the starting token
+  of each training block — it's always correct (from the ground truth) and the model learns to
+  predict the next B-1 tokens given this anchor and the target's hidden states. See the
+  [illustrated example](#random-anchor-sampling-num_anchors) below for why this improves efficiency.
 
 **Draft model components** (Qwen3-based):
 - `Qwen3MLP`, `Qwen3RMSNorm`, `Qwen3RotaryEmbedding` from transformers
