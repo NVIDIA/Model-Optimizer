@@ -39,6 +39,58 @@ Target Model (frozen)
   predict the next B-1 tokens given this anchor and the target's hidden states. See the
   [illustrated example](#random-anchor-sampling-num_anchors) below for why this improves efficiency.
 
+**KV Injection (token-level example):**
+
+Given context `"The answer is"` and block_size=4 with anchor `"is"`:
+
+```
+Target model hidden states (from frozen base model):
+  h["The"]  h["answer"]  h["is"]     ← target_hidden (ctx_len=3)
+     │          │           │
+     └──── FC + RMSNorm ────┘
+              │
+     fused context features
+
+Block input (draft token embeddings):
+  embed("is")  embed(MASK)  embed(MASK)  embed(MASK)     ← noise_embedding (block_size=4)
+     pos=3       pos=4        pos=5        pos=6
+
+In each DFlash decoder layer:
+  Q = q_proj(noise_embedding)                             ← shape [4, head_dim]
+      only the block tokens generate queries
+
+  K = concat(                                             ← shape [7, head_dim]
+        k_proj(fused_context),   ← from target hidden     [3 positions: "The","answer","is"]
+        k_proj(noise_embedding)  ← from block tokens      [4 positions: "is",MASK,MASK,MASK]
+      )
+
+  V = concat(v_proj(fused_context), v_proj(noise_embedding))  ← same shape as K
+
+  Attention: Q (4 tokens) attends to K/V (7 tokens)
+  ┌─────────────────────────────────────────────────────────────┐
+  │           K/V positions                                     │
+  │     context (from target)     │    block (from draft)       │
+  │  "The"  "answer"  "is"       │  "is"  MASK  MASK  MASK     │
+  │  pos=0   pos=1    pos=2      │  pos=3  pos=4 pos=5 pos=6   │
+  ├───────────────────────────────┼─────────────────────────────┤
+  │ Q pos=3 ("is"):     attends to all 7 K/V positions         │
+  │ Q pos=4 (MASK):     attends to all 7 K/V positions         │
+  │ Q pos=5 (MASK):     attends to all 7 K/V positions         │
+  │ Q pos=6 (MASK):     attends to all 7 K/V positions         │
+  └─────────────────────────────────────────────────────────────┘
+  (bidirectional within block, no attention mask at inference)
+
+  Output → lm_head → predictions:
+    pos=3: skip (anchor, already known)
+    pos=4: predict token after "is"      → "5"
+    pos=5: predict token after "is 5"    → "."
+    pos=6: predict token after "is 5."   → "[EOS]"
+```
+
+The draft model sees the target's internal representation of the context (via KV injection)
+without re-running the target model. This is what makes DFlash efficient — the expensive
+target model forward pass happens once, and the lightweight draft model reuses its hidden states.
+
 **Draft model components** (Qwen3-based):
 - `Qwen3MLP`, `Qwen3RMSNorm`, `Qwen3RotaryEmbedding` from transformers
 - Sliding window attention supported via `config.layer_types` *(implemented, not yet validated end-to-end)*
