@@ -911,7 +911,7 @@ def pad_nvfp4_weights(
             (_roundup(scale.shape[1], 16) - scale.shape[1]) if padding_strategy == "row_col" else 0
         )
 
-        if pad_r > 0 or pad_c_w > 0:
+        if pad_r > 0 or pad_c_w > 0 or pad_c_s > 0:
             state_dict[w_key] = torch.nn.functional.pad(weight, (0, pad_c_w, 0, pad_r))
             state_dict[s_key] = torch.nn.functional.pad(scale, (0, pad_c_s, 0, pad_r))
             padded_count += 1

@@ -19,6 +19,7 @@ import json
 
 import pytest
 import torch
+from safetensors import safe_open
 from safetensors.torch import load_file, save_file
 
 from modelopt.torch.export.diffusers_utils import (
@@ -159,6 +160,13 @@ class TestPostprocessSafetensors:
 
         reloaded = load_file(str(tmp_path / "model.safetensors"))
         assert torch.allclose(reloaded["weight"], sd["weight"])
+        with safe_open(str(tmp_path / "model.safetensors"), framework="pt", device="cpu") as f:
+            metadata = f.metadata()
+        assert json.loads(metadata["quantization_config"]) == hf_quant_config
+        assert json.loads(metadata["_quantization_metadata"]) == {
+            "format_version": "1.0",
+            "layers": {},
+        }
 
     def test_padding_and_swizzle(self, tmp_path):
         from modelopt.torch.export.unified_export_hf import _postprocess_safetensors
@@ -176,6 +184,7 @@ class TestPostprocessSafetensors:
         reloaded = load_file(str(tmp_path / "model.safetensors"))
         assert reloaded["layer0.weight"].shape[0] == 32
         assert reloaded["layer0.weight_scale"].dtype == torch.float8_e4m3fn
+        assert reloaded["layer0.weight_scale"].shape == (128, 64 // 16)
 
     def test_sharded_guard(self, tmp_path):
         from modelopt.torch.export.unified_export_hf import _postprocess_safetensors
