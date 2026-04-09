@@ -690,7 +690,7 @@ def download_hf_dataset_as_jsonl(
     output_dir: str | Path,
     json_keys: str | list[str] = ["text"],
     name: str | None = None,
-    split: str | None = "train",
+    split: str | None = None,
     max_samples_per_split: int | None = None,
     num_proc: int | None = None,
 ) -> list[str]:
@@ -701,7 +701,7 @@ def download_hf_dataset_as_jsonl(
         output_dir: Directory to save the JSONL files
         json_keys: Key or list of keys to extract from the dataset. Defaults to ["text"].
         name: Name of the subset to download
-        split: Split of the dataset to download. Defaults to "train".
+        split: Split of the dataset to download. Defaults to None (all splits).
         max_samples_per_split: Maximum number of samples to download per split. Defaults to None.
         num_proc: Number of processes to use for parallel processing. Defaults to None.
 
@@ -744,7 +744,6 @@ def download_hf_dataset_as_jsonl(
         print(f"\t{entry}")
 
     for entry in splits_to_process:
-        skip_processing = False
         path = entry["dataset"]
         name = entry.get("config", None)
         split = entry["split"]
@@ -761,12 +760,9 @@ def download_hf_dataset_as_jsonl(
 
         for key in json_keys:
             if key not in ds.features:
-                warn(f"[SKIP] {key=} not found in {ds.features=}")
-                skip_processing = True
-                break
-
-        if skip_processing:
-            continue
+                raise KeyError(
+                    f"{key=} not found in dataset features. Available: {list(ds.features)}"
+                )
 
         print(f"Saving raw dataset to {jsonl_file_path}")
         ds.to_json(jsonl_file_path, num_proc=num_proc)
