@@ -609,7 +609,7 @@ def load_vlm_or_llm(
     model = model_cls.from_pretrained(
         model_name_or_path,
         trust_remote_code=trust_remote_code,
-        dtype=dtype,
+        torch_dtype=dtype,
         device_map=device_map,
         **extra,
     )
