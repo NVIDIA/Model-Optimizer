@@ -6,7 +6,5 @@ ltx-trainer @ git+https://github.com/Lightricks/LTX-2.git#subdirectory=packages/
 
 # NVIDIA ModelOpt (quantization & distillation)
 nvidia-modelopt
-pyyaml
 safetensors
 
-torch>=2.0

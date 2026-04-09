@@ -23,6 +23,8 @@ from contextlib import contextmanager, nullcontext
 from typing import Any
 
 import torch
+from huggingface_hub import try_to_load_from_cache
+from huggingface_hub.errors import HFValidationError
 
 from modelopt.torch.utils import print_rank_0
 
@@ -57,7 +59,16 @@ def register_for_patching(name: str, cls: type, patch_methods: list[tuple[str, A
 
 
 def _get_modelopt_state_path(model_name_or_path: str) -> str:
-    return os.path.join(model_name_or_path, _MODELOPT_STATE_SAVE_NAME)
+    """Get the path to the ModelOpt state file or empty string if not found.
+
+    Also handles HF model card as input path. However for hf hub models, we dont have modelopt_state at the moment.
+    """
+    if os.path.isdir(model_name_or_path):
+        return os.path.join(model_name_or_path, _MODELOPT_STATE_SAVE_NAME)
+    try:
+        return try_to_load_from_cache(model_name_or_path, _MODELOPT_STATE_SAVE_NAME) or ""
+    except HFValidationError:
+        return ""
 
 
 @contextmanager

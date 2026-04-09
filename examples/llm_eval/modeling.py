@@ -187,7 +187,7 @@ class SeqToSeqModel(EvalModel):
                 args.update(device_map="auto")
             if self.load_8bit:
                 args.update(device_map="auto", load_in_8bit=True)
-            args.update(torch_dtype=getattr(torch, self.dtype) if self.dtype != "auto" else "auto")
+            args.update(dtype=getattr(torch, self.dtype) if self.dtype != "auto" else "auto")
             if self.attn_implementation:
                 args["attn_implementation"] = self.attn_implementation
             self.model = AutoModelForSeq2SeqLM.from_pretrained(
@@ -246,7 +246,7 @@ class CausalModel(SeqToSeqModel):
                 args.update(device_map="auto")
             if self.load_8bit:
                 args.update(device_map="auto", load_in_8bit=True)
-            args.update(torch_dtype=getattr(torch, self.dtype) if self.dtype != "auto" else "auto")
+            args.update(dtype=getattr(torch, self.dtype) if self.dtype != "auto" else "auto")
             if self.attn_implementation:
                 args["attn_implementation"] = self.attn_implementation
             self.model = AutoModelForCausalLM.from_pretrained(
@@ -327,7 +327,7 @@ class LlamaModel(SeqToSeqModel):
                 args.update(device_map="auto")
             if self.load_8bit:
                 args.update(device_map="auto", load_in_8bit=True)
-            args.update(torch_dtype=getattr(torch, self.dtype) if self.dtype != "auto" else "auto")
+            args.update(dtype=getattr(torch, self.dtype) if self.dtype != "auto" else "auto")
             self.model = LlamaForCausalLM.from_pretrained(self.model_path, **args)
             print_gpu_utilization()
             if self.lora_path:

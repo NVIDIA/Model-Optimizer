@@ -15,8 +15,11 @@
 
 """Utilities to describe symbols in the dynamic attention module."""
 
+import torch
+import transformers
+from packaging.version import Version
 from torch import nn
-from transformers.models.bert.modeling_bert import BertAttention
+from transformers.models.bert.modeling_bert import BertAttention, BertLayer
 from transformers.models.gptj.modeling_gptj import GPTJAttention
 
 from ..symbols import Symbol, SymInfo, SymMap
@@ -56,3 +59,57 @@ def get_hf_attn_sym_info_sortable(mod: nn.Module) -> SymInfo:
 @SymMap.register([GPTJAttention])
 def get_hf_attn_sym_info_unsortable(mod: nn.Module) -> SymInfo:
     return get_hf_attn_sym_info(sortable_attn=True)
+
+
+# In transformers>=5.0, BertLayer.forward uses tuple unpacking on the BertAttention output
+# (e.g. `self_attn_out, _ = self.attention(...)`), which FX symbolic tracing cannot handle when
+# BertAttention is a registered leaf (the proxy is not iterable). Patch BertLayer.forward to use
+# indexing instead, and call feed_forward_chunk directly (equivalent to apply_chunking_to_forward
+# with chunk_size=0, which is the default for BERT).
+if Version(transformers.__version__) >= Version("5.0"):
+
+    def _fx_friendly_bert_layer_forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask=None,
+        encoder_hidden_states=None,
+        encoder_attention_mask=None,
+        past_key_values=None,
+        cache_position=None,
+        **kwargs,
+    ):
+        # Use indexing instead of tuple-unpacking so FX can trace through BertLayer
+        # when BertAttention is a registered leaf (returns an opaque Proxy).
+        # Accept **kwargs so that a parent trace (e.g. BertEncoder) passing extra kwargs
+        # like position_ids does not mark BertLayer as failed. However, do NOT forward
+        # **kwargs into self.attention: FX represents **kwargs as a Proxy(_kwargs), so
+        # unpacking it with ** would trigger "Proxy cannot be iterated". Additionally,
+        # BertSelfAttention ignores these kwargs (e.g. position_ids) in practice.
+        _attn_outputs = self.attention(
+            hidden_states,
+            attention_mask,
+            past_key_values=past_key_values,
+            cache_position=cache_position,
+        )
+        attention_output = _attn_outputs[0]
+
+        if self.is_decoder and encoder_hidden_states is not None:
+            if not hasattr(self, "crossattention"):
+                raise ValueError(
+                    f"If `encoder_hidden_states` are passed, {self} has to be instantiated with"
+                    " cross-attention layers by setting `config.add_cross_attention=True`"
+                )
+            _cross_outputs = self.crossattention(
+                attention_output,
+                None,
+                encoder_hidden_states,
+                encoder_attention_mask,
+                past_key_values=past_key_values,
+            )
+            attention_output = _cross_outputs[0]
+
+        # Call feed_forward_chunk directly (equivalent to apply_chunking_to_forward when
+        # chunk_size_feed_forward=0, which is the BERT default).
+        return self.feed_forward_chunk(attention_output)
+
+    BertLayer.forward = _fx_friendly_bert_layer_forward

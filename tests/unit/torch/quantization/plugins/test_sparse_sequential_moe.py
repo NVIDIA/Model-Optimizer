@@ -13,15 +13,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for _is_sparse_moe_block and _QuantSparseMoe."""
+"""Tests for _is_sparse_sequaential_moe_block and _QuantSparseSequentialMoe."""
 
 import copy
 
 import pytest
 import torch
 import torch.nn as nn
+from packaging.version import Version
 
 pytest.importorskip("transformers")
+
+if Version(torch.__version__) < Version("2.9"):
+    pytest.skip("torch 2.8 grouped_mm is CUDA-only", allow_module_level=True)
 
 from _test_utils.torch.transformers_models import get_tiny_qwen3_moe
 
@@ -29,13 +33,13 @@ import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.nn import QuantModuleRegistry
 from modelopt.torch.quantization.plugins.huggingface import (
     TRANSFORMERS_VERSION_GE_5_0,
-    _is_sparse_moe_block,
+    _is_sparse_sequaential_moe_block,
     register_sparse_moe_on_the_fly,
 )
 
 
 # ---------------------------------------------------------------------------
-# Helpers: lightweight mock modules for _is_sparse_moe_block
+# Helpers: lightweight mock modules for _is_sparse_sequaential_moe_block
 # ---------------------------------------------------------------------------
 class _FakeGateWithRouter(nn.Module):
     """Mimics a v5.x TopKRouter gate with top_k and num_experts."""
@@ -97,25 +101,25 @@ class _MoEBlockFallback(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# Tests for _is_sparse_moe_block
+# Tests for _is_sparse_sequaential_moe_block
 # ---------------------------------------------------------------------------
 class TestIsSparseBlock:
     def test_no_experts_returns_false(self):
         module = nn.Linear(8, 8)
-        assert _is_sparse_moe_block(module) is False
+        assert _is_sparse_sequaential_moe_block(module) is False
 
     def test_experts_but_no_gate_or_topk_returns_false(self):
         module = nn.Module()
         module.experts = nn.ModuleList([nn.Linear(8, 8)])
-        assert _is_sparse_moe_block(module) is False
+        assert _is_sparse_sequaential_moe_block(module) is False
 
     def test_gate_with_router_attrs_returns_true(self):
         block = _MoEBlockWithGateRouter(num_experts=4, top_k=2)
-        assert _is_sparse_moe_block(block) is True
+        assert _is_sparse_sequaential_moe_block(block) is True
 
     def test_fallback_block_level_attrs_returns_true(self):
         block = _MoEBlockFallback(num_experts=4, top_k=2)
-        assert _is_sparse_moe_block(block) is True
+        assert _is_sparse_sequaential_moe_block(block) is True
 
     def test_gate_missing_num_experts_returns_false(self):
         """gate.top_k present but gate.num_experts absent -> primary path fails."""
@@ -124,7 +128,7 @@ class TestIsSparseBlock:
         gate = nn.Module()
         gate.top_k = 2
         module.gate = gate
-        assert _is_sparse_moe_block(module) is False
+        assert _is_sparse_sequaential_moe_block(module) is False
 
     def test_gate_missing_top_k_returns_false(self):
         """gate.num_experts present but gate.top_k absent -> primary path fails."""
@@ -133,14 +137,14 @@ class TestIsSparseBlock:
         gate = nn.Module()
         gate.num_experts = 4
         module.gate = gate
-        assert _is_sparse_moe_block(module) is False
+        assert _is_sparse_sequaential_moe_block(module) is False
 
     def test_block_level_top_k_infers_num_experts(self):
         """top_k on block + experts with __len__ -> num_experts is inferred, returns True."""
         module = nn.Module()
         module.experts = nn.ModuleList([nn.Linear(8, 8)])
         module.top_k = 2
-        assert _is_sparse_moe_block(module) is True
+        assert _is_sparse_sequaential_moe_block(module) is True
         assert module.num_experts == 1
 
     def test_block_level_top_k_no_len_returns_false(self):
@@ -148,14 +152,14 @@ class TestIsSparseBlock:
         module = nn.Module()
         module.experts = nn.Module()
         module.top_k = 2
-        assert _is_sparse_moe_block(module) is False
+        assert _is_sparse_sequaential_moe_block(module) is False
 
     def test_block_level_only_num_experts_returns_false(self):
         """Only num_experts on block (no top_k) -> fallback fails."""
         module = nn.Module()
         module.experts = nn.ModuleList([nn.Linear(8, 8)])
         module.num_experts = 4
-        assert _is_sparse_moe_block(module) is False
+        assert _is_sparse_sequaential_moe_block(module) is False
 
     def test_n_routed_experts_accepted(self):
         """A module with n_routed_experts (NemotronH-style) should be accepted."""
@@ -165,20 +169,21 @@ class TestIsSparseBlock:
         gate.top_k = 2
         gate.n_routed_experts = 4
         module.gate = gate
-        assert _is_sparse_moe_block(module) is True
+        assert _is_sparse_sequaential_moe_block(module) is True
 
 
 # ---------------------------------------------------------------------------
-# Tests for _QuantSparseMoe
+# Tests for _QuantSparseSequentialMoe
 # ---------------------------------------------------------------------------
-class TestQuantSparseMoe:
-    """Tests for _QuantSparseMoe using a real tiny Qwen3Moe model."""
+@pytest.mark.skipif(TRANSFORMERS_VERSION_GE_5_0, reason="Transformers v5 has stacked MoE")
+class TestQuantSparseSequentialMoe:
+    """Tests for _QuantSparseSequentialMoe using a real tiny Qwen3Moe model."""
 
     @staticmethod
     def _get_moe_block(model):
         """Return the first MoE block from the model."""
         for module in model.modules():
-            if _is_sparse_moe_block(module):
+            if _is_sparse_sequaential_moe_block(module):
                 return module
         raise RuntimeError("No MoE block found in model")
 
@@ -298,12 +303,13 @@ class TestQuantSparseMoe:
         assert converted.expert_token_count.sum().item() == 8 * top_k
 
 
-def test_qwen3_moe_quantize_with_token_forcing_and_counting():
+@pytest.mark.skipif(TRANSFORMERS_VERSION_GE_5_0, reason="Transformers v5 has stacked MoE")
+def test_qwen3_sequential_moe_quantize_with_token_forcing_and_counting():
     """End-to-end: mtq.quantize a Qwen3MoE with INT8 + moe_calib_experts_ratio + token counting."""
     model = get_tiny_qwen3_moe()
 
     # Verify detection
-    moe_found = any(_is_sparse_moe_block(m) for m in model.modules())
+    moe_found = any(_is_sparse_sequaential_moe_block(m) for m in model.modules())
     assert moe_found, "Qwen3MoE should be detected as a sparse MoE block"
 
     quant_cfg = copy.deepcopy(mtq.INT8_DEFAULT_CFG)

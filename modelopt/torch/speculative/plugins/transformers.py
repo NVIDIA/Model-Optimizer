@@ -38,7 +38,7 @@ import torch
 from torch import nn
 from torch.nn import CrossEntropyLoss
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask
-from transformers import Cache, DynamicCache, PretrainedConfig, PreTrainedModel
+from transformers import Cache, DynamicCache, PreTrainedModel
 from transformers.models.llama.modeling_llama import (
     LlamaDecoderLayer,
     LlamaRMSNorm,
@@ -601,7 +601,10 @@ class HFEagleModel(EagleModel):
         if rope_scaling and "rope_theta" not in rope_scaling and "rope_theta" in arch_config:
             rope_scaling["rope_theta"] = arch_config["rope_theta"]
 
-        self.eagle_config = PretrainedConfig.from_dict(arch_config)
+        # Use the base model's config class so fields like max_position_embeddings are declared
+        # before transformers>=5.5 rope standardization runs in __post_init__.
+        base_config_cls = type(self._base_llm_config)
+        self.eagle_config = base_config_cls.from_dict(arch_config)
         self.eagle_config.eagle_decoder_type = self.eagle_decoder_type
         self.eagle_config.draft_vocab_size = getattr(
             self.eagle_config, "draft_vocab_size", self.eagle_config.vocab_size

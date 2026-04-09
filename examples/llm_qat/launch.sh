@@ -165,7 +165,7 @@ CMD="accelerate launch --config-file accelerate_config/$CONFIG_FILE $FSDP_ARGS \
     --save_total_limit 2 \
     --learning_rate $LR \
     --weight_decay 0.0 \
-    --warmup_ratio 0.1 \
+    --warmup_steps 0.1 \
     --lr_scheduler_type linear \
     --logging_steps 1 \
     --report_to tensorboard \

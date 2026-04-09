@@ -583,7 +583,7 @@ def get_model(
     model_kwargs = config_kwargs.copy()
     # Don't set torch_dtype for VILA models as they handle it explicitly in their builder
     if "vila" not in ckpt_path.lower():
-        model_kwargs.setdefault("torch_dtype", "auto")
+        model_kwargs.setdefault("dtype", "auto")
 
     if "vila" in ckpt_path.lower():
         hf_vila = AutoModel.from_pretrained(
@@ -634,7 +634,7 @@ def get_model(
                     ckpt_path,
                     device_map="auto",
                     trust_remote_code=trust_remote_code,
-                    torch_dtype="auto",
+                    dtype="auto",
                 )
         else:
             architecture = hf_config.architectures[0]
@@ -666,7 +666,7 @@ def get_model(
                 model_kwargs2 = model_kwargs.copy()
                 if auto_model_module not in [AutoModelForCausalLM, AutoModel]:
                     model_kwargs2.pop("trust_remote_code", None)
-                model_kwargs2["torch_dtype"] = torch_dtype
+                model_kwargs2["dtype"] = torch_dtype
                 model_kwargs2.pop("max_memory", None)
                 model = from_config(hf_config, **model_kwargs2)
 
