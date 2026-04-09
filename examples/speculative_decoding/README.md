@@ -359,14 +359,14 @@ using masked parallel prediction with KV injection from the target model's hidde
 
 ### Quick Start
 
+For a complete end-to-end example (training + evaluation), see the
+[launcher example](../../tools/launcher/examples/Qwen/Qwen3-8B/hf_online_dflash.yaml):
+
 ```bash
-./launch_train.sh --config ../../modelopt_recipes/general/speculative_decoding/dflash.yaml \
-    model.model_name_or_path=/path/to/Qwen3-8B \
-    data.data_path=/path/to/train.jsonl \
-    training.output_dir=/path/to/output
+uv run launch.py --yaml examples/Qwen/Qwen3-8B/hf_online_dflash.yaml --yes
 ```
 
-### Key Configuration (dflash.yaml)
+### Key Configuration ([dflash.yaml](../../modelopt_recipes/general/speculative_decoding/dflash.yaml))
 
 | Field | Default | Description |
 |-------|---------|-------------|
@@ -376,6 +376,7 @@ using masked parallel prediction with KV injection from the target model's hidde
 | `dflash.dflash_self_logit_distillation` | true | Use logit distillation from target |
 | `dflash.dflash_architecture_config.num_hidden_layers` | 5 | Draft decoder layers |
 | `dflash.dflash_architecture_config.mask_token_id` | auto | Token ID for masked positions |
+| `training.answer_only_loss` | false | Mask loss on non-assistant tokens |
 
 ### Export
 

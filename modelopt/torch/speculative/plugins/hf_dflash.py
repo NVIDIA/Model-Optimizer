@@ -15,15 +15,41 @@
 
 """DFlash speculative decoding plugin for HuggingFace models.
 
-Matches the reference SpecForge implementation (github.com/sgl-project/SpecForge PR #415).
+Matches the reference SpecForge implementation (github.com/sgl-project/SpecForge).
 
 Architecture:
 - Feature Fusion: multi-layer target hidden states → FC + RMSNorm
 - KV Injection: fused features as K/V in every draft layer with QK-norm
-- Parallel Drafting: mask_token_id for unknown positions, causal within blocks
-- Loss: hard CE on input_ids[i] (position i predicts token i)
+- Parallel Drafting: mask_token_id for unknown positions, bidirectional within blocks
+- Random anchor sampling with exponential loss decay
+- Logit distillation from target model
 
 Reference: "DFlash: Block Diffusion for Flash Speculative Decoding" (arXiv:2602.06036)
+
+Draft model components:
+    The draft model currently uses Qwen3 components (MLP, RMSNorm, RotaryEmbedding)
+    from ``transformers.models.qwen3``, matching z-lab's reference checkpoint format.
+    Qwen3 sliding window attention is supported via ``config.layer_types``.
+    The draft architecture is independent of the target model — any target model can
+    be used as long as it provides hidden states.
+
+    To add support for other draft architectures:
+
+    Qwen3MoE (MoE MLP):
+        1. Import ``Qwen3MoeMLP`` from ``transformers.models.qwen3_moe``
+        2. Add a config flag (e.g., ``use_moe``) in ``dflash_architecture_config``
+        3. In ``DFlashDecoderLayer.__init__``, select MLP based on the flag
+        RMSNorm, RotaryEmbedding, and attention are shared across Qwen3 variants.
+
+    MLA (Multi-head Latent Attention, e.g., DeepseekV3/Kimi-K2):
+        MLA compresses K/V into a low-rank latent space. To support MLA in DFlash:
+        1. Replace ``DFlashAttention`` with an MLA-aware variant that handles
+           compressed KV injection (project target_hidden through MLA's down/up
+           projections before concatenating with noise K/V)
+        2. Handle lazy rope initialization (see ``_setup_kimi_k2_decoder`` in
+           ``modelopt.torch.speculative.utils`` for the EAGLE3 approach)
+        3. The ``_apply`` meta buffer fix in ``DFlashModule`` already handles the
+           lazy rope pattern needed for MLA models.
 """
 
 import torch
@@ -98,7 +124,12 @@ class DFlashAttention(nn.Module):
 
         # Resolve HF attention function matching SpecForge's dispatch
         self._attn_fn = None
-        self.sliding_window = None
+        # Qwen3 uses sliding window attention on some layers (config.layer_types)
+        if hasattr(config, "layer_types") and hasattr(config, "sliding_window"):
+            is_sliding = config.layer_types[layer_idx] == "sliding_attention"
+            self.sliding_window = config.sliding_window if is_sliding else None
+        else:
+            self.sliding_window = None
 
     def _get_attn_fn(self):
         """Lazily resolve the HF attention function."""
@@ -231,11 +262,30 @@ class DFlashModule(nn.Module):
         self._init_weights(config)
 
     def _apply(self, fn, recurse=True):
-        """Override _apply to handle meta-tensor rotary buffers during .to(device).
+        """Override _apply to fix meta-tensor rotary buffers before device transfer.
 
-        After checkpoint restore, rotary inv_freq buffers may be on meta device
-        (they are computed, not saved). Re-create rotary_emb before applying the
-        device/dtype transfer to avoid 'Cannot copy out of meta tensor' errors.
+        Why this is needed:
+            When resuming from a checkpoint, ModelOpt's ``enable_huggingface_checkpointing``
+            restores the model architecture from ``modelopt_state.pth``. During this restore,
+            ``DFlashModule.__init__`` runs and creates ``rotary_emb`` with its ``inv_freq``
+            buffer. However, ``inv_freq`` is a *computed* buffer (derived from ``rope_theta``
+            and ``head_dim``), not a learned parameter, so it is NOT saved in
+            ``model.safetensors``. After ``from_pretrained`` loads the saved weights, all
+            learned parameters are materialized on CPU, but ``inv_freq`` remains on the
+            **meta device** (a placeholder with shape but no data).
+
+            Later, HF Trainer calls ``model.to(device)`` which internally calls ``_apply``
+            on every submodule. When ``_apply`` reaches the meta ``inv_freq`` buffer, it
+            raises ``NotImplementedError: Cannot copy out of meta tensor``.
+
+        Fix:
+            Before ``super()._apply()`` transfers tensors to the target device, we check
+            if ``rotary_emb`` has any meta buffers. If so, we re-create it on CPU using
+            the stored config (``_rotary_config``). This produces a real ``inv_freq`` tensor
+            with correct values, which ``_apply`` can then safely move to GPU.
+
+            This approach is transparent to the training script (``main.py``) — no
+            mode-specific resume logic is needed there.
         """
         if hasattr(self, "rotary_emb") and any(b.is_meta for b in self.rotary_emb.buffers()):
             self.rotary_emb = _ROTARY_CLS(config=self._rotary_config, device="cpu")

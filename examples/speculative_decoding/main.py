@@ -176,8 +176,6 @@ def _load_config(config_path: str, overrides: list[str] = ()) -> tuple[dict, dic
 
 
 def train():
-    import json
-
     config_path, overrides = _parse_cli()
     hf_cfg, eagle_cfg, dflash_cfg = _load_config(config_path, overrides)
 
@@ -327,34 +325,7 @@ def train():
     )
 
     print_rank_0("Start training...")
-    if checkpoint and not os.path.isfile(
-        os.path.join(training_args.output_dir, "model.safetensors")
-    ):
-        # Resume from checkpoint subdir: try full resume first, fall back to
-        # partial resume (model weights + trainer state, fresh optimizer) if
-        # the optimizer state doesn't match.
-        try:
-            trainer.train(resume_from_checkpoint=checkpoint)
-        except ValueError as e:
-            if "parameter group" in str(e):
-                print_rank_0(
-                    f"Optimizer state mismatch: {e}\n"
-                    f"Resuming with fresh optimizer from {checkpoint}"
-                )
-                state_file = os.path.join(checkpoint, "trainer_state.json")
-                if os.path.isfile(state_file):
-                    state = json.load(open(state_file))
-                    resumed_step = state.get("global_step", 0)
-                    resumed_max_steps = state.get("max_steps", -1)
-                    print_rank_0(f"Resuming from step {resumed_step}/{resumed_max_steps}")
-                    if resumed_max_steps > 0:
-                        training_args.max_steps = resumed_max_steps
-                    trainer.state = trainer.state.load_from_json(state_file)
-                trainer.train()
-            else:
-                raise
-    else:
-        trainer.train(resume_from_checkpoint=checkpoint)
+    trainer.train(resume_from_checkpoint=checkpoint)
     trainer.save_state()
     trainer.save_model(training_args.output_dir)
 
