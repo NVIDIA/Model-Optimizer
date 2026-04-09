@@ -362,3 +362,37 @@ class TestWaterSICKVState:
         assert state.gamma is gamma
         assert state.perm is None
         assert state.rate == 2.5
+
+
+# ---------------------------------------------------------------------------
+# TestWaterSICKVCalibConfig
+# ---------------------------------------------------------------------------
+
+
+class TestWaterSICKVCalibConfig:
+    def test_defaults(self):
+        from modelopt.torch.quantization.algorithms.watersic_kv.config import WaterSICKVCalibConfig
+
+        cfg = WaterSICKVCalibConfig()
+        assert cfg.method == "watersic_kv"
+        assert cfg.target_rate == 2.0
+        assert cfg.kl_aware is False
+        assert cfg.use_lmmse is True
+        assert cfg.use_sequential is True
+
+    def test_custom_values(self):
+        from modelopt.torch.quantization.algorithms.watersic_kv.config import WaterSICKVCalibConfig
+
+        cfg = WaterSICKVCalibConfig(target_rate=4.0, kl_aware=True, importance_clip=20.0)
+        assert cfg.target_rate == 4.0
+        assert cfg.kl_aware is True
+        assert cfg.importance_clip == 20.0
+
+    def test_serialization_roundtrip(self):
+        from modelopt.torch.quantization.algorithms.watersic_kv.config import WaterSICKVCalibConfig
+
+        cfg = WaterSICKVCalibConfig(target_rate=3.0, kl_aware=True)
+        data = cfg.model_dump()
+        cfg2 = WaterSICKVCalibConfig(**data)
+        assert cfg2.target_rate == 3.0
+        assert cfg2.kl_aware is True

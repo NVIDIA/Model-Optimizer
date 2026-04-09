@@ -16,3 +16,8 @@
 """WaterSIC KV-cache quantization algorithm."""
 
 from __future__ import annotations
+
+from .config import WaterSICKVCalibConfig
+from .kv_quantizer import WaterSICKVHelper, WaterSICKVState
+
+__all__ = ["WaterSICKVCalibConfig", "WaterSICKVHelper", "WaterSICKVState"]
