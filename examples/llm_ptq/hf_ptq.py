@@ -350,6 +350,7 @@ def auto_quantize(
     )
 
     if is_base_model:
+        assert full_model is not None
         lm_head = full_model.lm_head
 
         def loss_func(output, data):
@@ -362,17 +363,22 @@ def auto_quantize(
             )
 
         if auto_quantize_method == "gradient":
+
             def forward_step(model, batch):
                 return model(**batch)
+
         elif auto_quantize_method == "kl_div":
+
             def forward_step(model, batch):
                 hidden_states = model(**batch).last_hidden_state
                 return lm_head(hidden_states)
+
         else:
             raise ValueError(
                 f"Invalid auto_quantize_method: {auto_quantize_method}. Must be 'gradient' or 'kl_div'"
             )
     else:
+
         def loss_func(output, data):
             # For transformers AutoModelForCausalLM models, the outputs are wrapped in `CausalLMOutputWithPast`
             # which contains the loss attribute.
@@ -380,12 +386,16 @@ def auto_quantize(
 
         if auto_quantize_method == "gradient":
             # For gradient-based method, return full output with loss
+
             def forward_step(model, batch):
                 return model(**batch)
+
         elif auto_quantize_method == "kl_div":
             # For KL divergence method, return only logits
+
             def forward_step(model, batch):
                 return model(**batch).logits
+
         else:
             raise ValueError(
                 f"Invalid auto_quantize_method: {auto_quantize_method}. Must be 'gradient' or 'kl_div'"
