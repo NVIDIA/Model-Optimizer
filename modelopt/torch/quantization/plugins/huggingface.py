@@ -786,105 +786,69 @@ class _QuantQwen3VLMoeTextExperts(QuantModule):
         return next_states
 
 
-class _Qwen35MoeExpertModule(nn.Module):
-    """Container for a single Qwen3.5 MoE expert's linear layers.
+class _QuantQwen35MoeExperts(_QuantFunctionalMixin):
+    """Quantized wrapper for ``transformers.Qwen3_5MoeExperts``.
 
-    Produces the naming pattern: experts.{id}.gate_proj.weight
-    (consistent with standard Qwen3 MoE per-expert module structure).
+    Keeps the original fused 3D ``gate_up_proj`` / ``down_proj`` parameters and
+    the unmodified HF forward (single ``F.linear`` + chunk per expert).
+
+    Per-expert quantization is achieved by intercepting ``F.linear`` and recovering
+    the expert index from the weight tensor's storage offset into the 3D parameter.
+    Each expert gets its own weight and input quantizers (``ModuleList``), so
+    calibration granularity matches the per-expert decomposition approach.
     """
 
-    def __init__(self, hidden_dim: int, expert_dim: int):
-        super().__init__()
-        self.gate_proj = nn.Linear(hidden_dim, expert_dim, bias=False)
-        self.up_proj = nn.Linear(hidden_dim, expert_dim, bias=False)
-        self.down_proj = nn.Linear(expert_dim, hidden_dim, bias=False)
+    def _get_expert_idx_from_gate_up(self, weight: torch.Tensor) -> int:
+        """Recover expert index from a ``gate_up_proj`` weight slice's storage offset.
 
-
-class _QuantQwen35MoeExperts(QuantModule):
-    def _setup(self):
-        """Modify the Qwen3_5MoeExperts by using per-expert nn.Module containers.
-
-        This produces the naming pattern: experts.{id}.gate_proj.weight
-        (consistent with standard Qwen3 MoE).
+        This relies on ``gate_up_proj[idx]`` returning a view into contiguous storage
+        (standard PyTorch indexing behaviour).  The invariant breaks if the tensor is
+        ``.contiguous()``-copied or redistributed by certain distributed wrappers.
         """
-        from accelerate import init_empty_weights
+        base_offset = self.gate_up_proj.storage_offset()
+        stride = self.gate_up_proj.stride(0)
+        if stride == 0:
+            return 0
+        return (weight.storage_offset() - base_offset) // stride
 
-        dtype, device = self.gate_up_proj.dtype, self.gate_up_proj.device
+    def _setup(self):
+        n = self.num_experts
+        self.gate_up_proj_input_quantizers = nn.ModuleList([TensorQuantizer() for _ in range(n)])
+        self.gate_up_proj_weight_quantizers = nn.ModuleList([TensorQuantizer() for _ in range(n)])
+        self.down_proj_input_quantizers = nn.ModuleList([TensorQuantizer() for _ in range(n)])
+        self.down_proj_weight_quantizers = nn.ModuleList([TensorQuantizer() for _ in range(n)])
 
-        def _copy_weight(module, weight):
-            module.to_empty(device=device)
-            with torch.no_grad():
-                module.weight.data = weight.detach().data.to(dtype=dtype, device=device)
+        self._register_temp_attribute("_down_proj_linear", False)
+        self._register_temp_attribute("_current_expert_idx", 0)
 
-        expert_dim = self.intermediate_dim
+    @property
+    def functionals_to_replace(self):
+        _orig_linear = torch.nn.functional.linear
 
-        with init_empty_weights():
-            expert_modules = nn.ModuleList(
-                [
-                    _Qwen35MoeExpertModule(self.hidden_dim, expert_dim)
-                    for _ in range(self.num_experts)
-                ]
-            )
+        # The toggle assumes the HF forward calls F.linear exactly twice per expert
+        # in strict alternation: first for gate_up_proj, then for down_proj.
+        # forward() resets the toggle before each call to super().forward(), so a
+        # stale state from a prior exception does not carry over across forward passes.
+        def _quantized_linear(input, weight, bias=None):
+            if self._down_proj_linear:
+                expert_idx = self._current_expert_idx
+                input = self.down_proj_input_quantizers[expert_idx](input)
+                weight = self.down_proj_weight_quantizers[expert_idx](weight)
+            else:
+                expert_idx = self._get_expert_idx_from_gate_up(weight)
+                self._current_expert_idx = expert_idx
+                input = self.gate_up_proj_input_quantizers[expert_idx](input)
+                weight = self.gate_up_proj_weight_quantizers[expert_idx](weight)
+            self._down_proj_linear = not self._down_proj_linear
+            return _orig_linear(input, weight, bias)
 
-        for idx in range(self.num_experts):
-            # gate_up_proj shape: (num_experts, 2*intermediate_dim, hidden_dim)
-            # Already in (out_features, in_features) format, no transpose needed
-            _copy_weight(expert_modules[idx].gate_proj, self.gate_up_proj[idx, :expert_dim, :])
-            _copy_weight(expert_modules[idx].up_proj, self.gate_up_proj[idx, expert_dim:, :])
-            # down_proj shape: (num_experts, hidden_dim, intermediate_dim)
-            # Already in (out_features, in_features) format
-            _copy_weight(expert_modules[idx].down_proj, self.down_proj[idx])
+        return [
+            (torch.nn.functional, "linear", _quantized_linear),
+        ]
 
-        delattr(self, "gate_up_proj")
-        delattr(self, "down_proj")
-        # Register expert modules directly as numbered children (like nn.ModuleList)
-        # so the naming pattern is: experts.{id}.gate_proj.weight (no extra nesting)
-        for idx in range(self.num_experts):
-            self.add_module(str(idx), expert_modules[idx])
-
-    def __len__(self):
-        """Support len() so the module is iterable like standard MoE experts."""
-        return self.num_experts
-
-    def __iter__(self):
-        """Support iteration over expert modules."""
-        for idx in range(self.num_experts):
-            yield getattr(self, str(idx))
-
-    def __getitem__(self, idx):
-        """Support indexing to get individual expert modules."""
-        return getattr(self, str(int(idx)))
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        top_k_index: torch.Tensor,
-        top_k_weights: torch.Tensor,
-    ) -> torch.Tensor:
-        final_hidden_states = torch.zeros_like(hidden_states)
-        with torch.no_grad():
-            expert_mask = torch.nn.functional.one_hot(top_k_index, num_classes=self.num_experts)
-            expert_mask = expert_mask.permute(2, 1, 0)
-            expert_hit = torch.greater(expert_mask.sum(dim=(-1, -2)), 0).nonzero()
-        for expert_idx in expert_hit:
-            expert_idx = expert_idx[0]
-            if expert_idx == self.num_experts:
-                continue
-            with torch.no_grad():
-                top_k_pos, token_idx = torch.where(expert_mask[expert_idx])
-            current_state = hidden_states[token_idx]
-            expert = self[expert_idx]
-            gate = expert.gate_proj(current_state)
-            up = expert.up_proj(current_state)
-            current_hidden_states = self.act_fn(gate) * up
-            current_hidden_states = expert.down_proj(current_hidden_states)
-            current_hidden_states = (
-                current_hidden_states * top_k_weights[token_idx, top_k_pos, None]
-            )
-            final_hidden_states.index_add_(
-                0, token_idx, current_hidden_states.to(final_hidden_states.dtype)
-            )
-        return final_hidden_states
+    def forward(self, *args, **kwargs):
+        self._down_proj_linear = False
+        return super().forward(*args, **kwargs)
 
 
 class _QuantDbrxFFN(_QuantSparseSequentialMoe):

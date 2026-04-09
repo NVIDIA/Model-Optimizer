@@ -677,6 +677,14 @@ def _process_quantized_modules(
                 with fsdp2_aware_weight_update(model, sub_module, reshard=False):
                     for weight_name in ["gate_up_proj", "down_proj"]:
                         _export_quantized_weight(sub_module, dtype, weight_name)
+            elif "Qwen3_5MoeExperts" in type(sub_module).__name__:
+                # Qwen3.5 MoE uses fused 3D params with per-expert quantizer
+                # ModuleLists at runtime.  Split into per-expert modules and
+                # export each projection individually.
+                from modelopt.torch.export.moe_utils import _export_qwen35_experts
+
+                with fsdp2_aware_weight_update(model, sub_module, reshard=False):
+                    _export_qwen35_experts(sub_module, dtype)
 
 
 def _export_transformers_checkpoint(
@@ -721,6 +729,11 @@ def _export_transformers_checkpoint(
                                 modules=list(linear_modulelist),
                                 quantizer_attrs=["input_quantizer"],
                             )
+                elif "QuantQwen3_5MoeExperts" in type(sub_module.experts).__name__:
+                    # Qwen3.5 MoE uses per-expert quantizer ModuleLists.
+                    # Amax fallback and scale export are handled by
+                    # _export_qwen35_experts in _process_quantized_modules.
+                    break  # exits the inner `for linear_name` loop; type check prevents re-entry
                 elif "QuantGptOssExperts" in type(sub_module.experts).__name__:
                     # Handle GPT-OSS experts specifically
                     # GPT-OSS experts use gate_up_proj and down_proj
