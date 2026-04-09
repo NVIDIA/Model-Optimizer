@@ -40,7 +40,7 @@ def get_calib_dataloader(
     else:
         raise NotImplementedError
 
-    batch_encoded = tokenizer.batch_encode_plus(
+    batch_encoded = tokenizer(
         dataset, return_tensors="pt", padding=True, truncation=True, max_length=block_size
     )
     if device:
@@ -98,7 +98,7 @@ def get_model(ckpt_path, dtype="fp16", trust_remote_code=False):
         dtype = torch.float32
     else:
         raise NotImplementedError(f"Unknown dtype {dtype}")
-    model_kwargs = {"torch_dtype": dtype}
+    model_kwargs = {"dtype": dtype}
 
     model = AutoModelForCausalLM.from_pretrained(
         ckpt_path, device_map="auto", **model_kwargs, trust_remote_code=trust_remote_code

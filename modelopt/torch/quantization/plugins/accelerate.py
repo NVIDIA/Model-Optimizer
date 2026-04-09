@@ -190,8 +190,10 @@ def init_quantized_weights(
 
         with init_empty_weights():
             # Fix torch_dtype to match original model
-            torch_dtype = kwargs.get("torch_dtype", getattr(config, "torch_dtype", torch.float16))
-            model = cls.from_config(config, torch_dtype=torch_dtype)
+            torch_dtype = kwargs.get(
+                "dtype", kwargs.get("torch_dtype", getattr(config, "torch_dtype", torch.float16))
+            )
+            model = cls.from_config(config, dtype=torch_dtype)
 
         mtq.quantize(model, quant_cfg)
         mtq.compress(model, config=mtq.CompressConfig(quant_gemm=quant_gemm))

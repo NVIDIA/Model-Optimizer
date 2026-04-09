@@ -129,7 +129,7 @@ class DataCollator:
             [instance[key] for instance in instances] for key in ("src_idx", "label_idx")
         )
 
-        batch_encoded = self.tokenizer.batch_encode_plus(
+        batch_encoded = self.tokenizer(
             sources,
             return_tensors="pt",
             padding=True,
@@ -254,7 +254,7 @@ def main():
     dataloader = get_dataloader(
         accelerator, dataset, tokenizer, args.model_max_length, args.batch_size, shuffle=False
     )
-    model = AutoModelForCausalLM.from_pretrained(args.model_dir, torch_dtype=torch.float16).to(
+    model = AutoModelForCausalLM.from_pretrained(args.model_dir, dtype=torch.float16).to(
         accelerator.device
     )
 

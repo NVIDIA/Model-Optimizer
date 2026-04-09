@@ -36,7 +36,6 @@ MIN_OPSET = {
 
 # onnxruntime version that supports opset 22+
 ORT_VERSION_FOR_OPSET_22 = version.parse("1.23.0")
-TORCH_VERSION_FOR_OPSET_22 = version.parse("2.8.0")
 
 
 # Test scenarios: (scenario_name, export_opset_offset, request_opset_offset, expected_opset_offset)
@@ -86,11 +85,6 @@ def test_quantize_opset_handling(
         if ort_version < ORT_VERSION_FOR_OPSET_22:
             pytest.skip(
                 f"Opset {max_opset} requires onnxruntime >= {ORT_VERSION_FOR_OPSET_22}, have {ort_version}"
-            )
-        torch_version = version.parse(torch.__version__)
-        if torch_version < TORCH_VERSION_FOR_OPSET_22:
-            pytest.skip(
-                f"Opset {max_opset} requires torch >= {TORCH_VERSION_FOR_OPSET_22}, have {torch_version}"
             )
 
     # Setup: create and export model

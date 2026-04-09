@@ -143,10 +143,7 @@ def main(args):
     # No need to specify attn_implementation here — mtsa.sparsify() sets it
     # automatically ("eager" for pytorch backend, "modelopt_triton" for triton).
     model = AutoModelForCausalLM.from_pretrained(
-        args.pyt_ckpt_path,
-        attn_implementation="eager",
-        torch_dtype="auto",
-        device_map="auto",
+        args.pyt_ckpt_path, attn_implementation="eager", dtype="auto", device_map="auto"
     )
     tokenizer = AutoTokenizer.from_pretrained(args.pyt_ckpt_path)
 
