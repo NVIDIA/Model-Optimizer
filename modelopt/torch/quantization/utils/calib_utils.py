@@ -47,6 +47,30 @@ from modelopt.torch.utils.network import bind_forward_method, unpatch_forward_me
 from modelopt.torch.utils.perf import get_used_gpu_mem_fraction
 
 
+def load_vector_lut_codebook(quantizer):
+    """Load vector LUT codebook and quantizer params from a weight_quantizer.
+
+    Returns:
+        Tuple of (codebook, quant_block_size, scale_type).
+    """
+    from luts import encode as luts_encode
+
+    extra_args = quantizer.backend_extra_args
+    encode_format = quantizer.num_bits
+    encode_path = extra_args.get("encode_path", "")
+    if encode_path and not encode_path.endswith("/"):
+        encode_path += "/"
+
+    if "sorted" in encode_format:
+        cb = torch.load(encode_path + encode_format + ".pt", map_location="cpu")
+        codebook = cb["sorted_values"].cuda().float()
+    else:
+        codebook, _ = luts_encode(encode_format, path=encode_path, norm=False, cuda=True)
+        codebook = codebook.float()
+
+    return codebook, extra_args.get("block_sizes"), extra_args.get("scale_type")
+
+
 def update_hessian(input, hessian, n_samples):
     """Update hessian matrix with new input samples using incremental formula.
 
@@ -140,11 +164,18 @@ class GPTQHelper:
         Populates ``self.weight`` and ``self.h_inv``, runs the blockwise update,
         logs MSE, and writes the result back to the module.
         """
+        backend_extra_args = getattr(self.module.weight_quantizer, "backend_extra_args", None)
+        is_vector_lut = bool(
+            backend_extra_args and backend_extra_args.get("lut_type") == "vector_lut"
+        )
         hessian = self.hessian.to(self.module.weight.device)
         self.weight = self.module.weight.data.float().clone()
         self._prepare_hessian_inverse(hessian, perc_damp)
 
-        self._blockwise_update(block_size)
+        if is_vector_lut:
+            self._blockwise_vector_update(block_size)
+        else:
+            self._blockwise_update(block_size)
 
         self._print_mse_error(hessian)
         self.module.weight.data = self.weight.reshape(self.module.weight.shape).to(
@@ -223,6 +254,64 @@ class GPTQHelper:
             self.weight[:, block_end:].addmm_(
                 errs, self.h_inv[block_start:block_end, block_end:], alpha=-1
             )
+
+    def _blockwise_vector_update(self, block_size):
+        """GPTQ blockwise update for vector LUT quantizers.
+
+        Pre-computes scales once, then runs the standard GPTQ 3-loop
+        with per-vector-group static quantization via clip_vector_prescaled.
+        """
+        import torch.nn.functional as F
+        from luts import clip_vector_prescaled, clip_vector_scalesign_fast
+
+        codebook, quant_block_size, scale_type = load_vector_lut_codebook(
+            self.module.weight_quantizer
+        )
+
+        # Get vector size from codebook
+        vector_size = codebook.shape[1]
+
+        assert self.weight is not None and self.h_inv is not None
+        num_cols = self.weight.shape[1]
+        assert block_size % quant_block_size == 0
+
+        # Pre-compute scales once outside the GPTQ loop
+        _, scales = clip_vector_scalesign_fast(
+            self.weight,
+            codebook,
+            quant_block_size,
+            scale_type,
+            scale_algo="max",
+            sign_scale=True,
+            return_scales=True,
+        )
+        scales_2d = scales.reshape(self.weight.shape[0], -1)
+
+        w = self.weight.clone()
+        h_inv = self.h_inv
+
+        for blk_start in range(0, num_cols, block_size):
+            blk_end = min(blk_start + block_size, num_cols)
+            errs = torch.zeros_like(w[:, blk_start:blk_end])
+
+            for j in range(blk_start, blk_end, vector_size):
+                d = min(vector_size, blk_end - j)
+                s = scales_2d[:, j // quant_block_size].contiguous()
+
+                sub = w[:, j : j + d].contiguous()
+                if d < vector_size:
+                    sub = F.pad(sub, (0, vector_size - d))
+                q_sub = clip_vector_prescaled(sub, codebook, s)
+
+                for k in range(d):
+                    col = j + k
+                    self.weight[:, col] = q_sub[:, k]
+                    err = (w[:, col] - q_sub[:, k]) / h_inv[col, col]
+                    errs[:, col - blk_start] = err
+                    w[:, col:blk_end].addr_(err, h_inv[col, col:blk_end], alpha=-1)
+
+            if blk_end < num_cols:
+                w[:, blk_end:] -= errs @ h_inv[blk_start:blk_end, blk_end:]
 
     def _print_mse_error(self, hessian):
         """Log Hessian-weighted relative MSE between ``self.weight`` and original weights."""
