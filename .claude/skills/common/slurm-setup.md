@@ -107,7 +107,7 @@ docker run --rm \
 - Mount paths with `-v` instead of `--container-mounts`
 - Pass env vars with `-e` instead of relying on SLURM env propagation
 - Use the two-script pattern: SLURM wrapper (sbatch directives + `docker run`) and inner runner (the actual work). The inner runner should unset SLURM env vars and set `HF_HOME`/`HF_DATASETS_OFFLINE` as needed
-- **NFS root_squash**: Docker runs as root by default, which NFS squashes to `nobody`. Run `chmod -R a+rwX` on all output/cache directories before submitting, or use `--user $(id -u):$(id -g)` in the `docker run` command
+- **NFS root_squash**: see section 5
 
 **How to detect which pattern to use**: Ask the user how they normally run containers, or check:
 
@@ -168,3 +168,28 @@ srun \
 ```
 
 Adjust `--nodes`, `--gpus-per-node`, and the distributed launch command per your workload.
+
+---
+
+## 5. NFS root_squash and Docker Permissions
+
+Docker containers typically run as root, but NFS filesystems with `root_squash` (the default) map root to `nobody`, blocking writes to directories owned by the user. This causes `PermissionError` when creating cache lock files, writing output, or saving logs.
+
+This affects both pyxis/enroot (`srun --container-image`) and plain `docker run` workflows.
+
+**Preferred fix** — run Docker with the host user's UID/GID to match NFS ownership:
+
+```bash
+docker run --user $(id -u):$(id -g) ...
+```
+
+> Note: `--user` may cause issues if the container expects root for package installation. In that case, fall back to the chmod approach below.
+
+**Fallback fix** — open permissions before submitting the job:
+
+```bash
+chmod -R a+rwX /path/to/workspace/
+chmod -R a+rwX /path/to/.hf_cache/
+```
+
+Scope `chmod` to only the directories the job needs — avoid world-writable paths on shared clusters.
