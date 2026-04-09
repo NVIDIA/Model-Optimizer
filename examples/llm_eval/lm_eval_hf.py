@@ -73,8 +73,6 @@ def _anymodel_patcher_context(pretrained, trust_remote_code=False):
         )
     except (ValueError, AttributeError):
         return contextlib.nullcontext()
-    if descriptor is None:
-        return contextlib.nullcontext()
     return deci_x_patcher(model_descriptor=descriptor)
 
 
@@ -160,6 +158,7 @@ HFLM.create_from_arg_string = classmethod(create_from_arg_string)
 
 
 def setup_parser_with_modelopt_args():
+    """Extend the lm-eval argument parser with ModelOpt quantization and sparsity options."""
     parser = setup_parser()
     parser.add_argument(
         "--quant_cfg",

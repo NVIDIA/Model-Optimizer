@@ -40,9 +40,9 @@ accelerate launch --multi_gpu --num_processes <num_copies_of_your_model> \
     --batch_size 4
 ```
 
-### Pruned Checkpoints (Puzzletron)
+### Heterogeneous Pruned Checkpoints (Puzzletron)
 
-Pruned checkpoints produced by Puzzletron are automatically detected and loaded with the appropriate model patcher. No additional flags are needed beyond specifying the checkpoint path:
+Heterogeneous pruned checkpoints produced by Puzzletron are automatically detected and loaded with the appropriate model patcher. No additional flags are needed beyond specifying the checkpoint path:
 
 ```sh
 python lm_eval_hf.py --model hf \
