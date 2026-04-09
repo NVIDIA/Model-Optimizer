@@ -786,106 +786,6 @@ class _QuantQwen3VLMoeTextExperts(QuantModule):
         return next_states
 
 
-class _Qwen35MoeExpertModule(nn.Module):
-    """Container for a single Qwen3.5 MoE expert's linear layers.
-
-    Produces the naming pattern: experts.{id}.gate_proj.weight
-    (consistent with standard Qwen3 MoE per-expert module structure).
-    """
-
-    def __init__(self, hidden_dim: int, expert_dim: int):
-        super().__init__()
-        self.gate_proj = nn.Linear(hidden_dim, expert_dim, bias=False)
-        self.up_proj = nn.Linear(hidden_dim, expert_dim, bias=False)
-        self.down_proj = nn.Linear(expert_dim, hidden_dim, bias=False)
-
-
-class _QuantQwen35MoeExperts(QuantModule):
-    def _setup(self):
-        """Modify the Qwen3_5MoeExperts by using per-expert nn.Module containers.
-
-        This produces the naming pattern: experts.{id}.gate_proj.weight
-        (consistent with standard Qwen3 MoE).
-        """
-        from accelerate import init_empty_weights
-
-        dtype, device = self.gate_up_proj.dtype, self.gate_up_proj.device
-
-        def _copy_weight(module, weight):
-            module.to_empty(device=device)
-            with torch.no_grad():
-                module.weight.data = weight.detach().data.to(dtype=dtype, device=device)
-
-        expert_dim = self.intermediate_dim
-
-        with init_empty_weights():
-            expert_modules = nn.ModuleList(
-                [
-                    _Qwen35MoeExpertModule(self.hidden_dim, expert_dim)
-                    for _ in range(self.num_experts)
-                ]
-            )
-
-        for idx in range(self.num_experts):
-            # gate_up_proj shape: (num_experts, 2*intermediate_dim, hidden_dim)
-            # Already in (out_features, in_features) format, no transpose needed
-            _copy_weight(expert_modules[idx].gate_proj, self.gate_up_proj[idx, :expert_dim, :])
-            _copy_weight(expert_modules[idx].up_proj, self.gate_up_proj[idx, expert_dim:, :])
-            # down_proj shape: (num_experts, hidden_dim, intermediate_dim)
-            # Already in (out_features, in_features) format
-            _copy_weight(expert_modules[idx].down_proj, self.down_proj[idx])
-
-        delattr(self, "gate_up_proj")
-        delattr(self, "down_proj")
-        # Register expert modules directly as numbered children (like nn.ModuleList)
-        # so the naming pattern is: experts.{id}.gate_proj.weight (no extra nesting)
-        for idx in range(self.num_experts):
-            self.add_module(str(idx), expert_modules[idx])
-
-    def __len__(self):
-        """Support len() so the module is iterable like standard MoE experts."""
-        return self.num_experts
-
-    def __iter__(self):
-        """Support iteration over expert modules."""
-        for idx in range(self.num_experts):
-            yield getattr(self, str(idx))
-
-    def __getitem__(self, idx):
-        """Support indexing to get individual expert modules."""
-        return getattr(self, str(int(idx)))
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        top_k_index: torch.Tensor,
-        top_k_weights: torch.Tensor,
-    ) -> torch.Tensor:
-        final_hidden_states = torch.zeros_like(hidden_states)
-        with torch.no_grad():
-            expert_mask = torch.nn.functional.one_hot(top_k_index, num_classes=self.num_experts)
-            expert_mask = expert_mask.permute(2, 1, 0)
-            expert_hit = torch.greater(expert_mask.sum(dim=(-1, -2)), 0).nonzero()
-        for expert_idx in expert_hit:
-            expert_idx = expert_idx[0]
-            if expert_idx == self.num_experts:
-                continue
-            with torch.no_grad():
-                top_k_pos, token_idx = torch.where(expert_mask[expert_idx])
-            current_state = hidden_states[token_idx]
-            expert = self[expert_idx]
-            gate = expert.gate_proj(current_state)
-            up = expert.up_proj(current_state)
-            current_hidden_states = self.act_fn(gate) * up
-            current_hidden_states = expert.down_proj(current_hidden_states)
-            current_hidden_states = (
-                current_hidden_states * top_k_weights[token_idx, top_k_pos, None]
-            )
-            final_hidden_states.index_add_(
-                0, token_idx, current_hidden_states.to(final_hidden_states.dtype)
-            )
-        return final_hidden_states
-
 
 def _get_fused_expert_intermediate_dim(module):
     """Resolve the intermediate (expert) dimension from a fused expert module.
@@ -1285,20 +1185,6 @@ except ImportError:
     pass
 
 
-try:
-    from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeExperts
-
-    # Qwen3_5MoeSparseMoeBlock registration is handled by register_sparse_moe_on_the_fly
-    # (auto-detected via gate.top_k + gate.num_experts + experts pattern).
-    # Only the fused expert weights need explicit registration.
-    if Qwen3_5MoeExperts not in QuantModuleRegistry:
-        QuantModuleRegistry.register({Qwen3_5MoeExperts: "hf.Qwen3_5MoeExperts"})(
-            _QuantQwen35MoeExperts
-        )
-except ImportError:
-    pass
-
-
 class _QuantGptOssExperts(_QuantFunctionalMixin):
     """Quantized wrapper for `transformers.GptOssExperts`.
 
@@ -1659,8 +1545,8 @@ class _QuantMoELinear(QuantModule):
     weights and scales back into the original 3D format.
 
     Note: we use expansion-then-reconstruction rather than the add_module() approach
-    (as in _QuantQwen35MoeExperts) because vLLM requires stacked 3D scaling factors;
-    per-expert expanded keys are not accepted by the downstream serving engine.
+    because vLLM requires stacked 3D scaling factors; per-expert expanded keys are
+    not accepted by the downstream serving engine.
     """
 
     def _setup(self):
