@@ -251,7 +251,7 @@ Trained on nvidia/Nemotron-Post-Training-Dataset-v2 (2M samples), 64 GPUs, 10 ep
 | Total Steps | 306,620 |
 | Final Per-Token Acc | 67.0% |
 
-### AR Evaluation
+### HuggingFace AR Evaluation
 
 AR is evaluated using `ar_validate.py` which calls `pseudo_speculative_generate`
 with online (context-dependent) ground truth:
