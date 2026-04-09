@@ -36,17 +36,19 @@ DRAFT=${DRAFT_MODEL}
 NUM_SPEC=${NUM_SPEC_TOKENS:-15}
 PORT=${VLLM_PORT:-8000}
 MAX_TOKENS=${MAX_BATCHED_TOKENS:-32768}
+TP=${TP_SIZE:-1}
 
 echo "=== vLLM DFlash Speculative Decoding ==="
 echo "Target: ${MODEL}"
 echo "Draft:  ${DRAFT}"
-echo "Spec tokens: ${NUM_SPEC}"
+echo "Spec tokens: ${NUM_SPEC}, TP: ${TP}"
 
 # Start vLLM server in background
 vllm serve ${MODEL} \
     --speculative-config "{\"method\": \"dflash\", \"model\": \"${DRAFT}\", \"num_speculative_tokens\": ${NUM_SPEC}}" \
     --attention-backend flash_attn \
     --max-num-batched-tokens ${MAX_TOKENS} \
+    --tensor-parallel-size ${TP} \
     --port ${PORT} \
     &
 SERVER_PID=$!
@@ -92,18 +94,18 @@ if [ -n "${BENCHMARK_PROMPTS}" ] && [ -f "${BENCHMARK_PROMPTS}" ]; then
 import json, time, requests
 
 with open('${BENCHMARK_PROMPTS}') as f:
-    prompts = [json.loads(line) for line in f][:20]
+    prompts = [json.loads(line) for line in f][:80]
 
 url = 'http://localhost:${PORT}/v1/completions'
 times = []
 tokens = []
 for i, p in enumerate(prompts):
-    q = p.get('turns', [p.get('question', 'Hello')])[0] if isinstance(p, dict) else str(p)
+    q = p.get('prompt', p.get('turns', [p.get('question', 'Hello')]))[0] if isinstance(p, dict) else str(p)
     start = time.time()
     r = requests.post(url, json={
         'model': '${MODEL}',
         'prompt': q,
-        'max_tokens': 512,
+        'max_tokens': 1024,
         'temperature': 0,
     }).json()
     elapsed = time.time() - start
