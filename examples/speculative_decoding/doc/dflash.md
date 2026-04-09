@@ -67,17 +67,15 @@ In each DFlash decoder layer:
   V = concat(v_proj(fused_context), v_proj(noise_embedding))  ← same shape as K
 
   Attention: Q (4 tokens) attends to K/V (7 tokens)
-  ┌─────────────────────────────────────────────────────────────┐
-  │           K/V positions                                     │
-  │     context (from target)     │    block (from draft)       │
-  │  "The"  "answer"  "is"       │  "is"  MASK  MASK  MASK     │
-  │  pos=0   pos=1    pos=2      │  pos=3  pos=4 pos=5 pos=6   │
-  ├───────────────────────────────┼─────────────────────────────┤
-  │ Q pos=3 ("is"):     attends to all 7 K/V positions         │
-  │ Q pos=4 (MASK):     attends to all 7 K/V positions         │
-  │ Q pos=5 (MASK):     attends to all 7 K/V positions         │
-  │ Q pos=6 (MASK):     attends to all 7 K/V positions         │
-  └─────────────────────────────────────────────────────────────┘
+
+              K/V:  "The" "answer" "is"  │  "is"  MASK  MASK  MASK
+                     pos0   pos1   pos2  │  pos3  pos4  pos5  pos6
+              ───────────────────────────┼──────────────────────────
+  Q pos=3 "is"  :    ✓      ✓      ✓    │   ✓     ✓     ✓     ✓
+  Q pos=4 MASK  :    ✓      ✓      ✓    │   ✓     ✓     ✓     ✓
+  Q pos=5 MASK  :    ✓      ✓      ✓    │   ✓     ✓     ✓     ✓
+  Q pos=6 MASK  :    ✓      ✓      ✓    │   ✓     ✓     ✓     ✓
+                     ─── context ───     │  ──── block ────────────
   (bidirectional within block, no attention mask at inference)
 
   Output → lm_head → predictions:
@@ -87,9 +85,59 @@ In each DFlash decoder layer:
     pos=6: predict token after "is 5."   → "[EOS]"
 ```
 
+**Training vs Inference:**
+
+```
+TRAINING (2 anchors, block_size=4):
+
+  Context tokens:  "The"  "answer"  "is"   "5"    "."
+  Block 0 (anchor="The"):  [The,  MASK, MASK, MASK]
+  Block 1 (anchor="is"):   [is,   MASK, MASK, MASK]
+
+  All blocks processed in ONE forward pass. Attention mask controls visibility:
+
+              K/V (context)          K/V (block 0)        K/V (block 1)
+              "The" "ans" "is" "5" "."  The  M    M    M    is   M    M    M
+               c0    c1   c2   c3  c4   b0   b1   b2   b3   b4   b5   b6   b7
+  Q ─────────────────────────────────────────────────────────────────────────
+  b0 "The"  :  ✗     ✗    ✗    ✗   ✗    ✓    ✓    ✓    ✓    ✗    ✗    ✗    ✗
+  b1  MASK  :  ✗     ✗    ✗    ✗   ✗    ✓    ✓    ✓    ✓    ✗    ✗    ✗    ✗
+  b2  MASK  :  ✗     ✗    ✗    ✗   ✗    ✓    ✓    ✓    ✓    ✗    ✗    ✗    ✗
+  b3  MASK  :  ✗     ✗    ✗    ✗   ✗    ✓    ✓    ✓    ✓    ✗    ✗    ✗    ✗
+  b4  "is"  :  ✓     ✓    ✗    ✗   ✗    ✗    ✗    ✗    ✗    ✓    ✓    ✓    ✓
+  b5  MASK  :  ✓     ✓    ✗    ✗   ✗    ✗    ✗    ✗    ✗    ✓    ✓    ✓    ✓
+  b6  MASK  :  ✓     ✓    ✗    ✗   ✗    ✗    ✗    ✗    ✗    ✓    ✓    ✓    ✓
+  b7  MASK  :  ✓     ✓    ✗    ✗   ✗    ✗    ✗    ✗    ✗    ✓    ✓    ✓    ✓
+               ── context ──────    ── block 0 ──────    ── block 1 ──────
+
+  Block 0: first block sees NO context (✗), only its own block (bidirectional ✓)
+  Block 1: sees context before anchor "is" (c0,c1 ✓), NOT its own anchor or later
+           plus its own block (bidirectional ✓)
+
+  Loss: computed on all non-anchor positions simultaneously.
+  No verification — ground truth labels known from training data.
+
+INFERENCE (one block at a time, NO attention mask):
+
+  Step 1: target forward("The answer is") → base_token = "5"
+          block = [5, MASK, MASK, MASK]
+
+              K/V:  "The" "ans" "is"  │  "5"  MASK  MASK  MASK
+  Q ─────────────────────────────────┼──────────────────────────
+  "5"   :            ✓     ✓     ✓   │   ✓     ✓     ✓     ✓
+  MASK  :            ✓     ✓     ✓   │   ✓     ✓     ✓     ✓
+  MASK  :            ✓     ✓     ✓   │   ✓     ✓     ✓     ✓
+  MASK  :            ✓     ✓     ✓   │   ✓     ✓     ✓     ✓
+
+  All ✓ — no mask at inference. Block sees full context freely.
+  Target verifies → accept 3 → sequence: "The answer is 5 . [EOS]"
+
+  Step 2: next block with grown context (5 tokens) ...
+```
+
 The draft model sees the target's internal representation of the context (via KV injection)
-without re-running the target model. This is what makes DFlash efficient — the expensive
-target model forward pass happens once, and the lightweight draft model reuses its hidden states.
+without re-running the target model for drafting. The expensive target forward pass is
+only needed for verification — the lightweight draft model reuses the target's hidden states.
 
 **Draft model components** (Qwen3-based):
 - `Qwen3MLP`, `Qwen3RMSNorm`, `Qwen3RotaryEmbedding` from transformers
