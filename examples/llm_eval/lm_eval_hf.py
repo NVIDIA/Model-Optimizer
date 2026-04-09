@@ -36,6 +36,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import contextlib
 import warnings
 
 import datasets
@@ -50,9 +51,33 @@ import modelopt.torch.opt as mto
 from modelopt.torch.quantization.utils import is_quantized
 from modelopt.torch.sparsity.attention_sparsity.conversion import is_attn_sparsified
 
+try:
+    import modelopt.torch.puzzletron.anymodel.models  # noqa: F401
+    from modelopt.torch.puzzletron.anymodel.model_descriptor.model_descriptor_factory import (
+        resolve_descriptor_from_pretrained,
+    )
+    from modelopt.torch.puzzletron.anymodel.puzzformer import deci_x_patcher
+
+    _ANYMODEL_AVAILABLE = True
+except ImportError:
+    _ANYMODEL_AVAILABLE = False
+
+
+def _anymodel_patcher_context(pretrained, trust_remote_code=False):
+    """Return a deci_x_patcher context if *pretrained* is a Puzzletron checkpoint, else a no-op."""
+    if not _ANYMODEL_AVAILABLE or not pretrained:
+        return contextlib.nullcontext()
+    try:
+        descriptor = resolve_descriptor_from_pretrained(
+            pretrained, trust_remote_code=trust_remote_code
+        )
+    except (ValueError, AttributeError):
+        return contextlib.nullcontext()
+    return deci_x_patcher(model_descriptor=descriptor)
+
 
 def create_from_arg_obj(cls: type[T], arg_dict: dict, additional_config: dict | None = None) -> T:
-    """Overrides the HFLM.create_from_arg_obj"""
+    """Override HFLM.create_from_arg_obj to add quantization, sparsity, and Puzzletron support."""
 
     quant_cfg = arg_dict.pop("quant_cfg", None)
     auto_quantize_bits = arg_dict.pop("auto_quantize_bits", None)
@@ -72,7 +97,10 @@ def create_from_arg_obj(cls: type[T], arg_dict: dict, additional_config: dict | 
     # Enable automatic save/load of modelopt state huggingface checkpointing
     mto.enable_huggingface_checkpointing()
 
-    model_obj = cls(**arg_dict, **additional_config)
+    with _anymodel_patcher_context(
+        arg_dict.get("pretrained"), arg_dict.get("trust_remote_code", False)
+    ):
+        model_obj = cls(**arg_dict, **additional_config)
     model_obj.tokenizer.padding_side = "left"
     if is_quantized(model_obj.model):
         # return if model is already quantized
@@ -109,10 +137,28 @@ def create_from_arg_obj(cls: type[T], arg_dict: dict, additional_config: dict | 
     return model_obj
 
 
+def create_from_arg_string(
+    cls: type[T], arg_string: str, additional_config: dict | None = None
+) -> T:
+    """Override HFLM.create_from_arg_string to support Puzzletron checkpoints."""
+    args = utils.simple_parse_args_string(arg_string)
+    additional_config = {} if additional_config is None else additional_config
+    args2 = {k: v for k, v in additional_config.items() if v is not None}
+
+    mto.enable_huggingface_checkpointing()
+
+    with _anymodel_patcher_context(args.get("pretrained"), args.get("trust_remote_code", False)):
+        model_obj = cls(**args, **args2)
+
+    return model_obj
+
+
 HFLM.create_from_arg_obj = classmethod(create_from_arg_obj)
+HFLM.create_from_arg_string = classmethod(create_from_arg_string)
 
 
 def setup_parser_with_modelopt_args():
+    """Extend the lm-eval argument parser with ModelOpt quantization and sparsity options."""
     parser = setup_parser()
     parser.add_argument(
         "--quant_cfg",
