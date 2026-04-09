@@ -92,6 +92,13 @@ def _export_fused_experts(module: nn.Module, dtype: torch.dtype) -> None:
                     slice_start = fused_start * amax_dim0 // fused_total
                     slice_end = (fused_start + weight_slice.shape[0]) * amax_dim0 // fused_total
                     w_quantizer.amax = amax[slice_start:slice_end].contiguous()
+                else:
+                    warnings.warn(
+                        f"Expert {idx} {proj_name}: fused amax dim0 ({amax_dim0}) does not "
+                        f"evenly divide fused_total ({fused_total}). Skipping amax slicing, "
+                        f"which may produce incorrect quantization scales.",
+                        stacklevel=2,
+                    )
 
             # If the weight quantizer was never calibrated, compute amax from weights.
             if (

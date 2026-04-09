@@ -40,6 +40,9 @@ from safetensors import safe_open
     [
         # Dense model (llama)
         ("fp8", "tiny_llama-fp8", True, False, True, True, False),
+        ("nvfp4", "tiny_llama-nvfp4", True, False, True, True, False),
+        ("nvfp4_mse", "tiny_llama-nvfp4-mse", True, False, True, True, False),
+        ("nvfp4_awq", "tiny_llama-nvfp4-awq", True, False, True, True, False),
         ("int4_awq", "tiny_llama-int4-awq", True, False, True, True, False),
         ("w4a8_awq", "tiny_llama-w4a8-awq", True, False, True, True, False),
         ("int8_wo", "tiny_llama-int8-wo", False, False, False, False, False),
