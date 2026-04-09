@@ -113,12 +113,46 @@ def calculate_subblock_memory(
     raise_unknown_subblock_config_error(subblock_config)
 
 
+def _infer_hybrid_pattern_char(pattern: str, block_config: BlockConfig) -> str:
+    """Pick the first ``hybrid_override_pattern`` character matching *block_config*'s layer type.
+
+    Fallback when ``parent_layer_index`` is not available (synthetic configs, internal
+    callers from memory functions).
+
+    The pattern alphabet (``M``, ``-``, ``*``, ``E``) is defined implicitly by the
+    Nemotron-H converters (``create_block_configs_from_main_config``).  Ideally
+    this mapping would live on ``ModelDescriptor`` so each architecture owns its
+    pattern semantics; for now the converter is the single source of truth.
+    """
+    pattern = pattern.replace("|", "")
+    ffn = block_config.ffn
+    attn = block_config.attention
+
+    if ffn is not None and not ffn.no_op:
+        candidates = {"-", "E"}
+    elif attn is not None and getattr(attn, "is_mamba", False):
+        candidates = {"M"}
+    else:
+        candidates = {"*"}
+
+    return next((c for c in pattern if c in candidates), pattern[0])
+
+
 def calculate_subblock_params(
     config: PretrainedConfig,
     layer_config: BlockConfig | FFNConfig | AttentionConfig,
     descriptor: Type[ModelDescriptor],
+    parent_layer_index: int | None = None,
 ) -> int:
-    """Count parameters on one meta decoder layer."""
+    """Count parameters on one meta decoder layer.
+
+    Args:
+        parent_layer_index: The original layer index in the full model.  Used to
+            select the correct entry from per-layer config fields (e.g.
+            ``hybrid_override_pattern`` for Nemotron-H).  ``None`` or ``-1`` means
+            the index is unknown; the function then infers the layer type from the
+            block config.
+    """
     if isinstance(layer_config, FFNConfig):
         block_config = layer_config.to_blockconfig()
     elif isinstance(layer_config, AttentionConfig):
@@ -141,6 +175,20 @@ def calculate_subblock_params(
     _config = copy.deepcopy(config)
     lm_config = descriptor.get_language_model_config(_config)
     lm_config.num_hidden_layers = 1
+
+    # For hybrid models (e.g. Nemotron-H), ``hybrid_override_pattern`` is a
+    # per-layer string that determines each layer's type:
+    #   M = Mamba,  - = FFN (simple MLP),  * = attention,  E = MoE
+    # With ``num_hidden_layers=1`` only layer 0 is instantiated.  We must
+    # select the pattern character that matches the subblock being measured;
+    # otherwise every FFN variant reports the same (wrong) param count because
+    # the 1-layer model builds the wrong layer type.
+    if hasattr(lm_config, "hybrid_override_pattern") and lm_config.hybrid_override_pattern:
+        pattern = lm_config.hybrid_override_pattern.replace("|", "")
+        if parent_layer_index is not None and 0 <= parent_layer_index < len(pattern):
+            lm_config.hybrid_override_pattern = pattern[parent_layer_index]
+        else:
+            lm_config.hybrid_override_pattern = _infer_hybrid_pattern_char(pattern, block_config)
 
     block_configs = maybe_cast_block_configs([block_config])
     _config.block_configs = block_configs

@@ -174,7 +174,9 @@ def calculate_subblock_stats(
         if not isinstance(subblock_memory, dict):
             subblock_memory = {"memory_mib": subblock_memory, "kv_cache_memory_mib": 0.0}
 
-        subblock_params = calculate_subblock_params(model_config, subblock_config, descriptor)
+        subblock_params = calculate_subblock_params(
+            model_config, subblock_config, descriptor, parent_layer_index=parent_layer_indices[0]
+        )
         if moe_stats_file is not None:
             subblock_active_params = calc_subblock_active_params(
                 subblock_config,
