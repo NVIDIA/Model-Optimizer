@@ -413,18 +413,12 @@ class HFDFlashModel(DFlashModel):
             if vocab_size >= 128256:  # Llama3 vocab size
                 return 128002  # <|reserved_special_token_0|>
 
-        # Generic: try pad_token_id, then eos
-        pad_id = getattr(base_config, "pad_token_id", None)
-        eos_id = getattr(base_config, "eos_token_id", None)
-        if isinstance(eos_id, list):
-            eos_id = eos_id[0]
-
-        # Prefer pad over eos (pad is less likely to interfere)
-        if pad_id is not None and pad_id != eos_id:
-            return pad_id
-
-        # Last resort
-        return eos_id or 0
+        # No suitable mask token found — user must provide one
+        raise ValueError(
+            f"Cannot auto-detect mask_token_id for model_type='{model_type}'. "
+            f"Please set dflash_architecture_config.mask_token_id explicitly in your config. "
+            f"The mask token should be an unused special token (not eos or pad)."
+        )
 
     def _find_base_model_parts(self):
         """Locate base model submodules (backbone, embeddings, lm_head) by probing known paths."""
@@ -507,8 +501,7 @@ class HFDFlashModel(DFlashModel):
         # 2. Auto-detect from model vocabulary:
         #    - Qwen3/3.5: built-in [MASK] token
         #    - Llama3: reserved_special_token_0 (128002)
-        #    - Others: tokenizer.mask_token_id
-        # 3. Fallback to pad_token_id or eos_token_id (suboptimal)
+        # 3. Error — user must provide mask_token_id for unsupported models
         mask_id = config.dflash_architecture_config.get("mask_token_id", None)
         if mask_id is None:
             mask_id = self._auto_detect_mask_token_id(base_config)
@@ -810,15 +803,55 @@ class HFDFlashModel(DFlashModel):
 
     @torch.no_grad()
     def pseudo_speculative_generate(self, input_ids, steps=1):
-        """Generate draft tokens using one DFlash block.
+        """Generate draft tokens using one DFlash block for AR validation.
 
-        DFlash generates block_size-1 draft tokens in a single forward pass.
-        The `steps` parameter is used as the number of tokens to return
-        (capped at block_size-1).
+        This method implements a single speculative decoding step:
+
+        1. **Base model forward**: Run the full target model on ``input_ids`` to get:
+           - ``base_token``: greedy next token (argmax of last position logits)
+           - ``hidden_states``: intermediate hidden states from target layers
+
+        2. **Extract target hidden states**: Concatenate hidden states from
+           ``target_layer_ids`` (e.g., layers [1, 9, 17, 25, 33] for 5-layer draft).
+           Shape: ``[B, seq_len, num_layers * hidden_size]``.
+
+        3. **Build block input**: Create a block of ``block_size`` tokens where:
+           - Position 0 = ``base_token`` (the anchor/known token)
+           - Positions 1..block_size-1 = ``mask_token_id`` (unknown, to be predicted)
+           Embed this block via the base model's embedding layer.
+
+        4. **Position IDs**: Context positions ``[0..seq_len-1]`` followed by block
+           positions ``[seq_len..seq_len+block_size-1]``. The draft model's attention
+           uses RoPE on these positions so Q (block only) attends to K (context + block)
+           with correct relative position encoding.
+
+        5. **Draft forward**: Run ``DFlashModule`` with:
+           - ``noise_embedding``: embedded block tokens
+           - ``target_hidden``: extracted hidden states from step 2
+           - ``position_ids``: context + block positions
+           - ``attention_mask=None``: no mask at inference (all positions attend freely)
+           The draft model's KV injection concatenates projected target_hidden as K/V
+           with the block's own K/V, enabling the draft to "see" the target's context.
+
+        6. **Decode**: Apply ``lm_head`` to draft hidden states at positions 1..block_size-1
+           (skip position 0 which is the known anchor). Argmax gives draft tokens.
+
+        7. **Return**: ``(base_token, draft_tokens[:steps])`` — base token is always
+           returned; draft tokens are truncated to ``steps`` (default: block_size-1).
+
+        Note:
+            This method re-runs the full target model from scratch on each call
+            (no KV cache). For AR validation, it is called repeatedly with growing
+            ``input_ids`` by ``AcceptanceRateValidation.validate()``. The ``steps``
+            parameter should be set to ``block_size - 1`` for full block evaluation.
+
+        Args:
+            input_ids: Input token IDs [B, seq_len].
+            steps: Number of draft tokens to return (capped at block_size-1).
 
         Returns:
             base_token: Next token from base model [B, 1].
-            draft_tokens: Draft tokens [B, min(steps, block_size-1)] or None.
+            draft_tokens: Draft tokens [B, min(steps, block_size-1)] or None if steps < 1.
         """
         # Call the base model's inner model directly (avoids DynamicModule dispatch)
         model_output = self._base_model(

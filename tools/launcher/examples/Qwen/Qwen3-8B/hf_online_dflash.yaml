@@ -46,13 +46,8 @@ pipeline:
     script: common/dflash/ar_eval_mtbench.sh
     args:
       - --ckpt_dir /scratchspace/dflash_bs16
-      - --block_size 16
-      - --num_layers 5
       - --osl 512
       - --steps 15
-      - --online true
-    environment:
-      - HF_MODEL_CKPT: <<global_vars.hf_model>>
     slurm_config:
       _factory_: "slurm_factory"
       nodes: 1

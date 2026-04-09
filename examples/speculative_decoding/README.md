@@ -392,4 +392,4 @@ python scripts/export_hf_checkpoint.py \
 
 ### Results
 
-See [doc/dflash_results.md](doc/dflash_results.md) for benchmark results on Qwen3-8B.
+See [doc/dflash.md](doc/dflash.md) for design details, benchmark results, and open items.
