@@ -331,7 +331,9 @@ class DFlashExporter(SpeculativeDecodingExporter):
             "initializer_range": getattr(base_config, "initializer_range", 0.02),
             "attention_bias": getattr(draft_config, "attention_bias", False),
             "attention_dropout": getattr(draft_config, "attention_dropout", 0.0),
-            "rope_theta": getattr(base_config, "rope_theta", 1000000.0),
+            "rope_theta": getattr(
+                draft_config, "rope_theta", getattr(base_config, "rope_theta", 1000000.0)
+            ),
             "rope_scaling": getattr(base_config, "rope_scaling", None),
             "tie_word_embeddings": False,
             "torch_dtype": "bfloat16",

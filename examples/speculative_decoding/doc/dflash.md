@@ -200,6 +200,17 @@ quantized weights transparently. No DFlash-specific quantization code is needed.
 
 TODO: Add a quantization recipe/script and validate FP8/NVFP4 AR impact.
 
+### vLLM Integration
+
+vLLM has a `DFlashProposer` in `v1/spec_decode/dflash.py`, but the model loader
+does not yet recognize the `DFlashDraftModel` architecture from z-lab checkpoints.
+The `specdec_bench` tool with `--speculative_algorithm EAGLE3` does not work for DFlash.
+
+Possible paths:
+- Wait for vLLM to add `DFlashDraftModel` to their model registry
+- Use vLLM's Python API directly with the DFlash proposer
+- Convert checkpoint to a format vLLM recognizes (e.g., register as a custom model)
+
 ### Docker Local Testing
 
 The launcher example currently requires Slurm cluster access. A local Docker example
