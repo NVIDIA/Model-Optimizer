@@ -82,9 +82,7 @@ def test_unified_hf_export_and_check_safetensors(
             tmp_path, with_tokenizer=True, num_hidden_layers=1
         )
     elif expected_suffix.startswith("tiny_gpt_oss"):
-        tiny_model_dir = create_tiny_gpt_oss_dir(
-            tmp_path, with_tokenizer=True, num_hidden_layers=1
-        )
+        tiny_model_dir = create_tiny_gpt_oss_dir(tmp_path, with_tokenizer=True, num_hidden_layers=1)
     else:
         tiny_model_dir = create_tiny_llama_dir(tmp_path, with_tokenizer=True, num_hidden_layers=1)
 
