@@ -72,6 +72,7 @@ If you skip --hf_split, it will download and tokenize all splits for the subset.
 """
 
 import argparse
+import gzip
 import json
 import multiprocessing
 from pathlib import Path
@@ -107,6 +108,7 @@ class _Encoder:
         append_eod: bool,
         max_sequence_length: int | None,
         reasoning_content: str = "strip",
+        strip_newlines: bool = False,
     ):
         self.tokenizer_name_or_path = tokenizer_name_or_path
         self.json_keys = json_keys
@@ -116,6 +118,7 @@ class _Encoder:
             max_sequence_length * 8 if max_sequence_length is not None else None
         )
         self.reasoning_content = reasoning_content
+        self.strip_newlines = strip_newlines
         print(f"Setting max document length: {self.max_document_length}")
         print(f"reasoning_content mode: {self.reasoning_content}")
 
@@ -174,7 +177,7 @@ class _Encoder:
                 # chat template already embeds all special tokens; don't add BOS again
                 add_special_tokens = False
             else:
-                text = value
+                text = value.replace("\n", " ") if self.strip_newlines else value
                 add_special_tokens = True
 
             # Truncate text by character length if specified
@@ -220,11 +223,16 @@ class _Partition:
     def process_json_file(
         self, input_file_name: str | Path, output_dir: str | Path, encoder: _Encoder
     ) -> tuple[int, list[str]]:
-        output_prefix = Path(output_dir) / Path(input_file_name).stem
+        input_path = Path(input_file_name)
+        stem = input_path.stem if input_path.suffix != ".gz" else Path(input_path.stem).stem
+        output_prefix = Path(output_dir) / stem
         prefixes = [f"{output_prefix}_{key}" for key in self.json_keys]
 
         print(f"\nOpening {input_file_name}")
-        fin = open(input_file_name, encoding="utf-8")
+        if input_path.suffix == ".gz":
+            fin = gzip.open(input_path, "rt", encoding="utf-8")
+        else:
+            fin = open(input_path, encoding="utf-8")
 
         pool = multiprocessing.Pool(self.workers, initializer=encoder.initializer)
         encoded_docs = pool.imap(encoder.encode, fin, 32)
@@ -347,7 +355,8 @@ def _enumerate_hf_splits(
     else:
         try:
             configs = get_dataset_config_names(dataset_name)
-        except Exception:
+        except (FileNotFoundError, ConnectionError) as e:
+            print(f"[WARN] Could not find configs for dataset '{dataset_name}': {e}")
             configs = [None]
 
     result: list[tuple[str | None, str]] = []
@@ -377,6 +386,7 @@ def megatron_preprocess_data(
     workers: int = 1,
     log_interval: int = 100000,
     reasoning_content: str = "strip",
+    strip_newlines: bool = False,
 ):
     """Process large data for pretraining.
 
@@ -402,6 +412,9 @@ def megatron_preprocess_data(
             ``"strip"`` (default) — remove before applying chat template (safe for any tokenizer);
             ``"inline"`` — wrap in ``<think>…</think>`` and prepend to ``content``;
             ``"native"`` — pass unchanged, requires the tokenizer chat template to handle it.
+        strip_newlines: Replace newlines with spaces in plain-text values before tokenization.
+            Defaults to False (newlines are preserved, matching prior behaviour). Has no effect
+            on chat-template encoded values.
 
     Returns:
         List of output file prefixes (one per json_key per split/file, without ``.bin``/``.idx``
@@ -419,7 +432,12 @@ def megatron_preprocess_data(
     vocab_size = AutoTokenizer.from_pretrained(tokenizer_name_or_path).vocab_size
 
     encoder = _Encoder(
-        tokenizer_name_or_path, json_keys, append_eod, max_sequence_length, reasoning_content
+        tokenizer_name_or_path,
+        json_keys,
+        append_eod,
+        max_sequence_length,
+        reasoning_content,
+        strip_newlines,
     )
     partition = _Partition(vocab_size, json_keys, log_interval, workers)
 
@@ -435,7 +453,9 @@ def megatron_preprocess_data(
             all_prefixes.extend(prefixes)
     else:
         if input_dir is not None:
-            file_names = sorted(Path(input_dir).glob("*.jsonl"))
+            file_names = sorted(
+                [*Path(input_dir).glob("*.jsonl"), *Path(input_dir).glob("*.jsonl.gz")]
+            )
             if not file_names:
                 raise ValueError(f"No JSONL files found in input directory: {input_dir}")
         elif isinstance(jsonl_paths, (str, Path)):
@@ -512,6 +532,15 @@ def main():
             "'native': pass unchanged (requires tokenizer chat template support, e.g. Qwen3)."
         ),
     )
+    parser.add_argument(
+        "--strip_newlines",
+        action="store_true",
+        help=(
+            "Replace newlines with spaces in plain-text values before tokenization. "
+            "By default, newlines are preserved. "
+            "Has no effect on chat-template encoded values."
+        ),
+    )
     args = parser.parse_args()
 
     print("\n==================== Arguments ====================")
@@ -534,6 +563,7 @@ def main():
         workers=args.workers,
         log_interval=args.log_interval,
         reasoning_content=args.reasoning_content,
+        strip_newlines=args.strip_newlines,
     )
 
 

@@ -140,7 +140,7 @@ In `generate` mode, assistant turns are stripped so the row ends with a user tur
 
 ## Tokenizing for Megatron Frameworks
 
-The distillation and pre-training scripts in Megatron-Bridge or Megatron-LM expect data pre-tokenized in Megatron's binary indexed format (`.bin` / `.idx`).  Use the `megatron_preprocess_data` utility to tokenize any JSONL or Hugging Face dataset. Below tokenization scripts prints the list of output prefixes (e.g. `tokenized_qwen3/data1_text`) that you can use for `data_paths` argument (with relative weights on differnt files) in megatron training scripts.
+The distillation and pre-training scripts in Megatron-Bridge or Megatron-LM expect data pre-tokenized in Megatron's binary indexed format (`.bin` / `.idx`).  Use the `megatron_preprocess_data` utility to tokenize any JSONL or Hugging Face dataset. Below tokenization scripts prints the list of output prefixes (e.g. `tokenized_qwen3/data1_text`) that you can use for `data_paths` argument (with relative weights on different files) in megatron training scripts.
 
 ### From JSONL files
 
@@ -169,8 +169,10 @@ python -m modelopt.torch.utils.plugins.megatron_preprocess_data \
     --workers 32
 ```
 
-Instead of `--jsonl_paths`, pass `--input_dir /path/to/dir` to tokenize all JSONL files in a directory.
+Instead of `--jsonl_paths`, pass `--input_dir /path/to/dir` to tokenize all JSONL files in a directory (`.jsonl` and `.jsonl.gz` are both supported).
 Set `--max_sequence_length 256_000` to avoid rare OOM errors if some text is very long.
+
+For **plain prose / pretraining text** (non-coding pretraining data) where newlines are not meaningful, add `--strip_newlines` to replace them with spaces before tokenization.
 
 ### From Hugging Face Hub
 
