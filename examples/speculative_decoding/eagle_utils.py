@@ -120,15 +120,105 @@ def make_speculative_data_module(
 class EagleTrainerWithAccLog(Trainer):
     """Wrapper around Trainer that logs training accuracy."""
 
+    def __init__(
+        self,
+        *args,
+        lora_lr_multiplier: float = 1.0,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        self.lora_lr_multiplier = lora_lr_multiplier
+
+    def create_optimizer(self):
+        """Override to give LoRA parameters a higher learning rate."""
+        super().create_optimizer()
+        if self.lora_lr_multiplier != 1.0:
+            lora_ids = {
+                id(p) for n, p in self.model.named_parameters() if "lora_" in n and p.requires_grad
+            }
+            if lora_ids:
+                new_groups = []
+                for group in self.optimizer.param_groups:
+                    lora = [p for p in group["params"] if id(p) in lora_ids]
+                    others = [p for p in group["params"] if id(p) not in lora_ids]
+                    if lora and others:
+                        new_groups.append({**group, "params": others})
+                        new_groups.append(
+                            {**group, "params": lora, "lr": group["lr"] * self.lora_lr_multiplier}
+                        )
+                    elif lora:
+                        new_groups.append({**group, "lr": group["lr"] * self.lora_lr_multiplier})
+                    else:
+                        new_groups.append(group)
+                self.optimizer.param_groups = new_groups
+        return self.optimizer
+
     def compute_loss(self, *args, **kwargs):
-        """Override compute_loss to save train accs in trainer state."""
+        """Override compute_loss to save train accs and per-component losses in trainer state."""
         if not hasattr(self.state, "training_accs"):
             self.state.training_accs = []
+        if not hasattr(self.state, "component_losses"):
+            self.state.component_losses = {"eagle": [], "preservation": []}
         kwargs.pop("num_items_in_batch", None)
         loss, outputs = super().compute_loss(return_outputs=True, *args, **kwargs)
-        if hasattr(outputs, "train_acc"):
+        if hasattr(outputs, "train_acc") and any(outputs.train_acc):
             self.state.training_accs.append(outputs.train_acc)
+        # Track per-component losses
+        for key, attr in [
+            ("eagle", "eagle_loss"),
+            ("preservation", "preservation_loss"),
+        ]:
+            val = getattr(outputs, attr, None)
+            if val is not None:
+                self.state.component_losses[key].append(val.item())
         return loss
+
+
+class LoRAWarmupCallback(TrainerCallback):
+    """Manages LoRA warmup: freezes LoRA during warmup, unfreezes after."""
+
+    def __init__(self, warmup_steps: int):
+        self.warmup_steps = warmup_steps
+        self._activated = False
+
+    def on_step_begin(self, args, state, control, **kwargs):
+        """Check if warmup is over and activate LoRA co-training."""
+        if self._activated:
+            return control
+        if state.global_step >= self.warmup_steps:
+            model = kwargs["model"]
+            # Unwrap DDP/FSDP if needed
+            raw_model = model.module if hasattr(model, "module") else model
+            if hasattr(raw_model, "_lora_cotraining_active"):
+                raw_model._lora_cotraining_active = True
+                # Unfreeze LoRA parameters
+                lora_params = []
+                for name, param in raw_model._base_model.named_parameters():
+                    if "lora_" in name:
+                        param.requires_grad = True
+                        lora_params.append(param)
+
+                # Add LoRA params to optimizer — they were excluded at creation time
+                # because requires_grad was False during warmup.
+                optimizer = kwargs.get("optimizer")
+                if optimizer is not None and lora_params:
+                    existing_ids = {id(p) for g in optimizer.param_groups for p in g["params"]}
+                    new_params = [p for p in lora_params if id(p) not in existing_ids]
+                    if new_params:
+                        optimizer.add_param_group(
+                            {
+                                "params": new_params,
+                                "lr": optimizer.param_groups[0]["lr"],
+                                "weight_decay": 0.0,
+                            }
+                        )
+                        print_rank_0(f"  Added {len(new_params)} LoRA params to optimizer")
+
+                print_rank_0(
+                    f"Step {state.global_step}: LoRA warmup complete, enabling co-training."
+                )
+            self._activated = True
+        return control
 
 
 class EagleTrainingPlot(TrainerCallback):
@@ -176,8 +266,16 @@ class EagleTrainingPlot(TrainerCallback):
             if logs:
                 wandb.log({k: v for k, v in logs.items() if v is not None}, step=state.global_step)
 
-        # reset training_accs
+            # Log per-component losses
+            if hasattr(state, "component_losses"):
+                for key, vals in state.component_losses.items():
+                    if vals:
+                        wandb.log({f"{key}_loss": np.mean(vals)}, step=state.global_step)
+
+        # reset training_accs and component_losses
         state.training_accs = []
+        if hasattr(state, "component_losses"):
+            state.component_losses = {"eagle": [], "preservation": []}
         return control
 
     def on_step_end(self, args, state, control, **kwargs):
@@ -186,6 +284,7 @@ class EagleTrainingPlot(TrainerCallback):
             return control
         if state.global_step % self.ar_validate_steps == 0 and state.global_step > 0:
             print_rank_0("Running AR validation...")
+            torch.cuda.empty_cache()
             try:
                 ars = validate_ar(
                     model=kwargs["model"],
