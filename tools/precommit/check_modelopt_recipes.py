@@ -135,8 +135,20 @@ def _is_dir_recipe(dir_path: Path) -> bool:
     return any((dir_path / n).is_file() for n in ("recipe.yml", "recipe.yaml"))
 
 
+def _is_ptq_recipe_file(path: Path) -> bool:
+    """Return True if *path* is a YAML file with ``metadata.recipe_type`` equal to ``ptq``."""
+    data = _load_yaml(path)
+    if data is None:
+        return False
+    metadata = data.get("metadata")
+    return isinstance(metadata, dict) and metadata.get("recipe_type") == "ptq"
+
+
 def _resolve_recipes(changed_files: list[str]) -> dict[Path, str]:
-    """Resolve changed files to recipes. Returns {recipe_path: kind} mapping.
+    """Resolve changed files to PTQ recipes. Returns {recipe_path: kind} mapping.
+
+    Only PTQ recipes are validated. Non-PTQ YAML files (e.g. speculative
+    decoding training configs) are silently skipped.
 
     kind is "file" for single-file recipes or "dir" for directory-format recipes.
     """
@@ -146,9 +158,15 @@ def _resolve_recipes(changed_files: list[str]) -> dict[Path, str]:
 
         # Check if this file is inside a directory-format recipe.
         if _is_dir_recipe(path.parent):
-            recipes.setdefault(path.parent, "dir")
+            # Directory recipes have a recipe.yml with metadata; check it.
+            for name in ("recipe.yml", "recipe.yaml"):
+                candidate = path.parent / name
+                if candidate.is_file() and _is_ptq_recipe_file(candidate):
+                    recipes.setdefault(path.parent, "dir")
+                    break
         elif path.is_file() and path.suffix in (".yml", ".yaml"):
-            recipes.setdefault(path, "file")
+            if _is_ptq_recipe_file(path):
+                recipes.setdefault(path, "file")
 
     return recipes
 
