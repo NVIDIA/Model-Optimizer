@@ -7,30 +7,40 @@ monitoring), see `skills/common/slurm-setup.md`.
 
 ## 1. Container
 
-Get the recommended image version from `examples/llm_ptq/README.md`, then look for a `.sqsh` file in the workspace and common sibling directories:
+Get the recommended image version from `examples/llm_ptq/README.md`, then look for an existing `.sqsh` file:
 
 ```bash
 ls *.sqsh ../*.sqsh ~/containers/*.sqsh 2>/dev/null
 ```
 
-If you find a `.sqsh` but aren't sure of its version, check it:
+**If a `.sqsh` exists**, use it directly with `--container-image=<path>`. Skip import.
 
-```bash
-srun --container-image=<path/to/container.sqsh> --ntasks=1 bash -c \
-    "pip show tensorrt-llm 2>/dev/null | grep Version || cat /VERSION 2>/dev/null || echo unknown"
-```
-
-If no `.sqsh` exists, import it with enroot. Set writable cache paths first — the default `/raid/containers` is often not writable:
+**If no `.sqsh` exists**, import with enroot (caches for subsequent smoke tests and reruns):
 
 ```bash
 export ENROOT_CACHE_PATH=/path/to/writable/enroot-cache
 export ENROOT_DATA_PATH=/path/to/writable/enroot-data
-export TMPDIR=/path/to/writable/tmp
-mkdir -p "$ENROOT_CACHE_PATH" "$ENROOT_DATA_PATH" "$TMPDIR"
-
-enroot import --output /path/to/container.sqsh \
-    docker://nvcr.io#nvidia/tensorrt-llm/release:<version>
+mkdir -p "$ENROOT_CACHE_PATH" "$ENROOT_DATA_PATH"
+enroot import --output /path/to/container.sqsh docker://nvcr.io#nvidia/tensorrt-llm/release:<version>
 ```
+
+If enroot import fails (e.g., permission errors on lustre), use pyxis inline pull as fallback — pass the NGC URI directly to `--container-image="nvcr.io/nvidia/tensorrt-llm/release:<version>"`. Note this re-pulls on every job.
+
+### Container dependency pitfalls
+
+**New models may need newer transformers** than what's in the container. Install from source inside the job script:
+
+```bash
+pip install git+https://github.com/huggingface/transformers.git --quiet
+```
+
+**Prefer `PYTHONPATH`** to use the synced ModelOpt source instead of installing inside the container — this avoids risking dependency conflicts (e.g., `pip install -U nvidia-modelopt[hf]` can upgrade PyTorch and break other packages):
+
+```bash
+export PYTHONPATH=/path/to/Model-Optimizer:$PYTHONPATH
+```
+
+If `PYTHONPATH` doesn't work due to missing compiled extensions, fall back to `pip install -e ".[hf]" --no-build-isolation`.
 
 ---
 
