@@ -47,7 +47,7 @@ Recipe file format
 ==================
 
 A recipe is a YAML file with two top-level sections: ``metadata`` and a
-type-specific configuration section (currently ``ptq_cfg`` for PTQ recipes).
+type-specific configuration section (currently ``quantize`` for PTQ recipes).
 
 Single-file format
 ------------------
@@ -62,20 +62,20 @@ The simplest form is a single ``.yml`` or ``.yaml`` file:
      recipe_type: ptq
      description: FP8 per-tensor weight and activation (W8A8), FP8 KV cache, max calibration.
 
-   ptq_cfg:
+   quantize:
      algorithm: max
      quant_cfg:
-       - quantizer_path: '*'
+       - quantizer_name: '*'
          enable: false
-       - quantizer_path: '*input_quantizer'
+       - quantizer_name: '*input_quantizer'
          cfg:
            num_bits: e4m3
            axis:
-       - quantizer_path: '*weight_quantizer'
+       - quantizer_name: '*weight_quantizer'
          cfg:
            num_bits: e4m3
            axis:
-       - quantizer_path: '*[kv]_bmm_quantizer'
+       - quantizer_name: '*[kv]_bmm_quantizer'
          enable: true
          cfg:
            num_bits: e4m3
@@ -91,7 +91,7 @@ quantization configuration, use a directory with two files:
 
    my_recipe/
      recipe.yml      # metadata section
-     ptq_cfg.yml     # ptq_cfg section (quant_cfg + algorithm)
+     quantize.yml    # quantize section (quant_cfg + algorithm)
 
 ``recipe.yml``:
 
@@ -101,19 +101,19 @@ quantization configuration, use a directory with two files:
      recipe_type: ptq
      description: My custom NVFP4 recipe.
 
-``ptq_cfg.yml``:
+``quantize.yml``:
 
 .. code-block:: yaml
 
    algorithm: max
    quant_cfg:
-     - quantizer_path: '*'
+     - quantizer_name: '*'
        enable: false
-     - quantizer_path: '*weight_quantizer'
+     - quantizer_name: '*weight_quantizer'
        cfg:
          num_bits: e2m1
          block_sizes: {-1: 16, type: dynamic, scale_bits: e4m3}
-     - quantizer_path: '*input_quantizer'
+     - quantizer_name: '*input_quantizer'
        cfg:
          num_bits: e4m3
          axis:
@@ -142,7 +142,7 @@ Every recipe file must contain a ``metadata`` mapping with at least a ``recipe_t
 PTQ configuration section
 =========================
 
-For PTQ recipes (``recipe_type: ptq``), the ``ptq_cfg`` mapping contains:
+For PTQ recipes (``recipe_type: ptq``), the ``quantize`` mapping contains:
 
 .. list-table::
    :header-rows: 1
@@ -264,16 +264,16 @@ against the built-in library first, then the filesystem:
    recipe = load_recipe("general/ptq/fp8_default-fp8_kv")
    assert isinstance(recipe, ModelOptPTQRecipe)
 
-   # The ptq_cfg dict can be passed directly to mtq.quantize()
+   # The quantize dict can be passed directly to mtq.quantize()
    import modelopt.torch.quantization as mtq
 
-   model = mtq.quantize(model, recipe.ptq_cfg, forward_loop)
+   model = mtq.quantize(model, recipe.quantize, forward_loop)
 
 .. code-block:: python
 
    # Load a custom recipe from the filesystem
    recipe = load_recipe("/path/to/my_custom_recipe.yml")
-   model = mtq.quantize(model, recipe.ptq_cfg, forward_loop)
+   model = mtq.quantize(model, recipe.quantize, forward_loop)
 
 Command-line usage
 ------------------
@@ -289,8 +289,8 @@ The ``hf_ptq.py`` example accepts a ``--recipe`` flag:
        --calib_size 512 \
        --export_fmt hf
 
-When ``--recipe`` is provided, the script loads the recipe and uses its ``ptq_cfg``
-directly, bypassing the ``--qformat`` / ``--kv_cache_qformat`` flags.
+When ``--recipe`` is provided, the script loads the recipe and uses its ``quantize``
+config directly, bypassing the ``--qformat`` / ``--kv_cache_qformat`` flags.
 
 
 Loading standalone configs
@@ -347,22 +347,22 @@ Example -- creating an INT8 per-channel recipe:
      recipe_type: ptq
      description: INT8 per-channel weight, per-tensor activation.
 
-   ptq_cfg:
+   quantize:
      algorithm: max
      quant_cfg:
-       - quantizer_path: '*'
+       - quantizer_name: '*'
          enable: false
-       - quantizer_path: '*weight_quantizer'
+       - quantizer_name: '*weight_quantizer'
          cfg:
            num_bits: 8
            axis: 0
-       - quantizer_path: '*input_quantizer'
+       - quantizer_name: '*input_quantizer'
          cfg:
            num_bits: 8
            axis:
-       - quantizer_path: '*lm_head*'
+       - quantizer_name: '*lm_head*'
          enable: false
-       - quantizer_path: '*output_layer*'
+       - quantizer_name: '*output_layer*'
          enable: false
 
 
@@ -397,7 +397,7 @@ Recipes are validated at load time using Pydantic models:
    Base class for all recipe types.  Contains ``recipe_type`` and ``description``.
 
 :class:`~modelopt.recipe.config.ModelOptPTQRecipe`
-   PTQ-specific recipe.  Adds the ``ptq_cfg`` field (a dict with ``quant_cfg`` and
+   PTQ-specific recipe.  Adds the ``quantize`` field (a dict with ``quant_cfg`` and
    ``algorithm``).
 
 :class:`~modelopt.recipe.config.RecipeType`

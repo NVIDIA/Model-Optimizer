@@ -1659,6 +1659,12 @@ def normalize_quant_cfg_list(v: dict | list) -> list[QuantizerCfgEntry]:
             raise ValueError(f"Invalid quant_cfg entry: {raw!r}.")
 
         for entry in entries:
+            # Normalize: empty cfg (empty dict or empty list) carries no information
+            # and is equivalent to no cfg.  Strip it so the validation below can
+            # detect entries that have *neither* cfg nor enable.
+            if "cfg" in entry and isinstance(entry["cfg"], (dict, list)) and len(entry["cfg"]) == 0:
+                del entry["cfg"]
+
             # Validate: must carry at least one instruction beyond the path selector.
             if "cfg" not in entry and "enable" not in entry:
                 raise ValueError(
