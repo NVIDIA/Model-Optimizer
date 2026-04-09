@@ -13,6 +13,7 @@ For **LLMs and VLMs**, use [TensorRT-Edge-LLM](https://github.com/NVIDIA/TensorR
 | Pre-Requisites | Required packages to use this example | [Link](#pre-requisites) |
 | Vision Models | Quantize timm models and export to ONNX | [Link](#vision-models) |
 | LLM Quantization and Export | Quantize and export LLMs/VLMs via TensorRT-Edge-LLM | [Link](#llm-quantization-and-export-with-tensorrt-edge-llm) |
+| Supported Models | LLM and VLM models supported by TensorRT-Edge-LLM | [Link](#supported-models) |
 | Mixed Precision | Auto mode for optimal per-layer quantization | [Link](#mixed-precision-quantization-auto-mode) |
 | Resources | Extra links to relevant resources | [Link](#resources) |
 
@@ -119,7 +120,7 @@ tensorrt-edgellm-export-llm --help
 - x86-64 Linux (Ubuntu 22.04 or 24.04 recommended)
 - NVIDIA GPU with Compute Capability 8.0+ (Ampere or newer)
 - CUDA 12.x or 13.x, Python 3.10+
-- GPU VRAM: 8-16 GB for models up to 3B, 20-48 GB for models up to 8B
+- GPU VRAM: 16 GB for models up to 3B, 40 GB for models up to 4B, 80 GB for models up to 8B
 
 ### CLI Tools
 
@@ -204,9 +205,13 @@ tensorrt-edgellm-export-draft \
 | FP8 | Best accuracy-to-memory balance on SM89+ hardware (Hopper, Ada) |
 | INT4 AWQ | Weight-only quantization; effective for memory-constrained platforms and low-batch inference |
 | NVFP4 | 4-bit format for NVIDIA Blackwell and Thor hardware; applies to both weights and activations |
+| MXFP8 | Experimental; Microscaling FP8 format for SM89+ hardware |
+| INT8 SmoothQuant | Experimental; INT8 weight and activation quantization with SmoothQuant |
 | INT4 GPTQ | Can be loaded directly from HuggingFace Hub (no additional quantization needed) |
 
 ### Supported Models
+
+For the latest support matrix, see the [TensorRT-Edge-LLM Supported Models](https://nvidia.github.io/TensorRT-Edge-LLM/developer_guide/getting-started/supported-models.html) page.
 
 #### LLMs
 
