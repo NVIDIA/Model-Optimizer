@@ -30,11 +30,16 @@ import torch
 import torch.nn as nn
 from safetensors.torch import load_file, save_file
 
+from .diffusers_utils import (
+    build_layerwise_quant_metadata,
+    pad_nvfp4_weights,
+    swizzle_nvfp4_scales,
+)
+
 try:
     import diffusers
 
     from .diffusers_utils import (
-        build_layerwise_quant_metadata,
         generate_diffusion_dummy_forward_fn,
         get_diffusion_components,
         get_diffusion_model_type,
@@ -44,8 +49,6 @@ try:
         is_diffusers_object,
         is_qkv_projection,
         merge_diffusion_checkpoint,
-        pad_nvfp4_weights,
-        swizzle_nvfp4_scales,
     )
 
     HAS_DIFFUSERS = True
