@@ -100,73 +100,21 @@ Trained on nvidia/Nemotron-Post-Training-Dataset-v2 (2M samples), 64 GPUs, 10 ep
 | Total Steps | 306,620 |
 | Final Per-Token Acc | 67.0% |
 
-### MT-Bench Per-Category AR (Online Validation, osl=512)
+### AR Evaluation
 
-| Category | 80K | 150K | 306K |
-|----------|-----|------|------|
-| math | 5.44 | 5.54 | **5.52** |
-| extraction | 4.81 | 4.82 | **4.88** |
-| coding | 4.40 | 4.53 | **4.60** |
-| reasoning | 4.34 | 4.41 | **4.44** |
-| stem | 4.05 | 4.15 | **4.17** |
-| writing | 3.76 | 3.79 | **3.84** |
-| roleplay | 3.58 | 3.73 | **3.78** |
-| humanities | 3.55 | 3.62 | **3.65** |
-| **ALL** | **4.24** | **4.32** | **4.36** |
-
-### Comparison with z-lab/Qwen3-8B-DFlash-b16
-
-**ModelOpt eval (online validation, osl=512):**
-
-| Dataset | z-lab | ModelOpt | Diff |
-|---------|-------|----------|------|
-| gsm8k | 4.10 | **5.19** | **+1.09** |
-| MT-Bench | 3.58 | **4.36** | **+0.78** |
-
-**z-lab official eval (dflash.benchmark, osl=512):**
-
-| Dataset | z-lab | ModelOpt | Diff |
-|---------|-------|----------|------|
-| gsm8k | **5.00** | 4.08 | -0.92 |
-| MT-Bench | **3.28** | 2.99 | -0.29 |
-
-> z-lab trained with block_size=16; ModelOpt trained with block_size=8.
-
-### AR Evaluation Methods
-
-Three methods exist for measuring acceptance rate, producing different numbers:
-
-**1. ModelOpt Online GT** (`ar_validate.py --per_category`)
-
-The default evaluation method in ModelOpt. Uses `pseudo_speculative_generate` with
-context-dependent (online) ground truth:
+AR is evaluated using `ar_validate.py` which calls `pseudo_speculative_generate`
+with online (context-dependent) ground truth:
 
 1. Run base model on `input_ids` → get base token + hidden states
 2. Build draft block: `[base_token, MASK, MASK, ...]`
 3. Run DFlash draft forward → get `block_size-1` draft tokens
-4. Run base model on `input_ids + base_token + draft_tokens` → verify each draft token
-   against what the base model would produce **given the accepted sequence so far**
-5. Accept consecutive matches, append target's correction token on first mismatch
+4. Verify each draft token against the base model's prediction **given the
+   accepted sequence so far** (not a pre-computed fixed reference)
+5. Accept consecutive matches, append target's correction on first mismatch
 6. AR = total accepted tokens / number of speculative steps
 
-Key: ground truth is **recomputed after each accepted draft** (context-dependent),
-matching actual speculative decoding behavior. Without this, fixed ground truth
-underestimates AR by ~1.0 because it doesn't account for the draft model's
-self-consistency — accepted draft tokens change the context for future predictions.
-
-**2. vLLM SpecDecoding** (`vllm serve --speculative-config`)
-
-The production evaluation. vLLM runs actual speculative decoding with full KV cache:
-- Draft model proposes `num_speculative_tokens` tokens per step
-- Target model verifies in parallel
-- `Mean acceptance length` and `Per-position acceptance rate` reported in server metrics
-
-**3. z-lab Benchmark** (`dflash.benchmark --backend transformers`)
-
-z-lab's reference evaluation. Similar to vLLM but uses their own generation loop with
-draft KV cache. Measures acceptance length as:
-```
-acceptance_length = (draft[:, 1:] == posterior[:, :-1]).cumprod().sum() + 1
+```bash
+python scripts/ar_validate.py --model_path /path/to/checkpoint --per_category --osl 512 --steps 7
 ```
 
 ### vLLM Deployment Results
@@ -204,7 +152,6 @@ ModelOpt wins acceptance length on 7/8 categories and TPS on 8/8 categories.
 | More efficient drafting | 44% vs 16.5% draft acceptance; fewer tokens drafted, more accepted |
 | Loss decay boosts AR | +0.12 AR at 55K (gamma=7, bs16); consistent across checkpoints |
 | Longer sequences help | seq=4096 vs 512: +0.49 AR on AA-Synthetic |
-| Online GT essential | Fixed GT underestimates by ~1.0 AR vs online GT |
 
 ## Open Items
 
@@ -223,14 +170,6 @@ in bf16. With 2M samples, full pre-computation would require ~320TB — not feas
 - Hybrid: quantized base model on CPU computes hidden states on-the-fly, draft on GPU
 - Logit distillation adds another dimension: teacher logits at anchor+k-1 positions
   need `[seq_len, vocab_size]` per sample (~600MB in bf16)
-
-### z-lab Eval Gap
-
-ModelOpt eval (online GT) gives higher AR than z-lab's official eval on our checkpoint
-(5.19 vs 4.08 on gsm8k). The gap is likely from:
-- z-lab uses draft KV cache (accumulates context across blocks); our eval re-runs from scratch
-- z-lab's `acceptance_length + 1` counting (minimum 1 per step)
-- `rope_theta` mismatch in exported config (was 10000 instead of 1000000 — now fixed)
 
 ### Model Support Expansion
 
