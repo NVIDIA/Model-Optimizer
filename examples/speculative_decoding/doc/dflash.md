@@ -50,24 +50,41 @@ See [`modelopt_recipes/general/speculative_decoding/dflash.yaml`](../../../model
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `dflash.dflash_block_size` | 8 | Block size for parallel prediction |
-| `dflash.dflash_num_anchors` | 512 | Random anchor positions per sample |
-| `dflash.dflash_loss_decay_factor` | 4.0 | Exponential decay gamma (0 disables) |
-| `dflash.dflash_self_logit_distillation` | true | Logit distillation from target |
+| `dflash.dflash_num_anchors` | 512 | Random anchor positions per sample (see below) |
+| `dflash.dflash_loss_decay_factor` | 4.0 | Exponential decay gamma (0 disables, see below) |
+| `dflash.dflash_self_logit_distillation` | true | Use target model logits as soft labels (vs hard CE) |
 | `dflash.dflash_architecture_config.num_hidden_layers` | 5 | Draft decoder layers |
 | `dflash.dflash_architecture_config.mask_token_id` | auto | Token ID for masked positions |
 | `training.answer_only_loss` | false | Mask loss on non-assistant tokens |
 
+### Random Anchor Sampling (`num_anchors`)
+
+During training, anchor positions are sampled randomly from valid (assistant response)
+tokens in each batch, rather than dividing the sequence into fixed blocks. Each anchor
+starts a block of `block_size` tokens where the draft model predicts positions 1..B-1.
+
+**Tradeoff:** Higher `num_anchors` = more training signal per sample but more compute.
+Lower = faster iteration but less data efficiency. With `seq_len=4096` and `block_size=8`,
+`num_anchors=512` means the model sees ~512 blocks per sample (covering ~4096 positions).
+Scale proportionally: `num_anchors ≈ seq_len / block_size` gives full coverage.
+
 ### Loss Decay
 
 The exponential decay factor (gamma) weights early block positions higher than later ones.
-If position 0 in a block is wrong, all subsequent positions are rejected in speculative
+If position 1 in a block is wrong, all subsequent positions are rejected in speculative
 decoding. Decay aligns the training loss with what matters for acceptance rate.
 
 ```
-weight[k] = exp(-k / gamma)    for k = 0..B-1
+weight[k] = exp(-(k-1).clamp(min=0) / gamma)    for k = 0..B-1
 ```
 
-Paper recommendation: gamma=7 for block_size=16, gamma=4 for block_size=8.
+Positions 0 (anchor, excluded by loss mask) and 1 get full weight (1.0). Later positions
+decay: e.g., with `gamma=4` and `block_size=8`, position 7 contributes only 22% as
+much as position 1. Paper recommendation: gamma=7 for block_size=16, gamma=4 for block_size=8.
+
+Note: this is different from EAGLE3's `eagle_loss_decay_factor` which multiplies loss by
+`alpha^step` across TTT steps. DFlash decay operates within a single block, weighting
+early positions higher because they gate acceptance of all later positions.
 
 ### Checkpoint Resume
 
@@ -160,16 +177,15 @@ ModelOpt wins acceptance length on 7/8 categories and TPS on 8/8 categories.
 Online training requires the full target model in GPU memory alongside the draft model.
 Offline training would pre-compute target hidden states and train the draft model separately.
 
-**Challenge**: DFlash uses random anchor sampling over full sequences, requiring hidden states
-at ALL positions. For Qwen3-8B with 5 target layers and seq_len=4096, this is ~160MB per sample
-in bf16. With 2M samples, full pre-computation would require ~320TB — not feasible.
+**Challenge**: DFlash needs hidden states from multiple target layers (not just the last)
+at all positions for KV injection. EAGLE3 offline only stores last-layer hidden states
+and reruns `lm_head` during training, but DFlash's feature fusion concatenates hidden
+states from layers [1, 9, 17, 25, 33] — 5x the storage per position.
 
 **Potential approaches:**
-- Pre-sample anchor positions and store only relevant slices (limits randomness)
-- Stream hidden states from disk with chunked loading
+- Store only the fused (post-FC) target hidden states instead of raw multi-layer states
+- Pre-sample anchor positions and store only relevant slices
 - Hybrid: quantized base model on CPU computes hidden states on-the-fly, draft on GPU
-- Logit distillation adds another dimension: teacher logits at anchor+k-1 positions
-  need `[seq_len, vocab_size]` per sample (~600MB in bf16)
 
 ### Model Support Expansion
 
@@ -199,7 +215,6 @@ DFlash speculative decoding is supported in vLLM nightly (v0.19.1+):
 ```bash
 vllm serve Qwen/Qwen3-8B \
     --speculative-config '{"method": "dflash", "model": "path/to/dflash-checkpoint", "num_speculative_tokens": 7}' \
-    --attention-backend flash_attn \
     --max-num-batched-tokens 32768
 ```
 

@@ -165,11 +165,16 @@ class DFlashAttention(nn.Module):
         return attn_output, None
 
     def forward(self, hidden_states, target_hidden, position_embeddings, attention_mask=None):
-        """Forward with KV injection: Q from noise, K/V from context+noise."""
+        """Forward with KV injection.
+
+        Q is projected from the noise block (draft token embeddings: [anchor, mask, mask, ...]).
+        K and V are projected from the concatenation of target hidden states (context from the
+        base model) and noise block, so the draft can attend to both context and its own block.
+        """
         bsz, q_len, _ = hidden_states.shape
         ctx_len = target_hidden.shape[1]
 
-        # Q from noise only, with QK-norm
+        # Q from noise block only (the draft tokens being predicted), with QK-norm
         q = self.q_proj(hidden_states).view(bsz, q_len, -1, self.head_dim)
         q = self.q_norm(q).transpose(1, 2)
 
@@ -336,6 +341,8 @@ def create_dflash_attention_mask(
     # Create in f32 then cast, matching SpecForge. This ensures masked
     # positions get -inf in bf16 (f32 min overflows to -inf when cast),
     # not the largest finite negative bf16 value.
+    # TODO: This f32→bf16 cast pattern may be simplified once the mask behavior is stable.
+    # Consider creating directly in the target dtype with appropriate fill value.
     full_mask = torch.zeros(seq_len, 2 * seq_len, device=device, dtype=torch.float32)
     full_mask.masked_fill_(~full_mask_bool, torch.finfo(torch.float32).min)
     full_mask = full_mask.to(dtype=dtype)
