@@ -12,10 +12,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-
 import pytest
-from _test_utils.examples.llm_ptq_utils import PTQCommand, WithRequirements
+import transformers
+from _test_utils.examples.llm_ptq_utils import PTQCommand
 from _test_utils.examples.models import (
     BART_PATH,
     MIXTRAL_PATH,
@@ -23,6 +22,7 @@ from _test_utils.examples.models import (
     TINY_LLAMA_PATH,
     WHISPER_PATH,
 )
+from packaging.version import Version
 
 
 @pytest.mark.parametrize(
@@ -36,18 +36,9 @@ def test_ptq_bart(command):
     command.run(BART_PATH)
 
 
-class TestT5(WithRequirements):
-    requirements = [("transformers", "4.48.0")]
-
-    @pytest.mark.parametrize(
-        "command",
-        [
-            PTQCommand(quant="fp8", min_sm=89),
-        ],
-        ids=PTQCommand.param_str,
-    )
-    def test_ptq_t5(self, command):
-        command.run(T5_PATH)
+@pytest.mark.parametrize("command", [PTQCommand(quant="fp8", min_sm=89)], ids=PTQCommand.param_str)
+def test_ptq_t5(command):
+    command.run(T5_PATH)
 
 
 @pytest.mark.parametrize(
@@ -61,22 +52,20 @@ def test_ptq_mixtral(command):
     command.run(MIXTRAL_PATH)
 
 
-class TestWhisper(WithRequirements):
-    requirements = [
-        ("librosa", None),
-        ("soundfile", None),
-    ]
-
-    @pytest.mark.parametrize(
-        "command",
-        [
-            # Auto-batch-size computation seems to take >10mins for Whisper hence using a fixed batch size
-            PTQCommand(quant="fp8", calib_batch_size=16, calib_dataset="peoples_speech", min_sm=89),
-        ],
-        ids=PTQCommand.param_str,
-    )
-    def test_ptq_whisper(self, command):
-        command.run(WHISPER_PATH)
+@pytest.mark.skipif(
+    Version(transformers.__version__) >= Version("5.0"),
+    reason="Whisper requires torchcodec and other system packages for transformers>=5.0",
+)
+@pytest.mark.parametrize(
+    "command",
+    [
+        # Auto-batch-size computation seems to take >10mins for Whisper hence using a fixed batch size
+        PTQCommand(quant="fp8", calib_batch_size=16, calib_dataset="peoples_speech", min_sm=89),
+    ],
+    ids=PTQCommand.param_str,
+)
+def test_ptq_whisper(command):
+    command.run(WHISPER_PATH)
 
 
 @pytest.mark.parametrize(

@@ -174,9 +174,7 @@ def train():
         print_rank_0(f"Last checkpoint detected: {last_checkpoint}")
 
     model = transformers.AutoModelForCausalLM.from_pretrained(
-        model_args.model_name_or_path,
-        cache_dir=training_args.cache_dir,
-        torch_dtype=torch.bfloat16,
+        model_args.model_name_or_path, cache_dir=training_args.cache_dir, dtype=torch.bfloat16
     )
     model.generation_config.do_sample = True
     tokenizer = transformers.AutoTokenizer.from_pretrained(
@@ -231,7 +229,7 @@ def train():
         teacher_model = transformers.AutoModelForCausalLM.from_pretrained(
             model_args.teacher_model,
             cache_dir=training_args.cache_dir,
-            torch_dtype=torch.bfloat16,
+            dtype=torch.bfloat16,
         )
         distill_config = {
             "teacher_model": teacher_model,

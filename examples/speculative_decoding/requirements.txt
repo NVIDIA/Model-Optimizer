@@ -1,2 +1,1 @@
-accelerate==1.12.0
 transformers<5.4

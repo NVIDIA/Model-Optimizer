@@ -38,7 +38,7 @@ import torch
 from torch import nn
 from torch.nn import CrossEntropyLoss
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask
-from transformers import Cache, DynamicCache, PretrainedConfig, PreTrainedModel
+from transformers import Cache, DynamicCache, PreTrainedModel
 from transformers.models.llama.modeling_llama import (
     LlamaDecoderLayer,
     LlamaRMSNorm,
@@ -460,6 +460,36 @@ class HFEagleModel(EagleModel):
             print(f"Failed to create NVTX range {name}: {e}")
             return contextlib.nullcontext()
 
+    def get_dummy_inputs(self) -> dict:
+        """Construct dummy inputs for export forward pass.
+
+        Returns a dict of kwargs that can be passed to forward(). For offline EAGLE models,
+        this includes dummy base_model_outputs with the right tensor shapes so the export
+        pipeline doesn't need to thread real calibration data through multiple layers.
+        """
+        device = self.device
+        dtype = next(self.parameters()).dtype
+        hidden_size = self._base_llm_config.hidden_size
+        dummy_inputs = {
+            "input_ids": torch.ones(1, 2, dtype=torch.long, device=device),
+        }
+        if self.eagle_offline:
+            base_model_outputs = {
+                "base_model_hidden_states": torch.zeros(
+                    1, 2, hidden_size, dtype=dtype, device=device
+                ),
+                "base_model_input_embeds": torch.zeros(
+                    1, 2, hidden_size, dtype=dtype, device=device
+                ),
+            }
+            if self.eagle_config.use_aux_hidden_state:
+                num_aux = len(self.eagle_config.eagle_aux_hidden_state_layer_ids)
+                base_model_outputs["aux_hidden_states"] = torch.zeros(
+                    1, 2, hidden_size * num_aux, dtype=dtype, device=device
+                )
+            dummy_inputs["base_model_outputs"] = base_model_outputs
+        return dummy_inputs
+
     def get_exporter(self) -> SpeculativeDecodingExporter:
         """Get the exporter for the draft model."""
         exporter_cls = (
@@ -571,7 +601,10 @@ class HFEagleModel(EagleModel):
         if rope_scaling and "rope_theta" not in rope_scaling and "rope_theta" in arch_config:
             rope_scaling["rope_theta"] = arch_config["rope_theta"]
 
-        self.eagle_config = PretrainedConfig.from_dict(arch_config)
+        # Use the base model's config class so fields like max_position_embeddings are declared
+        # before transformers>=5.5 rope standardization runs in __post_init__.
+        base_config_cls = type(self._base_llm_config)
+        self.eagle_config = base_config_cls.from_dict(arch_config)
         self.eagle_config.eagle_decoder_type = self.eagle_decoder_type
         self.eagle_config.draft_vocab_size = getattr(
             self.eagle_config, "draft_vocab_size", self.eagle_config.vocab_size

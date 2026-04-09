@@ -24,10 +24,12 @@ import transformers
 from _test_utils.torch.megatron.models import get_mcore_gpt_model
 from _test_utils.torch.megatron.utils import get_forward
 from _test_utils.torch.transformers_models import create_tiny_llama_dir
+from safetensors.torch import save_file
 
 import modelopt.torch.quantization as mtq
 import modelopt.torch.speculative as mtsp
 from modelopt.torch.export import KV_CACHE_FP8, export_mcore_gpt_to_hf, import_mcore_gpt_from_hf
+from modelopt.torch.export.unified_export_megatron import GPTModelExporter
 from modelopt.torch.speculative.eagle.default_config import default_eagle_config
 from modelopt.torch.speculative.plugins.megatron_eagle import _DynamicEagleGPTModel
 from modelopt.torch.speculative.plugins.megatron_medusa import _DynamicMedusaGPTModel
@@ -216,3 +218,155 @@ def test_unified_import_megatron(dist_workers, tmp_path):
     num_gpus = torch.cuda.device_count()
     tiny_llama_dir = create_tiny_llama_dir(tmp_path, num_key_value_heads=num_gpus)
     dist_workers.run(partial(_test_unified_import_megatron, tiny_llama_dir))
+
+
+def _test_qkv_slicing_gqa_tp2(tmp_path, rank, size):
+    """Export a GQA model with TP=2 to verify _qkv_slicing handles sharded weights."""
+    num_layers = 2
+    hidden_size = 64
+    num_attention_heads = 8
+    num_query_groups = 2  # GQA: fewer KV heads than Q heads; both divisible by TP=2
+    ffn_hidden_size = 128
+    max_sequence_length = 32
+    vocab_size = 64
+
+    model = get_mcore_gpt_model(
+        tensor_model_parallel_size=size,
+        pipeline_model_parallel_size=1,
+        initialize_megatron=True,
+        num_layers=num_layers,
+        hidden_size=hidden_size,
+        num_attention_heads=num_attention_heads,
+        num_query_groups=num_query_groups,
+        ffn_hidden_size=ffn_hidden_size,
+        max_sequence_length=max_sequence_length,
+        vocab_size=vocab_size,
+        activation_func="swiglu",
+        normalization="RMSNorm",
+        transformer_impl="modelopt",
+    ).cuda()
+
+    # Quantize with FP8 to also exercise the per-channel weight_scale reshape in _qkv_slicing
+    forward = get_forward(model)
+    model = mtq.quantize(model, mtq.FP8_DEFAULT_CFG, forward)
+
+    pretrained_config = {
+        "architectures": ["LlamaForCausalLM"],
+        "attention_bias": False,
+        "hidden_size": hidden_size,
+        "intermediate_size": ffn_hidden_size,
+        "max_position_embeddings": max_sequence_length,
+        "model_type": "llama",
+        "num_attention_heads": num_attention_heads,
+        "num_hidden_layers": num_layers,
+        "num_key_value_heads": num_query_groups,
+        "torch_dtype": "bfloat16",
+    }
+    with open(tmp_path / "config.json", "w") as f:
+        json.dump(pretrained_config, f)
+
+    export_dir = tmp_path / "export"
+    export_mcore_gpt_to_hf(
+        model,
+        tmp_path,
+        dtype=torch.bfloat16,
+        export_dir=str(export_dir),
+    )
+
+    # Verify Q/K/V projections were exported (collect keys from all shard files)
+    if rank == 0:
+        from safetensors import safe_open
+
+        safetensors_files = list(export_dir.glob("*.safetensors"))
+        assert safetensors_files, "no safetensors files found in export dir"
+        keys = []
+        for sf in safetensors_files:
+            with safe_open(str(sf), framework="pt", device="cpu") as f:
+                keys.extend(f.keys())
+        assert any("q_proj.weight" in k for k in keys), "q_proj.weight missing from export"
+        assert any("k_proj.weight" in k for k in keys), "k_proj.weight missing from export"
+        assert any("v_proj.weight" in k for k in keys), "v_proj.weight missing from export"
+
+
+def test_qkv_slicing_gqa_tp2(dist_workers_size_2, tmp_path):
+    """Export with TP=2 on a GQA model should not raise a reshape error in _qkv_slicing."""
+    dist_workers_size_2.run(partial(_test_qkv_slicing_gqa_tp2, tmp_path))
+
+
+def _make_exporter_for_mtp(model_dir: Path) -> GPTModelExporter:
+    """Create a minimal GPTModelExporter instance for testing _get_mtp_state_dict."""
+    exporter = object.__new__(GPTModelExporter)
+    exporter._hf_pretrained_model_name = str(model_dir)
+    exporter._state_dict = {}  # MTP keys are absent — they should be picked up
+    exporter.exclude_modules = []
+    return exporter
+
+
+def test_mtp_state_dict_single_safetensors(tmp_path):
+    """MTP weights are collected from a model with a single model.safetensors file."""
+    model_dir = tmp_path / "fake_hf_model"
+    model_dir.mkdir()
+
+    tensors = {
+        "model.embed_tokens.weight": torch.zeros(64, 32),
+        "mtp.0.enorm.weight": torch.ones(32),
+        "mtp.0.hnorm.weight": torch.full((32,), 2.0),
+    }
+    save_file(tensors, str(model_dir / "model.safetensors"))
+
+    exporter = _make_exporter_for_mtp(model_dir)
+    mtp_state_dict = exporter._get_mtp_state_dict()
+
+    assert "mtp.0.enorm.weight" in mtp_state_dict
+    assert "mtp.0.hnorm.weight" in mtp_state_dict
+    assert "model.embed_tokens.weight" not in mtp_state_dict, "non-MTP key should not be included"
+    assert torch.allclose(mtp_state_dict["mtp.0.enorm.weight"], torch.ones(32))
+    assert torch.allclose(mtp_state_dict["mtp.0.hnorm.weight"], torch.full((32,), 2.0))
+    assert "mtp*" in exporter.exclude_modules
+
+
+def test_mtp_state_dict_no_mtp_keys(tmp_path):
+    """_get_mtp_state_dict returns empty dict and leaves exclude_modules unchanged when no MTP keys."""
+    model_dir = tmp_path / "fake_hf_model"
+    model_dir.mkdir()
+
+    tensors = {"model.embed_tokens.weight": torch.zeros(64, 32)}
+    save_file(tensors, str(model_dir / "model.safetensors"))
+
+    exporter = _make_exporter_for_mtp(model_dir)
+    mtp_state_dict = exporter._get_mtp_state_dict()
+
+    assert mtp_state_dict == {}
+    assert exporter.exclude_modules == []
+
+
+def test_mtp_state_dict_index_file(tmp_path):
+    """MTP weights are collected from a sharded checkpoint (index file path)."""
+    model_dir = tmp_path / "fake_hf_model"
+    model_dir.mkdir()
+
+    shard1 = {
+        "model.embed_tokens.weight": torch.zeros(64, 32),
+        "mtp.0.enorm.weight": torch.ones(32),
+    }
+    shard2 = {"mtp.0.hnorm.weight": torch.full((32,), 3.0)}
+    save_file(shard1, str(model_dir / "model-00001-of-00002.safetensors"))
+    save_file(shard2, str(model_dir / "model-00002-of-00002.safetensors"))
+
+    index = {
+        "weight_map": {
+            "model.embed_tokens.weight": "model-00001-of-00002.safetensors",
+            "mtp.0.enorm.weight": "model-00001-of-00002.safetensors",
+            "mtp.0.hnorm.weight": "model-00002-of-00002.safetensors",
+        }
+    }
+    with open(model_dir / "model.safetensors.index.json", "w") as f:
+        json.dump(index, f)
+
+    exporter = _make_exporter_for_mtp(model_dir)
+    mtp_state_dict = exporter._get_mtp_state_dict()
+
+    assert "mtp.0.enorm.weight" in mtp_state_dict
+    assert "mtp.0.hnorm.weight" in mtp_state_dict
+    assert torch.allclose(mtp_state_dict["mtp.0.hnorm.weight"], torch.full((32,), 3.0))
+    assert "mtp*" in exporter.exclude_modules

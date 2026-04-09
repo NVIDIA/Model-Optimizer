@@ -132,10 +132,10 @@ MODELS = {
         ],
         _create_torchvision_segmentation_fn,
     ),
-    "unet": (
-        ["unet_carvana"],
-        _create_unet_fn,
-    ),
+    # "unet": (
+    #     ["unet_carvana"],
+    #     _create_unet_fn,
+    # ),
 }
 
 

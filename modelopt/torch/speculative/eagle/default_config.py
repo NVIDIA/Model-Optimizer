@@ -25,6 +25,7 @@ default_eagle_config = {
         "high_freq_factor": 4.0,
         "original_max_position_embeddings": 8192,
         "rope_type": "llama3",
+        "rope_theta": 500000.0,
     },
     "rope_theta": 500000.0,
     "num_hidden_layers": 1,
