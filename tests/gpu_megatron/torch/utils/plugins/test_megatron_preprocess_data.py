@@ -80,6 +80,10 @@ def test_megatron_preprocess_data_with_hf_dataset(tmp_path, hf_dataset, hf_split
     assert len(prefixes) > 0, "Expected at least one output prefix"
     assert len(prefixes) == len(json_keys), f"Expected one prefix per json_key, got {prefixes}"
     for prefix in prefixes:
+        assert "_max10" in prefix, (
+            f"Expected '_max10' in prefix when hf_max_samples_per_split=10, got {prefix}"
+        )
+    for prefix in prefixes:
         assert Path(prefix + ".bin").exists(), f"Expected binary file {prefix}.bin"
         assert Path(prefix + ".idx").exists(), f"Expected index file {prefix}.idx"
         assert Path(prefix + ".bin").stat().st_size > 0, f"{prefix}.bin should not be empty"

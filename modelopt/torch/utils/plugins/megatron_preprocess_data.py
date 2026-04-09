@@ -286,7 +286,7 @@ class _Partition:
         for i, (doc, sentence_lens, (doc_len, enc_len)) in enumerate(encoded_docs, start=1):
             total_doc_len += doc_len
             total_enc_len += enc_len
-            final_enc_len += sum(sentence_lens[key])
+            final_enc_len += sum(sum(sentence_lens[k]) for k in sentence_lens)
             for key in doc:
                 builders[key].add_document(doc[key], sentence_lens[key])
             self._print_processing_stats(i, total_doc_len, total_enc_len, start_time)
@@ -322,16 +322,17 @@ class _Partition:
 
         When ``max_samples`` is set, the dataset is shuffled to avoid sampling from a biased prefix of the dataset.
         """
-        split_arg = (
-            f"{split}[:{max_samples}]" if (max_samples is not None and not streaming) else split
-        )
-        print(f"\nLoading HF dataset {dataset_name=}, {config=}, {split_arg=}, {streaming=}")
-        ds = load_dataset(path=dataset_name, name=config, split=split_arg, streaming=streaming)
+        print(f"\nLoading HF dataset {dataset_name=}, {config=}, {split=}, {streaming=}")
+        ds = load_dataset(path=dataset_name, name=config, split=split, streaming=streaming)
         if max_samples is not None:
-            # Shuffle before capping to avoid biased sampling from the dataset prefix
+            # Shuffle first so the selected subset is random, not a biased prefix.
+            # Non-streaming: global index shuffle (memory-mapped, efficient) then .select(N).
+            # Streaming: buffer shuffle (approximate) then .take(N).
             ds = ds.shuffle(seed=42)
             if streaming:
                 ds = ds.take(max_samples)
+            else:
+                ds = ds.select(range(max_samples))
 
         # features are available from dataset metadata without downloading data
         features = ds.features if ds.features is not None else {}
@@ -343,16 +344,18 @@ class _Partition:
                     )
 
         safe_name = dataset_name.replace("/", "--")
+        sample_tag = f"_max{max_samples}" if max_samples is not None else ""
         output_prefix = Path(output_dir) / f"{safe_name}_{config}_{split}"
-        prefixes = [f"{output_prefix}_{key}" for key in self.json_keys]
 
+        prefixes = []
         output_bin_files = {}
         output_idx_files = {}
         builders = {}
-
         for key in self.json_keys:
-            output_bin_files[key] = f"{output_prefix}_{key}.bin"
-            output_idx_files[key] = f"{output_prefix}_{key}.idx"
+            prefix = f"{output_prefix}_{key}{sample_tag}"
+            prefixes.append(prefix)
+            output_bin_files[key] = f"{prefix}.bin"
+            output_idx_files[key] = f"{prefix}.idx"
             if Path(output_bin_files[key]).exists() and Path(output_idx_files[key]).exists():
                 continue
             builders[key] = indexed_dataset.IndexedDatasetBuilder(
