@@ -72,57 +72,6 @@ class TestSkipSoftmaxContext:
 
 
 # ---------------------------------------------------------------------------
-# Tests: diffusers eager attention
-# ---------------------------------------------------------------------------
-
-
-class TestDiffusersEagerAttention:
-    @pytest.fixture(autouse=True)
-    def _setup(self):
-        with patch.dict(sys.modules, _mock_diffusers()):
-            from modelopt.torch.sparsity.attention_sparsity.kernels.diffusers_eager_attention import (
-                _diffusers_eager_attention,
-                get_skip_softmax_attention_backend,
-                register_diffusers_eager_attention,
-            )
-
-            self._fn = _diffusers_eager_attention
-            self._register = register_diffusers_eager_attention
-            self._get_backend = get_skip_softmax_attention_backend
-
-            import modelopt.torch.sparsity.attention_sparsity.kernels.diffusers_eager_attention as mod
-
-            mod._BACKEND_REGISTERED = False
-            yield
-
-    def test_basic_shape(self):
-        q = torch.randn(2, 8, 4, 16)
-        assert self._fn(q, q, q).shape == (2, 8, 4, 16)
-
-    def test_cross_attention(self):
-        q = torch.randn(1, 4, 2, 8)
-        k = torch.randn(1, 12, 2, 8)
-        assert self._fn(q, k, k).shape == (1, 4, 2, 8)
-
-    def test_causal(self):
-        q = torch.randn(1, 4, 1, 8)
-        assert self._fn(q, q, q, is_causal=True).shape == (1, 4, 1, 8)
-
-    def test_gqa(self):
-        q = torch.randn(1, 4, 8, 16)
-        k = torch.randn(1, 4, 2, 16)
-        assert self._fn(q, k, k, enable_gqa=True).shape == (1, 4, 8, 16)
-
-    def test_register_idempotent(self):
-        self._register()
-        self._register()
-
-    def test_get_backend_before_register_raises(self):
-        with pytest.raises(RuntimeError, match="not registered"):
-            self._get_backend()
-
-
-# ---------------------------------------------------------------------------
 # Tests: diffusers triton attention
 # ---------------------------------------------------------------------------
 
@@ -195,14 +144,9 @@ class TestRegisterDiffusersBackends:
         with (
             patch.dict(sys.modules, {"diffusers.models.modeling_utils": mock_utils}),
             patch(
-                "modelopt.torch.sparsity.attention_sparsity.kernels.register_diffusers_eager_attention",
-                MagicMock(),
-            ) as mock_eager,
-            patch(
                 "modelopt.torch.sparsity.attention_sparsity.kernels.register_diffusers_triton_attention",
                 MagicMock(),
             ) as mock_triton,
         ):
             _register_diffusers_backends_if_needed(mock_mixin())
-            mock_eager.assert_called_once()
             mock_triton.assert_called_once()
