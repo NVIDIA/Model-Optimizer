@@ -210,8 +210,7 @@ def main(args: argparse.Namespace) -> None:
             # versions: in <5.0 the default is False (returns raw tensor), in 5.0+
             # the default changed to True (returns BatchEncoding).
             input_ids = tokenizer.apply_chat_template(
-                conversations, return_tensors="pt", return_dict=True,
-                add_generation_template=False
+                conversations, return_tensors="pt", return_dict=True, add_generation_template=False
             )["input_ids"]
             num_input_tokens = input_ids.shape[1]
             if num_input_tokens <= 10 or num_input_tokens > args.max_seq_len:
