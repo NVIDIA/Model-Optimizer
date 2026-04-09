@@ -21,11 +21,6 @@ import warnings
 MIN_PYTHON_VERSION = (3, 10)
 
 try:
-    # Apply ONNX compatibility shim before any onnx_graphsurgeon imports.
-    from modelopt.onnx._onnx_compat import patch_onnx_helper_removed_apis
-
-    patch_onnx_helper_removed_apis()
-
     from . import quantization
     from .logging_config import configure_logging, logger
 except ImportError as e:

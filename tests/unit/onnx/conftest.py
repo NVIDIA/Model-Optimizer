@@ -12,6 +12,3 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-# Apply ONNX compatibility shim before test modules import onnx_graphsurgeon.
-from modelopt.onnx._onnx_compat import patch_onnx_helper_removed_apis  # noqa: F401
