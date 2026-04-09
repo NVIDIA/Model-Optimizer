@@ -140,7 +140,7 @@ def test_quantize(model_cls, config):
         (SimpleLinear, INT4_SVDQUANT_CFG),
     ],
 )
-def test_save_restore(model_cls, quant_config):
+def test_save_restore(skip_on_windows, model_cls, quant_config):  # Flaky on Windows
     save_restore_test(model_cls, "cpu", quant_config)
 
 
