@@ -232,7 +232,7 @@ ModelOpt's `_QuantFP8Linear` plugin (`modelopt/torch/quantization/plugins/huggin
 2. **Dequantizes lazily** on-the-fly during calibration forward passes via `weight_dequant()`
 3. Has `unpack_weight()` for full dequantization at export time
 
-This is registered automatically for `transformers.integrations.finegrained_fp8.FP8Linear`. Just load the model normally — no `FineGrainedFP8Config(dequantize=True)` needed:
+This is registered automatically for `transformers.integrations.finegrained_fp8.FP8Linear`. It requires **Triton** to be installed (used internally for FP8 dequantization kernels). Just load the model normally — no `FineGrainedFP8Config(dequantize=True)` needed:
 
 ```python
 model = AutoModel.from_pretrained(model_path, device_map="auto", torch_dtype="auto")

@@ -94,7 +94,6 @@ docker run --rm \
     --shm-size=32g \
     --ulimit memlock=-1 \
     --network host \
-    --runtime=nvidia \
     -v <data_root>:<data_root> \
     -e CALIB_SIZE="${CALIB_SIZE:-512}" \
     <container_image> \
@@ -188,8 +187,8 @@ docker run --user $(id -u):$(id -g) ...
 **Fallback fix** — open permissions before submitting the job:
 
 ```bash
-chmod -R a+rwX /path/to/workspace/
-chmod -R a+rwX /path/to/.hf_cache/
+chmod -R g+rwX /path/to/workspace/
+chmod -R g+rwX /path/to/.hf_cache/
 ```
 
 Scope `chmod` to only the directories the job needs — avoid world-writable paths on shared clusters.

@@ -75,9 +75,9 @@ etc.) is implemented as one or more modes. Modes are recorded in the model's `mo
 optimization workflows can be composed, saved, and restored.
 
 The main entry points are in `modelopt/torch/opt/conversion.py`:
-- `apply_mode(model, mode, config)` — applies an optimization mode to a model
-- `restore(model, state_dict)` — restores a model to a previously saved optimization state
-- `save(model)` / `modelopt_state(model)` — captures the current optimization state
+- `apply_mode(model, mode, ...)` — applies an optimization mode to a model
+- `restore(model, ...)` — restores a model to a previously saved optimization state
+- `save(model, ...)` / `modelopt_state(model)` — captures the current optimization state
 
 ### Core Abstraction: Recipes
 
