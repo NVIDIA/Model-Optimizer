@@ -52,10 +52,14 @@ Draft model components:
            lazy rope pattern needed for MLA models.
 """
 
+import logging
+
 import torch
 import torch.nn.functional as F
 from torch import nn
 from transformers import PretrainedConfig, PreTrainedModel
+
+logger = logging.getLogger(__name__)
 
 # DFlash draft model uses Qwen3 components regardless of the target model.
 # This matches z-lab's implementation which inherits from Qwen3PreTrainedModel.
@@ -513,7 +517,7 @@ class HFDFlashModel(DFlashModel):
         if mask_id is None:
             mask_id = self._auto_detect_mask_token_id(base_config)
         self.mask_token_id = mask_id[0] if isinstance(mask_id, list) else mask_id
-        print(f"DFlash mask_token_id: {self.mask_token_id}")
+        logger.info("DFlash mask_token_id: %s", self.mask_token_id)
 
         # Freeze base model
         if self.dflash_freeze_base_model:
@@ -556,7 +560,7 @@ class HFDFlashModel(DFlashModel):
             # Last resort: use the class two levels up (skip DFlash wrapper + DynamicModule)
             original_cls = type(self).__mro__[2]
         self._original_forward_cls = original_cls
-        print(f"DFlash: using {original_cls.__name__}.forward as base forward")
+        logger.info("DFlash: using %s.forward as base forward", original_cls.__name__)
 
     def get_exporter(self):
         """Get the exporter for the DFlash draft model."""
@@ -886,13 +890,14 @@ class HFDFlashModel(DFlashModel):
             th_dbg = torch.cat(sel, dim=-1)
             n_layers = len(base_outputs.hidden_states)
             th_norm = th_dbg.norm().item()
-            print(
-                f"[psg] hidden layers: {n_layers}, target_hidden: {th_dbg.shape}, norm: {th_norm:.2f}"
+            logger.info(
+                "[psg] hidden layers: %d, target_hidden: %s, norm: %.2f",
+                n_layers, th_dbg.shape, th_norm,
             )
-            print(f"[psg] base_token: {base_token.item()}, mask_token_id: {self.mask_token_id}")
+            logger.info("[psg] base_token: %d, mask_token_id: %s", base_token[0].item(), self.mask_token_id)
             seq_len = input_ids.shape[1]
             blk = self.dflash_block_size
-            print(f"[psg] pos: ctx=[0..{seq_len - 1}], blk=[{seq_len}..{seq_len + blk - 1}]")
+            logger.info("[psg] pos: ctx=[0..%d], blk=[%d..%d]", seq_len - 1, seq_len, seq_len + blk - 1)
         selected = [base_outputs.hidden_states[lid + hid_offset] for lid in self.target_layer_ids]
         target_hidden = torch.cat(selected, dim=-1)
 

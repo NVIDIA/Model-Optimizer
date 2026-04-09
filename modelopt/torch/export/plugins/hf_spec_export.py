@@ -336,7 +336,7 @@ class DFlashExporter(SpeculativeDecodingExporter):
             ),
             "rope_scaling": getattr(base_config, "rope_scaling", None),
             "tie_word_embeddings": False,
-            "torch_dtype": "bfloat16",
+            "torch_dtype": str(getattr(base_config, "torch_dtype", torch.bfloat16)).replace("torch.", ""),
             "num_target_layers": getattr(base_config, "num_hidden_layers", 36),
         }
 
