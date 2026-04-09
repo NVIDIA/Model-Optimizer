@@ -96,7 +96,7 @@ Update pruning YAML files (`ffn_pruning.yaml`, `expert_pruning.yaml`, etc.):
 
 ## End-to-end example
 
-See [test_puzzletron.py](../../../../tests/gpu/torch/puzzletron/test_puzzletron.py) for a complete example that runs both convert and compression steps.
+See [test_puzzletron.py](../../../../tests/gpu/torch/puzzletron/test_puzzletron.py) for a complete example that runs both convert and compression steps. For container setup and dependencies needed to run this test, see the [Puzzletron README environment section](../../../../examples/puzzletron/README.md#environment).
 
 ---
 

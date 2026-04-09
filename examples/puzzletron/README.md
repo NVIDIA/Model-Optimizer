@@ -15,7 +15,27 @@ In this example, we compress the [Llama-3.1-8B-Instruct](https://huggingface.co/
 
 ## Environment
 
-- Install Model-Optimizer in editable mode with the corresponding dependencies (run from the repo root):
+### Container setup (NeMo)
+
+The recommended way to run puzzletron is inside an NVIDIA NeMo container (e.g. `nvcr.io/nvidia/nemo:26.02`). NeMo containers ship a pre-installed `nvidia-modelopt` that does not include the puzzletron extras so you need to replace it with an editable install from this repo.
+
+Once inside the container with the repo available, install dependencies from the repo root:
+
+```bash
+pip uninstall nvidia-modelopt nvidia-lm-eval -y 2>/dev/null
+pip install -e ".[hf,puzzletron]"
+pip install -r examples/puzzletron/requirements.txt
+```
+
+To verify the install, you can run the GPU tests as a smoke check:
+
+```bash
+python -m pytest -s -v tests/gpu/torch/puzzletron/test_puzzletron.py -o addopts="" -k "mistral"
+```
+
+### Bare-metal / other containers
+
+If you are not using a NeMo container, install Model-Optimizer in editable mode with the corresponding dependencies (run from the repo root):
 
 ```bash
 pip install -e .[hf,puzzletron]
@@ -24,6 +44,8 @@ pip install -r examples/puzzletron/requirements.txt
 
 > **Note:** NeMo containers may ship `nvidia-lm-eval` which may conflict with `lm-eval` that is used for evaluation.
 > If so, run `pip uninstall nvidia-lm-eval -y` before installing requirements.
+
+### Hardware
 
 - For this example we are using 2x NVIDIA H100 80GB HBM3 to show multi-GPU steps. You can use also use a single GPU.
 
