@@ -206,17 +206,9 @@ def main(args: argparse.Namespace) -> None:
                 continue
 
             # Tokenize and check length
-            tokenized = tokenizer.apply_chat_template(
+            input_ids = tokenizer.apply_chat_template(
                 conversations, return_tensors="pt", add_generation_template=False
-            )
-            # apply_chat_template return type varies by transformers version:
-            # - older versions return a plain torch.Tensor (input_ids directly)
-            # - newer versions (4.46+) return a BatchEncoding which no longer
-            #   subclasses dict, so isinstance(tokenized, dict) is False
-            if isinstance(tokenized, torch.Tensor):
-                input_ids = tokenized
-            else:
-                input_ids = tokenized["input_ids"]
+            )["input_ids"]
             num_input_tokens = input_ids.shape[1]
             if num_input_tokens <= 10 or num_input_tokens > args.max_seq_len:
                 num_skipped_too_long += 1
