@@ -140,12 +140,17 @@ In `generate` mode, assistant turns are stripped so the row ends with a user tur
 
 ## Tokenizing for Megatron Frameworks
 
-The distillation and pre-training scripts in Megatron-Bridge or Megatron-LM expect data pre-tokenized in Megatron's binary indexed format (`.bin` / `.idx`).  Use the `megatron_preprocess_data` utility to tokenize any JSONL or Hugging Face dataset. Below tokenization scripts prints the list of output prefixes (e.g. `tokenized_qwen3/data1_text`) that you can use for `data_paths` argument (with relative weights on different files) in megatron training scripts.
+The distillation and pre-training scripts in Megatron-Bridge or Megatron-LM expect data pre-tokenized in Megatron's binary indexed format (`.bin` / `.idx`).
+Use the `megatron_preprocess_data` utility to tokenize any JSONL or Hugging Face dataset.
+The tokenization scripts below prints the list of output prefixes (e.g. `tokenized_qwen3/data1_text`) that you can use for the `data_paths` argument (with relative weights on different files) in Megatron training scripts.
+
+**Important Notes:**
+
+- For Pretraining / raw-text data (`text` key) — use `--append_eod` so Megatron can tell where documents end when concatenating them into long sequences.
+- For Post-training chat data (`messages` key) — omit `--append_eod`; the chat template already appends EOS at the end of each conversation.
+- Set `--max_sequence_length 256_000` to avoid rare OOM errors if some text is very long.
 
 ### From JSONL files
-
-For **Pretraining / raw-text data** (`text` key) — use `--append_eod` so Megatron can tell where
-documents end when concatenating them into long sequences:
 
 ```bash
 python -m modelopt.torch.utils.plugins.megatron_preprocess_data \
@@ -157,9 +162,6 @@ python -m modelopt.torch.utils.plugins.megatron_preprocess_data \
     --append_eod
 ```
 
-For **Post-training chat data** (`messages` key) — omit `--append_eod`; the chat template already
-appends EOS at the end of each conversation:
-
 ```bash
 python -m modelopt.torch.utils.plugins.megatron_preprocess_data \
     --jsonl_paths /path/to/sft_data.jsonl \
@@ -170,9 +172,6 @@ python -m modelopt.torch.utils.plugins.megatron_preprocess_data \
 ```
 
 Instead of `--jsonl_paths`, pass `--input_dir /path/to/dir` to tokenize all JSONL files in a directory (`.jsonl` and `.jsonl.gz` are both supported).
-Set `--max_sequence_length 256_000` to avoid rare OOM errors if some text is very long.
-
-For **plain prose / pretraining text** (non-coding pretraining data) where newlines are not meaningful, add `--strip_newlines` to replace them with spaces before tokenization.
 
 ### From Hugging Face Hub
 
@@ -188,12 +187,17 @@ python -m modelopt.torch.utils.plugins.megatron_preprocess_data \
     --tokenizer Qwen/Qwen3-0.6B \
     --output_dir tokenized_qwen3 \
     --workers 32 \
-    --max_sequence_length 256_000 \
     --append_eod
 ```
 
 Omit `--hf_name` to process all subsets, `--hf_split` for all splits, or `--hf_max_samples_per_split` for all samples.
 To quickly test, use [nvidia/Nemotron-Pretraining-Dataset-sample](https://huggingface.co/datasets/nvidia/Nemotron-Pretraining-Dataset-sample).
+
+For **very large datasets** (tens of millions of documents), add `--hf_streaming --hf_max_samples_per_split <num_samples>` to avoid downloading the full dataset — only the rows actually consumed are fetched.
+
+> **Performance note:** Non-streaming mode downloads all Parquet shards once and caches them as Arrow files on disk.
+> Re-runs read from cache and are much faster.
+> Streaming re-downloads on every run with no cache, so it is slower for full-dataset processing.
 
 ### Nemotron Post-Training v3 (`reasoning_content`)
 

@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import gzip
 import json
 from pathlib import Path
 
@@ -125,3 +126,37 @@ def test_megatron_preprocess_data_reasoning_content(tmp_path):
     assert inline_size > strip_size, (
         f"inline ({inline_size} bytes) should produce a larger binary than strip ({strip_size} bytes)"
     )
+
+
+def test_megatron_preprocess_data_with_gzip_input(tmp_path):
+    gz_path = tmp_path / "data.jsonl.gz"
+    with gzip.open(gz_path, "wt", encoding="utf-8") as f:
+        for i in range(10):
+            f.write(json.dumps({"text": f"Line one.\nLine two.\nSample {i}."}) + "\n")
+
+    prefixes = megatron_preprocess_data(
+        jsonl_paths=gz_path,
+        output_dir=tmp_path,
+        tokenizer_name_or_path="gpt2",
+        json_keys=["text"],
+        workers=1,
+        strip_newlines=True,
+    )
+
+    # .jsonl.gz → stem should be "data", not "data.jsonl"
+    assert prefixes == [str(tmp_path / "data_text")], f"Unexpected prefix: {prefixes}"
+    assert Path(prefixes[0] + ".bin").stat().st_size > 0
+
+
+def test_megatron_preprocess_data_hf_streaming_warning(tmp_path):
+    # hf_streaming without hf_max_samples_per_split should warn and fall back to non-streaming
+    with pytest.warns(UserWarning, match="hf_streaming"):
+        megatron_preprocess_data(
+            hf_dataset="nanotron/minipile_100_samples",
+            hf_split="train",
+            hf_streaming=True,
+            output_dir=tmp_path,
+            tokenizer_name_or_path="gpt2",
+            json_keys=["text"],
+            workers=1,
+        )

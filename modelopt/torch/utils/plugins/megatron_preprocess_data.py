@@ -15,32 +15,26 @@
 
 # Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
 
-"""Processing large data pretraining and post-training datasets to tokenize for usage in megatron pretraining scripts.
+"""Tokenize pretraining and post-training datasets into Megatron's binary indexed format.
 
-We apply chat_template to the data if the JSON key is a list of message dicts (e.g. Nemotron-Post-Training-Dataset-v2)
-so that we can tokenize the data for usage in megatron pretraining scripts.
+When the value for a JSON key is a list of message dicts, ``tokenizer.apply_chat_template``
+is automatically used (``add_special_tokens=False`` to avoid a duplicate BOS). Plain-text
+values are tokenized directly.
 
-Usage to tokenize one or more JSONL files (pretraining, ``text`` key):
-
-```bash
-python -m modelopt.torch.utils.plugins.megatron_preprocess_data \
-    --jsonl_paths path/to/input/data1.jsonl path/to/input/data2.jsonl ... \
-    --json_keys text \
-    --output_dir /path/to/tokenized/Qwen3/ \
-    --tokenizer Qwen/Qwen3-0.6B
-```
-
-Usage to tokenize all JSONL files in a directory:
+**Tokenize JSONL files — pretraining text** (use ``--append_eod`` so Megatron knows document
+boundaries when concatenating sequences; use ``--strip_newlines`` for prose/web text):
 
 ```bash
 python -m modelopt.torch.utils.plugins.megatron_preprocess_data \
-    --input_dir /path/to/input/data/ \
+    --jsonl_paths path/to/data1.jsonl path/to/data2.jsonl \
     --json_keys text \
     --output_dir /path/to/tokenized/Qwen3/ \
-    --tokenizer Qwen/Qwen3-0.6B
+    --tokenizer Qwen/Qwen3-0.6B \
+    --append_eod \
+    --strip_newlines
 ```
 
-Usage to tokenize a post-training dataset with ``messages`` key (chat format):
+**Tokenize JSONL files — post-training chat data** (omit ``--append_eod``; chat template adds EOS):
 
 ```bash
 python -m modelopt.torch.utils.plugins.megatron_preprocess_data \
@@ -50,31 +44,50 @@ python -m modelopt.torch.utils.plugins.megatron_preprocess_data \
     --tokenizer Qwen/Qwen3-0.6B
 ```
 
-When the value for a JSON key is a list of message dicts (e.g.
-``[{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]``),
-``tokenizer.apply_chat_template`` is automatically used to render the conversation
-into a single text string before tokenization.
+Pass ``--input_dir /path/to/dir`` to tokenize all ``.jsonl`` / ``.jsonl.gz`` files in a directory.
 
-Usage to download and tokenize a dataset from Hugging Face Hub:
+**Download and tokenize from Hugging Face Hub:**
 
 ```bash
 python -m modelopt.torch.utils.plugins.megatron_preprocess_data \
-    --hf_dataset nvidia/Nemotron-Pretraining-Dataset-sample \
-    --hf_name Nemotron-SFT-Code \
+    --hf_dataset nvidia/Nemotron-Pretraining-SFT-v1 \
+    --hf_name Nemotron-SFT-General \
     --hf_split train \
     --json_keys text \
     --tokenizer Qwen/Qwen3-0.6B \
-    --output_dir /path/to/tokenized/Qwen3/
+    --output_dir /path/to/tokenized/Qwen3/ \
+    --append_eod \
+    --strip_newlines
 ```
 
-NOTE: If you skip --hf_name, it will download and tokenize all subsets for the dataset.
-If you skip --hf_split, it will download and tokenize all splits for the subset.
+Omit ``--hf_name`` to process all subsets; omit ``--hf_split`` for all splits. When ``--hf_max_samples_per_split``
+is set, the dataset is automatically shuffled to avoid biased sampling from the prefix.
+
+**Large datasets — streaming mode** (only consumed rows downloaded, no disk cache):
+
+```bash
+python -m modelopt.torch.utils.plugins.megatron_preprocess_data \
+    --hf_dataset nvidia/Nemotron-CC-v2.1 \
+    --hf_name High-Quality \
+    --hf_max_samples_per_split 5000000 \
+    --hf_streaming \
+    --json_keys text \
+    --tokenizer Qwen/Qwen3-0.6B \
+    --output_dir /path/to/tokenized/Qwen3/ \
+    --append_eod \
+    --strip_newlines
+```
+
+Note: ``--hf_streaming`` without ``--hf_max_samples_per_split`` falls back to non-streaming,
+since streaming the full dataset is slower than the cached non-streaming path.
 """
 
 import argparse
 import gzip
 import json
 import multiprocessing
+import time
+import warnings
 from pathlib import Path
 
 from datasets import get_dataset_config_names, get_dataset_split_names, load_dataset
@@ -125,6 +138,11 @@ class _Encoder:
     def initializer(self):
         # Use Encoder class as a container for global data
         _Encoder.tokenizer = AutoTokenizer.from_pretrained(self.tokenizer_name_or_path)
+        # Suppress "Token indices sequence length is longer than model_max_length" warnings.
+        # model_max_length is the model's inference limit and irrelevant here — we are only
+        # converting text to token IDs, not running a forward pass. Megatron splits documents
+        # into fixed-length training sequences at training time.
+        _Encoder.tokenizer.model_max_length = int(1e30)
 
     def _process_messages(self, messages: list[dict]) -> list[dict]:
         """Handle reasoning_content field in v3 Nemotron datasets.
@@ -212,11 +230,19 @@ class _Partition:
         self.workers = workers
 
     def _print_processing_stats(
-        self, count: int, total_doc_len: int, total_enc_len: int, *, force_print: bool = False
+        self,
+        count: int,
+        total_doc_len: int,
+        total_enc_len: int,
+        start_time: float,
+        *,
+        force_print: bool = False,
     ):
         if count % self.log_interval == 0 or force_print:
+            elapsed = (time.time() - start_time) / 60
             print(
-                f"\tProcessed {num2hrb(count)} docs = {num2hrb(total_doc_len)} chars = {num2hrb(total_enc_len)} tokens",
+                f"\tProcessed {num2hrb(count)} docs = {num2hrb(total_doc_len)} chars"
+                f" = {num2hrb(total_enc_len)} tokens ({elapsed:.1f}mins)",
                 flush=True,
             )
 
@@ -255,6 +281,7 @@ class _Partition:
             print(f"\t[SKIP] Output files corresponding to {input_file_name} already exist")
             return 0, prefixes
 
+        start_time = time.time()
         total_doc_len, total_enc_len, final_enc_len = 0, 0, 0
         for i, (doc, sentence_lens, (doc_len, enc_len)) in enumerate(encoded_docs, start=1):
             total_doc_len += doc_len
@@ -262,8 +289,8 @@ class _Partition:
             final_enc_len += sum(sentence_lens[key])
             for key in doc:
                 builders[key].add_document(doc[key], sentence_lens[key])
-            self._print_processing_stats(i, total_doc_len, total_enc_len)
-        self._print_processing_stats(i, total_doc_len, total_enc_len, force_print=True)
+            self._print_processing_stats(i, total_doc_len, total_enc_len, start_time)
+        self._print_processing_stats(i, total_doc_len, total_enc_len, start_time, force_print=True)
 
         fin.close()
         for key in builders:
@@ -285,17 +312,35 @@ class _Partition:
         config: str | None,
         split: str,
         max_samples: int | None = None,
+        streaming: bool = False,
     ) -> tuple[int, list[str]]:
-        """Load a HF dataset split and tokenize directly without writing an intermediate JSONL."""
-        split_arg = f"{split}[:{max_samples}]" if max_samples is not None else split
-        print(f"\nLoading HF dataset {dataset_name=}, {config=}, {split_arg=}")
-        ds = load_dataset(path=dataset_name, name=config, split=split_arg)
+        """Load a HF dataset split and tokenize directly without writing an intermediate JSONL.
 
-        for key in self.json_keys:
-            if key not in ds.features:
-                raise KeyError(
-                    f"{key=} not found in dataset features. Available: {list(ds.features)}"
-                )
+        When ``streaming=True``, only consumed rows are downloaded — useful for large pretraining
+        datasets where downloading the full split is impractical. Note that streaming mode does not
+        cache to disk, so re-runs will re-download the data.
+
+        When ``max_samples`` is set, the dataset is shuffled to avoid sampling from a biased prefix of the dataset.
+        """
+        split_arg = (
+            f"{split}[:{max_samples}]" if (max_samples is not None and not streaming) else split
+        )
+        print(f"\nLoading HF dataset {dataset_name=}, {config=}, {split_arg=}, {streaming=}")
+        ds = load_dataset(path=dataset_name, name=config, split=split_arg, streaming=streaming)
+        if max_samples is not None:
+            # Shuffle before capping to avoid biased sampling from the dataset prefix
+            ds = ds.shuffle(seed=42)
+            if streaming:
+                ds = ds.take(max_samples)
+
+        # features are available from dataset metadata without downloading data
+        features = ds.features if ds.features is not None else {}
+        if features:
+            for key in self.json_keys:
+                if key not in features:
+                    raise KeyError(
+                        f"{key=} not found in dataset features. Available: {list(features)}"
+                    )
 
         safe_name = dataset_name.replace("/", "--")
         output_prefix = Path(output_dir) / f"{safe_name}_{config}_{split}"
@@ -322,6 +367,7 @@ class _Partition:
         pool = multiprocessing.Pool(self.workers, initializer=encoder.initializer)
         encoded_docs = pool.imap(encoder.encode, self._iter_hf_as_json(ds), 32)
 
+        start_time = time.time()
         total_doc_len, total_enc_len, final_enc_len = 0, 0, 0
         i = 0
         for i, (doc, sentence_lens, (doc_len, enc_len)) in enumerate(encoded_docs, start=1):
@@ -330,10 +376,12 @@ class _Partition:
             final_enc_len += sum(sum(sentence_lens[key]) for key in sentence_lens)
             for key in doc:
                 builders[key].add_document(doc[key], sentence_lens[key])
-            self._print_processing_stats(i, total_doc_len, total_enc_len)
+            self._print_processing_stats(i, total_doc_len, total_enc_len, start_time)
 
         if i:
-            self._print_processing_stats(i, total_doc_len, total_enc_len, force_print=True)
+            self._print_processing_stats(
+                i, total_doc_len, total_enc_len, start_time, force_print=True
+            )
 
         pool.close()
         pool.join()
@@ -377,6 +425,7 @@ def megatron_preprocess_data(
     hf_name: str | None = None,
     hf_split: str | None = None,
     hf_max_samples_per_split: int | None = None,
+    hf_streaming: bool = False,
     # Other arguments
     output_dir: str | Path,
     tokenizer_name_or_path: str,
@@ -398,8 +447,10 @@ def megatron_preprocess_data(
         hf_dataset: Hugging Face Hub dataset name or path to download and tokenize.
         hf_name: Hugging Face Hub dataset subset name. Downloads all subsets if None.
         hf_split: Hugging Face Hub dataset split. Defaults to None (all splits).
-        hf_max_samples_per_split: Maximum number of samples to download per split from Hugging Face Hub.
-            Skip to download all samples.
+        hf_max_samples_per_split: Maximum number of rows to consume per split.
+        hf_streaming: Load HuggingFace datasets in streaming mode. Only consumed rows are
+            downloaded — useful for very large pretraining datasets. Note: streaming does not
+            cache to disk, so re-runs re-download. Defaults to False.
         output_dir: Path to directory to save binary output files.
         tokenizer_name_or_path: Name or path of the Hugging Face tokenizer to use.
         json_keys: Key or list of keys to extract from json. Defaults to ["text"].
@@ -427,8 +478,16 @@ def megatron_preprocess_data(
         raise ValueError(
             "Exactly one of `input_dir`, `jsonl_paths`, or `hf_dataset` must be provided."
         )
+    if hf_streaming and hf_max_samples_per_split is None and _is_main_or_first_worker():
+        warnings.warn(
+            "--hf_streaming is set but --hf_max_samples_per_split is not. "
+            "Streaming without a sample cap re-downloads the full dataset on every run with no "
+            "disk cache, which is slower than non-streaming mode. Falling back to streaming=False.",
+            stacklevel=2,
+        )
+        hf_streaming = False
 
-    Path(output_dir).mkdir(exist_ok=True)
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
     vocab_size = AutoTokenizer.from_pretrained(tokenizer_name_or_path).vocab_size
 
     encoder = _Encoder(
@@ -443,11 +502,18 @@ def megatron_preprocess_data(
 
     final_enc_len = 0
     all_prefixes: list[str] = []
+    overall_start = time.time()
 
     if hf_dataset is not None:
         for config, split in _enumerate_hf_splits(hf_dataset, hf_name, hf_split):
             enc_len, prefixes = partition.process_hf_split(
-                output_dir, encoder, hf_dataset, config, split, hf_max_samples_per_split
+                output_dir,
+                encoder,
+                hf_dataset,
+                config,
+                split,
+                hf_max_samples_per_split,
+                hf_streaming,
             )
             final_enc_len += enc_len
             all_prefixes.extend(prefixes)
@@ -468,7 +534,11 @@ def megatron_preprocess_data(
             final_enc_len += enc_len
             all_prefixes.extend(prefixes)
 
-    print(f"\n\n>>> Total number of tokens currently processed: {num2hrb(final_enc_len)}")
+    elapsed = (time.time() - overall_start) / 60
+    print(
+        f"\n\n>>> Total number of tokens currently processed: {num2hrb(final_enc_len)}"
+        f" (time: {elapsed:.1f}mins)"
+    )
     print(
         "\n>>> Output prefixes (Use to build weighted data_paths / blend in megatron training scripts):"
     )
@@ -508,7 +578,16 @@ def main():
         "--hf_max_samples_per_split",
         type=int,
         default=None,
-        help="Maximum number of samples to download per split from Hugging Face Hub. Skip to download all samples.",
+        help="Maximum number of rows to consume per split.",
+    )
+    parser.add_argument(
+        "--hf_streaming",
+        action="store_true",
+        help=(
+            "Load HuggingFace datasets in streaming mode. Only consumed rows are downloaded — "
+            "useful for very large pretraining datasets (e.g. Nemotron-CC-v2.1). "
+            "Note: streaming does not cache to disk, so re-runs will re-download the data."
+        ),
     )
     # Other arguments
     parser.add_argument("--output_dir", type=str, required=True, help="Output directory")
@@ -536,8 +615,7 @@ def main():
         "--strip_newlines",
         action="store_true",
         help=(
-            "Replace newlines with spaces in plain-text values before tokenization. "
-            "By default, newlines are preserved. "
+            "Replace newlines with spaces in plain-text values (non-coding pretraining data) before tokenization. "
             "Has no effect on chat-template encoded values."
         ),
     )
@@ -555,6 +633,7 @@ def main():
         hf_name=args.hf_name,
         hf_split=args.hf_split,
         hf_max_samples_per_split=args.hf_max_samples_per_split,
+        hf_streaming=args.hf_streaming,
         output_dir=args.output_dir,
         tokenizer_name_or_path=args.tokenizer,
         json_keys=args.json_keys,
