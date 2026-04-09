@@ -786,7 +786,6 @@ class _QuantQwen3VLMoeTextExperts(QuantModule):
         return next_states
 
 
-
 def _get_fused_expert_intermediate_dim(module):
     """Resolve the intermediate (expert) dimension from a fused expert module.
 
