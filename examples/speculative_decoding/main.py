@@ -222,20 +222,12 @@ def train():
     use_offline_training = data_args.offline_data_path is not None
 
     if checkpoint:
-        # Prefer top-level output_dir, fall back to checkpoint subdir
-        model_load_path = training_args.output_dir
-        if not os.path.isfile(os.path.join(model_load_path, "model.safetensors")):
-            model_load_path = checkpoint
-            print_rank_0(
-                f"No model.safetensors in {training_args.output_dir}, "
-                f"loading from checkpoint: {model_load_path}"
-            )
         with patch_transformers5_params_loading():
             model = load_vlm_or_llm(
                 checkpoint, dtype="auto", trust_remote_code=model_args.trust_remote_code
             )
         tokenizer = transformers.AutoTokenizer.from_pretrained(
-            model_load_path, trust_remote_code=model_args.trust_remote_code
+            checkpoint, trust_remote_code=model_args.trust_remote_code
         )
     else:
         # To avoid OOM for large models, we load and convert model on CPU first.

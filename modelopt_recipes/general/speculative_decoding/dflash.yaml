@@ -51,3 +51,5 @@ dflash:
   dflash_loss_decay_factor: 4.0
   dflash_architecture_config:
     num_hidden_layers: 5
+    # mask_token_id: auto-detected from model vocab (override for specific models)
+    # sliding_window and layer_types are inherited from base model config automatically

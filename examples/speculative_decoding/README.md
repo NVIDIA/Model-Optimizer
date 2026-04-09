@@ -378,6 +378,10 @@ uv run launch.py --yaml examples/Qwen/Qwen3-8B/hf_online_dflash.yaml --yes
 | `dflash.dflash_architecture_config.mask_token_id` | auto | Token ID for masked positions |
 | `training.answer_only_loss` | false | Mask loss on non-assistant tokens |
 
+Qwen3 sliding window attention is automatically supported — draft layers inherit
+`layer_types` and `sliding_window` from the config, matching the target model's
+attention pattern.
+
 ### Export
 
 ```bash
