@@ -17,8 +17,9 @@ metadata:
   recipe_type: ptq
   description: NVFP4 weight and activation (W4A4), gptq sequential calibration.
 quantize:
-  algorithm: gptq
-  use_sequential: true
+  algorithm:
+    method: gptq
+    use_sequential: true
   quant_cfg:
     - quantizer_name: '*'
       enable: false
