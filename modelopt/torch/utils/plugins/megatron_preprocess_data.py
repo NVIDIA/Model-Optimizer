@@ -76,13 +76,24 @@ import json
 import multiprocessing
 from pathlib import Path
 
+from datasets import get_dataset_config_names, get_dataset_split_names, load_dataset
 from megatron.core.datasets import indexed_dataset
 from transformers import AutoTokenizer
 
 from modelopt.torch.utils import num2hrb
-from modelopt.torch.utils.dataset_utils import download_hf_dataset_as_jsonl
 
 __all__ = ["megatron_preprocess_data"]
+
+
+def _is_main_or_first_worker() -> bool:
+    """Return True only for the main process or the first pool worker.
+
+    ``multiprocessing.current_process()._identity`` is ``()`` in the main process
+    and ``(N,)`` in the N-th pool worker.  Gating noisy prints on this prevents
+    the same message from appearing once per worker when using many workers.
+    """
+    identity = multiprocessing.current_process()._identity
+    return not identity or identity[0] == 1
 
 
 class _Encoder:
@@ -95,6 +106,7 @@ class _Encoder:
         json_keys: list[str],
         append_eod: bool,
         max_sequence_length: int | None,
+        reasoning_content: str = "strip",
     ):
         self.tokenizer_name_or_path = tokenizer_name_or_path
         self.json_keys = json_keys
@@ -103,11 +115,41 @@ class _Encoder:
         self.max_document_length = (
             max_sequence_length * 8 if max_sequence_length is not None else None
         )
+        self.reasoning_content = reasoning_content
         print(f"Setting max document length: {self.max_document_length}")
+        print(f"reasoning_content mode: {self.reasoning_content}")
 
     def initializer(self):
         # Use Encoder class as a container for global data
         _Encoder.tokenizer = AutoTokenizer.from_pretrained(self.tokenizer_name_or_path)
+
+    def _process_messages(self, messages: list[dict]) -> list[dict]:
+        """Handle reasoning_content field in v3 Nemotron datasets.
+
+        Nemotron Post-Training v3 datasets include a ``reasoning_content`` field
+        in assistant messages alongside ``content``. Behaviour is controlled by
+        ``self.reasoning_content``:
+
+        - ``"strip"``  (default): remove the field before calling apply_chat_template.
+          Safe for any tokenizer; reasoning traces are discarded.
+        - ``"inline"``: prepend ``<think>…</think>`` to ``content`` then strip the
+          field. Preserves the reasoning trace in a tokenizer-agnostic way.
+        - ``"native"``: pass messages unchanged; the tokenizer's chat template must
+          handle ``reasoning_content`` itself (e.g. Qwen3).
+        """
+        if self.reasoning_content == "native":
+            return messages
+        processed = []
+        for msg in messages:
+            if "reasoning_content" not in msg:
+                processed.append(msg)
+                continue
+            msg = dict(msg)  # shallow copy — don't mutate the original
+            rc = msg.pop("reasoning_content")
+            if self.reasoning_content == "inline" and rc:
+                msg["content"] = f"<think>\n{rc}\n</think>\n{msg.get('content', '')}"
+            processed.append(msg)
+        return processed
 
     def encode(self, json_line: str):
         data = json.loads(json_line)
@@ -121,25 +163,30 @@ class _Encoder:
             if isinstance(value, list):
                 if key not in _Encoder._chat_template_logged:
                     _Encoder._chat_template_logged.add(key)
-                    print(f"Applying chat_template to '{key}' key")
+                    if _is_main_or_first_worker():
+                        print(f"Applying chat_template to '{key}' key")
                 kwargs = {}
                 tools = data.get("tools")
                 if tools:
                     kwargs["tools"] = tools
+                value = self._process_messages(value)
                 text = _Encoder.tokenizer.apply_chat_template(value, tokenize=False, **kwargs)
+                # chat template already embeds all special tokens; don't add BOS again
+                add_special_tokens = False
             else:
                 text = value
+                add_special_tokens = True
 
             # Truncate text by character length if specified
             if self.max_document_length is not None:
                 original_length = len(text)
                 text = text[: self.max_document_length]
-                if original_length != len(text):
+                if original_length != len(text) and _is_main_or_first_worker():
                     print(f"Document truncated from {original_length} to {len(text)} characters")
             doc_len += len(text)
 
             # Tokenize the entire text as one document
-            encoded = _Encoder.tokenizer.encode(text)
+            encoded = _Encoder.tokenizer.encode(text, add_special_tokens=add_special_tokens)
 
             if self.max_sequence_length is not None:
                 encoded = encoded[: self.max_sequence_length]
@@ -172,8 +219,9 @@ class _Partition:
 
     def process_json_file(
         self, input_file_name: str | Path, output_dir: str | Path, encoder: _Encoder
-    ):
+    ) -> tuple[int, list[str]]:
         output_prefix = Path(output_dir) / Path(input_file_name).stem
+        prefixes = [f"{output_prefix}_{key}" for key in self.json_keys]
 
         print(f"\nOpening {input_file_name}")
         fin = open(input_file_name, encoding="utf-8")
@@ -184,11 +232,10 @@ class _Partition:
         output_bin_files = {}
         output_idx_files = {}
         builders = {}
-        level = "document"
 
         for key in self.json_keys:
-            output_bin_files[key] = "{}_{}_{}.bin".format(output_prefix, key, level)
-            output_idx_files[key] = "{}_{}_{}.idx".format(output_prefix, key, level)
+            output_bin_files[key] = f"{output_prefix}_{key}.bin"
+            output_idx_files[key] = f"{output_prefix}_{key}.idx"
             if Path(output_bin_files[key]).exists() and Path(output_idx_files[key]).exists():
                 continue
             builders[key] = indexed_dataset.IndexedDatasetBuilder(
@@ -198,7 +245,7 @@ class _Partition:
 
         if not builders:
             print(f"\t[SKIP] Output files corresponding to {input_file_name} already exist")
-            return 0
+            return 0, prefixes
 
         total_doc_len, total_enc_len, final_enc_len = 0, 0, 0
         for i, (doc, sentence_lens, (doc_len, enc_len)) in enumerate(encoded_docs, start=1):
@@ -214,7 +261,102 @@ class _Partition:
         for key in builders:
             builders[key].finalize(output_idx_files[key])
 
-        return final_enc_len
+        return final_enc_len, prefixes
+
+    @staticmethod
+    def _iter_hf_as_json(ds):
+        """Yield each row of a HF Dataset as a JSON string, matching JSONL line format."""
+        for row in ds:
+            yield json.dumps(dict(row))
+
+    def process_hf_split(
+        self,
+        output_dir: str | Path,
+        encoder: "_Encoder",
+        dataset_name: str,
+        config: str | None,
+        split: str,
+        max_samples: int | None = None,
+    ) -> tuple[int, list[str]]:
+        """Load a HF dataset split and tokenize directly without writing an intermediate JSONL."""
+        split_arg = f"{split}[:{max_samples}]" if max_samples is not None else split
+        print(f"\nLoading HF dataset {dataset_name=}, {config=}, {split_arg=}")
+        ds = load_dataset(path=dataset_name, name=config, split=split_arg)
+
+        for key in self.json_keys:
+            if key not in ds.features:
+                raise KeyError(
+                    f"{key=} not found in dataset features. Available: {list(ds.features)}"
+                )
+
+        safe_name = dataset_name.replace("/", "--")
+        output_prefix = Path(output_dir) / f"{safe_name}_{config}_{split}"
+        prefixes = [f"{output_prefix}_{key}" for key in self.json_keys]
+
+        output_bin_files = {}
+        output_idx_files = {}
+        builders = {}
+
+        for key in self.json_keys:
+            output_bin_files[key] = f"{output_prefix}_{key}.bin"
+            output_idx_files[key] = f"{output_prefix}_{key}.idx"
+            if Path(output_bin_files[key]).exists() and Path(output_idx_files[key]).exists():
+                continue
+            builders[key] = indexed_dataset.IndexedDatasetBuilder(
+                output_bin_files[key],
+                dtype=indexed_dataset.DType.optimal_dtype(self.vocab_size),
+            )
+
+        if not builders:
+            print(f"\t[SKIP] Output files for {dataset_name} {config}/{split} already exist")
+            return 0, prefixes
+
+        pool = multiprocessing.Pool(self.workers, initializer=encoder.initializer)
+        encoded_docs = pool.imap(encoder.encode, self._iter_hf_as_json(ds), 32)
+
+        total_doc_len, total_enc_len, final_enc_len = 0, 0, 0
+        i = 0
+        for i, (doc, sentence_lens, (doc_len, enc_len)) in enumerate(encoded_docs, start=1):
+            total_doc_len += doc_len
+            total_enc_len += enc_len
+            final_enc_len += sum(sum(sentence_lens[key]) for key in sentence_lens)
+            for key in doc:
+                builders[key].add_document(doc[key], sentence_lens[key])
+            self._print_processing_stats(i, total_doc_len, total_enc_len)
+
+        if i:
+            self._print_processing_stats(i, total_doc_len, total_enc_len, force_print=True)
+
+        pool.close()
+        pool.join()
+        for key in builders:
+            builders[key].finalize(output_idx_files[key])
+
+        return final_enc_len, prefixes
+
+
+def _enumerate_hf_splits(
+    dataset_name: str,
+    name: str | None,
+    split: str | None,
+) -> list[tuple[str | None, str]]:
+    """Return (config, split) pairs to process for a HuggingFace dataset."""
+    configs: list[str | None]
+    if name is not None:
+        configs = [name]
+    else:
+        try:
+            configs = get_dataset_config_names(dataset_name)
+        except Exception:
+            configs = [None]
+
+    result: list[tuple[str | None, str]] = []
+    for config in configs:
+        if split is not None:
+            result.append((config, split))
+        else:
+            result.extend((config, s) for s in get_dataset_split_names(dataset_name, config))
+    return result
 
 
 def megatron_preprocess_data(
@@ -224,7 +366,7 @@ def megatron_preprocess_data(
     # Hugging Face Hub dataset arguments
     hf_dataset: str | None = None,
     hf_name: str | None = None,
-    hf_split: str | None = "train",
+    hf_split: str | None = None,
     hf_max_samples_per_split: int | None = None,
     # Other arguments
     output_dir: str | Path,
@@ -234,6 +376,7 @@ def megatron_preprocess_data(
     max_sequence_length: int | None = None,
     workers: int = 1,
     log_interval: int = 100000,
+    reasoning_content: str = "strip",
 ):
     """Process large data for pretraining.
 
@@ -244,7 +387,7 @@ def megatron_preprocess_data(
         jsonl_paths: One or more paths to JSONL files.
         hf_dataset: Hugging Face Hub dataset name or path to download and tokenize.
         hf_name: Hugging Face Hub dataset subset name. Downloads all subsets if None.
-        hf_split: Hugging Face Hub dataset split. Defaults to "train".
+        hf_split: Hugging Face Hub dataset split. Defaults to None (all splits).
         hf_max_samples_per_split: Maximum number of samples to download per split from Hugging Face Hub.
             Skip to download all samples.
         output_dir: Path to directory to save binary output files.
@@ -254,6 +397,15 @@ def megatron_preprocess_data(
         max_sequence_length: Maximum tokenized sequence length. Defaults to None.
         workers: Number of worker processes to launch. Defaults to 1.
         log_interval: Interval between progress updates. Defaults to 100000.
+        reasoning_content: How to handle the ``reasoning_content`` field present in many
+            Nemotron Post-Training v3 datasets. One of:
+            ``"strip"`` (default) — remove before applying chat template (safe for any tokenizer);
+            ``"inline"`` — wrap in ``<think>…</think>`` and prepend to ``content``;
+            ``"native"`` — pass unchanged, requires the tokenizer chat template to handle it.
+
+    Returns:
+        List of output file prefixes (one per json_key per split/file, without ``.bin``/``.idx``
+        extension) that can be used directly to build weighted ``data_paths`` argument in megatron training scripts.
     """
     if isinstance(json_keys, str):
         json_keys = [json_keys]
@@ -263,39 +415,47 @@ def megatron_preprocess_data(
             "Exactly one of `input_dir`, `jsonl_paths`, or `hf_dataset` must be provided."
         )
 
-    if hf_dataset is not None:
-        jsonl_paths = download_hf_dataset_as_jsonl(
-            hf_dataset,
-            f"{output_dir}/raw",
-            json_keys,
-            name=hf_name,
-            split=hf_split,
-            max_samples_per_split=hf_max_samples_per_split,
-            num_proc=workers,
-        )
-        print(f"\n\nTokenizing downloaded JSONL files: {jsonl_paths}\n")
-
-    if input_dir is not None:
-        file_names = sorted(Path(input_dir).glob("*.jsonl"))
-        if not file_names:
-            raise ValueError(f"No JSONL files found in input directory: {input_dir}")
-    elif isinstance(jsonl_paths, (str, Path)):
-        file_names = [jsonl_paths]  # type: ignore[list-item]
-    else:
-        file_names = list(jsonl_paths)  # type: ignore[arg-type]
-
     Path(output_dir).mkdir(exist_ok=True)
     vocab_size = AutoTokenizer.from_pretrained(tokenizer_name_or_path).vocab_size
 
-    encoder = _Encoder(tokenizer_name_or_path, json_keys, append_eod, max_sequence_length)
+    encoder = _Encoder(
+        tokenizer_name_or_path, json_keys, append_eod, max_sequence_length, reasoning_content
+    )
     partition = _Partition(vocab_size, json_keys, log_interval, workers)
 
     final_enc_len = 0
-    for name in file_names:
-        num_tokens = partition.process_json_file(name, output_dir, encoder)
-        final_enc_len += num_tokens
+    all_prefixes: list[str] = []
 
-    print(f"\n\n>>> Total number of tokens currently processed: {num2hrb(final_enc_len)}\nDone!")
+    if hf_dataset is not None:
+        for config, split in _enumerate_hf_splits(hf_dataset, hf_name, hf_split):
+            enc_len, prefixes = partition.process_hf_split(
+                output_dir, encoder, hf_dataset, config, split, hf_max_samples_per_split
+            )
+            final_enc_len += enc_len
+            all_prefixes.extend(prefixes)
+    else:
+        if input_dir is not None:
+            file_names = sorted(Path(input_dir).glob("*.jsonl"))
+            if not file_names:
+                raise ValueError(f"No JSONL files found in input directory: {input_dir}")
+        elif isinstance(jsonl_paths, (str, Path)):
+            file_names = [jsonl_paths]  # type: ignore[list-item]
+        else:
+            file_names = list(jsonl_paths)  # type: ignore[arg-type]
+
+        for name in file_names:
+            enc_len, prefixes = partition.process_json_file(name, output_dir, encoder)
+            final_enc_len += enc_len
+            all_prefixes.extend(prefixes)
+
+    print(f"\n\n>>> Total number of tokens currently processed: {num2hrb(final_enc_len)}")
+    print(
+        "\n>>> Output prefixes (Use to build weighted data_paths / blend in megatron training scripts):"
+    )
+    for prefix in all_prefixes:
+        print(f"\t{prefix}")
+    print("Done!")
+    return all_prefixes
 
 
 def main():
@@ -321,7 +481,7 @@ def main():
     parser.add_argument(
         "--hf_split",
         type=str,
-        default="train",
+        default=None,
         help="Hugging Face Hub dataset split. Skip to download and tokenize all splits for the subset.",
     )
     parser.add_argument(
@@ -340,6 +500,18 @@ def main():
     )
     parser.add_argument("--workers", type=int, default=8, help="Number of worker processes")
     parser.add_argument("--log_interval", type=int, default=100000, help="Log interval")
+    parser.add_argument(
+        "--reasoning_content",
+        type=str,
+        default="strip",
+        choices=["strip", "inline", "native"],
+        help=(
+            "How to handle the reasoning_content field in Nemotron v3 datasets. "
+            "'strip': discard (default, safe for any tokenizer). "
+            "'inline': wrap in <think>...</think> and prepend to content. "
+            "'native': pass unchanged (requires tokenizer chat template support, e.g. Qwen3)."
+        ),
+    )
     args = parser.parse_args()
 
     print("\n==================== Arguments ====================")
@@ -361,6 +533,7 @@ def main():
         max_sequence_length=args.max_sequence_length,
         workers=args.workers,
         log_interval=args.log_interval,
+        reasoning_content=args.reasoning_content,
     )
 
 
