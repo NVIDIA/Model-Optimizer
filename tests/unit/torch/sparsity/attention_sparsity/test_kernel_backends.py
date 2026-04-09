@@ -20,7 +20,6 @@ import types
 from unittest.mock import MagicMock, patch
 
 import pytest
-import torch
 import torch.nn as nn
 
 
@@ -82,6 +81,7 @@ class TestDiffusersTritonAttention:
         mocks = _mock_diffusers()
         mk = types.ModuleType("modelopt.torch.kernels")
         mk.attention = lambda q, k, v, **kw: q
+        mk.attention_calibrate = None
         mk.IS_AVAILABLE = True
         mk.register_triton_attention = None
         mocks["modelopt.torch.kernels"] = mk
