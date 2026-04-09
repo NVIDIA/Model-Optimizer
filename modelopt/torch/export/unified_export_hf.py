@@ -30,11 +30,7 @@ import torch
 import torch.nn as nn
 from safetensors.torch import load_file, save_file
 
-from .diffusers_utils import (
-    build_layerwise_quant_metadata,
-    pad_nvfp4_weights,
-    swizzle_nvfp4_scales,
-)
+from .diffusers_utils import build_layerwise_quant_metadata, pad_nvfp4_weights, swizzle_nvfp4_scales
 
 try:
     import diffusers
