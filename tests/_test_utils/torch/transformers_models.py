@@ -139,6 +139,20 @@ def get_tiny_gpt_oss(**config_kwargs) -> PreTrainedModel:
     return tiny_gpt_oss
 
 
+def create_tiny_gpt_oss_dir(
+    tmp_path: Path | str, with_tokenizer: bool = False, **config_kwargs
+) -> Path:
+    gpt_oss_dir = Path(tmp_path) / "tiny_gpt_oss"
+    if with_tokenizer:
+        tokenizer = AutoTokenizer.from_pretrained(
+            "hf-internal-testing/tiny-random-LlamaForCausalLM"
+        )
+        tokenizer.save_pretrained(gpt_oss_dir)
+        config_kwargs["vocab_size"] = tokenizer.vocab_size
+    get_tiny_gpt_oss(**config_kwargs).save_pretrained(gpt_oss_dir)
+    return gpt_oss_dir
+
+
 ##### LLAMA #####
 def get_tiny_llama(**config_kwargs) -> PreTrainedModel:
     set_seed(SEED)
