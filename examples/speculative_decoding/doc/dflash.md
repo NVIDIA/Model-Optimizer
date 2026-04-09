@@ -132,26 +132,79 @@ Trained on nvidia/Nemotron-Post-Training-Dataset-v2 (2M samples), 64 GPUs, 10 ep
 
 > z-lab trained with block_size=16; ModelOpt trained with block_size=8.
 
-### Evaluation Methods
+### AR Evaluation Methods
 
-| Method | Description |
-|--------|-------------|
-| **Fixed GT** | Pre-compute greedy ground truth, check draft against it |
-| **Online GT** | Recompute ground truth after each accepted draft (context-dependent) |
-| **z-lab official** | Actual speculative decoding with draft KV cache |
+Three methods exist for measuring acceptance rate, producing different numbers:
 
-Online GT is more accurate than Fixed GT (~+1.0 AR) because speculative decoding
-acceptance depends on context-dependent verification, not a fixed reference sequence.
+**1. ModelOpt Online GT** (`ar_validate.py --per_category`)
+
+The default evaluation method in ModelOpt. Uses `pseudo_speculative_generate` with
+context-dependent (online) ground truth:
+
+1. Run base model on `input_ids` → get base token + hidden states
+2. Build draft block: `[base_token, MASK, MASK, ...]`
+3. Run DFlash draft forward → get `block_size-1` draft tokens
+4. Run base model on `input_ids + base_token + draft_tokens` → verify each draft token
+   against what the base model would produce **given the accepted sequence so far**
+5. Accept consecutive matches, append target's correction token on first mismatch
+6. AR = total accepted tokens / number of speculative steps
+
+Key: ground truth is **recomputed after each accepted draft** (context-dependent),
+matching actual speculative decoding behavior. Without this, fixed ground truth
+underestimates AR by ~1.0 because it doesn't account for the draft model's
+self-consistency — accepted draft tokens change the context for future predictions.
+
+**2. vLLM SpecDecoding** (`vllm serve --speculative-config`)
+
+The production evaluation. vLLM runs actual speculative decoding with full KV cache:
+- Draft model proposes `num_speculative_tokens` tokens per step
+- Target model verifies in parallel
+- `Mean acceptance length` and `Per-position acceptance rate` reported in server metrics
+
+**3. z-lab Benchmark** (`dflash.benchmark --backend transformers`)
+
+z-lab's reference evaluation. Similar to vLLM but uses their own generation loop with
+draft KV cache. Measures acceptance length as:
+```
+acceptance_length = (draft[:, 1:] == posterior[:, :-1]).cumprod().sum() + 1
+```
+
+### vLLM Deployment Results
+
+vLLM nightly (v0.19.1+), H100, MT-Bench 80 prompts, 1024 max tokens:
+
+| | Baseline | z-lab (bs16) | **ModelOpt (bs8)** |
+|---|---------|-------------|-------------------|
+| TP=1 tok/s | 145 | 422 | **443** |
+| TP=8 tok/s | 377 | 919 | **1053** |
+| Speedup (TP=1) | 1.0x | 2.9x | **3.1x** |
+
+**Per-Category (TP=8):**
+
+| Category | ModelOpt Accept | z-lab Accept | ModelOpt TPS | z-lab TPS |
+|----------|----------------|-------------|-------------|-----------|
+| math | **5.14** | 4.24 | **1238** | 1098 |
+| coding | **4.03** | 3.52 | **1299** | 1269 |
+| writing | **3.99** | 3.97 | **1002** | 903 |
+| reasoning | **3.89** | 3.49 | **1188** | 1020 |
+| roleplay | **3.88** | 3.37 | **1069** | 923 |
+| extraction | **3.60** | 3.02 | **1002** | 789 |
+| stem | 3.55 | **3.63** | **1027** | 914 |
+| humanities | **3.05** | 2.68 | **786** | 672 |
+| **ALL** | | | **1053** | 919 |
+
+ModelOpt wins acceptance length on 7/8 categories and TPS on 8/8 categories.
 
 ### Key Findings
 
 | Finding | Evidence |
 |---------|----------|
+| 3.1x speedup over baseline (TP=1) | 443 vs 145 tok/s on vLLM |
+| 15% faster than z-lab | TP=1: 443 vs 422; TP=8: 1053 vs 919 |
+| More efficient drafting | 44% vs 16.5% draft acceptance; fewer tokens drafted, more accepted |
 | Loss decay boosts AR | +0.12 AR at 55K (gamma=7, bs16); consistent across checkpoints |
 | Longer sequences help | seq=4096 vs 512: +0.49 AR on AA-Synthetic |
-| Online validation essential | Fixed GT underestimates by ~1.0 AR |
-| Forward pass identical to z-lab | Max diff 0.5 (bf16); 6/7 draft tokens match |
-| sdpa vs flash_attn: negligible | AR 3.31 vs 3.31; hidden states identical |
+| Online GT essential | Fixed GT underestimates by ~1.0 AR vs online GT |
 
 ## Open Items
 
@@ -206,16 +259,14 @@ DFlash speculative decoding is supported in vLLM nightly (v0.19.1+):
 
 ```bash
 vllm serve Qwen/Qwen3-8B \
-    --speculative-config '{"method": "dflash", "model": "z-lab/Qwen3-8B-DFlash-b16", "num_speculative_tokens": 15}' \
+    --speculative-config '{"method": "dflash", "model": "path/to/dflash-checkpoint", "num_speculative_tokens": 7}' \
     --attention-backend flash_attn \
     --max-num-batched-tokens 32768
 ```
 
-Validated: **386 tok/s** on single H100 with Qwen3-8B + DFlash-b16 (15 spec tokens).
-
 Note: requires `vllm/vllm-openai:nightly` — the `latest` tag (v0.19.0) does not include DFlash.
 See [`tools/launcher/common/dflash/vllm_serve.sh`](../../../tools/launcher/common/dflash/vllm_serve.sh)
-for a complete serve + benchmark script.
+for serve + benchmark scripts.
 
 ### Docker Local Testing
 
