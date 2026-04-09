@@ -104,6 +104,20 @@ def get_tiny_qwen3_moe(**config_kwargs) -> PreTrainedModel:
     return tiny_qwen3_moe
 
 
+def create_tiny_qwen3_moe_dir(
+    tmp_path: Path | str, with_tokenizer: bool = False, **config_kwargs
+) -> Path:
+    qwen3_moe_dir = Path(tmp_path) / "tiny_qwen3_moe"
+    if with_tokenizer:
+        tokenizer = AutoTokenizer.from_pretrained(
+            "hf-internal-testing/tiny-random-LlamaForCausalLM"
+        )
+        tokenizer.save_pretrained(qwen3_moe_dir)
+        config_kwargs["vocab_size"] = tokenizer.vocab_size
+    get_tiny_qwen3_moe(**config_kwargs).save_pretrained(qwen3_moe_dir)
+    return qwen3_moe_dir
+
+
 ##### GPT-OSS #####
 def get_tiny_gpt_oss(**config_kwargs) -> PreTrainedModel:
     set_seed(SEED)
