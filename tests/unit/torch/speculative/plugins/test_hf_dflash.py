@@ -21,6 +21,7 @@ GPU-dependent tests (training forward, module forward) are in tests/gpu/.
 import os
 from copy import deepcopy
 
+import pytest
 import torch
 from _test_utils.torch.transformers_models import (
     get_tiny_llama,
@@ -34,6 +35,7 @@ from modelopt.torch.speculative.config import DFLASH_DEFAULT_CFG
 from modelopt.torch.speculative.plugins.hf_dflash import (
     DFlashModule,
     HFDFlashModel,
+    build_target_layer_ids,
     create_dflash_attention_mask,
     create_dflash_loss_mask,
 )
@@ -110,6 +112,14 @@ class TestDFlashConvert:
         assert hasattr(model, "mask_token_id")
         assert model.mask_token_id == 0
 
+    def test_convert_missing_mask_token_id_errors(self):
+        """Test that missing mask_token_id raises ValueError for unknown model."""
+        model = get_tiny_llama(num_hidden_layers=4)
+        config = _get_dflash_config()
+        del config["dflash_architecture_config"]["mask_token_id"]
+        with pytest.raises(ValueError, match="Cannot auto-detect mask_token_id"):
+            mtsp.convert(model, [("dflash", config)])
+
 
 class TestDFlashSaveRestore:
     """Test DFlash model save and restore."""
@@ -129,49 +139,69 @@ class TestDFlashSaveRestore:
         tf_modelopt_state_and_output_tester(model_ref, model_test)
 
 
+class TestDFlashApplyMetaFix:
+    """Test DFlashModule._apply handles meta-tensor rotary buffers.
+
+    During checkpoint restore, rotary inv_freq buffers may be on meta device
+    (they are computed, not saved). _apply should re-create them on CPU.
+    """
+
+    def test_apply_recreates_meta_rotary(self):
+        """Test that .to() recreates rotary_emb when buffers are on meta device."""
+        model = get_tiny_llama(num_hidden_layers=4)
+        config = _get_dflash_config()
+        mtsp.convert(model, [("dflash", config)])
+
+        dflash_mod = model.dflash_module
+        # Simulate meta buffers (as happens during checkpoint restore)
+        for name, buf in list(dflash_mod.rotary_emb.named_buffers()):
+            dflash_mod.rotary_emb._buffers[name] = torch.empty_like(buf, device="meta")
+
+        assert any(b.is_meta for b in dflash_mod.rotary_emb.buffers())
+
+        # .to() triggers _apply which should fix meta buffers
+        dflash_mod.to("cpu")
+
+        assert not any(b.is_meta for b in dflash_mod.rotary_emb.buffers())
+
+    def test_apply_noop_when_no_meta(self):
+        """Test that .to() does not recreate rotary_emb when buffers are normal."""
+        model = get_tiny_llama(num_hidden_layers=4)
+        config = _get_dflash_config()
+        mtsp.convert(model, [("dflash", config)])
+
+        dflash_mod = model.dflash_module
+        rotary_id_before = id(dflash_mod.rotary_emb)
+        dflash_mod.to("cpu")
+        assert id(dflash_mod.rotary_emb) == rotary_id_before
+
+
 class TestDFlashAttentionMask:
     """Test DFlash attention mask construction."""
 
     def test_mask_shape(self):
-        """Test mask has shape [1, 1, L, 2L]."""
         mask = create_dflash_attention_mask(SEQ_LEN, BLOCK_SIZE, "cpu", torch.float32)
         assert mask.shape == (1, 1, SEQ_LEN, 2 * SEQ_LEN)
 
     def test_mask_context_strictly_previous_blocks(self):
         """Context (left half): block B can only see blocks 0..B-1."""
         mask = create_dflash_attention_mask(8, 4, "cpu", torch.float32)
-        mask_2d = mask[0, 0]  # [8, 16]
-        ctx_mask = mask_2d[:, :8]  # context part
-
-        # Block 0 (rows 0-3) should NOT see any context
+        mask_2d = mask[0, 0]
+        ctx_mask = mask_2d[:, :8]
         assert (ctx_mask[:4, :] < 0).all()
-
-        # Block 1 (rows 4-7) should see block 0 context only
-        assert (ctx_mask[4:8, :4] == 0).all()  # can see block 0
-        assert (ctx_mask[4:8, 4:8] < 0).all()  # cannot see own block
+        assert (ctx_mask[4:8, :4] == 0).all()
+        assert (ctx_mask[4:8, 4:8] < 0).all()
 
     def test_mask_noise_causal_within_block(self):
-        """Noise (right half): reverse-causal within same block, matching SpecForge.
-
-        SpecForge uses j >= i: position 0 (anchor) sees all positions in block,
-        position B-1 sees only itself. Cross-block noise is fully masked.
-        """
+        """Noise (right half): reverse-causal within same block (j >= i)."""
         mask = create_dflash_attention_mask(8, 4, "cpu", torch.float32)
-        mask_2d = mask[0, 0]
-        noise_mask = mask_2d[:, 8:]  # noise part
-
-        # Block 0, position 0: can see all positions in block (0-3)
+        noise_mask = mask[0, 0, :, 8:]
         assert (noise_mask[0, :4] == 0).all()
-
-        # Block 0, position 3: can only see position 3
         assert (noise_mask[3, :3] < 0).all()
         assert noise_mask[3, 3] == 0
-
-        # Block 1 cannot see block 0 noise
         assert (noise_mask[4:8, :4] < 0).all()
 
     def test_mask_values_are_zero_or_neg_inf(self):
-        """Test mask contains only 0 (attend) and -inf (mask)."""
         mask = create_dflash_attention_mask(SEQ_LEN, BLOCK_SIZE, "cpu", torch.float32)
         unique_vals = mask.unique()
         assert len(unique_vals) == 2
@@ -183,31 +213,26 @@ class TestDFlashLossMask:
     """Test DFlash loss mask construction."""
 
     def test_loss_mask_shape(self):
-        """Test loss mask has shape [L]."""
         mask = create_dflash_loss_mask(SEQ_LEN, BLOCK_SIZE, "cpu")
         assert mask.shape == (SEQ_LEN,)
 
     def test_loss_mask_excludes_block_zero(self):
-        """Test all positions in block 0 are masked out."""
         mask = create_dflash_loss_mask(SEQ_LEN, BLOCK_SIZE, "cpu")
         assert (mask[:BLOCK_SIZE] == 0).all()
 
     def test_loss_mask_excludes_block_starts(self):
-        """Test block start positions are masked."""
         mask = create_dflash_loss_mask(SEQ_LEN, BLOCK_SIZE, "cpu")
         for i in range(0, SEQ_LEN, BLOCK_SIZE):
-            assert mask[i] == 0, f"Block start position {i} should be masked"
+            assert mask[i] == 0
 
     def test_loss_mask_includes_non_start_positions(self):
-        """Test non-start positions in non-zero blocks are included."""
         mask = create_dflash_loss_mask(SEQ_LEN, BLOCK_SIZE, "cpu")
         for b in range(1, SEQ_LEN // BLOCK_SIZE):
             for offset in range(1, BLOCK_SIZE):
                 pos = b * BLOCK_SIZE + offset
-                assert mask[pos] == 1, f"Position {pos} should be in loss"
+                assert mask[pos] == 1
 
     def test_loss_mask_count(self):
-        """Test total active positions matches expected count."""
         mask = create_dflash_loss_mask(SEQ_LEN, BLOCK_SIZE, "cpu")
         num_blocks = SEQ_LEN // BLOCK_SIZE
         expected = (num_blocks - 1) * (BLOCK_SIZE - 1)
@@ -218,26 +243,65 @@ class TestBuildTargetLayerIds:
     """Test target layer selection."""
 
     def test_single_draft_layer(self):
-        """Test single draft layer selects middle target layer."""
-        from modelopt.torch.speculative.plugins.hf_dflash import build_target_layer_ids
-
         ids = build_target_layer_ids(32, 1)
         assert len(ids) == 1
-        assert ids[0] == 16  # middle layer
+        assert ids[0] == 16
 
     def test_multiple_draft_layers(self):
-        """Test multiple draft layers are monotonically increasing and in bounds."""
-        from modelopt.torch.speculative.plugins.hf_dflash import build_target_layer_ids
-
         ids = build_target_layer_ids(36, 5)
         assert len(ids) == 5
         assert ids == sorted(ids)
         assert all(1 <= lid <= 33 for lid in ids)
 
-    def test_layer_ids_spread(self):
-        """Test layer IDs have no duplicates."""
-        from modelopt.torch.speculative.plugins.hf_dflash import build_target_layer_ids
-
+    def test_layer_ids_no_duplicates(self):
         ids = build_target_layer_ids(32, 5)
-        assert len(ids) == 5
         assert len(set(ids)) == 5
+
+    def test_layer_ids_match_zlab(self):
+        """Test layer IDs match z-lab reference for Qwen3-8B (36 layers, 5 draft)."""
+        ids = build_target_layer_ids(36, 5)
+        assert ids == [1, 9, 17, 25, 33]
+
+
+class TestDFlashSlidingWindow:
+    """Test sliding window attention support."""
+
+    def test_sliding_window_from_config(self):
+        """Test DFlashAttention reads sliding_window from config.layer_types."""
+        from modelopt.torch.speculative.plugins.hf_dflash import DFlashAttention
+        from transformers import PretrainedConfig
+
+        config = PretrainedConfig(
+            hidden_size=64,
+            num_attention_heads=4,
+            num_key_value_heads=4,
+            head_dim=16,
+            rms_norm_eps=1e-6,
+            attention_bias=False,
+            attention_dropout=0.0,
+            layer_types=["full_attention", "sliding_attention"],
+            sliding_window=256,
+            _attn_implementation="sdpa",
+        )
+        attn_full = DFlashAttention(config, layer_idx=0)
+        attn_sliding = DFlashAttention(config, layer_idx=1)
+        assert attn_full.sliding_window is None
+        assert attn_sliding.sliding_window == 256
+
+    def test_no_sliding_window_without_config(self):
+        """Test DFlashAttention defaults to no sliding window."""
+        from modelopt.torch.speculative.plugins.hf_dflash import DFlashAttention
+        from transformers import PretrainedConfig
+
+        config = PretrainedConfig(
+            hidden_size=64,
+            num_attention_heads=4,
+            num_key_value_heads=4,
+            head_dim=16,
+            rms_norm_eps=1e-6,
+            attention_bias=False,
+            attention_dropout=0.0,
+            _attn_implementation="sdpa",
+        )
+        attn = DFlashAttention(config, layer_idx=0)
+        assert attn.sliding_window is None
