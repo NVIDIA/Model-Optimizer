@@ -32,7 +32,7 @@ Target Model (frozen)
 
 **Draft model components** (Qwen3-based):
 - `Qwen3MLP`, `Qwen3RMSNorm`, `Qwen3RotaryEmbedding` from transformers
-- Sliding window attention supported via `config.layer_types`
+- Sliding window attention supported via `config.layer_types` *(implemented, not yet validated end-to-end)*
 - Independent of target model architecture
 
 ## Training
@@ -172,57 +172,38 @@ ModelOpt wins acceptance length on 7/8 categories and TPS on 8/8 categories.
 
 ## Open Items
 
-### Offline Training
+### Not Yet Implemented
 
-Online training requires the full target model in GPU memory alongside the draft model.
-Offline training would pre-compute target hidden states and train the draft model separately.
+- **Offline training**: DFlash needs multi-layer hidden states at all positions for KV
+  injection (5x storage vs EAGLE3's single-layer approach). Possible approaches: store
+  fused hidden states, pre-sample anchors, or hybrid CPU base + GPU draft.
+- **Qwen3MoE draft**: Replace `Qwen3MLP` with `Qwen3MoeMLP` via config flag. See
+  `hf_dflash.py` module docstring for instructions.
+- **MLA support (DeepseekV3/Kimi-K2)**: Requires MLA-aware KV injection with compressed K/V.
+- **Docker local testing**: Launcher example requires Slurm. Need a local Docker example
+  with `hf_local=` path mapping.
 
-**Challenge**: DFlash needs hidden states from multiple target layers (not just the last)
-at all positions for KV injection. EAGLE3 offline only stores last-layer hidden states
-and reruns `lm_head` during training, but DFlash's feature fusion concatenates hidden
-states from layers [1, 9, 17, 25, 33] — 5x the storage per position.
+### Implemented but Not Yet Validated End-to-End
 
-**Potential approaches:**
-- Store only the fused (post-FC) target hidden states instead of raw multi-layer states
-- Pre-sample anchor positions and store only relevant slices
-- Hybrid: quantized base model on CPU computes hidden states on-the-fly, draft on GPU
+- **Sliding window attention**: Code reads `config.layer_types` and sets `sliding_window`
+  per layer. Unit tested but not validated in a full training run with sliding window models.
+- **FP8 / NVFP4 quantization**: Export pipeline supports quantized checkpoints via
+  `hf_ptq.py` (PTQ succeeded in testing). AR impact of quantization not yet measured.
+  The flow: train (bf16) → `mtq.quantize(model, quant_cfg)` → `export_hf_checkpoint.py`.
+- **Checkpoint resume**: `DFlashModule._apply()` handles meta-tensor rotary buffers.
+  Validated in training runs but not covered by integration tests.
 
-### Model Support Expansion
+### Validated
 
-Currently supports Qwen3 draft architecture. See `hf_dflash.py` module docstring for
-instructions on adding:
-- **Qwen3MoE**: Replace MLP with `Qwen3MoeMLP` via config flag
-- **MLA (DeepseekV3/Kimi-K2)**: Requires MLA-aware KV injection with compressed K/V
-
-### FP8 / NVFP4 Quantization
-
-The DFlash export pipeline supports quantized checkpoints via ModelOpt PTQ, following
-the same flow as EAGLE3:
-
-1. Train draft model (bf16)
-2. Apply PTQ: `mtq.quantize(model, quant_cfg)` with `FP8_DEFAULT_CFG` or `NVFP4_DEFAULT_CFG`
-3. Export: `export_hf_checkpoint.py` auto-detects quantization and writes scales + `quantization_config`
-
-The exporter's `has_quant_opt()` check and `_export_transformers_checkpoint()` handle
-quantized weights transparently. No DFlash-specific quantization code is needed.
-
-TODO: Add a quantization recipe/script and validate FP8/NVFP4 AR impact.
-
-### vLLM Deployment
-
-DFlash speculative decoding is supported in vLLM nightly (v0.19.1+):
-
-```bash
-vllm serve Qwen/Qwen3-8B \
-    --speculative-config '{"method": "dflash", "model": "path/to/dflash-checkpoint", "num_speculative_tokens": 7}' \
-    --max-num-batched-tokens 32768
-```
-
-Note: requires `vllm/vllm-openai:nightly` — the `latest` tag (v0.19.0) does not include DFlash.
-See [`tools/launcher/common/dflash/vllm_serve.sh`](../../../tools/launcher/common/dflash/vllm_serve.sh)
-for serve + benchmark scripts.
-
-### Docker Local Testing
-
-The launcher example currently requires Slurm cluster access. A local Docker example
-with `hf_local=` path mapping would enable development without cluster access.
+- **Online training**: E2E pipeline (train → export → eval) on sample-1K and sample-10K.
+- **Multi-node DDP**: 8-node (64 GPU) training on full dataset, 10 epochs.
+- **AR evaluation**: `ar_validate.py` with online GT, per-category MT-Bench.
+- **vLLM deployment**: Speculative decoding with `vllm/vllm-openai:nightly` (v0.19.1+).
+  3.1x speedup over baseline. Per-category benchmarks on MT-Bench.
+  ```bash
+  vllm serve Qwen/Qwen3-8B \
+      --speculative-config '{"method": "dflash", "model": "path/to/checkpoint", "num_speculative_tokens": 7}' \
+      --max-num-batched-tokens 32768
+  ```
+- **Export**: z-lab compatible HF format, loadable by vLLM and z-lab benchmark.
+- **Loss decay**: Validated +0.12 AR improvement with gamma=7 (bs16).
