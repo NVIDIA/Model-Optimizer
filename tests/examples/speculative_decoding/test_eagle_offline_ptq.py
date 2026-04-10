@@ -55,7 +55,7 @@ def offline_ptq_dirs(tmp_path_factory):
     }
 
 
-def test_collect_hidden_states(tiny_llama_path, tiny_daring_anteater_path, offline_ptq_dirs):
+def test_collect_hidden_states(tiny_llama_path, tiny_conversations_path, offline_ptq_dirs):
     """Stage 1: generate .pt hidden state files from the base model."""
     run_example_command(
         [
@@ -64,11 +64,13 @@ def test_collect_hidden_states(tiny_llama_path, tiny_daring_anteater_path, offli
             "--model",
             tiny_llama_path,
             "--input-data",
-            str(tiny_daring_anteater_path),
+            str(tiny_conversations_path),
             "--output-dir",
             str(offline_ptq_dirs["hidden_states"]),
             "--debug-max-num-conversations",
             "2",
+            "--max-seq-len",
+            "32",
         ],
         "speculative_decoding",
     )

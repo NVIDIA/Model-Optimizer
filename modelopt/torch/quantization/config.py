@@ -1560,6 +1560,10 @@ def normalize_quant_cfg_list(v: dict | list) -> list[QuantizerCfgEntry]:
     - An empty entry ``{}``.
     - An entry with only ``quantizer_name`` and no other keys — the only effect would be an
       implicit ``enable=True``, which must be stated explicitly.
+    - An entry with ``enable=True`` (explicit or implicit) whose ``cfg`` is not a non-empty
+      ``dict`` or ``list`` — e.g. ``{"quantizer_name": "*", "cfg": {}}`` or
+      ``{"quantizer_name": "*", "cfg": 42}``.  An enabled quantizer must have a valid
+      configuration.
 
     **Normalization** — after conversion and validation every entry is put into canonical form:
 
@@ -1577,7 +1581,8 @@ def normalize_quant_cfg_list(v: dict | list) -> list[QuantizerCfgEntry]:
 
     Raises:
         ValueError: If any entry has only ``quantizer_name`` with neither ``cfg`` nor ``enable``,
-            or if the entry format is not recognized.
+            if ``enable=True`` with an empty or non-dict/list ``cfg``, or if the entry format
+            is not recognized.
     """
 
     def _warn_legacy():
@@ -1661,6 +1666,28 @@ def normalize_quant_cfg_list(v: dict | list) -> list[QuantizerCfgEntry]:
                     "or both. An entry with only 'quantizer_name' has no effect (implicit "
                     "enable=True is not allowed; set it explicitly)."
                 )
+
+            # Validate: when cfg is present and enable=True, cfg must be a non-empty
+            # dict or list.  An empty cfg would attempt to create a
+            # QuantizerAttributeConfig with no actual configuration.
+            cfg = entry.get("cfg")
+            enable = entry.get("enable", True)
+            if enable and cfg is not None:
+                if isinstance(cfg, dict):
+                    is_invalid = len(cfg) == 0
+                elif isinstance(cfg, list):
+                    is_invalid = len(cfg) == 0 or any(
+                        not isinstance(item, dict) or len(item) == 0 for item in cfg
+                    )
+                else:
+                    is_invalid = True
+                if is_invalid:
+                    raise ValueError(
+                        f"Invalid quant_cfg entry: {raw!r} — 'cfg' must be a non-empty dict "
+                        f"or a non-empty list of non-empty dicts when enabling a quantizer "
+                        f"(got {type(cfg).__name__}: {cfg!r}). Either provide quantizer "
+                        "attributes in 'cfg' or remove 'cfg' and set 'enable' explicitly."
+                    )
 
             # Normalize: make enable and cfg always explicit.
             entry.setdefault("enable", True)
