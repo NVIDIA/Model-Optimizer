@@ -49,14 +49,16 @@ print(type(cfg).__name__)
      grep -r "class <ArchName>" /tmp/transformers-main/src/transformers/models/
      ```
 
-     - **Found** → install from that clone: `pip install /tmp/transformers-main --quiet`, then re-run `AutoConfig.from_pretrained()`.
+     - **Found** → install with deps: `pip install /tmp/transformers-main`, then re-run `AutoConfig.from_pretrained()`. **Important**: if ModelOpt is already installed, its `[hf]` extras may have pinned an older transformers. Install ModelOpt first, then upgrade transformers **after** (with deps, not `--no-deps`) so compatible `huggingface_hub` and other transitive deps are pulled in.
      - **Not found** → ask the user: *"The checkpoint uses `<ArchName>` which isn't in released or main-branch transformers. Do you have a private fork or custom modeling code?"*
 
 - **No `config.json`** → not a standard HF checkpoint. List the directory for README or `.py` files. If nothing useful, ask the user for the modeling code.
 
 ## Step B — Is the checkpoint already FP8-quantized?
 
-Check `config.json` for `"quantization_config"` or scan weight files for `*_scale_inv*` tensors. If found, the model must be dequantized before re-quantizing. HuggingFace's `WeightConverter` only handles standard `weight` / `weight_scale_inv` names and will silently miss non-standard parameter names (e.g., 3D expert tensors in MoE layers). See **Pattern 5** below.
+Check `config.json` for `"quantization_config"` with `"quant_method": "fp8"`, or scan weight files for `*_scale_inv*` tensors. If the model uses standard `FP8Linear` modules (2D weights with `weight` + `weight_scale_inv`), ModelOpt's `_QuantFP8Linear` plugin handles them automatically — no manual dequantization needed. The plugin keeps weights in FP8 and dequantizes lazily during calibration, which is memory-efficient.
+
+Manual dequantization is only needed for **non-standard parameter names** (e.g., 3D expert tensors in MoE layers) that the plugin doesn't cover. See **Pattern 5** below.
 
 ## Step C — Determine what custom patches are needed
 
@@ -69,7 +71,7 @@ Custom patches are required when:
 - **Fused/batched expert weights** — experts stored as a single parameter (e.g., 3D `[num_experts, in, out]`) rather than separate `nn.Linear` modules → Pattern 1 + 3
 - **Self-defined weight parameters** (`nn.Parameter` used directly instead of `nn.Linear`) — common in non-HF or research models → Pattern 1 + 3
 - **VLM structure** (vision encoder that should be excluded) → Pattern 4
-- **FP8 checkpoint** that needs dequantization before re-quantizing → Pattern 5
+- **FP8 checkpoint with non-standard parameter names** (standard `FP8Linear` is handled automatically by the `_QuantFP8Linear` plugin) → Pattern 5
 
 ## Step D — Check weight names against ModelOpt's config patterns
 
@@ -187,7 +189,9 @@ Both methods replace all instances of `original_cls` with `quantized_cls` during
 
 ## Pattern 4: VLM Language Model Extraction
 
-For multimodal models, only quantize the language model backbone:
+**Note**: `hf_ptq.py` already handles VLMs automatically via `extract_and_prepare_language_model_from_vl()`. It detects multimodal models, extracts the language backbone, and disables quantization for vision/projector modules. This works for most VLMs (tested with Mistral3/Devstral, Nemotron VL, Llama VL, etc.) — try `hf_ptq.py` first before writing custom VLM handling.
+
+For custom scripts or when `hf_ptq.py` doesn't handle the VLM correctly, only quantize the language model backbone:
 
 ```python
 from modelopt.torch.export.model_utils import get_language_model_from_vl, is_multimodal_model
@@ -218,30 +222,32 @@ quant_cfg["quant_cfg"]["*multi_modal_projector*"] = {"enable": False}
 
 **Known VLM export issue**: The export step (`requantize_resmooth_fused_llm_layers` in `unified_export_hf.py`) may try to run a dummy forward pass on the full VLM instead of the language model backbone. This currently only handles Nemotron VLMs. If hit, patch the export to use `is_multimodal_model()` for the VLM check instead of model-specific string matching.
 
-## Pattern 5: FP8 Checkpoint Dequantization
+## Pattern 5: FP8 Checkpoint Handling
 
-### Standard nn.Linear weights
+### Standard FP8Linear modules (preferred — no action needed)
 
-HuggingFace handles these automatically with `dequantize=True`:
+ModelOpt's `_QuantFP8Linear` plugin (`modelopt/torch/quantization/plugins/huggingface.py`) automatically handles HuggingFace `FP8Linear` modules. It:
+
+1. Keeps weights **compact in FP8** in GPU memory during calibration
+2. **Dequantizes lazily** on-the-fly during calibration forward passes via `weight_dequant()`
+3. Has `unpack_weight()` for full dequantization at export time
+
+This is registered automatically for `transformers.integrations.finegrained_fp8.FP8Linear`. It requires **Triton** to be installed (used internally for FP8 dequantization kernels). Just load the model normally — no `FineGrainedFP8Config(dequantize=True)` needed:
 
 ```python
-from transformers.utils.quantization_config import FineGrainedFP8Config
-
-model = AutoModel.from_pretrained(
-    model_path,
-    torch_dtype=torch.bfloat16,
-    device_map="auto",
-    quantization_config=FineGrainedFP8Config(dequantize=True),
-)
+model = AutoModel.from_pretrained(model_path, device_map="auto", torch_dtype="auto")
+# FP8Linear modules stay in FP8 → _QuantFP8Linear handles dequant during calibration
 ```
+
+**Do NOT use `FineGrainedFP8Config(dequantize=True)`** — it expands the entire model to BF16 upfront, wasting ~2x GPU memory. The plugin approach is both more memory-efficient and simpler.
 
 ### Non-standard parameter names (e.g., 3D expert weights)
 
-HF's `WeightConverter` uses source patterns `["weight$", "weight_scale_inv", "activation_scale"]`. Parameters with names like `gate_up_proj`, `down_proj`, `w1`, `w2`, `w3` won't match these patterns and will remain in FP8 after loading. Dequantize them manually:
+The `_QuantFP8Linear` plugin only handles standard 2D `FP8Linear` modules with `weight` + `weight_scale_inv`. Parameters with non-standard names (e.g., `gate_up_proj`, `down_proj`, `w1`/`w2`/`w3` in fused MoE experts) won't be covered. For these, dequantize manually after loading:
 
 ```python
 def dequantize_fp8_params(model, param_names=("gate_up_proj", "down_proj")):
-    """Dequantize remaining FP8 parameters that HF's WeightConverter missed."""
+    """Dequantize remaining FP8 parameters that the plugin doesn't cover."""
     count = 0
     for name, module in model.named_modules():
         for param_name in param_names:
@@ -252,10 +258,8 @@ def dequantize_fp8_params(model, param_names=("gate_up_proj", "down_proj")):
             if scale is None:
                 param.data = param.data.to(torch.bfloat16)
             elif scale.dim() == 1:
-                # Per-tensor scale
                 param.data = param.data.to(torch.bfloat16) * scale.data[:, None, None].to(torch.bfloat16)
             elif scale.dim() == 3:
-                # Per-block scale: reshape, broadcast, multiply
                 w = param.data
                 s = scale.data
                 assert w.shape[-2] % s.shape[-2] == 0 and w.shape[-1] % s.shape[-1] == 0, (
