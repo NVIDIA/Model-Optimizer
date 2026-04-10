@@ -22,9 +22,9 @@ The recommended way to run puzzletron is inside an NVIDIA NeMo container (e.g. `
 Once inside the container with the repo available, install dependencies from the repo root:
 
 ```bash
-pip uninstall nvidia-modelopt nvidia-lm-eval -y 2>/dev/null
-pip install -e ".[hf,puzzletron]"
-pip install -r examples/puzzletron/requirements.txt
+python -m pip uninstall nvidia-lm-eval -y 2>/dev/null
+python -m pip install -e ".[hf,puzzletron]"
+python -m pip install -r examples/puzzletron/requirements.txt
 ```
 
 To verify the install, you can run the GPU tests as a smoke check:
