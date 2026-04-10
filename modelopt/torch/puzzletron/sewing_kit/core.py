@@ -661,14 +661,15 @@ class StitchedModule(nn.Module):
 
                         works: list[Optional[torch.distributed.Work]] = []
                         for peer in peers:
-                            if process_group is not None:
-                                peer = torch.distributed.get_global_rank(process_group, peer)
-
-                            peer_works = distributed_isend_obj(data_descriptors, dst=peer)
+                            peer_works = distributed_isend_obj(
+                                data_descriptors, dst=peer, group=process_group
+                            )
                             works.extend(peer_works)
 
                             for tensor in tensors_to_send:
-                                work = torch.distributed.isend(tensor, dst=peer)
+                                work = torch.distributed.isend(
+                                    tensor, dst=peer, group=process_group
+                                )
                                 works.append(work)
 
                         if node.target.blocking:
@@ -682,10 +683,7 @@ class StitchedModule(nn.Module):
                         )
                         (peer,) = peers
 
-                        if process_group is not None:
-                            peer = torch.distributed.get_global_rank(process_group, peer)
-
-                        data_descriptors = distributed_recv_obj(src=peer)
+                        data_descriptors = distributed_recv_obj(src=peer, group=process_group)
                         assert isinstance(data_descriptors, list)
 
                         tensors_to_recv: list[torch.Tensor] = []
@@ -708,7 +706,7 @@ class StitchedModule(nn.Module):
 
                         works: list[Optional[torch.distributed.Work]] = []
                         for tensor in tensors_to_recv:
-                            work = torch.distributed.irecv(tensor, src=peer)
+                            work = torch.distributed.irecv(tensor, src=peer, group=process_group)
                             works.append(work)
 
                         for work in works:
