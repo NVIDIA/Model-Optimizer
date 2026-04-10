@@ -13,9 +13,5 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_converter import (
-    NemotronHConverter,
-)
-from modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor import (
-    NemotronHModelDescriptor,
-)
+from .nemotron_h_converter import NemotronHConverter
+from .nemotron_h_model_descriptor import NemotronHModelDescriptor

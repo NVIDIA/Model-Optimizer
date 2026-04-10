@@ -21,12 +21,11 @@ model outputs. Used by validation.py.
 """
 # mypy: ignore-errors
 
-from abc import ABCMeta, abstractmethod
-from typing import Callable, List, Literal, Optional, Tuple
+from typing import Literal
 
 import torch
 import torch.nn.functional as F
-from torch import Tensor, nn
+from torch import Tensor
 
 
 def normalized_mse_loss(

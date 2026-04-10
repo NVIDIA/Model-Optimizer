@@ -18,9 +18,9 @@
 
 from pathlib import Path
 
-from modelopt.torch.puzzletron.anymodel.converter.converter import Converter
-from modelopt.torch.puzzletron.anymodel.converter.converter_factory import ConverterFactory
-from modelopt.torch.puzzletron.anymodel.model_descriptor import ModelDescriptorFactory
+from ..model_descriptor import ModelDescriptorFactory
+from .base import Converter
+from .converter_factory import ConverterFactory
 
 __all__ = ["convert_model"]
 

@@ -30,24 +30,20 @@ import numpy as np
 import yaml
 from omegaconf import DictConfig, ListConfig, OmegaConf
 
-from modelopt.torch.puzzletron.anymodel.model_descriptor import (
-    ModelDescriptor,
-    ModelDescriptorFactory,
-)
-from modelopt.torch.puzzletron.block_config import AttentionConfig, BlockConfig, FFNConfig
-from modelopt.torch.puzzletron.mip.mip_with_multi_layer_replacements import (
-    run_mip as run_multi_layer_replacement_mip,
-)
-from modelopt.torch.puzzletron.replacement_library.replacement_utils import (
+from modelopt.torch.utils import json_dump
+
+from ..anymodel.model_descriptor import ModelDescriptorFactory
+from ..block_config import AttentionConfig, BlockConfig, FFNConfig
+from ..replacement_library.replacement_utils import (
     extract_block_configs_and_locations,
     parse_layer_replacement,
     replacement_is_teacher,
 )
-from modelopt.torch.puzzletron.tools.checkpoint_utils import load_model_config
-from modelopt.torch.puzzletron.tools.logger import mprint
-from modelopt.torch.puzzletron.tools.robust_json import json_dump
-from modelopt.torch.puzzletron.utils.parsing import get_nested_key, parse_json, parse_path
-from modelopt.torch.puzzletron.utils.utils import block_config_to_str, solution_to_str
+from ..tools.checkpoint_utils import load_model_config
+from ..tools.logger import mprint
+from ..utils.misc import block_config_to_str, solution_to_str
+from ..utils.parsing import get_nested_key, parse_json, parse_path
+from .mip_with_multi_layer_replacements import run_mip as run_multi_layer_replacement_mip
 
 """
 Usage:

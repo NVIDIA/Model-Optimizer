@@ -28,8 +28,8 @@ from torch import nn
 from transformers import AutoTokenizer
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME, SAFE_WEIGHTS_NAME
 
-from modelopt.torch.puzzletron.tools.checkpoint_utils_hf import load_model_config
-from modelopt.torch.puzzletron.tools.common import infer_weights_dtype
+from .checkpoint_utils_hf import load_model_config
+from .common import infer_weights_dtype
 
 SAFETENSORS_SUBBLOCKS_DIR_NAME = "subblocks_safetensors"
 PTH_SUBBLOCKS_DIR_NAME = "subblocks"
@@ -51,7 +51,7 @@ def load_state_dict(checkpoint_dir: Path | str) -> dict[str, torch.Tensor]:
     if (checkpoint_dir / SAFE_WEIGHTS_INDEX_NAME).exists() or (
         checkpoint_dir / SAFE_WEIGHTS_NAME
     ).exists():
-        from modelopt.torch.puzzletron.tools.sharded_checkpoint_utils import (
+        from .sharded_checkpoint_utils import (
             load_sharded_state_dict,  # local import to avoid circular import
         )
 

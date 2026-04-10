@@ -17,13 +17,8 @@
 
 from typing import TYPE_CHECKING, List
 
-from modelopt.torch.puzzletron.anymodel.converter import Converter, ConverterFactory
-from modelopt.torch.puzzletron.block_config import (
-    AttentionConfig,
-    BlockConfig,
-    FFNConfig,
-    MoEConfig,
-)
+from ....block_config import AttentionConfig, BlockConfig, FFNConfig, MoEConfig
+from ...converter import Converter, ConverterFactory
 
 if TYPE_CHECKING:
     from transformers import Qwen3VLMoeConfig

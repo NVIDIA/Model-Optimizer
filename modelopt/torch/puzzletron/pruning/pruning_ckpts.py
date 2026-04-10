@@ -27,24 +27,29 @@ from typing import Optional
 
 from omegaconf import DictConfig
 
-from modelopt.torch.puzzletron.anymodel.model_descriptor import ModelDescriptorFactory
-from modelopt.torch.puzzletron.pruning.expert_removal_pruning_mixin import ExpertRemovalPruningMixIn
-from modelopt.torch.puzzletron.pruning.ffn_intermediate_pruning_mixin import (
-    FFNIntermediatePruningMixIn,
-)
-from modelopt.torch.puzzletron.pruning.kv_heads_pruning_mixin import KVHeadsPruningMixIn
-from modelopt.torch.puzzletron.pruning.pruning_utils import (
+from ..anymodel.model_descriptor import ModelDescriptorFactory
+from ..tools.bypassed_training import init_child_from_parent
+from ..tools.checkpoint_utils import load_model_config
+from ..tools.logger import mprint
+from .expert_removal_pruning_mixin import ExpertRemovalPruningMixIn
+from .ffn_intermediate_pruning_mixin import FFNIntermediatePruningMixIn
+from .kv_heads_pruning_mixin import KVHeadsPruningMixIn
+from .pruning_utils import (
     GQAInitMode,
     HiddenSizeInitMode,
     LinearInitMode,
     MlpInitMode,
     resolve_pruning_mixin,
 )
-from modelopt.torch.puzzletron.tools.bypassed_training.init_child_from_parent import (
-    init_child_from_parent,
-)
-from modelopt.torch.puzzletron.tools.checkpoint_utils import load_model_config
-from modelopt.torch.puzzletron.tools.logger import mprint
+
+__all__ = [
+    "launch_ffn_intermediates_prune_ckpt",
+    "launch_attn_groups_prune_ckpt",
+    "launch_hidden_dim_prune_ckpt",
+    "launch_experts_prune_ckpt",
+    "launch_moe_ffn_intermediates_prune_ckpt",
+    "launch_prune_ckpt",
+]
 
 
 def launch_ffn_intermediates_prune_ckpt(

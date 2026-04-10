@@ -14,5 +14,5 @@
 # limitations under the License.
 """Model descriptors for defining model-specific properties and layer naming conventions."""
 
-from .model_descriptor import *
+from .base import *
 from .model_descriptor_factory import *

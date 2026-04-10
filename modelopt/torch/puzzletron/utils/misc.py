@@ -21,7 +21,7 @@ from typing import Any
 
 import torch
 
-from modelopt.torch.puzzletron.block_config import AttentionConfig, BlockConfig, FFNConfig
+from ..block_config import AttentionConfig, BlockConfig, FFNConfig
 
 
 def calculate_kv_dim(num_key_value_heads: int, n_head: int, n_embd: int) -> int:
@@ -137,13 +137,13 @@ def block_config_to_str(block_config: BlockConfig | dict[str, Any] | None) -> st
     return rep
 
 
+# TODO: Consider a better place for this function.
 def subblock_config_to_str(
     subblock_config: FFNConfig | AttentionConfig | dict[str, Any] | None,
     subblock_name: None | str = None,
 ) -> str | None:
     """Convert a subblock config (FFN, Attention, Mamba, or MoE) to string.
 
-    TODO: Consider a better place for this function.
     Args:
         subblock_config: FFNConfig, AttentionConfig dataclass or dict.
         subblock_name: Name of subblock ('ffn', 'attention', 'mamba', 'moe').
@@ -206,17 +206,18 @@ def subblock_config_to_str(
 
 class EmptyInitOnDevice(torch.overrides.TorchFunctionMode):
     def __init__(self, device=None, dtype=None):
-        """
-        Create tensors with given device and dtype and don't run initialization
-           (but instead use "empty tensors", i.e. uninitialized memory).
+        """Create tensors with given device and dtype using uninitialized memory.
 
-            device: `torch.device` to work with
-            dtype: `torch.dtype` to work with
+        Args:
+            device: ``torch.device`` to work with.
+            dtype: ``torch.dtype`` to work with.
 
         Example::
+
             with EmptyInitOnDevice("cuda", dtype=torch.bfloat16):
                 model = LLaMA(model_config)
-            model.load_state_dict(torch.load("llama-lit/7B/lit-llama.pth"))"""
+            model.load_state_dict(torch.load("llama-lit/7B/lit-llama.pth"))
+        """
 
         self.device = device
         self.dtype = dtype

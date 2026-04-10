@@ -34,28 +34,16 @@ from torch.utils.data import DataLoader
 from transformers import AutoTokenizer, PreTrainedModel, PreTrainedTokenizerBase
 
 import modelopt.torch.utils.distributed as dist
-from modelopt.torch.puzzletron.activation_scoring.activation_hooks.utils import (
-    register_activation_hooks,
-)
-from modelopt.torch.puzzletron.anymodel.model_descriptor import (
-    ModelDescriptor,
-    ModelDescriptorFactory,
-)
-from modelopt.torch.puzzletron.anymodel.puzzformer.no_op import Same
-from modelopt.torch.puzzletron.tools.common import resolve_torch_dtype
-from modelopt.torch.puzzletron.tools.logger import aprint, mprint
-from modelopt.torch.puzzletron.tools.sharded_checkpoint_utils import (
-    load_and_shard_model,
-    set_submodule,
-)
-from modelopt.torch.puzzletron.utils.data.dataloaders import create_validation_dataloader
-from modelopt.torch.puzzletron.utils.parsing import (
-    simple_parse_args_string,  # noqa: F401 (kept for backwards compat)
-)
-from modelopt.torch.puzzletron.utils.validate_runtime_pipeline import (
-    HiddenStatesAndLMHead,
-    calculate_losses_pipeline,
-)
+
+from ..activation_scoring.activation_hooks import register_activation_hooks
+from ..anymodel.model_descriptor import ModelDescriptor, ModelDescriptorFactory
+from ..anymodel.puzzformer import Same
+from ..utils.data import create_validation_dataloader
+from ..utils.parsing import simple_parse_args_string  # noqa: F401 (kept for backwards compat)
+from ..utils.validate_runtime_pipeline import HiddenStatesAndLMHead, calculate_losses_pipeline
+from .common import resolve_torch_dtype
+from .logger import aprint, mprint
+from .sharded_checkpoint_utils import load_and_shard_model, set_submodule
 
 """
 Two goals:
@@ -160,7 +148,7 @@ def validate_model(
         )
 
         # Create checkpoint manager with hooks
-        from modelopt.torch.puzzletron.utils.checkpoint_manager import ScoringCheckpointManager
+        from ..utils.checkpoint_manager import ScoringCheckpointManager
 
         mprint(
             f"Creating checkpoint manager with {len(activation_hooks)} hooks for dir: {args.activations_log_dir}"

@@ -22,8 +22,8 @@ from datasets import Dataset, DatasetDict
 from huggingface_hub import snapshot_download
 from transformers import AutoConfig, AutoModelForCausalLM, PreTrainedTokenizerBase
 
+import modelopt.torch.puzzletron as mtpz
 import modelopt.torch.utils.distributed as dist
-from modelopt.torch.puzzletron.tools.hydra_utils import register_hydra_resolvers
 
 
 def setup_test_model_and_data(
@@ -42,7 +42,7 @@ def setup_test_model_and_data(
         tuple[Path, Path, Path]: the puzzle_dir, hf_checkpoint_path, dataset_path
     """
     # Register Hydra custom resolvers (needed for config resolution)
-    register_hydra_resolvers()
+    mtpz.tools.register_hydra_resolvers()
 
     puzzle_dir = tmp_path / hf_model_name
     hf_checkpoint_path = puzzle_dir / f"hf_models/{hf_model_name}"

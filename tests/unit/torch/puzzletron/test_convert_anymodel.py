@@ -20,16 +20,14 @@ pytest.importorskip("transformers")
 from _test_utils.torch.transformers_models import create_tiny_qwen3_dir
 from transformers import AutoModelForCausalLM
 
-from modelopt.torch.puzzletron.anymodel import convert_model
-from modelopt.torch.puzzletron.anymodel.model_descriptor import ModelDescriptorFactory
-from modelopt.torch.puzzletron.anymodel.puzzformer import deci_x_patcher
+import modelopt.torch.puzzletron as mtpz
 
 
 def test_convert_anymodel(tmp_path):
     input_dir = create_tiny_qwen3_dir(tmp_path, with_tokenizer=True)
     output_dir = tmp_path / "qwen3-0.6b-anymodel"
-    convert_model(input_dir, output_dir, converter="qwen3")
+    mtpz.anymodel.convert_model(input_dir, output_dir, converter="qwen3")
 
-    descriptor = ModelDescriptorFactory.get("qwen3")
-    with deci_x_patcher(descriptor):
+    descriptor = mtpz.anymodel.ModelDescriptorFactory.get("qwen3")
+    with mtpz.anymodel.deci_x_patcher(descriptor):
         _ = AutoModelForCausalLM.from_pretrained(output_dir)

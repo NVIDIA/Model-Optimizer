@@ -23,37 +23,27 @@ import os
 import re
 import time
 from copy import deepcopy
-from enum import Enum
 from functools import partial
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Optional, Tuple, Union
 
 import torch
 from transformers import PretrainedConfig
 from typeguard import check_type
 
-from modelopt.torch.puzzletron.block_config import (
-    SUBBLOCK_CLS_DICT,
-    BlockConfig,
-    _get_dataclass_type,
-    _is_dataclass_type,
-)
-from modelopt.torch.puzzletron.pruning.pruning_utils import (
-    ACTIVATIONS_LOG,
+from ...block_config import SUBBLOCK_CLS_DICT, BlockConfig, _get_dataclass_type, _is_dataclass_type
+from ...pruning.pruning_utils import (
     GQAInitMode,
     HiddenSizeInitMode,
     LinearInitMode,
     MlpInitMode,
-    _cache_activations_log,
     _init_attention_biases,
     _init_attention_weights,
     _init_mlp_module,
     _init_moe_module,
-    _load_activations_log,
     _load_expert_scores,
-    _select_expert_indices,
 )
-from modelopt.torch.puzzletron.tools.logger import aprint, mprint
+from ..logger import aprint, mprint
 
 IgnoreFn = Callable[[str], bool]
 

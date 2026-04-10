@@ -27,18 +27,19 @@ from immutabledict import immutabledict
 from safetensors import safe_open
 from transformers import PretrainedConfig, PreTrainedModel
 
-from modelopt.torch.puzzletron.anymodel.converter.converter import Converter
-from modelopt.torch.puzzletron.replacement_library.replacement_utils import (
+from ..anymodel.converter import Converter
+from ..tools.checkpoint_utils import SAFETENSORS_SUBBLOCKS_DIR_NAME, load_model_config
+from ..tools.checkpoint_utils_hf import save_model_config
+from ..tools.sharded_checkpoint_utils import load_and_shard_model
+from .replacement_utils import (
     extract_block_configs_and_locations,
     parse_layer_replacement,
     weights_path_to_checkpoint_dir,
 )
-from modelopt.torch.puzzletron.tools.checkpoint_utils import (
-    SAFETENSORS_SUBBLOCKS_DIR_NAME,
-    load_model_config,
-)
-from modelopt.torch.puzzletron.tools.checkpoint_utils_hf import save_model_config
-from modelopt.torch.puzzletron.tools.sharded_checkpoint_utils import load_and_shard_model
+
+__all__ = [
+    "ReplacementLibrary",
+]
 
 
 class ReplacementLibrary:

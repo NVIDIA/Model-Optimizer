@@ -20,13 +20,8 @@ from typing import List
 
 from transformers import PretrainedConfig
 
-from modelopt.torch.puzzletron.anymodel.converter import Converter, ConverterFactory
-from modelopt.torch.puzzletron.block_config import (
-    AttentionConfig,
-    BlockConfig,
-    FFNConfig,
-    MoEConfig,
-)
+from ....block_config import AttentionConfig, BlockConfig, FFNConfig, MoEConfig
+from ...converter import Converter, ConverterFactory
 
 
 @ConverterFactory.register_decorator("gpt_oss")

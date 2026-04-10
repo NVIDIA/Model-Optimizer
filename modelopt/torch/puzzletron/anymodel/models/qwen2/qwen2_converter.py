@@ -20,8 +20,8 @@ from typing import List
 
 from transformers import Qwen2Config
 
-from modelopt.torch.puzzletron.anymodel.converter import Converter, ConverterFactory
-from modelopt.torch.puzzletron.block_config import AttentionConfig, BlockConfig, FFNConfig
+from ....block_config import AttentionConfig, BlockConfig, FFNConfig
+from ...converter import Converter, ConverterFactory
 
 
 @ConverterFactory.register_decorator("qwen2")

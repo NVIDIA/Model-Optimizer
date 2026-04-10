@@ -13,31 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Scoring utilities for Puzzletron subblock evaluation."""
 
-from .core import (
-    InputArgs,
-    OutputValue,
-    Passage,
-    PassageInputAdapter,
-    PassageInputOverrides,
-    PassageOutput,
-    PassageOutputAdapter,
-    PassageOutputOverrides,
-    Predicate,
-    always_false_predicate,
-    always_true_predicate,
-)
-
-__all__ = [
-    "InputArgs",
-    "OutputValue",
-    "Passage",
-    "PassageInputAdapter",
-    "PassageInputOverrides",
-    "PassageOutput",
-    "PassageOutputAdapter",
-    "PassageOutputOverrides",
-    "Predicate",
-    "always_false_predicate",
-    "always_true_predicate",
-]
+from .score import *

@@ -22,38 +22,30 @@ Uses native HuggingFace models with deci_x_patcher for heterogeneous layer confi
 """
 
 import json
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Literal, Type, cast
+from typing import Literal
 
 import numpy as np
 import torch
 import torch.distributed
 import torch.nn as nn
 import transformers
-from huggingface_hub import split_torch_state_dict_into_shards
 from safetensors import safe_open
 from safetensors.torch import load_file as safe_load_file
 from safetensors.torch import save_file as safe_save_file
-from tqdm import tqdm
-from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig
+from transformers import AutoModelForCausalLM, PretrainedConfig
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME, SAFE_WEIGHTS_NAME
 from transformers.utils.hub import cached_file, get_checkpoint_shard_files
 
 import modelopt.torch.utils.distributed as dist
-from modelopt.torch.puzzletron.tools.checkpoint_utils import load_model_config, load_state_dict
-from modelopt.torch.puzzletron.tools.checkpoint_utils_hf import (
-    _get_auto_class_for_trust_remote_code,
-)
-from modelopt.torch.puzzletron.tools.logger import mprint
-from modelopt.torch.puzzletron.utils.dummy_modules import (
-    DummyBlock,
-    DummyLMHead,
-    DummyModule,
-    DummyWTE,
-)
-from modelopt.torch.puzzletron.utils.utils import EmptyInitOnDevice
+
+from ..utils.dummy_modules import DummyLMHead, DummyWTE
+from ..utils.misc import EmptyInitOnDevice
+from .checkpoint_utils import load_model_config, load_state_dict
+from .checkpoint_utils_hf import _get_auto_class_for_trust_remote_code
+from .logger import mprint
 
 
 def set_submodule(model: nn.Module, module_name: str, new_submodule: nn.Module) -> None:
@@ -149,7 +141,7 @@ def load_and_shard_model(
         mprint("Initializing model shards")
         # Pass block_configs explicitly so patcher works for VL models where
         # decoder layers receive nested config (e.g., text_config) without block_configs
-        from modelopt.torch.puzzletron.anymodel.puzzformer import deci_x_patcher
+        from ..anymodel.puzzformer import deci_x_patcher
 
         with deci_x_patcher(
             model_descriptor=descriptor, block_configs=getattr(model_config, "block_configs", None)
@@ -267,10 +259,7 @@ def create_sharded_model(
 def load_state_dict_to_shards(
     model_shard: torch.nn.Module, loaded_state_dict: dict | None = None
 ) -> None:
-    from modelopt.torch.puzzletron.sewing_kit.utils import (
-        distributed_isend_obj,
-        distributed_recv_obj,
-    )
+    from ..sewing_kit.utils import distributed_isend_obj, distributed_recv_obj
 
     model_shard.to("meta")
     local_state_dict_keys = list(model_shard.state_dict().keys())

@@ -19,16 +19,14 @@ Utilities for loading and saving Hugging Face-format checkpoints (``AutoConfig``
 """
 
 import concurrent.futures
-import contextlib
 import dataclasses
 import fcntl
 import os
 import time
-import warnings
 from collections import defaultdict
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Any, BinaryIO
+from typing import TYPE_CHECKING, Any, BinaryIO
 
 import torch
 import transformers
@@ -37,11 +35,13 @@ from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig, Pre
 from transformers.dynamic_module_utils import get_class_from_dynamic_module
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
-from modelopt.torch.puzzletron.block_config import maybe_cast_block_configs
-from modelopt.torch.puzzletron.tools.common import infer_weights_dtype
-from modelopt.torch.puzzletron.tools.logger import mprint
-from modelopt.torch.puzzletron.tools.post_init_sparse import SparsityMethod
-from modelopt.torch.puzzletron.tools.robust_json import json_dumps
+from modelopt.torch.utils import json_dumps
+
+from ..block_config import maybe_cast_block_configs
+
+if TYPE_CHECKING:
+    from ..anymodel.model_descriptor import ModelDescriptor
+from .logger import mprint
 
 SAFETENSORS_SUBBLOCKS_DIR_NAME = "subblocks_safetensors"
 PTH_SUBBLOCKS_DIR_NAME = "subblocks"
@@ -183,9 +183,7 @@ def init_model_from_config(
 
 
 def save_checkpoint(
-    model: PreTrainedModel,
-    checkpoint_dir: Path | str,
-    descriptor: "ModelDescriptor",
+    model: PreTrainedModel, checkpoint_dir: Path | str, descriptor: "ModelDescriptor"
 ) -> None:
     _save_checkpoint(model.config, model.state_dict(), checkpoint_dir, descriptor)
 
@@ -197,8 +195,6 @@ def _save_checkpoint(
     descriptor: "ModelDescriptor",
     max_workers: int | None = None,  # Now optional - will auto-calculate if None
 ) -> None:
-    from modelopt.torch.puzzletron.anymodel.model_descriptor import ModelDescriptor
-
     if not isinstance(checkpoint_dir, Path):
         checkpoint_dir = Path(checkpoint_dir)
 

@@ -46,7 +46,7 @@ from megatron.core.datasets.utils import get_blend_from_list
 from megatron.core.distributed import DistributedDataParallelConfig
 
 # Import to register heterogeneous bridges (side effect)
-import modelopt.torch.puzzletron.export.mbridge  # noqa: F401
+import modelopt.torch.puzzletron  # noqa: F401
 import modelopt.torch.utils.distributed as dist
 from modelopt.torch.utils import print_rank_0
 

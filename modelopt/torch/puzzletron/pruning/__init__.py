@@ -13,31 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Structured pruning mixins and checkpoint utilities for Puzzletron."""
 
-from .core import (
-    InputArgs,
-    OutputValue,
-    Passage,
-    PassageInputAdapter,
-    PassageInputOverrides,
-    PassageOutput,
-    PassageOutputAdapter,
-    PassageOutputOverrides,
-    Predicate,
-    always_false_predicate,
-    always_true_predicate,
-)
-
-__all__ = [
-    "InputArgs",
-    "OutputValue",
-    "Passage",
-    "PassageInputAdapter",
-    "PassageInputOverrides",
-    "PassageOutput",
-    "PassageOutputAdapter",
-    "PassageOutputOverrides",
-    "Predicate",
-    "always_false_predicate",
-    "always_true_predicate",
-]
+from .expert_removal_pruning_mixin import *
+from .ffn_intermediate_pruning_mixin import *
+from .kv_heads_pruning_mixin import *
+from .pruning_ckpts import *
+from .pruning_mixin import *
+from .pruning_utils import *

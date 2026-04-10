@@ -15,14 +15,8 @@
 
 from typing import List
 
-from modelopt.torch.puzzletron.anymodel.converter import Converter, ConverterFactory
-from modelopt.torch.puzzletron.block_config import (
-    AttentionConfig,
-    BlockConfig,
-    FFNConfig,
-    MambaConfig,
-    MoEConfig,
-)
+from ....block_config import AttentionConfig, BlockConfig, FFNConfig, MambaConfig, MoEConfig
+from ...converter import Converter, ConverterFactory
 
 
 @ConverterFactory.register_decorator("nemotron_h")

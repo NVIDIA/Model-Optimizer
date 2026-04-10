@@ -26,21 +26,12 @@ from transformers.models.qwen3.modeling_qwen3 import (
     Qwen3RotaryEmbedding,
 )
 
-from modelopt.torch.puzzletron.anymodel.model_descriptor import (
-    ModelDescriptor,
-    ModelDescriptorFactory,
-)
-from modelopt.torch.puzzletron.anymodel.puzzformer.no_op import (
-    MatchingZeros,
-    Same,
-    return_tuple_of_size,
-)
-from modelopt.torch.puzzletron.block_config import BlockConfig
-from modelopt.torch.puzzletron.pruning.ffn_intermediate_pruning_mixin import (
-    FFNIntermediateLayerDescriptor,
-)
-from modelopt.torch.puzzletron.pruning.kv_heads_pruning_mixin import KVHeadsLayerDescriptor
-from modelopt.torch.puzzletron.utils.dummy_modules import DummyBlock
+from ....block_config import BlockConfig
+from ....pruning.ffn_intermediate_pruning_mixin import FFNIntermediateLayerDescriptor
+from ....pruning.kv_heads_pruning_mixin import KVHeadsLayerDescriptor
+from ....utils.dummy_modules import DummyBlock
+from ...model_descriptor import ModelDescriptor, ModelDescriptorFactory
+from ...puzzformer.no_op import MatchingZeros, Same, return_tuple_of_size
 
 
 @ModelDescriptorFactory.register_decorator("qwen3")

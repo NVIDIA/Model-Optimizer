@@ -23,7 +23,7 @@ from _test_utils.torch.puzzletron.utils import create_and_save_small_hf_model
 from _test_utils.torch.transformers_models import get_tiny_tokenizer
 from transformers import AutoModelForCausalLM
 
-from modelopt.torch.puzzletron.anymodel import convert_model
+import modelopt.torch.puzzletron as mtpz
 
 
 def test_distill_hf(project_root_path: Path, tmp_path: Path):
@@ -128,11 +128,11 @@ def _prepare_student_and_teacher_models(
     student_anymodel_dir = tmp_path / "student_anymodel"
     teacher_anymodel_dir = tmp_path / "teacher_anymodel"
 
-    convert_model(
+    mtpz.anymodel.convert_model(
         input_dir=str(student_hf_dir), output_dir=str(student_anymodel_dir), converter="qwen3"
     )
 
-    convert_model(
+    mtpz.anymodel.convert_model(
         input_dir=str(teacher_hf_dir), output_dir=str(teacher_anymodel_dir), converter="qwen3"
     )
     print("Models converted to AnyModel format:")

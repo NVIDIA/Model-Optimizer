@@ -18,19 +18,23 @@
 
 import json
 import time
-from pathlib import Path
 from typing import Optional
 
 import torch
 import yaml
 from transformers import AutoModelForCausalLM
 
-from modelopt.torch.puzzletron.anymodel.model_descriptor import (
-    ModelDescriptor,
-    ModelDescriptorFactory,
+from ...anymodel.model_descriptor import ModelDescriptor, ModelDescriptorFactory
+from ...anymodel.puzzformer import deci_x_patcher
+from ..checkpoint_utils import copy_tokenizer, load_state_dict
+from ..checkpoint_utils_hf import (
+    _get_auto_class_for_trust_remote_code,
+    _save_checkpoint,
+    load_model_config,
 )
-from modelopt.torch.puzzletron.anymodel.puzzformer import deci_x_patcher
-from modelopt.torch.puzzletron.tools.bypassed_training.child_init import (
+from ..logger import mprint
+from ..sharded_checkpoint_utils import _get_model_class_from_config
+from .child_init import (
     GQAInitMode,
     HiddenSizeInitMode,
     LinearInitMode,
@@ -38,14 +42,8 @@ from modelopt.torch.puzzletron.tools.bypassed_training.child_init import (
     create_child_state_dict,
     update_model_config,
 )
-from modelopt.torch.puzzletron.tools.checkpoint_utils import copy_tokenizer, load_state_dict
-from modelopt.torch.puzzletron.tools.checkpoint_utils_hf import (
-    _get_auto_class_for_trust_remote_code,
-    _save_checkpoint,
-    load_model_config,
-)
-from modelopt.torch.puzzletron.tools.logger import mprint
-from modelopt.torch.puzzletron.tools.sharded_checkpoint_utils import _get_model_class_from_config
+
+__all__ = ["init_child_from_parent"]
 
 
 def init_child_from_parent(

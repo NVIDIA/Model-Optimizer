@@ -31,10 +31,7 @@ from nemo_export_deploy_common.import_utils import (
 from peft import PeftModel
 from transformers import AutoModel, AutoModelForCausalLM, AutoTokenizer
 
-from modelopt.torch.puzzletron.anymodel.model_descriptor.model_descriptor_factory import (
-    resolve_descriptor_from_pretrained,
-)
-from modelopt.torch.puzzletron.anymodel.puzzformer import deci_x_patcher
+import modelopt.torch.puzzletron as mtpz
 
 try:
     from pytriton.decorators import batch
@@ -145,14 +142,14 @@ class HuggingFaceLLMDeploy(ITritonDeployable):
             # =========================================================================
             # BEGIN ANYMODEL PATCH
             # Wraps model loading with deci_x_patcher for heterogeneous layer configs.
-            # See: modelopt/torch/puzzletron/anymodel/puzzformer/utils.py
+            # See: modelopt/torch/puzzletron/anymodel/puzzformer/patcher.py
             # =========================================================================
 
-            descriptor = resolve_descriptor_from_pretrained(
+            descriptor = mtpz.anymodel.resolve_descriptor_from_pretrained(
                 self.hf_model_id_path, trust_remote_code=hf_kwargs.get("trust_remote_code", False)
             )
 
-            with deci_x_patcher(model_descriptor=descriptor):
+            with mtpz.anymodel.deci_x_patcher(model_descriptor=descriptor):
                 self.model = AutoModelForCausalLM.from_pretrained(
                     self.hf_model_id_path,
                     torch_dtype=torch_dtype,

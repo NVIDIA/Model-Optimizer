@@ -13,7 +13,5 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from modelopt.torch.puzzletron.anymodel.models.qwen2.qwen2_converter import Qwen2Converter
-from modelopt.torch.puzzletron.anymodel.models.qwen2.qwen2_model_descriptor import (
-    Qwen2ModelDescriptor,
-)
+from .qwen2_converter import Qwen2Converter
+from .qwen2_model_descriptor import Qwen2ModelDescriptor

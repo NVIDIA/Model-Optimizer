@@ -19,12 +19,5 @@ Provides no-op modules for layer replacement and patching utilities for heteroge
 per-layer configurations.
 """
 
-from modelopt.torch.puzzletron.anymodel.puzzformer.no_op import (
-    MatchingZeros,
-    Same,
-    return_tuple_of_size,
-)
-from modelopt.torch.puzzletron.anymodel.puzzformer.utils import (
-    deci_x_patcher,
-    override_config_with_block_configs,
-)
+from .no_op import *
+from .patcher import *

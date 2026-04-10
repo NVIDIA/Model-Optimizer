@@ -34,8 +34,9 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 import modelopt.torch.utils.distributed as dist
-from modelopt.torch.puzzletron.anymodel.model_descriptor import ModelDescriptor
-from modelopt.torch.puzzletron.sewing_kit import (
+
+from ..anymodel.model_descriptor import ModelDescriptor
+from ..sewing_kit import (
     ExternalTarget,
     InputArgs,
     ModuleTarget,
@@ -43,15 +44,11 @@ from modelopt.torch.puzzletron.sewing_kit import (
     RemoteTarget,
     StitchedModule,
 )
-from modelopt.torch.puzzletron.sewing_kit.core import InputReducer
-from modelopt.torch.puzzletron.sewing_kit.utils import (
-    distributed_recv_obj,
-    distributed_send_obj,
-    fake_tensor,
-)
-from modelopt.torch.puzzletron.tools.checkpoint_utils import init_module_with_state_dict
-from modelopt.torch.puzzletron.tools.sharded_checkpoint_utils import DummyBlock
-from modelopt.torch.puzzletron.utils.validation import _organize_outputs, calculate_batch_outputs
+from ..sewing_kit.core import InputReducer
+from ..sewing_kit.utils import distributed_recv_obj, distributed_send_obj, fake_tensor
+from ..tools.checkpoint_utils import init_module_with_state_dict
+from ..utils.dummy_modules import DummyBlock
+from .validation import _organize_outputs, calculate_batch_outputs
 
 
 def _log_forward_error(e: Exception, rank: int, batch_idx: int, num_batches: int) -> None:
@@ -99,24 +96,24 @@ def calculate_losses_pipeline(
     descriptor: Type[ModelDescriptor] = None,
     use_autocast: bool = True,
 ) -> tuple[dict[str, dict], HiddenStatesAndLMHead | None] | tuple[None, None]:
-    """
-    Do model forward on each batch and calculate LM loss.
-    Optionally also calculate kl_div loss and other metrics from given target_hidden_states_per_batch.
-    Optionally return hidden states per batch.
-    Does not support data-parallel.
-    just_model_forward: skip loss calculation, just forward the model. Useful for activation hooks.
+    """Do model forward on each batch and calculate LM loss.
 
+    Optionally also calculate kl_div loss and other metrics from given
+    *target_hidden_states_per_batch*.  Optionally return hidden states per batch.
+    Does not support data-parallel.
+    *just_model_forward*: skip loss calculation, just forward the model (useful for activation hooks).
 
     Returns:
-        losses: dict = {
-            "lm_loss": {
-                "avg": float,
-                "per_sample": list[float]
-            }
-            more metrics if provided with target_hidden_states_per_batch
-        }
-        target_hidden_states_per_batch: list[torch.Tensor], returned if return_hidden_states=True
+        Tuple of ``(losses, target_hidden_states_per_batch)``.
 
+        ``losses`` is a dict, e.g.::
+
+            {
+                "lm_loss": {"avg": float, "per_sample": [float, ...]},
+                ...  # more metrics if target_hidden_states_per_batch is provided
+            }
+
+        ``target_hidden_states_per_batch`` is returned when *return_hidden_states* is True.
     """
     if not isinstance(stitched_model, StitchedModule):
         stitched_model = perform_pipeline_stitches(stitched_model, descriptor)

@@ -37,28 +37,7 @@ Supported models:
     - (more to come: qwen2, mistral_small, etc.)
 """
 
-# Import models to trigger factory registration
-from modelopt.torch.puzzletron.anymodel import models  # noqa: F401
-from modelopt.torch.puzzletron.anymodel.converter import Converter, ConverterFactory, convert_model
-from modelopt.torch.puzzletron.anymodel.model_descriptor import (
-    ModelDescriptor,
-    ModelDescriptorFactory,
-)
-from modelopt.torch.puzzletron.anymodel.puzzformer import (
-    MatchingZeros,
-    Same,
-    deci_x_patcher,
-    return_tuple_of_size,
-)
-
-__all__ = [
-    "Converter",
-    "ConverterFactory",
-    "ModelDescriptor",
-    "ModelDescriptorFactory",
-    "deci_x_patcher",
-    "MatchingZeros",
-    "Same",
-    "return_tuple_of_size",
-    "convert_model",
-]
+from . import models  # trigger factory registration
+from .converter import *
+from .model_descriptor import *
+from .puzzformer import *

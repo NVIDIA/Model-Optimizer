@@ -27,7 +27,7 @@ import argparse
 import json
 import os
 import shutil
-from typing import Any, Dict, List, Optional, TextIO, Tuple
+from typing import Any, Dict, List, Tuple
 
 import torch
 from safetensors import safe_open
