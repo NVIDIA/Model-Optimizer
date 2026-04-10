@@ -20,6 +20,7 @@ from typing import Callable, Type
 from transformers import AutoConfig
 
 from modelopt.torch.puzzletron.anymodel.model_descriptor.model_descriptor import ModelDescriptor
+from modelopt.torch.puzzletron.tools.checkpoint_utils_hf import force_cache_dynamic_modules
 
 __all__ = ["ModelDescriptorFactory"]
 
@@ -53,6 +54,7 @@ def resolve_descriptor_from_pretrained(pretrained: str, trust_remote_code: bool 
     """
 
     config = AutoConfig.from_pretrained(pretrained, trust_remote_code=trust_remote_code)
+    force_cache_dynamic_modules(config, pretrained, trust_remote_code=trust_remote_code)
     model_type = getattr(config, "model_type", None)
 
     if model_type and model_type in _MODEL_TYPE_TO_DESCRIPTOR:
