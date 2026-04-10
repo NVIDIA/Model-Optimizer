@@ -68,3 +68,10 @@ This catches script errors cheaply before using GPU quota on a real run.
 See `skills/common/slurm-setup.md` section 2 for the smoke test partition pattern.
 
 Only submit the full calibration job after the smoke test exits cleanly.
+
+---
+
+## 4. PTQ-Specific Notes
+
+- **Gated datasets**: Some calibration datasets (e.g., `nvidia/Nemotron-Post-Training-Dataset-v2`) require HF authentication. Set `HF_TOKEN` in the job environment, or use `--dataset cnn_dailymail` to use a non-gated alternative.
+- **NFS permissions**: Docker + NFS root_squash causes `PermissionError` on output/cache dirs. See `skills/common/slurm-setup.md` section 5 for fixes.
