@@ -38,7 +38,7 @@ from modelopt.torch.puzzletron.anymodel.model_descriptor import (
     ModelDescriptor,
     ModelDescriptorFactory,
 )
-from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.block_config import (
+from modelopt.torch.puzzletron.block_config import (
     AttentionConfig,
     BlockConfig,
     FFNConfig,

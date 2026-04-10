@@ -30,7 +30,7 @@ from transformers import PretrainedConfig
 from transformers.integrations.mxfp4 import convert_moe_packed_tensors
 
 from modelopt.torch.puzzletron.anymodel.model_descriptor import ModelDescriptor
-from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.block_config import BlockConfig
+from modelopt.torch.puzzletron.block_config import BlockConfig
 from modelopt.torch.puzzletron.tools.checkpoint_utils_hf import load_model_config, save_model_config
 
 __all__ = ["Converter"]

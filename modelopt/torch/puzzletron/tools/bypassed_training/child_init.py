@@ -32,7 +32,7 @@ import torch
 from transformers import PretrainedConfig
 from typeguard import check_type
 
-from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.block_config import (
+from modelopt.torch.puzzletron.block_config import (
     SUBBLOCK_CLS_DICT,
     BlockConfig,
     _get_dataclass_type,

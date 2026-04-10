@@ -53,7 +53,7 @@ Step 2\: Compare outputs from different model variants\:
         --reference output_unpruned.pt \
         --compare output_l2norm.pt \
         --output-json comparison_stats.json \
-        --trust-inputs
+        --no-weights-only
 
 The saved file format\:
 

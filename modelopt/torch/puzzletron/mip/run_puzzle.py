@@ -34,11 +34,7 @@ from modelopt.torch.puzzletron.anymodel.model_descriptor import (
     ModelDescriptor,
     ModelDescriptorFactory,
 )
-from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.block_config import (
-    AttentionConfig,
-    BlockConfig,
-    FFNConfig,
-)
+from modelopt.torch.puzzletron.block_config import AttentionConfig, BlockConfig, FFNConfig
 from modelopt.torch.puzzletron.mip.mip_with_multi_layer_replacements import (
     run_mip as run_multi_layer_replacement_mip,
 )

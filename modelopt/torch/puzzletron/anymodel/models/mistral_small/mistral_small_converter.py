@@ -19,11 +19,7 @@ from typing import List
 from transformers import MistralConfig
 
 from modelopt.torch.puzzletron.anymodel.converter import Converter, ConverterFactory
-from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.block_config import (
-    AttentionConfig,
-    BlockConfig,
-    FFNConfig,
-)
+from modelopt.torch.puzzletron.block_config import AttentionConfig, BlockConfig, FFNConfig
 
 
 @ConverterFactory.register_decorator("mistral_small")

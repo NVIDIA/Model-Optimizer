@@ -29,12 +29,12 @@ from typing import Type
 
 import numpy as np
 import torch
+from torch import nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 import modelopt.torch.utils.distributed as dist
 from modelopt.torch.puzzletron.anymodel.model_descriptor import ModelDescriptor
-from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.modeling_decilm import LMHead
 from modelopt.torch.puzzletron.sewing_kit import (
     ExternalTarget,
     InputArgs,
@@ -69,6 +69,14 @@ def _log_forward_error(e: Exception, rank: int, batch_idx: int, num_batches: int
         f"{'=' * 60}\n"
     )
     print(error_msg, flush=True)
+
+
+class LMHead(nn.Linear):
+    """Special class to allow FSDP wrapping without affecting other Linear layers in the model.
+
+    Small nn helpers for puzzletron pipeline code. Model configs come from HuggingFace ``AutoConfig`` (AnyModel).
+    ``LMHead`` is a distinct ``nn.Linear`` subclass so pipeline / FSDP code can target it explicitly
+    """
 
 
 class HiddenStatesAndLMHead(list):

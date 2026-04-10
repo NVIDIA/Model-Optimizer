@@ -28,7 +28,7 @@ from modelopt.torch.puzzletron.anymodel.model_descriptor import (
     ModelDescriptorFactory,
 )
 from modelopt.torch.puzzletron.anymodel.puzzformer.no_op import MatchingZeros, Same
-from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.block_config import BlockConfig
+from modelopt.torch.puzzletron.block_config import BlockConfig
 from modelopt.torch.puzzletron.pruning.ffn_intermediate_pruning_mixin import (
     FFNIntermediateLayerDescriptor,
     FFNIntermediatePruningMixIn,

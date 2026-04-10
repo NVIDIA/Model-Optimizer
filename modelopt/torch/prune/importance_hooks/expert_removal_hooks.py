@@ -17,13 +17,15 @@
 """MoE expert-removal and ranked-choice importance hooks (uses Puzzletron BlockConfig)."""
 
 from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING
 
 import torch
 from torch import nn
 
-from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.block_config import BlockConfig  # noqa: TC001
-
 from .base_hooks import ForwardHook
+
+if TYPE_CHECKING:
+    from modelopt.torch.puzzletron.block_config import BlockConfig
 
 __all__ = [
     "NemotronHRemoveExpertsIndependentHook",
