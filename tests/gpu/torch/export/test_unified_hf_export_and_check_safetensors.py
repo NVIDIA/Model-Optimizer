@@ -17,7 +17,12 @@ import os
 import pytest
 import torch
 from _test_utils.examples.run_command import extend_cmd_parts, run_example_command
-from _test_utils.torch.transformers_models import create_tiny_llama_dir, create_tiny_t5_dir
+from _test_utils.torch.transformers_models import (
+    create_tiny_gpt_oss_dir,
+    create_tiny_llama_dir,
+    create_tiny_qwen3_moe_dir,
+    create_tiny_t5_dir,
+)
 from safetensors import safe_open
 
 
@@ -33,6 +38,7 @@ from safetensors import safe_open
         "fuse_svdquant_lora_a",
     ),
     [
+        # Dense model (llama)
         ("fp8", "tiny_llama-fp8", True, False, True, True, False),
         ("nvfp4", "tiny_llama-nvfp4", True, False, True, True, False),
         ("nvfp4_mse", "tiny_llama-nvfp4-mse", True, False, True, True, False),
@@ -41,6 +47,9 @@ from safetensors import safe_open
         ("w4a8_awq", "tiny_llama-w4a8-awq", True, False, True, True, False),
         ("int8_wo", "tiny_llama-int8-wo", False, False, False, False, False),
         ("nvfp4_svdquant", "tiny_llama-nvfp4-svdquant", True, False, True, True, True),
+        # MoE models (fused experts: Qwen3 MoE, GPT-OSS)
+        ("nvfp4", "tiny_qwen3_moe-nvfp4", True, False, True, True, False),
+        ("fp8", "tiny_gpt_oss-fp8", True, False, True, True, False),
     ],
 )
 def test_unified_hf_export_and_check_safetensors(
@@ -67,6 +76,12 @@ def test_unified_hf_export_and_check_safetensors(
         tiny_model_dir = create_tiny_t5_dir(
             tmp_path, with_tokenizer=True, num_hidden_layers=1, use_cache=False
         )
+    elif expected_suffix.startswith("tiny_qwen3_moe"):
+        tiny_model_dir = create_tiny_qwen3_moe_dir(
+            tmp_path, with_tokenizer=True, num_hidden_layers=1
+        )
+    elif expected_suffix.startswith("tiny_gpt_oss"):
+        tiny_model_dir = create_tiny_gpt_oss_dir(tmp_path, with_tokenizer=True, num_hidden_layers=1)
     else:
         tiny_model_dir = create_tiny_llama_dir(tmp_path, with_tokenizer=True, num_hidden_layers=1)
 

@@ -74,6 +74,47 @@ include a multi-node-capable partition as the last fallback.
 
 Only submit the full job after the smoke test exits cleanly.
 
+### Docker (non-pyxis) variant
+
+Some clusters don't have pyxis/enroot installed and instead use plain `docker run` on compute nodes. In this case, replace the `srun --container-image` pattern with `docker run` inside the job script:
+
+```bash
+#!/bin/bash
+#SBATCH --job-name=<name>
+#SBATCH --account=<account>
+#SBATCH --partition=<partition>
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --gpus-per-node=<N>
+#SBATCH --time=<HH:MM:SS>
+#SBATCH --output=<log_dir>/<name>_%j.log
+
+docker run --rm \
+    --gpus all \
+    --shm-size=32g \
+    --ulimit memlock=-1 \
+    --network host \
+    -v <data_root>:<data_root> \
+    -e CALIB_SIZE="${CALIB_SIZE:-512}" \
+    <container_image> \
+    bash <path/to/run_script.sh>
+```
+
+**Key differences from pyxis**:
+
+- No `srun` wrapper needed — SLURM just allocates the node, Docker runs the container
+- Mount paths with `-v` instead of `--container-mounts`
+- Pass env vars with `-e` instead of relying on SLURM env propagation
+- Use the two-script pattern: SLURM wrapper (sbatch directives + `docker run`) and inner runner (the actual work). The inner runner should unset SLURM env vars and set `HF_HOME`/`HF_DATASETS_OFFLINE` as needed
+- **NFS root_squash**: see section 5
+
+**How to detect which pattern to use**: Ask the user how they normally run containers, or check:
+
+```bash
+which enroot 2>/dev/null && echo "pyxis/enroot available"
+which docker 2>/dev/null && echo "docker available"
+```
+
 ---
 
 ## 3. Monitor Until Completion
@@ -126,3 +167,28 @@ srun \
 ```
 
 Adjust `--nodes`, `--gpus-per-node`, and the distributed launch command per your workload.
+
+---
+
+## 5. NFS root_squash and Docker Permissions
+
+Docker containers typically run as root, but NFS filesystems with `root_squash` (the default) map root to `nobody`, blocking writes to directories owned by the user. This causes `PermissionError` when creating cache lock files, writing output, or saving logs.
+
+This affects both pyxis/enroot (`srun --container-image`) and plain `docker run` workflows.
+
+**Preferred fix** — run Docker with the host user's UID/GID to match NFS ownership:
+
+```bash
+docker run --user $(id -u):$(id -g) ...
+```
+
+> Note: `--user` may cause issues if the container expects root for package installation. In that case, fall back to the chmod approach below.
+
+**Fallback fix** — open permissions before submitting the job:
+
+```bash
+chmod -R g+rwX /path/to/workspace/
+chmod -R g+rwX /path/to/.hf_cache/
+```
+
+Scope `chmod` to only the directories the job needs — avoid world-writable paths on shared clusters.

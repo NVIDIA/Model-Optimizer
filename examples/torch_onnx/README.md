@@ -1,6 +1,10 @@
 # Torch Quantization to ONNX Export
 
-This example demonstrates how to quantize PyTorch models (vision and LLM) followed by export to ONNX format. The scripts leverage the ModelOpt toolkit for both quantization and ONNX export.
+This example demonstrates how to quantize PyTorch models followed by export to ONNX format. The scripts leverage the ModelOpt toolkit for quantization and ONNX export.
+
+For **vision models**, the `torch_quant_to_onnx.py` script in this directory handles quantization and ONNX export directly.
+
+For **LLMs and VLMs**, use [TensorRT-Edge-LLM](https://github.com/NVIDIA/TensorRT-Edge-LLM) which provides a complete pipeline for quantizing models with ModelOpt and exporting them to optimized ONNX for deployment on edge platforms (Jetson, DRIVE).
 
 <div align="center">
 
@@ -8,9 +12,9 @@ This example demonstrates how to quantize PyTorch models (vision and LLM) follow
 | :------------: | :------------: | :------------: |
 | Pre-Requisites | Required packages to use this example | [Link](#pre-requisites) |
 | Vision Models | Quantize timm models and export to ONNX | [Link](#vision-models) |
-| LLM Export | Export LLMs to quantized ONNX | [Link](#llm-export) |
+| LLM Quantization and Export | Quantize and export LLMs/VLMs via TensorRT-Edge-LLM | [Link](#llm-quantization-and-export-with-tensorrt-edge-llm) |
+| Supported Models | LLM and VLM models supported by TensorRT-Edge-LLM | [Link](#supported-models) |
 | Mixed Precision | Auto mode for optimal per-layer quantization | [Link](#mixed-precision-quantization-auto-mode) |
-| Support Matrix | View the ONNX export supported LLM models | [Link](#onnx-export-supported-llm-models) |
 | Resources | Extra links to relevant resources | [Link](#resources) |
 
 </div>
@@ -78,67 +82,180 @@ python ../onnx_ptq/evaluate.py \
     --model_name=vit_base_patch16_224
 ```
 
-## LLM Export
+## LLM Quantization and Export with TensorRT-Edge-LLM
 
-The `llm_export.py` script exports LLM models to ONNX with optional quantization.
+[TensorRT-Edge-LLM](https://github.com/NVIDIA/TensorRT-Edge-LLM) provides a complete pipeline for quantizing LLMs and VLMs using NVIDIA ModelOpt and exporting them to optimized ONNX for deployment on edge platforms such as NVIDIA Jetson and DRIVE.
 
-### What it does
+### Overview
 
-- Loads a HuggingFace LLM model (local path or model name).
-- Optionally quantizes the model to FP8, INT4_AWQ, or NVFP4.
-- Exports the model to ONNX format.
-- Post-processes the ONNX graph for TensorRT compatibility.
+The pipeline follows these stages:
 
-### Usage
+1. **Quantize** (x86 host with GPU) — Reduce model precision using ModelOpt (FP8, INT4 AWQ, NVFP4)
+2. **Export** (x86 host with GPU) — Convert quantized model to ONNX
+3. **Build** (edge device) — Compile ONNX into TensorRT engines
+4. **Inference** (edge device) — Run the compiled engines
 
-```bash
-python llm_export.py \
-    --hf_model_path=<HuggingFace model name or local path> \
-    --dtype=<fp16|fp8|int4_awq|nvfp4> \
-    --output_dir=<directory to save ONNX model>
-```
-
-### Examples
-
-Export Qwen2 to FP16 ONNX:
+### Installation
 
 ```bash
-python llm_export.py \
-    --hf_model_path=Qwen/Qwen2-0.5B-Instruct \
-    --dtype=fp16 \
-    --output_dir=./qwen2_fp16
+# Use the PyTorch Docker image (recommended)
+docker pull nvcr.io/nvidia/pytorch:25.12-py3
+docker run --gpus all -it --rm -v $(pwd):/workspace -w /workspace nvcr.io/nvidia/pytorch:25.12-py3 bash
+
+# Clone and install TensorRT-Edge-LLM
+git clone https://github.com/NVIDIA/TensorRT-Edge-LLM.git
+cd TensorRT-Edge-LLM
+git submodule update --init --recursive
+python3 -m venv venv
+source venv/bin/activate
+pip3 install .
+
+# Verify installation
+tensorrt-edgellm-quantize-llm --help
+tensorrt-edgellm-export-llm --help
 ```
 
-Export Qwen2 to FP8 ONNX with quantization:
+**System requirements:**
 
-```bash
-python llm_export.py \
-    --hf_model_path=Qwen/Qwen2-0.5B-Instruct \
-    --dtype=fp8 \
-    --output_dir=./qwen2_fp8
-```
+- x86-64 Linux (Ubuntu 22.04 or 24.04 recommended)
+- NVIDIA GPU with Compute Capability 8.0+ (Ampere or newer)
+- CUDA 12.x or 13.x, Python 3.10+
+- GPU VRAM: 16 GB for models up to 3B, 40 GB for models up to 4B, 80 GB for models up to 8B
 
-Export to NVFP4 with custom calibration:
+### CLI Tools
 
-```bash
-python llm_export.py \
-    --hf_model_path=Qwen/Qwen3-0.6B \
-    --dtype=nvfp4 \
-    --calib_size=512 \
-    --output_dir=./qwen3_nvfp4
-```
-
-### Key Parameters
-
-| Parameter | Description |
+| Tool | Purpose |
 | :--- | :--- |
-| `--hf_model_path` | HuggingFace model name (e.g., `Qwen/Qwen2-0.5B-Instruct`) or local model path |
-| `--dtype` | Export precision: `fp16`, `fp8`, `int4_awq`, or `nvfp4` |
-| `--output_dir` | Directory to save the exported ONNX model |
-| `--calib_size` | Number of calibration samples for quantization (default: 512) |
-| `--lm_head` | Precision of lm_head layer (default: `fp16`) |
-| `--save_original` | Save the raw ONNX before post-processing |
-| `--trust_remote_code` | Trust remote code when loading from HuggingFace Hub |
+| `tensorrt-edgellm-quantize-llm` | Quantize LLM models using ModelOpt (FP8, INT4 AWQ, NVFP4) |
+| `tensorrt-edgellm-export-llm` | Export LLM to ONNX with precision-specific optimizations |
+| `tensorrt-edgellm-export-visual` | Export visual encoders for multimodal VLM models |
+| `tensorrt-edgellm-quantize-draft` | Quantize EAGLE draft models for speculative decoding |
+| `tensorrt-edgellm-export-draft` | Export EAGLE draft models to ONNX |
+| `tensorrt-edgellm-insert-lora` | Insert LoRA patterns into existing ONNX models |
+| `tensorrt-edgellm-process-lora` | Process LoRA adapter weights for runtime loading |
+
+### Example: Quantize and Export an LLM
+
+```bash
+# Step 1: Quantize with ModelOpt
+tensorrt-edgellm-quantize-llm \
+    --model_dir Qwen/Qwen2.5-3B-Instruct \
+    --quantization fp8 \
+    --output_dir quantized/qwen2.5-3b-fp8
+
+# Step 2: Export to ONNX
+tensorrt-edgellm-export-llm \
+    --model_dir quantized/qwen2.5-3b-fp8 \
+    --output_dir onnx_models/qwen2.5-3b
+```
+
+### Example: Quantize and Export a VLM
+
+```bash
+# Quantize the language model component
+tensorrt-edgellm-quantize-llm \
+    --model_dir Qwen/Qwen2.5-VL-3B-Instruct \
+    --quantization fp8 \
+    --output_dir quantized/qwen2.5-vl-3b
+
+# Export the language model
+tensorrt-edgellm-export-llm \
+    --model_dir quantized/qwen2.5-vl-3b \
+    --output_dir onnx_models/qwen2.5-vl-3b/llm
+
+# Export the visual encoder
+tensorrt-edgellm-export-visual \
+    --model_dir Qwen/Qwen2.5-VL-3B-Instruct \
+    --output_dir onnx_models/qwen2.5-vl-3b/visual
+```
+
+### Example: EAGLE Speculative Decoding
+
+```bash
+# Quantize base model
+tensorrt-edgellm-quantize-llm \
+    --model_dir meta-llama/Llama-3.1-8B-Instruct \
+    --quantization fp8 \
+    --output_dir quantized/llama3.1-8b-base
+
+# Export base model with EAGLE flag
+tensorrt-edgellm-export-llm \
+    --model_dir quantized/llama3.1-8b-base \
+    --output_dir onnx_models/llama3.1-8b/base \
+    --is_eagle_base
+
+# Quantize EAGLE draft model
+tensorrt-edgellm-quantize-draft \
+    --base_model_dir meta-llama/Llama-3.1-8B-Instruct \
+    --draft_model_dir EAGLE3-LLaMA3.1-Instruct-8B \
+    --quantization fp8 \
+    --output_dir quantized/llama3.1-8b-draft
+
+# Export draft model
+tensorrt-edgellm-export-draft \
+    --draft_model_dir quantized/llama3.1-8b-draft \
+    --base_model_dir meta-llama/Llama-3.1-8B-Instruct \
+    --output_dir onnx_models/llama3.1-8b/draft
+```
+
+### Quantization Methods
+
+| Method | Description |
+| :--- | :--- |
+| FP8 | Best accuracy-to-memory balance on SM89+ hardware (Hopper, Ada) |
+| INT4 AWQ | Weight-only quantization; effective for memory-constrained platforms and low-batch inference |
+| NVFP4 | 4-bit format for NVIDIA Blackwell and Thor hardware; applies to both weights and activations |
+| MXFP8 | Experimental; Microscaling FP8 format for SM89+ hardware |
+| INT8 SmoothQuant | Experimental; INT8 weight and activation quantization with SmoothQuant |
+| INT4 GPTQ | Can be loaded directly from HuggingFace Hub (no additional quantization needed) |
+
+### Supported Models
+
+For the latest support matrix, see the [TensorRT-Edge-LLM Supported Models](https://nvidia.github.io/TensorRT-Edge-LLM/developer_guide/getting-started/supported-models.html) page.
+
+#### LLMs
+
+| Model | FP16 | FP8 | INT4 | NVFP4 |
+| :--- | :---: | :---: | :---: | :---: |
+| [Llama-3-8B-Instruct](https://huggingface.co/meta-llama/Meta-Llama-3-8B-Instruct) | ✅ | ✅ | ✅ | ✅ |
+| [Llama-3.1-8B-Instruct](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct) | ✅ | ✅ | ✅ | ✅ |
+| [Llama-3.2-3B-Instruct](https://huggingface.co/meta-llama/Llama-3.2-3B-Instruct) | ✅ | ✅ | ✅ | ✅ |
+| [Qwen2-0.5B-Instruct](https://huggingface.co/Qwen/Qwen2-0.5B-Instruct) | ✅ | ✅ | ✅ | ✅ |
+| [Qwen2-1.5B-Instruct](https://huggingface.co/Qwen/Qwen2-1.5B-Instruct) | ✅ | ✅ | ✅ | ✅ |
+| [Qwen2-7B-Instruct](https://huggingface.co/Qwen/Qwen2-7B-Instruct) | ✅ | ✅ | ✅ | ✅ |
+| [Qwen2.5-0.5B-Instruct](https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct) | ✅ | ✅ | ✅ | ✅ |
+| [Qwen2.5-1.5B-Instruct](https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct) | ✅ | ✅ | ✅ | ✅ |
+| [Qwen2.5-3B-Instruct](https://huggingface.co/Qwen/Qwen2.5-3B-Instruct) | ✅ | ✅ | ✅ | ✅ |
+| [Qwen2.5-7B-Instruct](https://huggingface.co/Qwen/Qwen2.5-7B-Instruct) | ✅ | ✅ | ✅ | ✅ |
+| [Qwen3-0.6B](https://huggingface.co/Qwen/Qwen3-0.6B) | ✅ | ✅ | ✅ | ✅ |
+| [Qwen3-1.7B](https://huggingface.co/Qwen/Qwen3-1.7B) | ✅ | ✅ | ✅ | ✅ |
+| [Qwen3-4B-Instruct-2507](https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507) | ✅ | ✅ | ✅ | ✅ |
+| [Qwen3-8B](https://huggingface.co/Qwen/Qwen3-8B) | ✅ | ✅ | ✅ | ✅ |
+| [DeepSeek-R1-Distill-Qwen-1.5B](https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B) | ✅ | ✅ | ✅ | ✅ |
+| [DeepSeek-R1-Distill-Qwen-7B](https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-7B) | ✅ | ✅ | ✅ | ✅ |
+
+#### VLMs
+
+| Model | FP16 | FP8 | INT4 | NVFP4 |
+| :--- | :---: | :---: | :---: | :---: |
+| [Qwen2-VL-2B-Instruct](https://huggingface.co/Qwen/Qwen2-VL-2B-Instruct) | ✅ | ✅ | ✅ | ✅ |
+| [Qwen2-VL-7B-Instruct](https://huggingface.co/Qwen/Qwen2-VL-7B-Instruct) | ✅ | ✅ | ✅ | ✅ |
+| [Qwen2.5-VL-3B-Instruct](https://huggingface.co/Qwen/Qwen2.5-VL-3B-Instruct) | ✅ | ✅ | ✅ | ✅ |
+| [Qwen2.5-VL-7B-Instruct](https://huggingface.co/Qwen/Qwen2.5-VL-7B-Instruct) | ✅ | ✅ | ✅ | ✅ |
+| [Qwen3-VL-2B-Instruct](https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct) | ✅ | ✅ | ✅ | ✅ |
+| [Qwen3-VL-4B-Instruct](https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct) | ✅ | ✅ | ✅ | ✅ |
+| [Qwen3-VL-8B-Instruct](https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct) | ✅ | ✅ | ✅ | ✅ |
+| [InternVL3-1B](https://huggingface.co/OpenGVLab/InternVL3-1B) | ✅ | ✅ | ✅ | ✅ |
+| [InternVL3-2B](https://huggingface.co/OpenGVLab/InternVL3-2B) | ✅ | ✅ | ✅ | ✅ |
+| [Phi-4-multimodal-instruct](https://huggingface.co/microsoft/Phi-4-multimodal-instruct) | ✅ | ✅ | ✅ | ✅ |
+
+### Troubleshooting
+
+- **GPU out of memory**: Use a larger GPU (40 GB for models up to 4B, 80 GB for models up to 8B) or try `--device cpu` (limited precision support).
+- **Calibration dataset issues**: Download the dataset manually and pass the local path with `--calib_dataset ./path/to/dataset`.
+- **Accuracy degradation**: Try FP8 instead of INT4/NVFP4, or increase calibration sample size.
+
+For full documentation, see the [TensorRT-Edge-LLM Developer Guide](https://nvidia.github.io/TensorRT-Edge-LLM/).
 
 ## Mixed Precision Quantization (Auto Mode)
 
@@ -179,21 +296,6 @@ python torch_quant_to_onnx.py \
 | Torch autocast (FP16) | 85.11% | 97.53% |
 | NVFP4 Quantized | 84.558% | 97.36% |
 | Auto Quantized (FP8 + NVFP4, 4.78 effective bits) | 84.726% | 97.434% |
-
-## ONNX Export Supported LLM Models
-
-| Model | FP16 | INT4 | FP8 | NVFP4 |
-| :---: | :---: | :---: | :---: | :---: |
-| [Llama-3-8B-Instruct](https://huggingface.co/meta-llama/Meta-Llama-3-8B-Instruct) | ✅ | ✅ | ✅ | ✅ |
-| [Llama3.1-8B](https://huggingface.co/meta-llama/Llama-3.1-8B) | ✅ | ✅ | ✅ | ✅ |
-| [Llama3.2-3B](https://huggingface.co/meta-llama/Llama-3.2-3B) | ✅ | ✅ | ✅ | ✅ |
-| [Qwen2-0.5B-Instruct](https://huggingface.co/Qwen/Qwen2-0.5B-Instruct) | ✅ | ✅ | ✅ | ✅ |
-| [Qwen2-1.5B-Instruct](https://huggingface.co/Qwen/Qwen2-1.5B-Instruct) | ✅ | ✅ | ✅ | ✅ |
-| [Qwen2-7B-Instruct](https://huggingface.co/Qwen/Qwen2-7B-Instruct) | ✅ | ✅ | ✅ | ✅ |
-| [Qwen2.5-0.5B-Instruct](https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct) | ✅ | ✅ | ✅ | ✅ |
-| [Qwen2.5-1.5B-Instruct](https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct) | ✅ | ✅ | ✅ | ✅ |
-| [Qwen2.5-3B-Instruct](https://huggingface.co/Qwen/Qwen2.5-3B-Instruct) | ✅ | ✅ | ✅ | ✅ |
-| [Qwen2.5-7B-Instruct](https://huggingface.co/Qwen/Qwen2.5-7B-Instruct) | ✅ | ✅ | ✅ | ✅ |
 
 ## Resources
 
