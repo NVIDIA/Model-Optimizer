@@ -23,6 +23,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+pytest.importorskip("transformers")
+
 from modelopt.torch.puzzletron.anymodel.model_descriptor.model_descriptor_factory import (
     resolve_descriptor_from_pretrained,
 )
