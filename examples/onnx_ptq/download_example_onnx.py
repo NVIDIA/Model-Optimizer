@@ -51,6 +51,12 @@ if __name__ == "__main__":
         help="Export timm/vit_base_patch16_224 model to ONNX.",
     )
     parser.add_argument(
+        "--timm_model_name",
+        type=str,
+        default="vit_base_patch16_224",
+        help="Export any timm model to ONNX (e.g., swin_tiny_patch4_window7_224).",
+    )
+    parser.add_argument(
         "--llama",
         action="store_true",
         help="Export meta-llama/Llama-3.1-8B-Instruct to ONNX with KV cache.",
@@ -62,7 +68,7 @@ if __name__ == "__main__":
         "--batch_size",
         type=int,
         default=1,
-        help="Batch size for the exported ViT model.",
+        help="Batch size for the exported model.",
     )
     parser.add_argument(
         "--fp16",
@@ -89,6 +95,25 @@ if __name__ == "__main__":
             weights_dtype=weights_dtype,
         )
         print(f"ViT model exported to {vit_save_path}")
+
+    if args.timm_model_name:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        model = timm.create_model(args.timm_model_name, pretrained=True, num_classes=1000).to(
+            device
+        )
+        data_config = timm.data.resolve_model_data_config(model)
+        input_shape = (args.batch_size,) + data_config["input_size"]
+
+        save_path = args.onnx_save_path or f"{args.timm_model_name}.onnx"
+        weights_dtype = "fp16" if args.fp16 else "fp32"
+        export_to_onnx(
+            model,
+            input_shape,
+            save_path,
+            device,
+            weights_dtype=weights_dtype,
+        )
+        print(f"{args.timm_model_name} model exported to {save_path}")
 
     if args.llama:
         model_name = "meta-llama/Llama-3.1-8B-Instruct"
