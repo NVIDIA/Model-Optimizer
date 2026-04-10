@@ -184,7 +184,9 @@ def _load_config(config_path: str, overrides: list[str] = ()) -> tuple[dict, dic
 
     if hf_cfg.get("dp_shard_size") is None:
         cp_size = hf_cfg.get("cp_size", 1)
-        hf_cfg["dp_shard_size"] = torch.cuda.device_count() // cp_size
+        # Use WORLD_SIZE (total GPUs across all nodes) when available, else local GPU count.
+        world_size = int(os.environ.get("WORLD_SIZE", torch.cuda.device_count()))
+        hf_cfg["dp_shard_size"] = world_size // cp_size
 
     return hf_cfg, eagle_cfg, dflash_cfg
 
