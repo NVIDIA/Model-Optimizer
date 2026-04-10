@@ -28,6 +28,7 @@ You can either edit the `quant_config` dictionary in `vllm_serve_fakequant.py`, 
 | QUANT_FILE_PATH | Optional path to exported quantizer state dict `quantizer_state.pth` | None |
 | MODELOPT_STATE_PATH | Optional path to exported `vllm_fq_modelopt_state.pth` (restores quantizer state and parameters) | None |
 | CALIB_BATCH_SIZE | Calibration batch size                           | 1                  |
+| RECIPE_PATH      | Optional path to a ModelOpt PTQ recipe YAML  | None |
 
 Set these variables in your shell or Docker environment as needed to customize calibration.
 
@@ -65,7 +66,7 @@ Step 1: export the model with bf16 weights and quantizer state. To export the mo
 ```bash
 python ../llm_ptq/hf_ptq.py \
   --pyt_ckpt_path <MODEL_PATH> \
-  --qformat nvfp4 \
+  --recipe <PATH_TO_RECIPE> \
   --calib_size 512 \
   --export_path <EXPORT_DIR> \
   --vllm_fakequant_export \
