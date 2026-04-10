@@ -40,7 +40,7 @@ from accelerate import ParallelismConfig
 from eagle_utils import (
     EagleTrainerWithAccLog,
     EagleTrainingPlot,
-    make_eagle_supervised_data_module,
+    make_speculative_data_module,
     patch_ring_attention_for_ttt,
 )
 from omegaconf import OmegaConf
@@ -117,6 +117,12 @@ class TrainingArguments(transformers.TrainingArguments):
         default=False, metadata={"help": "Whether to estimate AR using training accuracy to log."}
     )
     ar_validate_steps: int = field(default=1000, metadata={"help": "AR validation interval."})
+    answer_only_loss: bool = field(
+        default=False,
+        metadata={
+            "help": "Mask loss on non-assistant tokens. Default: True for dflash, False for eagle3."
+        },
+    )
     cp_size: int = field(default=1, metadata={"help": "Context parallelism size."})
     dp_shard_size: int | None = field(
         default=None,
@@ -293,12 +299,14 @@ def train():
             raise Exception(f"{training_args.mode} is not supported!")
 
     print_rank_0("Loading dataset...")
+    is_dflash = training_args.mode == "dflash"
     if training_args.mode in ("eagle3", "dflash"):
-        data_module = make_eagle_supervised_data_module(
+        data_module = make_speculative_data_module(
             tokenizer,
             data_args,
             train_len=training_args.training_seq_len,
-            answer_only_loss=(training_args.mode == "dflash"),
+            answer_only_loss=training_args.answer_only_loss,
+            shift_labels=not is_dflash,
         )
 
     trainer = EagleTrainerWithAccLog(

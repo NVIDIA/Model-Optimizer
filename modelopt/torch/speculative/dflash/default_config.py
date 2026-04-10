@@ -16,13 +16,20 @@
 """Default DFlash architecture config.
 
 Model-specific settings (hidden_size, num_attention_heads, rope_*, etc.)
-are inherited from the base model in HFDFlashModel.modify(). Only
-DFlash-specific defaults are set here.
+are inherited from the base model in HFDFlashModel.modify(). Static
+defaults that don't depend on the base model are set here, similar to
+``eagle/default_config.py``.
 """
 
 default_dflash_config = {
+    # DFlash-specific
     "num_hidden_layers": 5,
+    # Architecture defaults (overridable by user config)
+    "hidden_act": "silu",
     "rms_norm_eps": 1e-06,
+    "initializer_range": 0.02,
     "attention_bias": False,
     "attention_dropout": 0.0,
+    "tie_word_embeddings": False,
+    "_attn_implementation": "sdpa",
 }

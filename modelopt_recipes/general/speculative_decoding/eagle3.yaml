@@ -30,6 +30,7 @@ training:
   disable_tqdm: false
   estimate_ar: false
   ar_validate_steps: -1
+  answer_only_loss: false
 
   # --- rarely modified ---
   do_eval: false

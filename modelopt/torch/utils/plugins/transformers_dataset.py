@@ -33,26 +33,6 @@ REMOVE_THINK_CHAT_TEMPLATE = (
 IGNORE_TOKEN_ID = LabelSmoother.ignore_index
 
 
-def _sharegpt_to_openai_messages(conversations: list[dict]):
-    """Optionally align sharedgpt format to openai format."""
-    role_mapping = {
-        "user": "user",
-        "User": "user",
-        "human": "user",
-        "assistant": "assistant",
-        "Assistant": "assistant",
-        "gpt": "assistant",
-        "system": "system",
-        "System": "system",
-    }
-    messages = []
-    for msg in conversations:
-        role = role_mapping[msg["role"]]
-        content = msg["content"]
-        messages.append({"role": role, "content": content})
-    return messages
-
-
 class ShardedDataset(torch.utils.data.Dataset):
     """Subclass of torch.utils.data.Dataset to load data from HuggingFace dataset."""
 
@@ -127,10 +107,29 @@ class LanguageDataCollator:
         chat_template: str | None = None,
         add_generation_prompt: bool = False,
         answer_only_loss: bool = False,
+        shift_labels: bool = True,
         json_key: str = "text",
         return_labels: bool = False,
     ):
-        """Initialize the LanguageDataset."""
+        """Initialize the LanguageDataset.
+
+        Args:
+            tokenizer: HuggingFace tokenizer.
+            train_len: Maximum sequence length for training.
+            chat_template: Optional custom chat template override.
+            add_generation_prompt: Whether to add generation prompt to chat template.
+            answer_only_loss: If True, mask loss on non-assistant tokens using
+                ``{% generation %}`` tags in the chat template.
+            shift_labels: Label alignment mode.
+                If True (default), labels are shifted by 1 for autoregressive training
+                (label[i] = input[i+1], used by EAGLE3). The answer_only_loss mask is
+                also shifted to align with the target tokens.
+                If False, labels are unshifted for diffusion-style training
+                (label[i] = input[i], used by DFlash). The answer_only_loss mask is
+                applied directly without shifting.
+            json_key: Key for plain text samples (non-chat format).
+            return_labels: Whether to include labels in the output.
+        """
         if not isinstance(tokenizer, transformers.PreTrainedTokenizerBase):
             raise ValueError(
                 "The tokenizer must be a transformers.PreTrainedTokenizerBase but got {}".format(
@@ -141,6 +140,7 @@ class LanguageDataCollator:
         self.train_len = train_len
         self.add_generation_prompt = add_generation_prompt
         self.answer_only_loss = answer_only_loss
+        self.shift_labels = shift_labels
         self.json_key = json_key
         self.return_labels = return_labels
 
@@ -348,12 +348,24 @@ class LanguageDataCollator:
         if self.return_labels:
             input_ids = tokenized_examples["input_ids"]
             labels = input_ids.new_full(input_ids.shape, IGNORE_TOKEN_ID)
-            labels[..., :-1] = input_ids[..., 1:]
+            if self.shift_labels:
+                # Autoregressive: label[i] = input[i+1]
+                labels[..., :-1] = input_ids[..., 1:]
+            else:
+                # Diffusion: label[i] = input[i]
+                labels[:] = input_ids
             if self.answer_only_loss:
                 if "assistant_masks" in tokenized_examples:
                     assistant_mask = tokenized_examples["assistant_masks"]
                     if isinstance(assistant_mask, torch.Tensor) and assistant_mask.any():
-                        labels[assistant_mask == 0] = IGNORE_TOKEN_ID
+                        if self.shift_labels:
+                            # Shifted labels: mask based on whether the *target* token
+                            # (input[i+1]) is assistant content.
+                            shifted_mask = assistant_mask[..., 1:]
+                            labels[..., :-1][shifted_mask == 0] = IGNORE_TOKEN_ID
+                        else:
+                            # Unshifted labels: mask based on the input token directly.
+                            labels[assistant_mask == 0] = IGNORE_TOKEN_ID
                     else:
                         # All assistant content truncated or no assistant in batch — mask all
                         labels[:] = IGNORE_TOKEN_ID
@@ -388,29 +400,17 @@ class LanguageDataCollator:
                 batch.append(text)
             else:
                 messages = example.get("messages", None)
-                conversations = example.get("conversations", None)
-                # Prefer whichever has an assistant turn for training
-                if messages and any(m.get("role") == "assistant" for m in messages):
-                    batch.append(messages)
-                elif conversations:
-                    converted = _sharegpt_to_openai_messages(conversations)
-                    if not any(m.get("role") == "assistant" for m in converted):
-                        print_rank_0(
-                            "=== WARNING === Skipping sample with no assistant turn in conversations."
-                        )
-                        continue
-                    batch.append(converted)
-                elif messages:
-                    if not any(m.get("role") == "assistant" for m in messages):
-                        print_rank_0(
-                            "=== WARNING === Skipping sample with no assistant turn in messages."
-                        )
-                        continue
-                    batch.append(messages)
-                else:
+                if not messages:
                     raise ValueError(
-                        "The sample must in either OpenAI messages format or ShareGPT conversations format."
+                        "Sample must have a 'messages' field in OpenAI format "
+                        "(list of {role, content} dicts)."
                     )
+                if not any(m.get("role") == "assistant" for m in messages):
+                    print_rank_0(
+                        "=== WARNING === Skipping sample with no assistant turn in messages."
+                    )
+                    continue
+                batch.append(messages)
 
         if not batch:
             # All samples skipped — create a dummy batch with all-masked labels
@@ -469,13 +469,10 @@ class VisionLanguageDataCollator(LanguageDataCollator):
         for example in examples:
             messages = example.get("messages", None)
             if messages is None:
-                conversations = example.get("conversations", None)
-                if conversations is None:
-                    raise ValueError(
-                        "The sample must in either OpenAI messages format or ShareGPT conversations format."
-                    )
-                else:
-                    messages = _sharegpt_to_openai_messages(conversations)
+                raise ValueError(
+                    "Sample must have a 'messages' field in OpenAI format "
+                    "(list of {role, content} dicts)."
+                )
 
             copy_messages = copy.deepcopy(messages)
 

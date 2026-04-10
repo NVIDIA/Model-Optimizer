@@ -1,19 +1,19 @@
-# DFlash online speculative decoding training for Qwen3-8B.
+# DFlash online speculative decoding training for Qwen3.5-4B.
 #
 # 2-step pipeline:
-#   task_0: Online DFlash training (8 nodes, 64 GPUs)
+#   task_0: Online DFlash training
 #   task_1: MT-Bench per-category AR evaluation (1 GPU)
 #
 # Reference: "DFlash: Block Diffusion for Flash Speculative Decoding" (arXiv:2602.06036)
 #
 # Usage:
-#   uv run launch.py --yaml examples/Qwen/Qwen3-8B/hf_online_dflash.yaml --yes
-#   uv run slurm.py --yaml modules/Model-Optimizer/tools/launcher/examples/Qwen/Qwen3-8B/hf_online_dflash.yaml --yes
+#   uv run launch.py --yaml examples/Qwen/Qwen3.5-4B/hf_online_dflash.yaml --yes
+#   uv run slurm.py --yaml modules/Model-Optimizer/tools/launcher/examples/Qwen/Qwen3.5-4B/hf_online_dflash.yaml --yes
 
-job_name: Qwen3-8B_DFlash_online
+job_name: Qwen3.5-4B_DFlash_online
 pipeline:
   global_vars:
-    hf_model: /hf-local/Qwen/Qwen3-8B
+    hf_model: /hf-local/Qwen/Qwen3.5-4B
 
   # Step 1: Online DFlash training
   task_0:
@@ -21,8 +21,9 @@ pipeline:
     args:
       - --config modules/Model-Optimizer/modelopt_recipes/general/speculative_decoding/dflash.yaml
       - model.model_name_or_path=<<global_vars.hf_model>>
-      - data.data_path=/hf-local/modelopt/Speculative-Decoding-Dataset-v1-Qwen3-8B/sample-1K.jsonl
-      - training.output_dir=/scratchspace/dflash_bs16
+      - model.trust_remote_code=true
+      - data.data_path=/hf-local/modelopt/Speculative-Decoding-Dataset-v1-Qwen3-8B/sample-1K-openai.jsonl
+      - training.output_dir=/scratchspace/dflash_qwen3.5_4b
       - training.num_train_epochs=1
       - training.training_seq_len=4096
       - training.save_steps=5000
@@ -32,7 +33,7 @@ pipeline:
       - dflash.dflash_block_size=16
       - dflash.dflash_num_anchors=512
       - dflash.dflash_loss_decay_factor=7
-      - dflash.dflash_architecture_config.mask_token_id=151669
+      - dflash.dflash_architecture_config.mask_token_id=248070
       - dflash.dflash_architecture_config.num_hidden_layers=5
     environment:
     slurm_config:
@@ -45,7 +46,7 @@ pipeline:
   task_1:
     script: common/specdec/ar_eval_mtbench.sh
     args:
-      - --ckpt_dir /scratchspace/dflash_bs16
+      - --ckpt_dir /scratchspace/dflash_qwen3.5_4b
       - --osl 512
       - --steps 15
     slurm_config:

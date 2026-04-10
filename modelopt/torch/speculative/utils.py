@@ -441,9 +441,8 @@ class AcceptanceRateValidation:
                     accepted += 1
                     input_ids = torch.cat((input_ids, draft_tokens[:, i : i + 1]), dim=-1)
                 else:
-                    # Rejected — append target's token instead
+                    # Rejected — append target's correction token (not counted as accepted)
                     input_ids = torch.cat((input_ids, posterior[:, pos + i : pos + i + 1]), dim=-1)
-                    accepted += 1  # target's token counts
                     break
 
                 if input_ids.shape[1] >= max_len:

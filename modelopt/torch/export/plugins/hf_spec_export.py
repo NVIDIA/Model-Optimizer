@@ -273,10 +273,6 @@ class DFlashExporter(SpeculativeDecodingExporter):
     - config.json: Qwen3-style config with dflash_config field
     """
 
-    def __init__(self, model: nn.Module):
-        """Initialize the DFlashExporter."""
-        super().__init__(model)
-
     def _extract_state_dict(self, full_state_dict: dict):
         """Extract DFlash module weights, stripping the dflash_module prefix."""
         export_sd = {}
@@ -336,7 +332,9 @@ class DFlashExporter(SpeculativeDecodingExporter):
             ),
             "rope_scaling": getattr(base_config, "rope_scaling", None),
             "tie_word_embeddings": False,
-            "torch_dtype": str(getattr(base_config, "torch_dtype", torch.bfloat16)).replace("torch.", ""),
+            "torch_dtype": str(getattr(base_config, "torch_dtype", torch.bfloat16)).replace(
+                "torch.", ""
+            ),
             "num_target_layers": getattr(base_config, "num_hidden_layers", 36),
         }
 
@@ -353,17 +351,30 @@ class DFlashExporter(SpeculativeDecodingExporter):
         export_dir = Path(export_dir)
         export_dir.mkdir(parents=True, exist_ok=True)
 
+        # Export quantized modules if applicable
+        if has_quant_opt(self.model):
+            from ..unified_export_hf import _export_transformers_checkpoint
+
+            full_sd, hf_quant_config = _export_transformers_checkpoint(self.model, dtype)
+        else:
+            full_sd, hf_quant_config = self.model.state_dict(), None
+
         # Export state dict
-        full_sd = self.model.state_dict()
         drafter_sd = self._extract_state_dict(full_sd)
-        if dtype is not None:
+        if dtype is not None and hf_quant_config is None:
             drafter_sd = {k: v.to(dtype) for k, v in drafter_sd.items()}
         save_file(drafter_sd, f"{export_dir}/model.safetensors")
 
         # Export config
         drafter_config = self._export_config()
+        if hf_quant_config is not None:
+            drafter_config["quantization_config"] = hf_quant_config
         with open(f"{export_dir}/config.json", "w") as f:
             json.dump(drafter_config, f, indent=2)
+
+        if hf_quant_config is not None:
+            with open(f"{export_dir}/hf_quant_config.json", "w") as f:
+                json.dump(hf_quant_config, f, indent=2)
 
         print(
             f"Exported DFlash draft model: {len(drafter_sd)} tensors, "

@@ -68,7 +68,7 @@ class DFlashConfig(ModeloptBaseConfig):
     """DFlash config for block-wise parallel speculative decoding."""
 
     dflash_block_size: int = ModeloptField(
-        default=16,
+        default=8,
         description="Block size for parallel prediction. Draft predicts this many tokens per block.",
     )
 

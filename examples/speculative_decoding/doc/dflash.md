@@ -9,7 +9,7 @@ Reference: [arXiv:2602.06036](https://arxiv.org/abs/2602.06036) |
 
 ## Architecture
 
-```
+```text
 Target Model (frozen)
   │
   ├─ hidden_states[layer 1, 9, 17, 25, 33]  ──► concat ──► FC + RMSNorm ──► target_hidden
@@ -43,7 +43,7 @@ Target Model (frozen)
 
 Given context `"The answer is"` and block_size=4 with anchor `"is"`:
 
-```
+```text
 Target model hidden states (from frozen base model):
   h["The"]  h["answer"]  h["is"]     ← target_hidden (ctx_len=3)
      │          │           │
@@ -87,7 +87,7 @@ In each DFlash decoder layer:
 
 **Training vs Inference:**
 
-```
+```text
 TRAINING (2 anchors, block_size=4):
 
   Context tokens:  "The"  "answer"  "is"   "5"    "."
@@ -166,13 +166,25 @@ See [`modelopt_recipes/general/speculative_decoding/dflash.yaml`](../../../model
 | `dflash.dflash_architecture_config.mask_token_id` | auto | Token ID for masked positions |
 | `training.answer_only_loss` | false | Mask loss on non-assistant tokens |
 
+> **Note on `answer_only_loss` and chat templates:** When `answer_only_loss=true`, the
+> dataset loader replaces the tokenizer's chat template with a simplified version that has
+> `{% generation %}` tags to identify assistant turns. This simplified template may not
+> support all features of the original (e.g., tool use formatting, multi-turn system
+> prompts). During serving, the draft model reuses the target model's original tokenizer
+> and template, so there is no train/inference mismatch in the tokenization itself — only
+> the loss masking during training uses the simplified template. However, if training data
+> contains tool-use conversations with model-family-specific formatting, the simplified
+> template may tokenize them differently, affecting which tokens get masked. For best
+> results with tool-use data, set `answer_only_loss=false` or provide a custom
+> `chat_template` that supports both generation tags and tool-use formatting.
+
 ### Random Anchor Sampling (`num_anchors`)
 
 During training, anchor positions are sampled randomly from valid (assistant response)
 tokens in each batch, rather than dividing the sequence into fixed blocks. Each anchor
 starts a block of `block_size` tokens where the draft model predicts positions 1..B-1.
 
-```
+```text
 Sequence:  [SYS] You helpful [USR] What 2+3? [AST] The answer is 5
 Position:    0    1     2      3     4    5     6    7    8    9  10
 loss_mask:   0    0     0      0     0    0     0    1    1    1   1
@@ -208,7 +220,7 @@ The exponential decay factor (gamma) weights early block positions higher than l
 If position 1 in a block is wrong, all subsequent positions are rejected in speculative
 decoding. Decay aligns the training loss with what matters for acceptance rate.
 
-```
+```text
 weight[k] = exp(-(k-1).clamp(min=0) / gamma)    for k = 0..B-1
 ```
 
@@ -324,8 +336,8 @@ ModelOpt wins acceptance length on 7/8 categories and TPS on 8/8 categories.
 - **FP8 / NVFP4 quantization**: Export pipeline supports quantized checkpoints via
   `hf_ptq.py` (PTQ succeeded in testing). AR impact of quantization not yet measured.
   The flow: train (bf16) → `mtq.quantize(model, quant_cfg)` → `export_hf_checkpoint.py`.
-- **Checkpoint resume**: `DFlashModule._apply()` handles meta-tensor rotary buffers.
-  Validated in training runs but not covered by integration tests.
+- **Checkpoint resume**: `DFlashModule._apply()` handles meta-tensor rotary buffers
+  (one-shot check on first `.to(device)` call). Validated in train+resume E2E tests.
 
 ### Validated
 
@@ -334,10 +346,12 @@ ModelOpt wins acceptance length on 7/8 categories and TPS on 8/8 categories.
 - **AR evaluation**: `ar_validate.py` with online GT, per-category MT-Bench.
 - **vLLM deployment**: Speculative decoding with `vllm/vllm-openai:nightly` (v0.19.1+).
   3.1x speedup over baseline. Per-category benchmarks on MT-Bench.
+
   ```bash
   vllm serve Qwen/Qwen3-8B \
       --speculative-config '{"method": "dflash", "model": "path/to/checkpoint", "num_speculative_tokens": 7}' \
       --max-num-batched-tokens 32768
   ```
+
 - **Export**: z-lab compatible HF format, loadable by vLLM and z-lab benchmark.
 - **Loss decay**: Validated +0.12 AR improvement with gamma=7 (bs16).

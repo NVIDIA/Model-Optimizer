@@ -75,6 +75,10 @@ fi
 MAIN_PY=modules/Model-Optimizer/examples/speculative_decoding/main.py
 
 if [[ "$NUM_NODES" != "1" ]]; then
+    if [ -z "$HEAD_NODE_IP" ]; then
+        echo "ERROR: HEAD_NODE_IP is empty. Cannot launch multi-node training."
+        exit 1
+    fi
     GPU_PER_NODE=${GPU_PER_NODE:-$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)}
     TOTAL_GPU=$((NUM_NODES * GPU_PER_NODE))
     echo "Total GPUs: $TOTAL_GPU (NUM_NODES: $NUM_NODES, GPU_PER_NODE: $GPU_PER_NODE)"
@@ -96,3 +100,31 @@ set -x
 start_time=$(date +%s)
 accelerate launch --mixed_precision bf16 $MULTI_NODE_ARGS $MAIN_PY "$@"
 echo "Training time: $(( $(date +%s) - start_time )) seconds"
+set +x
+
+# Export last checkpoint to deployment format (rank 0 only, single GPU)
+if [ "${SLURM_PROCID:-0}" = "0" ]; then
+    OUTPUT_DIR=$(python3 -c "
+import sys
+for arg in sys.argv[1:]:
+    if arg.startswith('training.output_dir='):
+        print(arg.split('=', 1)[1])
+        break
+" "$@")
+
+    if [ -n "$OUTPUT_DIR" ]; then
+        LAST_CKPT=$(ls -d ${OUTPUT_DIR}/checkpoint-* 2>/dev/null | sort -t- -k2 -n | tail -1)
+        if [ -n "$LAST_CKPT" ]; then
+            STEP=$(basename "$LAST_CKPT" | sed 's/checkpoint-//')
+            EXPORT_DIR="${OUTPUT_DIR}/exported-checkpoint-${STEP}"
+            echo "=== Exporting last checkpoint: ${LAST_CKPT} → ${EXPORT_DIR} ==="
+            CUDA_VISIBLE_DEVICES=0 python3 modules/Model-Optimizer/examples/speculative_decoding/scripts/export_hf_checkpoint.py \
+                --model_path "${LAST_CKPT}" \
+                --export_path "${EXPORT_DIR}"
+            echo "Export contents:"
+            ls -lh "${EXPORT_DIR}/"
+        else
+            echo "No checkpoints found in ${OUTPUT_DIR}, skipping export"
+        fi
+    fi
+fi
