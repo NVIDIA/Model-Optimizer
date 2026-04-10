@@ -43,6 +43,9 @@ from transformers.utils.hub import cached_file, get_checkpoint_shard_files
 
 import modelopt.torch.utils.distributed as dist
 from modelopt.torch.puzzletron.tools.checkpoint_utils import load_model_config, load_state_dict
+from modelopt.torch.puzzletron.tools.checkpoint_utils_hf import (
+    _get_auto_class_for_trust_remote_code,
+)
 from modelopt.torch.puzzletron.tools.logger import mprint
 from modelopt.torch.puzzletron.utils.dummy_modules import (
     DummyBlock,
@@ -172,8 +175,6 @@ def load_and_shard_model(
                 device=runtime.device,
             )
 
-            new_names = set(shard_state_dict.keys())
-            mprint(f"{new_names=}")
             # strict=False: allows missing lm_head.weight when tie_word_embeddings=True (e.g., Llama 3.2 3B)
             model_shard.load_state_dict(shard_state_dict, strict=False, assign=True)
 
@@ -239,10 +240,12 @@ def create_sharded_model(
     with EmptyInitOnDevice(device="meta", dtype=dtype):
         # Get model class from config.architectures (works for CausalLM, VL models, etc.)
         model_class = _get_model_class_from_config(model_config)
-        # AutoModelForCausalLM uses from_config(); concrete model classes use _from_config()
-        if model_class is AutoModelForCausalLM:
-            trust_remote_code = descriptor.requires_trust_remote_code()
-            model = model_class.from_config(model_config, trust_remote_code=trust_remote_code)
+        trust_remote_code = descriptor.requires_trust_remote_code()
+        if trust_remote_code:
+            auto_cls = _get_auto_class_for_trust_remote_code(model_config)
+            model = auto_cls.from_config(model_config, trust_remote_code=trust_remote_code)
+        elif model_class is AutoModelForCausalLM:
+            model = AutoModelForCausalLM.from_config(model_config)
         else:
             model = model_class._from_config(model_config)
         create_local_shard_(

@@ -39,7 +39,11 @@ from modelopt.torch.puzzletron.tools.bypassed_training.child_init import (
     update_model_config,
 )
 from modelopt.torch.puzzletron.tools.checkpoint_utils import copy_tokenizer, load_state_dict
-from modelopt.torch.puzzletron.tools.checkpoint_utils_hf import _save_checkpoint, load_model_config
+from modelopt.torch.puzzletron.tools.checkpoint_utils_hf import (
+    _get_auto_class_for_trust_remote_code,
+    _save_checkpoint,
+    load_model_config,
+)
 from modelopt.torch.puzzletron.tools.logger import mprint
 from modelopt.torch.puzzletron.tools.sharded_checkpoint_utils import _get_model_class_from_config
 
@@ -126,12 +130,14 @@ def init_child_from_parent(
             model_descriptor=descriptor, block_configs=child_model_config.block_configs
         ):
             model_class = _get_model_class_from_config(child_model_config)
-            # AutoModelForCausalLM uses from_config(); concrete model classes use _from_config()
-            if model_class is AutoModelForCausalLM:
-                trust_remote_code = descriptor.requires_trust_remote_code()
-                child_model = model_class.from_config(
+            trust_remote_code = descriptor.requires_trust_remote_code()
+            if trust_remote_code:
+                auto_cls = _get_auto_class_for_trust_remote_code(child_model_config)
+                child_model = auto_cls.from_config(
                     child_model_config, trust_remote_code=trust_remote_code
                 )
+            elif model_class is AutoModelForCausalLM:
+                child_model = AutoModelForCausalLM.from_config(child_model_config)
             else:
                 child_model = model_class._from_config(child_model_config)
 

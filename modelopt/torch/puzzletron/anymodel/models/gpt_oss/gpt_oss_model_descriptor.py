@@ -54,8 +54,9 @@ class GptOssModelDescriptor(ModelDescriptor):
     @classmethod
     def create_dummy_block(cls, original_layer: GptOssDecoderLayer, block_index: int) -> nn.Module:
         dummy_block = DummyBlock(block_index=block_index)
-        # Required by `GptOssModel.forward`.
-        dummy_block.attention_type = original_layer.attention_type
+        # Required by `GptOssModel.forward` in transformers<5.4
+        if hasattr(original_layer, "attention_type"):
+            dummy_block.attention_type = original_layer.attention_type
         return dummy_block
 
     @staticmethod

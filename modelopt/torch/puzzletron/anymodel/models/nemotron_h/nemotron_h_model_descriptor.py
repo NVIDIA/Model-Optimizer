@@ -200,7 +200,7 @@ class NemotronHModelDescriptor(ModelDescriptor):
     def layer_name_predicates(num_layers: int) -> Dict[str, re.Pattern]:
         layer_name_patterns = {
             "embeddings": re.compile(
-                r"^(model\.embed_tokens\.weight|backbone\.embeddings\.weight)$"
+                r"^(model\.embed_tokens\.weight|backbone\.embeddings?\.weight)$"
             ),
             "lm_head": re.compile(r"^(lm_head\.weight|backbone\.norm_f\.weight)$"),
         }

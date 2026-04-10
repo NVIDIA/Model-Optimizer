@@ -2,6 +2,12 @@ defaults:
   - /pruning/pruning_defaults@_here_
 
 eval_samples: 10
+# Toy test model has max_position_embeddings=512 and num_attention_heads=32.
+# Attention is O(batch * heads * seq^2), so we must keep batch and seq small.
+# pruning_defaults uses micro_batch_size=4 and block_size=8192, which creates
+# (4, 32, 8192, 8192) = 16 GiB attn tensors even with a tiny hidden_size.
+micro_batch_size: 1
+block_size: 512
 activations_log_dir: ${puzzle_dir}/pruning/pruning_scores/expert_removal/${pruning.experiment_id}
 
 pruning_mixin:
