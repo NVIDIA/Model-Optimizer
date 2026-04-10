@@ -57,8 +57,8 @@ onnx = [
     "cupy-cuda12x; platform_machine != 'aarch64' and platform_system != 'Darwin'",
     "lief",
     "ml_dtypes",
-    "onnx-graphsurgeon",
-    "onnx~=1.19.0",
+    "onnx-graphsurgeon>=0.6.1",
+    "onnx~=1.21.0",
     "onnxconverter-common~=1.16.0",
     # ORT for Windows
     "onnxruntime-gpu==1.22.0; platform_system == 'Windows'",

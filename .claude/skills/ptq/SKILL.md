@@ -118,9 +118,15 @@ Report the path and size to the user.
 - `mtq.register()` classes **must** define `_setup()` and call it from `__init__`
 - Call `mto.enable_huggingface_checkpointing()` **before** quantization
 - Wildcard `*gate*` matches too broadly — use `*mlp.gate*` or `*router*`
-- VLMs need `AutoModel`, not `AutoModelForCausalLM`
-- FP8 loading: `FineGrainedFP8Config(dequantize=True)`, not a dict
+- VLMs: `hf_ptq.py` auto-extracts the language model via `extract_and_prepare_language_model_from_vl()` — no manual VLM handling needed in most cases
+- FP8 checkpoints: prefer `_QuantFP8Linear` (lazy dequant) over `FineGrainedFP8Config(dequantize=True)` which wastes ~2x memory. See `references/unsupported-models.md` for details
 - Custom quantizer names must end with `_input_quantizer` or `_weight_quantizer`
+
+## Common Pitfalls
+
+- **Transformers version**: Newer models (e.g., Devstral/ministral3) may require a transformers version not yet in the container. Check `config.json` for `transformers_version` and upgrade if needed. Install ModelOpt first, then upgrade transformers **with** deps (not `--no-deps`) to pull compatible `huggingface_hub`
+- **Gated datasets**: Some calibration datasets require HF authentication. Ensure `HF_TOKEN` is set in the job environment, or use `--dataset cnn_dailymail` as a non-gated alternative
+- **NFS root_squash + Docker**: Docker runs as root, but NFS squashes root to `nobody`. Use `docker run --user $(id -u):$(id -g)`, or `chmod -R a+rwX` on needed directories as a fallback. See `skills/common/slurm-setup.md` section 5
 
 ## References
 
@@ -133,7 +139,7 @@ Report the path and size to the user.
 | `references/unsupported-models.md` | Step 4C only (unlisted model) |
 | `skills/common/remote-execution.md` | Step 4A/4C only, if target is remote |
 | `skills/common/slurm-setup.md` | Step 4A/4C only, if using SLURM manually (not launcher) |
-| `references/slurm-setup-ptq.md` | Step 4A/4C only, PTQ-specific SLURM (container, FSDP2) |
+| `references/slurm-setup-ptq.md` | Step 4A/4C only, PTQ-specific SLURM (container, GPU sizing, FSDP2) |
 | `examples/llm_ptq/README.md` | Step 3: support matrix, CLI flags, accuracy |
 | `modelopt/torch/quantization/config.py` | Step 3: format definitions |
 | `modelopt/torch/export/model_utils.py` | Step 4C: TRT-LLM export type mapping |
