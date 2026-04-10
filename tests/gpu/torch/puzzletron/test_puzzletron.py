@@ -95,7 +95,7 @@ def _test_puzzletron_multiprocess_job(
 ):
     # Set seed BEFORE dist.setup() to ensure reproducibility across all processes
     set_seed(SEED)
-    dist.setup(timeout=timedelta(10))
+    dist.setup(timeout=timedelta(minutes=10))
 
     # Setup the test model and data.
     puzzle_dir, hf_checkpoint_path, dataset_path = setup_test_model_and_data(

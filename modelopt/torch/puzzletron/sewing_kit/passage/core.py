@@ -107,7 +107,9 @@ class PassageOutputAdapter:
 
 
 class PassageInputOverrides(dict[str, Union[PassageInputAdapter, InputArgs]]):
-    def __init__(self, input_overrides: Mapping[str, PassageInputAdapter | InputArgs] = {}):
+    def __init__(self, input_overrides: Mapping[str, PassageInputAdapter | InputArgs] = None):
+        if input_overrides is None:
+            input_overrides = {}
         for k, v in input_overrides.items():
             self[k] = v
 
@@ -122,7 +124,9 @@ class PassageInputOverrides(dict[str, Union[PassageInputAdapter, InputArgs]]):
 
 
 class PassageOutputOverrides(dict[str, Union[PassageOutputAdapter, Any]]):
-    def __init__(self, output_overrides: Mapping[str, PassageOutputAdapter | Any] = {}):
+    def __init__(self, output_overrides: Mapping[str, PassageOutputAdapter | Any] = None):
+        if output_overrides is None:
+            output_overrides = {}
         for k, v in output_overrides.items():
             self[k] = v
 

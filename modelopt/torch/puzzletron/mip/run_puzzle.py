@@ -166,6 +166,8 @@ class PuzzleConstraints:
         # Throughput constraints
         throughput_constraints = []
         if "target_throughput" in self.constraints:
+            if self.constraints["target_throughput"] == 0:
+                raise ValueError("target_throughput must not be zero")
             throughput_constraints.append(
                 batch_size * generation_seq_len / self.constraints["target_throughput"]
             )
@@ -234,7 +236,7 @@ def run_single_puzzle_config(
     subblock_stats_args: dict,
     constraints: PuzzleConstraints,
     output_folder,
-) -> None:
+) -> Path:
     # we override the constraints and subblock_stats_args for this run to keep reporting out the same way.
     args = deepcopy(args)
 
@@ -445,7 +447,7 @@ def run_puzzle(args: DictConfig) -> list[str]:
     if args.gathered_metrics_path is not None:
         gathered_metrics = json.loads(args.gathered_metrics_path.read_text())
     else:
-        gathered_metrics = gather_multi_layer_puzle_metrics(
+        gathered_metrics = gather_multi_layer_puzzle_metrics(
             args.single_block_replacement_validation_dir
         )
 
@@ -504,7 +506,7 @@ def gather_puzzle_metrics(
     return gathered_metrics
 
 
-def gather_multi_layer_puzle_metrics(
+def gather_multi_layer_puzzle_metrics(
     single_replacement_validation_dir: Path,
 ) -> MultiLayerPuzzleMetrics:
     single_sequence_metrics = [

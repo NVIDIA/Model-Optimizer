@@ -238,7 +238,9 @@ def _init_attention_weights(
     if "bias" in k_key:
         for tensor in [wq, wk, wv, wo, new_wq, new_wk, new_wv, new_wo]:
             assert tensor.ndim == 1
-            tensor.unsqueeze_(1)
+        wq, wk, wv, wo, new_wq, new_wk, new_wv, new_wo = [
+            t.unsqueeze(1) for t in [wq, wk, wv, wo, new_wq, new_wk, new_wv, new_wo]
+        ]
     dim1 = wk.shape[1]  # this is the hidden_size in case of matrix weights, and 1 in case of biases
 
     if gqa_init_mode in (GQAInitMode.RandomKV, GQAInitMode.RandomBlock):
@@ -389,10 +391,11 @@ def _init_attention_biases(
             new_bias_sd[bias_key] = new_state_dict[key]
             bias_sd[bias_key] = original_state_dict[key]
 
-    # maybe unsqueeze all tensors
+    # maybe unsqueeze all tensors (non-in-place to avoid mutating shared state dict entries)
     for tensor in list(new_bias_sd.values()) + list(bias_sd.values()):
         assert tensor.ndim == 1
-        tensor.unsqueeze_(1)
+    new_bias_sd = {k: v.unsqueeze(1) for k, v in new_bias_sd.items()}
+    bias_sd = {k: v.unsqueeze(1) for k, v in bias_sd.items()}
 
     dim1 = 1  # this is the hidden_size in case of matrix weights, and 1 in case of biases
     if gqa_init_mode in (GQAInitMode.RandomKV, GQAInitMode.RandomBlock) and attention_bias:

@@ -38,7 +38,7 @@ def test_nas_convert_ffn_pruning(project_root_path: Path, tmp_path: Path):
 def _test_nas_convert_ffn_pruning_multiprocess_job(
     project_root_path: Path, tmp_path: Path, rank: int, size: int
 ):
-    dist.setup(timeout=timedelta(10))
+    dist.setup(timeout=timedelta(minutes=10))
     # Setup the test model and data.
     puzzle_dir, llama_checkpoint_path, dataset_path = setup_test_model_and_data(
         tmp_path, rank, "meta-llama/Llama-3.1-8B-Instruct"
@@ -94,7 +94,7 @@ def test_nas_convert_attn_pruning(project_root_path: Path, tmp_path: Path):
 def _test_nas_convert_attn_pruning_multiprocess_job(
     project_root_path: Path, tmp_path: Path, rank: int, size: int
 ):
-    dist.setup(timeout=timedelta(10))
+    dist.setup(timeout=timedelta(minutes=10))
     # Setup the test model and data.
     puzzle_dir, llama_checkpoint_path, dataset_path = setup_test_model_and_data(
         tmp_path, rank, "meta-llama/Llama-3.1-8B-Instruct"

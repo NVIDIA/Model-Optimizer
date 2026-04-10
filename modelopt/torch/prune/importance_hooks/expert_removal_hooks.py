@@ -281,7 +281,6 @@ class RankedChoiceVotingHook(ForwardHook):
 
             expert_ranks[least_popular_expert] = rank
             expert_counts_at_pruning_time[least_popular_expert] = min_count
-            print(f"#{rank}: router_argsort shape = {router_argsort.shape}")
             router_argsort = router_argsort[router_argsort != least_popular_expert].view(
                 num_tokens, -1
             )
@@ -293,7 +292,6 @@ class RankedChoiceVotingHook(ForwardHook):
         # Compute zero-shot expert ranks (double argsort converts counts to rank positions)
         zero_shot_expert_ranks = torch.argsort(torch.argsort(zero_shot_expert_counts))
 
-        print("Done: Returning hook metadata.")
         return {
             "expert_ranks": expert_ranks,
             "zero_shot_expert_ranks": zero_shot_expert_ranks,

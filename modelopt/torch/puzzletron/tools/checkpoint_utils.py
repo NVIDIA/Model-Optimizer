@@ -113,8 +113,10 @@ def init_empty_module(
     default_dtype = torch.get_default_dtype()
     current_device = torch.ones(1).device
     torch.set_default_dtype(dtype)
-    module = skip_init(module_cls, *init_args, device=current_device, **init_kwargs)
-    torch.set_default_dtype(default_dtype)
+    try:
+        module = skip_init(module_cls, *init_args, device=current_device, **init_kwargs)
+    finally:
+        torch.set_default_dtype(default_dtype)
     return module
 
 

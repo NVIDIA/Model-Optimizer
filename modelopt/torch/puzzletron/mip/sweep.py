@@ -271,10 +271,13 @@ def run_mip_sweep(hydra_cfg):
                 )
                 all_results.append(result)
 
-                mprint(
-                    f"✓ Results: actual_memory={result['actual_memory_mib']:.1f} MiB, "
-                    f"lm_loss={result['lm_loss']:.4f}"
+                mem = (
+                    f"{result['actual_memory_mib']:.1f}"
+                    if result["actual_memory_mib"] is not None
+                    else "N/A"
                 )
+                loss = f"{result['lm_loss']:.4f}" if result["lm_loss"] is not None else "N/A"
+                mprint(f"✓ Results: actual_memory={mem} MiB, lm_loss={loss}")
 
     # Write results to CSV (only on master rank)
     if dist.is_master():
