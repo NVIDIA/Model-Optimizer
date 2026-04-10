@@ -170,7 +170,7 @@ def zsic_quantize(
     L: Tensor,
     use_lmmse: bool = True,
     n_rescaler_iters: int = 0,
-) -> tuple[Tensor, float, float]:
+) -> tuple[Tensor, float, float, Tensor, Tensor]:
     """Run the ZSIC sequential integer coding loop.
 
     Parameters
@@ -190,6 +190,8 @@ def zsic_quantize(
     W_hat : Tensor (a, n)  – quantised reconstruction.
     rate : float           – estimated coding rate (bits per weight element).
     nmse : float           – output NMSE.
+    Z : Tensor (a, n)     – integer codes.
+    gamma : Tensor (n,)   – per-column LMMSE shrinkage gains.
     """
     a, n = W.shape
 
@@ -229,7 +231,7 @@ def zsic_quantize(
         W_hat = W_hat_0
 
     nmse = compute_output_nmse(W, W_hat, A)
-    return W_hat, rate, nmse
+    return W_hat, rate, nmse, Z, gamma
 
 
 # ---------------------------------------------------------------------------
@@ -245,7 +247,7 @@ def watersic_quantize(
     use_lmmse: bool = True,
     n_rescaler_iters: int = 0,
     _precomputed: tuple[Tensor, Tensor, Tensor | None] | None = None,
-) -> tuple[Tensor, float, float]:
+) -> tuple[Tensor, float, float, Tensor, Tensor]:
     """Quantise *W* using the WaterSIC algorithm for a given scale factor *c*.
 
     Parameters
@@ -265,6 +267,8 @@ def watersic_quantize(
     W_hat : Tensor (a, n)  – quantised reconstruction (in original column order).
     rate : float
     nmse : float
+    Z : Tensor (a, n)     – integer codes (in original column order).
+    gamma : Tensor (n,)   – per-column LMMSE shrinkage gains (in original column order).
     """
     if _precomputed is not None:
         Sigma_X, L, perm = _precomputed
@@ -278,7 +282,7 @@ def watersic_quantize(
 
     alpha = c / L.diag()
 
-    W_hat, rate, nmse = zsic_quantize(
+    W_hat, rate, nmse, Z, gamma = zsic_quantize(
         W, A, alpha, Sigma_X, L, use_lmmse=use_lmmse, n_rescaler_iters=n_rescaler_iters
     )
 
@@ -286,8 +290,10 @@ def watersic_quantize(
     if perm is not None:
         inv_perm = torch.argsort(perm)
         W_hat = W_hat[:, inv_perm]
+        Z = Z[:, inv_perm]
+        gamma = gamma[inv_perm]
 
-    return W_hat, rate, nmse
+    return W_hat, rate, nmse, Z, gamma
 
 
 # ---------------------------------------------------------------------------
@@ -351,7 +357,7 @@ def binary_search_c(
         log_c_mid = 0.5 * (log_c_lo + log_c_hi)
         c_mid = math.exp(log_c_mid)
 
-        _, rate, _ = watersic_quantize(
+        _, rate, _, _, _ = watersic_quantize(
             W_sub,
             A,
             c_mid,

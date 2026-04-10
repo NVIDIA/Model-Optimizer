@@ -165,24 +165,26 @@ class TestZsicQuantize:
     def test_produces_valid_output(self, setup):
         """Output should have correct shape, positive rate, and NMSE in (0, 1)."""
         W, A, alpha, Sigma_X, L = setup
-        W_hat, rate, nmse = zsic_quantize(W, A, alpha, Sigma_X, L, use_lmmse=False)
+        W_hat, rate, nmse, Z, gamma = zsic_quantize(W, A, alpha, Sigma_X, L, use_lmmse=False)
 
         assert W_hat.shape == W.shape
         assert rate > 0.0
         assert 0.0 < nmse < 1.0
+        assert Z.shape == W.shape
+        assert gamma.shape == (W.shape[1],)
 
     def test_lmmse_improves_nmse(self, setup):
         """LMMSE correction should reduce (or at least not increase) the NMSE."""
         W, A, alpha, Sigma_X, L = setup
-        _, _, nmse_no = zsic_quantize(W, A, alpha, Sigma_X, L, use_lmmse=False)
-        _, _, nmse_yes = zsic_quantize(W, A, alpha, Sigma_X, L, use_lmmse=True)
+        _, _, nmse_no, _, _ = zsic_quantize(W, A, alpha, Sigma_X, L, use_lmmse=False)
+        _, _, nmse_yes, _, _ = zsic_quantize(W, A, alpha, Sigma_X, L, use_lmmse=True)
 
         assert nmse_yes <= nmse_no + 1e-8
 
     def test_rescaler_produces_valid_low_nmse(self, setup):
         """Rescaler path with n_rescaler_iters=5 should produce valid output with low NMSE."""
         W, A, alpha, Sigma_X, L = setup
-        W_hat, rate, nmse = zsic_quantize(
+        W_hat, rate, nmse, Z, gamma = zsic_quantize(
             W, A, alpha, Sigma_X, L, use_lmmse=True, n_rescaler_iters=5
         )
 
@@ -213,22 +215,24 @@ class TestWatersicQuantize:
     def test_basic_quantization(self, data):
         """Should return valid W_hat, rate, and NMSE."""
         W, A = data
-        W_hat, rate, nmse = watersic_quantize(W, A, c=0.5)
+        W_hat, rate, nmse, Z, gamma = watersic_quantize(W, A, c=0.5)
         assert W_hat.shape == W.shape
         assert rate > 0.0
         assert nmse > 0.0
+        assert Z.shape == W.shape
+        assert gamma.shape == (W.shape[1],)
 
     def test_smaller_c_gives_higher_rate(self, data):
         """Smaller c should produce finer quantization and a higher coding rate."""
         W, A = data
-        _, rate_large, _ = watersic_quantize(W, A, c=2.0)
-        _, rate_small, _ = watersic_quantize(W, A, c=0.1)
+        _, rate_large, _, _, _ = watersic_quantize(W, A, c=2.0)
+        _, rate_small, _, _, _ = watersic_quantize(W, A, c=0.1)
         assert rate_small > rate_large
 
     def test_permutation_roundtrip(self, data):
         """Columns should be correctly un-permuted so W_hat is in the original order."""
         W, A = data
-        W_hat, _, _ = watersic_quantize(W, A, c=0.5)
+        W_hat, _, _, _, _ = watersic_quantize(W, A, c=0.5)
         # The reconstruction error should be smaller than the weight norm
         # (i.e. it's not just garbage / misaligned columns).
         assert (W - W_hat).norm() < W.norm()
@@ -256,5 +260,105 @@ class TestBinarySearchC:
         c = binary_search_c(W, A, target_rate=target, sample_frac=1.0)
 
         # Evaluate at full size to verify.
-        _, rate, _ = watersic_quantize(W, A, c)
+        _, rate, _, _, _ = watersic_quantize(W, A, c)
         assert abs(rate - target) < 1.0
+
+
+# ---------------------------------------------------------------------------
+# KV Quantizer Helper tests
+# ---------------------------------------------------------------------------
+
+from modelopt.torch.quantization.algorithms.watersic_kv.kv_quantizer import (
+    WaterSICKVState,
+    _compute_importance_weights,
+    kl_divergence_logits,
+)
+
+# ---------------------------------------------------------------------------
+# TestComputeImportanceWeights
+# ---------------------------------------------------------------------------
+
+
+class TestComputeImportanceWeights:
+    """Tests for :func:`_compute_importance_weights`."""
+
+    def test_uniform_attention_gives_uniform_weights(self):
+        """Uniform attention matrix should produce equal importance weights."""
+        N = 16
+        P = torch.ones(8, N) / N  # uniform over tokens
+        sqrt_w = _compute_importance_weights(P)
+
+        assert sqrt_w.shape == (N, 1)
+        # All weights should be identical (since input is uniform).
+        assert torch.allclose(sqrt_w, sqrt_w[0].expand_as(sqrt_w))
+
+    def test_peaked_attention_gives_high_weight(self):
+        """When all attention is on token 0, token 0 should have the highest weight."""
+        N = 16
+        P = torch.zeros(8, N)
+        P[:, 0] = 1.0  # all attention on token 0
+        sqrt_w = _compute_importance_weights(P)
+
+        assert sqrt_w.shape == (N, 1)
+        # Token 0 should have the largest weight.
+        assert sqrt_w[0, 0] == sqrt_w.max()
+
+    def test_clipping(self):
+        """Clipping should limit the maximum importance weight."""
+        N = 16
+        P = torch.zeros(8, N)
+        P[:, 0] = 1.0  # all attention on token 0
+        clip = 10.0
+        sqrt_w = _compute_importance_weights(P, importance_clip=clip)
+
+        import math
+
+        assert sqrt_w.max().item() <= math.sqrt(clip) + 1e-6
+
+
+# ---------------------------------------------------------------------------
+# TestKlDivergenceLogits
+# ---------------------------------------------------------------------------
+
+
+class TestKlDivergenceLogits:
+    """Tests for :func:`kl_divergence_logits`."""
+
+    def test_identical_keys_zero_kl(self):
+        """KL divergence should be zero when K_q == K."""
+        torch.manual_seed(42)
+        Q = torch.randn(2, 8, 4)
+        K = torch.randn(2, 12, 4)
+        kl = kl_divergence_logits(Q, K, K)
+        assert kl == pytest.approx(0.0, abs=1e-7)
+
+    def test_different_keys_positive_kl(self):
+        """KL divergence should be positive when K_q != K."""
+        torch.manual_seed(42)
+        Q = torch.randn(2, 8, 4)
+        K = torch.randn(2, 12, 4)
+        K_q = K + 0.5 * torch.randn_like(K)
+        kl = kl_divergence_logits(Q, K, K_q)
+        assert kl > 0.0
+
+
+# ---------------------------------------------------------------------------
+# TestWaterSICKVState
+# ---------------------------------------------------------------------------
+
+
+class TestWaterSICKVState:
+    """Tests for :class:`WaterSICKVState`."""
+
+    def test_state_creation(self):
+        """State dataclass should store all fields correctly."""
+        Z = torch.randint(0, 10, (4, 32, 16))
+        alpha = torch.randn(4, 16)
+        gamma = torch.randn(4, 16)
+        state = WaterSICKVState(Z=Z, alpha=alpha, gamma=gamma, perm=None, rate=2.5)
+
+        assert state.Z is Z
+        assert state.alpha is alpha
+        assert state.gamma is gamma
+        assert state.perm is None
+        assert state.rate == 2.5
