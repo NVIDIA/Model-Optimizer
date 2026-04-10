@@ -438,18 +438,37 @@ def load_state_dict_from_path(
     for key in checkpoint_quant_keys:
         if key not in model_quant_keys:
             print(f"Key {key} not found in model state dict, but exists in checkpoint")
+    # For weight quantizers absent from the checkpoint the weights were already fake-quantized
+    # at export time (amax folded into weights). Disable those quantizers so that fold_weight
+    # is a no-op for them. Any other missing quantizer key is still an error.
+    missing_wq_module_paths: set[str] = set()
     for key in model_quant_keys:
         if key not in checkpoint_quant_keys:
-            raise ValueError(f"Key {key} not found in checkpoint state dict, but exists in model")
+            if "weight_quantizer" in key:
+                parts = key.split(".")
+                for i, part in enumerate(parts):
+                    if part.endswith("weight_quantizer"):
+                        missing_wq_module_paths.add(".".join(parts[: i + 1]))
+                        break
+            else:
+                raise ValueError(
+                    f"Key {key} not found in checkpoint state dict, but exists in model"
+                )
+
+    for name, module in model.named_modules():
+        if name in missing_wq_module_paths and hasattr(module, "disable"):
+            module.disable()
 
     checkpoint_quant_count = len(checkpoint_quant_keys)
     model_quant_count = len(model_quant_keys)
 
-    # Ensure counts match
-    if checkpoint_quant_count != model_quant_count:
+    # Ensure counts match (excluding weight quantizer keys, which may be absent when weights
+    # were pre-folded at export)
+    model_non_wq_quant_count = sum(1 for k in model_quant_keys if "weight_quantizer" not in k)
+    if checkpoint_quant_count != model_non_wq_quant_count:
         warnings.warn(
             f"Mismatch in quantizer state key counts: checkpoint has {checkpoint_quant_count} "
-            f"quant keys but model has {model_quant_count} quantizer state keys. "
+            f"quant keys but model has {model_non_wq_quant_count} non-weight quantizer state keys. "
             f"This can happen if the model is using PP."
         )
 
