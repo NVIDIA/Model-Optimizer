@@ -28,10 +28,16 @@ If enroot import fails (e.g., permission errors on lustre), use pyxis inline pul
 
 ### Container dependency pitfalls
 
-**New models may need newer transformers** than what's in the container. Install from source inside the job script:
+**New models may need newer transformers** than what's in the container. Install from PyPI inside the job script (unset `PIP_CONSTRAINT` first if needed — see below):
 
 ```bash
-pip install git+https://github.com/huggingface/transformers.git --quiet
+pip install -U transformers
+```
+
+Only install from git if the fix you need isn't in a released version yet:
+
+```bash
+pip install git+https://github.com/huggingface/transformers.git
 ```
 
 **Prefer `PYTHONPATH`** to use the synced ModelOpt source instead of installing inside the container — this avoids risking dependency conflicts (e.g., `pip install -U nvidia-modelopt[hf]` can upgrade PyTorch and break other packages):
