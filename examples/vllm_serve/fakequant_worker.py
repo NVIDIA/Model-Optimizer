@@ -49,8 +49,7 @@ quant_config: dict[str, Any] = {
 def _fakequant_run_prolog_worker(self) -> None:
     trust_remote_code = os.environ.get("TRUST_REMOTE_CODE", "false").lower() == "true"
     tokenizer = AutoTokenizer.from_pretrained(
-        self.model_runner.model_config.tokenizer,
-        trust_remote_code=trust_remote_code,
+        self.model_runner.model_config.tokenizer, trust_remote_code=trust_remote_code
     )
     if tokenizer.pad_token != "<unk>" or tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token

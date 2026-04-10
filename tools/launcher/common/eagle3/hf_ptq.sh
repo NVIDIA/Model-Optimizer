@@ -18,23 +18,10 @@
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source ${SCRIPT_DIR}/../service_utils.sh
 
-pip install -r modules/Model-Optimizer/examples/speculative_decoding/requirements.txt
-pip install huggingface-hub>=1.2.1
-export PATH=$PATH:/workspace/.local/bin
+trap 'error_handler $0 $LINENO' ERR
 
 ###################################################################################################
 
-trap 'error_handler $0 $LINENO' ERR # ERROR HANDLER
-
-bash modules/Model-Optimizer/examples/speculative_decoding/launch_train.sh \
+python modules/Model-Optimizer/examples/llm_ptq/hf_ptq.py \
     --model ${HF_MODEL_CKPT} \
     ${@}
-
-python modules/Model-Optimizer/examples/speculative_decoding/scripts/export_hf_checkpoint.py \
-    --model_path /scratchspace/eagle3 \
-    --export_path /scratchspace/export
-
-###################################################################################################
-
-# This function handles the exit status (fails the CI).
-#exit_handler $0

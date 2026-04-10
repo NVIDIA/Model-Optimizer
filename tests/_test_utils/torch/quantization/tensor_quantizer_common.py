@@ -144,10 +144,9 @@ class TensorQuantizerTester:
             rtol=0,
         )
 
-    @pytest.mark.manual(reason="slow test, run with --run-manual")
     def test_entropy_and_percentile_calib(self):
         """Don't really have a good way to test it."""
-        quant_attr_cfg1 = QuantizerAttributeConfig(calib_method="histogram")
+        quant_attr_cfg1 = QuantizerAttributeConfig(calibrator="histogram")
         quantizer1 = TensorQuantizer(quant_attr_cfg1, if_calib=True, if_quant=False).to(self.device)
 
         x_1 = torch.rand(3, 6, 7, 7).to(self.device)

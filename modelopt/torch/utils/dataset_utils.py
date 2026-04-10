@@ -508,20 +508,25 @@ def get_max_batch_size(
         return 512
 
 
-def _process_batch(batch_data, infer_method, max_working_batch_size=None):
+def _process_batch(
+    batch_data, infer_method, max_working_batch_size=None, allowed_non_tensor_keys=None
+):
     """Process a batch of data through the model's inference method.
 
     Args:
         batch_data: Dictionary containing the batch data
         infer_method: Model's inference method (either forward or generate)
         max_working_batch_size: Maximum batch size known to work without OOM
+        allowed_non_tensor_keys: Set of key names whose values may be non-tensor types
 
     Returns:
         The maximum batch size that worked successfully
     """
-    assert all(torch.is_tensor(data) or data is None for data in batch_data.values()), (
-        "batch_data values must be tensors"
-    )
+    allowed_non_tensor_keys = allowed_non_tensor_keys or set()
+    assert all(
+        torch.is_tensor(data) or data is None or key in allowed_non_tensor_keys
+        for key, data in batch_data.items()
+    ), f"batch_data values must be tensors or None, except for keys: {allowed_non_tensor_keys}."
     # Get the batch size of current data
     batch_size = batch_data[next(iter(batch_data.keys()))].shape[0]
 
@@ -538,7 +543,7 @@ def _process_batch(batch_data, infer_method, max_working_batch_size=None):
                     split_data[key] = batch_data[key][i:end_idx, ...]
 
             max_working_batch_size = _process_batch(
-                split_data, infer_method, max_working_batch_size
+                split_data, infer_method, max_working_batch_size, allowed_non_tensor_keys
             )
 
         return max_working_batch_size
@@ -566,19 +571,28 @@ def _process_batch(batch_data, infer_method, max_working_batch_size=None):
     split_data_2 = {key: batch_data[key][mid:, ...] for key in batch_data}
 
     # Recursively process each half and track max working batch size
-    max_working_batch_size = _process_batch(split_data_1, infer_method)
-    max_working_batch_size = _process_batch(split_data_2, infer_method, max_working_batch_size)
+    max_working_batch_size = _process_batch(
+        split_data_1, infer_method, allowed_non_tensor_keys=allowed_non_tensor_keys
+    )
+    max_working_batch_size = _process_batch(
+        split_data_2, infer_method, max_working_batch_size, allowed_non_tensor_keys
+    )
 
     # Return the minimum of the two (to be conservative)
     return max_working_batch_size
 
 
-def _forward_loop(model: torch.nn.Module, dataloader: DataLoader) -> None:
+def _forward_loop(
+    model: torch.nn.Module,
+    dataloader: DataLoader,
+    allowed_non_tensor_keys: set | None = None,
+) -> None:
     """Runs forward passes through the model using data from the dataloader.
 
     Args:
         model: The PyTorch model to run inference on
         dataloader: DataLoader containing the batched input data
+        allowed_non_tensor_keys: Set of key names whose values may be non-tensor types
     """
     with torch.no_grad():
         is_enc_dec = model_type_is_enc_dec(model)
@@ -587,7 +601,9 @@ def _forward_loop(model: torch.nn.Module, dataloader: DataLoader) -> None:
 
         for _, data in enumerate(tqdm(dataloader)):
             # Process batch and update max working batch size
-            max_working_batch_size = _process_batch(data, infer_method, max_working_batch_size)
+            max_working_batch_size = _process_batch(
+                data, infer_method, max_working_batch_size, allowed_non_tensor_keys
+            )
 
 
 def create_forward_loop(
@@ -600,6 +616,7 @@ def create_forward_loop(
     device: str | None = None,
     include_labels: bool = False,
     dataloader: DataLoader | None = None,
+    allowed_non_tensor_keys: set | None = None,
 ) -> Callable:
     """Creates and returns a forward loop function configured for a specific model, dataset, and tokenizer.
 
@@ -618,6 +635,9 @@ def create_forward_loop(
         device: Target device for the returned dataloader.
         include_labels: Whether to include labels in the dataloader.
         dataloader: If provided, use the provided dataloader instead.
+        allowed_non_tensor_keys: Set of key names whose batch values may be non-tensor types.
+            Useful when the dataloader yields batches with non-standard fields (e.g., nested
+            model outputs).
 
     Example usage for quantization:
 
@@ -657,7 +677,7 @@ def create_forward_loop(
             include_labels=include_labels,
         )
 
-    return lambda model: _forward_loop(model, dataloader)
+    return lambda model: _forward_loop(model, dataloader, allowed_non_tensor_keys)
 
 
 def model_type_is_enc_dec(model):
@@ -670,7 +690,7 @@ def download_hf_dataset_as_jsonl(
     output_dir: str | Path,
     json_keys: str | list[str] = ["text"],
     name: str | None = None,
-    split: str | None = "train",
+    split: str | None = None,
     max_samples_per_split: int | None = None,
     num_proc: int | None = None,
 ) -> list[str]:
@@ -681,7 +701,7 @@ def download_hf_dataset_as_jsonl(
         output_dir: Directory to save the JSONL files
         json_keys: Key or list of keys to extract from the dataset. Defaults to ["text"].
         name: Name of the subset to download
-        split: Split of the dataset to download. Defaults to "train".
+        split: Split of the dataset to download. Defaults to None (all splits).
         max_samples_per_split: Maximum number of samples to download per split. Defaults to None.
         num_proc: Number of processes to use for parallel processing. Defaults to None.
 
@@ -724,7 +744,6 @@ def download_hf_dataset_as_jsonl(
         print(f"\t{entry}")
 
     for entry in splits_to_process:
-        skip_processing = False
         path = entry["dataset"]
         name = entry.get("config", None)
         split = entry["split"]
@@ -741,12 +760,9 @@ def download_hf_dataset_as_jsonl(
 
         for key in json_keys:
             if key not in ds.features:
-                warn(f"[SKIP] {key=} not found in {ds.features=}")
-                skip_processing = True
-                break
-
-        if skip_processing:
-            continue
+                raise KeyError(
+                    f"{key=} not found in dataset features. Available: {list(ds.features)}"
+                )
 
         print(f"Saving raw dataset to {jsonl_file_path}")
         ds.to_json(jsonl_file_path, num_proc=num_proc)

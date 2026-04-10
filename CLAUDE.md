@@ -1,5 +1,7 @@
 # CLAUDE.md
 
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
 NVIDIA Model Optimizer (ModelOpt): open-source library for model optimization techniques including
 quantization, pruning, distillation, sparsity, and speculative decoding to accelerate inference.
 Primarily Python codebase with optional C++/CUDA extensions supporting PyTorch, ONNX, and Hugging Face/Megatron models.
@@ -11,7 +13,7 @@ Primarily Python codebase with optional C++/CUDA extensions supporting PyTorch, 
 
 **CRITICAL (YOU MUST):**
 
-- NVIDIA Apache 2.0 license header on ALL new Python/C++/CUDA files (see `LICENSE_HEADER`)
+- NVIDIA Apache 2.0 license header on ALL new Python/C++/CUDA files — use the SPDX format from `LICENSE_HEADER` (auto-inserted by pre-commit for most files, but must be added manually for files copied from third-party sources, which are excluded from the hook)
 - `git commit -s -S` (DCO sign-off + cryptographic signing required). Never attribute AI tools in
   sign-off line
 - `pre-commit` hooks run on commit — if files are modified by hooks, re-stage and commit again
@@ -19,16 +21,19 @@ Primarily Python codebase with optional C++/CUDA extensions supporting PyTorch, 
 - After rebasing, always re-run tests locally before pushing
 - All code must follow the security guidelines in `SECURITY.md` — violations are blocked as pre-merge errors
 - For contribution guidelines, commit conventions, and PR requirements, see `CONTRIBUTING.md`
+- New PIP dependencies require license verification — non-permissive licenses need justification and approval from `@NVIDIA/modelopt-setup-codeowners`
 
 ## Common Commands
 
 | Task | Command |
 |------|---------|
 | Install (editable + dev) | `pip install -e ".[dev]"` |
+| Enable pre-commit hooks | `pre-commit install` |
 | CPU unit tests | `python -m pytest tests/unit` |
 | GPU unit tests | `python -m pytest tests/gpu` |
 | Megatron GPU tests | `python -m pytest tests/gpu_megatron` |
 | TRT-LLM GPU tests | `python -m pytest tests/gpu_trtllm` |
+| Single test file | `python -m pytest tests/unit/torch/quantization/test_quant_config.py` |
 | Pattern match | `pytest tests/unit -k "test_quantize"` |
 | Lint + format (all files) | `pre-commit run --all-files` |
 | Lint (diff only) | `pre-commit run --from-ref origin/main --to-ref HEAD` |
@@ -68,6 +73,11 @@ ModelOpt code base is organized into four top-level namespaces:
 A **mode** is the unit of model optimization in ModelOpt. Each algorithm (quantization, pruning,
 etc.) is implemented as one or more modes. Modes are recorded in the model's `modelopt_state` so
 optimization workflows can be composed, saved, and restored.
+
+The main entry points are in `modelopt/torch/opt/conversion.py`:
+- `apply_mode(model, mode, ...)` — applies an optimization mode to a model
+- `restore(model, ...)` — restores a model to a previously saved optimization state
+- `save(model, ...)` / `modelopt_state(model)` — captures the current optimization state
 
 ### Core Abstraction: Recipes
 

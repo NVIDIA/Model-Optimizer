@@ -58,8 +58,8 @@ The utilization of third-party code requires authorization via the Open Source R
 
 If you are an external contributor, seek guidance from `@NVIDIA/modelopt-setup-codeowners` for next steps. For internal contributors, follow the steps below:
 
-- **File NVBug for use of open-source code:**
-  Clone NVBug 2885977 and add your use case. Copying code from permissive licensed repositories (e.g. MIT, Apache 2) is generally self-checkout but for other licenses, it is necessary to get expert guidance before merging your PR.
+- **Update NVBug for details on use of open-source code:**
+  Reopen NVBug 6046893 and add your use case in the table. Merging your PR with code copied from permissive licensed repositories (e.g. MIT, Apache 2) is generally fine but for other licenses, it is necessary to get expert guidance before merging your PR.
 - **License header format:** The file which has code copied from another third-party GitHub repository should have the following in order:
   1. A reference link (with commit hash) to the source from which the code was copied.
   1. The original repository's Copyright / License.

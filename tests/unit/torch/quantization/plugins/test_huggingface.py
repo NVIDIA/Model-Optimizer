@@ -12,7 +12,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 import os
 import warnings
 from contextlib import nullcontext
@@ -28,6 +27,7 @@ from _test_utils.torch.transformers_models import (
     get_tiny_qwen3_moe,
     tf_modelopt_state_and_output_tester,
 )
+from packaging.version import Version
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.nn import QuantLinear, QuantModuleRegistry
@@ -105,12 +105,17 @@ def test_convert_conv1d():
     assert torch.allclose(out_1, out_2)
 
 
+@pytest.mark.skipif(
+    Version(transformers.__version__) < Version("5.0"),
+    reason="test_dbrx is not supported for transformers<5.0",
+)
 def test_dbrx():
     assert DbrxExperts in QuantModuleRegistry
     assert DbrxExpertGLU in QuantModuleRegistry
 
     config = DbrxConfig(
-        ffn_config=DbrxFFNConfig(ffn_hidden_size=8, moe_num_experts=2), hidden_size=32
+        ffn_config=DbrxFFNConfig(ffn_hidden_size=8, moe_num_experts=2, hidden_size=32),
+        hidden_size=32,
     )
 
     model_ref = DbrxFFN(config)
@@ -131,14 +136,17 @@ def test_dbrx():
     assert hasattr(expertglu_test, "v1_linear") and not hasattr(expertglu_test, "v1")
     assert hasattr(expertglu_test, "w2_linear") and not hasattr(expertglu_test, "w2")
 
+    # Weights are stored transposed (W = w1[i].T) to match F.linear semantics with
+    # transformers 5.0's raw matmul: x @ w1[i] = F.linear(x, w1[i].T)
     assert torch.allclose(
-        torch.concat(list(expertglu_test.w1_linear.parameters()), dim=0),
+        torch.concat([m.weight.T for m in expertglu_test.w1_linear], dim=0),
         expertglu_ref.w1,
     )
 
     mtq.set_quantizer_attributes_partial(model_test, "*", {"enable": False})
 
-    x = torch.randn(1, 4, 32)
+    # In transformers 5.0, the FFN input dimension is ffn_hidden_size (not hidden_size)
+    x = torch.randn(1, 4, 8)
     out_1 = model_ref(x)
     out_2 = model_test(x)
     assert torch.allclose(out_1[0], out_2[0])
@@ -147,6 +155,9 @@ def test_dbrx():
 @pytest.mark.parametrize("method", ["gradient", "kl_div"])
 @pytest.mark.parametrize("model_provider", [get_tiny_llama, get_tiny_qwen3_moe])
 def test_autoquantize_huggingface(model_provider, method):
+    if model_provider == get_tiny_qwen3_moe and Version(torch.__version__) < Version("2.9"):
+        pytest.skip("torch 2.8 grouped_mm is CUDA-only")
+
     model = model_provider()
     input_ids = model.dummy_inputs["input_ids"]
 
@@ -190,7 +201,7 @@ def test_autoquantize_huggingface(model_provider, method):
     ],
 )
 def test_quantized_transformers_save_restore(tmp_path, model_cls, quant_config):
-    tiny_llama_dir = create_tiny_llama_dir(tmp_path)
+    tiny_llama_dir = create_tiny_llama_dir(tmp_path, dtype=torch.float32)
     # update config to fit test cases
     if quant_config == mtq.INT4_AWQ_CFG:
         import copy

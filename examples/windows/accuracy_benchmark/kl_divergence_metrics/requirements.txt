@@ -3,6 +3,5 @@ accelerate
 datasets
 numpy
 safetensors>=0.4.0
-
-torch>=2.0.0
-transformers>=4.30.0
+torch>=2.6.0
+transformers<5.0
