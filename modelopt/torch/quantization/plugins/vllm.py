@@ -33,7 +33,6 @@ from vllm.distributed.parallel_state import get_dp_group, get_ep_group, get_tp_g
 
 from ...utils.distributed import ParallelState
 from ..nn import QuantLinearConvBase, QuantModule, QuantModuleRegistry, TensorQuantizer
-from ..utils import replace_function  # pragma: no cover
 from .custom import CUSTOM_MODEL_PLUGINS
 
 # Try multiple import paths for vLLM compatibility across versions
@@ -86,6 +85,14 @@ _ATTENTION_TYPES = tuple(
 )
 
 vllm_fused_moe_package = importlib.import_module("vllm.model_executor.layers.fused_moe.fused_moe")
+_FUSED_MOE_KERNEL_FUNC = next(
+    (
+        n
+        for n in ("invoke_fused_moe_kernel", "invoke_fused_moe_triton_kernel")
+        if hasattr(vllm_fused_moe_package, n)
+    ),
+    "",
+)
 
 
 @contextmanager
@@ -335,15 +342,6 @@ class _QuantFusedMoEBase(QuantModule):
         )
         self.parallel_state = create_parallel_state()
 
-        if getattr(self, "invoke_fused_moe_kernel_func", None) is None:  # pragma: no cover
-            for name in ("invoke_fused_moe_kernel", "dispatch_fused_moe_kernel"):
-                if hasattr(vllm_fused_moe_package, name):
-                    self.invoke_fused_moe_kernel_func = name
-                    break
-        assert (  # pragma: no cover
-            getattr(self, "invoke_fused_moe_kernel_func", None) is not None
-        ), "fused_moe_kernel is not found"
-
     def invoke_fused_moe_quantized(
         self,
         A: torch.Tensor,  # noqa: N803
@@ -389,13 +387,38 @@ class _QuantFusedMoEBase(QuantModule):
             raise ValueError("Cannot determine first or second layer of expert")
 
     def forward(self, hidden_states: torch.Tensor, router_logits: torch.Tensor):
-        with replace_function(  # pragma: no cover
-            vllm_fused_moe_package,
-            self.invoke_fused_moe_kernel_func,
-            self.invoke_fused_moe_quantized,
-            og_func_cache_name="_invoke_fused_moe_kernel",
-        ):
-            return super().forward(hidden_states, router_logits)
+        # This is again due to the bad coding of vLLM
+        # fused_moe submodule is overwritten by the fused_moe function
+        # so we need to import the fused_moe module explicitly
+        assert (
+            _FUSED_MOE_KERNEL_FUNC != ""
+            and getattr(vllm_fused_moe_package, _FUSED_MOE_KERNEL_FUNC, None) is not None
+        )
+        # This context manager will conflict with torch.compile
+        # with replace_function(
+        #     vllm_fused_moe_package,
+        #     "invoke_fused_moe_kernel",
+        #     self.invoke_fused_moe_quantized,
+        # ):
+        try:
+            original_invoke_fused_moe_kernel = getattr(
+                vllm_fused_moe_package,
+                _FUSED_MOE_KERNEL_FUNC,
+                None,
+            )
+            setattr(
+                vllm_fused_moe_package, "_invoke_fused_moe_kernel", original_invoke_fused_moe_kernel
+            )
+            setattr(vllm_fused_moe_package, _FUSED_MOE_KERNEL_FUNC, self.invoke_fused_moe_quantized)
+            output = super().forward(hidden_states, router_logits)
+            setattr(
+                vllm_fused_moe_package, _FUSED_MOE_KERNEL_FUNC, original_invoke_fused_moe_kernel
+            )
+            return output
+        finally:
+            setattr(
+                vllm_fused_moe_package, _FUSED_MOE_KERNEL_FUNC, original_invoke_fused_moe_kernel
+            )
 
     @torch.no_grad()
     def fold_weight(self, keep_attrs: bool = False):
