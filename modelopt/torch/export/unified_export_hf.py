@@ -28,7 +28,8 @@ from typing import Any
 
 import torch
 import torch.nn as nn
-from safetensors.torch import load_file, save_file
+from safetensors import safe_open
+from safetensors.torch import save_file
 
 from .diffusers_utils import build_layerwise_quant_metadata, pad_nvfp4_weights, swizzle_nvfp4_scales
 
@@ -179,8 +180,6 @@ def _postprocess_safetensors(
         padding_strategy: ``"row"``, ``"row_col"``, or None.
         enable_swizzle_layout: Whether to swizzle block scales.
     """
-    import struct
-
     safetensor_files = sorted(export_dir.glob("*.safetensors"))
     if not safetensor_files:
         return
@@ -194,22 +193,16 @@ def _postprocess_safetensors(
         )
 
     for sf_path in safetensor_files:
-        sd = load_file(str(sf_path))
-
-        with open(sf_path, "rb") as f:
-            header_size = struct.unpack("<Q", f.read(8))[0]
-            header = json.loads(f.read(header_size))
-        metadata = header.get("__metadata__", None) or {}
-
-        # Clone tensors so the memory-mapped file handle from load_file is
-        # released before we overwrite the same path (required on Windows).
-        sd = {k: v.clone() for k, v in sd.items()}
+        with safe_open(str(sf_path), framework="pt") as f:
+            metadata = dict(f.metadata() or {})
+            sd = {k: f.get_tensor(k).clone() for k in f.keys()}
 
         if merged_base_safetensor_path is not None and model_type is not None:
             sd, base_metadata = merge_diffusion_checkpoint(
-                sd, merged_base_safetensor_path, model_type, hf_quant_config
+                sd, merged_base_safetensor_path, model_type, hf_quant_config=None
             )
-            metadata.update(base_metadata)
+            base_metadata.update(metadata)
+            metadata = base_metadata
 
         if padding_strategy is not None:
             sd = pad_nvfp4_weights(sd, padding_strategy)

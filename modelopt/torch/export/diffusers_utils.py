@@ -940,7 +940,11 @@ def swizzle_nvfp4_scales(
         return (a + b - 1) // b
 
     def _to_blocked(input_matrix: torch.Tensor) -> torch.Tensor:
-        """Rearrange scale matrix to cuBLAS 2-D block-scaling-factors layout."""
+        """Rearrange scale matrix to cuBLAS 2-D block-scaling-factors layout.
+
+        Note: rows are padded to multiples of 128 for cuBLAS alignment, so the
+        output shape may differ from the input (e.g. (16, 4) -> (128, 4)).
+        """
         rows, cols = input_matrix.shape
         n_row_blocks = _ceil_div(rows, 128)
         n_col_blocks = _ceil_div(cols, 4)

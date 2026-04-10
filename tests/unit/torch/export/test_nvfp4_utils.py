@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -199,6 +199,35 @@ class TestPostprocessSafetensors:
                 model_type="ltx2",
                 enable_layerwise_quant_metadata=True,
             )
+
+    def test_preserves_existing_metadata(self, tmp_path):
+        """Simulate save_pretrained output: safetensors with pre-existing metadata."""
+        from modelopt.torch.export.unified_export_hf import _postprocess_safetensors
+
+        sd = _make_nvfp4_state_dict(rows=20, cols=64)
+        preexisting_metadata = {"format": "pt", "_class_name": "MyModel"}
+        save_file(sd, str(tmp_path / "model.safetensors"), metadata=preexisting_metadata)
+
+        hf_quant_config = {"quant_algo": "NVFP4"}
+        _postprocess_safetensors(
+            tmp_path,
+            hf_quant_config=hf_quant_config,
+            padding_strategy="row",
+            enable_swizzle_layout=True,
+            enable_layerwise_quant_metadata=True,
+        )
+
+        reloaded = load_file(str(tmp_path / "model.safetensors"))
+        assert reloaded["layer0.weight"].shape[0] == 32
+        assert reloaded["layer0.weight_scale"].shape == (128, 64 // 16)
+
+        with safe_open(str(tmp_path / "model.safetensors"), framework="pt") as f:
+            metadata = f.metadata()
+        assert metadata["format"] == "pt"
+        assert metadata["_class_name"] == "MyModel"
+        assert json.loads(metadata["quantization_config"]) == hf_quant_config
+        layer_meta = json.loads(metadata["_quantization_metadata"])
+        assert "layer0" in layer_meta["layers"]
 
     def test_no_safetensor_files(self, tmp_path):
         from modelopt.torch.export.unified_export_hf import _postprocess_safetensors
