@@ -91,4 +91,3 @@ This catches script errors cheaply before using GPU quota on a real run.
 See `skills/common/slurm-setup.md` section 2 for the smoke test partition pattern.
 
 Only submit the full calibration job after the smoke test exits cleanly.
-
