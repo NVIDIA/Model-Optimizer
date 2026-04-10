@@ -246,26 +246,39 @@ class RealQuantLinear(QuantModule):
                 self.weight_quantizer = weight_quantizer
 
             def __setitem__(self, key, value):
-                if (
-                    key == "weight"
-                    and self.weight_quantizer
-                    and self.weight_quantizer.is_enabled
-                    and not self.weight_quantizer._fake_quant
-                    and value.element_size() > 1
-                ):
-                    # reset the amax for later calibration
+                if key == "weight" and not isinstance(value, QTensorWrapper):
+                    existing = self.get("weight")
                     if (
-                        self.weight_quantizer.amax is not None
-                        and self.weight_quantizer.amax.is_meta
+                        isinstance(existing, QTensorWrapper)
+                        and not existing.is_meta
+                        and existing.shape == value.shape
                     ):
-                        delattr(self.weight_quantizer, "_amax")
-                        self.weight_quantizer.amax = self.weight_quantizer._get_amax(value)
-                        self.weight_quantizer._calibrator.reset()
-                    # compress the weight
-                    real_quant_tensor = self.weight_quantizer(value)
-                    real_quant_value = QTensorWrapper(real_quant_tensor)
-                    del value  # delete the original weight to save memory
-                    value = real_quant_value
+                        # Loading a compressed weight (e.g. from safetensors in transformers>=5.0
+                        # which replaces parameters via setattr rather than copy_). Preserve the
+                        # QTensorWrapper type and metadata.
+                        super().__setitem__(
+                            key, QTensorWrapper(qtensor=value.data, metadata=existing.metadata)
+                        )
+                        return
+                    if (
+                        self.weight_quantizer
+                        and self.weight_quantizer.is_enabled
+                        and not self.weight_quantizer._fake_quant
+                        and value.element_size() > 1
+                    ):
+                        # reset the amax for later calibration
+                        if (
+                            self.weight_quantizer.amax is not None
+                            and self.weight_quantizer.amax.is_meta
+                        ):
+                            delattr(self.weight_quantizer, "_amax")
+                            self.weight_quantizer.amax = self.weight_quantizer._get_amax(value)
+                            self.weight_quantizer._calibrator.reset()
+                        # compress the weight
+                        real_quant_tensor = self.weight_quantizer(value)
+                        real_quant_value = QTensorWrapper(real_quant_tensor)
+                        del value  # delete the original weight to save memory
+                        value = real_quant_value
                 super().__setitem__(key, value)
 
         # Monkey patch the _parameters.__setitem__ to real quant the weight when loading

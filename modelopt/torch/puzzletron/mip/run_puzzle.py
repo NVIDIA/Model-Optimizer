@@ -34,11 +34,7 @@ from modelopt.torch.puzzletron.anymodel.model_descriptor import (
     ModelDescriptor,
     ModelDescriptorFactory,
 )
-from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.block_config import (
-    AttentionConfig,
-    BlockConfig,
-    FFNConfig,
-)
+from modelopt.torch.puzzletron.block_config import AttentionConfig, BlockConfig, FFNConfig
 from modelopt.torch.puzzletron.mip.mip_with_multi_layer_replacements import (
     run_mip as run_multi_layer_replacement_mip,
 )
@@ -170,6 +166,8 @@ class PuzzleConstraints:
         # Throughput constraints
         throughput_constraints = []
         if "target_throughput" in self.constraints:
+            if self.constraints["target_throughput"] == 0:
+                raise ValueError("target_throughput must not be zero")
             throughput_constraints.append(
                 batch_size * generation_seq_len / self.constraints["target_throughput"]
             )
@@ -238,7 +236,7 @@ def run_single_puzzle_config(
     subblock_stats_args: dict,
     constraints: PuzzleConstraints,
     output_folder,
-) -> None:
+) -> Path:
     # we override the constraints and subblock_stats_args for this run to keep reporting out the same way.
     args = deepcopy(args)
 
@@ -399,13 +397,15 @@ def _assert_valid_config(args, puzzle_profile):
         "objective",
         "output_path",
     )
-    missing_args = [arg for arg in required_args if arg not in args or getattr(args, arg) is None]
+    missing_args = [
+        arg for arg in required_args if not hasattr(args, arg) or getattr(args, arg) is None
+    ]
     if missing_args:
         mprint(f"error: The following arguments are required: {', '.join(missing_args)}")
         sys.exit(1)
 
     # Make sure we have specified subblock_stats_args
-    if "subblock_stats_args" not in args and "subblock_stats_args" not in puzzle_profile:
+    if not hasattr(args, "subblock_stats_args") and "subblock_stats_args" not in puzzle_profile:
         mprint(
             "error: Must specify `subblock_stats_args` in either puzzle_profile or as a commandline arg."
         )
@@ -413,8 +413,8 @@ def _assert_valid_config(args, puzzle_profile):
 
     # Make sure we have specified constraints
     if (
-        "mip_constraints" not in args
-        and "human_constraints" not in args
+        not hasattr(args, "mip_constraints")
+        and not hasattr(args, "human_constraints")
         and "mip_constraints" not in puzzle_profile
         and "human_constraints" not in puzzle_profile
     ):
@@ -447,7 +447,7 @@ def run_puzzle(args: DictConfig) -> list[str]:
     if args.gathered_metrics_path is not None:
         gathered_metrics = json.loads(args.gathered_metrics_path.read_text())
     else:
-        gathered_metrics = gather_multi_layer_puzle_metrics(
+        gathered_metrics = gather_multi_layer_puzzle_metrics(
             args.single_block_replacement_validation_dir
         )
 
@@ -506,7 +506,7 @@ def gather_puzzle_metrics(
     return gathered_metrics
 
 
-def gather_multi_layer_puzle_metrics(
+def gather_multi_layer_puzzle_metrics(
     single_replacement_validation_dir: Path,
 ) -> MultiLayerPuzzleMetrics:
     single_sequence_metrics = [

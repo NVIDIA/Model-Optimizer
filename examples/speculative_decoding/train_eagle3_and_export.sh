@@ -17,50 +17,37 @@
 
 set -eo pipefail
 
-# Set default values for BASE_MODEL and DATA
 BASE_MODEL=meta-llama/Llama-3.2-1B-Instruct
 DATA=input_conversations/train.jsonl
 
-# Parse input arguments --base_model and --data
 while [[ $# -gt 0 ]]; do
-  key="$1"
-  case $key in
-    --base_model)
-      BASE_MODEL="$2"
-      shift; shift
-      ;;
-    --data)
-      DATA="$2"
-      shift; shift
-      ;;
-    --offline_data)
-      OFFLINE_DATA_PATH="$2"
-      shift; shift
-      ;;
-    *)
-      echo "Unknown argument: $1"
-      exit 1
-      ;;
+  case $1 in
+    --base_model) BASE_MODEL="$2"; shift; shift ;;
+    --data)       DATA="$2";       shift; shift ;;
+    --offline_data) OFFLINE_DATA_PATH="$2"; shift; shift ;;
+    *) echo "Unknown argument: $1"; exit 1 ;;
   esac
 done
 
-if [[ "$OFFLINE_DATA_PATH" != "" ]]; then
-  OFFLINE_DATA_ARGS="--offline-data $OFFLINE_DATA_PATH"
+MODEL_BASENAME=$(basename "$BASE_MODEL")
+OUTPUT_DIR=ckpts/${MODEL_BASENAME}-$(date +%Y%m%d_%H%M)
+mkdir -p "$OUTPUT_DIR"
+
+BASE_CFG="$(dirname "$(readlink -f "$0")")/../../modelopt_recipes/general/speculative_decoding/eagle3.yaml"
+
+# Build dotlist overrides
+OVERRIDES=(
+  model.model_name_or_path="$BASE_MODEL"
+  training.output_dir="$OUTPUT_DIR"
+)
+if [[ -n "$OFFLINE_DATA_PATH" ]]; then
+  OVERRIDES+=( data.offline_data_path="$OFFLINE_DATA_PATH" )
 else
-  OFFLINE_DATA_ARGS=""
+  OVERRIDES+=( data.data_path="$DATA" )
 fi
 
-MODEL_BASENAME=$(basename "$BASE_MODEL")
-
 echo "==== [1/3] Training draft model ===="
-OUTPUT_DIR=ckpts/${MODEL_BASENAME}-$(date +%Y%m%d_%H%M)
-mkdir -p "$(dirname "$OUTPUT_DIR")"
-./launch_train.sh --model $BASE_MODEL \
-            --output_dir $OUTPUT_DIR \
-            $OFFLINE_DATA_ARGS \
-            --data $DATA \
-            --num_epochs 2 \
-            --eagle_config eagle_config.json
+./launch_train.sh --config "$BASE_CFG" "${OVERRIDES[@]}"
 
 echo "==== [2/3] Evaluating ModelOpt checkpoint on MT-Bench ===="
 python scripts/ar_validate.py --model_path $OUTPUT_DIR

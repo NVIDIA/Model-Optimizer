@@ -94,3 +94,34 @@ KL-divergence (Kullback-Leibler divergence) quantifies the distributional differ
 *All KL-divergence results above are obtained via PyTorch fake quantization simulation unless otherwise noted. Inference with ONNX-runtime can also be evaluated .*
 
 For detailed instructions on computing KL-divergence, please refer to the [KL-divergence Evaluation Guide](./accuracy_benchmark/kl_divergence_metrics/README.md).
+
+#### 1.2.4 FVD (Fréchet Video Distance)
+
+FVD measures the distributional similarity between two sets of videos using features extracted from a pre-trained I3D model (Kinetics-400). Lower FVD values indicate that the generated videos are closer to the reference. FVD is the standard metric for evaluating video generation quality.
+
+**Learn more about FVD:** [FVD: A New Metric for Video Generation (arXiv)](https://arxiv.org/abs/1812.01717)
+
+- **Reference baseline**: BF16 model outputs
+- **Quantized models**: PTQ (Post-Training Quantization) and QAD (Quantization-Aware Distillation)
+- **Model**: LTX-2.3 video generation
+- **Evaluation dimensions**: [VBench](https://github.com/Vchitect/VBench) benchmark categories
+- **Feature extractor**: I3D (1024-dim pooled features from `rgb_imagenet.pt`)
+
+| Category | FVD: PTQ vs BF16 ↓ | FVD: QAD vs BF16 ↓ |
+|:---|:---|:---|
+| Temporal Flickering | 31.92 | 21.97 |
+| Subject Dynamic Motion | 23.44 | 16.28 |
+| Multiple Objects | 35.35 | 22.47 |
+| Human Action | 30.08 | 21.82 |
+| Object Class | 51.51 | 26.86 |
+| Color | 36.52 | 25.09 |
+| Spatial Relationship | 25.07 | 18.41 |
+| Scene Background | 64.92 | 35.69 |
+| Appearance Style | 31.08 | 20.82 |
+| Temporal Style | 23.61 | 15.85 |
+| Overall Consistency | 25.03 | 18.85 |
+| **Average** | **34.41** | **22.19** |
+
+QAD consistently outperforms PTQ across all VBench dimensions, achieving 35% lower average FVD (22.19 vs 34.41).
+
+For detailed instructions on computing FVD, please refer to the [FVD Evaluation Guide](./accuracy_benchmark/fvd_metrics/README.md).

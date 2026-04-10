@@ -19,6 +19,7 @@ from pathlib import Path
 import torch
 from _test_utils.torch.transformers_models import get_tiny_tokenizer
 from datasets import Dataset, DatasetDict
+from huggingface_hub import snapshot_download
 from transformers import AutoConfig, AutoModelForCausalLM, PreTrainedTokenizerBase
 
 import modelopt.torch.utils.distributed as dist
@@ -136,6 +137,11 @@ def create_and_save_small_hf_model(
         if getattr(config, "pad_token_id", None) is not None and config.pad_token_id >= vocab_size:
             config.pad_token_id = 0
 
+        # Ensure moe_latent_size is present: the native transformers NemotronH model (>=5.5)
+        # accesses config.moe_latent_size but older trust_remote_code configs don't define it.
+        if not hasattr(config, "moe_latent_size"):
+            config.moe_latent_size = None
+
     # Set seed for reproducible weight initialization
     torch.manual_seed(42)
 
@@ -168,13 +174,37 @@ def create_and_save_small_hf_model(
     else:
         os.environ.pop("CUDA_VISIBLE_DEVICES", None)
 
-    model.to(dtype=torch.bfloat16).save_pretrained(output_path)
+    model.to(dtype=torch.bfloat16)
+    # save_original_format=False: skip transformers' revert_weight_conversion so weights are saved
+    # with in-memory key names (e.g. backbone.embeddings.weight) rather than the on-disk "original"
+    # format (e.g. backbone.embedding.weight for NemotronH). This avoids key mismatches in
+    # load_and_shard_model which looks up shard keys from model.named_parameters().
+    try:
+        model.save_pretrained(output_path, save_original_format=False)
+    except AttributeError:
+        # Workaround: some trust_remote_code models define _tied_weights_keys in an older
+        # format (returning a list) that is incompatible with transformers v5, which
+        # expects _get_tied_weight_keys to return a dict. Clear tied weight keys and retry.
+        for submodule in model.modules():
+            if getattr(submodule, "_tied_weights_keys", None) is not None:
+                submodule._tied_weights_keys = None
+        model.save_pretrained(output_path, save_original_format=False)
 
     # Save tokenizer
     tokenizer.save_pretrained(output_path)
 
     # Save config
     config.save_pretrained(output_path)
+
+    # Download trust_remote_code .py files from HF hub into the checkpoint directory so that
+    # force_cache_dynamic_modules can resolve classes from the local path.
+    # save_pretrained only saves weights + config, not these .py files.
+    if hasattr(config, "auto_map") and isinstance(config.auto_map, dict):
+        snapshot_download(
+            repo_id=hf_model_name,
+            local_dir=output_path,
+            allow_patterns=["*.py"],
+        )
 
 
 def save_dummy_dataset(dataset_path: Path | str):

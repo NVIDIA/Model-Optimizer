@@ -43,11 +43,7 @@ from modelopt.torch.puzzletron.anymodel.model_descriptor import (
     ModelDescriptor,
     ModelDescriptorFactory,
 )
-from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.block_config import (
-    AttentionConfig,
-    BlockConfig,
-    FFNConfig,
-)
+from modelopt.torch.puzzletron.block_config import AttentionConfig, BlockConfig, FFNConfig
 from modelopt.torch.puzzletron.replacement_library.replacement_utils import (
     is_replacement_identical_to_teacher,
     replacement_is_teacher,

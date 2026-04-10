@@ -75,7 +75,7 @@ def run_full_puzzletron(hydra_config_path: str):
         config_path: Path to the YAML configuration file
     """
     mprint("Puzzletron Progress 1/8: starting puzzletron pipeline")
-    dist.setup(timeout=timedelta(10))
+    dist.setup(timeout=timedelta(minutes=10))
 
     # Register Hydra custom resolvers (needed for config resolution)
     register_hydra_resolvers()
@@ -132,7 +132,7 @@ def run_mip_only(hydra_config_path: str):
     Args:
         hydra_config_path: Path to the YAML configuration file
     """
-    dist.setup(timeout=timedelta(10))
+    dist.setup(timeout=timedelta(minutes=10))
 
     # Register Hydra custom resolvers (needed for config resolution)
     register_hydra_resolvers()

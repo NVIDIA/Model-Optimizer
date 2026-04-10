@@ -26,6 +26,11 @@ from _test_utils.torch.misc import set_seed
 from _test_utils.torch.puzzletron.utils import setup_test_model_and_data
 from packaging.version import Version
 
+# The puzzletron pipeline imports mip unconditionally at module level. In NeMo containers
+# the [puzzletron] extras are not pre-installed, so importing the test file fails with a
+# deep ModuleNotFoundError. Skip early with an actionable message instead.
+pytest.importorskip("mip", reason="pip install -e '.[puzzletron]' to install MIP solver")
+
 import modelopt.torch.utils.distributed as dist
 from modelopt.torch.puzzletron import puzzletron
 from modelopt.torch.puzzletron.anymodel import convert_model
@@ -95,7 +100,7 @@ def _test_puzzletron_multiprocess_job(
 ):
     # Set seed BEFORE dist.setup() to ensure reproducibility across all processes
     set_seed(SEED)
-    dist.setup(timeout=timedelta(10))
+    dist.setup(timeout=timedelta(minutes=10))
 
     # Setup the test model and data.
     puzzle_dir, hf_checkpoint_path, dataset_path = setup_test_model_and_data(

@@ -13,18 +13,31 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import json
 import os
 from pathlib import Path
 
 import pytest
 import safetensors.torch
 import torch
-from _test_utils.examples.run_command import run_example_command
+from _test_utils.examples.run_command import MODELOPT_ROOT, run_example_command
 from packaging.version import Version
 from transformers import AutoConfig
 
 from modelopt.torch.export.plugins.hf_spec_export import LLAMA_EAGLE_SINGLE_LAYER
+
+EAGLE3_YAML = str(
+    MODELOPT_ROOT / "modelopt_recipes" / "general" / "speculative_decoding" / "eagle3.yaml"
+)
+
+# Tiny EAGLE architecture overrides (dotlist entries)
+_TINY_EAGLE_ARCH = [
+    "eagle.eagle_architecture_config.max_position_embeddings=128",
+    "eagle.eagle_architecture_config.num_hidden_layers=1",
+    "eagle.eagle_architecture_config.intermediate_size=64",
+    "eagle.eagle_architecture_config.num_attention_heads=2",
+    "eagle.eagle_architecture_config.num_key_value_heads=2",
+    "eagle.eagle_architecture_config.head_dim=64",
+]
 
 
 def generate_offline_pt_data(
@@ -101,10 +114,10 @@ def test_calibrate_draft_vocab(tiny_llama_path, tiny_daring_anteater_path, draft
 
 
 # fmt: off
-@pytest.mark.parametrize(("cp_size", "mix_hidden_states"), [(1, "false"), (2, "false"), (1, "true"), (2, "true")])
+@pytest.mark.parametrize(("cp_size", "mix_hidden_states"), [(1, False), (2, False), (1, True), (2, True)])
 def test_llama_eagle3(tiny_llama_path,
                       tiny_daring_anteater_path,
-                      tmp_path, eagle_output_dir,
+                      eagle_output_dir,
                       cp_size,
                       mix_hidden_states,
                       num_gpus):
@@ -113,52 +126,40 @@ def test_llama_eagle3(tiny_llama_path,
         pytest.skip("cp_size=2 requires at least 2 GPUs, but only {} found.".format(num_gpus))
     if cp_size == 2 and not Version(torch.__version__) >= Version("2.10.0"):
         pytest.skip("cp_size=2 requires torch 2.10.0")
-    # Create an ultra-tiny EAGLE config for testing to reduce memory usage
-    tiny_eagle_config = {
-        "max_position_embeddings": 128,
-        "num_hidden_layers": 1,
-        "intermediate_size": 64,
-        "num_attention_heads": 2,
-        "num_key_value_heads": 2,
-        "head_dim": 64,
-    }
 
-    # Write the tiny config to a temporary file
-    config_file = tmp_path / f"tiny_eagle_config_cp{cp_size}.json"
-    with open(config_file, "w") as f:
-        json.dump(tiny_eagle_config, f)
+    output_dir = str(eagle_output_dir / f"eagle-tinyllama-cp{cp_size}-mix{mix_hidden_states}")
+    overrides = [
+        f"model.model_name_or_path={tiny_llama_path}",
+        f"data.data_path={tiny_daring_anteater_path}",
+        f"training.output_dir={output_dir}",
+        "training.num_train_epochs=0.25",
+        "training.learning_rate=1e-5",
+        "training.training_seq_len=128",
+        f"training.cp_size={cp_size}",
+        f"eagle.eagle_mix_hidden_states={mix_hidden_states}",
+        f"eagle.eagle_use_torch_compile={not mix_hidden_states}", #mhs fail for compile. TODO: fix this
+        *_TINY_EAGLE_ARCH,
+    ]
 
     run_example_command(
-        [
-            "./launch_train.sh",
-            "--model", tiny_llama_path,
-            "--data", tiny_daring_anteater_path,
-            "--num_epochs", "0.25",
-            "--lr", "1e-5",
-            "--mode", "eagle3",
-            "--eagle_config", str(config_file),
-            "--output_dir", eagle_output_dir / f"eagle-tinyllama-cp{cp_size}",
-            "--training_seq_len", "128", # Match max_position_embeddings
-            "--cp_size", str(cp_size),
-            "--mix_hidden_states", mix_hidden_states,
-        ],
+        ["./launch_train.sh", "--config", EAGLE3_YAML, *overrides],
         "speculative_decoding",
     )
 
 
 def test_resume_training(tiny_daring_anteater_path, eagle_output_dir):
     """Test resume training of Eagle3."""
+    checkpoint_dir = str(eagle_output_dir / "eagle-tinyllama-cp1-mixFalse")
+    overrides = [
+        f"model.model_name_or_path={checkpoint_dir}",
+        f"data.data_path={tiny_daring_anteater_path}",
+        f"training.output_dir={checkpoint_dir}",
+        "training.num_train_epochs=0.5",
+        "training.learning_rate=1e-5",
+        "training.training_seq_len=128",
+    ]
     run_example_command(
-        [
-            "./launch_train.sh",
-            "--model",  eagle_output_dir / "eagle-tinyllama-cp1",
-            "--data", tiny_daring_anteater_path,
-            "--num_epochs", "0.5",
-            "--lr", "1e-5",
-            "--mode", "eagle3",
-            "--output_dir", eagle_output_dir / "eagle-tinyllama-cp1",
-            "--training_seq_len", "128", # Match max_position_embeddings
-        ],
+        ["./launch_train.sh", "--config", EAGLE3_YAML, *overrides],
         "speculative_decoding",
     )
 
@@ -168,7 +169,7 @@ def test_ar_validate(eagle_output_dir):
     run_example_command(
         [
             "python", "./scripts/ar_validate.py",
-            "--model_path", eagle_output_dir / "eagle-tinyllama-cp1",
+            "--model_path", eagle_output_dir / "eagle-tinyllama-cp1-mixFalse",
             "--osl", "10",
             "--num_samples", "5",
             "--steps", "3"
@@ -182,7 +183,7 @@ def test_export_hf_checkpoint(eagle_output_dir):
     run_example_command(
         [
             "python", "./scripts/export_hf_checkpoint.py",
-            "--model_path", eagle_output_dir / "eagle-tinyllama-cp1",
+            "--model_path", eagle_output_dir / "eagle-tinyllama-cp1-mixFalse",
             "--export_path", eagle_output_dir / "eagle-tinyllama-export",
         ],
         "speculative_decoding",
@@ -242,35 +243,22 @@ def test_offline_eagle3_training(
         num_aux_layers=min(cfg.num_hidden_layers, 3),
     )
 
-    tiny_eagle_config = {
-        "max_position_embeddings": 128,
-        "num_hidden_layers": 1,
-        "intermediate_size": 64,
-        "num_attention_heads": 2,
-        "num_key_value_heads": 2,
-        "head_dim": 64,
-    }
-    config_file = tmp_path / "tiny_eagle_config_offline.json"
-    with open(config_file, "w") as f:
-        json.dump(tiny_eagle_config, f)
-
-    cmd = [
-        "./launch_train.sh",
-        "--model", model_path,
-        "--data", tiny_daring_anteater_path,
-        "--offline-data", offline_data_dir,
-        "--num_epochs", "0.1",
-        "--lr", "1e-5",
-        "--mode", "eagle3",
-        "--eagle_config", str(config_file),
-        "--output_dir", output_subdir,
-        "--training_seq_len", "64",
-        "--trust_remote_code", "True",
-        "--fsdp", "False",
+    overrides = [
+        f"model.model_name_or_path={model_path}",
+        "model.trust_remote_code=true",
+        f"model.use_fake_base_for_offline={str(use_fake_base).lower()}",
+        f"data.data_path={tiny_daring_anteater_path}",
+        f"data.offline_data_path={offline_data_dir}",
+        f"training.output_dir={output_subdir}",
+        "training.num_train_epochs=0.1",
+        "training.learning_rate=1e-5",
+        "training.training_seq_len=64",
+        *_TINY_EAGLE_ARCH,
     ]
-    if use_fake_base:
-        cmd += ["--use_fake_base_for_offline", "true"]
-    run_example_command(cmd, "speculative_decoding")
+    run_example_command(
+        ["./launch_train.sh", "--config", EAGLE3_YAML, *overrides],
+        "speculative_decoding",
+    )
     assert os.path.exists(output_subdir / "config.json")
 
 
@@ -290,20 +278,18 @@ def test_offline_resume_training_kimi(tiny_daring_anteater_path, tmp_path, eagle
         num_aux_layers=min(config.num_hidden_layers, 3),
     )
 
+    overrides = [
+        f"model.model_name_or_path={checkpoint_dir}",
+        "model.trust_remote_code=true",
+        "model.use_fake_base_for_offline=true",
+        f"data.data_path={tiny_daring_anteater_path}",
+        f"data.offline_data_path={offline_data_dir}",
+        f"training.output_dir={checkpoint_dir}",
+        "training.num_train_epochs=0.2",
+        "training.learning_rate=1e-5",
+        "training.training_seq_len=64",
+    ]
     run_example_command(
-        [
-            "./launch_train.sh",
-            "--model", checkpoint_dir,
-            "--data", tiny_daring_anteater_path,
-            "--offline-data", offline_data_dir,
-            "--num_epochs", "0.2",
-            "--lr", "1e-5",
-            "--mode", "eagle3",
-            "--output_dir", checkpoint_dir,
-            "--training_seq_len", "64",
-            "--trust_remote_code", "True",
-            "--fsdp", "False",
-            "--use_fake_base_for_offline", "true",
-        ],
+        ["./launch_train.sh", "--config", EAGLE3_YAML, *overrides],
         "speculative_decoding",
     )

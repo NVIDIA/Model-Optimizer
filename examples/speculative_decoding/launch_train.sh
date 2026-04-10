@@ -14,277 +14,62 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Usage:
+#   Single GPU:   ./launch_train.sh --config ../../modelopt_recipes/general/speculative_decoding/eagle3.yaml model.model_name_or_path=xxx
+#   Multi-node:   ./launch_train.sh --config ../../modelopt_recipes/general/speculative_decoding/eagle3.yaml --num_nodes 2 --head_node_ip <IP>
+#   With overrides: ./launch_train.sh --config my.yaml model.model_name_or_path=xxx training.output_dir=yyy
+#
+# Extra key=value args are forwarded as OmegaConf dotlist overrides to main.py.
+# All training config (model, data, hyperparams, eagle, fsdp) lives in the YAML file.
+# Only multi-node routing args are passed here; mixed_precision is fixed to bf16.
+
 set -eo pipefail
 
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+
+CONFIG_FILE=""
+NUM_NODES=1
+HEAD_NODE_IP=""
+EXTRA_ARGS=()
 while [ $# -gt 0 ]; do
   case "$1" in
-    --training_seq_len*)
-      if [[ "$1" != *=* ]]; then shift; fi
-      TRAINING_SEQ_LEN="${1#*=}"
-      ;;
-    --model*)
-      if [[ "$1" != *=* ]]; then shift; fi
-      MODEL="${1#*=}"
-      ;;
-    --data*)
-      if [[ "$1" != *=* ]]; then shift; fi
-      DATA="${1#*=}"
-      ;;
-    --offline-data*)
-      if [[ "$1" != *=* ]]; then shift; fi
-      OFFLINE_DATA_PATH="${1#*=}"
-      ;;
-    --mode*)
-      if [[ "$1" != *=* ]]; then shift; fi
-      MODE="${1#*=}"
-      ;;
-    --eagle_decoder_type*)
-      if [[ "$1" != *=* ]]; then shift; fi
-      EAGLE_DECODER_TYPE="${1#*=}"
-      ;;
-    --output_dir*)
-      if [[ "$1" != *=* ]]; then shift; fi
-      OUTPUT_DIR="${1#*=}"
-      ;;
-    --num_epochs*)
-      if [[ "$1" != *=* ]]; then shift; fi
-      NUM_EPOCHS="${1#*=}"
-      ;;
-    --save_steps*)
-      if [[ "$1" != *=* ]]; then shift; fi
-      SAVE_STEPS="${1#*=}"
-      ;;
-    --lr*)
-      if [[ "$1" != *=* ]]; then shift; fi
-      LR="${1#*=}"
-      ;;
-    --train_bs*)
-      if [[ "$1" != *=* ]]; then shift; fi
-      TRAIN_BS="${1#*=}"
-      ;;
-    --eagle_config*)
-      if [[ "$1" != *=* ]]; then shift; fi
-      EAGLE_CONFIG="${1#*=}"
-      ;;
-    --disable_tqdm*)
-      if [[ "$1" != *=* ]]; then shift; fi
-      DISABLE_TQDM="${1#*=}"
-      ;;
-    --vlm_processor*)
-      if [[ "$1" != *=* ]]; then shift; fi
-      VLM_PROCESSOR="${1#*=}"
-      ;;
-    --vlm_img_dir*)
-      if [[ "$1" != *=* ]]; then shift; fi
-      VLM_IMG_DIR="${1#*=}"
-      ;;
-    --estimate_ar*)
-      if [[ "$1" != *=* ]]; then shift; fi
-      ESTIMATE_AR="${1#*=}"
-      ;;
-    --ar_validate_steps*)
-      if [[ "$1" != *=* ]]; then shift; fi
-      AR_VALIDATE_STEPS="${1#*=}"
-      ;;
-    --num_ttt_steps*)
-      if [[ "$1" != *=* ]]; then shift; fi
-      NUM_TTT_STEPS="${1#*=}"
-      ;;
-    --cp_size*)
-      if [[ "$1" != *=* ]]; then shift; fi
-      CP_SIZE="${1#*=}"
-      ;;
-    --dp_size*)
-      if [[ "$1" != *=* ]]; then shift; fi
-      DP_SHARD_SIZE="${1#*=}"
-      ;;
-    --log_steps*)
-      if [[ "$1" != *=* ]]; then shift; fi
-      LOG_STEPS="${1#*=}"
-      ;;
-    --draft_vocab_cache*)
-      if [[ "$1" != *=* ]]; then shift; fi
-      DRAFT_VOCAB_CACHE="${1#*=}"
-      ;;
-    --num_nodes*)
-      if [[ "$1" != *=* ]]; then shift; fi
-      NUM_NODES="${1#*=}"
-      ;;
-    --head_node_ip*)
-      if [[ "$1" != *=* ]]; then shift; fi
-      HEAD_NODE_IP="${1#*=}"
-      ;;
-    --mix_hidden_states*)
-      if [[ "$1" != *=* ]]; then shift; fi
-      MIX_HIDDEN_STATES="${1#*=}"
-      ;;
-    --disable_torch_compile*)
-      if [[ "$1" != *=* ]]; then shift; fi
-      DISABLE_TORCH_COMPILE="${1#*=}"
-      ;;
-    --use_fake_base_for_offline*)
-      if [[ "$1" != *=* ]]; then shift; fi
-      USE_FAKE_BASE_FOR_OFFLINE="${1#*=}"
-      ;;
-    --trust_remote_code*)
-      if [[ "$1" != *=* ]]; then shift; fi
-      TRUST_REMOTE_CODE="${1#*=}"
-      ;;
-    --fsdp*)
-      if [[ "$1" != *=* ]]; then shift; fi
-      FSDP="${1#*=}"
-      ;;
-    *)
-      >&2 printf "Error: Invalid argument ${1#*=}\n"
-      exit 1
-      ;;
+    --config*)     if [[ "$1" != *=* ]]; then shift; fi; CONFIG_FILE="${1#*=}" ;;
+    --num_nodes*)  if [[ "$1" != *=* ]]; then shift; fi; NUM_NODES="${1#*=}" ;;
+    --head_node_ip*) if [[ "$1" != *=* ]]; then shift; fi; HEAD_NODE_IP="${1#*=}" ;;
+    *) EXTRA_ARGS+=("$1") ;;
   esac
   shift
 done
 
-set -x
+if [ -z "$CONFIG_FILE" ]; then
+  >&2 echo "Usage: ./launch_train.sh --config <yaml_file> [--num_nodes N] [--head_node_ip IP] [key=value ...]"
+  exit 1
+fi
 
-SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
-NUM_NODES=${NUM_NODES:-1}
-if [[ "$NUM_NODES" != 1 ]]; then
-  #Multi Node Training
+# GPU count detection
+if [[ "$NUM_NODES" != "1" ]]; then
   GPU_PER_NODE=${GPU_PER_NODE:-$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)}
   TOTAL_GPU=$((NUM_NODES * GPU_PER_NODE))
   echo "Total GPUs: $TOTAL_GPU (NUM_NODES: $NUM_NODES, GPU_PER_NODE: $GPU_PER_NODE)"
 else
-  #Single Node Training, GPU can be specified by $CUDA_VISIBLE_DEVICES
-  TOTAL_GPU=$(python -c "import torch; print(torch.cuda.device_count())")
-  echo "Total GPUs: $TOTAL_GPU (Single Node Training)"
-fi
-# Calculate save_steps
-DEFAULT_SAVE_STEPS=$((8192 / TOTAL_GPU))
-
-MODEL=${MODEL:-"TinyLlama/TinyLlama-1.1B-Chat-v1.0"}
-MODE=${MODE:-"eagle3"}
-EAGLE_DECODER_TYPE=${EAGLE_DECODER_TYPE:-"llama"}
-# Set default OUTPUT_DIR to ckpts/{modelname}, where {modelname} is the last part of the model path
-MODEL_BASENAME=$(basename "$MODEL")
-OUTPUT_DIR=${OUTPUT_DIR:-"ckpts/${MODEL_BASENAME}-$(date +%Y%m%d_%H%M)"}
-NUM_EPOCHS=${NUM_EPOCHS:-1}
-SAVE_STEPS=${SAVE_STEPS:-$DEFAULT_SAVE_STEPS}
-LR=${LR:-"1e-4"}
-TRAIN_BS=${TRAIN_BS:-1}
-TRAINING_SEQ_LEN=${TRAINING_SEQ_LEN:-2048}
-DATA=${DATA:-""}
-OFFLINE_DATA_PATH=${OFFLINE_DATA_PATH:-""}
-DISABLE_TQDM=${DISABLE_TQDM:-False}
-VLM_PROCESSOR=${VLM_PROCESSOR:-}
-VLM_IMG_DIR=${VLM_IMG_DIR:-}
-AR_VALIDATE_STEPS=${AR_VALIDATE_STEPS:-1000}
-ESTIMATE_AR=${ESTIMATE_AR:-False}
-CP_SIZE=${CP_SIZE:-1}
-DP_SHARD_SIZE=${DP_SHARD_SIZE:-$((TOTAL_GPU/CP_SIZE))}
-LOG_STEPS=${LOG_STEPS:-100}
-DRAFT_VOCAB_CACHE=${DRAFT_VOCAB_CACHE:-""}
-MIX_HIDDEN_STATES=${MIX_HIDDEN_STATES:-"False"}
-DISABLE_TORCH_COMPILE=${DISABLE_TORCH_COMPILE:-"False"}
-NUM_TTT_STEPS=${NUM_TTT_STEPS:-3}
-
-USE_FAKE_BASE_FOR_OFFLINE=${USE_FAKE_BASE_FOR_OFFLINE:-"False"}
-TRUST_REMOTE_CODE=${TRUST_REMOTE_CODE:-"False"}
-FSDP=${FSDP:-"False"}
-
-if [[ "$MODE" == "eagle3" ]]; then
-  if [[ -n "$EAGLE_CONFIG" ]]; then
-    SPECULATIVE_ARGS="--eagle_config $EAGLE_CONFIG"
-  else
-    SPECULATIVE_ARGS=""
-  fi
-else
-  echo "Only eagle3 supported for now!"
-  exit 1
+  TOTAL_GPU=$(python3 -c "import torch; print(torch.cuda.device_count())")
+  echo "Total GPUs: $TOTAL_GPU (single node)"
 fi
 
-if [[ "$OFFLINE_DATA_PATH" != "" ]]; then
-  if [[ ! -d "$OFFLINE_DATA_PATH" ]]; then
-    echo "Offline data path $OFFLINE_DATA_PATH does not exist or is not a directory."
-    exit 1
-  else
-    DATA_ARGS="--offline-data-path $OFFLINE_DATA_PATH --ar_validate_steps -1"
-  fi
-else
-  DATA_ARGS="--data_path $DATA"
-fi
-
-
-if [[ "$VLM_PROCESSOR" != "" ]]; then
-  VLM_ARGS="--vlm_processor $VLM_PROCESSOR --vlm_img_dir $VLM_IMG_DIR"
-else
-  VLM_ARGS=""
-fi
-
-if [[ "$TOTAL_GPU" -gt 1 && "$FSDP" == "True" ]]; then
-  #Use FSDP2 when multi GPU available
-  FSDP_ARGS="--fsdp 'full_shard' --fsdp_config ${SCRIPT_DIR}/fsdp_config.json"
-else
-  #Otherwise, single GPU training
-  FSDP_ARGS=""
-fi
-
-
-if [[ "$DRAFT_VOCAB_CACHE" != "" ]]; then
-  DRAFT_VOCAB_CACHE_ARGS="--draft_vocab_cache $DRAFT_VOCAB_CACHE"
-else
-  DRAFT_VOCAB_CACHE_ARGS=""
-fi
-
-if [[ "$NUM_NODES" != 1 ]]; then
+# Multi-node routing args (accelerate only; training config comes from the YAML)
+MULTI_NODE_ARGS=""
+if [[ "$NUM_NODES" != "1" ]]; then
   MULTI_NODE_ARGS="--num_processes $TOTAL_GPU \
                    --num_machines $NUM_NODES \
                    --machine_rank $SLURM_PROCID \
                    --rdzv_backend c10d \
                    --main_process_ip $HEAD_NODE_IP \
                    --main_process_port 29500"
-else
-  MULTI_NODE_ARGS=""
 fi
 
-# Disable tokenizers parallelism to avoid warning
 export TOKENIZERS_PARALLELISM=False
-CMD="accelerate launch $MULTI_NODE_ARGS --mixed_precision bf16 ${SCRIPT_DIR}/main.py \
-    --mode $MODE \
-    --eagle_decoder_type $EAGLE_DECODER_TYPE \
-    --model_name_or_path $MODEL \
-    --training_seq_len $TRAINING_SEQ_LEN \
-    --dataloader_drop_last True \
-    --bf16 True \
-    --output_dir $OUTPUT_DIR \
-    --num_train_epochs $NUM_EPOCHS \
-    --per_device_train_batch_size $TRAIN_BS \
-    --per_device_eval_batch_size $TRAIN_BS \
-    --gradient_accumulation_steps 1 \
-    --do_eval False \
-    --eval_accumulation_steps 1 \
-    --save_strategy steps \
-    --save_steps $SAVE_STEPS \
-    --learning_rate $LR \
-    --weight_decay 0.0 \
-    --warmup_steps 100 \
-    --lr_scheduler_type linear \
-    --logging_steps $LOG_STEPS \
-    --tf32 True \
-    $DATA_ARGS \
-    --disable_tqdm $DISABLE_TQDM \
-    --estimate_ar $ESTIMATE_AR \
-    --ar_validate_steps $AR_VALIDATE_STEPS \
-    --mix_hidden_states $MIX_HIDDEN_STATES \
-    --disable_torch_compile $DISABLE_TORCH_COMPILE \
-    --use_fake_base_for_offline $USE_FAKE_BASE_FOR_OFFLINE \
-    --trust_remote_code $TRUST_REMOTE_CODE \
-    $DRAFT_VOCAB_CACHE_ARGS \
-    $VLM_ARGS \
-    $SPECULATIVE_ARGS \
-    $FSDP_ARGS \
-    --cp_size $CP_SIZE \
-    --dp_shard_size $DP_SHARD_SIZE \
-    --num_ttt_steps $NUM_TTT_STEPS \
-"
 
+set -x
 start_time=$(date +%s)
-sh -c "$CMD"
-echo "Total time taken: $(( $(date +%s) - $start_time )) seconds"
+sh -c "accelerate launch --mixed_precision bf16 $MULTI_NODE_ARGS ${SCRIPT_DIR}/main.py --config $CONFIG_FILE ${EXTRA_ARGS[*]}"
+echo "Total time: $(( $(date +%s) - $start_time )) seconds"

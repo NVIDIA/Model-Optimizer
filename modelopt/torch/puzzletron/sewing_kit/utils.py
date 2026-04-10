@@ -96,7 +96,6 @@ class ActivityContext(Generic[T]):
         self.max_depth = max_depth
         self.no_duplicates = no_duplicates
         self.reversed = reversed
-        self.head_index = 0 if self.reversed else -1
 
     def __contains__(self, value: T) -> bool:
         result = value in self.activity_stack
@@ -105,13 +104,18 @@ class ActivityContext(Generic[T]):
     def __call__(self, value: T) -> ContextManager:
         @contextmanager
         def fn():
+            inserted = False
             try:
                 if self.no_duplicates and value in self.activity_stack:
                     raise ActivityContextDuplicateException(
                         f"Activity stack cannot have a duplicate of item {value}"
                     )
 
-                self.activity_stack.insert(self.head_index, value)
+                if self.reversed:
+                    self.activity_stack.insert(0, value)
+                else:
+                    self.activity_stack.append(value)
+                inserted = True
 
                 if self.max_depth is not None and len(self) > self.max_depth:
                     raise ActivityContextMaxDepthException(
@@ -120,8 +124,9 @@ class ActivityContext(Generic[T]):
 
                 yield
             finally:
-                assert self.is_active()
-                self.activity_stack.pop(self.head_index)
+                if inserted:
+                    assert self.is_active()
+                    self.activity_stack.pop(0 if self.reversed else -1)
 
         return fn()
 
@@ -142,10 +147,9 @@ class ActivityContext(Generic[T]):
         return result
 
     def get_active(self) -> Optional[T]:
-        if self.is_active:
+        if self.is_active():
             return self.activity_stack[-1]
-        else:
-            return None
+        return None
 
 
 def is_submodule_of(module_name: str, other_module_name: str) -> bool:

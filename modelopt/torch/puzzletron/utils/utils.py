@@ -21,11 +21,7 @@ from typing import Any
 
 import torch
 
-from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.block_config import (
-    AttentionConfig,
-    BlockConfig,
-    FFNConfig,
-)
+from modelopt.torch.puzzletron.block_config import AttentionConfig, BlockConfig, FFNConfig
 
 
 def calculate_kv_dim(num_key_value_heads: int, n_head: int, n_embd: int) -> int:

@@ -30,7 +30,7 @@ from transformers import PretrainedConfig
 from transformers.integrations.mxfp4 import convert_moe_packed_tensors
 
 from modelopt.torch.puzzletron.anymodel.model_descriptor import ModelDescriptor
-from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.block_config import BlockConfig
+from modelopt.torch.puzzletron.block_config import BlockConfig
 from modelopt.torch.puzzletron.tools.checkpoint_utils_hf import load_model_config, save_model_config
 
 __all__ = ["Converter"]
@@ -102,8 +102,8 @@ class Converter(ABC):
                             if name.endswith("_blocks"):
                                 converted_name = converted_name.replace("_blocks", "")
                                 tensors[converted_name] = convert_moe_packed_tensors(
-                                    data[converted_name + "_blocks"],
-                                    data[converted_name + "_scales"],
+                                    data[name],
+                                    data[name.replace("_blocks", "_scales")],
                                 )
                             elif name.endswith("_scales"):
                                 continue

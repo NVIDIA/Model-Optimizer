@@ -17,6 +17,7 @@ import importlib
 import inspect
 import pkgutil
 import re
+import sys
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Type
@@ -28,7 +29,7 @@ from modelopt.torch.puzzletron.anymodel.model_descriptor import (
     ModelDescriptorFactory,
 )
 from modelopt.torch.puzzletron.anymodel.puzzformer.no_op import MatchingZeros, Same
-from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.block_config import BlockConfig
+from modelopt.torch.puzzletron.block_config import BlockConfig
 from modelopt.torch.puzzletron.pruning.ffn_intermediate_pruning_mixin import (
     FFNIntermediateLayerDescriptor,
     FFNIntermediatePruningMixIn,
@@ -39,10 +40,21 @@ from modelopt.torch.puzzletron.pruning.pruning_mixin import PruningMixIn
 def get_dynamic_modules(module_cls_str: str) -> List[Type[nn.Module]]:
     import transformers_modules
 
+    prefix = transformers_modules.__name__ + "."
+
+    # Search already-imported modules first to avoid executing unrelated cached code.
     matches = []
-    for finder, modname, ispkg in pkgutil.walk_packages(
-        transformers_modules.__path__, transformers_modules.__name__ + "."
-    ):
+    for modname, module in list(sys.modules.items()):
+        if modname.startswith(prefix) and module is not None:
+            for _, obj in inspect.getmembers(module, inspect.isclass):
+                if obj.__name__ == module_cls_str:
+                    matches.append(obj)
+
+    if matches:
+        return matches
+
+    # Fall back to walking only the transformers_modules namespace if nothing found yet.
+    for finder, modname, ispkg in pkgutil.walk_packages(transformers_modules.__path__, prefix):
         module = importlib.import_module(modname)
         for _, obj in inspect.getmembers(module, inspect.isclass):
             if obj.__name__ == module_cls_str:
@@ -88,8 +100,12 @@ class NemotronHV2ModelDescriptor(ModelDescriptor):
             override_kwargs["num_key_value_heads"] = block_config.attention.num_key_value_heads
 
         if block_config.ffn is not None and block_config.ffn.moe is not None:
-            override_kwargs["moe_intermediate_size"] = block_config.ffn.moe.expert_intermediate_dim
-            override_kwargs["n_routed_experts"] = block_config.ffn.moe.num_local_experts
+            if block_config.ffn.moe.expert_intermediate_dim is not None:
+                override_kwargs["moe_intermediate_size"] = (
+                    block_config.ffn.moe.expert_intermediate_dim
+                )
+            if block_config.ffn.moe.num_local_experts is not None:
+                override_kwargs["n_routed_experts"] = block_config.ffn.moe.num_local_experts
 
         return override_kwargs
 
@@ -169,8 +185,8 @@ class NemotronHV2ModelDescriptor(ModelDescriptor):
         for group, names in weight_groups.items():
             if len(names) == 1:
                 only_name = names[0]
-                if only_name.endswith("norm.weight") and "layers" in only_name:
-                    # Skip and don't append this group to valid_weight_groups
+                if re.fullmatch(r"backbone\.layers\.\d+\.norm\.weight", only_name):
+                    # Skip the duplicated root layer norm; don't drop mixer.norm.weight etc.
                     continue
             valid_weight_groups[group] = names
 

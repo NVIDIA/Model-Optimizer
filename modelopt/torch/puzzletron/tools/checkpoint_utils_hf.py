@@ -37,7 +37,7 @@ from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig, Pre
 from transformers.dynamic_module_utils import get_class_from_dynamic_module
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
-from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.block_config import maybe_cast_block_configs
+from modelopt.torch.puzzletron.block_config import maybe_cast_block_configs
 from modelopt.torch.puzzletron.tools.common import infer_weights_dtype
 from modelopt.torch.puzzletron.tools.logger import mprint
 from modelopt.torch.puzzletron.tools.post_init_sparse import SparsityMethod
@@ -133,6 +133,33 @@ def _get_model_class_from_config(config: PretrainedConfig) -> type:
     return AutoModelForCausalLM
 
 
+def _get_auto_class_for_trust_remote_code(config: PretrainedConfig) -> type:
+    """Pick the right Auto class for a trust_remote_code model by inspecting auto_map.
+
+    When a model requires trust_remote_code, the native transformers class resolved from
+    config.architectures must NOT be used directly — it may have a different module structure
+    than the trust_remote_code class (e.g. NemotronH: native uses ``model.`` prefix, but the
+    trust_remote_code class uses ``backbone.`` prefix, causing key mismatches throughout the
+    pipeline). Instead, we route through the appropriate Auto class so that from_config()
+    resolves the class via auto_map, picking up the correct trust_remote_code implementation.
+
+    Models declare which Auto class they support via config.auto_map. We walk a priority list
+    so that CausalLM models and VL models (AutoModelForConditionalGeneration or similar) are
+    both handled correctly.
+    """
+    auto_map = getattr(config, "auto_map", {})
+    priority = [
+        "AutoModelForCausalLM",
+        "AutoModelForConditionalGeneration",
+        "AutoModelForImageTextToText",
+        "AutoModel",
+    ]
+    for name in priority:
+        if name in auto_map and hasattr(transformers, name):
+            return getattr(transformers, name)
+    return AutoModelForCausalLM
+
+
 def init_model_from_config(
     config: PretrainedConfig,
     *,
@@ -145,10 +172,13 @@ def init_model_from_config(
     Pass True when loading configs that rely on custom modeling code from the checkpoint.
     """
     model_class = _get_model_class_from_config(config)
+    if trust_remote_code:
+        auto_cls = _get_auto_class_for_trust_remote_code(config)
+        return auto_cls.from_config(config, trust_remote_code=trust_remote_code, **kwargs)
     if model_class is AutoModelForCausalLM:
-        return model_class.from_config(config, trust_remote_code=trust_remote_code, **kwargs)
-    # Concrete model classes (e.g. GptOssForCausalLM): _from_config forwards kwargs to __init__,
-    # which does not accept trust_remote_code (only AutoModel uses it when loading custom code).
+        return AutoModelForCausalLM.from_config(config, **kwargs)
+    # Concrete model classes (e.g. GptOssForCausalLM, Qwen3VLMoeForConditionalGeneration):
+    # _from_config forwards kwargs to __init__, which does not accept trust_remote_code.
     return model_class._from_config(config, **kwargs)
 
 
@@ -344,13 +374,17 @@ def _write_file_process_safe(
     and writes the content to the file. It can be _write_text (defined above), or torch.save,
     or a similar function (not safetensors.torch.save_file since it expects a path).
     """
-    with open(path, "wb") as f:
+    # Open with "ab+" so the file is not truncated before the lock is acquired.
+    # Once we hold the exclusive lock we seek to the start and truncate explicitly.
+    with open(path, "ab+") as f:
         # Try to acquire an exclusive, non-blocking lock
         try:
             fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             return  # Exit immediately if the lock is not acquired
 
+        f.seek(0)
+        f.truncate()
         write_fn(content, f)  # Write the content if lock is acquired
         f.flush()  # Ensure data is written to disk
 

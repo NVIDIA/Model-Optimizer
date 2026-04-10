@@ -135,7 +135,7 @@ def main(args: argparse.Namespace) -> None:
         dataset = dataset.select(range(args.debug_max_num_conversations))
 
     model = AutoModel.from_pretrained(
-        args.model, torch_dtype="auto", device_map="auto", trust_remote_code=args.trust_remote_code
+        args.model, dtype="auto", device_map="auto", trust_remote_code=args.trust_remote_code
     )
     num_hidden_layers = getattr(model.config, "num_hidden_layers", None)
 
@@ -206,8 +206,11 @@ def main(args: argparse.Namespace) -> None:
                 continue
 
             # Tokenize and check length
+            # return_dict=True ensures BatchEncoding is returned on all transformers
+            # versions: in <5.0 the default is False (returns raw tensor), in 5.0+
+            # the default changed to True (returns BatchEncoding).
             input_ids = tokenizer.apply_chat_template(
-                conversations, return_tensors="pt", add_generation_template=False
+                conversations, return_tensors="pt", return_dict=True, add_generation_template=False
             )["input_ids"]
             num_input_tokens = input_ids.shape[1]
             if num_input_tokens <= 10 or num_input_tokens > args.max_seq_len:

@@ -32,7 +32,7 @@ from modelopt.torch.puzzletron.anymodel.puzzformer.no_op import (
     Same,
     return_tuple_of_size,
 )
-from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.block_config import BlockConfig
+from modelopt.torch.puzzletron.block_config import BlockConfig
 from modelopt.torch.puzzletron.pruning.expert_removal_pruning_mixin import (
     ExpertRemovalLayerDescriptor,
     ExpertRemovalPruningMixIn,
@@ -54,8 +54,9 @@ class GptOssModelDescriptor(ModelDescriptor):
     @classmethod
     def create_dummy_block(cls, original_layer: GptOssDecoderLayer, block_index: int) -> nn.Module:
         dummy_block = DummyBlock(block_index=block_index)
-        # Required by `GptOssModel.forward`.
-        dummy_block.attention_type = original_layer.attention_type
+        # Required by `GptOssModel.forward` in transformers<5.4
+        if hasattr(original_layer, "attention_type"):
+            dummy_block.attention_type = original_layer.attention_type
         return dummy_block
 
     @staticmethod

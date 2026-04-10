@@ -235,8 +235,19 @@ def prepare_dataloader(
     if tokenizer is None:
         tokenizer_name = getattr(args, "tokenizer_name", None)
         assert (tokenizer_name is not None) or (args.model_name_or_path is not None)
+        # Auto-detect trust_remote_code from the descriptor when not explicitly set.
+        # Required for models like NemotronH v2 whose configs use characters (e.g. '-') that
+        # the native transformers NemotronHConfig._pattern_to_list doesn't support.
+        trust_remote_code = getattr(args, "trust_remote_code", False)
+        if not trust_remote_code and getattr(args, "descriptor", None):
+            try:
+                descriptor_cls = ModelDescriptorFactory.get(args.descriptor)
+                trust_remote_code = descriptor_cls.requires_trust_remote_code()
+            except Exception:
+                pass
         tokenizer = AutoTokenizer.from_pretrained(
-            tokenizer_name or args.model_name_or_path, trust_remote_code=True
+            tokenizer_name or args.model_name_or_path,
+            trust_remote_code=trust_remote_code,
         )
 
     val_dataloader = create_validation_dataloader(

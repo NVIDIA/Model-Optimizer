@@ -174,7 +174,7 @@ class Nvfp4Linear(Function):
             grad_weight = grad_outputs.reshape(-1, grad_outputs.shape[-1]).T @ input_tensor.reshape(
                 -1, input_tensor.shape[-1]
             )
-        if ctx.compute_bias_grad is not None:
+        if ctx.compute_bias_grad:
             # Sum all dimensions except the last one
             grad_bias = grad_outputs.sum(dim=list(range(grad_outputs.dim() - 1)))
 

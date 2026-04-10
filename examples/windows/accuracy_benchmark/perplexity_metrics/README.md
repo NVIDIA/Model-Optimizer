@@ -2,7 +2,7 @@
 
 ## Overview
 
-This tool evaluates the perplexity of ONNX Runtime GenAI models and HuggingFace models using the [WikiText-2](https://huggingface.co/datasets/wikitext) dataset. Perplexity is a standard metric for language models: lower values indicate better predictive performance.
+This tool evaluates the perplexity of ONNX Runtime GenAI models and HuggingFace models using the [WikiText-2](https://huggingface.co/datasets/Salesforce/wikitext) dataset. Perplexity is a standard metric for language models: lower values indicate better predictive performance.
 
 ## Attribution
 

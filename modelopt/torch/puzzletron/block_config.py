@@ -111,6 +111,8 @@ def _get_dataclass_type(tp: Type) -> dataclass:
 
 @dataclass(frozen=True, kw_only=True)
 class SubblockConfig(BaseDataclass):
+    """Base configuration for a subblock (e.g. attention or FFN) within a transformer block."""
+
     no_op: bool = False
     replace_with_linear: bool = False
     sparsify: Optional[list[str]] = None
@@ -148,10 +150,12 @@ class MoEConfig(BaseDataclass):
         if self.num_local_experts <= 0:
             raise ValueError(f"num_local_experts must be positive, got {self.num_local_experts}")
         if self.num_experts_per_tok <= 0:
-            raise ValueError(f"top_k must be positive, got {self.top_k}")
+            raise ValueError(
+                f"num_experts_per_tok must be positive, got {self.num_experts_per_tok}"
+            )
         if self.num_experts_per_tok > self.num_local_experts:
             raise ValueError(
-                f"top_k ({self.top_k}) cannot be greater than num_local_experts ({self.num_local_experts})"
+                f"num_experts_per_tok ({self.num_experts_per_tok}) cannot be greater than num_local_experts ({self.num_local_experts})"
             )
         # if self.router_aux_loss_coef < 0:
         #     raise ValueError(f"router_aux_loss_coef must be non-negative, got {self.router_aux_loss_coef}")
@@ -159,6 +163,8 @@ class MoEConfig(BaseDataclass):
 
 @dataclass(frozen=True, kw_only=True)
 class MambaConfig(BaseDataclass):
+    """Configuration for a Mamba (state-space model) subblock."""
+
     state_dim: int
     num_heads: int
     head_dim: int
@@ -167,6 +173,8 @@ class MambaConfig(BaseDataclass):
 
 @dataclass(frozen=True, kw_only=True)
 class Llama4AttentionConfig(BaseDataclass):
+    """Configuration for Llama-4-specific attention parameters."""
+
     attention_chunk_size: Optional[int] = None
     use_rope: Optional[bool] = None
     use_qk_norm: Optional[bool] = None
@@ -178,6 +186,8 @@ class Llama4AttentionConfig(BaseDataclass):
 
 @dataclass(frozen=True, kw_only=True)
 class AttentionConfig(SubblockConfig):
+    """Configuration for an attention subblock within a transformer block."""
+
     num_key_value_heads: Optional[int] = None
     llama4: Optional[Llama4AttentionConfig] = None
     mamba: Optional[MambaConfig] = None
@@ -211,6 +221,8 @@ class AttentionConfig(SubblockConfig):
 
 @dataclass(frozen=True, kw_only=True)
 class FFNConfig(SubblockConfig):
+    """Configuration for a feed-forward network subblock within a transformer block."""
+
     moe: Optional[MoEConfig] = None
     intermediate_size: Optional[int] = None
 
@@ -242,6 +254,8 @@ SUBBLOCK_CLS_DICT = {
 
 @dataclass(frozen=True, kw_only=True)
 class BlockConfig(BaseDataclass):
+    """Configuration for a single transformer block, including its attention and FFN subblocks."""
+
     attention: Optional[AttentionConfig] = None
     ffn: Optional[FFNConfig] = None
     parallel_blocks: Optional[list["BlockConfig"]] = None

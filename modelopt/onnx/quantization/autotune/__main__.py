@@ -22,6 +22,10 @@ from pathlib import Path
 
 from modelopt.onnx.logging_config import logger
 from modelopt.onnx.quantization.autotune.utils import (
+    DEFAULT_NUM_SCHEMES,
+    DEFAULT_TIMING_RUNS,
+    DEFAULT_WARMUP_RUNS,
+    MODE_PRESETS,
     StoreWithExplicitFlag,
     get_node_filter_list,
     validate_file_path,
@@ -32,21 +36,9 @@ from modelopt.onnx.quantization.autotune.workflows import (
 )
 
 DEFAULT_OUTPUT_DIR = "./autotuner_output"
-DEFAULT_NUM_SCHEMES = 50
 DEFAULT_QUANT_TYPE = "int8"
 DEFAULT_DQ_DTYPE = "float32"
 DEFAULT_TIMING_CACHE = str(Path(tempfile.gettempdir()) / "trtexec_timing.cache")
-DEFAULT_WARMUP_RUNS = 50
-DEFAULT_TIMING_RUNS = 100
-MODE_PRESETS = {
-    "quick": {"schemes_per_region": 30, "warmup_runs": 10, "timing_runs": 50},
-    "default": {
-        "schemes_per_region": DEFAULT_NUM_SCHEMES,
-        "warmup_runs": DEFAULT_WARMUP_RUNS,
-        "timing_runs": DEFAULT_TIMING_RUNS,
-    },
-    "extensive": {"schemes_per_region": 200, "warmup_runs": 50, "timing_runs": 200},
-}
 
 
 def apply_mode_presets(args) -> None:

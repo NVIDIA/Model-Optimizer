@@ -29,7 +29,7 @@ from modelopt.torch.puzzletron.anymodel.model_descriptor import (
     ModelDescriptorFactory,
 )
 from modelopt.torch.puzzletron.anymodel.puzzformer.no_op import MatchingZeros, Same
-from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.block_config import BlockConfig
+from modelopt.torch.puzzletron.block_config import BlockConfig
 from modelopt.torch.puzzletron.pruning.expert_removal_pruning_mixin import (
     ExpertRemovalLayerDescriptor,
     ExpertRemovalPruningMixIn,
@@ -200,7 +200,7 @@ class NemotronHModelDescriptor(ModelDescriptor):
     def layer_name_predicates(num_layers: int) -> Dict[str, re.Pattern]:
         layer_name_patterns = {
             "embeddings": re.compile(
-                r"^(model\.embed_tokens\.weight|backbone\.embeddings\.weight)$"
+                r"^(model\.embed_tokens\.weight|backbone\.embeddings?\.weight)$"
             ),
             "lm_head": re.compile(r"^(lm_head\.weight|backbone\.norm_f\.weight)$"),
         }

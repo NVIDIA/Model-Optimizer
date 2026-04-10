@@ -21,11 +21,7 @@ from dataclasses import dataclass
 from typing import Dict
 
 from torch import nn
-from transformers.models.qwen2.modeling_qwen2 import (
-    Qwen2DecoderLayer,
-    Qwen2ForCausalLM,
-    Qwen2RotaryEmbedding,
-)
+from transformers.models.qwen2.modeling_qwen2 import Qwen2DecoderLayer, Qwen2RotaryEmbedding
 
 from modelopt.torch.puzzletron.anymodel.model_descriptor import (
     ModelDescriptor,
@@ -39,7 +35,7 @@ from modelopt.torch.puzzletron.anymodel.puzzformer.no_op import (
     Same,
     return_tuple_of_size,
 )
-from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.block_config import BlockConfig
+from modelopt.torch.puzzletron.block_config import BlockConfig
 from modelopt.torch.puzzletron.utils.dummy_modules import DummyBlock
 
 
@@ -71,17 +67,17 @@ class Qwen2ModelDescriptor(ModelDescriptor):
         }
 
     @staticmethod
-    def attn_no_op_post_init(decoder_layer: Qwen2DecoderLayer):
+    def attn_no_op_post_init(decoder_layer: nn.Module):
         decoder_layer.input_layernorm = Same()
         decoder_layer.self_attn = return_tuple_of_size(MatchingZeros, size=2)()
 
     @staticmethod
-    def mlp_no_op_post_init(decoder_layer: Qwen2DecoderLayer):
+    def mlp_no_op_post_init(decoder_layer: nn.Module):
         decoder_layer.post_attention_layernorm = Same()
         decoder_layer.mlp = MatchingZeros()
 
     @staticmethod
-    def init_rotary_embedding(model: Qwen2ForCausalLM, runtime):
+    def init_rotary_embedding(model: nn.Module, runtime):
         model.model.rotary_emb = Qwen2RotaryEmbedding(config=model.config, device=runtime.device)
 
     @staticmethod

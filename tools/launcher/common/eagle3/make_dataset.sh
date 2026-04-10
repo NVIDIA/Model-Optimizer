@@ -1,3 +1,5 @@
+#!/bin/bash
+
 # SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -13,17 +15,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Copyright 2024 Nvidia Corporation, Google Inc, HuggingFace Inc, EleutherAI. All rights reserved.
-#
-# Small nn helpers for puzzletron pipeline code. Model configs come from HuggingFace ``AutoConfig`` (AnyModel).
-# ``LMHead`` is a distinct ``nn.Linear`` subclass so pipeline / FSDP code can target it explicitly
-# (see ``validate_runtime_pipeline``).
-# mypy: ignore-errors
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 
-from torch import nn
+source ${SCRIPT_DIR}/../service_utils.sh
+
+###################################################################################################
+
+trap 'error_handler $0 $LINENO' ERR # ERROR HANDLER
+
+python modules/Model-Optimizer/examples/dataset/make_dataset.py \
+    ${@}
+
+mkdir -p /scratchspace/data
+mv input_conversations/train.jsonl /scratchspace/data/train.jsonl
 
 
-class LMHead(nn.Linear):
-    """
-    Special class to allow FSDP wrapping without affecting other Linear layers in the model.
-    """

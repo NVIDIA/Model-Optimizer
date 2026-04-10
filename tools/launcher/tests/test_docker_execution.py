@@ -51,7 +51,7 @@ class TestBuildDockerExecutor:
             modelopt_src_path="/tmp/modelopt",
             experiment_title="cicd",
         )
-        scratch_dir = os.path.join(job_dir, "cicd", "exp_123", "task_0")
+        scratch_dir = os.path.join(job_dir, "cicd", "exp_123")
         assert os.path.isdir(scratch_dir)
 
     def test_hf_local_mount(self, tmp_path):
@@ -100,7 +100,7 @@ class TestBuildDockerExecutor:
             experiment_title="cicd",
         )
         volumes = executor.volumes
-        expected_scratch = os.path.join(job_dir, "cicd", "exp_456", "job_0")
+        expected_scratch = os.path.join(job_dir, "cicd", "exp_456")
         assert any(f"{expected_scratch}:/scratchspace" in v for v in volumes)
 
     def test_modelopt_mount(self, tmp_path):

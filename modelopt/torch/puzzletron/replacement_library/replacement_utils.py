@@ -23,7 +23,7 @@ from pathlib import Path
 
 from transformers import PretrainedConfig
 
-from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.block_config import BlockConfig
+from modelopt.torch.puzzletron.block_config import BlockConfig
 from modelopt.torch.puzzletron.mip.utils import sort_replacements
 
 
