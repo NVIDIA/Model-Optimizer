@@ -196,7 +196,7 @@ def _postprocess_safetensors(
     for sf_path in safetensor_files:
         with safe_open(str(sf_path), framework="pt") as f:
             metadata = dict(f.metadata() or {})
-            sd = {k: f.get_tensor(k).clone() for k in f.keys()}
+            sd = {k: f.get_tensor(k).clone() for k in f}
 
         if merged_base_safetensor_path is not None and model_type is not None:
             sd, base_metadata = merge_diffusion_checkpoint(
