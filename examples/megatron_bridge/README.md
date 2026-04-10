@@ -171,7 +171,7 @@ torchrun --nnodes 1 --nproc_per_node 8 distill.py \
     --student_hf_model Qwen/Qwen3-4B
 ```
 
-`--student_hf_model` should match the base architecture of the student (used as a template for export).
+`--student_hf_model` should match the base architecture of the student (used as a template for export). For non-Puzzletron (i.e. standard) models, it should be same as `--student_hf_path`.
 
 **Separate conversion** -- convert any saved iteration using the Megatron-Bridge conversion script:
 

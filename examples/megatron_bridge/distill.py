@@ -23,7 +23,6 @@ See `README.md` in this directory for example usage and data preparation instruc
 import argparse
 import contextlib
 import os
-import shutil
 
 import torch
 from megatron.bridge import AutoBridge
@@ -45,6 +44,7 @@ from megatron.bridge.training.distill import distill
 from megatron.bridge.training.post_training.distillation import ModelOptDistillConfig
 from megatron.core.datasets.utils import get_blend_from_list
 from megatron.core.distributed import DistributedDataParallelConfig
+from transformers import AutoConfig
 
 with contextlib.suppress(ImportError):
     import modelopt.torch.puzzletron.export.mbridge  # noqa: F401
@@ -301,7 +301,10 @@ def main(args: argparse.Namespace):
                 show_progress=True,
                 strict=True,
             )
-            shutil.copy(f"{args.student_hf_path}/config.json", f"{args.hf_export_path}/config.json")
+            # Copy config.json from student_hf_path (handles both local paths and HF model IDs)
+            AutoConfig.from_pretrained(
+                args.student_hf_path, trust_remote_code=args.trust_remote_code
+            ).save_pretrained(args.hf_export_path)
 
 
 if __name__ == "__main__":

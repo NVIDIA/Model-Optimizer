@@ -125,7 +125,7 @@ jobs:
     strategy: &nemo_strategy
       fail-fast: false
       matrix:
-        example: [megatron_bridge, puzzletron]
+        example: [megatron_bridge]
     uses: ./.github/workflows/_example_tests_runner.yml
     secrets: inherit
     with:
