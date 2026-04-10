@@ -78,6 +78,7 @@ additional_env_vars = {
     "KV_QUANT_CFG",
     "MODELOPT_STATE_PATH",
     "CALIB_BATCH_SIZE",
+    "RECIPE_PATH",
     "TRUST_REMOTE_CODE",
 }
 
