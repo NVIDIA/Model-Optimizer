@@ -66,7 +66,6 @@ if vllm_version <= version.parse("0.11.0"):
     from vllm.utils import FlexibleArgumentParser
 else:
     from vllm.utils.argparse_utils import FlexibleArgumentParser
-    from vllm.v1.executor.ray_executor import RayDistributedExecutor
 
 
 # Adding the envs you want to pass to the workers
@@ -81,7 +80,14 @@ additional_env_vars = {
     "TRUST_REMOTE_CODE",
 }
 
-RayDistributedExecutor.ADDITIONAL_ENV_VARS.update(additional_env_vars)
+if vllm_version <= version.parse("0.11.0"):
+    RayDistributedExecutor.ADDITIONAL_ENV_VARS.update(additional_env_vars)
+else:
+    from vllm.platforms import current_platform
+
+    for _name in additional_env_vars:
+        if _name not in current_platform.additional_env_vars:
+            current_platform.additional_env_vars.append(_name)
 
 
 def main():
