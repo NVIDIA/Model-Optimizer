@@ -23,7 +23,7 @@ from typing import Any, ContextManager, Iterable, Mapping, Optional, Union
 import torch.nn as nn
 from typing_extensions import override
 
-from ..utils import (
+from .utils import (
     ActivityContext,
     dynamo_skip,
     fake_tensors,

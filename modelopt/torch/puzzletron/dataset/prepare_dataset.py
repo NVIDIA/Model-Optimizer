@@ -21,7 +21,7 @@ import numpy as np
 
 from ..tools.logger import mprint
 
-__all__ = []
+__all__ = ["process_and_save_dataset"]
 
 
 def process_and_save_dataset(

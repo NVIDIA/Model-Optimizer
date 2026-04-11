@@ -36,15 +36,15 @@ from tqdm import tqdm
 
 import modelopt.torch.utils.distributed as dist
 
-from ..sewing_kit import (
+from ..sewing_kit.core import (
     ExternalTarget,
-    InputArgs,
+    InputReducer,
     ModuleTarget,
     Needle,
     RemoteTarget,
     StitchedModule,
 )
-from ..sewing_kit.core import InputReducer
+from ..sewing_kit.passage import InputArgs
 from ..sewing_kit.utils import distributed_recv_obj, distributed_send_obj, fake_tensor
 from ..tools.checkpoint_utils import init_module_with_state_dict
 from ..utils.dummy_modules import DummyBlock

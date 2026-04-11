@@ -27,14 +27,11 @@ from omegaconf import DictConfig
 
 import modelopt.torch.utils.distributed as dist
 
-from ..tools.hydra_utils import register_hydra_resolvers
-from ..tools.logger import mprint
-from ..tools.validate_puzzle_with_multi_replacements import validate_puzzle_solutions
+from .tools.hydra_utils import register_hydra_resolvers
+from .tools.logger import mprint
+from .tools.validate_puzzle_with_multi_replacements import validate_puzzle_solutions
 
-__all__ = [
-    "extract_solution_id",
-    "launch_scoring",
-]
+__all__ = ["launch_scoring"]
 
 
 def extract_solution_id(filename):
