@@ -1,8 +1,9 @@
 # DFlash online speculative decoding training for Qwen3-8B.
 #
-# 2-step pipeline:
-#   task_0: Online DFlash training (8 nodes, 64 GPUs)
-#   task_1: MT-Bench per-category AR evaluation (1 GPU)
+# 3-step pipeline:
+#   task_0: Online DFlash training
+#   task_1: vLLM smoke test with DFlash speculative decoding
+#   task_2: MT-Bench per-category HF AR evaluation (1 GPU)
 #
 # Reference: "DFlash: Block Diffusion for Flash Speculative Decoding" (arXiv:2602.06036)
 #
@@ -21,7 +22,8 @@ pipeline:
     args:
       - --config modules/Model-Optimizer/modelopt_recipes/general/speculative_decoding/dflash.yaml
       - model.model_name_or_path=<<global_vars.hf_model>>
-      - data.data_path=/hf-local/modelopt/Speculative-Decoding-Dataset-v1-Qwen3-8B/sample-1K.jsonl
+      - data.data_path=/hf-local/modelopt/Speculative-Decoding-Dataset-v1-Qwen3-8B/sample-1K-openai.jsonl
+      - data.chat_template=modules/Model-Optimizer/tools/launcher/examples/Qwen/Qwen3-8B/chat_template_train.jinja
       - training.output_dir=/scratchspace/dflash_bs16
       - training.num_train_epochs=1
       - training.training_seq_len=4096
@@ -41,8 +43,22 @@ pipeline:
       ntasks_per_node: 1
       gpus_per_node: 8
 
-  # Step 2: MT-Bench per-category AR evaluation
+  # Step 2: vLLM smoke test (uses exported checkpoint from training)
   task_1:
+    script: common/specdec/vllm_smoke_test.sh
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+      - DRAFT_CKPT_DIR: /scratchspace/dflash_bs16
+      - SPEC_METHOD: "dflash"
+      - NUM_SPEC_TOKENS: "7"
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 1
+
+  # Step 3: HF AR evaluation
+  task_2:
     script: common/specdec/ar_eval_mtbench.sh
     args:
       - --ckpt_dir /scratchspace/dflash_bs16

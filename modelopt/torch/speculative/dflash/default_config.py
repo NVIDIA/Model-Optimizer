@@ -30,6 +30,7 @@ default_dflash_config = {
     "initializer_range": 0.02,
     "attention_bias": False,
     "attention_dropout": 0.0,
+    "rope_scaling": {"rope_type": "default"},
     "tie_word_embeddings": False,
     "_attn_implementation": "sdpa",
 }

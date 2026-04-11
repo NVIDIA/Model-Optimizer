@@ -66,6 +66,14 @@ def make_speculative_data_module(
         shift_labels: If True, labels are shifted by 1 for autoregressive training (EAGLE3).
             If False, labels are unshifted for diffusion-style training (DFlash).
     """
+    # Load chat template from file if provided
+    chat_template = None
+    if getattr(data_args, "chat_template", None):
+        template_path = data_args.chat_template
+        with open(template_path) as f:
+            chat_template = f.read()
+        print_rank_0(f"Loaded chat template from {template_path}")
+
     if data_args.offline_data_path is None:
         train_dataset = ShardedDataset("json", data_files=data_args.data_path)
 
@@ -76,6 +84,7 @@ def make_speculative_data_module(
                 return_labels=True,
                 answer_only_loss=answer_only_loss,
                 shift_labels=shift_labels,
+                chat_template=chat_template,
             )
         else:
             data_collator = VisionLanguageDataCollator(

@@ -113,14 +113,22 @@ for arg in sys.argv[1:]:
 " "$@")
 
     if [ -n "$OUTPUT_DIR" ]; then
+        # Find the best checkpoint: last checkpoint-* subdir, or output_dir itself
         LAST_CKPT=$(ls -d ${OUTPUT_DIR}/checkpoint-* 2>/dev/null | sort -t- -k2 -n | tail -1)
         if [ -n "$LAST_CKPT" ]; then
             STEP=$(basename "$LAST_CKPT" | sed 's/checkpoint-//')
+        elif [ -f "${OUTPUT_DIR}/model.safetensors" ] || [ -f "${OUTPUT_DIR}/modelopt_state.pth" ]; then
+            LAST_CKPT="${OUTPUT_DIR}"
+            STEP="final"
+        fi
+
+        if [ -n "$LAST_CKPT" ]; then
             EXPORT_DIR="${OUTPUT_DIR}/exported-checkpoint-${STEP}"
-            echo "=== Exporting last checkpoint: ${LAST_CKPT} → ${EXPORT_DIR} ==="
+            echo "=== Exporting: ${LAST_CKPT} → ${EXPORT_DIR} ==="
             CUDA_VISIBLE_DEVICES=0 python3 modules/Model-Optimizer/examples/speculative_decoding/scripts/export_hf_checkpoint.py \
                 --model_path "${LAST_CKPT}" \
-                --export_path "${EXPORT_DIR}"
+                --export_path "${EXPORT_DIR}" \
+                --trust_remote_code
             echo "Export contents:"
             ls -lh "${EXPORT_DIR}/"
         else

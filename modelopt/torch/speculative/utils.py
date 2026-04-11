@@ -588,8 +588,11 @@ def load_vlm_or_llm(
 
         return FakeBaseModel.from_source(model_name_or_path, trust_remote_code=trust_remote_code)
 
+    is_local = os.path.isdir(model_name_or_path)
     model_config = transformers.AutoConfig.from_pretrained(
-        model_name_or_path, trust_remote_code=trust_remote_code
+        model_name_or_path,
+        trust_remote_code=trust_remote_code,
+        local_files_only=is_local,
     )
     if "vl" in model_config.model_type.lower():
         model_cls = transformers.AutoModelForVision2Seq
@@ -605,6 +608,7 @@ def load_vlm_or_llm(
     model = model_cls.from_pretrained(
         model_name_or_path,
         trust_remote_code=trust_remote_code,
+        local_files_only=is_local,
         dtype=dtype,
         device_map=device_map,
         **extra,

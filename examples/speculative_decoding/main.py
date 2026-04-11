@@ -90,6 +90,13 @@ class DataArguments:
         default=None,
         metadata={"help": "Path to draft vocabulary cache file."},
     )
+    chat_template: str = field(
+        default=None,
+        metadata={
+            "help": "Jinja chat template with {% generation %} tags for answer_only_loss. "
+            "If not set, the tokenizer's built-in template is used (must already have generation tags)."
+        },
+    )
     vlm_img_dir: str = field(default=None, metadata={"help": "Path to the VLM image directory."})
     vlm_processor: str = field(default=None, metadata={"help": "Path to the VLM processor."})
     sample_size: int = field(

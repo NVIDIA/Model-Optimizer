@@ -403,13 +403,15 @@ class HFDFlashModel(DFlashModel):
 
         # Inherit architecture settings from base model when not specified by user.
         # Static defaults (hidden_act, attention_bias, etc.) are in dflash/default_config.py.
+        # NOTE: rope_scaling is intentionally excluded. DFlash draft uses Qwen3
+        # RotaryEmbedding which only supports standard RoPE. Inheriting M-RoPE
+        # config from multimodal models (e.g. Qwen3.5) would be incorrect.
         _base_model_attrs = [
             "max_position_embeddings",
             "intermediate_size",
             "num_attention_heads",
             "num_key_value_heads",
             "rope_theta",
-            "rope_scaling",
             "rope_type",
             "rope_interleaved",
             "rms_norm_eps",

@@ -297,7 +297,10 @@ class DFlashExporter(SpeculativeDecodingExporter):
 
         config = {
             "architectures": ["DFlashDraftModel"],
-            "model_type": getattr(base_config, "model_type", "qwen3"),
+            # DFlash draft uses Qwen3 architecture regardless of base model type.
+            # Use "qwen3" as default; base model types like "qwen3_5_text" are not
+            # recognized by vLLM for draft model loading.
+            "model_type": "qwen3",
             "block_size": model.dflash_block_size,
             "dflash_config": {
                 "mask_token_id": model.mask_token_id,
@@ -330,7 +333,9 @@ class DFlashExporter(SpeculativeDecodingExporter):
             "rope_theta": getattr(
                 draft_config, "rope_theta", getattr(base_config, "rope_theta", 1000000.0)
             ),
-            "rope_scaling": getattr(base_config, "rope_scaling", None),
+            # DFlash draft uses standard Qwen3 RoPE, not M-RoPE from multimodal models.
+            # z-lab uses null; vLLM handles null rope_scaling correctly.
+            "rope_scaling": None,
             "tie_word_embeddings": False,
             "torch_dtype": str(getattr(base_config, "torch_dtype", torch.bfloat16)).replace(
                 "torch.", ""
