@@ -28,10 +28,16 @@ If enroot import fails (e.g., permission errors on lustre), use pyxis inline pul
 
 ### Container dependency pitfalls
 
-**New models may need newer transformers** than what's in the container. Install from source inside the job script:
+**New models may need newer transformers** than what's in the container. Upgrade inside the job script:
 
 ```bash
-pip install git+https://github.com/huggingface/transformers.git --quiet
+pip install -U transformers
+```
+
+If the model requires an unreleased fix not yet on PyPI, fall back to installing from git (pin to a tag or commit when possible):
+
+```bash
+pip install -U "git+https://github.com/huggingface/transformers.git"
 ```
 
 **Prefer `PYTHONPATH`** to use the synced ModelOpt source instead of installing inside the container — this avoids risking dependency conflicts (e.g., `pip install -U nvidia-modelopt[hf]` can upgrade PyTorch and break other packages):
@@ -40,7 +46,7 @@ pip install git+https://github.com/huggingface/transformers.git --quiet
 export PYTHONPATH=/path/to/Model-Optimizer:$PYTHONPATH
 ```
 
-If `PYTHONPATH` doesn't work due to missing compiled extensions, fall back to `pip install -e ".[hf]" --no-build-isolation`.
+If `PYTHONPATH` doesn't work due to missing compiled extensions, fall back to `pip install -e ".[hf]" --no-build-isolation` (run from the Model-Optimizer repo root).
 
 **Watch for pip dependency conflicts** — NGC containers set `PIP_CONSTRAINT` to pin versions, causing `ResolutionImpossible` errors. Unset it first so pip can resolve freely:
 

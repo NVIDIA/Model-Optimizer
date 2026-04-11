@@ -49,7 +49,7 @@ print(type(cfg).__name__)
      grep -r "class <ArchName>" /tmp/transformers-main/src/transformers/models/
      ```
 
-     - **Found** → install: `pip install /tmp/transformers-main`, then re-run `AutoConfig.from_pretrained()`. For container dependency issues, see `references/slurm-setup-ptq.md` (PIP_CONSTRAINT, PYTHONPATH).
+     - **Found** → install: `pip install /tmp/transformers-main`, then re-run `AutoConfig.from_pretrained()`. For container dependency issues, see `slurm-setup-ptq.md` (PIP_CONSTRAINT, PYTHONPATH).
      - **Not found** → ask the user: *"The checkpoint uses `<ArchName>` which isn't in released or main-branch transformers. Do you have a private fork or custom modeling code?"*
 
 - **No `config.json`** → not a standard HF checkpoint. List the directory for README or `.py` files. If nothing useful, ask the user for the modeling code.
