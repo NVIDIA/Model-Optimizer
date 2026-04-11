@@ -15,7 +15,11 @@ After download, inspect the model files on the target machine (use `remote_run` 
 
 Write custom scripts locally (in `./workspaces/<model>/scripts/`), then sync to remote before running.
 
-**Then check `config.json`** (on the target machine):
+**Check transformers compatibility** (on the target machine):
+
+First, if README or `config.json` specifies a required transformers version, check if installed version satisfies it. If not, upgrade: `pip install -U "transformers>=<required_version>"`.
+
+Then try loading:
 
 ```bash
 python -c "
@@ -40,16 +44,14 @@ print(type(cfg).__name__)
 
   Read the modeling file and proceed to Step B.
 
-- **Raises `ValueError` / `OSError` (unknown architecture)** → not in the installed transformers. Determine why:
-
-  1. **Check the transformers `main` branch** (not yet released):
+- **Raises `ValueError` / `OSError` (unknown architecture)** → not in the installed transformers. Try `pip install -U transformers` first. If still not found, check the `main` branch:
 
      ```bash
      git clone --depth 1 https://github.com/huggingface/transformers.git /tmp/transformers-main --quiet
      grep -r "class <ArchName>" /tmp/transformers-main/src/transformers/models/
      ```
 
-     - **Found** → install: `pip install /tmp/transformers-main`, then re-run `AutoConfig.from_pretrained()`. For container dependency issues, see `slurm-setup-ptq.md` (PIP_CONSTRAINT, PYTHONPATH).
+     - **Found** → `pip install /tmp/transformers-main`, then re-run `AutoConfig`.
      - **Not found** → ask the user: *"The checkpoint uses `<ArchName>` which isn't in released or main-branch transformers. Do you have a private fork or custom modeling code?"*
 
 - **No `config.json`** → not a standard HF checkpoint. List the directory for README or `.py` files. If nothing useful, ask the user for the modeling code.
