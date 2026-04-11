@@ -22,8 +22,13 @@ from typing import Any, Dict, List
 
 from transformers import PretrainedConfig
 
-from modelopt.torch.puzzletron.anymodel.model_descriptor.model_descriptor import ModelDescriptor
-from modelopt.torch.puzzletron.block_config import BlockConfig, maybe_cast_block_configs
+from ...block_config import BlockConfig, maybe_cast_block_configs
+from ..model_descriptor.base import ModelDescriptor
+
+__all__ = [
+    "deci_x_patcher",
+    "override_config_with_block_configs",
+]
 
 
 def _get_variable_from_stack(names: list[str]) -> Any:

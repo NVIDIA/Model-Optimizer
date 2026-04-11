@@ -27,6 +27,8 @@ from torch import nn
 from .base_hooks import ForwardHook
 
 if TYPE_CHECKING:
+    # Okay since this is only used for type hints else we should not import puzzletron here
+    # as its dependencies may not be installed
     from modelopt.torch.puzzletron.block_config import BlockConfig
 
 __all__ = [

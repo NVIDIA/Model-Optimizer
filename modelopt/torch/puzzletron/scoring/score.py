@@ -26,11 +26,17 @@ import pandas as pd
 from omegaconf import DictConfig
 
 import modelopt.torch.utils.distributed as dist
-from modelopt.torch.puzzletron.tools.hydra_utils import register_hydra_resolvers
-from modelopt.torch.puzzletron.tools.logger import mprint
-from modelopt.torch.puzzletron.tools.validate_puzzle_with_multi_replacements import (
-    validate_puzzle_solutions,
-)
+
+from ..tools.hydra_utils import register_hydra_resolvers
+from ..tools.logger import mprint
+from ..tools.validate_puzzle_with_multi_replacements import validate_puzzle_solutions
+
+__all__ = [
+    "extract_solution_id",
+    "find_missing_solutions",
+    "get_solutions_to_validate",
+    "launch_scoring",
+]
 
 
 def extract_solution_id(filename):

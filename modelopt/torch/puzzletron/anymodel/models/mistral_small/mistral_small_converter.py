@@ -18,8 +18,8 @@ from typing import List
 
 from transformers import MistralConfig
 
-from modelopt.torch.puzzletron.anymodel.converter import Converter, ConverterFactory
-from modelopt.torch.puzzletron.block_config import AttentionConfig, BlockConfig, FFNConfig
+from ....block_config import AttentionConfig, BlockConfig, FFNConfig
+from ...converter import Converter, ConverterFactory
 
 
 @ConverterFactory.register_decorator("mistral_small")

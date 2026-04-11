@@ -23,8 +23,8 @@ from _test_utils.torch.distributed.utils import spawn_multiprocess_job
 from _test_utils.torch.puzzletron.utils import setup_test_model_and_data
 
 import modelopt.torch.nas as mtn
+import modelopt.torch.puzzletron as mtpz
 import modelopt.torch.utils.distributed as dist
-from modelopt.torch.puzzletron.nas.plugins.puzzletron_nas_plugin import PuzzletronModel
 
 
 def test_nas_convert_ffn_pruning(project_root_path: Path, tmp_path: Path):
@@ -49,7 +49,7 @@ def _test_nas_convert_ffn_pruning_multiprocess_job(
     #
     # Run the mnt.convert() step
     #
-    input_model = PuzzletronModel()
+    input_model = mtpz.puzzletron_nas_plugin.PuzzletronModel()
     mtn.convert(
         input_model,
         mode=[
@@ -105,7 +105,7 @@ def _test_nas_convert_attn_pruning_multiprocess_job(
     #
     # Run the mnt.convert() step
     #
-    input_model = PuzzletronModel()
+    input_model = mtpz.puzzletron_nas_plugin.PuzzletronModel()
     mtn.convert(
         input_model,
         mode=[

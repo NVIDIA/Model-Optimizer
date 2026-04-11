@@ -50,6 +50,7 @@ modelopt_recipes @NVIDIA/modelopt-recipes-codeowners
 /examples/model_hub @NVIDIA/modelopt-examples-model_hub-codeowners
 /examples/onnx_ptq @NVIDIA/modelopt-onnx-codeowners
 /examples/pruning @NVIDIA/modelopt-torch-nas-prune-codeowners
+/examples/puzzletron @NVIDIA/modelopt-torch-puzzletron-codeowners
 /examples/specdec_bench @NVIDIA/modelopt-torch-speculative-codeowners
 /examples/speculative_decoding @NVIDIA/modelopt-torch-speculative-codeowners
 /examples/torch_onnx @NVIDIA/modelopt-onnx-codeowners

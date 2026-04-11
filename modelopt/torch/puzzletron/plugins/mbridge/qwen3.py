@@ -14,25 +14,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Megatron Bridge for Puzzletron Llama-based AnyModel heterogeneous checkpoints."""
+"""Megatron Bridge for Puzzletron Qwen3-based AnyModel heterogeneous checkpoints."""
 
 from megatron.bridge.models.conversion.model_bridge import MegatronModelBridge
-from megatron.bridge.models.llama.llama_bridge import LlamaBridge
+from megatron.bridge.models.qwen.qwen3_bridge import Qwen3Bridge
 from megatron.core.models.gpt.gpt_model import GPTModel
-from transformers import LlamaForCausalLM
+from transformers import Qwen3ForCausalLM
 
-from modelopt.torch.puzzletron.export.mbridge.base import HeterogeneousBridgeMixin
+from .base import HeterogeneousBridgeMixin
 
 
-@MegatronModelBridge.register_bridge(source=LlamaForCausalLM, target=GPTModel)
-class PuzzletronLlamaAnyModelBridge(HeterogeneousBridgeMixin, LlamaBridge):
+@MegatronModelBridge.register_bridge(source=Qwen3ForCausalLM, target=GPTModel)
+class PuzzletronQwen3AnyModelBridge(HeterogeneousBridgeMixin, Qwen3Bridge):
     """
-    Megatron Bridge for Puzzletron Llama-based AnyModel checkpoints.
+    Megatron Bridge for Puzzletron Qwen3-based AnyModel checkpoints.
 
-    Extends LlamaBridge with support for heterogeneous layer architectures (block_configs).
-    All Llama-specific settings are inherited from LlamaBridge.
+    Extends Qwen3Bridge with support for heterogeneous layer architectures (block_configs).
+    All Qwen3-specific settings are inherited from Qwen3Bridge.
     """
 
     # provider_bridge() is inherited from HeterogeneousBridgeMixin
-    # It automatically reuses LlamaBridge.provider_bridge() and adds heterogeneous config
-    # mapping_registry() is inherited from LlamaBridge
+    # It automatically reuses Qwen3Bridge.provider_bridge() and adds heterogeneous config
+    # mapping_registry() is inherited from Qwen3Bridge

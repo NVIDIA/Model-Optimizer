@@ -22,12 +22,14 @@ from modelopt.torch.prune.importance_hooks.base_hooks import (
     ForwardHook,
     IndependentKvHeadContributionHook,
 )
-from modelopt.torch.puzzletron.pruning.pruning_mixin import LayerDescriptor, PruningMixIn
-from modelopt.torch.puzzletron.pruning.pruning_utils import (
-    GQAInitMode,
-    _init_attention_biases,
-    _init_attention_weights,
-)
+
+from .pruning_mixin import LayerDescriptor, PruningMixIn
+from .pruning_utils import GQAInitMode, _init_attention_biases, _init_attention_weights
+
+__all__ = [
+    "KVHeadsLayerDescriptor",
+    "KVHeadsPruningMixIn",
+]
 
 
 @dataclass

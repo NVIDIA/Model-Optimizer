@@ -19,8 +19,8 @@ import torch
 from omegaconf import DictConfig
 
 import modelopt.torch.utils.distributed as dist
-from modelopt.torch.puzzletron.tools.logger import mprint
-from modelopt.torch.puzzletron.tools.validate_model import validate_model
+
+from ..tools.logger import mprint
 
 
 def has_checkpoint_support(activation_hooks_kwargs: dict) -> bool:
@@ -127,10 +127,9 @@ def should_skip_scoring_completely(cfg: DictConfig) -> bool:
     return is_completed
 
 
-# Old progress tracking removed - checkpoint manager handles all progress tracking
-
-
 def launch_score_activations(cfg: DictConfig):
+    from ..tools.validate_model import validate_model
+
     # Check if we should skip scoring entirely (only if 100% complete)
     if should_skip_scoring_completely(cfg):
         return

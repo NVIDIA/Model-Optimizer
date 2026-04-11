@@ -25,8 +25,6 @@ from itertools import product
 from pathlib import Path
 from typing import Iterable, Optional, Type, TypeVar
 
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
-
 import pandas as pd
 import torch
 from immutabledict import immutabledict
@@ -34,28 +32,21 @@ from omegaconf import DictConfig, ListConfig, OmegaConf
 from tqdm import tqdm
 from transformers import PretrainedConfig
 
-from modelopt.torch.puzzletron.anymodel.model_descriptor import (
-    ModelDescriptor,
-    ModelDescriptorFactory,
-)
-from modelopt.torch.puzzletron.block_config import (
-    AttentionConfig,
-    BlockConfig,
-    FFNConfig,
-    SubblockConfig,
-)
-from modelopt.torch.puzzletron.replacement_library.replacement_utils import parse_layer_replacement
-from modelopt.torch.puzzletron.subblock_stats.calc_subblock_params_and_memory import (
+from modelopt.torch.utils import json_dump
+
+from ..anymodel.model_descriptor import ModelDescriptor, ModelDescriptorFactory
+from ..block_config import AttentionConfig, BlockConfig, FFNConfig, SubblockConfig
+from ..replacement_library.replacement_utils import parse_layer_replacement
+from ..tools.checkpoint_utils import load_model_config
+from ..tools.logger import mprint
+from ..utils.parsing import format_global_config
+from .calc_subblock_params_and_memory import (
     calc_subblock_active_params,
     calculate_non_block_memory,
     calculate_non_block_params,
     calculate_subblock_memory,
     calculate_subblock_params,
 )
-from modelopt.torch.puzzletron.tools.checkpoint_utils import load_model_config
-from modelopt.torch.puzzletron.tools.logger import mprint
-from modelopt.torch.puzzletron.tools.robust_json import json_dump
-from modelopt.torch.puzzletron.utils.parsing import format_global_config
 
 # Type variable for dataclasses
 T_DataClass = TypeVar("T_DataClass")

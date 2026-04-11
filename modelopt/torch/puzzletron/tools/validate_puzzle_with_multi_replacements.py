@@ -21,7 +21,6 @@ TODO: Consider moving this a separate module dedicated for scoring
 # mypy: ignore-errors
 
 import json
-import shutil
 import warnings
 from functools import partial
 from pathlib import Path
@@ -33,24 +32,22 @@ from tqdm import tqdm
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 import modelopt.torch.utils.distributed as dist
-from modelopt.torch.puzzletron.anymodel.converter import Converter
-from modelopt.torch.puzzletron.anymodel.model_descriptor import ModelDescriptorFactory
-from modelopt.torch.puzzletron.replacement_library.replacement_library import ReplacementLibrary
-from modelopt.torch.puzzletron.replacement_library.replacement_utils import parse_layer_replacement
-from modelopt.torch.puzzletron.tools import validate_model
-from modelopt.torch.puzzletron.tools.checkpoint_utils import (
-    SAFETENSORS_SUBBLOCKS_DIR_NAME,
-    copy_tokenizer,
-)
-from modelopt.torch.puzzletron.tools.checkpoint_utils_hf import save_checkpoint
-from modelopt.torch.puzzletron.tools.common import resolve_torch_dtype
-from modelopt.torch.puzzletron.tools.sharded_checkpoint_utils import load_and_shard_model
-from modelopt.torch.puzzletron.tools.validation_utils import (
+
+from ..anymodel.converter import Converter
+from ..anymodel.model_descriptor import ModelDescriptorFactory
+from ..replacement_library.library import ReplacementLibrary
+from ..replacement_library.replacement_utils import parse_layer_replacement
+from ..utils.parsing import get_nested_key
+from ..utils.validate_runtime_pipeline import perform_pipeline_stitches
+from . import validate_model
+from .checkpoint_utils import copy_tokenizer
+from .checkpoint_utils_hf import save_checkpoint
+from .common import resolve_torch_dtype
+from .sharded_checkpoint_utils import load_and_shard_model
+from .validation_utils import (
     validate_model_and_extract_hidden_states,
     validate_model_with_teacher_similarity_metrics,
 )
-from modelopt.torch.puzzletron.utils.parsing import get_nested_key, parse_path
-from modelopt.torch.puzzletron.utils.validate_runtime_pipeline import perform_pipeline_stitches
 
 """
 Usage Example:

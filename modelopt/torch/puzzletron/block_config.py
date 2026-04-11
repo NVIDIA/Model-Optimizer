@@ -21,6 +21,19 @@ from abc import abstractmethod
 from dataclasses import dataclass
 from typing import Any, List, Optional, Type, Union, get_args, get_origin
 
+__all__ = [
+    "BaseDataclass",
+    "SubblockConfig",
+    "MoEConfig",
+    "MambaConfig",
+    "Llama4AttentionConfig",
+    "AttentionConfig",
+    "FFNConfig",
+    "SUBBLOCK_CLS_DICT",
+    "BlockConfig",
+    "maybe_cast_block_configs",
+]
+
 
 @dataclass(frozen=True, kw_only=True)
 class BaseDataclass:

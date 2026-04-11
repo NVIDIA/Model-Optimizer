@@ -23,8 +23,6 @@ from typing import (
     Callable,
     ContextManager,
     Generic,
-    Iterable,
-    Literal,
     Optional,
     Protocol,
     TypeVar,
@@ -37,7 +35,6 @@ import torch._C
 import torch._dynamo
 import torch.distributed
 import torch.nn as nn
-import torch.nn.functional as F
 import torch.utils._pytree as pytree
 from torch import Tensor
 from torch._subclasses import FakeTensor, FakeTensorMode

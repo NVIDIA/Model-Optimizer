@@ -26,37 +26,43 @@ from modelopt.torch.prune.importance_hooks.expert_removal_hooks import (
     RankedChoiceVotingHook,
     RankedChoiceVotingHookNemotronH,
 )
-from modelopt.torch.puzzletron.pruning.pruning_mixin import LayerDescriptor, PruningMixIn
-from modelopt.torch.puzzletron.pruning.pruning_utils import MlpInitMode, _init_moe_module
+
+from .pruning_mixin import LayerDescriptor, PruningMixIn
+from .pruning_utils import MlpInitMode, _init_moe_module
+
+__all__ = [
+    "ExpertRemovalLayerDescriptor",
+    "ExpertRemovalPruningMixIn",
+]
 
 
 @dataclass
 class ExpertRemovalLayerDescriptor(LayerDescriptor):
-    """
-    TODO - Add Shared expert weights in case it's prunable.
-    TODO - consider removing the segmentation between weight and bias, doesn't seem to affect the pruning algo.
-    Attributes:
-        target_name: module name required to register hooks for scoring_activations, can be a regex if start with the prefix `regex:`
-        moe_prefix_name: moe prefix layer name, should include a placeholder for `layer_idx` to be repeated for all layers. i.e: `model.layers.{layer_idx}.moe`
-        expert_prefix_name: expert prefix layer name relative to moe_prefix, should include a placeholder for `expert_idx` to be repeated for all experts. i.e: `experts.{expert_idx}`
-        router_weights: List of the router weight names relative to moe_prefix.
-        router_biases: List of the router bias names relative to moe_prefix.
-        expert_weights: List of the expert weight names relative to expert_prefix (for per-expert format).
-        expert_biases: List of the expert bias names relative to expert_prefix (for per-expert format).
-        is_fused_experts: If True, experts are stored as single fused tensors with shape [num_experts, ...].
-                         If False (default), experts are stored as separate tensors per expert.
-        fused_expert_weights: List of fused expert weight names relative to moe_prefix (for fused format).
-                             e.g., ["experts.gate_up_proj", "experts.down_proj"]
-    """
+    """Descriptor for expert-removal pruning layers."""
 
+    # TODO: Add shared expert weights in case it's prunable.
+    # TODO: Consider removing the segmentation between weight and bias.
+
+    #: Module name for hook registration; supports ``regex:`` prefix.
     target_name: str
+    #: MoE prefix layer name with ``{layer_idx}`` placeholder,
+    #: e.g. ``model.layers.{layer_idx}.moe``.
     moe_prefix_name: str
+    #: Expert prefix relative to *moe_prefix* with ``{expert_idx}`` placeholder,
+    #: e.g. ``experts.{expert_idx}``.
     expert_prefix_name: str = ""
+    #: Router weight names relative to *moe_prefix*.
     router_weights: List[str] = field(default_factory=list)
+    #: Router bias names relative to *moe_prefix*.
     router_biases: List[str] = field(default_factory=list)
+    #: Per-expert weight names relative to *expert_prefix* (per-expert format).
     expert_weights: List[str] = field(default_factory=list)
+    #: Per-expert bias names relative to *expert_prefix* (per-expert format).
     expert_biases: List[str] = field(default_factory=list)
+    #: If ``True``, experts are stored as single fused tensors (shape ``[num_experts, ...]``).
     is_fused_experts: bool = False
+    #: Fused expert weight names relative to *moe_prefix*,
+    #: e.g. ``["experts.gate_up_proj", "experts.down_proj"]``.
     fused_expert_weights: List[str] = field(default_factory=list)
 
     def module_name_regex(self) -> str:

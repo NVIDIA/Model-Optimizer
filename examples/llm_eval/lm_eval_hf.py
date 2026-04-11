@@ -52,11 +52,7 @@ from modelopt.torch.quantization.utils import is_quantized
 from modelopt.torch.sparsity.attention_sparsity.conversion import is_attn_sparsified
 
 try:
-    import modelopt.torch.puzzletron.anymodel.models  # noqa: F401
-    from modelopt.torch.puzzletron.anymodel.model_descriptor.model_descriptor_factory import (
-        resolve_descriptor_from_pretrained,
-    )
-    from modelopt.torch.puzzletron.anymodel.puzzformer import deci_x_patcher
+    import modelopt.torch.puzzletron as mtpz
 
     _ANYMODEL_AVAILABLE = True
 except ImportError:
@@ -68,12 +64,12 @@ def _anymodel_patcher_context(pretrained, trust_remote_code=False):
     if not _ANYMODEL_AVAILABLE or not pretrained:
         return contextlib.nullcontext()
     try:
-        descriptor = resolve_descriptor_from_pretrained(
+        descriptor = mtpz.anymodel.resolve_descriptor_from_pretrained(
             pretrained, trust_remote_code=trust_remote_code
         )
     except (ValueError, AttributeError):
         return contextlib.nullcontext()
-    return deci_x_patcher(model_descriptor=descriptor)
+    return mtpz.anymodel.deci_x_patcher(model_descriptor=descriptor)
 
 
 def create_from_arg_obj(cls: type[T], arg_dict: dict, additional_config: dict | None = None) -> T:

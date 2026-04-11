@@ -14,6 +14,6 @@
 # limitations under the License.
 """Converters for transforming HuggingFace models to AnyModel format."""
 
+from .base import *
 from .convert_any_model import *
-from .converter import *
 from .converter_factory import *

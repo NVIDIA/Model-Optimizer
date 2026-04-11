@@ -31,13 +31,8 @@ from packaging.version import Version
 # deep ModuleNotFoundError. Skip early with an actionable message instead.
 pytest.importorskip("mip", reason="pip install -e '.[puzzletron]' to install MIP solver")
 
+import modelopt.torch.puzzletron as mtpz
 import modelopt.torch.utils.distributed as dist
-from modelopt.torch.puzzletron import puzzletron
-from modelopt.torch.puzzletron.anymodel import convert_model
-from modelopt.torch.puzzletron.mip.sweep import (
-    get_teacher_memory_from_subblock_stats,
-    get_teacher_num_params_from_subblock_stats,
-)
 
 # The e2e test to compress a model based on Local Neural Architecture Search (Mixed Integer Programing NAS search)
 # using a one-click command.
@@ -112,7 +107,7 @@ def _test_puzzletron_multiprocess_job(
 
     # Convert the model using AnyModel converter.
     if rank == 0:
-        convert_model(
+        mtpz.anymodel.convert_model(
             input_dir=str(hf_checkpoint_path),
             output_dir=str(puzzle_dir / "ckpts/teacher"),
             converter=converter,
@@ -120,7 +115,7 @@ def _test_puzzletron_multiprocess_job(
     dist.barrier()
 
     # Compress the model using a one-click approach
-    hydra_cfg = puzzletron.puzzletron(
+    hydra_cfg = mtpz.entrypoint.puzzletron(
         str(hydra_config_dir), hydra_config_name, str(puzzle_dir), str(dataset_path)
     )
 
@@ -185,8 +180,8 @@ def _test_puzzletron_multiprocess_job(
 def _assert_subblock_stats_anymodel(hf_model_name: str, hydra_cfg) -> None:
     """Minimal subblock_stats checks and teacher memory / param regression values."""
     assert (Path(hydra_cfg.puzzle_dir) / "subblock_stats.json").is_file()
-    teacher_mem_mib = get_teacher_memory_from_subblock_stats(hydra_cfg)
-    teacher_num_params = get_teacher_num_params_from_subblock_stats(hydra_cfg)
+    teacher_mem_mib = mtpz.mip.get_teacher_memory_from_subblock_stats(hydra_cfg)
+    teacher_num_params = mtpz.mip.get_teacher_num_params_from_subblock_stats(hydra_cfg)
 
     assert abs(teacher_mem_mib - EXPECTED_TEACHER_MEMORY_MIB[hf_model_name]) < 1e-6, (
         f"Teacher memory mismatch for {hf_model_name}: "

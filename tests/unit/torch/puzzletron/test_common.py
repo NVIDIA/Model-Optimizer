@@ -18,7 +18,7 @@
 import pytest
 import torch
 
-from modelopt.torch.puzzletron.tools.common import resolve_torch_dtype
+import modelopt.torch.puzzletron as mtpz
 
 
 @pytest.mark.parametrize(
@@ -45,14 +45,14 @@ from modelopt.torch.puzzletron.tools.common import resolve_torch_dtype
     ],
 )
 def test_resolve_torch_dtype(input_dtype, expected):
-    assert resolve_torch_dtype(input_dtype) is expected
+    assert mtpz.tools.resolve_torch_dtype(input_dtype) is expected
 
 
 def test_resolve_torch_dtype_unknown_name():
     with pytest.raises(ValueError, match="Unknown torch dtype"):
-        resolve_torch_dtype("not_a_real_dtype")
+        mtpz.tools.resolve_torch_dtype("not_a_real_dtype")
 
 
 def test_resolve_torch_dtype_non_dtype_attr():
     with pytest.raises(ValueError, match="is not a dtype"):
-        resolve_torch_dtype("torch.nn")
+        mtpz.tools.resolve_torch_dtype("torch.nn")

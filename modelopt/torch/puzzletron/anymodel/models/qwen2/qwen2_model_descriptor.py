@@ -23,20 +23,11 @@ from typing import Dict
 from torch import nn
 from transformers.models.qwen2.modeling_qwen2 import Qwen2DecoderLayer, Qwen2RotaryEmbedding
 
-from modelopt.torch.puzzletron.anymodel.model_descriptor import (
-    ModelDescriptor,
-    ModelDescriptorFactory,
-)
-from modelopt.torch.puzzletron.anymodel.models.llama.llama_model_descriptor import (
-    LlamaFFNIntermediateLayerDescriptor,
-)
-from modelopt.torch.puzzletron.anymodel.puzzformer.no_op import (
-    MatchingZeros,
-    Same,
-    return_tuple_of_size,
-)
-from modelopt.torch.puzzletron.block_config import BlockConfig
-from modelopt.torch.puzzletron.utils.dummy_modules import DummyBlock
+from ....block_config import BlockConfig
+from ....utils.dummy_modules import DummyBlock
+from ...model_descriptor import ModelDescriptor, ModelDescriptorFactory
+from ...puzzformer.no_op import MatchingZeros, Same, return_tuple_of_size
+from ..llama.llama_model_descriptor import LlamaFFNIntermediateLayerDescriptor
 
 
 @ModelDescriptorFactory.register_decorator("qwen2")

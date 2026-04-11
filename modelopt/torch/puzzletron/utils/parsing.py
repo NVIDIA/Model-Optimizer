@@ -45,11 +45,7 @@ def handle_arg_string(arg):
 
 
 def simple_parse_args_string(args_string):
-    """
-    Parses something like
-        args1=val1,arg2=val2
-    Into a dictionary
-    """
+    """Parse ``args1=val1,arg2=val2`` into a dictionary."""
     if args_string is None:
         return {}
     args_string = args_string.strip()

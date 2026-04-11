@@ -20,6 +20,11 @@ from typing import List, Optional, Tuple, Type
 
 from modelopt.torch.prune.importance_hooks.base_hooks import ForwardHook
 
+__all__ = [
+    "LayerDescriptor",
+    "PruningMixIn",
+]
+
 
 class LayerDescriptor:
     def module_name_regex(self) -> str:

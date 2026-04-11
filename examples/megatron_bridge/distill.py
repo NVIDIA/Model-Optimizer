@@ -47,7 +47,7 @@ from megatron.core.distributed import DistributedDataParallelConfig
 from transformers import AutoConfig
 
 with contextlib.suppress(ImportError):
-    import modelopt.torch.puzzletron.export.mbridge  # noqa: F401
+    import modelopt.torch.puzzletron.plugins.mbridge  # noqa: F401
 
 import modelopt.torch.utils.distributed as dist
 from modelopt.torch.utils import print_rank_0

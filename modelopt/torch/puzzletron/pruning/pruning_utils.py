@@ -23,8 +23,16 @@ from typing import Any, Dict, List, Optional, Tuple, Type, Union
 import torch
 from transformers import PretrainedConfig
 
-from modelopt.torch.puzzletron.anymodel.model_descriptor import ModelDescriptor
-from modelopt.torch.puzzletron.pruning.pruning_mixin import PruningMixIn
+from ..anymodel.model_descriptor import ModelDescriptor
+from .pruning_mixin import PruningMixIn
+
+__all__ = [
+    "GQAInitMode",
+    "MlpInitMode",
+    "LinearInitMode",
+    "HiddenSizeInitMode",
+    "resolve_pruning_mixin",
+]
 
 
 class GQAInitMode(Enum):

@@ -18,13 +18,16 @@
 import hydra
 from omegaconf import DictConfig
 
-import modelopt.torch.puzzletron.activation_scoring.score_pruning_activations as score_pruning_activations
-import modelopt.torch.puzzletron.build_library_and_stats as build_library_and_stats
-import modelopt.torch.puzzletron.mip.mip_and_realize_models as mip_and_realize_models
-import modelopt.torch.puzzletron.pruning.pruning_ckpts as pruning_ckpts
-import modelopt.torch.puzzletron.scoring.scoring as scoring
 import modelopt.torch.utils.distributed as dist
-from modelopt.torch.puzzletron.tools.hydra_utils import initialize_hydra_config_for_dir
+
+from .activation_scoring import launch_score_activations
+from .build_library_and_stats import launch_build_library_and_stats
+from .mip import launch_mip_and_realize_model
+from .pruning import launch_prune_ckpt
+from .scoring import launch_scoring
+from .tools.hydra_utils import initialize_hydra_config_for_dir
+
+__all__ = ["puzzletron"]
 
 
 def puzzletron(
@@ -55,22 +58,22 @@ def puzzletron(
     hydra_cfg = hydra.utils.instantiate(hydra_cfg)
 
     # Step 1: score_pruning_activations (distributed processing)
-    score_pruning_activations.launch_score_activations(hydra_cfg)
+    launch_score_activations(hydra_cfg)
 
     # Step 2: pruning_ckpts (single process)
     if dist.is_master():
-        pruning_ckpts.launch_prune_ckpt(hydra_cfg)
+        launch_prune_ckpt(hydra_cfg)
     dist.barrier()
 
     # Step 4: build_library_and_stats (single process)
     if dist.is_master():
-        build_library_and_stats.launch_build_library_and_stats(hydra_cfg)
+        launch_build_library_and_stats(hydra_cfg)
     dist.barrier()
 
     # Step 5: calc_one_block_scores (distributed processing)
-    scoring.launch_scoring(hydra_cfg)
+    launch_scoring(hydra_cfg)
 
     # Step 6: mip_and_realize_models (distributed processing)
-    mip_and_realize_models.launch_mip_and_realize_model(hydra_cfg)
+    launch_mip_and_realize_model(hydra_cfg)
 
     return hydra_cfg

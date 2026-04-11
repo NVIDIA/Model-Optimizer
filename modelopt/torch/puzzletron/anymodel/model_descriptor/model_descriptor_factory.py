@@ -19,10 +19,10 @@ from typing import Callable, Type
 
 from transformers import AutoConfig
 
-from modelopt.torch.puzzletron.anymodel.model_descriptor.model_descriptor import ModelDescriptor
-from modelopt.torch.puzzletron.tools.checkpoint_utils_hf import force_cache_dynamic_modules
+from ...tools.checkpoint_utils_hf import force_cache_dynamic_modules
+from .base import ModelDescriptor
 
-__all__ = ["ModelDescriptorFactory"]
+__all__ = ["ModelDescriptorFactory", "resolve_descriptor_from_pretrained"]
 
 # Map from HuggingFace config.model_type (in checkpoint config.json) to ModelDescriptorFactory name.
 # Local to this script; add entries when supporting new model types for auto-detection.

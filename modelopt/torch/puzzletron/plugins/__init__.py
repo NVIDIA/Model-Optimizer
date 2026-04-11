@@ -13,3 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Export utilities for Puzzletron models."""
+
+from modelopt.torch.utils import import_plugin
+
+with import_plugin("puzzletron_mbridge"):
+    from .mbridge import *  # register bridge adapters

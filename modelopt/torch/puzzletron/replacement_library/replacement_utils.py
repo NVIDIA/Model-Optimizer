@@ -23,8 +23,16 @@ from pathlib import Path
 
 from transformers import PretrainedConfig
 
-from modelopt.torch.puzzletron.block_config import BlockConfig
-from modelopt.torch.puzzletron.mip.utils import sort_replacements
+from ..block_config import BlockConfig
+
+__all__ = [
+    "parse_layer_replacement",
+    "extract_block_configs_and_locations",
+    "weights_path_to_checkpoint_dir",
+    "replacement_is_teacher",
+    "is_replacement_identical_to_teacher",
+    "split_replacements_to_teacher_and_student",
+]
 
 
 def parse_layer_replacement(layer_replacement: dict | str) -> dict:
@@ -44,12 +52,11 @@ def parse_layer_replacement(layer_replacement: dict | str) -> dict:
     return layer_replacement
 
 
-# sort_replacements moved to modelopt.torch.puzzletron.mip.utils and imported above
-
-
 def extract_block_configs_and_locations(
     layer_replacements: list[dict],
 ) -> tuple[list[BlockConfig], list[tuple[dict, int]]]:
+    from ..mip.utils import sort_replacements  # local import to avoid circular dependency
+
     layer_replacements = sort_replacements(layer_replacements)
     block_configs = []
     block_locations = []

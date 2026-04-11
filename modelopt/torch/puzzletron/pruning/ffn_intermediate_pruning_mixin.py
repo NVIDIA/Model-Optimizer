@@ -25,11 +25,14 @@ from modelopt.torch.prune.importance_hooks.base_hooks import (
     IndependentChannelContributionHook,
     IterativeChannelContributionHook,
 )
-from modelopt.torch.puzzletron.pruning.pruning_mixin import LayerDescriptor, PruningMixIn
-from modelopt.torch.puzzletron.tools.bypassed_training.child_init import (
-    MlpInitMode,
-    _init_mlp_module,
-)
+
+from .pruning_mixin import LayerDescriptor, PruningMixIn
+from .pruning_utils import MlpInitMode, _init_mlp_module
+
+__all__ = [
+    "FFNIntermediateLayerDescriptor",
+    "FFNIntermediatePruningMixIn",
+]
 
 
 @dataclass

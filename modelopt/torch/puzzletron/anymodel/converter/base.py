@@ -29,9 +29,9 @@ from tqdm import tqdm
 from transformers import PretrainedConfig
 from transformers.integrations.mxfp4 import convert_moe_packed_tensors
 
-from modelopt.torch.puzzletron.anymodel.model_descriptor import ModelDescriptor
-from modelopt.torch.puzzletron.block_config import BlockConfig
-from modelopt.torch.puzzletron.tools.checkpoint_utils_hf import load_model_config, save_model_config
+from ...block_config import BlockConfig
+from ...tools.checkpoint_utils_hf import load_model_config, save_model_config
+from ..model_descriptor import ModelDescriptor
 
 __all__ = ["Converter"]
 

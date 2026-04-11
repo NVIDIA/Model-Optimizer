@@ -15,6 +15,11 @@
 
 import torch
 
+__all__ = [
+    "resolve_torch_dtype",
+    "infer_weights_dtype",
+]
+
 
 def resolve_torch_dtype(dtype: str | torch.dtype) -> torch.dtype:
     """Resolve a dtype that may be a string (e.g. from Hydra/OmegaConf config) to torch.dtype.

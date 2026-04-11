@@ -20,16 +20,11 @@ It is used by mtn.convert() to convert a model from HF format to Puzzletron hete
 and save pruned checkpoints, and by mtn.search() to perform the MIP-based NAS search.
 """
 
-import datetime
 from pathlib import Path
 
 import hydra
-import torch
 from torch import nn
 
-import modelopt.torch.puzzletron.mip.mip_and_realize_models as mip_and_realize_models
-import modelopt.torch.puzzletron.pruning.pruning_ckpts as pruning_ckpts
-import modelopt.torch.puzzletron.scoring.scoring as scoring
 import modelopt.torch.utils.distributed as dist
 from modelopt.torch.nas.conversion import NASModeRegistry
 from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
@@ -41,12 +36,25 @@ from modelopt.torch.opt.mode import (
     RestoreEntrypoint,
 )
 from modelopt.torch.opt.searcher import BaseSearcher, SearchStateDict
-from modelopt.torch.puzzletron import build_library_and_stats
-from modelopt.torch.puzzletron.activation_scoring import score_pruning_activations
-from modelopt.torch.puzzletron.anymodel.converter import ConverterFactory
-from modelopt.torch.puzzletron.anymodel.model_descriptor import ModelDescriptorFactory
-from modelopt.torch.puzzletron.tools.hydra_utils import initialize_hydra_config_for_dir
-from modelopt.torch.puzzletron.tools.logger import mprint
+
+from .activation_scoring import launch_score_activations
+from .anymodel.converter import ConverterFactory
+from .anymodel.model_descriptor import ModelDescriptorFactory
+from .build_library_and_stats import launch_build_library_and_stats
+from .mip import launch_mip_and_realize_model
+from .pruning import launch_prune_ckpt
+from .scoring import launch_scoring
+from .tools.hydra_utils import initialize_hydra_config_for_dir
+from .tools.logger import mprint
+
+__all__ = [
+    "PuzzletronModel",
+    "PuzzletronConfig",
+    "PuzzletronDescriptor",
+    "PuzzletronSearcher",
+    "convert_puzzletron_model",
+    "restore_puzzletron_model",
+]
 
 
 class PuzzletronModel(nn.Module):
@@ -138,14 +146,14 @@ def convert_puzzletron_model(model: nn.Module, config: PuzzletronConfig) -> Conv
 
     # Score_pruning_activations (distributed processing)
     mprint("Puzzletron Progress 3/8: scoring pruning activations (multi-gpu)")
-    score_pruning_activations.launch_score_activations(hydra_cfg)
+    launch_score_activations(hydra_cfg)
 
     # Prune the model and save pruned checkpoints
     if dist.is_master():
         mprint(
             "Puzzletron Progress 4/8: pruning the model and saving pruned checkpoints (single-gpu)"
         )
-        pruning_ckpts.launch_prune_ckpt(hydra_cfg)
+        launch_prune_ckpt(hydra_cfg)
     dist.barrier()
 
     return model, {}
@@ -223,13 +231,13 @@ class PuzzletronSearcher(BaseSearcher):
             mprint(
                 "Puzzletron Progress 5/8: building replacement library and subblock statistics (single-gpu)"
             )
-            build_library_and_stats.launch_build_library_and_stats(hydra_cfg)
+            launch_build_library_and_stats(hydra_cfg)
         dist.barrier()
 
         # Calc_one_block_scores (distributed processing)
         mprint("Puzzletron Progress 6/8: calculating one block scores (multi-gpu)")
-        scoring.launch_scoring(hydra_cfg)
+        launch_scoring(hydra_cfg)
 
         # mip_and_realize_models (distributed processing)
         mprint("Puzzletron Progress 7/8: running MIP and realizing models (multi-gpu)")
-        mip_and_realize_models.launch_mip_and_realize_model(hydra_cfg)
+        launch_mip_and_realize_model(hydra_cfg)

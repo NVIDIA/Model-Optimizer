@@ -25,9 +25,7 @@ import pytest
 
 pytest.importorskip("transformers")
 
-from modelopt.torch.puzzletron.anymodel.model_descriptor.model_descriptor_factory import (
-    resolve_descriptor_from_pretrained,
-)
+import modelopt.torch.puzzletron as mtpz
 
 MODEL_ID = "nvidia/NVIDIA-Nemotron-Nano-12B-v2-Base"
 
@@ -44,7 +42,7 @@ class TestResolveDescriptorCachesDynamicModules:
         mock_config.model_type = "llama"
         mock_auto_config_cls.from_pretrained.return_value = mock_config
 
-        resolve_descriptor_from_pretrained("/fake/path", trust_remote_code=True)
+        mtpz.anymodel.resolve_descriptor_from_pretrained("/fake/path", trust_remote_code=True)
 
         mock_force_cache.assert_called_once_with(mock_config, "/fake/path", trust_remote_code=True)
 
@@ -57,7 +55,7 @@ class TestResolveDescriptorCachesDynamicModules:
         mock_config.model_type = "llama"
         mock_auto_config_cls.from_pretrained.return_value = mock_config
 
-        resolve_descriptor_from_pretrained("/fake/path")
+        mtpz.anymodel.resolve_descriptor_from_pretrained("/fake/path")
 
         mock_force_cache.assert_called_once_with(mock_config, "/fake/path", trust_remote_code=False)
 
@@ -66,7 +64,7 @@ def test_resolve_descriptor_caches_dynamic_modules():
     """End-to-end: resolve_descriptor_from_pretrained must cache dynamic modules so decoder_layer_cls works."""
     pytest.importorskip("mamba_ssm")
 
-    descriptor = resolve_descriptor_from_pretrained(MODEL_ID, trust_remote_code=True)
+    descriptor = mtpz.anymodel.resolve_descriptor_from_pretrained(MODEL_ID, trust_remote_code=True)
 
     layer_classes = descriptor.decoder_layer_cls()
     assert layer_classes, (
