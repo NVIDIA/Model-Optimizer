@@ -15,8 +15,6 @@
 
 """DFlash speculative decoding plugin for HuggingFace models.
 
-Matches the reference SpecForge implementation (github.com/sgl-project/SpecForge).
-
 Architecture:
 - Feature Fusion: multi-layer target hidden states → FC + RMSNorm
 - KV Injection: fused features as K/V in every draft layer with QK-norm
@@ -57,33 +55,37 @@ import logging
 import torch
 import torch.nn.functional as F
 from torch import nn
-from transformers import PretrainedConfig, PreTrainedModel
-from transformers.trainer_pt_utils import LabelSmoother
-
-logger = logging.getLogger(__name__)
-
-# DFlash draft model uses Qwen3 components regardless of the target model.
-# This matches z-lab's implementation which inherits from Qwen3PreTrainedModel.
-from transformers.models.qwen3.modeling_qwen3 import Qwen3MLP as _MLP_CLS  # noqa: E402, N814
-from transformers.models.qwen3.modeling_qwen3 import Qwen3RMSNorm as _NORM_CLS  # noqa: E402, N814
-from transformers.models.qwen3.modeling_qwen3 import (  # noqa: E402
+from transformers import PreTrainedModel
+from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+from transformers.models.qwen3.configuration_qwen3 import Qwen3Config as _Qwen3Config
+from transformers.models.qwen3.modeling_qwen3 import Qwen3MLP as _MLP_CLS  # noqa: N814
+from transformers.models.qwen3.modeling_qwen3 import Qwen3RMSNorm as _NORM_CLS  # noqa: N814
+from transformers.models.qwen3.modeling_qwen3 import (
     Qwen3RotaryEmbedding as _ROTARY_CLS,  # noqa: N814
 )
-from transformers.models.qwen3.modeling_qwen3 import rotate_half as _rotate_half  # noqa: E402
-from transformers.utils import ModelOutput  # noqa: E402
+from transformers.models.qwen3.modeling_qwen3 import rotate_half as _rotate_half
+from transformers.trainer_pt_utils import LabelSmoother
+from transformers.utils import ModelOutput
 
-from ..dflash.conversion import DFlashDMRegistry  # noqa: E402
-from ..dflash.dflash_model import DFlashModel  # noqa: E402
+from ..dflash.conversion import DFlashDMRegistry
+from ..dflash.dflash_model import DFlashModel
+from .modeling_fakebase import _BASE_MODEL_PATHS, _EMBED_TOKENS_PATHS, _LM_HEAD_PATHS
+
+logger = logging.getLogger(__name__)
 
 __all__ = ["HFDFlashModel"]
 
 
 def build_target_layer_ids(num_target_layers, num_draft_layers):
     """Select layers uniformly from the target model for feature extraction."""
+    if num_target_layers < num_draft_layers:
+        raise ValueError(
+            f"num_target_layers ({num_target_layers}) must be >= num_draft_layers ({num_draft_layers})"
+        )
     if num_draft_layers == 1:
         return [num_target_layers // 2]
-    start = 1
-    end = num_target_layers - 3
+    start = min(1, num_target_layers - 1)
+    end = max(start, num_target_layers - 3)
     span = end - start
     return [round(start + (i * span) / (num_draft_layers - 1)) for i in range(num_draft_layers)]
 
@@ -99,7 +101,7 @@ def apply_rotary_pos_emb(q, k, cos, sin):
 
 
 class DFlashAttention(nn.Module):
-    """Attention with KV injection, using HF's attention dispatch for exact SpecForge parity."""
+    """Attention with KV injection, using HF's attention dispatch."""
 
     def __init__(self, config, layer_idx):
         """Initialize DFlash attention with KV injection projections and QK-norm."""
@@ -129,7 +131,7 @@ class DFlashAttention(nn.Module):
         self.q_norm = _NORM_CLS(self.head_dim, eps=config.rms_norm_eps)
         self.k_norm = _NORM_CLS(self.head_dim, eps=config.rms_norm_eps)
 
-        # Resolve HF attention function matching SpecForge's dispatch
+        # Resolve HF attention function
         self._attn_fn = None
         # Qwen3 uses sliding window attention on some layers (config.layer_types)
         if hasattr(config, "layer_types") and hasattr(config, "sliding_window"):
@@ -142,8 +144,6 @@ class DFlashAttention(nn.Module):
         """Lazily resolve the HF attention function (default: sdpa)."""
         if self._attn_fn is not None:
             return self._attn_fn
-        from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
-
         impl = self.config._attn_implementation  # default set in dflash/default_config.py
         self._attn_fn = ALL_ATTENTION_FUNCTIONS.get(impl, ALL_ATTENTION_FUNCTIONS["sdpa"])
         return self._attn_fn
@@ -225,7 +225,7 @@ class DFlashDecoderLayer(nn.Module):
 
 
 class DFlashModule(nn.Module):
-    """DFlash draft module matching SpecForge DFlashDraftModel."""
+    """DFlash draft module using Qwen3 components (MLP, RMSNorm, RotaryEmbedding)."""
 
     def __init__(self, config):
         """Initialize DFlash module with feature fusion, decoder layers, and rotary embeddings."""
@@ -271,7 +271,7 @@ class DFlashModule(nn.Module):
                     nn.init.zeros_(module.bias)
 
     def forward(self, noise_embedding, target_hidden, position_ids, attention_mask=None):
-        """Forward matching SpecForge DFlashDraftModel.forward."""
+        """Forward with feature fusion, KV injection, and position embeddings."""
         hidden_states = noise_embedding
         target_hidden = self.hidden_norm(self.fc(target_hidden))
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
@@ -282,44 +282,9 @@ class DFlashModule(nn.Module):
         return self.norm(hidden_states)
 
 
-def create_dflash_attention_mask(seq_len, block_size, device, dtype):
-    """Create [L, 2L] attention mask matching SpecForge.
-
-    Context (cols 0..L-1): Block B sees blocks 0..B-1 (strictly previous).
-    Noise (cols L..2L-1): causal within same block only.
-    """
-    indices = torch.arange(seq_len, device=device)
-    block_ids = indices // block_size
-
-    q_block_ids = block_ids.unsqueeze(1)  # [L, 1]
-    k_block_ids = block_ids.unsqueeze(0)  # [1, L]
-
-    ctx_mask = k_block_ids < q_block_ids
-    same_block = q_block_ids == k_block_ids
-    causal = indices.unsqueeze(0) >= indices.unsqueeze(1)  # matching SpecForge: j >= i
-    noise_mask = same_block & causal
-
-    full_mask_bool = torch.cat([ctx_mask, noise_mask], dim=1)
-
-    # Create additive mask directly in target dtype, matching EAGLE convention.
-    full_mask = torch.zeros(seq_len, 2 * seq_len, device=device, dtype=dtype)
-    full_mask.masked_fill_(~full_mask_bool, torch.finfo(dtype).min)
-
-    return full_mask.unsqueeze(0).unsqueeze(0)  # [1, 1, L, 2L]
-
-
-def create_dflash_loss_mask(seq_len, block_size, device):
-    """Create loss mask: exclude Block 0 and block starts."""
-    positions = torch.arange(seq_len, device=device)
-    block_ids = positions // block_size
-    is_block_0 = block_ids == 0
-    is_block_start = (positions % block_size) == 0
-    return (~is_block_0 & ~is_block_start).float()
-
-
 @DFlashDMRegistry.register({PreTrainedModel: "hf.PreTrainedModel"})
 class HFDFlashModel(DFlashModel):
-    """DFlash Model matching SpecForge OnlineDFlashModel."""
+    """DFlash Model for HuggingFace transformers."""
 
     @property
     def _base_model(self):
@@ -341,39 +306,11 @@ class HFDFlashModel(DFlashModel):
             or self.config
         )
 
-    @staticmethod
-    def _auto_detect_mask_token_id(base_config, trust_remote_code: bool = False):
-        """Auto-detect mask token ID from the base model's tokenizer.
-
-        Loads the tokenizer and returns ``tokenizer.mask_token_id`` if available.
-        Raises ValueError otherwise — the user must set mask_token_id explicitly.
-        """
-        from transformers import AutoTokenizer
-
-        model_name = getattr(base_config, "_name_or_path", None)
-        if model_name:
-            try:
-                tokenizer = AutoTokenizer.from_pretrained(
-                    model_name, trust_remote_code=trust_remote_code
-                )
-                if tokenizer.mask_token_id is not None:
-                    return tokenizer.mask_token_id
-            except Exception:
-                pass
-
-        raise ValueError(
-            "Cannot auto-detect mask_token_id. "
-            "Please set dflash_architecture_config.mask_token_id explicitly in your config. "
-            "The mask token should be an unused special token (not eos or pad)."
-        )
-
     def _find_base_model_parts(self):
         """Locate base model submodules (backbone, embeddings, lm_head) by probing known paths.
 
         Reuses the shared path constants from modeling_fakebase (same as EAGLE).
         """
-        from .modeling_fakebase import _BASE_MODEL_PATHS, _EMBED_TOKENS_PATHS, _LM_HEAD_PATHS
-
         for name, paths in {
             "base_model_path": _BASE_MODEL_PATHS,
             "base_model_embeddings_path": _EMBED_TOKENS_PATHS,
@@ -395,7 +332,9 @@ class HFDFlashModel(DFlashModel):
         super().modify(config)
 
         base_config = self._base_llm_config
-        self.dflash_config = PretrainedConfig.from_dict(config.dflash_architecture_config)
+        # Use Qwen3Config (not generic PretrainedConfig) so rope_parameters is
+        # auto-populated from rope_theta. DFlash draft uses Qwen3 components.
+        self.dflash_config = _Qwen3Config(**config.dflash_architecture_config)
 
         # hidden_size and vocab_size MUST match the base model.
         self.dflash_config.hidden_size = base_config.hidden_size
@@ -434,15 +373,15 @@ class HFDFlashModel(DFlashModel):
         self.target_layer_ids = build_target_layer_ids(num_target_layers, num_draft_layers)
         self.dflash_config.target_layer_ids = self.target_layer_ids
 
-        # mask_token_id resolution order:
-        # 1. Explicit in dflash_architecture_config (user override)
-        # 2. Auto-detect from tokenizer (tokenizer.mask_token_id)
-        # 3. Error — user must provide mask_token_id
-        mask_id = config.dflash_architecture_config.get("mask_token_id", None)
+        # mask_token_id: set in DFlashConfig (or auto-detected by main.py from tokenizer)
+        mask_id = config.dflash_mask_token_id
         if mask_id is None:
-            trust_remote = config.dflash_architecture_config.get("trust_remote_code", False)
-            mask_id = self._auto_detect_mask_token_id(base_config, trust_remote_code=trust_remote)
-        self.mask_token_id = mask_id[0] if isinstance(mask_id, list) else mask_id
+            raise ValueError(
+                "dflash_mask_token_id is required. Set it in the config YAML "
+                "(dflash.dflash_mask_token_id=TOKEN_ID) or let main.py auto-detect "
+                "from tokenizer.mask_token_id."
+            )
+        self.mask_token_id = mask_id
         logger.info("DFlash mask_token_id: %s", self.mask_token_id)
 
         # Freeze base model
@@ -469,7 +408,7 @@ class HFDFlashModel(DFlashModel):
         return DFlashExporter(self)
 
     def _sample_anchor_positions(self, seq_len, loss_mask, device):
-        """Randomly sample anchor positions per sample, matching SpecForge PR #473.
+        """Randomly sample anchor positions per sample.
 
         Returns (anchor_positions [B, N], block_keep_mask [B, N]).
 
@@ -668,9 +607,8 @@ class HFDFlashModel(DFlashModel):
         cache_position=None,
         **kwargs,
     ):
-        """Training forward matching SpecForge latest (post-PR #473).
+        """Training forward with random anchor sampling.
 
-        Key changes from original PR #415:
         - Random anchor sampling instead of uniform block division
         - Bidirectional intra-block attention (no causal constraint)
         - Context sees strictly before anchor position
@@ -678,13 +616,14 @@ class HFDFlashModel(DFlashModel):
         - Optional loss decay weighting
         """
         if not self.training:
+            # Don't pass labels to base model — DFlash uses unshifted labels
+            # which are incompatible with the base model's shifted loss.
             return super().forward(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 position_ids=position_ids,
                 past_key_values=past_key_values,
                 inputs_embeds=inputs_embeds,
-                labels=labels,
                 use_cache=use_cache,
                 output_attentions=output_attentions,
                 output_hidden_states=output_hidden_states,
@@ -693,7 +632,14 @@ class HFDFlashModel(DFlashModel):
             )
 
         bsz, seq_len = input_ids.shape
+        block_size = self.dflash_block_size
         device = input_ids.device
+
+        if seq_len % block_size != 0:
+            raise ValueError(
+                f"seq_len ({seq_len}) must be divisible by block_size ({block_size}). "
+                f"Adjust training_seq_len or use padding."
+            )
 
         # 1. Run base model → hidden states
         # TODO: For co-training the base model, remove no_grad and eval() switch.
@@ -708,14 +654,17 @@ class HFDFlashModel(DFlashModel):
         selected = [base_outputs.hidden_states[lid + offset] for lid in self.target_layer_ids]
         target_hidden = torch.cat(selected, dim=-1)  # [B, seq, num_layers * H]
 
-        # 2. Build loss mask: combine labels (answer-only) and attention_mask (padding)
+        # 2. Build loss mask from labels and attention_mask.
+        # labels encode both answer_only_loss masking (-100 for non-assistant) and
+        # padding (-100 for pad tokens). attention_mask provides additional padding
+        # coverage for cases where labels are not provided.
         loss_mask = torch.ones(bsz, seq_len, device=device)
         if labels is not None:
             loss_mask = loss_mask * (labels != LabelSmoother.ignore_index).float()
         if attention_mask is not None:
             loss_mask = loss_mask * attention_mask.float()
 
-        # 3. Random anchor sampling (SpecForge PR #463/#473)
+        # 3. Random anchor sampling
         anchor_positions, block_keep_mask = self._sample_anchor_positions(
             seq_len, loss_mask, device
         )
@@ -726,7 +675,7 @@ class HFDFlashModel(DFlashModel):
             dummy = self.dflash_module.fc.weight.sum() * 0.0
             return ModelOutput(loss=dummy, logits=base_outputs.logits, train_acc=[[0.0]])
 
-        # 4-6. Build draft inputs
+        # 4. Build draft inputs
         noise_embedding = self._build_noise_embedding(
             input_ids, anchor_positions, block_keep_mask, n_blocks
         )
@@ -735,7 +684,7 @@ class HFDFlashModel(DFlashModel):
             seq_len, anchor_positions, block_keep_mask, n_blocks, target_hidden.dtype, device
         )
 
-        # 7. Draft forward
+        # 5. Draft forward
         hidden = self.dflash_module(
             noise_embedding=noise_embedding,
             target_hidden=target_hidden,
@@ -743,7 +692,7 @@ class HFDFlashModel(DFlashModel):
             attention_mask=attn_mask,
         )
 
-        # 8. Compute loss and accuracy
+        # 6. Compute loss and accuracy
         logits = self._base_model_lm_head(hidden)
         loss, accuracy = self._compute_loss(
             logits,
@@ -854,7 +803,7 @@ class HFDFlashModel(DFlashModel):
         block_positions = torch.arange(ctx_len, ctx_len + block_size, device=device)
         pos_ids = torch.cat([ctx_positions, block_positions]).unsqueeze(0).expand(bsz, -1)
 
-        # No attention mask at inference — matching SpecForge's spec_generate
+        # No attention mask at inference
         # which uses KV cache with no mask. All positions attend freely to
         # context and each other within the block.
 

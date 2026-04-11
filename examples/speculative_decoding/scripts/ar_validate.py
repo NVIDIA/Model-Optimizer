@@ -34,7 +34,13 @@ mto.enable_huggingface_checkpointing()
 
 
 def validate_ar(
-    model, tokenizer, ds, steps=3, osl=20, num_samples=80, device=None,
+    model,
+    tokenizer,
+    ds,
+    steps=3,
+    osl=20,
+    num_samples=80,
+    device=None,
 ):
     """Validate acceptance rate on MT-Bench prompts using online validation.
 
@@ -56,6 +62,7 @@ def validate_ar(
     validator = HFARValidation(model, tokenizer)
     num_samples = min(num_samples, len(ds))
     results = []
+    failures = 0
     for i in tqdm(range(num_samples), desc="Validating AR"):
         prompt = ds[i]["prompt"][0]
         category = ds[i].get("category", "unknown")
@@ -71,8 +78,11 @@ def validate_ar(
         try:
             _, ar = validator.validate_online(osl, input_ids=input_ids, steps=steps)
             results.append((category, ar))
-        except Exception:
-            pass
+        except Exception as e:
+            failures += 1
+            print(f"  WARNING: sample {i} ({category}) failed: {e}")
+    if failures:
+        print(f"WARNING: {failures}/{num_samples} samples failed during AR validation")
     return results
 
 
@@ -130,9 +140,7 @@ def main():
         print(f"  Samples: {len(results)}")
 
         if args.ar_lower_bound and avg_ar < args.ar_lower_bound:
-            raise ValueError(
-                f"AR {avg_ar:.4f} is below lower bound {args.ar_lower_bound}."
-            )
+            raise ValueError(f"AR {avg_ar:.4f} is below lower bound {args.ar_lower_bound}.")
 
 
 if __name__ == "__main__":

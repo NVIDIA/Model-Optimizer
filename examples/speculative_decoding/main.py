@@ -127,7 +127,7 @@ class TrainingArguments(transformers.TrainingArguments):
     answer_only_loss: bool = field(
         default=False,
         metadata={
-            "help": "Mask loss on non-assistant tokens. Default: True for dflash, False for eagle3."
+            "help": "Mask loss on non-assistant tokens. Requires a chat_template with generation tags."
         },
     )
     cp_size: int = field(default=1, metadata={"help": "Context parallelism size."})
@@ -300,7 +300,18 @@ def train():
                 model.eagle_module.d2t = torch.load(data_args.draft_vocab_cache, weights_only=True)
                 print_rank_0(f"Loaded draft vocab cache from {data_args.draft_vocab_cache}.")
         elif training_args.mode == "dflash":
-            # dflash_cfg maps directly to DFlashConfig fields.
+            # Auto-detect mask_token_id from tokenizer if not set
+            if not dflash_cfg.get("dflash_mask_token_id"):
+                if tokenizer.mask_token_id is not None:
+                    dflash_cfg["dflash_mask_token_id"] = tokenizer.mask_token_id
+                    print_rank_0(
+                        f"Auto-detected mask_token_id={tokenizer.mask_token_id} from tokenizer"
+                    )
+                else:
+                    raise ValueError(
+                        "mask_token_id not found in tokenizer and not set in config. "
+                        "Set dflash.dflash_mask_token_id in the training YAML."
+                    )
             mtsp.convert(model, [("dflash", dflash_cfg)])
         else:
             raise Exception(f"{training_args.mode} is not supported!")

@@ -399,6 +399,9 @@ class AcceptanceRateValidation:
         if input_ids is None:
             input_ids = self.tokenize(prompt)
 
+        if input_ids.shape[0] != 1:
+            raise ValueError("validate_online only supports batch_size=1")
+
         isl = input_ids.shape[1]
         max_len = isl + osl
         total_accepted = 0

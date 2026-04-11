@@ -136,7 +136,7 @@ class EagleTrainingPlot(TrainerCallback):
 
     def __init__(self, ar_validate_steps: int = 1000, estimate_ar: bool = False):
         self.ar_validate_steps = ar_validate_steps
-        if hasattr(wandb, "init") and is_master():
+        if wandb is not None and wandb.run is not None and is_master():
             wandb.init()
         self.estimate_ar = estimate_ar
 
@@ -172,7 +172,7 @@ class EagleTrainingPlot(TrainerCallback):
             logs["estimated_training_ar"] = est_ar
 
         # log to wandb
-        if hasattr(wandb, "init") and is_master():
+        if wandb is not None and wandb.run is not None and is_master():
             if logs:
                 wandb.log({k: v for k, v in logs.items() if v is not None}, step=state.global_step)
 
@@ -194,7 +194,7 @@ class EagleTrainingPlot(TrainerCallback):
                     device=kwargs["model"].device,
                 )
                 print_rank_0(f"Step {state.global_step} AR: {sum(ars) / len(ars):.4f}")
-                if hasattr(wandb, "init") and is_master():
+                if wandb is not None and wandb.run is not None and is_master():
                     wandb.log({"validate_ar": sum(ars) / len(ars)}, step=state.global_step)
             except Exception:
                 print_rank_0("AR validation not available.")

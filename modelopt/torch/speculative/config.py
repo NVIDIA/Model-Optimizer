@@ -95,6 +95,12 @@ class DFlashConfig(ModeloptBaseConfig):
         default=True, description="Whether to report eval accuracy."
     )
 
+    dflash_mask_token_id: int = ModeloptField(
+        default=None,
+        description="Token ID used for masked (unknown) positions. "
+        "Set explicitly or auto-detected from tokenizer.mask_token_id in main.py.",
+    )
+
     dflash_architecture_config: dict = ModeloptField(
         default={}, description="Config for the DFlash draft module architecture."
     )

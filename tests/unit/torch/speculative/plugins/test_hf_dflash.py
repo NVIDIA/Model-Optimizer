@@ -20,6 +20,8 @@ GPU-dependent tests (training forward, module forward) are in tests/gpu/.
 
 import os
 from copy import deepcopy
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 import torch
@@ -36,8 +38,6 @@ from modelopt.torch.speculative.plugins.hf_dflash import (
     DFlashModule,
     HFDFlashModel,
     build_target_layer_ids,
-    create_dflash_attention_mask,
-    create_dflash_loss_mask,
 )
 
 BLOCK_SIZE = 4
@@ -50,9 +50,9 @@ def _get_dflash_config(block_size=BLOCK_SIZE, num_layers=NUM_DRAFT_LAYERS):
     config = deepcopy(DFLASH_DEFAULT_CFG["config"])
     config["dflash_block_size"] = block_size
     config["dflash_use_torch_compile"] = False
+    config["dflash_mask_token_id"] = 0  # use token 0 as mask for tiny model
     config["dflash_architecture_config"] = {
         "num_hidden_layers": num_layers,
-        "mask_token_id": 0,  # use token 0 as mask for tiny model
     }
     return config
 
@@ -113,11 +113,11 @@ class TestDFlashConvert:
         assert model.mask_token_id == 0
 
     def test_convert_missing_mask_token_id_errors(self):
-        """Test that missing mask_token_id raises ValueError for unknown model."""
+        """Test that missing mask_token_id raises ValueError."""
         model = get_tiny_llama(num_hidden_layers=4)
         config = _get_dflash_config()
-        del config["dflash_architecture_config"]["mask_token_id"]
-        with pytest.raises(ValueError, match="Cannot auto-detect mask_token_id"):
+        del config["dflash_mask_token_id"]
+        with pytest.raises(ValueError, match="dflash_mask_token_id is required"):
             mtsp.convert(model, [("dflash", config)])
 
 
@@ -174,69 +174,6 @@ class TestDFlashMetaRotaryFix:
         rotary_id_before = id(dflash_mod.rotary_emb)
         dflash_mod.to("cpu")
         assert id(dflash_mod.rotary_emb) == rotary_id_before
-
-
-class TestDFlashAttentionMask:
-    """Test DFlash attention mask construction."""
-
-    def test_mask_shape(self):
-        mask = create_dflash_attention_mask(SEQ_LEN, BLOCK_SIZE, "cpu", torch.float32)
-        assert mask.shape == (1, 1, SEQ_LEN, 2 * SEQ_LEN)
-
-    def test_mask_context_strictly_previous_blocks(self):
-        """Context (left half): block B can only see blocks 0..B-1."""
-        mask = create_dflash_attention_mask(8, 4, "cpu", torch.float32)
-        mask_2d = mask[0, 0]
-        ctx_mask = mask_2d[:, :8]
-        assert (ctx_mask[:4, :] < 0).all()
-        assert (ctx_mask[4:8, :4] == 0).all()
-        assert (ctx_mask[4:8, 4:8] < 0).all()
-
-    def test_mask_noise_causal_within_block(self):
-        """Noise (right half): reverse-causal within same block (j >= i)."""
-        mask = create_dflash_attention_mask(8, 4, "cpu", torch.float32)
-        noise_mask = mask[0, 0, :, 8:]
-        assert (noise_mask[0, :4] == 0).all()
-        assert (noise_mask[3, :3] < 0).all()
-        assert noise_mask[3, 3] == 0
-        assert (noise_mask[4:8, :4] < 0).all()
-
-    def test_mask_values_are_zero_or_neg_inf(self):
-        mask = create_dflash_attention_mask(SEQ_LEN, BLOCK_SIZE, "cpu", torch.float32)
-        unique_vals = mask.unique()
-        assert len(unique_vals) == 2
-        assert 0.0 in unique_vals
-        assert unique_vals.min() == torch.finfo(torch.float32).min
-
-
-class TestDFlashLossMask:
-    """Test DFlash loss mask construction."""
-
-    def test_loss_mask_shape(self):
-        mask = create_dflash_loss_mask(SEQ_LEN, BLOCK_SIZE, "cpu")
-        assert mask.shape == (SEQ_LEN,)
-
-    def test_loss_mask_excludes_block_zero(self):
-        mask = create_dflash_loss_mask(SEQ_LEN, BLOCK_SIZE, "cpu")
-        assert (mask[:BLOCK_SIZE] == 0).all()
-
-    def test_loss_mask_excludes_block_starts(self):
-        mask = create_dflash_loss_mask(SEQ_LEN, BLOCK_SIZE, "cpu")
-        for i in range(0, SEQ_LEN, BLOCK_SIZE):
-            assert mask[i] == 0
-
-    def test_loss_mask_includes_non_start_positions(self):
-        mask = create_dflash_loss_mask(SEQ_LEN, BLOCK_SIZE, "cpu")
-        for b in range(1, SEQ_LEN // BLOCK_SIZE):
-            for offset in range(1, BLOCK_SIZE):
-                pos = b * BLOCK_SIZE + offset
-                assert mask[pos] == 1
-
-    def test_loss_mask_count(self):
-        mask = create_dflash_loss_mask(SEQ_LEN, BLOCK_SIZE, "cpu")
-        num_blocks = SEQ_LEN // BLOCK_SIZE
-        expected = (num_blocks - 1) * (BLOCK_SIZE - 1)
-        assert mask.sum().item() == expected
 
 
 class TestBuildTargetLayerIds:
@@ -314,9 +251,6 @@ class TestValidateOnline:
 
     def test_all_accepted(self):
         """When all draft tokens match posterior, AR = 1 + steps."""
-        from types import SimpleNamespace
-        from unittest.mock import MagicMock
-
         from modelopt.torch.speculative.utils import AcceptanceRateValidation
 
         validator = AcceptanceRateValidation.__new__(AcceptanceRateValidation)
@@ -361,9 +295,6 @@ class TestValidateOnline:
 
     def test_all_rejected(self):
         """When no draft tokens match, AR = 1 (base token only + correction)."""
-        from types import SimpleNamespace
-        from unittest.mock import MagicMock
-
         from modelopt.torch.speculative.utils import AcceptanceRateValidation
 
         validator = AcceptanceRateValidation.__new__(AcceptanceRateValidation)
@@ -491,7 +422,7 @@ class TestEnsureGenerationTags:
     def qwen3_tokenizer(self):
         from transformers import AutoTokenizer
 
-        return AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B", trust_remote_code=True)
+        return AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")
 
     def test_chatml_think_template_produces_assistant_mask(self, qwen3_tokenizer):
         """Qwen3 uses chatml_think style. Verify generation tags are injected and masks work."""

@@ -10,9 +10,9 @@ model:
 data:
   data_path:
   offline_data_path:
-  # Path to a Jinja chat template file with {% generation %} tags.
-  # Required when answer_only_loss=true. Per-model templates are in
-  # tools/launcher/examples/<Model>/chat_template_train.jinja
+  # Jinja chat template with {% generation %} tags for answer_only_loss.
+  # Required when answer_only_loss=true. Set in per-model launcher YAML.
+  # Templates are in modelopt_recipes/general/speculative_decoding/chat_templates/
   chat_template:
 
 # maps to TrainingArguments (main.py)

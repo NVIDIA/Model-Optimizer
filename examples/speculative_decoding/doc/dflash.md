@@ -167,16 +167,22 @@ See [`modelopt_recipes/general/speculative_decoding/dflash.yaml`](../../../model
 | `training.answer_only_loss` | false | Mask loss on non-assistant tokens |
 
 > **Note on `answer_only_loss` and chat templates:** When `answer_only_loss=true`, the
-> dataset loader replaces the tokenizer's chat template with a simplified version that has
-> `{% generation %}` tags to identify assistant turns. This simplified template may not
-> support all features of the original (e.g., tool use formatting, multi-turn system
-> prompts). During serving, the draft model reuses the target model's original tokenizer
-> and template, so there is no train/inference mismatch in the tokenization itself — only
-> the loss masking during training uses the simplified template. However, if training data
-> contains tool-use conversations with model-family-specific formatting, the simplified
-> template may tokenize them differently, affecting which tokens get masked. For best
-> results with tool-use data, set `answer_only_loss=false` or provide a custom
-> `chat_template` that supports both generation tags and tool-use formatting.
+> tokenizer's chat template must include `{% generation %}` / `{% endgeneration %}` tags
+> around assistant content. HuggingFace uses these tags to produce `assistant_masks` via
+> `return_assistant_tokens_mask=True` in `apply_chat_template()`.
+>
+> Most model tokenizers (Qwen3, Llama3, etc.) do **not** ship with these tags by default.
+> You must provide a custom template via `data.chat_template=path/to/template.jinja` in
+> the training config. A Qwen3 template is provided at
+> `tools/launcher/examples/Qwen/Qwen3-8B/chat_template_train.jinja`.
+>
+> To create a template for other models:
+> 1. Copy the model's original `chat_template` from `tokenizer_config.json`
+> 2. Add `{% generation %}` before and `{% endgeneration %}` after assistant content
+> 3. Test that tokenization matches the original template (no extra/missing tokens)
+>
+> See the [HuggingFace guide on train-on-completions-only](https://huggingface.co/docs/transformers/en/chat_templating#train-on-completions-only)
+> for details on generation tags.
 
 ### Random Anchor Sampling (`num_anchors`)
 

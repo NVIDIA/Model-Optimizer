@@ -33,7 +33,7 @@ pipeline:
       - dflash.dflash_block_size=16
       - dflash.dflash_num_anchors=512
       - dflash.dflash_loss_decay_factor=7
-      - dflash.dflash_architecture_config.mask_token_id=248070
+      - dflash.dflash_mask_token_id=248070
       - dflash.dflash_architecture_config.num_hidden_layers=5
     environment:
     slurm_config:

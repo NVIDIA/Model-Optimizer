@@ -23,7 +23,7 @@ pipeline:
       - --config modules/Model-Optimizer/modelopt_recipes/general/speculative_decoding/dflash.yaml
       - model.model_name_or_path=<<global_vars.hf_model>>
       - data.data_path=/hf-local/modelopt/Speculative-Decoding-Dataset-v1-Qwen3-8B/sample-1K-openai.jsonl
-      - data.chat_template=modules/Model-Optimizer/tools/launcher/examples/Qwen/Qwen3-8B/chat_template_train.jinja
+      - data.chat_template=examples/Qwen/Qwen3-8B/chat_template_train.jinja
       - training.output_dir=/scratchspace/dflash_bs16
       - training.num_train_epochs=1
       - training.training_seq_len=4096
@@ -34,7 +34,7 @@ pipeline:
       - dflash.dflash_block_size=16
       - dflash.dflash_num_anchors=512
       - dflash.dflash_loss_decay_factor=7
-      - dflash.dflash_architecture_config.mask_token_id=151669
+      - dflash.dflash_mask_token_id=151669
       - dflash.dflash_architecture_config.num_hidden_layers=5
     environment:
     slurm_config:
