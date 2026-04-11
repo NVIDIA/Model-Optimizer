@@ -359,5 +359,28 @@ ModelOpt wins acceptance length on 7/8 categories and TPS on 8/8 categories.
       --max-num-batched-tokens 32768
   ```
 
+- **FSDP2 training**: `dp_shard_size=8` with checkpoint resume validated.
 - **Export**: z-lab compatible HF format, loadable by vLLM and z-lab benchmark.
 - **Loss decay**: Validated +0.12 AR improvement with gamma=7 (bs16).
+- **Qwen3.5-4B**: E2E pipeline validated (train → export → vLLM serve).
+
+### vLLM Deployment Notes for Qwen3.5
+
+Qwen3.5 models have non-standard architecture dimensions (`head_dim=160`, `num_attention_heads=16`)
+that cause vLLM KV cache page size errors when inherited by the DFlash draft model. Key findings:
+
+1. **M-RoPE incompatibility**: Qwen3.5 uses M-RoPE (multimodal RoPE with `mrope_section`).
+   DFlash draft models use standard Qwen3 RoPE. Inheriting `rope_scaling` from the base model
+   causes `NotImplementedError: Speculative Decoding does not support M-RoPE yet` in vLLM.
+   **Fix**: `rope_scaling` is not inherited from base model; the draft uses standard RoPE.
+
+2. **Head dimension mismatch**: Qwen3.5-4B has `head_dim=160` (2560/16 heads) which is
+   non-standard and causes `page size not divisible` errors in vLLM's KV cache.
+   **Fix**: Override draft architecture to use z-lab's dimensions: `num_attention_heads=32`,
+   `num_key_value_heads=8`, `head_dim=128`, `intermediate_size=9728`, `rope_theta=10000000`.
+   See `tools/launcher/examples/Qwen/Qwen3.5-4B/hf_online_dflash.yaml`.
+
+3. **MTP alternative**: Qwen3.5 has built-in MTP (Multi-Token Prediction) heads that work
+   with vLLM natively (no draft model needed): `--speculative-config '{"method": "mtp", "num_speculative_tokens": 1}'`.
+   MTP-1 achieves 91% acceptance rate on Qwen3.5-4B. DFlash provides higher speedup when
+   trained sufficiently (z-lab's checkpoint: 3.84 mean acceptance length).
