@@ -3,10 +3,12 @@
 Recipes
 #######
 
-A **recipe** is a declarative YAML specification that fully describes how to optimize a model.
+A **recipe** is a declarative specification that fully describes how to optimize a model.
+A recipe can be a single YAML file or a directory containing YAML configs and other files
+that together define a model optimization workflow.
 Recipes decouple optimization settings from Python code, enabling reuse, sharing, version
 control, and reproducibility.  Instead of editing Python scripts to change quantization
-parameters, you author (or select) a recipe file and pass it to the ModelOpt tooling.
+parameters, you author (or select) a recipe and pass it to the ModelOpt tooling.
 
 .. contents:: On this page
    :local:
@@ -26,7 +28,7 @@ constants, and ad-hoc code edits.  This makes it difficult to:
   settings to tweak.
 
 Recipes solve these problems by capturing **all** the configuration needed to optimize a
-model in a single YAML file (or a small directory of files).
+model in a single, portable artifact -- either a YAML file or a directory of files.
 
 
 Design overview
@@ -35,19 +37,20 @@ Design overview
 The recipe system is part of the :mod:`modelopt.recipe` package and consists of three
 layers:
 
-1. **Recipe files** -- YAML documents stored in the ``modelopt_recipes/`` directory (shipped
-   with the package) or on the user's filesystem.
+1. **Recipe sources** -- YAML files or directories stored in the ``modelopt_recipes/``
+   directory (shipped with the package) or on the user's filesystem.
 2. **Config loader** -- :func:`~modelopt.recipe.load_config` reads YAML files, resolves
    paths, and performs automatic ``ExMy`` floating-point notation conversion.
-3. **Recipe loader** -- :func:`~modelopt.recipe.load_recipe` validates the YAML against
-   Pydantic models and returns a typed recipe object ready for use.
+3. **Recipe loader** -- :func:`~modelopt.recipe.load_recipe` validates the loaded
+   configuration against Pydantic models and returns a typed recipe object ready for use.
 
 
-Recipe file format
-==================
+Recipe format
+=============
 
-A recipe is a YAML file with two top-level sections: ``metadata`` and a
-type-specific configuration section (currently ``quantize`` for PTQ recipes).
+A recipe contains two top-level sections: ``metadata`` and a type-specific
+configuration section (for example, ``quantize`` for PTQ recipes).  These can live
+in a single YAML file or be split across files in a directory.
 
 Single-file format
 ------------------
@@ -122,7 +125,7 @@ quantization configuration, use a directory with two files:
 Metadata section
 ================
 
-Every recipe file must contain a ``metadata`` mapping with at least a ``recipe_type`` field:
+Every recipe must contain a ``metadata`` mapping with at least a ``recipe_type`` field:
 
 .. list-table::
    :header-rows: 1
@@ -166,7 +169,7 @@ For PTQ recipes (``recipe_type: ptq``), the ``quantize`` mapping contains:
 ExMy floating-point notation
 =============================
 
-Recipe files support a convenient shorthand for floating-point bit formats in
+Recipe YAML files support a convenient shorthand for floating-point bit formats in
 ``num_bits`` and ``scale_bits`` fields.  Instead of writing a Python tuple, you
 write the format name directly:
 
@@ -271,8 +274,9 @@ against the built-in library first, then the filesystem:
 
 .. code-block:: python
 
-   # Load a custom recipe from the filesystem
+   # Load a custom recipe from the filesystem (file or directory)
    recipe = load_recipe("/path/to/my_custom_recipe.yml")
+   # or: recipe = load_recipe("/path/to/my_recipe_dir/")
    model = mtq.quantize(model, recipe.quantize, forward_loop)
 
 Command-line usage
@@ -315,8 +319,9 @@ resolve paths using the same strategy:
 
 1. If the path is absolute, use it directly.
 2. If relative, check the **built-in recipes library** first
-   (``modelopt_recipes/``), probing ``.yml`` and ``.yaml`` suffixes.
-3. Then check the **filesystem**, probing the same suffixes.
+   (``modelopt_recipes/``), probing ``.yml`` and ``.yaml`` suffixes as well as
+   directories.
+3. Then check the **filesystem**, probing the same suffixes and directories.
 
 This means built-in recipes can be referenced without any prefix:
 
@@ -336,7 +341,7 @@ To create a custom recipe:
 2. Copy it and modify the ``quant_cfg`` entries as needed (see :ref:`quant-cfg`
    for entry format details).
 3. Update the ``metadata.description`` to describe your changes.
-4. Save the file and pass its path to ``load_recipe()`` or ``--recipe``.
+4. Save the file (or directory) and pass its path to ``load_recipe()`` or ``--recipe``.
 
 Example -- creating an INT8 per-channel recipe:
 
