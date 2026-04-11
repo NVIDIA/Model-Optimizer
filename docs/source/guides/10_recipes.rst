@@ -7,8 +7,10 @@ A **recipe** is a declarative specification that fully describes how to optimize
 A recipe can be a single YAML file or a directory containing YAML configs and other files
 that together define a model optimization workflow.
 Recipes decouple optimization settings from Python code, enabling reuse, sharing, version
-control, and reproducibility.  Instead of editing Python scripts to change quantization
+control, and reproducibility.  Instead of editing Python scripts to change optimization
 parameters, you author (or select) a recipe and pass it to the ModelOpt tooling.
+While the examples below focus on PTQ (the first supported recipe type), the recipe
+system is designed to support any optimization technique.
 
 .. contents:: On this page
    :local:
@@ -24,7 +26,7 @@ constants, and ad-hoc code edits.  This makes it difficult to:
 * **Reproduce** a published result -- the exact configuration is buried in script arguments.
 * **Share** a configuration -- there is no single artifact to hand off.
 * **Version-control** changes -- diffs are mixed in with unrelated code changes.
-* **Onboard new models** -- inference engineers must read source code to discover which
+* **Onboard new models** -- engineers must read source code to discover which
   settings to tweak.
 
 Recipes solve these problems by capturing **all** the configuration needed to optimize a
@@ -55,7 +57,7 @@ in a single YAML file or be split across files in a directory.
 Single-file format
 ------------------
 
-The simplest form is a single ``.yml`` or ``.yaml`` file:
+The simplest form is a single ``.yml`` or ``.yaml`` file.  Here is a PTQ example:
 
 .. code-block:: yaml
 
@@ -88,7 +90,8 @@ Directory format
 ----------------
 
 For larger recipes or when you want to keep metadata separate from the
-quantization configuration, use a directory with two files:
+optimization configuration, use a directory with multiple files.  Here is a PTQ
+example:
 
 .. code-block:: text
 
@@ -136,16 +139,24 @@ Every recipe must contain a ``metadata`` mapping with at least a ``recipe_type``
      - Description
    * - ``recipe_type``
      - Yes
-     - The optimization category.  Currently only ``"ptq"`` is supported.
+     - The optimization category.  Determines which configuration sections are
+       expected (e.g., ``"ptq"`` expects a ``quantize`` section).  See
+       :class:`~modelopt.recipe.config.RecipeType` for supported values.
    * - ``description``
      - No
      - A human-readable summary of what the recipe does.
 
 
-PTQ configuration section
-=========================
+Type-specific configuration sections
+=====================================
 
-For PTQ recipes (``recipe_type: ptq``), the ``quantize`` mapping contains:
+Each recipe type defines its own configuration section.  The section name and
+schema depend on the ``recipe_type`` value in the metadata.
+
+PTQ (``recipe_type: ptq``)
+--------------------------
+
+PTQ recipes contain a ``quantize`` mapping with:
 
 .. list-table::
    :header-rows: 1
@@ -169,9 +180,10 @@ For PTQ recipes (``recipe_type: ptq``), the ``quantize`` mapping contains:
 ExMy floating-point notation
 =============================
 
-Recipe YAML files support a convenient shorthand for floating-point bit formats in
-``num_bits`` and ``scale_bits`` fields.  Instead of writing a Python tuple, you
-write the format name directly:
+The config loader supports a convenient shorthand for floating-point bit formats.
+This is primarily used in PTQ recipes for ``num_bits`` and ``scale_bits`` fields,
+but applies to any YAML value loaded through :func:`~modelopt.recipe.load_config`.
+Instead of writing a Python tuple, you write the format name directly:
 
 .. code-block:: yaml
 
@@ -212,10 +224,10 @@ ModelOpt ships a library of built-in recipes under the ``modelopt_recipes/`` pac
 These are bundled with the Python distribution and can be referenced by their relative
 path (without the ``modelopt_recipes/`` prefix).
 
-General PTQ recipes
--------------------
+PTQ recipes
+-----------
 
-General recipes are model-agnostic and apply to any supported architecture:
+General PTQ recipes are model-agnostic and apply to any supported architecture:
 
 .. list-table::
    :header-rows: 1
@@ -257,17 +269,17 @@ Python API
 ----------
 
 Use :func:`~modelopt.recipe.load_recipe` to load a recipe.  The path is resolved
-against the built-in library first, then the filesystem:
+against the built-in library first, then the filesystem.  The returned object's
+type depends on the ``recipe_type`` in the metadata:
 
 .. code-block:: python
 
-   from modelopt.recipe import load_recipe, ModelOptPTQRecipe
+   from modelopt.recipe import load_recipe
 
    # Load a built-in recipe by relative path (suffix optional)
    recipe = load_recipe("general/ptq/fp8_default-fp8_kv")
-   assert isinstance(recipe, ModelOptPTQRecipe)
 
-   # The quantize dict can be passed directly to mtq.quantize()
+   # For PTQ recipes, the quantize dict can be passed directly to mtq.quantize()
    import modelopt.torch.quantization as mtq
 
    model = mtq.quantize(model, recipe.quantize, forward_loop)
@@ -277,12 +289,11 @@ against the built-in library first, then the filesystem:
    # Load a custom recipe from the filesystem (file or directory)
    recipe = load_recipe("/path/to/my_custom_recipe.yml")
    # or: recipe = load_recipe("/path/to/my_recipe_dir/")
-   model = mtq.quantize(model, recipe.quantize, forward_loop)
 
 Command-line usage
 ------------------
 
-The ``hf_ptq.py`` example accepts a ``--recipe`` flag:
+Some example scripts accept a ``--recipe`` flag.  For instance, the PTQ example:
 
 .. code-block:: bash
 
@@ -293,8 +304,9 @@ The ``hf_ptq.py`` example accepts a ``--recipe`` flag:
        --calib_size 512 \
        --export_fmt hf
 
-When ``--recipe`` is provided, the script loads the recipe and uses its ``quantize``
-config directly, bypassing the ``--qformat`` / ``--kv_cache_qformat`` flags.
+When ``--recipe`` is provided, the script loads the recipe and uses its configuration
+directly, bypassing format-specific flags (e.g., ``--qformat`` / ``--kv_cache_qformat``
+for PTQ).
 
 
 Loading standalone configs
@@ -338,12 +350,12 @@ Writing a custom recipe
 To create a custom recipe:
 
 1. Start from an existing recipe that is close to your target configuration.
-2. Copy it and modify the ``quant_cfg`` entries as needed (see :ref:`quant-cfg`
-   for entry format details).
+2. Copy it and modify the type-specific configuration as needed (for PTQ recipes,
+   see :ref:`quant-cfg` for ``quant_cfg`` entry format details).
 3. Update the ``metadata.description`` to describe your changes.
 4. Save the file (or directory) and pass its path to ``load_recipe()`` or ``--recipe``.
 
-Example -- creating an INT8 per-channel recipe:
+Example -- creating a custom PTQ recipe (INT8 per-channel):
 
 .. code-block:: yaml
 
@@ -406,7 +418,7 @@ Recipes are validated at load time using Pydantic models:
    ``algorithm``).
 
 :class:`~modelopt.recipe.config.RecipeType`
-   Enum of supported recipe types.  Currently only ``PTQ``.
+   Enum of supported recipe types.
 
 
 Future directions
