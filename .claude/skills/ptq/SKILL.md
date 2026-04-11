@@ -124,9 +124,9 @@ Report the path and size to the user.
 
 ## Common Pitfalls
 
-- **Transformers version**: Newer models (e.g., Devstral/ministral3) may require a transformers version not yet in the container. Check `config.json` for `transformers_version` and upgrade if needed. Install ModelOpt first, then upgrade transformers **with** deps (not `--no-deps`) to pull compatible `huggingface_hub`
+- **Transformers version**: New models may need a newer version of transformers than what's installed. Check `config.json` for `transformers_version`. In containers, beware of `PIP_CONSTRAINT` blocking upgrades — see `references/slurm-setup-ptq.md` for workarounds
 - **Gated datasets**: Some calibration datasets require HF authentication. Ensure `HF_TOKEN` is set in the job environment, or use `--dataset cnn_dailymail` as a non-gated alternative
-- **NFS root_squash + Docker**: Docker runs as root, but NFS squashes root to `nobody`. Use `docker run --user $(id -u):$(id -g)`, or `chmod -R a+rwX` on needed directories as a fallback. See `skills/common/slurm-setup.md` section 5
+- **NFS root_squash + Docker**: See `skills/common/slurm-setup.md` section 5
 
 ## References
 

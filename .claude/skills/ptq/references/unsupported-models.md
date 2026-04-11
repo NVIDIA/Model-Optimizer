@@ -15,7 +15,11 @@ After download, inspect the model files on the target machine (use `remote_run` 
 
 Write custom scripts locally (in `./workspaces/<model>/scripts/`), then sync to remote before running.
 
-**Then check `config.json`** (on the target machine):
+**Check transformers compatibility** (on the target machine):
+
+First, if README or `config.json` specifies a required transformers version, check if installed version satisfies it. If not, upgrade: `pip install -U "transformers>=<required_version>"`.
+
+Then try loading:
 
 ```bash
 python -c "
@@ -40,16 +44,14 @@ print(type(cfg).__name__)
 
   Read the modeling file and proceed to Step B.
 
-- **Raises `ValueError` / `OSError` (unknown architecture)** → not in the installed transformers. Determine why:
-
-  1. **Check the transformers `main` branch** (not yet released):
+- **Raises `ValueError` / `OSError` (unknown architecture)** → not in the installed transformers. Try `pip install -U transformers` first. If still not found, check the `main` branch:
 
      ```bash
      git clone --depth 1 https://github.com/huggingface/transformers.git /tmp/transformers-main --quiet
      grep -r "class <ArchName>" /tmp/transformers-main/src/transformers/models/
      ```
 
-     - **Found** → install with deps: `pip install /tmp/transformers-main`, then re-run `AutoConfig.from_pretrained()`. **Important**: if ModelOpt is already installed, its `[hf]` extras may have pinned an older transformers. Install ModelOpt first, then upgrade transformers **after** (with deps, not `--no-deps`) so compatible `huggingface_hub` and other transitive deps are pulled in.
+     - **Found** → `pip install /tmp/transformers-main`, then re-run `AutoConfig`.
      - **Not found** → ask the user: *"The checkpoint uses `<ArchName>` which isn't in released or main-branch transformers. Do you have a private fork or custom modeling code?"*
 
 - **No `config.json`** → not a standard HF checkpoint. List the directory for README or `.py` files. If nothing useful, ask the user for the modeling code.
@@ -131,13 +133,15 @@ class QuantCustomModule(OriginalModule):
 
 ## Pattern 2: MoE Models
 
-**Standard MoE** (per-expert `nn.Linear` in a `ModuleList` with `gate` + `experts`): Auto-detected by `register_sparse_moe_on_the_fly`. No custom code needed — amax sync and calibration coverage are handled automatically.
+**Most MoE models are auto-detected** — ModelOpt handles two common patterns automatically:
 
-**Custom MoE** requires patching. Read the model source to understand how expert weights are stored and computed, then find the closest pattern in the plugin (`modelopt/torch/quantization/plugins/huggingface.py`):
+- **transformers >= 5.0**: Unified fused experts (`gate_up_proj` + `down_proj` 3D tensors) → auto-detected by `register_fused_experts_on_the_fly`, handled by `_QuantFusedExperts`. Covers Mixtral, Qwen, DeepSeek, Jamba, OlMoE, etc.
+- **transformers < 5.0**: Sequential per-expert `nn.Linear` with `gate` + `experts` → auto-detected by `register_sparse_moe_on_the_fly`.
+
+**Custom MoE** (non-standard layout not matching auto-detection) requires patching. Find the closest pattern in the plugin (`modelopt/torch/quantization/plugins/huggingface.py`):
 
 | MoE design | Strategy | Plugin example |
 | --- | --- | --- |
-| Fused weights + per-expert dispatch loop | Expand to per-expert `nn.Linear` | `_QuantQwen35MoeExperts` |
 | Fused weights + `torch.bmm` | Add `TensorQuantizer` around bmm | `_QuantLlama4TextExperts` |
 | Fused weights + functional interception | Intercept matmul ops | `_QuantGptOssExperts` |
 | Fused 2D weights (experts stacked in rows) | Two-level expansion | `_QuantDbrxExpertGLU` |
@@ -343,3 +347,4 @@ tokenizer.save_pretrained(output_path)
 - **Check quantizer summary**: `mtq.print_quant_summary(model)` shows which quantizers are enabled/disabled
 - **Inspect dtypes**: After loading, iterate `model.named_parameters()` and check for unexpected FP8 tensors
 - **Watch for silent disabling**: A misconfigured wildcard pattern can silently disable quantizers — always verify the summary
+- **Read pip errors carefully**: `ResolutionImpossible` means dependency conflict (try `--no-deps`), NOT network failure. Check for `Connection refused`/`Name resolution failed` before concluding network is down
