@@ -268,6 +268,16 @@ def train():
         elif training_args.mode == "eagle3":
             # eagle_cfg maps directly to EagleConfig fields; eagle_offline is derived here.
             eagle_cfg["eagle_offline"] = use_offline_training
+            export_rope = eagle_cfg.get("eagle_export_rope_scaling", {})
+            orig_max_pos = export_rope.get("original_max_position_embeddings")
+            if orig_max_pos is not None and orig_max_pos != training_args.training_seq_len:
+                import warnings
+
+                warnings.warn(
+                    f"eagle_export_rope_scaling.original_max_position_embeddings ({orig_max_pos}) "
+                    f"differs from training_seq_len ({training_args.training_seq_len}). "
+                    f"This may affect long-context inference quality."
+                )
             mtsp.convert(model, [("eagle", eagle_cfg)])
 
             # Load draft vocab cache if the draft model uses a compressed vocabulary

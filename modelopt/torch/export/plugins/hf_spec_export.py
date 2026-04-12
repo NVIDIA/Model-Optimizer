@@ -187,6 +187,17 @@ class EagleExporter(SpeculativeDecodingExporter):
                     new_value = str(new_value).replace("torch.", "")
                 template_config[key] = new_value
 
+        # For long-context quality, we disable rope scaling during training
+        # and inject yarn during export for inference.
+        eagle_export_rope_scaling = getattr(self.model, "eagle_export_rope_scaling", None)
+        rope_cfg = self.model.eagle_config.rope_scaling
+        if rope_cfg and rope_cfg.get("rope_type") == "default" and eagle_export_rope_scaling:
+            template_config["rope_scaling"] = eagle_export_rope_scaling
+
+        # In transformers 5.x, rope_theta is under rope_scaling, not the main config.
+        if template_config.get("rope_theta") is None and rope_cfg:
+            template_config["rope_theta"] = rope_cfg.get("rope_theta")
+
         return template_config
 
     def export(

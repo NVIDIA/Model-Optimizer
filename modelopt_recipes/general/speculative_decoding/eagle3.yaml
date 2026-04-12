@@ -55,5 +55,11 @@ eagle:
   eagle_reuse_base_decoder: false
   eagle_report_acc: true
   eagle_enable_nvtx: false
+  # Rope scaling: disable during training (default_config.py uses rope_type=default),
+  # inject YaRN during export for long-context inference.
+  eagle_export_rope_scaling:
+    rope_type: yarn
+    factor: 32.0
+    original_max_position_embeddings: 2048
   # overwrite to modelopt/torch/speculative/eagle/default_config.py
   eagle_architecture_config: {}
