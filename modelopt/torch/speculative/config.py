@@ -134,6 +134,20 @@ class EagleConfig(ModeloptBaseConfig):
     )
 
     @model_validator(mode="after")
+    def _check_rope_scaling_consistency(self) -> "EagleConfig":
+        if not self.eagle_export_rope_scaling:
+            return self
+        rope_cfg = self.eagle_architecture_config.get("rope_scaling", {})
+        rope_type = rope_cfg.get("rope_type")
+        if rope_type is not None and rope_type != "default":
+            raise ValueError(
+                f"eagle_export_rope_scaling is set but eagle_architecture_config has "
+                f"rope_type='{rope_type}'. Export rope overwrite is only valid when the "
+                f"training rope_type is 'default' (no scaling)."
+            )
+        return self
+
+    @model_validator(mode="after")
     def _warn_rope_vs_training_seq_len(self, info: ValidationInfo) -> "EagleConfig":
         ctx = info.context if info.context else {}
         training_args = ctx.get("training_args")
