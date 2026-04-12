@@ -15,7 +15,10 @@
 
 """Configurations for speculative decoding modes."""
 
+import warnings
 from copy import deepcopy
+
+from pydantic import ValidationInfo, model_validator
 
 from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
 
@@ -129,3 +132,18 @@ class EagleConfig(ModeloptBaseConfig):
             "Set to empty dict {} to disable rope scaling injection at export."
         ),
     )
+
+    @model_validator(mode="after")
+    def _warn_rope_vs_training_seq_len(self, info: ValidationInfo) -> "EagleConfig":
+        ctx = info.context if info.context else {}
+        training_args = ctx.get("training_args")
+        if training_args is None:
+            return self
+        orig_max_pos = self.eagle_export_rope_scaling.get("original_max_position_embeddings")
+        if orig_max_pos is not None and orig_max_pos != training_args.training_seq_len:
+            warnings.warn(
+                f"eagle_export_rope_scaling.original_max_position_embeddings ({orig_max_pos}) "
+                f"differs from training_seq_len ({training_args.training_seq_len}). "
+                f"This may affect long-context inference quality."
+            )
+        return self
