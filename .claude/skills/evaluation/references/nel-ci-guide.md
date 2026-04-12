@@ -126,12 +126,16 @@ execution:
 
 ### Gated datasets
 
-Tasks that download gated HuggingFace datasets (e.g., GPQA, HLE) need `HF_TOKEN` passed to the evaluation container. Set it at the evaluation level or per-task:
+Tasks that download gated HuggingFace datasets (e.g., GPQA, HLE) need `HF_TOKEN` passed to the evaluation container.
+
+**NEL CI (JET)**: Handled automatically — the `COMPEVAL_HF_TOKEN` JET secret is pre-configured by the eval platform team. No user action needed; you don't even need personal access to the gated dataset.
+
+**NEL SLURM executor**: You must provide your own HF token, AND your HuggingFace account must have been granted access to the gated dataset (e.g., request access at https://huggingface.co/datasets/Idavidrein/gpqa for GPQA).
 
 ```yaml
 evaluation:
   env_vars:
-    HF_TOKEN: host:HF_TOKEN  # SLURM executor
+    HF_TOKEN: host:HF_TOKEN  # SLURM executor — reads from your local env
   tasks:
     - name: simple_evals.gpqa_diamond
       env_vars:
