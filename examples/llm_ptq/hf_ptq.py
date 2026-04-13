@@ -1059,7 +1059,7 @@ def quantize_main(
             assert isinstance(recipe, ModelOptPTQRecipe), (
                 f"Expected PTQ recipe, but got {type(recipe).__name__} from {args.recipe}"
             )
-            quant_cfg = recipe.quantize
+            quant_cfg = recipe.quantize.model_dump()
 
         else:
             assert len(args.qformat.split(",")) == 1, (

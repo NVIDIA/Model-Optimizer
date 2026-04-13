@@ -170,7 +170,8 @@ def test_load_recipe_dir(tmp_path):
     recipe = load_recipe(tmp_path)
     assert recipe.recipe_type == RecipeType.PTQ
     assert recipe.description == "Dir test."
-    assert recipe.quantize == {"algorithm": "max", "quant_cfg": []}
+    assert recipe.quantize.algorithm == "max"
+    assert recipe.quantize.quant_cfg == []
 
 
 def test_load_recipe_dir_missing_recipe_raises(tmp_path):
