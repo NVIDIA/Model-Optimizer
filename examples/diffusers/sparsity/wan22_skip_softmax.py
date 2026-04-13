@@ -53,6 +53,7 @@ import argparse
 import os
 
 import torch
+from datasets import load_dataset
 from diffusers import AutoencoderKLWan, WanPipeline
 from diffusers.utils import export_to_video
 
@@ -258,8 +259,6 @@ def build_sparse_config(args: argparse.Namespace, num_blocks: int) -> dict:
 
 def load_calib_prompts(calib_size: int) -> list[str]:
     """Load calibration prompts from OpenVid-1M dataset."""
-    from datasets import load_dataset
-
     dataset = load_dataset("nkp37/OpenVid-1M", split="train")
     prompts = list(dataset["caption"][:calib_size])
     print(f"Loaded {len(prompts)} calibration prompts from OpenVid-1M")
