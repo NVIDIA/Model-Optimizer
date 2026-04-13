@@ -33,11 +33,11 @@
 import json
 
 import torch
-import transformers
 from torch.utils.data import Dataset
-from transformers.trainer_pt_utils import LabelSmoother
 
+import transformers
 from modelopt.torch.utils import print_rank_0
+from transformers.trainer_pt_utils import LabelSmoother
 
 IGNORE_TOKEN_ID = LabelSmoother.ignore_index
 

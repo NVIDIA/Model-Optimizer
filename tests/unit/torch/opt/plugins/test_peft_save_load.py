@@ -22,6 +22,7 @@ from _test_utils.torch.transformers_models import (
 pytest.importorskip("peft")
 from _test_utils.torch.opt.utils import apply_mode_with_sampling
 from peft import AutoPeftModelForCausalLM, LoraConfig, get_peft_model
+
 from transformers import AutoModelForCausalLM
 
 

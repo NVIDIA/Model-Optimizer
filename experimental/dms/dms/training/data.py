@@ -32,9 +32,9 @@ from typing import Any
 import numpy as np
 from datasets import Dataset, load_dataset, load_from_disk
 from tqdm import tqdm
-from transformers import PreTrainedTokenizerBase
 
 from dms.logging import get_logger
+from transformers import PreTrainedTokenizerBase
 
 logger = get_logger("Data")
 

@@ -22,13 +22,12 @@ if TYPE_CHECKING:
     from types import FrameType
 import numpy as np
 import torch
-import transformers
 from datasets import load_dataset
 from packaging.version import Version
 from scripts.ar_validate import validate_ar
-from transformers import Trainer, TrainerCallback
 
 import modelopt
+import transformers
 from modelopt.torch.speculative.eagle.utils import (
     EagleOfflineDataCollator,
     OfflineSupervisedDataset,
@@ -41,6 +40,7 @@ from modelopt.torch.utils.plugins.transformers_dataset import (
     ShardedDataset,
     VisionLanguageDataCollator,
 )
+from transformers import Trainer, TrainerCallback
 
 try:
     import wandb

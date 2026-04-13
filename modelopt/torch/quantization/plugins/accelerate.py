@@ -19,6 +19,8 @@ from contextlib import contextmanager
 from typing import Any
 
 import torch
+
+import modelopt.torch.quantization as mtq
 import transformers
 from accelerate import init_empty_weights, load_checkpoint_and_dispatch
 from accelerate.hooks import AlignDevicesHook, SequentialHook
@@ -26,14 +28,12 @@ from accelerate.utils import get_max_memory, infer_auto_device_map
 from accelerate.utils.dataclasses import CustomDtype
 from accelerate.utils.offload import PrefixedDataset
 
-import modelopt.torch.quantization as mtq
-
 __all__ = ["init_quantized_weights"]
 
 
 def _get_cpu_offload_hook(hook):
     if isinstance(hook, AlignDevicesHook) and hook.offload and hook.weights_map is not None:
-        assert "weight" in hook.weights_map
+        assert len(hook.weights_map) > 0
         if (
             isinstance(hook.weights_map, PrefixedDataset)
             and hook.weights_map.prefix + "weight" not in hook.weights_map.dataset.state_dict
@@ -50,32 +50,68 @@ def _get_cpu_offload_hook(hook):
     return None
 
 
+def _writeback_params_to_weights_map(module, align_hook):
+    """Write all non-meta parameters back to the hook's CPU weights_map."""
+    for name, param in module.named_parameters():
+        if param.device.type == "meta":
+            continue
+        if isinstance(align_hook.weights_map, PrefixedDataset):
+            key = align_hook.weights_map.prefix + name
+            w_map = align_hook.weights_map.dataset.state_dict
+        else:
+            w_map = align_hook.weights_map
+            key = name
+        if key in w_map:
+            w_map[key] = param.data.to(w_map[key].device, dtype=w_map[key].dtype)
+
+
 @contextmanager
 def weight_access_and_writeback_context(module):
-    """Context manager for weight access and writeback for modules managed by accelerate."""
+    """Context manager for weight access and writeback for modules managed by accelerate.
+
+    Handles two cases:
+    1. **Single-module**: the module's own ``_hf_hook`` is an offload hook.
+    2. **Sub-module**: the module's hook is non-offloading, but its children have
+       offload hooks (common with ``SequentialHook`` on sub-modules placed by
+       ``load_checkpoint_and_dispatch``).
+
+    For the sub-module case, ``pre_forward`` is skipped on sub-modules whose weights
+    are already materialized (not on meta).  This allows the context manager to be
+    used as a pure writeback after weight-modifying algorithms.
+    """
     assert hasattr(module, "_hf_hook")
     align_hook = _get_cpu_offload_hook(module._hf_hook)
 
     if align_hook:
-        # Accelerate uses AlignDevicesHook to offload weights to CPU/Disk and then reload them in the forward pass
-        # The CPU/Disk offloaded weights are managed by PrefixDataset and OffloadedWeightsLoader
-        # See https://github.com/huggingface/accelerate/blame/f48d95c4939b281505a45b3d6e0bf554b65cc1ea/src/accelerate/utils/offload.py#L104-L141
-        # TODO: Add support for disk-offloaded models if needed (they will be really slow, hence low priority)
-
-        # This will load the weights from CPU state_dict and move it to the GPU from meta device
         align_hook.pre_forward(module)
+        try:
+            yield
+        finally:
+            _writeback_params_to_weights_map(module, align_hook)
+            align_hook.post_forward(module, None)
+        return
+
+    materialized: list[tuple[torch.nn.Module, AlignDevicesHook, bool]] = []
+    for mod in module.modules():
+        if mod is module or not hasattr(mod, "_hf_hook"):
+            continue
+        hook = _get_cpu_offload_hook(mod._hf_hook)
+        if hook is None:
+            continue
+        # Only call pre_forward if weights need materializing; already-materialized
+        # weights would be overwritten with stale CPU state_dict values.
+        needs_materialize = any(p.device.type == "meta" for p in mod.parameters())
+        if needs_materialize:
+            hook.pre_forward(mod)
+        materialized.append((mod, hook, needs_materialize))
+
     try:
         yield
     finally:
-        if align_hook:
-            # Update the weight in the CPU state_dict
-            if isinstance(align_hook.weights_map, PrefixedDataset):
-                key = align_hook.weights_map.prefix + "weight"
-                w_map = align_hook.weights_map.dataset.state_dict
-            else:
-                key, w_map = "weight", align_hook.weights_map
-            w_map[key] = module.weight.data.to(w_map[key].device, dtype=w_map[key].dtype)
-            align_hook.post_forward(module, None)
+        for mod, hook, was_materialized in materialized:
+            _writeback_params_to_weights_map(mod, hook)
+            if was_materialized:
+                hook.post_forward(mod, None)
 
 
 @contextmanager

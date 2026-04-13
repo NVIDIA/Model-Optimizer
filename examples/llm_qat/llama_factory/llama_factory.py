@@ -19,7 +19,6 @@ from dataclasses import dataclass
 from typing import Any
 
 import torch
-import transformers
 import yaml
 from llamafactory.extras import logging
 from llamafactory.extras.misc import (
@@ -31,12 +30,13 @@ from llamafactory.hparams import FinetuningArguments, ModelArguments
 from llamafactory.model.adapter import init_adapter
 from llamafactory.model.loader import load_config
 from llamafactory.model.patcher import patch_config
-from transformers import AutoModelForCausalLM, PreTrainedModel, PreTrainedTokenizer, Trainer
 from wrapt import register_post_import_hook
 
 import modelopt.torch.opt as mto
+import transformers
 from modelopt.torch.distill.plugins.huggingface import LMLogitsLoss
 from modelopt.torch.quantization.plugins.transformers_trainer import QADTrainer, QATTrainer
+from transformers import AutoModelForCausalLM, PreTrainedModel, PreTrainedTokenizer, Trainer
 
 logger = logging.get_logger(__name__)
 

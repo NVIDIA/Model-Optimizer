@@ -23,13 +23,13 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
 
 import modelopt.torch.opt as mto
 import modelopt.torch.sparsity.attention_sparsity as mtsa
 from modelopt.torch.export import export_hf_checkpoint
 from modelopt.torch.sparsity.attention_sparsity.config import SKIP_SOFTMAX_CALIB
 from modelopt.torch.utils.memory_monitor import launch_memory_monitor
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 RAND_SEED = 1234
 

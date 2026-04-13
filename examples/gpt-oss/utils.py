@@ -16,7 +16,6 @@
 import os
 
 from datasets import load_dataset, load_from_disk
-from transformers import AutoConfig
 from trl import (
     ModelConfig,
     ScriptArguments,
@@ -24,6 +23,8 @@ from trl import (
     # SFTTrainer, Use ModelOpt's version instead
     get_peft_config,
 )
+
+from transformers import AutoConfig
 
 
 def is_distributed_job():

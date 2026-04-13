@@ -20,8 +20,9 @@ from functools import partial
 
 import datasets
 import torch
-import transformers
 from peft import LoraConfig, TaskType
+
+import transformers
 from transformers import default_data_collator
 
 IGNORE_INDEX = -100

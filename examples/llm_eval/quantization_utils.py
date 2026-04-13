@@ -15,7 +15,6 @@
 
 
 import torch
-from transformers import AutoTokenizer
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.config import need_calibration
@@ -25,6 +24,7 @@ from modelopt.torch.utils.dataset_utils import (
     get_dataset_dataloader,
     get_max_batch_size,
 )
+from transformers import AutoTokenizer
 
 MAX_SEQ_LEN = 4096
 MAX_OUTPUT_LEN = 512

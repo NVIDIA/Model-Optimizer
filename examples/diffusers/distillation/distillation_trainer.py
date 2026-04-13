@@ -1084,8 +1084,9 @@ class DistillationTrainer(LtxvTrainer):
 
     def _save_checkpoint(self) -> Path | None:
         """Save model weights (override: use global rank 0 for file writes)."""
-        from accelerate.utils import DistributedType
         from safetensors.torch import save_file
+
+        from accelerate.utils import DistributedType
 
         is_lora = self._config.model.training_mode == "lora"
         is_fsdp = self._accelerator.distributed_type == DistributedType.FSDP
@@ -1395,11 +1396,12 @@ class DistillationTrainer(LtxvTrainer):
         3. Skips already-completed steps
         4. Saves full training state at checkpoint intervals
         """
-        from accelerate.utils import DistributedType, set_seed
         from ltx_trainer.gpu_utils import get_gpu_memory_gb
         from ltx_trainer.hf_hub_utils import push_to_hub
         from ltx_trainer.progress import TrainingProgress
         from ltx_trainer.trainer import TrainingStats
+
+        from accelerate.utils import DistributedType, set_seed
 
         MEMORY_CHECK_INTERVAL = 200  # noqa: N806
 

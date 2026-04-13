@@ -49,12 +49,19 @@ import evaluate
 import numpy as np
 import torch
 import torch.nn as nn
+from torch.utils.data import DataLoader
+from tqdm.auto import tqdm
+
+# Model Optimizer: imports
+import modelopt.torch.distill as mtd
+import modelopt.torch.opt as mto
+import modelopt.torch.prune as mtp
+import modelopt.torch.quantization as mtq
 import transformers
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import set_seed
-from torch.utils.data import DataLoader
-from tqdm.auto import tqdm
+from modelopt.torch._deploy.utils import OnnxBytes, get_onnx_bytes_and_metadata
 from transformers import (
     AutoModelForQuestionAnswering,
     AutoTokenizer,
@@ -65,13 +72,6 @@ from transformers import (
     default_data_collator,
     get_scheduler,
 )
-
-# Model Optimizer: imports
-import modelopt.torch.distill as mtd
-import modelopt.torch.opt as mto
-import modelopt.torch.prune as mtp
-import modelopt.torch.quantization as mtq
-from modelopt.torch._deploy.utils import OnnxBytes, get_onnx_bytes_and_metadata
 
 # Enable automatic save/load of modelopt_state with huggingface checkpointing
 mto.enable_huggingface_checkpointing()

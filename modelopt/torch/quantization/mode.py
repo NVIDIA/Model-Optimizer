@@ -223,6 +223,7 @@ def wrapped_calib_func(
     kwargs = config.model_dump()
     method = kwargs.pop("method")
     sequential = kwargs.pop("use_sequential", False)
+    checkpoint_dir = kwargs.pop("checkpoint_dir", None)
     if method is not None and "awq" in method:
         # For backward compatibility
         kwargs["algorithm"] = method
@@ -240,14 +241,12 @@ def wrapped_calib_func(
         if sequential:
             if forward_loop is None:
                 raise ValueError("forward_loop is required for calibration but got None.")
-            assert method in ["max", "gptq"], (
-                f"Sequential calibration currently only supports max and gptq calibration, got {method}"
-            )
             # Wrap with sequential processing
             sequential_calibrate(
                 model,
                 forward_loop=forward_loop,
                 calib_func=func,
+                checkpoint_dir=checkpoint_dir,
                 **kwargs,
             )
         else:

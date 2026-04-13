@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import pytest
-import transformers
 from _test_utils.examples.llm_ptq_utils import PTQCommand
 from _test_utils.examples.models import (
     BART_PATH,
@@ -23,6 +22,8 @@ from _test_utils.examples.models import (
     WHISPER_PATH,
 )
 from packaging.version import Version
+
+import transformers
 
 
 @pytest.mark.parametrize(

@@ -34,8 +34,6 @@ from dataclasses import dataclass, field
 from warnings import warn
 
 import torch
-import transformers
-from transformers.trainer_utils import get_last_checkpoint
 from utils import (
     get_lora_config,
     get_metrics_with_perplexity,
@@ -45,9 +43,11 @@ from utils import (
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
+import transformers
 from modelopt.torch.distill.plugins.huggingface import LMLogitsLoss
 from modelopt.torch.quantization.plugins.transformers_trainer import QADTrainer, QATTrainer
 from modelopt.torch.utils import print_rank_0
+from transformers.trainer_utils import get_last_checkpoint
 
 # Enable automatic save/load of modelopt state huggingface checkpointing
 mto.enable_huggingface_checkpointing()

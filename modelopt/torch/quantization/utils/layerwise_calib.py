@@ -13,23 +13,35 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Sequential calibration layer patching and activation capture.
+"""Sequential calibration layer patching, activation capture, and checkpoint save/resume.
 
 This module provides :class:`LayerActivationCollector`, a stateful helper that
 patches decoder layers with a skip / run / capture strategy for efficient
-layer-by-layer calibration.
+layer-by-layer calibration, and :class:`_CheckpointState` for persisting
+per-layer calibration progress to disk.
 """
 
+from __future__ import annotations
+
+import json
+import os
+import shutil
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn as nn
 
-from modelopt.torch.opt.searcher import ForwardLoop
 from modelopt.torch.utils import print_rank_0
-from modelopt.torch.utils.network import bind_forward_method, unpatch_forward_method
+from modelopt.torch.utils.network import (
+    bind_forward_method,
+    get_module_device,
+    unpatch_forward_method,
+)
+
+if TYPE_CHECKING:
+    from modelopt.torch.opt.searcher import ForwardLoop
 
 
 class _EarlyStopForwardError(Exception):
@@ -49,6 +61,24 @@ class _LayerCalibState:
     cached_inputs: deque = field(default_factory=deque)
     collected_inputs: list = field(default_factory=list)
     output_meta: tuple | None = None
+
+
+class _SkipLayer(nn.Module):
+    """Parameter-free stand-in for a fully calibrated decoder layer.
+
+    Replaces the real layer in the ModuleList so that framework hooks
+    (accelerate, FSDP2, etc.) have no parameters to transfer. Holds a
+    reference to the original layer for restoration during cleanup.
+    """
+
+    def __init__(self, original: nn.Module):
+        super().__init__()
+        # Bypass nn.Module.__setattr__ to avoid registering original as a submodule.
+        object.__setattr__(self, "_original", original)
+        self._seq_calib = _LayerCalibState(mode="skip")
+
+    def forward(self, *args, **kwargs):
+        return LayerActivationCollector._zeros_from_meta(self._original._seq_calib.output_meta)
 
 
 class LayerActivationCollector:
@@ -73,14 +103,6 @@ class LayerActivationCollector:
     never consumed for real computation.
     """
 
-    # Global registry of (predicate, discoverer) pairs. Populated at import time
-    # by plugins (e.g. huggingface.py, megatron.py). Order matters: the first
-    # matching entry wins, so more specific predicates (e.g. Nemotron-H) must be
-    # registered before generic ones (e.g. homogeneous HF models).
-    #
-    # This is intentionally a mutable class variable shared across all instances:
-    # plugins register once at import time, and the registry is read-only after
-    # that.  register_decoder_layer_support() guards against duplicate entries.
     _decoder_layer_support: list[tuple[Any, Any]] = []
     _LAYER_ATTR = "_seq_calib"
 
@@ -90,6 +112,14 @@ class LayerActivationCollector:
         self._decoder_layers: nn.ModuleList | None = None
         self._layer_to_idx: dict[nn.Module, int] = {}
         self._patched = False
+
+    def _swap_to_dummy(self, idx: int):
+        """Replace decoder layer *idx* with a parameter-free dummy."""
+        assert self._decoder_layers is not None
+        layer = self._decoder_layers[idx]
+        layer._seq_calib.mode = "skip"
+        layer._seq_calib.cached_inputs.clear()
+        self._decoder_layers[idx] = _SkipLayer(layer)
 
     @staticmethod
     def get_decoder_layers(model: nn.Module) -> nn.ModuleList | None:
@@ -144,10 +174,6 @@ class LayerActivationCollector:
             return tuple(LayerActivationCollector._zeros_from_meta(m) for m in meta[1])
         if tag == "list":
             return [LayerActivationCollector._zeros_from_meta(m) for m in meta[1]]
-        # "other" values are expected to be lightweight non-tensors (e.g. None, small scalars).
-        # The value is returned directly (not copied); callers must not mutate it.
-        # In practice this is safe because skip-mode outputs are immediately discarded by the
-        # downstream run-mode layer, which replays from its own cached inputs instead.
         return meta[1]
 
     def _patch_all_layers(self, decoder_layers: nn.ModuleList | None = None):
@@ -159,11 +185,6 @@ class LayerActivationCollector:
         """
 
         def _patched_forward(self, *args, **kwargs):
-            """Unified forward bound to every decoder layer during sequential calibration.
-
-            ``self`` here is the decoder layer module (bound via ``bind_forward_method``).
-            All per-layer state is accessed through ``self._seq_calib``.
-            """
             info: _LayerCalibState = self._seq_calib
 
             if info.mode == "skip":
@@ -221,6 +242,11 @@ class LayerActivationCollector:
 
     def _cleanup_layers(self):
         """Best-effort cleanup of any patched layers and model forward."""
+        if self._decoder_layers is not None:
+            for idx, layer in enumerate(self._decoder_layers):
+                if isinstance(layer, _SkipLayer):
+                    self._decoder_layers[idx] = layer._original
+
         if hasattr(self.model, "_original_forward"):
             unpatch_forward_method(self.model, "_original_forward")
 
@@ -250,11 +276,9 @@ class LayerActivationCollector:
         assert self._decoder_layers is not None
 
         if layer_idx > 1:
-            done = self._decoder_layers[layer_idx - 2]._seq_calib
-            # output_meta is intentionally kept: skip mode needs it to produce
-            # correctly shaped zero-filled outputs for the parent forward.
-            done.mode = "skip"
-            done.cached_inputs.clear()
+            idx = layer_idx - 2
+            if not isinstance(self._decoder_layers[idx], _SkipLayer):
+                self._swap_to_dummy(idx)
 
         if layer_idx > 0:
             prev = self._decoder_layers[layer_idx - 1]._seq_calib
@@ -283,10 +307,6 @@ class LayerActivationCollector:
                 groups.setdefault(mode, []).append(i + 1)
         parts = [f"{mode}: {groups[mode]}" for mode in ("skip", "run", "capture") if mode in groups]
         print_rank_0(f"Calibrating layer {layer_idx + 1}/{n} | {' | '.join(parts)}")
-
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
 
     @torch.no_grad()
     def get_input_activations(self, layer: torch.nn.Module, forward_loop: ForwardLoop) -> list:
@@ -328,8 +348,264 @@ class LayerActivationCollector:
             )
 
         inputs = list(info.collected_inputs)
-        # After capture, set to original so calib_func can call the layer's
-        # real forward directly.  The layer will transition to run → skip
-        # in subsequent iterations via _set_layer_states.
         info.mode = "original"
         return inputs
+
+
+def _clone_to_cpu(obj: Any) -> Any:
+    """Recursively deep-clone tensors to CPU. Non-tensors are returned as-is."""
+    if isinstance(obj, torch.Tensor):
+        return obj.detach().cpu().clone()
+    if isinstance(obj, dict):
+        return {k: _clone_to_cpu(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        cloned = [_clone_to_cpu(v) for v in obj]
+        return type(obj)(cloned)
+    return obj
+
+
+def _move_to_device(obj: Any, device: torch.device) -> Any:
+    """Recursively move tensors to *device*. Non-tensors are returned as-is."""
+    if isinstance(obj, torch.Tensor):
+        return obj.to(device)
+    if isinstance(obj, dict):
+        return {k: _move_to_device(v, device) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        moved = [_move_to_device(v, device) for v in obj]
+        return type(obj)(moved)
+    return obj
+
+
+def _remap_output_metadata_device(meta: tuple, device: torch.device) -> tuple:
+    """Patch the device field inside output_meta tuples so _zeros_from_meta uses *device*."""
+    tag = meta[0]
+    if tag == "tensor":
+        _, shape, dtype, _old_device = meta
+        return ("tensor", shape, dtype, device)
+    if tag == "tuple":
+        return ("tuple", tuple(_remap_output_metadata_device(m, device) for m in meta[1]))
+    if tag == "list":
+        return ("list", [_remap_output_metadata_device(m, device) for m in meta[1]])
+    return meta
+
+
+def _read_manifest(checkpoint_dir: str) -> dict | None:
+    """Read manifest.json from *checkpoint_dir*. Returns None if missing or corrupt."""
+    path = os.path.join(checkpoint_dir, "manifest.json")
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def _write_manifest(checkpoint_dir: str, last_completed_layer: int, num_layers: int) -> None:
+    """Atomically write manifest.json."""
+    path = os.path.join(checkpoint_dir, "manifest.json")
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(
+            {"last_completed_layer": last_completed_layer, "num_layers": num_layers},
+            f,
+        )
+    os.replace(tmp, path)
+
+
+def _layer_dir(checkpoint_dir: str, idx: int) -> str:
+    return os.path.join(checkpoint_dir, f"layer_{idx:04d}")
+
+
+def _save_layer(
+    checkpoint_dir: str,
+    idx: int,
+    weights: dict,
+    qstate: dict,
+    output_meta: tuple,
+    next_inputs: list | None,
+    num_layers: int,
+) -> None:
+    """Save a single layer checkpoint and update the manifest atomically."""
+    d = _layer_dir(checkpoint_dir, idx)
+    if os.path.isdir(d):
+        shutil.rmtree(d)
+    os.makedirs(d)
+    torch.save(weights, os.path.join(d, "weights.pt"))
+    torch.save(qstate, os.path.join(d, "quantizer_state.pt"))
+    torch.save(output_meta, os.path.join(d, "output_meta.pt"))
+    if next_inputs is not None:
+        torch.save(next_inputs, os.path.join(d, "next_inputs.pt"))
+    _write_manifest(checkpoint_dir, idx, num_layers)
+
+
+def detect_resume_point(checkpoint_dir: str) -> tuple[int, dict] | None:
+    """Detect where to resume from an existing checkpoint directory.
+
+    Returns ``(start_layer, manifest)`` if there is work to resume,
+    or ``None`` if the directory is empty, corrupt, or calibration was already complete.
+    """
+    manifest = _read_manifest(checkpoint_dir)
+    if manifest is None:
+        return None
+    last = manifest.get("last_completed_layer")
+    total = manifest.get("num_layers")
+    if last is None or total is None:
+        return None
+    if last + 1 >= total:
+        return None
+    return (last + 1, manifest)
+
+
+class _CheckpointState:
+    """Manages checkpoint save and restore for sequential calibration.
+
+    Handles both saving per-layer checkpoints during calibration and
+    restoring from a previous partial run.
+    """
+
+    def __init__(self, checkpoint_dir: str, num_layers: int, start_layer: int = 0):
+        self.checkpoint_dir = checkpoint_dir
+        self.num_layers = num_layers
+        self.start_layer = start_layer
+        self._stashed_weights: dict[str, Any] | None = None
+        self._stashed_qstate: dict[str, Any] | None = None
+        self._stashed_idx: int = -1
+
+    @classmethod
+    def from_folder(cls, checkpoint_dir: str | None, num_layers: int) -> _CheckpointState | None:
+        """Create from folder. Detects resume point. Returns None if no checkpoint_dir."""
+        if not checkpoint_dir:
+            return None
+        os.makedirs(checkpoint_dir, exist_ok=True)
+        info = detect_resume_point(checkpoint_dir)
+        start = info[0] if info else 0
+        if start > 0:
+            print_rank_0(
+                f"Checkpoint: resuming sequential calibration from layer {start}/{num_layers}"
+            )
+        return cls(checkpoint_dir, num_layers, start_layer=start)
+
+    def setup_resume(self, layers: nn.ModuleList) -> list | None:
+        """Load output_meta for skip layers 0..K-1, return next_inputs for layer K.
+
+        Sets ``_seq_calib.output_meta`` on each already-calibrated layer so that
+        skip mode can produce correctly shaped dummy outputs.
+        """
+        if self.start_layer == 0:
+            return None
+
+        last_ckpt = self.start_layer - 1
+
+        for i in range(self.start_layer):
+            d = _layer_dir(self.checkpoint_dir, i)
+            meta = torch.load(
+                os.path.join(d, "output_meta.pt"), map_location="cpu", weights_only=False
+            )
+            layer_device = get_module_device(layers[i])
+            meta = _remap_output_metadata_device(meta, layer_device)
+            layers[i]._seq_calib.output_meta = meta
+
+        d = _layer_dir(self.checkpoint_dir, last_ckpt)
+        next_inputs_path = os.path.join(d, "next_inputs.pt")
+        if not os.path.isfile(next_inputs_path):
+            raise FileNotFoundError(f"Cannot resume: next_inputs.pt missing for layer {last_ckpt}")
+        next_inputs = torch.load(next_inputs_path, map_location="cpu", weights_only=False)
+        resume_device = get_module_device(layers[self.start_layer])
+        next_inputs = _move_to_device(next_inputs, resume_device)
+        return next_inputs
+
+    def full_restore(self, layers: nn.ModuleList, model: nn.Module) -> None:
+        """Restore weights and quantizer state for layers 0..K-1 after the calibration loop."""
+        from modelopt.torch.quantization.config import QuantizeConfig
+        from modelopt.torch.quantization.conversion import restore_quantizer_state
+        from modelopt.torch.quantization.utils.core_utils import enable_weight_access_and_writeback
+
+        if self.start_layer == 0:
+            return
+
+        dummy_config = QuantizeConfig()
+        name_to_module = dict(model.named_modules())
+        for i in range(self.start_layer):
+            layer = layers[i]
+            layer_device = get_module_device(layer)
+            d = _layer_dir(self.checkpoint_dir, i)
+
+            # Restore quantizer state first: may promote TensorQuantizer to
+            # NVFP4StaticQuantizer, changing module structure that load_state_dict
+            # expects.
+            qstate = torch.load(os.path.join(d, "quantizer_state.pt"), map_location=layer_device)
+            restore_quantizer_state(layer, dummy_config, {"quantizer_state": qstate})
+
+            # Load weights inside the framework's access context so that
+            # managed-weight frameworks (accelerate CPU offload, FSDP2) sync
+            # their internal state with the restored parameters.
+            with enable_weight_access_and_writeback(layer, model, name_to_module):
+                weights = torch.load(os.path.join(d, "weights.pt"), map_location=layer_device)
+                layer.load_state_dict(weights, strict=False)
+
+        print_rank_0(f"Checkpoint: restored {self.start_layer} previously calibrated layers")
+
+    def stash(self, layer_idx: int, layer: nn.Module, model: nn.Module) -> None:
+        """Snapshot layer state on CPU for deferred save."""
+        from modelopt.torch.quantization.conversion import quantizer_state
+        from modelopt.torch.quantization.utils.core_utils import enable_weight_access_and_writeback
+
+        with enable_weight_access_and_writeback(layer, model):
+            self._stashed_weights = _clone_to_cpu(layer.state_dict())
+        self._stashed_qstate = _clone_to_cpu(quantizer_state(layer))
+        self._stashed_idx = layer_idx
+
+    def save_prev(self, layers: nn.ModuleList, next_layer_inputs: list) -> None:
+        """Write the previously-stashed layer checkpoint.
+
+        Called at the start of iteration ``i+1`` when output_meta is set
+        (the layer entered "run" mode) and next_layer_inputs are captured.
+        """
+        if self._stashed_weights is None:
+            return
+        assert self._stashed_qstate is not None
+
+        idx = self._stashed_idx
+        layer = layers[idx]
+        output_meta = getattr(layer._seq_calib, "output_meta", None)
+        if output_meta is None:
+            output_meta = LayerActivationCollector._extract_output_meta(torch.zeros(1))
+
+        _save_layer(
+            self.checkpoint_dir,
+            idx,
+            self._stashed_weights,
+            self._stashed_qstate,
+            _clone_to_cpu(output_meta),
+            _clone_to_cpu(next_layer_inputs),
+            self.num_layers,
+        )
+        self._stashed_weights = None
+        self._stashed_qstate = None
+        print_rank_0(f"Checkpoint: saved layer {idx}")
+
+    def save_last(self, layers: nn.ModuleList) -> None:
+        """Save the final layer checkpoint (no next_inputs)."""
+        if self._stashed_weights is None:
+            return
+        assert self._stashed_qstate is not None
+
+        idx = self._stashed_idx
+        layer = layers[idx]
+        output_meta = getattr(layer._seq_calib, "output_meta", None)
+        if output_meta is None:
+            output_meta = LayerActivationCollector._extract_output_meta(torch.zeros(1))
+
+        _save_layer(
+            self.checkpoint_dir,
+            idx,
+            self._stashed_weights,
+            self._stashed_qstate,
+            _clone_to_cpu(output_meta),
+            None,
+            self.num_layers,
+        )
+        self._stashed_weights = None
+        self._stashed_qstate = None
+        print_rank_0(f"Checkpoint: saved layer {idx} (final)")

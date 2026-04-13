@@ -21,11 +21,11 @@ import torch.nn as nn
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from transformers import AutoModelForCausalLM, AutoTokenizer
 from utils import get_daring_anteater
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 
 def get_dataloader(args, tokenizer):

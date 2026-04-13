@@ -18,6 +18,7 @@
 import os
 
 from PIL import Image
+
 from transformers import AutoImageProcessor, AutoProcessor
 
 

@@ -249,9 +249,8 @@ class TestSkipSoftmaxHFIntegration:
     def test_skip_softmax_via_sparsify(self, tiny_llama_dir):
         """mtsa.sparsify() with triton_skip_softmax produces finite logits."""
         pytest.importorskip("transformers")
-        from transformers import AutoModelForCausalLM, AutoTokenizer
-
         import modelopt.torch.sparsity.attention_sparsity as mtsa
+        from transformers import AutoModelForCausalLM, AutoTokenizer
 
         tok = AutoTokenizer.from_pretrained(tiny_llama_dir)
         if tok.pad_token_id is None:

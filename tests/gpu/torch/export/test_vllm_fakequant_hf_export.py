@@ -17,12 +17,12 @@ from copy import deepcopy
 import pytest
 import torch
 from _test_utils.torch.transformers_models import create_tiny_llama_dir
-from transformers import AutoModelForCausalLM
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export import export_hf_vllm_fq_checkpoint
 from modelopt.torch.quantization.model_quant import fold_weight
 from modelopt.torch.utils import safe_load
+from transformers import AutoModelForCausalLM
 
 
 @pytest.mark.parametrize("quant_cfg", [mtq.FP8_DEFAULT_CFG])

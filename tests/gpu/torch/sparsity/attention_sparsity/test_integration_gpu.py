@@ -18,11 +18,11 @@
 import pytest
 import torch
 from _test_utils.torch.transformers_models import create_tiny_llama_dir
-from transformers import AutoModelForCausalLM, AutoTokenizer
 
 import modelopt.torch.sparsity.attention_sparsity as sparse_attn
 from modelopt.torch.sparsity.attention_sparsity import SparseAttentionConfig
 from modelopt.torch.sparsity.attention_sparsity.sparse_attention import SparseAttentionModule
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 
 @pytest.fixture(scope="module")

@@ -15,10 +15,10 @@
 
 import pytest
 import torch
-from transformers import LlamaConfig, LlamaForCausalLM, Qwen3MoeConfig, Qwen3MoeForCausalLM
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.quant_utils import fuse_prequant_to_linear
+from transformers import LlamaConfig, LlamaForCausalLM, Qwen3MoeConfig, Qwen3MoeForCausalLM
 
 
 def get_tiny_llama(attention_heads=4, key_value_heads=4):

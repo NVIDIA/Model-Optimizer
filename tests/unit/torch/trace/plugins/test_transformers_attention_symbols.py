@@ -17,10 +17,9 @@ import pytest
 
 pytest.importorskip("transformers")
 
+from modelopt.torch.trace.plugins.transformers import get_hf_attn_sym_info
 from transformers.models.bert.modeling_bert import BertAttention, BertConfig
 from transformers.models.gptj.modeling_gptj import GPTJAttention, GPTJConfig
-
-from modelopt.torch.trace.plugins.transformers import get_hf_attn_sym_info
 
 
 @pytest.mark.parametrize(

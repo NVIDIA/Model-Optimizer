@@ -14,6 +14,7 @@
 # limitations under the License.
 
 from tqdm import tqdm
+
 from transformers import AutoTokenizer
 
 try:

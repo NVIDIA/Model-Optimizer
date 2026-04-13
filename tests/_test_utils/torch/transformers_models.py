@@ -21,6 +21,7 @@ import torch
 from _test_utils.torch.misc import set_seed
 
 transformers = pytest.importorskip("transformers")
+import modelopt.torch.opt as mto
 from transformers import (
     AutoModelForCausalLM,
     AutoModelForQuestionAnswering,
@@ -34,8 +35,6 @@ from transformers import (
     T5Config,
     T5ForConditionalGeneration,
 )
-
-import modelopt.torch.opt as mto
 
 SEED = 1234
 

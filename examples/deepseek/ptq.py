@@ -50,7 +50,6 @@ import torch.distributed as dist
 import torch.nn.functional as F
 from safetensors.torch import load_model
 from tqdm import tqdm
-from transformers import AutoTokenizer
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.model_config import KV_CACHE_FP8
@@ -64,6 +63,7 @@ from modelopt.torch.quantization.utils import (
 )
 from modelopt.torch.utils.dataset_utils import get_dataset_dataloader
 from modelopt.torch.utils.distributed import ParallelState
+from transformers import AutoTokenizer
 
 DS_V3_PATH = Path(__file__).resolve().parent / "DeepSeek-V3/inference"
 DS_V3_2_PATH = Path(__file__).resolve().parent / "DeepSeek-V3.2-Exp/inference"

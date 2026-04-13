@@ -23,10 +23,10 @@ from enum import Enum
 from typing import Any
 
 import torch
-from transformers import CacheLayerMixin
-from transformers.cache_utils import Cache
 
 from dms.cache_paged import DMSPagedCacheLayer
+from transformers import CacheLayerMixin
+from transformers.cache_utils import Cache
 
 # =============================================================================
 # Contiguous (non-paged) DMS cache layer

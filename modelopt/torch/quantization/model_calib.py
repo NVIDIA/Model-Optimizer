@@ -28,7 +28,7 @@ import torch.nn.functional as F
 from tqdm import tqdm
 
 from modelopt.torch.opt.searcher import ForwardLoop
-from modelopt.torch.quantization.utils.activation_collector import LayerActivationCollector
+from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 from modelopt.torch.utils import print_rank_0
 from modelopt.torch.utils.distributed import DistributedProcessGroup, ParallelState
 from modelopt.torch.utils.network import bind_forward_method, unpatch_forward_method
@@ -1563,7 +1563,15 @@ def sequential_calibrate(
     Runs the full model forward per layer but patches decoder layers with a
     skip / run / capture strategy so that inter-layer logic in parent modules
     (e.g. mask construction) executes naturally without model-specific hooks.
+
+    If ``checkpoint_dir`` is passed (via ``calib_kwargs``), per-layer checkpoints
+    are saved after each layer completes. On restart, calibration resumes from
+    the last completed layer.
     """
+    from modelopt.torch.quantization.utils.layerwise_calib import _CheckpointState
+
+    checkpoint_dir = calib_kwargs.pop("checkpoint_dir", None)
+
     if forward_loop is None:
         raise ValueError(
             "forward_loop must not be None for sequential calibration. "
@@ -1577,15 +1585,27 @@ def sequential_calibrate(
             "Sequential calibration requires a model with identifiable transformer layers."
         )
 
-    print_rank_0(f"Sequential calibration: Found {len(transformer_layers)} transformer layers")
+    num_layers = len(transformer_layers)
+    print_rank_0(f"Sequential calibration: Found {num_layers} transformer layers")
+
+    ckpt = _CheckpointState.from_folder(checkpoint_dir, num_layers)
+    start_layer = ckpt.start_layer if ckpt else 0
 
     input_getter = LayerActivationCollector(model)
     input_getter._patch_all_layers(decoder_layers=transformer_layers)
 
+    resumed_inputs = ckpt.setup_resume(transformer_layers) if ckpt and start_layer > 0 else None
+
     try:
-        for layer_idx, layer in enumerate(transformer_layers):
-            print_rank_0(f"Calibrating layer {layer_idx + 1}/{len(transformer_layers)}")
-            layer_inputs = input_getter.get_input_activations(layer, forward_loop)
+        for layer_idx, layer in enumerate(list(transformer_layers)):
+            if layer_idx < start_layer:
+                continue
+
+            layer_inputs = _get_layer_inputs(
+                layer_idx, start_layer, resumed_inputs, layer, input_getter, forward_loop
+            )
+            if ckpt:
+                ckpt.save_prev(transformer_layers, layer_inputs)
 
             def _layer_forward_loop(m, _inputs=layer_inputs):
                 for args, kwargs_input in _inputs:
@@ -1593,12 +1613,47 @@ def sequential_calibrate(
 
             calib_func(layer, _layer_forward_loop, **calib_kwargs)
 
+            if ckpt:
+                ckpt.stash(layer_idx, layer, model)
+
             del layer_inputs
             torch.cuda.empty_cache()
+
+        if ckpt:
+            ckpt.save_last(transformer_layers)
     finally:
         input_getter._unpatch_all_layers()
 
+    if ckpt:
+        ckpt.full_restore(transformer_layers, model)
+
     print_rank_0("Sequential calibration completed")
+
+
+def _get_layer_inputs(
+    layer_idx: int,
+    start_layer: int,
+    resumed_inputs: list | None,
+    layer: nn.Module,
+    input_getter: LayerActivationCollector,
+    forward_loop: ForwardLoop,
+) -> list:
+    """Get inputs for a layer, using resumed_inputs for the first resumed layer."""
+    if layer_idx == start_layer and resumed_inputs is not None:
+        print_rank_0(f"Calibrating layer {layer_idx + 1} (resumed)")
+        # Manually set skip mode on all already-calibrated layers (output_meta
+        # was loaded by setup_resume). Don't call _set_layer_states which
+        # assumes the normal sequential progression with collected_inputs.
+        assert input_getter._decoder_layers is not None
+        for i in range(start_layer):
+            input_getter._swap_to_dummy(i)
+        # Seed collected_inputs so the next _set_layer_states call can
+        # transition this layer to "run" mode.
+        layer._seq_calib.collected_inputs = resumed_inputs
+        layer._seq_calib.mode = "original"
+        return resumed_inputs
+
+    return input_getter.get_input_activations(layer, forward_loop)
 
 
 @torch.no_grad()
@@ -1663,8 +1718,10 @@ def gptq(
         handle.cleanup()
 
     print_rank_0("Updating weights using GPTQ algorithm...")
+    name_to_module = dict(model.named_modules())
     for handle in gptq_handles.values():
-        handle.update_weights(block_size, perc_damp)
+        with enable_weight_access_and_writeback(handle.module, model, name_to_module):
+            handle.update_weights(block_size, perc_damp)
         handle.free()
     del gptq_handles
 

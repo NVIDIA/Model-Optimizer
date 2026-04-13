@@ -16,9 +16,9 @@
 
 from _test_utils.torch.megatron.models import get_mcore_qwen3_600m
 from _test_utils.torch.megatron.utils import initialize_for_megatron
-from transformers import AutoTokenizer
 
 from modelopt.torch.utils.plugins import megatron_generate, megatron_mmlu
+from transformers import AutoTokenizer
 
 SEED = 1234
 

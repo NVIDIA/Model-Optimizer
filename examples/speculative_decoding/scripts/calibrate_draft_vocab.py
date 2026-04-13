@@ -19,9 +19,9 @@ import os
 from itertools import islice
 
 import torch
-from transformers import AutoTokenizer
 
 from modelopt.torch.speculative.utils import calibrate_frequent_vocab
+from transformers import AutoTokenizer
 
 
 def main():

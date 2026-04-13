@@ -42,8 +42,9 @@
 
 import requests
 import torch
-import transformers
 from datasets import load_dataset
+
+import transformers
 
 from .megatron_generate import megatron_generate
 

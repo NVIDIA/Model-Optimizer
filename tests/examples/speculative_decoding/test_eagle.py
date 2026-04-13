@@ -21,9 +21,9 @@ import safetensors.torch
 import torch
 from _test_utils.examples.run_command import MODELOPT_ROOT, run_example_command
 from packaging.version import Version
-from transformers import AutoConfig
 
 from modelopt.torch.export.plugins.hf_spec_export import LLAMA_EAGLE_SINGLE_LAYER
+from transformers import AutoConfig
 
 EAGLE3_YAML = str(
     MODELOPT_ROOT / "modelopt_recipes" / "general" / "speculative_decoding" / "eagle3.yaml"

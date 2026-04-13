@@ -26,10 +26,11 @@ from pathlib import Path
 from typing import Any
 
 import torch
+from safetensors.torch import load_file
+
 import transformers
 from accelerate import infer_auto_device_map, init_empty_weights
 from accelerate.utils import get_max_memory
-from safetensors.torch import load_file
 from transformers import (
     AutoConfig,
     AutoModel,

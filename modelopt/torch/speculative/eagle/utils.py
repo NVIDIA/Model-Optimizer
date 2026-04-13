@@ -39,6 +39,7 @@ from typing import Any
 
 import torch
 from torch.utils.data import Dataset
+
 from transformers.trainer_pt_utils import LabelSmoother
 
 IGNORE_TOKEN_ID = LabelSmoother.ignore_index

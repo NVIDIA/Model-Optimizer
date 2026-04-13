@@ -22,10 +22,10 @@ import numpy as np
 import torch
 from datasets import load_dataset
 from torch.utils.data import DataLoader
-from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel, PreTrainedTokenizer
 
 import modelopt.torch.opt as mto
 import modelopt.torch.sparsity as mts
+from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel, PreTrainedTokenizer
 
 DEFAULT_PAD_TOKEN = "[PAD]"
 

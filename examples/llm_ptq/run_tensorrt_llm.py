@@ -19,9 +19,9 @@ import argparse
 
 import torch
 from example_utils import get_tokenizer
-from transformers import PreTrainedTokenizerBase
 
 from modelopt.deploy.llm import LLM
+from transformers import PreTrainedTokenizerBase
 
 
 def parse_arguments():

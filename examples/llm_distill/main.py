@@ -21,13 +21,13 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import datasets
 import torch
 import torch.distributed
-import transformers
-from accelerate.logging import get_logger
-from transformers import AutoTokenizer
 from trl import SFTTrainer
 
 import modelopt.torch.opt as mto
+import transformers
+from accelerate.logging import get_logger
 from modelopt.torch.distill.plugins.huggingface import KDTrainer, LMLogitsLoss
+from transformers import AutoTokenizer
 
 logger = get_logger(__name__, log_level="INFO")
 

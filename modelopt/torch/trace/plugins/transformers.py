@@ -16,9 +16,10 @@
 """Utilities to describe symbols in the dynamic attention module."""
 
 import torch
-import transformers
 from packaging.version import Version
 from torch import nn
+
+import transformers
 from transformers.models.bert.modeling_bert import BertAttention, BertLayer
 from transformers.models.gptj.modeling_gptj import GPTJAttention
 

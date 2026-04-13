@@ -20,11 +20,11 @@ import itertools
 import os
 
 import torch
-import transformers
 from datasets import load_dataset
-from transformers.trainer_pt_utils import LabelSmoother
 
+import transformers
 from modelopt.torch.utils import print_rank_0
+from transformers.trainer_pt_utils import LabelSmoother
 
 REMOVE_THINK_CHAT_TEMPLATE = (
     "{% if '</think>' in content %}{% set content = content.split('</think>')[-1] %}{% endif %}"

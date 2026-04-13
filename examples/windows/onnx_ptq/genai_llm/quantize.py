@@ -24,9 +24,9 @@ import torch
 from datasets import load_dataset
 from onnx import helper
 from torch.utils.data import DataLoader
-from transformers import AutoConfig, AutoTokenizer
 
 from modelopt.onnx.quantization.int4 import quantize as quantize_int4
+from transformers import AutoConfig, AutoTokenizer
 
 logging.getLogger().setLevel(logging.INFO)
 

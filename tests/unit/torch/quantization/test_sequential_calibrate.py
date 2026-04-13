@@ -22,7 +22,7 @@ import torch
 import torch.nn as nn
 
 from modelopt.torch.quantization.model_calib import sequential_calibrate
-from modelopt.torch.quantization.utils.activation_collector import LayerActivationCollector
+from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector, _SkipLayer
 
 
 class _DecoderBlock(nn.Module):
@@ -517,19 +517,110 @@ def test_skip_output_meta_not_shared_across_heterogeneous_layers(monkeypatch):
         for d in data:
             m(d)
 
+    originals = list(model.layers)
     collector = LayerActivationCollector(model)
     collector._patch_all_layers()
     try:
-        for layer in model.layers:
+        for layer in originals:
             collector.get_input_activations(layer, forward_loop)
 
-        # After full calibration, layers 0 and 1 have been through 'run' and have output_meta
-        meta_0 = model.layers[0]._seq_calib.output_meta
-        meta_1 = model.layers[1]._seq_calib.output_meta
+        # After full calibration, layers 0 and 1 have been through 'run' and have output_meta.
+        # Access via originals since skip-position entries are now _SkipLayer dummies.
+        meta_0 = originals[0]._seq_calib.output_meta
+        meta_1 = originals[1]._seq_calib.output_meta
         assert meta_0 is not None
         assert meta_1 is not None
         # SmallBlock returns 3-element tuple, BigBlock returns 1-element tuple
         assert len(meta_0[1]) == 3
         assert len(meta_1[1]) == 1
+    finally:
+        collector._unpatch_all_layers()
+
+
+# ---------------------------------------------------------------------------
+# _SkipLayer swap / restore tests
+# ---------------------------------------------------------------------------
+
+
+def test_skip_layers_replaced_with_dummy(monkeypatch):
+    """After calibrating enough layers, skip-position entries must be _SkipLayer with no params."""
+    _register_test_discoverer(monkeypatch)
+    model = _TupleUnpackingModel(n_layers=5, dim=16)
+    data = [torch.randn(2, 16) for _ in range(2)]
+
+    def forward_loop(m):
+        for d in data:
+            m(d)
+
+    collector = LayerActivationCollector(model)
+    collector._patch_all_layers()
+    try:
+        for layer in list(model.layers):
+            collector.get_input_activations(layer, forward_loop)
+
+        # Layers 0..2 should be dummies (swapped when calibrating layers 2..4)
+        for i in range(3):
+            assert isinstance(model.layers[i], _SkipLayer), f"Layer {i} should be _SkipLayer"
+            assert list(model.layers[i].parameters()) == [], (
+                f"Layer {i} dummy should have no params"
+            )
+        # Layers 3 (run) and 4 (original) remain real
+        for i in range(3, 5):
+            assert not isinstance(model.layers[i], _SkipLayer), f"Layer {i} should still be real"
+    finally:
+        collector._unpatch_all_layers()
+
+
+def test_cleanup_restores_original_layers(monkeypatch):
+    """After _unpatch_all_layers, all ModuleList entries must be the original modules."""
+    _register_test_discoverer(monkeypatch)
+    model = _TupleUnpackingModel(n_layers=5, dim=16)
+    originals = list(model.layers)
+    data = [torch.randn(2, 16)]
+
+    def forward_loop(m):
+        for d in data:
+            m(d)
+
+    collector = LayerActivationCollector(model)
+    collector._patch_all_layers()
+    for layer in originals:
+        collector.get_input_activations(layer, forward_loop)
+    collector._unpatch_all_layers()
+
+    for i, orig in enumerate(originals):
+        assert model.layers[i] is orig, f"Layer {i} not restored to original after cleanup"
+        assert not hasattr(orig, "_seq_calib"), f"Layer {i} still has _seq_calib"
+
+
+def test_skip_dummy_has_no_hf_hook(monkeypatch):
+    """Dummies must not carry _hf_hook from the original layer."""
+    accelerate = pytest.importorskip("accelerate")
+    from accelerate.hooks import AlignDevicesHook
+
+    _register_test_discoverer(monkeypatch)
+    model = _TupleUnpackingModel(n_layers=4, dim=16)
+    data = [torch.randn(2, 16)]
+
+    # Attach a no-op AlignDevicesHook to every layer
+    for layer in model.layers:
+        hook = AlignDevicesHook(execution_device=torch.device("cpu"))
+        accelerate.hooks.add_hook_to_module(layer, hook)
+
+    def forward_loop(m):
+        for d in data:
+            m(d)
+
+    collector = LayerActivationCollector(model)
+    collector._patch_all_layers()
+    try:
+        for layer in list(model.layers):
+            collector.get_input_activations(layer, forward_loop)
+
+        # Layers 0 and 1 should be dummies without _hf_hook
+        for i in range(2):
+            dummy = model.layers[i]
+            assert isinstance(dummy, _SkipLayer)
+            assert not hasattr(dummy, "_hf_hook"), f"Dummy at {i} should not have _hf_hook"
     finally:
         collector._unpatch_all_layers()

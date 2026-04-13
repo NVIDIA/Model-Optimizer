@@ -21,10 +21,10 @@ from _test_utils.torch.transformers_models import (
     get_tiny_llama,
     tf_modelopt_state_and_output_tester,
 )
-from transformers import AutoModelForCausalLM
 
 import modelopt.torch.speculative as mtsp
 from modelopt.torch.speculative.config import EAGLE3_DEFAULT_CFG
+from transformers import AutoModelForCausalLM
 
 
 @pytest.mark.parametrize("eagle_config", [EAGLE3_DEFAULT_CFG])

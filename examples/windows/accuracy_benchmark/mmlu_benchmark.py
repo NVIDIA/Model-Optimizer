@@ -28,6 +28,7 @@ from fire import Fire
 from modeling import EvalModel, TrtllmPipeline, select_model
 from quantization_utils import MAX_SEQ_LEN, get_tokenizer, quantize_model
 from tqdm import tqdm
+
 from transformers import AutoTokenizer
 
 try:

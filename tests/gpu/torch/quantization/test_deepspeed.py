@@ -24,10 +24,10 @@ import pytest
 import torch
 import torch.nn as nn
 from _test_utils.torch.distributed.utils import synchronize_state_dict
-from accelerate import Accelerator
-from accelerate.utils import DeepSpeedPlugin
 
 import modelopt.torch.quantization as mtq
+from accelerate import Accelerator
+from accelerate.utils import DeepSpeedPlugin
 from modelopt.torch.opt.dynamic import _pytorch_managed
 
 

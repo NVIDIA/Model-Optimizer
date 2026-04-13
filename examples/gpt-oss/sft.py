@@ -40,7 +40,6 @@ accelerate launch \
     --quant_cfg MXFP4_MLP_WEIGHT_ONLY_CFG
 """
 
-from transformers import AutoModelForCausalLM, AutoTokenizer, Mxfp4Config
 from trl import (
     ModelConfig,
     ScriptArguments,
@@ -59,6 +58,7 @@ import modelopt.torch.opt as mto
 
 # import ModelOpt's QATSFTTrainer instead of Huggingface TRL's SFTTrainer
 from modelopt.torch.quantization.plugins import QATSFTTrainer, QuantizationArguments
+from transformers import AutoModelForCausalLM, AutoTokenizer, Mxfp4Config
 
 # Enable automatic save/load of modelopt state huggingface checkpointing
 mto.enable_huggingface_checkpointing()

@@ -18,14 +18,13 @@ import json
 import warnings
 from pathlib import Path
 
-from transformers import AutoModelForCausalLM, AutoTokenizer
-
 import modelopt.torch.opt as mto
 from modelopt.torch.export.convert_hf_config import convert_hf_quant_config_format
 from modelopt.torch.export.unified_export_hf import _export_transformers_checkpoint
 from modelopt.torch.opt.conversion import restore_from_modelopt_state
 from modelopt.torch.quantization.utils import set_quantizer_state_dict
 from modelopt.torch.utils import print_rank_0
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 RAND_SEED = 1234
 

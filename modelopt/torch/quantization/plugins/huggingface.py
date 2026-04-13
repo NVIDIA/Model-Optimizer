@@ -24,14 +24,14 @@ from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
-import transformers
 from packaging import version
 from torch import Tensor
 from torch.nn.functional import linear
-from transformers.models.t5.modeling_t5 import T5Attention
 
+import transformers
 from modelopt.torch.opt.dynamic import DynamicModule
 from modelopt.torch.utils.distributed import ParallelState
+from transformers.models.t5.modeling_t5 import T5Attention
 
 from ..algorithms import AutoQuantizeGradientSearcher
 from ..conversion import register
@@ -39,7 +39,7 @@ from ..nn import QuantInputBase, QuantModule, QuantModuleRegistry, TensorQuantiz
 from ..nn.modules.quant_linear import _QuantLinear
 from ..triton import IS_AVAILABLE as IS_TRITON_AVAILABLE
 from ..utils import replace_function, sync_moe_expert_amax
-from ..utils.activation_collector import LayerActivationCollector
+from ..utils.layerwise_calib import LayerActivationCollector
 from .attention import register_attention_for_kv_quant
 from .custom import CUSTOM_MODEL_PLUGINS, _ParallelLinear, _QuantFunctionalMixin
 

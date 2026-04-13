@@ -27,19 +27,19 @@ from typing import Any
 import numpy as np
 import torch
 import torch.nn as nn
-from accelerate import Accelerator
 from example_utils import build_quant_cfg, get_tokenizer
 from tqdm import tqdm
-from transformers import AutoModelForCausalLM, PreTrainedTokenizer, PreTrainedTokenizerFast
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
+from accelerate import Accelerator
 from modelopt.torch.export import get_model_type
 from modelopt.torch.export.convert_hf_config import convert_hf_quant_config_format
 from modelopt.torch.export.unified_export_hf import _export_transformers_checkpoint
 from modelopt.torch.quantization.config import need_calibration
 from modelopt.torch.quantization.utils import patch_fsdp_mp_dtypes
 from modelopt.torch.utils.dataset_utils import get_dataset_dataloader, get_supported_datasets
+from transformers import AutoModelForCausalLM, PreTrainedTokenizer, PreTrainedTokenizerFast
 
 # Constants
 RAND_SEED = 1234

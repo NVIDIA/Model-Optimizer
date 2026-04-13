@@ -1227,6 +1227,16 @@ class QuantizeAlgorithmConfig(ModeloptBaseConfig):
         ),
     )
 
+    checkpoint_dir: str | None = ModeloptField(
+        default=None,
+        title="Checkpoint directory for sequential calibration.",
+        description=(
+            "If set together with use_sequential=True, per-layer checkpoints are saved to this "
+            "directory during calibration. On restart, calibration resumes from the last "
+            "completed layer."
+        ),
+    )
+
 
 class MaxCalibConfig(QuantizeAlgorithmConfig):
     """The config for max calibration algorithm.

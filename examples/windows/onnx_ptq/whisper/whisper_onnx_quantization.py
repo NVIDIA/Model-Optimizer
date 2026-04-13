@@ -21,9 +21,9 @@ import numpy as np
 import torch
 from datasets import load_dataset
 from optimum.onnxruntime import ORTModelForSpeechSeq2Seq
-from transformers import WhisperProcessor
 
 from modelopt.onnx.quantization.quantize import quantize as quantize_top_level_api
+from transformers import WhisperProcessor
 
 logging.getLogger().setLevel(logging.INFO)
 

@@ -42,7 +42,6 @@ import torch
 from megatron.bridge import AutoBridge
 from megatron.bridge.models.mamba.mamba_provider import MambaModelProvider
 from megatron.bridge.models.nemotronh.nemotron_h_provider import NemotronHModelProvider
-from transformers import AutoConfig, AutoModelForCausalLM
 
 import modelopt.torch.opt as mto
 import modelopt.torch.prune as mtp
@@ -53,6 +52,7 @@ from modelopt.torch.utils.plugins.mbridge import (
     load_mbridge_model_from_hf,
 )
 from modelopt.torch.utils.plugins.megatron_mmlu import megatron_mmlu
+from transformers import AutoConfig, AutoModelForCausalLM
 
 
 def get_args() -> argparse.Namespace:

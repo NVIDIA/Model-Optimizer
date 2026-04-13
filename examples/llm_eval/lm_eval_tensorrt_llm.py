@@ -28,9 +28,9 @@ import torch.nn.functional as F
 from lm_eval.__main__ import cli_evaluate
 from lm_eval.api.registry import register_model
 from lm_eval.models.api_models import TemplateAPI
-from transformers import BatchEncoding
 
 from modelopt.deploy.llm import LLM
+from transformers import BatchEncoding
 
 logger = logging.getLogger(__name__)
 

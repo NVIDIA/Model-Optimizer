@@ -18,7 +18,6 @@ import copy
 import pytest
 import torch
 from _test_utils.torch.transformers_models import get_tiny_llama
-from transformers import AutoTokenizer
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.unified_export_hf import _export_quantized_weight
@@ -26,6 +25,7 @@ from modelopt.torch.quantization.model_calib import gptq
 from modelopt.torch.quantization.qtensor.nvfp4_tensor import NVFP4QTensor
 from modelopt.torch.quantization.utils.calib_utils import update_hessian
 from modelopt.torch.utils.dataset_utils import create_forward_loop, get_dataset_dataloader
+from transformers import AutoTokenizer
 
 RAND_SEED = 42
 torch.manual_seed(RAND_SEED)

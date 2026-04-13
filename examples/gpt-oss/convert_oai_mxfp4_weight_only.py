@@ -20,10 +20,10 @@ import os
 
 import torch
 from peft import PeftModel
-from transformers import AutoModelForCausalLM, AutoTokenizer, Mxfp4Config
 from utils import get_original_huggingface_quant_method
 
 from modelopt.torch.quantization.qtensor import MXFP4QTensor
+from transformers import AutoModelForCausalLM, AutoTokenizer, Mxfp4Config
 
 
 def _to_oai_mxfp4_weight_only(model, block_size=32):

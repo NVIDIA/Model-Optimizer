@@ -53,12 +53,13 @@ import rwkv.utils
 import tiktoken
 import torch
 import torch.nn as nn
-import transformers
 from fire import Fire
 from peft import PeftModel
 from pydantic import BaseModel
 from rwkv.model import RWKV
 from torchvision.datasets.utils import download_url
+
+import transformers
 from transformers import (
     AutoModel,
     AutoModelForCausalLM,

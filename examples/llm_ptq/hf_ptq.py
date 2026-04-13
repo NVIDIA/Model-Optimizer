@@ -23,7 +23,6 @@ from typing import Any
 
 import numpy as np
 import torch
-from accelerate.hooks import remove_hook_from_module
 from example_utils import (
     build_quant_cfg,
     copy_custom_model_files,
@@ -37,20 +36,11 @@ from example_utils import (
     run_nemotron_vl_preview,
 )
 from torch.utils.data import DataLoader
-from transformers import (
-    AutoConfig,
-    AutoModelForCausalLM,
-    AutoProcessor,
-    PreTrainedTokenizer,
-    PreTrainedTokenizerBase,
-    PreTrainedTokenizerFast,
-    ProcessorMixin,
-    WhisperProcessor,
-)
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 import modelopt.torch.sparsity as mts
+from accelerate.hooks import remove_hook_from_module
 from modelopt.recipe import ModelOptPTQRecipe, load_recipe
 from modelopt.torch.export import (
     export_hf_checkpoint,
@@ -79,6 +69,16 @@ from modelopt.torch.utils.image_processor import BaseImageProcessor, MllamaImage
 from modelopt.torch.utils.memory_monitor import launch_memory_monitor
 from modelopt.torch.utils.speech_dataset_utils import get_speech_dataset_dataloader
 from modelopt.torch.utils.vlm_dataset_utils import get_vlm_dataset_dataloader
+from transformers import (
+    AutoConfig,
+    AutoModelForCausalLM,
+    AutoProcessor,
+    PreTrainedTokenizer,
+    PreTrainedTokenizerBase,
+    PreTrainedTokenizerFast,
+    ProcessorMixin,
+    WhisperProcessor,
+)
 
 RAND_SEED = 1234
 

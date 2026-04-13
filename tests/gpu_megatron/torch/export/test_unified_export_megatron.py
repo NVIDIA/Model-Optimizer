@@ -20,7 +20,6 @@ from pathlib import Path
 
 import pytest
 import torch
-import transformers
 from _test_utils.torch.megatron.models import get_mcore_gpt_model
 from _test_utils.torch.megatron.utils import get_forward
 from _test_utils.torch.transformers_models import create_tiny_llama_dir
@@ -28,6 +27,7 @@ from safetensors.torch import save_file
 
 import modelopt.torch.quantization as mtq
 import modelopt.torch.speculative as mtsp
+import transformers
 from modelopt.torch.export import KV_CACHE_FP8, export_mcore_gpt_to_hf, import_mcore_gpt_from_hf
 from modelopt.torch.export.unified_export_megatron import GPTModelExporter
 from modelopt.torch.speculative.eagle.default_config import default_eagle_config

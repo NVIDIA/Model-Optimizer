@@ -17,9 +17,9 @@ from functools import partial
 
 import torch
 from _test_utils.torch.transformers_models import create_tiny_llama_dir
-from transformers import AutoModelForCausalLM
 
 import modelopt.torch.quantization as mtq
+from transformers import AutoModelForCausalLM
 
 
 def _test_transformers_tp(model_path, rank, size):

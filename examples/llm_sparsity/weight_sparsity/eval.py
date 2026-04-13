@@ -23,14 +23,14 @@ import evaluate
 import nltk
 import numpy as np
 import torch
-import transformers
-from accelerate import Accelerator
 from packaging.version import Version
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
-from transformers import AutoModelForCausalLM, AutoTokenizer
 
 import modelopt.torch.opt as mto
+import transformers
+from accelerate import Accelerator
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 DEFAULT_PAD_TOKEN = "[PAD]"
 

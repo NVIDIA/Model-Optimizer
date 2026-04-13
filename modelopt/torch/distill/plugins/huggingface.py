@@ -16,12 +16,12 @@
 """ModelOpt plugin to train HuggingFace models with knowledge distillation."""
 
 from torch import Tensor
-from transformers.modeling_outputs import CausalLMOutputWithPast
-from transformers.trainer_pt_utils import LabelSmoother
 
 import modelopt.torch.distill as mtd
 from modelopt.torch.opt.plugins import ModelOptHFTrainer
 from modelopt.torch.utils import print_rank_0
+from transformers.modeling_outputs import CausalLMOutputWithPast
+from transformers.trainer_pt_utils import LabelSmoother
 
 IGNORE_TOKEN_ID = LabelSmoother.ignore_index  # equals -100
 

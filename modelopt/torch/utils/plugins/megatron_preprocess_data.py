@@ -92,9 +92,9 @@ from pathlib import Path
 
 from datasets import get_dataset_config_names, get_dataset_split_names, load_dataset
 from megatron.core.datasets import indexed_dataset
-from transformers import AutoTokenizer
 
 from modelopt.torch.utils import num2hrb
+from transformers import AutoTokenizer
 
 __all__ = ["megatron_preprocess_data"]
 

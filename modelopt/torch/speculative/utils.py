@@ -25,10 +25,11 @@ from collections import Counter, defaultdict, deque
 
 import torch
 import torch.distributed
-import transformers
 from huggingface_hub import snapshot_download
 from torch import nn
 from torch.nn.attention import SDPBackend, sdpa_kernel
+
+import transformers
 from transformers.cache_utils import DynamicCache
 
 KIMI_K2_REPO_ID = "moonshotai/Kimi-K2-Thinking"

@@ -35,8 +35,6 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 import torch
-import transformers
-from accelerate import ParallelismConfig
 from eagle_utils import (
     EagleTrainerWithAccLog,
     EagleTrainingPlot,
@@ -44,12 +42,14 @@ from eagle_utils import (
     patch_ring_attention_for_ttt,
 )
 from omegaconf import OmegaConf
-from transformers.trainer_utils import get_last_checkpoint
 
 import modelopt.torch.opt as mto
 import modelopt.torch.speculative as mtsp
+import transformers
+from accelerate import ParallelismConfig
 from modelopt.torch.speculative.utils import load_vlm_or_llm, patch_transformers5_params_loading
 from modelopt.torch.utils import print_rank_0
+from transformers.trainer_utils import get_last_checkpoint
 
 torch.manual_seed(0)
 mto.enable_huggingface_checkpointing()

@@ -45,10 +45,10 @@ from megatron.core.models.mamba import MambaModel
 from megatron.core.parallel_state import get_data_parallel_group
 from megatron.core.transformer.module import MegatronModule
 from megatron.core.utils import unwrap_model
-from transformers import AutoTokenizer
 
 from modelopt.torch.nas.plugins.megatron import get_te_mamba_stack_spec
 from modelopt.torch.utils import get_dataset_samples, print_rank_0, warn_rank_0
+from transformers import AutoTokenizer
 
 __all__ = ["get_hf_mbridge_calibration_loop", "load_mbridge_model_from_hf"]
 

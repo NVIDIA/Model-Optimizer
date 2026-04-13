@@ -19,11 +19,11 @@ import random
 
 import numpy as np
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel, PreTrainedTokenizer
 
 import modelopt.torch.opt as mto
 import modelopt.torch.sparsity as mts
 from modelopt.torch.export import export_tensorrt_llm_checkpoint, get_model_type
+from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel, PreTrainedTokenizer
 
 DEFAULT_PAD_TOKEN = "[PAD]"
 

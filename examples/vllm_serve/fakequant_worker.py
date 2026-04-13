@@ -18,7 +18,6 @@ import os
 from typing import Any
 
 import torch
-from transformers import AutoTokenizer
 from vllm.v1.worker.gpu_worker import Worker as BaseWorker
 from vllm_ptq_utils import calibrate_fun, get_quant_config
 from vllm_reload_utils import (
@@ -34,6 +33,7 @@ from modelopt.torch.quantization.plugins.vllm import (
     post_restore_vllm_parallel_linears,
 )
 from modelopt.torch.utils.dataset_utils import get_dataset_dataloader
+from transformers import AutoTokenizer
 
 quant_config: dict[str, Any] = {
     "dataset": os.environ.get("QUANT_DATASET", "cnn_dailymail"),

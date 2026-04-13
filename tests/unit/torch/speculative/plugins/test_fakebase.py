@@ -23,7 +23,6 @@ import torch
 
 pytest.importorskip("transformers")
 import transformers
-
 from modelopt.torch.speculative.plugins.modeling_fakebase import FakeBaseModel
 from modelopt.torch.speculative.utils import load_vlm_or_llm
 

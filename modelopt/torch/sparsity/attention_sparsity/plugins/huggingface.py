@@ -16,8 +16,8 @@
 """Dynamic sparse attention registration for HuggingFace models."""
 
 import torch.nn as nn
-import transformers
 
+import transformers
 from modelopt.torch.opt.dynamic import DynamicModule
 
 from ..sparse_attention import SparseAttentionModule, SparseAttentionRegistry

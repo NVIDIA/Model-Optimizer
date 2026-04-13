@@ -20,10 +20,10 @@ import types
 from contextlib import contextmanager
 
 import torch
-from transformers import PreTrainedModel, Trainer, TrainerCallback
-from transformers import modeling_utils as tf_modeling_utils
 
 from modelopt.torch.utils import report_memory
+from transformers import PreTrainedModel, Trainer, TrainerCallback
+from transformers import modeling_utils as tf_modeling_utils
 
 from ..conversion import ModeloptStateManager, load_modelopt_state
 from .huggingface import (

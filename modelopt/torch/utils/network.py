@@ -15,6 +15,7 @@
 
 """Utility functions for PyTorch models."""
 
+import functools
 import inspect
 import types
 import warnings
@@ -90,12 +91,43 @@ def is_parallel(model: nn.Module) -> bool:
     return isinstance(model, (nn.parallel.DataParallel, nn.parallel.DistributedDataParallel))
 
 
+def _get_execution_device_from_hook(module: nn.Module) -> torch.device | None:
+    """Extract the execution device from an accelerate ``_hf_hook``, if present.
+
+    Handles both ``AlignDevicesHook`` (direct) and ``SequentialHook`` (which
+    may wrap one or more ``AlignDevicesHook`` instances).  Returns ``None``
+    when no hook is found or the hook carries no ``execution_device``.
+    """
+    hook = getattr(module, "_hf_hook", None)
+    if hook is None:
+        return None
+
+    dev = getattr(hook, "execution_device", None)
+    if dev is not None:
+        return torch.device(dev)
+
+    for h in getattr(hook, "hooks", ()):
+        dev = getattr(h, "execution_device", None)
+        if dev is not None:
+            return torch.device(dev)
+
+    return None
+
+
 def get_module_device(module: nn.Module) -> torch.device:
-    """Get the device of a PyTorch module."""
+    """Get the device of a PyTorch module.
+
+    For modules managed by accelerate (``_hf_hook``), returns the hook's
+    ``execution_device`` which is the authoritative device even when
+    parameters are offloaded to CPU/meta between forward calls.
+    """
+    hook_device = _get_execution_device_from_hook(module)
+    if hook_device is not None:
+        return hook_device
+
     try:
         return next(module.parameters()).device
     except StopIteration:
-        # For modules without parameters
         return torch.device("cpu")
 
 
@@ -590,11 +622,14 @@ def get_unwrapped_name(name: str, model: nn.Module | None = None) -> str:
 
 @contextmanager
 def temporarily_remove_accelerate_hook(module):
-    """Context manager to temporarily remove accelerate hook from a module."""
+    """Context manager to temporarily remove accelerate hook from a module.
+
+    Re-attaches the hook afterwards without calling ``init_hook``, which would
+    fail when newly-added quantizer modules have weights on the meta device.
+    """
     accelerate_hook = None
     if hasattr(module, "_hf_hook"):
-        # A module with forward method patched by accelerate
-        from accelerate.hooks import add_hook_to_module, remove_hook_from_module
+        from accelerate.hooks import remove_hook_from_module
 
         accelerate_hook = module._hf_hook
         remove_hook_from_module(module)
@@ -602,9 +637,22 @@ def temporarily_remove_accelerate_hook(module):
         yield
     finally:
         if accelerate_hook is not None:
-            from accelerate.hooks import add_hook_to_module
+            # Re-attach hook without init_hook (which calls set_module_tensor_to_device).
+            module._old_forward = module.forward
+            module._hf_hook = accelerate_hook
 
-            add_hook_to_module(module, accelerate_hook)
+            def new_forward(mod, *args, **kwargs):
+                args, kwargs = mod._hf_hook.pre_forward(mod, *args, **kwargs)
+                if mod._hf_hook.no_grad:
+                    with torch.no_grad():
+                        output = mod._old_forward(*args, **kwargs)
+                else:
+                    output = mod._old_forward(*args, **kwargs)
+                return mod._hf_hook.post_forward(mod, output)
+
+            module.forward = functools.update_wrapper(
+                functools.partial(new_forward, module), module._old_forward
+            )
 
 
 def bind_forward_method(

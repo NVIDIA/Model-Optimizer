@@ -15,14 +15,14 @@
 
 import argparse
 
-from accelerate import Accelerator
 from datasets import load_dataset
 from tqdm import tqdm
-from transformers import AutoTokenizer
 
 import modelopt.torch.opt as mto
+from accelerate import Accelerator
 from modelopt.torch.speculative.plugins.transformers import HFARValidation
 from modelopt.torch.speculative.utils import load_vlm_or_llm
+from transformers import AutoTokenizer
 
 mto.enable_huggingface_checkpointing()
 

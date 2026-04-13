@@ -17,12 +17,12 @@ import argparse
 from collections import defaultdict
 
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.utils import create_forward_loop
 from modelopt.torch.utils.dataset_utils import get_dataset_dataloader
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 SUPPORT_QUANT_FORMAT = {
     "fp8": mtq.FP8_DEFAULT_CFG,

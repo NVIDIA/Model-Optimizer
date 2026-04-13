@@ -21,9 +21,9 @@ from typing import Any
 
 import torch
 import torch.nn as nn
-from transformers import AutoTokenizer
 
 from modelopt.torch.utils import get_module_device
+from transformers import AutoTokenizer
 
 from ..config import CalibrationConfig
 from ..conversion import print_sparse_attention_summary

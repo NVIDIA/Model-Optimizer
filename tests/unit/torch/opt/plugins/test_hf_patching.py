@@ -19,10 +19,10 @@ from _test_utils.torch.transformers_models import (
     get_tiny_qwen3,
     tf_output_tester,
 )
-from transformers import AutoModelForCausalLM
 
 import modelopt.torch.distill as mtd
 import modelopt.torch.opt as mto
+from transformers import AutoModelForCausalLM
 
 
 @pytest.mark.parametrize(

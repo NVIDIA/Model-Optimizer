@@ -30,17 +30,17 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 import torch
-import transformers
 import utils
 from torch.utils.data import Dataset
 from tqdm import tqdm
-from transformers import Trainer
-from transformers.trainer_utils import get_last_checkpoint
 
 import modelopt.torch.opt as mto
 import modelopt.torch.utils.distributed as dist
+import transformers
 from modelopt.torch.opt.utils import is_dynamic
 from modelopt.torch.utils import print_rank_0
+from transformers import Trainer
+from transformers.trainer_utils import get_last_checkpoint
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 

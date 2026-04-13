@@ -19,14 +19,14 @@ from collections.abc import Callable, Sequence
 
 import torch
 from torch import nn
-from transformers.models.bert.modeling_bert import BertAttention, BertSelfAttention
-from transformers.models.gptj.modeling_gptj import GPTJAttention
 
 from modelopt.torch.opt.dynamic import DynamicModule
 from modelopt.torch.opt.hparam import HPType
 from modelopt.torch.trace import Symbol
 from modelopt.torch.trace.plugins.transformers import SymAttentionHead
 from modelopt.torch.utils import make_divisible
+from transformers.models.bert.modeling_bert import BertAttention, BertSelfAttention
+from transformers.models.gptj.modeling_gptj import GPTJAttention
 
 from ..autonas import AutoNASConfig
 from ..registry import DMRegistry
