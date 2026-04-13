@@ -19,11 +19,11 @@ from pathlib import Path
 import torch
 from _test_utils.torch.transformers_models import get_tiny_tokenizer
 from datasets import Dataset, DatasetDict
-from huggingface_hub import snapshot_download
 from transformers import AutoConfig, AutoModelForCausalLM, PreTrainedTokenizerBase
 
 import modelopt.torch.puzzletron as mtpz
 import modelopt.torch.utils.distributed as dist
+from modelopt.torch.export import copy_hf_ckpt_remote_code
 
 
 def setup_test_model_and_data(
@@ -189,21 +189,11 @@ def create_and_save_small_hf_model(
                 submodule._tied_weights_keys = None
         model.save_pretrained(output_path, save_original_format=False)
 
-    # Save tokenizer
+    # Save tokenizer, config, and custom code files
     tokenizer.save_pretrained(output_path)
-
-    # Save config
     config.save_pretrained(output_path)
-
-    # Download trust_remote_code .py files from HF hub into the checkpoint directory so that
-    # force_cache_dynamic_modules can resolve classes from the local path.
-    # save_pretrained only saves weights + config, not these .py files.
     if hasattr(config, "auto_map") and isinstance(config.auto_map, dict):
-        snapshot_download(
-            repo_id=hf_model_name,
-            local_dir=output_path,
-            allow_patterns=["*.py"],
-        )
+        copy_hf_ckpt_remote_code(hf_model_name, output_path)
 
 
 def save_dummy_dataset(dataset_path: Path | str):
