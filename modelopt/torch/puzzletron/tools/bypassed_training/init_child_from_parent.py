@@ -24,6 +24,8 @@ import torch
 import yaml
 from transformers import AutoModelForCausalLM
 
+from modelopt.torch.export import copy_hf_ckpt_remote_code
+
 from ...anymodel.model_descriptor import ModelDescriptor, ModelDescriptorFactory
 from ...anymodel.puzzformer import deci_x_patcher
 from ..checkpoint_utils import copy_tokenizer, load_state_dict
@@ -86,6 +88,9 @@ def init_child_from_parent(
         output_checkpoint_dir,
         trust_remote_code=descriptor.requires_trust_remote_code(),
     )
+
+    if descriptor.requires_trust_remote_code():
+        copy_hf_ckpt_remote_code(parent_checkpoint_dir, output_checkpoint_dir)
 
     parent_model_config = load_model_config(
         parent_checkpoint_dir, trust_remote_code=descriptor.requires_trust_remote_code()
