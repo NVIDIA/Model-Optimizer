@@ -71,6 +71,7 @@ from modelopt.torch.speculative.eagle.utils import (
 )
 from modelopt.torch.utils.dataset_utils import (
     create_forward_loop,
+    get_calib_and_holdout_dataloaders,
     get_dataset_dataloader,
     get_max_batch_size,
     get_supported_datasets,
@@ -203,9 +204,10 @@ def make_calib_dataloader(
     tokenizer: PreTrainedTokenizerBase | None,
     device: torch.device,
     model_type: str | None,
-) -> tuple[DataLoader | _DeviceDataLoader, str | None]:
+) -> tuple[DataLoader | _DeviceDataLoader, str | None, Path | None]:
     calib_dataloader = None
     first_text_speech_dataset = None
+    holdout_path = None
     if args.specdec_offline_dataset is not None:
         offline_data_path = Path(args.specdec_offline_dataset)
         dumped_files = sorted(str(p) for p in offline_data_path.glob("*.pt"))
@@ -283,15 +285,29 @@ def make_calib_dataloader(
         include_labels = (
             args.auto_quantize_bits is not None and args.auto_quantize_method == "gradient"
         )
-        calib_dataloader = get_dataset_dataloader(
-            dataset_name=args.dataset,
-            tokenizer=tokenizer,
-            batch_size=args.batch_size,
-            num_samples=args.calib_size,
-            device=device,
-            include_labels=include_labels,
-        )
-    return calib_dataloader, first_text_speech_dataset
+
+        if args.holdout_size > 0:
+            calib_dataloader, holdout_path = get_calib_and_holdout_dataloaders(
+                dataset_name=args.dataset,
+                tokenizer=tokenizer,
+                batch_size=args.batch_size,
+                calib_size=args.calib_size,
+                holdout_size=args.holdout_size,
+                max_sample_length=args.calib_seq,
+                device=device,
+                include_labels=include_labels,
+                save_dir=args.calib_data_dir,
+            )
+        else:
+            calib_dataloader = get_dataset_dataloader(
+                dataset_name=args.dataset,
+                tokenizer=tokenizer,
+                batch_size=args.batch_size,
+                num_samples=args.calib_size,
+                device=device,
+                include_labels=include_labels,
+            )
+    return calib_dataloader, first_text_speech_dataset, holdout_path
 
 
 def auto_quantize(
@@ -419,10 +435,15 @@ def load_model(args: argparse.Namespace):
             attn_implementation=args.attn_implementation,
         )
     else:
-        assert args.qformat in QUANT_CFG_CHOICES, (
-            f"Quantization format is not supported for low memory mode. Supported formats: {QUANT_CFG_CHOICES.keys()}"
-        )
-        quant_cfg = QUANT_CFG_CHOICES[args.qformat]
+        if args.qformat in QUANT_CFG_CHOICES:
+            quant_cfg = QUANT_CFG_CHOICES[args.qformat]
+        elif hasattr(mtq, args.qformat):
+            quant_cfg = getattr(mtq, args.qformat)
+        else:
+            raise AssertionError(
+                f"Quantization format is not supported for low memory mode. "
+                f"Supported formats: {QUANT_CFG_CHOICES.keys()}"
+            )
         if args.kv_cache_qformat != "none":
             quant_cfg = mtq.utils.update_quant_cfg_with_kv_cache_quant(
                 quant_cfg,
@@ -1028,7 +1049,7 @@ def quantize_main(
 
     print(f"Use calib batch_size {args.batch_size}")
 
-    calib_dataloader, first_text_speech_dataset = make_calib_dataloader(
+    calib_dataloader, first_text_speech_dataset, holdout_path = make_calib_dataloader(
         args, language_model, processor, tokenizer, device, model_type
     )
 
@@ -1066,10 +1087,14 @@ def quantize_main(
                 "Plain quantization supports only one quantization format."
             )
 
-            assert args.qformat in QUANT_CFG_CHOICES, (
-                f"Unsupported quantization format: {args.qformat}, choices are: {list(QUANT_CFG_CHOICES.keys())}"
-            )
-            quant_cfg = QUANT_CFG_CHOICES[args.qformat]
+            if args.qformat in QUANT_CFG_CHOICES:
+                quant_cfg = QUANT_CFG_CHOICES[args.qformat]
+            elif hasattr(mtq, args.qformat):
+                quant_cfg = getattr(mtq, args.qformat)
+            else:
+                raise AssertionError(
+                    f"Unsupported quantization format: {args.qformat}, choices are: {list(QUANT_CFG_CHOICES.keys())}"
+                )
 
             quant_cfg = build_quant_cfg(
                 args.qformat,
@@ -1104,7 +1129,7 @@ def quantize_main(
             quant_cfg = copy.deepcopy(quant_cfg)
             _set_kv_cache_constant_amax(quant_cfg["quant_cfg"])
 
-        if args.qformat in QUANT_CFG_CHOICES:
+        if args.qformat in QUANT_CFG_CHOICES or hasattr(mtq, args.qformat):
             mono_quantize(
                 args,
                 quant_cfg,
@@ -1179,6 +1204,26 @@ def parse_args() -> argparse.Namespace:
         ),
         type=str,
         default="512",
+    )
+    parser.add_argument(
+        "--holdout_size",
+        help=(
+            "Number of holdout samples to save as a .pt file for evaluation. "
+            "Holdout samples are drawn from the same dataset immediately after "
+            "the calibration samples so there is no overlap. 0 disables holdout."
+        ),
+        type=int,
+        default=0,
+    )
+    parser.add_argument(
+        "--calib_data_dir",
+        help=(
+            "Directory to save/load calib.pt and holdout.pt. "
+            "If both files exist, data is reloaded from disk instead of re-downloading. "
+            "Defaults to --export_path if not specified."
+        ),
+        type=str,
+        default=None,
     )
     parser.add_argument(
         "--calib_seq",

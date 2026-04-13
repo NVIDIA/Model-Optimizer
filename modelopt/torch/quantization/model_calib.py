@@ -1589,6 +1589,21 @@ def sequential_calibrate(
 
             def _layer_forward_loop(m, _inputs=layer_inputs):
                 for args, kwargs_input in _inputs:
+                    # Reset past_key_values to prevent the KV cache from
+                    # accumulating across multiple forward replays (e.g.
+                    # max_calibrate then Hessian collection in GPTQ).
+                    # The layer doesn't need stale KV data — each replay
+                    # should start with a fresh cache.
+                    if (
+                        "past_key_values" in kwargs_input
+                        and kwargs_input["past_key_values"] is not None
+                    ):
+                        kwargs_input = dict(kwargs_input)
+                        cache = kwargs_input["past_key_values"]
+                        if hasattr(cache, "reset"):
+                            cache.reset()
+                        else:
+                            kwargs_input["past_key_values"] = None
                     m(*args, **kwargs_input)
 
             calib_func(layer, _layer_forward_loop, **calib_kwargs)
@@ -1665,6 +1680,10 @@ def gptq(
     print_rank_0("Updating weights using GPTQ algorithm...")
     for handle in gptq_handles.values():
         handle.update_weights(block_size, perc_damp)
+
+        # Disable weight quantizer after running GPTQ update since weights are already QDQ'ed
+        if hasattr(handle.module, "weight_quantizer"):
+            handle.module.weight_quantizer.disable()
         handle.free()
     del gptq_handles
 

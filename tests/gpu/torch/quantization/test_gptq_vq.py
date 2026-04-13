@@ -443,16 +443,6 @@ def test_mtq_quantize_gptq_vs_gptq_quantize_scaled_vq():
 
     from luts import clip_vector_scalesign_fast
 
-    # Register psx_luts backend (workaround for _default_disabled_quantizer_cfg list/dict change)
-    import modelopt.torch.quantization.config as _mtq_cfg
-
-    _orig = _mtq_cfg._default_disabled_quantizer_cfg
-    if isinstance(_orig, list):
-        _mtq_cfg._default_disabled_quantizer_cfg = {}
-    import modelopt_internal.torch.quantization.plugins.psx_luts  # noqa: F401
-
-    _mtq_cfg._default_disabled_quantizer_cfg = _orig
-
     import modelopt.torch.quantization as mtq
 
     torch.manual_seed(SEED)
