@@ -32,7 +32,6 @@ quantize:
       cfg:
         $import: fp8
     - quantizer_name: '*[kv]_bmm_quantizer'
-      enable: true
       cfg:
         $import: fp8
     - $import: default_disabled

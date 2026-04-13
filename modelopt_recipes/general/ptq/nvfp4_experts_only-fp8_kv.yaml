@@ -27,23 +27,18 @@ quantize:
   quant_cfg:
     - $import: base_disable_all
     - quantizer_name: '*mlp.experts*weight_quantizer'
-      enable: true
       cfg:
         $import: nvfp4
     - quantizer_name: '*mlp.experts*input_quantizer'
-      enable: true
       cfg:
         $import: nvfp4
     - quantizer_name: '*block_sparse_moe*weight_quantizer'
-      enable: true
       cfg:
         $import: nvfp4
     - quantizer_name: '*block_sparse_moe*input_quantizer'
-      enable: true
       cfg:
         $import: nvfp4
     - quantizer_name: '*[kv]_bmm_quantizer'
-      enable: true
       cfg:
         $import: fp8
     - $import: default_disabled

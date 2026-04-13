@@ -27,15 +27,12 @@ quantize:
   quant_cfg:
     - $import: base_disable_all
     - quantizer_name: '*weight_quantizer'
-      enable: true
       cfg:
         $import: nvfp4
     - quantizer_name: '*input_quantizer'
-      enable: true
       cfg:
         $import: nvfp4
     - quantizer_name: '*[kv]_bmm_quantizer'
-      enable: true
       cfg:
         $import: fp8
     - $import: default_disabled
