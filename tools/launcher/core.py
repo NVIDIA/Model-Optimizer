@@ -471,6 +471,11 @@ def run_jobs(
                     )
                     task_env.update(default_slurm_env)
 
+                # When allow_to_fail is set, use "afterany" so downstream tasks
+                # run even if a predecessor times out or fails.
+                if job.allow_to_fail and hasattr(executor, "dependency_type"):
+                    executor.dependency_type = "afterany"
+
                 task_instance = run.Script(task.script, args=task_args, env=task_env)
                 print(f"job {job_name} task {task_id} slurm_config: {task.slurm_config}")
 
