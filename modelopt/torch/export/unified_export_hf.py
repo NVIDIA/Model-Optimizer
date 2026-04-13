@@ -677,6 +677,13 @@ def _process_quantized_modules(
                 with fsdp2_aware_weight_update(model, sub_module, reshard=False):
                     for weight_name in ["gate_up_proj", "down_proj"]:
                         _export_quantized_weight(sub_module, dtype, weight_name)
+            elif hasattr(sub_module, "gate_up_proj_weight_quantizers"):
+                # Generic fused MoE experts (_QuantFusedExperts) with per-expert
+                # quantizer ModuleLists. Split into per-expert modules and export.
+                from modelopt.torch.export.moe_utils import _export_fused_experts
+
+                with fsdp2_aware_weight_update(model, sub_module, reshard=False):
+                    _export_fused_experts(sub_module, dtype)
 
 
 def _export_transformers_checkpoint(
@@ -721,6 +728,9 @@ def _export_transformers_checkpoint(
                                 modules=list(linear_modulelist),
                                 quantizer_attrs=["input_quantizer"],
                             )
+                elif hasattr(sub_module.experts, "gate_up_proj_weight_quantizers"):
+                    # _QuantFusedExperts: amax fallback is handled in _export_fused_experts
+                    break
                 elif "QuantGptOssExperts" in type(sub_module.experts).__name__:
                     # Handle GPT-OSS experts specifically
                     # GPT-OSS experts use gate_up_proj and down_proj

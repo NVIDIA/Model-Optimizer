@@ -98,44 +98,8 @@ The [distill.py](distill.py) script loads student and teacher models from Huggin
 
 The distillation script expects pre-tokenized data in Megatron's binary format (`.bin` / `.idx` files).
 
-You can tokenize your JSONL datasets using the following command:
-
-```bash
-python -m modelopt.torch.utils.plugins.megatron_preprocess_data \
-    --jsonl_paths /path/to/data1.jsonl /path/to/data2.jsonl ... \
-    --json_keys text \
-    --tokenizer Qwen/Qwen3-0.6B \
-    --output_dir tokenized_qwen3 \
-    --workers 32 \
-    --max_sequence_length 256_000
-```
-
-This will create `tokenized_qwen3/data1_text_document.{bin,idx}` and `tokenized_qwen3/data2_text_document.{bin,idx}` files. We can use these files in the distillation script by passing `--data_paths 1.0 tokenized_qwen3/data1_text_document 1.0 tokenized_qwen3/data2_text_document` (equal weight for both datasets).
-
-Instead of `--jsonl_paths`, you can also pass a directory path to the `--input_dir` argument to tokenize all JSONL files in the directory.
-We are setting a maximum sequence length of 256k to avoid rare OOM errors in tokenization if text is too long.
-
-If you want to download and tokenize a dataset from Hugging Face Hub directly, you can use the following command:
-
-```bash
-python -m modelopt.torch.utils.plugins.megatron_preprocess_data \
-    --hf_dataset nvidia/Nemotron-Pretraining-SFT-v1 \
-    --hf_name Nemotron-SFT-General \
-    --hf_split train \
-    --hf_max_samples_per_split 10_000_000 \
-    --json_keys text \
-    --tokenizer Qwen/Qwen3-0.6B \
-    --output_dir tokenized_qwen3 \
-    --workers 32 \
-    --max_sequence_length 256_000
-```
-
-The [Nemotron-Pretraining-SFT-v1](https://huggingface.co/datasets/nvidia/Nemotron-Pretraining-SFT-v1) dataset is huge, so it will take a few hours to download and tokenize. You can also split the large `.jsonl` into multiple files (e.g. 10M samples per file using `split -l 10000000 -d --additional-suffix=.jsonl <file>.jsonl <file>_part`) and tokenize them parallelly via the `--jsonl_paths` argument.
-To quickly test the script, you can try the [nvidia/Nemotron-Pretraining-Dataset-sample](https://huggingface.co/datasets/nvidia/Nemotron-Pretraining-Dataset-sample) dataset.
-
-If you skip `--hf_name`, it will download and tokenize all subsets for the dataset.
-If you skip `--hf_split`, it will download and tokenize all splits for the subset.
-If you skip `--hf_max_samples_per_split`, it will download and tokenize all samples for the split.
+See the **[Dataset Preparation README](../dataset/README.md#tokenizing-for-megatron-frameworks)**
+for full instructions on tokenizing JSONL files and Hugging Face datasets and get the list of output prefixes that you can use for `--data_paths` argument.
 
 ### Distillation with Real Data
 

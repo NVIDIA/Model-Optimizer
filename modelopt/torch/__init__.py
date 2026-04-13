@@ -15,12 +15,25 @@
 
 """Model optimization and deployment subpackage for torch."""
 
+import importlib
 import warnings as _warnings
 
 from packaging.version import Version as _Version
 from torch import __version__ as _torch_version
 
-from . import distill, nas, opt, peft, prune, quantization, sparsity, speculative, utils
+# Pre-initialize torch._dynamo to prevent double-registration with peft's torch.compile() call
+importlib.import_module("torch._dynamo")
+from . import (  # noqa: E402
+    distill,
+    nas,
+    opt,
+    peft,
+    prune,
+    quantization,
+    sparsity,
+    speculative,
+    utils,
+)
 
 if _Version(_torch_version) < _Version("2.9"):
     _warnings.warn(

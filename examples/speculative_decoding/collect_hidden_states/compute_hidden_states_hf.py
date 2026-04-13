@@ -142,7 +142,8 @@ def main(args: argparse.Namespace) -> None:
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=args.trust_remote_code)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    tokenizer.chat_template = tokenizer.chat_template.replace(REMOVE_THINK_CHAT_TEMPLATE, "")
+    if tokenizer.chat_template is not None:
+        tokenizer.chat_template = tokenizer.chat_template.replace(REMOVE_THINK_CHAT_TEMPLATE, "")
 
     output_dir = args.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -206,10 +207,12 @@ def main(args: argparse.Namespace) -> None:
                 continue
 
             # Tokenize and check length
-            tokenized = tokenizer.apply_chat_template(
-                conversations, return_tensors="pt", add_generation_template=False
-            )
-            input_ids = tokenized["input_ids"] if isinstance(tokenized, dict) else tokenized
+            # return_dict=True ensures BatchEncoding is returned on all transformers
+            # versions: in <5.0 the default is False (returns raw tensor), in 5.0+
+            # the default changed to True (returns BatchEncoding).
+            input_ids = tokenizer.apply_chat_template(
+                conversations, return_tensors="pt", return_dict=True, add_generation_template=False
+            )["input_ids"]
             num_input_tokens = input_ids.shape[1]
             if num_input_tokens <= 10 or num_input_tokens > args.max_seq_len:
                 num_skipped_too_long += 1

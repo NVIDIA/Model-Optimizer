@@ -1,5 +1,19 @@
 # LTX-2 Distillation Training with ModelOpt
 
+> [!WARNING]
+> **Third-Party License Notice — LTX-2**
+>
+> LTX-2 is a third-party model and set of packages developed and provided by Lightricks. LTX-2
+> is **not** covered by the Apache 2.0 license that governs NVIDIA Model Optimizer.
+>
+> By installing and using LTX-2 packages (`ltx-core`, `ltx-pipelines`, `ltx-trainer`) with
+> NVIDIA Model Optimizer, you **must** comply with the
+> [LTX Community License Agreement](https://github.com/Lightricks/LTX-2/blob/main/LICENSE).
+>
+> Any derivative models or fine-tuned weights produced from LTX-2 using NVIDIA Model Optimizer
+> (including quantized or distilled checkpoints) remain subject to the LTX Community License
+> Agreement and are **not** covered by Apache 2.0.
+
 Knowledge distillation for LTX-2 DiT models using NVIDIA ModelOpt. A frozen **teacher** guides a trainable **student** through a combined loss:
 
 ```text

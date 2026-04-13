@@ -13,9 +13,36 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
+
 import pytest
 import yaml
 from _test_utils.examples.run_command import run_example_command
+
+
+@pytest.fixture(scope="session")
+def tiny_conversations_path(tmp_path_factory):
+    """Tiny JSONL with short synthetic conversations for compute_hidden_states_hf tests.
+
+    Uses minimal single-turn conversations so that tokenized lengths stay well
+    within the tiny test model's max_position_embeddings (32) even after chat
+    template formatting.
+    """
+    tmp_dir = tmp_path_factory.mktemp("tiny_convs")
+    output_file = tmp_dir / "train.jsonl"
+    conversations = [
+        {
+            "conversation_id": f"test-{i}",
+            "conversations": [
+                {"role": "user", "content": "What is 2 plus 2?"},
+                {"role": "assistant", "content": "4"},
+            ],
+        }
+        for i in range(5)
+    ]
+    with open(output_file, "w") as f:
+        f.writelines(json.dumps(conv) + "\n" for conv in conversations)
+    return output_file
 
 
 @pytest.fixture(scope="session", autouse=True)
