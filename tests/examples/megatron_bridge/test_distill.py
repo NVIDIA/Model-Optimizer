@@ -72,19 +72,16 @@ def test_distill_puzzletron_anymodel(tmp_path: Path, num_gpus):
     """Integration test for distill.py with Puzzletron AnyModel (heterogeneous) checkpoints.
 
     Creates Qwen3 models, converts the student to Puzzletron AnyModel format
-    (heterogeneous layer architectures), and runs mbridge distillation.
-
-    Note: HF export via --hf_export_path is NOT tested here because Megatron-Bridge's
-    export_ckpt cannot reload heterogeneous model configs from saved checkpoints
-    (heterogeneous_layers_config_encoded_json is None during __post_init__).
-    HF export for standard models is tested in test_distill_and_convert.
+    (heterogeneous layer architectures), runs mbridge distillation, and exports
+    the distilled checkpoint to HuggingFace format via --hf_export_path.
     """
-    _, student_anymodel_dir, teacher_hf_dir = _prepare_puzzletron_anymodel_student_and_teacher(
-        tmp_path
+    student_hf_dir, student_anymodel_dir, teacher_hf_dir = (
+        _prepare_puzzletron_anymodel_student_and_teacher(tmp_path)
     )
 
     train_iters = 5
     output_dir = tmp_path / "distill_output"
+    hf_export_path = tmp_path / "distilled_anymodel_hf"
     cmd_parts = extend_cmd_parts(
         ["torchrun", f"--nproc_per_node={num_gpus}", "distill.py", "--use_mock_data"],
         student_hf_path=student_anymodel_dir,
@@ -100,11 +97,17 @@ def test_distill_puzzletron_anymodel(tmp_path: Path, num_gpus):
         eval_interval=5,
         eval_iters=1,
         log_interval=1,
+        hf_export_path=hf_export_path,
+        student_hf_model=student_hf_dir,
     )
     run_example_command(cmd_parts, example_path="megatron_bridge")
 
     run_config_path = output_dir / "checkpoints" / f"iter_{train_iters:07d}" / "run_config.yaml"
     assert run_config_path.exists(), f"Expected run_config.yaml at: {run_config_path}"
+
+    assert (hf_export_path / "config.json").exists(), (
+        f"Expected HF export at: {hf_export_path}/config.json"
+    )
 
 
 def _prepare_puzzletron_anymodel_student_and_teacher(tmp_path: Path) -> tuple[Path, Path, Path]:
