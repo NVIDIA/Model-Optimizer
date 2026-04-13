@@ -1,10 +1,13 @@
-accelerate
 # LTX-2 packages (from Lightricks/LTX-2 monorepo)
+# Third-Party License Notice: LTX-2 packages below are provided by Lightricks and are NOT
+# covered by the Apache 2.0 license governing NVIDIA Model Optimizer. You MUST comply with
+# the LTX Community License Agreement when installing and using LTX-2 with NVIDIA Model
+# Optimizer. Any derivative models or fine-tuned weights produced from LTX-2 (including
+# quantized or distilled checkpoints) remain subject to the LTX Community License Agreement,
+# not Apache 2.0. See: https://github.com/Lightricks/LTX-2/blob/main/LICENSE
 ltx-core @ git+https://github.com/Lightricks/LTX-2.git#subdirectory=packages/ltx-core
 ltx-pipelines @ git+https://github.com/Lightricks/LTX-2.git#subdirectory=packages/ltx-pipelines
 ltx-trainer @ git+https://github.com/Lightricks/LTX-2.git#subdirectory=packages/ltx-trainer
+nvidia-modelopt[hf]
 
-# NVIDIA ModelOpt (quantization & distillation)
-nvidia-modelopt
-safetensors
 

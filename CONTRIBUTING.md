@@ -2,6 +2,9 @@
 
 Thanks for your interest in contributing to Model Optimizer (ModelOpt)!
 
+> [!NOTE]
+> Any contributions to this repository are only accepted under the Apache 2.0 license.
+
 ## 🛠️ Setting up your environment
 
 Ensure that Model Optimizer (ModelOpt) is installed in editable mode and that all `dev` optional requirements are installed:
@@ -64,10 +67,17 @@ If you are an external contributor, seek guidance from `@NVIDIA/modelopt-setup-c
   1. A reference link (with commit hash) to the source from which the code was copied.
   1. The original repository's Copyright / License.
   1. The NVIDIA Apache 2.0 Copyright / License header.
+- **Update `SPDX-License-Identifier`:** If the third-party code uses a different license than Apache 2.0, update the `SPDX-License-Identifier` in the NVIDIA header to reflect both licenses using SPDX expression syntax. For example, for MIT-licensed source code:
 
-  See [`modelopt/torch/speculative/eagle/utils.py`](./modelopt/torch/speculative/eagle/utils.py)
-  for an example of the correct license header format.
+  ```python
+  # SPDX-License-Identifier: Apache-2.0 AND MIT
+  ```
+
+  If the third-party code is also Apache 2.0, no change is needed (`SPDX-License-Identifier: Apache-2.0` remains correct).
+- **Update `LICENSE`:** Add the third-party copyright holder to the appropriate license section in the [`LICENSE`](./LICENSE) file under *Third-Party Software Notices*. If the third-party license is not already listed there, add a new section with the full license text.
 - **Exclude from license pre-commit hook:** Exclude copied files from the license pre-commit hook so it doesn't auto-add the NVIDIA Apache 2.0 license on top of the file. Add the file path to the `exclude` list in the `insert-license` hook in [`.pre-commit-config.yaml`](./.pre-commit-config.yaml).
+
+See [`modelopt/torch/quantization/utils/calib_utils.py`](./modelopt/torch/quantization/utils/calib_utils.py) for an example of the correct license header format.
 
 ## 📝 Writing tests
 
