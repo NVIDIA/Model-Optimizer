@@ -50,7 +50,7 @@ def _verify_trt_engine_build(onnx_save_path, quantize_mode):
         f"--builderOptimizationLevel={opt_level}",
     ]
 
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)  # nosec
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
     assert result.returncode == 0, (
         f"TensorRT engine build failed for {onnx_save_path} "
         f"(mode={quantize_mode}):\n{result.stdout}\n{result.stderr}"
