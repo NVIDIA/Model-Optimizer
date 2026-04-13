@@ -20,11 +20,93 @@ try:
 except ImportError:  # Python < 3.11
     from importlib.abc import Traversable
 from pathlib import Path
+from typing import Any
 
 from ._config_loader import BUILTIN_RECIPES_LIB, load_config
 from .config import ModelOptPTQRecipe, ModelOptRecipeBase, RecipeType
 
 __all__ = ["load_config", "load_recipe"]
+
+
+def _resolve_imports(
+    data: dict[str, Any], _loading: frozenset[str] | None = None
+) -> dict[str, Any]:
+    """Resolve the ``imports`` section in a recipe and substitute named references.
+
+    An ``imports`` block is a dict mapping short names to config file paths::
+
+        imports:
+          fp8: configs/numerics/fp8
+          nvfp4: configs/numerics/nvfp4_dynamic
+
+    ``cfg`` values in ``quant_cfg`` entries that are plain strings are looked up
+    against the imported names and replaced with the loaded config dict.
+
+    Resolution is **recursive**: an imported snippet may itself contain an
+    ``imports`` section.  Circular imports are detected and raise ``ValueError``.
+    """
+    imports_dict = data.pop("imports", None)
+    if not imports_dict:
+        return data
+
+    if not isinstance(imports_dict, dict):
+        raise ValueError(
+            f"'imports' must be a dict mapping names to config paths, got: {type(imports_dict).__name__}"
+        )
+
+    if _loading is None:
+        _loading = frozenset()
+
+    # Build name → config mapping (recursively resolve nested imports)
+    import_map: dict[str, Any] = {}
+    for name, config_path in imports_dict.items():
+        if not config_path:
+            raise ValueError(f"Import {name!r} has an empty config path.")
+        if config_path in _loading:
+            raise ValueError(
+                f"Circular import detected: {config_path!r} is already being loaded. "
+                f"Import chain: {sorted(_loading)}"
+            )
+        snippet = load_config(config_path)
+        if isinstance(snippet, dict) and "imports" in snippet:
+            snippet = _resolve_imports(snippet, _loading | {config_path})
+        import_map[name] = snippet
+
+    # Resolve string references in quant_cfg entries
+    quantize = data.get("quantize")
+    if isinstance(quantize, dict):
+        quant_cfg = quantize.get("quant_cfg")
+        if isinstance(quant_cfg, list):
+            resolved_cfg: list[Any] = []
+            for entry in quant_cfg:
+                if isinstance(entry, str):
+                    # Entire entry is a string → replace with the imported value
+                    if entry not in import_map:
+                        raise ValueError(
+                            f"Unknown import reference {entry!r} in quant_cfg list. "
+                            f"Available imports: {list(import_map.keys())}"
+                        )
+                    imported = import_map[entry]
+                    if isinstance(imported, list):
+                        # List import → splice all entries in place
+                        resolved_cfg.extend(imported)
+                    else:
+                        resolved_cfg.append(imported)
+                elif isinstance(entry, dict) and isinstance(entry.get("cfg"), str):
+                    # cfg field is a string → replace cfg value
+                    ref_name = entry["cfg"]
+                    if ref_name not in import_map:
+                        raise ValueError(
+                            f"Unknown import reference {ref_name!r} in quant_cfg entry "
+                            f"{entry!r}. Available imports: {list(import_map.keys())}"
+                        )
+                    entry["cfg"] = import_map[ref_name]
+                    resolved_cfg.append(entry)
+                else:
+                    resolved_cfg.append(entry)
+            quantize["quant_cfg"] = resolved_cfg
+
+    return data
 
 
 def _resolve_recipe_path(recipe_path: str | Path | Traversable) -> Path | Traversable:
@@ -86,7 +168,9 @@ def _load_recipe_from_file(recipe_file: Path | Traversable) -> ModelOptRecipeBas
     The file must contain a ``metadata`` section with at least ``recipe_type``,
     plus a ``quant_cfg`` mapping and an optional ``algorithm`` for PTQ recipes.
     """
-    data = load_config(recipe_file)
+    raw = load_config(recipe_file)
+    assert isinstance(raw, dict), f"Recipe file {recipe_file} must be a YAML mapping."
+    data = _resolve_imports(raw)
 
     metadata = data.get("metadata", {})
     recipe_type = metadata.get("recipe_type")
@@ -117,7 +201,9 @@ def _load_recipe_from_dir(recipe_dir: Path | Traversable) -> ModelOptRecipeBase:
             f"Cannot find a recipe descriptor in {recipe_dir}. Looked for: recipe.yml, recipe.yaml"
         )
 
-    metadata = load_config(recipe_file).get("metadata", {})
+    recipe_data = load_config(recipe_file)
+    assert isinstance(recipe_data, dict), f"Recipe file {recipe_file} must be a YAML mapping."
+    metadata = recipe_data.get("metadata", {})
     recipe_type = metadata.get("recipe_type")
     if recipe_type is None:
         raise ValueError(f"Recipe file {recipe_file} must contain a 'metadata.recipe_type' field.")
@@ -133,9 +219,17 @@ def _load_recipe_from_dir(recipe_dir: Path | Traversable) -> ModelOptRecipeBase:
             raise ValueError(
                 f"Cannot find quantize in {recipe_dir}. Looked for: quantize.yml, quantize.yaml"
             )
+        # Resolve imports: imports are in recipe.yml, quantize data is separate
+        quantize_data = load_config(quantize_file)
+        assert isinstance(quantize_data, dict), f"{quantize_file} must be a YAML mapping."
+        combined: dict[str, Any] = {"quantize": quantize_data}
+        imports = recipe_data.get("imports")
+        if imports:
+            combined["imports"] = imports
+        combined = _resolve_imports(combined)
         return ModelOptPTQRecipe(
             recipe_type=RecipeType.PTQ,
             description=metadata.get("description", "PTQ recipe."),
-            quantize=load_config(quantize_file),
+            quantize=combined["quantize"],
         )
     raise ValueError(f"Unsupported recipe type: {recipe_type!r}")

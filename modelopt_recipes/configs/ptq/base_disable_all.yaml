@@ -1,0 +1,3 @@
+# Disable all quantizers by default (deny-all-then-configure pattern).
+quantizer_name: '*'
+enable: false

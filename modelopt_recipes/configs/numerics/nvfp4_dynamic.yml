@@ -1,0 +1,6 @@
+# NVFP4 E2M1 blockwise with dynamic calibration and FP8 E4M3 scales.
+num_bits: e2m1
+block_sizes:
+  -1: 16
+  type: dynamic
+  scale_bits: e4m3

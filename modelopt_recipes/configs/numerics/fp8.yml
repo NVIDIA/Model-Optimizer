@@ -1,0 +1,2 @@
+# FP8 E4M3 quantizer attributes (no axis — used for KV cache, etc.).
+num_bits: e4m3

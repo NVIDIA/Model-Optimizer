@@ -62,7 +62,7 @@ def _parse_exmy(s: str) -> tuple[int, int] | str:
     return s
 
 
-def load_config(config_file: str | Path | Traversable) -> dict[str, Any]:
+def load_config(config_file: str | Path | Traversable) -> dict[str, Any] | list[Any]:
     """Load a config yaml.
 
     config_file: Path to a config yaml file. The path suffix can be omitted.
@@ -106,8 +106,8 @@ def load_config(config_file: str | Path | Traversable) -> dict[str, Any]:
     _raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     if _raw is None:
         return {}
-    if not isinstance(_raw, dict):
+    if not isinstance(_raw, (dict, list)):
         raise ValueError(
-            f"Config file {config_path} must contain a YAML mapping, got {type(_raw).__name__}"
+            f"Config file {config_path} must contain a YAML mapping or list, got {type(_raw).__name__}"
         )
     return _parse_exmy_num_bits(_raw)

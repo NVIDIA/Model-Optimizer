@@ -48,6 +48,9 @@ def _check_quant_cfg(quant_cfg, label: str) -> list[str]:
         )
     elif isinstance(quant_cfg, list):
         for i, entry in enumerate(quant_cfg):
+            if isinstance(entry, str):
+                # String entries are import references — resolved at load time
+                continue
             if not isinstance(entry, dict):
                 errors.append(
                     f"{label}: quant_cfg[{i}] must be a dict with "

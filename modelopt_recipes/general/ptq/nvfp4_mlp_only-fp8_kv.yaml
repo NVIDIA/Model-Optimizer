@@ -13,79 +13,32 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+imports:
+  base_disable_all: configs/ptq/base_disable_all
+  default_disabled: configs/ptq/default_disabled_quantizers
+  nvfp4: configs/numerics/nvfp4_dynamic
+  fp8: configs/numerics/fp8
+
 metadata:
   recipe_type: ptq
   description: NVFP4 static weight and dynamic activation for all linear layers (W4A4), FP8 KV cache, max calibration.
 quantize:
   algorithm: max
   quant_cfg:
-    - quantizer_name: '*'
-      enable: false
+    - base_disable_all
     - quantizer_name: '*mlp*weight_quantizer'
       enable: true
-      cfg:
-        block_sizes:
-          -1: 16
-          type: dynamic
-          scale_bits: e4m3
-        num_bits: e2m1
+      cfg: nvfp4
     - quantizer_name: '*mlp*input_quantizer'
       enable: true
-      cfg:
-        block_sizes:
-          -1: 16
-          type: dynamic
-          scale_bits: e4m3
-        num_bits: e2m1
+      cfg: nvfp4
     - quantizer_name: '*block_sparse_moe*weight_quantizer'
       enable: true
-      cfg:
-        block_sizes:
-          -1: 16
-          type: dynamic
-          scale_bits: e4m3
-        num_bits: e2m1
+      cfg: nvfp4
     - quantizer_name: '*block_sparse_moe*input_quantizer'
       enable: true
-      cfg:
-        block_sizes:
-          -1: 16
-          type: dynamic
-          scale_bits: e4m3
-        num_bits: e2m1
+      cfg: nvfp4
     - quantizer_name: '*[kv]_bmm_quantizer'
       enable: true
-      cfg:
-        num_bits: e4m3
-    - quantizer_name: '*block_sparse_moe.gate*'
-      enable: false
-    - quantizer_name: '*linear_attn.conv1d*'
-      enable: false
-    - quantizer_name: '*lm_head*'
-      enable: false
-    - quantizer_name: '*mixer.conv1d*'
-      enable: false
-    - quantizer_name: '*mlp.gate.*'
-      enable: false
-    - quantizer_name: '*mlp.shared_expert_gate.*'
-      enable: false
-    - quantizer_name: '*output_layer*'
-      enable: false
-    - quantizer_name: '*proj_out.*'
-      enable: false
-    - quantizer_name: '*router*'
-      enable: false
-    - quantizer_name: 'output.*'
-      enable: false
-    - parent_class: 'nn.BatchNorm1d'
-      quantizer_name: '*'
-      enable: false
-    - parent_class: 'nn.BatchNorm2d'
-      quantizer_name: '*'
-      enable: false
-    - parent_class: 'nn.BatchNorm3d'
-      quantizer_name: '*'
-      enable: false
-    - parent_class: 'nn.LeakyReLU'
-      quantizer_name: '*'
-      enable: false
+      cfg: fp8
+    - default_disabled
