@@ -28,6 +28,7 @@ Config Generation Progress:
 - [ ] Step 5: Confirm tasks (iterative)
 - [ ] Step 6: Advanced - Multi-node (Data Parallel)
 - [ ] Step 7: Advanced - Interceptors
+- [ ] Step 7.5: Check container registry auth (SLURM only)
 - [ ] Step 8: Run the evaluation
 ```
 
@@ -76,7 +77,7 @@ Prompt the user with "I'll ask you 5 questions to build the base config we'll ad
 
 DON'T ALLOW FOR ANY OTHER OPTIONS, only the ones listed above under each category (Execution, Deployment, Auto-export, Model type, Benchmarks). YOU HAVE TO GATHER THE ANSWERS for the 5 questions before you can build the base config.
 
-> **Note:** These categories come from NEL's `build-config` CLI. If `nel skills build-config --help` shows different options than listed above, use the CLI's current options instead.
+> **Note:** These categories come from NEL's `build-config` CLI. **Always run `nel skills build-config --help` first** to get the current options — they may differ from this list (e.g., `chat_reasoning` instead of separate `chat`/`reasoning`, `general_knowledge` instead of `standard`). Use the CLI's current options, not this list, when they conflict.
 
 When you have all the answers, run the script to build the base config:
 
@@ -180,6 +181,37 @@ If the user needs multi-node evaluation (model >120B, or more throughput), read 
 **Documentation Errata**
 
 - The docs may show incorrect parameter names for logging. Use `max_logged_requests` and `max_logged_responses` (NOT `max_saved_*` or `max_*`).
+
+**Step 7.5: Check container registry authentication (SLURM only)**
+
+NEL's default deployment images by framework:
+
+| Framework | Default image | Registry |
+| --- | --- | --- |
+| vLLM | `vllm/vllm-openai:latest` | DockerHub |
+| SGLang | `lmsysorg/sglang:latest` | DockerHub |
+| TRT-LLM | `nvcr.io/nvidia/tensorrt-llm/release:...` | NGC |
+| Evaluation tasks | `nvcr.io/nvidia/eval-factory/*:26.03` | NGC |
+
+Before submitting, verify the cluster has credentials for the deployment image. See `skills/common/slurm-setup.md` section 6 for the full procedure.
+
+```bash
+ssh <host> "cat ~/.config/enroot/.credentials 2>/dev/null"
+```
+
+**Default behavior: use DockerHub image first.** If the job fails with a `401` or image pull error, fall back to the NGC alternative by adding `deployment.image` to the config:
+
+```yaml
+deployment:
+  image: nvcr.io/nvidia/vllm:<YY.MM>-py3  # check https://catalog.ngc.nvidia.com/orgs/nvidia/containers/vllm for latest tag
+```
+
+**Decision flow:**
+1. Submit with the default DockerHub image (`vllm/vllm-openai:latest`)
+2. If the job fails with image pull auth error (401) → check credentials
+3. If DockerHub credentials can be added → add them and resubmit
+4. If not → override `deployment.image` to the NGC vLLM image and resubmit
+5. **Do not retry more than once** without fixing the auth issue
 
 **Step 8: Run the evaluation**
 

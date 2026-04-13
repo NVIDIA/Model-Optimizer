@@ -192,3 +192,150 @@ chmod -R g+rwX /path/to/.hf_cache/
 ```
 
 Scope `chmod` to only the directories the job needs — avoid world-writable paths on shared clusters.
+
+---
+
+## 6. Container Registry Authentication
+
+**Before submitting any SLURM job that pulls a container image**, check that the cluster has credentials for the image's registry. Missing auth causes jobs to fail after waiting in the queue — a costly mistake.
+
+### Step 1: Detect the container runtime
+
+Different clusters use different container runtimes. Detect which is available:
+
+```bash
+# On the cluster (or via ssh):
+which enroot 2>/dev/null && echo "RUNTIME=enroot"
+which singularity 2>/dev/null && echo "RUNTIME=singularity"
+which apptainer 2>/dev/null && echo "RUNTIME=apptainer"
+which docker 2>/dev/null && echo "RUNTIME=docker"
+```
+
+| Runtime | Typical clusters | SLURM integration |
+| --- | --- | --- |
+| **enroot/pyxis** | NVIDIA internal (DGX Cloud, EOS, Selene, GCP-NRT) | `srun --container-image` |
+| **Singularity/Apptainer** | HPC / academic clusters | `singularity exec` inside job script |
+| **Docker** | Bare-metal / on-prem with GPU | `docker run` inside job script |
+
+### Step 2: Check credentials for the image's registry
+
+Determine the registry from the image URI:
+
+| Image pattern | Registry |
+| --- | --- |
+| `nvcr.io/nvidia/...` | NGC |
+| `vllm/vllm-openai:...` or no registry prefix | DockerHub |
+| `ghcr.io/...` | GitHub Container Registry |
+| `docker.io/...` | DockerHub (explicit) |
+
+Then check credentials based on the runtime:
+
+#### enroot/pyxis
+
+```bash
+cat ~/.config/enroot/.credentials 2>/dev/null
+```
+
+Look for `machine <registry>` lines:
+- NGC → `machine nvcr.io`
+- DockerHub → `machine auth.docker.io`
+- GHCR → `machine ghcr.io`
+
+#### Docker
+
+```bash
+cat ~/.docker/config.json 2>/dev/null | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin).get('auths',{}), indent=2))"
+```
+
+Look for registry keys (`https://index.docker.io/v1/`, `nvcr.io`, `ghcr.io`).
+
+#### Singularity/Apptainer
+
+```bash
+cat ~/.singularity/docker-config.json 2>/dev/null || cat ~/.apptainer/docker-config.json 2>/dev/null
+```
+
+Same format as Docker's `config.json` — look for registry keys in `auths`.
+
+### Step 3: If credentials are missing
+
+**Do not submit the job.** Instead:
+
+1. Tell the user which registry and runtime need authentication
+2. Show the fix for their runtime:
+
+**enroot/pyxis:**
+
+```bash
+mkdir -p ~/.config/enroot
+
+# DockerHub (get token from https://hub.docker.com/settings/security)
+cat >> ~/.config/enroot/.credentials << 'EOF'
+machine auth.docker.io
+  login <dockerhub_username>
+  password <access_token>
+EOF
+
+# NGC (get API key from https://org.ngc.nvidia.com/setup/api-keys)
+cat >> ~/.config/enroot/.credentials << 'EOF'
+machine nvcr.io
+  login $oauthtoken
+  password <ngc_api_key>
+EOF
+```
+
+**Docker:**
+
+```bash
+# DockerHub
+docker login
+
+# NGC
+docker login nvcr.io -u '$oauthtoken' -p <ngc_api_key>
+```
+
+**Singularity/Apptainer:**
+
+```bash
+# DockerHub
+singularity remote login --username <user> docker://docker.io
+
+# NGC
+singularity remote login --username '$oauthtoken' --password <ngc_api_key> docker://nvcr.io
+```
+
+3. **Suggest an alternative image** on an authenticated registry. NVIDIA clusters typically have NGC auth pre-configured, so prefer NGC-hosted images:
+
+| DockerHub image | NGC alternative |
+| --- | --- |
+| `vllm/vllm-openai:latest` | `nvcr.io/nvidia/vllm:<YY.MM>-py3` (check [NGC catalog](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/vllm) for latest tag) |
+| `nvcr.io/nvidia/tensorrt-llm/release:<tag>` | Already NGC |
+
+> **Note:** NGC image tags follow `YY.MM-py3` format (e.g., `26.03-py3`). Not all DockerHub images have NGC equivalents. If no NGC alternative exists and DockerHub auth is missing, the user must add DockerHub credentials or pre-cache the image as a `.sqsh` file.
+
+4. After the user fixes auth or switches images, verify the image is **actually pullable** before submitting (credentials alone don't guarantee the image exists):
+
+```bash
+# enroot — test pull (aborts after manifest fetch)
+enroot import --output /dev/null docker://<registry>#<image> 2>&1 | head -10
+# Success: shows "Fetching image manifest" + layer info
+# Failure: shows "401 Unauthorized" or "404 Not Found"
+
+# docker
+docker manifest inspect <image> 2>&1 | head -5
+
+# singularity
+singularity pull --dry-run docker://<image> 2>&1 | head -5
+```
+
+> **Important**: Credentials existing for a registry does NOT mean a specific image is accessible. The image may not exist, or the credentials may lack permissions for that repository. Always verify the specific image before submitting.
+
+### Common failure modes
+
+| Symptom | Runtime | Cause | Fix |
+| --- | --- | --- | --- |
+| `curl: (22) ... error: 401` | enroot | No credentials for registry | Add to `~/.config/enroot/.credentials` |
+| `pyxis: failed to import docker image` | enroot | Auth failed or rate limit | Check credentials; DockerHub free: 100 pulls/6h per IP |
+| `unauthorized: authentication required` | docker | No `docker login` | Run `docker login [registry]` |
+| `FATAL: While making image from oci registry` | singularity | No remote login | Run `singularity remote login` |
+| Image pulls on some nodes but not others | any | Cached on one node only | Pre-cache image or ensure auth on all nodes |
