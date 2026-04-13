@@ -67,7 +67,7 @@ class ModelOptPTQRecipe(ModelOptRecipeBase):
     """Our config class for PTQ recipes."""
 
     quantize: QuantizeConfig = ModeloptField(
-        default_factory=QuantizeConfig,
+        default=QuantizeConfig(),
         title="PTQ config",
         description="PTQ config containing quant_cfg and algorithm.",
         validate_default=True,
