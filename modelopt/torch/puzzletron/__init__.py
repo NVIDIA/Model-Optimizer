@@ -27,7 +27,6 @@ from . import (
     puzzletron_nas_plugin,
     replacement_library,
     scoring,
-    sewing_kit,
     subblock_stats,
     tools,
     utils,

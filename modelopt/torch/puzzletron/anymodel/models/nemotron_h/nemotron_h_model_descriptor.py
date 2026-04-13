@@ -33,6 +33,8 @@ from ....pruning.pruning_mixin import PruningMixIn
 from ...model_descriptor import ModelDescriptor, ModelDescriptorFactory
 from ...puzzformer.no_op import MatchingZeros, Same
 
+__all__ = ["NemotronHExpertRemovalLayerDescriptor", "NemotronHModelDescriptor"]
+
 
 def get_dynamic_modules(module_cls_str: str) -> List[Type[nn.Module]]:
     import transformers_modules

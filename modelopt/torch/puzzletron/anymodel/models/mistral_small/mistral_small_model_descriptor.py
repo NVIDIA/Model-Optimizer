@@ -30,6 +30,12 @@ from ....pruning.kv_heads_pruning_mixin import KVHeadsLayerDescriptor
 from ...model_descriptor import ModelDescriptor, ModelDescriptorFactory
 from ...puzzformer.no_op import MatchingZeros, Same, return_tuple_of_size
 
+__all__ = [
+    "MistralSmallModelDescriptor",
+    "MistralFFNIntermediateLayerDescriptor",
+    "MistralKVHeadsLayerDescriptor",
+]
+
 
 @ModelDescriptorFactory.register_decorator("mistral_small")
 class MistralSmallModelDescriptor(ModelDescriptor):

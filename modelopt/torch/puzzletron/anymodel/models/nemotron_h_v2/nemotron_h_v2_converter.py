@@ -18,6 +18,8 @@ from typing import List
 from ....block_config import AttentionConfig, BlockConfig, FFNConfig, MambaConfig, MoEConfig
 from ...converter import Converter, ConverterFactory
 
+__all__ = ["NemotronHV2Converter"]
+
 
 @ConverterFactory.register_decorator("nemotron_h_v2")
 class NemotronHV2Converter(Converter):

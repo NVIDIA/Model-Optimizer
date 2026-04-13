@@ -28,7 +28,6 @@ from ..tools.validate_puzzle_with_multi_replacements import validate_puzzle_solu
 from .run_puzzle import run_puzzle
 
 __all__ = [
-    "launch_mip",
     "launch_realize_model",
     "launch_mip_and_realize_model",
 ]

@@ -29,6 +29,8 @@ from ...model_descriptor import ModelDescriptor, ModelDescriptorFactory
 from ...puzzformer.no_op import MatchingZeros, Same, return_tuple_of_size
 from ..llama.llama_model_descriptor import LlamaFFNIntermediateLayerDescriptor
 
+__all__ = ["Qwen2ModelDescriptor", "Qwen2FFNIntermediateLayerDescriptor"]
+
 
 @ModelDescriptorFactory.register_decorator("qwen2")
 class Qwen2ModelDescriptor(ModelDescriptor):

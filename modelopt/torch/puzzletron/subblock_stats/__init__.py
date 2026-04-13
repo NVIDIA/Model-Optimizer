@@ -14,3 +14,6 @@
 # limitations under the License.
 
 """Subblock statistics collection for Puzzletron."""
+
+from .calc_subblock_params_and_memory import *
+from .calc_subblock_stats import *

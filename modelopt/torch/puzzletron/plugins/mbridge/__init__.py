@@ -20,12 +20,6 @@ This module provides bridges for converting Puzzletron AnyModel checkpoints
 """
 
 # Import to register bridges (side effect)
-from .base import HeterogeneousBridgeMixin
-from .llama import PuzzletronLlamaAnyModelBridge  # noqa: F401
-from .qwen3 import PuzzletronQwen3AnyModelBridge  # noqa: F401
-
-__all__ = [
-    "HeterogeneousBridgeMixin",
-    "PuzzletronLlamaAnyModelBridge",
-    "PuzzletronQwen3AnyModelBridge",
-]
+from .base import *
+from .llama import *
+from .qwen3 import *

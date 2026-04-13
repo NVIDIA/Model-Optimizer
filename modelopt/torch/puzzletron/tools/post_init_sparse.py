@@ -22,6 +22,8 @@ Converts a state dictionary from PyTorch's pruning format (with _orig and _mask 
 into a standard format with sparsified weights.
 """
 
+__all__ = []
+
 
 class SparsityMethod:
     def calculate_masks(self, state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:

@@ -28,6 +28,8 @@ from mip import BINARY, Model, maximize, minimize, xsum
 
 from .utils import consecutive_ngrams, get_nested_key, sort_replacements
 
+__all__ = ["run_mip"]
+
 ReplacementID: TypeAlias = Hashable
 Replacement: TypeAlias = dict[str, Any]
 ChosenReplacements: TypeAlias = list[Replacement]
@@ -52,6 +54,9 @@ def run_mip(
             f"mip: removed {orig_num_replacements - len(replacements)} replacements with NaN/inf objective value"
         )
         print("\n\n\n")
+
+    if not replacements:
+        return [], 0.0, {}
 
     mip_model = Model()
 

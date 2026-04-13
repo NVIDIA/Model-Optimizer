@@ -21,8 +21,6 @@ import sys
 import torch.distributed.launch  # noqa: F401
 
 __all__ = [
-    "LogColors",
-    "DistributedLogger",
     "logger",
     "aprint",
     "lmprint",

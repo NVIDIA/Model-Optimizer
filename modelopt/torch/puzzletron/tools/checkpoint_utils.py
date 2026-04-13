@@ -31,6 +31,19 @@ from transformers.utils import SAFE_WEIGHTS_INDEX_NAME, SAFE_WEIGHTS_NAME
 from .checkpoint_utils_hf import load_model_config
 from .common import infer_weights_dtype
 
+__all__ = [
+    "SAFETENSORS_SUBBLOCKS_DIR_NAME",
+    "PTH_SUBBLOCKS_DIR_NAME",
+    "STATE_DICT_FILE_NAME",
+    "load_state_dict",
+    "load_model_config",
+    "init_module_with_state_dict",
+    "init_empty_module",
+    "skip_init",
+    "is_valid_decilm_checkpoint",
+    "copy_tokenizer",
+]
+
 SAFETENSORS_SUBBLOCKS_DIR_NAME = "subblocks_safetensors"
 PTH_SUBBLOCKS_DIR_NAME = "subblocks"
 STATE_DICT_FILE_NAME = "model.pth"

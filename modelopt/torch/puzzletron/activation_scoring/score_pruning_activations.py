@@ -22,6 +22,8 @@ import modelopt.torch.utils.distributed as dist
 
 from ..tools.logger import mprint
 
+__all__ = ["launch_score_activations"]
+
 
 def has_checkpoint_support(activation_hooks_kwargs: dict) -> bool:
     """Determine if the activation hook method has proper checkpoint support implemented.

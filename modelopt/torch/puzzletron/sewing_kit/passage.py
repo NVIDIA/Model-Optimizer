@@ -23,7 +23,7 @@ from typing import Any, ContextManager, Iterable, Mapping, Optional, Union
 import torch.nn as nn
 from typing_extensions import override
 
-from ..utils import (
+from .utils import (
     ActivityContext,
     dynamo_skip,
     fake_tensors,
@@ -32,6 +32,22 @@ from ..utils import (
     is_submodule_or_same,
     real_tensors,
 )
+
+__all__ = [
+    "InputArgs",
+    "OutputValue",
+    "PassageInputAdapter",
+    "PassageOutputAdapter",
+    "PassageInputOverrides",
+    "PassageOutputOverrides",
+    "NoActivePassageContextError",
+    "RequiredPassageOutputsCapturedSignal",
+    "PassageOutput",
+    "Predicate",
+    "always_false_predicate",
+    "Passage",
+    "patch_module",
+]
 
 
 @dataclass
@@ -281,6 +297,7 @@ class Passage(nn.Module):
     def __exit__(self, exc_type, exc_val, exc_tb):
         assert self.active_context_manager is not None
         self.active_context_manager.__exit__(exc_type, exc_val, exc_tb)
+        self.active_context_manager = None
 
     def freeze(self):
         self.eval()

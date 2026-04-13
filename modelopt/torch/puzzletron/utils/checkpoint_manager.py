@@ -24,6 +24,8 @@ import modelopt.torch.utils.distributed as dist
 
 from ..tools.logger import aprint, mprint
 
+__all__ = ["ScoringCheckpointManager"]
+
 
 class ScoringCheckpointManager:
     """Manages checkpointing for activation hook scoring with periodic saves."""

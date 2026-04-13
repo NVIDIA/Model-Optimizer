@@ -27,6 +27,8 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 
+__all__ = ["normalized_mse_loss", "cosine_embedding_loss_batched"]
+
 
 def normalized_mse_loss(
     input: Tensor,

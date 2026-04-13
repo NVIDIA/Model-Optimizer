@@ -13,5 +13,5 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .llama_converter import LlamaConverter
-from .llama_model_descriptor import LlamaModelDescriptor
+from .llama_converter import *
+from .llama_model_descriptor import *

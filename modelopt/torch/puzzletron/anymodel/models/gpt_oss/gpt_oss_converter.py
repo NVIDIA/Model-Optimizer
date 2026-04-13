@@ -23,6 +23,8 @@ from transformers import PretrainedConfig
 from ....block_config import AttentionConfig, BlockConfig, FFNConfig, MoEConfig
 from ...converter import Converter, ConverterFactory
 
+__all__ = ["GptOssConverter"]
+
 
 @ConverterFactory.register_decorator("gpt_oss")
 class GptOssConverter(Converter):

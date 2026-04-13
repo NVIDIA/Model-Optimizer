@@ -45,6 +45,8 @@ from .common import resolve_torch_dtype
 from .logger import aprint, mprint
 from .sharded_checkpoint_utils import load_and_shard_model, set_submodule
 
+__all__ = ["validate_model", "prepare_model", "prepare_dataloader"]
+
 """
 Two goals:
 1) Calculate lm loss and token accuracy for a model.

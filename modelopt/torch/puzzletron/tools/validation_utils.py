@@ -38,6 +38,12 @@ from .logger import mprint
 if TYPE_CHECKING:
     from ..sewing_kit import StitchedModule
 
+__all__ = [
+    "validate_model_and_extract_hidden_states",
+    "validate_model_with_teacher_similarity_metrics",
+    "write_results",
+]
+
 
 def validate_model_and_extract_hidden_states(
     args: DictConfig,

@@ -37,6 +37,8 @@ from ....utils.dummy_modules import DummyBlock
 from ...model_descriptor import ModelDescriptor, ModelDescriptorFactory
 from ...puzzformer.no_op import MatchingZeros, Same, return_tuple_of_size
 
+__all__ = ["GptOssModelDescriptor", "GptOssExpertRemovalLayerDescriptor"]
+
 
 @ModelDescriptorFactory.register_decorator("gpt_oss")
 class GptOssModelDescriptor(ModelDescriptor):

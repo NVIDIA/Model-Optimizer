@@ -35,6 +35,8 @@ from .replacement_library.build_replacement_library import launch_build_replacem
 from .subblock_stats.calc_subblock_stats import launch_calc_subblock_stats
 from .tools.logger import mprint
 
+__all__ = ["launch_build_library_and_stats"]
+
 
 def launch_build_library_and_stats(cfg: DictConfig) -> None:
     """

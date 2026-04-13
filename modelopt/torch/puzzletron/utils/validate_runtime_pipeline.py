@@ -21,34 +21,46 @@ using sewing_kit's StitchedModule framework. Relies on validation.py for core lo
 
 Used by validate_model.py during activation scoring for sharded models.
 """
+
 # mypy: ignore-errors
+from __future__ import annotations
 
 import traceback
 from contextlib import nullcontext
-from typing import Type
+from typing import TYPE_CHECKING, Type
 
 import numpy as np
 import torch
 from torch import nn
-from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 import modelopt.torch.utils.distributed as dist
 
-from ..anymodel.model_descriptor import ModelDescriptor
-from ..sewing_kit import (
+from ..sewing_kit.core import (
     ExternalTarget,
-    InputArgs,
+    InputReducer,
     ModuleTarget,
     Needle,
     RemoteTarget,
     StitchedModule,
 )
-from ..sewing_kit.core import InputReducer
+from ..sewing_kit.passage import InputArgs
 from ..sewing_kit.utils import distributed_recv_obj, distributed_send_obj, fake_tensor
 from ..tools.checkpoint_utils import init_module_with_state_dict
 from ..utils.dummy_modules import DummyBlock
 from .validation import _organize_outputs, calculate_batch_outputs
+
+if TYPE_CHECKING:
+    from torch.utils.data import DataLoader
+
+    from ..anymodel.model_descriptor import ModelDescriptor
+
+__all__ = [
+    "LMHead",
+    "HiddenStatesAndLMHead",
+    "calculate_losses_pipeline",
+    "perform_pipeline_stitches",
+]
 
 
 def _log_forward_error(e: Exception, rank: int, batch_idx: int, num_batches: int) -> None:

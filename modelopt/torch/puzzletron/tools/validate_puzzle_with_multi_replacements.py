@@ -49,6 +49,8 @@ from .validation_utils import (
     validate_model_with_teacher_similarity_metrics,
 )
 
+__all__ = ["validate_puzzle_solutions", "load_puzzle_solutions"]
+
 """
 Usage Example:
 ==============

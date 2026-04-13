@@ -32,6 +32,12 @@ from ....pruning.kv_heads_pruning_mixin import KVHeadsLayerDescriptor
 from ...model_descriptor import ModelDescriptor, ModelDescriptorFactory
 from ...puzzformer.no_op import MatchingZeros, Same, return_tuple_of_size
 
+__all__ = [
+    "LlamaModelDescriptor",
+    "LlamaFFNIntermediateLayerDescriptor",
+    "LlamaKVHeadsLayerDescriptor",
+]
+
 
 @ModelDescriptorFactory.register_decorator("llama")
 class LlamaModelDescriptor(ModelDescriptor):

@@ -23,6 +23,8 @@ from transformers import LlamaForCausalLM
 
 from .base import HeterogeneousBridgeMixin
 
+__all__ = ["PuzzletronLlamaAnyModelBridge"]
+
 
 @MegatronModelBridge.register_bridge(source=LlamaForCausalLM, target=GPTModel)
 class PuzzletronLlamaAnyModelBridge(HeterogeneousBridgeMixin, LlamaBridge):

@@ -21,6 +21,8 @@ from transformers import MistralConfig
 from ....block_config import AttentionConfig, BlockConfig, FFNConfig
 from ...converter import Converter, ConverterFactory
 
+__all__ = ["MistralSmallConverter"]
+
 
 @ConverterFactory.register_decorator("mistral_small")
 class MistralSmallConverter(Converter):

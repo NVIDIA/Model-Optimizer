@@ -45,6 +45,8 @@ from ...pruning.pruning_utils import (
 )
 from ..logger import aprint, mprint
 
+__all__ = ["create_child_state_dict", "update_model_config"]
+
 IgnoreFn = Callable[[str], bool]
 
 default_ignore_fn: IgnoreFn = lambda _: False

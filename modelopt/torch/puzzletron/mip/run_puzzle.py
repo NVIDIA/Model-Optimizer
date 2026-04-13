@@ -45,6 +45,14 @@ from ..utils.misc import block_config_to_str, solution_to_str
 from ..utils.parsing import get_nested_key, parse_json, parse_path
 from .mip_with_multi_layer_replacements import run_mip as run_multi_layer_replacement_mip
 
+__all__ = [
+    "PuzzleMetrics",
+    "MultiLayerPuzzleMetrics",
+    "run_puzzle",
+    "gather_multi_layer_puzzle_metrics",
+    "filter_subblock_stats_by_args",
+]
+
 """
 Usage:
 Must specify either --single_block_replacement_validation_dir and --subblock_stats_path (in which case the metrics will

@@ -32,6 +32,13 @@ from ....pruning.kv_heads_pruning_mixin import KVHeadsLayerDescriptor
 from ...model_descriptor import ModelDescriptor, ModelDescriptorFactory
 from ...puzzformer.no_op import MatchingZeros, Same, return_tuple_of_size
 
+__all__ = [
+    "Qwen3VLModelDescriptor",
+    "Qwen3VLFFNIntermediateLayerDescriptor",
+    "Qwen3VLKVHeadsLayerDescriptor",
+    "Qwen3VLExpertRemovalLayerDescriptor",
+]
+
 
 @ModelDescriptorFactory.register_decorator("qwen3_vl")
 class Qwen3VLModelDescriptor(ModelDescriptor):

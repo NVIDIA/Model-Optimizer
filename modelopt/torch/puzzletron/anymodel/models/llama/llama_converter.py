@@ -23,6 +23,8 @@ from transformers import LlamaConfig
 from ....block_config import AttentionConfig, BlockConfig, FFNConfig
 from ...converter import Converter, ConverterFactory
 
+__all__ = ["LlamaConverter"]
+
 
 @ConverterFactory.register_decorator("llama")
 class LlamaConverter(Converter):

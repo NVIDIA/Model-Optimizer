@@ -31,7 +31,7 @@ from transformers import PreTrainedTokenizerBase
 from ...tools.logger import mprint
 from .dataset import ConstantLengthDataset
 
-__all__ = ["create_validation_dataloader", "realize_dataset_in_memory", "create_padded_tensor"]
+__all__ = ["create_validation_dataloader", "create_padded_tensor"]
 
 
 def collate_none_fn(

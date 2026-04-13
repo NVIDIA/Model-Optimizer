@@ -47,6 +47,19 @@ from ..utils.misc import (
     sizeof_dtype,
 )
 
+__all__ = [
+    "calculate_subblock_memory",
+    "calculate_subblock_params",
+    "calc_subblock_active_params",
+    "load_moe_stats",
+    "estimate_num_active_experts",
+    "calculate_mamba_memory",
+    "calculate_mamba_state_size",
+    "calculate_ffn_memory",
+    "calculate_non_block_memory",
+    "calculate_non_block_params",
+]
+
 
 def calculate_subblock_memory(
     subblock_config: FFNConfig | AttentionConfig,

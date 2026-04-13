@@ -47,6 +47,14 @@ from .checkpoint_utils import load_model_config, load_state_dict
 from .checkpoint_utils_hf import _get_auto_class_for_trust_remote_code
 from .logger import mprint
 
+__all__ = [
+    "set_submodule",
+    "load_and_shard_model",
+    "create_sharded_model",
+    "load_sharded_state_dict",
+    "is_in_safetensors_format",
+]
+
 
 def set_submodule(model: nn.Module, module_name: str, new_submodule: nn.Module) -> None:
     """Set a submodule on a model by dotted path."""

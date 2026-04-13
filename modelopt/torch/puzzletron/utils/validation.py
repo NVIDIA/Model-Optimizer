@@ -35,6 +35,16 @@ from typing_extensions import Self
 
 from ..tools import kd_model
 
+__all__ = [
+    "LowMemorySparseTensor",
+    "calculate_losses",
+    "calculate_batch_outputs",
+    "cosine_embedding_loss",
+    "normalized_mse_loss",
+    "mse_loss",
+    "kl_div",
+]
+
 
 class UnshardedLowMemorySparseTensor:
     def __init__(self, x: torch.Tensor):

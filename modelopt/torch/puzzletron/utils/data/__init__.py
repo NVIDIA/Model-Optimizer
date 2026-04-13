@@ -16,3 +16,4 @@
 """Dataset and dataloader utilities for Puzzletron."""
 
 from .dataloaders import *
+from .dataset import *

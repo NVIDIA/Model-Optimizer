@@ -42,6 +42,8 @@ from megatron.core.transformer.spec_utils import ModuleSpec
 if not hasattr(TransformerConfig, "get_config_for_layer"):
     TransformerConfig.get_config_for_layer = lambda self, layer_number: self
 
+__all__ = ["heterogeneous_layer_spec", "GenericHeterogeneousProvider", "HeterogeneousBridgeMixin"]
+
 
 def heterogeneous_layer_spec(config) -> ModuleSpec:
     """Get GPT heterogeneous layer spec using Transformer Engine."""

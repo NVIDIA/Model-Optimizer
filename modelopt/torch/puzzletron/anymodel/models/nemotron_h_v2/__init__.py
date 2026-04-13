@@ -13,5 +13,5 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .nemotron_h_v2_converter import NemotronHV2Converter
-from .nemotron_h_v2_model_descriptor import NemotronHV2ModelDescriptor
+from .nemotron_h_v2_converter import *
+from .nemotron_h_v2_model_descriptor import *

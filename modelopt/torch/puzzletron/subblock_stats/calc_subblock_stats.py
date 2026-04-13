@@ -48,6 +48,12 @@ from .calc_subblock_params_and_memory import (
     calculate_subblock_params,
 )
 
+__all__ = [
+    "calculate_subblock_stats",
+    "launch_calc_subblock_stats",
+    "add_int8_runtime_estimates",
+]
+
 # Type variable for dataclasses
 T_DataClass = TypeVar("T_DataClass")
 

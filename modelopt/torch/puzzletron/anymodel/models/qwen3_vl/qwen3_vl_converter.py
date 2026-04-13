@@ -23,6 +23,8 @@ from ...converter import Converter, ConverterFactory
 if TYPE_CHECKING:
     from transformers import Qwen3VLMoeConfig
 
+__all__ = ["Qwen3VLConverter"]
+
 
 @ConverterFactory.register_decorator("qwen3_vl")
 class Qwen3VLConverter(Converter):

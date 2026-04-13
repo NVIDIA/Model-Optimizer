@@ -13,5 +13,5 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .qwen3_vl_converter import Qwen3VLConverter
-from .qwen3_vl_model_descriptor import Qwen3VLModelDescriptor
+from .qwen3_vl_converter import *
+from .qwen3_vl_model_descriptor import *

@@ -26,7 +26,6 @@ from hydra.utils import get_object
 from omegaconf import DictConfig, OmegaConf
 
 __all__ = [
-    "warmup_steps",
     "register_hydra_resolvers",
     "initialize_hydra_config_for_dir",
     "initialize_hydra_config",

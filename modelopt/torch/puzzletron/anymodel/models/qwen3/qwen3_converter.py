@@ -22,6 +22,8 @@ from transformers import Qwen3Config
 from ....block_config import AttentionConfig, BlockConfig, FFNConfig
 from ...converter import Converter, ConverterFactory
 
+__all__ = ["Qwen3Converter"]
+
 
 @ConverterFactory.register_decorator("qwen3")
 class Qwen3Converter(Converter):

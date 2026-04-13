@@ -33,6 +33,12 @@ from ....utils.dummy_modules import DummyBlock
 from ...model_descriptor import ModelDescriptor, ModelDescriptorFactory
 from ...puzzformer.no_op import MatchingZeros, Same, return_tuple_of_size
 
+__all__ = [
+    "Qwen3ModelDescriptor",
+    "Qwen3FFNIntermediateLayerDescriptor",
+    "Qwen3KVHeadsLayerDescriptor",
+]
+
 
 @ModelDescriptorFactory.register_decorator("qwen3")
 class Qwen3ModelDescriptor(ModelDescriptor):

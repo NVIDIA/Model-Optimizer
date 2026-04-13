@@ -23,6 +23,8 @@ from transformers import Qwen3ForCausalLM
 
 from .base import HeterogeneousBridgeMixin
 
+__all__ = []
+
 
 @MegatronModelBridge.register_bridge(source=Qwen3ForCausalLM, target=GPTModel)
 class PuzzletronQwen3AnyModelBridge(HeterogeneousBridgeMixin, Qwen3Bridge):
