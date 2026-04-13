@@ -15,7 +15,7 @@
 """Distillation script for Megatron-Bridge.
 
 Loads student and teacher models directly from HuggingFace checkpoints (local or remote) and saves the distilled model
-to `<output_dir>/checkpoints` in megatron distributed checkpoint format.
+to `<output_dir>/checkpoints` in megatron distributed checkpoint or HuggingFace format.
 
 See `README.md` in this directory for example usage and data preparation instructions.
 """
@@ -23,10 +23,14 @@ See `README.md` in this directory for example usage and data preparation instruc
 import argparse
 import contextlib
 import os
+from dataclasses import fields
 
 import torch
 from megatron.bridge import AutoBridge
-from megatron.bridge.models.distillation_provider import convert_to_distillation_provider
+from megatron.bridge.models.distillation_provider import (
+    DistillationProvider,
+    convert_to_distillation_provider,
+)
 from megatron.bridge.recipes.utils.optimizer_utils import (
     distributed_fused_adam_with_cosine_annealing,
 )
@@ -46,13 +50,46 @@ from megatron.core.datasets.utils import get_blend_from_list
 from megatron.core.distributed import DistributedDataParallelConfig
 from transformers import AutoConfig
 
-with contextlib.suppress(ImportError):
-    import modelopt.torch.puzzletron.plugins.mbridge  # noqa: F401
-
 import modelopt.torch.utils.distributed as dist
 from modelopt.torch.utils import print_rank_0
 
+with contextlib.suppress(ImportError):
+    import modelopt.torch.puzzletron.plugins.mbridge  # noqa: F401
+
 SEED = 1234
+
+
+def _patched_to_cfg_dict(self):
+    """Patched DistillationProvider.to_cfg_dict method for heterogeneous teacher and student models.
+
+    TODO: Upstream this patch to Megatron-Bridge.
+    """
+    from megatron.bridge.training.utils.config_utils import _ConfigContainerBase
+
+    result = {"_target_": f"{self._super_class.__module__}.{self._super_class.__qualname__}"}
+    # Use fields from the actual student provider class, not DistillationProvider.
+    # DistillationProvider's __dataclass_fields__ only includes TransformerConfig fields
+    # (set at class definition time), missing GPTModelProvider-level fields like
+    # vocab_size, share_embeddings_and_output_weights, etc.
+    excluded_fields = {"teacher", "kd_config"}
+    for field in fields(self._super_class):
+        if field.name.startswith("_") or field.name in excluded_fields:
+            continue
+        if hasattr(self, field.name):
+            result[field.name] = _ConfigContainerBase._convert_value_to_dict(
+                getattr(self, field.name)
+            )
+    for field in fields(self):
+        if field.name.startswith("_") or field.name in excluded_fields:
+            continue
+        if field.name not in result:
+            result[field.name] = _ConfigContainerBase._convert_value_to_dict(
+                getattr(self, field.name)
+            )
+    return result
+
+
+DistillationProvider.to_cfg_dict = _patched_to_cfg_dict
 
 
 def get_args():
