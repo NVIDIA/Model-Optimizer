@@ -36,6 +36,16 @@ def test_rope_consistency_error_non_default_rope_type():
         EagleConfig.model_validate(cfg)
 
 
+def test_rope_consistency_error_non_default_rope_type_alt_key():
+    """Error when rope_scaling uses 'type' key instead of 'rope_type' (kimik2-style)."""
+    cfg = {
+        "eagle_export_rope_scaling": {"rope_type": "yarn", "factor": 32.0},
+        "eagle_architecture_config": {"rope_scaling": {"type": "yarn"}},
+    }
+    with pytest.raises(ValidationError, match="rope_type='yarn'"):
+        EagleConfig.model_validate(cfg)
+
+
 def test_rope_consistency_ok_default_rope_type():
     """No error when training rope_type is 'default'."""
     cfg = {

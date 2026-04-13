@@ -187,14 +187,15 @@ class EagleExporter(SpeculativeDecodingExporter):
                     new_value = str(new_value).replace("torch.", "")
                 template_config[key] = new_value
 
-        # Inject export rope scaling override (validated at config time to require
-        # training rope_type == "default").
+        # Inject export rope scaling override when training rope_type is "default".
+        rope_cfg = self.model.eagle_config.rope_scaling or {}
+        training_rope_type = rope_cfg.get("rope_type") or rope_cfg.get("type")
         eagle_export_rope_scaling = getattr(self.model, "eagle_export_rope_scaling", None)
-        if eagle_export_rope_scaling:
+        if eagle_export_rope_scaling and training_rope_type == "default":
             template_config["rope_scaling"] = eagle_export_rope_scaling
 
         # In transformers 5.x, rope_theta is under rope_scaling, not the main config.
-        rope_cfg = self.model.eagle_config.rope_scaling
+        # Always source from the training rope config (rope_theta is not in export overrides).
         if template_config.get("rope_theta") is None and rope_cfg:
             template_config["rope_theta"] = rope_cfg.get("rope_theta")
 

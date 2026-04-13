@@ -268,10 +268,10 @@ def train():
             mtsp.convert(model, [("medusa", config)])
         elif training_args.mode == "eagle3":
             # Validate and rewrite eagle config fields
-            EagleConfig.model_validate(
+            eagle_cfg = EagleConfig.model_validate(
                 eagle_cfg,
                 context={"training_args": training_args, "data_args": data_args},
-            )
+            ).model_dump()
             mtsp.convert(model, [("eagle", eagle_cfg)])
 
             # Load draft vocab cache if the draft model uses a compressed vocabulary

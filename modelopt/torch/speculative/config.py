@@ -148,8 +148,8 @@ class EagleConfig(ModeloptBaseConfig):
     def _check_rope_scaling_consistency(self) -> "EagleConfig":
         if not self.eagle_export_rope_scaling:
             return self
-        rope_cfg = self.eagle_architecture_config.get("rope_scaling", {})
-        rope_type = rope_cfg.get("rope_type")
+        rope_cfg = self.eagle_architecture_config.get("rope_scaling", {}) or {}
+        rope_type = rope_cfg.get("rope_type") or rope_cfg.get("type")
         if rope_type is not None and rope_type != "default":
             raise ValueError(
                 f"eagle_export_rope_scaling is set but eagle_architecture_config has "
