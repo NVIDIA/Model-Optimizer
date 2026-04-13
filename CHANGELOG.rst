@@ -270,7 +270,7 @@ Changelog
 - NeMo and Megatron-LM distributed checkpoint (``torch-dist``) stored with legacy version can no longer be loaded. The remedy is to load the legacy distributed checkpoint with 0.29 and store a ``torch`` checkpoint and resume with 0.31 to convert to a new format. The following changes only apply to storing and resuming distributed checkpoint.
     - ``quantizer_state`` of :class:`TensorQuantizer <modelopt.torch.quantization.nn.modules.TensorQuantizer>` is now stored in ``extra_state`` of :class:`QuantModule <modelopt.torch.quantization.nn.module.QuantModule>` where it used to be stored in the sharded ``modelopt_state``.
     - The dtype and shape of ``amax`` and ``pre_quant_scale`` stored in the distributed checkpoint are now restored. Some dtype and shape are previously changed to make all decoder layers to have homogeneous structure in the checkpoint.
-    - Together with megatron.core-0.13, quantized model will store and resume distributed checkpoint in a heterogenous format.
+    - Together with megatron.core-0.13, quantized model will store and resume distributed checkpoint in a heterogeneous format.
 - auto_quantize API now accepts a list of quantization config dicts as the list of quantization choices.
     - This API previously accepts a list of strings of quantization format names. It was therefore limited to only pre-defined quantization formats unless through some hacks.
     - With this change, now user can easily use their own custom quantization formats for auto_quantize.

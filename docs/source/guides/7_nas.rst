@@ -570,7 +570,7 @@ NAS-based training
 During training of an search space, we simultaneously train both the model's weights and
 architecture:
 
-* Using :mod:`modelopt.torch.nas<modelopt.torch.nas>` you can re-use your existing
+* Using :mod:`modelopt.torch.nas<modelopt.torch.nas>` you can reuse your existing
   training loop to train the search space.
 
 * During search space training the entire collection of subnets is automatically trained together

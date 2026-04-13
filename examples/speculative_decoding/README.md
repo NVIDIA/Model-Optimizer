@@ -93,7 +93,7 @@ For large models, you can export intermediate hidden states to disk and train on
 
 ### Dumpping Hidden States to Disk
 
-We support two backends for generating base model hidden states. For better effciency, it is recommended to use TRT-LLM:
+We support two backends for generating base model hidden states. For better efficiency, it is recommended to use TRT-LLM:
 
 ```bash
 python collect_hidden_states/compute_hidden_states_trtllm.py \
