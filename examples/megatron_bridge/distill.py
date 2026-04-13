@@ -332,6 +332,7 @@ def main(args: argparse.Namespace):
             export_bridge = AutoBridge.from_hf_pretrained(
                 args.student_hf_model, trust_remote_code=args.trust_remote_code
             )
+            # Copy weights and remote code
             export_bridge.export_ckpt(
                 megatron_path=f"{checkpoint_dir}/iter_{args.train_iters:07d}",
                 hf_path=args.hf_export_path,
