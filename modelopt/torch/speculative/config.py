@@ -17,6 +17,7 @@
 
 import warnings
 from copy import deepcopy
+from typing import Any
 
 from pydantic import ValidationInfo, model_validator
 
@@ -132,6 +133,16 @@ class EagleConfig(ModeloptBaseConfig):
             "Set to empty dict {} to disable rope scaling injection at export."
         ),
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _derive_eagle_offline(cls, data: Any, info: ValidationInfo) -> Any:
+        """Derive ``eagle_offline`` from ``data_args.offline_data_path`` when provided in context."""
+        ctx = info.context if info.context else {}
+        data_args = ctx.get("data_args")
+        if data_args is not None and isinstance(data, dict):
+            data["eagle_offline"] = data_args.offline_data_path is not None
+        return data
 
     @model_validator(mode="after")
     def _check_rope_scaling_consistency(self) -> "EagleConfig":
