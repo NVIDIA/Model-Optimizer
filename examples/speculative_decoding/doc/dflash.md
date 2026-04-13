@@ -22,17 +22,18 @@ Target Model (frozen)
 ```
 
 **Key components:**
-- **Feature Fusion**: Multi-layer hidden states → Linear(num_layers × hidden_size, hidden_size) + RMSNorm.
-  Unlike EAGLE3 which uses a single layer's hidden state, DFlash concatenates hidden states from
-  multiple target layers (e.g., layers 1, 9, 17, 25, 33) to give the draft model richer context.
-- **KV Injection**: In each draft decoder layer, K and V are projected from the concatenation of
-  target hidden states and the block's own embeddings. Q is projected from the block embeddings only
-  (the `[anchor, mask, mask, ...]` token embeddings). This lets the draft model attend to the
-  full target context while generating all block positions in parallel.
 - **Parallel Drafting**: Position 0 is the anchor (the last accepted token — known and correct),
   positions 1..B-1 are filled with a special mask token (similar to BERT's `[MASK]`). The draft
   model predicts all B-1 unknown positions in a single forward pass, unlike autoregressive drafters
   (EAGLE3) which predict one token at a time. Benefit: one forward pass produces B-1 draft tokens.
+- **Feature Fusion**: Multi-layer hidden states → Linear(num_layers × hidden_size, hidden_size) + RMSNorm.
+  Concatenates hidden states from multiple target layers (e.g., layers 1, 9, 17, 25, 33) to give
+  the draft model richer context. Similar to EAGLE3's fused feature approach.
+- **KV Injection**: A design choice for how the draft model conditions on the target model's
+  context. In each draft decoder layer, K and V are projected from the concatenation of target
+  hidden states and the block's own embeddings, while Q is projected from the block embeddings
+  only. This is one approach to parallel prediction — alternatives include cross-attention or
+  prefix conditioning.
 - **Random Anchor Sampling**: During training, anchors are sampled randomly from assistant response
   positions (where `loss_mask=1`), not placed at fixed intervals. The anchor is the starting token
   of each training block — it's always correct (from the ground truth) and the model learns to

@@ -37,9 +37,9 @@ def _get_dflash_config(block_size=BLOCK_SIZE, num_layers=NUM_DRAFT_LAYERS):
     config = deepcopy(DFLASH_DEFAULT_CFG["config"])
     config["dflash_block_size"] = block_size
     config["dflash_use_torch_compile"] = False
+    config["dflash_mask_token_id"] = 0
     config["dflash_architecture_config"] = {
         "num_hidden_layers": num_layers,
-        "mask_token_id": 0,
     }
     return config
 
