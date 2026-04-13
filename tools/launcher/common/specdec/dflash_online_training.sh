@@ -113,26 +113,33 @@ for arg in sys.argv[1:]:
 " "$@")
 
     if [ -n "$OUTPUT_DIR" ]; then
-        # Find the best checkpoint: last checkpoint-* subdir, or output_dir itself
-        LAST_CKPT=$(ls -d ${OUTPUT_DIR}/checkpoint-* 2>/dev/null | sort -t- -k2 -n | tail -1)
-        if [ -n "$LAST_CKPT" ]; then
-            STEP=$(basename "$LAST_CKPT" | sed 's/checkpoint-//')
-        elif [ -f "${OUTPUT_DIR}/model.safetensors" ] || [ -f "${OUTPUT_DIR}/modelopt_state.pth" ]; then
-            LAST_CKPT="${OUTPUT_DIR}"
-            STEP="final"
-        fi
-
-        if [ -n "$LAST_CKPT" ]; then
+        # Export all checkpoints that don't already have an exported version
+        EXPORTED=0
+        for CKPT in $(ls -d ${OUTPUT_DIR}/checkpoint-* 2>/dev/null | sort -t- -k2 -n); do
+            STEP=$(basename "$CKPT" | sed 's/checkpoint-//')
             EXPORT_DIR="${OUTPUT_DIR}/exported-checkpoint-${STEP}"
-            echo "=== Exporting: ${LAST_CKPT} → ${EXPORT_DIR} ==="
+            if [ -d "$EXPORT_DIR" ]; then
+                echo "Already exported: ${EXPORT_DIR}"
+                continue
+            fi
+            echo "=== Exporting: ${CKPT} → ${EXPORT_DIR} ==="
             CUDA_VISIBLE_DEVICES=0 python3 modules/Model-Optimizer/examples/speculative_decoding/scripts/export_hf_checkpoint.py \
-                --model_path "${LAST_CKPT}" \
+                --model_path "${CKPT}" \
                 --export_path "${EXPORT_DIR}" \
                 --trust_remote_code
-            echo "Export contents:"
-            ls -lh "${EXPORT_DIR}/"
-        else
-            echo "No checkpoints found in ${OUTPUT_DIR}, skipping export"
+            EXPORTED=$((EXPORTED + 1))
+        done
+        # Also export final model if saved directly to output_dir
+        if [ -f "${OUTPUT_DIR}/modelopt_state.pth" ] && [ ! -d "${OUTPUT_DIR}/exported-checkpoint-final" ]; then
+            echo "=== Exporting: ${OUTPUT_DIR} → ${OUTPUT_DIR}/exported-checkpoint-final ==="
+            CUDA_VISIBLE_DEVICES=0 python3 modules/Model-Optimizer/examples/speculative_decoding/scripts/export_hf_checkpoint.py \
+                --model_path "${OUTPUT_DIR}" \
+                --export_path "${OUTPUT_DIR}/exported-checkpoint-final" \
+                --trust_remote_code
+            EXPORTED=$((EXPORTED + 1))
+        fi
+        if [ "$EXPORTED" -eq 0 ]; then
+            echo "No new checkpoints to export in ${OUTPUT_DIR}"
         fi
     fi
 fi
