@@ -240,9 +240,9 @@ early positions higher because they gate acceptance of all later positions.
 
 ### Checkpoint Resume
 
-DFlash supports checkpoint resume transparently. The `DFlashModule._apply()` method
-handles meta-tensor rotary buffers that arise during ModelOpt checkpoint restore — no
-special resume logic needed in the training script.
+DFlash supports checkpoint resume transparently. Rotary embeddings are lazily
+initialized on first forward (matching EAGLE3's `_maybe_init_rope` pattern),
+avoiding meta-tensor issues during `from_pretrained` model construction.
 
 ### Export
 
@@ -342,8 +342,8 @@ ModelOpt wins acceptance length on 7/8 categories and TPS on 8/8 categories.
 - **FP8 / NVFP4 quantization**: Export pipeline supports quantized checkpoints via
   `hf_ptq.py` (PTQ succeeded in testing). AR impact of quantization not yet measured.
   The flow: train (bf16) → `mtq.quantize(model, quant_cfg)` → `export_hf_checkpoint.py`.
-- **Checkpoint resume**: `DFlashModule._apply()` handles meta-tensor rotary buffers
-  (one-shot check on first `.to(device)` call). Validated in train+resume E2E tests.
+- **Checkpoint resume**: Lazy rotary embedding init (matching EAGLE3 pattern).
+  Validated in train+resume E2E tests on DDP and FSDP2.
 
 ### Validated
 

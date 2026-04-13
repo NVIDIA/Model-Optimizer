@@ -243,23 +243,22 @@ class DFlashModule(nn.Module):
             [DFlashDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
         )
         self.norm = _NORM_CLS(config.hidden_size, eps=config.rms_norm_eps)
-        self.rotary_emb = _ROTARY_CLS(config=config)
-        self._rotary_config = config  # Stored for re-creating rotary_emb on resume
+        self._rotary_config = config  # Used by _maybe_init_rotary_emb
 
         # Explicit weight init is needed because DFlashModule is instantiated via
         # mtsp.convert() AFTER the base model's post_init() has already run, so HF's
         # automatic _init_weights walk doesn't reach these new layers.
         self._init_weights(config)
 
-    def _apply(self, fn, recurse=True):
-        """Re-create rotary_emb if its buffers are on meta device.
+    def _maybe_init_rotary_emb(self, device=None):
+        """Lazily initialize rotary embeddings on first forward call.
 
-        On checkpoint resume, inv_freq (a computed buffer, not saved in checkpoint)
-        stays on meta device. Re-create rotary_emb on CPU so _apply can proceed.
+        Same pattern as EAGLE3's _maybe_init_rope. Avoids creating rotary_emb
+        during __init__ (which runs on meta device during from_pretrained),
+        preventing the meta-tensor inv_freq issue on checkpoint resume.
         """
-        if hasattr(self, "rotary_emb") and any(b.is_meta for b in self.rotary_emb.buffers()):
-            self.rotary_emb = _ROTARY_CLS(config=self._rotary_config, device="cpu")
-        return super()._apply(fn, recurse)
+        if not hasattr(self, "rotary_emb"):
+            self.rotary_emb = _ROTARY_CLS(config=self._rotary_config, device=device)
 
     def _init_weights(self, config):
         """Initialize weights matching HF PreTrainedModel._init_weights."""
@@ -274,6 +273,7 @@ class DFlashModule(nn.Module):
         """Forward with feature fusion, KV injection, and position embeddings."""
         hidden_states = noise_embedding
         target_hidden = self.hidden_norm(self.fc(target_hidden))
+        self._maybe_init_rotary_emb(device=hidden_states.device)
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
         for layer in self.layers:
@@ -654,15 +654,16 @@ class HFDFlashModel(DFlashModel):
         selected = [base_outputs.hidden_states[lid + offset] for lid in self.target_layer_ids]
         target_hidden = torch.cat(selected, dim=-1)  # [B, seq, num_layers * H]
 
-        # 2. Build loss mask from labels and attention_mask.
-        # labels encode both answer_only_loss masking (-100 for non-assistant) and
-        # padding (-100 for pad tokens). attention_mask provides additional padding
-        # coverage for cases where labels are not provided.
-        loss_mask = torch.ones(bsz, seq_len, device=device)
+        # 2. Build loss mask.
+        # When labels are provided (answer_only_loss), they already encode both
+        # assistant masking and padding (-100 for both). When labels are not
+        # provided, fall back to attention_mask for padding only.
         if labels is not None:
-            loss_mask = loss_mask * (labels != LabelSmoother.ignore_index).float()
-        if attention_mask is not None:
-            loss_mask = loss_mask * attention_mask.float()
+            loss_mask = (labels != LabelSmoother.ignore_index).float()
+        elif attention_mask is not None:
+            loss_mask = attention_mask.float()
+        else:
+            loss_mask = torch.ones(bsz, seq_len, device=device)
 
         # 3. Random anchor sampling
         anchor_positions, block_keep_mask = self._sample_anchor_positions(

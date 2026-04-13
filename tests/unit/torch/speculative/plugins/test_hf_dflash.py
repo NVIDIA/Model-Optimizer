@@ -139,41 +139,31 @@ class TestDFlashSaveRestore:
         tf_modelopt_state_and_output_tester(model_ref, model_test)
 
 
-class TestDFlashMetaRotaryFix:
-    """Test _apply fixes meta-tensor rotary buffers on .to() calls.
+class TestDFlashLazyRotaryEmb:
+    """Test lazy rotary embedding initialization (matching EAGLE3 pattern).
 
-    During checkpoint restore, rotary inv_freq buffers may be on meta device
-    (they are computed, not saved). _apply should re-create them.
+    rotary_emb is not created in __init__ — it's lazily initialized on first
+    forward call to avoid meta-tensor issues during from_pretrained restore.
     """
 
-    def test_to_fixes_meta_rotary(self):
-        """Test that .to() recreates rotary_emb when buffers are on meta device."""
+    def test_rotary_emb_not_created_in_init(self):
+        """rotary_emb should not exist after convert (before forward)."""
+        model = get_tiny_llama(num_hidden_layers=4)
+        config = _get_dflash_config()
+        mtsp.convert(model, [("dflash", config)])
+        assert not hasattr(model.dflash_module, "rotary_emb")
+
+    def test_rotary_emb_created_on_forward(self):
+        """rotary_emb should be created on first forward call."""
         model = get_tiny_llama(num_hidden_layers=4)
         config = _get_dflash_config()
         mtsp.convert(model, [("dflash", config)])
 
         dflash_mod = model.dflash_module
-        # Simulate meta buffers (as happens during checkpoint restore)
-        for name, buf in list(dflash_mod.rotary_emb.named_buffers()):
-            dflash_mod.rotary_emb._buffers[name] = torch.empty_like(buf, device="meta")
-
-        assert any(b.is_meta for b in dflash_mod.rotary_emb.buffers())
-
-        # .to() triggers _apply which should fix meta buffers
-        dflash_mod.to("cpu")
-
+        # Call _maybe_init_rotary_emb directly
+        dflash_mod._maybe_init_rotary_emb(device="cpu")
+        assert hasattr(dflash_mod, "rotary_emb")
         assert not any(b.is_meta for b in dflash_mod.rotary_emb.buffers())
-
-    def test_to_noop_when_no_meta(self):
-        """Test that .to() does not recreate rotary_emb when buffers are normal."""
-        model = get_tiny_llama(num_hidden_layers=4)
-        config = _get_dflash_config()
-        mtsp.convert(model, [("dflash", config)])
-
-        dflash_mod = model.dflash_module
-        rotary_id_before = id(dflash_mod.rotary_emb)
-        dflash_mod.to("cpu")
-        assert id(dflash_mod.rotary_emb) == rotary_id_before
 
 
 class TestBuildTargetLayerIds:
