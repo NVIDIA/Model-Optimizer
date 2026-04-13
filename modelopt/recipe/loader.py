@@ -28,10 +28,13 @@ from .config import ModelOptPTQRecipe, ModelOptRecipeBase, RecipeType
 __all__ = ["load_config", "load_recipe"]
 
 
+_IMPORT_KEY = "$import"
+
+
 def _resolve_imports(
     data: dict[str, Any], _loading: frozenset[str] | None = None
 ) -> dict[str, Any]:
-    """Resolve the ``imports`` section in a recipe and substitute named references.
+    """Resolve the ``imports`` section and ``$import`` references in a recipe.
 
     An ``imports`` block is a dict mapping short names to config file paths::
 
@@ -39,8 +42,14 @@ def _resolve_imports(
           fp8: configs/numerics/fp8
           nvfp4: configs/numerics/nvfp4_dynamic
 
-    ``cfg`` values in ``quant_cfg`` entries that are plain strings are looked up
-    against the imported names and replaced with the loaded config dict.
+    References use the explicit ``$import`` marker so they are never confused
+    with literal string values::
+
+        quant_cfg:
+          - $import: base_disable_all           # entire entry replaced (or list spliced)
+          - quantizer_name: '*weight_quantizer'
+            cfg:
+              $import: fp8                      # cfg value replaced
 
     Resolution is **recursive**: an imported snippet may itself contain an
     ``imports`` section.  Circular imports are detected and raise ``ValueError``.
@@ -72,35 +81,35 @@ def _resolve_imports(
             snippet = _resolve_imports(snippet, _loading | {config_path})
         import_map[name] = snippet
 
-    # Resolve string references in quant_cfg entries
+    def _lookup(ref_name: str, context: str) -> Any:
+        if ref_name not in import_map:
+            raise ValueError(
+                f"Unknown $import reference {ref_name!r} in {context}. "
+                f"Available imports: {list(import_map.keys())}"
+            )
+        return import_map[ref_name]
+
+    # Resolve $import references in quant_cfg entries
     quantize = data.get("quantize")
     if isinstance(quantize, dict):
         quant_cfg = quantize.get("quant_cfg")
         if isinstance(quant_cfg, list):
             resolved_cfg: list[Any] = []
             for entry in quant_cfg:
-                if isinstance(entry, str):
-                    # Entire entry is a string → replace with the imported value
-                    if entry not in import_map:
-                        raise ValueError(
-                            f"Unknown import reference {entry!r} in quant_cfg list. "
-                            f"Available imports: {list(import_map.keys())}"
-                        )
-                    imported = import_map[entry]
+                if isinstance(entry, dict) and _IMPORT_KEY in entry:
+                    # {$import: name} → replace entire entry (or splice list)
+                    imported = _lookup(entry[_IMPORT_KEY], "quant_cfg entry")
                     if isinstance(imported, list):
-                        # List import → splice all entries in place
                         resolved_cfg.extend(imported)
                     else:
                         resolved_cfg.append(imported)
-                elif isinstance(entry, dict) and isinstance(entry.get("cfg"), str):
-                    # cfg field is a string → replace cfg value
-                    ref_name = entry["cfg"]
-                    if ref_name not in import_map:
-                        raise ValueError(
-                            f"Unknown import reference {ref_name!r} in quant_cfg entry "
-                            f"{entry!r}. Available imports: {list(import_map.keys())}"
-                        )
-                    entry["cfg"] = import_map[ref_name]
+                elif (
+                    isinstance(entry, dict)
+                    and isinstance(entry.get("cfg"), dict)
+                    and _IMPORT_KEY in entry["cfg"]
+                ):
+                    # cfg: {$import: name} → replace cfg value
+                    entry["cfg"] = _lookup(entry["cfg"][_IMPORT_KEY], f"cfg of {entry}")
                     resolved_cfg.append(entry)
                 else:
                     resolved_cfg.append(entry)

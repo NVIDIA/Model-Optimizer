@@ -27,11 +27,13 @@ quantize:
     method: gptq
     use_sequential: true
   quant_cfg:
-    - base_disable_all
+    - $import: base_disable_all
     - quantizer_name: '*weight_quantizer'
-      cfg: nvfp4_static
+      cfg:
+        $import: nvfp4_static
     - quantizer_name: '*input_quantizer'
-      cfg: nvfp4_dynamic
+      cfg:
+        $import: nvfp4_dynamic
     - quantizer_name: '*[kv]_bmm_quantizer'
       enable: false
-    - default_disabled
+    - $import: default_disabled

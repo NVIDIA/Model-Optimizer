@@ -48,20 +48,20 @@ def _check_quant_cfg(quant_cfg, label: str) -> list[str]:
         )
     elif isinstance(quant_cfg, list):
         for i, entry in enumerate(quant_cfg):
-            if isinstance(entry, str):
-                # String entries are import references — resolved at load time
-                continue
             if not isinstance(entry, dict):
                 errors.append(
                     f"{label}: quant_cfg[{i}] must be a dict with "
-                    f"'quantizer_name', got {type(entry).__name__}. "
+                    f"'quantizer_name' or '$import', got {type(entry).__name__}. "
                     "See https://nvidia.github.io/Model-Optimizer/guides/_quant_cfg.html"
                 )
+                continue
+            # {$import: name} entries are resolved at load time
+            if "$import" in entry:
                 continue
             if "quantizer_name" not in entry:
                 errors.append(
                     f"{label}: quant_cfg[{i}] is missing 'quantizer_name'. "
-                    "Each entry must have an explicit 'quantizer_name' key. "
+                    "Each entry must have an explicit 'quantizer_name' or '$import' key. "
                     "See https://nvidia.github.io/Model-Optimizer/guides/_quant_cfg.html"
                 )
     return errors

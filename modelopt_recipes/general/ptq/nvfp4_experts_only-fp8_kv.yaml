@@ -25,20 +25,25 @@ metadata:
 quantize:
   algorithm: max
   quant_cfg:
-    - base_disable_all
+    - $import: base_disable_all
     - quantizer_name: '*mlp.experts*weight_quantizer'
       enable: true
-      cfg: nvfp4
+      cfg:
+        $import: nvfp4
     - quantizer_name: '*mlp.experts*input_quantizer'
       enable: true
-      cfg: nvfp4
+      cfg:
+        $import: nvfp4
     - quantizer_name: '*block_sparse_moe*weight_quantizer'
       enable: true
-      cfg: nvfp4
+      cfg:
+        $import: nvfp4
     - quantizer_name: '*block_sparse_moe*input_quantizer'
       enable: true
-      cfg: nvfp4
+      cfg:
+        $import: nvfp4
     - quantizer_name: '*[kv]_bmm_quantizer'
       enable: true
-      cfg: fp8
-    - default_disabled
+      cfg:
+        $import: fp8
+    - $import: default_disabled

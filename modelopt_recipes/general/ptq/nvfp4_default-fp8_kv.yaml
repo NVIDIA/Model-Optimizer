@@ -25,14 +25,17 @@ metadata:
 quantize:
   algorithm: max
   quant_cfg:
-    - base_disable_all
+    - $import: base_disable_all
     - quantizer_name: '*weight_quantizer'
       enable: true
-      cfg: nvfp4
+      cfg:
+        $import: nvfp4
     - quantizer_name: '*input_quantizer'
       enable: true
-      cfg: nvfp4
+      cfg:
+        $import: nvfp4
     - quantizer_name: '*[kv]_bmm_quantizer'
       enable: true
-      cfg: fp8
-    - default_disabled
+      cfg:
+        $import: fp8
+    - $import: default_disabled

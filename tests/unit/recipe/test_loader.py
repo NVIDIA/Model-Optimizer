@@ -259,7 +259,7 @@ def test_general_ptq_yaml_matches_config_dicts(yaml_path, model_cfg_name, kv_cfg
 
 
 def test_import_resolves_cfg_reference(tmp_path):
-    """String cfg values are replaced with the imported config dict."""
+    """$import in cfg is replaced with the imported config dict."""
     (tmp_path / "fp8.yml").write_text("num_bits: e4m3\naxis:\n")
     recipe_file = tmp_path / "recipe.yml"
     recipe_file.write_text(
@@ -271,7 +271,8 @@ def test_import_resolves_cfg_reference(tmp_path):
         f"  algorithm: max\n"
         f"  quant_cfg:\n"
         f"    - quantizer_name: '*weight_quantizer'\n"
-        f"      cfg: fp8\n"
+        f"      cfg:\n"
+        f"        $import: fp8\n"
     )
     recipe = load_recipe(recipe_file)
     entry = recipe.quantize["quant_cfg"][0]
@@ -291,9 +292,11 @@ def test_import_same_name_used_twice(tmp_path):
         f"  algorithm: max\n"
         f"  quant_cfg:\n"
         f"    - quantizer_name: '*weight_quantizer'\n"
-        f"      cfg: fp8\n"
+        f"      cfg:\n"
+        f"        $import: fp8\n"
         f"    - quantizer_name: '*input_quantizer'\n"
-        f"      cfg: fp8\n"
+        f"      cfg:\n"
+        f"        $import: fp8\n"
     )
     recipe = load_recipe(recipe_file)
     assert recipe.quantize["quant_cfg"][0]["cfg"] == recipe.quantize["quant_cfg"][1]["cfg"]
@@ -314,9 +317,11 @@ def test_import_multiple_snippets(tmp_path):
         f"  algorithm: max\n"
         f"  quant_cfg:\n"
         f"    - quantizer_name: '*weight_quantizer'\n"
-        f"      cfg: nvfp4\n"
+        f"      cfg:\n"
+        f"        $import: nvfp4\n"
         f"    - quantizer_name: '*[kv]_bmm_quantizer'\n"
-        f"      cfg: fp8\n"
+        f"      cfg:\n"
+        f"        $import: fp8\n"
     )
     recipe = load_recipe(recipe_file)
     assert recipe.quantize["quant_cfg"][0]["cfg"]["num_bits"] == (2, 1)
@@ -324,7 +329,7 @@ def test_import_multiple_snippets(tmp_path):
 
 
 def test_import_inline_cfg_not_affected(tmp_path):
-    """Inline dict cfg entries are not touched by import resolution."""
+    """Inline dict cfg entries without $import are not touched."""
     (tmp_path / "fp8.yml").write_text("num_bits: e4m3\naxis:\n")
     recipe_file = tmp_path / "recipe.yml"
     recipe_file.write_text(
@@ -336,7 +341,8 @@ def test_import_inline_cfg_not_affected(tmp_path):
         f"  algorithm: max\n"
         f"  quant_cfg:\n"
         f"    - quantizer_name: '*weight_quantizer'\n"
-        f"      cfg: fp8\n"
+        f"      cfg:\n"
+        f"        $import: fp8\n"
         f"    - quantizer_name: '*input_quantizer'\n"
         f"      cfg:\n"
         f"        num_bits: 8\n"
@@ -358,9 +364,10 @@ def test_import_unknown_reference_raises(tmp_path):
         "  algorithm: max\n"
         "  quant_cfg:\n"
         "    - quantizer_name: '*weight_quantizer'\n"
-        "      cfg: nonexistent\n"
+        "      cfg:\n"
+        "        $import: nonexistent\n"
     )
-    with pytest.raises(ValueError, match="Unknown import reference"):
+    with pytest.raises(ValueError, match=r"Unknown \$import reference"):
         load_recipe(recipe_file)
 
 
@@ -412,11 +419,57 @@ def test_import_no_imports_section(tmp_path):
     assert recipe.quantize["quant_cfg"][0]["enable"] is False
 
 
-def test_import_builtin_config_snippet():
-    """Imports can reference built-in config snippets by relative path."""
+def test_import_builtin_recipe_with_imports():
+    """Built-in recipes using $import load and resolve correctly."""
     recipe = load_recipe("general/ptq/fp8_default-fp8_kv")
-    # This recipe doesn't use imports, but verify it still loads fine
     assert recipe.quantize
+    # Verify $import was resolved — cfg should be a dict, not a {$import: ...} marker
+    for entry in recipe.quantize["quant_cfg"]:
+        if "cfg" in entry and entry["cfg"] is not None:
+            assert "$import" not in entry["cfg"], f"Unresolved $import in {entry}"
+
+
+def test_import_entry_dict_replacement(tmp_path):
+    """$import as a quant_cfg list entry replaces with the imported dict."""
+    (tmp_path / "disable.yml").write_text("quantizer_name: '*'\nenable: false\n")
+    recipe_file = tmp_path / "recipe.yml"
+    recipe_file.write_text(
+        f"imports:\n"
+        f"  disable_all: {tmp_path / 'disable.yml'}\n"
+        f"metadata:\n"
+        f"  recipe_type: ptq\n"
+        f"quantize:\n"
+        f"  algorithm: max\n"
+        f"  quant_cfg:\n"
+        f"    - $import: disable_all\n"
+    )
+    recipe = load_recipe(recipe_file)
+    assert recipe.quantize["quant_cfg"][0] == {"quantizer_name": "*", "enable": False}
+
+
+def test_import_entry_list_splice(tmp_path):
+    """$import as a quant_cfg list entry splices a list-valued snippet."""
+    (tmp_path / "disables.yml").write_text(
+        "- quantizer_name: '*lm_head*'\n  enable: false\n"
+        "- quantizer_name: '*router*'\n  enable: false\n"
+    )
+    recipe_file = tmp_path / "recipe.yml"
+    recipe_file.write_text(
+        f"imports:\n"
+        f"  disables: {tmp_path / 'disables.yml'}\n"
+        f"metadata:\n"
+        f"  recipe_type: ptq\n"
+        f"quantize:\n"
+        f"  algorithm: max\n"
+        f"  quant_cfg:\n"
+        f"    - quantizer_name: '*'\n"
+        f"      enable: false\n"
+        f"    - $import: disables\n"
+    )
+    recipe = load_recipe(recipe_file)
+    assert len(recipe.quantize["quant_cfg"]) == 3
+    assert recipe.quantize["quant_cfg"][1]["quantizer_name"] == "*lm_head*"
+    assert recipe.quantize["quant_cfg"][2]["quantizer_name"] == "*router*"
 
 
 def test_import_dir_format(tmp_path):
@@ -430,7 +483,11 @@ def test_import_dir_format(tmp_path):
         f"  description: Dir with imports.\n"
     )
     (tmp_path / "quantize.yml").write_text(
-        "algorithm: max\nquant_cfg:\n  - quantizer_name: '*weight_quantizer'\n    cfg: fp8\n"
+        "algorithm: max\n"
+        "quant_cfg:\n"
+        "  - quantizer_name: '*weight_quantizer'\n"
+        "    cfg:\n"
+        "      $import: fp8\n"
     )
     recipe = load_recipe(tmp_path)
     assert recipe.quantize["quant_cfg"][0]["cfg"] == {"num_bits": (4, 3), "axis": None}
@@ -443,13 +500,10 @@ def test_import_dir_format(tmp_path):
 
 def test_import_recursive(tmp_path):
     """A snippet can itself import other snippets."""
-    # base snippet — no imports
     (tmp_path / "base.yml").write_text("num_bits: e4m3\n")
-    # mid-level snippet imports base
     (tmp_path / "mid.yml").write_text(
-        f"imports:\n  base: {tmp_path / 'base.yml'}\nnum_bits: base\n"
+        f"imports:\n  base: {tmp_path / 'base.yml'}\nnum_bits:\n  $import: base\n"
     )
-    # recipe imports mid
     recipe_file = tmp_path / "recipe.yml"
     recipe_file.write_text(
         f"imports:\n"
@@ -460,11 +514,12 @@ def test_import_recursive(tmp_path):
         f"  algorithm: max\n"
         f"  quant_cfg:\n"
         f"    - quantizer_name: '*weight_quantizer'\n"
-        f"      cfg: mid\n"
+        f"      cfg:\n"
+        f"        $import: mid\n"
     )
     recipe = load_recipe(recipe_file)
-    # mid.yml's "num_bits: base" should have been resolved to the base snippet's content
     cfg = recipe.quantize["quant_cfg"][0]["cfg"]
+    # mid.yml resolved "num_bits: {$import: base}" → base.yml content
     assert cfg["num_bits"] == {"num_bits": (4, 3)}
 
 
@@ -487,26 +542,12 @@ def test_import_circular_raises(tmp_path):
 
 
 def test_import_cross_file_same_name_no_conflict(tmp_path):
-    """Same import name in parent and child files resolve independently (no conflict).
-
-    recipe.yml imports ``fmt`` → fp8.yml (num_bits: e4m3)
-    recipe.yml also imports ``child`` → child.yml
-    child.yml  imports ``fmt`` → nvfp4.yml (num_bits: e2m1, block_sizes: ...)
-
-    The parent's ``fmt`` and the child's ``fmt`` are different configs.
-    The parent should get fp8 for its own ``fmt`` reference, and the child's
-    ``fmt`` should be resolved within the child's scope only.
-    """
-    # Two different snippets, both will be imported under the name "fmt"
+    """Same import name in parent and child resolve independently (scoped)."""
     (tmp_path / "fp8.yml").write_text("num_bits: e4m3\n")
     (tmp_path / "nvfp4.yml").write_text("num_bits: e2m1\nblock_sizes:\n  -1: 16\n")
-
-    # Child snippet imports "fmt" → nvfp4
     (tmp_path / "child.yml").write_text(
         f"imports:\n  fmt: {tmp_path / 'nvfp4.yml'}\nweight_format: fmt\n"
     )
-
-    # Parent recipe imports "fmt" → fp8, and also imports "child"
     recipe_file = tmp_path / "recipe.yml"
     recipe_file.write_text(
         f"imports:\n"
@@ -518,10 +559,10 @@ def test_import_cross_file_same_name_no_conflict(tmp_path):
         f"  algorithm: max\n"
         f"  quant_cfg:\n"
         f"    - quantizer_name: '*weight_quantizer'\n"
-        f"      cfg: fmt\n"
+        f"      cfg:\n"
+        f"        $import: fmt\n"
     )
     recipe = load_recipe(recipe_file)
-
-    # Parent's "fmt" should resolve to fp8 (e4m3), not nvfp4
+    # Parent's "fmt" resolves to fp8 (e4m3), not child's nvfp4
     cfg = recipe.quantize["quant_cfg"][0]["cfg"]
     assert cfg == {"num_bits": (4, 3)}
