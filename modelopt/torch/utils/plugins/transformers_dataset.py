@@ -270,10 +270,10 @@ class LanguageDataCollator:
             if isinstance(text, str):
                 batch.append(text)
             else:
-                messages = example.get("messages", None)
+                messages = example.get("messages", None) or example.get("conversations", None)
                 if not messages:
                     raise ValueError(
-                        "Sample must have a 'messages' field in OpenAI format "
+                        "Sample must have a 'messages' or 'conversations' field "
                         "(list of {role, content} dicts)."
                     )
                 if not any(m.get("role") == "assistant" for m in messages):
@@ -338,10 +338,10 @@ class VisionLanguageDataCollator(LanguageDataCollator):
         batch = []
 
         for example in examples:
-            messages = example.get("messages", None)
+            messages = example.get("messages", None) or example.get("conversations", None)
             if messages is None:
                 raise ValueError(
-                    "Sample must have a 'messages' field in OpenAI format "
+                    "Sample must have a 'messages' or 'conversations' field "
                     "(list of {role, content} dicts)."
                 )
 
