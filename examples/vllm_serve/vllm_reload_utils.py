@@ -460,8 +460,7 @@ def load_state_dict_from_path(
             module.disable()
 
     checkpoint_quant_count = len(checkpoint_quant_keys)
-    model_quant_count = len(model_quant_keys)
-
+    
     # Ensure counts match (excluding weight quantizer keys, which may be absent when weights
     # were pre-folded at export)
     model_non_wq_quant_count = sum(1 for k in model_quant_keys if "weight_quantizer" not in k)
