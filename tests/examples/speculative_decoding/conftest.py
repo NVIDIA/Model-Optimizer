@@ -66,4 +66,13 @@ def tiny_daring_anteater_path(tmp_path_factory):
         ["python", "make_dataset.py", "-f", str(config_path), "--full-conversations"], "dataset"
     )
 
+    # Convert conversations → messages (OpenAI format)
+    lines = output_file.read_text().strip().split("\n")
+    with open(output_file, "w") as f:
+        for line in lines:
+            d = json.loads(line)
+            if "conversations" in d and "messages" not in d:
+                d["messages"] = d.pop("conversations")
+            f.write(json.dumps(d) + "\n")
+
     return output_file
