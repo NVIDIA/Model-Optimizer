@@ -53,7 +53,8 @@ repos:
     hooks:
       - id: yamlfmt
         args: [--mapping=2, --sequence=4, --offset=2, --implicit_start, --implicit_end, --preserve-quotes]
-        exclude: ^.github/workflows/
+        # configs/ contains reusable snippets that may be top-level YAML lists — yamlfmt misformats these
+        exclude: ^(.github/workflows/|modelopt_recipes/configs/)
 
   - repo: local
     hooks:
