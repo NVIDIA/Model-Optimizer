@@ -1,5 +1,6 @@
-import argparse
 import json
+import os
+import subprocess
 import tempfile
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -8,8 +9,6 @@ import torch
 from omegaconf import DictConfig
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer, LlamaConfig, LlamaForCausalLM
-from vllm.benchmarks.latency import add_cli_args
-from vllm.benchmarks.latency import main as vllm_main
 
 from modelopt.torch.puzzletron.anymodel.converter import Converter
 from modelopt.torch.puzzletron.anymodel.models.llama import LlamaConverter, LlamaModelDescriptor
@@ -117,33 +116,45 @@ class RuntimeConfig:
     prefill_seq_len: int
     generation_seq_len: int
     batch_size: int
+    num_iters: int
+    num_warmup_iters: int
 
 
 def run_vllm_latency_benchmark(model_path: Path, runtime_config: RuntimeConfig):
 
     output_json_path = model_path / "vllm_latency_benchmark.json"
-    parser = argparse.ArgumentParser()
-    add_cli_args(parser)
 
-    args = parser.parse_args(
-        [
-            "--model",
-            str(model_path),
-            "--input-len",
-            str(runtime_config.prefill_seq_len),
-            "--output-len",
-            str(runtime_config.generation_seq_len),
-            "--batch-size",
-            str(runtime_config.batch_size),
-            "--output-json",
-            str(output_json_path),
-            "--max-model-len",
-            str(runtime_config.prefill_seq_len + runtime_config.generation_seq_len),
-        ]
-    )
-    vllm_main(args)
+    cmd = [
+        "vllm",
+        "bench",
+        "latency",
+        "--model",
+        str(model_path),
+        "--input-len",
+        str(runtime_config.prefill_seq_len),
+        "--output-len",
+        str(runtime_config.generation_seq_len),
+        "--batch-size",
+        str(runtime_config.batch_size),
+        "--output-json",
+        str(output_json_path),
+        "--max-model-len",
+        str(runtime_config.prefill_seq_len + runtime_config.generation_seq_len),
+        "--num-iters-warmup",
+        str(runtime_config.num_warmup_iters),
+        "--num-iters",
+        str(runtime_config.num_iters),
+        "--max-num-seqs",
+        "1",
+        "--distributed-executor-backend",
+        "external_launcher",
+    ]
+    os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+    if os.environ["RANK"] == "0":
+        subprocess.run(cmd)
     with open(output_json_path) as f:
         vllm_results = json.load(f)
+    print(vllm_results)
     return vllm_results["avg_latency"]
 
 
@@ -226,6 +237,8 @@ def calc_runtime_for_subblocks(
         prefill_seq_len,
         generation_seq_len,
         runtime_stats_config.get("batch_size", 1),
+        runtime_stats_config.get("num_iters", 30),
+        runtime_stats_config.get("num_warmup_iters", 10),
     )
 
     runtime_by_subblock_dict = {}
