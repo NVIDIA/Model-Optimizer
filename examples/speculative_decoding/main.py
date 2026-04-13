@@ -267,8 +267,7 @@ def train():
             }
             mtsp.convert(model, [("medusa", config)])
         elif training_args.mode == "eagle3":
-            # eagle_cfg maps directly to EagleConfig fields; eagle_offline is derived
-            # automatically from data_args.offline_data_path via EagleConfig validation.
+            # Validate and rewrite eagle config fields
             EagleConfig.model_validate(
                 eagle_cfg,
                 context={"training_args": training_args, "data_args": data_args},
