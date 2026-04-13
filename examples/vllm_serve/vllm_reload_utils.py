@@ -22,6 +22,7 @@ from typing import Any
 import torch
 from vllm.distributed.parallel_state import get_tp_group
 
+from modelopt.torch.export.hf_vllm_quantizer_merge import merge_amax_tensors_for_vllm_group
 from modelopt.torch.opt.conversion import (
     ModelLikeModule,
     ModeloptStateManager,
@@ -173,7 +174,7 @@ def _merge_values_by_max_or_concat(merged_key: str, key_value_pairs: list[tuple[
         for dict_key in values[0]:
             tensors = [v[dict_key] for v in values]
             if "_amax" in dict_key:
-                merged_value[dict_key] = torch.stack(tensors).max(dim=0)[0]
+                merged_value[dict_key] = merge_amax_tensors_for_vllm_group(tensors)
             elif "_pre_quant_scale" in dict_key:
                 # _pre_quant_scale is per-input-channel: identical across q/k/v projections
                 # since they share the same input. Do not concatenate; take the first value.
@@ -184,7 +185,7 @@ def _merge_values_by_max_or_concat(merged_key: str, key_value_pairs: list[tuple[
     else:
         # Values are tensors directly
         if "_amax" in merged_key:
-            merged_value = torch.stack(values).max(dim=0)[0]
+            merged_value = merge_amax_tensors_for_vllm_group(values)
         else:
             merged_value = torch.cat(values, dim=0)
         return merged_value

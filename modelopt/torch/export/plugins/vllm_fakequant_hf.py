@@ -14,6 +14,8 @@
 # limitations under the License.
 """Export HuggingFace model to vLLM fakequant checkpoint."""
 
+import copy
+import re
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +25,7 @@ import torch.nn as nn
 import modelopt.torch.opt as mto
 from modelopt.torch.quantization.config import RotateConfig
 from modelopt.torch.quantization.conversion import quantizer_state
+from modelopt.torch.quantization.model_calib import enable_stats_collection, finish_stats_collection
 from modelopt.torch.quantization.nn import QuantModule, TensorQuantizer
 from modelopt.torch.quantization.utils import get_quantizer_state_dict
 from modelopt.torch.quantization.utils.core_utils import enable_weight_access_and_writeback
@@ -33,6 +36,14 @@ from ..layer_utils import get_experts_list, is_moe
 from ..quant_utils import get_quantization_format
 
 __all__ = ["export_hf_vllm_fq_checkpoint"]
+
+# Matches ``…weight_quantizer``, ``…weight_quantizer.0``, ``…w13_weight_quantizer.0``, etc.
+_WEIGHT_QUANTIZER_STATE_KEY = re.compile(r"(?:^|\.)(?:\w+_)?weight_quantizer(?:\.\d+)*$")
+
+
+def _is_weight_quantizer_state_key(key: str) -> bool:
+    """True for weight quantizer state keys, including ModuleList entries (``…weight_quantizer.0``)."""
+    return bool(_WEIGHT_QUANTIZER_STATE_KEY.search(key))
 
 
 def disable_rotate(quantizer: TensorQuantizer):
@@ -126,10 +137,24 @@ def _collect_expert_pre_quant_scales(
     return pqs_list
 
 
+def requant_weights_for_export(
+    quantizer: TensorQuantizer,
+    w: torch.Tensor,
+) -> torch.Tensor:
+    """Requantize weights for export."""
+    quantizer_copy = copy.deepcopy(quantizer)
+    quantizer_copy.eval()
+    quantizer_copy.reset_amax()
+    enable_stats_collection(quantizer_copy)
+    quantizer_copy(w)
+    finish_stats_collection(quantizer_copy)
+    return quantizer_copy(w.float()).to(w.dtype)
+
+
 def _resmooth_experts_for_export(
     model: nn.Module,
     state_dict: dict[str, Any],
-) -> dict[str, tuple[torch.Tensor, torch.Tensor | None]]:
+) -> tuple[dict[str, tuple[torch.Tensor, torch.Tensor | None]], set[str]]:
     """Average pqs and unify input amax across MoE experts when AWQ smoothing applies (no-op otherwise).
 
     Adjusts expert weights in ``state_dict`` as ``W' = W * old_pqs / avg_pqs`` and returns
@@ -139,14 +164,14 @@ def _resmooth_experts_for_export(
     """
     qfmt = get_quantization_format(model)
     if qfmt is None or "awq" not in qfmt.lower():
-        return {}
+        return {}, set()
 
     model_type = type(model).__name__.lower()
     id_to_name: dict[int, str] = {id(m): n for n, m in model.named_modules()}
     out: dict[str, tuple[torch.Tensor, torch.Tensor | None]] = {}
-
+    requant_weights: set[str] = set()
     for _, module in model.named_modules():
-        if not (is_moe(module) or "nemotronhmoe" in model_type):
+        if not is_moe(module):
             continue
         try:
             expert_groups = get_experts_list(module, model_type)
@@ -173,6 +198,7 @@ def _resmooth_experts_for_export(
                 w = state_dict[f"{nm}.weight"]
                 ratio = (old_pqs / avg_pqs).to(dtype=torch.float32, device=w.device)
                 state_dict[f"{nm}.weight"] = (w.float() * ratio[None, :]).to(w.dtype)
+                requant_weights.add(f"{nm}.weight")
 
             iq0 = experts[0].input_quantizer
             max_in_amax: torch.Tensor | None = None
@@ -188,7 +214,7 @@ def _resmooth_experts_for_export(
                     continue
                 out[get_unwrapped_name(f"{nm}.input_quantizer", model)] = (avg_out, max_in_amax)
 
-    return out
+    return out, requant_weights
 
 
 def export_hf_vllm_fq_checkpoint(
@@ -207,8 +233,8 @@ def export_hf_vllm_fq_checkpoint(
 
     For MoE models with AWQ quantization, pre_quant_scale is averaged across experts
     and input amax is unified — required because vLLM uses a single input quantizer
-    per expert group. This averaging is performed non-mutingly on a detached state_dict
-    copy; the original model is never modified.
+    per expert group. This averaging is performed without mutating the model; only a
+    detached ``state_dict`` copy is updated.
 
     Args:
         model: In-memory quantized model.
@@ -230,9 +256,9 @@ def export_hf_vllm_fq_checkpoint(
     # Non-mutating MoE expert resmooth: average pqs and adjust state_dict weights.
     # Must run before the fakequant loop so that the adjusted weights are fakequanted
     # with the correct per-block scales.
-    expert_pqs_overrides = _resmooth_experts_for_export(model, state_dict)
+    expert_pqs_overrides, requant_weights = _resmooth_experts_for_export(model, state_dict)
 
-    fakequant_weights = set()
+    fakequant_weights: set[str] = set()
     # Input quantizer keys whose _pre_quant_scale was folded into the weight above.
     input_quantizers_folded_pqs: set[str] = set()
     with torch.inference_mode():
@@ -291,7 +317,7 @@ def export_hf_vllm_fq_checkpoint(
     # attention quantizers remain active.
     # Rotation is also cleared: the weight was already folded with rotation applied,
     # so if fold_weight is called on reload it must not re-rotate the exported weight.
-    wqs_to_restore = []
+    wqs_to_restore: list[tuple[TensorQuantizer, Any]] = []
     for _, module in model.named_modules():
         if isinstance(module, QuantModule):
             for attr_name, quantizer in module.named_children():
@@ -308,7 +334,7 @@ def export_hf_vllm_fq_checkpoint(
 
     quantizer_state_dict = get_quantizer_state_dict(model)
     for key in list(quantizer_state_dict):
-        if key.endswith("weight_quantizer"):
+        if _is_weight_quantizer_state_key(key):
             # Fakequant amax is folded into HF weights; do not reload weight quantizer tensors.
             quantizer_state_dict.pop(key)
         elif key in input_quantizers_folded_pqs:
@@ -336,7 +362,7 @@ def export_hf_vllm_fq_checkpoint(
     # ``quantizer_state`` and drop disabled weight quantizer entries (weights already folded).
     qstate = quantizer_state(model)
     for key in list(qstate):
-        if key.endswith("weight_quantizer") and qstate[key].get("_disabled"):
+        if _is_weight_quantizer_state_key(key) and qstate[key].get("_disabled"):
             qstate.pop(key)
 
     for mode_str, m_state in modelopt_state.get("modelopt_state_dict", []):
