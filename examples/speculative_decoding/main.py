@@ -48,6 +48,7 @@ from transformers.trainer_utils import get_last_checkpoint
 
 import modelopt.torch.opt as mto
 import modelopt.torch.speculative as mtsp
+from modelopt.torch.speculative.config import EagleConfig
 from modelopt.torch.speculative.utils import load_vlm_or_llm, patch_transformers5_params_loading
 from modelopt.torch.utils import print_rank_0
 
@@ -266,8 +267,11 @@ def train():
             }
             mtsp.convert(model, [("medusa", config)])
         elif training_args.mode == "eagle3":
-            # eagle_cfg maps directly to EagleConfig fields; eagle_offline is derived here.
-            eagle_cfg["eagle_offline"] = use_offline_training
+            # Validate and rewrite eagle config fields
+            eagle_cfg = EagleConfig.model_validate(
+                eagle_cfg,
+                context={"training_args": training_args, "data_args": data_args},
+            ).model_dump()
             mtsp.convert(model, [("eagle", eagle_cfg)])
 
             # Load draft vocab cache if the draft model uses a compressed vocabulary

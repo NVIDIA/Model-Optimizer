@@ -69,7 +69,9 @@ class TinyMobileNetFeatures(nn.Module):
 def _create_timm_fn(name):
     def get_model_and_input(on_gpu: bool = False):
         model = timm.create_model(name)
-        return process_model_and_inputs(model, (torch.randn(1, 3, 224, 224),), {}, on_gpu)
+        data_config = timm.data.resolve_model_data_config(model)
+        input_size = data_config["input_size"]  # e.g., (3, 224, 224)
+        return process_model_and_inputs(model, (torch.randn(1, *input_size),), {}, on_gpu)
 
     return get_model_and_input
 
@@ -114,6 +116,7 @@ MODELS = {
             # "vovnet39a",
             # "dm_nfnet_f0",
             "efficientnet_b0",
+            "swin_tiny_patch4_window7_224",
         ],
         _create_timm_fn,
     ),

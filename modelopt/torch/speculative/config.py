@@ -15,7 +15,11 @@
 
 """Configurations for speculative decoding modes."""
 
+import warnings
 from copy import deepcopy
+from typing import Any
+
+from pydantic import ValidationInfo, model_validator
 
 from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
 
@@ -120,3 +124,51 @@ class EagleConfig(ModeloptBaseConfig):
         default=False,
         description="Whether to enable NVTX ranges for profiling eagle forward/loss methods.",
     )
+
+    eagle_export_rope_scaling: dict = ModeloptField(
+        default={"rope_type": "yarn", "factor": 32.0, "original_max_position_embeddings": 2048},
+        description=(
+            "The rope_scaling config to inject into the exported HuggingFace model config. "
+            "Applied when the training rope_type is 'default' (no scaling). "
+            "Set to empty dict {} to disable rope scaling injection at export."
+        ),
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _derive_eagle_offline(cls, data: Any, info: ValidationInfo) -> Any:
+        """Derive ``eagle_offline`` from ``data_args.offline_data_path`` when provided in context."""
+        ctx = info.context if info.context else {}
+        data_args = ctx.get("data_args")
+        if data_args is not None and isinstance(data, dict):
+            data["eagle_offline"] = data_args.offline_data_path is not None
+        return data
+
+    @model_validator(mode="after")
+    def _check_rope_scaling_consistency(self) -> "EagleConfig":
+        if not self.eagle_export_rope_scaling:
+            return self
+        rope_cfg = self.eagle_architecture_config.get("rope_scaling", {}) or {}
+        rope_type = rope_cfg.get("rope_type") or rope_cfg.get("type")
+        if rope_type is not None and rope_type != "default":
+            raise ValueError(
+                f"eagle_export_rope_scaling is set but eagle_architecture_config has "
+                f"rope_type='{rope_type}'. Export rope overwrite is only valid when the "
+                f"training rope_type is 'default' (no scaling)."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _warn_rope_vs_training_seq_len(self, info: ValidationInfo) -> "EagleConfig":
+        ctx = info.context if info.context else {}
+        training_args = ctx.get("training_args")
+        if training_args is None:
+            return self
+        orig_max_pos = self.eagle_export_rope_scaling.get("original_max_position_embeddings")
+        if orig_max_pos is not None and orig_max_pos != training_args.training_seq_len:
+            warnings.warn(
+                f"eagle_export_rope_scaling.original_max_position_embeddings ({orig_max_pos}) "
+                f"differs from training_seq_len ({training_args.training_seq_len}). "
+                f"This may affect long-context inference quality."
+            )
+        return self

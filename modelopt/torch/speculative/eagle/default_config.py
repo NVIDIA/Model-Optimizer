@@ -19,15 +19,10 @@ default_eagle_config = {
     "hidden_act": "silu",
     "torch_dtype": "bfloat16",
     "position_embedding_type": "rope",
-    "rope_scaling": {
-        "factor": 8.0,
-        "low_freq_factor": 1.0,
-        "high_freq_factor": 4.0,
-        "original_max_position_embeddings": 8192,
-        "rope_type": "llama3",
-        "rope_theta": 500000.0,
-    },
-    "rope_theta": 500000.0,
+    # rope_theta is set both inside rope_scaling and at the top level for cross-version
+    # compatibility: transformers 5.x reads it from rope_scaling, while 4.x reads it top-level.
+    "rope_scaling": {"rope_type": "default", "rope_theta": 10000},
+    "rope_theta": 10000,
     "num_hidden_layers": 1,
     "intermediate_size": 14336,
     "num_attention_heads": 32,
@@ -83,6 +78,8 @@ default_kimik2_eagle_config = {
     "qk_nope_head_dim": 128,
     "qk_rope_head_dim": 64,
     "rms_norm_eps": 0.00001,
+    # rope_theta is set both inside rope_scaling and at the top level for cross-version
+    # compatibility: transformers 5.x reads it from rope_scaling, while 4.x reads it top-level.
     "rope_scaling": {
         "beta_fast": 1.0,
         "beta_slow": 1.0,
@@ -91,6 +88,7 @@ default_kimik2_eagle_config = {
         "mscale_all_dim": 1.0,
         "original_max_position_embeddings": 4096,
         "type": "yarn",
+        "rope_theta": 50000.0,
     },
     "rope_theta": 50000.0,
     "routed_scaling_factor": 2.827,

@@ -53,6 +53,7 @@ The `torch_quant_to_onnx.py` script quantizes [timm](https://github.com/huggingf
 
 - Loads a pretrained timm torch model (default: ViT-Base).
 - Quantizes the torch model to FP8, MXFP8, INT8, NVFP4, or INT4_AWQ using ModelOpt.
+- For models with Conv2d layers (e.g., SwinTransformer), automatically overrides Conv2d quantization to FP8 (for MXFP8/NVFP4 modes) or INT8 (for INT4_AWQ mode) for TensorRT compatibility.
 - Exports the quantized model to ONNX.
 - Postprocesses the ONNX model to be compatible with TensorRT.
 - Saves the final ONNX model.
@@ -63,10 +64,20 @@ The `torch_quant_to_onnx.py` script quantizes [timm](https://github.com/huggingf
 
 ```bash
 python torch_quant_to_onnx.py \
-    --timm_model_name=vit_base_patch16_224 \
+    --timm_model_name=<timm model name> \
     --quantize_mode=<fp8|mxfp8|int8|nvfp4|int4_awq> \
     --onnx_save_path=<path to save the exported ONNX model>
 ```
+
+### Conv2d Quantization Override
+
+TensorRT only supports FP8 and INT8 for convolution operations. When quantizing models with Conv2d layers (like SwinTransformer), the script automatically applies the following overrides:
+
+| Quantize Mode | Conv2d Override | Reason |
+| :---: | :---: | :--- |
+| FP8, INT8 | None (already compatible) | Native TRT support |
+| MXFP8, NVFP4 | Conv2d -> FP8 | TRT Conv limitation |
+| INT4_AWQ | Conv2d -> INT8 | TRT Conv limitation |
 
 ### Evaluation
 
@@ -79,7 +90,7 @@ python ../onnx_ptq/evaluate.py \
     --onnx_path=<path to the exported ONNX model> \
     --imagenet_path=<HF dataset card or local path to the ImageNet dataset> \
     --engine_precision=stronglyTyped \
-    --model_name=vit_base_patch16_224
+    --model_name=<timm model name>
 ```
 
 ## LLM Quantization and Export with TensorRT-Edge-LLM
@@ -289,13 +300,13 @@ python torch_quant_to_onnx.py \
     --onnx_save_path=vit_base_patch16_224.auto_quant.onnx
 ```
 
-### Results (ViT-Base)
+## ONNX Export Supported Vision Models
 
-| | Top-1 accuracy (torch) | Top-5 accuracy (torch) |
-| :--- | :---: | :---: |
-| Torch autocast (FP16) | 85.11% | 97.53% |
-| NVFP4 Quantized | 84.558% | 97.36% |
-| Auto Quantized (FP8 + NVFP4, 4.78 effective bits) | 84.726% | 97.434% |
+| Model | FP8 | INT8 | MXFP8 | NVFP4 | INT4_AWQ | Auto |
+| :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| [vit_base_patch16_224](https://huggingface.co/timm/vit_base_patch16_224.augreg_in21k_ft_in1k) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| [swin_tiny_patch4_window7_224](https://huggingface.co/timm/swin_tiny_patch4_window7_224.ms_in1k) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| [swinv2_tiny_window8_256](https://huggingface.co/timm/swinv2_tiny_window8_256.ms_in1k) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 
 ## Resources
 
