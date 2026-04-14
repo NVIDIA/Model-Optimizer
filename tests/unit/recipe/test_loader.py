@@ -532,9 +532,9 @@ def test_import_cfg_extend(tmp_path):
     assert cfg == {"num_bits": (4, 3), "axis": 0}
 
 
-def test_import_cfg_conflict_raises(tmp_path):
-    """$import in cfg with conflicting keys raises ValueError."""
-    (tmp_path / "fp8.yml").write_text("num_bits: e4m3\n")
+def test_import_cfg_inline_overrides_import(tmp_path):
+    """Inline keys override imported values (highest precedence)."""
+    (tmp_path / "fp8.yml").write_text("num_bits: e4m3\naxis:\n")
     recipe_file = tmp_path / "recipe.yml"
     recipe_file.write_text(
         f"imports:\n"
@@ -549,8 +549,12 @@ def test_import_cfg_conflict_raises(tmp_path):
         f"        $import: fp8\n"
         f"        num_bits: 8\n"
     )
-    with pytest.raises(ValueError, match="conflict with imported"):
-        load_recipe(recipe_file)
+    recipe = load_recipe(recipe_file)
+    cfg = recipe.quantize["quant_cfg"][0]["cfg"]
+    # inline num_bits: 8 overrides imported num_bits: e4m3 → (4,3)
+    assert cfg["num_bits"] == 8
+    # imported axis: None is preserved (no inline override)
+    assert cfg["axis"] is None
 
 
 def test_import_cfg_multi_import(tmp_path):
@@ -576,9 +580,9 @@ def test_import_cfg_multi_import(tmp_path):
     assert cfg == {"num_bits": (4, 3), "axis": 0}
 
 
-def test_import_cfg_multi_import_conflict_raises(tmp_path):
-    """$import with a list of names raises when snippets have overlapping keys."""
-    (tmp_path / "a.yml").write_text("num_bits: e4m3\n")
+def test_import_cfg_multi_import_later_overrides_earlier(tmp_path):
+    """In $import list, later snippets override earlier ones on key conflicts."""
+    (tmp_path / "a.yml").write_text("num_bits: e4m3\naxis: 0\n")
     (tmp_path / "b.yml").write_text("num_bits: 8\n")
     recipe_file = tmp_path / "recipe.yml"
     recipe_file.write_text(
@@ -594,8 +598,11 @@ def test_import_cfg_multi_import_conflict_raises(tmp_path):
         f"      cfg:\n"
         f"        $import: [a, b]\n"
     )
-    with pytest.raises(ValueError, match="conflicts with keys from prior imports"):
-        load_recipe(recipe_file)
+    recipe = load_recipe(recipe_file)
+    cfg = recipe.quantize["quant_cfg"][0]["cfg"]
+    # b overrides a's num_bits; a's axis is preserved
+    assert cfg["num_bits"] == 8
+    assert cfg["axis"] == 0
 
 
 def test_import_cfg_multi_import_with_extend(tmp_path):

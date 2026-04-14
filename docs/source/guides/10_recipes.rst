@@ -179,33 +179,38 @@ confused with literal values.  The marker can appear anywhere in the recipe:
 - As a **list element** — the snippet (which must itself be a list) is spliced
   into the surrounding list.
 
-As a **dict value**, ``$import`` supports three composition modes:
+As a **dict value**, ``$import`` supports composition with clear override
+precedence (lowest to highest):
 
-- **Single import:** ``$import: name`` — replaced with the snippet content.
-- **Multiple imports:** ``$import: [name1, name2]`` — snippets are merged into
-  one dict.  The snippets must not have overlapping keys.
-- **Import + extend:** extra keys alongside ``$import`` are merged in after the
-  import(s).  Extra keys must not conflict with any imported key.
+1. **Imports in list order** — ``$import: [base, override]``: later snippets
+   override earlier ones on key conflicts.
+2. **Inline keys** — extra keys alongside ``$import`` override all imported
+   values.
+
+This is equivalent to calling ``dict.update()`` in order: imports first (in
+list order), then inline keys last.
 
 .. code-block:: yaml
 
    # Single import
    cfg:
-     $import: fp8
+     $import: nvfp4
 
-   # Multiple imports — merge two non-overlapping snippets
+   # Import + override — import nvfp4_dynamic, then override type inline
+   cfg:
+     $import: nvfp4    # imports {num_bits: e2m1, block_sizes: {-1: 16, type: dynamic, ...}}
+     block_sizes:
+       -1: 16
+       type: static    # overrides type: dynamic → static calibration
+
+   # Multiple imports — later snippet overrides earlier on conflict
+   cfg:
+     $import: [base_format, kv_tweaks]   # kv_tweaks wins on shared keys
+
+   # All three: multi-import + inline override
    cfg:
      $import: [bits, scale]
-
-   # Import + extend — add axis on top of imported fp8
-   cfg:
-     $import: fp8
-     axis: 0          # result: {num_bits: e4m3, axis: 0}
-
-Key conflicts are never allowed — whether between imported snippets or between
-imports and inline keys.  If a key appears in more than one source, the loader
-raises an error.  This avoids ambiguous merge semantics.  If you need different
-values for an existing key, create a new snippet instead.
+     axis: 0            # highest precedence
 
 As a **list element**, ``$import`` must be the only key — extra keys alongside
 a list splice are not supported.
