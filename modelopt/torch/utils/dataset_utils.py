@@ -211,22 +211,43 @@ def _auto_preprocess_sample(
     )
 
 
-def _load_streaming_dataset(
+def get_dataset_samples(
     dataset_name: str,
+    num_samples: int,
     *,
     apply_chat_template: bool = False,
     tokenizer: "PreTrainedTokenizerBase | None" = None,
     split: str | list[str] | None = None,
-) -> tuple[list, Callable[[dict], str]]:
-    """Resolve dataset config and return streaming splits with a preprocessing function.
+) -> list[str]:
+    """Load a portion of a dataset with the dataset name and a given size.
 
-    This is a shared helper for :func:`get_dataset_samples`.
+    Supports both registered datasets (in ``SUPPORTED_DATASET_CONFIG``) and arbitrary
+    HuggingFace datasets.  Unregistered datasets are auto-detected by column names:
+    ``messages``/``conversations`` (chat), ``prompt``, ``text``, or ``input``.
+
+    Args:
+        dataset_name: Name or HuggingFace path of the dataset to load, a local directory path,
+            or a path to a ``.jsonl`` file.  For local directory paths, the
+            predefined config from ``SUPPORTED_DATASET_CONFIG`` is matched if the base folder name
+            matches a registered key (e.g. ``/hf-local/abisee/cnn_dailymail`` matches ``cnn_dailymail`` key).
+        num_samples: Number of samples to load from the dataset.
+        apply_chat_template: Whether to apply the chat template to the samples
+            (if supported by the dataset).  For unregistered datasets with a
+            ``messages`` column, chat template is always applied regardless of
+            this flag.
+        tokenizer: Tokenizer to use for applying the chat template to the samples.
+            No tokenization is done and plain text is still returned.
+        split: Override the split(s) to load.  Accepts a single split name or a list.
+            If ``None``, uses the splits defined in ``SUPPORTED_DATASET_CONFIG`` for
+            registered datasets, or ``["train"]`` for unregistered datasets.
 
     Returns:
-        A tuple of ``(dataset_splits, preprocess_fn)`` where *dataset_splits* is a list of
-        HuggingFace ``IterableDataset`` objects and *preprocess_fn* maps a raw sample dict
-        to a plain-text string (empty string signals a sample to skip).
+        Samples: The list of samples.
     """
+    # Local JSONL file path support (each line is a JSON object with a `text` field).
+    if dataset_name.endswith(".jsonl"):
+        return get_jsonl_text_samples(dataset_name, num_samples, key="text")
+
     from datasets import load_dataset
 
     local_dataset_path = None
@@ -280,66 +301,17 @@ def _load_streaming_dataset(
     print(f"Loading dataset with {config=} and {splits=}")
     dataset_splits = [load_dataset(streaming=True, **config, split=s) for s in splits]
 
-    return dataset_splits, _preprocess
-
-
-def get_dataset_samples(
-    dataset_name: str,
-    num_samples: int,
-    *,
-    apply_chat_template: bool = False,
-    tokenizer: "PreTrainedTokenizerBase | None" = None,
-    split: str | list[str] | None = None,
-) -> list[str]:
-    """Load a portion of a dataset with the dataset name and a given size.
-
-    Supports both registered datasets (in ``SUPPORTED_DATASET_CONFIG``) and arbitrary
-    HuggingFace datasets.  Unregistered datasets are auto-detected by column names:
-    ``messages``/``conversations`` (chat), ``prompt``, ``text``, or ``input``.
-
-    Args:
-        dataset_name: Name or HuggingFace path of the dataset to load, a local directory path,
-            or a path to a ``.jsonl`` file.  For local directory paths, the
-            predefined config from ``SUPPORTED_DATASET_CONFIG`` is matched if the base folder name
-            matches a registered key (e.g. ``/hf-local/abisee/cnn_dailymail`` matches ``cnn_dailymail`` key).
-        num_samples: Number of samples to load from the dataset.
-        apply_chat_template: Whether to apply the chat template to the samples
-            (if supported by the dataset).  For unregistered datasets with a
-            ``messages`` column, chat template is always applied regardless of
-            this flag.
-        tokenizer: Tokenizer to use for applying the chat template to the samples.
-            No tokenization is done and plain text is still returned.
-        split: Override the split(s) to load.  Accepts a single split name or a list.
-            If ``None``, uses the splits defined in ``SUPPORTED_DATASET_CONFIG`` for
-            registered datasets, or ``["train"]`` for unregistered datasets.
-
-    Returns:
-        Samples: The list of samples.
-    """
-    # Local JSONL file path support (each line is a JSON object with a `text` field).
-    if dataset_name.endswith(".jsonl"):
-        return get_jsonl_text_samples(dataset_name, num_samples, key="text")
-
-    dataset_splits, _preprocess = _load_streaming_dataset(
-        dataset_name,
-        apply_chat_template=apply_chat_template,
-        tokenizer=tokenizer,
-        split=split,
-    )
-
     num_per_split = [num_samples // len(dataset_splits)] * len(dataset_splits)
     num_per_split[-1] += num_samples - sum(num_per_split)
 
     samples: list[str] = []
     for dataset, n in zip(dataset_splits, num_per_split):
-        split_samples: list[str] = []
-        for sample in dataset:
-            if len(split_samples) >= n:
+        for i, sample in enumerate(dataset):
+            if i >= n:
                 break
             text = _preprocess(sample)
             if text:
-                split_samples.append(text)
-        samples.extend(split_samples)
+                samples.append(text)
 
     return samples
 
