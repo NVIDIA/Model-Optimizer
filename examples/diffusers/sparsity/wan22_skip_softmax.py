@@ -16,7 +16,7 @@
 """Wan 2.2 inference with skip-softmax sparse attention.
 
 This example applies skip-softmax sparse attention to the Wan 2.2 video
-generation model (text-to-video). Three modes are supported:
+generation model (text-to-video). Four modes are supported:
 
 1. **Baseline** — pass ``--baseline`` for dense inference (default diffusers backend).
 2. **Triton baseline** — pass ``--triton-baseline`` for dense Triton FA kernel
@@ -50,6 +50,7 @@ Usage::
 """
 
 import argparse
+import gc
 import os
 
 import torch
@@ -249,7 +250,6 @@ def build_sparse_config(args: argparse.Namespace, num_blocks: int) -> dict:
     if args.calibrate and args.raw_threshold is None:
         sparse_cfg["calibration"] = {
             "target_sparse_ratio": {"prefill": args.target_sparsity},
-            "samples": 1,
             "threshold_trials": DEFAULT_THRESHOLD_TRIALS,
             "fit_logspace": True,
         }
@@ -370,6 +370,11 @@ def _get_num_blocks(transformer: torch.nn.Module) -> int:
         for i, part in enumerate(parts):
             if part == "blocks" and i + 1 < len(parts) and parts[i + 1].isdigit():
                 max_idx = max(max_idx, int(parts[i + 1]))
+    if max_idx < 0:
+        raise ValueError(
+            "Could not detect transformer blocks (expected submodules matching *.blocks.N.*). "
+            "Check that the model architecture uses 'blocks' as the layer container name."
+        )
     return max_idx + 1
 
 
@@ -387,6 +392,7 @@ def main() -> None:
         transformers.append(("transformer", pipe.transformer))
     if getattr(pipe, "transformer_2", None) is not None:
         transformers.append(("transformer_2", pipe.transformer_2))
+    is_14b = len(transformers) > 1
 
     # ---- Sparsify (unless baseline) ----
     if args.baseline:
@@ -415,7 +421,7 @@ def main() -> None:
                 width=args.width,
                 seed=args.seed,
                 guidance_scale=args.guidance_scale,
-                guidance_scale_2=args.guidance_scale_2,
+                guidance_scale_2=args.guidance_scale_2 if is_14b else None,
                 negative_prompt=args.negative_prompt,
             )
         else:
@@ -432,8 +438,6 @@ def main() -> None:
 
     # ---- Free calibration memory before inference ----
     if not args.baseline and not args.triton_baseline and forward_loop is not None:
-        import gc
-
         gc.collect()
         torch.cuda.empty_cache()
         print("Cleared CUDA cache after calibration")
@@ -456,7 +460,7 @@ def main() -> None:
             "guidance_scale": args.guidance_scale,
             "generator": torch.Generator(device="cuda").manual_seed(args.seed),
         }
-        if args.guidance_scale_2 is not None:
+        if is_14b and args.guidance_scale_2 is not None:
             pipe_kwargs["guidance_scale_2"] = args.guidance_scale_2
         output = pipe(**pipe_kwargs)
 

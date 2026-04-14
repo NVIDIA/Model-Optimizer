@@ -22,11 +22,11 @@ Two modes:
 
 import math
 import threading
-import warnings
 
 import torch
 
 from modelopt.torch.kernels import attention, attention_calibrate
+from modelopt.torch.utils.logging import warn_rank_0
 
 # Thread-local storage for skip-softmax configuration
 _thread_local = threading.local()
@@ -172,22 +172,19 @@ def register_ltx_triton_attention(model: torch.nn.Module) -> None:
     """Patch all ``ltx_core.Attention`` modules for Triton dispatch."""
     from ltx_core.model.transformer.attention import Attention
 
-    _warned = False
     for module in model.modules():
         if isinstance(module, Attention):
-            if not _warned:
-                warnings.warn(
-                    "LTX-2 packages (ltx-core, ltx-pipelines, ltx-trainer) are provided by "
-                    "Lightricks and are NOT covered by the Apache 2.0 license governing NVIDIA "
-                    "Model Optimizer. You MUST comply with the LTX Community License Agreement "
-                    "when installing and using LTX-2 with NVIDIA Model Optimizer. Any derivative "
-                    "models or fine-tuned weights from LTX-2 (including quantized or distilled "
-                    "checkpoints) remain subject to the LTX Community License Agreement, not "
-                    "Apache 2.0. See: https://github.com/Lightricks/LTX-2/blob/main/LICENSE",
-                    UserWarning,
-                    stacklevel=2,
-                )
-                _warned = True
+            warn_rank_0(
+                "LTX-2 packages (ltx-core, ltx-pipelines, ltx-trainer) are provided by "
+                "Lightricks and are NOT covered by the Apache 2.0 license governing NVIDIA "
+                "Model Optimizer. You MUST comply with the LTX Community License Agreement "
+                "when installing and using LTX-2 with NVIDIA Model Optimizer. Any derivative "
+                "models or fine-tuned weights from LTX-2 (including quantized or distilled "
+                "checkpoints) remain subject to the LTX Community License Agreement, not "
+                "Apache 2.0. See: https://github.com/Lightricks/LTX-2/blob/main/LICENSE",
+                UserWarning,
+                stacklevel=2,
+            )
             fn = module.attention_function
             if not isinstance(fn, _TritonLTXAttentionWrapper):
                 module.attention_function = _TritonLTXAttentionWrapper(fn)
