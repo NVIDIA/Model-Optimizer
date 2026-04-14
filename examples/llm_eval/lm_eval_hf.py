@@ -38,8 +38,15 @@
 # limitations under the License.
 import warnings
 
+import lm_eval
 from lm_eval import utils
 from lm_eval.__main__ import cli_evaluate, parse_eval_args, setup_parser
+
+if not lm_eval.__version__.startswith("0.4.8"):
+    warnings.warn(
+        f"lm_eval_hf.py is tested with lm-eval 0.4.8; found {lm_eval.__version__}. "
+        "Later versions may have incompatible API changes."
+    )
 from lm_eval.api.model import T
 from lm_eval.models.huggingface import HFLM
 from quantization_utils import quantize_model

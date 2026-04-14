@@ -1,3 +1,3 @@
-lm-eval==0.4.10
+lm-eval==0.4.8
 math-verify
 ray
