@@ -142,4 +142,9 @@ for arg in sys.argv[1:]:
             echo "No new checkpoints to export in ${OUTPUT_DIR}"
         fi
     fi
+
+    # Regression check (uses env vars MAX_FINAL_LOSS, MIN_FINAL_ACC, etc.)
+    if [ -n "$OUTPUT_DIR" ]; then
+        python3 common/check_regression.py "${OUTPUT_DIR}" || true
+    fi
 fi
