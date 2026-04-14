@@ -39,8 +39,8 @@
 import contextlib
 import warnings
 
-import lm_eval
 import datasets
+import lm_eval
 from lm_eval import utils
 from lm_eval.__main__ import cli_evaluate, parse_eval_args, setup_parser
 
