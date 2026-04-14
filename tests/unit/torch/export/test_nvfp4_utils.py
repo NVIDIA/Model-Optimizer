@@ -27,6 +27,7 @@ from modelopt.torch.export.diffusers_utils import (
     pad_nvfp4_weights,
     swizzle_nvfp4_scales,
 )
+from modelopt.torch.export.unified_export_hf import _postprocess_safetensors
 
 
 def _make_nvfp4_state_dict(rows=32, cols=64):
@@ -146,8 +147,6 @@ class TestSwizzleNvfp4Scales:
 
 class TestPostprocessSafetensors:
     def test_metadata_injection(self, tmp_path):
-        from modelopt.torch.export.unified_export_hf import _postprocess_safetensors
-
         sd = {"weight": torch.randn(4, 4)}
         save_file(sd, str(tmp_path / "model.safetensors"))
 
@@ -169,8 +168,6 @@ class TestPostprocessSafetensors:
         }
 
     def test_padding_and_swizzle(self, tmp_path):
-        from modelopt.torch.export.unified_export_hf import _postprocess_safetensors
-
         sd = _make_nvfp4_state_dict(rows=20, cols=64)
         save_file(sd, str(tmp_path / "model.safetensors"))
 
@@ -187,8 +184,6 @@ class TestPostprocessSafetensors:
         assert reloaded["layer0.weight_scale"].shape == (128, 64 // 16)
 
     def test_sharded_guard(self, tmp_path):
-        from modelopt.torch.export.unified_export_hf import _postprocess_safetensors
-
         save_file({"w": torch.randn(2, 2)}, str(tmp_path / "model.safetensors"))
         (tmp_path / "model.safetensors.index.json").write_text("{}")
 
@@ -196,14 +191,11 @@ class TestPostprocessSafetensors:
             _postprocess_safetensors(
                 tmp_path,
                 merged_base_safetensor_path="/fake/path.safetensors",
-                model_type="ltx2",
                 enable_layerwise_quant_metadata=True,
             )
 
     def test_preserves_existing_metadata(self, tmp_path):
         """Simulate save_pretrained output: safetensors with pre-existing metadata."""
-        from modelopt.torch.export.unified_export_hf import _postprocess_safetensors
-
         sd = _make_nvfp4_state_dict(rows=20, cols=64)
         preexisting_metadata = {"format": "pt", "_class_name": "MyModel"}
         save_file(sd, str(tmp_path / "model.safetensors"), metadata=preexisting_metadata)
@@ -230,6 +222,22 @@ class TestPostprocessSafetensors:
         assert "layer0" in layer_meta["layers"]
 
     def test_no_safetensor_files(self, tmp_path):
-        from modelopt.torch.export.unified_export_hf import _postprocess_safetensors
-
         _postprocess_safetensors(tmp_path)
+
+    def test_unknown_kwargs_silently_ignored(self, tmp_path):
+        sd = {"weight": torch.randn(4, 4)}
+        save_file(sd, str(tmp_path / "model.safetensors"))
+
+        _postprocess_safetensors(tmp_path, bad_option=True)
+
+        reloaded = load_file(str(tmp_path / "model.safetensors"))
+        assert torch.allclose(reloaded["weight"], sd["weight"])
+
+    def test_merge_requires_pipe(self, tmp_path):
+        save_file({"w": torch.randn(2, 2)}, str(tmp_path / "model.safetensors"))
+
+        with pytest.raises(ValueError, match="`pipe` must be provided"):
+            _postprocess_safetensors(
+                tmp_path,
+                merged_base_safetensor_path="/fake/path.safetensors",
+            )
