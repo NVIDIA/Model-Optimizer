@@ -392,8 +392,10 @@ class _QuantFusedMoEBase(QuantModule):
                 # In case the weight quantizer isn't folded yet in vllm_serve_fakequant, pass the
                 # quantized weight to the kernel.
                 B = self.w13_weight  # noqa: N806
-                original_kernel(A, B, C, *args, **kwargs)
-                self.w13_weight = original_weight
+                try:
+                    original_kernel(A, B, C, *args, **kwargs)
+                finally:
+                    self.w13_weight = original_weight
             else:
                 original_kernel(A, B, C, *args, **kwargs)
             if self.w13_output_quantizer.is_enabled:
@@ -408,8 +410,10 @@ class _QuantFusedMoEBase(QuantModule):
                 # In case the weight quantizer isn't folded yet in vllm_serve_fakequant, pass the
                 # quantized weight to the kernel.
                 B = self.w2_weight  # noqa: N806
-                original_kernel(A, B, C, *args, **kwargs)
-                self.w2_weight = original_weight
+                try:
+                    original_kernel(A, B, C, *args, **kwargs)
+                finally:
+                    self.w2_weight = original_weight
             else:
                 original_kernel(A, B, C, *args, **kwargs)
             if self.w2_output_quantizer.is_enabled:
