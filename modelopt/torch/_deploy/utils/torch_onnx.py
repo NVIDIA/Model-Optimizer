@@ -46,6 +46,7 @@ from modelopt.onnx.quantization.qdq_utils import qdq_to_dq, replace_zero_scale_w
 from modelopt.onnx.utils import (
     change_casts_to_fp16,
     check_model_uses_external_data,
+    fix_fp16_fp32_mismatches,
     get_input_names,
     get_input_shapes,
     get_node_names,
@@ -382,22 +383,30 @@ def is_int8_quantized(model: nn.Module) -> bool:
     return False
 
 
+def _is_fp8_quantizer(quantizer) -> bool:
+    """Check if a single quantizer is configured for FP8 (not MXFP8)."""
+    return (
+        quantizer.is_enabled
+        and quantizer._num_bits == (4, 3)
+        and not (
+            quantizer.block_sizes
+            and quantizer.block_sizes.get("scale_bits", None) == (8, 0)
+        )
+    )
+
+
 def is_fp8_quantized(model: nn.Module) -> bool:
-    """Check if the model is quantized in FP8 mode."""
+    """Check if the model is quantized in FP8 mode.
+
+    Returns True if any module has an FP8-configured quantizer (weight or input).
+    This covers mixed-precision scenarios (e.g., auto_quantize) where only the
+    input_quantizer might be FP8 while the weight_quantizer is disabled or uses
+    a different format.
+    """
     for _, module in model.named_modules():
-        if (
-            hasattr(module, "weight_quantizer")
-            and hasattr(module, "input_quantizer")
-            and module.weight_quantizer.is_enabled
-            and module.input_quantizer.is_enabled
-            and module.weight_quantizer._num_bits == (4, 3)
-            and module.input_quantizer._num_bits == (4, 3)
-            # Exclude MXFP8 which also uses (4,3) but has block_sizes with scale_bits
-            and not (
-                module.input_quantizer.block_sizes
-                and module.input_quantizer.block_sizes.get("scale_bits", None) == (8, 0)
-            )
-        ):
+        if hasattr(module, "weight_quantizer") and _is_fp8_quantizer(module.weight_quantizer):
+            return True
+        if hasattr(module, "input_quantizer") and _is_fp8_quantizer(module.input_quantizer):
             return True
     return False
 
@@ -522,7 +531,10 @@ def get_onnx_bytes_and_metadata(
     input_none_names = list(set(tree_spec_input.names) - set(input_names))
 
     use_torch_autocast = not (
-        is_fp4_quantized(model) or is_mxfp8_quantized(model) or weights_dtype == "fp32"
+        is_fp4_quantized(model)
+        or is_mxfp8_quantized(model)
+        or is_fp8_quantized(model)
+        or weights_dtype == "fp32"
     )
     autocast = torch.autocast("cuda") if use_torch_autocast else nullcontext()
 
@@ -556,6 +568,22 @@ def get_onnx_bytes_and_metadata(
         if is_fp4_quantized(model) or is_mxfp8_quantized(model)
         else nullcontext()
     )
+
+    # Disable Conv2d FP8 weight quantizer for ONNX export.
+    # FP8 TRT_FP8QuantizeLinear/DequantizeLinear custom ops produce tensors with
+    # dynamic shapes, and the ONNX Conv exporter requires static kernel shapes.
+    # Disabling the weight quantizer keeps Conv2d weights as static constants in
+    # the ONNX graph. Input quantizer remains enabled so TRT still uses FP8 for
+    # Conv2d activations. Weights are converted to FP16 by post-export processing.
+    conv_quantizers_to_reenable: list[tuple[nn.Module, str]] = []
+    if is_fp8_quantized(model):
+        for module in model.modules():
+            if not isinstance(module, nn.Conv2d):
+                continue
+            quantizer = getattr(module, "weight_quantizer", None)
+            if quantizer is not None and _is_fp8_quantizer(quantizer):
+                quantizer.disable()
+                conv_quantizers_to_reenable.append((module, "weight_quantizer"))
     with torch.inference_mode(), autocast, quantizer_context:
         additional_kwargs = {}
         if not dynamo_export:
@@ -570,6 +598,10 @@ def get_onnx_bytes_and_metadata(
             dynamo=dynamo_export,
             **additional_kwargs,
         )
+
+    # Re-enable Conv2d quantizers that were temporarily disabled for FP8 export
+    for module, qname in conv_quantizers_to_reenable:
+        getattr(module, qname).enable()
 
     # Check that export worked
     assert len(os.listdir(onnx_path)) > 0, "Torch to onnx export failed."
@@ -616,6 +648,16 @@ def get_onnx_bytes_and_metadata(
             )
 
     onnx_opt_graph = remove_redundant_casts(onnx_opt_graph)
+
+    # Fix remaining FP32/FP16 mismatches AFTER remove_redundant_casts.
+    # Only needed for the convert_float_to_float16 path (FP8/MXFP8/NVFP4) where
+    # blocked QDQ ops produce FP32 that flows into nodes with FP16 inputs.
+    # Must run after remove_redundant_casts because that function uses unreliable
+    # value_info metadata and would incorrectly remove the Cast nodes we insert.
+    if weights_dtype in ["fp16", "bf16"] and (
+        is_int4_quantized(model) or is_mxfp8_quantized(model) or is_fp8_quantized(model)
+    ):
+        onnx_opt_graph = fix_fp16_fp32_mismatches(onnx_opt_graph)
 
     # TensorRT expects all scales to be postive
     onnx_opt_graph = replace_zero_scale_with_smallest_nonzero(onnx_opt_graph)

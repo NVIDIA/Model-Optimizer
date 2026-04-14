@@ -17,6 +17,7 @@ import argparse
 import copy
 import json
 import re
+import subprocess
 import sys
 import warnings
 from pathlib import Path
@@ -96,6 +97,10 @@ def get_quant_config(quantize_mode):
             f"Overriding Conv2d quantization to FP8 for '{quantize_mode}' mode."
         )
         config["quant_cfg"].extend(_FP8_CONV_OVERRIDE)
+        # The FP8 Conv2d overrides use static quantization which requires
+        # calibration (amax). Ensure the calibration algorithm is set.
+        if config.get("algorithm") is None:
+            config["algorithm"] = "max"
     elif quantize_mode == "int4_awq":
         warnings.warn(
             "TensorRT only supports FP8/INT8 for Conv layers. "
@@ -109,7 +114,8 @@ def filter_func(name):
     """Filter function to exclude certain layers from quantization."""
     pattern = re.compile(
         r".*(time_emb_proj|time_embedding|conv_in|conv_out|conv_shortcut|add_embedding|"
-        r"pos_embed|time_text_embed|context_embedder|norm_out|x_embedder|patch_embed|cpb_mlp|downsample).*"
+        r"pos_embed|time_text_embed|context_embedder|norm_out|x_embedder|patch_embed|cpb_mlp|"
+        r"downsample|global_pool).*"
     )
     return pattern.match(name) is not None
 
@@ -147,6 +153,21 @@ def load_calibration_data(model_name, data_size, batch_size, device, with_labels
         )
 
 
+def _disable_conv2d_dynamic_quantizers(model):
+    """Disable dynamic block quantizers (NVFP4/MXFP8) on Conv2d modules.
+
+    TRT's FP4/MXFP8 DynamicQuantize only supports 2D/3D input tensors, but Conv2d
+    layers have 4D inputs. Disable these quantizers to avoid TRT build failures.
+    """
+    for name, module in model.named_modules():
+        if not isinstance(module, torch.nn.Conv2d):
+            continue
+        for qname in ("input_quantizer", "weight_quantizer"):
+            quantizer = getattr(module, qname, None)
+            if quantizer is not None and getattr(quantizer, "block_sizes", None):
+                quantizer.disable()
+
+
 def quantize_model(model, config, data_loader=None):
     """Quantize the model using the given config and calibration data."""
     if data_loader is not None:
@@ -160,6 +181,7 @@ def quantize_model(model, config, data_loader=None):
         quantized_model = mtq.quantize(model, config)
 
     mtq.disable_quantizer(quantized_model, filter_func)
+    _disable_conv2d_dynamic_quantizers(quantized_model)
     return quantized_model
 
 
@@ -235,6 +257,7 @@ def auto_quantize_model(
 
     # Disable quantization for specified layers
     mtq.disable_quantizer(quantized_model, filter_func)
+    _disable_conv2d_dynamic_quantizers(quantized_model)
 
     return quantized_model, search_state
 
@@ -321,6 +344,17 @@ def main():
         help="Number of scoring steps for auto quantization. Default is 128.",
     )
     parser.add_argument(
+        "--trt_build",
+        action="store_true",
+        help="Build a TRT engine from the exported ONNX model to verify compatibility.",
+    )
+    parser.add_argument(
+        "--trt_builder_opt_level",
+        type=int,
+        default=4,
+        help="TRT builder optimization level (default: 4).",
+    )
+    parser.add_argument(
         "--no_pretrained",
         action="store_true",
         help="Don't load pretrained weights (useful for testing with random weights).",
@@ -378,18 +412,19 @@ def main():
             args.num_score_steps,
         )
     else:
-        # Standard quantization - only load calibration data if needed
+        # Standard quantization
         config = get_quant_config(args.quantize_mode)
-        if args.quantize_mode == "mxfp8":
-            data_loader = None
-        else:
-            data_loader = load_calibration_data(
-                args.timm_model_name,
-                args.calibration_data_size,
-                args.batch_size,
-                device,
-                with_labels=False,
-            )
+        # Always load calibration data. Even though MXFP8 uses dynamic quantization
+        # and doesn't strictly require calibration, the Conv2d FP8 overrides (applied
+        # by get_quant_config for MXFP8/NVFP4) use static FP8 quantization which
+        # needs calibration data to compute amax values.
+        data_loader = load_calibration_data(
+            args.timm_model_name,
+            args.calibration_data_size,
+            args.batch_size,
+            device,
+            with_labels=False,
+        )
 
         quantized_model = quantize_model(model, config, data_loader)
 
@@ -420,6 +455,25 @@ def main():
     )
 
     print(f"Quantized ONNX model is saved to {args.onnx_save_path}")
+
+    if args.trt_build:
+        print("\n=== Building TRT Engine ===")
+        cmd = [
+            "trtexec",
+            f"--onnx={args.onnx_save_path}",
+            "--stronglyTyped",
+            f"--builderOptimizationLevel={args.trt_builder_opt_level}",
+        ]
+        print(f"Running: {' '.join(cmd)}")
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            print("TRT engine build FAILED:")
+            for line in result.stderr.splitlines():
+                if "Error" in line or "FAIL" in line or "error" in line:
+                    print(f"  {line.strip()}")
+            sys.exit(1)
+        else:
+            print("TRT engine build succeeded.")
 
 
 if __name__ == "__main__":
