@@ -340,7 +340,7 @@ class DFlashExporter(SpeculativeDecodingExporter):
             "torch_dtype": str(getattr(base_config, "torch_dtype", torch.bfloat16)).replace(
                 "torch.", ""
             ),
-            "num_target_layers": getattr(base_config, "num_hidden_layers", 36),
+            "num_target_layers": base_config.num_hidden_layers,
         }
 
         # Add layer_types if present (Qwen3-style)
@@ -366,12 +366,16 @@ class DFlashExporter(SpeculativeDecodingExporter):
 
         # Export state dict
         drafter_sd = self._extract_state_dict(full_sd)
+        assert drafter_sd, "No dflash_module weights found in state dict"
         if dtype is not None and hf_quant_config is None:
             drafter_sd = {k: v.to(dtype) for k, v in drafter_sd.items()}
         save_file(drafter_sd, f"{export_dir}/model.safetensors")
 
         # Export config
         drafter_config = self._export_config()
+        # Update torch_dtype to match actual exported weights
+        if dtype is not None:
+            drafter_config["torch_dtype"] = str(dtype).replace("torch.", "")
         if hf_quant_config is not None:
             drafter_config["quantization_config"] = hf_quant_config
         with open(f"{export_dir}/config.json", "w") as f:
