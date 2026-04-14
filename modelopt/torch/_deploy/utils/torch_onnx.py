@@ -587,9 +587,7 @@ def get_onnx_bytes_and_metadata(
     # Disable FP8 Conv weight quantizers: TorchScript ONNX exporter requires static
     # kernel shapes, but FP8 DequantizeLinear produces dynamic shapes.
     conv_wq_context = (
-        _disable_fp8_conv_weight_quantizers(model)
-        if is_fp8_quantized(model)
-        else nullcontext()
+        _disable_fp8_conv_weight_quantizers(model) if is_fp8_quantized(model) else nullcontext()
     )
     with torch.inference_mode(), autocast, quantizer_context, conv_wq_context:
         additional_kwargs = {}

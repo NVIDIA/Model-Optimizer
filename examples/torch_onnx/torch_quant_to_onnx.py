@@ -166,7 +166,11 @@ def _calibrate_uncalibrated_quantizers(model, data_loader):
             if not hasattr(module, attr_name):
                 continue
             quantizer = getattr(module, attr_name)
-            if quantizer.is_enabled and not quantizer.block_sizes and not hasattr(quantizer, "_amax"):
+            if (
+                quantizer.is_enabled
+                and not quantizer.block_sizes
+                and not hasattr(quantizer, "_amax")
+            ):
                 quantizer.enable_calib()
                 uncalibrated.append(quantizer)
 
