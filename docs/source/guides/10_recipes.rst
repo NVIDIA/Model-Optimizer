@@ -125,6 +125,79 @@ example:
          axis:
 
 
+Composable imports
+------------------
+
+Recipes can import **reusable config snippets** via the ``imports`` section.
+This eliminates duplication — numeric format definitions and standard exclusion
+lists are authored once and referenced by name across recipes.
+
+The ``imports`` section is a dict mapping short names to config file paths.
+References use the explicit ``{$import: name}`` marker so they are never
+confused with literal values.  The marker can appear anywhere in the recipe:
+
+- As a **dict value** — the marker is replaced with the snippet content.
+- As a **list element** — the snippet (which must itself be a list) is spliced
+  into the surrounding list.
+
+.. code-block:: yaml
+
+   imports:
+     base_disable_all: configs/ptq/base_disable_all
+     default_disabled: configs/ptq/default_disabled_quantizers
+     fp8: configs/numerics/fp8
+
+   metadata:
+     recipe_type: ptq
+     description: FP8 W8A8, FP8 KV cache.
+
+   quantize:
+     algorithm: max
+     quant_cfg:
+       - $import: base_disable_all          # spliced from a single-element list snippet
+       - quantizer_name: '*weight_quantizer'
+         cfg:
+           $import: fp8                     # cfg value replaced with imported dict
+       - $import: default_disabled          # spliced from a multi-element list snippet
+
+In this example:
+
+- ``$import: base_disable_all`` and ``$import: default_disabled`` are **list elements**
+  — their snippets (YAML lists) are spliced into ``quant_cfg``.
+- ``$import: fp8`` under ``cfg`` is a **dict value** — the snippet (a YAML dict of
+  quantizer attributes) replaces the ``cfg`` field.
+
+Import paths are resolved via :func:`~modelopt.recipe.load_config` — the
+built-in ``modelopt_recipes/`` library is checked first, then the filesystem.
+
+**Recursive imports:** An imported snippet may itself contain an ``imports``
+section.  Each file's imports are scoped to that file — the same name can be
+used in different files without conflict.  Circular imports are detected and
+raise ``ValueError``.
+
+Built-in config snippets
+^^^^^^^^^^^^^^^^^^^^^^^^
+
+Reusable snippets are stored under ``modelopt_recipes/configs/``:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 45 55
+
+   * - Snippet path
+     - Description
+   * - ``configs/numerics/fp8``
+     - FP8 E4M3 quantizer attributes
+   * - ``configs/numerics/nvfp4_dynamic``
+     - NVFP4 E2M1 blockwise, dynamic calibration, FP8 scales
+   * - ``configs/numerics/nvfp4_static``
+     - NVFP4 E2M1 blockwise, static calibration, FP8 scales
+   * - ``configs/ptq/base_disable_all``
+     - Disable all quantizers (deny-all-then-configure pattern)
+   * - ``configs/ptq/default_disabled_quantizers``
+     - Standard exclusions (LM head, routers, BatchNorm, etc.)
+
+
 Metadata section
 ================
 
@@ -355,11 +428,15 @@ To create a custom recipe:
 3. Update the ``metadata.description`` to describe your changes.
 4. Save the file (or directory) and pass its path to ``load_recipe()`` or ``--recipe``.
 
-Example -- creating a custom PTQ recipe (INT8 per-channel):
+Example -- creating a custom PTQ recipe using imports:
 
 .. code-block:: yaml
 
    # my_int8_recipe.yml
+   imports:
+     base_disable_all: configs/ptq/base_disable_all
+     default_disabled: configs/ptq/default_disabled_quantizers
+
    metadata:
      recipe_type: ptq
      description: INT8 per-channel weight, per-tensor activation.
@@ -367,8 +444,7 @@ Example -- creating a custom PTQ recipe (INT8 per-channel):
    quantize:
      algorithm: max
      quant_cfg:
-       - quantizer_name: '*'
-         enable: false
+       - $import: base_disable_all
        - quantizer_name: '*weight_quantizer'
          cfg:
            num_bits: 8
@@ -377,10 +453,11 @@ Example -- creating a custom PTQ recipe (INT8 per-channel):
          cfg:
            num_bits: 8
            axis:
-       - quantizer_name: '*lm_head*'
-         enable: false
-       - quantizer_name: '*output_layer*'
-         enable: false
+       - $import: default_disabled
+
+The built-in snippets (``base_disable_all``, ``default_disabled``) handle the
+deny-all prefix and standard exclusions.  Only the format-specific entries need
+to be written inline.
 
 
 Recipe repository layout
@@ -402,7 +479,14 @@ The ``modelopt_recipes/`` package is organized as follows:
    +-- models/                     # Model-specific recipes
    |   +-- Step3.5-Flash/
    |       +-- nvfp4-mlp-only.yaml
-   +-- configs/                    # Shared configuration fragments
+   +-- configs/                    # Reusable config snippets (imported via $import)
+       +-- numerics/               # Numeric format definitions
+       |   +-- fp8.yml
+       |   +-- nvfp4_dynamic.yml
+       |   +-- nvfp4_static.yml
+       +-- ptq/                    # PTQ-specific entry snippets
+           +-- base_disable_all.yaml
+           +-- default_disabled_quantizers.yaml
 
 
 Recipe data model
