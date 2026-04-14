@@ -217,8 +217,7 @@ To use your own datasets, please preprocess your data into a `.jsonl` file with 
 
 ```json
 {
-    "conversation_id": <unique id>,
-    "conversations": [{"role":<user or assistant>, "content":<content>}]
+    "messages": [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]
 }
 ```
 

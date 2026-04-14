@@ -124,7 +124,7 @@ def disable_thinking_column(data):
 
 
 def synthesize(data):
-    messages = data.get("conversations") or data.get("messages")
+    messages = data.get("messages") or data.get("conversations")
     if messages is None:
         raise ValueError(
             "No conversations or messages in the data. Only OAI chat data is supported."
@@ -196,7 +196,7 @@ def synthesize(data):
                 current_messages[i] = last_full_message
                 break
 
-    return {"conversations": current_messages}
+    return {"messages": current_messages}
 
 
 # Support both HF Hub repo IDs and local file paths (.jsonl, .json, .parquet, etc.)
