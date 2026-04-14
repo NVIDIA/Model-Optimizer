@@ -651,6 +651,49 @@ def test_import_dir_format(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# imports — multi-document snippets
+# ---------------------------------------------------------------------------
+
+
+def test_import_multi_document_list_snippet(tmp_path):
+    """List snippet using multi-document YAML (imports --- content) resolves $import."""
+    (tmp_path / "fp8.yml").write_text("num_bits: e4m3\n")
+    (tmp_path / "kv.yaml").write_text(
+        f"imports:\n"
+        f"  fp8: {tmp_path / 'fp8.yml'}\n"
+        f"---\n"
+        f"- quantizer_name: '*[kv]_bmm_quantizer'\n"
+        f"  cfg:\n"
+        f"    $import: fp8\n"
+    )
+    recipe_file = tmp_path / "recipe.yml"
+    recipe_file.write_text(
+        f"imports:\n"
+        f"  kv: {tmp_path / 'kv.yaml'}\n"
+        f"metadata:\n"
+        f"  recipe_type: ptq\n"
+        f"quantize:\n"
+        f"  algorithm: max\n"
+        f"  quant_cfg:\n"
+        f"    - $import: kv\n"
+    )
+    recipe = load_recipe(recipe_file)
+    assert len(recipe.quantize["quant_cfg"]) == 1
+    assert recipe.quantize["quant_cfg"][0]["quantizer_name"] == "*[kv]_bmm_quantizer"
+    assert recipe.quantize["quant_cfg"][0]["cfg"] == {"num_bits": (4, 3)}
+
+
+def test_import_builtin_fp8_kv_snippet():
+    """Built-in fp8_kv snippet uses multi-document format and resolves correctly."""
+    recipe = load_recipe("general/ptq/fp8_default-fp8_kv")
+    kv_entries = [
+        e for e in recipe.quantize["quant_cfg"] if e.get("quantizer_name") == "*[kv]_bmm_quantizer"
+    ]
+    assert len(kv_entries) == 1
+    assert kv_entries[0]["cfg"]["num_bits"] == (4, 3)
+
+
+# ---------------------------------------------------------------------------
 # imports — recursive resolution and cycle detection
 # ---------------------------------------------------------------------------
 

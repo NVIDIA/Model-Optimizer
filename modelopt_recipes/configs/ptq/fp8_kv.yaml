@@ -1,0 +1,7 @@
+# FP8 E4M3 KV cache quantization.
+imports:
+  fp8: configs/numerics/fp8
+---
+  - quantizer_name: '*[kv]_bmm_quantizer'
+    cfg:
+      $import: fp8

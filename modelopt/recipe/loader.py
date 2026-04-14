@@ -79,6 +79,9 @@ def _resolve_imports(
         snippet = load_config(config_path)
         if isinstance(snippet, dict) and "imports" in snippet:
             snippet = _resolve_imports(snippet, _loading | {config_path})
+        # Unwrap _list_content (multi-document YAML: imports + list content)
+        if isinstance(snippet, dict) and "_list_content" in snippet:
+            snippet = snippet["_list_content"]
         import_map[name] = snippet
 
     def _lookup(ref_name: str, context: str) -> Any:
@@ -89,58 +92,65 @@ def _resolve_imports(
             )
         return import_map[ref_name]
 
+    def _resolve_list(entries: list[Any]) -> list[Any]:
+        """Resolve $import markers in a list of quant_cfg-style entries."""
+        resolved: list[Any] = []
+        for entry in entries:
+            if isinstance(entry, dict) and _IMPORT_KEY in entry:
+                # {$import: name} → splice imported list
+                if len(entry) > 1:
+                    raise ValueError(
+                        f"$import must be the only key in the dict, got extra keys: "
+                        f"{sorted(k for k in entry if k != _IMPORT_KEY)}"
+                    )
+                imported = _lookup(entry[_IMPORT_KEY], "list entry")
+                if not isinstance(imported, list):
+                    raise ValueError(
+                        f"$import {entry[_IMPORT_KEY]!r} in list must resolve to a "
+                        f"list, got {type(imported).__name__}."
+                    )
+                resolved.extend(imported)
+            elif (
+                isinstance(entry, dict)
+                and isinstance(entry.get("cfg"), dict)
+                and _IMPORT_KEY in entry["cfg"]
+            ):
+                # cfg: {$import: name_or_list, ...inline} → import then override
+                #
+                # Precedence (lowest → highest):
+                #   1. Imports in list order (later imports override earlier)
+                #   2. Inline keys (override all imports)
+                ref = entry["cfg"].pop(_IMPORT_KEY)
+                inline_keys = dict(entry["cfg"])
+                ref_names = ref if isinstance(ref, list) else [ref]
+
+                merged: dict[str, Any] = {}
+                for name in ref_names:
+                    snippet = _lookup(name, f"cfg of {entry}")
+                    if not isinstance(snippet, dict):
+                        raise ValueError(
+                            f"$import {name!r} in cfg must resolve to a dict, "
+                            f"got {type(snippet).__name__}."
+                        )
+                    merged.update(snippet)
+
+                merged.update(inline_keys)
+                entry["cfg"] = merged
+                resolved.append(entry)
+            else:
+                resolved.append(entry)
+        return resolved
+
     # Resolve $import references in quant_cfg entries
     quantize = data.get("quantize")
     if isinstance(quantize, dict):
         quant_cfg = quantize.get("quant_cfg")
         if isinstance(quant_cfg, list):
-            resolved_cfg: list[Any] = []
-            for entry in quant_cfg:
-                if isinstance(entry, dict) and _IMPORT_KEY in entry:
-                    # {$import: name} → splice imported list into quant_cfg
-                    if len(entry) > 1:
-                        raise ValueError(
-                            f"$import must be the only key in the dict, got extra keys: "
-                            f"{sorted(k for k in entry if k != _IMPORT_KEY)}"
-                        )
-                    imported = _lookup(entry[_IMPORT_KEY], "quant_cfg entry")
-                    if not isinstance(imported, list):
-                        raise ValueError(
-                            f"$import {entry[_IMPORT_KEY]!r} in quant_cfg must resolve to a "
-                            f"list, got {type(imported).__name__}. Config snippets used as "
-                            f"quant_cfg entries must be YAML lists."
-                        )
-                    resolved_cfg.extend(imported)
-                elif (
-                    isinstance(entry, dict)
-                    and isinstance(entry.get("cfg"), dict)
-                    and _IMPORT_KEY in entry["cfg"]
-                ):
-                    # cfg: {$import: name_or_list, ...inline} → import then override
-                    #
-                    # Precedence (lowest → highest):
-                    #   1. Imports in list order (later imports override earlier)
-                    #   2. Inline keys (override all imports)
-                    ref = entry["cfg"].pop(_IMPORT_KEY)
-                    inline_keys = dict(entry["cfg"])  # remaining inline keys
-                    ref_names = ref if isinstance(ref, list) else [ref]
+            quantize["quant_cfg"] = _resolve_list(quant_cfg)
 
-                    merged: dict[str, Any] = {}
-                    for name in ref_names:
-                        snippet = _lookup(name, f"cfg of {entry}")
-                        if not isinstance(snippet, dict):
-                            raise ValueError(
-                                f"$import {name!r} in cfg must resolve to a dict, "
-                                f"got {type(snippet).__name__}."
-                            )
-                        merged.update(snippet)
-
-                    merged.update(inline_keys)
-                    entry["cfg"] = merged
-                    resolved_cfg.append(entry)
-                else:
-                    resolved_cfg.append(entry)
-            quantize["quant_cfg"] = resolved_cfg
+    # Resolve $import references in _list_content (multi-document snippets)
+    if "_list_content" in data:
+        data["_list_content"] = _resolve_list(data["_list_content"])
 
     return data
 

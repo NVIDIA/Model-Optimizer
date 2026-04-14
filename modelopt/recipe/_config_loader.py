@@ -103,9 +103,39 @@ def load_config(config_file: str | Path | Traversable) -> dict[str, Any] | list[
             f"Cannot find config file of {config_file}, paths checked: {paths_to_check}"
         )
 
-    _raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-    if _raw is None:
+    text = config_path.read_text(encoding="utf-8")
+    docs = list(yaml.safe_load_all(text))
+
+    if len(docs) == 0 or docs[0] is None:
         return {}
+    if len(docs) == 1:
+        _raw = docs[0]
+    elif len(docs) == 2:
+        # Multi-document: first doc is imports/metadata, second is content.
+        # Merge the imports into the content for downstream resolution.
+        header, content = docs[0], docs[1]
+        if not isinstance(header, dict):
+            raise ValueError(
+                f"Config file {config_path}: first YAML document must be a mapping, "
+                f"got {type(header).__name__}"
+            )
+        if content is None:
+            content = {}
+        if isinstance(content, dict):
+            _raw = {**header, **content}
+        elif isinstance(content, list):
+            # List content with a header dict — attach imports via wrapper
+            _raw = {**header, "_list_content": content}
+        else:
+            raise ValueError(
+                f"Config file {config_path}: second YAML document must be a mapping or list, "
+                f"got {type(content).__name__}"
+            )
+    else:
+        raise ValueError(
+            f"Config file {config_path}: expected 1 or 2 YAML documents, got {len(docs)}"
+        )
+
     if not isinstance(_raw, (dict, list)):
         raise ValueError(
             f"Config file {config_path} must contain a YAML mapping or list, got {type(_raw).__name__}"
