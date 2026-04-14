@@ -173,7 +173,16 @@ lists are authored once and referenced by name across recipes.
 
 The ``imports`` section is a dict mapping short names to config file paths.
 References use the explicit ``{$import: name}`` marker so they are never
-confused with literal values.  The marker can appear anywhere in the recipe:
+confused with literal values.
+
+.. note::
+
+   ``imports`` (no ``$``) is a **top-level structural section** — like
+   ``metadata`` or ``quantize``, it declares the recipe's dependencies.
+   ``$import`` (with ``$``) is an **inline directive** that appears inside
+   data values and gets resolved at load time.
+
+The ``$import`` marker can appear anywhere in the recipe:
 
 - As a **dict value** — the marker is replaced with the snippet content.
 - As a **list element** — the snippet (which must itself be a list) is spliced
@@ -250,6 +259,35 @@ section.  Each file's imports are scoped to that file — the same name can be
 used in different files without conflict.  Circular imports are detected and
 raise ``ValueError``.
 
+Multi-document snippets
+^^^^^^^^^^^^^^^^^^^^^^^
+
+Dict-valued snippets (e.g., numeric format definitions) can use ``imports``
+directly because the ``imports`` key and the snippet content are both part of
+the same YAML mapping.  List-valued snippets have a problem: YAML only allows
+one root node per document, so a file cannot be both a mapping (for
+``imports``) and a list (for entries) at the same time.
+
+The solution is **multi-document YAML**: the first document holds the
+``imports``, and the second document (after ``---``) holds the list content.
+The loader parses both documents, resolves ``$import`` markers in the content,
+and returns the resolved list:
+
+.. code-block:: yaml
+
+   # configs/ptq/fp8_kv.yaml — list snippet that imports a dict snippet
+   imports:
+     fp8: configs/numerics/fp8
+   ---
+   - quantizer_name: '*[kv]_bmm_quantizer'
+     cfg:
+       $import: fp8
+
+This enables full composability — list snippets can reference dict snippets,
+dict snippets can reference other dict snippets, and recipes can reference
+any of them.  All import resolution happens at load time with the same
+precedence rules.
+
 Built-in config snippets
 ^^^^^^^^^^^^^^^^^^^^^^^^
 
@@ -271,6 +309,8 @@ Reusable snippets are stored under ``modelopt_recipes/configs/``:
      - Disable all quantizers (deny-all-then-configure pattern)
    * - ``configs/ptq/default_disabled_quantizers``
      - Standard exclusions (LM head, routers, BatchNorm, etc.)
+   * - ``configs/ptq/fp8_kv``
+     - FP8 E4M3 KV cache quantization (multi-document, imports ``fp8``)
 
 
 Metadata section
