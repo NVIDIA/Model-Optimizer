@@ -20,6 +20,7 @@ GPU-dependent tests (training forward, module forward) are in tests/gpu/.
 
 import os
 from copy import deepcopy
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -414,8 +415,18 @@ class TestEnsureGenerationTags:
 
         return AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")
 
-    def test_chatml_think_template_produces_assistant_mask(self, qwen3_tokenizer):
-        """Qwen3 uses chatml_think style. Verify generation tags are injected and masks work."""
+    @pytest.fixture
+    def qwen3_chat_template(self):
+        template_path = (
+            Path(__file__).parents[5]
+            / "tools/launcher/examples/Qwen/Qwen3-8B/chat_template_train.jinja"
+        )
+        return template_path.read_text()
+
+    def test_chatml_think_template_produces_assistant_mask(
+        self, qwen3_tokenizer, qwen3_chat_template
+    ):
+        """Verify generation-tagged chat template produces correct assistant masks."""
         from modelopt.torch.utils.plugins.transformers_dataset import LanguageDataCollator
 
         collator = LanguageDataCollator(
@@ -423,6 +434,7 @@ class TestEnsureGenerationTags:
             train_len=128,
             return_labels=True,
             answer_only_loss=True,
+            chat_template=qwen3_chat_template,
         )
 
         # Verify template was replaced with generation-tagged version
@@ -451,7 +463,7 @@ class TestEnsureGenerationTags:
         decoded = qwen3_tokenizer.decode(non_masked)
         assert "The answer is 4." in decoded
 
-    def test_multi_turn_masks_only_assistant(self, qwen3_tokenizer):
+    def test_multi_turn_masks_only_assistant(self, qwen3_tokenizer, qwen3_chat_template):
         """Verify multi-turn: only assistant turns are unmasked."""
         from modelopt.torch.utils.plugins.transformers_dataset import LanguageDataCollator
 
@@ -460,6 +472,7 @@ class TestEnsureGenerationTags:
             train_len=256,
             return_labels=True,
             answer_only_loss=True,
+            chat_template=qwen3_chat_template,
         )
 
         messages = [
