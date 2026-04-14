@@ -218,9 +218,7 @@ def _postprocess_safetensors(
     model_type: str | None = None
     if merged_base_safetensor_path is not None:
         if pipe is None:
-            raise ValueError(
-                "`pipe` must be provided when `merged_base_safetensor_path` is set."
-            )
+            raise ValueError("`pipe` must be provided when `merged_base_safetensor_path` is set.")
         model_type = get_diffusion_model_type(pipe)
 
     for sf_path in safetensor_files:
