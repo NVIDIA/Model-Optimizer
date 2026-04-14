@@ -29,13 +29,22 @@ from pathlib import Path
 
 def main() -> int:
     """Rename .yml files to .yaml, exit 1 if any were renamed."""
-    renamed = []
+    renamed: list[tuple[Path, Path]] = []
+    collisions: list[tuple[Path, Path]] = []
     for f in sys.argv[1:]:
         path = Path(f)
         if path.suffix == ".yml" and path.is_file():
             new_path = path.with_suffix(".yaml")
+            if new_path.exists():
+                collisions.append((path, new_path))
+                continue
             os.rename(path, new_path)
             renamed.append((path, new_path))
+
+    if collisions:
+        for old, new in collisions:
+            print(f"ERROR: Cannot rename {old} -> {new} (destination already exists)")
+        return 1
 
     if renamed:
         for old, new in renamed:
