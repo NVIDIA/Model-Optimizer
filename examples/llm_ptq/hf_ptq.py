@@ -71,7 +71,6 @@ from modelopt.torch.speculative.eagle.utils import (
 )
 from modelopt.torch.utils.dataset_utils import (
     create_forward_loop,
-    get_calib_and_holdout_dataloaders,
     get_dataset_dataloader,
     get_max_batch_size,
     get_supported_datasets,
@@ -204,10 +203,9 @@ def make_calib_dataloader(
     tokenizer: PreTrainedTokenizerBase | None,
     device: torch.device,
     model_type: str | None,
-) -> tuple[DataLoader | _DeviceDataLoader, str | None, Path | None]:
+) -> tuple[DataLoader | _DeviceDataLoader, str | None]:
     calib_dataloader = None
     first_text_speech_dataset = None
-    holdout_path = None
     if args.specdec_offline_dataset is not None:
         offline_data_path = Path(args.specdec_offline_dataset)
         dumped_files = sorted(str(p) for p in offline_data_path.glob("*.pt"))
@@ -286,28 +284,15 @@ def make_calib_dataloader(
             args.auto_quantize_bits is not None and args.auto_quantize_method == "gradient"
         )
 
-        if args.holdout_size > 0:
-            calib_dataloader, holdout_path = get_calib_and_holdout_dataloaders(
-                dataset_name=args.dataset,
-                tokenizer=tokenizer,
-                batch_size=args.batch_size,
-                calib_size=args.calib_size,
-                holdout_size=args.holdout_size,
-                max_sample_length=args.calib_seq,
-                device=device,
-                include_labels=include_labels,
-                save_dir=args.calib_data_dir,
-            )
-        else:
-            calib_dataloader = get_dataset_dataloader(
-                dataset_name=args.dataset,
-                tokenizer=tokenizer,
-                batch_size=args.batch_size,
-                num_samples=args.calib_size,
-                device=device,
-                include_labels=include_labels,
-            )
-    return calib_dataloader, first_text_speech_dataset, holdout_path
+        calib_dataloader = get_dataset_dataloader(
+            dataset_name=args.dataset,
+            tokenizer=tokenizer,
+            batch_size=args.batch_size,
+            num_samples=args.calib_size,
+            device=device,
+            include_labels=include_labels,
+        )
+    return calib_dataloader, first_text_speech_dataset
 
 
 def auto_quantize(
@@ -1049,7 +1034,7 @@ def quantize_main(
 
     print(f"Use calib batch_size {args.batch_size}")
 
-    calib_dataloader, first_text_speech_dataset, holdout_path = make_calib_dataloader(
+    calib_dataloader, first_text_speech_dataset = make_calib_dataloader(
         args, language_model, processor, tokenizer, device, model_type
     )
 
@@ -1204,26 +1189,6 @@ def parse_args() -> argparse.Namespace:
         ),
         type=str,
         default="512",
-    )
-    parser.add_argument(
-        "--holdout_size",
-        help=(
-            "Number of holdout samples to save as a .pt file for evaluation. "
-            "Holdout samples are drawn from the same dataset immediately after "
-            "the calibration samples so there is no overlap. 0 disables holdout."
-        ),
-        type=int,
-        default=0,
-    )
-    parser.add_argument(
-        "--calib_data_dir",
-        help=(
-            "Directory to save/load calib.pt and holdout.pt. "
-            "If both files exist, data is reloaded from disk instead of re-downloading. "
-            "Defaults to --export_path if not specified."
-        ),
-        type=str,
-        default=None,
     )
     parser.add_argument(
         "--calib_seq",
