@@ -1089,10 +1089,11 @@ def find_nodes_from_matmul_to_exclude(
     calibration_eps: list[str] = ["cpu", "cuda:0", "trt"],
     calibration_shapes: str | dict | None = None,
 ) -> list[str]:
-    """Find MatMul nodes that meets gemv condition to exclude.
+    """Find MatMul nodes that meets gemv or small-gemm condition to exclude.
 
-    Either of m or n in matmul is 1, this matmul cannot utilize
-    TensorCores. The perf of adding Q/DQ layers is not good in
+    Either of m or n in matmul is 1 (GEMV), or K or N is smaller than
+    _MIN_MATMUL_DIM_INT8 (16), this matmul cannot efficiently utilize
+    INT8 TensorCores. The perf of adding Q/DQ layers is not good in
     TRT. Thus, in this case, do not add Q/DQ layers to this matmul.
 
     Args:
@@ -1143,6 +1144,7 @@ def find_nodes_from_matmul_to_exclude(
 
 
 _MIN_CHANNELS_FP8 = 16
+_MIN_MATMUL_DIM_INT8 = 16
 
 
 def find_nodes_from_convs_to_exclude(graph: Graph, quantize_mode: str = "int8"):
@@ -1212,8 +1214,7 @@ def find_nodes_from_convs_to_exclude(graph: Graph, quantize_mode: str = "int8"):
             if quantize_mode == "fp8" and filter_size > 32:
                 logger.debug(f"Found large filter conv for FP8: {node.name}")
                 unsupported_conv_nodes.append(node.name)
-                # skip the small-channel check below; already excluded
-                continue
+                continue  # skip the small-channel check below; already excluded
 
             # For FP8, exclude small-channel convolutions. These layers do not benefit from
             # FP8 quantization and cause perf regressions on GPUs where the FP8 conv kernels
@@ -1231,10 +1232,39 @@ def find_nodes_from_convs_to_exclude(graph: Graph, quantize_mode: str = "int8"):
     return unsupported_conv_nodes
 
 
+def _get_inp_b_k_dim(
+    matmul_node, value_info_map: dict | None = None, output_map: dict | None = None
+):
+    """Get the K dimension from the second input of a MatMul node.
+
+    Tries Constant shape first, then falls back to shape inference (value_info_map)
+    or runtime inference (output_map).
+
+    Returns:
+        The K dimension value, or None if it cannot be determined.
+    """
+    inp_b = matmul_node.inputs[1]
+    if hasattr(inp_b, "values") and inp_b.values is not None:
+        inp_b_shape = inp_b.values.shape
+        if len(inp_b_shape) >= 2:
+            return inp_b_shape[-2]
+    if value_info_map is not None:
+        inp_b_info = value_info_map.get(inp_b.name)
+        if inp_b_info:
+            inp_b_dims = inp_b_info.type.tensor_type.shape.dim
+            if len(inp_b_dims) >= 2:
+                return inp_b_dims[-2].dim_value
+    if output_map is not None and inp_b.name in output_map:
+        inp_b_out = output_map[inp_b.name]
+        if len(inp_b_out.shape) >= 2:
+            return inp_b_out.shape[-2]
+    return None
+
+
 def _exclude_matmuls_by_shape_inference(
     model: onnx.ModelProto, matmul_nodes: list, calibration_shapes: str | dict | None = None
 ) -> list[str]:
-    """Use shape inference to find MatMuls with dimension 1."""
+    """Use shape inference to find MatMuls with dimension 1 or small K/N."""
     # Prepare model for symbolic inference
     for graph_input in model.graph.input:
         for dim in graph_input.type.tensor_type.shape.dim:
@@ -1280,7 +1310,21 @@ def _exclude_matmuls_by_shape_inference(
 
             if dims[-1].dim_value == 1 or dims[-2].dim_value == 1:
                 nodes_to_exclude.append(matmul_node.name)
+                continue
         elif len(dims) < 3 and any(out.dim_value == 1 for out in dims):
+            nodes_to_exclude.append(matmul_node.name)
+            continue
+        # Small-gemm check: exclude if N or K < 16 (INT8 Tensor Cores need >= 16).
+        n_dim = dims[-1].dim_value if len(dims) >= 2 else 0
+        k_dim = _get_inp_b_k_dim(matmul_node, value_info_map=value_info_map)
+        small_n = 0 < n_dim < _MIN_MATMUL_DIM_INT8
+        small_k = k_dim is not None and 0 < k_dim < _MIN_MATMUL_DIM_INT8
+
+        if small_n or small_k:
+            logger.debug(
+                f"Excluding small-dim MatMul from INT8 quantization: {matmul_node.name} "
+                f"(N={n_dim}, K={k_dim}, threshold={_MIN_MATMUL_DIM_INT8})"
+            )
             nodes_to_exclude.append(matmul_node.name)
 
     return nodes_to_exclude
@@ -1295,10 +1339,13 @@ def _exclude_matmuls_by_inference(
     calibration_data_reader: CalibrationDataReader,
     calibration_eps: list[str],
 ) -> list[str]:
-    """Use actual inference to find MatMuls with dimension 1."""
-    # Add matmul outputs to model outputs
+    """Use actual inference to find MatMuls with dimension 1 or small K/N (INT8)."""
+    # Add matmul outputs and second-input outputs to model outputs
     for matmul_node in matmul_nodes:
         model.graph.output.extend([onnx.ValueInfoProto(name=matmul_node.outputs[0].name)])
+        # Also add second input for K-dimension check (only if it's a Variable, not a Constant)
+        if isinstance(matmul_node.inputs[1], Variable):
+            model.graph.output.extend([onnx.ValueInfoProto(name=matmul_node.inputs[1].name)])
 
     output_map = get_extended_model_outputs(
         onnx_path,
@@ -1319,7 +1366,22 @@ def _exclude_matmuls_by_inference(
                 or matmul_output.shape[-2] == 1
             ):
                 nodes_to_exclude.append(matmul_node.name)
+                continue
         elif len(matmul_output.shape) < 3 and any(out == 1 for out in matmul_output.shape):
+            nodes_to_exclude.append(matmul_node.name)
+            continue
+
+        # Small-gemm check: exclude if N or K < 16 (INT8 Tensor Cores need >= 16).
+        n_dim = matmul_output.shape[-1] if len(matmul_output.shape) >= 2 else 0
+        k_dim = _get_inp_b_k_dim(matmul_node, output_map=output_map)
+        small_n = 0 < n_dim < _MIN_MATMUL_DIM_INT8
+        small_k = k_dim is not None and 0 < k_dim < _MIN_MATMUL_DIM_INT8
+
+        if small_n or small_k:
+            logger.debug(
+                f"Excluding small-dim MatMul from INT8 quantization: {matmul_node.name} "
+                f"(N={n_dim}, K={k_dim}, threshold={_MIN_MATMUL_DIM_INT8})"
+            )
             nodes_to_exclude.append(matmul_node.name)
 
     return nodes_to_exclude
