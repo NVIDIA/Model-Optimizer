@@ -143,6 +143,7 @@ class LanguageDataCollator:
         self.shift_labels = shift_labels
         self.json_key = json_key
         self.return_labels = return_labels
+        self._conversations_warned = False
 
         if chat_template is not None:
             self.tokenizer.chat_template = chat_template
@@ -270,10 +271,18 @@ class LanguageDataCollator:
             if isinstance(text, str):
                 batch.append(text)
             else:
-                messages = example.get("messages", None) or example.get("conversations", None)
+                messages = example.get("messages", None)
+                if not messages and example.get("conversations", None):
+                    messages = example["conversations"]
+                    if not self._conversations_warned:
+                        print_rank_0(
+                            "=== DEPRECATION WARNING === 'conversations' field is deprecated. "
+                            "Use 'messages' (OpenAI format) instead."
+                        )
+                        self._conversations_warned = True
                 if not messages:
                     raise ValueError(
-                        "Sample must have a 'messages' or 'conversations' field "
+                        "Sample must have a 'messages' field in OpenAI format "
                         "(list of {role, content} dicts)."
                     )
                 if not any(m.get("role") == "assistant" for m in messages):
@@ -308,6 +317,7 @@ class VisionLanguageDataCollator(LanguageDataCollator):
         self.processor = transformers.AutoProcessor.from_pretrained(processor)
         self.chat_template = chat_template
         self.local_image_path = local_image_path
+        self._conversations_warned = False
 
         super().__init__(
             tokenizer=self.processor.tokenizer,
@@ -338,10 +348,18 @@ class VisionLanguageDataCollator(LanguageDataCollator):
         batch = []
 
         for example in examples:
-            messages = example.get("messages", None) or example.get("conversations", None)
+            messages = example.get("messages", None)
+            if not messages and example.get("conversations", None):
+                messages = example["conversations"]
+                if not self._conversations_warned:
+                    print_rank_0(
+                        "=== DEPRECATION WARNING === 'conversations' field is deprecated. "
+                        "Use 'messages' (OpenAI format) instead."
+                    )
+                    self._conversations_warned = True
             if messages is None:
                 raise ValueError(
-                    "Sample must have a 'messages' or 'conversations' field "
+                    "Sample must have a 'messages' field in OpenAI format "
                     "(list of {role, content} dicts)."
                 )
 
