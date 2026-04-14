@@ -144,8 +144,11 @@ def _fakequant_run_prolog_worker(self) -> None:
 
     mtq.fold_weight(model)
     for name, module in model.named_modules():
-        if is_weight_quantizer_state_key(name):
-            assert not module.is_enabled, f"quantizer {name} is still enabled"
+        if is_weight_quantizer_state_key(name) and module.is_enabled:
+            raise RuntimeError(
+                f"Weight quantizer {name!r} is still enabled after fold_weight — "
+                "double-quantization would corrupt activations."
+            )
 
 
 class FakeQuantWorker(BaseWorker):

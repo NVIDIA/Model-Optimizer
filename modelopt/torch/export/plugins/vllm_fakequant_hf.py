@@ -38,7 +38,6 @@ from ..quant_utils import get_quantization_format
 __all__ = [
     "export_hf_vllm_fq_checkpoint",
     "is_weight_quantizer_state_key",
-    "merge_amax_tensors_for_vllm_group",
 ]
 
 # Matches ``…weight_quantizer``, ``…weight_quantizer.0``, ``…w13_weight_quantizer.0``, etc.
@@ -51,33 +50,6 @@ def is_weight_quantizer_state_key(key: str) -> bool:
     Matches ``weight_quantizer``, ``w13_weight_quantizer``, ``weight_quantizer.0``, etc.
     """
     return bool(_WEIGHT_QUANTIZER_STATE_KEY.search(key))
-
-
-def merge_amax_tensors_for_vllm_group(tensors: list[torch.Tensor]) -> torch.Tensor:
-    """Combine `_amax` buffers from a merge group into a single tensor.
-
-    Used when HuggingFace module names are folded to vLLM names (e.g. q/k/v → qkv_proj).
-
-    - If every tensor has the same shape, take the element-wise maximum over the group
-      (conservative when each branch carried the same axis layout).
-    - If shapes differ (e.g. GQA q vs k), try ``torch.cat(..., dim=0)`` when valid for
-      per-channel amax; otherwise fall back to a scalar max over all elements.
-    """
-    if not tensors:
-        raise ValueError("merge_amax_tensors_for_vllm_group: expected at least one tensor")
-    if len(tensors) == 1:
-        return tensors[0]
-
-    first = tensors[0]
-    if all(t.shape == first.shape for t in tensors):
-        stacked = torch.stack([t.float() for t in tensors], dim=0)
-        return torch.amax(stacked, dim=0).to(dtype=first.dtype, device=first.device)
-
-    try:
-        return torch.cat(tensors, dim=0).to(dtype=first.dtype, device=first.device)
-    except RuntimeError:
-        flat = torch.cat([t.reshape(-1).float() for t in tensors])
-        return torch.max(flat).to(dtype=first.dtype, device=first.device)
 
 
 def disable_rotate(quantizer: TensorQuantizer):
