@@ -22,6 +22,8 @@ Usage:
     pytest -v -s -o addopts= tests/gpu/puzzletron/test_nemotron_h_gpu_validation.py
 """
 
+import copy
+
 import pytest
 
 import modelopt.torch.puzzletron.anymodel.models.nemotron_h_v2.nemotron_h_v2_model_descriptor  # noqa: F401
@@ -63,11 +65,13 @@ def test_ffn_variants_produce_distinct_params(nemotron_config, nemotron_descript
 
     param_counts = {}
     for size in sizes:
+        layer_config = copy.deepcopy(nemotron_config)
+        nemotron_descriptor.truncate_pattern_for_subblock(
+            nemotron_descriptor.get_language_model_config(layer_config), ffn_indices[0]
+        )
+
         params = calculate_subblock_params(
-            nemotron_config,
-            FFNConfig(intermediate_size=size),
-            nemotron_descriptor,
-            parent_layer_index=ffn_indices[0],
+            layer_config, FFNConfig(intermediate_size=size), nemotron_descriptor
         )
         param_counts[size] = params
         print(f"  intermediate_size={size:>8d} -> params={params:>12,}")

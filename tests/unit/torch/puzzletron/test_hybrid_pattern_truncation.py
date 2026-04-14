@@ -13,12 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for hybrid_override_pattern handling via ModelDescriptor.truncate_pattern_for_subblock.
+"""Tests for ModelDescriptor.truncate_pattern_for_subblock.
 
-Covers the base descriptor method that selects the correct pattern
-character when calculate_subblock_params builds a 1-layer model.
-End-to-end validation with the real model is in
-tests/gpu/puzzletron/test_nemotron_h_gpu_validation.py.
+Validates that the base descriptor method selects the correct pattern
+character when building a 1-layer model for per-subblock param counting.
 """
 
 from types import SimpleNamespace
@@ -31,62 +29,80 @@ from modelopt.torch.puzzletron.anymodel.model_descriptor import ModelDescriptor
 
 NEMOTRON_H_PATTERN = "M-M-M-M*-M-M-M-M-M*-M-M-M-M-M*-M-M-M-M-M*-M-M-M-M-M-"
 
-descriptor = ModelDescriptor
-
 
 def _make_config(pattern=NEMOTRON_H_PATTERN):
     return SimpleNamespace(hybrid_override_pattern=pattern)
 
 
 class TestTruncatePatternForSubblock:
-    """Test truncate_pattern_for_subblock with parent_layer_index lookups."""
+    """Test ModelDescriptor.truncate_pattern_for_subblock."""
 
-    def test_index_selects_mamba(self):
+    @pytest.mark.parametrize(
+        ("index", "expected"),
+        [
+            (0, "M"),
+            (1, "-"),
+            (7, "*"),
+        ],
+        ids=["mamba", "ffn", "attention"],
+    )
+    def test_index_selects_correct_layer_type(self, index, expected):
+        """Parent layer index selects the matching character from the pattern."""
         cfg = _make_config()
-        descriptor.truncate_pattern_for_subblock(cfg, parent_layer_index=0)
-        assert cfg.hybrid_override_pattern == "M"
 
-    def test_index_selects_ffn(self):
-        cfg = _make_config()
-        descriptor.truncate_pattern_for_subblock(cfg, parent_layer_index=1)
-        assert cfg.hybrid_override_pattern == "-"
+        ModelDescriptor.truncate_pattern_for_subblock(cfg, parent_layer_index=index)
 
-    def test_index_selects_attention(self):
-        cfg = _make_config()
-        descriptor.truncate_pattern_for_subblock(cfg, parent_layer_index=7)
-        assert cfg.hybrid_override_pattern == "*"
+        assert cfg.hybrid_override_pattern == expected
 
-    def test_pipe_separator_stripped(self):
-        """Pipe-delimited patterns are normalised before index lookup."""
+    @pytest.mark.parametrize(
+        ("index", "expected"),
+        [
+            (1, "-"),
+            (2, "*"),
+        ],
+        ids=["ffn_after_strip", "attention_after_strip"],
+    )
+    def test_pipe_separators_stripped_before_indexing(self, index, expected):
+        """Pipe-delimited patterns like 'M|-|*' are normalised to 'M-*' before lookup."""
         cfg = _make_config("M|-|*")
-        descriptor.truncate_pattern_for_subblock(cfg, parent_layer_index=1)
-        assert cfg.hybrid_override_pattern == "-"
 
-    def test_pipe_index_after_stripping(self):
-        """Index maps to the stripped pattern, not the raw string."""
-        cfg = _make_config("M|-|*")
-        descriptor.truncate_pattern_for_subblock(cfg, parent_layer_index=2)
-        assert cfg.hybrid_override_pattern == "*"
+        ModelDescriptor.truncate_pattern_for_subblock(cfg, parent_layer_index=index)
 
-    def test_no_index_falls_back_to_first_char(self):
-        """Without parent_layer_index the method falls back to pattern[0]."""
-        cfg = _make_config()
-        descriptor.truncate_pattern_for_subblock(cfg)
-        assert cfg.hybrid_override_pattern == "M"
+        assert cfg.hybrid_override_pattern == expected
 
-    def test_out_of_range_falls_back_to_first_char(self):
-        cfg = _make_config("M-*")
-        descriptor.truncate_pattern_for_subblock(cfg, parent_layer_index=999)
-        assert cfg.hybrid_override_pattern == "M"
-
-    def test_no_pattern_is_noop(self):
-        """Config without hybrid_override_pattern should be left unchanged."""
+    def test_missing_attribute_is_noop(self):
+        """Config without hybrid_override_pattern is left unchanged."""
         cfg = SimpleNamespace()
-        descriptor.truncate_pattern_for_subblock(cfg)
+
+        ModelDescriptor.truncate_pattern_for_subblock(cfg, parent_layer_index=0)
+
         assert not hasattr(cfg, "hybrid_override_pattern")
 
     def test_empty_pattern_is_noop(self):
-        """Empty pattern string should be left unchanged."""
+        """Empty pattern string is left unchanged."""
         cfg = _make_config("")
-        descriptor.truncate_pattern_for_subblock(cfg)
+
+        ModelDescriptor.truncate_pattern_for_subblock(cfg, parent_layer_index=0)
+
         assert cfg.hybrid_override_pattern == ""
+
+    def test_none_index_defaults_to_first_char(self):
+        """Without an explicit index, defaults to pattern[0]."""
+        cfg = _make_config("*-M")
+
+        ModelDescriptor.truncate_pattern_for_subblock(cfg)
+
+        assert cfg.hybrid_override_pattern == "*"
+
+    @pytest.mark.parametrize(
+        "index",
+        [999, -1],
+        ids=["above_range", "negative"],
+    )
+    def test_out_of_range_index_defaults_to_first_char(self, index):
+        """Out-of-range index defaults to pattern[0]."""
+        cfg = _make_config("*-M")
+
+        ModelDescriptor.truncate_pattern_for_subblock(cfg, parent_layer_index=index)
+
+        assert cfg.hybrid_override_pattern == "*"
