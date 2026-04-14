@@ -272,7 +272,7 @@ def build_slurm_executor(
         array=slurm_config.array,
         time=slurm_config.time,
         mem="0",
-        retries=getattr(slurm_config, "retries", 0),
+        retries=0,
         packager=packager,
         srun_args=slurm_config.srun_args,
     )
