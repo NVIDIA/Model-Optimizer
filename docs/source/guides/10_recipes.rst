@@ -54,14 +54,18 @@ A recipe contains two top-level sections: ``metadata`` and a type-specific
 configuration section (for example, ``quantize`` for PTQ recipes).  These can live
 in a single YAML file or be split across files in a directory.
 
+Recipes support two authoring styles: **inline** (all values written directly)
+and **import-based** (reusable snippets referenced via ``$import``).  Both
+styles can be used in a single-file or directory layout.
+
 Single-file format
 ------------------
 
-The simplest form is a single ``.yml`` or ``.yaml`` file.  Here is a PTQ example:
+The simplest form is a single ``.yml`` or ``.yaml`` file.
+
+**Inline style** — all config values are written directly:
 
 .. code-block:: yaml
-
-   # modelopt_recipes/general/ptq/fp8_default-fp8_kv.yml
 
    metadata:
      recipe_type: ptq
@@ -81,10 +85,41 @@ The simplest form is a single ``.yml`` or ``.yaml`` file.  Here is a PTQ example
            num_bits: e4m3
            axis:
        - quantizer_name: '*[kv]_bmm_quantizer'
-         enable: true
          cfg:
            num_bits: e4m3
        # ... standard exclusions omitted for brevity
+
+**Import style** — the same recipe using reusable config snippets:
+
+.. code-block:: yaml
+
+   imports:
+     base_disable_all: configs/ptq/base_disable_all
+     default_disabled: configs/ptq/default_disabled_quantizers
+     fp8: configs/numerics/fp8
+
+   metadata:
+     recipe_type: ptq
+     description: FP8 per-tensor weight and activation (W8A8), FP8 KV cache, max calibration.
+
+   quantize:
+     algorithm: max
+     quant_cfg:
+       - $import: base_disable_all
+       - quantizer_name: '*input_quantizer'
+         cfg:
+           $import: fp8
+       - quantizer_name: '*weight_quantizer'
+         cfg:
+           $import: fp8
+       - quantizer_name: '*[kv]_bmm_quantizer'
+         cfg:
+           $import: fp8
+       - $import: default_disabled
+
+Both styles produce identical results at load time.  The import style reduces
+duplication when multiple recipes share the same numeric formats or exclusion
+lists.  See :ref:`composable-imports` below for the full ``$import`` specification.
 
 Directory format
 ----------------
@@ -96,7 +131,7 @@ example:
 .. code-block:: text
 
    my_recipe/
-     recipe.yml      # metadata section
+     recipe.yml      # metadata section (+ optional imports)
      quantize.yml    # quantize section (quant_cfg + algorithm)
 
 ``recipe.yml``:
@@ -124,6 +159,10 @@ example:
          num_bits: e4m3
          axis:
 
+Both inline and import styles work with the directory format.  When using
+imports in a directory recipe, place the ``imports`` section in ``recipe.yml``.
+
+.. _composable-imports:
 
 Composable imports
 ------------------
