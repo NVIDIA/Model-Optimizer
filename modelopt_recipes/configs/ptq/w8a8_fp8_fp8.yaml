@@ -13,19 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# W8A8 FP8: FP8 E4M3 weight and activation quantizers.
 imports:
-  base_disable_all: configs/ptq/base_disable_all
-  default_disabled: configs/ptq/default_disabled_quantizers
-  w8a8_fp8_fp8: configs/ptq/w8a8_fp8_fp8
-  fp8_kv: configs/ptq/fp8_kv
-
-metadata:
-  recipe_type: ptq
-  description: FP8 per-tensor weight and activation (W8A8), FP8 KV cache, max calibration.
-quantize:
-  algorithm: max
-  quant_cfg:
-    - $import: base_disable_all
-    - $import: w8a8_fp8_fp8
-    - $import: fp8_kv
-    - $import: default_disabled
+  fp8: configs/numerics/fp8
+---
+  - quantizer_name: '*weight_quantizer'
+    cfg:
+      $import: fp8
+  - quantizer_name: '*input_quantizer'
+    cfg:
+      $import: fp8
