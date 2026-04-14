@@ -31,7 +31,7 @@ from vllm_reload_utils import (
 )
 
 import modelopt.torch.quantization as mtq
-from modelopt.torch.export.hf_vllm_quantizer_merge import is_weight_quantizer_state_key
+from modelopt.torch.export.plugins.vllm_fakequant_hf import is_weight_quantizer_state_key
 from modelopt.torch.quantization.plugins.vllm import (
     disable_compilation,
     post_restore_vllm_parallel_linears,

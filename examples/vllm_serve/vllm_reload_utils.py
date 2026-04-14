@@ -23,7 +23,7 @@ from typing import Any
 import torch
 from vllm.distributed.parallel_state import get_tp_group
 
-from modelopt.torch.export.hf_vllm_quantizer_merge import (
+from modelopt.torch.export.plugins.vllm_fakequant_hf import (
     is_weight_quantizer_state_key,
     merge_amax_tensors_for_vllm_group,
 )
