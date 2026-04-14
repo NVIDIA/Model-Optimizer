@@ -1,6 +1,6 @@
 # Deploying Unsupported Models
 
-When deploying a model not in the validated support matrix (`references/support-matrix.md`), expect failures. This guide covers the iterative debug loop for getting unsupported models running on vLLM, SGLang, or TRT-LLM.
+When deploying a model not in the validated support matrix (`support-matrix.md`), expect failures. This guide covers the iterative debug loop for getting unsupported models running on vLLM, SGLang, or TRT-LLM.
 
 ## Step 1 — Run and collect the error
 
@@ -33,6 +33,13 @@ sed -i 's/old_pattern/new_pattern/' "${FRAMEWORK_FILE}"
 ```
 
 > **Tip**: when locating framework source files inside containers, use `find` instead of Python import — some frameworks print log messages to stdout during import that can corrupt captured paths.
+
+### Speeding up debug iterations (vLLM)
+
+When iterating on fixes, use these flags to shorten the feedback loop:
+
+- **`--load-format dummy`** — skip loading actual model weights. Useful for testing whether the model initializes, config is parsed correctly, and weight keys match without waiting for the full checkpoint load.
+- **`VLLM_USE_PRECOMPILED=1 pip install --editable .`** — when patching vLLM source directly (instead of `sed`), this rebuilds only Python code without recompiling C++/CUDA extensions.
 
 ### Quantized/unquantized layer confusion
 
