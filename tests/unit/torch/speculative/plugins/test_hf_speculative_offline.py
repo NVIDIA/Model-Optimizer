@@ -54,7 +54,7 @@ _spec = importlib.util.spec_from_file_location("eagle_utils", _EAGLE_UTILS_PATH)
 assert _spec is not None and _spec.loader is not None
 _eagle_utils = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_eagle_utils)
-make_eagle_supervised_data_module = _eagle_utils.make_eagle_supervised_data_module
+make_speculative_data_module = _eagle_utils.make_speculative_data_module
 
 
 # ---------------------------------------------------------------------------
@@ -79,7 +79,7 @@ def test_sample_size_positive_truncates(tmp_path):
     """sample_size > 0 should truncate the dataset to that many samples."""
     data_args = _make_data_args(sample_size=3, tmp_path=tmp_path, n_files=5)
     tokenizer = MagicMock()
-    module = make_eagle_supervised_data_module(tokenizer, data_args, train_len=8)
+    module = make_speculative_data_module(tokenizer, data_args, train_len=8)
     assert len(module["train_dataset"]) == 3
 
 
@@ -87,7 +87,7 @@ def test_sample_size_minus_one_uses_all(tmp_path):
     """sample_size=-1 should use all samples."""
     data_args = _make_data_args(sample_size=-1, tmp_path=tmp_path, n_files=5)
     tokenizer = MagicMock()
-    module = make_eagle_supervised_data_module(tokenizer, data_args, train_len=8)
+    module = make_speculative_data_module(tokenizer, data_args, train_len=8)
     assert len(module["train_dataset"]) == 5
 
 
@@ -96,14 +96,14 @@ def test_sample_size_zero_raises(tmp_path):
     data_args = _make_data_args(sample_size=0, tmp_path=tmp_path, n_files=5)
     tokenizer = MagicMock()
     with pytest.raises(ValueError, match="sample_size must be -1"):
-        make_eagle_supervised_data_module(tokenizer, data_args, train_len=8)
+        make_speculative_data_module(tokenizer, data_args, train_len=8)
 
 
 def test_sample_size_larger_than_dataset_uses_all(tmp_path):
     """sample_size > number of files should use all samples without error."""
     data_args = _make_data_args(sample_size=100, tmp_path=tmp_path, n_files=5)
     tokenizer = MagicMock()
-    module = make_eagle_supervised_data_module(tokenizer, data_args, train_len=8)
+    module = make_speculative_data_module(tokenizer, data_args, train_len=8)
     assert len(module["train_dataset"]) == 5
 
 
@@ -118,7 +118,7 @@ def test_sample_size_no_pt_files_raises(tmp_path):
     )
     tokenizer = MagicMock()
     with pytest.raises(ValueError, match="No .pt files found"):
-        make_eagle_supervised_data_module(tokenizer, data_args, train_len=8)
+        make_speculative_data_module(tokenizer, data_args, train_len=8)
 
 
 # ---------------------------------------------------------------------------
