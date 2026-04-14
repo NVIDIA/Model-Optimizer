@@ -28,6 +28,7 @@ _MODELS = {
     "vit_tiny": ("vit_tiny_patch16_224", '{"depth": 1}'),
     "swin_tiny": ("swin_tiny_patch4_window7_224", '{"depths": [1, 1, 1, 1]}'),
     "swinv2_tiny": ("swinv2_tiny_window8_256", '{"depths": [1, 1, 1, 1]}'),
+    "resnet50": ("resnet50", None),
 }
 
 # Builder optimization level: 4 for low-bit modes, 3 otherwise

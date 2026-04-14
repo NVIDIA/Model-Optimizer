@@ -109,7 +109,8 @@ def filter_func(name):
     """Filter function to exclude certain layers from quantization."""
     pattern = re.compile(
         r".*(time_emb_proj|time_embedding|conv_in|conv_out|conv_shortcut|add_embedding|"
-        r"pos_embed|time_text_embed|context_embedder|norm_out|x_embedder|patch_embed|cpb_mlp|downsample).*"
+        r"pos_embed|time_text_embed|context_embedder|norm_out|x_embedder|patch_embed|cpb_mlp|"
+        r"downsample|maxpool|global_pool).*"
     )
     return pattern.match(name) is not None
 
@@ -147,6 +148,36 @@ def load_calibration_data(model_name, data_size, batch_size, device, with_labels
         )
 
 
+def _calibrate_uncalibrated_quantizers(model, data_loader):
+    """Calibrate FP8 quantizers that weren't calibrated by mtq.quantize().
+
+    When MXFP8/NVFP4 modes override Conv2d to FP8, the FP8 quantizers may not
+    be calibrated because the MXFP8/NVFP4 quantization pipeline skips standard
+    calibration. This function explicitly calibrates those uncalibrated quantizers.
+    """
+    uncalibrated = []
+    for _, module in model.named_modules():
+        for attr_name in ("input_quantizer", "weight_quantizer"):
+            if not hasattr(module, attr_name):
+                continue
+            quantizer = getattr(module, attr_name)
+            if quantizer.is_enabled and not quantizer.block_sizes and not hasattr(quantizer, "_amax"):
+                quantizer.enable_calib()
+                uncalibrated.append(quantizer)
+
+    if not uncalibrated:
+        return
+
+    model.eval()
+    with torch.no_grad():
+        for batch in data_loader:
+            model(batch)
+
+    for quantizer in uncalibrated:
+        quantizer.disable_calib()
+        quantizer.load_calib_amax()
+
+
 def quantize_model(model, config, data_loader=None):
     """Quantize the model using the given config and calibration data."""
     if data_loader is not None:
@@ -158,6 +189,10 @@ def quantize_model(model, config, data_loader=None):
         quantized_model = mtq.quantize(model, config, forward_loop=forward_loop)
     else:
         quantized_model = mtq.quantize(model, config)
+
+    # Calibrate any FP8 override quantizers that weren't calibrated by mtq.quantize()
+    if data_loader is not None:
+        _calibrate_uncalibrated_quantizers(quantized_model, data_loader)
 
     mtq.disable_quantizer(quantized_model, filter_func)
     return quantized_model
@@ -183,6 +218,38 @@ def _disable_inplace_relu(model):
     for module in model.modules():
         if isinstance(module, torch.nn.ReLU) and module.inplace:
             module.inplace = False
+
+
+def _override_conv2d_to_fp8(model, data_loader):
+    """Override Conv2d layers with NVFP4/MXFP8 block quantization to FP8.
+
+    TRT DynamicQuantize requires 2D/3D input, but Conv2d operates on 4D tensors.
+    This overrides Conv2d block quantizers to FP8 per-tensor and calibrates them.
+    """
+    overridden = []
+    for _, module in model.named_modules():
+        if not isinstance(module, torch.nn.Conv2d):
+            continue
+        for attr_name in ("input_quantizer", "weight_quantizer"):
+            if not hasattr(module, attr_name):
+                continue
+            quantizer = getattr(module, attr_name)
+            if quantizer.is_enabled and quantizer.block_sizes:
+                # Override to FP8 per-tensor
+                quantizer.block_sizes = None
+                quantizer._num_bits = (4, 3)
+                quantizer._axis = None
+                quantizer.enable_calib()
+                overridden.append(quantizer)
+
+    if overridden:
+        model.eval()
+        with torch.no_grad():
+            for batch in data_loader:
+                model(batch["image"])
+        for quantizer in overridden:
+            quantizer.disable_calib()
+            quantizer.load_calib_amax()
 
 
 def auto_quantize_model(
@@ -232,6 +299,10 @@ def auto_quantize_model(
         num_score_steps=num_score_steps,
         verbose=True,
     )
+
+    # Override Conv2d layers that got NVFP4/MXFP8 to FP8 for TRT compatibility.
+    # TRT DynamicQuantize requires 2D/3D input, but Conv2d operates on 4D tensors.
+    _override_conv2d_to_fp8(quantized_model, data_loader)
 
     # Disable quantization for specified layers
     mtq.disable_quantizer(quantized_model, filter_func)
@@ -378,18 +449,18 @@ def main():
             args.num_score_steps,
         )
     else:
-        # Standard quantization - only load calibration data if needed
+        # Standard quantization - load calibration data
+        # Note: MXFP8 is dynamic and does not need calibration itself, but when
+        # Conv2d layers are overridden to FP8 (for TRT compatibility), those FP8
+        # quantizers require calibration data.
         config = get_quant_config(args.quantize_mode)
-        if args.quantize_mode == "mxfp8":
-            data_loader = None
-        else:
-            data_loader = load_calibration_data(
-                args.timm_model_name,
-                args.calibration_data_size,
-                args.batch_size,
-                device,
-                with_labels=False,
-            )
+        data_loader = load_calibration_data(
+            args.timm_model_name,
+            args.calibration_data_size,
+            args.batch_size,
+            device,
+            with_labels=False,
+        )
 
         quantized_model = quantize_model(model, config, data_loader)
 
