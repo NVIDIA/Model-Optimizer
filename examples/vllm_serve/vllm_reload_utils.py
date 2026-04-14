@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
 import re
 import warnings
 from collections import defaultdict
@@ -22,7 +23,10 @@ from typing import Any
 import torch
 from vllm.distributed.parallel_state import get_tp_group
 
-from modelopt.torch.export.hf_vllm_quantizer_merge import merge_amax_tensors_for_vllm_group
+from modelopt.torch.export.hf_vllm_quantizer_merge import (
+    is_weight_quantizer_state_key,
+    merge_amax_tensors_for_vllm_group,
+)
 from modelopt.torch.opt.conversion import (
     ModelLikeModule,
     ModeloptStateManager,
@@ -244,8 +248,6 @@ def _infer_prefix_remap(
                 if new_first != first_component:
                     prefix_remap[first_component] = new_first
         except Exception as e:
-            import logging
-
             logging.getLogger(__name__).debug("prefix-remap probe failed for %r: %s", probe_key, e)
     return prefix_remap
 
@@ -396,7 +398,7 @@ def filter_modelopt_state_quantizer_state_for_model(
                 # (weights are already fake-quantized and pre_quant_scale is folded in).
                 # Keep them disabled on reload so fold_weight does not re-quantize the
                 # already-folded weights (re-quantizing distorts the pqs-scaled values).
-                if k.endswith("weight_quantizer") and not state.get("_disabled"):
+                if is_weight_quantizer_state_key(k) and not state.get("_disabled"):
                     state = {**state, "_disabled": True}
                 filtered[k] = state
             metadata["quantizer_state"] = filtered
@@ -544,16 +546,13 @@ def shard_pre_quant_scale_for_tp(model: Any) -> None:
         expected_shape = _pqs_local_expected_shape(pqs, expected_in)
         if expected_shape is None:
             continue
-        try:
-            quantizer._pre_quant_scale = _narrow_tensor_to_tp_local_shard(
-                pqs,
-                expected_shape,
-                tp_rank,
-                tp_world_size,
-                context=f"{qname}._pre_quant_scale",
-            )
-        except ValueError as e:
-            warnings.warn(str(e))
+        quantizer._pre_quant_scale = _narrow_tensor_to_tp_local_shard(
+            pqs,
+            expected_shape,
+            tp_rank,
+            tp_world_size,
+            context=f"{qname}._pre_quant_scale",
+        )
 
 
 def process_state_dict_for_tp(saved_qstate_dict, current_state_dict):

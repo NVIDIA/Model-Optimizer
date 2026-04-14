@@ -31,10 +31,12 @@ from vllm_reload_utils import (
 )
 
 import modelopt.torch.quantization as mtq
+from modelopt.torch.export.hf_vllm_quantizer_merge import is_weight_quantizer_state_key
 from modelopt.torch.quantization.plugins.vllm import (
     disable_compilation,
     post_restore_vllm_parallel_linears,
 )
+from modelopt.torch.utils import safe_load
 from modelopt.torch.utils.dataset_utils import get_dataset_dataloader
 
 quant_config: dict[str, Any] = {
@@ -63,14 +65,8 @@ def _fakequant_run_prolog_worker(self) -> None:
         model = model.unwrap()
     if quant_config["modelopt_state_path"]:
         print(f"Loading modelopt state from {quant_config['modelopt_state_path']}")
-        # map_location="cpu": load tensors on CPU so device ids in the file need not match this worker.
-        # weights_only=False: ``vllm_fq_modelopt_state.pth`` is a full ModelOpt pickle (metadata,
-        # nested dicts, dtypes, etc.); PyTorch's ``weights_only=True`` rejects that and only
-        # allows tensor-only checkpoints. Loading arbitrary pickles can execute stored code—use
-        # paths you trust (your own exports or verified checkpoints).
-        modelopt_state = torch.load(
-            quant_config["modelopt_state_path"], weights_only=False, map_location="cpu"
-        )
+        # Load on CPU to avoid failures when the checkpoint was saved from a different GPU mapping.
+        modelopt_state = safe_load(quant_config["modelopt_state_path"], map_location="cpu")
         modelopt_weights = modelopt_state.pop("modelopt_state_weights", None)
         map_fun = (
             self.model_runner.model.hf_to_vllm_mapper.apply_dict
@@ -148,7 +144,7 @@ def _fakequant_run_prolog_worker(self) -> None:
 
     mtq.fold_weight(model)
     for name, module in model.named_modules():
-        if name.endswith("weight_quantizer"):
+        if is_weight_quantizer_state_key(name):
             assert not module.is_enabled, f"quantizer {name} is still enabled"
 
 
