@@ -54,9 +54,9 @@ def load_recipe(recipe_path: str | Path | Traversable) -> ModelOptRecipeBase:
 
     ``recipe_path`` can be:
 
-    * A ``.yml`` / ``.yaml`` file with ``metadata`` and ``ptq_cfg`` sections.
+    * A ``.yml`` / ``.yaml`` file with ``metadata`` and ``quantize`` sections.
       The suffix may be omitted and will be probed automatically.
-    * A directory containing ``recipe.yml`` (metadata) and ``ptq_cfg.yml``.
+    * A directory containing ``recipe.yml`` (metadata) and ``quantize.yml``.
 
     The path may be relative to the built-in recipes library or an absolute /
     relative filesystem path.
@@ -94,18 +94,18 @@ def _load_recipe_from_file(recipe_file: Path | Traversable) -> ModelOptRecipeBas
         raise ValueError(f"Recipe file {recipe_file} must contain a 'metadata.recipe_type' field.")
 
     if recipe_type == RecipeType.PTQ:
-        if "ptq_cfg" not in data:
-            raise ValueError(f"PTQ recipe file {recipe_file} must contain 'ptq_cfg'.")
+        if "quantize" not in data:
+            raise ValueError(f"PTQ recipe file {recipe_file} must contain 'quantize'.")
         return ModelOptPTQRecipe(
             recipe_type=RecipeType.PTQ,
             description=metadata.get("description", "PTQ recipe."),
-            ptq_cfg=data["ptq_cfg"],
+            quantize=data["quantize"],
         )
     raise ValueError(f"Unsupported recipe type: {recipe_type!r}")
 
 
 def _load_recipe_from_dir(recipe_dir: Path | Traversable) -> ModelOptRecipeBase:
-    """Load a recipe from a directory containing ``recipe.yml`` and ``ptq_cfg.yml``."""
+    """Load a recipe from a directory containing ``recipe.yml`` and ``quantize.yml``."""
     recipe_file = None
     for name in ("recipe.yml", "recipe.yaml"):
         candidate = recipe_dir.joinpath(name)
@@ -123,19 +123,19 @@ def _load_recipe_from_dir(recipe_dir: Path | Traversable) -> ModelOptRecipeBase:
         raise ValueError(f"Recipe file {recipe_file} must contain a 'metadata.recipe_type' field.")
 
     if recipe_type == RecipeType.PTQ:
-        ptq_cfg_file = None
-        for name in ("ptq_cfg.yml", "ptq_cfg.yaml"):
+        quantize_file = None
+        for name in ("quantize.yml", "quantize.yaml"):
             candidate = recipe_dir.joinpath(name)
             if candidate.is_file():
-                ptq_cfg_file = candidate
+                quantize_file = candidate
                 break
-        if ptq_cfg_file is None:
+        if quantize_file is None:
             raise ValueError(
-                f"Cannot find ptq_cfg in {recipe_dir}. Looked for: ptq_cfg.yml, ptq_cfg.yaml"
+                f"Cannot find quantize in {recipe_dir}. Looked for: quantize.yml, quantize.yaml"
             )
         return ModelOptPTQRecipe(
             recipe_type=RecipeType.PTQ,
             description=metadata.get("description", "PTQ recipe."),
-            ptq_cfg=load_config(ptq_cfg_file),
+            quantize=load_config(quantize_file),
         )
     raise ValueError(f"Unsupported recipe type: {recipe_type!r}")

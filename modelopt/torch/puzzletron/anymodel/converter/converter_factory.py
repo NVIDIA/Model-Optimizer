@@ -17,7 +17,7 @@
 import inspect
 from typing import Callable, Type
 
-from modelopt.torch.puzzletron.anymodel.model_descriptor import ModelDescriptor
+from ..model_descriptor import ModelDescriptor
 
 __all__ = ["ConverterFactory"]
 

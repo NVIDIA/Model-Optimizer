@@ -105,6 +105,21 @@ def triton_attention_forward(
         kw["b_seq_len_k"] = torch.full((batch,), seq_k, device=device, dtype=torch.int32)
         kw["max_input_len_k"] = seq_k
 
+    # Sparse attention params
+    method = getattr(module, "_sparse_method_instance", None)
+
+    # N:M sparse softmax: prefill only (no perf benefit for decode)
+    if method is not None and not is_decode and getattr(module, "_apply_sparse_nm", False):
+        kw["sparsity_n"] = method.sparsity_n
+        kw["sparsity_m"] = method.sparsity_m
+        kw["num_sink_tokens"] = method.num_sink_tokens
+        kw["dense_window_size"] = method.dense_window_size
+
+    # Skip-softmax: applies to both prefill and decode
+    if method is not None and getattr(module, "_apply_skip_softmax", False):
+        if method.skip_softmax_threshold:
+            kw["skip_softmax_threshold"] = method.skip_softmax_threshold
+
     o = attention(q, k, v, **kw)
 
     attn_output = o.view(batch, seq_len, num_heads, head_dim)

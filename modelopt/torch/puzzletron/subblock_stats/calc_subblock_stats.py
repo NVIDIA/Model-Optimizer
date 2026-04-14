@@ -19,12 +19,11 @@
 import dataclasses
 import json
 import os
+import warnings
 from functools import partial
 from itertools import product
 from pathlib import Path
 from typing import Iterable, Optional, Type, TypeVar
-
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 import pandas as pd
 import torch
@@ -33,28 +32,27 @@ from omegaconf import DictConfig, ListConfig, OmegaConf
 from tqdm import tqdm
 from transformers import PretrainedConfig
 
-from modelopt.torch.puzzletron.anymodel.model_descriptor import (
-    ModelDescriptor,
-    ModelDescriptorFactory,
-)
-from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.block_config import (
-    AttentionConfig,
-    BlockConfig,
-    FFNConfig,
-    SubblockConfig,
-)
-from modelopt.torch.puzzletron.replacement_library.replacement_utils import parse_layer_replacement
-from modelopt.torch.puzzletron.subblock_stats.calc_subblock_params_and_memory import (
+from modelopt.torch.utils import json_dump
+
+from ..anymodel.model_descriptor import ModelDescriptor, ModelDescriptorFactory
+from ..block_config import AttentionConfig, BlockConfig, FFNConfig, SubblockConfig
+from ..replacement_library.replacement_utils import parse_layer_replacement
+from ..tools.checkpoint_utils import load_model_config
+from ..tools.logger import mprint
+from ..utils.parsing import format_global_config
+from .calc_subblock_params_and_memory import (
     calc_subblock_active_params,
     calculate_non_block_memory,
     calculate_non_block_params,
     calculate_subblock_memory,
     calculate_subblock_params,
 )
-from modelopt.torch.puzzletron.tools.checkpoint_utils import load_model_config
-from modelopt.torch.puzzletron.tools.logger import mprint
-from modelopt.torch.puzzletron.tools.robust_json import json_dump
-from modelopt.torch.puzzletron.utils.parsing import format_global_config
+
+__all__ = [
+    "calculate_subblock_stats",
+    "launch_calc_subblock_stats",
+    "add_int8_runtime_estimates",
+]
 
 # Type variable for dataclasses
 T_DataClass = TypeVar("T_DataClass")
@@ -118,6 +116,7 @@ def calculate_subblock_stats(
     }
     # Compute runtime stats for unique subblocks only
     if is_calc_runtime:
+        raise NotImplementedError("Runtime stats calculation is not implemented yet")
         subblock_configs_nolayerindex = set(
             [subblock_config["subblock_config"] for subblock_config in subblock_configs]
         )
@@ -203,7 +202,6 @@ def calculate_subblock_stats(
         )
 
     if is_calc_runtime:
-        pass
         # TODO: fix
         # from puzzle_tools.calc_subblock_runtime import measure_non_block_runtime_ms
         # non_block_runtime_ms, embedding_runtime_ms, lm_head_runtime_ms = \
@@ -315,7 +313,7 @@ def calculate_subblock_stats_for_puzzle_dir(
 
     moe_stats_file = master_puzzle_dir / moe_stats_filename
     if not moe_stats_file.exists():
-        Warning(
+        warnings.warn(
             f"MOE stats file {moe_stats_file} does not exist, can't calculate num active params"
         )
         moe_stats_file = None
@@ -412,7 +410,12 @@ def _load_subblock_configs_from_subblock_library(master_puzzle_dir: Path) -> lis
     )
     attention_configs = subblocks_df["attention_config"].dropna().drop_duplicates().tolist()
     ffn_configs = subblocks_df["ffn_config"].dropna().drop_duplicates().tolist()
-    subblock_configs = attention_configs + ffn_configs
+    # Wrap in the same dict format expected by calculate_subblock_stats() callers.
+    # Use parent_layer_indices=(-1,) to indicate no specific parent layer.
+    subblock_configs = [
+        immutabledict({"subblock_config": cfg, "parent_layer_indices": (-1,)})
+        for cfg in attention_configs + ffn_configs
+    ]
     return subblock_configs
 
 

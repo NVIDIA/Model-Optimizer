@@ -23,17 +23,8 @@ from typing import Dict, List, Tuple, Type
 import torch.nn as nn
 from transformers.models.gpt_oss.modeling_gpt_oss import GptOssDecoderLayer, GptOssRotaryEmbedding
 
-from modelopt.torch.puzzletron.anymodel.model_descriptor import (
-    ModelDescriptor,
-    ModelDescriptorFactory,
-)
-from modelopt.torch.puzzletron.anymodel.puzzformer.no_op import (
-    MatchingZeros,
-    Same,
-    return_tuple_of_size,
-)
-from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.block_config import BlockConfig
-from modelopt.torch.puzzletron.pruning.expert_removal_pruning_mixin import (
+from ....block_config import BlockConfig
+from ....pruning.expert_removal_pruning_mixin import (
     ExpertRemovalLayerDescriptor,
     ExpertRemovalPruningMixIn,
 )
@@ -41,8 +32,12 @@ from modelopt.torch.puzzletron.pruning.expert_removal_pruning_mixin import (
 # Expert removal is supported for unquantized models (test models).
 # Production models use MXFP4 quantized MoE with combined tensors
 # (gate_up_proj_blocks, down_proj_blocks), which is not yet supported.
-from modelopt.torch.puzzletron.pruning.pruning_mixin import PruningMixIn
-from modelopt.torch.puzzletron.utils.dummy_modules import DummyBlock
+from ....pruning.pruning_mixin import PruningMixIn
+from ....utils.dummy_modules import DummyBlock
+from ...model_descriptor import ModelDescriptor, ModelDescriptorFactory
+from ...puzzformer.no_op import MatchingZeros, Same, return_tuple_of_size
+
+__all__ = ["GptOssModelDescriptor", "GptOssExpertRemovalLayerDescriptor"]
 
 
 @ModelDescriptorFactory.register_decorator("gpt_oss")
@@ -54,8 +49,9 @@ class GptOssModelDescriptor(ModelDescriptor):
     @classmethod
     def create_dummy_block(cls, original_layer: GptOssDecoderLayer, block_index: int) -> nn.Module:
         dummy_block = DummyBlock(block_index=block_index)
-        # Required by `GptOssModel.forward`.
-        dummy_block.attention_type = original_layer.attention_type
+        # Required by `GptOssModel.forward` in transformers<5.4
+        if hasattr(original_layer, "attention_type"):
+            dummy_block.attention_type = original_layer.attention_type
         return dummy_block
 
     @staticmethod

@@ -22,35 +22,38 @@ Uses native HuggingFace models with deci_x_patcher for heterogeneous layer confi
 """
 
 import json
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Literal, Type, cast
+from typing import Literal
 
 import numpy as np
 import torch
 import torch.distributed
 import torch.nn as nn
 import transformers
-from huggingface_hub import split_torch_state_dict_into_shards
 from safetensors import safe_open
 from safetensors.torch import load_file as safe_load_file
 from safetensors.torch import save_file as safe_save_file
-from tqdm import tqdm
-from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig
+from transformers import AutoModelForCausalLM, PretrainedConfig
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME, SAFE_WEIGHTS_NAME
 from transformers.utils.hub import cached_file, get_checkpoint_shard_files
 
 import modelopt.torch.utils.distributed as dist
-from modelopt.torch.puzzletron.tools.checkpoint_utils import load_model_config, load_state_dict
-from modelopt.torch.puzzletron.tools.logger import mprint
-from modelopt.torch.puzzletron.utils.dummy_modules import (
-    DummyBlock,
-    DummyLMHead,
-    DummyModule,
-    DummyWTE,
-)
-from modelopt.torch.puzzletron.utils.utils import EmptyInitOnDevice
+
+from ..utils.dummy_modules import DummyLMHead, DummyWTE
+from ..utils.misc import EmptyInitOnDevice
+from .checkpoint_utils import load_model_config, load_state_dict
+from .checkpoint_utils_hf import _get_auto_class_for_trust_remote_code
+from .logger import mprint
+
+__all__ = [
+    "set_submodule",
+    "load_and_shard_model",
+    "create_sharded_model",
+    "load_sharded_state_dict",
+    "is_in_safetensors_format",
+]
 
 
 def set_submodule(model: nn.Module, module_name: str, new_submodule: nn.Module) -> None:
@@ -146,7 +149,7 @@ def load_and_shard_model(
         mprint("Initializing model shards")
         # Pass block_configs explicitly so patcher works for VL models where
         # decoder layers receive nested config (e.g., text_config) without block_configs
-        from modelopt.torch.puzzletron.anymodel.puzzformer import deci_x_patcher
+        from ..anymodel.puzzformer import deci_x_patcher
 
         with deci_x_patcher(
             model_descriptor=descriptor, block_configs=getattr(model_config, "block_configs", None)
@@ -172,8 +175,6 @@ def load_and_shard_model(
                 device=runtime.device,
             )
 
-            new_names = set(shard_state_dict.keys())
-            mprint(f"{new_names=}")
             # strict=False: allows missing lm_head.weight when tie_word_embeddings=True (e.g., Llama 3.2 3B)
             model_shard.load_state_dict(shard_state_dict, strict=False, assign=True)
 
@@ -239,10 +240,12 @@ def create_sharded_model(
     with EmptyInitOnDevice(device="meta", dtype=dtype):
         # Get model class from config.architectures (works for CausalLM, VL models, etc.)
         model_class = _get_model_class_from_config(model_config)
-        # AutoModelForCausalLM uses from_config(); concrete model classes use _from_config()
-        if model_class is AutoModelForCausalLM:
-            trust_remote_code = descriptor.requires_trust_remote_code()
-            model = model_class.from_config(model_config, trust_remote_code=trust_remote_code)
+        trust_remote_code = descriptor.requires_trust_remote_code()
+        if trust_remote_code:
+            auto_cls = _get_auto_class_for_trust_remote_code(model_config)
+            model = auto_cls.from_config(model_config, trust_remote_code=trust_remote_code)
+        elif model_class is AutoModelForCausalLM:
+            model = AutoModelForCausalLM.from_config(model_config)
         else:
             model = model_class._from_config(model_config)
         create_local_shard_(
@@ -264,10 +267,7 @@ def create_sharded_model(
 def load_state_dict_to_shards(
     model_shard: torch.nn.Module, loaded_state_dict: dict | None = None
 ) -> None:
-    from modelopt.torch.puzzletron.sewing_kit.utils import (
-        distributed_isend_obj,
-        distributed_recv_obj,
-    )
+    from ..sewing_kit.utils import distributed_isend_obj, distributed_recv_obj
 
     model_shard.to("meta")
     local_state_dict_keys = list(model_shard.state_dict().keys())

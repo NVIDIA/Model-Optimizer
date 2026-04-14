@@ -13,3 +13,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# NOTE: Some modules also trigger factory registration as side effect
+from . import (
+    activation_scoring,
+    anymodel,
+    block_config,
+    build_library_and_stats,
+    dataset,
+    entrypoint,
+    mip,
+    plugins,
+    pruning,
+    puzzletron_nas_plugin,
+    replacement_library,
+    scoring,
+    subblock_stats,
+    tools,
+    utils,
+)

@@ -14,91 +14,74 @@
 # limitations under the License.
 
 import os
-import shutil
 from pathlib import Path
 
 import torch
+from _test_utils.torch.transformers_models import get_tiny_tokenizer
 from datasets import Dataset, DatasetDict
-from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenizerBase
+from transformers import AutoConfig, AutoModelForCausalLM, PreTrainedTokenizerBase
 
+import modelopt.torch.puzzletron as mtpz
 import modelopt.torch.utils.distributed as dist
-from modelopt.torch.puzzletron.tools.hydra_utils import register_hydra_resolvers
+from modelopt.torch.export import copy_hf_ckpt_remote_code
 
 
 def setup_test_model_and_data(
-    project_root_path: Path,
-    tmp_path: Path,
-    rank: int,
-    hf_model_name: str,
-    hybrid_override_pattern: str | None = None,
+    tmp_path: Path, rank: int, hf_model_name: str, hybrid_override_pattern: str | None = None
 ) -> tuple[Path, Path, Path]:
     """
     Setup the test model and data for the puzzletron NAS search.
 
     Args:
-        project_root_path (Path): the root path of the project
-        tmp_path (Path): the temporary path to use for the test
-        rank (int): the rank of the process
-        hf_model_name (str): HuggingFace model card name (e.g., "meta-llama/Llama-3.1-8B-Instruct")
-        hybrid_override_pattern (str): For NemotronH models, the layer type pattern
+        tmp_path: the temporary path to use for the test
+        rank: the rank of the process
+        hf_model_name: HuggingFace model card name (e.g., "meta-llama/Llama-3.1-8B-Instruct")
+        hybrid_override_pattern: For NemotronH models, the layer type pattern
 
     Returns:
-        tuple[Path, Path, Path]:
-        the puzzle_dir, hf_checkpoint_path, dataset_path
+        tuple[Path, Path, Path]: the puzzle_dir, hf_checkpoint_path, dataset_path
     """
-
     # Register Hydra custom resolvers (needed for config resolution)
-    register_hydra_resolvers()
+    mtpz.tools.register_hydra_resolvers()
 
     puzzle_dir = tmp_path / hf_model_name
     hf_checkpoint_path = puzzle_dir / f"hf_models/{hf_model_name}"
     dataset_path = puzzle_dir / "dummy_dataset"
 
     if rank == 0:
-        # Setup puzzle_dir and dataset
-        setup_puzzle_dir(puzzle_dir)
         save_dummy_dataset(dataset_path)
 
         # Create a small HF model
-        tokenizer = create_tokenizer(project_root_path)
+        tokenizer = get_tiny_tokenizer()
         create_and_save_small_hf_model(
             output_path=str(hf_checkpoint_path),
-            vocab_size=tokenizer.vocab_size,
             tokenizer=tokenizer,
             hf_model_name=hf_model_name,
             hybrid_override_pattern=hybrid_override_pattern,
         )
     dist.barrier()
 
-    return (
-        puzzle_dir,
-        hf_checkpoint_path,
-        dataset_path,
-    )
+    return puzzle_dir, hf_checkpoint_path, dataset_path
 
 
 def create_and_save_small_hf_model(
     output_path: str,
-    vocab_size: int,
     tokenizer: PreTrainedTokenizerBase,
     hf_model_name: str,
     hybrid_override_pattern: str | None = None,
 ):
-    """
-    Create and save a small HuggingFace model for testing the conversion pipeline.
+    """Create and save a small HuggingFace model for testing the conversion pipeline.
+
     Uses real HuggingFace config to preserve model-specific settings (like tie_word_embeddings),
     but shrinks size parameters for fast testing.
 
     Args:
-        output_path: Where to save the model
-        vocab_size: Vocabulary size (should match tokenizer)
-        tokenizer: Tokenizer to save alongside the model
-        hf_model_name: HuggingFace model card name (e.g., "meta-llama/Llama-3.1-8B-Instruct")
-        hybrid_override_pattern: For NemotronH models, the layer type pattern (e.g., "*-" for Attention+MLP,
-                                 "M-" for Mamba+MLP). Must match num_hidden_layers. None for non-NemotronH models.
+        output_path: Where to save the model.
+        tokenizer: Tokenizer to save alongside the model.
+        hf_model_name: HuggingFace model card name (e.g., "meta-llama/Llama-3.1-8B-Instruct").
+        hybrid_override_pattern: For NemotronH models, the layer type pattern (e.g., "*-" for
+            Attention+MLP, "M-" for Mamba+MLP). Must match num_hidden_layers.
     """
-    os.makedirs(output_path, exist_ok=True)
-
     # Load real HuggingFace config (preserves tie_word_embeddings, rope_scaling, etc.)
     config = AutoConfig.from_pretrained(hf_model_name, trust_remote_code=True)
 
@@ -108,7 +91,7 @@ def create_and_save_small_hf_model(
 
     # VL models have nested configs (text_config, vision_config)
     if hasattr(config, "text_config") and hasattr(config, "vision_config"):
-        config.text_config.vocab_size = vocab_size
+        config.text_config.vocab_size = tokenizer.vocab_size
         config.text_config.hidden_size = 256
         config.text_config.intermediate_size = 512
         config.text_config.num_hidden_layers = 2
@@ -126,7 +109,7 @@ def create_and_save_small_hf_model(
         config.num_hidden_layers = config.text_config.num_hidden_layers
     else:
         # Regular models have flat config
-        config.vocab_size = vocab_size
+        config.vocab_size = tokenizer.vocab_size
         config.hidden_size = 256
         config.intermediate_size = 512
         config.num_hidden_layers = max(2, dist.size())
@@ -147,8 +130,16 @@ def create_and_save_small_hf_model(
             config.hybrid_override_pattern = hybrid_override_pattern
 
         # Ensure pad_token_id is within vocab_size (nn.Embedding requires padding_idx < num_embeddings)
-        if getattr(config, "pad_token_id", None) is not None and config.pad_token_id >= vocab_size:
+        if (
+            getattr(config, "pad_token_id", None) is not None
+            and config.pad_token_id >= tokenizer.vocab_size
+        ):
             config.pad_token_id = 0
+
+        # Ensure moe_latent_size is present: the native transformers NemotronH model (>=5.5)
+        # accesses config.moe_latent_size but older trust_remote_code configs don't define it.
+        if not hasattr(config, "moe_latent_size"):
+            config.moe_latent_size = None
 
     # Set seed for reproducible weight initialization
     torch.manual_seed(42)
@@ -171,7 +162,7 @@ def create_and_save_small_hf_model(
     model.initialize_weights()
 
     # Fix any remaining NaN/Inf values that initialize_weights() might have missed
-    for name, param in model.named_parameters():
+    for param in model.parameters():
         if torch.isnan(param).any() or torch.isinf(param).any():
             nan_inf_mask = torch.isnan(param) | torch.isinf(param)
             param.data = torch.where(nan_inf_mask, torch.zeros_like(param), param)
@@ -182,32 +173,27 @@ def create_and_save_small_hf_model(
     else:
         os.environ.pop("CUDA_VISIBLE_DEVICES", None)
 
-    model.to(dtype=torch.bfloat16).save_pretrained(output_path)
+    model.to(dtype=torch.bfloat16)
+    # save_original_format=False: skip transformers' revert_weight_conversion so weights are saved
+    # with in-memory key names (e.g. backbone.embeddings.weight) rather than the on-disk "original"
+    # format (e.g. backbone.embedding.weight for NemotronH). This avoids key mismatches in
+    # load_and_shard_model which looks up shard keys from model.named_parameters().
+    try:
+        model.save_pretrained(output_path, save_original_format=False)
+    except AttributeError:
+        # Workaround: some trust_remote_code models define _tied_weights_keys in an older
+        # format (returning a list) that is incompatible with transformers v5, which
+        # expects _get_tied_weight_keys to return a dict. Clear tied weight keys and retry.
+        for submodule in model.modules():
+            if getattr(submodule, "_tied_weights_keys", None) is not None:
+                submodule._tied_weights_keys = None
+        model.save_pretrained(output_path, save_original_format=False)
 
-    # Save tokenizer
+    # Save tokenizer, config, and custom code files
     tokenizer.save_pretrained(output_path)
-
-    # Save config
     config.save_pretrained(output_path)
-
-
-def create_tokenizer(project_root_path: Path) -> PreTrainedTokenizerBase:
-    """
-    Create a tokenizer for the model.
-    """
-    tokenizer_path = project_root_path / "tests/gpu/torch/puzzletron/resources/tokenizer"
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
-    return tokenizer
-
-
-def setup_puzzle_dir(puzzle_dir: str | Path):
-    """
-    Setup puzzle directory by removing existing directory and creating a new one.
-    """
-    puzzle_dir = Path(puzzle_dir)
-    if puzzle_dir.exists():
-        shutil.rmtree(puzzle_dir)
-    puzzle_dir.mkdir(parents=True, exist_ok=True)
+    if hasattr(config, "auto_map") and isinstance(config.auto_map, dict):
+        copy_hf_ckpt_remote_code(hf_model_name, output_path)
 
 
 def save_dummy_dataset(dataset_path: Path | str):

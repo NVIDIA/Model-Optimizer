@@ -96,7 +96,7 @@ Update pruning YAML files (`ffn_pruning.yaml`, `expert_pruning.yaml`, etc.):
 
 ## End-to-end example
 
-See [test_puzzletron.py](../../../../tests/gpu/torch/puzzletron/test_puzzletron.py) for a complete example that runs both convert and compression steps.
+See [test_puzzletron.py](../../../../tests/gpu/torch/puzzletron/test_puzzletron.py) for a complete example that runs both convert and compression steps. For container setup and dependencies needed to run this test, see the [Puzzletron README environment section](../../../../examples/puzzletron/README.md#environment).
 
 ---
 
@@ -165,7 +165,7 @@ activation_hooks_kwargs:
 
 ## Implementing `block_config_to_layer_overrides`
 
-Maps Puzzletron's [`BlockConfig`](../decilm/deci_lm_hf_code/block_config.py) fields to HuggingFace config attribute names. Only override attributes that change during pruning:
+Maps Puzzletron's [`BlockConfig`](../block_config.py) fields to HuggingFace config attribute names. Only override attributes that change during pruning:
 
 | BlockConfig Field | HuggingFace Attribute (check `config.json`) |
 |-------------------|---------------------------------------------|

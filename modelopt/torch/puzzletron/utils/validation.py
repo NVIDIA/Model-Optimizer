@@ -33,7 +33,17 @@ from tqdm import tqdm
 from transformers.generation.logits_process import TopKLogitsWarper, TopPLogitsWarper
 from typing_extensions import Self
 
-from modelopt.torch.puzzletron.tools import kd_model
+from ..tools import kd_model
+
+__all__ = [
+    "LowMemorySparseTensor",
+    "calculate_losses",
+    "calculate_batch_outputs",
+    "cosine_embedding_loss",
+    "normalized_mse_loss",
+    "mse_loss",
+    "kl_div",
+]
 
 
 class UnshardedLowMemorySparseTensor:
@@ -94,20 +104,22 @@ def calculate_losses(
     checkpoint_manager=None,
 ) -> tuple[dict[str, dict], None] | tuple[None, None]:
     """Do model forward on each batch and calculate LM loss.
-    Works on lit-llama models (single gpu) and huggingface models (can be multi gpu).
+
+    Works on lit-llama models (single GPU) and HuggingFace models (can be multi-GPU).
     Does not support data-parallel.
 
-    ### Anything related to probs and hidden states is not supported currently! ###
-    calculate_losses() isn't updated according to the major refactor in
-    calculate_losses_pipeline() regarding hidden states.
+    .. note::
+        Anything related to probs and hidden states is not supported currently.
 
     Returns:
-        outputs = {
-            "lm_loss": list[float],
-            "token_accuracy_top_1": list[float],
-            "token_accuracy_top_5": list[float],
-            "token_accuracy_top_10": list[float],
-        }
+        Tuple of ``(outputs, None)``.  ``outputs`` is a dict::
+
+            {
+                "lm_loss": [float, ...],
+                "token_accuracy_top_1": [float, ...],
+                "token_accuracy_top_5": [float, ...],
+                "token_accuracy_top_10": [float, ...],
+            }
     """
     if (target_probs is not None) or return_probs:
         raise NotImplementedError(

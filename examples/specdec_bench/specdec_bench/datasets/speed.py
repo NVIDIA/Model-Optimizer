@@ -716,7 +716,27 @@ her fear and anger)."""
                 }
             else:
                 data_files = {"test": [str(config_name_or_dataset_path_path)]}
-            dataset = load_dataset("parquet", data_files=data_files, split="test")
+            try:
+                dataset = load_dataset("parquet", data_files=data_files, split="test")
+            except (TypeError, ValueError):
+                # Fallback: parquet metadata may be incompatible with the installed
+                # ``datasets`` version.  Read via PyArrow and convert directly.
+                import pyarrow
+                import pyarrow.parquet as pq
+                from datasets import Dataset as HFDataset
+
+                tables = [pq.read_table(f) for f in data_files["test"]]
+                table = pyarrow.concat_tables(tables) if len(tables) > 1 else tables[0]
+                # Strip HF metadata from the schema to avoid Feature parsing errors
+                schema = table.schema
+                if schema.metadata and b"huggingface" in schema.metadata:
+                    new_meta = {
+                        k: v
+                        for k, v in schema.metadata.items()
+                        if k != b"huggingface"
+                    }
+                    table = table.replace_schema_metadata(new_meta or None)
+                dataset = HFDataset(table)
         if self.num_samples is not None:
             dataset = dataset.select(range(self.num_samples))
         return dataset

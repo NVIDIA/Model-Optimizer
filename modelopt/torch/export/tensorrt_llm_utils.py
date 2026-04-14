@@ -48,6 +48,7 @@ MODEL_NAME_TO_HF_ARCH_MAP = {
     "gemma": "GemmaForCausalLM",
     "gemma3": "Gemma3ForCausalLM",
     "gpt": "GPTForCausalLM",
+    "qwen": "QWenForCausalLM",
     "enc": "EncoderModel",
     "dec": "DecoderModel",
     "mllama": "MLLaMAModel",
@@ -240,7 +241,7 @@ def convert_to_tensorrt_llm_config(
     layernorm_type_map = {i.name: i.value for i in LayerNormType}
     layernorm_position_map = {i.name: i.value for i in LayerNormPositionType}
 
-    if decoder_type in ["gpt", "gemma", "llama"]:
+    if decoder_type in ["gpt", "gemma", "llama", "qwen"]:
         pass
     elif decoder_type == "mpt":
         config.update(

@@ -54,12 +54,20 @@ mto.enable_huggingface_checkpointing()
 
 CUSTOM_QUANT_CFG = {
     "INT4_WEIGHT_INT8_ACTIVATIONS": {
-        "quant_cfg": {
-            "*weight_quantizer": {"num_bits": 4, "block_sizes": {-1: 128}, "enable": True},
-            "*input_quantizer": {"num_bits": 8, "axis": None, "enable": True},
-            "*lm_head*": {"enable": False},
-            "default": {"enable": False},
-        },
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {
+                "quantizer_name": "*weight_quantizer",
+                "cfg": {"num_bits": 4, "block_sizes": {-1: 128}},
+                "enable": True,
+            },
+            {
+                "quantizer_name": "*input_quantizer",
+                "cfg": {"num_bits": 8, "axis": None},
+                "enable": True,
+            },
+            {"quantizer_name": "*lm_head*", "enable": False},
+        ],
         "algorithm": "max",
     }
 }
@@ -166,9 +174,7 @@ def train():
         print_rank_0(f"Last checkpoint detected: {last_checkpoint}")
 
     model = transformers.AutoModelForCausalLM.from_pretrained(
-        model_args.model_name_or_path,
-        cache_dir=training_args.cache_dir,
-        torch_dtype=torch.bfloat16,
+        model_args.model_name_or_path, cache_dir=training_args.cache_dir, dtype=torch.bfloat16
     )
     model.generation_config.do_sample = True
     tokenizer = transformers.AutoTokenizer.from_pretrained(
@@ -223,7 +229,7 @@ def train():
         teacher_model = transformers.AutoModelForCausalLM.from_pretrained(
             model_args.teacher_model,
             cache_dir=training_args.cache_dir,
-            torch_dtype=torch.bfloat16,
+            dtype=torch.bfloat16,
         )
         distill_config = {
             "teacher_model": teacher_model,

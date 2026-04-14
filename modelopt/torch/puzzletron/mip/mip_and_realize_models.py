@@ -22,11 +22,15 @@ import torch
 from omegaconf import DictConfig
 
 import modelopt.torch.utils.distributed as dist
-from modelopt.torch.puzzletron.mip.run_puzzle import run_puzzle
-from modelopt.torch.puzzletron.tools.logger import mprint
-from modelopt.torch.puzzletron.tools.validate_puzzle_with_multi_replacements import (
-    validate_puzzle_solutions,
-)
+
+from ..tools.logger import mprint
+from ..tools.validate_puzzle_with_multi_replacements import validate_puzzle_solutions
+from .run_puzzle import run_puzzle
+
+__all__ = [
+    "launch_realize_model",
+    "launch_mip_and_realize_model",
+]
 
 
 def launch_mip(cfg: DictConfig) -> list[str]:

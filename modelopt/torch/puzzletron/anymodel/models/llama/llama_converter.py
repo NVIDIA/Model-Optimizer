@@ -20,12 +20,10 @@ from typing import List
 
 from transformers import LlamaConfig
 
-from modelopt.torch.puzzletron.anymodel.converter import Converter, ConverterFactory
-from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.block_config import (
-    AttentionConfig,
-    BlockConfig,
-    FFNConfig,
-)
+from ....block_config import AttentionConfig, BlockConfig, FFNConfig
+from ...converter import Converter, ConverterFactory
+
+__all__ = ["LlamaConverter"]
 
 
 @ConverterFactory.register_decorator("llama")

@@ -44,6 +44,7 @@ scoring:
 
   eval_samples: 2
   micro_batch_size: 1
+  block_size: 512  # Toy model has max_position_embeddings=512; attention is O(batch*heads*seq^2)
   dataset_path: ${dataset_path}/valid
   seed: 42
   shuffle_seed: 444
@@ -97,6 +98,7 @@ realize_model:
   skip_validation: false # To enable validation of the model solution set `skip_validation` as False
   eval_samples: 2
   micro_batch_size: 1
+  block_size: 512  # Toy model has max_position_embeddings=512; attention is O(batch*heads*seq^2)
   dataset_path: ${dataset_path}/valid
   seed: 42
   shuffle_seed: 444

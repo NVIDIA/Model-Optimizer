@@ -137,7 +137,8 @@ class TestTinyLlama:
         sparse_model = sparse_attn.sparsify(model, config)
 
         # Create decode input (seq_len = 1)
-        input_ids = torch.randint(0, 32000, (1, 1), device="cuda")
+        vocab_size = model.config.vocab_size
+        input_ids = torch.randint(0, vocab_size, (1, 1), device="cuda")
 
         # Forward pass
         sparse_model.eval()
@@ -147,7 +148,7 @@ class TestTinyLlama:
         # Verify output
         assert outputs.logits is not None
         assert not torch.isnan(outputs.logits).any()
-        assert outputs.logits.shape == (1, 1, 32000)  # batch=1, seq=1, vocab_size
+        assert outputs.logits.shape == (1, 1, vocab_size)
 
     def test_gqa_attention(self, tinyllama_model):
         """Verify GQA support (num_kv_heads < num_heads)."""
@@ -176,7 +177,7 @@ class TestTinyLlama:
         sparse_model = sparse_attn.sparsify(model, sparse_config)
 
         # Test forward pass with GQA
-        input_ids = torch.randint(0, 32000, (1, 32), device="cuda")
+        input_ids = torch.randint(0, config.vocab_size, (1, 32), device="cuda")
 
         sparse_model.eval()
         with torch.no_grad():

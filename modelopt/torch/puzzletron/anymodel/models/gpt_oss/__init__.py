@@ -18,5 +18,5 @@
 
 """GPT-OSS model support for AnyModel."""
 
-from .gpt_oss_converter import GptOssConverter
-from .gpt_oss_model_descriptor import GptOssModelDescriptor
+from .gpt_oss_converter import *
+from .gpt_oss_model_descriptor import *

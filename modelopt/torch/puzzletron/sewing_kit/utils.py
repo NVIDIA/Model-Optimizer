@@ -16,15 +16,13 @@
 from __future__ import annotations
 
 import inspect
-from collections.abc import Sequence
 from contextlib import contextmanager
 from typing import (
+    TYPE_CHECKING,
     Any,
     Callable,
     ContextManager,
     Generic,
-    Iterable,
-    Literal,
     Optional,
     Protocol,
     TypeVar,
@@ -37,11 +35,31 @@ import torch._C
 import torch._dynamo
 import torch.distributed
 import torch.nn as nn
-import torch.nn.functional as F
 import torch.utils._pytree as pytree
 from torch import Tensor
 from torch._subclasses import FakeTensor, FakeTensorMode
 from typing_extensions import override
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+__all__ = [
+    "ActivityContext",
+    "ActivityContextDuplicateException",
+    "dynamo_skip",
+    "dynamo_disable",
+    "is_submodule_of",
+    "is_submodule_or_same",
+    "fake_mode",
+    "fake_tensor",
+    "fake_tensor_like",
+    "fake_tensors",
+    "real_tensors",
+    "has_fake_tensor",
+    "distributed_isend_obj",
+    "distributed_send_obj",
+    "distributed_recv_obj",
+]
 
 Fn = TypeVar("Fn", bound=Callable)
 
@@ -61,11 +79,11 @@ class DynamoDisable(Protocol):
 
 
 try:
-    dynamo_skip: DynamoSkip = cast(Any, torch._dynamo.decorators).skip
-    dynamo_disable: DynamoDisable = cast(Any, torch._dynamo.decorators).disable
+    dynamo_skip: DynamoSkip = cast("Any", torch._dynamo.decorators).skip
+    dynamo_disable: DynamoDisable = cast("Any", torch._dynamo.decorators).disable
 except:
-    dynamo_skip: DynamoSkip = cast(Any, torch._dynamo.eval_frame).skip
-    dynamo_disable: DynamoDisable = cast(Any, torch._dynamo.eval_frame).disable
+    dynamo_skip: DynamoSkip = cast("Any", torch._dynamo.eval_frame).skip
+    dynamo_disable: DynamoDisable = cast("Any", torch._dynamo.eval_frame).disable
 
 
 TModule = TypeVar("TModule", bound=nn.Module)
@@ -93,7 +111,6 @@ class ActivityContext(Generic[T]):
         self.max_depth = max_depth
         self.no_duplicates = no_duplicates
         self.reversed = reversed
-        self.head_index = 0 if self.reversed else -1
 
     def __contains__(self, value: T) -> bool:
         result = value in self.activity_stack
@@ -102,13 +119,18 @@ class ActivityContext(Generic[T]):
     def __call__(self, value: T) -> ContextManager:
         @contextmanager
         def fn():
+            inserted = False
             try:
                 if self.no_duplicates and value in self.activity_stack:
                     raise ActivityContextDuplicateException(
                         f"Activity stack cannot have a duplicate of item {value}"
                     )
 
-                self.activity_stack.insert(self.head_index, value)
+                if self.reversed:
+                    self.activity_stack.insert(0, value)
+                else:
+                    self.activity_stack.append(value)
+                inserted = True
 
                 if self.max_depth is not None and len(self) > self.max_depth:
                     raise ActivityContextMaxDepthException(
@@ -117,8 +139,9 @@ class ActivityContext(Generic[T]):
 
                 yield
             finally:
-                assert self.is_active()
-                self.activity_stack.pop(self.head_index)
+                if inserted:
+                    assert self.is_active()
+                    self.activity_stack.pop(0 if self.reversed else -1)
 
         return fn()
 
@@ -139,10 +162,9 @@ class ActivityContext(Generic[T]):
         return result
 
     def get_active(self) -> Optional[T]:
-        if self.is_active:
+        if self.is_active():
             return self.activity_stack[-1]
-        else:
-            return None
+        return None
 
 
 def is_submodule_of(module_name: str, other_module_name: str) -> bool:
@@ -264,7 +286,7 @@ class MyFakeTensor(Tensor):
             dispatch_device=True,
             device_for_backend_keys=device,
         )
-        return cast(MyFakeTensor, self)
+        return cast("MyFakeTensor", self)
 
     @classmethod
     @dynamo_disable
@@ -353,21 +375,21 @@ def has_fake_tensor(v: Any) -> bool:
 
 def _get_device_for_distributed(
     group: Optional[torch.distributed.ProcessGroup] = None,
-) -> str:
+) -> torch.device:
     """
     Determine the appropriate device for distributed communication based on the backend.
     NCCL backend requires CUDA tensors, while Gloo supports both CPU and CUDA.
     """
     if not torch.distributed.is_initialized():
-        return "cpu"
+        return torch.device("cpu")
 
     backend = torch.distributed.get_backend(group)
     if backend == "nccl":
         # NCCL requires CUDA tensors
-        return torch.cuda.current_device()
+        return torch.device("cuda", torch.cuda.current_device())
     else:
         # Gloo and other backends support CPU tensors
-        return "cpu"
+        return torch.device("cpu")
 
 
 def distributed_isend_obj(

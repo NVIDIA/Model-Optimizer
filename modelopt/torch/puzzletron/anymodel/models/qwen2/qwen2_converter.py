@@ -20,12 +20,10 @@ from typing import List
 
 from transformers import Qwen2Config
 
-from modelopt.torch.puzzletron.anymodel.converter import Converter, ConverterFactory
-from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.block_config import (
-    AttentionConfig,
-    BlockConfig,
-    FFNConfig,
-)
+from ....block_config import AttentionConfig, BlockConfig, FFNConfig
+from ...converter import Converter, ConverterFactory
+
+__all__ = ["Qwen2Converter"]
 
 
 @ConverterFactory.register_decorator("qwen2")
@@ -46,5 +44,5 @@ class Qwen2Converter(Converter):
             ffn=FFNConfig(no_op=False, intermediate_size=config.intermediate_size),
         ).to_dict()
 
-        block_configs = [block_config] * num_hidden_layers
+        block_configs = [block_config.copy() for _ in range(num_hidden_layers)]
         return block_configs

@@ -275,7 +275,7 @@ def main(args):
 
     processor = WhisperProcessor.from_pretrained(args.model_name, cache_dir=args.cache_dir)
 
-    asr_dataset = load_dataset("librispeech_asr", "clean", split="test", trust_remote_code=True)
+    asr_dataset = load_dataset("librispeech_asr", "clean", split="test")
     # asr_dataset = load_dataset("librispeech_asr", "all", split="test.clean")
 
     calib_data = None

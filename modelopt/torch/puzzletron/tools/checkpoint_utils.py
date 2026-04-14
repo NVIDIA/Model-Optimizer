@@ -28,21 +28,32 @@ from torch import nn
 from transformers import AutoTokenizer
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME, SAFE_WEIGHTS_NAME
 
-from modelopt.torch.puzzletron.tools.checkpoint_utils_hf import load_model_config
-from modelopt.torch.puzzletron.tools.common import infer_weights_dtype
+from .checkpoint_utils_hf import load_model_config
+from .common import infer_weights_dtype
+
+__all__ = [
+    "SAFETENSORS_SUBBLOCKS_DIR_NAME",
+    "PTH_SUBBLOCKS_DIR_NAME",
+    "STATE_DICT_FILE_NAME",
+    "load_state_dict",
+    "load_model_config",
+    "init_module_with_state_dict",
+    "init_empty_module",
+    "skip_init",
+    "is_valid_decilm_checkpoint",
+    "copy_tokenizer",
+]
 
 SAFETENSORS_SUBBLOCKS_DIR_NAME = "subblocks_safetensors"
 PTH_SUBBLOCKS_DIR_NAME = "subblocks"
 STATE_DICT_FILE_NAME = "model.pth"
-
-warnings.filterwarnings("ignore", "You are using `torch.load` with `weights_only=False`*.")
 
 
 def load_state_dict(checkpoint_dir: Path | str) -> dict[str, torch.Tensor]:
     checkpoint_dir = _normalize_checkpoint_dir(checkpoint_dir)
 
     if (state_dict_path := checkpoint_dir / STATE_DICT_FILE_NAME).exists():
-        return torch.load(state_dict_path, map_location="cpu", weights_only=False)
+        return torch.load(state_dict_path, map_location="cpu", weights_only=True)
 
     if (safetensors_subblocks_dir := checkpoint_dir / SAFETENSORS_SUBBLOCKS_DIR_NAME).exists():
         return _load_state_dict_from_subblocks(safetensors_subblocks_dir)
@@ -53,7 +64,7 @@ def load_state_dict(checkpoint_dir: Path | str) -> dict[str, torch.Tensor]:
     if (checkpoint_dir / SAFE_WEIGHTS_INDEX_NAME).exists() or (
         checkpoint_dir / SAFE_WEIGHTS_NAME
     ).exists():
-        from modelopt.torch.puzzletron.tools.sharded_checkpoint_utils import (
+        from .sharded_checkpoint_utils import (
             load_sharded_state_dict,  # local import to avoid circular import
         )
 
@@ -76,7 +87,7 @@ def _load_state_dict_from_subblocks(subblocks_dir: Path) -> dict[str, torch.Tens
     safetensors_paths = list(subblocks_dir.glob("*.safetensors"))
 
     if len(torch_paths) != 0:
-        load_fn = partial(torch.load, map_location="cpu", weights_only=False)
+        load_fn = partial(torch.load, map_location="cpu", weights_only=True)
         file_paths = torch_paths
     elif len(safetensors_paths) != 0:
         load_fn = safe_load_file
@@ -115,8 +126,10 @@ def init_empty_module(
     default_dtype = torch.get_default_dtype()
     current_device = torch.ones(1).device
     torch.set_default_dtype(dtype)
-    module = skip_init(module_cls, *init_args, device=current_device, **init_kwargs)
-    torch.set_default_dtype(default_dtype)
+    try:
+        module = skip_init(module_cls, *init_args, device=current_device, **init_kwargs)
+    finally:
+        torch.set_default_dtype(default_dtype)
     return module
 
 
@@ -147,7 +160,7 @@ def is_valid_decilm_checkpoint(checkpoint_dir: Path | str, trust_remote_code: bo
     """
     try:
         model_config = load_model_config(checkpoint_dir, trust_remote_code=trust_remote_code)
-        if model_config.block_configs is None:
+        if not hasattr(model_config, "block_configs") or model_config.block_configs is None:
             warnings.warn(
                 f"Skipping checkpoint '{checkpoint_dir}' - missing block_configs (not an AnyModel-style layout)"
             )
@@ -162,6 +175,7 @@ def copy_tokenizer(
     source_dir_or_tokenizer_name: Path | str,
     target_dir: Path | str,
     on_failure: Literal["raise", "warn"] = "raise",
+    trust_remote_code: bool = False,
 ) -> None:
     """Prefer loading the tokenizer from huggingface hub (when tokenizer_name.txt file is available)
     to avoid collision between transformers versions.
@@ -173,7 +187,7 @@ def copy_tokenizer(
     tokenizer = None
     try:
         tokenizer = AutoTokenizer.from_pretrained(
-            source_dir_or_tokenizer_name, trust_remote_code=True
+            source_dir_or_tokenizer_name, trust_remote_code=trust_remote_code
         )
     except Exception:
         message = f"Couldn't load tokenizer from '{source_dir_or_tokenizer_name}'"

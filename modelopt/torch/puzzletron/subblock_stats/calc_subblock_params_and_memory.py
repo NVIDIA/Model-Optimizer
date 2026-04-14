@@ -31,21 +31,34 @@ import numpy as np
 import torch
 from transformers import PretrainedConfig
 
-from modelopt.torch.puzzletron.anymodel.model_descriptor import ModelDescriptor
-from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.block_config import (
+from ..anymodel.model_descriptor import ModelDescriptor
+from ..block_config import (
     AttentionConfig,
     BlockConfig,
     FFNConfig,
     MambaConfig,
     maybe_cast_block_configs,
 )
-from modelopt.torch.puzzletron.tools.checkpoint_utils_hf import init_model_from_config
-from modelopt.torch.puzzletron.utils.utils import (
+from ..tools.checkpoint_utils_hf import init_model_from_config
+from ..utils.misc import (
     EmptyInitOnDevice,
     calculate_kv_dim,
     raise_unknown_subblock_config_error,
     sizeof_dtype,
 )
+
+__all__ = [
+    "calculate_subblock_memory",
+    "calculate_subblock_params",
+    "calc_subblock_active_params",
+    "load_moe_stats",
+    "estimate_num_active_experts",
+    "calculate_mamba_memory",
+    "calculate_mamba_state_size",
+    "calculate_ffn_memory",
+    "calculate_non_block_memory",
+    "calculate_non_block_params",
+]
 
 
 def calculate_subblock_memory(

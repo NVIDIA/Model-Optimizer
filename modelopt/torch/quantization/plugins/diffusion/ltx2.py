@@ -16,6 +16,7 @@
 """LTX-2 quantization plugin."""
 
 import contextlib
+import warnings
 
 import torch
 
@@ -36,6 +37,18 @@ def _upcast_fp8_weight(
     if target_dtype is torch.bfloat16:
         try:
             from ltx_core.loader.fuse_loras import fused_add_round_launch
+
+            warnings.warn(
+                "LTX-2 packages (ltx-core, ltx-pipelines, ltx-trainer) are provided by Lightricks "
+                "and are NOT covered by the Apache 2.0 license governing NVIDIA Model Optimizer. "
+                "You MUST comply with the LTX Community License Agreement when installing and using "
+                "LTX-2 with NVIDIA Model Optimizer. Any derivative models or fine-tuned weights from "
+                "LTX-2 (including quantized or distilled checkpoints) remain subject to the LTX "
+                "Community License Agreement, not Apache 2.0. "
+                "See: https://github.com/Lightricks/LTX-2/blob/main/LICENSE",
+                UserWarning,
+                stacklevel=2,
+            )
 
             return fused_add_round_launch(
                 torch.zeros_like(weight, dtype=target_dtype),

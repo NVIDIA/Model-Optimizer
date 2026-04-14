@@ -13,9 +13,5 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_converter import (
-    MistralSmallConverter,
-)
-from modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_model_descriptor import (
-    MistralSmallModelDescriptor,
-)
+from .mistral_small_converter import *
+from .mistral_small_model_descriptor import *

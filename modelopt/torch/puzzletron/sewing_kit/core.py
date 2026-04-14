@@ -46,6 +46,22 @@ from .passage import (
 )
 from .utils import distributed_isend_obj, distributed_recv_obj, dynamo_skip
 
+__all__ = [
+    "ExternalTarget",
+    "FunctionTarget",
+    "ModuleTarget",
+    "RemoteTarget",
+    "Needle",
+    "StitchedModule",
+    "CantResolveNodeDependenciesException",
+    "OutputsLoopFoundException",
+    "KnotException",
+    "MultipleExternalNodesException",
+    "OnlyInternalNodesException",
+    "InputReducer",
+]
+
+
 InputAdapter = Callable[[InputArgs], InputArgs]
 OutputAdapter = Callable[..., OutputValue]
 
@@ -661,14 +677,15 @@ class StitchedModule(nn.Module):
 
                         works: list[Optional[torch.distributed.Work]] = []
                         for peer in peers:
-                            if process_group is not None:
-                                peer = torch.distributed.get_global_rank(process_group, peer)
-
-                            peer_works = distributed_isend_obj(data_descriptors, dst=peer)
+                            peer_works = distributed_isend_obj(
+                                data_descriptors, dst=peer, group=process_group
+                            )
                             works.extend(peer_works)
 
                             for tensor in tensors_to_send:
-                                work = torch.distributed.isend(tensor, dst=peer)
+                                work = torch.distributed.isend(
+                                    tensor, dst=peer, group=process_group
+                                )
                                 works.append(work)
 
                         if node.target.blocking:
@@ -676,18 +693,13 @@ class StitchedModule(nn.Module):
                                 if work is not None:
                                     work.wait()
 
-                        pass
-
                     if len(node.stitches_from) > 0:
                         assert len(peers) == 1, (
                             f"Cannot use multiple peers when using RemoteTarget as a source ({peers=})"
                         )
                         (peer,) = peers
 
-                        if process_group is not None:
-                            peer = torch.distributed.get_global_rank(process_group, peer)
-
-                        data_descriptors = distributed_recv_obj(src=peer)
+                        data_descriptors = distributed_recv_obj(src=peer, group=process_group)
                         assert isinstance(data_descriptors, list)
 
                         tensors_to_recv: list[torch.Tensor] = []
@@ -710,7 +722,7 @@ class StitchedModule(nn.Module):
 
                         works: list[Optional[torch.distributed.Work]] = []
                         for tensor in tensors_to_recv:
-                            work = torch.distributed.irecv(tensor, src=peer)
+                            work = torch.distributed.irecv(tensor, src=peer, group=process_group)
                             works.append(work)
 
                         for work in works:

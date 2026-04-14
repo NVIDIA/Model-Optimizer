@@ -30,6 +30,16 @@ from typing import Any
 import torch
 from omegaconf import DictConfig
 
+__all__ = [
+    "handle_arg_string",
+    "simple_parse_args_string",
+    "parse_json",
+    "parse_path",
+    "get_nested_key",
+    "format_global_config",
+    "format_stitched_losses",
+]
+
 
 def handle_arg_string(arg):
     if arg.lower() == "true":
@@ -45,11 +55,7 @@ def handle_arg_string(arg):
 
 
 def simple_parse_args_string(args_string):
-    """
-    Parses something like
-        args1=val1,arg2=val2
-    Into a dictionary
-    """
+    """Parse ``args1=val1,arg2=val2`` into a dictionary."""
     if args_string is None:
         return {}
     args_string = args_string.strip()

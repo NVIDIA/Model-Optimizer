@@ -172,14 +172,20 @@ class _QuantAttention(QuantModule):
         The forward method is used to patch the attention interface with _quantized_attention.
         Once output tensors are generated, it restores the original attention interface.
         """
+        # In transformers>=5.0 some attention classes (e.g. BertAttention) no longer store
+        # `self.config` directly; fall back to searching child modules for a config attribute.
+        _config = getattr(self, "config", None)
+        if _config is None:
+            _config = next(
+                (getattr(m, "config", None) for m in self.children() if hasattr(m, "config")),
+                None,
+            )
+        _attn_impl = getattr(_config, "_attn_implementation", None) if _config is not None else None
 
         def _is_eager_attention():
-            if self.config._attn_implementation == "eager":
+            if _attn_impl is None or _attn_impl == "eager":
                 return True
-            return bool(
-                self.config._attn_implementation == "sdpa"
-                and kwargs.get("output_attentions", False)
-            )
+            return bool(_attn_impl == "sdpa" and kwargs.get("output_attentions", False))
 
         # Get the original transformers module before wrapped in any ModelOpt DynamicModule
         module: ModuleType = inspect.getmodule(self.get_attn_type(self))
@@ -188,7 +194,7 @@ class _QuantAttention(QuantModule):
         original_attention_interface = (
             module.eager_attention_forward
             if _is_eager_attention()
-            else module.ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
+            else module.ALL_ATTENTION_FUNCTIONS[_attn_impl]
         )
         patch_fn = partial(self._quantized_attention, original_attention_interface)
 
@@ -201,7 +207,7 @@ class _QuantAttention(QuantModule):
                 )
             module.eager_attention_forward = patch_fn  # type: ignore[attr-defined]
         else:
-            module.ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation] = patch_fn
+            module.ALL_ATTENTION_FUNCTIONS[_attn_impl] = patch_fn
 
         try:
             outputs = super().forward(*args, **kwargs)
@@ -210,9 +216,7 @@ class _QuantAttention(QuantModule):
             if _is_eager_attention():
                 module.eager_attention_forward = original_attention_interface  # type: ignore[attr-defined]
             else:
-                module.ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation] = (
-                    original_attention_interface
-                )
+                module.ALL_ATTENTION_FUNCTIONS[_attn_impl] = original_attention_interface
 
         return outputs
 
@@ -333,10 +337,14 @@ class HFParallelLinear(torch.nn.Linear, DynamicModule):
     shard = None
 
     def _setup(self):
-        assert self.weight.placements == self.shard, (
-            f"Received unexpected shard {self.weight.placements} for {self}"
-        )
-        tp_group = self.weight.device_mesh.get_group()
+        if isinstance(self.weight, torch.distributed.tensor.DTensor):  # transformers<5.0
+            assert self.weight.placements == self.shard, (
+                f"Received unexpected shard {self.weight.placements} for {self}"
+            )
+            device_mesh = self.weight.device_mesh
+        else:  # transformers>=5.0: weights are plain Parameters, mesh is on the module
+            device_mesh = self._hf_device_mesh
+        tp_group = device_mesh.get_group()
         self._parallel_state = ParallelState(data_parallel_group=-1, tensor_parallel_group=tp_group)
 
     @classmethod
@@ -371,14 +379,17 @@ class _QuantHFParallelLinear(_ParallelLinear):
 
     @contextmanager
     def enable_weight_access_and_writeback(self):
-        assert self.weight.placements == self.shard, (
-            f"Received unexpected shard {self.weight.placements} for {self}"
-        )
-        weight = self.weight
-        # TODO: To support TP + FSDP, we need to redistribute the tensor with replicate instead of shard
-        self.weight = nn.Parameter(weight.to_local())
-        yield
-        self.weight = weight
+        if isinstance(self.weight, torch.distributed.tensor.DTensor):  # transformers<5.0
+            assert self.weight.placements == self.shard, (
+                f"Received unexpected shard {self.weight.placements} for {self}"
+            )
+            weight = self.weight
+            # TODO: To support TP + FSDP, we need to redistribute the tensor with replicate instead of shard
+            self.weight = nn.Parameter(weight.to_local())
+            yield
+            self.weight = weight
+        else:  # transformers>=5.0: weights are already plain Parameters
+            yield
 
 
 @QuantModuleRegistry.register({HFColumnParallelLinear: "HFColumnParallelLinear"})
@@ -441,8 +452,11 @@ class _TransposedQuantization(torch.autograd.Function):
 _transposed_quantize = _TransposedQuantization.apply
 
 
-class _QuantSparseMoe(QuantModule):
+class _QuantSparseSequentialMoe(QuantModule):
     """Quantization wrapper for HuggingFace sparse MoE blocks.
+
+    This base class is for Sequential MoEs (i.e each experts are implemented as standalone modules).
+    Transformers>=5.0 has batched experts, no per-expert quantizers.
 
     Supports ``layer_sync_moe_local_experts_amax`` to sync input quantizer amax across experts.
 
@@ -523,7 +537,7 @@ class _QuantSparseMoe(QuantModule):
                 super().forward(hidden_states)
                 self.gate.top_k = original_top_k
             else:
-                # Path for transformers < 5.0
+                # Path for transformers<5.0
                 if hasattr(self, "gate") and hasattr(self.gate, "top_k"):
                     top_k_owner = self.gate
                 else:
@@ -553,14 +567,19 @@ class _QuantSparseMoe(QuantModule):
         self._count_expert_tokens = False
         return output
 
-    def layer_sync_moe_local_experts_amax(self):
+    def layer_sync_moe_local_experts_amax(self, sync_weight_amax=False):
         """Sync input_quantizer amax across experts so all share the same amax per quantizer.
 
         Skipped when _moe_calib_experts_ratio is set, as each expert is calibrated independently.
+        Also skipped when experts is a fused module (e.g. Llama4TextExperts) with shared quantizers.
+
+        Args:
+            sync_weight_amax: If True, also sync weight quantizer amax across experts.
+
         """
         if self._moe_calib_experts_ratio is not None:
             return
-        sync_moe_expert_amax(self.experts)
+        sync_moe_expert_amax(self.experts, sync_weight_amax=sync_weight_amax)
 
 
 class _QuantLlama4TextExperts(QuantModule):
@@ -591,22 +610,20 @@ class _QuantDbrxExperts(QuantModule):
         """Modify the DbrxExpert."""
         # No setup is needed for DbrxExpert, we only need to update DbrxExpertGLU
 
-    # forward method copied from the original dbrx repo - https://github.com/databricks/dbrx/blob/a3200393/model/modeling_dbrx.py#L795
     def forward(
         self,
         x: torch.Tensor,
-        weights: torch.Tensor,
-        top_weights: torch.Tensor,
         top_experts: torch.LongTensor,
+        top_weights: torch.Tensor,
     ) -> torch.Tensor:
         bsz, q_len, hidden_size = x.shape
         x = x.view(-1, hidden_size)
         out = torch.zeros_like(x)
 
-        expert_mask = nn.functional.one_hot(top_experts, num_classes=self.moe_num_experts).permute(
+        expert_mask = nn.functional.one_hot(top_experts, num_classes=self.num_experts).permute(
             2, 1, 0
         )
-        for expert_idx in range(self.moe_num_experts):
+        for expert_idx in range(self.num_experts):
             topk_idx, token_idx = torch.where(expert_mask[expert_idx])
             if token_idx.shape[0] == 0:
                 continue
@@ -636,41 +653,48 @@ class _QuantDbrxExpertGLU(QuantModule):
                 with torch.no_grad():
                     module.weight.copy_(weights[expert_idx].detach())
 
+        # In transformers 5.0, DbrxExpertGLU.forward uses raw matmul: x @ w1[i] where
+        # w1[i] has shape (ffn_hidden_size, hidden_size). To match via F.linear (which
+        # computes x @ W.T), we store weights transposed: W = w1[i].T.
         self.w1_linear = nn.ModuleList(
-            [
-                nn.Linear(self.hidden_size, self.ffn_hidden_size, bias=False)
-                for _ in range(self.moe_num_experts)
-            ]
-        )
-        _copy_weights(
-            self.w1_linear,
-            self.w1.view(self.moe_num_experts, self.ffn_hidden_size, self.hidden_size),
-        )
-        delattr(self, "w1")
-
-        self.v1_linear = nn.ModuleList(
-            [
-                nn.Linear(self.hidden_size, self.ffn_hidden_size, bias=False)
-                for _ in range(self.moe_num_experts)
-            ]
-        )
-        _copy_weights(
-            self.v1_linear,
-            self.v1.view(self.moe_num_experts, self.ffn_hidden_size, self.hidden_size),
-        )
-        delattr(self, "v1")
-
-        self.w2_linear = nn.ModuleList(
             [
                 nn.Linear(self.ffn_hidden_size, self.hidden_size, bias=False)
                 for _ in range(self.moe_num_experts)
             ]
         )
         _copy_weights(
-            self.w2_linear,
-            self.w2.view(self.moe_num_experts, self.ffn_hidden_size, self.hidden_size).transpose(
+            self.w1_linear,
+            self.w1.view(self.moe_num_experts, self.ffn_hidden_size, self.hidden_size).transpose(
                 1, 2
             ),
+        )
+        delattr(self, "w1")
+
+        self.v1_linear = nn.ModuleList(
+            [
+                nn.Linear(self.ffn_hidden_size, self.hidden_size, bias=False)
+                for _ in range(self.moe_num_experts)
+            ]
+        )
+        _copy_weights(
+            self.v1_linear,
+            self.v1.view(self.moe_num_experts, self.ffn_hidden_size, self.hidden_size).transpose(
+                1, 2
+            ),
+        )
+        delattr(self, "v1")
+
+        # w2: down_proj uses intermediate.matmul(w2[i].t()) = F.linear(intermediate, w2[i])
+        # so W = w2[i] directly (no extra transpose needed).
+        self.w2_linear = nn.ModuleList(
+            [
+                nn.Linear(self.hidden_size, self.ffn_hidden_size, bias=False)
+                for _ in range(self.moe_num_experts)
+            ]
+        )
+        _copy_weights(
+            self.w2_linear,
+            self.w2.view(self.moe_num_experts, self.ffn_hidden_size, self.hidden_size),
         )
         delattr(self, "w2")
 
@@ -762,119 +786,121 @@ class _QuantQwen3VLMoeTextExperts(QuantModule):
         return next_states
 
 
-class _Qwen35MoeExpertModule(nn.Module):
-    """Container for a single Qwen3.5 MoE expert's linear layers.
+def _get_fused_expert_intermediate_dim(module):
+    """Resolve the intermediate (expert) dimension from a fused expert module.
 
-    Produces the naming pattern: experts.{id}.gate_proj.weight
-    (consistent with standard Qwen3 MoE per-expert module structure).
+    Different transformers versions use ``intermediate_size`` or ``intermediate_dim``.
+    """
+    for attr in ("intermediate_dim", "intermediate_size", "moe_intermediate_size"):
+        if hasattr(module, attr):
+            return getattr(module, attr)
+    return module.gate_up_proj.shape[1] // 2
+
+
+class _QuantFusedExperts(_QuantFunctionalMixin):
+    """Generic quantized wrapper for HuggingFace fused MoE expert modules.
+
+    Handles any module following the standard HF transformers 5.0+ fused expert
+    pattern (``@use_experts_implementation``):
+
+    * ``gate_up_proj``: 3-D ``nn.Parameter`` of shape ``(num_experts, 2*intermediate_dim, hidden_dim)``
+    * ``down_proj``:    3-D ``nn.Parameter`` of shape ``(num_experts, hidden_dim, intermediate_dim)``
+    * ``act_fn``:       activation function applied between gate/up and down projections
+    * ``forward``:      calls ``F.linear`` exactly twice per expert (gate_up then down)
+
+    Per-expert quantization is achieved by intercepting ``F.linear`` and recovering
+    the expert index from the weight tensor's storage offset into the 3-D parameter.
+    Each expert gets its own weight quantizers (``nn.ModuleList``), while input
+    quantizers are shared across all experts (single ``TensorQuantizer``) to match
+    the shared input quantization scale used by downstream inference frameworks.
+
+    Verified compatible models: Mixtral, Qwen2-MoE, Qwen3-MoE, Qwen3.5-MoE,
+    DeepSeek-V3, Jamba, OLMoE.
+
+    Limitation: only works when ``experts_implementation="eager"`` (default).
+    ``batched_mm`` / ``grouped_mm`` backends use ``torch.bmm`` /
+    ``torch._grouped_mm`` instead of ``F.linear`` and are not intercepted.
     """
 
-    def __init__(self, hidden_dim: int, expert_dim: int):
-        super().__init__()
-        self.gate_proj = nn.Linear(hidden_dim, expert_dim, bias=False)
-        self.up_proj = nn.Linear(hidden_dim, expert_dim, bias=False)
-        self.down_proj = nn.Linear(expert_dim, hidden_dim, bias=False)
+    def _get_expert_idx_from_gate_up(self, weight: torch.Tensor) -> int:
+        """Recover expert index from a ``gate_up_proj`` weight slice's storage offset.
 
+        When HF indexes ``gate_up_proj[idx]``, the result is a view sharing the
+        same underlying storage.  The offset delta divided by the stride along
+        dim-0 gives the expert index.
 
-class _QuantQwen35MoeExperts(QuantModule):
-    def _setup(self):
-        """Modify the Qwen3_5MoeExperts by using per-expert nn.Module containers.
-
-        This produces the naming pattern: experts.{id}.gate_proj.weight
-        (consistent with standard Qwen3 MoE).
+        The invariant breaks if the tensor is ``.contiguous()``-copied or
+        redistributed by certain distributed wrappers (FSDP2, tensor parallel).
         """
-        from accelerate import init_empty_weights
+        base_offset = self.gate_up_proj.storage_offset()
+        stride = self.gate_up_proj.stride(0)
+        if stride == 0:
+            return 0
+        idx = (weight.storage_offset() - base_offset) // stride
+        assert 0 <= idx < self.num_experts, (
+            f"Computed expert index {idx} out of range [0, {self.num_experts}). "
+            "This can happen if the weight was .contiguous()-copied or redistributed."
+        )
+        return idx
 
-        dtype, device = self.gate_up_proj.dtype, self.gate_up_proj.device
+    def _setup(self):
+        n = self.num_experts
+        self.gate_up_proj_input_quantizer = TensorQuantizer()
+        self.gate_up_proj_weight_quantizers = nn.ModuleList([TensorQuantizer() for _ in range(n)])
+        self.down_proj_input_quantizer = TensorQuantizer()
+        self.down_proj_weight_quantizers = nn.ModuleList([TensorQuantizer() for _ in range(n)])
 
-        def _copy_weight(module, weight):
-            module.to_empty(device=device)
-            with torch.no_grad():
-                module.weight.data = weight.detach().data.to(dtype=dtype, device=device)
+        self._register_temp_attribute("_down_proj_linear", False)
+        self._register_temp_attribute("_current_expert_idx", 0)
 
-        expert_dim = self.intermediate_dim
+    @property
+    def functionals_to_replace(self):
+        _orig_linear = torch.nn.functional.linear
 
-        with init_empty_weights():
-            expert_modules = nn.ModuleList(
-                [
-                    _Qwen35MoeExpertModule(self.hidden_dim, expert_dim)
-                    for _ in range(self.num_experts)
-                ]
-            )
+        # The HF fused expert forward calls F.linear exactly twice per expert
+        # in strict alternation: first for gate_up_proj, then for down_proj.
+        # forward() resets the toggle before each call to super().forward().
+        def _quantized_linear(input, weight, bias=None):
+            if self._down_proj_linear:
+                idx = self._current_expert_idx
+                input = self.down_proj_input_quantizer(input)
+                weight = self.down_proj_weight_quantizers[idx](weight)
+            else:
+                idx = self._get_expert_idx_from_gate_up(weight)
+                self._current_expert_idx = idx
+                input = self.gate_up_proj_input_quantizer(input)
+                weight = self.gate_up_proj_weight_quantizers[idx](weight)
+            self._down_proj_linear = not self._down_proj_linear
+            return _orig_linear(input, weight, bias)
 
-        for idx in range(self.num_experts):
-            # gate_up_proj shape: (num_experts, 2*intermediate_dim, hidden_dim)
-            # Already in (out_features, in_features) format, no transpose needed
-            _copy_weight(expert_modules[idx].gate_proj, self.gate_up_proj[idx, :expert_dim, :])
-            _copy_weight(expert_modules[idx].up_proj, self.gate_up_proj[idx, expert_dim:, :])
-            # down_proj shape: (num_experts, hidden_dim, intermediate_dim)
-            # Already in (out_features, in_features) format
-            _copy_weight(expert_modules[idx].down_proj, self.down_proj[idx])
+        return [
+            (torch.nn.functional, "linear", _quantized_linear),
+        ]
 
-        delattr(self, "gate_up_proj")
-        delattr(self, "down_proj")
-        # Register expert modules directly as numbered children (like nn.ModuleList)
-        # so the naming pattern is: experts.{id}.gate_proj.weight (no extra nesting)
-        for idx in range(self.num_experts):
-            self.add_module(str(idx), expert_modules[idx])
-
-    def __len__(self):
-        """Support len() so the module is iterable like standard MoE experts."""
-        return self.num_experts
-
-    def __iter__(self):
-        """Support iteration over expert modules."""
-        for idx in range(self.num_experts):
-            yield getattr(self, str(idx))
-
-    def __getitem__(self, idx):
-        """Support indexing to get individual expert modules."""
-        return getattr(self, str(int(idx)))
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        top_k_index: torch.Tensor,
-        top_k_weights: torch.Tensor,
-    ) -> torch.Tensor:
-        final_hidden_states = torch.zeros_like(hidden_states)
-        with torch.no_grad():
-            expert_mask = torch.nn.functional.one_hot(top_k_index, num_classes=self.num_experts)
-            expert_mask = expert_mask.permute(2, 1, 0)
-            expert_hit = torch.greater(expert_mask.sum(dim=(-1, -2)), 0).nonzero()
-        for expert_idx in expert_hit:
-            expert_idx = expert_idx[0]
-            if expert_idx == self.num_experts:
-                continue
-            with torch.no_grad():
-                top_k_pos, token_idx = torch.where(expert_mask[expert_idx])
-            current_state = hidden_states[token_idx]
-            expert = self[expert_idx]
-            gate = expert.gate_proj(current_state)
-            up = expert.up_proj(current_state)
-            current_hidden_states = self.act_fn(gate) * up
-            current_hidden_states = expert.down_proj(current_hidden_states)
-            current_hidden_states = (
-                current_hidden_states * top_k_weights[token_idx, top_k_pos, None]
-            )
-            final_hidden_states.index_add_(
-                0, token_idx, current_hidden_states.to(final_hidden_states.dtype)
-            )
-        return final_hidden_states
+    def forward(self, *args, **kwargs):
+        self._down_proj_linear = False
+        return super().forward(*args, **kwargs)
 
 
-class _QuantDbrxFFN(_QuantSparseMoe):
+class _QuantDbrxFFN(_QuantSparseSequentialMoe):
     @property
     def num_experts(self):
         return self.router.moe_num_experts
 
     @property
     def top_k(self):
-        return self.router.moe_top_k
+        # In older transformers, top_k was stored on DbrxRouter as moe_top_k.
+        # In transformers 5.0, DbrxFFN stores it as a plain attribute (top_k).
+        if hasattr(self.router, "moe_top_k"):
+            return self.router.moe_top_k
+        return self.__dict__.get("top_k", 1)
 
     @top_k.setter
     def top_k(self, value):
-        self.router.moe_top_k = value
+        if hasattr(self.router, "moe_top_k"):
+            self.router.moe_top_k = value
+        else:
+            self.__dict__["top_k"] = value
 
 
 @contextmanager
@@ -897,10 +923,7 @@ def patch_compressed_linear_loading():
 
         with patch_compressed_linear_loading():
             model = AutoModelForCausalLM.from_pretrained(
-                ckpt_path,
-                device_map="auto",
-                trust_remote_code=True,
-                torch_dtype="auto",
+                ckpt_path, device_map="auto", trust_remote_code=True, dtype="auto"
             )
     """
     try:
@@ -1161,20 +1184,6 @@ except ImportError:
     pass
 
 
-try:
-    from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeExperts
-
-    # Qwen3_5MoeSparseMoeBlock registration is handled by register_sparse_moe_on_the_fly
-    # (auto-detected via gate.top_k + gate.num_experts + experts pattern).
-    # Only the fused expert weights need explicit registration.
-    if Qwen3_5MoeExperts not in QuantModuleRegistry:
-        QuantModuleRegistry.register({Qwen3_5MoeExperts: "hf.Qwen3_5MoeExperts"})(
-            _QuantQwen35MoeExperts
-        )
-except ImportError:
-    pass
-
-
 class _QuantGptOssExperts(_QuantFunctionalMixin):
     """Quantized wrapper for `transformers.GptOssExperts`.
 
@@ -1300,8 +1309,8 @@ def _has_num_experts(obj):
     return hasattr(obj, "num_experts") or hasattr(obj, "n_routed_experts")
 
 
-def _is_sparse_moe_block(module):
-    """Check if a module is structurally a sparse MoE block compatible with _QuantSparseMoe.
+def _is_sparse_sequaential_moe_block(module):
+    """Check if a module is structurally a sparse sequential MoE block compatible with _QuantSparseSequentialMoe.
 
     All HuggingFace MoE blocks (Mixtral, Qwen3Moe, Qwen2Moe, Qwen3Next, Llama4, MiniMax,
     NemotronH, etc.) share a common structural pattern: a ``gate`` (TopKRouter) sub-module with
@@ -1312,6 +1321,10 @@ def _is_sparse_moe_block(module):
     with new MoE architectures.
     """
     if not hasattr(module, "experts"):
+        return False
+
+    if not hasattr(module.experts, "__iter__"):
+        # transformers>=5.0 has batched experts, no per-expert quantizers
         return False
 
     # Primary: gate sub-module has topk/top_k + num_experts (standard TopKRouter pattern)
@@ -1330,10 +1343,10 @@ def _is_sparse_moe_block(module):
 
 
 def register_sparse_moe_on_the_fly(model):
-    """Auto-detect and register MOE modules as _QuantSparseMoe.
+    """Auto-detect and register MOE modules as _QuantSparseSequentialMoe.
 
     Walks the model tree, identifies MoE blocks by their structural attributes
-    (``gate`` + ``experts``), and registers unregistered ones with ``_QuantSparseMoe``.
+    (``gate`` + ``experts``), and registers unregistered ones with ``_QuantSparseSequentialMoe``.
     """
     visited_types = set()
     for name, module in model.named_modules():
@@ -1346,12 +1359,64 @@ def register_sparse_moe_on_the_fly(model):
 
         visited_types.add(mod_type)
 
-        if _is_sparse_moe_block(module):
+        if _is_sparse_sequaential_moe_block(module):
             print(
                 f"\033[1mDetected MOE module '{name}' of type {mod_type.__name__}, "
-                f"registering with _QuantSparseMoe.\033[0m"
+                f"registering with _QuantSparseSequentialMoe.\033[0m"
             )
-            QuantModuleRegistry.register({mod_type: f"hf.{mod_type.__name__}"})(_QuantSparseMoe)
+            QuantModuleRegistry.register({mod_type: f"hf.{mod_type.__name__}"})(
+                _QuantSparseSequentialMoe
+            )
+
+
+def _is_fused_experts_module(module):
+    """Check if a module is a fused MoE expert container compatible with _QuantFusedExperts.
+
+    Detects the standardized HuggingFace transformers 5.0+ fused expert pattern:
+    ``gate_up_proj`` (3-D parameter), ``down_proj`` (3-D parameter), ``num_experts``,
+    and ``act_fn``.  Matches ``MixtralExperts``, ``Qwen2MoeExperts``,
+    ``Qwen3MoeExperts``, ``Qwen3_5MoeExperts``, ``DeepseekV3NaiveMoe``,
+    ``JambaExperts``, ``OlmoeExperts``, etc.
+
+    Returns ``False`` for non-standard layouts (DBRX, GptOss, GraniteMoE,
+    Llama4TextExperts) which have their own explicit registrations.
+    """
+    if not hasattr(module, "gate_up_proj") or not hasattr(module, "down_proj"):
+        return False
+    if not hasattr(module, "num_experts") or not hasattr(module, "act_fn"):
+        return False
+    gate_up = getattr(module, "gate_up_proj")
+    down = getattr(module, "down_proj")
+    if not isinstance(gate_up, (nn.Parameter, Tensor)) or gate_up.dim() != 3:
+        return False
+    return isinstance(down, (nn.Parameter, Tensor)) and down.dim() == 3
+
+
+def register_fused_experts_on_the_fly(model):
+    """Auto-detect and register fused MoE expert modules as _QuantFusedExperts.
+
+    Walks the model tree, identifies fused expert containers by their structural
+    attributes (``gate_up_proj`` + ``down_proj`` 3-D parameters), and registers
+    unregistered ones with ``_QuantFusedExperts``.
+
+    Skips modules that are already registered (e.g. Llama4TextExperts, GptOssExperts
+    have their own explicit registrations with different quantization strategies).
+    """
+    visited_types = set()
+    for name, module in model.named_modules():
+        mod_type = type(module)
+
+        if mod_type in visited_types or QuantModuleRegistry.get(mod_type) is not None:
+            continue
+
+        visited_types.add(mod_type)
+
+        if _is_fused_experts_module(module):
+            print(
+                f"\033[1mDetected fused MoE experts '{name}' of type {mod_type.__name__}, "
+                f"registering with _QuantFusedExperts.\033[0m"
+            )
+            QuantModuleRegistry.register({mod_type: f"hf.{mod_type.__name__}"})(_QuantFusedExperts)
 
 
 def _is_supported_hf_model(model):
@@ -1479,8 +1544,8 @@ class _QuantMoELinear(QuantModule):
     weights and scales back into the original 3D format.
 
     Note: we use expansion-then-reconstruction rather than the add_module() approach
-    (as in _QuantQwen35MoeExperts) because vLLM requires stacked 3D scaling factors;
-    per-expert expanded keys are not accepted by the downstream serving engine.
+    because vLLM requires stacked 3D scaling factors; per-expert expanded keys are
+    not accepted by the downstream serving engine.
     """
 
     def _setup(self):
@@ -1580,6 +1645,7 @@ CUSTOM_MODEL_PLUGINS.update(
         register_falcon_linears_on_the_fly,
         register_dbrx_moe_on_the_fly,
         register_step3p5_moe_on_the_fly,
+        register_fused_experts_on_the_fly,
         register_sparse_moe_on_the_fly,
         register_hf_attentions_on_the_fly,
         convert_hf_parallel_linears_on_the_fly,

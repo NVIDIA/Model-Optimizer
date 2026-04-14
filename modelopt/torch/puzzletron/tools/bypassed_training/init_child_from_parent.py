@@ -18,19 +18,25 @@
 
 import json
 import time
-from pathlib import Path
 from typing import Optional
 
 import torch
 import yaml
 from transformers import AutoModelForCausalLM
 
-from modelopt.torch.puzzletron.anymodel.model_descriptor import (
-    ModelDescriptor,
-    ModelDescriptorFactory,
+from modelopt.torch.export import copy_hf_ckpt_remote_code
+
+from ...anymodel.model_descriptor import ModelDescriptor, ModelDescriptorFactory
+from ...anymodel.puzzformer import deci_x_patcher
+from ..checkpoint_utils import copy_tokenizer, load_state_dict
+from ..checkpoint_utils_hf import (
+    _get_auto_class_for_trust_remote_code,
+    _save_checkpoint,
+    load_model_config,
 )
-from modelopt.torch.puzzletron.anymodel.puzzformer import deci_x_patcher
-from modelopt.torch.puzzletron.tools.bypassed_training.child_init import (
+from ..logger import mprint
+from ..sharded_checkpoint_utils import _get_model_class_from_config
+from .child_init import (
     GQAInitMode,
     HiddenSizeInitMode,
     LinearInitMode,
@@ -38,10 +44,8 @@ from modelopt.torch.puzzletron.tools.bypassed_training.child_init import (
     create_child_state_dict,
     update_model_config,
 )
-from modelopt.torch.puzzletron.tools.checkpoint_utils import copy_tokenizer, load_state_dict
-from modelopt.torch.puzzletron.tools.checkpoint_utils_hf import _save_checkpoint, load_model_config
-from modelopt.torch.puzzletron.tools.logger import mprint
-from modelopt.torch.puzzletron.tools.sharded_checkpoint_utils import _get_model_class_from_config
+
+__all__ = ["init_child_from_parent"]
 
 
 def init_child_from_parent(
@@ -70,8 +74,7 @@ def init_child_from_parent(
     - max_layer_workers: Number of threads for parallel layer processing (default: auto-calculate min(CPU count, num layers))
     """
     assert (
-        gqa_init_mode != GQAInitMode.RandomKV
-        and gqa_init_mode != GQAInitMode.RandomBlock
+        gqa_init_mode not in [GQAInitMode.RandomKV, GQAInitMode.RandomBlock]
         and mlp_init_mode != MlpInitMode.Random
         and linear_init_mode != LinearInitMode.Random
     ), (
@@ -80,7 +83,14 @@ def init_child_from_parent(
 
     descriptor = ModelDescriptorFactory.get(descriptor)
 
-    copy_tokenizer(parent_checkpoint_dir, output_checkpoint_dir)
+    copy_tokenizer(
+        parent_checkpoint_dir,
+        output_checkpoint_dir,
+        trust_remote_code=descriptor.requires_trust_remote_code(),
+    )
+
+    if descriptor.requires_trust_remote_code():
+        copy_hf_ckpt_remote_code(parent_checkpoint_dir, output_checkpoint_dir)
 
     parent_model_config = load_model_config(
         parent_checkpoint_dir, trust_remote_code=descriptor.requires_trust_remote_code()
@@ -123,12 +133,14 @@ def init_child_from_parent(
             model_descriptor=descriptor, block_configs=child_model_config.block_configs
         ):
             model_class = _get_model_class_from_config(child_model_config)
-            # AutoModelForCausalLM uses from_config(); concrete model classes use _from_config()
-            if model_class is AutoModelForCausalLM:
-                trust_remote_code = descriptor.requires_trust_remote_code()
-                child_model = model_class.from_config(
+            trust_remote_code = descriptor.requires_trust_remote_code()
+            if trust_remote_code:
+                auto_cls = _get_auto_class_for_trust_remote_code(child_model_config)
+                child_model = auto_cls.from_config(
                     child_model_config, trust_remote_code=trust_remote_code
                 )
+            elif model_class is AutoModelForCausalLM:
+                child_model = AutoModelForCausalLM.from_config(child_model_config)
             else:
                 child_model = model_class._from_config(child_model_config)
 

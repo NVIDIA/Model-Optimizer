@@ -28,6 +28,14 @@ __all__ = ["HPType", "Hparam"]
 class CustomHPType(ABC):
     """Custom hyperparameter type base class for user-defined hparam types."""
 
+    def __init_subclass__(cls, **kwargs) -> None:
+        """Register the custom hparam type as a safe global for torch serialization.
+
+        It can be used to load the custom hparam type with torch.load(weights_only=True) in safe_load().
+        """
+        super().__init_subclass__(**kwargs)
+        torch.serialization.add_safe_globals([cls])
+
     @abstractmethod
     def __repr__(self) -> str:
         """Return string representation with relevant properties of the class."""

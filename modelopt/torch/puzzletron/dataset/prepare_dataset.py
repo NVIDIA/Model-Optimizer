@@ -19,7 +19,9 @@ import datasets
 import fire
 import numpy as np
 
-from modelopt.torch.puzzletron.tools.logger import mprint
+from ..tools.logger import mprint
+
+__all__ = ["process_and_save_dataset"]
 
 
 def process_and_save_dataset(

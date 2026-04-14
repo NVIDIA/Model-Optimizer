@@ -24,20 +24,17 @@ from transformers.models.mistral.modeling_mistral import (
     MistralRotaryEmbedding,
 )
 
-from modelopt.torch.puzzletron.anymodel.model_descriptor import (
-    ModelDescriptor,
-    ModelDescriptorFactory,
-)
-from modelopt.torch.puzzletron.anymodel.puzzformer.no_op import (
-    MatchingZeros,
-    Same,
-    return_tuple_of_size,
-)
-from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.block_config import BlockConfig
-from modelopt.torch.puzzletron.pruning.ffn_intermediate_pruning_mixin import (
-    FFNIntermediateLayerDescriptor,
-)
-from modelopt.torch.puzzletron.pruning.kv_heads_pruning_mixin import KVHeadsLayerDescriptor
+from ....block_config import BlockConfig
+from ....pruning.ffn_intermediate_pruning_mixin import FFNIntermediateLayerDescriptor
+from ....pruning.kv_heads_pruning_mixin import KVHeadsLayerDescriptor
+from ...model_descriptor import ModelDescriptor, ModelDescriptorFactory
+from ...puzzformer.no_op import MatchingZeros, Same, return_tuple_of_size
+
+__all__ = [
+    "MistralSmallModelDescriptor",
+    "MistralFFNIntermediateLayerDescriptor",
+    "MistralKVHeadsLayerDescriptor",
+]
 
 
 @ModelDescriptorFactory.register_decorator("mistral_small")

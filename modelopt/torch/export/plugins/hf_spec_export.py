@@ -92,7 +92,11 @@ class SpeculativeDecodingExporter(ABC):
         self.model = model
 
     @abstractmethod
-    def export(self, export_dir: Path | str, dtype: torch.dtype | None = None):
+    def export(
+        self,
+        export_dir: Path | str,
+        dtype: torch.dtype | None = None,
+    ):
         """Export the model to the deployment format."""
         raise NotImplementedError("Subclasses must implement this method.")
 
@@ -185,7 +189,11 @@ class EagleExporter(SpeculativeDecodingExporter):
 
         return template_config
 
-    def export(self, export_dir: Path | str, dtype: torch.dtype | None = None):
+    def export(
+        self,
+        export_dir: Path | str,
+        dtype: torch.dtype | None = None,
+    ):
         """Export the model to the deployment format."""
         # Make export dir
         export_dir = Path(export_dir)

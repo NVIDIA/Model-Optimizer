@@ -17,11 +17,11 @@
 
 from typing import Any
 
+__all__ = ["InfeasibleError", "sort_replacements", "get_nested_key", "consecutive_ngrams"]
+
 
 class InfeasibleError(Exception):
     """Exception raised when optimization problem is infeasible."""
-
-    pass
 
 
 def sort_replacements(layer_replacements: list[dict]) -> list[dict]:

@@ -22,10 +22,10 @@ import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.nn import TensorQuantizer
 
 INT8_CFG = {
-    "quant_cfg": {
-        "*weight_quantizer": {"num_bits": 8, "axis": 0},
-        "*input_quantizer": {"num_bits": 8, "axis": None},
-    },
+    "quant_cfg": [
+        {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+        {"quantizer_name": "*input_quantizer", "cfg": {"num_bits": 8, "axis": None}},
+    ],
     "algorithm": "max",
 }
 

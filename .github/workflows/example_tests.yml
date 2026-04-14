@@ -56,6 +56,68 @@ jobs:
       match_pattern: "^DCO$|^linux$" # Wait for DCO and Unit tests / linux to pass
       delay: 300s
 
+  ##### PyTorch Example Tests (speculative_decoding requires 26.01 image) #####
+  torch-pr:
+    needs: [check-file-changes, wait-checks]
+    if: startsWith(github.ref, 'refs/heads/pull-request/') && needs.check-file-changes.outputs.any_changed == 'true'
+    strategy: &torch_strategy
+      fail-fast: false
+      matrix:
+        example: [llm_distill, llm_qat, llm_sparsity]
+        include:
+          - example: speculative_decoding
+            docker_image: "26.01"
+    uses: ./.github/workflows/_example_tests_runner.yml
+    secrets: inherit
+    with:
+      docker_image: "nvcr.io/nvidia/pytorch:${{ matrix.docker_image || '26.03' }}-py3"
+      example: ${{ matrix.example }}
+      timeout_minutes: 30
+      pip_install_extras: "[hf,dev-test]"
+      runner: linux-amd64-gpu-rtxpro6000-latest-1
+
+  torch-non-pr:
+    if: ${{ !startsWith(github.ref, 'refs/heads/pull-request/') }}
+    strategy: *torch_strategy
+    uses: ./.github/workflows/_example_tests_runner.yml
+    secrets: inherit
+    with:
+      docker_image: "nvcr.io/nvidia/pytorch:${{ matrix.docker_image || '26.03' }}-py3"
+      example: ${{ matrix.example }}
+      timeout_minutes: 30
+      pip_install_extras: "[hf,dev-test]"
+      runner: linux-amd64-gpu-rtxpro6000-latest-2
+
+  ##### TensorRT-LLM Example Tests #####
+  trtllm-pr:
+    needs: [check-file-changes, wait-checks]
+    if: startsWith(github.ref, 'refs/heads/pull-request/') && needs.check-file-changes.outputs.any_changed == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        example: [llm_ptq, vlm_ptq]
+    uses: ./.github/workflows/_example_tests_runner.yml
+    secrets: inherit
+    with:
+      docker_image: "nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc10"
+      example: ${{ matrix.example }}
+      pip_install_extras: "[hf,dev-test]"
+      runner: linux-amd64-gpu-rtxpro6000-latest-1
+
+  trtllm-non-pr:
+    if: ${{ !startsWith(github.ref, 'refs/heads/pull-request/') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        example: [llm_autodeploy, llm_eval, llm_ptq, vlm_ptq]
+    uses: ./.github/workflows/_example_tests_runner.yml
+    secrets: inherit
+    with:
+      docker_image: "nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc10"
+      example: ${{ matrix.example }}
+      pip_install_extras: "[hf,dev-test]"
+      runner: linux-amd64-gpu-rtxpro6000-latest-2
+
   ##### NeMo Example Tests #####
   nemo-pr:
     needs: [check-file-changes, wait-checks]
@@ -63,7 +125,7 @@ jobs:
     strategy: &nemo_strategy
       fail-fast: false
       matrix:
-        example: [megatron_bridge, puzzletron]
+        example: [megatron_bridge]
     uses: ./.github/workflows/_example_tests_runner.yml
     secrets: inherit
     with:
@@ -85,17 +147,47 @@ jobs:
       pip_install_extras: "[hf,puzzletron,dev-test]"
       runner: linux-amd64-gpu-rtxpro6000-latest-2
 
+  ##### ONNX/TensorRT Example Tests #####
+  onnx-pr:
+    needs: [check-file-changes, wait-checks]
+    if: startsWith(github.ref, 'refs/heads/pull-request/') && needs.check-file-changes.outputs.any_changed == 'true'
+    strategy: &onnx_strategy
+      fail-fast: false
+      matrix:
+        example: [diffusers, torch_onnx]
+    uses: ./.github/workflows/_example_tests_runner.yml
+    secrets: inherit
+    with:
+      docker_image: "nvcr.io/nvidia/tensorrt:26.02-py3"
+      example: ${{ matrix.example }}
+      pip_install_extras: "[all,dev-test]"
+      runner: linux-amd64-gpu-rtxpro6000-latest-1
+
+  onnx-non-pr:
+    if: ${{ !startsWith(github.ref, 'refs/heads/pull-request/') }}
+    strategy: *onnx_strategy
+    uses: ./.github/workflows/_example_tests_runner.yml
+    secrets: inherit
+    with:
+      docker_image: "nvcr.io/nvidia/tensorrt:26.02-py3"
+      example: ${{ matrix.example }}
+      pip_install_extras: "[all,dev-test]"
+      runner: linux-amd64-gpu-rtxpro6000-latest-2
+
   ##### Required Check for PR #####
   example-pr-required-check:
     # Run even if example tests are skipped
     if: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && always() }}
-    needs: [check-file-changes, nemo-pr]
+    needs: [check-file-changes, torch-pr, trtllm-pr, nemo-pr, onnx-pr]
     runs-on: ubuntu-latest
     steps:
       - name: Required GPU tests did not succeed
         if: |
           needs.check-file-changes.result != 'success' ||
           (needs.check-file-changes.outputs.any_changed == 'true' && (
-            needs.nemo-pr.result != 'success'
+            needs.torch-pr.result != 'success' ||
+            needs.trtllm-pr.result != 'success' ||
+            needs.nemo-pr.result != 'success' ||
+            needs.onnx-pr.result != 'success'
           ))
         run: exit 1

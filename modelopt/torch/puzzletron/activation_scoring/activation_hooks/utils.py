@@ -22,8 +22,11 @@ from typing import Type
 import torch
 
 from modelopt.torch.prune.importance_hooks.base_hooks import ForwardHook as ActivationsHook
-from modelopt.torch.puzzletron.tools.logger import aprint
-from modelopt.torch.puzzletron.utils.dummy_modules import DummyBlock, DummyModule
+
+from ...tools.logger import aprint
+from ...utils.dummy_modules import DummyBlock, DummyModule
+
+__all__ = ["register_activation_hooks"]
 
 
 def register_activation_hooks(

@@ -20,6 +20,7 @@ import argparse
 import dataclasses
 import enum
 import json
+import sys
 from collections.abc import Hashable, Iterable
 from copy import deepcopy
 from pathlib import Path
@@ -29,28 +30,28 @@ import numpy as np
 import yaml
 from omegaconf import DictConfig, ListConfig, OmegaConf
 
-from modelopt.torch.puzzletron.anymodel.model_descriptor import (
-    ModelDescriptor,
-    ModelDescriptorFactory,
-)
-from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.block_config import (
-    AttentionConfig,
-    BlockConfig,
-    FFNConfig,
-)
-from modelopt.torch.puzzletron.mip.mip_with_multi_layer_replacements import (
-    run_mip as run_multi_layer_replacement_mip,
-)
-from modelopt.torch.puzzletron.replacement_library.replacement_utils import (
+from modelopt.torch.utils import json_dump
+
+from ..anymodel.model_descriptor import ModelDescriptorFactory
+from ..block_config import AttentionConfig, BlockConfig, FFNConfig
+from ..replacement_library.replacement_utils import (
     extract_block_configs_and_locations,
     parse_layer_replacement,
     replacement_is_teacher,
 )
-from modelopt.torch.puzzletron.tools.checkpoint_utils import load_model_config
-from modelopt.torch.puzzletron.tools.logger import mprint
-from modelopt.torch.puzzletron.tools.robust_json import json_dump
-from modelopt.torch.puzzletron.utils.parsing import get_nested_key, parse_json, parse_path
-from modelopt.torch.puzzletron.utils.utils import block_config_to_str, solution_to_str
+from ..tools.checkpoint_utils import load_model_config
+from ..tools.logger import mprint
+from ..utils.misc import block_config_to_str, solution_to_str
+from ..utils.parsing import get_nested_key, parse_json, parse_path
+from .mip_with_multi_layer_replacements import run_mip as run_multi_layer_replacement_mip
+
+__all__ = [
+    "PuzzleMetrics",
+    "MultiLayerPuzzleMetrics",
+    "run_puzzle",
+    "gather_multi_layer_puzzle_metrics",
+    "filter_subblock_stats_by_args",
+]
 
 """
 Usage:
@@ -155,7 +156,7 @@ class PuzzleConstraints:
             return self.constraints
 
         assert all(key in subblock_stats_args for key in ("batch_size", "generation_seq_len")), (
-            "Can't realize human constraints without 'block_size' and 'generation_seq_len' in subblock_stats_args."
+            "Can't realize human constraints without 'batch_size' and 'generation_seq_len' in subblock_stats_args."
         )
         batch_size = subblock_stats_args["batch_size"]
         generation_seq_len = subblock_stats_args["generation_seq_len"]
@@ -169,6 +170,8 @@ class PuzzleConstraints:
         # Throughput constraints
         throughput_constraints = []
         if "target_throughput" in self.constraints:
+            if self.constraints["target_throughput"] == 0:
+                raise ValueError("target_throughput must not be zero")
             throughput_constraints.append(
                 batch_size * generation_seq_len / self.constraints["target_throughput"]
             )
@@ -191,7 +194,7 @@ class PuzzleConstraints:
         return mip_constraints
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args() -> DictConfig:
     parser = argparse.ArgumentParser()
 
     parser.add_argument("--puzzle_profile", type=parse_path)
@@ -227,17 +230,17 @@ def parse_args() -> argparse.Namespace:
     )
 
     args = parser.parse_args()
-    return args
+    return DictConfig(vars(args))
 
 
 def run_single_puzzle_config(
-    args: argparse.Namespace | DictConfig,
+    args: DictConfig,
     gathered_metrics: dict,
     subblock_stats: dict,
     subblock_stats_args: dict,
     constraints: PuzzleConstraints,
     output_folder,
-) -> None:
+) -> Path:
     # we override the constraints and subblock_stats_args for this run to keep reporting out the same way.
     args = deepcopy(args)
 
@@ -398,29 +401,31 @@ def _assert_valid_config(args, puzzle_profile):
         "objective",
         "output_path",
     )
-    missing_args = [arg for arg in required_args if arg not in args or getattr(args, arg) is None]
+    missing_args = [
+        arg for arg in required_args if not hasattr(args, arg) or getattr(args, arg) is None
+    ]
     if missing_args:
         mprint(f"error: The following arguments are required: {', '.join(missing_args)}")
-        exit(1)
+        sys.exit(1)
 
     # Make sure we have specified subblock_stats_args
-    if "subblock_stats_args" not in args and "subblock_stats_args" not in puzzle_profile:
+    if not hasattr(args, "subblock_stats_args") and "subblock_stats_args" not in puzzle_profile:
         mprint(
-            "error: Must specify `subblock_stats_arrs` in either puzzle_profile or as a commandline arg."
+            "error: Must specify `subblock_stats_args` in either puzzle_profile or as a commandline arg."
         )
-        exit(1)
+        sys.exit(1)
 
     # Make sure we have specified constraints
     if (
-        "mip_constraints" not in args
-        and "human_constraints" not in args
+        not hasattr(args, "mip_constraints")
+        and not hasattr(args, "human_constraints")
         and "mip_constraints" not in puzzle_profile
         and "human_constraints" not in puzzle_profile
     ):
         mprint(
             "error: Must specify either `mip_constraints` or `human_constraints` in one of puzzle_profile or as a commandline argument."
         )
-        exit(1)
+        sys.exit(1)
 
 
 def _get_minimal_unique_names(dicts: list[dict]) -> list[str]:
@@ -431,7 +436,7 @@ def _get_minimal_unique_names(dicts: list[dict]) -> list[str]:
     return ["-".join(f"{k}_{d[k]}".replace(".", "_") for k in non_common_keys) for d in dicts]
 
 
-def run_puzzle(args: argparse.Namespace | DictConfig) -> list[str]:
+def run_puzzle(args: DictConfig) -> list[str]:
     # Loads config from args/puzzle_profile
     if args.puzzle_profile is not None:
         with open(args.puzzle_profile) as f:
@@ -446,7 +451,7 @@ def run_puzzle(args: argparse.Namespace | DictConfig) -> list[str]:
     if args.gathered_metrics_path is not None:
         gathered_metrics = json.loads(args.gathered_metrics_path.read_text())
     else:
-        gathered_metrics = gather_multi_layer_puzle_metrics(
+        gathered_metrics = gather_multi_layer_puzzle_metrics(
             args.single_block_replacement_validation_dir
         )
 
@@ -505,7 +510,7 @@ def gather_puzzle_metrics(
     return gathered_metrics
 
 
-def gather_multi_layer_puzle_metrics(
+def gather_multi_layer_puzzle_metrics(
     single_replacement_validation_dir: Path,
 ) -> MultiLayerPuzzleMetrics:
     single_sequence_metrics = [

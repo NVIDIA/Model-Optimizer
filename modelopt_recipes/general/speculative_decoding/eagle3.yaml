@@ -1,0 +1,59 @@
+# Base config for EAGLE3 training. Override fields via OmegaConf dotlist on the CLI.
+
+# maps to ModelArguments (main.py)
+model:
+  model_name_or_path:
+  trust_remote_code: false
+  use_fake_base_for_offline: false
+
+# maps to DataArguments (main.py)
+data:
+  data_path: input_conversations/train.jsonl
+  offline_data_path:
+  draft_vocab_cache:
+  vlm_img_dir:
+  vlm_processor:
+
+# maps to TrainingArguments (main.py)
+training:
+  # --- commonly modified ---
+  mode: eagle3
+  output_dir:
+  num_train_epochs: 1
+  per_device_train_batch_size: 1
+  learning_rate: 1.0e-4
+  warmup_steps: 1000
+  training_seq_len: 2048
+  logging_steps: 100
+  save_steps: 8192
+  cp_size: 1
+  disable_tqdm: false
+  estimate_ar: false
+  ar_validate_steps: -1
+
+  # --- rarely modified ---
+  do_eval: false
+  lr_scheduler_type: linear
+  save_strategy: steps
+  weight_decay: 0.0
+  dataloader_drop_last: true
+  bf16: true
+  tf32: true
+  remove_unused_columns: false
+
+# maps to EagleConfig (modelopt/torch/speculative/config.py).
+eagle:
+  # eagle_offline is derived from data.offline_data_path; do not set here.
+  eagle_decoder_type: llama
+  eagle_ttt_steps: 3
+  eagle_mix_hidden_states: false
+  eagle_use_torch_compile: true
+  eagle_self_logit_distillation: true
+  eagle_freeze_base_model: true
+  eagle_loss_decay_factor: 0.9
+  eagle_hidden_state_distillation: false
+  eagle_reuse_base_decoder: false
+  eagle_report_acc: true
+  eagle_enable_nvtx: false
+  # overwrite to modelopt/torch/speculative/eagle/default_config.py
+  eagle_architecture_config: {}

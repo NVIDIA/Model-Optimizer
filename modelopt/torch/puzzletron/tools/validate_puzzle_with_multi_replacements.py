@@ -21,7 +21,6 @@ TODO: Consider moving this a separate module dedicated for scoring
 # mypy: ignore-errors
 
 import json
-import shutil
 import warnings
 from functools import partial
 from pathlib import Path
@@ -33,23 +32,24 @@ from tqdm import tqdm
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 import modelopt.torch.utils.distributed as dist
-from modelopt.torch.puzzletron.anymodel.converter import Converter
-from modelopt.torch.puzzletron.anymodel.model_descriptor import ModelDescriptorFactory
-from modelopt.torch.puzzletron.replacement_library.replacement_library import ReplacementLibrary
-from modelopt.torch.puzzletron.replacement_library.replacement_utils import parse_layer_replacement
-from modelopt.torch.puzzletron.tools import validate_model
-from modelopt.torch.puzzletron.tools.checkpoint_utils import (
-    SAFETENSORS_SUBBLOCKS_DIR_NAME,
-    copy_tokenizer,
-)
-from modelopt.torch.puzzletron.tools.checkpoint_utils_hf import save_checkpoint
-from modelopt.torch.puzzletron.tools.sharded_checkpoint_utils import load_and_shard_model
-from modelopt.torch.puzzletron.tools.validation_utils import (
+
+from ..anymodel.converter import Converter
+from ..anymodel.model_descriptor import ModelDescriptorFactory
+from ..replacement_library.library import ReplacementLibrary
+from ..replacement_library.replacement_utils import parse_layer_replacement
+from ..utils.parsing import get_nested_key
+from ..utils.validate_runtime_pipeline import perform_pipeline_stitches
+from . import validate_model
+from .checkpoint_utils import copy_tokenizer
+from .checkpoint_utils_hf import save_checkpoint
+from .common import resolve_torch_dtype
+from .sharded_checkpoint_utils import load_and_shard_model
+from .validation_utils import (
     validate_model_and_extract_hidden_states,
     validate_model_with_teacher_similarity_metrics,
 )
-from modelopt.torch.puzzletron.utils.parsing import get_nested_key, parse_path
-from modelopt.torch.puzzletron.utils.validate_runtime_pipeline import perform_pipeline_stitches
+
+__all__ = ["validate_puzzle_solutions", "load_puzzle_solutions"]
 
 """
 Usage Example:
@@ -124,7 +124,7 @@ def validate_puzzle_solutions(args: DictConfig) -> None:
         args.solutions_to_validate = list(range(len(puzzle_solutions)))
     puzzle_solutions = [puzzle_solutions[i] for i in args.solutions_to_validate]
 
-    tokenizer = _load_tokenizer(args)
+    tokenizer = _load_tokenizer(args, trust_remote_code=descriptor.requires_trust_remote_code())
     if not args.skip_validation:
         val_dataloader = (
             validate_model.prepare_dataloader(args, tokenizer) if dist.is_master() else None
@@ -182,7 +182,7 @@ def validate_puzzle_solutions(args: DictConfig) -> None:
                 / f"solution_{i_solution}"
             )
 
-            model_config.dtype = getattr(args, "model_dtype", "torch.bfloat16")
+            model_config.dtype = resolve_torch_dtype(getattr(args, "model_dtype", "torch.bfloat16"))
             Converter.copy_checkpoint_files(args.teacher_dir, checkpoint_dir)
             if realizable_as_symlinks:
                 if dist.is_master():
@@ -191,7 +191,11 @@ def validate_puzzle_solutions(args: DictConfig) -> None:
                     pass
             save_checkpoint(model, checkpoint_dir, descriptor)
 
-            copy_tokenizer(args.tokenizer_name, checkpoint_dir)
+            copy_tokenizer(
+                args.tokenizer_name,
+                checkpoint_dir,
+                trust_remote_code=descriptor.requires_trust_remote_code(),
+            )
 
         dist.barrier()
 
@@ -227,14 +231,18 @@ def can_realize_as_symlinks(layer_replacements: list[dict]) -> bool:
     return True
 
 
-def _load_tokenizer(args: DictConfig) -> PreTrainedTokenizerBase:
+def _load_tokenizer(args: DictConfig, trust_remote_code: bool = False) -> PreTrainedTokenizerBase:
     tokenizer = None
     if (tokenizer_name := getattr(args, "tokenizer_name", None)) is not None:
-        tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, trust_remote_code=True)
+        tokenizer = AutoTokenizer.from_pretrained(
+            tokenizer_name, trust_remote_code=trust_remote_code
+        )
     elif args.teacher_dir is not None:
         try:
-            tokenizer = AutoTokenizer.from_pretrained(args.teacher_dir, trust_remote_code=True)
-        except:
+            tokenizer = AutoTokenizer.from_pretrained(
+                args.teacher_dir, trust_remote_code=trust_remote_code
+            )
+        except Exception:
             pass
     if tokenizer is None:
         warnings.warn("Couldn't find a tokenizer, trying to continue without one")

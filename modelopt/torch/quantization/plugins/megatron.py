@@ -575,15 +575,20 @@ class _MegatronSequentialMLP(DynamicModule):
             expert.linear_fc1.parallel_state = self.parallel_state
             expert.linear_fc2.parallel_state = self.parallel_state
 
-    def layer_sync_moe_local_experts_amax(self):
-        """Sync input quantizer amax across local experts in a SequentialMLP.
+    def layer_sync_moe_local_experts_amax(self, sync_weight_amax=False):
+        """Sync quantizer amax across local experts in a SequentialMLP.
 
-        Ensures all experts have the same input quantizer amax. This function operates
-        on a single rank and does not require distributed sync.
+        Always syncs input quantizer amax across experts. Optionally syncs weight
+        quantizer amax as well, which matches TEGroupedMLP behavior where all
+        experts are fused into a single GEMM with one quantizer per linear layer.
 
-        Distributed amax sync across EP and ETP (for RowParallel) happens in model_calib.max_calibrate().
-        This function should be called before the distributed sync to ensure the amax values
-        are synchronized across the layer first.
+        Args:
+            sync_weight_amax: If True, also sync weight quantizer amax across experts.
+
+        This function operates on a single rank and does not require distributed sync.
+        Distributed amax sync across EP and ETP (for RowParallel) happens in
+        model_calib.max_calibrate(). This function should be called before the
+        distributed sync to ensure the amax values are synchronized across the layer first.
 
         Note:
             Because there are logic which calls collective communication based on whether amax is not None,
@@ -591,7 +596,7 @@ class _MegatronSequentialMLP(DynamicModule):
             when synchronizing over EP since some ranks may have amax None and not calling the collective
             communication.
         """
-        sync_moe_expert_amax(self.local_experts)
+        sync_moe_expert_amax(self.local_experts, sync_weight_amax=sync_weight_amax)
 
     def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
         """Override the default to enable singleton_local_shards.

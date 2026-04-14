@@ -20,6 +20,8 @@ import torch.nn as nn
 from transformers import PretrainedConfig
 from typing_extensions import override
 
+__all__ = ["DummyModule", "DummyBlock", "DummyWTE", "DummyLMHead"]
+
 
 class DummyModule(nn.Module):
     def __init__(self, *args, **kwargs) -> None:

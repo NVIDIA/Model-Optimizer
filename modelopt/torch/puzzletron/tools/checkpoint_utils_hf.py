@@ -19,16 +19,14 @@ Utilities for loading and saving Hugging Face-format checkpoints (``AutoConfig``
 """
 
 import concurrent.futures
-import contextlib
 import dataclasses
 import fcntl
 import os
 import time
-import warnings
 from collections import defaultdict
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Any, BinaryIO
+from typing import TYPE_CHECKING, Any, BinaryIO
 
 import torch
 import transformers
@@ -37,11 +35,25 @@ from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig, Pre
 from transformers.dynamic_module_utils import get_class_from_dynamic_module
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
-from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.block_config import maybe_cast_block_configs
-from modelopt.torch.puzzletron.tools.common import infer_weights_dtype
-from modelopt.torch.puzzletron.tools.logger import mprint
-from modelopt.torch.puzzletron.tools.post_init_sparse import SparsityMethod
-from modelopt.torch.puzzletron.tools.robust_json import json_dumps
+from modelopt.torch.utils import json_dumps
+
+from ..block_config import maybe_cast_block_configs
+
+if TYPE_CHECKING:
+    from ..anymodel.model_descriptor import ModelDescriptor
+from .logger import mprint
+
+__all__ = [
+    "SAFETENSORS_SUBBLOCKS_DIR_NAME",
+    "PTH_SUBBLOCKS_DIR_NAME",
+    "RELATIVE_SUBBLOCKS_DIR",
+    "force_cache_dynamic_modules",
+    "load_model_config",
+    "init_model_from_config",
+    "save_checkpoint",
+    "save_subblocks",
+    "save_model_config",
+]
 
 SAFETENSORS_SUBBLOCKS_DIR_NAME = "subblocks_safetensors"
 PTH_SUBBLOCKS_DIR_NAME = "subblocks"
@@ -62,8 +74,6 @@ MODULE_WITHIN_LAYER_TO_FILE_TYPE = {
     "parallel_blocks": "multi_block",
 }
 LAYERS_MODULE_NAME = "model.layers"
-
-warnings.filterwarnings("ignore", "You are using `torch.load` with `weights_only=False`*.")
 
 
 def force_cache_dynamic_modules(
@@ -135,6 +145,33 @@ def _get_model_class_from_config(config: PretrainedConfig) -> type:
     return AutoModelForCausalLM
 
 
+def _get_auto_class_for_trust_remote_code(config: PretrainedConfig) -> type:
+    """Pick the right Auto class for a trust_remote_code model by inspecting auto_map.
+
+    When a model requires trust_remote_code, the native transformers class resolved from
+    config.architectures must NOT be used directly — it may have a different module structure
+    than the trust_remote_code class (e.g. NemotronH: native uses ``model.`` prefix, but the
+    trust_remote_code class uses ``backbone.`` prefix, causing key mismatches throughout the
+    pipeline). Instead, we route through the appropriate Auto class so that from_config()
+    resolves the class via auto_map, picking up the correct trust_remote_code implementation.
+
+    Models declare which Auto class they support via config.auto_map. We walk a priority list
+    so that CausalLM models and VL models (AutoModelForConditionalGeneration or similar) are
+    both handled correctly.
+    """
+    auto_map = getattr(config, "auto_map", {})
+    priority = [
+        "AutoModelForCausalLM",
+        "AutoModelForConditionalGeneration",
+        "AutoModelForImageTextToText",
+        "AutoModel",
+    ]
+    for name in priority:
+        if name in auto_map and hasattr(transformers, name):
+            return getattr(transformers, name)
+    return AutoModelForCausalLM
+
+
 def init_model_from_config(
     config: PretrainedConfig,
     *,
@@ -147,17 +184,18 @@ def init_model_from_config(
     Pass True when loading configs that rely on custom modeling code from the checkpoint.
     """
     model_class = _get_model_class_from_config(config)
+    if trust_remote_code:
+        auto_cls = _get_auto_class_for_trust_remote_code(config)
+        return auto_cls.from_config(config, trust_remote_code=trust_remote_code, **kwargs)
     if model_class is AutoModelForCausalLM:
-        return model_class.from_config(config, trust_remote_code=trust_remote_code, **kwargs)
-    # Concrete model classes (e.g. GptOssForCausalLM): _from_config forwards kwargs to __init__,
-    # which does not accept trust_remote_code (only AutoModel uses it when loading custom code).
+        return AutoModelForCausalLM.from_config(config, **kwargs)
+    # Concrete model classes (e.g. GptOssForCausalLM, Qwen3VLMoeForConditionalGeneration):
+    # _from_config forwards kwargs to __init__, which does not accept trust_remote_code.
     return model_class._from_config(config, **kwargs)
 
 
 def save_checkpoint(
-    model: PreTrainedModel,
-    checkpoint_dir: Path | str,
-    descriptor: "ModelDescriptor",
+    model: PreTrainedModel, checkpoint_dir: Path | str, descriptor: "ModelDescriptor"
 ) -> None:
     _save_checkpoint(model.config, model.state_dict(), checkpoint_dir, descriptor)
 
@@ -169,8 +207,6 @@ def _save_checkpoint(
     descriptor: "ModelDescriptor",
     max_workers: int | None = None,  # Now optional - will auto-calculate if None
 ) -> None:
-    from modelopt.torch.puzzletron.anymodel.model_descriptor import ModelDescriptor
-
     if not isinstance(checkpoint_dir, Path):
         checkpoint_dir = Path(checkpoint_dir)
 
@@ -306,7 +342,7 @@ def save_subblocks(
         # Check for any failures
         failed_saves = sum(1 for r in results if not r)
         if failed_saves > 0:
-            mprint(f"  Warning: {failed_saves} files failed to save")
+            raise RuntimeError(f"  {failed_saves} shard file(s) failed to save")
     else:
         mprint("  Using single-threaded saving...")
         for kwargs in safe_save_kwargs:
@@ -346,13 +382,17 @@ def _write_file_process_safe(
     and writes the content to the file. It can be _write_text (defined above), or torch.save,
     or a similar function (not safetensors.torch.save_file since it expects a path).
     """
-    with open(path, "wb") as f:
+    # Open with "ab+" so the file is not truncated before the lock is acquired.
+    # Once we hold the exclusive lock we seek to the start and truncate explicitly.
+    with open(path, "ab+") as f:
         # Try to acquire an exclusive, non-blocking lock
         try:
             fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             return  # Exit immediately if the lock is not acquired
 
+        f.seek(0)
+        f.truncate()
         write_fn(content, f)  # Write the content if lock is acquired
         f.flush()  # Ensure data is written to disk
 

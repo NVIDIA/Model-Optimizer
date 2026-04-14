@@ -174,7 +174,7 @@ These scripts are currently validated with following settings:
 - Calibration size - 32
 - Calibration EPs - \[`cuda`, `cpu`\]
 - Audio dataset - `librispeech_asr` dataset (32 samples used for calibration, 100+ samples used for WER test)
-  - `load_dataset("librispeech_asr", "clean", split="test", trust_remote_code=True)`
+  - `load_dataset("librispeech_asr", "clean", split="test")`
 - Quantization support for various ONNX files - `encoder_model.onnx`, `decoder_model.onnx`, `decoder_with_past_model.onnx`
 - The `use_merged` argument in optimum-ORT's Whisper model API is kept False.
 

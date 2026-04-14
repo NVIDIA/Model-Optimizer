@@ -47,11 +47,8 @@ jobs:
           echo "PATH=${PATH}:/usr/local/tensorrt/targets/x86_64-linux-gnu/bin" >> $GITHUB_ENV
       - name: Install dependencies
         run: |
-          # Install git-lfs for Daring-Anteater dataset
-          apt-get update && apt-get install -y git-lfs
-          git lfs install --system
-
           # use `python -m pip` instead of `pip` to avoid conflicts with system pip for nemo containers
+          pip uninstall -y nvidia-modelopt
           python -m pip install ".${{ inputs.pip_install_extras }}"
 
           if [[ "${{ inputs.example }}" == *"diffusers"* ]]; then
@@ -61,6 +58,19 @@ jobs:
 
           find examples/${{ inputs.example }} -name "requirements.txt" | while read req_file; do python -m pip install -r "$req_file" || exit 1; done
       - name: Run tests
+        env:
+          # Absolute paths so subprocesses running from different working directories
+          # all find the config and write .coverage.* files to the same location.
+          COVERAGE_PROCESS_START: ${{ github.workspace }}/pyproject.toml
+          COVERAGE_FILE: ${{ github.workspace }}/.coverage
         run: |
           echo "Running tests for: ${{ inputs.example }}"
-          pytest tests/examples/${{ inputs.example }}
+          python -m pytest tests/examples/${{ inputs.example }} --cov
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage.xml
+          flags: examples
+          fail_ci_if_error: false # test may be skipped if relevant file changes are not detected
+          verbose: true

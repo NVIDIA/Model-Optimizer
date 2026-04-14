@@ -20,6 +20,15 @@ import sys
 
 import torch.distributed.launch  # noqa: F401
 
+__all__ = [
+    "logger",
+    "aprint",
+    "lmprint",
+    "mprint",
+    "lprint",
+]
+
+
 logging.getLogger("fsspec.local").setLevel(logging.ERROR)
 logging.getLogger("websockets.client").setLevel(logging.WARN)
 logging.getLogger("websockets.server").setLevel(logging.WARN)
@@ -62,7 +71,7 @@ class DistributedLogger(logging.Logger):
         if ranks not in ["all", "main", "local_main", "last"]:
             raise NotImplementedError(
                 f"Could not broadcast msg {msg} - "
-                f"ranks parameters choices are ['all', 'main', 'local_main']. Got {ranks}"
+                f"ranks parameters choices are ['all', 'main', 'local_main', 'last']. Got {ranks}"
             )
         # All ranks to print
         if ranks == "all":
@@ -71,7 +80,7 @@ class DistributedLogger(logging.Logger):
         # Only main rank at node 0 to print
         elif (
             (ranks == "main" and self.global_rank != 0)
-            or (ranks == "last" and self.local_rank != self.world_size - 1)
+            or (ranks == "last" and self.global_rank != self.world_size - 1)
             or (ranks == "local_main" and self.local_rank != 0)
         ):
             return
@@ -100,9 +109,8 @@ class DistributedLogger(logging.Logger):
         return f"{filename}:{lineno}"
 
 
-# Initialize logger
-logging.setLoggerClass(DistributedLogger)
-logger = logging.getLogger(__name__)
+# Initialize logger without modifying global logger class or torch logger
+logger = DistributedLogger(__name__)
 logger.propagate = False
 
 formatter = logging.Formatter("[%(asctime)s]%(message)s")
@@ -111,23 +119,6 @@ handler.setFormatter(formatter)
 handler.setLevel(logging.DEBUG)
 logger.addHandler(handler)
 
-# Manually edit torch logger
-torch_logger = logging.getLogger("torch")
-torch_logger.handlers = logger.handlers
-torch_logger.propagate = False
-
-# Manually edit deepspeed logger
-
-# Show some love to Mac & Windows users who can't easily install deepspeed ;)
-# This is allowing running tests on Mac & Windows and train in non-DDP
-try:
-    from deepspeed.utils import logger as deepspeed_logger
-
-    deepspeed_logger.handlers = logger.handlers
-    deepspeed_logger.propagate = False
-except ImportError:
-    # If deepspeed is not installed - no op
-    pass
 
 # Define a custom function to redirect warnings to logger
 # def custom_warning_handler(message, category, filename, lineno, file=None, line=None):

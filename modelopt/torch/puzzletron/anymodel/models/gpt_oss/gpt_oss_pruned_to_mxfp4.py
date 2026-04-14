@@ -27,13 +27,15 @@ import argparse
 import json
 import os
 import shutil
-from typing import Any, Dict, List, Optional, TextIO, Tuple
+from typing import Any, Dict, List, Tuple
 
 import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
 from tqdm import tqdm
 from transformers.integrations.mxfp4 import convert_moe_packed_tensors
+
+__all__ = []
 
 
 def deduce_experts_for_layer(

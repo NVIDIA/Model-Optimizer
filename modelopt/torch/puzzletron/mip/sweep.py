@@ -22,15 +22,22 @@ from typing import Any
 from omegaconf import DictConfig, OmegaConf
 from transformers import PretrainedConfig
 
-import modelopt.torch.puzzletron.anymodel.models  # noqa: F401 — register ModelDescriptorFactory entries
-import modelopt.torch.puzzletron.mip.mip_and_realize_models as mip_and_realize_models
 import modelopt.torch.utils.distributed as dist
-from modelopt.torch.puzzletron.anymodel.model_descriptor.model_descriptor_factory import (
-    ModelDescriptorFactory,
-)
-from modelopt.torch.puzzletron.mip.run_puzzle import _get_block_stats, filter_subblock_stats_by_args
-from modelopt.torch.puzzletron.tools.checkpoint_utils_hf import load_model_config
-from modelopt.torch.puzzletron.tools.logger import mprint
+
+from ..anymodel import models  # noqa: F401 — register ModelDescriptorFactory entries
+from ..anymodel.model_descriptor import ModelDescriptorFactory
+from ..tools.checkpoint_utils_hf import load_model_config
+from ..tools.logger import mprint
+from . import mip_and_realize_models
+from .run_puzzle import _get_block_stats, filter_subblock_stats_by_args
+
+__all__ = [
+    "get_teacher_memory_from_subblock_stats",
+    "get_teacher_num_params_from_subblock_stats",
+    "extract_solution_results",
+    "write_results_to_csv",
+    "run_mip_sweep",
+]
 
 
 def _load_teacher_subblock_stats(hydra_cfg: DictConfig) -> tuple[dict[str, Any], PretrainedConfig]:
@@ -271,10 +278,13 @@ def run_mip_sweep(hydra_cfg):
                 )
                 all_results.append(result)
 
-                mprint(
-                    f"✓ Results: actual_memory={result['actual_memory_mib']:.1f} MiB, "
-                    f"lm_loss={result['lm_loss']:.4f}"
+                mem = (
+                    f"{result['actual_memory_mib']:.1f}"
+                    if result["actual_memory_mib"] is not None
+                    else "N/A"
                 )
+                loss = f"{result['lm_loss']:.4f}" if result["lm_loss"] is not None else "N/A"
+                mprint(f"✓ Results: actual_memory={mem} MiB, lm_loss={loss}")
 
     # Write results to CSV (only on master rank)
     if dist.is_master():

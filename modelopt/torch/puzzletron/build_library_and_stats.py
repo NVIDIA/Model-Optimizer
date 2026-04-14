@@ -29,16 +29,13 @@ The script uses the same Hydra configuration as the individual commands and supp
 all the same configuration parameters for both build_replacement_library and calc_subblock_stats.
 """
 
-import hydra
 from omegaconf import DictConfig
 
-from modelopt.torch.puzzletron.replacement_library.build_replacement_library import (
-    launch_build_replacement_library,
-)
-from modelopt.torch.puzzletron.subblock_stats.calc_subblock_stats import launch_calc_subblock_stats
-from modelopt.torch.puzzletron.tools.hydra_utils import register_hydra_resolvers
-from modelopt.torch.puzzletron.tools.logger import mprint
-from modelopt.torch.puzzletron.utils.parsing import format_global_config
+from .replacement_library.build_replacement_library import launch_build_replacement_library
+from .subblock_stats.calc_subblock_stats import launch_calc_subblock_stats
+from .tools.logger import mprint
+
+__all__ = ["launch_build_library_and_stats"]
 
 
 def launch_build_library_and_stats(cfg: DictConfig) -> None:

@@ -20,9 +20,10 @@ collect responses, and optionally save them to disk for downstream pipelines
 (e.g., EAGLE3 data synthesis).
 """
 
-# ruff: noqa: D101, D102, D103, D107, F841, PLR1722
+# ruff: noqa: D101, D102, D103, D107, PLR1722
 import argparse
 import os
+import re
 
 from datasets import load_dataset
 from openai import OpenAI
@@ -30,18 +31,43 @@ from openai import OpenAI
 early_termination = False
 
 
+def _strip_thinking(content: str) -> str:
+    """Strip <think>...</think> blocks from assistant message content.
+
+    Used to clean intermediate assistant turns before they are appended to the
+    context for the next generation step.  Only the final assistant turn in a
+    multi-turn conversation should retain the full reasoning trace.
+    """
+    return re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
+
+
 class LLM:
     def __init__(self, args):
         self.args = args
+        self._pid = os.getpid()
         self.client = OpenAI(base_url=args.base_url)
         self.generate(messages=[{"role": "user", "content": "Hello! /no_think"}], verbose=True)
 
+    def _ensure_client(self):
+        """Reinitialize the HTTP client if we've been forked into a new process.
+
+        datasets.map(num_proc>1) forks worker processes that inherit the parent's
+        connection pool.  Reusing inherited sockets across processes causes
+        "Invalid HTTP request" errors.  Creating a fresh client per-process avoids this.
+        """
+        if os.getpid() != self._pid:
+            self._pid = os.getpid()
+            self.client = OpenAI(base_url=self.args.base_url)
+
     def generate(self, messages, verbose=False, **chat_template_kwargs):
+        global early_termination
+        self._ensure_client()
         try:
             completion = self.client.chat.completions.create(
                 model=self.args.model,
                 messages=messages,
                 temperature=self.args.temperature,
+                max_tokens=self.args.max_tokens,
             )
             new_message = completion.choices[0].message.content
             if verbose:
@@ -52,11 +78,9 @@ class LLM:
             new_message = {"role": "assistant", "content": new_message}
         except Exception as e:
             print(e)
-
             if "Connection error" in str(e):
                 early_termination = True
-
-            new_message = None
+            raise  # always propagate so datasets.map() halts the shard
 
         return new_message
 
@@ -76,6 +100,9 @@ parser.add_argument(
 )
 parser.add_argument("--num-proc", type=int, default=32, help="number of processes (concurrency).")
 parser.add_argument("--temperature", type=float, default=0.0, help="temperature.")
+parser.add_argument(
+    "--max-tokens", type=int, default=None, help="maximum tokens to generate per response."
+)
 args = parser.parse_args()
 
 llm = LLM(args)
@@ -90,42 +117,77 @@ def disable_thinking_column(data):
 
 
 def synthesize(data):
-    messages = data.get("conversations", None)
-    if messages is None:
-        messages = data.get("messages", None)
+    messages = data.get("conversations") or data.get("messages")
     if messages is None:
         raise ValueError(
-            "No conversations of messages in the data. Only OAI chat data is supported."
+            "No conversations or messages in the data. Only OAI chat data is supported."
         )
 
     # Handle generation specific kwargs.
     enable_thinking = data.get("enable_thinking", True)
 
     current_messages = []
+    last_full_message = None  # tracks the most recent generated response (unstripped)
 
     for msg in messages:
-        if msg["role"] == "system":
+        role = msg["role"]
+        if role == "system":
             current_messages.append(msg)
-        elif msg["role"] == "user":
+        elif role == "user":
             if not enable_thinking:
+                # Copy to avoid mutating the original dataset row.
+                msg = dict(msg)
                 msg["content"] = msg["content"] + " /no_think"
 
             current_messages.append(msg)
             new_message = llm.generate(current_messages, verbose=False)
             if new_message is None:
                 break
+
+            last_full_message = new_message
+
+            if enable_thinking:
+                # Append a thinking-stripped copy as context for the next turn.
+                # Multi-turn reasoning: only the *last* assistant turn should
+                # retain the full <think>...</think> trace; prior turns are
+                # already resolved and the trace would distract the model.
+                # The full trace is restored to the last turn after the loop.
+                stripped = {
+                    "role": "assistant",
+                    "content": _strip_thinking(new_message["content"]),
+                }
+                current_messages.append(stripped)
             else:
                 current_messages.append(new_message)
-        elif msg["role"] == "assistant":
-            # Original assistant messages are not used
+        elif role == "developer":
+            # Map developer-role messages to system per OpenAI schema conventions.
+            current_messages.append({"role": "system", "content": msg["content"]})
+        elif role == "assistant":
+            # Original assistant messages are not used — the model generates fresh responses.
+            pass
+        elif role == "tool":
+            # Tool turns are not sent to the generation model — skip them.
             pass
         else:
-            raise ValueError("unknown role: {}".format(msg["role"]))
+            raise ValueError(f"Unexpected message role {role!r} in conversation.")
+
+    # Restore the full reasoning trace for the last generated assistant turn.
+    if enable_thinking and last_full_message is not None:
+        for i in range(len(current_messages) - 1, -1, -1):
+            if current_messages[i]["role"] == "assistant":
+                current_messages[i] = last_full_message
+                break
 
     return {"conversations": current_messages}
 
 
-dataset = load_dataset(args.data, split=args.data_split)
+# Support both HF Hub repo IDs and local file paths (.jsonl, .json, .parquet, etc.)
+if os.path.isfile(args.data):
+    ext = os.path.splitext(args.data)[1].lower()
+    fmt = "parquet" if ext == ".parquet" else "json"
+    dataset = load_dataset(fmt, data_files={"train": args.data}, split=args.data_split)
+else:
+    dataset = load_dataset(args.data, split=args.data_split)
 
 if args.num_shards * 100 > len(dataset):
     args.num_shards = min(16, len(dataset) // 100)

@@ -21,7 +21,7 @@ TODO: Consider moving this a separate module dedicated for scoring.
 # mypy: ignore-errors
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Optional, Union
+from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 from omegaconf import DictConfig, OmegaConf
@@ -29,13 +29,20 @@ from torch import nn
 from transformers import PreTrainedTokenizerBase
 
 import modelopt.torch.utils.distributed as dist
-from modelopt.torch.puzzletron.tools import validate_model
-from modelopt.torch.puzzletron.tools.logger import mprint
-from modelopt.torch.puzzletron.tools.robust_json import json_dump
-from modelopt.torch.puzzletron.utils.validation import LowMemorySparseTensor
+from modelopt.torch.utils import json_dump
+
+from ..utils.validation import LowMemorySparseTensor
+from . import validate_model
+from .logger import mprint
 
 if TYPE_CHECKING:
-    from modelopt.torch.puzzletron.sewing_kit import StitchedModule
+    from ..sewing_kit import StitchedModule
+
+__all__ = [
+    "validate_model_and_extract_hidden_states",
+    "validate_model_with_teacher_similarity_metrics",
+    "write_results",
+]
 
 
 def validate_model_and_extract_hidden_states(

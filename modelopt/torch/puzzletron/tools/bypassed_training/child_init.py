@@ -23,37 +23,29 @@ import os
 import re
 import time
 from copy import deepcopy
-from enum import Enum
 from functools import partial
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Optional, Tuple, Union
 
 import torch
 from transformers import PretrainedConfig
 from typeguard import check_type
 
-from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.block_config import (
-    SUBBLOCK_CLS_DICT,
-    BlockConfig,
-    _get_dataclass_type,
-    _is_dataclass_type,
-)
-from modelopt.torch.puzzletron.pruning.pruning_utils import (
-    ACTIVATIONS_LOG,
+from ...block_config import SUBBLOCK_CLS_DICT, BlockConfig, _get_dataclass_type, _is_dataclass_type
+from ...pruning.pruning_utils import (
     GQAInitMode,
     HiddenSizeInitMode,
     LinearInitMode,
     MlpInitMode,
-    _cache_activations_log,
     _init_attention_biases,
     _init_attention_weights,
     _init_mlp_module,
     _init_moe_module,
-    _load_activations_log,
     _load_expert_scores,
-    _select_expert_indices,
 )
-from modelopt.torch.puzzletron.tools.logger import aprint, mprint
+from ..logger import aprint, mprint
+
+__all__ = ["create_child_state_dict", "update_model_config"]
 
 IgnoreFn = Callable[[str], bool]
 
@@ -552,9 +544,7 @@ def _concatenate_experts_into_dense_ffn(
     child_block_config: BlockConfig,
     parent_block_config: BlockConfig,
 ) -> dict[str, torch.Tensor]:
-    assert child_block_config.ffn.gated and child_block_config.ffn.hidden_act == "silu", (
-        "Llama4 experts use SwiGLU."
-    )
+    # Llama4 experts use SwiGLU (gated + silu); FFNConfig does not track these fields directly.
 
     # verify sizes
     child_intermediate_size = child_block_config.ffn.intermediate_size
@@ -918,6 +908,7 @@ def _apply_hidden_size_pruning(
         return out_state_dict
 
     # Load channel ranking if needed
+    channel_ranking = None
     if hidden_size_init_mode == HiddenSizeInitMode.PruneByChannelRanking:
         if channel_importance_path is not None:
             with open(channel_importance_path, "r") as f:

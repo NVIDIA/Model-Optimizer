@@ -21,7 +21,10 @@ from pathlib import Path
 from typing import Any
 
 import modelopt.torch.utils.distributed as dist
-from modelopt.torch.puzzletron.tools.logger import aprint, mprint
+
+from ..tools.logger import aprint, mprint
+
+__all__ = ["ScoringCheckpointManager"]
 
 
 class ScoringCheckpointManager:

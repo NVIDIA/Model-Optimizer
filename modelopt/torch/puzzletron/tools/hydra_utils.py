@@ -25,6 +25,12 @@ from hydra import compose, initialize, initialize_config_dir
 from hydra.utils import get_object
 from omegaconf import DictConfig, OmegaConf
 
+__all__ = [
+    "register_hydra_resolvers",
+    "initialize_hydra_config_for_dir",
+    "initialize_hydra_config",
+]
+
 
 def warmup_steps(tokens: int, block: int, mbs: int, pct: float = 0.05) -> int:
     """

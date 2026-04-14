@@ -34,27 +34,18 @@ from torch.utils.data import DataLoader
 from transformers import AutoTokenizer, PreTrainedModel, PreTrainedTokenizerBase
 
 import modelopt.torch.utils.distributed as dist
-from modelopt.torch.puzzletron.activation_scoring.activation_hooks.utils import (
-    register_activation_hooks,
-)
-from modelopt.torch.puzzletron.anymodel.model_descriptor import (
-    ModelDescriptor,
-    ModelDescriptorFactory,
-)
-from modelopt.torch.puzzletron.anymodel.puzzformer.no_op import Same
-from modelopt.torch.puzzletron.tools.logger import aprint, mprint
-from modelopt.torch.puzzletron.tools.sharded_checkpoint_utils import (
-    load_and_shard_model,
-    set_submodule,
-)
-from modelopt.torch.puzzletron.utils.data.dataloaders import create_validation_dataloader
-from modelopt.torch.puzzletron.utils.parsing import (
-    simple_parse_args_string,  # noqa: F401 (kept for backwards compat)
-)
-from modelopt.torch.puzzletron.utils.validate_runtime_pipeline import (
-    HiddenStatesAndLMHead,
-    calculate_losses_pipeline,
-)
+
+from ..activation_scoring.activation_hooks import register_activation_hooks
+from ..anymodel.model_descriptor import ModelDescriptor, ModelDescriptorFactory
+from ..anymodel.puzzformer import Same
+from ..utils.data import create_validation_dataloader
+from ..utils.parsing import simple_parse_args_string  # noqa: F401 (kept for backwards compat)
+from ..utils.validate_runtime_pipeline import HiddenStatesAndLMHead, calculate_losses_pipeline
+from .common import resolve_torch_dtype
+from .logger import aprint, mprint
+from .sharded_checkpoint_utils import load_and_shard_model, set_submodule
+
+__all__ = ["validate_model", "prepare_model", "prepare_dataloader"]
 
 """
 Two goals:
@@ -159,7 +150,7 @@ def validate_model(
         )
 
         # Create checkpoint manager with hooks
-        from modelopt.torch.puzzletron.utils.checkpoint_manager import ScoringCheckpointManager
+        from ..utils.checkpoint_manager import ScoringCheckpointManager
 
         mprint(
             f"Creating checkpoint manager with {len(activation_hooks)} hooks for dir: {args.activations_log_dir}"
@@ -189,9 +180,7 @@ def validate_model(
         calc_on_cpu=args.calc_losses_on_cpu,
         just_model_forward=just_model_forward,
         checkpoint_manager=checkpoint_manager,
-        autocast_dtype=getattr(
-            torch, getattr(args, "autocast_dtype", "torch.bfloat16").strip("torch.")
-        ),
+        autocast_dtype=resolve_torch_dtype(getattr(args, "autocast_dtype", "torch.bfloat16")),
         descriptor=descriptor,
         use_autocast=descriptor.uses_autocast(),
     )
@@ -236,8 +225,19 @@ def prepare_dataloader(
     if tokenizer is None:
         tokenizer_name = getattr(args, "tokenizer_name", None)
         assert (tokenizer_name is not None) or (args.model_name_or_path is not None)
+        # Auto-detect trust_remote_code from the descriptor when not explicitly set.
+        # Required for models like NemotronH v2 whose configs use characters (e.g. '-') that
+        # the native transformers NemotronHConfig._pattern_to_list doesn't support.
+        trust_remote_code = getattr(args, "trust_remote_code", False)
+        if not trust_remote_code and getattr(args, "descriptor", None):
+            try:
+                descriptor_cls = ModelDescriptorFactory.get(args.descriptor)
+                trust_remote_code = descriptor_cls.requires_trust_remote_code()
+            except Exception:
+                pass
         tokenizer = AutoTokenizer.from_pretrained(
-            tokenizer_name or args.model_name_or_path, trust_remote_code=True
+            tokenizer_name or args.model_name_or_path,
+            trust_remote_code=trust_remote_code,
         )
 
     val_dataloader = create_validation_dataloader(
