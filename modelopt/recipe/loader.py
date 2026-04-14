@@ -97,12 +97,15 @@ def _resolve_imports(
             resolved_cfg: list[Any] = []
             for entry in quant_cfg:
                 if isinstance(entry, dict) and _IMPORT_KEY in entry:
-                    # {$import: name} → replace entire entry (or splice list)
+                    # {$import: name} → splice imported list into quant_cfg
                     imported = _lookup(entry[_IMPORT_KEY], "quant_cfg entry")
-                    if isinstance(imported, list):
-                        resolved_cfg.extend(imported)
-                    else:
-                        resolved_cfg.append(imported)
+                    if not isinstance(imported, list):
+                        raise ValueError(
+                            f"$import {entry[_IMPORT_KEY]!r} in quant_cfg must resolve to a "
+                            f"list, got {type(imported).__name__}. Config snippets used as "
+                            f"quant_cfg entries must be YAML lists."
+                        )
+                    resolved_cfg.extend(imported)
                 elif (
                     isinstance(entry, dict)
                     and isinstance(entry.get("cfg"), dict)

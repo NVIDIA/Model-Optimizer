@@ -429,9 +429,9 @@ def test_import_builtin_recipe_with_imports():
             assert "$import" not in entry["cfg"], f"Unresolved $import in {entry}"
 
 
-def test_import_entry_dict_replacement(tmp_path):
-    """$import as a quant_cfg list entry replaces with the imported dict."""
-    (tmp_path / "disable.yml").write_text("quantizer_name: '*'\nenable: false\n")
+def test_import_entry_single_element_list(tmp_path):
+    """$import splices a single-element list snippet into quant_cfg."""
+    (tmp_path / "disable.yml").write_text("- quantizer_name: '*'\n  enable: false\n")
     recipe_file = tmp_path / "recipe.yml"
     recipe_file.write_text(
         f"imports:\n"
@@ -444,7 +444,26 @@ def test_import_entry_dict_replacement(tmp_path):
         f"    - $import: disable_all\n"
     )
     recipe = load_recipe(recipe_file)
+    assert len(recipe.quantize["quant_cfg"]) == 1
     assert recipe.quantize["quant_cfg"][0] == {"quantizer_name": "*", "enable": False}
+
+
+def test_import_entry_non_list_raises(tmp_path):
+    """$import in quant_cfg list position raises if snippet is not a list."""
+    (tmp_path / "disable.yml").write_text("quantizer_name: '*'\nenable: false\n")
+    recipe_file = tmp_path / "recipe.yml"
+    recipe_file.write_text(
+        f"imports:\n"
+        f"  disable_all: {tmp_path / 'disable.yml'}\n"
+        f"metadata:\n"
+        f"  recipe_type: ptq\n"
+        f"quantize:\n"
+        f"  algorithm: max\n"
+        f"  quant_cfg:\n"
+        f"    - $import: disable_all\n"
+    )
+    with pytest.raises(ValueError, match="must resolve to a list"):
+        load_recipe(recipe_file)
 
 
 def test_import_entry_list_splice(tmp_path):
