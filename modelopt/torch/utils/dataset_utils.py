@@ -405,8 +405,15 @@ def get_dataset_dataloader(
         )
         tokenized_dataset = _CustomDataset(batch_encoded)
     else:
-        # For backward compatibility, if labels are not needed, we only return the input_ids.
-        tokenized_dataset = _CustomDataset({"input_ids": batch_encoded["input_ids"]})
+        # Always include attention_mask so the model correctly ignores padding tokens
+        # during calibration. Without it, HF models create a full causal mask and
+        # padding tokens participate in attention, skewing calibration statistics.
+        tokenized_dataset = _CustomDataset(
+            {
+                "input_ids": batch_encoded["input_ids"],
+                "attention_mask": batch_encoded["attention_mask"],
+            }
+        )
 
     calib_dataloader = DataLoader(tokenized_dataset, batch_size=batch_size, shuffle=False)
 
