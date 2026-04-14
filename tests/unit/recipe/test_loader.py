@@ -491,6 +491,137 @@ def test_import_entry_list_splice(tmp_path):
     assert recipe.quantize["quant_cfg"][2]["quantizer_name"] == "*router*"
 
 
+def test_import_entry_sibling_keys_raises(tmp_path):
+    """$import as a list entry with sibling keys raises ValueError."""
+    (tmp_path / "disable.yml").write_text("- quantizer_name: '*'\n  enable: false\n")
+    recipe_file = tmp_path / "recipe.yml"
+    recipe_file.write_text(
+        f"imports:\n"
+        f"  disable_all: {tmp_path / 'disable.yml'}\n"
+        f"metadata:\n"
+        f"  recipe_type: ptq\n"
+        f"quantize:\n"
+        f"  algorithm: max\n"
+        f"  quant_cfg:\n"
+        f"    - $import: disable_all\n"
+        f"      quantizer_name: '*extra*'\n"
+    )
+    with pytest.raises(ValueError, match="must be the only key"):
+        load_recipe(recipe_file)
+
+
+def test_import_cfg_extend(tmp_path):
+    """$import in cfg with extra non-conflicting keys extends the snippet."""
+    (tmp_path / "fp8.yml").write_text("num_bits: e4m3\n")
+    recipe_file = tmp_path / "recipe.yml"
+    recipe_file.write_text(
+        f"imports:\n"
+        f"  fp8: {tmp_path / 'fp8.yml'}\n"
+        f"metadata:\n"
+        f"  recipe_type: ptq\n"
+        f"quantize:\n"
+        f"  algorithm: max\n"
+        f"  quant_cfg:\n"
+        f"    - quantizer_name: '*weight_quantizer'\n"
+        f"      cfg:\n"
+        f"        $import: fp8\n"
+        f"        axis: 0\n"
+    )
+    recipe = load_recipe(recipe_file)
+    cfg = recipe.quantize["quant_cfg"][0]["cfg"]
+    assert cfg == {"num_bits": (4, 3), "axis": 0}
+
+
+def test_import_cfg_conflict_raises(tmp_path):
+    """$import in cfg with conflicting keys raises ValueError."""
+    (tmp_path / "fp8.yml").write_text("num_bits: e4m3\n")
+    recipe_file = tmp_path / "recipe.yml"
+    recipe_file.write_text(
+        f"imports:\n"
+        f"  fp8: {tmp_path / 'fp8.yml'}\n"
+        f"metadata:\n"
+        f"  recipe_type: ptq\n"
+        f"quantize:\n"
+        f"  algorithm: max\n"
+        f"  quant_cfg:\n"
+        f"    - quantizer_name: '*weight_quantizer'\n"
+        f"      cfg:\n"
+        f"        $import: fp8\n"
+        f"        num_bits: 8\n"
+    )
+    with pytest.raises(ValueError, match="conflict with imported"):
+        load_recipe(recipe_file)
+
+
+def test_import_cfg_multi_import(tmp_path):
+    """$import with a list of names merges non-overlapping snippets."""
+    (tmp_path / "bits.yml").write_text("num_bits: e4m3\n")
+    (tmp_path / "axis.yml").write_text("axis: 0\n")
+    recipe_file = tmp_path / "recipe.yml"
+    recipe_file.write_text(
+        f"imports:\n"
+        f"  bits: {tmp_path / 'bits.yml'}\n"
+        f"  axis: {tmp_path / 'axis.yml'}\n"
+        f"metadata:\n"
+        f"  recipe_type: ptq\n"
+        f"quantize:\n"
+        f"  algorithm: max\n"
+        f"  quant_cfg:\n"
+        f"    - quantizer_name: '*weight_quantizer'\n"
+        f"      cfg:\n"
+        f"        $import: [bits, axis]\n"
+    )
+    recipe = load_recipe(recipe_file)
+    cfg = recipe.quantize["quant_cfg"][0]["cfg"]
+    assert cfg == {"num_bits": (4, 3), "axis": 0}
+
+
+def test_import_cfg_multi_import_conflict_raises(tmp_path):
+    """$import with a list of names raises when snippets have overlapping keys."""
+    (tmp_path / "a.yml").write_text("num_bits: e4m3\n")
+    (tmp_path / "b.yml").write_text("num_bits: 8\n")
+    recipe_file = tmp_path / "recipe.yml"
+    recipe_file.write_text(
+        f"imports:\n"
+        f"  a: {tmp_path / 'a.yml'}\n"
+        f"  b: {tmp_path / 'b.yml'}\n"
+        f"metadata:\n"
+        f"  recipe_type: ptq\n"
+        f"quantize:\n"
+        f"  algorithm: max\n"
+        f"  quant_cfg:\n"
+        f"    - quantizer_name: '*weight_quantizer'\n"
+        f"      cfg:\n"
+        f"        $import: [a, b]\n"
+    )
+    with pytest.raises(ValueError, match="conflicts with keys from prior imports"):
+        load_recipe(recipe_file)
+
+
+def test_import_cfg_multi_import_with_extend(tmp_path):
+    """$import list + inline keys all merge without conflicts."""
+    (tmp_path / "bits.yml").write_text("num_bits: e4m3\n")
+    (tmp_path / "scale.yml").write_text("scale_bits: e8m0\n")
+    recipe_file = tmp_path / "recipe.yml"
+    recipe_file.write_text(
+        f"imports:\n"
+        f"  bits: {tmp_path / 'bits.yml'}\n"
+        f"  scale: {tmp_path / 'scale.yml'}\n"
+        f"metadata:\n"
+        f"  recipe_type: ptq\n"
+        f"quantize:\n"
+        f"  algorithm: max\n"
+        f"  quant_cfg:\n"
+        f"    - quantizer_name: '*weight_quantizer'\n"
+        f"      cfg:\n"
+        f"        $import: [bits, scale]\n"
+        f"        axis: 0\n"
+    )
+    recipe = load_recipe(recipe_file)
+    cfg = recipe.quantize["quant_cfg"][0]["cfg"]
+    assert cfg == {"num_bits": (4, 3), "scale_bits": (8, 0), "axis": 0}
+
+
 def test_import_dir_format(tmp_path):
     """Imports in recipe.yml work with the directory recipe format."""
     (tmp_path / "fp8.yml").write_text("num_bits: e4m3\naxis:\n")

@@ -140,6 +140,37 @@ confused with literal values.  The marker can appear anywhere in the recipe:
 - As a **list element** — the snippet (which must itself be a list) is spliced
   into the surrounding list.
 
+As a **dict value**, ``$import`` supports three composition modes:
+
+- **Single import:** ``$import: name`` — replaced with the snippet content.
+- **Multiple imports:** ``$import: [name1, name2]`` — snippets are merged into
+  one dict.  The snippets must not have overlapping keys.
+- **Import + extend:** extra keys alongside ``$import`` are merged in after the
+  import(s).  Extra keys must not conflict with any imported key.
+
+.. code-block:: yaml
+
+   # Single import
+   cfg:
+     $import: fp8
+
+   # Multiple imports — merge two non-overlapping snippets
+   cfg:
+     $import: [bits, scale]
+
+   # Import + extend — add axis on top of imported fp8
+   cfg:
+     $import: fp8
+     axis: 0          # result: {num_bits: e4m3, axis: 0}
+
+Key conflicts are never allowed — whether between imported snippets or between
+imports and inline keys.  If a key appears in more than one source, the loader
+raises an error.  This avoids ambiguous merge semantics.  If you need different
+values for an existing key, create a new snippet instead.
+
+As a **list element**, ``$import`` must be the only key — extra keys alongside
+a list splice are not supported.
+
 .. code-block:: yaml
 
    imports:

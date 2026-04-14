@@ -98,6 +98,11 @@ def _resolve_imports(
             for entry in quant_cfg:
                 if isinstance(entry, dict) and _IMPORT_KEY in entry:
                     # {$import: name} → splice imported list into quant_cfg
+                    if len(entry) > 1:
+                        raise ValueError(
+                            f"$import must be the only key in the dict, got extra keys: "
+                            f"{sorted(k for k in entry if k != _IMPORT_KEY)}"
+                        )
                     imported = _lookup(entry[_IMPORT_KEY], "quant_cfg entry")
                     if not isinstance(imported, list):
                         raise ValueError(
@@ -111,8 +116,40 @@ def _resolve_imports(
                     and isinstance(entry.get("cfg"), dict)
                     and _IMPORT_KEY in entry["cfg"]
                 ):
-                    # cfg: {$import: name} → replace cfg value
-                    entry["cfg"] = _lookup(entry["cfg"][_IMPORT_KEY], f"cfg of {entry}")
+                    # cfg: {$import: name_or_list, ...extra} → import, merge, extend
+                    ref = entry["cfg"].pop(_IMPORT_KEY)
+                    extra_keys = dict(entry["cfg"])  # remaining inline keys
+                    ref_names = ref if isinstance(ref, list) else [ref]
+
+                    # Merge all imported snippets, detecting conflicts between them
+                    merged: dict[str, Any] = {}
+                    for name in ref_names:
+                        snippet = _lookup(name, f"cfg of {entry}")
+                        if not isinstance(snippet, dict):
+                            raise ValueError(
+                                f"$import {name!r} in cfg must resolve to a dict, "
+                                f"got {type(snippet).__name__}."
+                            )
+                        conflicts = set(snippet) & set(merged)
+                        if conflicts:
+                            raise ValueError(
+                                f"$import {name!r} conflicts with keys from prior imports: "
+                                f"{sorted(conflicts)}. Imported snippets must not overlap."
+                            )
+                        merged.update(snippet)
+
+                    # Extend with inline keys, detecting conflicts with imports
+                    if extra_keys:
+                        conflicts = set(extra_keys) & set(merged)
+                        if conflicts:
+                            raise ValueError(
+                                f"Inline keys {sorted(conflicts)} conflict with imported "
+                                f"values. Cannot override imported values — create a new "
+                                f"snippet instead."
+                            )
+                        merged.update(extra_keys)
+
+                    entry["cfg"] = merged
                     resolved_cfg.append(entry)
                 else:
                     resolved_cfg.append(entry)
