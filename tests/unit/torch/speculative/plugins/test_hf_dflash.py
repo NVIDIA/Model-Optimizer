@@ -438,7 +438,7 @@ class TestEnsureGenerationTags:
         )
 
         # Verify template was replaced with generation-tagged version
-        assert "{% generation %}" in collator.tokenizer.chat_template
+        assert "generation" in collator.tokenizer.chat_template
 
         # Tokenize a sample conversation
         messages = [

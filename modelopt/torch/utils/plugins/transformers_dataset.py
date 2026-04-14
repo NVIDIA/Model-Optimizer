@@ -191,7 +191,7 @@ class LanguageDataCollator:
         can be tested.
         """
         template = self.tokenizer.chat_template
-        if template and ("{% generation %}" in template or "{%generation%}" in template):
+        if template and ("generation" in template and "endgeneration" in template):
             return
 
         raise ValueError(
