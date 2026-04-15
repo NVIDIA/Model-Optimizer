@@ -149,7 +149,8 @@ class ForwardHook(ABC):
         torch.save(activations_log, activations_log_path)
 
         if rank == 0:
-            args.activation_hooks_kwargs.pop("model")
+            if args.activation_hooks_kwargs is not None:
+                args.activation_hooks_kwargs.pop("model", None)
             json_dump(OmegaConf.to_container(args, resolve=True), activations_log_dir / "args.json")
         dist.barrier()
 
@@ -565,9 +566,9 @@ class IndependentKvHeadContributionHook(ForwardHook):
         assert self.optimize_for in ["latency", "memory"]
 
         self.hidden_size = model_config.hidden_size
-        self.n_heads_in_group = block_config.attention.n_heads_in_group
         self.num_q_heads = model_config.num_attention_heads
-        self.num_kv_heads = self.num_q_heads // self.n_heads_in_group
+        self.num_kv_heads = block_config.attention.num_key_value_heads
+        self.n_heads_in_group = self.num_q_heads // self.num_kv_heads
         self.head_dim = getattr(model_config, "head_dim", self.hidden_size // self.num_q_heads)
 
         self.agg_kv_head_contributions = torch.zeros(

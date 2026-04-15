@@ -31,6 +31,7 @@
 # import sys
 # sys.path.insert(0, os.path.abspath('.'))
 
+import contextlib
 import os
 import sys
 
@@ -43,6 +44,14 @@ from modelopt import __version__
 
 sys.path.insert(0, os.path.abspath("../../"))
 sys.path.append(os.path.abspath("./_ext"))
+
+# Pre-import modelopt.torch so it is cached in sys.modules before Sphinx applies
+# autodoc_mock_imports.  Mocking triton/tensorrt_llm at the Sphinx level can break
+# transitive imports (transformers, transformer_engine, …) and cause modelopt.torch
+# to fail inside autosummary.  Importing here — while the real packages are still on
+# sys.path — avoids that problem entirely.
+with contextlib.suppress(Exception):
+    import modelopt.torch  # noqa: F401
 
 # -- Project information -----------------------------------------------------
 

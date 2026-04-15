@@ -221,6 +221,31 @@ If the model uses custom TensorRT operations, provide the plugin libraries:
        --output_dir ./results \
        --plugin_libraries /path/to/plugin1.so /path/to/plugin2.so
 
+Remote Autotuning
+-----------------------
+
+TensorRT 10.15+ supports remote autotuning in safety mode (``--safe``), which allows TensorRT's optimization process to be offloaded to a remote hardware. This is useful when optimizing models for different target GPUs without having direct access to them.
+
+To use remote autotuning during Q/DQ placement optimization, run with ``trtexec`` and pass extra args:
+
+.. code-block:: bash
+
+   python -m modelopt.onnx.quantization.autotune \
+       --onnx_path model.onnx \
+       --output_dir ./model_remote_autotuned \
+       --schemes_per_region 50 \
+       --use_trtexec \
+       --trtexec_benchmark_args "--remoteAutoTuningConfig=\"<remote autotuning config>\" --safe --skipInference"
+
+**Requirements:**
+
+* TensorRT 10.15 or later
+* Valid remote autotuning configuration
+* ``--use_trtexec`` must be set (benchmarking uses ``trtexec`` instead of the TensorRT Python API)
+* ``--safe --skipInference`` must be enabled via ``--trtexec_benchmark_args``
+
+Replace ``<remote autotuning config>`` with an actual remote autotuning configuration string (see ``trtexec --help`` for more details). Other TensorRT benchmark options (e.g. ``--timing_cache``, ``--warmup_runs``, ``--timing_runs``, ``--plugin_libraries``) are also available; run ``--help`` for details.
+
 Low-Level API Usage
 ===================
 

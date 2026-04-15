@@ -53,10 +53,20 @@ bash tools/debugger/client.sh run "nvidia-smi"
 bash tools/debugger/client.sh run "python script.py --model /hf-local/Qwen/Qwen3-8B"
 ```
 
+### Cancelling Commands
+
+```bash
+# Cancel the currently running command
+bash tools/debugger/client.sh cancel
+
+# Client-side timeout also auto-cancels the running command
+```
+
 ### Important Notes
 
 - The server must be started by the user manually inside Docker before the handshake.
 - Default command timeout is 600 seconds (10 minutes). Use `--timeout` for longer tasks.
 - Commands execute sequentially — one at a time.
+- A running command can be cancelled; cancelled commands exit with code 130.
 - All commands run with the auto-detected repo root as the working directory.
 - The `.relay/` directory is ephemeral and git-ignored.
