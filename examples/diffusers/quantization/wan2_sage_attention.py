@@ -223,6 +223,7 @@ def _detect_available_kernels() -> list[str]:
         available.append(KERNEL_TRITON_SPARSE)
         available.append(KERNEL_TRITON_SKIP)
         available.append(KERNEL_NVFP4)
+        available.append(KERNEL_NVFP4_V3)
     except ImportError:
         pass
 
