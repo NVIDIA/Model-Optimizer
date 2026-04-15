@@ -15,7 +15,7 @@
 
 imports:
   base_disable_all: configs/ptq/units/base_disable_all
-  default_disabled: configs/ptq/units/default_disabled_quantizers
+  default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
   w4a4_nvfp4_nvfp4: configs/ptq/units/w4a4_nvfp4_nvfp4
   fp8_kv: configs/ptq/units/fp8_kv
 
@@ -28,4 +28,4 @@ quantize:
     - $import: base_disable_all
     - $import: w4a4_nvfp4_nvfp4
     - $import: fp8_kv
-    - $import: default_disabled
+    - $import: default_disabled_quantizers

@@ -17,11 +17,11 @@
 # Equivalent to the hardcoded FP8_DEFAULT_CFG in config.py.
 imports:
   base_disable_all: configs/ptq/units/base_disable_all
-  w8a8: configs/ptq/units/w8a8_fp8_fp8
-  default_disabled: configs/ptq/units/default_disabled_quantizers
+  w8a8_fp8_fp8: configs/ptq/units/w8a8_fp8_fp8
+  default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
 
 algorithm: max
 quant_cfg:
   - $import: base_disable_all
-  - $import: w8a8
-  - $import: default_disabled
+  - $import: w8a8_fp8_fp8
+  - $import: default_disabled_quantizers

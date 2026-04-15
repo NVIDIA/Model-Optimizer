@@ -61,7 +61,7 @@ styles can be used in a single-file or directory layout.
 Single-file format
 ------------------
 
-The simplest form is a single ``.yml`` or ``.yaml`` file.
+The simplest form is a single ``.yaml`` file.
 
 **Inline style** — all config values are written directly:
 
@@ -131,10 +131,10 @@ example:
 .. code-block:: text
 
    my_recipe/
-     recipe.yml      # metadata section (+ optional imports)
-     quantize.yml    # quantize section (quant_cfg + algorithm)
+     recipe.yaml      # metadata section (+ optional imports)
+     quantize.yaml    # quantize section (+ optional imports)
 
-``recipe.yml``:
+``recipe.yaml``:
 
 .. code-block:: yaml
 
@@ -142,7 +142,7 @@ example:
      recipe_type: ptq
      description: My custom NVFP4 recipe.
 
-``quantize.yml``:
+``quantize.yaml``:
 
 .. code-block:: yaml
 
@@ -159,8 +159,9 @@ example:
          num_bits: e4m3
          axis:
 
-Both inline and import styles work with the directory format.  When using
-imports in a directory recipe, place the ``imports`` section in ``recipe.yml``.
+Both inline and import styles work with the directory format.  Any YAML file
+in the directory can have its own ``imports`` section — ``recipe.yaml``,
+``quantize.yaml``, or any other config file.
 
 .. _composable-imports:
 
@@ -475,7 +476,7 @@ type depends on the ``recipe_type`` in the metadata:
 .. code-block:: python
 
    # Load a custom recipe from the filesystem (file or directory)
-   recipe = load_recipe("/path/to/my_custom_recipe.yml")
+   recipe = load_recipe("/path/to/my_custom_recipe.yaml")
    # or: recipe = load_recipe("/path/to/my_recipe_dir/")
 
 Command-line usage
@@ -529,7 +530,7 @@ This means built-in recipes can be referenced without any prefix:
 
    # These are all equivalent:
    load_recipe("general/ptq/fp8_default-fp8_kv")
-   load_recipe("general/ptq/fp8_default-fp8_kv.yml")
+   load_recipe("general/ptq/fp8_default-fp8_kv.yaml")
 
 
 Writing a custom recipe
@@ -547,7 +548,7 @@ Example -- creating a custom PTQ recipe using imports:
 
 .. code-block:: yaml
 
-   # my_int8_recipe.yml
+   # my_int8_recipe.yaml
    imports:
      base_disable_all: configs/ptq/units/base_disable_all
      default_disabled: configs/ptq/units/default_disabled_quantizers
@@ -586,19 +587,19 @@ The ``modelopt_recipes/`` package is organized as follows:
    +-- __init__.py
    +-- general/                    # Model-agnostic recipes
    |   +-- ptq/
-   |       +-- fp8_default-fp8_kv.yml
-   |       +-- nvfp4_default-fp8_kv.yml
-   |       +-- nvfp4_mlp_only-fp8_kv.yml
-   |       +-- nvfp4_experts_only-fp8_kv.yml
-   |       +-- nvfp4_omlp_only-fp8_kv.yml
+   |       +-- fp8_default-fp8_kv.yaml
+   |       +-- nvfp4_default-fp8_kv.yaml
+   |       +-- nvfp4_mlp_only-fp8_kv.yaml
+   |       +-- nvfp4_experts_only-fp8_kv.yaml
+   |       +-- nvfp4_omlp_only-fp8_kv.yaml
    +-- models/                     # Model-specific recipes
    |   +-- Step3.5-Flash/
    |       +-- nvfp4-mlp-only.yaml
    +-- configs/                    # Reusable config snippets (imported via $import)
        +-- numerics/               # Numeric format definitions
-       |   +-- fp8.yml
-       |   +-- nvfp4_static.yml
-       |   +-- nvfp4.yml
+       |   +-- fp8.yaml
+       |   +-- nvfp4_static.yaml
+       |   +-- nvfp4.yaml
        +-- ptq/                    # PTQ-specific entry snippets
            +-- base_disable_all.yaml
            +-- default_disabled_quantizers.yaml

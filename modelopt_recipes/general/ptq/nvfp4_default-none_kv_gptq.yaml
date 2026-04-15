@@ -15,7 +15,7 @@
 
 imports:
   base_disable_all: configs/ptq/units/base_disable_all
-  default_disabled: configs/ptq/units/default_disabled_quantizers
+  default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
   nvfp4_static: configs/numerics/nvfp4_static
   nvfp4: configs/numerics/nvfp4
 
@@ -36,4 +36,4 @@ quantize:
         $import: nvfp4
     - quantizer_name: '*[kv]_bmm_quantizer'
       enable: false
-    - $import: default_disabled
+    - $import: default_disabled_quantizers
