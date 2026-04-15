@@ -808,6 +808,10 @@ def main() -> None:
             from modelopt.torch.quantization import apply_sage_attention
 
             apply_sage_attention(pipe.transformer)
+        elif args.kernel == KERNEL_NVFP4_V3:
+            from modelopt.torch.quantization import apply_sage_attention_v3
+
+            apply_sage_attention_v3(pipe.transformer)
         elif args.kernel in _TRITON_MODELOPT_KERNELS:
             apply_triton_sparse_kernel(
                 pipe.transformer,
@@ -821,7 +825,10 @@ def main() -> None:
         else:
             enable_attention_kernel(args.kernel)
         _, frames_quant = run_inference(pipe, args, label=args.kernel)
-        if args.kernel not in _TRITON_MODELOPT_KERNELS and args.kernel != KERNEL_NVFP4:
+        if args.kernel not in _TRITON_MODELOPT_KERNELS and args.kernel not in (
+            KERNEL_NVFP4,
+            KERNEL_NVFP4_V3,
+        ):
             print_kernel_stats()
             disable_attention_kernel()
 
@@ -860,7 +867,7 @@ def main() -> None:
             if kernel not in AVAILABLE_KERNELS:
                 print(f"\n[{kernel}] Skipped — not available")
                 continue
-            if kernel in _TRITON_MODELOPT_KERNELS or kernel == KERNEL_NVFP4:
+            if kernel in _TRITON_MODELOPT_KERNELS or kernel in (KERNEL_NVFP4, KERNEL_NVFP4_V3):
                 print(
                     f"\n[{kernel}] Skipped in --benchmark (ModelOpt kernels modify the model "
                     f"in-place; run separately with --kernel {kernel})"
@@ -877,7 +884,7 @@ def main() -> None:
         print(f"  {'-' * 40}")
         print(f"  {'baseline (SDPA)':<20} {t_base:>7.1f}s   {'1.00x':>8}")
         for kernel in KERNEL_CHOICES:
-            if kernel in _TRITON_MODELOPT_KERNELS or kernel == KERNEL_NVFP4:
+            if kernel in _TRITON_MODELOPT_KERNELS or kernel in (KERNEL_NVFP4, KERNEL_NVFP4_V3):
                 print(f"  {kernel:<20} {'N/A':>8}   {'N/A':>8}  (run separately)")
                 continue
             if kernel not in timing:
