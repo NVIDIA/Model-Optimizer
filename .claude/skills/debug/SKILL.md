@@ -7,7 +7,7 @@ description: Run commands inside a remote Docker container via the file-based co
 
 Execute commands inside a Docker container from the host using the file-based command relay.
 
-**Read `tools/debugger/CLAUDE.md` for full usage details** — it has the protocol, examples, and troubleshooting.
+**Read `tools/debugger/CLAUDE.md` for full usage details** — it has the protocol and examples.
 
 ## Quick Reference
 

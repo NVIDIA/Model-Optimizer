@@ -67,8 +67,7 @@ cleanup() {
     # from aborting the trap and leaving stale marker files)
     running_pid=$(cut -d: -f2 "$RELAY_DIR/running" 2>/dev/null) || true
     if [[ -n "$running_pid" ]]; then
-        pkill -P "$running_pid" 2>/dev/null || true
-        kill "$running_pid" 2>/dev/null || true
+        kill -- -"$running_pid" 2>/dev/null || kill "$running_pid" 2>/dev/null || true
     fi
     # Kill any child processes in our process group
     pkill -P $$ 2>/dev/null || true
@@ -98,11 +97,12 @@ mkdir -p "$CMD_DIR" "$RESULT_DIR"
 
 # Ensure modelopt is editable-installed from WORKDIR
 check_modelopt_local() {
-    python -c "
+    # Clear PYTHONPATH and use -I to validate actual install state, not source tree
+    PYTHONPATH="" python -I -c "
 import modelopt, os, sys
 actual = os.path.realpath(modelopt.__path__[0])
 expected = os.path.realpath('$WORKDIR')
-if not actual.startswith(expected):
+if os.path.commonpath([actual, expected]) != expected:
     print(f'modelopt loaded from {actual}, expected under {expected}', file=sys.stderr)
     sys.exit(1)
 " 2>&1
@@ -169,8 +169,8 @@ while true; do
         tail -f "$RESULT_DIR/$cmd_id.log" &
         tail_pid=$!
 
-        # Run from cmd_content (not the file) since we already removed it
-        (cd "$WORKDIR" && bash -c "$cmd_content") >> "$RESULT_DIR/$cmd_id.log" 2>&1 &
+        # Run in a new process group (setsid) for clean cancellation of entire process tree
+        (cd "$WORKDIR" && exec setsid bash -c "$cmd_content") >> "$RESULT_DIR/$cmd_id.log" 2>&1 &
         cmd_pid=$!
 
         # Track the running command (ID and PID) — atomic write to prevent partial reads
@@ -189,9 +189,8 @@ while true; do
                     continue
                 fi
                 echo "[server] Cancelling command $cmd_id (PID $cmd_pid)..."
-                # Send SIGTERM to children first, then parent
-                pkill -P "$cmd_pid" 2>/dev/null || true
-                kill "$cmd_pid" 2>/dev/null || true
+                # Kill entire process group (negative PID) for full tree cleanup
+                kill -- -"$cmd_pid" 2>/dev/null || kill "$cmd_pid" 2>/dev/null || true
                 # Wait up to 5s for graceful exit, then escalate to SIGKILL
                 for _ in $(seq 1 5); do
                     kill -0 "$cmd_pid" 2>/dev/null || break
@@ -199,8 +198,7 @@ while true; do
                 done
                 if kill -0 "$cmd_pid" 2>/dev/null; then
                     echo "[server] Process $cmd_pid did not exit, sending SIGKILL..."
-                    pkill -9 -P "$cmd_pid" 2>/dev/null || true
-                    kill -9 "$cmd_pid" 2>/dev/null || true
+                    kill -9 -- -"$cmd_pid" 2>/dev/null || kill -9 "$cmd_pid" 2>/dev/null || true
                 fi
                 wait "$cmd_pid" 2>/dev/null || true
                 cancelled="true"

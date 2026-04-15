@@ -86,15 +86,16 @@ The relay uses a directory at `tools/debugger/.relay/` with this structure:
 
 ### Command Execution
 
-1. Client writes a command to `.relay/cmd/<timestamp>.sh`
-2. Server detects the file, runs `bash <file>` in the workdir in background, writes `.relay/running`
-3. Server writes `.relay/result/<timestamp>.log` and `.relay/result/<timestamp>.exit`
-4. Server removes the `.sh` file and `.relay/running`; client reads results and cleans up
+1. Client writes a command to `.relay/cmd/<id>.sh`
+2. Server detects the file, reads the command content, and removes the `.sh` file
+3. Server runs `bash -c <content>` in a new process group, writes `.relay/running`
+4. Server writes `.relay/result/<id>.exit` and `.relay/result/<id>.log`, then removes `.relay/running`
+5. Client reads results and cleans up
 
 ### Cancellation
 
-1. Client writes `.relay/cancel`
-2. Server detects the cancel signal, kills the running command process tree
+1. Client writes the target `cmd_id` to `.relay/cancel`
+2. Server verifies the `cmd_id` matches, then kills the command's process group
 3. Server writes exit code 130 and removes `.relay/running` and `.relay/cancel`
 4. Client-side timeout also triggers cancellation automatically
 
