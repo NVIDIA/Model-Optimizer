@@ -252,6 +252,11 @@ def build_quant_cfg(
         quant_cfg["quant_cfg"].append({"quantizer_name": "*image*", "enable": False})
         quant_cfg["quant_cfg"].append({"quantizer_name": "*vision*", "enable": False})
 
+    if model_type == "qwen3_5moe":
+        # TRT-LLM's Qwen3.5-MoE weight loader uses intermediate_size (default hidden_size*2)
+        # instead of moe_intermediate_size for expert buffer allocation, causing shape mismatches.
+        quant_cfg["quant_cfg"].append({"quantizer_name": "*experts*", "enable": False})
+
     return quant_cfg
 
 

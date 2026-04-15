@@ -29,6 +29,8 @@ MODEL_NAME_TO_TYPE = {
     "MPT": "mpt",
     "Bloom": "bloom",
     "ChatGLM": "chatglm",
+    "Qwen3_5Moe": "qwen3_5moe",
+    "Qwen3_5": "qwen3_5",
     "Qwen3Moe": "qwen3moe",
     "Qwen3Next": "qwen3next",
     "QWen": "qwen",

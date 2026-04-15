@@ -1216,12 +1216,12 @@ PQS_FUSE_MODULE_MAPPING = [
     # Mathematical equivalence:
     #   Before: o_proj_out = [attn @ (v_proj_in @ v_proj.W^T)^T * scale] @ o_proj.W^T
     #   After:  o_proj_out = [attn @ (v_proj_in @ (v_proj.W * scale)^T)^T] @ o_proj.W^T
-    (["LlamaAttention", "Qwen3Attention", "Qwen3MoeAttention"], ("v_proj", "o_proj")),
+    (["LlamaAttention", "Qwen3Attention", "Qwen3MoeAttention", "Qwen3_5Attention"], ("v_proj", "o_proj")),
     # MLP: Fuse down_proj's pre_quant_scale into up_proj's output dimension
     # Mathematical equivalence:
     #   Before: down_proj_out = {[act_fn(self.gate_proj(x)) * up_proj(x)] * scale} @ down_proj.W^T
     #   After:  down_proj_out = {[act_fn(self.gate_proj(x)) * (up_proj(x) * scale)]} @ down_proj.W^T
-    (["LlamaMLP", "Qwen3MLP", "Qwen3MoeMLP"], ("up_proj", "down_proj")),
+    (["LlamaMLP", "Qwen3MLP", "Qwen3MoeMLP", "Qwen3_5MLP"], ("up_proj", "down_proj")),
 ]
 
 
