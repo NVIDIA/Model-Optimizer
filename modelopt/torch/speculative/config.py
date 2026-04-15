@@ -50,6 +50,67 @@ EAGLE_MTP_DEFAULT_CFG = {
 }
 
 
+def _get_dflash_default_config():
+    from .dflash.default_config import default_dflash_config
+
+    return default_dflash_config
+
+
+DFLASH_DEFAULT_CFG = {
+    "algorithm": "dflash",
+    "config": {
+        "dflash_architecture_config": {},  # merged with default at convert time
+    },
+}
+
+
+class DFlashConfig(ModeloptBaseConfig):
+    """DFlash config for block-wise parallel speculative decoding."""
+
+    dflash_block_size: int = ModeloptField(
+        default=8,
+        description="Block size for parallel prediction. Draft predicts this many tokens per block.",
+    )
+
+    dflash_freeze_base_model: bool = ModeloptField(
+        default=True, description="Whether to freeze base model during DFlash module training."
+    )
+
+    dflash_self_logit_distillation: bool = ModeloptField(
+        default=True, description="Whether to use logit distillation from base model."
+    )
+
+    dflash_loss_decay_factor: float = ModeloptField(
+        default=0.0,
+        description="Gamma for exponential loss decay weighting (paper Eq.4). "
+        "Suggested: 7 for block_size=16, 5 for 10, 4 for 8. 0 disables.",
+    )
+
+    dflash_num_anchors: int = ModeloptField(
+        default=512,
+        description="Number of random anchor positions sampled per sequence during training.",
+    )
+
+    dflash_report_acc: bool = ModeloptField(
+        default=True, description="Whether to report eval accuracy."
+    )
+
+    dflash_mask_token_id: int = ModeloptField(
+        default=None,
+        description="Token ID used for masked (unknown) positions. "
+        "Set explicitly or auto-detected from tokenizer.mask_token_id in main.py.",
+    )
+
+    dflash_architecture_config: dict = ModeloptField(
+        default={}, description="Config for the DFlash draft module architecture."
+    )
+
+    dflash_use_torch_compile: bool = ModeloptField(
+        default=True,
+        description="Whether to use torch.compile on DFlash forward/loss methods.",
+    )
+
+
 class MedusaConfig(ModeloptBaseConfig):
     """Medusa config."""
 

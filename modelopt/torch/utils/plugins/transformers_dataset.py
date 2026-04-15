@@ -33,26 +33,6 @@ REMOVE_THINK_CHAT_TEMPLATE = (
 IGNORE_TOKEN_ID = LabelSmoother.ignore_index
 
 
-def _sharegpt_to_openai_messages(conversations: list[dict]):
-    """Optionally align sharedgpt format to openai format."""
-    role_mapping = {
-        "user": "user",
-        "User": "user",
-        "human": "user",
-        "assistant": "assistant",
-        "Assistant": "assistant",
-        "gpt": "assistant",
-        "system": "system",
-        "System": "system",
-    }
-    messages = []
-    for msg in conversations:
-        role = role_mapping[msg["role"]]
-        content = msg["content"]
-        messages.append({"role": role, "content": content})
-    return messages
-
-
 class ShardedDataset(torch.utils.data.Dataset):
     """Subclass of torch.utils.data.Dataset to load data from HuggingFace dataset."""
 
@@ -127,10 +107,29 @@ class LanguageDataCollator:
         chat_template: str | None = None,
         add_generation_prompt: bool = False,
         answer_only_loss: bool = False,
+        shift_labels: bool = True,
         json_key: str = "text",
         return_labels: bool = False,
     ):
-        """Initialize the LanguageDataset."""
+        """Initialize the LanguageDataset.
+
+        Args:
+            tokenizer: HuggingFace tokenizer.
+            train_len: Maximum sequence length for training.
+            chat_template: Optional custom chat template override.
+            add_generation_prompt: Whether to add generation prompt to chat template.
+            answer_only_loss: If True, mask loss on non-assistant tokens using
+                ``{% generation %}`` tags in the chat template.
+            shift_labels: Label alignment mode.
+                If True (default), labels are shifted by 1 for autoregressive training
+                (label[i] = input[i+1], used by EAGLE3). The answer_only_loss mask is
+                also shifted to align with the target tokens.
+                If False, labels are unshifted for diffusion-style training
+                (label[i] = input[i], used by DFlash). The answer_only_loss mask is
+                applied directly without shifting.
+            json_key: Key for plain text samples (non-chat format).
+            return_labels: Whether to include labels in the output.
+        """
         if not isinstance(tokenizer, transformers.PreTrainedTokenizerBase):
             raise ValueError(
                 "The tokenizer must be a transformers.PreTrainedTokenizerBase but got {}".format(
@@ -141,8 +140,10 @@ class LanguageDataCollator:
         self.train_len = train_len
         self.add_generation_prompt = add_generation_prompt
         self.answer_only_loss = answer_only_loss
+        self.shift_labels = shift_labels
         self.json_key = json_key
         self.return_labels = return_labels
+        self._conversations_warned = False
 
         if chat_template is not None:
             self.tokenizer.chat_template = chat_template
@@ -152,6 +153,9 @@ class LanguageDataCollator:
         self._post_process_tokenizer()
         if self.tokenizer.chat_template is None:
             raise ValueError("No valid chat template!")
+
+        if self.answer_only_loss:
+            self._verify_generation_tags()
 
     def _post_process_tokenizer(self):
         if self.tokenizer.pad_token_id is None:
@@ -171,6 +175,37 @@ class LanguageDataCollator:
             REMOVE_THINK_CHAT_TEMPLATE, ""
         )
 
+    def _verify_generation_tags(self):
+        """Verify the chat template supports answer_only_loss via {% generation %} tags.
+
+        answer_only_loss requires the tokenizer's chat template to include
+        {% generation %} / {% endgeneration %} tags around assistant content.
+        These tags tell HuggingFace's apply_chat_template() which tokens are
+        assistant responses, enabling return_assistant_tokens_mask.
+
+        If the template lacks these tags, this method raises an error with
+        instructions for the user to provide a compatible template.
+
+        Per-model chat templates with generation tags should be maintained
+        alongside model recipes (e.g., in modelopt_recipes/) where correctness
+        can be tested.
+        """
+        template = self.tokenizer.chat_template
+        if template and ("generation" in template and "endgeneration" in template):
+            return
+
+        raise ValueError(
+            "answer_only_loss requires {% generation %} / {% endgeneration %} tags in the "
+            "chat template, but the current template does not have them.\n\n"
+            "To fix, provide a chat_template with generation tags:\n"
+            "  1. Copy your model's chat_template from tokenizer_config.json\n"
+            "  2. Wrap assistant content with {% generation %} / {% endgeneration %}\n"
+            "  3. Pass via LanguageDataCollator(chat_template=...) or the training config\n\n"
+            "See https://huggingface.co/docs/transformers/en/chat_templating"
+            "#train-on-completions-only for the official HuggingFace guide.\n\n"
+            "Per-model templates are maintained in modelopt_recipes/ alongside training recipes."
+        )
+
     def _process_chat_sample(self, examples: list):
         tokenized_examples = self.tokenizer.apply_chat_template(
             examples,
@@ -185,7 +220,33 @@ class LanguageDataCollator:
         if self.return_labels:
             input_ids = tokenized_examples["input_ids"]
             labels = input_ids.new_full(input_ids.shape, IGNORE_TOKEN_ID)
-            labels[..., :-1] = input_ids[..., 1:]
+            if self.shift_labels:
+                # Autoregressive: label[i] = input[i+1]
+                labels[..., :-1] = input_ids[..., 1:]
+            else:
+                # Diffusion: label[i] = input[i]
+                labels[:] = input_ids
+            if self.answer_only_loss:
+                if "assistant_masks" in tokenized_examples:
+                    assistant_mask = tokenized_examples["assistant_masks"]
+                    if isinstance(assistant_mask, torch.Tensor) and assistant_mask.any():
+                        if self.shift_labels:
+                            # Shifted labels: mask based on whether the *target* token
+                            # (input[i+1]) is assistant content.
+                            shifted_mask = assistant_mask[..., 1:]
+                            labels[..., :-1][shifted_mask == 0] = IGNORE_TOKEN_ID
+                        else:
+                            # Unshifted labels: mask based on the input token directly.
+                            labels[assistant_mask == 0] = IGNORE_TOKEN_ID
+                    else:
+                        # All assistant content truncated or no assistant in batch — mask all
+                        labels[:] = IGNORE_TOKEN_ID
+                else:
+                    raise ValueError(
+                        "answer_only_loss requires {% generation %} tags in the chat "
+                        "template but assistant_masks was not returned by the tokenizer. "
+                        "Ensure _ensure_generation_tags() ran successfully."
+                    )
             tokenized_examples["labels"] = labels
         return tokenized_examples
 
@@ -211,15 +272,30 @@ class LanguageDataCollator:
                 batch.append(text)
             else:
                 messages = example.get("messages", None)
-                if messages is None:
-                    conversations = example.get("conversations", None)
-                    if conversations is None:
-                        raise ValueError(
-                            "The sample must in either OpenAI messages format or ShareGPT conversations format."
+                if not messages and example.get("conversations", None):
+                    messages = example["conversations"]
+                    if not self._conversations_warned:
+                        print_rank_0(
+                            "=== DEPRECATION WARNING === 'conversations' field is deprecated. "
+                            "Use 'messages' (OpenAI format) instead."
                         )
-                    else:
-                        messages = _sharegpt_to_openai_messages(conversations)
+                        self._conversations_warned = True
+                if not messages:
+                    raise ValueError(
+                        "Sample must have a 'messages' field in OpenAI format "
+                        "(list of {role, content} dicts)."
+                    )
+                if not any(m.get("role") == "assistant" for m in messages):
+                    print_rank_0(
+                        "=== WARNING === Skipping sample with no assistant turn in messages."
+                    )
+                    continue
                 batch.append(messages)
+
+        if not batch:
+            # All samples skipped — create a dummy batch with all-masked labels
+            # so the training step produces zero loss without crashing DDP
+            batch = [[{"role": "user", "content": ""}, {"role": "assistant", "content": ""}]]  # type: ignore[list-item]
 
         return self._process_chat_sample(batch)
 
@@ -241,6 +317,7 @@ class VisionLanguageDataCollator(LanguageDataCollator):
         self.processor = transformers.AutoProcessor.from_pretrained(processor)
         self.chat_template = chat_template
         self.local_image_path = local_image_path
+        self._conversations_warned = False
 
         super().__init__(
             tokenizer=self.processor.tokenizer,
@@ -272,14 +349,19 @@ class VisionLanguageDataCollator(LanguageDataCollator):
 
         for example in examples:
             messages = example.get("messages", None)
-            if messages is None:
-                conversations = example.get("conversations", None)
-                if conversations is None:
-                    raise ValueError(
-                        "The sample must in either OpenAI messages format or ShareGPT conversations format."
+            if not messages and example.get("conversations", None):
+                messages = example["conversations"]
+                if not self._conversations_warned:
+                    print_rank_0(
+                        "=== DEPRECATION WARNING === 'conversations' field is deprecated. "
+                        "Use 'messages' (OpenAI format) instead."
                     )
-                else:
-                    messages = _sharegpt_to_openai_messages(conversations)
+                    self._conversations_warned = True
+            if messages is None:
+                raise ValueError(
+                    "Sample must have a 'messages' field in OpenAI format "
+                    "(list of {role, content} dicts)."
+                )
 
             copy_messages = copy.deepcopy(messages)
 

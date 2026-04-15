@@ -42,6 +42,11 @@ jobs:
             .github/workflows/gpu_tests.yml
             modelopt/**
             tests/gpu/**
+            tests/gpu_regression/**
+            examples/speculative_decoding/**
+            examples/dataset/**
+            modelopt_recipes/general/speculative_decoding/**
+            tools/launcher/**
             pyproject.toml
             tox.ini
           fail_on_initial_diff_error: true
@@ -66,6 +71,9 @@ jobs:
             timeout: 45
             container_image: pytorch:26.01-py3
             # tests/gpu/_extensions/test_onnx_extensions.py fails for newer containers until https://github.com/tbenthompson/cppimport/pull/98
+          - example: gpu-regression
+            timeout: 15
+            container_image: pytorch:26.01-py3
           - example: gpu-megatron
             timeout: 45
             container_image: pytorch:26.01-py3

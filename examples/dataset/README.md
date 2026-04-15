@@ -219,3 +219,16 @@ python -m modelopt.torch.utils.plugins.megatron_preprocess_data \
     --workers 32 \
     --reasoning_content inline
 ```
+
+## Synthetic Test Dataset
+
+`synthetic_conversations_1k.jsonl` is a 1,000-sample dataset in OpenAI messages format
+(900 single-turn + 100 two-turn conversations) covering writing, reasoning, math, coding,
+STEM, extraction, humanities, and roleplay categories.
+
+This dataset was synthesized by Claude (Anthropic) and is licensed under Apache-2.0.
+It is intended for testing and CI regression — not for production training.
+
+```json
+{"messages": [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]}
+```

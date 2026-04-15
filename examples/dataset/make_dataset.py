@@ -522,7 +522,10 @@ async def main(args: argparse.Namespace) -> None:
                 )
                 if "conversation_id" not in entry:
                     entry["conversation_id"] = id_for_conversation(entry["conversations"])
-                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                # Output in OpenAI messages format (rename conversations → messages)
+                output_entry = {k: v for k, v in entry.items() if k != "conversations"}
+                output_entry["messages"] = entry["conversations"]
+                f.write(json.dumps(output_entry, ensure_ascii=False) + "\n")
 
 
 if __name__ == "__main__":

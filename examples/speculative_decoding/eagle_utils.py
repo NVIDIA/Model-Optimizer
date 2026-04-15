@@ -53,11 +53,27 @@ except (ImportError, AttributeError):
 __all__ = ["EagleOfflineDataCollator", "OfflineSupervisedDataset"]
 
 
-def make_eagle_supervised_data_module(
+def make_speculative_data_module(
     tokenizer: transformers.PreTrainedTokenizer,
     data_args,
     train_len=None,
+    answer_only_loss=False,
+    shift_labels=True,
 ) -> dict:
+    """Create data module for speculative decoding training.
+
+    Args:
+        shift_labels: If True, labels are shifted by 1 for autoregressive training (EAGLE3).
+            If False, labels are unshifted for diffusion-style training (DFlash).
+    """
+    # Load chat template from file if provided
+    chat_template = None
+    if getattr(data_args, "chat_template", None):
+        template_path = data_args.chat_template
+        with open(template_path) as f:
+            chat_template = f.read()
+        print_rank_0(f"Loaded chat template from {template_path}")
+
     if data_args.offline_data_path is None:
         train_dataset = ShardedDataset("json", data_files=data_args.data_path)
 
@@ -66,6 +82,9 @@ def make_eagle_supervised_data_module(
                 tokenizer=tokenizer,
                 train_len=train_len,
                 return_labels=True,
+                answer_only_loss=answer_only_loss,
+                shift_labels=shift_labels,
+                chat_template=chat_template,
             )
         else:
             data_collator = VisionLanguageDataCollator(
@@ -117,7 +136,7 @@ class EagleTrainingPlot(TrainerCallback):
 
     def __init__(self, ar_validate_steps: int = 1000, estimate_ar: bool = False):
         self.ar_validate_steps = ar_validate_steps
-        if hasattr(wandb, "init") and is_master():
+        if wandb is not None and wandb.run is not None and is_master():
             wandb.init()
         self.estimate_ar = estimate_ar
 
@@ -126,6 +145,17 @@ class EagleTrainingPlot(TrainerCallback):
         if not hasattr(state, "training_accs") or len(state.training_accs) == 0:
             return control
         average_acc = np.mean(state.training_accs, axis=0)
+        # Always print accuracy to console
+        try:
+            acc_str = ", ".join(f"{a:.4f}" for a in np.array(average_acc).flatten())
+            print_rank_0(f"Step {state.global_step} Training Acc: [{acc_str}]")
+        except Exception:
+            print_rank_0(f"Step {state.global_step} Training Acc: {average_acc}")
+        # Log accuracy to HF Trainer's logs dict (picked up by TensorBoard)
+        logs = kwargs.get("logs") or {}
+        for i, draft_acc in enumerate(average_acc):
+            for j, step_acc in enumerate(draft_acc):
+                logs[f"train_acc/parallel_{i}_step_{j}"] = float(step_acc)
         if self.estimate_ar:
             # Calculate mean training AR since last log
             # NOTE: This is only an estimate of the real AR.
@@ -139,19 +169,12 @@ class EagleTrainingPlot(TrainerCallback):
                 acc_cumprod *= draft_acc[-1]
                 est_ar += acc_cumprod
             print_rank_0(f"Step {state.global_step} Estimated Training AR: {est_ar:.4f}")
+            logs["estimated_training_ar"] = est_ar
 
         # log to wandb
-        if wandb and is_master():
-            logs = kwargs.get("logs") or {}
+        if wandb is not None and wandb.run is not None and is_master():
             if logs:
                 wandb.log({k: v for k, v in logs.items() if v is not None}, step=state.global_step)
-            for i, draft_acc in enumerate(average_acc):
-                for j, step_acc in enumerate(draft_acc):
-                    wandb.log(
-                        {f"parallel_{i}_step_{j}_train_acc": step_acc}, step=state.global_step
-                    )
-            if self.estimate_ar:
-                wandb.log({"estimated_training_ar": est_ar}, step=state.global_step)
 
         # reset training_accs
         state.training_accs = []
@@ -171,7 +194,7 @@ class EagleTrainingPlot(TrainerCallback):
                     device=kwargs["model"].device,
                 )
                 print_rank_0(f"Step {state.global_step} AR: {sum(ars) / len(ars):.4f}")
-                if wandb and is_master():
+                if wandb is not None and wandb.run is not None and is_master():
                     wandb.log({"validate_ar": sum(ars) / len(ars)}, step=state.global_step)
             except Exception:
                 print_rank_0("AR validation not available.")

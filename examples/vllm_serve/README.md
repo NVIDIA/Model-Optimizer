@@ -4,7 +4,7 @@ This is a simple example to demonstrate calibrating and serving ModelOpt fakequa
 
 Compared with realquant, fakequant is 2-5x slower, but doesn't require dedicated kernel support and facilitates research.
 
-This example is tested with vllm 0.9.0 and 0.11.2
+This example is tested with vllm 0.9.0 and 0.19.1
 
 ## Prepare environment
 

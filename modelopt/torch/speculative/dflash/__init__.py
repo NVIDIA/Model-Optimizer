@@ -13,22 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Handles speculative plugins for third-party modules.
+"""DFlash Optimization Method."""
 
-Please check out the source code of this module for examples of how plugins work and how you can
-write your own one. Currently, we support plugins for
-
-- :meth:`transformers<modelopt.torch.speculative.plugins.transformers>`
-"""
-
-from modelopt.torch.utils import import_plugin
-
-with import_plugin("megatron_eagle"):
-    from .megatron_eagle import *
-
-with import_plugin("megatron_medusa"):
-    from .megatron_medusa import *
-
-with import_plugin("transformers"):
-    from .hf_dflash import *
-    from .transformers import *
+from .conversion import *
+from .default_config import *
+from .dflash_model import *
