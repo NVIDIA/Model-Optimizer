@@ -60,8 +60,12 @@ def _check_for_trtexec(min_version: str = "10.0") -> str:
     from packaging.version import InvalidVersion, Version
 
     def _parse_version_from_string(version_str: str) -> str | None:
-        # Try canonical x.x.x.x strings first
-        match = re.search(r"(\d+(\.\d+)+)", version_str)
+        # Try canonical TensorRT x.x.x.x strings first
+        match = re.search(
+            r"TensorRT(?:\s+version)?\s*[:=]\s*(\d+(?:\.\d+)+)",
+            version_str,
+            flags=re.IGNORECASE,
+        )
         if match:
             return match.group(1)
 
