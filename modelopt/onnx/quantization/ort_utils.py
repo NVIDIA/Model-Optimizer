@@ -41,6 +41,71 @@ def _check_lib_in_ld_library_path(ld_library_path, lib_pattern):
     return False, None
 
 
+def _check_for_trtexec(min_version: str = "10.0") -> str:
+    """Check if the `trtexec` CLI tool is available in PATH and is >= min_version.
+
+    Args:
+        min_version (str): Minimum required version (e.g., "10.0")
+
+    Returns:
+        str: The resolved path to the `trtexec` binary.
+
+    Raises:
+        ImportError: If `trtexec` is not found or the version is too low.
+    """
+    import re
+    import shutil
+    import subprocess  # nosec B404
+
+    from packaging.version import InvalidVersion, Version
+
+    def _parse_version_from_string(version_str: str) -> str | None:
+        # Try canonical x.x.x.x strings first
+        match = re.search(r"(\d+(\.\d+)+)", version_str)
+        if match:
+            return match.group(1)
+
+        # Fallback: look for "[TensorRT v101502]" pattern and convert to "10.15"
+        match = re.search(r"\[TensorRT v(\d{6,8})\]", version_str)
+        if match:
+            vnum = match.group(1)
+            # Use only major and minor, e.g., v101502 -> 10.15
+            if len(vnum) >= 4:
+                major = int(vnum[0:2])
+                minor = int(vnum[2:4])
+                return f"{major}.{minor}"
+            return None
+        return None
+
+    trtexec_path = shutil.which("trtexec")
+    if trtexec_path is None:
+        logger.error("trtexec executable not found in PATH.")
+        raise ImportError(
+            "Could not find the `trtexec` executable. Please install TensorRT and ensure `trtexec` is in your PATH."
+        )
+
+    try:
+        result = subprocess.run([trtexec_path], capture_output=True, text=True, timeout=5)  # nosec B603
+        banner_output = result.stdout + result.stderr
+        parsed_version = _parse_version_from_string(banner_output)
+
+        if not parsed_version:
+            raise ValueError("Could not parse version from trtexec output.")
+
+        if Version(parsed_version) < Version(min_version):
+            logger.error(
+                f"trtexec version found ({parsed_version}) is lower than required ({min_version})"
+            )
+            raise ImportError(f"`trtexec` version must be >= {min_version}, found {parsed_version}")
+        logger.info(f"trtexec found at {trtexec_path} (version {parsed_version})")
+        return trtexec_path
+    except (subprocess.SubprocessError, FileNotFoundError, ValueError, InvalidVersion) as err:
+        logger.error(f"Failed to check trtexec version: {err}")
+        raise ImportError(
+            "Could not determine the version of `trtexec`. Please ensure the CLI is installed and available."
+        )
+
+
 def _check_for_tensorrt(min_version: str = "10.0"):
     """Check if the `tensorrt` python package is installed and that it's >= min_version."""
     try:

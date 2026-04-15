@@ -42,7 +42,7 @@ import numpy as np
 import torch
 
 from modelopt.onnx.logging_config import logger
-from modelopt.onnx.quantization.ort_utils import _check_for_tensorrt
+from modelopt.onnx.quantization.ort_utils import _check_for_trtexec
 
 TRT_AVAILABLE = importlib.util.find_spec("tensorrt") is not None
 if TRT_AVAILABLE:
@@ -208,7 +208,7 @@ class TrtExecBenchmark(Benchmark):
 
         if has_remote_config:
             try:
-                _check_for_tensorrt(min_version="10.15")
+                _check_for_trtexec(min_version="10.15")
                 self.logger.debug("TensorRT Python API version >= 10.15 detected")
                 if "--safe" not in trtexec_args:
                     self.logger.warning(
