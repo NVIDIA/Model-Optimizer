@@ -30,10 +30,6 @@ from modelopt.torch.puzzletron.anymodel.model_descriptor import ModelDescriptor
 NEMOTRON_H_PATTERN = "M-M-M-M*-M-M-M-M-M*-M-M-M-M-M*-M-M-M-M-M*-M-M-M-M-M-"
 
 
-def _make_config(pattern=NEMOTRON_H_PATTERN):
-    return SimpleNamespace(hybrid_override_pattern=pattern)
-
-
 class TestTruncatePatternForSubblock:
     """Test ModelDescriptor.truncate_pattern_for_subblock."""
 
@@ -86,6 +82,13 @@ class TestTruncatePatternForSubblock:
 
         assert cfg.hybrid_override_pattern == ""
 
+    def test_pipes_only_pattern_raises(self):
+        """Pattern with only pipe separators has no layer-type characters and should error."""
+        cfg = _make_config("|||")
+
+        with pytest.raises(ValueError, match="no layer-type characters"):
+            ModelDescriptor.truncate_pattern_for_subblock(cfg, parent_layer_index=0)
+
     def test_none_index_defaults_to_first_char(self):
         """Without an explicit index, defaults to pattern[0]."""
         cfg = _make_config("*-M")
@@ -106,3 +109,7 @@ class TestTruncatePatternForSubblock:
         ModelDescriptor.truncate_pattern_for_subblock(cfg, parent_layer_index=index)
 
         assert cfg.hybrid_override_pattern == "*"
+
+
+def _make_config(pattern=NEMOTRON_H_PATTERN):
+    return SimpleNamespace(hybrid_override_pattern=pattern)

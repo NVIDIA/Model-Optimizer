@@ -27,7 +27,10 @@ import copy
 import pytest
 
 import modelopt.torch.puzzletron.anymodel.models.nemotron_h_v2.nemotron_h_v2_model_descriptor  # noqa: F401
-from modelopt.torch.puzzletron.anymodel.model_descriptor import ModelDescriptorFactory
+from modelopt.torch.puzzletron.anymodel.model_descriptor import (
+    ModelDescriptor,
+    ModelDescriptorFactory,
+)
 from modelopt.torch.puzzletron.block_config import FFNConfig
 from modelopt.torch.puzzletron.subblock_stats.calc_subblock_params_and_memory import (
     calculate_subblock_params,
@@ -37,17 +40,18 @@ from modelopt.torch.puzzletron.tools.checkpoint_utils import load_model_config
 MODEL_ID = "nvidia/NVIDIA-Nemotron-Nano-12B-v2-Base"
 
 
-@pytest.fixture(scope="module")
-def nemotron_config():
-    return load_model_config(MODEL_ID, trust_remote_code=True)
-
-
-@pytest.fixture(scope="module")
+@pytest.fixture
 def nemotron_descriptor():
     return ModelDescriptorFactory.get("nemotron_h_v2")
 
 
-@pytest.mark.gpu
+@pytest.fixture
+def nemotron_config(nemotron_descriptor):
+    return load_model_config(
+        MODEL_ID, trust_remote_code=nemotron_descriptor.requires_trust_remote_code()
+    )
+
+
 def test_ffn_variants_produce_distinct_params(nemotron_config, nemotron_descriptor):
     """FFN subblocks with different intermediate_size must report different param counts.
 
@@ -66,7 +70,7 @@ def test_ffn_variants_produce_distinct_params(nemotron_config, nemotron_descript
     param_counts = {}
     for size in sizes:
         layer_config = copy.deepcopy(nemotron_config)
-        nemotron_descriptor.truncate_pattern_for_subblock(
+        ModelDescriptor.truncate_pattern_for_subblock(
             nemotron_descriptor.get_language_model_config(layer_config), ffn_indices[0]
         )
 

@@ -180,7 +180,9 @@ class ModelDescriptor(ABC):
         return config
 
     @staticmethod
-    def truncate_pattern_for_subblock(lm_config, parent_layer_index=None):
+    def truncate_pattern_for_subblock(
+        lm_config: Any, parent_layer_index: int | None = None
+    ) -> None:
         """Adjust per-layer config fields so a single-layer model represents the correct layer type.
 
         The default implementation handles ``hybrid_override_pattern`` for
@@ -192,6 +194,11 @@ class ModelDescriptor(ABC):
             return
         # Strip cosmetic pipe separators (e.g. "M|-|*" -> "M-*") before indexing.
         pattern = pattern.replace("|", "")
+        if not pattern:
+            raise ValueError(
+                f"hybrid_override_pattern is set but contains no layer-type characters "
+                f"(original: {lm_config.hybrid_override_pattern!r})"
+            )
         if parent_layer_index is not None and 0 <= parent_layer_index < len(pattern):
             lm_config.hybrid_override_pattern = pattern[parent_layer_index]
             return
