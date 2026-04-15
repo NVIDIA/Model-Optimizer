@@ -14,6 +14,7 @@
 # limitations under the License.
 """Export HuggingFace model to vLLM fakequant checkpoint."""
 
+import contextlib
 import copy
 import re
 from pathlib import Path
@@ -34,6 +35,7 @@ from modelopt.torch.utils import get_unwrapped_name, safe_save
 
 from ..layer_utils import get_experts_list, is_moe
 from ..quant_utils import get_quantization_format
+from ..unified_export_hf import collect_shared_input_modules
 
 __all__ = [
     "export_hf_vllm_fq_checkpoint",
@@ -189,12 +191,22 @@ def _resmooth_experts_for_export(
     model: nn.Module,
     state_dict: dict[str, Any],
 ) -> tuple[dict[str, tuple[torch.Tensor, torch.Tensor | None]], set[str]]:
-    """Average pqs and unify input amax across MoE experts when AWQ smoothing applies (no-op otherwise).
+    """Average pqs and unify input amax for all groups vLLM collapses to one input quantizer.
 
-    Adjusts expert weights in ``state_dict`` as ``W' = W * old_pqs / avg_pqs`` and returns
-    input-quantizer overrides for ``modelopt_state_weights``. **Does nothing** for weight-only
-    MoE (no ``pre_quant_scale`` on experts) or unsupported MoE layouts — same as skipping the
-    MoE branch in :func:`requantize_resmooth_fused_llm_layers`.
+    Covers two cases that are structurally identical — a set of linears sharing the
+    same input that vLLM fuses behind a single input quantizer:
+
+    * **MoE experts** — vLLM uses one input quantizer per expert group.
+    * **Dense GQA attention** — vLLM fuses q/k/v into ``qkv_proj`` with one input
+      quantizer. AWQ calibration gives each projection a different pqs because they
+      share the same input but have different weight magnitudes; using only q's pqs
+      for k and v at inference corrupts those activations.
+
+    For each group, adjusts weights in ``state_dict`` as ``W' = W * old_pqs / avg_pqs``
+    and returns input-quantizer overrides so every member exports the same ``avg_pqs``.
+    Only runs when input quantizers are **enabled** (``nvfp4_awq_wa`` style); for
+    weight-only AWQ the input quantizer is disabled and pqs is folded into each
+    projection's own weight independently.
     """
     qfmt = get_quantization_format(model)
     if qfmt is None or "awq" not in qfmt.lower():
@@ -204,61 +216,70 @@ def _resmooth_experts_for_export(
     id_to_name: dict[int, str] = {id(m): n for n, m in model.named_modules()}
     out: dict[str, tuple[torch.Tensor, torch.Tensor | None]] = {}
     requant_weights: set[str] = set()
+
+    def _process_group(modules: list[nn.Module]) -> None:
+        pqs_list = _collect_expert_pre_quant_scales(modules)
+        if pqs_list is None:
+            return
+
+        avg_pqs = torch.stack(pqs_list).mean(0)
+        avg_pqs = avg_pqs.clamp(min=torch.finfo(torch.float32).tiny)
+
+        for m in modules:
+            nm = id_to_name.get(id(m))
+            if nm is None or f"{nm}.weight" not in state_dict:
+                continue
+            old_pqs = m.input_quantizer._pre_quant_scale
+            avg_pqs_dev = avg_pqs.to(device=old_pqs.device, dtype=old_pqs.dtype)
+            if torch.equal(old_pqs, avg_pqs_dev):
+                continue
+            weight = state_dict[f"{nm}.weight"]
+            ratio = old_pqs.to(dtype=torch.float32, device=weight.device) / avg_pqs_dev.to(
+                dtype=torch.float32, device=weight.device
+            )
+            state_dict[f"{nm}.weight"] = (weight.to(torch.float32) * ratio).to(weight.dtype)
+            requant_weights.add(f"{nm}.weight")
+
+        synced_amax: torch.Tensor | None = None
+        amaxes = [m.input_quantizer.amax for m in modules]
+        if all(a is not None for a in amaxes):
+            synced_amax = merge_amax_tensors_for_group(amaxes)
+
+        avg_pqs_out = avg_pqs.detach().clone()
+        for m in modules:
+            nm = id_to_name.get(id(m))
+            if nm is None:
+                continue
+            out[get_unwrapped_name(f"{nm}.input_quantizer", model)] = (avg_pqs_out, synced_amax)
+
+    # MoE expert groups — must be enumerated by name because MoE routing sends
+    # different tokens to each expert, so forward hooks cannot detect them as
+    # sharing the same input tensor.
     for _, module in model.named_modules():
-        if not is_moe(module):
-            continue
-        try:
-            expert_groups = get_experts_list(module, model_type)
-        except NotImplementedError:
-            continue
+        if is_moe(module):
+            try:
+                expert_groups = get_experts_list(module, model_type)
+            except NotImplementedError:
+                pass
+            else:
+                for experts in expert_groups:
+                    if experts:
+                        _process_group(experts)
 
-        for experts in expert_groups:
-            if not experts:
-                continue
-            pre_quant_scales_list = _collect_expert_pre_quant_scales(experts)
-            if pre_quant_scales_list is None:
-                continue
+    # Dense shared-input groups (e.g. q/k/v in GQA attention) — detected via forward
+    # hooks so any architecture is covered regardless of projection attribute names.
 
-            avg_pre_quant_scale = torch.stack(pre_quant_scales_list).mean(0)
-            # Guard against degenerate calibration where a channel's scale is zero:
-            # zero avg_pqs would produce inf ratio and corrupt the exported weight.
-            avg_pre_quant_scale = avg_pre_quant_scale.clamp(min=torch.finfo(torch.float32).tiny)
+    dev = next(model.parameters()).device
 
-            for ex in experts:
-                nm = id_to_name.get(id(ex))
-                if nm is None or f"{nm}.weight" not in state_dict:
-                    continue
-                old_pre_quant_scale = ex.input_quantizer._pre_quant_scale
-                avg_pre_quant_scale = avg_pre_quant_scale.to(
-                    device=old_pre_quant_scale.device, dtype=old_pre_quant_scale.dtype
-                )
-                if torch.equal(old_pre_quant_scale, avg_pre_quant_scale):
-                    continue
-                weight = state_dict[f"{nm}.weight"]
-                updated_weight = (
-                    weight.to(torch.float32)
-                    * old_pre_quant_scale.to(dtype=torch.float32, device=weight.device)
-                    / avg_pre_quant_scale.to(dtype=torch.float32, device=weight.device)
-                ).to(weight.dtype)
-                state_dict[f"{nm}.weight"] = updated_weight
-                requant_weights.add(f"{nm}.weight")
+    def _dummy_forward() -> None:
+        # Partial forward is OK: hooks record layers reached before failure (e.g. VLMs).
+        with contextlib.suppress(Exception):
+            model(torch.ones([1, 2], dtype=torch.long, device=dev))
 
-            iq0 = experts[0].input_quantizer
-            synced_amax: torch.Tensor | None = None
-            if iq0.is_enabled:
-                amaxes = [e.input_quantizer.amax for e in experts]
-                if all(a is not None for a in amaxes):
-                    synced_amax = merge_amax_tensors_for_group(amaxes)
-
-            avg_pre_quant_scale_output = avg_pre_quant_scale.detach().clone()
-            for ex in experts:
-                nm = id_to_name.get(id(ex))
-                if nm is None:
-                    continue
-                out[get_unwrapped_name(f"{nm}.input_quantizer", model)] = (
-                    avg_pre_quant_scale_output,
-                    synced_amax,
-                )
+    input_to_linear, _ = collect_shared_input_modules(model, _dummy_forward)
+    for modules in input_to_linear.values():
+        if len(modules) > 1:
+            _process_group(modules)
 
     return out, requant_weights
 
@@ -299,10 +320,10 @@ def export_hf_vllm_fq_checkpoint(
     # to the corresponding weight tensor in the copy.
     state_dict = model.state_dict()
 
-    # Non-mutating MoE expert resmooth: average pqs and adjust state_dict weights.
-    # Must run before the fakequant loop so that the adjusted weights are fakequanted
-    # with the correct per-block scales.
-    expert_pqs_overrides, requant_weights = _resmooth_experts_for_export(model, state_dict)
+    # Non-mutating resmooth: average pqs across all shared-input groups (dense GQA q/k/v
+    # and MoE experts) and adjust state_dict weights. Must run before the fakequant loop
+    # so adjusted weights are fakequanted with the correct per-block scales.
+    pqs_overrides, requant_weights = _resmooth_experts_for_export(model, state_dict)
 
     fakequant_weights: set[str] = set()
     # Input quantizer keys whose _pre_quant_scale was folded into the weight above.
@@ -392,9 +413,9 @@ def export_hf_vllm_fq_checkpoint(
                     qstate_val["_pre_quant_scale"]
                 )
 
-    # Patch expert input quantizers with averaged pqs and unified amax so that
-    # vLLM's single per-group input quantizer sees consistent values across experts.
-    for iq_key, (avg_pqs, max_input_amax) in expert_pqs_overrides.items():
+    # Patch input quantizers with averaged pqs and unified amax so that vLLM's single
+    # per-group input quantizer sees consistent values (covers both dense qkv and MoE experts).
+    for iq_key, (avg_pqs, max_input_amax) in pqs_overrides.items():
         if iq_key in quantizer_state_dict:
             qstate_val = quantizer_state_dict[iq_key]
             if isinstance(qstate_val, dict):
