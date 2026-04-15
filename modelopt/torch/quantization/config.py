@@ -157,8 +157,8 @@ from typing import Any, Literal, cast
 from pydantic import ValidationInfo, field_validator, model_validator
 from typing_extensions import Required, TypedDict
 
-from modelopt.recipe._config_loader import load_config
 from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
+from modelopt.torch.opt.config_loader import load_config
 from modelopt.torch.utils.network import ConstructorLike
 
 
