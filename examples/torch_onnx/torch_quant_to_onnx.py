@@ -86,6 +86,11 @@ _INT8_CONV_OVERRIDE: list = [
     },
 ]
 
+# Auto-quantize format configs that use block quantization and need Conv2d overrides for TRT.
+# TRT DynamicQuantize requires 2D/3D input, but Conv2d operates on 4D tensors.
+_NEEDS_FP8_CONV_OVERRIDE: set[str] = {"NVFP4_AWQ_LITE_CFG", "NVFP4_DEFAULT_CFG", "MXFP8_DEFAULT_CFG"}
+_NEEDS_INT8_CONV_OVERRIDE: set[str] = {"INT4_AWQ_CFG"}
+
 
 def get_quant_config(quantize_mode):
     """Get quantization config, overriding Conv2d for TRT compatibility.
@@ -229,38 +234,6 @@ def _disable_inplace_relu(model):
             module.inplace = False
 
 
-def _override_conv2d_to_fp8(model, data_loader):
-    """Override Conv2d layers with NVFP4/MXFP8 block quantization to FP8.
-
-    TRT DynamicQuantize requires 2D/3D input, but Conv2d operates on 4D tensors.
-    This overrides Conv2d block quantizers to FP8 per-tensor and calibrates them.
-    """
-    overridden = []
-    for _, module in model.named_modules():
-        if not isinstance(module, torch.nn.Conv2d):
-            continue
-        for attr_name in ("input_quantizer", "weight_quantizer"):
-            if not hasattr(module, attr_name):
-                continue
-            quantizer = getattr(module, attr_name)
-            if quantizer.is_enabled and quantizer.block_sizes:
-                # Override to FP8 per-tensor
-                quantizer.block_sizes = None
-                quantizer._num_bits = (4, 3)
-                quantizer._axis = None
-                quantizer.enable_calib()
-                overridden.append(quantizer)
-
-    if overridden:
-        model.eval()
-        with torch.no_grad():
-            for batch in data_loader:
-                model(batch["image"])
-        for quantizer in overridden:
-            quantizer.disable_calib()
-            quantizer.load_calib_amax()
-
-
 def auto_quantize_model(
     model,
     data_loader,
@@ -285,11 +258,19 @@ def auto_quantize_model(
     _disable_inplace_relu(model)
     constraints = {"effective_bits": effective_bits}
 
-    # Convert string format names to actual config objects
+    # Convert string format names to config objects, incorporating Conv2d TRT overrides.
+    # TRT DynamicQuantize requires 2D/3D input, but Conv2d operates on 4D tensors.
+    # By including the overrides in the format configs, the auto_quantize search
+    # correctly accounts for Conv2d being FP8/INT8 in the effective_bits budget.
     format_configs = []
     for fmt in quantization_formats:
         if isinstance(fmt, str):
-            format_configs.append(getattr(mtq, fmt))
+            config = copy.deepcopy(getattr(mtq, fmt))
+            if fmt in _NEEDS_FP8_CONV_OVERRIDE:
+                config["quant_cfg"].extend(_FP8_CONV_OVERRIDE)
+            elif fmt in _NEEDS_INT8_CONV_OVERRIDE:
+                config["quant_cfg"].extend(_INT8_CONV_OVERRIDE)
+            format_configs.append(config)
         else:
             format_configs.append(fmt)
 
@@ -308,10 +289,6 @@ def auto_quantize_model(
         num_score_steps=num_score_steps,
         verbose=True,
     )
-
-    # Override Conv2d layers that got NVFP4/MXFP8 to FP8 for TRT compatibility.
-    # TRT DynamicQuantize requires 2D/3D input, but Conv2d operates on 4D tensors.
-    _override_conv2d_to_fp8(quantized_model, data_loader)
 
     # Disable quantization for specified layers
     mtq.disable_quantizer(quantized_model, filter_func)
