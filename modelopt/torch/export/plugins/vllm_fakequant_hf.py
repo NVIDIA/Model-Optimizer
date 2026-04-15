@@ -215,41 +215,50 @@ def _resmooth_experts_for_export(
         for experts in expert_groups:
             if not experts:
                 continue
-            pqs_list = _collect_expert_pre_quant_scales(experts)
-            if pqs_list is None:
+            pre_quant_scales_list = _collect_expert_pre_quant_scales(experts)
+            if pre_quant_scales_list is None:
                 continue
 
-            avg_pqs = torch.stack(pqs_list).mean(0)
+            avg_pre_quant_scale = torch.stack(pre_quant_scales_list).mean(0)
             # Guard against degenerate calibration where a channel's scale is zero:
             # zero avg_pqs would produce inf ratio and corrupt the exported weight.
-            avg_pqs = avg_pqs.clamp(min=torch.finfo(torch.float32).tiny)
+            avg_pre_quant_scale = avg_pre_quant_scale.clamp(min=torch.finfo(torch.float32).tiny)
 
             for ex in experts:
                 nm = id_to_name.get(id(ex))
                 if nm is None or f"{nm}.weight" not in state_dict:
                     continue
-                old_pqs = ex.input_quantizer._pre_quant_scale
-                avg_on_dev = avg_pqs.to(device=old_pqs.device, dtype=old_pqs.dtype)
-                if torch.equal(old_pqs, avg_on_dev):
+                old_pre_quant_scale = ex.input_quantizer._pre_quant_scale
+                avg_pre_quant_scale = avg_pre_quant_scale.to(
+                    device=old_pre_quant_scale.device, dtype=old_pre_quant_scale.dtype
+                )
+                if torch.equal(old_pre_quant_scale, avg_pre_quant_scale):
                     continue
-                w = state_dict[f"{nm}.weight"]
-                ratio = (old_pqs / avg_pqs).to(dtype=torch.float32, device=w.device)
-                state_dict[f"{nm}.weight"] = (w.float() * ratio[None, :]).to(w.dtype)
+                weight = state_dict[f"{nm}.weight"]
+                updated_weight = (
+                    weight.to(torch.float32)
+                    * old_pre_quant_scale.to(dtype=torch.float32, device=weight.device)
+                    / avg_pre_quant_scale.to(dtype=torch.float32, device=weight.device)
+                ).to(weight.dtype)
+                state_dict[f"{nm}.weight"] = updated_weight
                 requant_weights.add(f"{nm}.weight")
 
             iq0 = experts[0].input_quantizer
-            max_in_amax: torch.Tensor | None = None
+            synced_amax: torch.Tensor | None = None
             if iq0.is_enabled:
                 amaxes = [e.input_quantizer.amax for e in experts]
                 if all(a is not None for a in amaxes):
-                    max_in_amax = merge_amax_tensors_for_group(amaxes)
+                    synced_amax = merge_amax_tensors_for_group(amaxes)
 
-            avg_out = avg_pqs.detach().clone()
+            avg_pre_quant_scale_output = avg_pre_quant_scale.detach().clone()
             for ex in experts:
                 nm = id_to_name.get(id(ex))
                 if nm is None:
                     continue
-                out[get_unwrapped_name(f"{nm}.input_quantizer", model)] = (avg_out, max_in_amax)
+                out[get_unwrapped_name(f"{nm}.input_quantizer", model)] = (
+                    avg_pre_quant_scale_output,
+                    synced_amax,
+                )
 
     return out, requant_weights
 
