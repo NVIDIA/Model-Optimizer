@@ -204,35 +204,11 @@ def find_quant_cfg_entry_by_path(
     return result
 
 
-_base_disable_all: list[QuantizerCfgEntry] = [
-    {"quantizer_name": "*", "enable": False},
-]
+_base_disable_all: list[QuantizerCfgEntry] = load_config("configs/ptq/units/base_disable_all")
 
-_default_disabled_quantizer_cfg: list[QuantizerCfgEntry] = [
-    {"parent_class": "nn.BatchNorm1d", "quantizer_name": "*", "enable": False},
-    {"parent_class": "nn.BatchNorm2d", "quantizer_name": "*", "enable": False},
-    {"parent_class": "nn.BatchNorm3d", "quantizer_name": "*", "enable": False},
-    {"parent_class": "nn.LeakyReLU", "quantizer_name": "*", "enable": False},
-    {"quantizer_name": "*lm_head*", "enable": False},
-    {
-        "quantizer_name": "*proj_out.*",
-        "enable": False,
-    },  # In Whisper model, lm_head has key name proj_out
-    {
-        "quantizer_name": "*block_sparse_moe.gate*",
-        "enable": False,
-    },  # Skip the MOE router
-    {"quantizer_name": "*router*", "enable": False},  # Skip the MOE router
-    {"quantizer_name": "*mlp.gate.*", "enable": False},  # Skip the MOE router
-    {
-        "quantizer_name": "*mlp.shared_expert_gate.*",
-        "enable": False,
-    },  # Skip the MOE router
-    {"quantizer_name": "*linear_attn.conv1d*", "enable": False},
-    {"quantizer_name": "*mixer.conv1d*", "enable": False},  # Skip mamba conv1d
-    {"quantizer_name": "*output_layer*", "enable": False},
-    {"quantizer_name": "output.*", "enable": False},
-]
+_default_disabled_quantizer_cfg: list[QuantizerCfgEntry] = load_config(
+    "configs/ptq/units/default_disabled_quantizers"
+)
 
 _mamba_moe_disabled_quantizer_cfg: list[QuantizerCfgEntry] = [
     {"quantizer_name": "*fc1_latent_proj*", "enable": False},  # Skip Latent MOE
