@@ -31,7 +31,6 @@ import importlib.util
 import os
 import re
 import shutil
-import subprocess  # nosec B404
 import tempfile
 import time
 from abc import ABC, abstractmethod
@@ -42,7 +41,7 @@ import numpy as np
 import torch
 
 from modelopt.onnx.logging_config import logger
-from modelopt.onnx.quantization.ort_utils import _check_for_trtexec
+from modelopt.onnx.quantization.ort_utils import _check_for_trtexec, _run_trtexec
 
 TRT_AVAILABLE = importlib.util.find_spec("tensorrt") is not None
 if TRT_AVAILABLE:
@@ -269,7 +268,7 @@ class TrtExecBenchmark(Benchmark):
 
             cmd = [*self._base_cmd, f"--onnx={model_path}"]
             self.logger.debug(f"Running: {' '.join(cmd)}")
-            result = subprocess.run(cmd, capture_output=True, text=True)  # nosec B603
+            result = _run_trtexec(cmd)
             self._write_log_file(
                 log_file,
                 "\n".join(

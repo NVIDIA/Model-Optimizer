@@ -46,6 +46,15 @@ def _check_lib_in_ld_library_path(ld_library_path, lib_pattern):
     return False, None
 
 
+def _run_trtexec(cmd, timeout=None):
+    """Run a 'trtexec' command via subprocess."""
+    # Ensure that this command is a trtexec run
+    assert any("trtexec" in c for c in cmd), "Subprocess can only execute 'trtexec' commands"
+
+    # Run trtexec command
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)  # nosec B603
+
+
 def _check_for_trtexec(min_version: str = "10.0") -> str:
     """Check if the `trtexec` CLI tool is available in PATH and is >= min_version.
 
@@ -89,7 +98,7 @@ def _check_for_trtexec(min_version: str = "10.0") -> str:
         )
 
     try:
-        result = subprocess.run([trtexec_path], capture_output=True, text=True, timeout=5)  # nosec B603
+        result = _run_trtexec([trtexec_path], timeout=5)
         banner_output = result.stdout + result.stderr
         parsed_version = _parse_version_from_string(banner_output)
 
