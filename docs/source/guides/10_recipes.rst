@@ -205,7 +205,7 @@ list order), then inline keys last.
    cfg:
      $import: nvfp4
 
-   # Import + override — import nvfp4_dynamic, then override type inline
+   # Import + override — import nvfp4, then override type inline
    cfg:
      $import: nvfp4    # imports {num_bits: e2m1, block_sizes: {-1: 16, type: dynamic, ...}}
      block_sizes:
@@ -301,8 +301,8 @@ Reusable snippets are stored under ``modelopt_recipes/configs/``:
      - Description
    * - ``configs/numerics/fp8``
      - FP8 E4M3 quantizer attributes
-   * - ``configs/numerics/nvfp4_dynamic``
-     - NVFP4 E2M1 blockwise, dynamic calibration, FP8 scales
+   * - ``configs/numerics/nvfp4``
+     - NVFP4 E2M1 blockwise, dynamic calibration, FP8 scales (default)
    * - ``configs/numerics/nvfp4_static``
      - NVFP4 E2M1 blockwise, static calibration, FP8 scales
    * - ``configs/ptq/base_disable_all``
@@ -597,8 +597,8 @@ The ``modelopt_recipes/`` package is organized as follows:
    +-- configs/                    # Reusable config snippets (imported via $import)
        +-- numerics/               # Numeric format definitions
        |   +-- fp8.yml
-       |   +-- nvfp4_dynamic.yml
        |   +-- nvfp4_static.yml
+       |   +-- nvfp4.yml
        +-- ptq/                    # PTQ-specific entry snippets
            +-- base_disable_all.yaml
            +-- default_disabled_quantizers.yaml

@@ -16,7 +16,7 @@
 imports:
   base_disable_all: configs/ptq/base_disable_all
   default_disabled: configs/ptq/default_disabled_quantizers
-  nvfp4: configs/numerics/nvfp4_dynamic
+  nvfp4: configs/numerics/nvfp4
   fp8_kv: configs/ptq/fp8_kv
 
 metadata:

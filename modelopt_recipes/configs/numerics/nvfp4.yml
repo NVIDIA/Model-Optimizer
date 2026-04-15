@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# NVFP4 E2M1 blockwise with dynamic calibration and FP8 E4M3 scales.
+# NVFP4 E2M1 blockwise quantizer attributes with FP8 E4M3 scales (dynamic calibration, the default).
 num_bits: e2m1
 block_sizes:
   -1: 16
