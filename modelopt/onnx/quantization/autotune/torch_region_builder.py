@@ -62,8 +62,8 @@ class TorchRegionBuilder(RegionSearchBase):
 
     def __init__(self, graph: gs.Graph):
         """Initialize the TorchRegionBuilder with a computation graph."""
+        graph.toposort()
         super().__init__(graph, root=None)
-        self.graph.toposort()
         self.regions: list[Region] = []
         self.next_region_id = 0
         self.min_depth = 1

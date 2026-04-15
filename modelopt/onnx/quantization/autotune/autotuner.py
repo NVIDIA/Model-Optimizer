@@ -100,8 +100,10 @@ class QDQAutotuner(QDQAutotunerBase):
         logger.info("Discovering optimization regions")
         if check_torch_naming_convention(self.graph):
             torch_search = TorchRegionBuilder(self.graph)
+            # linearize=True returns leaves + innermost composites, leaves first
             self.regions = torch_search.build_regions(linearize=True, only_quantizable=True)
-            self._reassign_region_ids(self.regions)
+            for i, region in enumerate(self.regions):
+                region.id = i
         else:
             default_search = CombinedRegionSearch(
                 self.graph,
@@ -110,15 +112,14 @@ class QDQAutotuner(QDQAutotunerBase):
             )
             self.regions = default_search.search_regions()
             self._reassign_region_ids(self.regions)
-        logger.debug(f"Found {len(self.regions)} top-level regions")
 
-        # Flatten the hierarchy into a list of all regions
-        all_regions = []
-        for region in self.regions:
-            all_regions.extend(QDQAutotuner._visit_region_recursively(region))
+            # Flatten the hierarchy into a list of all regions
+            all_regions = []
+            for region in self.regions:
+                all_regions.extend(QDQAutotuner._visit_region_recursively(region))
 
-        all_regions.sort(key=lambda r: r.type != RegionType.LEAF)
-        self.regions = all_regions
+            all_regions.sort(key=lambda r: r.type != RegionType.LEAF)
+            self.regions = all_regions
 
         type_counts = Counter(r.type for r in self.regions)
         logger.info(
