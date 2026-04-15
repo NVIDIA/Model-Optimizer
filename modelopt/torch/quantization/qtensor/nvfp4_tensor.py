@@ -189,6 +189,32 @@ class NVFP4QTensor(BaseQuantizedTensor):
 
         activation_scaling_factor = amax.float() / (quantizer.maxbound * 448.0)
 
+        # Handle exact-zero entries produced by MoE routing sparsity: some
+        # per-channel input slots on rarely-routed experts never see traffic
+        # during calibration, leaving their amax (and therefore scaling factor)
+        # at exactly zero. A zero scaling factor would break downstream
+        # dequantization arithmetic. Replace exact zeros with the minimum
+        # positive value in the same tensor — this is a no-op for values
+        # flowing through zeroed channels (~0 anyway) and keeps the tensor
+        # valid. We deliberately leave negative entries alone so that the
+        # existing positivity assertion below still catches upstream
+        # quantizer/config bugs rather than silently masking them.
+        zero_mask = activation_scaling_factor == 0
+        if zero_mask.any():
+            positive = activation_scaling_factor[activation_scaling_factor > 0]
+            replacement = (
+                positive.min()
+                if positive.numel() > 0
+                else torch.tensor(
+                    1e-8,
+                    device=activation_scaling_factor.device,
+                    dtype=activation_scaling_factor.dtype,
+                )
+            )
+            activation_scaling_factor = torch.where(
+                zero_mask, replacement, activation_scaling_factor
+            )
+
         assert torch.all(activation_scaling_factor > 0), (
             f" activation scaling factor {activation_scaling_factor} not positive."
         )
