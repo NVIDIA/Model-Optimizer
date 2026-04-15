@@ -157,6 +157,7 @@ from typing import Any, Literal, cast
 from pydantic import ValidationInfo, field_validator, model_validator
 from typing_extensions import Required, TypedDict
 
+from modelopt.recipe._config_loader import load_config
 from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
 from modelopt.torch.utils.network import ConstructorLike
 
@@ -272,21 +273,7 @@ INT8_WEIGHT_ONLY_CFG = {
     "algorithm": "max",
 }
 
-FP8_DEFAULT_CFG = {
-    "quant_cfg": [
-        *_base_disable_all,
-        {
-            "quantizer_name": "*weight_quantizer",
-            "cfg": {"num_bits": (4, 3), "axis": None},
-        },
-        {
-            "quantizer_name": "*input_quantizer",
-            "cfg": {"num_bits": (4, 3), "axis": None},
-        },
-        *_default_disabled_quantizer_cfg,
-    ],
-    "algorithm": "max",
-}
+FP8_DEFAULT_CFG: dict[str, Any] = load_config("configs/ptq/presets/fp8_default")
 
 MAMBA_MOE_FP8_AGGRESSIVE_CFG = {
     "quant_cfg": [

@@ -22,137 +22,10 @@ except ImportError:  # Python < 3.11
 from pathlib import Path
 from typing import Any
 
-from ._config_loader import BUILTIN_RECIPES_LIB, load_config
+from ._config_loader import BUILTIN_RECIPES_LIB, _load_raw_config, _resolve_imports, load_config
 from .config import ModelOptPTQRecipe, ModelOptRecipeBase, RecipeType
 
 __all__ = ["load_config", "load_recipe"]
-
-
-_IMPORT_KEY = "$import"
-
-
-def _resolve_imports(
-    data: dict[str, Any], _loading: frozenset[str] | None = None
-) -> dict[str, Any]:
-    """Resolve the ``imports`` section and ``$import`` references in a recipe.
-
-    An ``imports`` block is a dict mapping short names to config file paths::
-
-        imports:
-          fp8: configs/numerics/fp8
-          nvfp4: configs/numerics/nvfp4_dynamic
-
-    References use the explicit ``$import`` marker so they are never confused
-    with literal string values::
-
-        quant_cfg:
-          - $import: base_disable_all           # entire entry replaced (or list spliced)
-          - quantizer_name: '*weight_quantizer'
-            cfg:
-              $import: fp8                      # cfg value replaced
-
-    Resolution is **recursive**: an imported snippet may itself contain an
-    ``imports`` section.  Circular imports are detected and raise ``ValueError``.
-    """
-    imports_dict = data.pop("imports", None)
-    if not imports_dict:
-        return data
-
-    if not isinstance(imports_dict, dict):
-        raise ValueError(
-            f"'imports' must be a dict mapping names to config paths, got: {type(imports_dict).__name__}"
-        )
-
-    if _loading is None:
-        _loading = frozenset()
-
-    # Build name → config mapping (recursively resolve nested imports)
-    import_map: dict[str, Any] = {}
-    for name, config_path in imports_dict.items():
-        if not config_path:
-            raise ValueError(f"Import {name!r} has an empty config path.")
-        if config_path in _loading:
-            raise ValueError(
-                f"Circular import detected: {config_path!r} is already being loaded. "
-                f"Import chain: {sorted(_loading)}"
-            )
-        snippet = load_config(config_path)
-        if isinstance(snippet, dict) and "imports" in snippet:
-            snippet = _resolve_imports(snippet, _loading | {config_path})
-        # Unwrap _list_content (multi-document YAML: imports + list content)
-        if isinstance(snippet, dict) and "_list_content" in snippet:
-            snippet = snippet["_list_content"]
-        import_map[name] = snippet
-
-    def _lookup(ref_name: str, context: str) -> Any:
-        if ref_name not in import_map:
-            raise ValueError(
-                f"Unknown $import reference {ref_name!r} in {context}. "
-                f"Available imports: {list(import_map.keys())}"
-            )
-        return import_map[ref_name]
-
-    def _resolve_list(entries: list[Any]) -> list[Any]:
-        """Resolve $import markers in a list of quant_cfg-style entries."""
-        resolved: list[Any] = []
-        for entry in entries:
-            if isinstance(entry, dict) and _IMPORT_KEY in entry:
-                # {$import: name} → splice imported list
-                if len(entry) > 1:
-                    raise ValueError(
-                        f"$import must be the only key in the dict, got extra keys: "
-                        f"{sorted(k for k in entry if k != _IMPORT_KEY)}"
-                    )
-                imported = _lookup(entry[_IMPORT_KEY], "list entry")
-                if not isinstance(imported, list):
-                    raise ValueError(
-                        f"$import {entry[_IMPORT_KEY]!r} in list must resolve to a "
-                        f"list, got {type(imported).__name__}."
-                    )
-                resolved.extend(imported)
-            elif (
-                isinstance(entry, dict)
-                and isinstance(entry.get("cfg"), dict)
-                and _IMPORT_KEY in entry["cfg"]
-            ):
-                # cfg: {$import: name_or_list, ...inline} → import then override
-                #
-                # Precedence (lowest → highest):
-                #   1. Imports in list order (later imports override earlier)
-                #   2. Inline keys (override all imports)
-                ref = entry["cfg"].pop(_IMPORT_KEY)
-                inline_keys = dict(entry["cfg"])
-                ref_names = ref if isinstance(ref, list) else [ref]
-
-                merged: dict[str, Any] = {}
-                for name in ref_names:
-                    snippet = _lookup(name, f"cfg of {entry}")
-                    if not isinstance(snippet, dict):
-                        raise ValueError(
-                            f"$import {name!r} in cfg must resolve to a dict, "
-                            f"got {type(snippet).__name__}."
-                        )
-                    merged.update(snippet)
-
-                merged.update(inline_keys)
-                entry["cfg"] = merged
-                resolved.append(entry)
-            else:
-                resolved.append(entry)
-        return resolved
-
-    # Resolve $import references in quant_cfg entries
-    quantize = data.get("quantize")
-    if isinstance(quantize, dict):
-        quant_cfg = quantize.get("quant_cfg")
-        if isinstance(quant_cfg, list):
-            quantize["quant_cfg"] = _resolve_list(quant_cfg)
-
-    # Resolve $import references in _list_content (multi-document snippets)
-    if "_list_content" in data:
-        data["_list_content"] = _resolve_list(data["_list_content"])
-
-    return data
 
 
 def _resolve_recipe_path(recipe_path: str | Path | Traversable) -> Path | Traversable:
@@ -214,7 +87,7 @@ def _load_recipe_from_file(recipe_file: Path | Traversable) -> ModelOptRecipeBas
     The file must contain a ``metadata`` section with at least ``recipe_type``,
     plus a ``quant_cfg`` mapping and an optional ``algorithm`` for PTQ recipes.
     """
-    raw = load_config(recipe_file)
+    raw = _load_raw_config(recipe_file)
     assert isinstance(raw, dict), f"Recipe file {recipe_file} must be a YAML mapping."
     data = _resolve_imports(raw)
 
@@ -247,7 +120,7 @@ def _load_recipe_from_dir(recipe_dir: Path | Traversable) -> ModelOptRecipeBase:
             f"Cannot find a recipe descriptor in {recipe_dir}. Looked for: recipe.yml, recipe.yaml"
         )
 
-    recipe_data = load_config(recipe_file)
+    recipe_data = _load_raw_config(recipe_file)
     assert isinstance(recipe_data, dict), f"Recipe file {recipe_file} must be a YAML mapping."
     metadata = recipe_data.get("metadata", {})
     recipe_type = metadata.get("recipe_type")
@@ -266,7 +139,7 @@ def _load_recipe_from_dir(recipe_dir: Path | Traversable) -> ModelOptRecipeBase:
                 f"Cannot find quantize in {recipe_dir}. Looked for: quantize.yml, quantize.yaml"
             )
         # Resolve imports: imports are in recipe.yml, quantize data is separate
-        quantize_data = load_config(quantize_file)
+        quantize_data = _load_raw_config(quantize_file)
         assert isinstance(quantize_data, dict), f"{quantize_file} must be a YAML mapping."
         combined: dict[str, Any] = {"quantize": quantize_data}
         imports = recipe_data.get("imports")
