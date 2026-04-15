@@ -198,6 +198,28 @@ def _resolve_imports(
             )
         return import_map[ref_name]
 
+    def _resolve_dict_value(d: dict[str, Any], key: str) -> None:
+        """Resolve ``$import`` in a dict value: ``key: {$import: name, ...inline}``."""
+        val = d[key]
+        if not isinstance(val, dict) or _IMPORT_KEY not in val:
+            return
+        ref = val.pop(_IMPORT_KEY)
+        inline_keys = dict(val)
+        ref_names = ref if isinstance(ref, list) else [ref]
+
+        merged: dict[str, Any] = {}
+        for rname in ref_names:
+            snippet = _lookup(rname, f"{key} of {d}")
+            if not isinstance(snippet, dict):
+                raise ValueError(
+                    f"$import {rname!r} in {key} must resolve to a dict, "
+                    f"got {type(snippet).__name__}."
+                )
+            merged.update(snippet)
+
+        merged.update(inline_keys)
+        d[key] = merged
+
     def _resolve_list(entries: list[Any]) -> list[Any]:
         """Resolve $import markers in a list of entries."""
         resolved: list[Any] = []
@@ -215,27 +237,11 @@ def _resolve_imports(
                         f"list, got {type(imported).__name__}."
                     )
                 resolved.extend(imported)
-            elif (
-                isinstance(entry, dict)
-                and isinstance(entry.get("cfg"), dict)
-                and _IMPORT_KEY in entry["cfg"]
-            ):
-                ref = entry["cfg"].pop(_IMPORT_KEY)
-                inline_keys = dict(entry["cfg"])
-                ref_names = ref if isinstance(ref, list) else [ref]
-
-                merged: dict[str, Any] = {}
-                for rname in ref_names:
-                    snippet = _lookup(rname, f"cfg of {entry}")
-                    if not isinstance(snippet, dict):
-                        raise ValueError(
-                            f"$import {rname!r} in cfg must resolve to a dict, "
-                            f"got {type(snippet).__name__}."
-                        )
-                    merged.update(snippet)
-
-                merged.update(inline_keys)
-                entry["cfg"] = merged
+            elif isinstance(entry, dict):
+                # Resolve $import in any dict value within the entry
+                for key in list(entry):
+                    if isinstance(entry.get(key), dict) and _IMPORT_KEY in entry[key]:
+                        _resolve_dict_value(entry, key)
                 resolved.append(entry)
             else:
                 resolved.append(entry)

@@ -88,7 +88,10 @@ def _load_recipe_from_file(recipe_file: Path | Traversable) -> ModelOptRecipeBas
     plus a ``quant_cfg`` mapping and an optional ``algorithm`` for PTQ recipes.
     """
     raw = _load_raw_config(recipe_file)
-    assert isinstance(raw, dict), f"Recipe file {recipe_file} must be a YAML mapping."
+    if not isinstance(raw, dict):
+        raise ValueError(
+            f"Recipe file {recipe_file} must be a YAML mapping, got {type(raw).__name__}."
+        )
     data = _resolve_imports(raw)
 
     metadata = data.get("metadata", {})
@@ -121,7 +124,10 @@ def _load_recipe_from_dir(recipe_dir: Path | Traversable) -> ModelOptRecipeBase:
         )
 
     recipe_data = _load_raw_config(recipe_file)
-    assert isinstance(recipe_data, dict), f"Recipe file {recipe_file} must be a YAML mapping."
+    if not isinstance(recipe_data, dict):
+        raise ValueError(
+            f"Recipe file {recipe_file} must be a YAML mapping, got {type(recipe_data).__name__}."
+        )
     metadata = recipe_data.get("metadata", {})
     recipe_type = metadata.get("recipe_type")
     if recipe_type is None:
@@ -138,14 +144,21 @@ def _load_recipe_from_dir(recipe_dir: Path | Traversable) -> ModelOptRecipeBase:
             raise ValueError(
                 f"Cannot find quantize in {recipe_dir}. Looked for: quantize.yml, quantize.yaml"
             )
-        # Resolve imports: imports are in recipe.yml, quantize data is separate
+        # Resolve imports from both recipe.yaml and quantize.yaml
         quantize_data = _load_raw_config(quantize_file)
-        assert isinstance(quantize_data, dict), f"{quantize_file} must be a YAML mapping."
+        if not isinstance(quantize_data, dict):
+            raise ValueError(
+                f"{quantize_file} must be a YAML mapping, got {type(quantize_data).__name__}."
+            )
+        # Resolve quantize.yaml's own imports first (if any)
+        if "imports" in quantize_data:
+            quantize_data = _resolve_imports(quantize_data)
+        # Then resolve recipe.yaml's imports applied to the quantize data
         combined: dict[str, Any] = {"quantize": quantize_data}
         imports = recipe_data.get("imports")
         if imports:
             combined["imports"] = imports
-        combined = _resolve_imports(combined)
+            combined = _resolve_imports(combined)
         return ModelOptPTQRecipe(
             recipe_type=RecipeType.PTQ,
             description=metadata.get("description", "PTQ recipe."),
