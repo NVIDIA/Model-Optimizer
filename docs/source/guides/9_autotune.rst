@@ -229,13 +229,13 @@ TensorRT 10.15+ supports remote autotuning in safety mode (``--safe``), which al
 To use remote autotuning during Q/DQ placement optimization, run with ``trtexec`` and pass extra args:
 
 .. code-block:: bash
-  python -m modelopt.onnx.quantization.autotune \
-      --onnx_path resnet50_Opset17_bs128.onnx \
-      --output_dir ./resnet50_remote_autotuned \
-      --schemes_per_region 50 \
-      --use_trtexec \
-      --trtexec_benchmark_args "--remoteAutoTuningConfig=\"<remote autotuning config>\" --safe --skipInference"
-```
+
+   python -m modelopt.onnx.quantization.autotune \
+       --onnx_path model.onnx \
+       --output_dir ./model_remote_autotuned \
+       --schemes_per_region 50 \
+       --use_trtexec \
+       --trtexec_benchmark_args "--remoteAutoTuningConfig=\"<remote autotuning config>\" --safe --skipInference"
 
 **Requirements:**
 
@@ -244,8 +244,7 @@ To use remote autotuning during Q/DQ placement optimization, run with ``trtexec`
 * ``--use_trtexec`` must be set (benchmarking uses ``trtexec`` instead of the TensorRT Python API)
 * ``--safe --skipInference`` must be enabled via ``--trtexec_benchmark_args``
 
-Replace ``<remote autotuning config>`` with an actual remote autotuning configuration string (see ``trtexec --help`` for more details).
- Other TensorRT benchmark options (e.g. ``--timing_cache``, ``--warmup_runs``, ``--timing_runs``, ``--plugin_libraries``) are also available; run ``--help`` for details.
+Replace ``<remote autotuning config>`` with an actual remote autotuning configuration string (see ``trtexec --help`` for more details). Other TensorRT benchmark options (e.g. ``--timing_cache``, ``--warmup_runs``, ``--timing_runs``, ``--plugin_libraries``) are also available; run ``--help`` for details.
 
 Low-Level API Usage
 ===================

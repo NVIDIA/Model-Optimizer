@@ -215,6 +215,11 @@ class TrtExecBenchmark(Benchmark):
                         "Remote autotuning requires '--safe' to be set. Adding it to trtexec arguments."
                     )
                     self.trtexec_args.append("--safe")
+                if "--skipInference" not in trtexec_args:
+                    self.logger.warning(
+                        "Remote autotuning requires '--skipInference' to be set. Adding it to trtexec arguments."
+                    )
+                    self.trtexec_args.append("--skipInference")
                 return
             except ImportError:
                 self.logger.warning(
