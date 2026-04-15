@@ -36,7 +36,6 @@ pipeline:
       - dflash.dflash_loss_decay_factor=7
       - dflash.dflash_mask_token_id=151669
       - dflash.dflash_architecture_config.num_hidden_layers=5
-    environment:
     slurm_config:
       _factory_: "slurm_factory"
       nodes: 1
