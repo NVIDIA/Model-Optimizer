@@ -1,14 +1,20 @@
 # PTQ Preset Configs
 
 This directory holds preset quantization configurations that serve as the
-single source of truth for the hardcoded `*_CFG` dicts in
+YAML source of truth for the hardcoded `*_CFG` dicts in
 `modelopt.torch.quantization.config` (e.g., `FP8_DEFAULT_CFG`).
 
 Each preset is a complete, self-contained config with `algorithm` and
 `quant_cfg` — ready to pass directly to `mtq.quantize()`. Presets compose
-from the reusable snippets in `configs/numerics/` and `configs/ptq/` via
-the `$import` system.
+from the reusable snippets in `configs/numerics/` and `configs/ptq/units/`
+via the `$import` system.
 
-When adding a new preset, use existing snippets where possible and keep
-the YAML as the authoritative definition — the Python config should load
-from here rather than hardcoding the dict.
+**Note:** The main purpose of these presets is to support the existing
+`hf_ptq.py` script's `--qformat` / `--kv_cache_qformat` flags and other
+code paths that reference
+the hardcoded `*_CFG` dicts, maintaining backward compatibility during
+the transition to recipe-based workflows. Users are encouraged to use
+`load_recipe` with full recipe files under `general/` or `models/`
+instead. Some or all of these presets may be deprecated or removed in
+future releases as the recipe-based workflow becomes the standard entry
+point.

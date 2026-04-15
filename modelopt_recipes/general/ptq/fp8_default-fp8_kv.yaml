@@ -14,10 +14,10 @@
 # limitations under the License.
 
 imports:
-  base_disable_all: configs/ptq/base_disable_all
-  default_disabled: configs/ptq/default_disabled_quantizers
-  w8a8_fp8_fp8: configs/ptq/w8a8_fp8_fp8
-  fp8_kv: configs/ptq/fp8_kv
+  base_disable_all: configs/ptq/units/base_disable_all
+  default_disabled: configs/ptq/units/default_disabled_quantizers
+  w8a8_fp8_fp8: configs/ptq/units/w8a8_fp8_fp8
+  fp8_kv: configs/ptq/units/fp8_kv
 
 metadata:
   recipe_type: ptq

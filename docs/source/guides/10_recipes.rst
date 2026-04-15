@@ -94,8 +94,8 @@ The simplest form is a single ``.yml`` or ``.yaml`` file.
 .. code-block:: yaml
 
    imports:
-     base_disable_all: configs/ptq/base_disable_all
-     default_disabled: configs/ptq/default_disabled_quantizers
+     base_disable_all: configs/ptq/units/base_disable_all
+     default_disabled: configs/ptq/units/default_disabled_quantizers
      fp8: configs/numerics/fp8
 
    metadata:
@@ -227,8 +227,8 @@ a list splice are not supported.
 .. code-block:: yaml
 
    imports:
-     base_disable_all: configs/ptq/base_disable_all
-     default_disabled: configs/ptq/default_disabled_quantizers
+     base_disable_all: configs/ptq/units/base_disable_all
+     default_disabled: configs/ptq/units/default_disabled_quantizers
      fp8: configs/numerics/fp8
 
    metadata:
@@ -275,7 +275,7 @@ and returns the resolved list:
 
 .. code-block:: yaml
 
-   # configs/ptq/fp8_kv.yaml — list snippet that imports a dict snippet
+   # configs/ptq/units/fp8_kv.yaml — list snippet that imports a dict snippet
    imports:
      fp8: configs/numerics/fp8
    ---
@@ -305,11 +305,11 @@ Reusable snippets are stored under ``modelopt_recipes/configs/``:
      - NVFP4 E2M1 blockwise, dynamic calibration, FP8 scales (default)
    * - ``configs/numerics/nvfp4_static``
      - NVFP4 E2M1 blockwise, static calibration, FP8 scales
-   * - ``configs/ptq/base_disable_all``
+   * - ``configs/ptq/units/base_disable_all``
      - Disable all quantizers (deny-all-then-configure pattern)
-   * - ``configs/ptq/default_disabled_quantizers``
+   * - ``configs/ptq/units/default_disabled_quantizers``
      - Standard exclusions (LM head, routers, BatchNorm, etc.)
-   * - ``configs/ptq/fp8_kv``
+   * - ``configs/ptq/units/fp8_kv``
      - FP8 E4M3 KV cache quantization (multi-document, imports ``fp8``)
 
 
@@ -549,8 +549,8 @@ Example -- creating a custom PTQ recipe using imports:
 
    # my_int8_recipe.yml
    imports:
-     base_disable_all: configs/ptq/base_disable_all
-     default_disabled: configs/ptq/default_disabled_quantizers
+     base_disable_all: configs/ptq/units/base_disable_all
+     default_disabled: configs/ptq/units/default_disabled_quantizers
 
    metadata:
      recipe_type: ptq
