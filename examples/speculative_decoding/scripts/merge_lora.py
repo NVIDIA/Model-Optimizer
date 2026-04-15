@@ -119,20 +119,17 @@ def main():
     model.save_pretrained(args.output_path)
     tokenizer.save_pretrained(args.output_path)
 
-    # Fix rope_theta for TRT-LLM compatibility: newer transformers (Qwen3) saves
-    # rope config under rope_parameters instead of the top-level rope_theta that
-    # TRT-LLM expects. Copy it over if missing.
-    import json
+    # Restore the original base model's config.json.  save_pretrained() with newer
+    # transformers (>=5.x) rewrites config fields (e.g. rope_theta → rope_parameters,
+    # torch_dtype → dtype) which can confuse downstream engines like TRT-LLM or vLLM.
+    # Since LoRA only changes weights — not architecture — the original config is correct.
+    import shutil
 
-    config_path = Path(args.output_path) / "config.json"
-    with open(config_path) as f:
-        cfg = json.load(f)
-    rope_params = cfg.get("rope_parameters", {})
-    if rope_params and cfg.get("rope_theta") is None:
-        cfg["rope_theta"] = rope_params.get("rope_theta")
-        with open(config_path, "w") as f:
-            json.dump(cfg, f, indent=2)
-        print(f"  Fixed rope_theta={cfg['rope_theta']} for TRT-LLM compatibility")
+    base_config = Path(args.base_model_path) / "config.json"
+    output_config = Path(args.output_path) / "config.json"
+    if base_config.exists():
+        shutil.copy2(str(base_config), str(output_config))
+        print(f"  Restored original config.json from {base_config}")
 
     print(f"Done! Merged model saved to {args.output_path}")
 
