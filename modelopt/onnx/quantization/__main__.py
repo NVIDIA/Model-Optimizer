@@ -399,7 +399,7 @@ def get_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Additional 'trtexec' arguments as a single quoted string. Only relevant with the 'trtexec' workflow "
-            "enabled. Example (simple): '--fp16 --workspace=4096'"
+            "enabled. Example: '--fp16 --workspace=4096'"
         ),
     )
     return argparser

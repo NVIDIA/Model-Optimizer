@@ -22,7 +22,7 @@ Changelog
 **Bug Fixes**
 
 - Fix Minitron pruning (``mcore_minitron``) for MoE models. Importance estimation hooks were incorrectly registered for MoE modules and NAS step was hanging before this.
-- Fix TRT support for remote autotuning in ONNX Autotune from 10.16+ to 10.15+ and check the ``trtexec`` version instead of the TRT Python API when using ``trtexec`` backend.
+- Fix TRT support for remote autotuning in ONNX Autotune from 10.16+ to 10.15+ and fix TRT versioning check to the ``trtexec`` version instead of the TRT Python API when using ``trtexec`` backend.
 
 **Misc**
 
