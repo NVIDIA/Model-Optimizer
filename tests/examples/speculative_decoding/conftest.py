@@ -14,10 +14,9 @@
 # limitations under the License.
 
 import json
+from pathlib import Path
 
 import pytest
-import yaml
-from _test_utils.examples.run_command import run_example_command
 
 
 @pytest.fixture(scope="session")
@@ -46,24 +45,11 @@ def tiny_conversations_path(tmp_path_factory):
 
 
 @pytest.fixture(scope="session", autouse=True)
-def tiny_daring_anteater_path(tmp_path_factory):
-    tmp_dir = tmp_path_factory.mktemp("daring_anteater")
-    output_file = tmp_dir / "train.jsonl"
+def tiny_daring_anteater_path():
+    """Return path to synthetic test data in OpenAI messages format.
 
-    config = {
-        "outputs": [
-            {
-                "filename": str(output_file),
-                "global_limit": 100,
-                "sources": [{"name": "daring-anteater", "splits": {"all": 100}}],
-            }
-        ]
-    }
-    config_path = tmp_dir / "data_config.yaml"
-    config_path.write_text(yaml.dump(config))
-
-    run_example_command(
-        ["python", "make_dataset.py", "-f", str(config_path), "--full-conversations"], "dataset"
-    )
-
-    return output_file
+    Uses examples/dataset/synthetic_conversations_1k.jsonl (1000 samples,
+    900 single-turn + 100 two-turn). Synthesized by Claude (Anthropic),
+    Apache-2.0 licensed.
+    """
+    return Path(__file__).parents[3] / "examples" / "dataset" / "synthetic_conversations_1k.jsonl"

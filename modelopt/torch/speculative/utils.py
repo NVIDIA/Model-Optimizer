@@ -376,6 +376,86 @@ class AcceptanceRateValidation:
 
         return ground_truth, ar
 
+    def validate_online(
+        self,
+        osl,
+        prompt=None,
+        input_ids=None,
+        steps=1,
+    ):
+        """Validate AR with online (context-dependent) ground truth.
+
+        Instead of pre-computing a fixed ground truth, this method verifies
+        draft tokens against the target model's response to the current
+        sequence (including previously accepted draft tokens). This matches
+        the actual speculative decoding verification loop.
+
+        Args:
+            osl: output sequence length
+            prompt: text prompt (alternative to input_ids)
+            input_ids: tokenized input
+            steps: number of draft tokens per step
+        """
+        if input_ids is None:
+            input_ids = self.tokenize(prompt)
+
+        if input_ids.shape[0] != 1:
+            raise ValueError("validate_online only supports batch_size=1")
+
+        isl = input_ids.shape[1]
+        max_len = isl + osl
+        total_accepted = 0
+        cnt = 0
+
+        while input_ids.shape[1] < max_len:
+            cnt += 1
+
+            # Generate base token + draft tokens
+            input_id, draft_tokens = self.model.pseudo_speculative_generate(input_ids, steps=steps)
+            draft_tokens = self.check_data_consistency_across_ranks(draft_tokens)
+            input_id = self.check_data_consistency_across_ranks(input_id)
+
+            # Append base token
+            input_ids = torch.cat((input_ids, input_id), dim=-1)
+
+            if draft_tokens is None or input_ids.shape[1] >= max_len:
+                total_accepted += 1  # base token
+                continue
+
+            # Build candidate sequence with draft tokens appended
+            candidate = torch.cat((input_ids, draft_tokens), dim=-1)
+
+            # Get target model's response to the candidate sequence
+            with torch.no_grad():
+                target_output = self.model._base_model(candidate)
+                target_logits = self.model._base_model_lm_head(target_output.last_hidden_state)
+                # posterior[i] = target's prediction given candidate[:i+1]
+                # For positions where we placed draft tokens, compare
+                # target's prediction at position i-1 with draft token at i
+                posterior = target_logits.argmax(dim=-1)
+
+            # Check acceptance: compare draft[i] with posterior at input_ids_len-1+i
+            accepted = 0
+            pos = input_ids.shape[1] - 1  # position of base token in candidate
+            for i in range(draft_tokens.shape[-1]):
+                if pos + i >= candidate.shape[1] - 1:
+                    break
+                if posterior[:, pos + i] == draft_tokens[:, i]:
+                    accepted += 1
+                    input_ids = torch.cat((input_ids, draft_tokens[:, i : i + 1]), dim=-1)
+                else:
+                    # Rejected — append target's correction token (not counted as accepted)
+                    input_ids = torch.cat((input_ids, posterior[:, pos + i : pos + i + 1]), dim=-1)
+                    break
+
+                if input_ids.shape[1] >= max_len:
+                    break
+
+            total_accepted += 1 + accepted  # base token + accepted drafts
+
+        ar = total_accepted / cnt if cnt > 0 else 0.0
+        return input_ids, ar
+
 
 @contextlib.contextmanager
 def temporary_set_config_value(config, field, value):
@@ -512,7 +592,8 @@ def load_vlm_or_llm(
         return FakeBaseModel.from_source(model_name_or_path, trust_remote_code=trust_remote_code)
 
     model_config = transformers.AutoConfig.from_pretrained(
-        model_name_or_path, trust_remote_code=trust_remote_code
+        model_name_or_path,
+        trust_remote_code=trust_remote_code,
     )
     if "vl" in model_config.model_type.lower():
         model_cls = transformers.AutoModelForVision2Seq

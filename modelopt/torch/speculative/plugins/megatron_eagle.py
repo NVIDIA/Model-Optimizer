@@ -107,12 +107,9 @@ def dict_to_config(
     config.position_embedding_type = architecture_config.get("position_embedding_type")
     config.rotary_percent = 1.0
     config.rotary_base = architecture_config.get("rope_theta")
-    config.rope_scaling = "rope_scaling" in architecture_config
-    config.rope_scaling_factor = (
-        architecture_config.get("rope_scaling").get("factor")
-        if "rope_scaling" in architecture_config
-        else None
-    )
+    _rope_scaling_dict = architecture_config.get("rope_scaling", {})
+    config.rope_scaling = isinstance(_rope_scaling_dict, dict) and "factor" in _rope_scaling_dict
+    config.rope_scaling_factor = _rope_scaling_dict.get("factor") if config.rope_scaling else None
 
     config.draft_vocab_size = architecture_config.get("draft_vocab_size")
     config.use_input_layernorm_in_first_layer = architecture_config.get(

@@ -14,8 +14,11 @@
 # limitations under the License.
 
 import argparse
+import copy
+import json
 import re
 import sys
+import warnings
 from pathlib import Path
 
 # Add onnx_ptq to path for shared modules
@@ -44,7 +47,7 @@ The script will:
 
 mp.set_start_method("spawn", force=True)  # Needed for data loader with multiple workers
 
-QUANT_CONFIG_DICT = {
+QUANT_CONFIG_DICT: dict[str, dict] = {
     "fp8": mtq.FP8_DEFAULT_CFG,
     "int8": mtq.INT8_DEFAULT_CFG,
     "mxfp8": mtq.MXFP8_DEFAULT_CFG,
@@ -52,12 +55,61 @@ QUANT_CONFIG_DICT = {
     "int4_awq": mtq.INT4_AWQ_CFG,
 }
 
+_FP8_CONV_OVERRIDE: list = [
+    {
+        "parent_class": "nn.Conv2d",
+        "quantizer_name": "*weight_quantizer",
+        "cfg": {"num_bits": (4, 3), "axis": None},
+    },
+    {
+        "parent_class": "nn.Conv2d",
+        "quantizer_name": "*input_quantizer",
+        "cfg": {"num_bits": (4, 3), "axis": None},
+    },
+]
+
+_INT8_CONV_OVERRIDE: list = [
+    {
+        "parent_class": "nn.Conv2d",
+        "quantizer_name": "*weight_quantizer",
+        "cfg": {"num_bits": 8, "axis": 0},
+    },
+    {
+        "parent_class": "nn.Conv2d",
+        "quantizer_name": "*input_quantizer",
+        "cfg": {"num_bits": 8, "axis": None},
+    },
+]
+
+
+def get_quant_config(quantize_mode):
+    """Get quantization config, overriding Conv2d for TRT compatibility.
+
+    TensorRT only supports FP8 and INT8 for Conv layers.
+    - For MXFP8, NVFP4: override Conv2d to FP8
+    - For INT4_AWQ: override Conv2d to INT8
+    """
+    config: dict = copy.deepcopy(QUANT_CONFIG_DICT[quantize_mode])
+    if quantize_mode in ("mxfp8", "nvfp4"):
+        warnings.warn(
+            f"TensorRT only supports FP8/INT8 for Conv layers. "
+            f"Overriding Conv2d quantization to FP8 for '{quantize_mode}' mode."
+        )
+        config["quant_cfg"].extend(_FP8_CONV_OVERRIDE)
+    elif quantize_mode == "int4_awq":
+        warnings.warn(
+            "TensorRT only supports FP8/INT8 for Conv layers. "
+            "Overriding Conv2d quantization to INT8 for 'int4_awq' mode."
+        )
+        config["quant_cfg"].extend(_INT8_CONV_OVERRIDE)
+    return config
+
 
 def filter_func(name):
     """Filter function to exclude certain layers from quantization."""
     pattern = re.compile(
         r".*(time_emb_proj|time_embedding|conv_in|conv_out|conv_shortcut|add_embedding|"
-        r"pos_embed|time_text_embed|context_embedder|norm_out|x_embedder|patch_embed).*"
+        r"pos_embed|time_text_embed|context_embedder|norm_out|x_embedder|patch_embed|cpb_mlp|downsample).*"
     )
     return pattern.match(name) is not None
 
@@ -121,6 +173,18 @@ def loss_func(output, batch):
     return F.cross_entropy(output, batch["label"])
 
 
+def _disable_inplace_relu(model):
+    """Replace inplace ReLU with non-inplace ReLU throughout the model.
+
+    This is needed for auto_quantize which uses backward hooks for gradient-based
+    sensitivity scoring. Inplace ReLU on views created by custom Functions causes
+    PyTorch autograd errors.
+    """
+    for module in model.modules():
+        if isinstance(module, torch.nn.ReLU) and module.inplace:
+            module.inplace = False
+
+
 def auto_quantize_model(
     model,
     data_loader,
@@ -142,6 +206,7 @@ def auto_quantize_model(
     Returns:
         Tuple of (quantized_model, search_state_dict)
     """
+    _disable_inplace_relu(model)
     constraints = {"effective_bits": effective_bits}
 
     # Convert string format names to actual config objects
@@ -255,12 +320,29 @@ def main():
         default=128,
         help="Number of scoring steps for auto quantization. Default is 128.",
     )
+    parser.add_argument(
+        "--no_pretrained",
+        action="store_true",
+        help="Don't load pretrained weights (useful for testing with random weights).",
+    )
+    parser.add_argument(
+        "--model_kwargs",
+        type=str,
+        default=None,
+        help="JSON string of extra model kwargs (e.g., '{\"depth\": 1}').",
+    )
 
     args = parser.parse_args()
 
     # Create model and move to appropriate device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = timm.create_model(args.timm_model_name, pretrained=True, num_classes=1000).to(device)
+    model_kwargs = json.loads(args.model_kwargs) if args.model_kwargs else {}
+    model = timm.create_model(
+        args.timm_model_name,
+        pretrained=not args.no_pretrained,
+        num_classes=1000,
+        **model_kwargs,
+    ).to(device)
 
     # Get input shape from model config
     input_size = get_model_input_shape(model)
@@ -297,7 +379,7 @@ def main():
         )
     else:
         # Standard quantization - only load calibration data if needed
-        config = QUANT_CONFIG_DICT[args.quantize_mode]
+        config = get_quant_config(args.quantize_mode)
         if args.quantize_mode == "mxfp8":
             data_loader = None
         else:
