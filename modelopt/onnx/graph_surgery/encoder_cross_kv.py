@@ -319,6 +319,72 @@ def _add_cross_kv_outputs(
     return encoder_model
 
 
+def _transform_cross_kv(
+    model: onnx.ModelProto,
+    hf_model_id: str,
+    hidden_state_output_name: str = "last_hidden_state",
+    rename_input_features: bool = True,
+    verbose: bool = True,
+    trust_remote_code: bool = False,
+) -> onnx.ModelProto:
+    """Pure in-memory cross-attention KV transformation. No file I/O.
+
+    Takes an already-loaded encoder ONNX model, adds cross-attention KV cache
+    outputs, and returns the modified model without saving.
+
+    Args:
+        model: Already-loaded ONNX ModelProto (encoder).
+        hf_model_id: HuggingFace model ID for loading cross-attention weights.
+        hidden_state_output_name: Name of encoder hidden state output.
+        rename_input_features: Whether to rename input_features to audio_features.
+        verbose: Whether to print progress messages.
+        trust_remote_code: Whether to trust remote code in HuggingFace model.
+
+    Returns:
+        Modified ONNX model (same object, mutated in place).
+    """
+    # Load cross-attention weights from HuggingFace model
+    cross_attn_weights, num_heads, head_size, num_layers = _get_cross_attn_weights_from_hf(
+        hf_model_id, trust_remote_code=trust_remote_code
+    )
+
+    # Detect model dtype
+    onnx_dtype, np_dtype = detect_model_dtype(model)
+    if verbose:
+        dtype_names = {
+            TensorProto.FLOAT: "FP32",
+            TensorProto.FLOAT16: "FP16",
+            TensorProto.BFLOAT16: "BF16",
+        }
+        logger.info(f"Detected model dtype: {dtype_names.get(onnx_dtype, 'unknown')}")
+
+    if verbose:
+        logger.info("Adding cross KV cache outputs to encoder...")
+
+    modified_model = _add_cross_kv_outputs(
+        model,
+        cross_attn_weights,
+        hidden_state_output_name,
+        num_heads,
+        head_size,
+        num_layers,
+        rename_input_features,
+        onnx_dtype=onnx_dtype,
+        np_dtype=np_dtype,
+    )
+
+    if verbose:
+        logger.info("Cross-KV transformation complete.")
+        logger.info("\nEncoder inputs:")
+        for inp in modified_model.graph.input:
+            logger.info(f"  {inp.name}")
+        logger.info("\nEncoder outputs:")
+        for output in modified_model.graph.output:
+            logger.info(f"  {output.name}")
+
+    return modified_model
+
+
 def add_cross_kv_to_encoder(
     model_path: str,
     output_path: str,
@@ -374,39 +440,18 @@ def add_cross_kv_to_encoder(
         ...     hf_model_id="openai/whisper-large-v3-turbo",
         ... )
     """
-    # Load cross-attention weights from HuggingFace model
-    cross_attn_weights, num_heads, head_size, num_layers = _get_cross_attn_weights_from_hf(
-        hf_model_id, trust_remote_code=trust_remote_code
-    )
-
     if verbose:
         logger.info(f"Loading encoder model from: {model_path}")
 
     encoder_model = onnx.load(model_path, load_external_data=True)
 
-    # Detect model dtype
-    onnx_dtype, np_dtype = detect_model_dtype(encoder_model)
-    if verbose:
-        dtype_names = {
-            TensorProto.FLOAT: "FP32",
-            TensorProto.FLOAT16: "FP16",
-            TensorProto.BFLOAT16: "BF16",
-        }
-        logger.info(f"Detected model dtype: {dtype_names.get(onnx_dtype, 'unknown')}")
-
-    if verbose:
-        logger.info("Adding cross KV cache outputs to encoder...")
-
-    modified_encoder = _add_cross_kv_outputs(
+    modified_encoder = _transform_cross_kv(
         encoder_model,
-        cross_attn_weights,
-        hidden_state_output_name,
-        num_heads,
-        head_size,
-        num_layers,
-        rename_input_features,
-        onnx_dtype=onnx_dtype,
-        np_dtype=np_dtype,
+        hf_model_id=hf_model_id,
+        hidden_state_output_name=hidden_state_output_name,
+        rename_input_features=rename_input_features,
+        verbose=verbose,
+        trust_remote_code=trust_remote_code,
     )
 
     # Save model
@@ -438,12 +483,6 @@ def add_cross_kv_to_encoder(
 
     if verbose:
         logger.info("Done!")
-        logger.info("\nEncoder inputs:")
-        for inp in modified_encoder.graph.input:
-            logger.info(f"  {inp.name}")
-        logger.info("\nEncoder outputs:")
-        for output in modified_encoder.graph.output:
-            logger.info(f"  {output.name}")
 
         logger.info("\n" + "=" * 60)
         logger.info("UPDATE genai_config.json with:")
