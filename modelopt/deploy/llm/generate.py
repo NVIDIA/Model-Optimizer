@@ -126,9 +126,16 @@ class LLM(TRTLLM):
 
         cuda_graph_config = None
         if max_batch_size > 0:
+            batch_sizes = [2**i for i in range(int((max_batch_size - 1).bit_length()))] + [
+                max_batch_size
+            ]
+            if ep > 1:
+                # DeepEP low-latency dispatch requires (num_ranks * num_max_dispatch_tokens_per_rank) % 4 == 0.
+                # num_max_dispatch_tokens_per_rank equals the CUDA-graph batch size, so filter out
+                # any batch size that would violate the constraint.
+                batch_sizes = [b for b in batch_sizes if (ep * b) % 4 == 0]
             cuda_graph_config = CudaGraphConfig(
-                batch_sizes=[2**i for i in range(int((max_batch_size - 1).bit_length()))]
-                + [max_batch_size],
+                batch_sizes=batch_sizes,
                 max_batch_size=max_batch_size,
                 enable_padding=True,
             )
