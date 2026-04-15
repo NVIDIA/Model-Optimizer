@@ -496,7 +496,7 @@ def apply_triton_sparse_kernel(
 
     config = copy.deepcopy(_TRITON_KERNEL_CONFIGS[kernel])
     if skip_threshold is not None and kernel == KERNEL_TRITON_SKIP:
-        star: dict = config["sparse_cfg"]["*"]  # type: ignore[assignment]
+        star: dict = config["sparse_cfg"]["*"]
         star["skip_softmax_threshold"] = skip_threshold
 
     mtsa.sparsify(transformer, config)
