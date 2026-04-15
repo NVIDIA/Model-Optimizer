@@ -28,6 +28,7 @@ from typing import Any
 
 import torch
 import torch.nn as nn
+import yaml
 from safetensors.torch import save_file
 
 try:
@@ -1008,6 +1009,24 @@ def _export_diffusers_checkpoint(
                 model_type=model_type,
             )
 
+        # Step 8: Update config.json with sparse attention info (both quantized and non-quantized)
+        if export_sparse_attention_config is not None:
+            sparse_attn_config = export_sparse_attention_config(component)
+            if sparse_attn_config is not None:
+                config_path = component_export_dir / "config.json"
+                if config_path.exists():
+                    with open(config_path) as file:
+                        config_data = json.load(file)
+                    config_data["sparse_attention_config"] = sparse_attn_config
+                    with open(config_path, "w") as file:
+                        json.dump(config_data, file, indent=4)
+                    print(f"  Added sparse_attention_config to {config_path.name}")
+
+                yaml_path = component_export_dir / "sparse.yaml"
+                with open(yaml_path, "w") as file:
+                    yaml.dump(sparse_attn_config, file, default_flow_style=False, sort_keys=False)
+                print(f"  Saved sparse config to {yaml_path.name}")
+
         print(f"  Saved to: {component_export_dir}")
 
     # Step 4: Export non-nn.Module components (tokenizers, schedulers, feature extractors, etc.)
@@ -1228,6 +1247,13 @@ def export_hf_checkpoint(
             sparse_attn_config = export_sparse_attention_config(model)
             if sparse_attn_config is not None:
                 config_data["sparse_attention_config"] = sparse_attn_config
+
+                # Also save as standalone YAML for easy inspection and reuse
+                import yaml
+
+                yaml_path = Path(export_dir) / "sparse.yaml"
+                with open(yaml_path, "w") as file:
+                    yaml.dump(sparse_attn_config, file, default_flow_style=False, sort_keys=False)
 
         with open(original_config, "w") as file:
             json.dump(config_data, file, indent=4)

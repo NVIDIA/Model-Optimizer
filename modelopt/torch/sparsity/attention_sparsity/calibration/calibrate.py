@@ -342,6 +342,9 @@ def calibrate_sparse_attention(
                 "a": result["a"],
                 "b": result["b"],
             }
+            if result.get("fit_logspace"):
+                params["log_a"] = result["log_a"]
+                params["fit_logspace"] = True
             if "min_observed_sparsity" in result:
                 params["min_observed_sparsity"] = result["min_observed_sparsity"]
             if "max_observed_sparsity" in result:
