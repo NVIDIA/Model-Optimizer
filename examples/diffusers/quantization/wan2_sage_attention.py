@@ -148,6 +148,7 @@ _KERNEL_DESCRIPTIONS = {
     KERNEL_TRITON_SPARSE: "ModelOpt Triton flash-attn + N:M sparse softmax (2:4) via mtsa.sparsify()",
     KERNEL_TRITON_SKIP: "ModelOpt Triton flash-attn + skip-softmax tile pruning via mtsa.sparsify()",
     KERNEL_NVFP4: "ModelOpt SageAttention NVFP4 E2M1 P-matrix quantization via mtq.apply_sage_attention()",
+    KERNEL_NVFP4_V3: "ModelOpt SageAttention v3 per-group MX NVFP4 on Q/K/V/P via mtq.apply_sage_attention_v3()",
 }
 
 # SageAttention CUDA kernel support by GPU compute capability:
