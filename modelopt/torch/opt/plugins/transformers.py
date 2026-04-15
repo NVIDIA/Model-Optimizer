@@ -15,6 +15,7 @@
 
 """ModelOpt plugin for enabling automatic save/restore of ModelOpt state for HuggingFace models."""
 
+import os
 import types
 from contextlib import contextmanager
 
@@ -24,8 +25,9 @@ from transformers import modeling_utils as tf_modeling_utils
 
 from modelopt.torch.utils import report_memory
 
-from ..conversion import ModeloptStateManager
+from ..conversion import ModeloptStateManager, load_modelopt_state
 from .huggingface import (
+    _get_modelopt_state_path,
     _new_save_pretrained,
     _patch_model_init_for_modelopt,
     enable_huggingface_checkpointing,
@@ -60,6 +62,39 @@ def _undo_torch_init_override_by_transformers():
         setattr(torch.nn.init, name, init_func)
 
 
+def _restore_qtensor_wrappers(model, model_path):
+    """Re-wrap QTensorWrapper weights that were replaced during HF weight loading.
+
+    Transformers>=5.0 uses ``setattr`` to load weights, which replaces ``QTensorWrapper``
+    objects with plain ``Parameter`` tensors.  The compressed data is loaded correctly but
+    the wrapper metadata (original shape, dtype, qtensor class) is lost.  This function
+    reads the saved ``q_tensor_state`` from ``modelopt_state.pth`` and re-wraps the affected
+    weights.
+    """
+    modelopt_state_path = _get_modelopt_state_path(model_path)
+    if not os.path.isfile(modelopt_state_path):
+        return
+
+    from modelopt.torch.quantization.nn.modules.quant_linear import RealQuantLinear
+    from modelopt.torch.quantization.qtensor import QTensorWrapper
+
+    state = load_modelopt_state(modelopt_state_path)
+    for _, mode_config in state["modelopt_state_dict"]:
+        q_tensor_state = mode_config.get("metadata", {}).get("q_tensor_state", {})
+        if not q_tensor_state:
+            continue
+        for name, module in model.named_modules():
+            if (
+                isinstance(module, RealQuantLinear)
+                and name in q_tensor_state
+                and not isinstance(module.weight, QTensorWrapper)
+            ):
+                module._parameters["weight"] = QTensorWrapper(
+                    qtensor=module.weight.data,
+                    metadata=q_tensor_state[name]["metadata"],
+                )
+
+
 def _new_from_pretrained(cls, /, pretrained_model_name_or_path, *args, **kwargs):
     """Patch for `cls.from_pretrained` method to restore ModelOpt state."""
     with _patch_model_init_for_modelopt(
@@ -68,6 +103,8 @@ def _new_from_pretrained(cls, /, pretrained_model_name_or_path, *args, **kwargs)
         model = types.MethodType(cls._modelopt_cache["from_pretrained"].__func__, cls)(
             pretrained_model_name_or_path, *args, **kwargs
         )
+
+    _restore_qtensor_wrappers(model, pretrained_model_name_or_path)
 
     return model
 
@@ -93,12 +130,12 @@ def _save_pretrained_with_checks(self, save_directory, *args, **kwargs):
 
 # [Fix for huggingface bug] deepspeed zero3 training backend only loads params into the model from
 # state_dict, but not buffers. So lets explicitly load the buffers into the model from state_dict.
-def _load_params_and_buffers_into_zero3_model(model_to_load, state_dict):
+def _load_params_and_buffers_into_zero3_model(model_to_load, state_dict, load_config=None):
     buffer_names = [name for name, _ in model_to_load.named_buffers()]
     buffer_state_dict = {k: v for k, v in state_dict.items() if k in buffer_names}
     model_to_load.load_state_dict(buffer_state_dict, strict=False)
     return tf_modeling_utils._modelopt_cache["_load_state_dict_into_zero3_model"](
-        model_to_load, state_dict
+        model_to_load, state_dict, load_config
     )
 
 

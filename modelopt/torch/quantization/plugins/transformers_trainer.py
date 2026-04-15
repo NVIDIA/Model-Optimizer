@@ -29,7 +29,7 @@ import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.distill.plugins.huggingface import KDTrainer
 from modelopt.torch.opt.plugins import ModelOptHFTrainer
-from modelopt.torch.utils import print_rank_0
+from modelopt.torch.utils import get_module_device, print_rank_0
 
 from ..config import QuantizeConfig
 from ..nn import TensorQuantizer
@@ -344,8 +344,10 @@ class QATTrainer(ModelOptHFTrainer):
             ), "Some base_layer parameters are not frozen"
 
             adapter_name = self.model.active_adapters()[0]
+            device = get_module_device(self.model)
             self.model.delete_adapter(adapter_name)
             self.model.load_adapter(self.state.best_model_checkpoint, adapter_name)
+            self.model.to(device)
         else:
             super()._load_best_model(*args, **kwargs)
 

@@ -1222,8 +1222,8 @@ class QuantizeAlgorithmConfig(ModeloptBaseConfig):
         title="Enable sequential layer-by-layer calibration.",
         description=(
             "If True, the calibration algorithm is applied sequentially to each decoder block. "
-            "The current approach recomputes a full forward pass per layer to propagate updated activations,"
-            "incurring O(N²) cost. Future revisions will add caching to eliminate redundant passes."
+            "Each layer's inputs are captured via a single forward pass that reflects the "
+            "quantization of all preceding layers, incurring O(N) forward passes for N layers."
         ),
     )
 
@@ -1503,24 +1503,20 @@ class SVDQuantConfig(QuantizeAlgorithmConfig):
     )
 
 
-class GPTQLiteConfig(QuantizeAlgorithmConfig):
-    """The config for GPTQ lite.
+class GPTQCalibConfig(QuantizeAlgorithmConfig):
+    """The config for GPTQ quantization.
 
-    GPTQ lite is a variant of GPTQ that does not exactly follow the official GPTQ implementation.
-
-    GPTQ lite does not perform sequential quantization of layers. This means that the updated
-    activations are not used to process the next layer.
+    GPTQ minimizes the layer-wise quantization error by using second-order (Hessian) information
+    to perform blockwise weight updates that compensate for rounding loss. Layers are quantized
+    sequentially so that each layer's Hessian is computed from activations that already reflect
+    the quantization of preceding layers.
 
     The default values are taken from the official GPTQ implementation:
     https://github.com/IST-DASLab/FP-Quant/blob/d2e3092f968262c4de5fb050e1aef568a280dadd/src/quantization/gptq.py#L35
-
-    Note: This feature is currently experimental and may not translate to improved accuracy as expected.
-
-
     """
 
-    method: Literal["gptq_lite"] = ModeloptField("gptq_lite")
-    percdamp: float | None = ModeloptField(
+    method: Literal["gptq"] = ModeloptField("gptq")
+    perc_damp: float | None = ModeloptField(
         default=0.01,
         gt=0.0,
         le=1.0,
@@ -1532,12 +1528,6 @@ class GPTQLiteConfig(QuantizeAlgorithmConfig):
         title="Block size for GPTQ weight update.",
         description="""The block size for GPTQ weight update, which must be a multiple of the
         group_size used in the quantization.""",
-    )
-    hessian_state_path: str | None = ModeloptField(
-        default=None,
-        title="Path to the Hessian state file.",
-        description="""The path to the Hessian state file. If hessian path exists, we load from
-         hessian file instead of recomputing them.""",
     )
 
 
@@ -1570,6 +1560,10 @@ def normalize_quant_cfg_list(v: dict | list) -> list[QuantizerCfgEntry]:
     - An empty entry ``{}``.
     - An entry with only ``quantizer_name`` and no other keys — the only effect would be an
       implicit ``enable=True``, which must be stated explicitly.
+    - An entry with ``enable=True`` (explicit or implicit) whose ``cfg`` is not a non-empty
+      ``dict`` or ``list`` — e.g. ``{"quantizer_name": "*", "cfg": {}}`` or
+      ``{"quantizer_name": "*", "cfg": 42}``.  An enabled quantizer must have a valid
+      configuration.
 
     **Normalization** — after conversion and validation every entry is put into canonical form:
 
@@ -1587,7 +1581,8 @@ def normalize_quant_cfg_list(v: dict | list) -> list[QuantizerCfgEntry]:
 
     Raises:
         ValueError: If any entry has only ``quantizer_name`` with neither ``cfg`` nor ``enable``,
-            or if the entry format is not recognized.
+            if ``enable=True`` with an empty or non-dict/list ``cfg``, or if the entry format
+            is not recognized.
     """
 
     def _warn_legacy():
@@ -1671,6 +1666,28 @@ def normalize_quant_cfg_list(v: dict | list) -> list[QuantizerCfgEntry]:
                     "or both. An entry with only 'quantizer_name' has no effect (implicit "
                     "enable=True is not allowed; set it explicitly)."
                 )
+
+            # Validate: when cfg is present and enable=True, cfg must be a non-empty
+            # dict or list.  An empty cfg would attempt to create a
+            # QuantizerAttributeConfig with no actual configuration.
+            cfg = entry.get("cfg")
+            enable = entry.get("enable", True)
+            if enable and cfg is not None:
+                if isinstance(cfg, dict):
+                    is_invalid = len(cfg) == 0
+                elif isinstance(cfg, list):
+                    is_invalid = len(cfg) == 0 or any(
+                        not isinstance(item, dict) or len(item) == 0 for item in cfg
+                    )
+                else:
+                    is_invalid = True
+                if is_invalid:
+                    raise ValueError(
+                        f"Invalid quant_cfg entry: {raw!r} — 'cfg' must be a non-empty dict "
+                        f"or a non-empty list of non-empty dicts when enabling a quantizer "
+                        f"(got {type(cfg).__name__}: {cfg!r}). Either provide quantizer "
+                        "attributes in 'cfg' or remove 'cfg' and set 'enable' explicitly."
+                    )
 
             # Normalize: make enable and cfg always explicit.
             entry.setdefault("enable", True)

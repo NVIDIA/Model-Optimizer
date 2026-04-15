@@ -40,6 +40,22 @@ accelerate launch --multi_gpu --num_processes <num_copies_of_your_model> \
     --batch_size 4
 ```
 
+### Heterogeneous Pruned Checkpoints (Puzzletron)
+
+Heterogeneous pruned checkpoints produced by Puzzletron are automatically detected and loaded with the appropriate model patcher. No additional flags are needed beyond specifying the checkpoint path:
+
+```sh
+python lm_eval_hf.py --model hf \
+    --model_args pretrained=path/to/anymodel/checkpoint,dtype=bfloat16,parallelize=True \
+    --tasks mmlu \
+    --num_fewshot 5 \
+    --batch_size 4
+```
+
+For a quick smoke test, add `--limit 10`.
+
+> **Note:** Requires the `puzzletron` extra to be installed (`pip install -e ".[puzzletron]"`).
+
 ### Quantized (simulated)
 
 - For simulated quantization with any of the default quantization formats:

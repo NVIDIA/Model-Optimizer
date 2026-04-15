@@ -15,7 +15,6 @@
 
 import argparse
 import os
-import subprocess
 
 import timm
 import torch
@@ -46,14 +45,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Download and export example models to ONNX.")
 
     parser.add_argument(
-        "--vit",
-        action="store_true",
-        help="Export timm/vit_base_patch16_224 model to ONNX.",
-    )
-    parser.add_argument(
-        "--llama",
-        action="store_true",
-        help="Export meta-llama/Llama-3.1-8B-Instruct to ONNX with KV cache.",
+        "--timm_model_name",
+        type=str,
+        required=True,
+        help="Export any timm model to ONNX (e.g., vit_base_patch16_224, swin_tiny_patch4_window7_224).",
     )
     parser.add_argument(
         "--onnx_save_path", type=str, required=False, help="Path to save the final ONNX model."
@@ -62,7 +57,7 @@ if __name__ == "__main__":
         "--batch_size",
         type=int,
         default=1,
-        help="Batch size for the exported ViT model.",
+        help="Batch size for the exported model.",
     )
     parser.add_argument(
         "--fp16",
@@ -71,54 +66,18 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    if args.vit:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        model = timm.create_model("vit_base_patch16_224", pretrained=True, num_classes=1000).to(
-            device
-        )
-        data_config = timm.data.resolve_model_data_config(model)
-        input_shape = (args.batch_size,) + data_config["input_size"]
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = timm.create_model(args.timm_model_name, pretrained=True, num_classes=1000).to(device)
+    data_config = timm.data.resolve_model_data_config(model)
+    input_shape = (args.batch_size,) + data_config["input_size"]
 
-        vit_save_path = args.onnx_save_path or "vit_base_patch16_224.onnx"
-        weights_dtype = "fp16" if args.fp16 else "fp32"
-        export_to_onnx(
-            model,
-            input_shape,
-            vit_save_path,
-            device,
-            weights_dtype=weights_dtype,
-        )
-        print(f"ViT model exported to {vit_save_path}")
-
-    if args.llama:
-        model_name = "meta-llama/Llama-3.1-8B-Instruct"
-        if not args.onnx_save_path:
-            args.onnx_save_path = "Llama-3.1-8B-Instruct/model.onnx"
-
-        output_dir = os.path.dirname(args.onnx_save_path)
-        if not output_dir:  # Handle cases where only filename is given (save in current dir)
-            output_dir = "."
-        os.makedirs(output_dir, exist_ok=True)
-
-        command = [
-            "python",
-            "-m",
-            "optimum.commands.optimum_cli",
-            "export",
-            "onnx",
-            "--model",
-            model_name,
-            "--task",
-            "causal-lm-with-past",
-            "--device",
-            "cuda",
-            "--fp16" if args.fp16 else "",
-            output_dir,
-        ]
-
-        try:
-            print(f"Running optimum-cli export to {output_dir}...")
-            subprocess.run(command, check=True, capture_output=True, text=True, encoding="utf-8")
-            print(f"Llama model exported to {output_dir}")
-        except subprocess.CalledProcessError as e:
-            raise RuntimeError(f"Failed to export model: {e.stderr}")
+    save_path = args.onnx_save_path or f"{args.timm_model_name}.onnx"
+    weights_dtype = "fp16" if args.fp16 else "fp32"
+    export_to_onnx(
+        model,
+        input_shape,
+        save_path,
+        device,
+        weights_dtype=weights_dtype,
+    )
+    print(f"{args.timm_model_name} model exported to {save_path}")

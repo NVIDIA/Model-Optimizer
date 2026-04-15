@@ -40,7 +40,7 @@ from accelerate import ParallelismConfig
 from eagle_utils import (
     EagleTrainerWithAccLog,
     EagleTrainingPlot,
-    make_eagle_supervised_data_module,
+    make_speculative_data_module,
     patch_ring_attention_for_ttt,
 )
 from omegaconf import OmegaConf
@@ -48,6 +48,7 @@ from transformers.trainer_utils import get_last_checkpoint
 
 import modelopt.torch.opt as mto
 import modelopt.torch.speculative as mtsp
+from modelopt.torch.speculative.config import EagleConfig
 from modelopt.torch.speculative.utils import load_vlm_or_llm, patch_transformers5_params_loading
 from modelopt.torch.utils import print_rank_0
 
@@ -89,8 +90,23 @@ class DataArguments:
         default=None,
         metadata={"help": "Path to draft vocabulary cache file."},
     )
+    chat_template: str = field(
+        default=None,
+        metadata={
+            "help": "Jinja chat template with {% generation %} tags for answer_only_loss. "
+            "If not set, the tokenizer's built-in template is used (must already have generation tags)."
+        },
+    )
     vlm_img_dir: str = field(default=None, metadata={"help": "Path to the VLM image directory."})
     vlm_processor: str = field(default=None, metadata={"help": "Path to the VLM processor."})
+    sample_size: int = field(
+        default=-1,
+        metadata={"help": "Number of samples to use for training. Use -1 to use all samples."},
+    )
+
+    def __post_init__(self):
+        if self.sample_size == 0 or self.sample_size < -1:
+            raise ValueError("sample_size must be -1 (use all samples) or a positive integer")
 
 
 @dataclass
@@ -103,11 +119,17 @@ class TrainingArguments(transformers.TrainingArguments):
             )
         },
     )
-    mode: Literal["eagle3", "medusa"] = "eagle3"
+    mode: Literal["eagle3", "medusa", "dflash"] = "eagle3"
     estimate_ar: bool = field(
         default=False, metadata={"help": "Whether to estimate AR using training accuracy to log."}
     )
     ar_validate_steps: int = field(default=1000, metadata={"help": "AR validation interval."})
+    answer_only_loss: bool = field(
+        default=False,
+        metadata={
+            "help": "Mask loss on non-assistant tokens. Requires a chat_template with generation tags."
+        },
+    )
     cp_size: int = field(default=1, metadata={"help": "Context parallelism size."})
     dp_shard_size: int | None = field(
         default=None,
@@ -133,8 +155,8 @@ def _parse_cli() -> tuple[str, list[str]]:
     return args.config, overrides
 
 
-def _load_config(config_path: str, overrides: list[str] = ()) -> tuple[dict, dict]:
-    """Load training config from a YAML file with sections: model, data, training, eagle.
+def _load_config(config_path: str, overrides: list[str] = ()) -> tuple[dict, dict, dict]:
+    """Load training config from a YAML file with sections: model, data, training, eagle/dflash.
 
     *overrides* are OmegaConf dotlist entries (e.g. ``["model.model_name_or_path=xxx"]``)
     applied on top of the YAML.
@@ -142,15 +164,16 @@ def _load_config(config_path: str, overrides: list[str] = ()) -> tuple[dict, dic
     Returns:
         hf_cfg: Flat dict from model/data/training sections, for HfArgumentParser.parse_dict()
         eagle_cfg: Eagle section dict (EagleConfig fields), passed directly to mtsp.convert()
+        dflash_cfg: DFlash section dict (DFlashConfig fields), passed directly to mtsp.convert()
     """
     merged = OmegaConf.load(config_path)
     if overrides:
         merged = OmegaConf.merge(merged, OmegaConf.from_dotlist(list(overrides)))
     cfg = OmegaConf.to_container(merged, resolve=True)
 
-    # Eagle section maps directly to EagleConfig fields — no field enumeration needed.
-    # eagle_architecture_config is a nested dict and is included as-is.
+    # Eagle/DFlash sections map directly to config fields — no field enumeration needed.
     eagle_cfg = cfg.get("eagle", {})
+    dflash_cfg = cfg.get("dflash", {})
 
     hf_cfg = {
         **cfg.get("model", {}),
@@ -162,12 +185,12 @@ def _load_config(config_path: str, overrides: list[str] = ()) -> tuple[dict, dic
         cp_size = hf_cfg.get("cp_size", 1)
         hf_cfg["dp_shard_size"] = torch.cuda.device_count() // cp_size
 
-    return hf_cfg, eagle_cfg
+    return hf_cfg, eagle_cfg, dflash_cfg
 
 
 def train():
     config_path, overrides = _parse_cli()
-    hf_cfg, eagle_cfg = _load_config(config_path, overrides)
+    hf_cfg, eagle_cfg, dflash_cfg = _load_config(config_path, overrides)
 
     parser = transformers.HfArgumentParser(
         (
@@ -193,7 +216,10 @@ def train():
         patch_ring_attention_for_ttt()
         # Specific patch to accelerate 1.12.0. Removable after move to 1.13.0
         training_args.parallelism_config.sp_backend = None
-    print_rank_0(f"arguments: {model_args}, {training_args}, {medusa_args}, eagle_cfg={eagle_cfg}")
+    print_rank_0(
+        f"arguments: {model_args}, {training_args}, {medusa_args}, "
+        f"eagle_cfg={eagle_cfg}, dflash_cfg={dflash_cfg}"
+    )
 
     # Detect checkpoint to resume from
     last_checkpoint = (
@@ -211,7 +237,7 @@ def train():
     if checkpoint:
         with patch_transformers5_params_loading():
             model = load_vlm_or_llm(
-                checkpoint, torch_dtype="auto", trust_remote_code=model_args.trust_remote_code
+                checkpoint, dtype="auto", trust_remote_code=model_args.trust_remote_code
             )
         tokenizer = transformers.AutoTokenizer.from_pretrained(
             checkpoint, trust_remote_code=model_args.trust_remote_code
@@ -219,14 +245,33 @@ def train():
     else:
         # To avoid OOM for large models, we load and convert model on CPU first.
         # Model will be moved to GPU during HF trainer.init().
+        if use_offline_training:
+            # Load config first to preserve original num_hidden_layers before
+            # load_vlm_or_llm may reduce layers for offline space savings.
+            model_config = transformers.AutoConfig.from_pretrained(
+                model_args.model_name_or_path,
+                trust_remote_code=model_args.trust_remote_code,
+            )
         model = load_vlm_or_llm(
             model_args.model_name_or_path,
             use_fake_base=model_args.use_fake_base_for_offline,
             use_offline_training=use_offline_training,
-            torch_dtype="auto",
+            dtype="auto",
             device_map="cpu",
             trust_remote_code=model_args.trust_remote_code,
         )
+        if use_offline_training:
+            # When doing offline training, we need to set num_hidden_layers
+            # since we override it when loading the model for space savings.
+            # Some models (e.g. Kimi-K2.5) use non-standard config attributes,
+            # so fall back to the model's own config if the attribute is missing.
+            model.config.num_orig_hidden_layers = getattr(
+                model_config, "num_hidden_layers", model.config.num_hidden_layers
+            )
+            if hasattr(model.config, "layer_types"):
+                del (
+                    model.config.layer_types
+                )  # remove layer_types to avoid mismatch with the modified model
         tokenizer = transformers.AutoTokenizer.from_pretrained(
             model_args.model_name_or_path,
             model_max_length=training_args.training_seq_len,
@@ -239,8 +284,11 @@ def train():
             }
             mtsp.convert(model, [("medusa", config)])
         elif training_args.mode == "eagle3":
-            # eagle_cfg maps directly to EagleConfig fields; eagle_offline is derived here.
-            eagle_cfg["eagle_offline"] = use_offline_training
+            # Validate and rewrite eagle config fields
+            eagle_cfg = EagleConfig.model_validate(
+                eagle_cfg,
+                context={"training_args": training_args, "data_args": data_args},
+            ).model_dump()
             mtsp.convert(model, [("eagle", eagle_cfg)])
 
             # Load draft vocab cache if the draft model uses a compressed vocabulary
@@ -251,13 +299,32 @@ def train():
                     )
                 model.eagle_module.d2t = torch.load(data_args.draft_vocab_cache, weights_only=True)
                 print_rank_0(f"Loaded draft vocab cache from {data_args.draft_vocab_cache}.")
+        elif training_args.mode == "dflash":
+            # Auto-detect mask_token_id from tokenizer if not set
+            if not dflash_cfg.get("dflash_mask_token_id"):
+                if tokenizer.mask_token_id is not None:
+                    dflash_cfg["dflash_mask_token_id"] = tokenizer.mask_token_id
+                    print_rank_0(
+                        f"Auto-detected mask_token_id={tokenizer.mask_token_id} from tokenizer"
+                    )
+                else:
+                    raise ValueError(
+                        "mask_token_id not found in tokenizer and not set in config. "
+                        "Set dflash.dflash_mask_token_id in the training YAML."
+                    )
+            mtsp.convert(model, [("dflash", dflash_cfg)])
         else:
             raise Exception(f"{training_args.mode} is not supported!")
 
     print_rank_0("Loading dataset...")
-    if training_args.mode == "eagle3":
-        data_module = make_eagle_supervised_data_module(
-            tokenizer, data_args, train_len=training_args.training_seq_len
+    is_dflash = training_args.mode == "dflash"
+    if training_args.mode in ("eagle3", "dflash"):
+        data_module = make_speculative_data_module(
+            tokenizer,
+            data_args,
+            train_len=training_args.training_seq_len,
+            answer_only_loss=training_args.answer_only_loss,
+            shift_labels=not is_dflash,
         )
 
     trainer = EagleTrainerWithAccLog(

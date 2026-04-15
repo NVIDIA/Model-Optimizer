@@ -20,19 +20,19 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from types import FrameType
-from typing import Any
-
 import numpy as np
 import torch
 import transformers
 from datasets import load_dataset
 from packaging.version import Version
 from scripts.ar_validate import validate_ar
-from torch.utils.data import Dataset
 from transformers import Trainer, TrainerCallback
-from transformers.trainer_pt_utils import LabelSmoother
 
 import modelopt
+from modelopt.torch.speculative.eagle.utils import (
+    EagleOfflineDataCollator,
+    OfflineSupervisedDataset,
+)
 from modelopt.torch.speculative.utils import get_ttt_msk_func
 from modelopt.torch.utils import print_rank_0
 from modelopt.torch.utils.distributed import is_master
@@ -49,99 +49,31 @@ try:
 except (ImportError, AttributeError):
     wandb = None
 
-IGNORE_TOKEN_ID = LabelSmoother.ignore_index
+# Re-export for backward compatibility
+__all__ = ["EagleOfflineDataCollator", "OfflineSupervisedDataset"]
 
 
-class OfflineSupervisedDataset(Dataset):
-    """Offline dataset for supervised fine-tuning.
-
-    This dataset loads data on-the-fly from pre-processed .pt data files.
-
-    Args:
-        dumped_files (list): A list of file paths to the dumped .pt files.
-    """
-
-    def __init__(
-        self,
-        dumped_files,
-    ):
-        super().__init__()
-        self.dumped_files = dumped_files
-
-    def __len__(self):
-        return len(self.dumped_files)
-
-    def __getitem__(self, i) -> dict[str, torch.Tensor]:
-        try:
-            offline_data = torch.load(self.dumped_files[i])
-        except Exception as e:
-            print(
-                f"[ERROR] Failed to load file at index={i}, "
-                f"path='{self.dumped_files[i]}', error={e}. "
-                "Reusing data from previous index (i-1)."
-            )
-            return self.__getitem__(i - 1)
-
-        labels = torch.full_like(offline_data["input_ids"], IGNORE_TOKEN_ID)
-        labels[..., :-1] = offline_data["input_ids"][..., 1:]
-
-        ret = {
-            "input_ids": offline_data["input_ids"],
-            "base_model_hidden_states": offline_data["hidden_states"],
-            "aux_hidden_states": offline_data["aux_hidden_states"],
-            "attention_mask": torch.ones_like(offline_data["input_ids"]),
-            "loss_mask": torch.ones_like(offline_data["input_ids"]),
-            "labels": labels,
-        }
-        return ret
-
-
-class EagleOfflineDataCollator:
-    """Data collator that truncate or pads data for offline training."""
-
-    def __init__(self, train_len):
-        self.train_len = train_len
-
-    def _pad_or_truncate(self, x: torch.Tensor, length: int, dim: int = 0):
-        """Pad or truncate a tensor to length along a given dimension."""
-        dim = dim % x.ndim  # support negative dimension
-
-        # allocate output tensor
-        out_shape = list(x.shape)
-        out_shape[dim] = length
-        out = x.new_zeros(out_shape)
-
-        # consturct copy slice
-        slc = [slice(None)] * x.ndim
-        slc[dim] = slice(0, min(length, x.size(dim)))
-
-        # populate output tensor
-        out[tuple(slc)] = x[tuple(slc)]
-        return out
-
-    def __call__(self, features: list[dict[str, Any]]) -> dict[str, Any]:
-        base_batch = {
-            k: torch.stack([self._pad_or_truncate(item[k], self.train_len) for item in features])
-            for k in ["input_ids", "attention_mask", "loss_mask", "labels"]
-        }
-
-        base_model_outputs = {
-            k: torch.stack([self._pad_or_truncate(item[k], self.train_len) for item in features])
-            for k in ["base_model_hidden_states", "aux_hidden_states"]
-        }
-
-        batch = {
-            **base_batch,
-            "base_model_outputs": base_model_outputs,
-        }
-        return batch
-
-
-def make_eagle_supervised_data_module(
+def make_speculative_data_module(
     tokenizer: transformers.PreTrainedTokenizer,
     data_args,
     train_len=None,
+    answer_only_loss=False,
+    shift_labels=True,
 ) -> dict:
+    """Create data module for speculative decoding training.
+
+    Args:
+        shift_labels: If True, labels are shifted by 1 for autoregressive training (EAGLE3).
+            If False, labels are unshifted for diffusion-style training (DFlash).
+    """
+    # Load chat template from file if provided
+    chat_template = None
+    if getattr(data_args, "chat_template", None):
+        template_path = data_args.chat_template
+        with open(template_path) as f:
+            chat_template = f.read()
+        print_rank_0(f"Loaded chat template from {template_path}")
+
     if data_args.offline_data_path is None:
         train_dataset = ShardedDataset("json", data_files=data_args.data_path)
 
@@ -150,6 +82,9 @@ def make_eagle_supervised_data_module(
                 tokenizer=tokenizer,
                 train_len=train_len,
                 return_labels=True,
+                answer_only_loss=answer_only_loss,
+                shift_labels=shift_labels,
+                chat_template=chat_template,
             )
         else:
             data_collator = VisionLanguageDataCollator(
@@ -168,6 +103,11 @@ def make_eagle_supervised_data_module(
         if not dumped_files:
             raise ValueError(f"No .pt files found in {data_args.offline_data_path}")
 
+        # sample_size=-1 means use all samples; positive integer selects that many
+        if data_args.sample_size == 0 or data_args.sample_size < -1:
+            raise ValueError("sample_size must be -1 (use all samples) or a positive integer")
+        if data_args.sample_size > 0:
+            dumped_files = dumped_files[: data_args.sample_size]
         train_dataset = OfflineSupervisedDataset(dumped_files)
         data_collator = EagleOfflineDataCollator(train_len=train_len)
 
@@ -196,7 +136,7 @@ class EagleTrainingPlot(TrainerCallback):
 
     def __init__(self, ar_validate_steps: int = 1000, estimate_ar: bool = False):
         self.ar_validate_steps = ar_validate_steps
-        if hasattr(wandb, "init") and is_master():
+        if wandb is not None and wandb.run is not None and is_master():
             wandb.init()
         self.estimate_ar = estimate_ar
 
@@ -205,6 +145,17 @@ class EagleTrainingPlot(TrainerCallback):
         if not hasattr(state, "training_accs") or len(state.training_accs) == 0:
             return control
         average_acc = np.mean(state.training_accs, axis=0)
+        # Always print accuracy to console
+        try:
+            acc_str = ", ".join(f"{a:.4f}" for a in np.array(average_acc).flatten())
+            print_rank_0(f"Step {state.global_step} Training Acc: [{acc_str}]")
+        except Exception:
+            print_rank_0(f"Step {state.global_step} Training Acc: {average_acc}")
+        # Log accuracy to HF Trainer's logs dict (picked up by TensorBoard)
+        logs = kwargs.get("logs") or {}
+        for i, draft_acc in enumerate(average_acc):
+            for j, step_acc in enumerate(draft_acc):
+                logs[f"train_acc/parallel_{i}_step_{j}"] = float(step_acc)
         if self.estimate_ar:
             # Calculate mean training AR since last log
             # NOTE: This is only an estimate of the real AR.
@@ -218,19 +169,12 @@ class EagleTrainingPlot(TrainerCallback):
                 acc_cumprod *= draft_acc[-1]
                 est_ar += acc_cumprod
             print_rank_0(f"Step {state.global_step} Estimated Training AR: {est_ar:.4f}")
+            logs["estimated_training_ar"] = est_ar
 
         # log to wandb
-        if wandb and is_master():
-            logs = kwargs.get("logs") or {}
+        if wandb is not None and wandb.run is not None and is_master():
             if logs:
                 wandb.log({k: v for k, v in logs.items() if v is not None}, step=state.global_step)
-            for i, draft_acc in enumerate(average_acc):
-                for j, step_acc in enumerate(draft_acc):
-                    wandb.log(
-                        {f"parallel_{i}_step_{j}_train_acc": step_acc}, step=state.global_step
-                    )
-            if self.estimate_ar:
-                wandb.log({"estimated_training_ar": est_ar}, step=state.global_step)
 
         # reset training_accs
         state.training_accs = []
@@ -250,7 +194,7 @@ class EagleTrainingPlot(TrainerCallback):
                     device=kwargs["model"].device,
                 )
                 print_rank_0(f"Step {state.global_step} AR: {sum(ars) / len(ars):.4f}")
-                if wandb and is_master():
+                if wandb is not None and wandb.run is not None and is_master():
                     wandb.log({"validate_ar": sum(ars) / len(ars)}, step=state.global_step)
             except Exception:
                 print_rank_0("AR validation not available.")

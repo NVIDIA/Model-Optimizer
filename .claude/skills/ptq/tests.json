@@ -57,6 +57,21 @@
         "Runs hf_ptq.py (not a standalone custom script)",
         "Runs smoke test first, then full calibration"
       ]
+    },
+    {
+      "id": 5,
+      "prompt": "Quantize MiniMax-M2.5 to nvfp4",
+      "expected_output": "Agent detects FP8 pre-quantized checkpoint, relies on _QuantFP8Linear plugin for standard FP8Linear modules, dequantizes non-standard MoE expert weights manually, then runs PTQ",
+      "files": [],
+      "expectations": [
+        "Checks README — MiniMax-M2.5 is NOT listed",
+        "Reads unsupported-models.md (4C path)",
+        "Detects FP8 quantization_config in config.json (Step B)",
+        "Identifies _QuantFP8Linear plugin handles standard FP8Linear modules automatically",
+        "Identifies non-standard 3D MoE expert weights that need manual dequantization (Pattern 5)",
+        "Applies manual dequantize_fp8_params for fused expert tensors",
+        "Runs smoke test first, then full calibration"
+      ]
     }
   ]
 }

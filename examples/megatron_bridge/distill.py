@@ -15,17 +15,22 @@
 """Distillation script for Megatron-Bridge.
 
 Loads student and teacher models directly from HuggingFace checkpoints (local or remote) and saves the distilled model
-to `<output_dir>/checkpoints` in megatron distributed checkpoint format.
+to `<output_dir>/checkpoints` in megatron distributed checkpoint or HuggingFace format.
 
 See `README.md` in this directory for example usage and data preparation instructions.
 """
 
 import argparse
+import contextlib
 import os
+from dataclasses import fields
 
 import torch
 from megatron.bridge import AutoBridge
-from megatron.bridge.models.distillation_provider import convert_to_distillation_provider
+from megatron.bridge.models.distillation_provider import (
+    DistillationProvider,
+    convert_to_distillation_provider,
+)
 from megatron.bridge.recipes.utils.optimizer_utils import (
     distributed_fused_adam_with_cosine_annealing,
 )
@@ -43,11 +48,48 @@ from megatron.bridge.training.distill import distill
 from megatron.bridge.training.post_training.distillation import ModelOptDistillConfig
 from megatron.core.datasets.utils import get_blend_from_list
 from megatron.core.distributed import DistributedDataParallelConfig
+from transformers import AutoConfig
 
 import modelopt.torch.utils.distributed as dist
 from modelopt.torch.utils import print_rank_0
 
+with contextlib.suppress(ModuleNotFoundError):
+    import modelopt.torch.puzzletron.plugins.mbridge  # noqa: F401
+
 SEED = 1234
+
+
+def _patched_to_cfg_dict(self):
+    """Patched DistillationProvider.to_cfg_dict method for heterogeneous teacher and student models.
+
+    TODO: Upstream this patch to Megatron-Bridge.
+    """
+    from megatron.bridge.training.utils.config_utils import _ConfigContainerBase
+
+    result = {"_target_": f"{self._super_class.__module__}.{self._super_class.__qualname__}"}
+    # Use fields from the actual student provider class, not DistillationProvider.
+    # DistillationProvider's __dataclass_fields__ only includes TransformerConfig fields
+    # (set at class definition time), missing GPTModelProvider-level fields like
+    # vocab_size, share_embeddings_and_output_weights, etc.
+    excluded_fields = {"teacher", "kd_config"}
+    for field in fields(self._super_class):
+        if field.name.startswith("_") or field.name in excluded_fields:
+            continue
+        if hasattr(self, field.name):
+            result[field.name] = _ConfigContainerBase._convert_value_to_dict(
+                getattr(self, field.name)
+            )
+    for field in fields(self):
+        if field.name.startswith("_") or field.name in excluded_fields:
+            continue
+        if field.name not in result:
+            result[field.name] = _ConfigContainerBase._convert_value_to_dict(
+                getattr(self, field.name)
+            )
+    return result
+
+
+DistillationProvider.to_cfg_dict = _patched_to_cfg_dict
 
 
 def get_args():
@@ -124,11 +166,32 @@ def get_args():
     )
     parser.add_argument("--wandb_entity", type=str, help="Wandb entity name (optional)")
     parser.add_argument("--wandb_exp_name", type=str, help="Wandb experiment name (optional)")
+    # Export arguments
+    parser.add_argument(
+        "--hf_export_path",
+        type=str,
+        default=None,
+        help=(
+            "Path where to save the HuggingFace export. "
+            "If provided, exports last iteration checkpoint to HF format after distillation."
+        ),
+    )
+    parser.add_argument(
+        "--student_hf_model",
+        type=str,
+        required=False,
+        default=None,
+        help="HuggingFace model ID to use as template for export (e.g., Qwen/Qwen3-0.6B). "
+        "Should match the base architecture of the student model if --hf_export_path is provided.",
+    )
     args = parser.parse_args()
 
     # Sanity checks
     if not args.use_mock_data and not args.data_paths:
         raise ValueError("Must provide either --data_paths or set --use_mock_data.")
+
+    if args.hf_export_path and not args.student_hf_model:
+        raise ValueError("Must provide --student_hf_model if --hf_export_path is provided.")
 
     print_rank_0("\n==================== Arguments ====================")
     for k, v in args.__dict__.items():
@@ -252,8 +315,34 @@ def main(args: argparse.Namespace):
     print_rank_0("\nStarting distillation...")
     distill(config)
     print_rank_0(
-        f"\nDistillation done! Saved checkpoint to {checkpoint_dir} in megatron distributed checkpoint format.\n"
+        f"\nDistillation done! Saved checkpoint to {checkpoint_dir}"
+        " in megatron distributed checkpoint format.\n"
     )
+
+    if args.hf_export_path:
+        print_rank_0(f"Exporting final distilled ckpt to HF format to {args.hf_export_path}")
+        # Save rank before destroying process group (dist.rank() won't work after destruction)
+        is_rank_0 = dist.rank() == 0
+
+        # Destroy process group on all ranks -- export_ckpt will create its own temporary one.
+        # This prevents cleanup from hanging (cleanup tries to barrier, but rank 0 would be gone).
+        dist.cleanup()
+
+        if is_rank_0:
+            export_bridge = AutoBridge.from_hf_pretrained(
+                args.student_hf_model, trust_remote_code=args.trust_remote_code
+            )
+            # Copy weights and remote code
+            export_bridge.export_ckpt(
+                megatron_path=f"{checkpoint_dir}/iter_{args.train_iters:07d}",
+                hf_path=args.hf_export_path,
+                show_progress=True,
+                strict=True,
+            )
+            # Copy config.json from student_hf_path (handles both local paths and HF model IDs)
+            AutoConfig.from_pretrained(
+                args.student_hf_path, trust_remote_code=args.trust_remote_code
+            ).save_pretrained(args.hf_export_path)
 
 
 if __name__ == "__main__":

@@ -21,13 +21,13 @@ import shutil
 from pathlib import Path
 
 import torch
+from huggingface_hub import snapshot_download
 from safetensors.torch import safe_open
 from tqdm import tqdm
 
 
-def copy_remote_code(
-    pretrained_model_path: str | os.PathLike,
-    save_directory: str | os.PathLike,
+def copy_hf_ckpt_remote_code(
+    pretrained_model_path: str | os.PathLike, save_directory: str | os.PathLike
 ):
     """Copy remote code from pretrained model to save directory.
 
@@ -35,24 +35,26 @@ def copy_remote_code(
     we need to copy them to the export directory for seamless integration with inference
     frameworks.
 
-    Args:
-        pretrained_model_path: Path to the pretrained model.
-        save_directory: Path to the save directory.
+    If ``pretrained_model_path`` is a local directory, Python files are copied directly.
+    If it's a HF Hub model ID (e.g. ``nvidia/NVIDIA-Nemotron-Nano-12B-v2``), files are downloaded from the Hub.
 
-    Raises:
-        ValueError: If the pretrained model path is not a directory.
+    Args:
+        pretrained_model_path: Local path to the pretrained model or HuggingFace Hub model ID.
+        save_directory: Path to the save directory.
     """
     hf_checkpoint_path = Path(pretrained_model_path)
     save_dir = Path(save_directory)
+    save_dir.mkdir(parents=True, exist_ok=True)
 
-    if not hf_checkpoint_path.is_dir():
-        raise ValueError(
-            f"Invalid pretrained model path: {pretrained_model_path}. It should be a directory."
+    if hf_checkpoint_path.is_dir():
+        for py_file in hf_checkpoint_path.glob("*.py"):
+            shutil.copy2(py_file, save_dir / py_file.name)
+    else:
+        snapshot_download(
+            repo_id=str(pretrained_model_path),
+            local_dir=str(save_dir),
+            allow_patterns=["*.py"],
         )
-
-    for py_file in hf_checkpoint_path.glob("*.py"):
-        if py_file.is_file():
-            shutil.copy(py_file, save_dir / py_file.name)
 
 
 def load_multimodal_components(
