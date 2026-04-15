@@ -118,6 +118,22 @@ def main():
     print(f"Saving merged model to {args.output_path}...")
     model.save_pretrained(args.output_path)
     tokenizer.save_pretrained(args.output_path)
+
+    # Fix rope_theta for TRT-LLM compatibility: newer transformers (Qwen3) saves
+    # rope config under rope_parameters instead of the top-level rope_theta that
+    # TRT-LLM expects. Copy it over if missing.
+    import json
+
+    config_path = Path(args.output_path) / "config.json"
+    with open(config_path) as f:
+        cfg = json.load(f)
+    rope_params = cfg.get("rope_parameters", {})
+    if rope_params and cfg.get("rope_theta") is None:
+        cfg["rope_theta"] = rope_params.get("rope_theta")
+        with open(config_path, "w") as f:
+            json.dump(cfg, f, indent=2)
+        print(f"  Fixed rope_theta={cfg['rope_theta']} for TRT-LLM compatibility")
+
     print(f"Done! Merged model saved to {args.output_path}")
 
 
