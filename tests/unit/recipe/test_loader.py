@@ -557,6 +557,53 @@ def test_import_cfg_inline_overrides_import(tmp_path):
     assert cfg["axis"] is None
 
 
+def test_import_in_non_cfg_dict_value(tmp_path):
+    """$import resolves in any dict value, not just cfg."""
+    (tmp_path / "bias_cfg.yml").write_text("enable: true\ntype: static\naxis: -1\n")
+    recipe_file = tmp_path / "recipe.yml"
+    recipe_file.write_text(
+        f"imports:\n"
+        f"  bias_cfg: {tmp_path / 'bias_cfg.yml'}\n"
+        f"metadata:\n"
+        f"  recipe_type: ptq\n"
+        f"quantize:\n"
+        f"  algorithm: max\n"
+        f"  quant_cfg:\n"
+        f"    - quantizer_name: '*weight_quantizer'\n"
+        f"      bias:\n"
+        f"        $import: bias_cfg\n"
+    )
+    recipe = load_recipe(recipe_file)
+    entry = recipe.quantize["quant_cfg"][0]
+    assert entry["bias"] == {"enable": True, "type": "static", "axis": -1}
+
+
+def test_import_in_multiple_dict_values(tmp_path):
+    """$import resolves independently in multiple dict values of the same entry."""
+    (tmp_path / "fp8.yml").write_text("num_bits: e4m3\n")
+    (tmp_path / "bias_cfg.yml").write_text("enable: true\ntype: dynamic\n")
+    recipe_file = tmp_path / "recipe.yml"
+    recipe_file.write_text(
+        f"imports:\n"
+        f"  fp8: {tmp_path / 'fp8.yml'}\n"
+        f"  bias_cfg: {tmp_path / 'bias_cfg.yml'}\n"
+        f"metadata:\n"
+        f"  recipe_type: ptq\n"
+        f"quantize:\n"
+        f"  algorithm: max\n"
+        f"  quant_cfg:\n"
+        f"    - quantizer_name: '*weight_quantizer'\n"
+        f"      cfg:\n"
+        f"        $import: fp8\n"
+        f"      bias:\n"
+        f"        $import: bias_cfg\n"
+    )
+    recipe = load_recipe(recipe_file)
+    entry = recipe.quantize["quant_cfg"][0]
+    assert entry["cfg"] == {"num_bits": (4, 3)}
+    assert entry["bias"] == {"enable": True, "type": "dynamic"}
+
+
 def test_import_cfg_multi_import(tmp_path):
     """$import with a list of names merges non-overlapping snippets."""
     (tmp_path / "bits.yml").write_text("num_bits: e4m3\n")
