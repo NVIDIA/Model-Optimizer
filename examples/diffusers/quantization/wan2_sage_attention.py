@@ -92,6 +92,12 @@ Usage::
     # ModelOpt Triton skip-softmax + NVFP4 P-matrix quantization
     python wan2_sage_attention.py --prompt "..." --kernel triton-skip --quantize-p
 
+    # ModelOpt Triton skip-softmax + SageAttention v3 (Q/K/V/P)
+    python wan2_sage_attention.py --prompt "..." --kernel triton-skip --quantize-qkv
+
+    # ModelOpt Triton sparse + SageAttention v3 (Q/K/V/P)
+    python wan2_sage_attention.py --prompt "..." --kernel triton-sparse --quantize-qkv
+
     # Smaller 5B model (fits on a single 24 GB GPU)
     python wan2_sage_attention.py \\
         --model Wan-AI/Wan2.2-TI2V-5B-Diffusers \\
@@ -752,6 +758,17 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--quantize-qkv",
+        action="store_true",
+        default=False,
+        help=(
+            "Apply SageAttention v3 per-group MX NVFP4 quantization on Q, K, V, and P via "
+            "modelopt.torch.quantization.apply_sage_attention_v3(). "
+            "Can be combined with any Triton sparse kernel: "
+            "--kernel triton-skip --quantize-qkv"
+        ),
+    )
+    parser.add_argument(
         "--baseline",
         action="store_true",
         help="Run with standard SDPA, no quantization",
@@ -818,7 +835,11 @@ def main() -> None:
                 args.kernel,
                 skip_threshold=args.skip_threshold,
             )
-            if args.quantize_p:
+            if args.quantize_qkv:
+                from modelopt.torch.quantization import apply_sage_attention_v3
+
+                apply_sage_attention_v3(pipe.transformer)
+            elif args.quantize_p:
                 from modelopt.torch.quantization import apply_sage_attention
 
                 apply_sage_attention(pipe.transformer)
@@ -915,7 +936,11 @@ def main() -> None:
             args.kernel,
             skip_threshold=args.skip_threshold,
         )
-        if args.quantize_p:
+        if args.quantize_qkv:
+            from modelopt.torch.quantization import apply_sage_attention_v3
+
+            apply_sage_attention_v3(pipe.transformer)
+        elif args.quantize_p:
             from modelopt.torch.quantization import apply_sage_attention
 
             apply_sage_attention(pipe.transformer)
