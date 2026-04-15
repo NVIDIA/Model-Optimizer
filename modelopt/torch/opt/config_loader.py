@@ -33,8 +33,8 @@ from typing import Any
 
 import yaml
 
-# Root to all built-in recipes. Users can create own recipes.
-BUILTIN_RECIPES_LIB = files("modelopt_recipes")
+# Root to all built-in configs and recipes.
+BUILTIN_CONFIG_ROOT = files("modelopt_recipes")
 
 _EXMY_RE = re.compile(r"^[Ee](\d+)[Mm](\d+)$")
 _EXMY_KEYS = frozenset({"num_bits", "scale_bits"})
@@ -73,22 +73,22 @@ def _load_raw_config(config_file: str | Path | Traversable) -> dict[str, Any] | 
         if not config_file.endswith(".yml") and not config_file.endswith(".yaml"):
             paths_to_check.append(Path(f"{config_file}.yml"))
             paths_to_check.append(Path(f"{config_file}.yaml"))
-            paths_to_check.append(BUILTIN_RECIPES_LIB.joinpath(f"{config_file}.yml"))
-            paths_to_check.append(BUILTIN_RECIPES_LIB.joinpath(f"{config_file}.yaml"))
+            paths_to_check.append(BUILTIN_CONFIG_ROOT.joinpath(f"{config_file}.yml"))
+            paths_to_check.append(BUILTIN_CONFIG_ROOT.joinpath(f"{config_file}.yaml"))
         else:
             paths_to_check.append(Path(config_file))
-            paths_to_check.append(BUILTIN_RECIPES_LIB.joinpath(config_file))
+            paths_to_check.append(BUILTIN_CONFIG_ROOT.joinpath(config_file))
     elif isinstance(config_file, Path):
         if config_file.suffix in (".yml", ".yaml"):
             paths_to_check.append(config_file)
             if not config_file.is_absolute():
-                paths_to_check.append(BUILTIN_RECIPES_LIB.joinpath(str(config_file)))
+                paths_to_check.append(BUILTIN_CONFIG_ROOT.joinpath(str(config_file)))
         else:
             paths_to_check.append(Path(f"{config_file}.yml"))
             paths_to_check.append(Path(f"{config_file}.yaml"))
             if not config_file.is_absolute():
-                paths_to_check.append(BUILTIN_RECIPES_LIB.joinpath(f"{config_file}.yml"))
-                paths_to_check.append(BUILTIN_RECIPES_LIB.joinpath(f"{config_file}.yaml"))
+                paths_to_check.append(BUILTIN_CONFIG_ROOT.joinpath(f"{config_file}.yml"))
+                paths_to_check.append(BUILTIN_CONFIG_ROOT.joinpath(f"{config_file}.yaml"))
     elif isinstance(config_file, Traversable):
         paths_to_check.append(config_file)
     else:
