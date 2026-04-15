@@ -13,14 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""SPDX-FileCopyrightText: Copyright (c) 1993-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-
-Torch Region Builder - Hierarchical Region Discovery from PyTorch-exported ONNX Models
+"""Torch Region Builder - Hierarchical Region Discovery from PyTorch-exported ONNX Models.
 
 This module provides region building capabilities specifically designed for ONNX models
 exported from PyTorch using torch.onnx.export(). It leverages the hierarchical naming
 convention in PyTorch-exported node names to create multi-level region structures.
-
 """
 
 import fnmatch
@@ -79,13 +76,12 @@ class TorchRegionBuilder(RegionSearchBase):
 
     def _build_constant_tensor_set(self) -> set[str]:
         """Build a set of tensor names that are produced by Constant nodes."""
-        constant_tensors: set[str] = set()
-        for node in self.graph.nodes:
-            if node.op == "Constant":
-                for output in node.outputs:
-                    constant_tensors.add(output.name)
-        logger.debug(f"Found {len(constant_tensors)} constant-produced tensors to exclude")
-        return constant_tensors
+        return {
+            output.name
+            for node in self.graph.nodes
+            if node.op == "Constant"
+            for output in node.outputs
+        }
 
     def _parse_node_path(self, node_name: str) -> list[str]:
         """Parse a PyTorch-style node name into path components."""
@@ -109,39 +105,23 @@ class TorchRegionBuilder(RegionSearchBase):
                 continue
             path_parts = self._parse_node_path(node.name)
             if not path_parts:
-                misc_path = "/_misc_"
-                if misc_path not in self.path_to_nodes:
-                    self.path_to_nodes[misc_path] = []
-                    self.path_trie[""].add("_misc_")
-                self.path_to_nodes[misc_path].append(node_idx)
+                self.path_to_nodes.setdefault("/_misc_", []).append(node_idx)
+                self.path_trie[""].add("_misc_")
                 continue
 
             full_depth = len(path_parts)
             if self.max_depth is not None:
                 full_depth = min(full_depth, self.max_depth)
-
-            if full_depth > 1:
-                register_depth = full_depth - 1
-            else:
-                register_depth = full_depth
+            register_depth = max(full_depth - 1, 1)
 
             register_path = self._get_path_at_depth(path_parts, register_depth)
-            if register_path not in self.path_to_nodes:
-                self.path_to_nodes[register_path] = []
-            self.path_to_nodes[register_path].append(node_idx)
+            self.path_to_nodes.setdefault(register_path, []).append(node_idx)
 
             for depth in range(1, register_depth + 1):
-                current_path = self._get_path_at_depth(path_parts, depth)
                 parent_path = self._get_path_at_depth(path_parts, depth - 1)
-
-                if parent_path not in self.path_trie:
-                    self.path_trie[parent_path] = set()
-
-                child_component = path_parts[depth - 1]
-                self.path_trie[parent_path].add(child_component)
-
-                if current_path not in self.path_trie:
-                    self.path_trie[current_path] = set()
+                self.path_trie.setdefault(parent_path, set()).add(path_parts[depth - 1])
+                current_path = self._get_path_at_depth(path_parts, depth)
+                self.path_trie.setdefault(current_path, set())
 
     def _collect_nodes_recursive(self, path: str) -> set[int]:
         """Recursively collect all node indices under a path prefix."""
@@ -162,25 +142,21 @@ class TorchRegionBuilder(RegionSearchBase):
     ) -> Region | None:
         """Create a region for a specific path in the hierarchy."""
         all_nodes = self._collect_nodes_recursive(path)
-
         if not all_nodes:
             return None
 
-        children_paths = []
         direct_nodes = set(self.path_to_nodes.get(path, []))
 
+        # Collect child paths and their node sets in one pass
+        child_entries: list[tuple[str, set[int]]] = []
         if path in self.path_trie:
             for child_component in sorted(self.path_trie[path]):
                 child_path = f"{path}/{child_component}" if path else f"/{child_component}"
-                children_paths.append(child_path)
+                child_entries.append((child_path, self._collect_nodes_recursive(child_path)))
 
-        has_significant_children = False
-
-        for child_path in children_paths:
-            child_nodes = self._collect_nodes_recursive(child_path)
-            if len(child_nodes) >= self.min_region_size:
-                has_significant_children = True
-                break
+        has_significant_children = any(
+            len(nodes) >= self.min_region_size for _, nodes in child_entries
+        )
 
         region = Region(
             region_id=self.next_region_id,
@@ -188,57 +164,22 @@ class TorchRegionBuilder(RegionSearchBase):
             region_type=RegionType.COMPOSITE if has_significant_children else RegionType.LEAF,
         )
         self.next_region_id += 1
-
         region.metadata["path"] = path if path else "/"
-
-        for node_idx in direct_nodes:
-            region.nodes.add(node_idx)
+        region.nodes.update(direct_nodes)
 
         if parent is not None:
             parent.add_child(region)
 
         if has_significant_children:
-            for child_path in children_paths:
-                child_nodes = self._collect_nodes_recursive(child_path)
+            for child_path, child_nodes in child_entries:
                 if len(child_nodes) >= self.min_region_size:
-                    child_region = self._create_region_for_path(
-                        child_path, level + 1, parent=region
-                    )
-                    if child_region is not None:
-                        pass
+                    self._create_region_for_path(child_path, level + 1, parent=region)
                 else:
-                    for node_idx in child_nodes:
-                        region.nodes.add(node_idx)
+                    region.nodes.update(child_nodes)
         else:
-            for node_idx in all_nodes:
-                if node_idx not in direct_nodes:
-                    region.nodes.add(node_idx)
+            region.nodes.update(all_nodes - direct_nodes)
 
         return region
-
-    def _find_common_prefix_depth(self) -> int:
-        """Find the common prefix depth across all node paths."""
-        all_paths = list(self.path_to_nodes.keys())
-        if not all_paths:
-            return 0
-
-        all_parts = [self._parse_node_path(p) for p in all_paths]
-        all_parts = [p for p in all_parts if p]
-
-        if not all_parts:
-            return 0
-
-        min_len = min(len(p) for p in all_parts)
-
-        common_depth = 0
-        for depth in range(min_len):
-            component = all_parts[0][depth]
-            if all(p[depth] == component for p in all_parts):
-                common_depth = depth + 1
-            else:
-                break
-
-        return common_depth
 
     def _count_regions(self, region: Region) -> int:
         """Count total regions in hierarchy."""
@@ -258,49 +199,30 @@ class TorchRegionBuilder(RegionSearchBase):
         """Compute input and output tensor boundaries for a region, excluding constant tensors."""
         node_indices = region.get_region_nodes_and_descendants()
         all_inputs: set[str] = set()
-        all_outputs: set[str] = set()
         internal_tensors: set[str] = set()
+        region_outputs: set[str] = set()
+        graph_output_names = {t.name for t in self.graph.outputs}
 
         for node_idx in node_indices:
             if node_idx >= len(self.graph.nodes):
                 continue
             node = self.graph.nodes[node_idx]
             for input_tensor in node.inputs:
-                if isinstance(input_tensor, gs.Constant):
-                    continue
-                all_inputs.add(input_tensor.name)
+                if not isinstance(input_tensor, gs.Constant):
+                    all_inputs.add(input_tensor.name)
             for output_tensor in node.outputs:
-                all_outputs.add(output_tensor.name)
-                internal_tensors.add(output_tensor.name)
+                name = output_tensor.name
+                internal_tensors.add(name)
+                consumers = self.tensor_users_map.get(name, [])
+                if (
+                    not consumers
+                    or any(c not in node_indices for c in consumers)
+                    or name in graph_output_names
+                ):
+                    region_outputs.add(name)
 
-        region_inputs = all_inputs - internal_tensors - self.constant_tensor_names
-        region_outputs: set[str] = set()
-        for node_idx in node_indices:
-            if node_idx >= len(self.graph.nodes):
-                continue
-            node = self.graph.nodes[node_idx]
-            for output_tensor in node.outputs:
-                tensor_name = output_tensor.name
-                if tensor_name not in self.tensor_users_map:
-                    region_outputs.add(tensor_name)
-                    continue
-                has_external_consumer = False
-                consumer_indices = self.tensor_users_map[tensor_name]
-                for consumer_idx in consumer_indices:
-                    if consumer_idx not in node_indices:
-                        has_external_consumer = True
-                        break
-                if has_external_consumer:
-                    region_outputs.add(tensor_name)
-                if output_tensor in self.graph.outputs:
-                    region_outputs.add(tensor_name)
-
-        region.inputs = sorted(region_inputs)
+        region.inputs = sorted(all_inputs - internal_tensors - self.constant_tensor_names)
         region.outputs = sorted(region_outputs)
-
-        logger.debug(
-            f"Computed boundaries (no constants): {len(region_inputs)} inputs, {len(region_outputs)} outputs"
-        )
 
     def _sort_regions(self, region: Region) -> None:
         """Sort regions by topological order."""
@@ -311,18 +233,22 @@ class TorchRegionBuilder(RegionSearchBase):
             self._sort_regions(child)
 
     def _build_id_to_region_map(
-        self, region: Region, id_to_region_map: dict[int, Region] = {}
+        self, region: Region, id_to_region_map: dict[int, Region] | None = None
     ) -> dict[int, Region]:
         """Build a map from region ids to regions."""
+        if id_to_region_map is None:
+            id_to_region_map = {}
         id_to_region_map[region.id] = region
         for child in region.get_children():
             self._build_id_to_region_map(child, id_to_region_map)
         return id_to_region_map
 
     def _build_tensor_to_regions_map(
-        self, region: Region, tensor_to_regions_map: dict[str, set[int]] = {}
+        self, region: Region, tensor_to_regions_map: dict[str, set[int]] | None = None
     ) -> dict[str, set[int]]:
         """Build a map from tensor names to regions."""
+        if tensor_to_regions_map is None:
+            tensor_to_regions_map = {}
         for input in region.inputs:
             if input not in tensor_to_regions_map:
                 tensor_to_regions_map[input] = set()
@@ -332,7 +258,9 @@ class TorchRegionBuilder(RegionSearchBase):
             self._build_tensor_to_regions_map(child, tensor_to_regions_map)
         return tensor_to_regions_map
 
-    def _merge_neighboring_regions(self, region: Region, to_remove: set[int] = set()) -> None:
+    def _merge_neighboring_regions(self, region: Region, to_remove: set[int] | None = None) -> None:
+        if to_remove is None:
+            to_remove = set()
         self._compute_all_boundaries(region)
         id_to_region_map = self._build_id_to_region_map(region)
         tensor_to_regions_map = self._build_tensor_to_regions_map(region)
@@ -361,6 +289,22 @@ class TorchRegionBuilder(RegionSearchBase):
             to_remove.add(user.id)
         region.children = [child for child in region.get_children() if child.id not in to_remove]
         self._compute_all_boundaries(region)
+
+    def _flatten_leaf_regions(self, region: Region) -> None:
+        """Ensure LEAF regions have no children by absorbing descendant nodes.
+
+        After merging, a LEAF region may end up with orphaned children
+        (e.g., when a COMPOSITE parent was dissolved and its children
+        were re-parented under a LEAF sibling). This method absorbs all
+        descendant nodes into the LEAF and removes the children.
+        """
+        for child in list(region.get_children()):
+            self._flatten_leaf_regions(child)
+
+        if region.type == RegionType.LEAF and region.get_children():
+            region.nodes.update(region.get_region_nodes_and_descendants())
+            for child in list(region.get_children()):
+                region.remove_child(child)
 
     def _merge_small_composite_regions(self, region: Region, target_region_size: int) -> None:
         """Merge small composite regions into their parent regions."""
@@ -435,16 +379,27 @@ class TorchRegionBuilder(RegionSearchBase):
             "Resize",
         }
 
-    @staticmethod
-    def is_fusible_node(op_type: str) -> bool:
-        """Check if a node is fusible (pointwise, elementwise, reduction, copy, or normalization)."""
-        if op_type in {"Div", "Sqrt", "Pow", "Neg", "Log", "Exp", "Erf"}:
-            return False
-        if op_type in {"Softmax", "Clip"}:
-            return False
-        if op_type in {"Cast", "Constant"}:
-            return False
-        if op_type in {
+    _NON_FUSIBLE_OPS = frozenset(
+        {
+            # Math / activation
+            "Div",
+            "Sqrt",
+            "Pow",
+            "Neg",
+            "Log",
+            "Exp",
+            "Erf",
+            "Softmax",
+            "Clip",
+            # Normalization (not fused with quantized kernels by TRT)
+            "LayerNormalization",
+            "BatchNormalization",
+            "InstanceNormalization",
+            "GroupNormalization",
+            # Type / constant
+            "Cast",
+            "Constant",
+            # Layout / shape
             "Transpose",
             "Reshape",
             "Squeeze",
@@ -455,20 +410,20 @@ class TorchRegionBuilder(RegionSearchBase):
             "Concat",
             "Shape",
             "Flatten",
-        }:
-            return False
-        if op_type in {
+            # Gather / scatter
             "Gather",
             "GatherND",
             "GatherElements",
             "Scatter",
             "ScatterND",
             "GridSample",
-        }:
-            return False
-        if op_type in {"ReduceMean", "ReduceMax", "ReduceSum", "ArgMax", "ArgMin"}:
-            return False
-        return op_type not in {
+            # Reduction
+            "ReduceMean",
+            "ReduceMax",
+            "ReduceSum",
+            "ArgMax",
+            "ArgMin",
+            # Comparison / logic
             "Equal",
             "Greater",
             "GreaterOrEqual",
@@ -480,154 +435,152 @@ class TorchRegionBuilder(RegionSearchBase):
             "Xor",
             "Not",
         }
+    )
+
+    @staticmethod
+    def is_fusible_node(op_type: str) -> bool:
+        """Check if a node is fusible (not in the non-fusible op set)."""
+        return op_type not in TorchRegionBuilder._NON_FUSIBLE_OPS
 
     def _has_quantizable_upstream(self, node: gs.Node, max_steps: int = 5) -> bool:
-        """Check if a node has a quantizable upstream.
-
-        Recursively traverses upstream nodes to check if any quantizable node exists.
-
-        Args:
-            node_idx: The starting node index
-            max_steps: Maximum number of steps to search upstream (default 5)
-
-        Returns:
-            True if a quantizable node is found upstream, False otherwise
-        """
+        """Check if a node has a quantizable upstream within max_steps hops."""
         if max_steps <= 0:
             return False
         if self.is_quantizable_node(node.op):
             return True
-        if not hasattr(self, "_node_to_idx"):
-            self._node_to_idx = {id(n): idx for idx, n in enumerate(self.graph.nodes)}
-
         for input_tensor in node.inputs:
             if hasattr(input_tensor, "inputs") and input_tensor.inputs:
-                producer = input_tensor.inputs[0]
-                if self._has_quantizable_upstream(producer, max_steps - 1):
+                if self._has_quantizable_upstream(input_tensor.inputs[0], max_steps - 1):
                     return True
         return False
 
     def _probe_epilogues_recursive(
         self, node_idx: int, current_step: int, max_steps: int, epilogue_ops: list[int]
     ) -> None:
-        """Recursively probe forward to find fusible non-divergent epilogue nodes.
-
-        Args:
-            node_idx: Current node index to probe from
-            current_step: Current recursion depth
-            max_steps: Maximum number of steps to probe (default 3)
-            epilogue_ops: Accumulator list of epilogue node indices
-        """
-        # Stop if we've reached max steps
-        if current_step >= max_steps:
-            logger.debug(f"    [Probe] Stopping at node {node_idx}: max_steps={max_steps} reached")
+        """Recursively probe forward to find fusible non-divergent epilogue nodes."""
+        if current_step >= max_steps or node_idx >= len(self.graph.nodes):
             return
-        if node_idx >= len(self.graph.nodes):
-            return
-
-        node = self.graph.nodes[node_idx]
-
-        # Stop if the current node is divergent (branches to multiple consumers)
         if self._is_node_divergent(node_idx):
-            logger.debug(f"    [Probe] Stopping at node {node_idx} ({node.op}): node is divergent")
             return
-        # Get consumer nodes
+
         consumer_indices = [
-            consumer_idx
+            idx
             for output in self.graph.nodes[node_idx].outputs
-            for consumer_idx in self.tensor_users_map.get(output.name, [])
+            for idx in self.tensor_users_map.get(output.name, [])
         ]
 
-        if consumer_indices:
-            logger.debug(
-                f"    [Probe] From node {node_idx} ({node.op}, step {current_step}): {len(consumer_indices)} consumers"
-            )
-
-        # For each consumer, check if it's fusible and non-divergent
         for consumer_idx in consumer_indices:
+            if consumer_idx >= len(self.graph.nodes):
+                continue
             epilogue_ops.append(consumer_idx)
-            self._probe_epilogues_recursive(consumer_idx, current_step + 1, max_steps, epilogue_ops)
+            # Recurse into fusible consumers; non-fusible consumers are included
+            # as boundary nodes (their inputs are Q/DQ insertion points) but not
+            # recursed past.
+            if self.is_fusible_node(self.graph.nodes[consumer_idx].op):
+                self._probe_epilogues_recursive(
+                    consumer_idx, current_step + 1, max_steps, epilogue_ops
+                )
 
     def _probe_epilogues(self, region: Region, max_steps: int = 3) -> None:
-        """Probe forward from leaf region outputs to find fusible non-divergent epilogue nodes.
+        """Probe forward from leaf outputs to find fusible non-divergent epilogue nodes.
 
-        For each leaf region, this method probes forward up to max_steps to find nodes that:
-        1. Are fusible (pointwise, elementwise, reduction, copy, or normalization ops)
-        2. Are non-divergent (don't branch to multiple consumers)
-
-        These epilogue nodes are then added to the leaf region to create better fusion patterns.
+        Epilogue nodes are added to the leaf region to create better fusion patterns.
         Nodes can be included in multiple regions to optimize fusion opportunities.
-
-        Args:
-            region: The region (or region hierarchy) to process
-            max_steps: Maximum number of steps to probe forward (default 3)
         """
-        # Recursively process children first
         for child in region.get_children():
             self._probe_epilogues(child, max_steps)
-        # Only process leaf regions
         if region.type != RegionType.LEAF:
             return
-        # Get the nodes in this leaf region
         region_nodes = region.get_nodes()
         if not region_nodes:
             return
 
-        logger.debug(f"Probing epilogues for Region {region.id} (nodes: {region_nodes})")
-
-        # Keep track of epilogue ops found
         epilogue_ops: list[int] = []
-        # Start probing from each node in the region
         for node_idx in region_nodes:
             self._probe_epilogues_recursive(node_idx, 0, max_steps, epilogue_ops)
 
         if epilogue_ops:
-            logger.debug(
-                f"Found {len(epilogue_ops)} epilogue nodes for Region {region.id}: {epilogue_ops}"
-            )
-        else:
-            logger.debug(f"No fusible epilogue nodes found for Region {region.id}")
-
-        # Add epilogue ops to the region (nodes can be shared across regions)
-        for epilogue_idx in epilogue_ops:
-            region.nodes.add(epilogue_idx)
-            logger.debug(
-                f"Added epilogue node {epilogue_idx} ({self.graph.nodes[epilogue_idx].op}) to region {region.id}"
-            )
+            region.nodes.update(epilogue_ops)
+            logger.debug(f"Region {region.id}: added {len(epilogue_ops)} epilogue nodes")
 
     def _filter_out_non_quantizable_nodes(self, region: Region) -> None:
-        """Filter out non-quantizable nodes from regions recursively.
-
-        Args:
-            region: The region (and its children) to filter
-        """
+        """Filter out non-quantizable nodes from regions recursively."""
         for child in region.get_children():
             self._filter_out_non_quantizable_nodes(child)
         nodes_to_remove = []
         for node_idx in region.get_nodes():
             if node_idx >= len(self.graph.nodes):
                 nodes_to_remove.append(node_idx)
-                continue
-            if not self.is_fusible_node(self.graph.nodes[node_idx].op):
-                if self._has_quantizable_upstream(self.graph.nodes[node_idx], max_steps=2):
-                    continue
+            elif not self.is_fusible_node(self.graph.nodes[node_idx].op):
+                if not self._has_quantizable_upstream(self.graph.nodes[node_idx], max_steps=2):
+                    nodes_to_remove.append(node_idx)
+            elif not self._has_quantizable_upstream(self.graph.nodes[node_idx]):
                 nodes_to_remove.append(node_idx)
-                continue
-            if not self._has_quantizable_upstream(self.graph.nodes[node_idx]):
-                nodes_to_remove.append(node_idx)
-                continue
         for node_idx in nodes_to_remove:
             region.nodes.remove(node_idx)
 
+    def _add_boundary_consumers(self, region: Region) -> None:
+        """Add immediate consumers of surviving nodes as Q/DQ insertion boundaries.
+
+        After filtering removes non-quantizable nodes, the region's output edges
+        lead to nodes outside the region. The autotuner searches node inputs for
+        Q/DQ insertion points, so these immediate consumers must be in the region
+        for their inputs to be visible as insertion candidates.
+
+        E.g., MatMul → Add → Reshape: Reshape is non-fusible but its input
+        (Add's output) is a natural Q/DQ insertion point.
+        """
+        for child in region.get_children():
+            self._add_boundary_consumers(child)
+        if region.type != RegionType.LEAF:
+            return
+
+        boundary = set()
+        for node_idx in list(region.get_nodes()):
+            if node_idx >= len(self.graph.nodes):
+                continue
+            for output in self.graph.nodes[node_idx].outputs:
+                for consumer_idx in self.tensor_users_map.get(output.name, []):
+                    if consumer_idx not in region.nodes and consumer_idx < len(self.graph.nodes):
+                        boundary.add(consumer_idx)
+        region.nodes.update(boundary)
+
+    def _remove_empty_regions(self, region: Region) -> None:
+        """Remove leaf regions that are empty or have no quantizable backbone ops.
+
+        After node filtering, some regions may have zero nodes or only contain
+        non-quantizable ops (e.g., a standalone LayerNormalization). These regions
+        would never benefit from Q/DQ insertion, so remove them.
+        Also removes COMPOSITE regions whose children were all removed.
+        """
+        for child in list(region.get_children()):
+            self._remove_empty_regions(child)
+
+        children_to_remove = []
+        for child in region.get_children():
+            child_nodes = child.get_region_nodes_and_descendants()
+            if not child_nodes:
+                children_to_remove.append(child)
+                continue
+            if child.type == RegionType.LEAF:
+                has_backbone = any(
+                    self.is_quantizable_node(self.graph.nodes[idx].op)
+                    for idx in child_nodes
+                    if idx < len(self.graph.nodes)
+                )
+                if not has_backbone:
+                    children_to_remove.append(child)
+
+        for child in children_to_remove:
+            region.remove_child(child)
+
     def torch_node_ratio(self) -> float:
-        """Count the number of nodes that are exported from PyTorch."""
+        """Return the fraction of non-Constant nodes with PyTorch-style '/' names."""
         non_constant_nodes = [n for n in self.graph.nodes if n.op != "Constant"]
+        if not non_constant_nodes:
+            return 0.0
         slash_count = sum(1 for n in non_constant_nodes if n.name and n.name.startswith("/"))
         return slash_count / len(non_constant_nodes)
-
-    def is_torch_exported_model(self, threshold: float = 0.8) -> bool:
-        """Check if the model is exported from PyTorch."""
-        return self.torch_node_ratio() >= threshold
 
     def _linearize_regions(self, region: Region) -> list[Region]:
         """Linearize the regions into a list using DFS post-order traversal.
@@ -644,10 +597,8 @@ class TorchRegionBuilder(RegionSearchBase):
         result = []
         for child in region.get_children():
             result.extend(self._linearize_regions(child))
-        # only keep leaf region ans inner most composite region
-        if region.type == RegionType.LEAF or all(
-            region.type == RegionType.LEAF for region in result
-        ):
+        # only keep leaf regions and innermost composite regions
+        if region.type == RegionType.LEAF or all(r.type == RegionType.LEAF for r in result):
             result.append(region)
         return result
 
@@ -664,18 +615,6 @@ class TorchRegionBuilder(RegionSearchBase):
 
         self._build_path_trie()
 
-        logger.debug(f"Found {len(self.path_to_nodes)} unique paths")
-        logger.debug(f"Trie has {len(self.path_trie)} nodes")
-
-        common_depth = self._find_common_prefix_depth()
-        if common_depth > 0:
-            sample_path = next(iter(self.path_to_nodes.keys()))
-            sample_parts = self._parse_node_path(sample_path)
-            common_prefix = self._get_path_at_depth(sample_parts, common_depth - 1)
-            logger.debug(f"Common prefix depth: {common_depth}, starting from: {common_prefix}")
-        else:
-            common_prefix = ""
-
         root_region = self._create_region_for_path("", level=0)
         if root_region is None:
             self.regions = []
@@ -688,21 +627,19 @@ class TorchRegionBuilder(RegionSearchBase):
             self._merge_neighboring_regions(root_region)
             self._merge_small_composite_regions(root_region, target_region_size=12)
 
+        self._flatten_leaf_regions(root_region)
         self._probe_epilogues(root_region)
 
-        if root_region is not None:
-            root_region.type = RegionType.ROOT
-            self.regions = [root_region]
+        root_region.type = RegionType.ROOT
+        self.regions = [root_region]
+        self._compute_all_boundaries(root_region)
+        self._sort_regions(root_region)
+        if only_quantizable:
+            self._filter_out_non_quantizable_nodes(root_region)
+            self._add_boundary_consumers(root_region)
+            self._remove_empty_regions(root_region)
             self._compute_all_boundaries(root_region)
-            self._sort_regions(root_region)
-            if only_quantizable:
-                self._filter_out_non_quantizable_nodes(root_region)
-            logger.info(
-                f"Created region hierarchy: {self._count_regions(root_region)} total regions"
-            )
-        else:
-            logger.warning("No regions created - no valid node paths found")
-            self.regions = []
+        logger.info(f"Created region hierarchy: {self._count_regions(root_region)} total regions")
 
         return self.linearize_regions() if linearize else self.regions
 
@@ -749,69 +686,43 @@ def inspect_torch_regions(
     Args:
         onnx_path: Path to the ONNX model file (should be exported from PyTorch)
         include_all_regions: Include all regions, even those without quantizable ops
+        only_quantizable: Only include quantizable regions
 
     Returns:
         List of discovered regions with hierarchical structure
     """
-    only_quantizable = True
     logger.info(f"Loading model: {onnx_path}")
     onnx_model = onnx.load(onnx_path)
-
     graph = gs.import_onnx(onnx_model)
     graph.cleanup().toposort()
-    logger.info(
-        f"Loaded graph: {len(graph.nodes)} nodes, {len(graph.inputs)} inputs, {len(graph.outputs)} outputs"
-    )
 
-    logger.info("Building regions from node name hierarchy")
     builder = TorchRegionBuilder(graph)
-    torch_ratio = builder.torch_node_ratio()
-    logger.info(f"PyTorch naming check: {torch_ratio:.2f} of nodes are exported from PyTorch")
+    logger.info(f"PyTorch naming ratio: {builder.torch_node_ratio():.2f}")
     regions = builder.build_regions(only_quantizable=only_quantizable)
 
-    logger.info("Analyzing region structure")
-    for i, region in enumerate(regions):
-        if not include_all_regions:
-            children_to_remove = [
+    if not include_all_regions:
+        for region in regions:
+            for child in [
                 c for c in region.get_children() if not has_quantizable_operations(c, graph)
-            ]
-            for child in children_to_remove:
+            ]:
                 region.remove_child(child)
-
-        if not include_all_regions and not has_quantizable_operations(region, graph):
-            logger.debug(f"Filtered out region {i} (no quantizable operations)")
-            continue
-
-        logger.debug(
-            f"Region {i}: {region.type.value}, {len(region.get_region_nodes_and_descendants())} nodes, "
-            f"path={region.metadata.get('path', 'N/A')}"
-        )
-        builder.print_tree(region, indent=2)
-
-    leaf_regions = sum(1 for r in regions if r.type == RegionType.LEAF)
-    composite_regions = sum(1 for r in regions if r.type == RegionType.COMPOSITE)
-    root_regions = sum(1 for r in regions if r.type == RegionType.ROOT)
 
     all_nodes = set()
     for region in regions:
         all_nodes.update(region.get_region_nodes_and_descendants())
-    total_nodes = len(all_nodes)
-    coverage_pct = 100 * total_nodes / len(graph.nodes) if graph.nodes else 0
+    coverage_pct = 100 * len(all_nodes) / len(graph.nodes) if graph.nodes else 0
 
+    type_counts = Counter(r.type for r in regions)
     logger.info(
-        f"Summary: {len(regions)} regions ({leaf_regions} LEAF, {composite_regions} COMPOSITE,"
-        f" {root_regions} ROOT), quantizable nodes: {total_nodes}/{len(graph.nodes)} nodes"
-        f" ({coverage_pct:.1f}%)"
+        f"{len(regions)} regions ({type_counts[RegionType.LEAF]} LEAF, "
+        f"{type_counts[RegionType.COMPOSITE]} COMPOSITE), "
+        f"coverage: {len(all_nodes)}/{len(graph.nodes)} ({coverage_pct:.1f}%)"
     )
 
-    paths = [r.metadata.get("path", "") for r in regions if r.metadata.get("path")]
-    if paths:
-        depth_counts = Counter(p.count("/") for p in paths)
-        logger.debug("Depth distribution:")
-        for depth in sorted(depth_counts.keys()):
-            count = depth_counts[depth]
-            bar = "█" * min(count, 50)
-            logger.debug(f"  Depth {depth:2d}: {bar} ({count} regions)")
+    # Print region tree for the root (non-linearized hierarchy)
+    if builder.regions:
+        for root in builder.regions:
+            builder.print_tree(root)
 
     return regions
 

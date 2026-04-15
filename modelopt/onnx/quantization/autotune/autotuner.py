@@ -101,6 +101,7 @@ class QDQAutotuner(QDQAutotunerBase):
         if check_torch_naming_convention(self.graph):
             torch_search = TorchRegionBuilder(self.graph)
             self.regions = torch_search.build_regions(linearize=True, only_quantizable=True)
+            self._reassign_region_ids(self.regions)
         else:
             default_search = CombinedRegionSearch(
                 self.graph,
