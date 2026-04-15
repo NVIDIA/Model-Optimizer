@@ -16,6 +16,7 @@
 
 """Calc subblock stats to compute memory and runtime statistics for subblocks."""
 
+import copy
 import dataclasses
 import json
 import os
@@ -150,6 +151,11 @@ def calculate_subblock_stats(
         subblock_config = subblock_config_indexed["subblock_config"]
         parent_layer_indices = subblock_config_indexed["parent_layer_indices"]
 
+        layer_model_config = copy.deepcopy(model_config)
+        ModelDescriptor.truncate_pattern_for_subblock(
+            descriptor.get_language_model_config(layer_model_config), parent_layer_indices[0]
+        )
+
         if is_calc_runtime:
             total_runtime_ms = runtime_by_subblock_dict[subblock_config]
             prefill_runtime_ms = None
@@ -168,17 +174,17 @@ def calculate_subblock_stats(
             weights_dtype,
             kv_cache_dtype,
             allocate_prefill_query,
-            model_config=model_config,
+            model_config=layer_model_config,
             descriptor=descriptor,
         )
         if not isinstance(subblock_memory, dict):
             subblock_memory = {"memory_mib": subblock_memory, "kv_cache_memory_mib": 0.0}
 
-        subblock_params = calculate_subblock_params(model_config, subblock_config, descriptor)
+        subblock_params = calculate_subblock_params(layer_model_config, subblock_config, descriptor)
         if moe_stats_file is not None:
             subblock_active_params = calc_subblock_active_params(
                 subblock_config,
-                model_config,
+                layer_model_config,
                 descriptor,
                 n_embd,
                 moe_stats_file,

@@ -118,7 +118,12 @@ def calculate_subblock_params(
     layer_config: BlockConfig | FFNConfig | AttentionConfig,
     descriptor: Type[ModelDescriptor],
 ) -> int:
-    """Count parameters on one meta decoder layer."""
+    """Count parameters on one meta decoder layer.
+
+    The caller is responsible for adjusting per-layer config fields (e.g.
+    ``hybrid_override_pattern``) before passing ``config``; see
+    ``ModelDescriptor.truncate_pattern_for_subblock``.
+    """
     if isinstance(layer_config, FFNConfig):
         block_config = layer_config.to_blockconfig()
     elif isinstance(layer_config, AttentionConfig):
