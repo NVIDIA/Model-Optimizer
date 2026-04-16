@@ -29,7 +29,8 @@ set -e
 if [ -n "$EXTRA_PIP_DEPS" ]; then
     echo "Installing extra dependencies: $EXTRA_PIP_DEPS"
     unset PIP_CONSTRAINT
-    pip install $EXTRA_PIP_DEPS
+    read -r -a _deps <<< "$EXTRA_PIP_DEPS"
+    pip install "${_deps[@]}"
 fi
 
 REPO=""

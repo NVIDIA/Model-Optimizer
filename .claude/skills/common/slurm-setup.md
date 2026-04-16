@@ -206,15 +206,12 @@ Different clusters use different container runtimes. Detect which is available:
 ```bash
 # On the cluster (or via ssh):
 which enroot 2>/dev/null && echo "RUNTIME=enroot"
-which singularity 2>/dev/null && echo "RUNTIME=singularity"
-which apptainer 2>/dev/null && echo "RUNTIME=apptainer"
 which docker 2>/dev/null && echo "RUNTIME=docker"
 ```
 
 | Runtime | Typical clusters | SLURM integration |
 | --- | --- | --- |
 | **enroot/pyxis** | NVIDIA internal (DGX Cloud, EOS, Selene, GCP-NRT) | `srun --container-image` |
-| **Singularity/Apptainer** | HPC / academic clusters | `singularity exec` inside job script |
 | **Docker** | Bare-metal / on-prem with GPU | `docker run` inside job script |
 
 ### Step 2: Check credentials for the image's registry
@@ -224,7 +221,7 @@ Determine the registry from the image URI:
 | Image pattern | Registry |
 | --- | --- |
 | `nvcr.io/nvidia/...` | NGC |
-| `vllm/vllm-openai:...` or no registry prefix | DockerHub |
+| `vllm/vllm-openai:...`, `lmsysorg/sglang:...`, or no registry prefix | DockerHub |
 | `ghcr.io/...` | GitHub Container Registry |
 | `docker.io/...` | DockerHub (explicit) |
 
@@ -233,7 +230,7 @@ Then check credentials based on the runtime:
 #### enroot/pyxis
 
 ```bash
-cat ~/.config/enroot/.credentials 2>/dev/null
+grep -E '^\s*machine\s+' ~/.config/enroot/.credentials 2>/dev/null
 ```
 
 Look for `machine <registry>` lines:
@@ -244,18 +241,10 @@ Look for `machine <registry>` lines:
 #### Docker
 
 ```bash
-cat ~/.docker/config.json 2>/dev/null | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin).get('auths',{}), indent=2))"
+cat ~/.docker/config.json 2>/dev/null | python3 -c "import json,sys; print('\n'.join(json.load(sys.stdin).get('auths', {}).keys()))"
 ```
 
 Look for registry keys (`https://index.docker.io/v1/`, `nvcr.io`, `ghcr.io`).
-
-#### Singularity/Apptainer
-
-```bash
-cat ~/.singularity/docker-config.json 2>/dev/null || cat ~/.apptainer/docker-config.json 2>/dev/null
-```
-
-Same format as Docker's `config.json` — look for registry keys in `auths`.
 
 ### Step 3: If credentials are missing
 
@@ -287,21 +276,11 @@ EOF
 **Docker:**
 
 ```bash
-# DockerHub
+# DockerHub (interactive prompt)
 docker login
 
-# NGC
-docker login nvcr.io -u '$oauthtoken' -p <ngc_api_key>
-```
-
-**Singularity/Apptainer:**
-
-```bash
-# DockerHub
-singularity remote login --username <user> docker://docker.io
-
-# NGC
-singularity remote login --username '$oauthtoken' --password <ngc_api_key> docker://nvcr.io
+# NGC (use --password-stdin to avoid exposing secrets in process list)
+echo "$NGC_API_KEY" | docker login nvcr.io -u '$oauthtoken' --password-stdin
 ```
 
 3. **Suggest an alternative image** on an authenticated registry. NVIDIA clusters typically have NGC auth pre-configured, so prefer NGC-hosted images:
@@ -337,5 +316,4 @@ singularity pull --dry-run docker://<image> 2>&1 | head -5
 | `curl: (22) ... error: 401` | enroot | No credentials for registry | Add to `~/.config/enroot/.credentials` |
 | `pyxis: failed to import docker image` | enroot | Auth failed or rate limit | Check credentials; DockerHub free: 100 pulls/6h per IP |
 | `unauthorized: authentication required` | docker | No `docker login` | Run `docker login [registry]` |
-| `FATAL: While making image from oci registry` | singularity | No remote login | Run `singularity remote login` |
 | Image pulls on some nodes but not others | any | Cached on one node only | Pre-cache image or ensure auth on all nodes |
