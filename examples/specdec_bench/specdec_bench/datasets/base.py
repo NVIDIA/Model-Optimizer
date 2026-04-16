@@ -25,6 +25,7 @@ class Request:
     system_prompt: str | None = None
     turns: list[str] = field(default_factory=list)
     mm_content: Any | None = None  # TODO
+    messages: list[dict] | None = None  # pre-built full conversation history
 
     # not to be set by user
     output_turn_ids = None

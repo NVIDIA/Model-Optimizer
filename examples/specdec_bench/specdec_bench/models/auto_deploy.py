@@ -20,13 +20,18 @@ from typing import Any
 
 try:
     from tensorrt_llm._torch.auto_deploy.llm import LLM
-    from tensorrt_llm.llmapi import DraftTargetDecodingConfig
+    from tensorrt_llm.llmapi import (
+        DraftTargetDecodingConfig,
+        Eagle3DecodingConfig,
+        EagleDecodingConfig,
+        MTPDecodingConfig,
+    )
     from tensorrt_llm.sampling_params import SamplingParams
 except ImportError:
     print("tensorrt_llm._torch.auto_deploy is not installed.")
     LLM = None
 
-from .base import Model
+from .base import Model, build_model_output
 
 
 class AutoDeployModel(Model):
@@ -34,8 +39,7 @@ class AutoDeployModel(Model):
         self.model = create_auto_deploy_model(model_path, max_concurrent_requests, kwargs)
         self.sampling_kwargs = sampling_kwargs
 
-    async def run(self, prompt_ids, max_length, end_id, request_id, turn_id):
-        output_dict = {}
+    async def run(self, prompt_ids, max_length, end_id, request_id=None, turn_id=None):
         sampling_config = check_sampling_config(self.sampling_kwargs, max_length, end_id)
         outputs = []
         timing = [time.perf_counter()]
@@ -61,10 +65,7 @@ class AutoDeployModel(Model):
             if len(response.token_ids) > beam_len[-1]:
                 reformatted_output_ids[beam_idx].append(response.token_ids[beam_len[-1] :])
 
-        output_dict["output_ids"] = reformatted_output_ids
-        output_dict["output_logits"] = None
-        output_dict["token_times"] = timing
-        return output_dict
+        return build_model_output(reformatted_output_ids, timing)
 
     def stop(self):
         """Stop and cleanup the model."""
@@ -91,13 +92,38 @@ def create_auto_deploy_model(model_path: str, max_concurrent_requests: int, kwar
             max_draft_len=kwargs.get("speculative_num_steps", 3),
             speculative_model_dir=kwargs.get("draft_model_dir"),
         )
+    elif speculative_algorithm == "EAGLE":
+        specdec = EagleDecodingConfig(
+            speculative_model=kwargs.get("draft_model_dir"),
+            max_draft_len=kwargs.get("speculative_num_steps", 3),
+            num_eagle_layers=kwargs.get("num_eagle_layers"),
+            max_non_leaves_per_layer=kwargs.get("max_non_leaves_per_layer"),
+            eagle_choices=kwargs.get("eagle_choices"),
+        )
+    elif speculative_algorithm == "EAGLE3":
+        specdec = Eagle3DecodingConfig(
+            speculative_model=kwargs.get("draft_model_dir"),
+            max_draft_len=kwargs.get("speculative_num_steps", 3),
+            eagle3_one_model=kwargs.get("eagle3_one_model", True),
+            eagle3_layers_to_capture=kwargs.get("eagle3_layers_to_capture"),
+        )
+    elif speculative_algorithm == "MTP":
+        specdec = MTPDecodingConfig(
+            speculative_model=kwargs.get("draft_model_dir"),
+            num_nextn_predict_layers=kwargs.get("speculative_num_steps", 1),
+            mtp_eagle_one_model=True,
+        )
     elif speculative_algorithm == "NONE":
+        specdec = None
+    else:
+        print(f"Unknown speculative algorithm: {speculative_algorithm} for AutoDeploy")
         specdec = None
 
     max_num_tokens = kwargs.get("max_num_tokens", 8192)
 
     llm_kwargs = {
         "model": model_path,
+        "trust_remote_code": kwargs.get("trust_remote_code", False),
         "world_size": world_size,
         "max_batch_size": max_concurrent_requests,
         "max_seq_len": max_seq_len,
@@ -108,6 +134,9 @@ def create_auto_deploy_model(model_path: str, max_concurrent_requests: int, kwar
         "disable_overlap_scheduler": kwargs.get("disable_overlap_scheduler", True),
         "speculative_config": specdec,
     }
+
+    if kwargs.get("transforms"):
+        llm_kwargs["transforms"] = kwargs["transforms"]
 
     if kwargs.get("attn_backend"):
         llm_kwargs["attn_backend"] = kwargs["attn_backend"]

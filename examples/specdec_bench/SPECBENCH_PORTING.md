@@ -5,13 +5,11 @@ This guide explains how to convert any `inference_*.py` runner from [Spec-Bench]
 ## Overview
 
 Spec-Bench inference runners follow a pattern where:
-
 1. A `*_forward()` function handles the speculative decoding logic
 2. The `run_eval()` function orchestrates evaluation with tokenized inputs
 3. Models are loaded in `__main__` and passed to `run_eval()`
 
 In contrast, `specdec_bench` uses a class-based approach where:
-
 1. Models inherit from the `Model` base class
 2. `__init__()` handles model loading
 3. `run()` is an async method that processes single requests
@@ -29,7 +27,6 @@ class Model:
         prompt_ids: list of token IDs (not a tensor!)
         Returns dict with:
             - output_ids: list of list of token chunks per step [[chunk1, chunk2, ...]]
-            - output_logits: optional logits (usually None)
             - token_times: list of timestamps per decoding step
         """
         raise NotImplementedError
@@ -181,7 +178,7 @@ Convert the standalone `*_forward()` function to an internal method:
             turn_id: Turn identifier
         
         Returns:
-            dict with output_ids, output_logits, token_times
+            dict with output_ids and token_times
         """
         output_dict = {}
         
@@ -221,7 +218,6 @@ Convert the standalone `*_forward()` function to an internal method:
             reformatted_output_ids[0].append(generated_tokens[start:])
         
         output_dict['output_ids'] = reformatted_output_ids
-        output_dict['output_logits'] = None
         output_dict['token_times'] = timing
         
         return output_dict
@@ -261,7 +257,7 @@ from .specbench_<method> import SpecBench<Method>Model
 | Aspect | Spec-Bench | specdec_bench |
 |--------|-----------|---------------|
 | Input format | `inputs.input_ids` (tensor from tokenizer) | `prompt_ids` (list of ints) |
-| Output format | `(output_ids, new_token, steps, accept_lengths)` | `dict` with `output_ids`, `output_logits`, `token_times` |
+| Output format | `(output_ids, new_token, steps, accept_lengths)` | `dict` with `output_ids`, `token_times` |
 | Output IDs | Full sequence tensor | List of token chunks per step |
 | Timing | External (in `run_eval`) | Internal (in `run()`) |
 | Device | `device_map="auto"` | Explicit single device |
@@ -318,12 +314,4 @@ async def test():
     model.stop()
 
 asyncio.run(test())
-```
-
-Adjust the vicuna chat template to be in the tokenizer_config to be
-
-Insert to tokenizer_config (for vicuna)
-
-```json
-"chat_template": "{% set ns = namespace(system='') %}{% for m in messages %}{% if m['role'] == 'system' %}{% set ns.system = m['content'] %}{% endif %}{% endfor %}{{ ns.system | trim }}{% if ns.system | trim != '' %} {% endif %}{% for m in messages %}{% if m['role'] == 'user' %}USER: {{ m['content'] | trim }} ASSISTANT:{% elif m['role'] == 'assistant' %}{{ m['content'] | trim }}{% endif %}{% endfor %}"
 ```

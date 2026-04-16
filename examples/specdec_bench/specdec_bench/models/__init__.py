@@ -14,15 +14,8 @@
 # limitations under the License.
 
 from .auto_deploy import AutoDeployModel
+from .base import Model
 from .sglang import SGLANGModel
 from .specbench_medusa import SpecBenchMedusaModel
 from .trtllm_torch_api import TRTLLMPYTModel
 from .vllm import VLLMModel
-
-__all__ = [
-    "AutoDeployModel",
-    "SGLANGModel",
-    "SpecBenchMedusaModel",
-    "TRTLLMPYTModel",
-    "VLLMModel",
-]
