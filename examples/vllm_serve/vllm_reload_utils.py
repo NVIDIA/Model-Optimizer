@@ -13,8 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import logging
 import re
+import warnings
 from collections import defaultdict
 from collections.abc import Callable
 from typing import Any
@@ -34,8 +34,6 @@ from modelopt.torch.quantization.conversion import (
 from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
 from modelopt.torch.quantization.utils import is_quantized
 
-logger = logging.getLogger(__name__)
-
 
 def _union_quantizer_keys_across_ranks(local_quantizer_keys: list[str]) -> set[str]:
     """Union of quantizer key strings from every rank (same file on all ranks → identical to local)."""
@@ -53,9 +51,8 @@ def _union_quantizer_keys_across_ranks(local_quantizer_keys: list[str]) -> set[s
             out.update(g)
         return out
     except Exception as e:
-        logger.warning(
-            "Could not all_gather quantizer key lists across ranks (%s); using this rank's keys only.",
-            e,
+        warnings.warn(
+            f"Could not all_gather quantizer key lists across ranks ({e}); using this rank's keys only."
         )
         return local
 
@@ -311,7 +308,7 @@ def filter_modelopt_state_quantizer_state_for_model(
         model: Model with quantizers (must already be converted)
     """
     from modelopt.torch.quantization.conversion import quantizer_state
-    from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
+    from modelopt.torch.quantization.nn import TensorQuantizer
     from modelopt.torch.utils import get_unwrapped_name
 
     model_qstate = quantizer_state(model)
@@ -493,11 +490,9 @@ def load_state_dict_from_path(
         keys = sorted(global_missing_non_wq)
         n = len(keys)
         sample, rest = keys[:8], n - 8
-        logger.warning(
-            "%s quantizer key(s) missing from every rank's checkpoint (after all_gather): %s%s",
-            n,
-            sample,
-            f" ... (+{rest} more)" if rest > 0 else "",
+        warnings.warn(
+            f"{n} quantizer key(s) missing from every rank's checkpoint (after all_gather):"
+            f"{sample}{' ... (+{rest} more)' if rest > 0 else ''}"
         )
 
     for name, module in model.named_modules():
