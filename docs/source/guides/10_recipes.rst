@@ -600,9 +600,18 @@ The ``modelopt_recipes/`` package is organized as follows:
        |   +-- fp8.yaml
        |   +-- nvfp4_static.yaml
        |   +-- nvfp4.yaml
-       +-- ptq/                    # PTQ-specific entry snippets
-           +-- base_disable_all.yaml
-           +-- default_disabled_quantizers.yaml
+       +-- ptq/
+           +-- units/                # Reusable quant_cfg building blocks
+           |   +-- base_disable_all.yaml
+           |   +-- default_disabled_quantizers.yaml
+           |   +-- fp8_kv.yaml
+           |   +-- w8a8_fp8_fp8.yaml
+           |   +-- w4a4_nvfp4_nvfp4.yaml
+           +-- presets/              # Complete configs (backward compat with *_CFG dicts)
+               +-- model/
+               |   +-- fp8.yaml
+               +-- kv/
+                   +-- fp8.yaml
 
 
 Recipe data model

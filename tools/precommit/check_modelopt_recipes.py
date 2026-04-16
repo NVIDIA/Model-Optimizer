@@ -57,6 +57,14 @@ def _check_quant_cfg(quant_cfg, label: str) -> list[str]:
                 continue
             # {$import: name} entries are resolved at load time
             if "$import" in entry:
+                ref = entry["$import"]
+                if not isinstance(ref, (str, list)) or (
+                    isinstance(ref, list) and not all(isinstance(r, str) for r in ref)
+                ):
+                    errors.append(
+                        f"{label}: quant_cfg[{i}] '$import' must be a string or list of strings, "
+                        f"got {type(ref).__name__}: {ref!r}"
+                    )
                 continue
             if "quantizer_name" not in entry:
                 errors.append(

@@ -68,6 +68,8 @@ def _load_raw_config(config_file: str | Path | Traversable) -> dict[str, Any] | 
 
     config_file: Path to a config yaml file. The path suffix can be omitted.
     """
+    # Probe order: filesystem first, then built-in library.
+    # This lets users override built-in configs by placing a file locally.
     paths_to_check: list[Path | Traversable] = []
     if isinstance(config_file, str):
         if not config_file.endswith(".yml") and not config_file.endswith(".yaml"):
