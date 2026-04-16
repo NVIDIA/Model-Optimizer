@@ -20,6 +20,7 @@ import time
 import warnings
 from collections.abc import Callable
 from functools import partial
+from typing import TypeAlias
 
 import torch
 import torch.distributed as dist
@@ -33,7 +34,7 @@ from modelopt.torch.utils import print_rank_0
 from modelopt.torch.utils.distributed import DistributedProcessGroup, ParallelState
 from modelopt.torch.utils.network import bind_forward_method, unpatch_forward_method
 
-from .calib import MseCalibrator, NVFP4MSECalibrator
+from .calib import MseCalibrator, NVFP4MSECalibrator, _Calibrator
 from .conversion import create_and_replace_svdquant_linear_on_the_fly, set_quantizer_by_cfg_context
 from .nn import NVFP4StaticQuantizer, QuantModule, SequentialQuantizer, TensorQuantizer
 from .utils import (
@@ -52,6 +53,7 @@ from .utils import (
 from .utils.calib_utils import GPTQHelper
 
 __all__ = [
+    "CalibratorFactory",
     "awq",
     "local_hessian_calibrate",
     "max_calibrate",
@@ -61,11 +63,14 @@ __all__ = [
     "svdquant",
 ]
 
-# Registry for backends that provide a custom calibrator factory for mse_calibrate().
-_FP8_SWEEP_CALIBRATOR_REGISTRY: dict[str, type] = {}
+CalibratorFactory: TypeAlias = Callable[
+    [torch.Tensor, int | tuple | list | None, Callable[..., torch.Tensor]], _Calibrator
+]
+
+_FP8_SWEEP_CALIBRATOR_REGISTRY: dict[str, CalibratorFactory] = {}
 
 
-def register_fp8_sweep_calibrator(backend: str, calibrator_factory) -> None:
+def register_fp8_sweep_calibrator(backend: str, calibrator_factory: CalibratorFactory) -> None:
     """Register a custom calibrator factory for a quantization backend.
 
     When ``fp8_scale_sweep=True`` is passed to :func:`mse_calibrate`, any weight
@@ -74,8 +79,9 @@ def register_fp8_sweep_calibrator(backend: str, calibrator_factory) -> None:
 
     Args:
         backend: Backend name string (must match ``TensorQuantizer.backend``).
-        calibrator_factory: Callable with signature ``(amax, axis, quant_func)``
-            that returns a calibrator instance.
+        calibrator_factory: Callable with signature
+            ``(amax: Tensor, axis: int | tuple | list | None, quant_func: Callable)``
+            that returns a :class:`_Calibrator` instance.
     """
     _FP8_SWEEP_CALIBRATOR_REGISTRY[backend] = calibrator_factory
 
@@ -358,8 +364,11 @@ def mse_calibrate(
 
                 if fp8_scale_sweep:
                     # Check if backend has a registered custom calibrator factory.
-                    backend_factory = _FP8_SWEEP_CALIBRATOR_REGISTRY.get(
-                        getattr(module, "backend", None)
+                    _backend: str | None = getattr(module, "backend", None)
+                    backend_factory = (
+                        _FP8_SWEEP_CALIBRATOR_REGISTRY.get(_backend)
+                        if _backend is not None
+                        else None
                     )
                     if backend_factory is not None:
                         module._calibrator = backend_factory(
