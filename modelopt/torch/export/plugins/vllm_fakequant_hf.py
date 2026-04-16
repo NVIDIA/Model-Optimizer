@@ -14,9 +14,10 @@
 # limitations under the License.
 """Export HuggingFace model to vLLM fakequant checkpoint."""
 
-import contextlib
 import copy
+import logging
 import re
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -27,7 +28,7 @@ import modelopt.torch.opt as mto
 from modelopt.torch.quantization.config import RotateConfig
 from modelopt.torch.quantization.conversion import quantizer_state
 from modelopt.torch.quantization.model_calib import enable_stats_collection, finish_stats_collection
-from modelopt.torch.quantization.nn import QuantModule, TensorQuantizer
+from modelopt.torch.quantization.nn import QuantModule, SequentialQuantizer, TensorQuantizer
 from modelopt.torch.quantization.utils import get_quantizer_state_dict
 from modelopt.torch.quantization.utils.core_utils import enable_weight_access_and_writeback
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
@@ -39,6 +40,7 @@ from ..unified_export_hf import collect_shared_input_modules
 
 __all__ = [
     "export_hf_vllm_fq_checkpoint",
+    "infer_quantizer_prefix_remap",
     "is_weight_quantizer_state_key",
     "merge_amax_tensors_for_group",
 ]
@@ -53,6 +55,79 @@ def is_weight_quantizer_state_key(key: str) -> bool:
     Matches ``weight_quantizer``, ``w13_weight_quantizer``, ``weight_quantizer.0``, etc.
     """
     return bool(_WEIGHT_QUANTIZER_STATE_KEY.search(key))
+
+
+def infer_quantizer_prefix_remap(
+    quantizer_keys: dict[str, Any],
+    map_fun: Callable[[dict[str, Any]], dict[str, Any]],
+) -> dict[str, str]:
+    """Infer HF root name → vLLM root (e.g. ``backbone`` → ``model``) for reload/export.
+
+    Map HF root → vLLM root (e.g. ``backbone`` → ``model``) by probing ``map_fun`` with
+    synthetic ``<module>.weight`` keys and a 2-D placeholder (quantizer paths are not weight
+    keys). Keys under the same HF root must agree on the target root or :exc:`ValueError` is
+    raised; failed probes are skipped. Returns ``{hf_root: vllm_root}`` only where the root
+    renames; not for arbitrary layer rewrites.
+
+    Args:
+        quantizer_keys: HF quantizer state paths as keys (values unused).
+        map_fun: HF→vLLM weight ``state_dict`` mapper, same as for ``convert_dict_to_vllm``.
+
+    Returns:
+        ``{hf_root: vllm_root}`` for roots that rename; omits identity pairs.
+    """
+    logger = logging.getLogger(__name__)
+    probe_weight = torch.empty((1, 1))
+    observed_vllm_root: dict[str, str] = {}
+
+    for key in quantizer_keys:
+        first_component = key.split(".")[0]
+        last_dot = key.rfind(".")
+        if last_dot == -1:
+            continue
+        probe_key = key[:last_dot] + ".weight"
+        try:
+            result = map_fun({probe_key: probe_weight})
+            if not result:
+                continue
+            new_key = next(iter(result))
+            new_first = new_key.split(".")[0]
+        except Exception as e:
+            logger.debug("prefix-remap probe failed for %r: %s", probe_key, e)
+            continue
+
+        if first_component not in observed_vllm_root:
+            observed_vllm_root[first_component] = new_first
+        elif observed_vllm_root[first_component] != new_first:
+            raise ValueError(
+                "Inconsistent HF→vLLM prefix remap for "
+                f"{first_component!r}: probes implied "
+                f"{observed_vllm_root[first_component]!r} and {new_first!r}. "
+                "map_fun must apply one target root per HF root, or use explicit quantizer "
+                "key remapping."
+            )
+
+    return {
+        hf_root: vllm_root
+        for hf_root, vllm_root in observed_vllm_root.items()
+        if hf_root != vllm_root
+    }
+
+
+def _check_all_weight_quantizers_disabled(model: nn.Module) -> None:
+    """Export invariant before writing metadata: every weight quantizer must be off."""
+    for _, module in model.named_modules():
+        if not isinstance(module, QuantModule):
+            continue
+        for attr_name, quantizer in module.named_children():
+            if attr_name.endswith("weight_quantizer") and isinstance(
+                quantizer, (TensorQuantizer, SequentialQuantizer)
+            ):
+                assert not quantizer.is_enabled, (
+                    f"vLLM fakequant export: {attr_name!r} must be disabled before saving "
+                    f"quantizer_state (weights already folded). "
+                    f"See filter_modelopt_state_quantizer_state_for_model in vllm_reload_utils."
+                )
 
 
 def disable_rotate(quantizer: TensorQuantizer):
@@ -129,7 +204,7 @@ def _fakequant_module_weights(
         fakequant_weights.add(sd_key)
 
 
-def _collect_expert_pre_quant_scales(
+def _collect_group_pre_quant_scales(
     experts: list[nn.Module],
 ) -> list[torch.Tensor] | None:
     """Return per-expert ``pre_quant_scale`` tensors if every expert can be averaged; else None.
@@ -137,27 +212,53 @@ def _collect_expert_pre_quant_scales(
     Skips groups where any expert has no input quantizer, no pqs (e.g. weight-only AWQ INT4),
     or a disabled input quantizer (pqs already folded / not used).
     """
-    pqs_list: list[torch.Tensor] = []
-    for ex in experts:
-        iq = getattr(ex, "input_quantizer", None)
-        if iq is None or not iq.is_enabled or iq.pre_quant_scale is None:
+    pre_quant_scales: list[torch.Tensor] = []
+    for expert_module in experts:
+        input_quantizer = getattr(expert_module, "input_quantizer", None)
+        if (
+            input_quantizer is None
+            or not input_quantizer.is_enabled
+            or input_quantizer.pre_quant_scale is None
+        ):
             return None
-        pqs_list.append(iq.pre_quant_scale)
-    return pqs_list
+        pre_quant_scales.append(input_quantizer.pre_quant_scale)
+    return pre_quant_scales
 
 
 def requant_weights_for_export(
-    quantizer: TensorQuantizer,
-    w: torch.Tensor,
+    quantizer: TensorQuantizer | SequentialQuantizer,
+    weight: torch.Tensor,
 ) -> torch.Tensor:
-    """Requantize weights for export."""
-    quantizer_copy = copy.deepcopy(quantizer)
-    quantizer_copy.eval()
-    quantizer_copy.reset_amax()
-    enable_stats_collection(quantizer_copy)
-    quantizer_copy(w)
-    finish_stats_collection(quantizer_copy)
-    return quantizer_copy(w.float()).to(w.dtype)
+    """Requantize folded weights after resmooth (``TensorQuantizer`` or ``SequentialQuantizer``).
+
+    A single ``TensorQuantizer`` is treated as a one-stage chain so the same
+    calibrate-then-apply steps cover W4A8-style sequential weights (e.g. INT4→FP8).
+
+    Deepcopy may leave buffers on the original device; ``.to(device=w.device)`` aligns with
+    ``w`` (e.g. CPU offload).
+    """
+    copied = copy.deepcopy(quantizer).to(device=weight.device)
+    sequence_quantizers: list[TensorQuantizer] = (
+        list(copied) if isinstance(copied, SequentialQuantizer) else [copied]
+    )
+
+    for quantizer_copy in sequence_quantizers:
+        quantizer_copy.eval()
+        quantizer_copy.reset_amax()
+        enable_stats_collection(quantizer_copy)
+    # Match legacy single-quantizer path: first calib uses ``w`` as-is; chains use float.
+    if len(sequence_quantizers) == 1:
+        weight_quantized = sequence_quantizers[0](weight)
+    else:
+        weight_quantized = weight.float()
+        for quantizer_copy in sequence_quantizers:
+            weight_quantized = quantizer_copy(weight_quantized)
+    for quantizer_copy in sequence_quantizers:
+        finish_stats_collection(quantizer_copy)
+    weight_quantized = weight.float()
+    for quantizer_copy in sequence_quantizers:
+        weight_quantized = quantizer_copy(weight_quantized)
+    return weight_quantized.to(weight.dtype)
 
 
 def merge_amax_tensors_for_group(tensors: list[torch.Tensor]) -> torch.Tensor:
@@ -167,8 +268,10 @@ def merge_amax_tensors_for_group(tensors: list[torch.Tensor]) -> torch.Tensor:
 
     - If every tensor has the same shape, take the element-wise maximum over the group
       (conservative when each branch carried the same axis layout).
-    - If shapes differ (e.g. GQA q vs k), try ``torch.cat(..., dim=0)`` when valid for
-      per-channel amax; otherwise fall back to a scalar max over all elements.
+    - If shapes differ: ``torch.cat(..., dim=0)`` assumes **1D per-channel** amaxes in
+      fused order (e.g. GQA q/k/v → ``[N_q]`` + ``[N_kv]`` + ``[N_kv]``), matching vLLM’s
+      grouped quantizer. Not valid for 2D blockwise amax; on failure, **scalar**
+      max (drops channel structure).
     """
     if not tensors:
         raise ValueError("merge_amax_tensors_for_group: expected at least one tensor")
@@ -218,7 +321,7 @@ def _resmooth_experts_for_export(
     requant_weights: set[str] = set()
 
     def _process_group(modules: list[nn.Module]) -> None:
-        pqs_list = _collect_expert_pre_quant_scales(modules)
+        pqs_list = _collect_group_pre_quant_scales(modules)
         if pqs_list is None:
             return
 
@@ -272,9 +375,15 @@ def _resmooth_experts_for_export(
     dev = next(model.parameters()).device
 
     def _dummy_forward() -> None:
-        # Partial forward is OK: hooks record layers reached before failure (e.g. VLMs).
-        with contextlib.suppress(Exception):
+        # Partial forward is OK: hooks record layers reached before failure.
+        try:
             model(torch.ones([1, 2], dtype=torch.long, device=dev))
+        except Exception as e:
+            import logging
+
+            logging.getLogger(__name__).debug(
+                "Dummy forward for shared-input detection failed (expected for VLMs): %s", e
+            )
 
     input_to_linear, _ = collect_shared_input_modules(model, _dummy_forward)
     for modules in input_to_linear.values():
@@ -388,11 +497,16 @@ def export_hf_vllm_fq_checkpoint(
     for _, module in model.named_modules():
         if isinstance(module, QuantModule):
             for attr_name, quantizer in module.named_children():
-                if (
-                    attr_name.endswith("weight_quantizer")
-                    and isinstance(quantizer, TensorQuantizer)
-                    and quantizer.is_enabled
-                ):
+                if not (attr_name.endswith("weight_quantizer") and quantizer.is_enabled):
+                    continue
+                if isinstance(quantizer, SequentialQuantizer):
+                    quantizer.disable()
+                    for sub in quantizer:
+                        orig_rotate = sub._rotate
+                        if sub.rotate_is_enabled:
+                            sub._rotate = disable_rotate(sub)
+                        wqs_to_restore.append((sub, orig_rotate))
+                elif isinstance(quantizer, TensorQuantizer):
                     quantizer.disable()
                     orig_rotate = quantizer._rotate
                     if quantizer.rotate_is_enabled:
@@ -403,6 +517,8 @@ def export_hf_vllm_fq_checkpoint(
     for key in list(quantizer_state_dict):
         if is_weight_quantizer_state_key(key):
             # Fakequant amax is folded into HF weights; do not reload weight quantizer tensors.
+            # Reload must force-disable WQs missing from saved state (see
+            # ``filter_modelopt_state_quantizer_state_for_model`` assertion in vllm_reload_utils).
             quantizer_state_dict.pop(key)
         elif key in input_quantizers_folded_pqs:
             # pre_quant_scale was folded into the weight; keep the buffer for strict load but
@@ -426,10 +542,12 @@ def export_hf_vllm_fq_checkpoint(
 
     modelopt_state = mto.modelopt_state(model)
     # ``modelopt_state`` may be stale if another mode (e.g. calibrate) ran last. Rebuild
-    # ``quantizer_state`` and drop disabled weight quantizer entries (weights already folded).
+    # ``quantizer_state`` and strip weight-quantizer entries (same policy as
+    # ``modelopt_state_weights``). Reload synthesizes missing WQ rows with ``_disabled``.
+    _check_all_weight_quantizers_disabled(model)
     qstate = quantizer_state(model)
     for key in list(qstate):
-        if is_weight_quantizer_state_key(key) and qstate[key].get("_disabled"):
+        if is_weight_quantizer_state_key(key):
             qstate.pop(key)
 
     for mode_str, m_state in modelopt_state.get("modelopt_state_dict", []):

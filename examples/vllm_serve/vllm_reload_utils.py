@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import logging
 import re
 import warnings
 from collections import defaultdict
@@ -248,7 +247,7 @@ def _infer_prefix_remap(
                 if new_first != first_component:
                     prefix_remap[first_component] = new_first
         except Exception as e:
-            logging.getLogger(__name__).debug("prefix-remap probe failed for %r: %s", probe_key, e)
+            warnings.warn(f"prefix-remap probe failed for {probe_key!r}: {e}")
     return prefix_remap
 
 
@@ -401,6 +400,17 @@ def filter_modelopt_state_quantizer_state_for_model(
                 if is_weight_quantizer_state_key(k) and not state.get("_disabled"):
                     state = {**state, "_disabled": True}
                 filtered[k] = state
+
+            # Invariant: weight quantizers absent from export must be _disabled.
+            for wq_k in model_keys:
+                if not is_weight_quantizer_state_key(wq_k):
+                    continue
+                wq_state = filtered[wq_k]
+                assert wq_k in saved or wq_state.get("_disabled"), (
+                    f"Weight quantizer {wq_k!r} is missing from saved quantizer_state but "
+                    f"is not marked _disabled (got _disabled={wq_state.get('_disabled')!r}). "
+                    f"vLLM fakequant export omits weight quantizer keys when weights are folded."
+                )
             metadata["quantizer_state"] = filtered
 
 
