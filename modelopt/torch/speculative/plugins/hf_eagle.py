@@ -179,7 +179,9 @@ class HFEagleModel(HFSpecDecMixin, EagleModel):
 
         KL(softmax(ref) || log_softmax(lora)) weighted by eagle_base_lora_preservation_loss_weight.
         """
-        loss = nn.Softmax(dim=-1)(ref_logits.detach()) * nn.LogSoftmax(dim=-1)(lora_logits)
+        loss = torch.nn.Softmax(dim=-1)(ref_logits.detach()) * torch.nn.LogSoftmax(dim=-1)(
+            lora_logits
+        )
         return -loss.sum(dim=-1).mean() * self.eagle_base_lora_preservation_loss_weight
 
     def modify(
@@ -469,7 +471,7 @@ class HFEagleModel(HFSpecDecMixin, EagleModel):
         if ref_logits is not None:
             base_model_loss = self._preservation_loss(ref_logits, base_model_logits)
         elif not freeze_base_model and labels is not None:
-            loss_fct = CrossEntropyLoss()
+            loss_fct = torch.nn.CrossEntropyLoss()
             base_model_loss = loss_fct(
                 base_model_logits.view(-1, base_model_logits.shape[-1]), labels.view(-1)
             )

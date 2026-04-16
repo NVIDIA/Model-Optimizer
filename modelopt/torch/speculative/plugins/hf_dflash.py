@@ -119,7 +119,11 @@ class HFDFlashModel(HFSpecDecMixin, DFlashModel):
         self.dflash_config.block_size = self.dflash_block_size
 
         # Target layer IDs
-        num_target_layers = base_config.num_hidden_layers
+        num_target_layers = (
+            base_config.num_orig_hidden_layers
+            if self.dflash_offline
+            else base_config.num_hidden_layers
+        )
         num_draft_layers = self.dflash_config.num_hidden_layers
         self.target_layer_ids = build_target_layer_ids(num_target_layers, num_draft_layers)
         self.dflash_config.target_layer_ids = self.target_layer_ids

@@ -556,7 +556,7 @@ def enable_cp_ttt_patch():
     """Context manager to enable CP TTT patch."""
     import modelopt.torch.speculative.plugins.hf_eagle
 
-    modelopt.torch.speculative.plugins.transformers.ENABLE_CP_TTT_PATCH = True
+    modelopt.torch.speculative.plugins.hf_eagle.ENABLE_CP_TTT_PATCH = True
     with sdpa_kernel([SDPBackend.CUDNN_ATTENTION, SDPBackend.MATH]):
         try:
             yield
