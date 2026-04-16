@@ -144,22 +144,29 @@ class VllmFqGPTModelExporter(GPTModelExporter):
             weight_quantizer = getattr(module, "weight_quantizer", None)
             if weight_quantizer is not None and weight_quantizer.is_enabled:
                 with torch.no_grad():
-                    # Some quantizers (e.g. NVFP4) require CUDA. If the model landed on
-                    # CPU after TP gather, lift to the current CUDA device for the forward
-                    # pass, then restore buffer devices.
+                    # NVFP4-like kernels may need CUDA; if weights are CPU after gather, run on
+                    # CUDA then ``weight_quantizer.to`` back (full module round-trip).
                     quant_device = (
                         torch.device("cuda", torch.cuda.current_device())
                         if weight.device.type == "cpu" and torch.cuda.is_available()
                         else weight.device
                     )
-                    buf_devices = [(buf, buf.device) for buf in weight_quantizer.buffers()]
-                    for buf, _ in buf_devices:
-                        buf.data = buf.data.to(quant_device)
+                    # TensorQuantizer does not expose nn.Module.device (custom __getattr__).
+                    param_device = next(weight_quantizer.parameters(), None)
+                    buf_device = next(weight_quantizer.buffers(), None)
+                    wq_dev = (
+                        param_device.device
+                        if param_device is not None
+                        else (buf_device.device if buf_device is not None else torch.device("cpu"))
+                    )
+                    need_move = wq_dev != quant_device
+                    if need_move:
+                        weight_quantizer.to(quant_device)
                     try:
                         weight = weight_quantizer(weight.to(quant_device)).to(dtype)
                     finally:
-                        for buf, orig_device in buf_devices:
-                            buf.data = buf.data.to(orig_device)
+                        if need_move:
+                            weight_quantizer.to(wq_dev)
             name_to_value["weight"] = weight.cpu()
         else:
             return name_to_value, qformat, block_size

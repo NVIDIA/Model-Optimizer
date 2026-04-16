@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
 import re
 from collections import defaultdict
 from collections.abc import Callable
@@ -30,7 +31,33 @@ from modelopt.torch.quantization.conversion import (
     convert_to_quantized_model,
     restore_quantizer_state,
 )
+from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
 from modelopt.torch.quantization.utils import is_quantized
+
+logger = logging.getLogger(__name__)
+
+
+def _union_quantizer_keys_across_ranks(local_quantizer_keys: list[str]) -> set[str]:
+    """Union of quantizer key strings from every rank (same file on all ranks → identical to local)."""
+    local = set(local_quantizer_keys)
+    if not torch.distributed.is_available() or not torch.distributed.is_initialized():
+        return local
+    if torch.distributed.get_world_size() <= 1:
+        return local
+    try:
+        world_size = torch.distributed.get_world_size()
+        gathered: list[list[str]] = [[] for _ in range(world_size)]
+        torch.distributed.all_gather_object(gathered, list(local_quantizer_keys))
+        out: set[str] = set()
+        for g in gathered:
+            out.update(g)
+        return out
+    except Exception as e:
+        logger.warning(
+            "Could not all_gather quantizer key lists across ranks (%s); using this rank's keys only.",
+            e,
+        )
+        return local
 
 
 def _values_equal(v1: Any, v2: Any) -> bool:
@@ -434,37 +461,51 @@ def load_state_dict_from_path(
     # Count quant keys in checkpoint and model
     checkpoint_quant_keys = [key for key in saved_quant_dict if "quantizer" in key]
     model_quant_keys = [key for key in current_state_dict if "quantizer" in key]
-    for key in checkpoint_quant_keys:
-        if key not in model_quant_keys:
-            print(f"Key {key} not found in model state dict, but exists in checkpoint")
+    ckpt_key_set = set(checkpoint_quant_keys)
+    global_ckpt_key_set = _union_quantizer_keys_across_ranks(checkpoint_quant_keys)
     # For weight quantizers absent from the checkpoint the weights were already fake-quantized
     # at export time (amax folded into weights). Disable those quantizers so that fold_weight
-    # is a no-op for them. Any other missing quantizer key is still an error.
+    # is a no-op for them. Non-weight keys missing on this rank but present on another rank's
+    # shard are omitted from global_missing (all_gather union of key strings).
     missing_wq_module_paths: set[str] = set()
+    global_missing_non_wq: list[str] = []
     for key in model_quant_keys:
-        if key not in checkpoint_quant_keys:
-            if "weight_quantizer" in key:
-                # State dict keys continue past the submodule (e.g. ...weight_quantizer._amax).
-                # named_modules() names stop at the weight_quantizer module; strip the suffix.
-                parts = key.split(".")
-                wq_i = next(
-                    (i for i, p in enumerate(parts) if p.endswith("weight_quantizer")),
-                    None,
-                )
-                if wq_i is not None:
-                    missing_wq_module_paths.add(".".join(parts[: wq_i + 1]))
-                else:
-                    raise ValueError(
-                        f"Missing checkpoint key {key!r} looks like a weight quantizer, but no path "
-                        "component ends with 'weight_quantizer'; cannot map to a module to disable."
-                    )
+        if key in ckpt_key_set:
+            continue
+        if "weight_quantizer" in key:
+            # Per-rank shard: only disable using this rank's checkpoint contents.
+            parts = key.split(".")
+            weight_quantizer_index = next(
+                (i for i, p in enumerate(parts) if p.endswith("weight_quantizer")),
+                None,
+            )
+            if weight_quantizer_index is not None:
+                missing_wq_module_paths.add(".".join(parts[: weight_quantizer_index + 1]))
             else:
                 raise ValueError(
-                    f"Key {key} not found in checkpoint state dict, but exists in model"
+                    f"Missing checkpoint key {key!r} looks like a weight quantizer, but no path "
+                    "component ends with 'weight_quantizer'; cannot map to a module to disable."
                 )
+        elif key not in global_ckpt_key_set:
+            global_missing_non_wq.append(key)
+
+    if global_missing_non_wq:
+        keys = sorted(global_missing_non_wq)
+        n = len(keys)
+        sample, rest = keys[:8], n - 8
+        logger.warning(
+            "%s quantizer key(s) missing from every rank's checkpoint (after all_gather): %s%s",
+            n,
+            sample,
+            f" ... (+{rest} more)" if rest > 0 else "",
+        )
 
     for name, module in model.named_modules():
-        if name in missing_wq_module_paths and hasattr(module, "disable"):
+        if (
+            name in missing_wq_module_paths
+            and isinstance(module, TensorQuantizer)
+            and hasattr(module, "disable")
+        ):
             module.disable()
 
     # Update quant values
