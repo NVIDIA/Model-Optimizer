@@ -40,6 +40,7 @@ from accelerate import ParallelismConfig
 from eagle_utils import (
     EagleTrainerWithAccLog,
     EagleTrainingPlot,
+    LoRAWarmupCallback,
     make_speculative_data_module,
     patch_ring_attention_for_ttt,
 )
@@ -183,7 +184,9 @@ def _load_config(config_path: str, overrides: list[str] = ()) -> tuple[dict, dic
 
     if hf_cfg.get("dp_shard_size") is None:
         cp_size = hf_cfg.get("cp_size", 1)
-        hf_cfg["dp_shard_size"] = torch.cuda.device_count() // cp_size
+        # Use WORLD_SIZE (total GPUs across all nodes) when available, else local GPU count.
+        world_size = int(os.environ.get("WORLD_SIZE", torch.cuda.device_count()))
+        hf_cfg["dp_shard_size"] = world_size // cp_size
 
     return hf_cfg, eagle_cfg, dflash_cfg
 
@@ -316,6 +319,20 @@ def train():
         else:
             raise Exception(f"{training_args.mode} is not supported!")
 
+    # Move any remaining CPU buffers to CUDA so DDP (NCCL-only) can broadcast
+    # them.  We iterate named_buffers and reassign via the owning module to
+    # keep the module tree consistent.  Parameters are left on CPU — the HF
+    # Trainer will move them during init.
+    if torch.cuda.is_available():
+        _target_dev = torch.device("cuda", 0)
+        for name, buf in list(model.named_buffers()):
+            if buf.device.type == "cpu":
+                parts = name.split(".")
+                mod = model
+                for p in parts[:-1]:
+                    mod = getattr(mod, p)
+                setattr(mod, parts[-1], buf.to(_target_dev))
+
     print_rank_0("Loading dataset...")
     is_dflash = training_args.mode == "dflash"
     if training_args.mode in ("eagle3", "dflash"):
@@ -327,11 +344,15 @@ def train():
             shift_labels=not is_dflash,
         )
 
+    callbacks = [EagleTrainingPlot(training_args.ar_validate_steps, training_args.estimate_ar)]
+    if eagle_cfg.get("eagle_base_lora") and eagle_cfg.get("eagle_base_lora_warmup_steps", 0) > 0:
+        callbacks.append(LoRAWarmupCallback(eagle_cfg["eagle_base_lora_warmup_steps"]))
+
     trainer = EagleTrainerWithAccLog(
         model=model,
         processing_class=tokenizer,
         args=training_args,
-        callbacks=[EagleTrainingPlot(training_args.ar_validate_steps, training_args.estimate_ar)],
+        callbacks=callbacks,
         **data_module,
     )
 
