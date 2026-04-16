@@ -116,11 +116,17 @@ class EagleExporter(SpeculativeDecodingExporter):
             "llama": LLAMA_EAGLE_SINGLE_LAYER,
             "kimik2": KIMIK2_EAGLE_SINGLE_LAYER,
         }[self.eagle_decoder_type]
+        # fc and hidden_norm are only present when use_aux_hidden_state=True
+        use_aux = getattr(self.model.eagle_config, "use_aux_hidden_state", False)
+        aux_only_keys = {"fc", "layers.0.hidden_norm"}
+        required_keys = set(expected_keys_single_layer["required"])
+        if not use_aux:
+            required_keys -= aux_only_keys
         # Check that export sd has required keys
-        for key in expected_keys_single_layer["required"]:
+        for key in required_keys:
             assert f"{key}.weight" in export_sd, f"Missing required key: {key}.weight"
         for i in range(1, self.num_hidden_layers):
-            for key in expected_keys_single_layer["required"] - {
+            for key in required_keys - {
                 "layers.0.hidden_norm",
                 "layers.0.input_layernorm",
                 "norm",
@@ -201,6 +207,42 @@ class EagleExporter(SpeculativeDecodingExporter):
 
         return template_config
 
+    def _export_lora(self, export_dir: Path, full_sd: dict):
+        """Export base model LoRA adapter weights alongside the eagle module artifacts."""
+        from peft import LoraConfig
+
+        lora_sd = {k: v for k, v in full_sd.items() if ".lora_A." in k or ".lora_B." in k}
+        if not lora_sd:
+            raise RuntimeError(
+                "No LoRA adapter tensors found in the model state dict. "
+                "Ensure eagle_base_lora=True and the model was converted with LoRA adapters."
+            )
+        # Reformat keys to match peft's standard adapter file format:
+        # 1. Strip the adapter name (e.g. ".default") — peft re-inserts it on load.
+        # 2. Add "base_model.model." prefix — peft expects this in saved adapters.
+        lora_sd = {
+            re.sub(r"(lora_[AB])\.\w+\.weight$", r"\1.weight", k): v for k, v in lora_sd.items()
+        }
+        lora_sd = {f"base_model.model.{k}": v for k, v in lora_sd.items()}
+        save_file(lora_sd, export_dir / "adapter_model.safetensors")
+
+        # Infer target modules from the exported LoRA keys (e.g., "q_proj", "v_proj")
+        # Keys are like: base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight
+        target_modules = sorted({k.split(".")[-3] for k in lora_sd if ".lora_A." in k})
+        lora_config = LoraConfig(
+            r=self.model.eagle_base_lora_rank,
+            lora_alpha=self.model.eagle_base_lora_alpha,
+            target_modules=target_modules,
+            bias="none",
+        )
+        with open(export_dir / "adapter_config.json", "w") as f:
+            json.dump(
+                lora_config.to_dict(),
+                f,
+                indent=4,
+                default=lambda o: sorted(o) if isinstance(o, set) else o,
+            )
+
     def export(
         self,
         export_dir: Path | str,
@@ -234,6 +276,10 @@ class EagleExporter(SpeculativeDecodingExporter):
         if hf_quant_config is not None:
             with open(f"{export_dir}/hf_quant_config.json", "w") as file:
                 json.dump(hf_quant_config, file, indent=4)
+
+        # Export LoRA adapter weights separately
+        if getattr(self.model, "eagle_base_lora", False):
+            self._export_lora(export_dir, full_sd)
 
 
 class EagleMedusaExporter(EagleExporter):

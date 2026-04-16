@@ -117,6 +117,10 @@ class VllmFqGPTModelExporter(GPTModelExporter):
     ) -> tuple[dict[str, torch.Tensor], str, int]:
         """Return a state_dict, quantization format, and block_size of the module.
 
+        The weight_quantizer is folded into the weight via fake-quantization
+        (quantize + dequantize), and its amax is not exported. The vLLM fakequant
+        reload path is expected to disable the weight quantizer when the amax is absent.
+
         Args:
             module: The target module to perform real quantization.
             dtype: The default data type.
@@ -133,14 +137,48 @@ class VllmFqGPTModelExporter(GPTModelExporter):
         block_size = 0
 
         if hasattr(module, "weight") and module.weight is not None:
-            weight = module.weight.to(dtype).cpu()
-            name_to_value["weight"] = weight
+            weight = module.weight.to(dtype)
+            # Fold the weight_quantizer into the weight by applying fake-quantization
+            # (quantize then dequantize). The weight_quantizer amax is not exported;
+            # the vLLM fakequant reload path disables the weight quantizer when absent.
+            weight_quantizer = getattr(module, "weight_quantizer", None)
+            if weight_quantizer is not None and weight_quantizer.is_enabled:
+                with torch.no_grad():
+                    # NVFP4-like kernels may need CUDA; if weights are CPU after gather, run on
+                    # CUDA then ``weight_quantizer.to`` back (full module round-trip).
+                    quant_device = (
+                        torch.device("cuda", torch.cuda.current_device())
+                        if weight.device.type == "cpu" and torch.cuda.is_available()
+                        else weight.device
+                    )
+                    # TensorQuantizer does not expose nn.Module.device (custom __getattr__).
+                    param_device = next(weight_quantizer.parameters(), None)
+                    buf_device = next(weight_quantizer.buffers(), None)
+                    wq_dev = (
+                        param_device.device
+                        if param_device is not None
+                        else (buf_device.device if buf_device is not None else torch.device("cpu"))
+                    )
+                    need_move = wq_dev != quant_device
+                    if need_move:
+                        weight_quantizer.to(quant_device)
+                    try:
+                        weight = weight_quantizer(weight.to(quant_device)).to(dtype)
+                    finally:
+                        if need_move:
+                            weight_quantizer.to(wq_dev)
+            name_to_value["weight"] = weight.cpu()
         else:
             return name_to_value, qformat, block_size
 
         if hasattr(module, "bias") and module.bias is not None:
             name_to_value["bias"] = module.bias.to(dtype).cpu()
+
+        # Only save input/output quantizer state; weight_quantizer amax is not exported
+        # since it has been folded into the weight above.
         for name, param in get_quantizer_state_dict(module).items():
+            if "weight_quantizer" in name:
+                continue
             for key, value in param.items():
                 name_to_value[name + "." + key] = value.to(dtype).cpu()
         return name_to_value, qformat, block_size

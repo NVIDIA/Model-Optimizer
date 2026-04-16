@@ -195,6 +195,58 @@ class EagleConfig(ModeloptBaseConfig):
         ),
     )
 
+    eagle_base_lora: bool = ModeloptField(
+        default=False,
+        description=(
+            "Whether to add LoRA adapters to the base model for co-training with the EAGLE module. "
+            "Requires the `peft` library. Incompatible with eagle_offline=True."
+        ),
+    )
+
+    eagle_base_lora_rank: int = ModeloptField(
+        default=64,
+        description="LoRA rank for the base model adapters.",
+    )
+
+    eagle_base_lora_alpha: float = ModeloptField(
+        default=16.0,
+        description="LoRA alpha (scaling) for the base model adapters.",
+    )
+
+    eagle_base_lora_target_modules: list | None = ModeloptField(
+        default=None,
+        description=(
+            "List of module name patterns to apply LoRA to in the base model "
+            "(e.g. ['q_proj', 'v_proj']). None uses peft defaults."
+        ),
+    )
+
+    eagle_base_lora_preservation_loss_weight: float = ModeloptField(
+        default=0.1,
+        description=(
+            "Weight for the preservation loss that minimizes the KL divergence between "
+            "the LoRA-adapted base model output and the original base model output."
+        ),
+    )
+
+    eagle_base_lora_warmup_steps: int = ModeloptField(
+        default=0,
+        description=(
+            "Number of warmup steps where LoRA is frozen and only the EAGLE draft head trains. "
+            "After warmup, LoRA is enabled for co-training."
+        ),
+    )
+
+    eagle_base_lora_logits_detach_prob: float = ModeloptField(
+        default=0.5,
+        description=(
+            "After warmup, probability of detaching base_output_softmax_logits each step. "
+            "Acts as dropout regularization on the eagle-loss-to-LoRA gradient path through "
+            "logits, preventing LoRA from degenerating to maximize EAGLE accuracy at the cost "
+            "of base model quality. 1.0 = always detach (no logits gradient), 0.0 = never detach."
+        ),
+    )
+
     @model_validator(mode="before")
     @classmethod
     def _derive_eagle_offline(cls, data: Any, info: ValidationInfo) -> Any:

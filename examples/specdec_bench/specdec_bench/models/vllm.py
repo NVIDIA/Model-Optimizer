@@ -72,6 +72,7 @@ class VLLMModel(Model):
             num_speculative_tokens = specdec.get("num_speculative_tokens", 3)
         engine_args = AsyncEngineArgs(
             model=model_dir,
+            tokenizer=kwargs.get("tokenizer_path"),
             trust_remote_code=kwargs.get("trust_remote_code", False),
             tensor_parallel_size=kwargs.get("tensor_parallel_size", 1),
             enable_expert_parallel=kwargs.get("moe_expert_parallel_size", 1) > 1,
