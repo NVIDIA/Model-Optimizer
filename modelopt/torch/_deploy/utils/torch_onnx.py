@@ -47,6 +47,7 @@ from modelopt.onnx.quantization.qdq_utils import qdq_to_dq, replace_zero_scale_w
 from modelopt.onnx.utils import (
     change_casts_to_fp16,
     check_model_uses_external_data,
+    fold_dq_fp32_to_fp16_casts,
     get_input_names,
     get_input_shapes,
     get_node_names,
@@ -408,10 +409,10 @@ def _disable_fp8_conv_weight_quantizers(model: nn.Module):
     """Temporarily disable FP8 weight quantizers on Conv layers during ONNX export.
 
     The TorchScript ONNX exporter requires static kernel shapes for Conv operations,
-    but FP8 weight quantization (TRT_FP8QuantizeLinear -> TRT_FP8DequantizeLinear)
-    produces dynamic-shape outputs that break this requirement. Disabling Conv weight
-    quantizers during export allows the Conv to export with static-shape FP16/FP32
-    weights. Conv activations still have FP8 QDQ nodes (input quantizers remain enabled).
+    but the TRT_FP8DequantizeLinear custom op produces outputs with unknown shapes in
+    the TorchScript IR, causing the _convolution symbolic to fail. Disabling Conv weight
+    quantizers during export allows the Conv to export with static-shape FP16/FP32 weights.
+    FP8 weight quantization is restored as a post-processing step in FP8QuantExporter.
     """
     disabled = []
     for _, module in model.named_modules():
@@ -584,8 +585,9 @@ def get_onnx_bytes_and_metadata(
         if is_fp4_quantized(model) or is_mxfp8_quantized(model)
         else nullcontext()
     )
-    # Disable FP8 Conv weight quantizers: TorchScript ONNX exporter requires static
-    # kernel shapes, but FP8 DequantizeLinear produces dynamic shapes.
+    # Disable FP8 Conv weight quantizers: TorchScript custom ops produce outputs with
+    # unknown shapes, causing _convolution symbolic to fail. Conv weights are quantized
+    # to FP8 in post-processing by FP8QuantExporter instead.
     conv_wq_context = (
         _disable_fp8_conv_weight_quantizers(model) if is_fp8_quantized(model) else nullcontext()
     )
@@ -648,6 +650,8 @@ def get_onnx_bytes_and_metadata(
             # Change FP32 cast nodes feeding into Concat/Add to FP16
             op_list = ["Concat", "Add", "Sqrt", "LayerNormalization", "Clip", "Mul", "Exp"]
             onnx_opt_graph = change_casts_to_fp16(onnx_opt_graph, op_list)
+            # Remove Cast(FP32->FP16) nodes after DQ by setting DQ output to FP16 directly
+            onnx_opt_graph = fold_dq_fp32_to_fp16_casts(onnx_opt_graph)
         else:
             onnx_opt_graph = convert_to_f16(
                 onnx_opt_graph, low_precision_type=weights_dtype, keep_io_types=False

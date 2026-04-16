@@ -120,7 +120,7 @@ def filter_func(name):
     pattern = re.compile(
         r".*(time_emb_proj|time_embedding|conv_in|conv_out|conv_shortcut|add_embedding|"
         r"pos_embed|time_text_embed|context_embedder|norm_out|x_embedder|patch_embed|cpb_mlp|"
-        r"downsample|maxpool|global_pool).*"
+        r"maxpool|global_pool).*"
     )
     return pattern.match(name) is not None
 

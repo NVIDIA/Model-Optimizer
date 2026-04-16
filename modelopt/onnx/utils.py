@@ -1504,6 +1504,87 @@ def remove_redundant_casts(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
     return onnx_model
 
 
+def fold_dq_fp32_to_fp16_casts(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
+    """Remove Cast(FP32->FP16) nodes after DequantizeLinear by setting DQ output to FP16.
+
+    When convert_float_to_float16 blocks DequantizeLinear, it inserts Cast nodes to bridge
+    the FP32 DQ output to the FP16 graph. This function removes those Cast nodes by:
+    1. Converting the DQ scale initializer from FP32 to FP16
+    2. Updating the DQ output type to FP16 in value_info
+    3. Bypassing and removing the Cast node
+
+    Args:
+        onnx_model: The ONNX model with DQ -> Cast(FP32->FP16) patterns.
+
+    Returns:
+        The ONNX model with Cast nodes removed and DQ outputs set to FP16.
+    """
+    DQ_OPS = {"DequantizeLinear", "TRT_FP8DequantizeLinear"}
+
+    # Build a map of tensor name -> producer node
+    producer_map: dict[str, onnx.NodeProto] = {}
+    for node in onnx_model.graph.node:
+        for out in node.output:
+            producer_map[out] = node
+
+    # Build initializer lookup
+    initializer_map: dict[str, onnx.TensorProto] = {
+        init.name: init for init in onnx_model.graph.initializer
+    }
+
+    nodes_to_remove = []
+    for node in onnx_model.graph.node:
+        if node.op_type != "Cast":
+            continue
+
+        # Check: Cast target is FP16
+        cast_to = None
+        for attr in node.attribute:
+            if attr.name == "to":
+                cast_to = attr.i
+        if cast_to != onnx.TensorProto.FLOAT16:
+            continue
+
+        # Check: producer is a DQ node
+        producer = producer_map.get(node.input[0])
+        if producer is None or producer.op_type not in DQ_OPS:
+            continue
+
+        # Convert the DQ scale initializer from FP32 to FP16
+        # DQ inputs: [input, scale, (zero_point)]
+        if len(producer.input) >= 2:
+            scale_name = producer.input[1]
+            if scale_name in initializer_map:
+                scale_init = initializer_map[scale_name]
+                if scale_init.data_type == onnx.TensorProto.FLOAT:
+                    import numpy as np
+
+                    scale_data = np.frombuffer(scale_init.raw_data, dtype=np.float32)
+                    if not scale_data.size:
+                        scale_data = np.array(scale_init.float_data, dtype=np.float32)
+                    scale_fp16 = scale_data.astype(np.float16)
+                    scale_init.data_type = onnx.TensorProto.FLOAT16
+                    scale_init.raw_data = scale_fp16.tobytes()
+                    del scale_init.float_data[:]
+
+        # Bypass the Cast node
+        _bypass_cast_node(onnx_model, node)
+        nodes_to_remove.append(node)
+
+        # Update the DQ output type in value_info
+        dq_output_name = producer.output[0]
+        for vi in onnx_model.graph.value_info:
+            if vi.name == dq_output_name:
+                vi.type.tensor_type.elem_type = onnx.TensorProto.FLOAT16
+                break
+
+    logger.debug(f"Folded {len(nodes_to_remove)} DQ -> Cast(FP32->FP16) patterns")
+    for node in nodes_to_remove:
+        onnx_model.graph.node.remove(node)
+
+    return onnx_model
+
+
 def remove_node_training_mode(onnx_model: onnx.ModelProto, node_op_type: str) -> onnx.ModelProto:
     """Remove `training_mode` attribute and extra training outputs from nodes of a given op type.
 
