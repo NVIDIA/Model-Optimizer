@@ -92,6 +92,7 @@ def draft_vocab_cache_dir(tmp_path_factory):
 
 def test_calibrate_draft_vocab(tiny_llama_path, tiny_daring_anteater_path, draft_vocab_cache_dir):
     """Test calibration of draft vocabulary."""
+    draft_vocab_size = 80  # tiny tokenizer has vocab size 128 only
     run_example_command(
         [
             "python",
@@ -101,7 +102,7 @@ def test_calibrate_draft_vocab(tiny_llama_path, tiny_daring_anteater_path, draft
             "--data",
             tiny_daring_anteater_path,
             "--draft_vocab_size",
-            "100",
+            str(draft_vocab_size),
             "--save_dir",
             draft_vocab_cache_dir,
         ],
@@ -110,7 +111,9 @@ def test_calibrate_draft_vocab(tiny_llama_path, tiny_daring_anteater_path, draft
 
     model_name = os.path.basename(os.path.normpath(tiny_llama_path))
     d2t = torch.load(os.path.join(draft_vocab_cache_dir, model_name, "d2t.pt"))
-    assert d2t.shape[0] == 100, f"Expected draft vocab size 100, got {d2t.shape[0]}"
+    assert d2t.shape[0] == draft_vocab_size, (
+        f"Expected draft vocab size {draft_vocab_size}, got {d2t.shape[0]}"
+    )
 
 
 # fmt: off

@@ -390,13 +390,6 @@ class FlashSkipSoftmax(SparseAttentionMethod):
         set_skip_softmax_context(True)
         stack.callback(set_skip_softmax_context, False)
 
-        try:
-            from ..kernels.diffusers_eager_attention import get_skip_softmax_attention_backend
-
-            stack.enter_context(get_skip_softmax_attention_backend())
-        except (ImportError, RuntimeError):
-            pass
-
         stack.enter_context(replace_function(torch.nn.functional, "softmax", sparse_softmax))
         return stack
 

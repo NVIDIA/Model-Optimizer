@@ -398,8 +398,8 @@ def get_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help=(
-            "Additional trtexec arguments as a single quoted string. "
-            "Example: --autotune_trtexec_args '--fp16 --workspace=4096'"
+            "Additional 'trtexec' arguments as a single quoted string. Only relevant when '--autotune_use_trtexec' is "
+            "set. Example: '--fp16 --workspace=4096'"
         ),
     )
     return argparser

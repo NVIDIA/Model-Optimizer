@@ -132,7 +132,7 @@ jobs:
       docker_image: "nvcr.io/nvidia/nemo:26.02"
       example: ${{ matrix.example }}
       timeout_minutes: 30
-      pip_install_extras: "[hf,dev-test]"
+      pip_install_extras: "[hf,puzzletron,dev-test]"
       runner: linux-amd64-gpu-rtxpro6000-latest-1
 
   nemo-non-pr:
@@ -144,7 +144,7 @@ jobs:
       docker_image: "nvcr.io/nvidia/nemo:26.02"
       example: ${{ matrix.example }}
       timeout_minutes: 30
-      pip_install_extras: "[hf,dev-test]"
+      pip_install_extras: "[hf,puzzletron,dev-test]"
       runner: linux-amd64-gpu-rtxpro6000-latest-2
 
   ##### ONNX/TensorRT Example Tests #####

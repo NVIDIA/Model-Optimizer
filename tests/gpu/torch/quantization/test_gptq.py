@@ -17,8 +17,7 @@ import copy
 
 import pytest
 import torch
-from _test_utils.torch.transformers_models import get_tiny_llama
-from transformers import AutoTokenizer
+from _test_utils.torch.transformers_models import get_tiny_llama, get_tiny_tokenizer
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.unified_export_hf import _export_quantized_weight
@@ -208,7 +207,7 @@ def test_gptq_export_roundtrip():
     "quant_cfg", [mtq.NVFP4_DEFAULT_CFG, mtq.FP8_DEFAULT_CFG, mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG]
 )
 def test_gptq_e2e_flow(quant_cfg):
-    tokenizer = AutoTokenizer.from_pretrained("hf-internal-testing/tiny-random-LlamaForCausalLM")
+    tokenizer = get_tiny_tokenizer()
     model = get_tiny_llama(vocab_size=tokenizer.vocab_size).to("cuda")
 
     if tokenizer.pad_token is None:

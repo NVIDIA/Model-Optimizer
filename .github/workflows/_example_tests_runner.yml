@@ -48,6 +48,7 @@ jobs:
       - name: Install dependencies
         run: |
           # use `python -m pip` instead of `pip` to avoid conflicts with system pip for nemo containers
+          pip uninstall -y nvidia-modelopt
           python -m pip install ".${{ inputs.pip_install_extras }}"
 
           if [[ "${{ inputs.example }}" == *"diffusers"* ]]; then
@@ -64,7 +65,7 @@ jobs:
           COVERAGE_FILE: ${{ github.workspace }}/.coverage
         run: |
           echo "Running tests for: ${{ inputs.example }}"
-          pytest tests/examples/${{ inputs.example }} --cov
+          python -m pytest tests/examples/${{ inputs.example }} --cov
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
         with:
