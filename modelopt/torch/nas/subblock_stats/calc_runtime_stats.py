@@ -13,7 +13,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, LlamaConfig, Llama
 from modelopt.torch.puzzletron.anymodel.converter import Converter
 from modelopt.torch.puzzletron.anymodel.models.llama import LlamaConverter, LlamaModelDescriptor
 from modelopt.torch.puzzletron.anymodel.puzzformer import deci_x_patcher
-from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.block_config import (
+from modelopt.torch.puzzletron.block_config import (
     AttentionConfig,
     BlockConfig,
     FFNConfig,

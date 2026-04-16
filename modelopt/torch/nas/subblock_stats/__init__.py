@@ -13,3 +13,4 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from .calc_runtime_stats import calc_runtime_for_subblocks
+from .calc_subblock_params_and_memory import *

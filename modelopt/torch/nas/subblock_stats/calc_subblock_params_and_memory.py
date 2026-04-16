@@ -25,22 +25,21 @@ import copy
 import json
 import math
 from pathlib import Path
-from typing import Type
 
 import numpy as np
 import torch
 from transformers import PretrainedConfig
 
-from ..anymodel.model_descriptor import ModelDescriptor
-from ..block_config import (
+from modelopt.torch.puzzletron.anymodel.model_descriptor import ModelDescriptor
+from modelopt.torch.puzzletron.block_config import (
     AttentionConfig,
     BlockConfig,
     FFNConfig,
     MambaConfig,
     maybe_cast_block_configs,
 )
-from ..tools.checkpoint_utils_hf import init_model_from_config
-from ..utils.misc import (
+from modelopt.torch.puzzletron.tools.checkpoint_utils_hf import init_model_from_config
+from modelopt.torch.puzzletron.utils.misc import (
     EmptyInitOnDevice,
     calculate_kv_dim,
     raise_unknown_subblock_config_error,
@@ -48,16 +47,16 @@ from ..utils.misc import (
 )
 
 __all__ = [
-    "calculate_subblock_memory",
-    "calculate_subblock_params",
     "calc_subblock_active_params",
-    "load_moe_stats",
-    "estimate_num_active_experts",
+    "calculate_ffn_memory",
     "calculate_mamba_memory",
     "calculate_mamba_state_size",
-    "calculate_ffn_memory",
     "calculate_non_block_memory",
     "calculate_non_block_params",
+    "calculate_subblock_memory",
+    "calculate_subblock_params",
+    "estimate_num_active_experts",
+    "load_moe_stats",
 ]
 
 
@@ -73,7 +72,7 @@ def calculate_subblock_memory(
     kv_cache_dtype: torch.dtype,
     allocate_prefill_query: bool,
     model_config: PretrainedConfig,
-    descriptor: Type[ModelDescriptor],
+    descriptor: type[ModelDescriptor],
 ) -> float | dict[str, float]:
     """``model_config`` / ``descriptor`` are required (puzzletron-style); FFN uses them for meta init."""
     if subblock_config.no_op:
@@ -116,12 +115,10 @@ def calculate_subblock_memory(
 def calculate_subblock_params(
     config: PretrainedConfig,
     layer_config: BlockConfig | FFNConfig | AttentionConfig,
-    descriptor: Type[ModelDescriptor],
+    descriptor: type[ModelDescriptor],
 ) -> int:
     """Count parameters on one meta decoder layer."""
-    if isinstance(layer_config, FFNConfig):
-        block_config = layer_config.to_blockconfig()
-    elif isinstance(layer_config, AttentionConfig):
+    if isinstance(layer_config, FFNConfig) or isinstance(layer_config, AttentionConfig):
         block_config = layer_config.to_blockconfig()
     else:
         block_config = layer_config
@@ -184,7 +181,7 @@ def calculate_subblock_params(
 def calc_subblock_active_params(
     sublayer_config: FFNConfig | AttentionConfig,
     model_config: PretrainedConfig,
-    descriptor: Type[ModelDescriptor],
+    descriptor: type[ModelDescriptor],
     n_embd: int,
     moe_stats_file: str,
     batch_size: int,
@@ -250,7 +247,7 @@ def estimate_moe_active_params(
 def calculate_attention_memory(
     attention_config: AttentionConfig,
     model_config: PretrainedConfig,
-    descriptor: Type[ModelDescriptor],
+    descriptor: type[ModelDescriptor],
     batch_size: int,
     prefill_seq_len: int,
     generation_seq_len: int,
@@ -289,7 +286,7 @@ def calculate_attention_memory(
 def calculate_mamba_memory(
     attention_config: AttentionConfig,
     model_config: PretrainedConfig,
-    descriptor: Type[ModelDescriptor],
+    descriptor: type[ModelDescriptor],
     batch_size: int,
     weights_dtype: torch.dtype,
     kv_cache_dtype: torch.dtype,
@@ -328,7 +325,7 @@ def _calculate_mamba_intermediates(mamba_config: MambaConfig) -> tuple[int, ...]
 def calculate_ffn_memory(
     ffn_config: FFNConfig,
     model_config: PretrainedConfig,
-    descriptor: Type[ModelDescriptor],
+    descriptor: type[ModelDescriptor],
     weights_dtype: torch.dtype | str,
     experts_dtype: torch.dtype | str | None = None,
 ) -> float:

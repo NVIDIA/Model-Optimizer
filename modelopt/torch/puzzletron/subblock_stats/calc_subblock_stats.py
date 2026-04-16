@@ -32,6 +32,13 @@ from omegaconf import DictConfig, ListConfig, OmegaConf
 from tqdm import tqdm
 from transformers import PretrainedConfig
 
+from modelopt.torch.nas.subblock_stats.calc_subblock_params_and_memory import (
+    calc_subblock_active_params,
+    calculate_non_block_memory,
+    calculate_non_block_params,
+    calculate_subblock_memory,
+    calculate_subblock_params,
+)
 from modelopt.torch.utils import json_dump
 
 from ..anymodel.model_descriptor import ModelDescriptor, ModelDescriptorFactory
@@ -40,18 +47,10 @@ from ..replacement_library.replacement_utils import parse_layer_replacement
 from ..tools.checkpoint_utils import load_model_config
 from ..tools.logger import mprint
 from ..utils.parsing import format_global_config
-from modelopt.torch.nas.subblock_stats.calc_subblock_params_and_memory import (
-    calc_subblock_active_params,
-    calculate_non_block_memory,
-    calculate_non_block_params,
-    calculate_subblock_memory,
-    calculate_subblock_params,
-)
 
 __all__ = [
     "calculate_subblock_stats",
     "launch_calc_subblock_stats",
-    "add_int8_runtime_estimates",
 ]
 
 # Type variable for dataclasses
