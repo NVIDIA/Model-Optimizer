@@ -200,65 +200,57 @@ def _resolve_imports(
             )
         return import_map[ref_name]
 
-    def _resolve_dict_value(d: dict[str, Any], key: str) -> None:
-        """Resolve ``$import`` in a dict value: ``key: {$import: name, ...inline}``."""
-        val = d[key]
-        if not isinstance(val, dict) or _IMPORT_KEY not in val:
-            return
-        ref = val.pop(_IMPORT_KEY)
-        inline_keys = dict(val)
-        ref_names = ref if isinstance(ref, list) else [ref]
+    def _resolve_value(obj: Any) -> Any:
+        """Recursively resolve ``$import`` markers anywhere in the config tree.
 
-        merged: dict[str, Any] = {}
-        for rname in ref_names:
-            snippet = _lookup(rname, f"{key} of {d}")
-            if not isinstance(snippet, dict):
-                raise ValueError(
-                    f"$import {rname!r} in {key} must resolve to a dict, "
-                    f"got {type(snippet).__name__}."
-                )
-            merged.update(snippet)
+        - Dict with ``$import`` as only key and list value → splice (in list context)
+        - Dict with ``$import`` key → replace/merge (import + override with inline keys)
+        - List → resolve each element (with list-splice for ``$import`` entries)
+        - Other → return as-is
+        """
+        if isinstance(obj, dict):
+            if _IMPORT_KEY in obj:
+                # {$import: name, ...inline} → import, merge, override
+                ref = obj.pop(_IMPORT_KEY)
+                inline_keys = dict(obj)
+                ref_names = ref if isinstance(ref, list) else [ref]
 
-        merged.update(inline_keys)
-        d[key] = merged
+                merged: dict[str, Any] = {}
+                for rname in ref_names:
+                    snippet = _lookup(rname, "dict value")
+                    if not isinstance(snippet, dict):
+                        raise ValueError(
+                            f"$import {rname!r} in dict must resolve to a dict, "
+                            f"got {type(snippet).__name__}."
+                        )
+                    merged.update(snippet)
 
-    def _resolve_list(entries: list[Any]) -> list[Any]:
-        """Resolve $import markers in a list of entries."""
-        resolved: list[Any] = []
-        for entry in entries:
-            if isinstance(entry, dict) and _IMPORT_KEY in entry:
-                if len(entry) > 1:
-                    raise ValueError(
-                        f"$import must be the only key in the dict, got extra keys: "
-                        f"{sorted(k for k in entry if k != _IMPORT_KEY)}"
-                    )
-                imported = _lookup(entry[_IMPORT_KEY], "list entry")
-                if not isinstance(imported, list):
-                    raise ValueError(
-                        f"$import {entry[_IMPORT_KEY]!r} in list must resolve to a "
-                        f"list, got {type(imported).__name__}."
-                    )
-                resolved.extend(imported)
-            elif isinstance(entry, dict):
-                # Resolve $import in any dict value within the entry
-                for key in list(entry):
-                    if isinstance(entry.get(key), dict) and _IMPORT_KEY in entry[key]:
-                        _resolve_dict_value(entry, key)
-                resolved.append(entry)
+                merged.update(inline_keys)
+                return _resolve_value(merged)  # resolve any nested $import in result
             else:
-                resolved.append(entry)
-        return resolved
+                return {k: _resolve_value(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            resolved: list[Any] = []
+            for entry in obj:
+                if isinstance(entry, dict) and _IMPORT_KEY in entry and len(entry) == 1:
+                    # {$import: name} as sole key in list → splice
+                    imported = _lookup(entry[_IMPORT_KEY], "list entry")
+                    if not isinstance(imported, list):
+                        raise ValueError(
+                            f"$import {entry[_IMPORT_KEY]!r} in list must resolve to a "
+                            f"list, got {type(imported).__name__}."
+                        )
+                    resolved.extend(_resolve_value(imported))
+                else:
+                    resolved.append(_resolve_value(entry))
+            return resolved
+        return obj
 
-    # Resolve in quant_cfg (top-level or nested under quantize)
-    for container in [data, data.get("quantize", {})]:
-        if isinstance(container, dict):
-            quant_cfg = container.get("quant_cfg")
-            if isinstance(quant_cfg, list):
-                container["quant_cfg"] = _resolve_list(quant_cfg)
+    data = _resolve_value(data)
 
-    # Resolve in _list_content (multi-document snippets)
-    if "_list_content" in data:
-        data["_list_content"] = _resolve_list(data["_list_content"])
+    # Unwrap _list_content (multi-document snippets)
+    if isinstance(data, dict) and "_list_content" in data:
+        data["_list_content"] = _resolve_value(data["_list_content"])
 
     return data
 

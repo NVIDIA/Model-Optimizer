@@ -445,7 +445,9 @@ def test_import_entry_single_element_list(tmp_path):
     )
     recipe = load_recipe(recipe_file)
     assert len(recipe.quantize["quant_cfg"]) == 1
-    assert recipe.quantize["quant_cfg"][0] == {"quantizer_name": "*", "enable": False}
+    entry = recipe.quantize["quant_cfg"][0]
+    assert entry["quantizer_name"] == "*"
+    assert entry["enable"] is False
 
 
 def test_import_entry_non_list_raises(tmp_path):
@@ -491,8 +493,8 @@ def test_import_entry_list_splice(tmp_path):
     assert recipe.quantize["quant_cfg"][2]["quantizer_name"] == "*router*"
 
 
-def test_import_entry_sibling_keys_raises(tmp_path):
-    """$import as a list entry with sibling keys raises ValueError."""
+def test_import_entry_sibling_keys_with_list_snippet_raises(tmp_path):
+    """$import with sibling keys raises when the import resolves to a list (not a dict)."""
     (tmp_path / "disable.yml").write_text("- quantizer_name: '*'\n  enable: false\n")
     recipe_file = tmp_path / "recipe.yml"
     recipe_file.write_text(
@@ -506,7 +508,7 @@ def test_import_entry_sibling_keys_raises(tmp_path):
         f"    - $import: disable_all\n"
         f"      quantizer_name: '*extra*'\n"
     )
-    with pytest.raises(ValueError, match="must be the only key"):
+    with pytest.raises(ValueError, match="must resolve to a dict"):
         load_recipe(recipe_file)
 
 
@@ -558,50 +560,42 @@ def test_import_cfg_inline_overrides_import(tmp_path):
 
 
 def test_import_in_non_cfg_dict_value(tmp_path):
-    """$import resolves in any dict value, not just cfg."""
-    (tmp_path / "bias_cfg.yml").write_text("enable: true\ntype: static\naxis: -1\n")
-    recipe_file = tmp_path / "recipe.yml"
-    recipe_file.write_text(
+    """$import resolves in any dict value, not just cfg (tested via load_config to skip validation)."""
+    (tmp_path / "extra.yml").write_text("foo: bar\nbaz: 42\n")
+    config_file = tmp_path / "config.yml"
+    config_file.write_text(
         f"imports:\n"
-        f"  bias_cfg: {tmp_path / 'bias_cfg.yml'}\n"
-        f"metadata:\n"
-        f"  recipe_type: ptq\n"
-        f"quantize:\n"
-        f"  algorithm: max\n"
-        f"  quant_cfg:\n"
-        f"    - quantizer_name: '*weight_quantizer'\n"
-        f"      bias:\n"
-        f"        $import: bias_cfg\n"
+        f"  extra: {tmp_path / 'extra.yml'}\n"
+        f"quant_cfg:\n"
+        f"  - quantizer_name: '*weight_quantizer'\n"
+        f"    my_field:\n"
+        f"      $import: extra\n"
     )
-    recipe = load_recipe(recipe_file)
-    entry = recipe.quantize["quant_cfg"][0]
-    assert entry["bias"] == {"enable": True, "type": "static", "axis": -1}
+    data = load_config(config_file)
+    entry = data["quant_cfg"][0]
+    assert entry["my_field"] == {"foo": "bar", "baz": 42}
 
 
 def test_import_in_multiple_dict_values(tmp_path):
     """$import resolves independently in multiple dict values of the same entry."""
     (tmp_path / "fp8.yml").write_text("num_bits: e4m3\n")
-    (tmp_path / "bias_cfg.yml").write_text("enable: true\ntype: dynamic\n")
-    recipe_file = tmp_path / "recipe.yml"
-    recipe_file.write_text(
+    (tmp_path / "extra.yml").write_text("foo: bar\n")
+    config_file = tmp_path / "config.yml"
+    config_file.write_text(
         f"imports:\n"
         f"  fp8: {tmp_path / 'fp8.yml'}\n"
-        f"  bias_cfg: {tmp_path / 'bias_cfg.yml'}\n"
-        f"metadata:\n"
-        f"  recipe_type: ptq\n"
-        f"quantize:\n"
-        f"  algorithm: max\n"
-        f"  quant_cfg:\n"
-        f"    - quantizer_name: '*weight_quantizer'\n"
-        f"      cfg:\n"
-        f"        $import: fp8\n"
-        f"      bias:\n"
-        f"        $import: bias_cfg\n"
+        f"  extra: {tmp_path / 'extra.yml'}\n"
+        f"quant_cfg:\n"
+        f"  - quantizer_name: '*weight_quantizer'\n"
+        f"    cfg:\n"
+        f"      $import: fp8\n"
+        f"    my_field:\n"
+        f"      $import: extra\n"
     )
-    recipe = load_recipe(recipe_file)
-    entry = recipe.quantize["quant_cfg"][0]
+    data = load_config(config_file)
+    entry = data["quant_cfg"][0]
     assert entry["cfg"] == {"num_bits": (4, 3)}
-    assert entry["bias"] == {"enable": True, "type": "dynamic"}
+    assert entry["my_field"] == {"foo": "bar"}
 
 
 def test_import_cfg_multi_import(tmp_path):
@@ -655,12 +649,12 @@ def test_import_cfg_multi_import_later_overrides_earlier(tmp_path):
 def test_import_cfg_multi_import_with_extend(tmp_path):
     """$import list + inline keys all merge without conflicts."""
     (tmp_path / "bits.yml").write_text("num_bits: e4m3\n")
-    (tmp_path / "scale.yml").write_text("scale_bits: e8m0\n")
+    (tmp_path / "extra.yml").write_text("fake_quant: false\n")
     recipe_file = tmp_path / "recipe.yml"
     recipe_file.write_text(
         f"imports:\n"
         f"  bits: {tmp_path / 'bits.yml'}\n"
-        f"  scale: {tmp_path / 'scale.yml'}\n"
+        f"  extra: {tmp_path / 'extra.yml'}\n"
         f"metadata:\n"
         f"  recipe_type: ptq\n"
         f"quantize:\n"
@@ -668,12 +662,12 @@ def test_import_cfg_multi_import_with_extend(tmp_path):
         f"  quant_cfg:\n"
         f"    - quantizer_name: '*weight_quantizer'\n"
         f"      cfg:\n"
-        f"        $import: [bits, scale]\n"
+        f"        $import: [bits, extra]\n"
         f"        axis: 0\n"
     )
     recipe = load_recipe(recipe_file)
     cfg = recipe.quantize["quant_cfg"][0]["cfg"]
-    assert cfg == {"num_bits": (4, 3), "scale_bits": (8, 0), "axis": 0}
+    assert cfg == {"num_bits": (4, 3), "fake_quant": False, "axis": 0}
 
 
 def test_import_dir_format(tmp_path):
@@ -741,33 +735,140 @@ def test_import_builtin_fp8_kv_snippet():
 
 
 # ---------------------------------------------------------------------------
+# imports — general tree-wide resolution (not just quant_cfg)
+# ---------------------------------------------------------------------------
+
+
+def test_import_in_top_level_dict_value(tmp_path):
+    """$import resolves in a top-level dict value (not inside any list)."""
+    (tmp_path / "algo.yml").write_text("method: gptq\nuse_layerwise: true\n")
+    config_file = tmp_path / "config.yml"
+    config_file.write_text(
+        f"imports:\n  algo: {tmp_path / 'algo.yml'}\nalgorithm:\n  $import: algo\nquant_cfg: []\n"
+    )
+    data = load_config(config_file)
+    assert data["algorithm"] == {"method": "gptq", "use_layerwise": True}
+
+
+def test_import_in_nested_dict(tmp_path):
+    """$import resolves in deeply nested dicts."""
+    (tmp_path / "settings.yml").write_text("lr: 0.001\nepochs: 10\n")
+    config_file = tmp_path / "config.yml"
+    config_file.write_text(
+        f"imports:\n"
+        f"  settings: {tmp_path / 'settings.yml'}\n"
+        f"training:\n"
+        f"  optimizer:\n"
+        f"    params:\n"
+        f"      $import: settings\n"
+    )
+    data = load_config(config_file)
+    assert data["training"]["optimizer"]["params"] == {"lr": 0.001, "epochs": 10}
+
+
+def test_import_list_splice_outside_quant_cfg(tmp_path):
+    """$import list splice works in any list, not just quant_cfg."""
+    (tmp_path / "extra_tasks.yml").write_text("- name: task_b\n- name: task_c\n")
+    config_file = tmp_path / "config.yml"
+    config_file.write_text(
+        f"imports:\n"
+        f"  extra: {tmp_path / 'extra_tasks.yml'}\n"
+        f"tasks:\n"
+        f"  - name: task_a\n"
+        f"  - $import: extra\n"
+        f"  - name: task_d\n"
+    )
+    data = load_config(config_file)
+    assert data["tasks"] == [
+        {"name": "task_a"},
+        {"name": "task_b"},
+        {"name": "task_c"},
+        {"name": "task_d"},
+    ]
+
+
+def test_import_in_nested_list_of_dicts(tmp_path):
+    """$import in dict values within a nested list resolves correctly."""
+    (tmp_path / "defaults.yml").write_text("timeout: 30\nretries: 3\n")
+    config_file = tmp_path / "config.yml"
+    config_file.write_text(
+        f"imports:\n"
+        f"  defaults: {tmp_path / 'defaults.yml'}\n"
+        f"stages:\n"
+        f"  - name: build\n"
+        f"    config:\n"
+        f"      $import: defaults\n"
+        f"      verbose: true\n"
+        f"  - name: test\n"
+        f"    config:\n"
+        f"      $import: defaults\n"
+    )
+    data = load_config(config_file)
+    assert data["stages"][0]["config"] == {"timeout": 30, "retries": 3, "verbose": True}
+    assert data["stages"][1]["config"] == {"timeout": 30, "retries": 3}
+
+
+def test_import_mixed_tree(tmp_path):
+    """$import resolves at multiple levels in the same config."""
+    (tmp_path / "fp8.yml").write_text("num_bits: e4m3\n")
+    (tmp_path / "disables.yml").write_text("- quantizer_name: '*lm_head*'\n  enable: false\n")
+    (tmp_path / "meta.yml").write_text("version: 2\nauthor: test\n")
+    config_file = tmp_path / "config.yml"
+    config_file.write_text(
+        f"imports:\n"
+        f"  fp8: {tmp_path / 'fp8.yml'}\n"
+        f"  disables: {tmp_path / 'disables.yml'}\n"
+        f"  meta: {tmp_path / 'meta.yml'}\n"
+        f"info:\n"
+        f"  $import: meta\n"
+        f"items:\n"
+        f"  - name: a\n"
+        f"    cfg:\n"
+        f"      $import: fp8\n"
+        f"  - $import: disables\n"
+    )
+    data = load_config(config_file)
+    # Top-level dict import
+    assert data["info"] == {"version": 2, "author": "test"}
+    # Dict import inside list entry
+    assert data["items"][0]["cfg"] == {"num_bits": (4, 3)}
+    # List splice
+    assert data["items"][1] == {"quantizer_name": "*lm_head*", "enable": False}
+
+
+# ---------------------------------------------------------------------------
 # imports — recursive resolution and cycle detection
 # ---------------------------------------------------------------------------
 
 
 def test_import_recursive(tmp_path):
-    """A snippet can itself import other snippets."""
-    (tmp_path / "base.yml").write_text("num_bits: e4m3\n")
-    (tmp_path / "mid.yml").write_text(
-        f"imports:\n  base: {tmp_path / 'base.yml'}\nnum_bits:\n  $import: base\n"
+    """A list snippet can import a dict snippet (recursive resolution via multi-doc)."""
+    # base: dict snippet with FP8 attributes
+    (tmp_path / "fp8.yml").write_text("num_bits: e4m3\n")
+    # mid: list snippet that imports base and uses $import in cfg
+    (tmp_path / "mid.yaml").write_text(
+        f"imports:\n"
+        f"  fp8: {tmp_path / 'fp8.yml'}\n"
+        f"---\n"
+        f"- quantizer_name: '*weight_quantizer'\n"
+        f"  cfg:\n"
+        f"    $import: fp8\n"
     )
+    # recipe imports mid
     recipe_file = tmp_path / "recipe.yml"
     recipe_file.write_text(
         f"imports:\n"
-        f"  mid: {tmp_path / 'mid.yml'}\n"
+        f"  mid: {tmp_path / 'mid.yaml'}\n"
         f"metadata:\n"
         f"  recipe_type: ptq\n"
         f"quantize:\n"
         f"  algorithm: max\n"
         f"  quant_cfg:\n"
-        f"    - quantizer_name: '*weight_quantizer'\n"
-        f"      cfg:\n"
-        f"        $import: mid\n"
+        f"    - $import: mid\n"
     )
     recipe = load_recipe(recipe_file)
     cfg = recipe.quantize["quant_cfg"][0]["cfg"]
-    # mid.yml resolved "num_bits: {$import: base}" → base.yml content
-    assert cfg["num_bits"] == {"num_bits": (4, 3)}
+    assert cfg == {"num_bits": (4, 3)}
 
 
 def test_import_circular_raises(tmp_path):
