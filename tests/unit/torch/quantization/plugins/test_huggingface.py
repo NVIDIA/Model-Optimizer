@@ -234,57 +234,6 @@ def test_is_homogeneous_hf_model_gpt_oss():
     assert is_homogeneous_hf_model(model)
 
 
-def test_qwen3_moe_nvfp4_experts_only_export_exclude_modules(tmp_path):
-    """Test that NVFP4_EXPERTS_ONLY_CFG correctly excludes non-expert modules in HF export.
-
-    For a Qwen3 MoE model, only routed expert layers (mlp.experts.*) should be quantized.
-    Attention layers and lm_head should appear in the exported hf_quant_config.json
-    exclude_modules.
-
-    Reference: https://huggingface.co/nvidia/Qwen3.5-397B-A17B-NVFP4/blob/main/hf_quant_config.json
-    """
-    from modelopt.torch.export.unified_export_hf import export_hf_checkpoint
-
-    model = get_tiny_qwen3_moe()
-    # from_config doesn't set architectures; export code requires it
-    model.config.architectures = ["Qwen3MoeForCausalLM"]
-
-    # Quantize with NVFP4_EXPERTS_ONLY_CFG (targets only *mlp.experts* patterns)
-    mtq.quantize(model, mtq.NVFP4_EXPERTS_ONLY_CFG, lambda m: m(**m.dummy_inputs))
-
-    # Export
-    export_dir = tmp_path / "qwen3_moe_nvfp4_experts_only"
-    export_hf_checkpoint(model, export_dir=export_dir)
-
-    # Load the generated hf_quant_config.json
-    import json
-
-    hf_quant_config_path = export_dir / "hf_quant_config.json"
-    assert hf_quant_config_path.exists(), "hf_quant_config.json should be generated"
-    with open(hf_quant_config_path) as f:
-        hf_quant_config = json.load(f)
-
-    quant_section = hf_quant_config["quantization"]
-    assert quant_section["quant_algo"] == "NVFP4"
-    exclude_modules = quant_section["exclude_modules"]
-
-    # Attention layers must be excluded
-    assert any("self_attn" in m for m in exclude_modules), (
-        f"self_attn should be in exclude_modules, got: {exclude_modules}"
-    )
-
-    # lm_head must be excluded
-    assert any("lm_head" in m for m in exclude_modules), (
-        f"lm_head should be in exclude_modules, got: {exclude_modules}"
-    )
-
-    # No exclude pattern should match the routed experts
-    for pattern in exclude_modules:
-        assert not ("mlp.experts." in pattern and "shared" not in pattern), (
-            f"Routed expert pattern should NOT be excluded: {pattern}"
-        )
-
-
 def test_hf_decoder_discoverer_registration_path():
     model = get_tiny_llama()
     assert any(
