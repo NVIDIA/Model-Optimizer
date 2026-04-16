@@ -39,36 +39,13 @@
 """GPTQ helper and Hessian utilities for calibration."""
 
 import math
+from contextlib import contextmanager
 
 import torch
 
 from modelopt.torch.utils import print_rank_0
 from modelopt.torch.utils.network import bind_forward_method, unpatch_forward_method
 from modelopt.torch.utils.perf import get_used_gpu_mem_fraction
-
-
-def load_vector_lut_codebook(quantizer):
-    """Load vector LUT codebook and quantizer params from a weight_quantizer.
-
-    Returns:
-        Tuple of (codebook, quant_block_size, scale_type).
-    """
-    from luts import encode as luts_encode
-
-    extra_args = quantizer.backend_extra_args
-    encode_format = quantizer.num_bits
-    encode_path = extra_args.get("encode_path", "")
-    if encode_path and not encode_path.endswith("/"):
-        encode_path += "/"
-
-    if "sorted" in encode_format:
-        cb = torch.load(encode_path + encode_format + ".pt", map_location="cpu")
-        codebook = cb["sorted_values"].cuda().float()
-    else:
-        codebook, _ = luts_encode(encode_format, path=encode_path, norm=False, cuda=True)
-        codebook = codebook.float()
-
-    return codebook, extra_args.get("block_sizes"), extra_args.get("scale_type")
 
 
 def update_hessian(input, hessian, n_samples):
@@ -158,21 +135,33 @@ class GPTQHelper:
         self.weight = None
         self.h_inv = None
 
+    def is_vector_lut(self) -> bool:
+        """Check if this module's weight quantizer is configured for vector LUT quantization."""
+        extra_args = getattr(self.module.weight_quantizer, "backend_extra_args", None)
+        return bool(extra_args and extra_args.get("lut_type") == "vector_lut")
+
+    @contextmanager
+    def weight_slice_scales(self, scales):
+        """Temporarily replace _psx_scales with per-slice scales, then restore."""
+        quantizer = self.module.weight_quantizer
+        original = quantizer._psx_scales
+        quantizer._psx_scales = scales
+        try:
+            yield
+        finally:
+            quantizer._psx_scales = original
+
     def update_weights(self, block_size, perc_damp):
         """Run GPTQ blockwise weight update on this module.
 
         Populates ``self.weight`` and ``self.h_inv``, runs the blockwise update,
         logs MSE, and writes the result back to the module.
         """
-        backend_extra_args = getattr(self.module.weight_quantizer, "backend_extra_args", None)
-        is_vector_lut = bool(
-            backend_extra_args and backend_extra_args.get("lut_type") == "vector_lut"
-        )
         hessian = self.hessian.to(self.module.weight.device)
         self.weight = self.module.weight.data.float().clone()
         self._prepare_hessian_inverse(hessian, perc_damp)
 
-        if is_vector_lut:
+        if self.is_vector_lut():
             self._blockwise_vector_update(block_size)
         else:
             self._blockwise_update(block_size)
@@ -256,36 +245,28 @@ class GPTQHelper:
             )
 
     def _blockwise_vector_update(self, block_size):
-        """GPTQ blockwise update for vector LUT quantizers.
+        """GPTQ blockwise update for vector quantizers.
 
-        Pre-computes scales once, then runs the standard GPTQ 3-loop
-        with per-vector-group static quantization via clip_vector_prescaled.
+        A single ``quantizer(weight)`` call computes and caches per-block
+        scales (``_psx_scales``) on the quantizer via the backend's
+        ``static_scales`` path.  The GPTQ loop then slices per-vector-group
+        scales from ``_psx_scales`` for each sub-vector quantization call.
         """
         import torch.nn.functional as F
-        from luts import clip_vector_prescaled, clip_vector_scalesign_fast
 
-        codebook, quant_block_size, scale_type = load_vector_lut_codebook(
-            self.module.weight_quantizer
+        quantizer = self.module.weight_quantizer
+        assert quantizer.backend_extra_args.get("static_scales", False), (
+            "GPTQ vector update requires static_scales=True in backend_extra_args."
         )
-
-        # Get vector size from codebook
-        vector_size = codebook.shape[1]
+        vector_size = quantizer.backend_extra_args["vector_size"]
+        quant_block_size = quantizer.backend_extra_args["block_sizes"]
 
         assert self.weight is not None and self.h_inv is not None
         num_cols = self.weight.shape[1]
         assert block_size % quant_block_size == 0
 
-        # Pre-compute scales once outside the GPTQ loop
-        _, scales = clip_vector_scalesign_fast(
-            self.weight,
-            codebook,
-            quant_block_size,
-            scale_type,
-            scale_algo="max",
-            sign_scale=True,
-            return_scales=True,
-        )
-        scales_2d = scales.reshape(self.weight.shape[0], -1)
+        # Compute and cache _psx_scales on the quantizer via the backend.
+        quantizer(self.weight)
 
         w = self.weight.clone()
         h_inv = self.h_inv
@@ -296,12 +277,14 @@ class GPTQHelper:
 
             for j in range(blk_start, blk_end, vector_size):
                 d = min(vector_size, blk_end - j)
-                s = scales_2d[:, j // quant_block_size].contiguous()
+                s = quantizer._psx_scales[:, j // quant_block_size].contiguous()
 
                 sub = w[:, j : j + d].contiguous()
                 if d < vector_size:
                     sub = F.pad(sub, (0, vector_size - d))
-                q_sub = clip_vector_prescaled(sub, codebook, s)
+
+                with self.weight_slice_scales(s):
+                    q_sub = quantizer(sub)
 
                 for k in range(d):
                     col = j + k
