@@ -17,6 +17,7 @@
 import copy
 import logging
 import re
+import warnings
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -123,11 +124,12 @@ def _check_all_weight_quantizers_disabled(model: nn.Module) -> None:
             if attr_name.endswith("weight_quantizer") and isinstance(
                 quantizer, (TensorQuantizer, SequentialQuantizer)
             ):
-                assert not quantizer.is_enabled, (
-                    f"vLLM fakequant export: {attr_name!r} must be disabled before saving "
-                    f"quantizer_state (weights already folded). "
-                    f"See filter_modelopt_state_quantizer_state_for_model in vllm_reload_utils."
-                )
+                if quantizer.is_enabled:
+                    raise RuntimeError(
+                        f"vLLM fakequant export: {attr_name!r} must be disabled before saving "
+                        f"quantizer_state (weights already folded). "
+                        f"See filter_modelopt_state_quantizer_state_for_model in vllm_reload_utils."
+                    )
 
 
 def disable_rotate(quantizer: TensorQuantizer):
@@ -238,25 +240,27 @@ def requant_weights_for_export(
     ``w`` (e.g. CPU offload).
     """
     copied = copy.deepcopy(quantizer).to(device=weight.device)
-    sequence_quantizers: list[TensorQuantizer] = (
+    quantizers: list[TensorQuantizer] = (
         list(copied) if isinstance(copied, SequentialQuantizer) else [copied]
     )
 
-    for quantizer_copy in sequence_quantizers:
+    for quantizer_copy in quantizers:
         quantizer_copy.eval()
         quantizer_copy.reset_amax()
         enable_stats_collection(quantizer_copy)
     # Match legacy single-quantizer path: first calib uses ``w`` as-is; chains use float.
-    if len(sequence_quantizers) == 1:
-        weight_quantized = sequence_quantizers[0](weight)
+    if len(quantizers) == 1:
+        weight_quantized = quantizers[0](weight)
     else:
-        weight_quantized = weight.float()
-        for quantizer_copy in sequence_quantizers:
+        weight_quantized = weight
+        for quantizer_copy in quantizers:
             weight_quantized = quantizer_copy(weight_quantized)
-    for quantizer_copy in sequence_quantizers:
+    for quantizer_copy in quantizers:
         finish_stats_collection(quantizer_copy)
-    weight_quantized = weight.float()
-    for quantizer_copy in sequence_quantizers:
+    # Re-run application pass to get the quantized output with the freshly collected amax.
+    # The calibration forward above only collected stats; its output is intentionally discarded.
+    weight_quantized = weight
+    for quantizer_copy in quantizers:
         weight_quantized = quantizer_copy(weight_quantized)
     return weight_quantized.to(weight.dtype)
 
@@ -286,6 +290,12 @@ def merge_amax_tensors_for_group(tensors: list[torch.Tensor]) -> torch.Tensor:
     try:
         return torch.cat(tensors, dim=0).to(dtype=first.dtype, device=first.device)
     except RuntimeError:
+        shapes = [tuple(t.shape) for t in tensors]
+        warnings.warn(
+            f"merge_amax_tensors_for_group: torch.cat failed for shapes {shapes}; "
+            "falling back to scalar max which loses per-channel amax structure.",
+            stacklevel=2,
+        )
         flat = torch.cat([t.reshape(-1).float() for t in tensors])
         return torch.max(flat).to(dtype=first.dtype, device=first.device)
 
@@ -325,7 +335,9 @@ def _resmooth_experts_for_export(
         if pqs_list is None:
             return
 
-        avg_pqs = torch.stack(pqs_list).mean(0)
+        # Mean and clamp in float32: fp16/bf16 would underflow float32.tiny to 0 and divide by zero.
+        pqs_dtype = pqs_list[0].dtype
+        avg_pqs = torch.stack([p.float() for p in pqs_list]).mean(0)
         avg_pqs = avg_pqs.clamp(min=torch.finfo(torch.float32).tiny)
 
         for m in modules:
@@ -337,8 +349,8 @@ def _resmooth_experts_for_export(
             if torch.equal(old_pqs, avg_pqs_dev):
                 continue
             weight = state_dict[f"{nm}.weight"]
-            ratio = old_pqs.to(dtype=torch.float32, device=weight.device) / avg_pqs_dev.to(
-                dtype=torch.float32, device=weight.device
+            ratio = old_pqs.to(dtype=torch.float32, device=weight.device) / avg_pqs.to(
+                device=weight.device
             )
             state_dict[f"{nm}.weight"] = (weight.to(torch.float32) * ratio).to(weight.dtype)
             requant_weights.add(f"{nm}.weight")
@@ -348,7 +360,7 @@ def _resmooth_experts_for_export(
         if all(a is not None for a in amaxes):
             synced_amax = merge_amax_tensors_for_group(amaxes)
 
-        avg_pqs_out = avg_pqs.detach().clone()
+        avg_pqs_out = avg_pqs.detach().to(pqs_dtype).clone()
         for m in modules:
             nm = id_to_name.get(id(m))
             if nm is None:
@@ -376,14 +388,15 @@ def _resmooth_experts_for_export(
 
     def _dummy_forward() -> None:
         # Partial forward is OK: hooks record layers reached before failure.
-        try:
-            model(torch.ones([1, 2], dtype=torch.long, device=dev))
-        except Exception as e:
-            import logging
+        with torch.inference_mode():
+            try:
+                model(torch.ones([1, 2], dtype=torch.long, device=dev))
+            except Exception as e:
+                import logging
 
-            logging.getLogger(__name__).debug(
-                "Dummy forward for shared-input detection failed (expected for VLMs): %s", e
-            )
+                logging.getLogger(__name__).debug(
+                    "Dummy forward for shared-input detection failed (expected for VLMs): %s", e
+                )
 
     input_to_linear, _ = collect_shared_input_modules(model, _dummy_forward)
     for modules in input_to_linear.values():
@@ -494,83 +507,85 @@ def export_hf_vllm_fq_checkpoint(
     # Rotation is also cleared: the weight was already folded with rotation applied,
     # so if fold_weight is called on reload it must not re-rotate the exported weight.
     wqs_to_restore: list[tuple[TensorQuantizer, Any]] = []
-    for _, module in model.named_modules():
-        if isinstance(module, QuantModule):
-            for attr_name, quantizer in module.named_children():
-                if not (attr_name.endswith("weight_quantizer") and quantizer.is_enabled):
-                    continue
-                if isinstance(quantizer, SequentialQuantizer):
-                    quantizer.disable()
-                    for sub in quantizer:
-                        orig_rotate = sub._rotate
-                        if sub.rotate_is_enabled:
-                            sub._rotate = disable_rotate(sub)
-                        wqs_to_restore.append((sub, orig_rotate))
-                elif isinstance(quantizer, TensorQuantizer):
-                    quantizer.disable()
-                    orig_rotate = quantizer._rotate
-                    if quantizer.rotate_is_enabled:
-                        quantizer._rotate = disable_rotate(quantizer)
-                    wqs_to_restore.append((quantizer, orig_rotate))
+    try:
+        for _, module in model.named_modules():
+            if isinstance(module, QuantModule):
+                for attr_name, quantizer in module.named_children():
+                    if not (attr_name.endswith("weight_quantizer") and quantizer.is_enabled):
+                        continue
+                    if isinstance(quantizer, SequentialQuantizer):
+                        quantizer.disable()
+                        for sub in quantizer:
+                            orig_rotate = sub._rotate
+                            if sub.rotate_is_enabled:
+                                sub._rotate = disable_rotate(sub)
+                            wqs_to_restore.append((sub, orig_rotate))
+                    elif isinstance(quantizer, TensorQuantizer):
+                        quantizer.disable()
+                        orig_rotate = quantizer._rotate
+                        if quantizer.rotate_is_enabled:
+                            quantizer._rotate = disable_rotate(quantizer)
+                        wqs_to_restore.append((quantizer, orig_rotate))
 
-    quantizer_state_dict = get_quantizer_state_dict(model)
-    for key in list(quantizer_state_dict):
-        if is_weight_quantizer_state_key(key):
-            # Fakequant amax is folded into HF weights; do not reload weight quantizer tensors.
-            # Reload must force-disable WQs missing from saved state (see
-            # ``filter_modelopt_state_quantizer_state_for_model`` assertion in vllm_reload_utils).
-            quantizer_state_dict.pop(key)
-        elif key in input_quantizers_folded_pqs:
-            # pre_quant_scale was folded into the weight; keep the buffer for strict load but
-            # save identity so activations are not scaled twice.
-            qstate_val = quantizer_state_dict[key]
-            if isinstance(qstate_val, dict) and "_pre_quant_scale" in qstate_val:
-                quantizer_state_dict[key]["_pre_quant_scale"] = torch.ones_like(
-                    qstate_val["_pre_quant_scale"]
-                )
+        quantizer_state_dict = get_quantizer_state_dict(model)
+        for key in list(quantizer_state_dict):
+            if is_weight_quantizer_state_key(key):
+                # Fakequant amax is folded into HF weights; do not reload weight quantizer tensors.
+                # Reload must force-disable WQs missing from saved state (see
+                # ``filter_modelopt_state_quantizer_state_for_model`` assertion in vllm_reload_utils).
+                quantizer_state_dict.pop(key)
+            elif key in input_quantizers_folded_pqs:
+                # pre_quant_scale was folded into the weight; keep the buffer for strict load but
+                # save identity so activations are not scaled twice.
+                qstate_val = quantizer_state_dict[key]
+                if isinstance(qstate_val, dict) and "_pre_quant_scale" in qstate_val:
+                    quantizer_state_dict[key]["_pre_quant_scale"] = torch.ones_like(
+                        qstate_val["_pre_quant_scale"]
+                    )
 
-    # Patch input quantizers with averaged pqs and unified amax so that vLLM's single
-    # per-group input quantizer sees consistent values (covers both dense qkv and MoE experts).
-    for iq_key, (avg_pqs, max_input_amax) in pqs_overrides.items():
-        if iq_key in quantizer_state_dict:
-            qstate_val = quantizer_state_dict[iq_key]
-            if isinstance(qstate_val, dict):
-                if "_pre_quant_scale" in qstate_val:
-                    qstate_val["_pre_quant_scale"] = avg_pqs
-                if max_input_amax is not None and "_amax" in qstate_val:
-                    qstate_val["_amax"] = max_input_amax
+        # Patch input quantizers with averaged pqs and unified amax so that vLLM's single
+        # per-group input quantizer sees consistent values (covers both dense qkv and MoE experts).
+        for iq_key, (avg_pqs, max_input_amax) in pqs_overrides.items():
+            if iq_key in quantizer_state_dict:
+                qstate_val = quantizer_state_dict[iq_key]
+                if isinstance(qstate_val, dict):
+                    if "_pre_quant_scale" in qstate_val:
+                        qstate_val["_pre_quant_scale"] = avg_pqs
+                    if max_input_amax is not None and "_amax" in qstate_val:
+                        qstate_val["_amax"] = max_input_amax
 
-    modelopt_state = mto.modelopt_state(model)
-    # ``modelopt_state`` may be stale if another mode (e.g. calibrate) ran last. Rebuild
-    # ``quantizer_state`` and strip weight-quantizer entries (same policy as
-    # ``modelopt_state_weights``). Reload synthesizes missing WQ rows with ``_disabled``.
-    _check_all_weight_quantizers_disabled(model)
-    qstate = quantizer_state(model)
-    for key in list(qstate):
-        if is_weight_quantizer_state_key(key):
-            qstate.pop(key)
+        modelopt_state = mto.modelopt_state(model)
+        # ``modelopt_state`` may be stale if another mode (e.g. calibrate) ran last. Rebuild
+        # ``quantizer_state`` and strip weight-quantizer entries (same policy as
+        # ``modelopt_state_weights``). Reload synthesizes missing WQ rows with ``_disabled``.
+        _check_all_weight_quantizers_disabled(model)
+        qstate = quantizer_state(model)
+        for key in list(qstate):
+            if is_weight_quantizer_state_key(key):
+                qstate.pop(key)
 
-    for mode_str, m_state in modelopt_state.get("modelopt_state_dict", []):
-        if mode_str == "quantize" and "metadata" in m_state:
-            m_state["metadata"]["quantizer_state"] = qstate
-            break
+        for mode_str, m_state in modelopt_state.get("modelopt_state_dict", []):
+            if mode_str == "quantize" and "metadata" in m_state:
+                m_state["metadata"]["quantizer_state"] = qstate
+                break
 
-    # Per-quantizer tensor dict loaded alongside metadata on reload.
-    modelopt_state["modelopt_state_weights"] = quantizer_state_dict
-    safe_save(modelopt_state, export_dir / "vllm_fq_modelopt_state.pth")
+        # Per-quantizer tensor dict loaded alongside metadata on reload.
+        modelopt_state["modelopt_state_weights"] = quantizer_state_dict
+        safe_save(modelopt_state, export_dir / "vllm_fq_modelopt_state.pth")
 
-    # Step 3: Save HF weights.
-    if inplace_mem_efficient:
-        prev_ignore = getattr(model, "_keys_to_ignore_on_save", None)
-        model._keys_to_ignore_on_save = quantizer_keys
-        try:
-            model.save_pretrained(export_dir, save_modelopt_state=False)
-        finally:
-            model._keys_to_ignore_on_save = prev_ignore
-    else:
-        model.save_pretrained(export_dir, state_dict=clean_sd, save_modelopt_state=False)
+        # Step 3: Save HF weights.
+        if inplace_mem_efficient:
+            prev_ignore = getattr(model, "_keys_to_ignore_on_save", None)
+            model._keys_to_ignore_on_save = quantizer_keys
+            try:
+                model.save_pretrained(export_dir, save_modelopt_state=False)
+            finally:
+                model._keys_to_ignore_on_save = prev_ignore
+        else:
+            model.save_pretrained(export_dir, state_dict=clean_sd, save_modelopt_state=False)
 
-    if not inplace_mem_efficient:
-        for wq, orig_rotate in wqs_to_restore:
-            wq.enable()
-            wq._rotate = orig_rotate
+    finally:
+        if not inplace_mem_efficient:
+            for wq, orig_rotate in wqs_to_restore:
+                wq.enable()
+                wq._rotate = orig_rotate

@@ -16,8 +16,10 @@
 import pytest
 import torch
 
-from modelopt.torch.export.plugins.vllm_fakequant_hf import merge_amax_tensors_for_group
-from modelopt.torch.export.plugins.vllm_fakequant_hf import infer_quantizer_prefix_remap
+from modelopt.torch.export.plugins.vllm_fakequant_hf import (
+    infer_quantizer_prefix_remap,
+    merge_amax_tensors_for_group,
+)
 
 
 def _map_backbone_to_model(sd: dict) -> dict:
@@ -53,6 +55,7 @@ def test_infer_prefix_remap_multiple_probes_same_root_agree():
 
 def test_infer_prefix_remap_raises_on_inconsistent_root():
     """If ``map_fun`` maps the same HF root to different vLLM roots, raise with a clear error."""
+
     def bad_map(sd: dict) -> dict:
         out = {}
         for k, v in sd.items():
@@ -110,6 +113,7 @@ def test_infer_prefix_remap_no_quantizer_segment_still_probes_weight_path():
 
 def test_infer_prefix_remap_complex_mapper_not_one_root_raises_or_wrong():
     """Same HF root ``x`` mapping to different first components (``va.*`` vs ``vb.*``) must error."""
+
     def split_map(sd: dict) -> dict:
         k = next(iter(sd))
         v = sd[k]

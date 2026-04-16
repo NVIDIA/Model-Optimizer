@@ -28,7 +28,15 @@ from modelopt.torch.quantization.utils import enable_weight_access_and_writeback
 from modelopt.torch.utils import safe_load
 
 
-@pytest.mark.parametrize("quant_cfg", [mtq.FP8_DEFAULT_CFG])
+@pytest.mark.parametrize(
+    "quant_cfg",
+    [
+        mtq.FP8_DEFAULT_CFG,
+        # INT4_AWQ_CFG: exercises the AWQ detection path in _resmooth_experts_for_export and the
+        # pre_quant_scale-folded-into-weight path (disabled input quantizer with pqs → identity saved).
+        mtq.INT4_AWQ_CFG,
+    ],
+)
 def test_hf_vllm_export(tmp_path, quant_cfg):
     """Test HuggingFace model export for vLLM with fake quantization.
 

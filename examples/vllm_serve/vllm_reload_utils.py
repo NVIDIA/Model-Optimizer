@@ -23,6 +23,7 @@ import torch
 from vllm.distributed.parallel_state import get_tp_group
 
 from modelopt.torch.export.plugins.vllm_fakequant_hf import (
+    infer_quantizer_prefix_remap,
     is_weight_quantizer_state_key,
     merge_amax_tensors_for_group,
 )
@@ -149,9 +150,10 @@ def _group_keys_for_vllm(
     for key, value in state_dict.items():
         action, new_key, new_value = _convert_key_for_vllm(key, value)
         if new_key is None or new_value is None:
-            assert action == "skip", (
-                f"Expected action to be 'skip' for key {key}, value {value}, got {action}"
-            )
+            if action != "skip":
+                raise RuntimeError(
+                    f"Expected action to be 'skip' for key {key}, value {value}, got {action}"
+                )
             continue
         if action == "copy":
             vllm_state_dict[new_key] = new_value
@@ -219,38 +221,6 @@ def _merge_values_require_identical(merged_key: str, key_value_pairs: list[tuple
     return first_value
 
 
-def _infer_prefix_remap(
-    quantizer_keys: dict[str, Any],
-    map_fun: Callable[[dict[str, Any]], dict[str, Any]],
-) -> dict[str, str]:
-    """Map HF root name → vLLM root (e.g. ``backbone`` → ``model``) using ``map_fun`` on ``*.weight`` keys.
-
-    Quantizer keys never go through ``map_fun`` later, so we probe with a tiny CPU placeholder.
-    It must be **2-D** (mappers expect matrix weights; 1-D often errors). Only the returned key
-    path is used; values are ignored. A CPU tensor is enough for typical HF↔vLLM name mapping.
-    """
-    prefix_remap: dict[str, str] = {}
-    probe_weight = torch.empty((1, 1))
-    for key in quantizer_keys:
-        first_component = key.split(".")[0]
-        if first_component in prefix_remap:
-            continue
-        last_dot = key.rfind(".")
-        if last_dot == -1:
-            continue
-        probe_key = key[:last_dot] + ".weight"
-        try:
-            result = map_fun({probe_key: probe_weight})
-            if result:
-                new_key = next(iter(result))
-                new_first = new_key.split(".")[0]
-                if new_first != first_component:
-                    prefix_remap[first_component] = new_first
-        except Exception as e:
-            warnings.warn(f"prefix-remap probe failed for {probe_key!r}: {e}")
-    return prefix_remap
-
-
 def convert_dict_to_vllm(
     state_dict: dict[str, Any],
     max_or_concat: bool = True,
@@ -273,7 +243,7 @@ def convert_dict_to_vllm(
     # invoked on non-quantizer keys.
     if map_fun is not None:
         q_only = {k: v for k, v in state_dict.items() if "_quantizer" in k}
-        prefix_remap = _infer_prefix_remap(q_only, map_fun)
+        prefix_remap = infer_quantizer_prefix_remap(q_only, map_fun)
         if prefix_remap:
             renamed = {}
             for k, v in state_dict.items():
@@ -406,11 +376,12 @@ def filter_modelopt_state_quantizer_state_for_model(
                 if not is_weight_quantizer_state_key(wq_k):
                     continue
                 wq_state = filtered[wq_k]
-                assert wq_k in saved or wq_state.get("_disabled"), (
-                    f"Weight quantizer {wq_k!r} is missing from saved quantizer_state but "
-                    f"is not marked _disabled (got _disabled={wq_state.get('_disabled')!r}). "
-                    f"vLLM fakequant export omits weight quantizer keys when weights are folded."
-                )
+                if wq_k not in saved and not wq_state.get("_disabled"):
+                    raise RuntimeError(
+                        f"Weight quantizer {wq_k!r} is missing from saved quantizer_state but "
+                        f"is not marked _disabled (got _disabled={wq_state.get('_disabled')!r}). "
+                        f"vLLM fakequant export omits weight quantizer keys when weights are folded."
+                    )
             metadata["quantizer_state"] = filtered
 
 
@@ -449,7 +420,8 @@ def restore_from_modelopt_state_vllm(
 
     if not manager.has_state and isinstance(model, ModelLikeModule):
         model = model.init_modellike()
-    assert not isinstance(model, ModelLikeModule), "Model must be a regular Module now!"
+    if isinstance(model, ModelLikeModule):
+        raise RuntimeError("Model must be a regular Module after restore, got ModelLikeModule")
     return model
 
 
