@@ -222,6 +222,10 @@ For NEL-managed deployment (evaluation with self-deployment), use the evaluation
 | `Connection refused` on health check | Server still starting | Wait 30-60s for large models; check logs for errors |
 | `modelopt_fp4 not supported` | Framework doesn't support FP4 for this model | Check support matrix in `references/support-matrix.md` |
 
+## Unsupported Models
+
+If the model is not in the validated support matrix (`references/support-matrix.md`), deployment may fail due to weight key mismatches, missing architecture mappings, or quantized/unquantized layer confusion. Read `references/unsupported-models.md` for the iterative debug loop: **run → read error → diagnose → patch framework source → re-run**. For kernel-level issues, escalate to the framework team rather than attempting fixes.
+
 ## Success Criteria
 
 1. Server process is running and healthy (`/health` returns 200)
