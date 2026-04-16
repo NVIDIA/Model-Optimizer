@@ -46,6 +46,7 @@ from tqdm import tqdm
 from transformers import PreTrainedTokenizer
 
 from .. import distributed as dist
+from .. import print_rank_0
 from .megatron_generate import megatron_prefill
 
 __all__ = ["megatron_mmlu"]
@@ -73,6 +74,11 @@ def megatron_mmlu(
         fraction: The fraction of the test set to evaluate on.
         batch_size: Number of examples to process in one forward pass.
     """
+    print_rank_0(
+        f"\nMMLU ({fraction * 100}%, {few_shots}-shot, Batch Size: {batch_size}) evaluation started...\n"
+        "First batch may take longer to evaluate for Pipeline Parallel models."
+    )
+
     # Token IDs for " A", " B", " C", " D" — the last subword handles edge cases.
     choice_ids = [tokenizer.encode(f" {c}", add_special_tokens=False)[-1] for c in _CHOICES]
 
@@ -174,18 +180,13 @@ def megatron_mmlu(
     n_total = len(all_correct)
     avg = sum(all_correct) / n_total
 
-    if dist.is_master():
-        print(f"\nMMLU ({fraction * 100}%, {few_shots}-shot) evaluation started...\n", flush=True)
-        print("{:48} | (ACC) | Count/Total".format("Subject"), flush=True)
-        print("{:48} | {:5} | {:11}".format("-" * 48, "-" * 5, "-" * 11), flush=True)
-        for subj in sorted(subject_correct):
-            correct = subject_correct[subj]
-            n = len(correct)
-            print(f"{subj:48} | {sum(correct) / n:.3f} | {sum(correct):5}/{n:5}", flush=True)
-        print("{:48} | {:5} | {:11}".format("-" * 48, "-" * 5, "-" * 11), flush=True)
-        print(
-            "{:48} | {:.3f} | {:5}/{:5}".format("average", avg, sum(all_correct), n_total),
-            flush=True,
-        )
+    print_rank_0("{:48} | (ACC) | Count/Total".format("Subject"))
+    print_rank_0("{:48} | {:5} | {:11}".format("-" * 48, "-" * 5, "-" * 11))
+    for subj in sorted(subject_correct):
+        correct = subject_correct[subj]
+        n = len(correct)
+        print_rank_0(f"{subj:48} | {sum(correct) / n:.3f} | {sum(correct):5}/{n:5}")
+    print_rank_0("{:48} | {:5} | {:11}".format("-" * 48, "-" * 5, "-" * 11))
+    print_rank_0("{:48} | {:.3f} | {:5}/{:5}".format("average", avg, sum(all_correct), n_total))
 
     return avg
