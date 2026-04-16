@@ -55,10 +55,29 @@ __all__ = [
     "awq",
     "local_hessian_calibrate",
     "max_calibrate",
+    "register_fp8_sweep_calibrator",
     "sequential_calibrate",
     "smoothquant",
     "svdquant",
 ]
+
+# Registry for backends that provide a custom calibrator factory for mse_calibrate().
+_FP8_SWEEP_CALIBRATOR_REGISTRY: dict[str, type] = {}
+
+
+def register_fp8_sweep_calibrator(backend: str, calibrator_factory) -> None:
+    """Register a custom calibrator factory for a quantization backend.
+
+    When ``fp8_scale_sweep=True`` is passed to :func:`mse_calibrate`, any weight
+    quantizer whose ``backend`` attribute matches a registered key will use the
+    corresponding factory instead of the default :class:`MseCalibrator`.
+
+    Args:
+        backend: Backend name string (must match ``TensorQuantizer.backend``).
+        calibrator_factory: Callable with signature ``(amax, axis, quant_func)``
+            that returns a calibrator instance.
+    """
+    _FP8_SWEEP_CALIBRATOR_REGISTRY[backend] = calibrator_factory
 
 
 def weight_only_quantize(model: nn.Module):
@@ -336,6 +355,19 @@ def mse_calibrate(
 
                     # Convert to NVFP4StaticQuantizer in-place
                     NVFP4StaticQuantizer.from_tensor_quantizer(module, global_amax=global_amax)
+
+                if fp8_scale_sweep:
+                    # Check if backend has a registered custom calibrator factory.
+                    backend_factory = _FP8_SWEEP_CALIBRATOR_REGISTRY.get(
+                        getattr(module, "backend", None)
+                    )
+                    if backend_factory is not None:
+                        module._calibrator = backend_factory(
+                            initial_amax,
+                            module._calibrator._axis,
+                            partial(_mse_quant_func, quantizer=module),
+                        )
+                        continue
 
                 if fp8_scale_sweep and is_nvfp4_static:
                     # Replace calibrator with NVFP4MSECalibrator
