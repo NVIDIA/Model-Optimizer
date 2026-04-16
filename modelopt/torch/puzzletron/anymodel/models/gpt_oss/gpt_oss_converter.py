@@ -63,6 +63,7 @@ class GptOssConverter(Converter):
                         num_local_experts=num_local_experts,
                         num_experts_per_tok=experts_per_token,
                         expert_intermediate_dim=intermediate_size,
+                        shared_expert_intermediate_dim=None,
                     ),
                 ),
             ).to_dict()

@@ -1,0 +1,146 @@
+# Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+# Default Megatron Bridge ConfigContainer layout for examples/puzzletron/distillation/distill.py
+# Merge order: _pretrain_common() skeleton → this file → Hydra-style CLI overrides.
+#
+# Paths below are placeholders — override for your environment.
+
+# ---------------------------------------------------------------------------
+# Model (DistillationProvider + TransformerConfig fields)
+# ---------------------------------------------------------------------------
+model:
+  # Heterogeneous AnyModel / per-layer MoE: distinct checkpoint keys per global layer.
+  hetereogenous_dist_checkpoint: true
+
+  tensor_model_parallel_size: 2
+  pipeline_model_parallel_size: 3
+  context_parallel_size: 1
+  expert_model_parallel_size: 2
+  expert_tensor_parallel_size: 1
+  sequence_parallel: true
+  pipeline_dtype: torch.bfloat16
+  seq_length: 4096
+
+  cross_entropy_fusion_impl: native
+
+  kd_config:
+    logit_layers:
+      - output_layer
+      - output_layer
+    skip_lm_loss: true
+    kd_loss_scale: 1.0
+    logit_kl_temperature: 1.0
+
+# ---------------------------------------------------------------------------
+# Training
+# ---------------------------------------------------------------------------
+train:
+  train_iters: 10
+  global_batch_size: 30
+  micro_batch_size: 1
+  manual_gc: true
+  manual_gc_interval: 100
+
+# ---------------------------------------------------------------------------
+# Validation (preferred over deprecated train.eval_* fields)
+# ---------------------------------------------------------------------------
+validation:
+  eval_interval: 10
+  eval_iters: 10
+
+# ---------------------------------------------------------------------------
+# Optimizer / scheduler (matches distributed_fused_adam_with_cosine_annealing defaults)
+# ---------------------------------------------------------------------------
+optimizer:
+  optimizer: adam
+  lr: 1.0e-4
+  min_lr: 1.0e-5
+  weight_decay: 0.1
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_eps: 1.0e-8
+  bf16: true
+  fp16: false
+  use_distributed_optimizer: false
+  clip_grad: 1.0
+
+scheduler:
+  lr_decay_style: cosine
+  lr_warmup_iters: 1
+  lr_warmup_init: 0.0
+  lr_decay_iters: null
+  start_weight_decay: 0.033
+  end_weight_decay: 0.033
+  weight_decay_incr_style: constant
+  override_opt_param_scheduler: true
+
+# ---------------------------------------------------------------------------
+# DDP
+# ---------------------------------------------------------------------------
+ddp:
+  check_for_nan_in_grad: true
+  grad_reduce_in_fp32: true
+  overlap_grad_reduce: true
+  # Required false when use_distributed_optimizer is false (Megatron).
+  overlap_param_gather: false
+  average_in_collective: true
+  use_distributed_optimizer: false
+
+# ---------------------------------------------------------------------------
+# Dataset (mock blend — replace with real blend / per_split_data_args_path for production)
+# ---------------------------------------------------------------------------
+dataset:
+  seq_length: 4096
+  random_seed: 1234
+  reset_attention_mask: false
+  reset_position_ids: false
+  eod_mask_loss: false
+  num_dataset_builder_threads: 1
+  data_sharding: true
+  dataloader_type: single
+  skip_getting_attention_mask_from_dataset: true
+  blend: null
+  blend_per_split: null
+  split: "9999,8,2"
+  path_to_cache: ./dataset_cache
+
+# ---------------------------------------------------------------------------
+# Tokenizer (override to NullTokenizer + vocab_size for mock-token runs)
+# ---------------------------------------------------------------------------
+tokenizer:
+  tokenizer_type: HuggingFaceTokenizer
+  # Omit ``tokenizer_model`` here so distill.py can set it from ``--student-checkpoint``.
+
+# ---------------------------------------------------------------------------
+# Checkpoint
+# ---------------------------------------------------------------------------
+checkpoint:
+  save_interval: 5
+  save: ./outputs/kd-checkpoints
+  load: ./outputs/kd-checkpoints
+  most_recent_k: 5
+  ckpt_format: torch_dist
+  async_save: true
+  fully_parallel_save: true
+  save_optim: true
+
+# ---------------------------------------------------------------------------
+# Logger
+# ---------------------------------------------------------------------------
+logger:
+  log_interval: 1
+  tensorboard_dir: ./outputs/tb
+  log_timers_to_tensorboard: true
+
+# ---------------------------------------------------------------------------
+# RNG / distributed / precision
+# ---------------------------------------------------------------------------
+rng:
+  seed: 42
+
+dist:
+  distributed_timeout_minutes: 180
+
+mixed_precision: bf16_mixed
