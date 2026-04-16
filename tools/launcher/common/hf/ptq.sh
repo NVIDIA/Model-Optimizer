@@ -25,6 +25,14 @@
 
 set -e
 
+# Install extra pip dependencies if specified (e.g., mamba-ssm for hybrid Mamba models).
+if [ -n "$EXTRA_PIP_DEPS" ]; then
+    echo "Installing extra dependencies: $EXTRA_PIP_DEPS"
+    unset PIP_CONSTRAINT
+    read -r -a _deps <<< "$EXTRA_PIP_DEPS"
+    pip install "${_deps[@]}"
+fi
+
 REPO=""
 LOCAL_DIR=""
 PTQ_ARGS=()
