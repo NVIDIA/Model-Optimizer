@@ -4,10 +4,9 @@ This directory holds preset quantization configurations that serve as the
 YAML source of truth for the hardcoded `*_CFG` dicts in
 `modelopt.torch.quantization.config` (e.g., `FP8_DEFAULT_CFG`).
 
-Each preset is a complete, self-contained config with `algorithm` and
-`quant_cfg` — ready to pass directly to `mtq.quantize()`. Presets compose
-from the reusable snippets in `configs/numerics/` and `configs/ptq/units/`
-via the `$import` system.
+Each preset is a self-contained config with `quant_cfg` that can be
+passed to `mtq.quantize()`. Presets compose from the reusable snippets
+in `configs/numerics/` and `configs/ptq/units/` via the `$import` system.
 
 **Note:** The main purpose of these presets is to support the existing
 `hf_ptq.py` script's `--qformat` / `--kv_cache_qformat` flags and other
