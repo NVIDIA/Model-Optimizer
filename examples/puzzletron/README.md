@@ -275,12 +275,17 @@ For a quick smoke test, add `--limit 10`.
 Now let's evaluate how much speedup we get with the compressed model in terms of throughput and latency.
 
 - Install [vLLM from source](https://docs.vllm.ai/en/latest/getting_started/installation/gpu/index.html#build-wheel-from-source).
-- Rearrange the model safetensors to be used for vLLM.
 
-```bash
-cd path/to/model
-mv subblocks_safetensors/* .
-sed -i 's+subblocks_safetensors/++g' model.safetensors.index.json
+- Modify the model's `config.json` file to support vLLM, see [AnyModel Guide](../../modelopt/torch/puzzletron/anymodel/README.md#deploy-compressed-model-in-vllm) for details.
+
+
+```json
+{
+  ...
+  "architectures": ["AnyModel"],
+  "base_architecture": "LlamaForCausalLM",
+  ...
+}
 ```
 
 - Benchmark latency
