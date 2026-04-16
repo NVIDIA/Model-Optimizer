@@ -25,9 +25,7 @@ SEED = 1234
 
 def _test_megatron_generate_and_mmlu(rank, size):
     initialize_for_megatron(tensor_model_parallel_size=size, seed=SEED)
-
     model = get_mcore_qwen3_600m(tensor_model_parallel_size=size).cuda().eval()
-
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")
 
     messages = [
@@ -42,9 +40,9 @@ def _test_megatron_generate_and_mmlu(rank, size):
     model_inputs = tokenizer([text], return_tensors="pt").to(device="cuda")
     output_ids = megatron_generate(model, model_inputs["input_ids"])
     output_text = tokenizer.batch_decode(output_ids)
-    print(output_text)
+    print(rank, output_text)
 
-    assert megatron_mmlu(model, tokenizer) > 0.24
+    assert 0.37 < megatron_mmlu(model, tokenizer, fraction=0.1, batch_size=16) < 0.38
 
 
 def test_megatron_generate_and_mmlu(dist_workers):
