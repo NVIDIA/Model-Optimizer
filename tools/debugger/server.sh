@@ -61,6 +61,8 @@ fi
 CMD_DIR="$RELAY_DIR/cmd"
 RESULT_DIR="$RELAY_DIR/result"
 
+echo "[server] Workdir: $WORKDIR"
+
 cleanup() {
     echo "[server] Shutting down..."
     # Kill any running command (guard all reads with || true to prevent set -e
@@ -97,8 +99,7 @@ mkdir -p "$CMD_DIR" "$RESULT_DIR"
 
 # Ensure modelopt is editable-installed from WORKDIR
 check_modelopt_local() {
-    # Clear PYTHONPATH and use -I to validate actual install state, not source tree
-    PYTHONPATH="" python -I -c "
+    python -c "
 import modelopt, os, sys
 actual = os.path.realpath(modelopt.__path__[0])
 expected = os.path.realpath('$WORKDIR')
@@ -124,7 +125,6 @@ fi
 # Signal that server is ready
 echo "$(hostname):$$:$(date -Iseconds)" > "$RELAY_DIR/server.ready"
 echo "[server] Ready. Relay dir: $RELAY_DIR"
-echo "[server] Workdir: $WORKDIR"
 echo "[server] Waiting for client handshake..."
 
 # Wait for client handshake
