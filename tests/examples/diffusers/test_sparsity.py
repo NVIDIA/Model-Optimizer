@@ -130,7 +130,7 @@ def test_wan22_export_sparse_checkpoint(tiny_wan22_path, tmp_path):
     # Verify export directory structure
     assert export_dir.exists()
 
-    # Both transformers should have sparse_attention_config in config.json and sparse.yaml
+    # Both transformers should have sparse_attention_config in their config.json
     for component in ["transformer", "transformer_2"]:
         component_dir = export_dir / component
         assert component_dir.exists(), f"Missing component dir: {component}"
@@ -153,16 +153,24 @@ def test_wan22_export_sparse_checkpoint(tiny_wan22_path, tmp_path):
         assert "disabled_layers" in group_0  # cross-attn layers are disabled
         assert "producer" in sa_config
 
-        # Check sparse.yaml exists and matches config.json
-        yaml_path = component_dir / "sparse.yaml"
-        assert yaml_path.exists(), f"Missing sparse.yaml for {component}"
-        with open(yaml_path) as f:
-            yaml_data = yaml.safe_load(f)
-        assert yaml_data == sa_config, f"sparse.yaml does not match config.json for {component}"
-
         # Check model weights were saved
         weight_files = list(component_dir.glob("*.safetensors")) + list(component_dir.glob("*.bin"))
         assert len(weight_files) > 0, f"No weight files for {component}"
+
+    # Check unified sparse.yaml at top level (combines all components)
+    yaml_path = export_dir / "sparse.yaml"
+    assert yaml_path.exists(), "Missing top-level sparse.yaml"
+    with open(yaml_path) as f:
+        yaml_data = yaml.safe_load(f)
+    assert "transformer" in yaml_data, "Missing transformer in sparse.yaml"
+    assert "transformer_2" in yaml_data, "Missing transformer_2 in sparse.yaml"
+    # Each component's entry should match its config.json
+    for component in ["transformer", "transformer_2"]:
+        with open(export_dir / component / "config.json") as f:
+            expected = json.load(f)["sparse_attention_config"]
+        assert yaml_data[component] == expected, (
+            f"sparse.yaml[{component}] does not match {component}/config.json"
+        )
 
 
 def test_wan22_calibrated_export(tmp_path):
@@ -257,9 +265,14 @@ def test_wan22_calibrated_export(tmp_path):
         # No raw_threshold — this is calibrated mode
         assert "raw_threshold" not in group_0
 
-        # Verify sparse.yaml matches
-        yaml_path = export_dir / component / "sparse.yaml"
-        assert yaml_path.exists()
-        with open(yaml_path) as f:
-            yaml_data = yaml.safe_load(f)
-        assert yaml_data == sa_config
+    # Verify unified sparse.yaml at top level
+    yaml_path = export_dir / "sparse.yaml"
+    assert yaml_path.exists(), "Missing top-level sparse.yaml"
+    with open(yaml_path) as f:
+        yaml_data = yaml.safe_load(f)
+    assert "transformer" in yaml_data
+    assert "transformer_2" in yaml_data
+    for component in ["transformer", "transformer_2"]:
+        with open(export_dir / component / "config.json") as f:
+            expected = json.load(f)["sparse_attention_config"]
+        assert yaml_data[component] == expected
