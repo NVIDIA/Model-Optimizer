@@ -248,13 +248,9 @@ def requant_weights_for_export(
         quantizer_copy.eval()
         quantizer_copy.reset_amax()
         enable_stats_collection(quantizer_copy)
-    # Match legacy single-quantizer path: first calib uses ``w`` as-is; chains use float.
-    if len(quantizers) == 1:
-        weight_quantized = quantizers[0](weight)
-    else:
-        weight_quantized = weight
-        for quantizer_copy in quantizers:
-            weight_quantized = quantizer_copy(weight_quantized)
+    weight_quantized = weight
+    for quantizer_copy in quantizers:
+        weight_quantized = quantizer_copy(weight_quantized)
     for quantizer_copy in quantizers:
         finish_stats_collection(quantizer_copy)
     # Re-run application pass to get the quantized output with the freshly collected amax.
