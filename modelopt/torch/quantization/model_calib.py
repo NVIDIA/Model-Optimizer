@@ -55,10 +55,30 @@ __all__ = [
     "awq",
     "local_hessian_calibrate",
     "max_calibrate",
+    "register_fp8_sweep_calibrator",
     "sequential_calibrate",
     "smoothquant",
     "svdquant",
 ]
+
+# Registry for backends that want a custom FP8-sweep calibrator for mse_calibrate().
+# Keys are backend name strings; values are FP8ScaleSweepCalibrator (sub)classes.
+_FP8_SWEEP_CALIBRATOR_REGISTRY: dict[str, type] = {}
+
+
+def register_fp8_sweep_calibrator(backend: str, calibrator_cls: type) -> None:
+    """Register a :class:`FP8ScaleSweepCalibrator` subclass for a quantization backend.
+
+    When ``fp8_scale_sweep=True`` is passed to :func:`mse_calibrate`, any weight quantizer
+    whose ``backend`` attribute matches a registered key will use the corresponding
+    calibrator class instead of the default :class:`MseCalibrator`.
+
+    Args:
+        backend: Backend name string (must match ``TensorQuantizer.backend``).
+        calibrator_cls: A :class:`FP8ScaleSweepCalibrator` subclass whose constructor
+            accepts ``(amax, axis, quant_func)``.
+    """
+    _FP8_SWEEP_CALIBRATOR_REGISTRY[backend] = calibrator_cls
 
 
 def weight_only_quantize(model: nn.Module):
@@ -330,6 +350,11 @@ def mse_calibrate(
                     and module._block_sizes.get("scale_bits") == (4, 3)
                 )
 
+                is_fp8_static_per_block_scales = (
+                    is_nvfp4_static
+                    or getattr(module, "backend", None) in _FP8_SWEEP_CALIBRATOR_REGISTRY
+                )
+
                 if is_nvfp4_static:
                     # Compute and set global_amax
                     global_amax = reduce_amax(initial_amax, axis=None)
@@ -337,14 +362,21 @@ def mse_calibrate(
                     # Convert to NVFP4StaticQuantizer in-place
                     NVFP4StaticQuantizer.from_tensor_quantizer(module, global_amax=global_amax)
 
-                if fp8_scale_sweep and is_nvfp4_static:
-                    # Replace calibrator with NVFP4MSECalibrator
-                    module._calibrator = NVFP4MSECalibrator(
-                        amax=initial_amax,
-                        axis=module._calibrator._axis,
-                        global_amax=module.global_amax,
-                        quant_func=partial(_mse_quant_func, quantizer=module),
-                    )
+                if fp8_scale_sweep and is_fp8_static_per_block_scales:
+                    if is_nvfp4_static:
+                        module._calibrator = NVFP4MSECalibrator(
+                            amax=initial_amax,
+                            axis=module._calibrator._axis,
+                            global_amax=module.global_amax,
+                            quant_func=partial(_mse_quant_func, quantizer=module),
+                        )
+                    else:
+                        calibrator_cls = _FP8_SWEEP_CALIBRATOR_REGISTRY[module.backend]
+                        module._calibrator = calibrator_cls(
+                            amax=initial_amax,
+                            axis=module._calibrator._axis,
+                            quant_func=partial(_mse_quant_func, quantizer=module),
+                        )
                     continue
 
                 # Create MSE calibrator with quant_func
@@ -618,20 +650,38 @@ def local_hessian_calibrate(
             and weight_quantizer._block_sizes.get("scale_bits") == (4, 3)
         )
 
+        is_fp8_static_per_block_scales = (
+            is_nvfp4_static
+            or getattr(weight_quantizer, "backend", None) in _FP8_SWEEP_CALIBRATOR_REGISTRY
+        )
+
         if is_nvfp4_static:
             global_amax = reduce_amax(initial_amax, axis=None)
             NVFP4StaticQuantizer.from_tensor_quantizer(weight_quantizer, global_amax=global_amax)
 
         error_func = helper.get_error_func()
 
-        if fp8_scale_sweep and is_nvfp4_static:
-            weight_quantizer._calibrator = NVFP4MSECalibrator(
-                amax=initial_amax,
-                axis=weight_quantizer._calibrator._axis if weight_quantizer._calibrator else None,
-                global_amax=weight_quantizer.global_amax,
-                quant_func=quant_func,
-                error_func=error_func,
-            )
+        if fp8_scale_sweep and is_fp8_static_per_block_scales:
+            if is_nvfp4_static:
+                weight_quantizer._calibrator = NVFP4MSECalibrator(
+                    amax=initial_amax,
+                    axis=weight_quantizer._calibrator._axis
+                    if weight_quantizer._calibrator
+                    else None,
+                    global_amax=weight_quantizer.global_amax,
+                    quant_func=quant_func,
+                    error_func=error_func,
+                )
+            else:
+                calibrator_cls = _FP8_SWEEP_CALIBRATOR_REGISTRY[weight_quantizer.backend]
+                weight_quantizer._calibrator = calibrator_cls(
+                    amax=initial_amax,
+                    axis=weight_quantizer._calibrator._axis
+                    if weight_quantizer._calibrator
+                    else None,
+                    quant_func=quant_func,
+                    error_func=error_func,
+                )
         else:
             weight_quantizer._calibrator = MseCalibrator(
                 amax=initial_amax,

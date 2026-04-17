@@ -24,7 +24,7 @@ import torch.nn.functional as F
 from .. import utils as quant_utils
 from .calibrator import _Calibrator
 
-__all__ = ["MseCalibrator", "NVFP4MSECalibrator"]
+__all__ = ["FP8ScaleSweepCalibrator", "MseCalibrator", "NVFP4MSECalibrator"]
 
 
 class MseCalibrator(_Calibrator):
@@ -171,30 +171,49 @@ class MseCalibrator(_Calibrator):
         return self._amax
 
 
-class NVFP4MSECalibrator(MseCalibrator):
-    """Per-block FP8 scale sweep calibrator for NVFP4 static quantization."""
+class FP8ScaleSweepCalibrator(MseCalibrator):
+    """MSE calibrator that sweeps 126 valid FP8 E4M3 candidates of ``initial_amax``.
 
-    def __init__(
-        self,
-        amax: torch.Tensor,  # per_block_amax shape [num_blocks]
-        global_amax: torch.Tensor,  # scalar
-        axis: int | tuple | list | None = None,
-        quant_func: Callable | None = None,
-        error_func: Callable | None = None,
-    ):
-        """Initialize NVFP4 MSE calibrator with per-block and global amax."""
-        super().__init__(amax=amax, axis=axis, quant_func=quant_func, error_func=error_func)
-        self._global_amax = global_amax
-
-    def _compute_candidate_amax(self, candidates: torch.Tensor) -> torch.Tensor:
-        if candidates.ndim != 0:  # Called during final compute amax
-            candidates = candidates.view_as(self._initial_amax)
-        return torch.ones_like(self._initial_amax) * self._global_amax * candidates
+    Candidate amax values are ``initial_amax * candidate``
+    """
 
     def _generate_candidates(self, device: torch.device) -> torch.Tensor:
         """Generate 126 valid FP8 E4M3 scale candidates."""
         uint8_values = torch.arange(0, 128, dtype=torch.uint8, device=device)
         fp8_values = uint8_values.view(torch.float8_e4m3fn).float()
         valid_mask = torch.isfinite(fp8_values) & (fp8_values > 0)
-        fp8_values = fp8_values[valid_mask]
-        return fp8_values / 448.0
+        return fp8_values[valid_mask] / 448.0
+
+
+class NVFP4MSECalibrator(FP8ScaleSweepCalibrator):
+    """FP8 scale sweep calibrator for NVFP4 per-block static quantization.
+
+    Extends :class:`FP8ScaleSweepCalibrator` with a ``global_amax`` that drives the
+    candidate amax computation: each candidate scales ``global_amax`` uniformly across
+    all blocks.
+    """
+
+    def __init__(
+        self,
+        amax: torch.Tensor,
+        global_amax: torch.Tensor,
+        axis: int | tuple | list | None = None,
+        quant_func: Callable | None = None,
+        error_func: Callable | None = None,
+    ):
+        """Initialize NVFP4 calibrator.
+
+        Args:
+            amax: Per-block amax tensor (shape ``[num_blocks]``).
+            global_amax: Scalar global amax used to scale all FP8 candidates.
+            axis: Quantization axis. None means per-tensor quantization.
+            quant_func: Function that quantizes input tensor given an amax value.
+            error_func: Function to compute error between x and xq.
+        """
+        super().__init__(amax=amax, axis=axis, quant_func=quant_func, error_func=error_func)
+        self._global_amax = global_amax
+
+    def _compute_candidate_amax(self, candidates: torch.Tensor) -> torch.Tensor:
+        if candidates.ndim != 0:  # Called during final compute_amax
+            candidates = candidates.view_as(self._initial_amax)
+        return torch.ones_like(self._initial_amax) * self._global_amax * candidates
