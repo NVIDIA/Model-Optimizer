@@ -170,7 +170,8 @@ def _fakequant_module_weights(
         weight_name = attr_name.removesuffix("_quantizer")
         prefix = f"{module_name}." if module_name else ""
         sd_key = f"{prefix}{weight_name}"
-        assert sd_key not in fakequant_weights, f"Weight {sd_key} has already been fakequantized"
+        if sd_key in fakequant_weights:
+            raise RuntimeError(f"Weight {sd_key} has already been fakequantized")
 
         if inplace:
             w = getattr(module, weight_name)
@@ -179,7 +180,8 @@ def _fakequant_module_weights(
             else:
                 w_quant = quantizer(w.float()).to(w.dtype)
         else:
-            assert state_dict is not None
+            if state_dict is None:
+                raise RuntimeError("state_dict is required when inplace=False for fakequant export")
             if sd_key not in state_dict:
                 continue
             w = state_dict[sd_key]
@@ -209,7 +211,8 @@ def _fakequant_module_weights(
         if inplace:
             w.data.copy_(w_quant)
         else:
-            assert state_dict is not None
+            if state_dict is None:
+                raise RuntimeError("state_dict is required when inplace=False for fakequant export")
             state_dict[sd_key] = w_quant.cpu()
         fakequant_weights.add(sd_key)
 
@@ -390,7 +393,10 @@ def _resmooth_experts_for_export(
                 )
                 w_param.data.copy_((w_param.to(torch.float32) * ratio).to(w_param.dtype))
             else:
-                assert state_dict is not None
+                if state_dict is None:
+                    raise RuntimeError(
+                        "state_dict is required when inplace=False in _resmooth_experts_for_export"
+                    )
                 weight = state_dict[w_key]
                 ratio = old_pqs.to(dtype=torch.float32, device=weight.device) / avg_pqs.to(
                     device=weight.device
@@ -424,7 +430,10 @@ def _resmooth_experts_for_export(
             if not experts:
                 continue
             if inplace:
-                assert name_to_module is not None
+                if name_to_module is None:
+                    raise RuntimeError(
+                        "name_to_module is required when inplace=True in _resmooth_experts_for_export"
+                    )
                 with _enable_writeback_for_group(experts, model, name_to_module):
                     _process_group(experts)
             else:
@@ -450,7 +459,10 @@ def _resmooth_experts_for_export(
         if len(modules) <= 1:
             continue
         if inplace:
-            assert name_to_module is not None
+            if name_to_module is None:
+                raise RuntimeError(
+                    "name_to_module is required when inplace=True in _resmooth_experts_for_export"
+                )
             with _enable_writeback_for_group(modules, model, name_to_module):
                 _process_group(modules)
         else:
@@ -499,9 +511,10 @@ def export_hf_vllm_fq_checkpoint(
             pqs_overrides, requant_weights = _resmooth_experts_for_export(model, None, inplace=True)
             # Inplace path: iterate decoder layers, one offload<->onload per layer.
             decoder_layers = LayerActivationCollector.get_decoder_layers(model)
-            assert decoder_layers is not None, (
-                "inplace_mem_efficient=True requires a model with discoverable decoder layers"
-            )
+            if decoder_layers is None:
+                raise RuntimeError(
+                    "inplace_mem_efficient=True requires a model with discoverable decoder layers"
+                )
             for name, module in model.named_modules():
                 if module not in decoder_layers:
                     continue
