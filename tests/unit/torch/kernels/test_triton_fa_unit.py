@@ -13,10 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for Triton flash attention Python wrappers (no kernel execution).
+"""Unit tests for Triton flash attention pure-Python helpers (no GPU required).
 
-These tests cover argument validation, configuration logic, and the public
-API shape — without actually invoking the Triton kernels (which require CUDA).
+The ``@triton.jit`` kernels themselves require a GPU and are covered by
+``tests/gpu/torch/sparsity/attention_sparsity/test_triton_fa*.py``.
+These unit tests only exercise argument validation and module-level constants.
 """
 
 import pytest
@@ -49,17 +50,13 @@ class TestPublicAPI:
 
         assert pytest.approx(math.log2(math.e), rel=1e-5) == mod.LOG2E
 
-    def test_fwd_configs_nonempty(self):
-        mod = _require_triton_module()
-        assert len(mod._FWD_CONFIGS) >= 1
-
 
 class TestAttentionCalibrateArgValidation:
-    """``attention_calibrate`` argument validation (can run without CUDA)."""
+    """``attention_calibrate`` argument validation (runs before kernel launch)."""
 
     def test_empty_threshold_trials_raises(self):
         mod = _require_triton_module()
-        # Create tiny CPU tensors — the validation path raises before kernel launch.
+        # Tiny CPU tensors — the validation path raises before reaching the kernel.
         q = torch.empty(1, 1, 8)
         k = torch.empty(1, 1, 8)
         v = torch.empty(1, 1, 8)
@@ -94,19 +91,3 @@ class TestAttentionCalibrateArgValidation:
                 max_input_len=1,
                 threshold_trials=None,
             )
-
-
-class TestPytestEnvOverride:
-    """Test that PYTEST_VERSION override makes _FWD_CONFIGS deterministic."""
-
-    def test_single_config_under_pytest(self):
-        """Under PYTEST_VERSION, autotune collapses to one config for reproducibility."""
-        import os
-
-        assert "PYTEST_VERSION" in os.environ, "This test must run under pytest"
-        mod = _require_triton_module()
-        # Under pytest, _FWD_CONFIGS is a single deterministic config
-        assert len(mod._FWD_CONFIGS) == 1
-        cfg = mod._FWD_CONFIGS[0]
-        assert cfg.kwargs["BLOCK_M"] == 128
-        assert cfg.kwargs["BLOCK_N"] == 64
