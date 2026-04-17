@@ -88,6 +88,22 @@ _INT8_CONV_OVERRIDE: list = [
     },
 ]
 
+# FP8 MHA-aware config entries: quantize LayerNorm output so TRT can fuse the shared
+# Q/DQ across all downstream Q/K/V/FC consumers. Softmax-output Q/DQ is handled by the
+# FP8 ONNX exporter's post-processing pass (fixed 1/448 scale, data-independent).
+_FP8_MHA_OVERRIDE: list = [
+    {
+        "parent_class": "nn.LayerNorm",
+        "quantizer_name": "*output_quantizer",
+        "cfg": {"num_bits": (4, 3), "axis": None},
+    },
+    {
+        "parent_class": "nn.LayerNorm",
+        "quantizer_name": "*input_quantizer",
+        "enable": False,
+    },
+]
+
 # Auto-quantize format configs that use block quantization and need Conv2d overrides for TRT.
 # TRT DynamicQuantize requires 2D/3D input, but Conv2d operates on 4D tensors.
 _NEEDS_FP8_CONV_OVERRIDE: set[str] = {
@@ -102,11 +118,16 @@ def get_quant_config(quantize_mode):
     """Get quantization config, overriding Conv2d for TRT compatibility.
 
     TensorRT only supports FP8 and INT8 for Conv layers.
+    - For FP8: add MHA-aware LayerNorm output quantizer so TRT fuses shared Q/DQ into
+      downstream attention matmuls. Softmax-output Q/DQ is inserted by the FP8 ONNX
+      exporter's post-processing (fixed 1/448 scale, no calibration needed).
     - For MXFP8, NVFP4: override Conv2d to FP8
     - For INT4_AWQ: override Conv2d to INT8
     """
     config: dict = copy.deepcopy(QUANT_CONFIG_DICT[quantize_mode])
-    if quantize_mode in ("mxfp8", "nvfp4"):
+    if quantize_mode == "fp8":
+        config["quant_cfg"].extend(_FP8_MHA_OVERRIDE)
+    elif quantize_mode in ("mxfp8", "nvfp4"):
         warnings.warn(
             f"TensorRT only supports FP8/INT8 for Conv layers. "
             f"Overriding Conv2d quantization to FP8 for '{quantize_mode}' mode."
@@ -458,6 +479,7 @@ def main():
         # Conv2d layers are overridden to FP8 (for TRT compatibility), those FP8
         # quantizers require calibration data.
         config = get_quant_config(args.quantize_mode)
+
         data_loader = load_calibration_data(
             model,
             args.calibration_data_size,
