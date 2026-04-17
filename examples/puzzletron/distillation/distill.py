@@ -374,24 +374,23 @@ def main(args: argparse.Namespace) -> None:  # noqa: C901 (complexity OK for an 
     student_provider.seq_length = 4096
     student_provider.tensor_model_parallel_size = 1
     student_provider.sequence_parallel = student_provider.tensor_model_parallel_size > 1
-    student_provider.pipeline_model_parallel_size = 3
+    student_provider.pipeline_model_parallel_size = 2
     student_provider.pipeline_dtype = torch.bfloat16
     student_provider.context_parallel_size = 1
     student_provider.expert_model_parallel_size = 1
     student_provider.expert_tensor_parallel_size = 1
-    student_provider.seq_length = 4096
     student_provider.hetereogenous_dist_checkpoint = True
 
-    teacher_provider.seq_length = 4096
-    teacher_provider.tensor_model_parallel_size = 1
-    teacher_provider.sequence_parallel = teacher_provider.tensor_model_parallel_size > 1
-    teacher_provider.pipeline_model_parallel_size = 3
-    teacher_provider.pipeline_dtype = torch.bfloat16
-    teacher_provider.context_parallel_size = 1
-    teacher_provider.expert_model_parallel_size = 1
-    teacher_provider.expert_tensor_parallel_size = 1
-    teacher_provider.seq_length = 4096
-    teacher_provider.hetereogenous_dist_checkpoint = True
+    # Fix teacher to match student
+    teacher_provider.seq_length = student_provider.seq_length
+    teacher_provider.tensor_model_parallel_size = student_provider.tensor_model_parallel_size
+    teacher_provider.sequence_parallel = student_provider.sequence_parallel
+    teacher_provider.pipeline_model_parallel_size = student_provider.pipeline_model_parallel_size
+    teacher_provider.pipeline_dtype = student_provider.pipeline_dtype
+    teacher_provider.context_parallel_size = student_provider.context_parallel_size
+    teacher_provider.expert_model_parallel_size = student_provider.expert_model_parallel_size
+    teacher_provider.expert_tensor_parallel_size = student_provider.expert_tensor_parallel_size
+    teacher_provider.hetereogenous_dist_checkpoint = student_provider.hetereogenous_dist_checkpoint
 
     # ------------------------------------------------------------------
     # Step 7: Create DistillationProvider
@@ -468,7 +467,14 @@ def main(args: argparse.Namespace) -> None:  # noqa: C901 (complexity OK for an 
     logger.info("Step 10: Starting distillation")
     logger.info("Rank: %s", get_rank_safe())
 
-    distill(config=config)
+    try:
+        distill(config=config)
+    except Exception as e:
+        logger.error("Error during distillation: %s", e)
+        raise e
+    finally:
+        if torch.distributed.is_initialized():
+            torch.distributed.destroy_process_group()
 
 # ---------------------------------------------------------------------------
 # Internal helpers
