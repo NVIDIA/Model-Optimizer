@@ -747,6 +747,17 @@ class GPTModelImporter:
         if hasattr(model, "output_layer") and not model.share_embeddings_and_output_weights:
             self.rules["output_layer"](model.output_layer)
 
+        # For PP with shared embedding/output weights, re-sync the output layer on the last
+        # pipeline stage from stage 0's (now HF-loaded) embedding. At model init,
+        # setup_embeddings_and_output_layer() zeros out the last stage's weight and all-reduces
+        # from stage 0. After importing HF weights into stage 0's embedding, that sync is stale,
+        # so we re-run it here.
+        if (
+            model.share_embeddings_and_output_weights
+            and model.config.pipeline_model_parallel_size > 1
+        ):
+            model.setup_embeddings_and_output_layer()
+
         # MTP
         if hasattr(model, "mtp"):
             layer_pbar.set_description("Importing MTP")

@@ -9,5 +9,5 @@ coverage:
     project:
       default:
         target: auto
-        threshold: 2% # Allow atmost 2% coverage drop from main branch.
+        threshold: 1% # Allow atmost 1% coverage drop from main branch.
     patch: false
