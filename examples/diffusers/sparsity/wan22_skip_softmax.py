@@ -464,8 +464,17 @@ def main() -> None:
             pipe_kwargs["guidance_scale_2"] = args.guidance_scale_2
         output = pipe(**pipe_kwargs)
 
-        export_to_video(output.frames[0], args.output, fps=16)
-        print(f"Saved to {args.output}")
+        try:
+            export_to_video(output.frames[0], args.output, fps=16)
+            print(f"Saved to {args.output}")
+        except ImportError as exc:
+            # Fall back to saving the first frame as PNG if no video backend
+            # (opencv / imageio) is installed — useful in minimal CI envs.
+            print(f"Video export skipped ({exc}); saving first frame as PNG")
+            frame0 = output.frames[0][0]
+            png_path = str(args.output).rsplit(".", 1)[0] + ".png"
+            frame0.save(png_path)
+            print(f"Saved first frame to {png_path}")
 
     # ---- Print stats ----
     if not args.baseline:
