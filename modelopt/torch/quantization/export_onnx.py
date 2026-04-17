@@ -656,9 +656,20 @@ def export_fp4(
 
 @contextlib.contextmanager
 def configure_linear_module_onnx_quantizers(model):
-    """Sets the onnx export attributes for the given model."""
+    """Sets the onnx export attributes for the given model.
+
+    For Linear modules, sets both input and weight quantizer types.
+    For other modules with block-quantized input_quantizers (e.g., pooling layers
+    in models like EfficientViT), sets the input quantizer to "dynamic" to prevent
+    TRT_FP4QDQ static export for activations.
+    """
     for _, module in model.named_modules():
         if isinstance(module, torch.nn.Linear):
             module.input_quantizer._onnx_quantizer_type = "dynamic"
             module.weight_quantizer._onnx_quantizer_type = "static"
+        elif (
+            hasattr(module, "input_quantizer")
+            and getattr(module.input_quantizer, "block_sizes", None)
+        ):
+            module.input_quantizer._onnx_quantizer_type = "dynamic"
     yield

@@ -1504,6 +1504,130 @@ def remove_redundant_casts(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
     return onnx_model
 
 
+def fix_fp16_fp32_mismatches(model: onnx.ModelProto) -> onnx.ModelProto:
+    """Insert Cast nodes to resolve FP32/FP16 type mismatches after blocked-op FP16 conversion.
+
+    After convert_float_to_float16 with an op_block_list, FP32 data from blocked ops
+    (e.g., QDQ paths) can flow into nodes whose other inputs are FP16. TensorRT
+    --stronglyTyped rejects such mismatches. This function propagates "real" types
+    through the graph and inserts FP32->FP16 Cast nodes where needed.
+
+    Note: value_info types are unreliable after convert_float_to_float16 with blocked ops
+    (metadata may say FP16 even when actual data is FP32), so this function re-derives
+    types by following op semantics.
+
+    Args:
+        model: The ONNX model to fix.
+
+    Returns:
+        The modified ONNX model with Cast nodes inserted to resolve mismatches.
+    """
+    FLOAT = onnx.TensorProto.FLOAT
+    FLOAT16 = onnx.TensorProto.FLOAT16
+
+    # Ops whose data inputs must all have the same type in TRT stronglyTyped mode.
+    _ELEMENTWISE_OPS = {
+        "Add", "Sub", "Mul", "Div", "Pow", "Min", "Max", "Equal", "Less",
+        "Greater", "Where", "Sum", "Mean", "Concat",
+    }
+
+    # Ops that are FP32-only (QDQ) — never cast their I/O.
+    _BLOCKED_OPS = {"QuantizeLinear", "DequantizeLinear"}
+
+    # --- Step 1: Propagate real element types through the graph. ---
+    real_type: dict[str, int] = {}
+
+    # Seed from graph inputs and initializers (these are authoritative).
+    for inp in model.graph.input:
+        real_type[inp.name] = inp.type.tensor_type.elem_type
+    for init in model.graph.initializer:
+        real_type[init.name] = init.data_type
+
+    # Process nodes in topological order.
+    for node in model.graph.node:
+        if node.op_type == "Constant":
+            for attr in node.attribute:
+                if attr.name == "value" and attr.type == onnx.AttributeProto.TENSOR:
+                    for out in node.output:
+                        real_type[out] = attr.t.data_type
+            continue
+
+        if node.op_type == "Cast":
+            cast_to = get_cast_to_type(node)
+            for out in node.output:
+                real_type[out] = cast_to
+            continue
+
+        if node.op_type in _BLOCKED_OPS:
+            for out in node.output:
+                real_type[out] = FLOAT
+            continue
+
+        # For other ops: output type matches the predominant data-input type.
+        data_types = []
+        for inp_name in node.input:
+            if inp_name and inp_name in real_type and real_type[inp_name] in (FLOAT, FLOAT16):
+                data_types.append(real_type[inp_name])
+
+        if data_types:
+            out_type = FLOAT if FLOAT in data_types else FLOAT16
+        else:
+            out_type = FLOAT16
+
+        for out in node.output:
+            real_type[out] = out_type
+
+    # --- Step 2: Find nodes with mixed real types and insert Casts. ---
+    nodes_to_insert: list[tuple[int, onnx.NodeProto]] = []
+
+    for node_idx, node in enumerate(model.graph.node):
+        if node.op_type not in _ELEMENTWISE_OPS:
+            continue
+
+        input_real_types = []
+        for inp_name in node.input:
+            if inp_name and inp_name in real_type and real_type[inp_name] in (FLOAT, FLOAT16):
+                input_real_types.append((inp_name, real_type[inp_name]))
+
+        if not input_real_types:
+            continue
+
+        has_fp32 = any(t == FLOAT for _, t in input_real_types)
+        has_fp16 = any(t == FLOAT16 for _, t in input_real_types)
+        if not (has_fp32 and has_fp16):
+            continue
+
+        # Insert Cast(FP32 -> FP16) for each FP32 input.
+        # Reuse existing Cast if the same input was already cast (avoids duplicate names).
+        for inp_idx, inp_name in enumerate(node.input):
+            if not inp_name or inp_name not in real_type:
+                continue
+            if real_type[inp_name] != FLOAT:
+                continue
+            cast_out_name = inp_name + "_cast_to_fp16"
+            if cast_out_name not in real_type:
+                cast_node = onnx.helper.make_node(
+                    "Cast",
+                    inputs=[inp_name],
+                    outputs=[cast_out_name],
+                    to=FLOAT16,
+                )
+                real_type[cast_out_name] = FLOAT16
+                nodes_to_insert.append((node_idx, cast_node))
+            node.input[inp_idx] = cast_out_name
+
+    # Insert cast nodes in reverse order so positions stay valid.
+    for pos, cast_node in sorted(nodes_to_insert, key=lambda x: x[0], reverse=True):
+        model.graph.node.insert(pos, cast_node)
+
+    if nodes_to_insert:
+        logger.info(
+            f"Inserted {len(nodes_to_insert)} Cast node(s) to fix FP32/FP16 mismatches"
+        )
+
+    return model
+
+
 def remove_node_training_mode(onnx_model: onnx.ModelProto, node_op_type: str) -> onnx.ModelProto:
     """Remove `training_mode` attribute and extra training outputs from nodes of a given op type.
 
