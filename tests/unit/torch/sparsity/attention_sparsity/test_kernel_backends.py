@@ -13,42 +13,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for diffusers kernel backends and thread-local context."""
+"""Unit tests for diffusers kernel backend registration and thread-local context.
 
-import sys
-import types
-from unittest.mock import MagicMock, patch
+The forward pass of ``_diffusers_triton_attention`` requires a GPU and is
+exercised in ``tests/gpu/torch/sparsity/attention_sparsity/
+test_diffusers_triton_attention.py``. These CPU tests cover backend
+registration, thread-local config, and the conversion-time plumbing.
+"""
 
 import pytest
 import torch.nn as nn
 
-
-def _mock_diffusers():
-    """Mock diffusers.models.attention_dispatch for testing without real diffusers."""
-    m = types.ModuleType("diffusers.models.attention_dispatch")
-
-    class FakeBackendName(str):
-        _member_map_: dict = {}
-        _value2member_map_: dict = {}
-
-    m.AttentionBackendName = FakeBackendName
-
-    class FakeReg:
-        _backends: dict = {}
-        _constraints: dict = {}
-        _supported_arg_names: dict = {}
-
-    m._AttentionBackendRegistry = FakeReg
-    m.attention_backend = MagicMock()
-    return {
-        "diffusers": types.ModuleType("diffusers"),
-        "diffusers.models": types.ModuleType("diffusers.models"),
-        "diffusers.models.attention_dispatch": m,
-    }
+pytest.importorskip("diffusers")
 
 
 # ---------------------------------------------------------------------------
-# Tests: thread-local skip-softmax context
+# Thread-local skip-softmax context
 # ---------------------------------------------------------------------------
 
 
@@ -71,212 +51,58 @@ class TestSkipSoftmaxContext:
 
 
 # ---------------------------------------------------------------------------
-# Tests: diffusers triton attention
+# Diffusers triton attention backend registration and config
 # ---------------------------------------------------------------------------
 
 
-class TestDiffusersTritonAttention:
-    @pytest.fixture(autouse=True)
-    def _setup(self):
-        mocks = _mock_diffusers()
-        mk = types.ModuleType("modelopt.torch.kernels")
-        mk.attention = lambda q, k, v, **kw: q
-        mk.attention_calibrate = None
-        mk.IS_AVAILABLE = True
-        mk.register_triton_attention = None
-        mocks["modelopt.torch.kernels"] = mk
-
-        with patch.dict(sys.modules, mocks):
-            from modelopt.torch.sparsity.attention_sparsity.kernels.diffusers_triton_attention import (
-                _diffusers_triton_attention,
-                clear_triton_skip_softmax_config,
-                get_triton_attention_backend,
-                register_diffusers_triton_attention,
-                set_triton_skip_softmax_config,
-            )
-
-            self._fn = _diffusers_triton_attention
-            self._set = set_triton_skip_softmax_config
-            self._clear = clear_triton_skip_softmax_config
-            self._register = register_diffusers_triton_attention
-            self._get_backend = get_triton_attention_backend
-
-            import modelopt.torch.sparsity.attention_sparsity.kernels.diffusers_triton_attention as mod
-
-            mod._BACKEND_REGISTERED = False
-            yield
-
-    def test_set_clear_config(self):
-        self._set(threshold=0.1)
-        self._clear()
-
-    def test_register_idempotent(self):
-        self._register()
-        self._register()
-
-    def test_get_backend_before_register_raises(self):
-        with pytest.raises(RuntimeError, match="not registered"):
-            self._get_backend()
-
-
-# ---------------------------------------------------------------------------
-# Tests: _diffusers_triton_attention forward and counter helpers
-# ---------------------------------------------------------------------------
-
-
-class TestDiffusersTritonForward:
-    """Exercise _diffusers_triton_attention with a fake Triton backend."""
+class TestDiffusersTritonBackend:
+    """Backend registration, thread-local config — no kernel execution."""
 
     @pytest.fixture(autouse=True)
-    def _setup(self):
-        import torch
-
-        self.torch = torch
-
-        def _fake_attention(q, k, v, **kw):
-            out = q.clone()
-            if kw.get("measure_sparsity"):
-                out._sparsity_total = 7
-                out._sparsity_skipped = 3
-            return out
-
-        def _fake_attention_calibrate(q, k, v, threshold_trials, **kw):
-            num_thresholds = len(threshold_trials)
-            counters = torch.zeros(num_thresholds, 2, dtype=torch.int64)
-            counters[:, 0] = 20
-            counters[:, 1] = 7
-            return q.clone(), counters
-
-        # Import the real module and monkey-patch its bound attention symbols.
-        # This sidesteps Python's module-attribute caching on the parent package
-        # which can defeat sys.modules-based patching.
+    def _reset(self):
         from modelopt.torch.sparsity.attention_sparsity.kernels import (
             diffusers_triton_attention as mod,
         )
 
-        orig_attn = mod.attention
-        orig_calib = mod.attention_calibrate
-        mod.attention = _fake_attention
-        mod.attention_calibrate = _fake_attention_calibrate
-        self.mod = mod
-        try:
-            yield
-        finally:
-            mod.attention = orig_attn
-            mod.attention_calibrate = orig_calib
-            mod.clear_triton_skip_softmax_config()
+        mod._BACKEND_REGISTERED = False
+        mod.clear_triton_skip_softmax_config()
+        yield
+        mod.clear_triton_skip_softmax_config()
 
-    def _make_qkv(self, b=1, seq_q=8, seq_k=8, h=2, d=4):
-        q = self.torch.randn(b, seq_q, h, d)
-        k = self.torch.randn(b, seq_k, h, d)
-        v = self.torch.randn(b, seq_k, h, d)
-        return q, k, v
-
-    def test_inference_mode_default(self):
-        """Default path: no skip-softmax, just pass-through."""
-        q, k, v = self._make_qkv()
-        out = self.mod._diffusers_triton_attention(q, k, v)
-        assert out.shape == q.shape
-
-    def test_inference_mode_with_threshold(self):
-        """Static threshold configuration."""
-        self.mod.set_triton_skip_softmax_config(threshold=0.05)
-        q, k, v = self._make_qkv()
-        out = self.mod._diffusers_triton_attention(q, k, v)
-        assert out.shape == q.shape
-        self.mod.clear_triton_skip_softmax_config()
-
-    def test_inference_mode_with_raw_threshold(self):
-        """Raw threshold takes precedence."""
-        self.mod.set_triton_skip_softmax_config(raw_threshold=-5.0)
-        q, k, v = self._make_qkv()
-        out = self.mod._diffusers_triton_attention(q, k, v)
-        assert out.shape == q.shape
-        self.mod.clear_triton_skip_softmax_config()
-
-    def test_inference_mode_with_scale_factor(self):
-        """Scale factor used for dynamic threshold."""
-        self.mod.set_triton_skip_softmax_config(scale_factor=2.0)
-        q, k, v = self._make_qkv()
-        out = self.mod._diffusers_triton_attention(q, k, v)
-        assert out.shape == q.shape
-        self.mod.clear_triton_skip_softmax_config()
-
-    def test_different_seq_q_seq_k(self):
-        """Cross-attention: seq_q != seq_k."""
-        q, k, v = self._make_qkv(seq_q=8, seq_k=16)
-        out = self.mod._diffusers_triton_attention(q, k, v)
-        assert out.shape == q.shape
-
-    def test_is_causal_passthrough(self):
-        """is_causal flag is forwarded to the kernel wrapper."""
-        q, k, v = self._make_qkv()
-        out = self.mod._diffusers_triton_attention(q, k, v, is_causal=True)
-        assert out.shape == q.shape
-
-    def test_measure_sparsity_accumulates_counters(self):
-        """measure_sparsity=True accumulates runtime counters."""
-        self.mod.set_triton_skip_softmax_config(threshold=0.05, measure_sparsity=True)
-        q, k, v = self._make_qkv()
-        self.mod._diffusers_triton_attention(q, k, v)
-        total, skipped = self.mod.get_sparsity_counters()
-        assert total == 7
-        assert skipped == 3
-        # Second call accumulates
-        self.mod._diffusers_triton_attention(q, k, v)
-        total2, skipped2 = self.mod.get_sparsity_counters()
-        assert total2 == 14
-        assert skipped2 == 6
-        self.mod.clear_triton_skip_softmax_config()
-
-    def test_calibration_mode_accumulates(self):
-        """Calibration mode stores and sums counters across calls."""
-        self.mod.set_triton_skip_softmax_config(
-            calibration_mode=True,
-            threshold_trials=[0.01, 0.1],
+    def test_set_clear_config(self):
+        from modelopt.torch.sparsity.attention_sparsity.kernels.diffusers_triton_attention import (
+            clear_triton_skip_softmax_config,
+            set_triton_skip_softmax_config,
         )
-        q, k, v = self._make_qkv()
-        self.mod._diffusers_triton_attention(q, k, v)
-        counters1 = self.mod.get_calibration_counters()
-        assert counters1 is not None
-        assert counters1.shape == (2, 2)
-        seq_k = self.mod.get_calibration_seq_k()
-        assert seq_k == q.shape[1]
 
-        # Second call accumulates
-        self.mod._diffusers_triton_attention(q, k, v)
-        counters2 = self.mod.get_calibration_counters()
-        assert (counters2 == counters1 * 2).all()
+        set_triton_skip_softmax_config(threshold=0.1)
+        clear_triton_skip_softmax_config()
 
-        self.mod.clear_triton_skip_softmax_config()
+    def test_register_idempotent(self):
+        from modelopt.torch.sparsity.attention_sparsity.kernels.diffusers_triton_attention import (
+            register_diffusers_triton_attention,
+        )
 
-    def test_clear_resets_counters(self):
-        """clear_triton_skip_softmax_config resets all counters."""
-        self.mod.set_triton_skip_softmax_config(threshold=0.05, measure_sparsity=True)
-        q, k, v = self._make_qkv()
-        self.mod._diffusers_triton_attention(q, k, v)
-        assert self.mod.get_sparsity_counters() != (0, 0)
-        self.mod.clear_triton_skip_softmax_config()
-        assert self.mod.get_sparsity_counters() == (0, 0)
-        assert self.mod.get_calibration_counters() is None
-        assert self.mod.get_calibration_seq_k() is None
+        register_diffusers_triton_attention()
+        register_diffusers_triton_attention()  # Should be a no-op
 
-    def test_register_backend_and_get(self):
-        """After registration, get_triton_attention_backend returns a context."""
-        self.mod._BACKEND_REGISTERED = False
-        self.mod.register_diffusers_triton_attention()
-        # Even after registering, our mock returns a MagicMock — just call it.
-        backend_ctx = self.mod.get_triton_attention_backend()
-        assert backend_ctx is not None
+    def test_get_backend_before_register_raises(self):
+        from modelopt.torch.sparsity.attention_sparsity.kernels.diffusers_triton_attention import (
+            get_triton_attention_backend,
+        )
+
+        with pytest.raises(RuntimeError, match="not registered"):
+            get_triton_attention_backend()
 
 
 # ---------------------------------------------------------------------------
-# Tests: conversion.py _register_diffusers_backends_if_needed
+# conversion._register_diffusers_backends_if_needed
 # ---------------------------------------------------------------------------
 
 
 class TestRegisterDiffusersBackends:
-    def test_no_diffusers_no_error(self):
+    def test_no_diffusers_model_no_error(self):
+        """Non-ModelMixin models pass through without registering."""
         from modelopt.torch.sparsity.attention_sparsity.conversion import (
             _register_diffusers_backends_if_needed,
         )
@@ -284,20 +110,22 @@ class TestRegisterDiffusersBackends:
         _register_diffusers_backends_if_needed(nn.Linear(10, 10))
 
     def test_with_diffusers_model(self):
+        """A ModelMixin subclass triggers diffusers backend registration."""
+        from diffusers.models.modeling_utils import ModelMixin
+
         from modelopt.torch.sparsity.attention_sparsity.conversion import (
             _register_diffusers_backends_if_needed,
         )
+        from modelopt.torch.sparsity.attention_sparsity.kernels import (
+            diffusers_triton_attention as mod,
+        )
 
-        mock_mixin = type("ModelMixin", (nn.Module,), {})
-        mock_utils = types.ModuleType("diffusers.models.modeling_utils")
-        mock_utils.ModelMixin = mock_mixin
+        mod._BACKEND_REGISTERED = False
 
-        with (
-            patch.dict(sys.modules, {"diffusers.models.modeling_utils": mock_utils}),
-            patch(
-                "modelopt.torch.sparsity.attention_sparsity.kernels.register_diffusers_triton_attention",
-                MagicMock(),
-            ) as mock_triton,
-        ):
-            _register_diffusers_backends_if_needed(mock_mixin())
-            mock_triton.assert_called_once()
+        class _TinyMixinModel(ModelMixin):
+            def __init__(self):
+                super().__init__()
+                self.lin = nn.Linear(4, 4)
+
+        _register_diffusers_backends_if_needed(_TinyMixinModel())
+        assert mod._BACKEND_REGISTERED is True

@@ -17,7 +17,6 @@
 
 import math
 import warnings
-from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -25,10 +24,6 @@ import torch
 from modelopt.torch.sparsity.attention_sparsity.methods.triton_skip_softmax import (
     TritonSkipSoftmaxMethod,
 )
-
-# Module paths used by _set_triton_backends / _clear_triton_backends.
-_DIFF_MOD_PATH = "modelopt.torch.sparsity.attention_sparsity.kernels.diffusers_triton_attention"
-_LTX_MOD_PATH = "modelopt.torch.sparsity.attention_sparsity.kernels.ltx_triton_attention"
 
 
 class TestInit:
@@ -202,183 +197,26 @@ class TestGetSparseContext:
         assert hasattr(ctx, "__enter__")
 
 
-class TestSetClearTritonBackends:
-    """Test _set_triton_backends / _clear_triton_backends import-fallback paths."""
+class TestCollectCalibrationStats:
+    """Defensive null-guards in _collect_calibration_stats (no GPU required).
 
-    def test_set_backends_calls_both(self):
-        """When both diffusers and LTX backends exist, both are configured."""
-        m = TritonSkipSoftmaxMethod()
-        with (
-            patch(f"{_DIFF_MOD_PATH}.set_triton_skip_softmax_config", MagicMock()) as set_diff,
-            patch(f"{_LTX_MOD_PATH}.set_ltx_triton_context", MagicMock()) as set_ltx,
-        ):
-            m._set_triton_backends(threshold=0.1)
-            set_diff.assert_called_once_with(threshold=0.1)
-            set_ltx.assert_called_once()
+    The happy-path (calibration context populating ``module._last_stats`` from
+    real counters) is exercised by GPU tests in
+    ``tests/gpu/torch/sparsity/attention_sparsity/``.
+    """
 
-    def test_clear_backends_calls_both(self):
-        """When both diffusers and LTX backends exist, both are cleared."""
-        m = TritonSkipSoftmaxMethod()
-        with (
-            patch(f"{_DIFF_MOD_PATH}.clear_triton_skip_softmax_config", MagicMock()) as clear_diff,
-            patch(f"{_LTX_MOD_PATH}.clear_ltx_triton_context", MagicMock()) as clear_ltx,
-        ):
-            m._clear_triton_backends()
-            clear_diff.assert_called_once()
-            clear_ltx.assert_called_once()
-
-
-class TestInferenceContextManager:
-    """Exercise _triton_inference_context's raw/scale/static branches."""
-
-    def _get_module(self):
-        return type("M", (), {"_apply_skip_softmax": False})()
-
-    def _mock_backends(self):
-        """Patch both backends so context managers don't touch real kernels."""
-        return (
-            patch(f"{_DIFF_MOD_PATH}.set_triton_skip_softmax_config", MagicMock()),
-            patch(f"{_DIFF_MOD_PATH}.clear_triton_skip_softmax_config", MagicMock()),
-            patch(f"{_LTX_MOD_PATH}.set_ltx_triton_context", MagicMock()),
-            patch(f"{_LTX_MOD_PATH}.clear_ltx_triton_context", MagicMock()),
-            patch(
-                f"{_DIFF_MOD_PATH}.get_triton_attention_backend",
-                MagicMock(side_effect=RuntimeError("no diffusers backend")),
-            ),
-        )
-
-    def test_raw_threshold_branch(self):
-        """Raw threshold takes precedence over scale_factor."""
-        m = TritonSkipSoftmaxMethod({"skip_softmax_raw_threshold": -4.0})
-        module = self._get_module()
-        p0, p1, p2, p3, p4 = self._mock_backends()
-        with p0, p1, p2, p3, p4:
-            with m._triton_inference_context(module):
-                assert module._apply_skip_softmax is True
-            assert module._apply_skip_softmax is False
-
-    def test_scale_factor_branch(self):
-        """Calibrated scale_factor used when raw is None."""
-        m = TritonSkipSoftmaxMethod()
-        m.calibration_params = {"prefill": {"a": 2.0, "b": 3.0}}
-        m.target_sparse_ratio = {"prefill": 0.5}
-        module = self._get_module()
-        p0, p1, p2, p3, p4 = self._mock_backends()
-        with p0, p1, p2, p3, p4:
-            with m._triton_inference_context(module):
-                assert module._apply_skip_softmax is True
-            assert module._apply_skip_softmax is False
-
-    def test_static_threshold_branch(self):
-        """Static threshold used when no raw/scale present."""
-        m = TritonSkipSoftmaxMethod({"skip_softmax_threshold": 0.05})
-        module = self._get_module()
-        p0, p1, p2, p3, p4 = self._mock_backends()
-        with p0, p1, p2, p3, p4, m._triton_inference_context(module):
-            pass
-
-    def test_measure_sparsity_path(self):
-        """measure_sparsity=True triggers _collect_sparsity_counters on exit."""
-        m = TritonSkipSoftmaxMethod({"skip_softmax_threshold": 0.05})
-        m.enable_measure_sparsity(True)
-        module = self._get_module()
-        p0, p1, p2, p3, p4 = self._mock_backends()
-        with (
-            p0,
-            p1,
-            p2,
-            p3,
-            p4,
-            patch(
-                f"{_DIFF_MOD_PATH}.get_sparsity_counters",
-                MagicMock(return_value=(100, 30)),
-            ),
-            m._triton_inference_context(module),
-        ):
-            pass
-        # After the context, counters should be accumulated
-        assert m._sparsity_total == 100
-        assert m._sparsity_skipped == 30
-
-
-class TestCalibrationContextManager:
-    """Exercise _triton_calibration_context and _collect_calibration_stats."""
-
-    def test_calibration_ctx_with_diffusers_counters(self):
-        """Calibration context populates module._last_stats from diffusers counters."""
-        m = TritonSkipSoftmaxMethod()
-        m._calibration_mode = True
-        m._threshold_trials = [0.01, 0.1, 0.5]
-        module = type("M", (), {"_apply_skip_softmax": False, "_last_stats": None})()
-
-        # counters: 3 thresholds, [total, skipped]
-        fake_counters = torch.tensor([[100, 10], [100, 50], [100, 90]], dtype=torch.int64)
-
-        with (
-            patch(f"{_DIFF_MOD_PATH}.set_triton_skip_softmax_config", MagicMock()),
-            patch(f"{_DIFF_MOD_PATH}.clear_triton_skip_softmax_config", MagicMock()),
-            patch(f"{_LTX_MOD_PATH}.set_ltx_triton_context", MagicMock()),
-            patch(f"{_LTX_MOD_PATH}.clear_ltx_triton_context", MagicMock()),
-            patch(
-                f"{_DIFF_MOD_PATH}.get_calibration_counters",
-                MagicMock(return_value=fake_counters),
-            ),
-            patch(f"{_DIFF_MOD_PATH}.get_calibration_seq_k", MagicMock(return_value=4096)),
-            patch(
-                f"{_DIFF_MOD_PATH}.get_triton_attention_backend",
-                MagicMock(side_effect=RuntimeError("no backend")),
-            ),
-            m._triton_calibration_context(module),
-        ):
-            pass
-
-        assert module._last_stats is not None
-        assert module._last_stats["phase"] == "prefill"
-        assert module._last_stats["sample_length"] == 4096
-        assert len(module._last_stats["sparsity"]) == 3
-        # sparsity = skipped/total for each threshold
-        assert module._last_stats["sparsity"][0] == pytest.approx(0.1)
-        assert module._last_stats["sparsity"][1] == pytest.approx(0.5)
-        assert module._last_stats["sparsity"][2] == pytest.approx(0.9)
-
-    def test_collect_stats_no_counters(self):
-        """_collect_calibration_stats is a no-op when no counters present."""
+    def test_no_counters_is_noop(self):
+        """Skips writing stats when neither backend has counters."""
         m = TritonSkipSoftmaxMethod()
         m._threshold_trials = [0.01]
         module = type("M", (), {"_last_stats": None})()
+        m._collect_calibration_stats(module)
+        assert module._last_stats is None
 
-        with (
-            patch(f"{_DIFF_MOD_PATH}.get_calibration_counters", MagicMock(return_value=None)),
-            patch(f"{_LTX_MOD_PATH}.get_calibration_counters", MagicMock(return_value=None)),
-        ):
-            m._collect_calibration_stats(module)
-            # Should not have set _last_stats because no counters available
-            assert module._last_stats is None
-
-    def test_collect_stats_no_threshold_trials(self):
-        """_collect_calibration_stats short-circuits when threshold_trials is None."""
+    def test_no_threshold_trials_is_noop(self):
+        """Skips writing stats when threshold_trials was never set."""
         m = TritonSkipSoftmaxMethod()
-        m._threshold_trials = None  # Not set
+        m._threshold_trials = None
         module = type("M", (), {"_last_stats": None})()
-
-        with patch(
-            f"{_DIFF_MOD_PATH}.get_calibration_counters",
-            MagicMock(return_value=torch.tensor([[100, 50]], dtype=torch.int64)),
-        ):
-            m._collect_calibration_stats(module)
-            assert module._last_stats is None
-
-
-class TestDiffusersBackendContext:
-    """Test _get_diffusers_backend_context import-fallback."""
-
-    def test_context_fallback_when_unavailable(self):
-        """Context should yield even if diffusers attention backend unavailable."""
-        with (
-            patch(
-                f"{_DIFF_MOD_PATH}.get_triton_attention_backend",
-                MagicMock(side_effect=RuntimeError("not registered")),
-            ),
-            TritonSkipSoftmaxMethod._get_diffusers_backend_context(),
-        ):
-            pass  # Should not raise
+        m._collect_calibration_stats(module)
+        assert module._last_stats is None
