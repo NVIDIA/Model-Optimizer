@@ -32,7 +32,7 @@ Changelog
 - [Experimental] Add support for transformers>=5.0, including generic PTQ and unified HF checkpoint export for fused MoE expert modules (Mixtral, Qwen2-MoE, Qwen3-MoE, Qwen3.5-MoE, DeepSeek-V3, Jamba, OLMoE, etc.).
 - Improve ``megatron_preprocess_data``: add ``--reasoning_content`` support for Nemotron v3 datasets, eliminate intermediate JSONL for HuggingFace datasets, return output file prefixes from the Python API, add gzip input support (``.jsonl.gz``), add ``--strip_newlines`` flag for plain-text pretraining data, add ``--hf_streaming`` for very large datasets (only consumed rows downloaded), and auto-shuffle when ``--hf_max_samples_per_split`` is set to avoid biased sampling.
 
-0.43 (2026-04-09)
+0.43 (2026-04-16)
 ^^^^^^^^^^^^^^^^^
 
 **Bug Fixes**
