@@ -34,8 +34,8 @@ from modelopt.torch.sparsity.attention_sparsity.kernels import ltx_triton_attent
 
 
 @pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="Need CUDA + triton")
-class TestDiffusersTritonAttentionGPU:
-    """Exercise _diffusers_triton_attention on GPU."""
+class TestDiffusersTritonAttention:
+    """Exercise _diffusers_triton_attention on a real device."""
 
     @pytest.fixture(autouse=True)
     def _reset_thread_local(self):
@@ -100,8 +100,8 @@ class TestDiffusersTritonAttentionGPU:
 
 
 @pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="Need CUDA + triton")
-class TestLTXTritonAttentionGPU:
-    """Exercise _ltx_triton_attention on GPU (LTX layout [B, T, H*D])."""
+class TestLTXTritonAttention:
+    """Exercise _ltx_triton_attention (LTX layout [B, T, H*D])."""
 
     @pytest.fixture(autouse=True)
     def _reset_thread_local(self):
