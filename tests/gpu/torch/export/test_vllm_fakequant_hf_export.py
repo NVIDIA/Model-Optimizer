@@ -17,9 +17,10 @@ from copy import deepcopy
 
 import pytest
 import torch
-from _test_utils.torch.transformers_models import create_tiny_llama_dir
 from accelerate import init_empty_weights, load_checkpoint_and_dispatch
 from transformers import AutoConfig, AutoModelForCausalLM
+import transformers
+from _test_utils.torch.transformers_models import create_tiny_llama_dir, create_tiny_qwen3_moe_dir
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export import export_hf_vllm_fq_checkpoint
@@ -28,16 +29,7 @@ from modelopt.torch.quantization.utils import enable_weight_access_and_writeback
 from modelopt.torch.utils import safe_load
 
 
-@pytest.mark.parametrize(
-    "quant_cfg",
-    [
-        mtq.FP8_DEFAULT_CFG,
-        # INT4_AWQ_CFG: exercises the AWQ detection path in _resmooth_experts_for_export and the
-        # pre_quant_scale-folded-into-weight path (disabled input quantizer with pqs → identity saved).
-        mtq.INT4_AWQ_CFG,
-    ],
-)
-def test_hf_vllm_export(tmp_path, quant_cfg):
+def _test_hf_vllm_export(tmp_path, quant_cfg, model_dir):
     """Test HuggingFace model export for vLLM with fake quantization.
 
     This test verifies:
@@ -47,11 +39,8 @@ def test_hf_vllm_export(tmp_path, quant_cfg):
     4. Weight quantizer states are empty in saved state dict; input quantizer amaxes preserved
     """
 
-    # Create a tiny LLaMA model for testing
-    tiny_model_dir = create_tiny_llama_dir(tmp_path, num_hidden_layers=2)
-
     # Load the model
-    model = AutoModelForCausalLM.from_pretrained(tiny_model_dir)
+    model = AutoModelForCausalLM.from_pretrained(model_dir)
     model = model.cuda()
     model.eval()
 
@@ -256,3 +245,15 @@ def test_hf_vllm_export_offload(tmp_path, quant_cfg):
             "_amax" in k for k in quantizer_state_dict_before[name]
         ):
             assert any("_amax" in k for k in state), f"input quantizer {name} should preserve _amax"
+@pytest.mark.parametrize("quant_cfg", [mtq.FP8_DEFAULT_CFG, mtq.INT4_AWQ_CFG])
+def test_hf_vllm_export_tiny_llama(tmp_path, quant_cfg):
+    tiny_model_dir = create_tiny_llama_dir(tmp_path, num_hidden_layers=2)
+    _test_hf_vllm_export(tmp_path, quant_cfg, tiny_model_dir)
+
+
+@pytest.mark.parametrize("quant_cfg", [mtq.FP8_DEFAULT_CFG, mtq.INT4_AWQ_CFG])
+def test_hf_vllm_export_tiny_qwen3_moe(tmp_path, quant_cfg):
+    if quant_cfg == mtq.INT4_AWQ_CFG and transformers.__version__.startswith("5."):
+        pytest.skip("INT4_AWQ_CFG is not supported for Qwen3 MoE in transformers > 5.x")
+    tiny_model_dir = create_tiny_qwen3_moe_dir(tmp_path, num_hidden_layers=2)
+    _test_hf_vllm_export(tmp_path, quant_cfg, tiny_model_dir)
