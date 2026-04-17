@@ -335,7 +335,4 @@ exclude_lines = [
     "if TYPE_CHECKING:",
     # Don't complain about abstract methods, they aren't run
     "@(abc\\.)?abstractmethod",
-    # Triton JIT/autotune kernels are GPU-only and tested via tests/gpu/
-    "@triton\\.jit",
-    "@triton\\.autotune",
 ]

@@ -4,6 +4,19 @@
 flag_management:
   default_rules:
     carryforward: true
+  # Triton JIT kernels (modelopt/torch/kernels/triton_fa.py, hf_triton_attention.py)
+  # are GPU-only code that unit tests (CPU) cannot exercise. We keep them in the
+  # `gpu` flag so nightly GPU runs report their coverage, but exclude them from
+  # the `unit` flag so CPU-only unit tests are not penalized for missing them.
+  individual_flags:
+    - name: unit
+      paths:
+        - "modelopt/**"
+        - "!modelopt/torch/kernels/triton_fa.py"
+        - "!modelopt/torch/kernels/hf_triton_attention.py"
+    - name: gpu
+      paths:
+        - "modelopt/**"
 coverage:
   status:
     project:
