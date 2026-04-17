@@ -48,6 +48,7 @@ from modelopt.onnx.utils import (
     change_casts_to_fp16,
     check_model_uses_external_data,
     fold_dq_fp32_to_fp16_casts,
+    fold_qdq_scale_fp16_to_fp32_casts,
     get_input_names,
     get_input_shapes,
     get_node_names,
@@ -652,6 +653,9 @@ def get_onnx_bytes_and_metadata(
             onnx_opt_graph = change_casts_to_fp16(onnx_opt_graph, op_list)
             # Remove Cast(FP32->FP16) nodes after DQ by setting DQ output to FP16 directly
             onnx_opt_graph = fold_dq_fp32_to_fp16_casts(onnx_opt_graph)
+            # Remove Cast(FP16->FP32) feeding Q/DQ scales so DQ stays FP16 for downstream
+            # MatMul/Add layers under strongly-typed TRT parsing.
+            onnx_opt_graph = fold_qdq_scale_fp16_to_fp32_casts(onnx_opt_graph)
         else:
             onnx_opt_graph = convert_to_f16(
                 onnx_opt_graph, low_precision_type=weights_dtype, keep_io_types=False

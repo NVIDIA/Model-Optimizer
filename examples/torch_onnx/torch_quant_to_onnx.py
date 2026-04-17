@@ -122,11 +122,15 @@ def get_quant_config(quantize_mode):
 
 
 def filter_func(name):
-    """Filter function to exclude certain layers from quantization."""
+    """Filter function to exclude certain layers from quantization.
+
+    ``downsample.reduction`` (Swin/SwinV2) is excluded because it operates on 4D tensors
+    and TRT's DynamicQuantize layer (used for MXFP8/NVFP4) requires 2D/3D input.
+    """
     pattern = re.compile(
         r".*(time_emb_proj|time_embedding|conv_in|conv_out|conv_shortcut|add_embedding|"
         r"pos_embed|time_text_embed|context_embedder|norm_out|x_embedder|patch_embed|cpb_mlp|"
-        r"maxpool|global_pool).*"
+        r"maxpool|global_pool|downsample\.reduction).*"
     )
     return pattern.match(name) is not None
 
@@ -192,7 +196,7 @@ def _calibrate_uncalibrated_quantizers(model, data_loader):
 
     for quantizer in uncalibrated:
         quantizer.disable_calib()
-        quantizer.load_calib_amax()
+        quantizer.load_calib_amax(strict=False)
 
 
 def quantize_model(model, config, data_loader=None):
