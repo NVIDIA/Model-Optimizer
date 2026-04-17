@@ -667,9 +667,25 @@ def configure_linear_module_onnx_quantizers(model):
     input quantizers that would otherwise default to the static path and produce
     TRT_FP4QDQ nodes on activations (which the NVFP4 exporter cannot handle).
     """
+    sentinel = object()
+    originals: list[tuple] = []
     for _, module in model.named_modules():
-        if hasattr(module, "input_quantizer") and module.input_quantizer.block_sizes:
-            module.input_quantizer._onnx_quantizer_type = "dynamic"
-        if hasattr(module, "weight_quantizer") and module.weight_quantizer.block_sizes:
-            module.weight_quantizer._onnx_quantizer_type = "static"
-    yield
+        for attr_name, new_value in (
+            ("input_quantizer", "dynamic"),
+            ("weight_quantizer", "static"),
+        ):
+            quantizer = getattr(module, attr_name, None)
+            if quantizer is None or not quantizer.block_sizes:
+                continue
+            original = getattr(quantizer, "_onnx_quantizer_type", sentinel)
+            originals.append((quantizer, original))
+            quantizer._onnx_quantizer_type = new_value
+    try:
+        yield
+    finally:
+        for quantizer, original in originals:
+            if original is sentinel:
+                if hasattr(quantizer, "_onnx_quantizer_type"):
+                    delattr(quantizer, "_onnx_quantizer_type")
+            else:
+                quantizer._onnx_quantizer_type = original

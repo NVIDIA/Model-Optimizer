@@ -38,7 +38,9 @@ import modelopt.torch.quantization as mtq
 """
 Quantize a timm vision model and export to ONNX for TensorRT deployment.
 
-Supports FP8, INT8, MXFP8, NVFP4, INT4_AWQ, and AUTO (mixed-precision) quantization modes.
+Supports FP8, INT8, MXFP8, NVFP4, and AUTO (mixed-precision) quantization modes end-to-end
+(quantize + ONNX export + TRT build). INT4_AWQ is quantize/export-only; it is not compatible
+with ``--trt_build``.
 
 The script will:
 1. Load a pretrained timm model (e.g., ViT, Swin, ResNet).
@@ -88,7 +90,11 @@ _INT8_CONV_OVERRIDE: list = [
 
 # Auto-quantize format configs that use block quantization and need Conv2d overrides for TRT.
 # TRT DynamicQuantize requires 2D/3D input, but Conv2d operates on 4D tensors.
-_NEEDS_FP8_CONV_OVERRIDE: set[str] = {"NVFP4_AWQ_LITE_CFG", "NVFP4_DEFAULT_CFG", "MXFP8_DEFAULT_CFG"}
+_NEEDS_FP8_CONV_OVERRIDE: set[str] = {
+    "NVFP4_AWQ_LITE_CFG",
+    "NVFP4_DEFAULT_CFG",
+    "MXFP8_DEFAULT_CFG",
+}
 _NEEDS_INT8_CONV_OVERRIDE: set[str] = {"INT4_AWQ_CFG"}
 
 
@@ -125,11 +131,13 @@ def filter_func(name):
     return pattern.match(name) is not None
 
 
-def load_calibration_data(model_name, data_size, batch_size, device, with_labels=False):
+def load_calibration_data(model, data_size, batch_size, device, with_labels=False):
     """Load and prepare calibration data.
 
     Args:
-        model_name: Name of the timm model
+        model: The timm model being quantized; used to derive the calibration transforms so the
+               data pipeline matches the exact model config (respects --no_pretrained and
+               --model_kwargs).
         data_size: Number of samples to load
         batch_size: Batch size for data loader
         device: Device to load data to
@@ -137,7 +145,6 @@ def load_calibration_data(model_name, data_size, batch_size, device, with_labels
                     If False, return just the images (for standard quantize)
     """
     dataset = load_dataset("zh-plus/tiny-imagenet")
-    model = timm.create_model(model_name, pretrained=True, num_classes=1000)
     data_config = timm.data.resolve_model_data_config(model)
     transforms = timm.data.create_transform(**data_config, is_training=False)
 
@@ -171,11 +178,7 @@ def _calibrate_uncalibrated_quantizers(model, data_loader):
             if not hasattr(module, attr_name):
                 continue
             quantizer = getattr(module, attr_name)
-            if (
-                quantizer.is_enabled
-                and not quantizer.block_sizes
-                and not hasattr(quantizer, "_amax")
-            ):
+            if quantizer.is_enabled and not quantizer.block_sizes and quantizer.amax is None:
                 quantizer.enable_calib()
                 uncalibrated.append(quantizer)
 
@@ -204,11 +207,14 @@ def quantize_model(model, config, data_loader=None):
     else:
         quantized_model = mtq.quantize(model, config)
 
-    # Calibrate any FP8 override quantizers that weren't calibrated by mtq.quantize()
+    # Disable filtered quantizers BEFORE calibrating override quantizers so we don't
+    # waste time calibrating quantizers that are about to be turned off.
+    mtq.disable_quantizer(quantized_model, filter_func)
+
+    # Calibrate any FP8 override quantizers that weren't calibrated by mtq.quantize().
     if data_loader is not None:
         _calibrate_uncalibrated_quantizers(quantized_model, data_loader)
 
-    mtq.disable_quantizer(quantized_model, filter_func)
     return quantized_model
 
 
@@ -305,7 +311,10 @@ def get_model_input_shape(model):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Quantize timm models to FP8, MXFP8, INT8, NVFP4, INT4_AWQ, or use AUTO quantization"
+        description=(
+            "Quantize timm models to FP8, MXFP8, INT8, NVFP4, or use AUTO quantization. "
+            "INT4_AWQ is supported for quantize/export only and is not compatible with --trt_build."
+        )
     )
 
     # Model hyperparameters
@@ -424,7 +433,7 @@ def main():
     if args.quantize_mode == "auto":
         # Auto quantization requires labels for loss computation
         data_loader = load_calibration_data(
-            args.timm_model_name,
+            model,
             args.calibration_data_size,
             args.batch_size,
             device,
@@ -446,7 +455,7 @@ def main():
         # quantizers require calibration data.
         config = get_quant_config(args.quantize_mode)
         data_loader = load_calibration_data(
-            args.timm_model_name,
+            model,
             args.calibration_data_size,
             args.batch_size,
             device,
@@ -496,7 +505,14 @@ def build_trt_engine(onnx_path):
         "--builderOptimizationLevel=4",
     ]
     print(f"\nBuilding TensorRT engine: {' '.join(cmd)}")
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    except FileNotFoundError as e:
+        raise RuntimeError(
+            "trtexec not found on PATH; install TensorRT or drop --trt_build."
+        ) from e
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError(f"trtexec timed out building {onnx_path} after 600s.") from e
     if result.returncode != 0:
         raise RuntimeError(
             f"TensorRT engine build failed for {onnx_path}:\n{result.stdout}\n{result.stderr}"
