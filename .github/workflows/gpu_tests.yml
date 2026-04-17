@@ -41,16 +41,16 @@ jobs:
           files: |
             .github/workflows/gpu_tests.yml
             modelopt/**
+            noxfile.py
+            pyproject.toml
             tests/gpu/**
             tests/gpu_megatron/**
-            tests/gpu_regression/**
             tests/gpu_trtllm/**
+            tests/gpu_regression/**
             examples/speculative_decoding/**
             examples/dataset/**
             modelopt_recipes/general/speculative_decoding/**
             tools/launcher/**
-            pyproject.toml
-            tox.ini
           fail_on_initial_diff_error: true
   wait-checks:
     needs: [check-file-changes]
@@ -101,14 +101,8 @@ jobs:
           COVERAGE_PROCESS_START: ${{ github.workspace }}/pyproject.toml
           COVERAGE_FILE: ${{ github.workspace }}/.coverage
         run: |
-          # nemo containers use uv venvs which is not compatible with tox-current-env, so run tests directly
-          if [[ "${{ matrix.example }}" == "gpu_megatron" ]]; then
-            python -m pip install -e .[hf,dev-test]
-            python -m pytest tests/gpu_megatron --cov
-          else
-            python -m pip install tox tox-current-env
-            COV_ARGS="--cov" python -m tox -e cuda13-${{ matrix.example }} --current-env
-          fi
+          pip install nox
+          nox -s ${{ matrix.example }}
       - name: Upload GPU coverage to Codecov
         uses: codecov/codecov-action@v5
         with:
