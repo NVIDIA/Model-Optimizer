@@ -13,12 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from unittest import mock
+
 import numpy as np
 import onnx_graphsurgeon as gs
 import pytest
 from onnx import TensorProto, helper
 
 from modelopt.onnx.quantization.graph_utils import (
+    _exclude_matmuls_by_inference,
     _exclude_matmuls_by_shape_inference,
     _get_inp_b_k_dim,
     find_nodes_from_convs_to_exclude,
@@ -180,3 +183,175 @@ def test_matmul_large_dims_not_excluded():
     calibration_shapes = {"A": [128, 256]}
     excluded = _exclude_matmuls_by_shape_inference(model, nodes, calibration_shapes)
     assert "MatMul_0" not in excluded
+
+
+def _make_gemm_model(m, k, n, trans_b, name="Gemm_0"):
+    """Build a minimal ONNX model with a single Gemm node and a constant B.
+
+    If trans_b is 1, B has shape [N, K] (K is last axis).
+    Otherwise B has shape [K, N].
+    """
+    inp_a = helper.make_tensor_value_info("A", TensorProto.FLOAT, [m, k])
+    out = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [m, n])
+
+    b_shape = [n, k] if trans_b else [k, n]
+    b_init = helper.make_tensor(
+        "B", TensorProto.FLOAT, b_shape, np.ones(b_shape[0] * b_shape[1]).tolist()
+    )
+    gemm = helper.make_node("Gemm", ["A", "B"], ["Y"], name=name, transB=trans_b)
+    graph = helper.make_graph([gemm], "test", [inp_a], [out], initializer=[b_init])
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
+    return model
+
+
+def _get_nodes_by_op(model, op):
+    graph = gs.import_onnx(model)
+    return [n for n in graph.nodes if n.op == op]
+
+
+@pytest.mark.parametrize("trans_b", [0, 1])
+def test_get_inp_b_k_dim_gemm_transb_constant(trans_b):
+    """Gemm should honor transB when deriving K from a Constant B."""
+    model = _make_gemm_model(m=32, k=10, n=64, trans_b=trans_b)
+    nodes = _get_nodes_by_op(model, "Gemm")
+    assert _get_inp_b_k_dim(nodes[0]) == 10
+
+
+@pytest.mark.parametrize("trans_b", [0, 1])
+def test_get_inp_b_k_dim_gemm_transb_output_map(trans_b):
+    """Gemm should honor transB when deriving K from an output_map."""
+    # Build with a Variable B so the node's input is not a Constant.
+    inp_a = helper.make_tensor_value_info("A", TensorProto.FLOAT, [32, 10])
+    inp_b = helper.make_tensor_value_info("B", TensorProto.FLOAT, [64, 10] if trans_b else [10, 64])
+    out = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [32, 64])
+    gemm = helper.make_node("Gemm", ["A", "B"], ["Y"], name="Gemm_0", transB=trans_b)
+    graph = helper.make_graph([gemm], "test", [inp_a, inp_b], [out])
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
+    nodes = _get_nodes_by_op(model, "Gemm")
+
+    b_runtime_shape = (64, 10) if trans_b else (10, 64)
+    output_map = {"B": np.zeros(b_runtime_shape)}
+    assert _get_inp_b_k_dim(nodes[0], output_map=output_map) == 10
+
+
+def test_gemm_small_k_excluded_with_transb():
+    """Gemm with transB=1 and small K should be excluded (regression: prior code read N)."""
+    # N=64 is large; K=8 is small. With transB=1, B=[N,K]=[64,8], K axis is -1.
+    # If _get_inp_b_k_dim ignored transB it would read 64 (N) and not exclude.
+    model = _make_gemm_model(m=32, k=8, n=64, trans_b=1)
+    nodes = _get_nodes_by_op(model, "Gemm")
+    calibration_shapes = {"A": [32, 8]}
+    excluded = _exclude_matmuls_by_shape_inference(model, nodes, calibration_shapes)
+    assert "Gemm_0" in excluded
+
+
+def test_gemm_large_dims_not_excluded_with_transb():
+    """Gemm with transB=1 and all large dims should NOT be excluded."""
+    model = _make_gemm_model(m=32, k=64, n=64, trans_b=1)
+    nodes = _get_nodes_by_op(model, "Gemm")
+    calibration_shapes = {"A": [32, 64]}
+    excluded = _exclude_matmuls_by_shape_inference(model, nodes, calibration_shapes)
+    assert "Gemm_0" not in excluded
+
+
+def _make_matmul_model_graph_input_b(m, k, n, name="MatMul_0"):
+    """MatMul where B is a graph input (its shape lives in model.graph.input only)."""
+    inp_a = helper.make_tensor_value_info("A", TensorProto.FLOAT, [m, k])
+    inp_b = helper.make_tensor_value_info("B", TensorProto.FLOAT, [k, n])
+    out = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [m, n])
+    matmul = helper.make_node("MatMul", ["A", "B"], ["Y"], name=name)
+    graph = helper.make_graph([matmul], "test", [inp_a, inp_b], [out])
+    return helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
+
+
+def test_matmul_small_k_graph_input_b_excluded():
+    """Small-K MatMul whose B is a graph input should still be excluded.
+
+    Regression: previous value_info_map only covered model.graph.value_info/output,
+    missing graph inputs, so K was undetectable and the MatMul wasn't excluded.
+    """
+    model = _make_matmul_model_graph_input_b(m=32, k=8, n=64)
+    nodes = _get_matmul_nodes(model)
+    calibration_shapes = {"A": [32, 8], "B": [8, 64]}
+    excluded = _exclude_matmuls_by_shape_inference(model, nodes, calibration_shapes)
+    assert "MatMul_0" in excluded
+
+
+@pytest.mark.parametrize(
+    ("k", "n", "expected_excluded"),
+    [
+        (8, 64, True),
+        (64, 8, True),
+        (64, 64, False),
+    ],
+)
+def test_exclude_matmuls_by_inference_runtime_path(k, n, expected_excluded):
+    """Exercise the runtime-inference path with B as a graph input (read from output_map)."""
+    m = 32
+    model = _make_matmul_model_graph_input_b(m=m, k=k, n=n)
+    nodes = _get_matmul_nodes(model)
+
+    # Mock get_extended_model_outputs to return a synthetic output_map so we don't
+    # need an actual ORT session.
+    fake_output_map = {
+        "Y": np.zeros((m, n), dtype=np.float32),
+        "B": np.zeros((k, n), dtype=np.float32),
+    }
+    with mock.patch(
+        "modelopt.onnx.quantization.graph_utils.get_extended_model_outputs",
+        return_value=fake_output_map,
+    ):
+        excluded = _exclude_matmuls_by_inference(
+            onnx_path="unused.onnx",
+            model=model,
+            matmul_nodes=nodes,
+            use_external_data_format=False,
+            intermediate_generated_files=[],
+            calibration_data_reader=None,
+            calibration_eps=["cpu"],
+        )
+    if expected_excluded:
+        assert "MatMul_0" in excluded
+    else:
+        assert "MatMul_0" not in excluded
+
+
+def test_exclude_matmuls_by_inference_dedupes_added_outputs():
+    """Two MatMuls sharing the same Variable B must not create duplicate graph outputs."""
+    # Build two MatMuls sharing B as a graph input.
+    m, k, n = 32, 8, 64
+    inp_a1 = helper.make_tensor_value_info("A1", TensorProto.FLOAT, [m, k])
+    inp_a2 = helper.make_tensor_value_info("A2", TensorProto.FLOAT, [m, k])
+    inp_b = helper.make_tensor_value_info("B", TensorProto.FLOAT, [k, n])
+    out1 = helper.make_tensor_value_info("Y1", TensorProto.FLOAT, [m, n])
+    out2 = helper.make_tensor_value_info("Y2", TensorProto.FLOAT, [m, n])
+    mm1 = helper.make_node("MatMul", ["A1", "B"], ["Y1"], name="MatMul_0")
+    mm2 = helper.make_node("MatMul", ["A2", "B"], ["Y2"], name="MatMul_1")
+    graph = helper.make_graph([mm1, mm2], "test", [inp_a1, inp_a2, inp_b], [out1, out2])
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
+    nodes = _get_matmul_nodes(model)
+
+    fake_output_map = {
+        "Y1": np.zeros((m, n), dtype=np.float32),
+        "Y2": np.zeros((m, n), dtype=np.float32),
+        "B": np.zeros((k, n), dtype=np.float32),
+    }
+    with mock.patch(
+        "modelopt.onnx.quantization.graph_utils.get_extended_model_outputs",
+        return_value=fake_output_map,
+    ):
+        excluded = _exclude_matmuls_by_inference(
+            onnx_path="unused.onnx",
+            model=model,
+            matmul_nodes=nodes,
+            use_external_data_format=False,
+            intermediate_generated_files=[],
+            calibration_data_reader=None,
+            calibration_eps=["cpu"],
+        )
+    output_names = [o.name for o in model.graph.output]
+    # B should appear only once in the graph outputs.
+    assert output_names.count("B") == 1
+    # Both MatMuls should be excluded (small K).
+    assert "MatMul_0" in excluded
+    assert "MatMul_1" in excluded
