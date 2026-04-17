@@ -1519,7 +1519,7 @@ def fold_dq_fp32_to_fp16_casts(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
     Returns:
         The ONNX model with Cast nodes removed and DQ outputs set to FP16.
     """
-    DQ_OPS = {"DequantizeLinear", "TRT_FP8DequantizeLinear"}
+    dq_ops = {"DequantizeLinear", "TRT_FP8DequantizeLinear"}
 
     # Build a map of tensor name -> producer node
     producer_map: dict[str, onnx.NodeProto] = {}
@@ -1547,7 +1547,7 @@ def fold_dq_fp32_to_fp16_casts(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
 
         # Check: producer is a DQ node
         producer = producer_map.get(node.input[0])
-        if producer is None or producer.op_type not in DQ_OPS:
+        if producer is None or producer.op_type not in dq_ops:
             continue
 
         # Convert the DQ scale initializer from FP32 to FP16

@@ -121,7 +121,7 @@ class FP8QuantExporter(ONNXQuantExporter):
         Returns:
             Number of Conv weight DQ nodes inserted.
         """
-        FP8_MAX = 448.0
+        fp8_max = 448.0
         count = 0
 
         for node in list(graph.nodes):
@@ -142,12 +142,10 @@ class FP8QuantExporter(ONNXQuantExporter):
             amax = torch_weights.abs().max().float()
             if amax == 0:
                 continue
-            scale_val = (amax / FP8_MAX).item()
+            scale_val = (amax / fp8_max).item()
 
             # Quantize weights to FP8 (WAR: numpy doesn't support fp8)
-            fp8_data = (
-                (torch_weights / scale_val).to(torch.float8_e4m3fn).view(torch.uint8).numpy()
-            )
+            fp8_data = (torch_weights / scale_val).to(torch.float8_e4m3fn).view(torch.uint8).numpy()
             fp8_tensor = onnx.TensorProto()
             fp8_tensor.data_type = onnx.TensorProto.FLOAT8E4M3FN
             fp8_tensor.dims.extend(fp8_data.shape)
