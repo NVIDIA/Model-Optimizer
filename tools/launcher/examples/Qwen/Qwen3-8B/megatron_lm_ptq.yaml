@@ -1,4 +1,4 @@
-# Qwen3-8B NVFP4 quantization (4 GPUs, for Slurm clusters).
+# Qwen3-8B NVFP4 quantization (8 GPUs, for Slurm clusters).
 #
 # Uses MegatronLMQuantizeTask with typed config — see common/megatron_lm/quantize/task.py
 # for all available fields.
@@ -19,7 +19,7 @@ pipeline:
     config:
       model: Qwen/Qwen3-8B
       quant_cfg: NVFP4_DEFAULT_CFG
-      tp: 4
+      tp: 8
       calib_dataset: abisee/cnn_dailymail
       calib_size: 32
       mmlu_dataset: cais/mmlu
@@ -27,5 +27,5 @@ pipeline:
     slurm_config:
       _factory_: "slurm_factory"
       nodes: 1
-      ntasks_per_node: 4
-      gpus_per_node: 4
+      ntasks_per_node: 8
+      gpus_per_node: 8
