@@ -49,7 +49,7 @@ from .utils import (
     reduce_amax,
     weight_attr_names,
 )
-from .utils.calib_utils import GPTQHelper
+from .utils.calib_utils import _GPTQ_HELPER_REGISTRY, GPTQHelper
 
 __all__ = [
     "awq",
@@ -1663,7 +1663,12 @@ def gptq(
         print_rank_0("No quantized linear layers found, skipping GPTQ")
         return
 
-    gptq_handles = {name: GPTQHelper(m, name, offload_to_cpu=True) for name, m in quantized_layers}
+    def _make_gptq_handle(name, m):
+        backend = getattr(m.weight_quantizer, "backend", None)
+        cls = _GPTQ_HELPER_REGISTRY.get(backend, GPTQHelper)
+        return cls(m, name, offload_to_cpu=True)
+
+    gptq_handles = {name: _make_gptq_handle(name, m) for name, m in quantized_layers}
     for handle in gptq_handles.values():
         handle.setup()
 

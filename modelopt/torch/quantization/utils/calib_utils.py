@@ -39,7 +39,6 @@
 """GPTQ helper and Hessian utilities for calibration."""
 
 import math
-from contextlib import contextmanager
 
 import torch
 
@@ -135,22 +134,6 @@ class GPTQHelper:
         self.weight = None
         self.h_inv = None
 
-    def is_vector_lut(self) -> bool:
-        """Check if this module's weight quantizer is configured for vector LUT quantization."""
-        extra_args = getattr(self.module.weight_quantizer, "backend_extra_args", None)
-        return bool(extra_args and extra_args.get("lut_type") == "vector_lut")
-
-    @contextmanager
-    def weight_slice_scales(self, scales):
-        """Temporarily replace _psx_scales with per-slice scales, then restore."""
-        quantizer = self.module.weight_quantizer
-        original = quantizer._psx_scales
-        quantizer._psx_scales = scales
-        try:
-            yield
-        finally:
-            quantizer._psx_scales = original
-
     def update_weights(self, block_size, perc_damp):
         """Run GPTQ blockwise weight update on this module.
 
@@ -160,12 +143,7 @@ class GPTQHelper:
         hessian = self.hessian.to(self.module.weight.device)
         self.weight = self.module.weight.data.float().clone()
         self._prepare_hessian_inverse(hessian, perc_damp)
-
-        if self.is_vector_lut():
-            self._blockwise_vector_update(block_size)
-        else:
-            self._blockwise_update(block_size)
-
+        self._blockwise_update(block_size)
         self._print_mse_error(hessian)
         self.module.weight.data = self.weight.reshape(self.module.weight.shape).to(
             self.module.weight.data.dtype
@@ -244,58 +222,6 @@ class GPTQHelper:
                 errs, self.h_inv[block_start:block_end, block_end:], alpha=-1
             )
 
-    def _blockwise_vector_update(self, block_size):
-        """GPTQ blockwise update for vector quantizers.
-
-        A single ``quantizer(weight)`` call computes and caches per-block
-        scales (``_psx_scales``) on the quantizer via the backend's
-        ``static_scales`` path.  The GPTQ loop then slices per-vector-group
-        scales from ``_psx_scales`` for each sub-vector quantization call.
-        """
-        import torch.nn.functional as F
-
-        quantizer = self.module.weight_quantizer
-        assert quantizer.backend_extra_args.get("static_scales", False), (
-            "GPTQ vector update requires static_scales=True in backend_extra_args."
-        )
-        vector_size = quantizer.backend_extra_args["vector_size"]
-        quant_block_size = quantizer.backend_extra_args["block_sizes"]
-
-        assert self.weight is not None and self.h_inv is not None
-        num_cols = self.weight.shape[1]
-        assert block_size % quant_block_size == 0
-
-        # Compute and cache _psx_scales on the quantizer via the backend.
-        quantizer(self.weight)
-
-        w = self.weight.clone()
-        h_inv = self.h_inv
-
-        for blk_start in range(0, num_cols, block_size):
-            blk_end = min(blk_start + block_size, num_cols)
-            errs = torch.zeros_like(w[:, blk_start:blk_end])
-
-            for j in range(blk_start, blk_end, vector_size):
-                d = min(vector_size, blk_end - j)
-                s = quantizer._psx_scales[:, j // quant_block_size].contiguous()
-
-                sub = w[:, j : j + d].contiguous()
-                if d < vector_size:
-                    sub = F.pad(sub, (0, vector_size - d))
-
-                with self.weight_slice_scales(s):
-                    q_sub = quantizer(sub)
-
-                for k in range(d):
-                    col = j + k
-                    self.weight[:, col] = q_sub[:, k]
-                    err = (w[:, col] - q_sub[:, k]) / h_inv[col, col]
-                    errs[:, col - blk_start] = err
-                    w[:, col:blk_end].addr_(err, h_inv[col, col:blk_end], alpha=-1)
-
-            if blk_end < num_cols:
-                w[:, blk_end:] -= errs @ h_inv[blk_start:blk_end, blk_end:]
-
     def _print_mse_error(self, hessian):
         """Log Hessian-weighted relative MSE between ``self.weight`` and original weights."""
         w_orig = self.module.weight.float()
@@ -303,3 +229,16 @@ class GPTQHelper:
         mse = (delta).mm(hessian).mul(delta).mean() / (w_orig.mm(hessian).mul(w_orig).mean() + 1e-6)
         suffix = f", n_hessian_samples: {self.n_samples}" if self.n_samples else ""
         print_rank_0(f"[{self.name}] Relative MSE error: {mse.item():.2e}{suffix}")
+
+
+_GPTQ_HELPER_REGISTRY: dict[str, type[GPTQHelper]] = {}
+
+
+def register_gptq_helper(backend: str, factory: type[GPTQHelper]) -> None:
+    """Register a :class:`GPTQHelper` subclass for a quantizer backend.
+
+    When :func:`modelopt.torch.quantization.model_calib.gptq` encounters a
+    module whose ``weight_quantizer.backend`` matches ``backend``, it will
+    construct ``factory`` instead of the default ``GPTQHelper``.
+    """
+    _GPTQ_HELPER_REGISTRY[backend] = factory
