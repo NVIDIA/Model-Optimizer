@@ -1067,14 +1067,10 @@ def quantize_main(
                 "Plain quantization supports only one quantization format."
             )
 
-            if args.qformat in QUANT_CFG_CHOICES:
-                quant_cfg = QUANT_CFG_CHOICES[args.qformat]
-            elif hasattr(mtq, args.qformat):
-                quant_cfg = getattr(mtq, args.qformat)
-            else:
-                raise AssertionError(
-                    f"Unsupported quantization format: {args.qformat}, choices are: {list(QUANT_CFG_CHOICES.keys())}"
-                )
+            assert args.qformat in QUANT_CFG_CHOICES, (
+                f"Unsupported quantization format: {args.qformat}, choices are: {list(QUANT_CFG_CHOICES.keys())}"
+            )
+            quant_cfg = QUANT_CFG_CHOICES[args.qformat]
 
             quant_cfg = build_quant_cfg(
                 args.qformat,
@@ -1109,7 +1105,7 @@ def quantize_main(
             quant_cfg = copy.deepcopy(quant_cfg)
             _set_kv_cache_constant_amax(quant_cfg["quant_cfg"])
 
-        if args.qformat in QUANT_CFG_CHOICES or hasattr(mtq, args.qformat):
+        if args.qformat in QUANT_CFG_CHOICES:
             mono_quantize(
                 args,
                 quant_cfg,
