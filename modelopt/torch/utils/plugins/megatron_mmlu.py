@@ -78,6 +78,7 @@ def megatron_mmlu(
         f"\nMMLU ({fraction * 100}%, {few_shots}-shot, Batch Size: {batch_size}) evaluation started...\n"
         "First batch may take longer to evaluate for Pipeline Parallel models."
     )
+    assert 0 < fraction <= 1, "Fraction must be between 0 and 1"
 
     # Token IDs for " A", " B", " C", " D" — the last subword handles edge cases.
     choice_ids = [tokenizer.encode(f" {c}", add_special_tokens=False)[-1] for c in _CHOICES]

@@ -299,17 +299,13 @@ def main(args: argparse.Namespace):
         match = re.fullmatch(r"mmlu_(\d+)pct", args.prune_score_func)
         if not match:
             raise ValueError(
-                f"Invalid score function: {args.prune_score_func}. "
-                "Expected format: mmlu_<N>pct (e.g. mmlu_10pct)"
+                f"Invalid score function: {args.prune_score_func}. Expected format: mmlu_<N>pct (e.g. mmlu_10pct)"
             )
-        mmlu_pct = int(match.group(1))
-        if not 0 < mmlu_pct <= 100:
-            raise ValueError("--prune_score_func percentage must be in the range [1, 100].")
-        _mmlu_frac = mmlu_pct / 100.0
+        mmlu_frac = float(match.group(1)) / 100.0
 
         def score_func(m):
             return megatron_mmlu(
-                m, tokenizer, few_shots=0, fraction=_mmlu_frac, batch_size=args.calib_mbs
+                m, tokenizer, few_shots=0, fraction=mmlu_frac, batch_size=args.calib_mbs
             )
 
         pruning_config["score_func"] = score_func
