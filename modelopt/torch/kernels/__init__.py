@@ -21,6 +21,7 @@ from modelopt.torch.utils import import_plugin
 
 IS_AVAILABLE = False
 attention = None
+attention_calibrate = None
 register_triton_attention = None
 
 if torch.cuda.is_available():
@@ -32,8 +33,10 @@ if torch.cuda.is_available():
         ),
     ):
         from .triton_fa import attention as _attention
+        from .triton_fa import attention_calibrate as _attention_calibrate
 
         attention = _attention
+        attention_calibrate = _attention_calibrate
         IS_AVAILABLE = True
         from .hf_triton_attention import register_triton_attention as _register_triton_attention
 
@@ -42,5 +45,6 @@ if torch.cuda.is_available():
 __all__ = [
     "IS_AVAILABLE",
     "attention",
+    "attention_calibrate",
     "register_triton_attention",
 ]

@@ -24,4 +24,5 @@ from .config import *
 from .conversion import *
 from .model_quant import *
 from .nn.modules.quant_module import QuantModuleRegistry
+from .sage_attention import apply_sage_attention, apply_sage_attention_v3
 from .utils import update_quant_cfg_with_kv_cache_quant

@@ -243,6 +243,7 @@ convention = "google"
 
 [tool.ruff.lint.isort]
 known-first-party = ["modelopt"]
+known-third-party = ["vllm"]
 split-on-trailing-comma = false
 
 

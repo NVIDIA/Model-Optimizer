@@ -59,9 +59,47 @@ class TritonSparseSoftmaxMethod(SparseAttentionMethod):
         @contextmanager
         def _sparse_nm_context():
             module._apply_sparse_nm = True
-            try:
-                yield
-            finally:
-                module._apply_sparse_nm = False
+            self._set_triton_backends(
+                sparsity_n=self.sparsity_n,
+                sparsity_m=self.sparsity_m,
+                num_sink_tokens=self.num_sink_tokens,
+                dense_window_size=self.dense_window_size,
+            )
+            with self._get_diffusers_backend_context():
+                try:
+                    yield
+                finally:
+                    module._apply_sparse_nm = False
+                    self._clear_triton_backends()
 
         return _sparse_nm_context()
+
+    @staticmethod
+    @contextmanager
+    def _get_diffusers_backend_context():
+        """Activate the modelopt_triton diffusers backend if registered."""
+        try:
+            from ..kernels.diffusers_triton_attention import get_triton_attention_backend
+
+            with get_triton_attention_backend():
+                yield
+        except (ImportError, RuntimeError):
+            yield
+
+    def _set_triton_backends(self, **kwargs):
+        """Set config on the diffusers Triton backend."""
+        try:
+            from ..kernels.diffusers_triton_attention import set_triton_skip_softmax_config
+
+            set_triton_skip_softmax_config(**kwargs)
+        except ImportError:
+            pass
+
+    def _clear_triton_backends(self):
+        """Clear config on the diffusers Triton backend."""
+        try:
+            from ..kernels.diffusers_triton_attention import clear_triton_skip_softmax_config
+
+            clear_triton_skip_softmax_config()
+        except ImportError:
+            pass

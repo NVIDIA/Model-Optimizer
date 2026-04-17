@@ -155,7 +155,8 @@ class SparseAttentionAttributeConfig(ModeloptBaseConfig):
             raise ValueError(
                 f"Invalid backend: {v}. Supported backends: 'pytorch' (requires "
                 f"attn_implementation='eager'), 'triton' (requires "
-                f"attn_implementation='modelopt_triton')."
+                f"attn_implementation='modelopt_triton' for HuggingFace models or the "
+                f"modelopt_triton diffusers backend for diffusers models)."
             )
         return v
 

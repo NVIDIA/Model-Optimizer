@@ -187,6 +187,95 @@ def _is_dense_region(
 
 
 # ---------------------------------------------------------------------------
+# Paged KV cache helpers
+# ---------------------------------------------------------------------------
+@triton.jit
+def _load_paged_k_tile(
+    K_cache,  # [num_blocks, page_size, num_kv_heads, head_dim]
+    Block_table,  # [batch, max_blocks_per_seq]
+    batch_idx,
+    kv_head_idx,
+    kv_start,
+    kv_pos,  # [BLOCK_N] relative positions
+    dim_pos,  # [BLOCK_D]
+    seq_len_kv,
+    stride_kc_block,
+    stride_kc_pos,
+    stride_kc_head,
+    PAGE_SIZE: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    max_blocks_per_seq,
+):
+    """Load K^T tile [BLOCK_D, BLOCK_N] from paged KV cache."""
+    d_mask = dim_pos < HEAD_DIM
+    kv_abs = kv_start + kv_pos  # absolute token positions
+    kv_valid = kv_abs < seq_len_kv
+
+    # Translate token positions -> (page_id, offset_in_page)
+    page_local = kv_abs // PAGE_SIZE
+    offset_in_page = kv_abs % PAGE_SIZE
+    page_global = tl.load(
+        Block_table + batch_idx * max_blocks_per_seq + page_local,
+        mask=kv_valid,
+        other=0,
+    )
+
+    # Load K values: K_cache[page_global, offset_in_page, kv_head_idx, dim]
+    # K^T layout [BLOCK_D, BLOCK_N] for Q @ K^T matmul
+    k_ptrs = (
+        page_global[None, :] * stride_kc_block
+        + offset_in_page[None, :] * stride_kc_pos
+        + kv_head_idx * stride_kc_head
+        + dim_pos[:, None]
+    )
+    return tl.load(K_cache + k_ptrs, mask=kv_valid[None, :] & d_mask[:, None], other=0.0)
+
+
+@triton.jit
+def _load_paged_v_tile(
+    V_cache,  # [num_blocks, page_size, num_kv_heads, head_dim]
+    Block_table,  # [batch, max_blocks_per_seq]
+    batch_idx,
+    kv_head_idx,
+    kv_start,
+    kv_pos,  # [BLOCK_N] relative positions
+    dim_pos,  # [BLOCK_D]
+    seq_len_kv,
+    stride_vc_block,
+    stride_vc_pos,
+    stride_vc_head,
+    PAGE_SIZE: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    max_blocks_per_seq,
+):
+    """Load V tile [BLOCK_N, BLOCK_D] from paged KV cache."""
+    d_mask = dim_pos < HEAD_DIM
+    kv_abs = kv_start + kv_pos
+    kv_valid = kv_abs < seq_len_kv
+
+    page_local = kv_abs // PAGE_SIZE
+    offset_in_page = kv_abs % PAGE_SIZE
+    page_global = tl.load(
+        Block_table + batch_idx * max_blocks_per_seq + page_local,
+        mask=kv_valid,
+        other=0,
+    )
+
+    # V layout [BLOCK_N, BLOCK_D]
+    v_ptrs = (
+        page_global[:, None] * stride_vc_block
+        + offset_in_page[:, None] * stride_vc_pos
+        + kv_head_idx * stride_vc_head
+        + dim_pos[None, :]
+    )
+    return tl.load(V_cache + v_ptrs, mask=kv_valid[:, None] & d_mask[None, :], other=0.0)
+
+
+# ---------------------------------------------------------------------------
 # Masking helper
 # ---------------------------------------------------------------------------
 @triton.jit
@@ -210,6 +299,79 @@ def _apply_mask(
     else:
         scores += tl.where((kv_start + kv_pos[None, :]) < seq_len_kv, 0, float("-inf"))
     return scores
+
+
+# ---------------------------------------------------------------------------
+# NVFP4 E2M1 per-tile P-matrix quantization helper
+# ---------------------------------------------------------------------------
+@triton.jit
+def _quantize_p_nvfp4(p, BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr):
+    """Quantize a post-softmax p tile to NVFP4 E2M1 (straight-through estimator).
+
+    P values are non-negative (softmax output). Per-tile scaling:
+    ``scale = max(p) / 6.0`` then boundary-compare to the 8 positive NVFP4
+    E2M1 levels {0, 0.5, 1, 1.5, 2, 3, 4, 6}.  The backward pass uses the
+    straight-through estimator (quantization not re-applied during backward).
+    """
+    p_max = tl.max(tl.max(p, 1), 0)  # per-tile scalar maximum
+    scale = tl.maximum(p_max, 1e-12) / 6.0  # NVFP4 max representable level = 6.0
+    p_scaled = p / scale  # normalize to [0, 6]
+    # Progressive boundary-compare: walk through NVFP4 rounding boundaries
+    # Boundaries: 0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0
+    q = tl.full((BLOCK_M, BLOCK_N), 0.0, dtype=tl.float32)
+    q = tl.where(p_scaled >= 0.25, 0.5, q)
+    q = tl.where(p_scaled >= 0.75, 1.0, q)
+    q = tl.where(p_scaled >= 1.25, 1.5, q)
+    q = tl.where(p_scaled >= 1.75, 2.0, q)
+    q = tl.where(p_scaled >= 2.50, 3.0, q)
+    q = tl.where(p_scaled >= 3.50, 4.0, q)
+    q = tl.where(p_scaled >= 5.00, 6.0, q)
+    return q * scale  # dequantize back to original scale
+
+
+# NVFP4 E2M1 per-group microscaling helper (SageAttention v3 style)
+# ---------------------------------------------------------------------------
+@triton.jit
+def _quantize_vec_mx_nvfp4(x, ROWS: tl.constexpr, COLS: tl.constexpr, MX_BLOCK: tl.constexpr):
+    """Per-group NVFP4 E2M1 microscaling quantization (SageAttention v3).
+
+    Quantizes ``x [ROWS, COLS]`` in groups of ``MX_BLOCK`` consecutive elements
+    along the last axis (i.e. along the head-dimension for Q/K/V, or along the
+    KV axis for P).  Each group of ``MX_BLOCK`` elements shares one scale:
+    ``scale = max(|x|) / 6.0`` — a float32 approximation of the paper's FP8-E8M0
+    per-block scale.  Supports both positive and negative values (Q, K, V are
+    not bounded to [0, 1] like P).
+
+    The quantized levels are the 15 symmetric NVFP4 E2M1 values:
+    ``{±0.5, ±1, ±1.5, ±2, ±3, ±4, ±6, 0}``.
+
+    Usage:
+      * Q ``[BLOCK_M, BLOCK_D]``: call directly.
+      * K^T ``[BLOCK_D, BLOCK_N]``: call as
+        ``tl.trans(_quantize_vec_mx_nvfp4(tl.trans(k), BLOCK_N, BLOCK_D, 16))``
+        so that the 16-element groups run along BLOCK_D within each key vector.
+      * V ``[BLOCK_N, BLOCK_D]``: call directly.
+      * P ``[BLOCK_M, BLOCK_N]``: call directly (groups of 16 along KV axis).
+    """
+    NUM_GROUPS: tl.constexpr = ROWS * COLS // MX_BLOCK
+    x_grouped = tl.reshape(x, (NUM_GROUPS, MX_BLOCK))
+    # Per-group scale: max(|x|) / 6.0
+    x_max = tl.max(tl.abs(x_grouped), axis=1)  # [NUM_GROUPS]
+    scale = tl.maximum(x_max, 1e-12) / 6.0  # [NUM_GROUPS]
+    x_norm = x_grouped / scale[:, None]  # [NUM_GROUPS, MX_BLOCK]
+    # Symmetric NVFP4 E2M1 boundary-compare
+    # Boundaries: ±0.25, ±0.75, ±1.25, ±1.75, ±2.5, ±3.5, ±5.0
+    x_abs = tl.abs(x_norm)
+    sign = tl.where(x_norm >= 0.0, 1.0, -1.0)
+    q = tl.full((NUM_GROUPS, MX_BLOCK), 0.0, dtype=tl.float32)
+    q = tl.where(x_abs >= 0.25, 0.5 * sign, q)
+    q = tl.where(x_abs >= 0.75, 1.0 * sign, q)
+    q = tl.where(x_abs >= 1.25, 1.5 * sign, q)
+    q = tl.where(x_abs >= 1.75, 2.0 * sign, q)
+    q = tl.where(x_abs >= 2.50, 3.0 * sign, q)
+    q = tl.where(x_abs >= 3.50, 4.0 * sign, q)
+    q = tl.where(x_abs >= 5.00, 6.0 * sign, q)
+    return tl.reshape(q * scale[:, None], (ROWS, COLS))
 
 
 # ---------------------------------------------------------------------------
@@ -252,6 +414,20 @@ def _attn_fwd(
     DENSE_WINDOW_SIZE: tl.constexpr = 64,  # Tokens near diagonal kept dense (absolute, BLOCK_N-independent)
     APPLY_SKIP_SOFTMAX: tl.constexpr = False,  # Skip KV tiles with negligible scores
     SKIP_THRESHOLD_LOG2: tl.constexpr = 0.0,  # log2(lambda) * sm_scale, pre-scaled for comparison on scaled scores
+    QUANTIZE_P: tl.constexpr = False,  # Quantize post-softmax p tile to NVFP4 E2M1 (per-tile, STE)
+    QUANTIZE_QKV: tl.constexpr = False,  # SageAttn-v3: per-group MX NVFP4 for Q/K/V + finer P
+    IS_PAGED: tl.constexpr = False,  # Whether K/V are in paged cache
+    K_cache=None,  # [num_blocks, page_size, num_kv_heads, head_dim] paged K
+    V_cache=None,  # [num_blocks, page_size, num_kv_heads, head_dim] paged V
+    Block_table=None,  # [batch, max_blocks_per_seq] page table
+    stride_kc_block=0,
+    stride_kc_pos=0,
+    stride_kc_head=0,
+    stride_vc_block=0,
+    stride_vc_pos=0,
+    stride_vc_head=0,
+    PAGE_SIZE: tl.constexpr = 16,
+    max_blocks_per_seq=0,
 ):
     # --- Grid: (batch, num_q_heads, num_q_tiles) ---
     # Example: batch=2, num_q_heads=32, seq_len=256, BLOCK_M=128
@@ -280,6 +456,9 @@ def _attn_fwd(
     # --- Load Q tile [BLOCK_M, BLOCK_D]: stays in SRAM for the entire KV loop ---
     q_ptrs = (q_offset + q_pos[:, None]) * stride_qbs + head_idx * stride_qh + dim_pos[None, :]
     q = tl.load(Q + q_ptrs, mask=(q_pos[:, None] < seq_len_q) & d_mask[None, :], other=0.0)
+    if QUANTIZE_QKV:
+        # SageAttn-v3: per-group MX NVFP4 quantization of Q (groups of 16 along head_dim)
+        q = _quantize_vec_mx_nvfp4(q, BLOCK_M, BLOCK_D, 16)
 
     # Base pointers for K and V at this KV head (per-tile offset added in loop)
     k_base = K + kv_head_idx * stride_kh
@@ -298,12 +477,37 @@ def _attn_fwd(
         kv_start = tl.multiple_of(kv_start, BLOCK_N)  # Compiler hint for alignment
 
         # Load K^T [BLOCK_D, BLOCK_N] (transposed layout for Q @ K^T matmul)
-        k_offs = (kv_offset + kv_start + kv_pos[None, :]) * stride_kbs + dim_pos[:, None]
-        k = tl.load(
-            k_base + k_offs,
-            mask=((kv_start + kv_pos[None, :]) < seq_len_kv) & d_mask[:, None],
-            other=0.0,
-        )
+        if IS_PAGED:
+            k = _load_paged_k_tile(
+                K_cache,
+                Block_table,
+                batch_idx,
+                kv_head_idx,
+                kv_start,
+                kv_pos,
+                dim_pos,
+                seq_len_kv,
+                stride_kc_block,
+                stride_kc_pos,
+                stride_kc_head,
+                PAGE_SIZE,
+                BLOCK_N,
+                BLOCK_D,
+                HEAD_DIM,
+                max_blocks_per_seq,
+            )
+        else:
+            k_offs = (kv_offset + kv_start + kv_pos[None, :]) * stride_kbs + dim_pos[:, None]
+            k = tl.load(
+                k_base + k_offs,
+                mask=((kv_start + kv_pos[None, :]) < seq_len_kv) & d_mask[:, None],
+                other=0.0,
+            )
+
+        if QUANTIZE_QKV:
+            # SageAttn-v3: per-group MX NVFP4 for K (groups of 16 along head_dim).
+            # K^T is [BLOCK_D, BLOCK_N]; transpose so groups run along BLOCK_D per key vector.
+            k = tl.trans(_quantize_vec_mx_nvfp4(tl.trans(k), BLOCK_N, BLOCK_D, 16))
 
         # scores = Q @ K^T * scale  [BLOCK_M, BLOCK_N]
         scores = tl.dot(q, k) * qk_scale
@@ -355,12 +559,39 @@ def _attn_fwd(
                 row_sum = row_sum * correction + l_new
                 acc = acc * correction[:, None]
 
-                v_offs = (kv_offset + kv_start + kv_pos[:, None]) * stride_vbs + dim_pos[None, :]
-                v = tl.load(
-                    v_base + v_offs,
-                    mask=((kv_start + kv_pos[:, None]) < seq_len_kv) & d_mask[None, :],
-                    other=0.0,
-                )
+                if IS_PAGED:
+                    v = _load_paged_v_tile(
+                        V_cache,
+                        Block_table,
+                        batch_idx,
+                        kv_head_idx,
+                        kv_start,
+                        kv_pos,
+                        dim_pos,
+                        seq_len_kv,
+                        stride_vc_block,
+                        stride_vc_pos,
+                        stride_vc_head,
+                        PAGE_SIZE,
+                        BLOCK_N,
+                        BLOCK_D,
+                        HEAD_DIM,
+                        max_blocks_per_seq,
+                    )
+                else:
+                    v_offs = (kv_offset + kv_start + kv_pos[:, None]) * stride_vbs + dim_pos[
+                        None, :
+                    ]
+                    v = tl.load(
+                        v_base + v_offs,
+                        mask=((kv_start + kv_pos[:, None]) < seq_len_kv) & d_mask[None, :],
+                        other=0.0,
+                    )
+                if QUANTIZE_QKV:
+                    v = _quantize_vec_mx_nvfp4(v, BLOCK_N, BLOCK_D, 16)
+                    p = _quantize_vec_mx_nvfp4(p, BLOCK_M, BLOCK_N, 16)
+                elif QUANTIZE_P:
+                    p = _quantize_p_nvfp4(p, BLOCK_M, BLOCK_N)
                 acc = tl.dot(p.to(v.dtype), v, acc)
                 row_max = m_new
             # else: tile skipped: no softmax computation, V load, and BMM2 computation
@@ -375,12 +606,37 @@ def _attn_fwd(
             acc = acc * correction[:, None]
 
             # Load V and accumulate
-            v_offs = (kv_offset + kv_start + kv_pos[:, None]) * stride_vbs + dim_pos[None, :]
-            v = tl.load(
-                v_base + v_offs,
-                mask=((kv_start + kv_pos[:, None]) < seq_len_kv) & d_mask[None, :],
-                other=0.0,
-            )
+            if IS_PAGED:
+                v = _load_paged_v_tile(
+                    V_cache,
+                    Block_table,
+                    batch_idx,
+                    kv_head_idx,
+                    kv_start,
+                    kv_pos,
+                    dim_pos,
+                    seq_len_kv,
+                    stride_vc_block,
+                    stride_vc_pos,
+                    stride_vc_head,
+                    PAGE_SIZE,
+                    BLOCK_N,
+                    BLOCK_D,
+                    HEAD_DIM,
+                    max_blocks_per_seq,
+                )
+            else:
+                v_offs = (kv_offset + kv_start + kv_pos[:, None]) * stride_vbs + dim_pos[None, :]
+                v = tl.load(
+                    v_base + v_offs,
+                    mask=((kv_start + kv_pos[:, None]) < seq_len_kv) & d_mask[None, :],
+                    other=0.0,
+                )
+            if QUANTIZE_QKV:
+                v = _quantize_vec_mx_nvfp4(v, BLOCK_N, BLOCK_D, 16)
+                p = _quantize_vec_mx_nvfp4(p, BLOCK_M, BLOCK_N, 16)
+            elif QUANTIZE_P:
+                p = _quantize_p_nvfp4(p, BLOCK_M, BLOCK_N)
             acc = tl.dot(p.to(v.dtype), v, acc)
             row_max = m_new
 
@@ -768,12 +1024,20 @@ class _Attention(torch.autograd.Function):
         num_sink_tokens,
         dense_window_size,
         skip_softmax_threshold,
+        k_cache,
+        v_cache,
+        block_table,
+        page_size,
+        quantize_p,
+        quantize_qkv,
     ):
         HEAD_DIM = q.shape[2]
         num_q_heads = q.shape[1]
         num_kv_heads = k.shape[1]
         kv_group_num = num_q_heads // num_kv_heads
         batch = b_seq_len.shape[0]
+
+        is_paged = k_cache is not None
 
         # Prefill: Q/K/V are the same packed tensor, reuse Q offsets for K/V.
         # Decode: K/V is a separate KV cache tensor, caller must pass explicit metadata.
@@ -782,17 +1046,33 @@ class _Attention(torch.autograd.Function):
             b_start_loc_k = b_start_loc
             max_input_len_k = max_input_len
 
+        if is_paged:
+            if v_cache is None or block_table is None:
+                raise ValueError("k_cache, v_cache, and block_table must all be provided together")
+            # Paged mode: b_start_loc_k is never dereferenced, but Triton still needs a tensor.
+            if b_start_loc_k is None:
+                b_start_loc_k = torch.zeros_like(b_start_loc)
+        elif b_start_loc_k is None and b_seq_len_k is not None:
+            raise ValueError(
+                "b_start_loc_k is required when K/V are passed as a separate packed tensor"
+            )
+
         # Pre-multiply scale by log2(e) so the kernel can use exp2()
         # exp(score * sm_scale) = exp2(score * sm_scale * log2(e))
         qk_scale = sm_scale * LOG2E
         # Triton tiles must be powers of 2; pad head dim
         BLOCK_D = triton.next_power_of_2(HEAD_DIM)
 
-        # Skip-softmax: convert threshold to scaled log2 space for the kernel.
-        # The BLASST reference (https://arxiv.org/pdf/2512.12087) checks
-        # ln(lambda) on unscaled scores. Our kernel works in log2-scaled space
-        # (scores pre-multiplied by qk_scale = sm_scale * LOG2E), so we
-        # pre-scale: threshold_scaled = log2(lambda) * sm_scale.
+        # Skip-softmax: convert lambda threshold to log2 space for the kernel.
+        # The threshold is scaled by sm_scale to control sparsity relative to
+        # head dimension: larger head_dim → smaller sm_scale → more aggressive
+        # skipping for the same lambda value.
+        if (quantize_p or quantize_qkv) and (q.requires_grad or k.requires_grad or v.requires_grad):
+            raise NotImplementedError(
+                "quantize_p / quantize_qkv support inference only; "
+                "backward does not model the quantized path"
+            )
+
         apply_skip = skip_softmax_threshold is not None and skip_softmax_threshold > 0.0
         if apply_skip:
             skip_threshold_log2 = math.log2(skip_softmax_threshold) * sm_scale
@@ -839,6 +1119,20 @@ class _Attention(torch.autograd.Function):
             DENSE_WINDOW_SIZE=dense_window_size,
             APPLY_SKIP_SOFTMAX=apply_skip,
             SKIP_THRESHOLD_LOG2=skip_threshold_log2,
+            QUANTIZE_P=quantize_p,
+            QUANTIZE_QKV=quantize_qkv,
+            IS_PAGED=is_paged,
+            K_cache=k_cache,
+            V_cache=v_cache,
+            Block_table=block_table,
+            stride_kc_block=k_cache.stride(0) if is_paged else 0,
+            stride_kc_pos=k_cache.stride(1) if is_paged else 0,
+            stride_kc_head=k_cache.stride(2) if is_paged else 0,
+            stride_vc_block=v_cache.stride(0) if is_paged else 0,
+            stride_vc_pos=v_cache.stride(1) if is_paged else 0,
+            stride_vc_head=v_cache.stride(2) if is_paged else 0,
+            PAGE_SIZE=page_size,
+            max_blocks_per_seq=block_table.shape[1] if is_paged else 0,
             # BLOCK_M, BLOCK_N, num_warps, num_stages chosen by autotune
         )
 
@@ -859,6 +1153,8 @@ class _Attention(torch.autograd.Function):
         ctx.dense_window_size = dense_window_size
         ctx.apply_skip = apply_skip
         ctx.skip_threshold_log2 = skip_threshold_log2
+        ctx.quantize_p = quantize_p
+        ctx.quantize_qkv = quantize_qkv
         return o
 
     @staticmethod
@@ -972,19 +1268,25 @@ class _Attention(torch.autograd.Function):
             dq,
             dk,
             dv,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
+            None,  # b_start_loc
+            None,  # b_seq_len
+            None,  # max_input_len
+            None,  # is_causal
+            None,  # sm_scale
+            None,  # b_start_loc_k
+            None,  # b_seq_len_k
+            None,  # max_input_len_k
+            None,  # sparsity_n
+            None,  # sparsity_m
+            None,  # num_sink_tokens
+            None,  # dense_window_size
+            None,  # skip_softmax_threshold
+            None,  # k_cache
+            None,  # v_cache
+            None,  # block_table
+            None,  # page_size
+            None,  # quantize_p
+            None,  # quantize_qkv
         )
 
 
@@ -1006,8 +1308,14 @@ def attention(
     num_sink_tokens: int = 0,
     dense_window_size: int = 64,
     skip_softmax_threshold: float | None = None,
+    quantize_p: bool = False,
+    quantize_qkv: bool = False,
+    k_cache: torch.Tensor | None = None,
+    v_cache: torch.Tensor | None = None,
+    block_table: torch.Tensor | None = None,
+    page_size: int = 16,
 ) -> torch.Tensor:
-    """Variable-length flash attention with GQA, autograd, and optional N:M sparse softmax and skip-softmax.
+    """Variable-length flash attention with GQA, autograd, optional sparsity, and paged KV.
 
     Args:
         q: [total_q_tokens, num_q_heads, head_dim]
@@ -1030,13 +1338,27 @@ def attention(
             (attention sinks). Absolute token count, BLOCK_N-independent.
         dense_window_size: Tokens near the query diagonal kept dense (local
             attention window). Absolute token count, BLOCK_N-independent.
-            Default 64 (one reference block).
+            Default 64 tokens.
         skip_softmax_threshold: BLASST threshold lambda
             (https://arxiv.org/pdf/2512.12087). Skip KV tiles where
             ``exp(tile_max - running_max) < lambda``, meaning the tile's
             softmax contribution is negligible. Tiles are skipped entirely
             (no softmax, V load, or BMM2). The threshold is applied on
             unscaled scores. Set to ``None`` or ``0`` to disable.
+        quantize_p: If ``True``, quantize the post-softmax P tile to NVFP4
+            E2M1 before the P @ V matmul (per-tile max scaling, STE).
+            Default ``False``.
+        quantize_qkv: If ``True``, apply SageAttention-v3-style per-group
+            microscaling NVFP4 to Q, K, V (groups of 16 along head_dim) and
+            per-group NVFP4 to P (groups of 16 along the KV axis). Supersedes
+            ``quantize_p`` when both are set. Default ``False``.
+        k_cache: Paged K cache [num_blocks, page_size, num_kv_heads, head_dim].
+            When provided, K/V are read from paged cache via block_table
+            instead of from contiguous k/v tensors.
+        v_cache: Paged V cache [num_blocks, page_size, num_kv_heads, head_dim].
+        block_table: Page table [batch, max_blocks_per_seq] mapping sequence
+            block indices to global page IDs.
+        page_size: Number of tokens per page in the KV cache.
 
     Returns:
         Output tensor [total_q_tokens, num_q_heads, head_dim].
@@ -1059,7 +1381,232 @@ def attention(
         num_sink_tokens,
         dense_window_size,
         skip_softmax_threshold,
+        k_cache,
+        v_cache,
+        block_table,
+        page_size,
+        quantize_p,
+        quantize_qkv,
     )
 
 
-__all__ = ["attention"]
+# ---------------------------------------------------------------------------
+# Calibration kernel: collect multi-threshold skip-softmax sparsity stats
+# ---------------------------------------------------------------------------
+@triton.jit
+def _attn_fwd_calibrate(
+    Q,
+    K,
+    V,
+    qk_scale,
+    b_start_loc,
+    b_seq_len,
+    b_start_loc_k,
+    b_seq_len_k,
+    Out,
+    stride_qbs,
+    stride_qh,
+    stride_kbs,
+    stride_kh,
+    stride_vbs,
+    stride_vh,
+    stride_obs,
+    stride_oh,
+    Threshold_trials,  # [NUM_THRESHOLDS] float32 — pre-scaled to log2 space
+    Sparsity_counters,  # [NUM_THRESHOLDS * 2] int64 — [total, skipped] per threshold
+    kv_group_num: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    IS_CAUSAL: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    NUM_THRESHOLDS: tl.constexpr,
+):
+    """Forward kernel with multi-threshold sparsity measurement.
+
+    Computes full attention (no skipping) while counting how many KV tiles
+    would be skipped at each threshold. Statistics are collected via atomic
+    adds to ``Sparsity_counters[t*2]`` (total tiles) and
+    ``Sparsity_counters[t*2+1]`` (skipped tiles).
+    """
+    batch_idx = tl.program_id(0)
+    head_idx = tl.program_id(1)
+    tile_q = tl.program_id(2)
+    kv_head_idx = head_idx // kv_group_num
+
+    seq_len_q = tl.load(b_seq_len + batch_idx)
+    seq_len_kv = tl.load(b_seq_len_k + batch_idx)
+    q_offset = tl.load(b_start_loc + batch_idx)
+    kv_offset = tl.load(b_start_loc_k + batch_idx)
+
+    if tile_q * BLOCK_M >= seq_len_q:
+        return
+
+    q_pos = tile_q * BLOCK_M + tl.arange(0, BLOCK_M)
+    kv_pos = tl.arange(0, BLOCK_N)
+    dim_pos = tl.arange(0, BLOCK_D)
+    d_mask = dim_pos < HEAD_DIM
+
+    q_ptrs = (q_offset + q_pos[:, None]) * stride_qbs + head_idx * stride_qh + dim_pos[None, :]
+    q = tl.load(Q + q_ptrs, mask=(q_pos[:, None] < seq_len_q) & d_mask[None, :], other=0.0)
+
+    k_base = K + kv_head_idx * stride_kh
+    v_base = V + kv_head_idx * stride_vh
+
+    row_max = tl.zeros([BLOCK_M], dtype=tl.float32) - float("inf")
+    row_sum = tl.zeros([BLOCK_M], dtype=tl.float32)
+    acc = tl.zeros([BLOCK_M, BLOCK_D], dtype=tl.float32)
+
+    kv_bound = seq_len_kv if not IS_CAUSAL else tl.minimum((tile_q + 1) * BLOCK_M, seq_len_kv)
+
+    for kv_start in range(0, kv_bound, BLOCK_N):
+        kv_start = tl.multiple_of(kv_start, BLOCK_N)
+
+        k_offs = (kv_offset + kv_start + kv_pos[None, :]) * stride_kbs + dim_pos[:, None]
+        k = tl.load(
+            k_base + k_offs,
+            mask=((kv_start + kv_pos[None, :]) < seq_len_kv) & d_mask[:, None],
+            other=0.0,
+        )
+
+        scores = tl.dot(q, k) * qk_scale
+        scores = _apply_mask(scores, q_pos, kv_pos, seq_len_q, seq_len_kv, kv_start, IS_CAUSAL)
+
+        tile_row_max = tl.max(scores, 1)
+
+        # --- Multi-threshold sparsity measurement ---
+        for t in range(NUM_THRESHOLDS):
+            thresh = tl.load(Threshold_trials + t)
+            can_skip = tile_row_max < (row_max + thresh)
+            skip_tile = tl.min(can_skip.to(tl.int32)) == 1
+            tl.atomic_add(Sparsity_counters + t * 2, 1)  # total tiles
+            if skip_tile:
+                tl.atomic_add(Sparsity_counters + t * 2 + 1, 1)  # skipped tiles
+
+        # --- Always compute full attention (no skipping) ---
+        m_new = tl.maximum(row_max, tile_row_max)
+        p = tl.math.exp2(scores - m_new[:, None])
+        l_new = tl.sum(p, 1)
+        correction = tl.math.exp2(row_max - m_new)
+        row_sum = row_sum * correction + l_new
+        acc = acc * correction[:, None]
+
+        v_offs = (kv_offset + kv_start + kv_pos[:, None]) * stride_vbs + dim_pos[None, :]
+        v = tl.load(
+            v_base + v_offs,
+            mask=((kv_start + kv_pos[:, None]) < seq_len_kv) & d_mask[None, :],
+            other=0.0,
+        )
+        acc = tl.dot(p.to(v.dtype), v, acc)
+        row_max = m_new
+
+    acc = acc / row_sum[:, None]
+    o_ptrs = (q_offset + q_pos[:, None]) * stride_obs + head_idx * stride_oh + dim_pos[None, :]
+    tl.store(Out + o_ptrs, acc, mask=(q_pos[:, None] < seq_len_q) & d_mask[None, :])
+
+
+def attention_calibrate(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    b_start_loc: torch.Tensor,
+    b_seq_len: torch.Tensor,
+    max_input_len: int,
+    is_causal: bool = True,
+    softmax_scale: float | None = None,
+    b_start_loc_k: torch.Tensor | None = None,
+    b_seq_len_k: torch.Tensor | None = None,
+    max_input_len_k: int | None = None,
+    *,
+    threshold_trials: list[float] | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Flash attention with multi-threshold skip-softmax sparsity measurement.
+
+    Computes full attention (identical output to dense attention) while
+    measuring how many KV tiles would be skipped at each threshold in
+    ``threshold_trials``. No autograd — forward only.
+
+    Args:
+        q, k, v, b_start_loc, b_seq_len, max_input_len, is_causal,
+        softmax_scale, b_start_loc_k, b_seq_len_k, max_input_len_k:
+            Same as :func:`attention`.
+        threshold_trials: List of threshold values to measure sparsity for.
+            Each value is converted to log2-scaled space for the kernel.
+
+    Returns:
+        Tuple of (output, sparsity_counters):
+        - output: ``[total_q_tokens, num_q_heads, head_dim]``
+        - sparsity_counters: ``[num_thresholds, 2]`` int64 tensor where
+          ``[:, 0]`` = total tile evaluations, ``[:, 1]`` = skipped tiles.
+          Sparsity per threshold = ``counters[:, 1] / counters[:, 0]``.
+    """
+    if threshold_trials is None or len(threshold_trials) == 0:
+        raise ValueError("threshold_trials must be a non-empty list")
+
+    HEAD_DIM = q.shape[2]
+    num_q_heads = q.shape[1]
+    num_kv_heads = k.shape[1]
+    kv_group_num = num_q_heads // num_kv_heads
+    batch = b_seq_len.shape[0]
+    sm_scale = 1.0 / (HEAD_DIM**0.5) if softmax_scale is None else softmax_scale
+    qk_scale = sm_scale * LOG2E
+    BLOCK_D = triton.next_power_of_2(HEAD_DIM)
+    BLOCK_M = 128
+    BLOCK_N = 64
+
+    if b_seq_len_k is None:
+        b_seq_len_k = b_seq_len
+        b_start_loc_k = b_start_loc
+
+    num_thresholds = len(threshold_trials)
+
+    # Convert thresholds to log2-scaled space: log2(lambda) * sm_scale
+    threshold_tensor = torch.tensor(
+        [math.log2(t) * sm_scale for t in threshold_trials],
+        dtype=torch.float32,
+        device=q.device,
+    )
+
+    # Atomic counters: [num_thresholds * 2] — flat layout [total_0, skip_0, total_1, skip_1, ...]
+    sparsity_counters = torch.zeros(num_thresholds * 2, dtype=torch.int64, device=q.device)
+
+    o = torch.empty_like(q)
+
+    grid = (batch, num_q_heads, triton.cdiv(max_input_len, BLOCK_M))
+
+    _attn_fwd_calibrate[grid](
+        q,
+        k,
+        v,
+        qk_scale,
+        b_start_loc,
+        b_seq_len,
+        b_start_loc_k,
+        b_seq_len_k,
+        o,
+        q.stride(0),
+        q.stride(1),
+        k.stride(0),
+        k.stride(1),
+        v.stride(0),
+        v.stride(1),
+        o.stride(0),
+        o.stride(1),
+        threshold_tensor,
+        sparsity_counters,
+        kv_group_num=kv_group_num,
+        BLOCK_M=BLOCK_M,
+        BLOCK_D=BLOCK_D,
+        BLOCK_N=BLOCK_N,
+        IS_CAUSAL=is_causal,
+        HEAD_DIM=HEAD_DIM,
+        NUM_THRESHOLDS=num_thresholds,
+        num_warps=4,
+        num_stages=1,
+    )
+
+    # Reshape to [num_thresholds, 2]
+    return o, sparsity_counters.view(num_thresholds, 2)
+
+
+__all__ = ["attention", "attention_calibrate"]

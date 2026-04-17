@@ -197,8 +197,8 @@ if AttentionModuleMixin.__module__.startswith(diffusers.__name__):
                 return super().forward(*args, **kwargs)
 
     QuantModuleRegistry.register({FluxAttention: "FluxAttention"})(_QuantAttentionModuleMixin)
-    QuantModuleRegistry.register({WanAttention: "WanAttention"})(_QuantAttentionModuleMixin)
     QuantModuleRegistry.register({LTXAttention: "LTXAttention"})(_QuantAttentionModuleMixin)
+    QuantModuleRegistry.register({WanAttention: "WanAttention"})(_QuantAttentionModuleMixin)
     if Flux2Attention is not None:
         QuantModuleRegistry.register({Flux2Attention: "Flux2Attention"})(_QuantAttentionModuleMixin)
     if Flux2ParallelSelfAttention is not None:

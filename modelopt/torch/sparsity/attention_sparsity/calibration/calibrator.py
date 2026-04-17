@@ -333,6 +333,16 @@ class DynamicThresholdCalibrator:
         return aggregated_stats
 
     def _set_thresholds(self, modules: list[nn.Module], thresholds: list[float]):
-        """Set thresholds list on sparse attention modules."""
+        """Set thresholds list on sparse attention modules.
+
+        Supports both flash_skip_softmax (sets ``thresholds`` attribute) and
+        triton_skip_softmax (sets ``_threshold_trials`` attribute).
+        """
         for module in modules:
-            module._sparse_method_instance.thresholds = thresholds
+            method = module._sparse_method_instance
+            if hasattr(method, "_threshold_trials"):
+                # triton_skip_softmax: calibration uses Triton calibration kernel
+                method._threshold_trials = thresholds
+            else:
+                # flash_skip_softmax: calibration uses F.softmax patching
+                method.thresholds = thresholds

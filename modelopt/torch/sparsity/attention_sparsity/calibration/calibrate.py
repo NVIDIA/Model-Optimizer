@@ -21,7 +21,6 @@ from typing import Any
 
 import torch
 import torch.nn as nn
-from transformers import AutoTokenizer
 
 from modelopt.torch.utils import get_module_device
 
@@ -32,8 +31,10 @@ from .calibrator import DynamicThresholdCalibrator
 from .ruler_dataset import RulerDatasetBuilder
 
 
-def _load_tokenizer(tokenizer_name_or_path: str) -> "AutoTokenizer":
+def _load_tokenizer(tokenizer_name_or_path: str):
     """Load tokenizer and ensure pad_token is set."""
+    from transformers import AutoTokenizer
+
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_name_or_path)
     if not tokenizer.pad_token:
         tokenizer.pad_token = tokenizer.eos_token
@@ -255,11 +256,14 @@ def calibrate_sparse_attention(
 
     print(f"Calibrating {len(sparse_modules)} sparse attention modules together...")
 
-    # Extract tokenizer and build calibration data if needed
-    tokenizer = _extract_tokenizer_from_model(model)
+    # Extract tokenizer and build calibration data only if no forward_loop is provided.
+    # When the user supplies their own forward_loop (e.g. for diffusion models),
+    # RULER dataset generation is skipped entirely.
+    tokenizer = None
     calibration_data = None
 
-    if calibrate_prefill or calibrate_decode:
+    if forward_loop is None and (calibrate_prefill or calibrate_decode):
+        tokenizer = _extract_tokenizer_from_model(model)
         builder = RulerDatasetBuilder(
             samples=calib_config.samples,
             max_seqlen=calib_config.max_seqlen,
@@ -280,11 +284,15 @@ def calibrate_sparse_attention(
         print("PREFILL PHASE CALIBRATION")
         print("=" * 60)
 
-        if calibration_data is None:
+        if forward_loop is None and calibration_data is None:
             raise RuntimeError("calibration_data must be built before prefill")
-        prefill_forward_loop = forward_loop or create_calibration_forward_loop(
-            calibration_data, tokenizer, chunk_size=calib_config.chunk_size
-        )
+        if forward_loop is not None:
+            prefill_forward_loop = forward_loop
+        else:
+            assert calibration_data is not None and tokenizer is not None
+            prefill_forward_loop = create_calibration_forward_loop(
+                calibration_data, tokenizer, chunk_size=calib_config.chunk_size
+            )
 
         prefill_calibrator = DynamicThresholdCalibrator(
             threshold_trials=calib_config.threshold_trials,
@@ -302,8 +310,8 @@ def calibrate_sparse_attention(
         print("DECODE PHASE CALIBRATION")
         print("=" * 60)
 
-        if calibration_data is None:
-            raise RuntimeError("calibration_data must be built before decode")
+        if calibration_data is None or tokenizer is None:
+            raise RuntimeError("calibration_data and tokenizer must be built before decode")
         decode_forward_loop = create_decode_calibration_forward_loop(
             calibration_data, tokenizer, num_decode_tokens=calib_config.num_decode_tokens
         )
