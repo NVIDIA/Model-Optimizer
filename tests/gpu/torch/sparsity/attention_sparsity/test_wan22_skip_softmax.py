@@ -199,7 +199,11 @@ class TestWan22PipelineE2E:
         assert total_sum > 0, "Expected nonzero sparsity counters after pipeline run"
 
     def test_save_restore_roundtrip(self, tiny_wan22_pipe):
-        """Sparsified transformer saves & restores via modelopt_state."""
+        """Sparsified transformer saves & restores via modelopt_state, preserving
+        per-module method choice. The ``*attn1*`` pattern maps to triton_skip_softmax;
+        ``attn2`` modules keep the default method. The restored model must show the
+        identical (module_name → method) mapping.
+        """
         from _test_utils.torch.diffusers_models import get_tiny_wan22_transformer
 
         import modelopt.torch.opt as mto
@@ -212,10 +216,31 @@ class TestWan22PipelineE2E:
         restored = get_tiny_wan22_transformer().to("cuda", dtype=torch.bfloat16).eval()
         mto.restore_from_modelopt_state(restored, state)
 
-        # The number of sparse modules should match the original
-        restored_count = _count_sparse_modules(restored)
-        orig_count = _count_sparse_modules(tiny_wan22_pipe.transformer)
-        assert restored_count == orig_count > 0
+        def _method_map(module):
+            return {
+                name: m._method
+                for name, m in module.named_modules()
+                if isinstance(m, SparseAttentionModule)
+            }
+
+        orig_map = _method_map(tiny_wan22_pipe.transformer)
+        restored_map = _method_map(restored)
+        assert orig_map == restored_map, (
+            f"Restored method map differs from original:\n"
+            f"  orig:     {orig_map}\n"
+            f"  restored: {restored_map}"
+        )
+        # Sanity: the ``*attn1*`` pattern should have produced at least one
+        # triton_skip_softmax module in the restored model.
+        triton_attn1 = [
+            name
+            for name, method in restored_map.items()
+            if method == "triton_skip_softmax" and "attn1" in name
+        ]
+        assert triton_attn1, (
+            f"Expected at least one attn1 module with triton_skip_softmax after restore, "
+            f"got {restored_map}"
+        )
 
 
 @pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="Need CUDA + triton")
