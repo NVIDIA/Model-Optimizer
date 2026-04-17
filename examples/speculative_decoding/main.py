@@ -219,13 +219,16 @@ def train():
             # Load draft vocab cache
             mtsp.plugins.HFEagleModel.load_draft_vocab_cache(model, recipe.data.draft_vocab_cache)
         elif isinstance(recipe, ModelOptDFlashRecipe):
-            # Fall back to tokenizer.mask_token_id when not set in the recipe; require one of the two.
             if recipe.dflash.dflash_mask_token_id is None:
                 recipe.dflash.dflash_mask_token_id = getattr(tokenizer, "mask_token_id", None)
             if recipe.dflash.dflash_mask_token_id is None:
-                raise ValueError(
-                    "dflash.dflash_mask_token_id is required: set it in the recipe YAML "
-                    "or use a tokenizer that defines mask_token_id."
+                mask_token = "<|mask|>"
+                tokenizer.add_special_tokens({"mask_token": mask_token})
+                model.resize_token_embeddings(len(tokenizer))
+                recipe.dflash.dflash_mask_token_id = tokenizer.mask_token_id
+                print_rank_0(
+                    f"Added {mask_token} (ID={tokenizer.mask_token_id}), "
+                    f"resized embeddings to {len(tokenizer)}"
                 )
             dflash_cfg: dict = recipe.dflash.model_dump()
             mtsp.convert(model, [("dflash", dflash_cfg)])
