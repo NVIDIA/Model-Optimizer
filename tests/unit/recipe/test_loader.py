@@ -914,3 +914,125 @@ def test_import_cross_file_same_name_no_conflict(tmp_path):
     # Parent's "fmt" resolves to fp8 (e4m3), not child's nvfp4
     cfg = recipe.quantize["quant_cfg"][0]["cfg"]
     assert cfg == {"num_bits": (4, 3)}
+
+
+# ---------------------------------------------------------------------------
+# Coverage: _load_raw_config edge cases
+# ---------------------------------------------------------------------------
+
+
+def test_load_config_path_object(tmp_path):
+    """load_config accepts a Path object."""
+    cfg_file = tmp_path / "test.yaml"
+    cfg_file.write_text("key: value\n")
+    data = load_config(cfg_file)
+    assert data == {"key": "value"}
+
+
+def test_load_config_path_without_suffix(tmp_path):
+    """load_config probes .yml/.yaml suffixes for a Path without suffix."""
+    cfg_file = tmp_path / "test.yaml"
+    cfg_file.write_text("key: value\n")
+    data = load_config(tmp_path / "test")  # no suffix
+    assert data == {"key": "value"}
+
+
+def test_load_config_empty_yaml(tmp_path):
+    """load_config returns empty dict for empty YAML file."""
+    cfg_file = tmp_path / "empty.yaml"
+    cfg_file.write_text("")
+    data = load_config(cfg_file)
+    assert data == {}
+
+
+def test_load_config_null_yaml(tmp_path):
+    """load_config returns empty dict for YAML file containing only null."""
+    cfg_file = tmp_path / "null.yaml"
+    cfg_file.write_text("---\n")
+    data = load_config(cfg_file)
+    assert data == {}
+
+
+def test_load_config_multi_doc_dict_dict(tmp_path):
+    """Multi-document YAML with two dicts merges them."""
+    cfg_file = tmp_path / "multi.yaml"
+    cfg_file.write_text("imports:\n  fp8: some/path\n---\nalgorithm: max\n")
+    from modelopt.torch.opt.config_loader import _load_raw_config
+
+    data = _load_raw_config(cfg_file)
+    assert data["imports"] == {"fp8": "some/path"}
+    assert data["algorithm"] == "max"
+
+
+def test_load_config_multi_doc_null_content(tmp_path):
+    """Multi-document YAML where second doc is null treats content as empty dict."""
+    cfg_file = tmp_path / "multi_null.yaml"
+    cfg_file.write_text("key: value\n---\n")
+    from modelopt.torch.opt.config_loader import _load_raw_config
+
+    data = _load_raw_config(cfg_file)
+    assert data == {"key": "value"}
+
+
+def test_load_config_multi_doc_first_not_dict_raises(tmp_path):
+    """Multi-document YAML with non-dict first document raises ValueError."""
+    cfg_file = tmp_path / "bad_multi.yaml"
+    cfg_file.write_text("- item1\n---\nkey: value\n")
+    with pytest.raises(ValueError, match="first YAML document must be a mapping"):
+        load_config(cfg_file)
+
+
+def test_load_config_multi_doc_second_not_dict_or_list_raises(tmp_path):
+    """Multi-document YAML with scalar second document raises ValueError."""
+    cfg_file = tmp_path / "bad_multi2.yaml"
+    cfg_file.write_text("key: value\n---\njust a string\n")
+    with pytest.raises(ValueError, match="second YAML document must be a mapping or list"):
+        load_config(cfg_file)
+
+
+def test_load_config_three_docs_raises(tmp_path):
+    """YAML with 3+ documents raises ValueError."""
+    cfg_file = tmp_path / "three_docs.yaml"
+    cfg_file.write_text("a: 1\n---\nb: 2\n---\nc: 3\n")
+    with pytest.raises(ValueError, match="expected 1 or 2 YAML documents"):
+        load_config(cfg_file)
+
+
+def test_load_config_invalid_type_raises():
+    """load_config with non-string/Path/Traversable raises ValueError."""
+    with pytest.raises(ValueError, match="Invalid config file"):
+        load_config(12345)
+
+
+def test_load_config_list_valued_yaml(tmp_path):
+    """load_config handles top-level YAML list."""
+    cfg_file = tmp_path / "list.yaml"
+    cfg_file.write_text("- name: a\n  value: 1\n- name: b\n  value: 2\n")
+    data = load_config(cfg_file)
+    assert isinstance(data, list)
+    assert len(data) == 2
+    assert data[0] == {"name": "a", "value": 1}
+
+
+# ---------------------------------------------------------------------------
+# Coverage: _resolve_imports edge cases
+# ---------------------------------------------------------------------------
+
+
+def test_import_dict_value_resolves_to_list_raises(tmp_path):
+    """$import in dict value position raises when snippet is a list."""
+    (tmp_path / "entries.yml").write_text("- a: 1\n- b: 2\n")
+    config_file = tmp_path / "config.yml"
+    config_file.write_text(
+        f"imports:\n  entries: {tmp_path / 'entries.yml'}\nmy_field:\n  $import: entries\n"
+    )
+    with pytest.raises(ValueError, match="must resolve to a dict"):
+        load_config(config_file)
+
+
+def test_import_imports_not_a_dict_raises(tmp_path):
+    """imports section that is a list raises ValueError."""
+    config_file = tmp_path / "config.yml"
+    config_file.write_text("imports:\n  - some/path\nkey: value\n")
+    with pytest.raises(ValueError, match="must be a dict"):
+        load_config(config_file)
