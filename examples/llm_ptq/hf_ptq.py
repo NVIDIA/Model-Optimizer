@@ -283,6 +283,7 @@ def make_calib_dataloader(
         include_labels = (
             args.auto_quantize_bits is not None and args.auto_quantize_method == "gradient"
         )
+
         calib_dataloader = get_dataset_dataloader(
             dataset_name=args.dataset,
             tokenizer=tokenizer,
