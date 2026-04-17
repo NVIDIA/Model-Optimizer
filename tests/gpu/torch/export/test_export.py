@@ -488,7 +488,8 @@ def test_qwen3_moe_nvfp4_experts_only_export_exclude_modules(tmp_path):
     model.config.architectures = ["Qwen3MoeForCausalLM"]
 
     # Quantize with NVFP4_EXPERTS_ONLY_CFG (targets only *mlp.experts* patterns)
-    mtq.quantize(model, NVFP4_EXPERTS_ONLY_CFG, lambda m: m(**m.dummy_inputs))
+    dummy_inputs = {k: v.to("cuda") for k, v in model.dummy_inputs.items()}
+    mtq.quantize(model, NVFP4_EXPERTS_ONLY_CFG, lambda m: m(**dummy_inputs))
 
     # Export
     export_dir = tmp_path / "qwen3_moe_nvfp4_experts_only"
