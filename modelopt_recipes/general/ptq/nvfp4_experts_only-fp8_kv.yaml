@@ -15,9 +15,12 @@
 
 metadata:
   recipe_type: ptq
-  description: NVFP4 static weight and dynamic activation for expert layers only (W4A4), FP8 KV cache, max calibration.
+  description: NVFP4 static weight and dynamic activation for expert layers only (W4A4), FP8 KV cache, max layerwise calibration.
 quantize:
-  algorithm: max
+  algorithm:
+    method: max
+    layerwise: true
+    layerwise_checkpoint_dir: output/layerwise_ckpts/
   quant_cfg:
     - quantizer_name: '*'
       enable: false
