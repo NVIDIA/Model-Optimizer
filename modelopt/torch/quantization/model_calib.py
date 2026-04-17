@@ -1665,7 +1665,10 @@ def gptq(
 
     def _make_gptq_handle(name, m):
         backend = getattr(m.weight_quantizer, "backend", None)
-        cls = _GPTQ_HELPER_REGISTRY.get(backend, GPTQHelper)
+        if backend is None:
+            cls = GPTQHelper
+        else:
+            cls = _GPTQ_HELPER_REGISTRY.get(backend, GPTQHelper)
         return cls(m, name, offload_to_cpu=True)
 
     gptq_handles = {name: _make_gptq_handle(name, m) for name, m in quantized_layers}
@@ -1685,10 +1688,6 @@ def gptq(
     print_rank_0("Updating weights using GPTQ algorithm...")
     for handle in gptq_handles.values():
         handle.update_weights(block_size, perc_damp)
-
-        # Disable weight quantizer after running GPTQ update since weights are already QDQ'ed
-        if hasattr(handle.module, "weight_quantizer"):
-            handle.module.weight_quantizer.disable()
         handle.free()
     del gptq_handles
 

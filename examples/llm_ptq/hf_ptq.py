@@ -420,15 +420,10 @@ def load_model(args: argparse.Namespace):
             attn_implementation=args.attn_implementation,
         )
     else:
-        if args.qformat in QUANT_CFG_CHOICES:
-            quant_cfg = QUANT_CFG_CHOICES[args.qformat]
-        elif hasattr(mtq, args.qformat):
-            quant_cfg = getattr(mtq, args.qformat)
-        else:
-            raise AssertionError(
-                f"Quantization format is not supported for low memory mode. "
-                f"Supported formats: {QUANT_CFG_CHOICES.keys()}"
-            )
+        assert args.qformat in QUANT_CFG_CHOICES, (
+            f"Quantization format is not supported for low memory mode. Supported formats: {QUANT_CFG_CHOICES.keys()}"
+        )
+        quant_cfg = QUANT_CFG_CHOICES[args.qformat]
         if args.kv_cache_qformat != "none":
             quant_cfg = mtq.utils.update_quant_cfg_with_kv_cache_quant(
                 quant_cfg,
