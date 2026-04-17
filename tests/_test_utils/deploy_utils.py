@@ -257,6 +257,8 @@ class ModelDeployer:
         qwen3_models = (
             "nvidia/Qwen3-Next-80B-A3B-Instruct-NVFP4",
             "nvidia/Qwen3-Next-80B-A3B-Thinking-NVFP4",
+            "nvidia/EAGLE3-NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+            "/s3/nvidia/EAGLE3-NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
         )
         nemotron_models = (
             "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8",

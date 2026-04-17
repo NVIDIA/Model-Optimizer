@@ -69,6 +69,11 @@ QWEN_VL_PATH = _select_path(
 )
 
 # Diffusers
+FLUX_DEV_PATH = _select_path(
+    remote_id="black-forest-labs/FLUX.1-dev",
+    local_id="black-forest-labs/FLUX.1-dev",
+)
+
 FLUX_SCHNELL_PATH = _select_path(
     remote_id="hf-internal-testing/tiny-flux-pipe",
     local_id="black-forest-labs/FLUX.1-schnell",

@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 import pytest
-from _test_utils.examples.models import FLUX_SCHNELL_PATH, SD3_PATH, SDXL_1_0_PATH
+from _test_utils.examples.models import FLUX_DEV_PATH, FLUX_SCHNELL_PATH, SD3_PATH, SDXL_1_0_PATH
 from _test_utils.examples.run_command import run_example_command
 from _test_utils.torch.misc import minimum_sm
 
@@ -99,6 +99,17 @@ class DiffuserModel(NamedTuple):
 @pytest.mark.parametrize(
     "model",
     [
+        pytest.param(
+            DiffuserModel(
+                name="flux-dev",
+                path=FLUX_DEV_PATH,
+                dtype="BFloat16",
+                format_type="fp8",
+                quant_algo="max",
+                collect_method="default",
+            ),
+            marks=minimum_sm(89),
+        ),
         DiffuserModel(
             name="flux-schnell",
             path=FLUX_SCHNELL_PATH,
@@ -136,6 +147,7 @@ class DiffuserModel(NamedTuple):
         ),
     ],
     ids=[
+        "flux_dev_bf16_fp8_max_3.0_default",
         "flux_schnell_bf16_int8_smoothquant_3.0_min_mean",
         "sd3_medium_fp16_int8_smoothquant_3.0_min_mean",
         "sdxl_1.0_fp16_fp8_max_3.0_default",

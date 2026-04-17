@@ -247,6 +247,12 @@ def test_llama(command):
             mini_sm=100,
         ),
         *ModelDeployerList(
+            model_id="nvidia/Qwen3-VL-235B-A22B-Instruct-NVFP4",
+            backend=("trtllm", "vllm", "sglang"),
+            tensor_parallel_size=8,
+            mini_sm=100,
+        ),
+        *ModelDeployerList(
             model_id="nvidia/Qwen3-30B-A3B-NVFP4",
             backend=("trtllm", "vllm", "sglang"),
             tensor_parallel_size=4,
@@ -299,6 +305,28 @@ def test_qwen(command):
     "command",
     [
         *ModelDeployerList(
+            model_id="nvidia/GLM-4.7-NVFP4",
+            backend=("trtllm", "vllm", "sglang"),
+            tensor_parallel_size=8,
+            mini_sm=100,
+        ),
+        *ModelDeployerList(
+            model_id="nvidia/GLM-5-NVFP4",
+            backend=("trtllm", "vllm", "sglang"),
+            tensor_parallel_size=8,
+            mini_sm=100,
+        ),
+    ],
+    ids=idfn,
+)
+def test_glm(command):
+    command.run()
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        *ModelDeployerList(
             model_id="nvidia/Mixtral-8x7B-Instruct-v0.1-FP8",
             backend=("trtllm", "vllm", "sglang"),
             mini_sm=89,
@@ -344,6 +372,13 @@ def test_mixtral(command):
             backend=("trtllm", "vllm", "sglang"),
             tensor_parallel_size=1,
             mini_sm=89,
+            attn_backend="FLASHINFER",
+        ),
+        *ModelDeployerList(
+            model_id="nvidia/Gemma-4-31B-IT-NVFP4",
+            backend=("trtllm", "vllm", "sglang"),
+            tensor_parallel_size=1,
+            mini_sm=100,
             attn_backend="FLASHINFER",
         ),
     ],
@@ -451,6 +486,18 @@ def test_kimi(command):
             mini_sm=89,
             attn_backend="FLASHINFER",
         ),
+        *ModelDeployerList(
+            model_id="nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8",
+            backend=("trtllm", "vllm", "sglang"),
+            tensor_parallel_size=8,
+            mini_sm=89,
+        ),
+        *ModelDeployerList(
+            model_id="nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4",
+            backend=("trtllm", "vllm", "sglang"),
+            tensor_parallel_size=8,
+            mini_sm=100,
+        ),
     ],
     ids=idfn,
 )
@@ -482,7 +529,6 @@ def test_llama_nemotron(command):
     ],
     ids=idfn,
 )
-@pytest.mark.skip(reason="Medusa is not supported yet")
 def test_medusa(command):
     command.run()
 
@@ -496,6 +542,22 @@ def test_medusa(command):
             backend=("trtllm", "sglang"),
             tensor_parallel_size=8,
             mini_sm=89,
+        ),
+        *ModelDeployerList(
+            base_model="nvidia/Kimi-K2-Thinking-NVFP4",
+            model_id="nvidia/Kimi-K2-Thinking-Eagle3",
+            backend=("trtllm", "sglang"),
+            tensor_parallel_size=8,
+            mini_sm=100,
+            eagle3_one_model=False,
+        ),
+        *ModelDeployerList(
+            base_model="nvidia/Kimi-K2.5-NVFP4",
+            model_id="nvidia/Kimi-K2.5-Thinking-Eagle3",
+            backend=("trtllm", "sglang"),
+            tensor_parallel_size=8,
+            mini_sm=100,
+            eagle3_one_model=False,
         ),
         *ModelDeployerList(
             base_model="Qwen/Qwen3-235B-A22B",
@@ -588,3 +650,19 @@ def test_eagle(command):
         command.run()
     else:
         pytest.skip(f"Local model not found: {local_path}")
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        *ModelDeployerList(
+            model_id="nvidia/MiniMax-M2.5-NVFP4",
+            backend=("trtllm", "vllm", "sglang"),
+            tensor_parallel_size=8,
+            mini_sm=100,
+        ),
+    ],
+    ids=idfn,
+)
+def test_minimax(command):
+    command.run()
