@@ -118,8 +118,8 @@ jobs:
       pip_install_extras: "[hf,dev-test]"
       runner: linux-amd64-gpu-rtxpro6000-latest-2
 
-  ##### NeMo Example Tests #####
-  nemo-pr:
+  ##### Megatron Example Tests #####
+  megatron-pr:
     needs: [check-file-changes, wait-checks]
     if: startsWith(github.ref, 'refs/heads/pull-request/') && needs.check-file-changes.outputs.any_changed == 'true'
     strategy: &nemo_strategy
@@ -135,7 +135,7 @@ jobs:
       pip_install_extras: "[hf,puzzletron,dev-test]"
       runner: linux-amd64-gpu-rtxpro6000-latest-1
 
-  nemo-non-pr:
+  megatron-non-pr:
     if: ${{ !startsWith(github.ref, 'refs/heads/pull-request/') }}
     strategy: *nemo_strategy
     uses: ./.github/workflows/_example_tests_runner.yml
@@ -160,7 +160,7 @@ jobs:
     with:
       docker_image: "nvcr.io/nvidia/tensorrt:26.02-py3"
       example: ${{ matrix.example }}
-      pip_install_extras: "[all,dev-test]"
+      pip_install_extras: "[onnx,hf,dev-test]"
       runner: linux-amd64-gpu-rtxpro6000-latest-1
 
   onnx-non-pr:
@@ -171,14 +171,14 @@ jobs:
     with:
       docker_image: "nvcr.io/nvidia/tensorrt:26.02-py3"
       example: ${{ matrix.example }}
-      pip_install_extras: "[all,dev-test]"
+      pip_install_extras: "[onnx,hf,dev-test]"
       runner: linux-amd64-gpu-rtxpro6000-latest-2
 
   ##### Required Check for PR #####
   example-pr-required-check:
     # Run even if example tests are skipped
     if: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && always() }}
-    needs: [check-file-changes, torch-pr, trtllm-pr, nemo-pr, onnx-pr]
+    needs: [check-file-changes, torch-pr, trtllm-pr, megatron-pr, onnx-pr]
     runs-on: ubuntu-latest
     steps:
       - name: Required GPU tests did not succeed
@@ -187,7 +187,7 @@ jobs:
           (needs.check-file-changes.outputs.any_changed == 'true' && (
             needs.torch-pr.result != 'success' ||
             needs.trtllm-pr.result != 'success' ||
-            needs.nemo-pr.result != 'success' ||
+            needs.megatron-pr.result != 'success' ||
             needs.onnx-pr.result != 'success'
           ))
         run: exit 1
