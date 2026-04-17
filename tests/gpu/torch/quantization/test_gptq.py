@@ -14,15 +14,18 @@
 # limitations under the License.
 
 import copy
+import time
 
 import pytest
 import torch
 from _test_utils.torch.transformers_models import get_tiny_llama, get_tiny_tokenizer
+from conftest import requires_triton
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.unified_export_hf import _export_quantized_weight
 from modelopt.torch.quantization.model_calib import gptq
 from modelopt.torch.quantization.qtensor.nvfp4_tensor import NVFP4QTensor
+from modelopt.torch.quantization.triton.fp4_kernel import compute_fp4_scales
 from modelopt.torch.quantization.utils.calib_utils import update_hessian
 from modelopt.torch.utils.dataset_utils import create_forward_loop, get_dataset_dataloader
 
@@ -231,3 +234,221 @@ def test_gptq_e2e_flow(quant_cfg):
 
     calibrate_loop = create_forward_loop(dataloader=calib_dataloader)
     model = mtq.quantize(model, quant_cfg, forward_loop=calibrate_loop)
+
+
+# ---------------------------------------------------------------------------
+# Fused Triton GPTQ kernel tests for NVFP4 scalar quantization
+# ---------------------------------------------------------------------------
+
+
+def _compute_h_inv(hessian, weight, percdamp=0.01):
+    """Compute damped upper-Cholesky inverse Hessian."""
+    h = hessian.clone()
+    zero_cols = torch.nonzero(weight.eq(0).all(dim=0)).unsqueeze(-1)
+    h[zero_cols, :] = 0
+    h[:, zero_cols] = 0
+    h[zero_cols, zero_cols] = 1
+    damp = percdamp * torch.mean(torch.diag(h))
+    diag_idx = torch.arange(h.shape[0], device=h.device)
+    h[diag_idx, diag_idx] += damp
+    h = torch.cholesky_inverse(torch.linalg.cholesky(h))
+    return torch.linalg.cholesky(h, upper=True)
+
+
+def _make_nvfp4_test_data(quant_block_size, out_features, dim):
+    """Create weight, h_inv, and scales_2d for NVFP4 GPTQ tests."""
+    weight = torch.randn(out_features, dim, device="cuda", dtype=torch.float32)
+    n_blocks = dim // quant_block_size
+    amax = weight.reshape(out_features, n_blocks, quant_block_size).abs().amax(dim=-1)
+    scales_2d = compute_fp4_scales(amax)
+
+    inp = torch.randn(4, 32, dim, device="cuda")
+    hessian = torch.zeros(dim, dim, dtype=torch.float32)
+    hessian, _ = update_hessian(inp, hessian, 0)
+    hessian = hessian.to("cuda")
+    h_inv = _compute_h_inv(hessian, weight)
+
+    return weight, scales_2d, h_inv
+
+
+def _run_unfused_gptq_nvfp4(weight, scales_2d, h_inv, gptq_block_size, quant_block_size):
+    """Unfused NVFP4 GPTQ using the production Triton FP4 kernel per column.
+
+    Both fused and unfused use the same frozen pre-computed scales so the
+    test verifies the fused kernel's correctness (not scale computation).
+    """
+    from modelopt.torch.quantization.triton.fp4_kernel import static_blockwise_fp4_fake_quant
+
+    out_features, num_cols = weight.shape
+    n_blocks = num_cols // quant_block_size
+    w = weight.float().clone()
+    q = torch.zeros_like(w)
+    # Recover amax from scales (scales = amax / 6.0, already FP8-quantized)
+    amax_flat = (scales_2d * 6.0).reshape(out_features * n_blocks)
+
+    for i in range(0, num_cols, gptq_block_size):
+        j_end = min(i + gptq_block_size, num_cols)
+        e = torch.zeros(out_features, j_end - i, dtype=w.dtype, device=w.device)
+
+        for j in range(i, j_end):
+            # Quantize full weight using production Triton FP4 kernel
+            w_blocked = w.reshape(out_features * n_blocks, quant_block_size)
+            qdq = static_blockwise_fp4_fake_quant(
+                w_blocked,
+                amax_flat,
+                quantize_block_scales=False,
+            ).reshape(out_features, num_cols)
+            q[:, j] = qdq[:, j]
+
+            err = (w[:, j] - q[:, j]) / h_inv[j, j]
+            e[:, j - i] = err
+            w[:, j:j_end] -= err.unsqueeze(1) * h_inv[j, j:j_end].unsqueeze(0)
+
+        if j_end < num_cols:
+            w[:, j_end:] -= e @ h_inv[i:j_end, j_end:]
+
+    return q
+
+
+def _run_fused_gptq_nvfp4(weight, scales_2d, h_inv, gptq_block_size, quant_block_size):
+    """Fused Triton GPTQ for NVFP4."""
+    from modelopt.torch.quantization.triton.gptq_fused_kernel import gptq_fused_block_scalar
+
+    dim = weight.shape[1]
+    w = weight.float().clone()
+    for bs in range(0, dim, gptq_block_size):
+        be = min(bs + gptq_block_size, dim)
+        nc = be - bs
+        qw, err = gptq_fused_block_scalar(
+            w[:, bs:be].clone().contiguous(),
+            scales_2d,
+            h_inv[bs:be, bs:be].contiguous(),
+            quant_block_size,
+            bs,
+            nc,
+        )
+        w[:, bs:be] = qw
+        if be < dim:
+            w[:, be:].addmm_(err[:, :nc], h_inv[bs:be, be:], alpha=-1)
+    return w
+
+
+_NVFP4_QUANT_BLOCK_SIZES = [16, 128]
+_NVFP4_GPTQ_BLOCK_SIZES = [16, 128]
+
+
+@requires_triton
+@pytest.mark.parametrize("quant_block_size", _NVFP4_QUANT_BLOCK_SIZES)
+@pytest.mark.parametrize("gptq_block_size", _NVFP4_GPTQ_BLOCK_SIZES)
+def test_fused_vs_unfused_nvfp4(quant_block_size, gptq_block_size):
+    """Fused Triton NVFP4 GPTQ must match unfused production reference."""
+    torch.manual_seed(42)
+    dim = max(256, quant_block_size * 4)
+    out_features = 64
+
+    weight, scales_2d, h_inv = _make_nvfp4_test_data(
+        quant_block_size,
+        out_features,
+        dim,
+    )
+
+    weight_fused = _run_fused_gptq_nvfp4(
+        weight,
+        scales_2d,
+        h_inv,
+        gptq_block_size,
+        quant_block_size,
+    )
+    weight_unfused = _run_unfused_gptq_nvfp4(
+        weight,
+        scales_2d,
+        h_inv,
+        gptq_block_size,
+        quant_block_size,
+    )
+
+    assert not torch.equal(weight_fused, weight.float()), "Fused did not update weights"
+    assert not torch.equal(weight_unfused, weight.float()), "Unfused did not update weights"
+
+    diff = (weight_fused - weight_unfused).abs()
+    max_abs = diff.max().item()
+    mean_abs = diff.mean().item()
+    denom = weight_unfused.abs().max().item()
+    rel_max = max_abs / denom if denom > 0 else 0.0
+
+    print(
+        f"\n[nvfp4] gptq_bs={gptq_block_size} quant_bs={quant_block_size}: "
+        f"max_abs={max_abs:.2e}  mean_abs={mean_abs:.2e}  rel_max={rel_max:.2e}"
+    )
+
+    torch.testing.assert_close(weight_fused, weight_unfused, atol=1e-4, rtol=1e-4)
+
+
+_NVFP4_BENCH_CONFIGS = [
+    (16, 128, 256, 512),
+    (16, 128, 256, 2048),
+    (16, 128, 256, 4096),
+    (128, 128, 256, 512),
+    (128, 128, 256, 2048),
+    (128, 128, 256, 4096),
+]
+
+_NVFP4_BENCH_IDS = [f"qbs{qbs}_gbs{gbs}_{of}x{d}" for qbs, gbs, of, d in _NVFP4_BENCH_CONFIGS]
+
+
+@requires_triton
+@pytest.mark.parametrize(
+    ("quant_block_size", "gptq_block_size", "out_features", "dim"),
+    _NVFP4_BENCH_CONFIGS,
+    ids=_NVFP4_BENCH_IDS,
+)
+def test_fused_nvfp4_benchmark(quant_block_size, gptq_block_size, out_features, dim):
+    """Benchmark fused Triton NVFP4 GPTQ vs unfused production loop."""
+    torch.manual_seed(42)
+
+    weight, scales_2d, h_inv = _make_nvfp4_test_data(
+        quant_block_size,
+        out_features,
+        dim,
+    )
+
+    def _bench(fn, n_warmup=2, n_iters=5):
+        for _ in range(n_warmup):
+            fn()
+        torch.cuda.synchronize()
+        total = 0.0
+        for _ in range(n_iters):
+            torch.cuda.synchronize()
+            t0 = time.perf_counter()
+            fn()
+            torch.cuda.synchronize()
+            total += time.perf_counter() - t0
+        return total / n_iters
+
+    def run_fused():
+        return _run_fused_gptq_nvfp4(
+            weight,
+            scales_2d,
+            h_inv,
+            gptq_block_size,
+            quant_block_size,
+        )
+
+    def run_unfused():
+        return _run_unfused_gptq_nvfp4(
+            weight,
+            scales_2d,
+            h_inv,
+            gptq_block_size,
+            quant_block_size,
+        )
+
+    t_fused = _bench(run_fused)
+    t_unfused = _bench(run_unfused)
+    speedup = t_unfused / t_fused if t_fused > 0 else float("inf")
+
+    tag = f"qbs{quant_block_size}_gbs{gptq_block_size}_{out_features}x{dim}"
+    print(
+        f"\n[{tag}] Fused: {t_fused * 1e3:8.2f} ms | "
+        f"Unfused: {t_unfused * 1e3:8.2f} ms | Speedup: {speedup:.1f}x"
+    )

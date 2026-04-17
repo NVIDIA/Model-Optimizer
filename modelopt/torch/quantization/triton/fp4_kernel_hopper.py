@@ -24,6 +24,7 @@ import triton
 import triton.language as tl
 
 from .fp4_kernel import _torch_dtype_to_tl
+from .nvfp4_quant import fp4_round_magnitude
 
 __all__ = ["fp4_fake_quant_block"]
 
@@ -90,31 +91,7 @@ def fp4_fake_quant_kernel(
 
     abs_scaled = x_abs / block_max_quant_broadcast
 
-    q_val = tl.where(
-        abs_scaled <= 0.25,
-        0.0,
-        tl.where(
-            abs_scaled < 0.75,
-            0.5,
-            tl.where(
-                abs_scaled <= 1.25,
-                1.0,
-                tl.where(
-                    abs_scaled < 1.75,
-                    1.5,
-                    tl.where(
-                        abs_scaled <= 2.5,
-                        2.0,
-                        tl.where(
-                            abs_scaled < 3.5,
-                            3.0,
-                            tl.where(abs_scaled <= 5.0, 4.0, 6.0),
-                        ),
-                    ),
-                ),
-            ),
-        ),
-    )
+    q_val = fp4_round_magnitude(abs_scaled)
 
     x_rescaled = q_val * block_max_quant_broadcast
     x_rescaled = tl.where(tile_reshaped >= 0, x_rescaled, -x_rescaled)
