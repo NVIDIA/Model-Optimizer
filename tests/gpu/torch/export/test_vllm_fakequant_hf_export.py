@@ -17,10 +17,10 @@ from copy import deepcopy
 
 import pytest
 import torch
-from accelerate import init_empty_weights, load_checkpoint_and_dispatch
-from transformers import AutoConfig, AutoModelForCausalLM
 import transformers
 from _test_utils.torch.transformers_models import create_tiny_llama_dir, create_tiny_qwen3_moe_dir
+from accelerate import init_empty_weights, load_checkpoint_and_dispatch
+from transformers import AutoConfig, AutoModelForCausalLM
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export import export_hf_vllm_fq_checkpoint
@@ -245,6 +245,8 @@ def test_hf_vllm_export_offload(tmp_path, quant_cfg):
             "_amax" in k for k in quantizer_state_dict_before[name]
         ):
             assert any("_amax" in k for k in state), f"input quantizer {name} should preserve _amax"
+
+
 @pytest.mark.parametrize("quant_cfg", [mtq.FP8_DEFAULT_CFG, mtq.INT4_AWQ_CFG])
 def test_hf_vllm_export_tiny_llama(tmp_path, quant_cfg):
     tiny_model_dir = create_tiny_llama_dir(tmp_path, num_hidden_layers=2)
