@@ -38,12 +38,12 @@ from modelopt.torch.opt.utils import get_hparam, named_hparams
 from modelopt.torch.utils import create_param_grad_clear_hook, print_rank_0, report_memory
 from modelopt.torch.utils.distributed import DistributedProcessGroup, ParallelState, is_master
 
-from . import config as mtq_config
-from . import model_calib
-from .config import QuantizeConfig, QuantizerAttributeConfig
-from .conversion import set_quantizer_by_cfg
-from .nn import QuantLinearConvBase, QuantModule, SequentialQuantizer, TensorQuantizer
-from .utils import is_quantized_linear
+from .. import config as mtq_config
+from .. import model_calib
+from ..config import QuantizeConfig, QuantizerAttributeConfig
+from ..conversion import set_quantizer_by_cfg
+from ..nn import QuantLinearConvBase, QuantModule, SequentialQuantizer, TensorQuantizer
+from ..utils import is_quantized_linear
 
 
 def estimate_quant_compression(quant_cfg: QuantizeConfig) -> float:
@@ -615,8 +615,8 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         # Import here to avoid circular import
         from modelopt.torch.quantization.model_quant import calibrate
 
-        from .conversion import restore_quantizer_state, update_quantize_metadata
-        from .utils import get_quantizer_state_dict, set_quantizer_state_dict
+        from ..conversion import restore_quantizer_state, update_quantize_metadata
+        from ..utils import get_quantizer_state_dict, set_quantizer_state_dict
 
         super().before_search()
         restored_method = getattr(self, "method", None)

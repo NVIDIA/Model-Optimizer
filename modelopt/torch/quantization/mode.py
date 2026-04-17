@@ -66,6 +66,7 @@ from .model_calib import (
     sequential_calibrate,
     smoothquant,
     svdquant,
+    watersic_kv,
 )
 
 __all__ = ["BaseCalibrateModeDescriptor"]
@@ -502,3 +503,17 @@ class GPTQModeDescriptor(BaseCalibrateModeDescriptor):
         return GPTQCalibConfig
 
     _calib_func = gptq
+
+
+@CalibrateModeRegistry.register_mode
+class WaterSICKVModeDescriptor(BaseCalibrateModeDescriptor):
+    """Mode for WaterSIC KV-cache quantization algorithm."""
+
+    @property
+    def config_class(self) -> type[QuantizeAlgorithmConfig]:
+        """Specifies the config class for the mode."""
+        from .algorithms.watersic_kv.config import WaterSICKVCalibConfig
+
+        return WaterSICKVCalibConfig
+
+    _calib_func = watersic_kv

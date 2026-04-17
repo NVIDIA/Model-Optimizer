@@ -232,6 +232,8 @@ extend-ignore = [
     "N806",
 ] # triton kernel style
 "examples/deepseek/ds_kernel.py" = ["N803", "N806", "E731"] # triton style
+"modelopt/torch/quantization/algorithms/watersic_kv/*" = ["N803", "N806"]
+"tests/unit/torch/quantization/test_watersic_kv.py" = ["N803", "N806"]
 
 [tool.ruff.lint.pycodestyle]
 max-line-length = 120 # Line length limit for comments and docstrings

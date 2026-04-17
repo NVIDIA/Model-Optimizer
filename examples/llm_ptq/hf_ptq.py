@@ -127,6 +127,7 @@ KV_QUANT_CFG_CHOICES = {
     "nvfp4": "NVFP4_KV_CFG",
     "nvfp4_affine": "NVFP4_AFFINE_KV_CFG",
     "nvfp4_rotate": "NVFP4_KV_ROTATE_CFG",
+    "watersic_kv": "WATERSIC_KV_CFG",
 }
 
 # Formats that use use_constant_amax (no calibration needed).
@@ -384,7 +385,7 @@ def auto_quantize(
     # We need to explicitly set up KV cache quantization after auto_quantize
     enable_quant_kv_cache = args.kv_cache_qformat != "none"
     print(f"{'Enable' if enable_quant_kv_cache else 'Disable'} KV cache quantization")
-    if enable_quant_kv_cache:
+    if enable_quant_kv_cache and args.kv_cache_qformat != "watersic_kv":
         kv_cache_quant_cfg = copy.deepcopy(
             getattr(mtq, KV_QUANT_CFG_CHOICES[args.kv_cache_qformat])["quant_cfg"]
         )
@@ -403,6 +404,16 @@ def auto_quantize(
                 [{"quantizer_name": "*", "enable": False}, *kv_cache_quant_cfg],
             ):
                 mtq.calibrate(language_model, algorithm="max", forward_loop=calibrate_loop)
+
+    # WaterSIC KV-cache needs a separate quantization pass with its own algorithm
+    if args.kv_cache_qformat == "watersic_kv":
+        watersic_cfg = copy.deepcopy(getattr(mtq, KV_QUANT_CFG_CHOICES["watersic_kv"]))
+        if args.watersic_target_rate is not None:
+            watersic_cfg["algorithm"]["target_rate"] = args.watersic_target_rate
+        if args.watersic_kl_aware:
+            watersic_cfg["algorithm"]["kl_aware"] = True
+        language_model = mtq.quantize(language_model, watersic_cfg, forward_loop=calibrate_loop)
+
     return language_model
 
 
@@ -423,7 +434,7 @@ def load_model(args: argparse.Namespace):
             f"Quantization format is not supported for low memory mode. Supported formats: {QUANT_CFG_CHOICES.keys()}"
         )
         quant_cfg = QUANT_CFG_CHOICES[args.qformat]
-        if args.kv_cache_qformat != "none":
+        if args.kv_cache_qformat not in {"none", "watersic_kv"}:
             quant_cfg = mtq.utils.update_quant_cfg_with_kv_cache_quant(
                 quant_cfg,
                 getattr(mtq, KV_QUANT_CFG_CHOICES[args.kv_cache_qformat])["quant_cfg"],
@@ -651,6 +662,15 @@ def mono_quantize(
             )
         else:
             language_model = mtq.quantize(language_model, quant_cfg, forward_loop=calibrate_loop)
+
+        # WaterSIC KV-cache needs a separate quantization pass with its own algorithm
+        if args.kv_cache_qformat == "watersic_kv":
+            watersic_cfg = copy.deepcopy(getattr(mtq, KV_QUANT_CFG_CHOICES["watersic_kv"]))
+            if args.watersic_target_rate is not None:
+                watersic_cfg["algorithm"]["target_rate"] = args.watersic_target_rate
+            if args.watersic_kl_aware:
+                watersic_cfg["algorithm"]["kl_aware"] = True
+            language_model = mtq.quantize(language_model, watersic_cfg, forward_loop=calibrate_loop)
 
         # For VL models, update full_model to use the quantized language model
         if is_nemotron_vl_model:
@@ -1083,7 +1103,8 @@ def quantize_main(
             print(f"{'Enable' if enable_quant_kv_cache else 'Disable'} KV cache quantization")
 
             # Check if any bmm_quantizer is in the quant_cfg. If so, we need to enable the bmm_quantizer.
-            if enable_quant_kv_cache:
+            # WaterSIC KV-cache uses a separate quantization pass, so skip merging here.
+            if enable_quant_kv_cache and args.kv_cache_qformat != "watersic_kv":
                 quant_cfg = mtq.update_quant_cfg_with_kv_cache_quant(
                     quant_cfg,
                     getattr(mtq, KV_QUANT_CFG_CHOICES[args.kv_cache_qformat])["quant_cfg"],
@@ -1241,6 +1262,17 @@ def parse_args() -> argparse.Namespace:
             "without data-driven calibration. "
             "Other formats (fp8, nvfp4, etc.) use data-driven calibration."
         ),
+    )
+    parser.add_argument(
+        "--watersic_target_rate",
+        type=float,
+        default=None,
+        help="Target bits per element for WaterSIC KV-cache quantization (default: 2.0)",
+    )
+    parser.add_argument(
+        "--watersic_kl_aware",
+        action="store_true",
+        help="Enable KL-aware importance weighting for WaterSIC KV-cache quantization",
     )
     parser.add_argument(
         "--export_fmt",

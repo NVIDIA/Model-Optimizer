@@ -23,8 +23,8 @@ from functools import partial
 
 import torch
 import torch.distributed as dist
-import torch.nn as nn
 import torch.nn.functional as F
+from torch import nn
 from tqdm import tqdm
 
 from modelopt.torch.opt.searcher import ForwardLoop
@@ -58,6 +58,7 @@ __all__ = [
     "sequential_calibrate",
     "smoothquant",
     "svdquant",
+    "watersic_kv",
 ]
 
 
@@ -100,7 +101,7 @@ def _check_moe_calibration_complete(quantizer, parallel_state):
         if any(amax_states) and not all(amax_states):
             raise RuntimeError(
                 "MoE calibration incomplete: some experts received no tokens during calibration. "
-                "Increase --calib-size to ensure all experts see calibration data."
+                "Increase --calib-size to ensure all experts see calibration data.",
             )
 
 
@@ -186,7 +187,11 @@ def max_calibrate(
             for _q in quantizer:
                 # Syncing amax across TP for sequential quantizer
                 sync_quantizer_amax_across_tp(
-                    _q, linear_name, quantizer_type, axes_for_sync, parallel_state
+                    _q,
+                    linear_name,
+                    quantizer_type,
+                    axes_for_sync,
+                    parallel_state,
                 )
             return
         # sync is not needed for block quantization
@@ -194,7 +199,7 @@ def max_calibrate(
             if hasattr(quantizer, "_padding"):
                 warnings.warn(
                     f"Found block-quantized padded {quantizer_type} for {linear_name}, amax will"
-                    " not be synced correctly."
+                    " not be synced correctly.",
                 )
             # Skip amax sync for INT4 / W4A8 block quantization
             # Sync amax for NVFP4 (dynamic per-block, static per-tensor quantized scale)
@@ -249,7 +254,7 @@ def max_calibrate(
             for quantizer in [module.k_bmm_quantizer, module.v_bmm_quantizer]:
                 if isinstance(quantizer, TensorQuantizer) and quantizer.amax is not None:
                     quantizer.sync_amax_across_distributed_group(
-                        module.parallel_state.tensor_parallel_group
+                        module.parallel_state.tensor_parallel_group,
                     )
 
 
@@ -373,7 +378,7 @@ def mse_calibrate(
     # Step 3: Calibrate weight quantizers ONE AT A TIME with immediate amax computation
     # This prevents massive memory accumulation seen in large models
     for idx, (parent_module, weight_name, weight_quantizer) in enumerate(
-        tqdm(weight_quantizers, desc="MSE weight calibration")
+        tqdm(weight_quantizers, desc="MSE weight calibration"),
     ):
         # Enable calibration mode for the weight quantizer
         weight_quantizer.disable_quant()
@@ -486,7 +491,7 @@ def local_hessian_calibrate(
             if self.cin % self.block_size != 0:
                 warnings.warn(
                     f"Module {self.name}: input features ({self.cin}) not divisible by "
-                    f"block_size ({self.block_size}). Skipping local Hessian for this module."
+                    f"block_size ({self.block_size}). Skipping local Hessian for this module.",
                 )
                 self.is_enabled = False
 
@@ -705,7 +710,7 @@ def enable_stats_collection(model: nn.Module):
                 # Disable quantization during calibration so it doesn't affect other quantizers.
                 module.disable_quant()
                 continue
-            elif module._calibrator is not None:
+            if module._calibrator is not None:
                 module.disable_quant()
                 module.enable_calib()
             else:
@@ -752,7 +757,7 @@ def disable_pre_quant_scale_and_resmooth(linear: nn.Module, delete_pre_quant_sca
     pre_quant_scale = linear.input_quantizer._pre_quant_scale.to(torch.float32)
 
     linear.weight.copy_(
-        (linear.weight * pre_quant_scale.squeeze()[None, :]).to(linear.weight.dtype)
+        (linear.weight * pre_quant_scale.squeeze()[None, :]).to(linear.weight.dtype),
     )
     linear.weight_quantizer.reset_amax()
     max_calibrate(linear, lambda linear: linear.weight_quantizer(linear.weight))
@@ -764,7 +769,8 @@ def disable_pre_quant_scale_and_resmooth(linear: nn.Module, delete_pre_quant_sca
         assert hasattr(linear.input_quantizer, "_amax_for_smoothing")
         device, dtype = linear.weight.device, linear.weight.dtype
         linear.input_quantizer.amax = linear.input_quantizer._amax_for_smoothing.amax().to(
-            device=device, dtype=dtype
+            device=device,
+            dtype=dtype,
         )
 
     if delete_pre_quant_scale:
@@ -781,13 +787,13 @@ def _apply_weight_pre_quant_scale(linear, pre_quant_scale):
     if _ENABLE_FOLDING_PQS_TO_WEIGHTS:
         linear.weight.data.copy_(
             (linear.weight * pre_quant_scale.to(linear.weight.device).squeeze()[None, :]).to(
-                linear.weight.dtype
-            )
+                linear.weight.dtype,
+            ),
         )
     else:
         linear.weight_quantizer._enable_pre_quant_scale = True
         linear.weight_quantizer.pre_quant_scale = pre_quant_scale.squeeze()[None, :].to(
-            linear.weight.dtype
+            linear.weight.dtype,
         )
 
     linear.weight_quantizer.reset_amax()
@@ -796,7 +802,8 @@ def _apply_weight_pre_quant_scale(linear, pre_quant_scale):
 
 @torch.no_grad()
 def apply_pre_quant_scale_and_smooth(
-    linear: nn.Module, pre_quant_scale: torch.Tensor | None = None
+    linear: nn.Module,
+    pre_quant_scale: torch.Tensor | None = None,
 ):
     """Apply pre_quant_scale and smooth the quantized linear weights.
 
@@ -829,7 +836,8 @@ def apply_pre_quant_scale_and_smooth(
         assert hasattr(linear.input_quantizer, "_amax_for_smoothing")
         device, dtype = linear.weight.device, linear.weight.dtype
         _amax_for_smoothing = linear.input_quantizer._amax_for_smoothing.to(
-            device=device, dtype=dtype
+            device=device,
+            dtype=dtype,
         )
         linear.input_quantizer.amax = (
             (_amax_for_smoothing * pre_quant_scale.to(device)).amax().to(dtype)
@@ -837,7 +845,7 @@ def apply_pre_quant_scale_and_smooth(
 
         if is_quantized_column_parallel_linear(linear) or is_quantized_row_parallel_linear(linear):
             linear.input_quantizer.sync_amax_across_distributed_group(
-                linear.parallel_state.tensor_parallel_group
+                linear.parallel_state.tensor_parallel_group,
             )
 
 
@@ -1104,7 +1112,8 @@ def awq_lite(
             self.awq_lite.num_tokens += input.numel() / input.shape[-1]
             if self.awq_lite.is_input_quantized:
                 with set_quantizer_by_cfg_context(
-                    self.input_quantizer, [{"quantizer_name": "*", "enable": True}]
+                    self.input_quantizer,
+                    [{"quantizer_name": "*", "enable": True}],
                 ):
                     max_calibrate(self.input_quantizer, lambda quantizer: quantizer(input), False)
             return out_actual
@@ -1155,7 +1164,9 @@ def awq_lite(
         """Sync activation scale across Data Parallel (DP)."""
         if data_parallel_group.is_initialized():
             dist.all_reduce(
-                module.awq_lite.act_scale, op=dist.ReduceOp.AVG, group=data_parallel_group.group
+                module.awq_lite.act_scale,
+                op=dist.ReduceOp.AVG,
+                group=data_parallel_group.group,
             )
 
     for name, module in model.named_modules():
@@ -1169,10 +1180,12 @@ def awq_lite(
             module.awq_lite.act_scale = module.awq_lite.act_scale / module.awq_lite.num_cache_steps
 
             has_nan_local = torch.any(torch.isnan(module.awq_lite.act_scale)) or torch.any(
-                torch.isnan(module.awq_lite.weight_scale)
+                torch.isnan(module.awq_lite.weight_scale),
             )
             has_nan = DistributedProcessGroup.get_dist_syncd_obj(
-                has_nan_local, module.parallel_state.data_parallel_group, lambda objs: any(objs)
+                has_nan_local,
+                module.parallel_state.data_parallel_group,
+                lambda objs: any(objs),
             )
 
             if has_nan:
@@ -1250,7 +1263,7 @@ def awq_lite(
                     warnings.warn(
                         "awq_lite: Calling `forward_loop(model)` the second time did not forward"
                         f" data through the {name}. Please provide a valid `forward_loop` function"
-                        " that can be used to forward data through the model many times."
+                        " that can be used to forward data through the model many times.",
                     )
                 with enable_weight_access_and_writeback(module, model, name_to_module):
                     postprocess(module, name)
@@ -1333,7 +1346,9 @@ def awq_clip(
             indices = loss < self.awq_clip.best_loss
             self.awq_clip.best_loss = torch.where(indices, loss, self.awq_clip.best_loss)
             self.awq_clip.best_clip_val = torch.where(
-                indices, self.awq_clip.w_amax * shrink, self.awq_clip.best_clip_val
+                indices,
+                self.awq_clip.w_amax * shrink,
+                self.awq_clip.best_clip_val,
             )
 
     def _clip_search(self, inputs, co_bsz=256, max_tokens=16):
@@ -1424,7 +1439,7 @@ def awq_clip(
             if "CUDA out of memory" in str(e):
                 raise RuntimeError(
                     f"Clip search on {name} failed due to CUDA out of memory, try reducing"
-                    " max_co_batch_size"
+                    " max_co_batch_size",
                 ) from e
             raise RuntimeError(e)
 
@@ -1499,7 +1514,7 @@ def svd(weight, rank):
         warnings.warn(
             "The low-rank dimensions do not match the layer dimensions. "
             "Please verify your configuration and model settings. "
-            f"Rank is {us.shape[1]} and {vt.shape[0]}"
+            f"Rank is {us.shape[1]} and {vt.shape[0]}",
         )
         us_temp = torch.zeros((us.shape[0], rank), dtype=us.dtype, device=us.device)
         vt_temp = torch.zeros((rank, vt.shape[1]), dtype=vt.dtype, device=vt.device)
@@ -1535,7 +1550,7 @@ def svdquant(
         module.weight_quantizer.svdquant_lora_a = vt
         module.weight_quantizer.svdquant_lora_b = us
         module.weight.data.sub_(
-            module.weight_quantizer.svdquant_lora_b @ module.weight_quantizer.svdquant_lora_a
+            module.weight_quantizer.svdquant_lora_b @ module.weight_quantizer.svdquant_lora_a,
         )
         module.weight_quantizer.reset_amax()
         module.input_quantizer.reset_amax()
@@ -1567,14 +1582,14 @@ def sequential_calibrate(
     if forward_loop is None:
         raise ValueError(
             "forward_loop must not be None for sequential calibration. "
-            "Please provide a valid forward_loop callable."
+            "Please provide a valid forward_loop callable.",
         )
 
     transformer_layers = LayerActivationCollector.get_decoder_layers(model)
     if transformer_layers is None or len(transformer_layers) == 0:
         raise ValueError(
             "Could not find transformer layers in model. "
-            "Sequential calibration requires a model with identifiable transformer layers."
+            "Sequential calibration requires a model with identifiable transformer layers.",
         )
 
     print_rank_0(f"Sequential calibration: Found {len(transformer_layers)} transformer layers")
@@ -1655,7 +1670,8 @@ def gptq(
     print_rank_0(f"Computing Hessians for {len(gptq_handles)} linear layers...")
 
     with set_quantizer_by_cfg_context(
-        model, [{"quantizer_name": "*weight_quantizer", "enable": False}]
+        model,
+        [{"quantizer_name": "*weight_quantizer", "enable": False}],
     ):
         forward_loop(model)
 
@@ -1671,3 +1687,78 @@ def gptq(
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
     print_rank_0(f"GPTQ time: {time.time() - total_start:.2f}s")
+
+
+@torch.no_grad()
+def watersic_kv(
+    model: nn.Module,
+    forward_loop: ForwardLoop,
+    target_rate: float = 2.0,
+    kl_aware: bool = False,
+    importance_clip: float = 50.0,
+    use_lmmse: bool = True,
+    n_rescaler_iters: int = 0,
+    sample_frac: float | None = None,
+):
+    """WaterSIC KV-cache quantization.
+
+    Collects post-RoPE Q and K tensors from attention layers during calibration,
+    then runs WaterSIC entropy-coded quantization on K cache per attention head.
+
+    Args:
+        model: Module to quantize (full model or single decoder layer).
+        forward_loop: Callable that replays calibration inputs.
+        target_rate: Target bits per element.
+        kl_aware: Use attention-based importance weighting.
+        importance_clip: Clamp range for importance weights.
+        use_lmmse: Apply LMMSE shrinkage correction.
+        n_rescaler_iters: Diagonal rescaler optimization iterations.
+        sample_frac: Row subsampling for binary search (None = auto).
+    """
+    from modelopt.torch.quantization.algorithms.watersic_kv.helper import WaterSICKVHelper
+    from modelopt.torch.quantization.plugins.huggingface import _QuantAttention
+
+    total_start = time.time()
+
+    attn_modules = [(n, m) for n, m in model.named_modules() if isinstance(m, _QuantAttention)]
+    if not attn_modules:
+        raise ValueError(
+            "WaterSIC KV-cache quantization was requested, but no _QuantAttention modules "
+            "were found. Ensure the model has been quantized with KV-cache quantizers enabled "
+            "before running WaterSIC KV calibration."
+        )
+
+    print_rank_0(f"WaterSIC KV: Found {len(attn_modules)} attention layers")
+
+    # Phase 1: Collect Q, K
+    helpers = {
+        name: WaterSICKVHelper(m, name, kl_aware=kl_aware, importance_clip=importance_clip)
+        for name, m in attn_modules
+    }
+    for helper in helpers.values():
+        helper.setup()
+
+    print_rank_0("Collecting Q, K activations...")
+    try:
+        forward_loop(model)
+    finally:
+        for helper in helpers.values():
+            helper.cleanup()
+
+    # Phase 2: Run WaterSIC per layer
+    print_rank_0("Running WaterSIC quantization...")
+    for helper in helpers.values():
+        helper.quantize(
+            target_rate=target_rate,
+            use_lmmse=use_lmmse,
+            n_rescaler_iters=n_rescaler_iters,
+            sample_frac=sample_frac,
+        )
+        helper.free()
+    del helpers
+
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    elapsed = time.time() - total_start
+    print_rank_0(f"WaterSIC KV completed in {elapsed:.1f}s")

@@ -741,6 +741,17 @@ NVFP4_KV_ROTATE_CFG = {
     "algorithm": "max",
 }
 
+WATERSIC_KV_CFG = {
+    "quant_cfg": [
+        {"quantizer_name": "*", "enable": False},
+        {"quantizer_name": "*[kv]_bmm_quantizer", "enable": True},
+    ],
+    "algorithm": {
+        "method": "watersic_kv",
+        "target_rate": 2.0,
+    },
+}
+
 NVFP4_SVDQUANT_DEFAULT_CFG = _nvfp4_selective_quant_cfg(
     ["*"], algorithm={"method": "svdquant", "lowrank": 32}
 )
@@ -833,6 +844,7 @@ choices: set[str] = {
     "MAMBA_MOE_FP8_CONSERVATIVE_CFG",
     "MAMBA_MOE_FP8_AGGRESSIVE_CFG",
     "NVFP4_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG",
+    "WATERSIC_KV_CFG",
 }
 
 BiasType = Literal["static", "dynamic"]
