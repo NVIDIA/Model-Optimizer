@@ -55,6 +55,20 @@ repos:
         args: [--mapping=2, --sequence=4, --offset=2, --implicit_start, --implicit_end, --preserve-quotes]
         exclude: ^.github/workflows/
 
+  - repo: local
+    hooks:
+      - id: normalize-yaml-ext
+        name: normalize .yml to .yaml in required places, right now only yaml files in modelopt_recipes
+        entry: python tools/precommit/normalize_yaml_ext.py
+        language: system
+        files: ^modelopt_recipes/.*\.yml$
+
+      - id: check-modelopt-recipes
+        name: validate modelopt recipes
+        entry: python tools/precommit/check_modelopt_recipes.py
+        language: system
+        files: ^modelopt_recipes/
+
   # Instructions to change license file if ever needed:
   # https://github.com/Lucas-C/pre-commit-hooks#removing-old-license-and-replacing-it-with-a-new-one
   - repo: https://github.com/Lucas-C/pre-commit-hooks
@@ -75,21 +89,22 @@ repos:
         # Instead, we should manually add the license header to those files *after* the original header.
         exclude: >
           (?x)^(
+              modelopt/torch/quantization/utils/calib_utils.py|
               modelopt/onnx/quantization/operators.py|
               modelopt/onnx/quantization/ort_patching.py|
               modelopt/torch/_deploy/utils/onnx_utils.py|
               modelopt/torch/export/transformer_engine.py|
+              modelopt/torch/puzzletron/anymodel/models/gpt_oss/gpt_oss_pruned_to_mxfp4.py|
               modelopt/torch/quantization/export_onnx.py|
               modelopt/torch/quantization/plugins/attention.py|
+              modelopt/torch/sparsity/attention_sparsity/methods/vsa_utils.py|
               modelopt/torch/speculative/eagle/utils.py|
               modelopt/torch/speculative/plugins/transformers.py|
               modelopt/torch/utils/plugins/megatron_mmlu.py|
               examples/chained_optimizations/bert_prune_distill_quantize.py|
               examples/deepseek/quantize_to_nvfp4.py|
               examples/deepseek/ptq.py|
-              examples/diffusers/cache_diffusion/pipeline/models/sdxl.py|
               examples/diffusers/quantization/onnx_utils/export.py|
-              examples/llm_eval/humaneval.py|
               examples/llm_eval/lm_eval_hf.py|
               examples/llm_eval/mmlu.py|
               examples/llm_eval/modeling.py|
@@ -98,7 +113,7 @@ repos:
               examples/specdec_bench/specdec_bench/models/specbench_medusa.py|
               examples/speculative_decoding/main.py|
               examples/speculative_decoding/medusa_utils.py|
-              examples/speculative_decoding/server_generate.py|
+              examples/speculative_decoding/scripts/server_generate.py|
               experimental/dms/models/qwen3/configuration_qwen3_dms.py|
               experimental/dms/models/qwen3/modeling_qwen3_dms.py|
           )$

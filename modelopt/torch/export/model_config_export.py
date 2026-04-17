@@ -151,7 +151,8 @@ def torch_to_tensorrt_llm_checkpoint(
         model_metadata_config = model.config.__dict__
         vocab_size = model.config.vocab_size
         hf_config = model.config
-        architecture = model.config.architectures[0]
+        architectures = getattr(model.config, "architectures", None)
+        architecture = architectures[0] if architectures else ""
 
         # For Baichuan 13B, we check if alibi is used with the alibi_mask property.
         if hasattr(model, "model") and hasattr(model.model, "alibi_mask"):

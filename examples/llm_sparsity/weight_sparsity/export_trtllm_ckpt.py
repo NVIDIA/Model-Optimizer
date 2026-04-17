@@ -74,7 +74,7 @@ def get_model(ckpt_path, dtype="fp16", trust_remote_code=False):
         dtype = torch.float32
     else:
         raise NotImplementedError(f"Unknown dtype {dtype}")
-    model_kwargs = {"torch_dtype": dtype}
+    model_kwargs = {"dtype": dtype}
 
     model = AutoModelForCausalLM.from_pretrained(
         ckpt_path, device_map="auto", **model_kwargs, trust_remote_code=trust_remote_code

@@ -139,7 +139,7 @@ def sparsify(
                     model = AutoModelForCausalLM.from_pretrained(
                         model_path,
                         attn_implementation="eager",  # Required for sparse attention
-                        torch_dtype=torch.bfloat16,
+                        dtype=torch.bfloat16,
                     )
 
                 This is because sparse attention works by patching torch.nn.functional.softmax,

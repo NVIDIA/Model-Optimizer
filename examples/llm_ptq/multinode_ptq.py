@@ -149,9 +149,7 @@ def load_and_prepare_model(
         Tuple of (prepared_model, model_type, original_architectures, calibration_dataloader)
     """
     model = AutoModelForCausalLM.from_pretrained(
-        model_path,
-        torch_dtype="auto",
-        trust_remote_code=trust_remote_code,
+        model_path, dtype="auto", trust_remote_code=trust_remote_code
     )
     model.eval()
     model_type = get_model_type(model)

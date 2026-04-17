@@ -20,6 +20,7 @@ import json
 from collections.abc import Callable, ItemsView, Iterator, KeysView, ValuesView
 from typing import Any, TypeAlias
 
+import torch
 from pydantic import (
     BaseModel,
     Field,
@@ -64,6 +65,14 @@ class ModeloptBaseConfig(BaseModel):
     """
 
     model_config = PyDanticConfigDict(extra="forbid", validate_assignment=True)
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        """Register the config class as a safe global for torch serialization.
+
+        It can be used to load the config with torch.load(weights_only=True) in safe_load().
+        """
+        super().__init_subclass__(**kwargs)
+        torch.serialization.add_safe_globals([cls])
 
     def model_dump(self, **kwargs):
         """Dump the config to a dictionary with aliases and no warnings by default."""

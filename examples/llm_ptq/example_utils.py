@@ -53,7 +53,13 @@ SPECULATIVE_MODEL_LIST = ["Eagle", "Medusa"]
 
 
 def run_nemotron_vl_preview(
-    full_model, tokenizer, input_ids, pyt_ckpt_path, stage_name, allow_fallback=False
+    full_model,
+    tokenizer,
+    input_ids,
+    pyt_ckpt_path,
+    stage_name,
+    allow_fallback=False,
+    trust_remote_code=False,
 ):
     """Run text-only and VL preview generation for Nemotron VL models.
 
@@ -64,7 +70,7 @@ def run_nemotron_vl_preview(
         pyt_ckpt_path: Path to the model checkpoint
         stage_name: Description of the stage (e.g., "before quantization", "after quantization")
         allow_fallback: Whether to allow fallback to standard generate on failure
-
+        trust_remote_code: Whether to trust remote code for Huggingface models and tokenizers
     Returns:
         Generated text response or None if generation failed
     """
@@ -80,7 +86,7 @@ def run_nemotron_vl_preview(
 
     # Try text-only generation (may fail for encoder-decoder models like Nemotron-Parse)
     text_response = run_text_only_generation(
-        full_model, tokenizer, question, generation_config, pyt_ckpt_path
+        full_model, tokenizer, question, generation_config, pyt_ckpt_path, trust_remote_code
     )
 
     generated_ids = None
@@ -93,7 +99,7 @@ def run_nemotron_vl_preview(
 
     # Run additional VL test with images
     print(f"Running additional VL test with images ({stage_name})...")
-    run_vl_preview_generation(full_model, tokenizer, pyt_ckpt_path, stage_name)
+    run_vl_preview_generation(full_model, tokenizer, pyt_ckpt_path, stage_name, trust_remote_code)
 
     return generated_ids
 
@@ -205,7 +211,12 @@ def build_quant_cfg(
 ) -> dict[str, Any]:
     quant_cfg = copy.deepcopy(quant_cfg)
     if "awq" in str(quant_cfg.get("algorithm")):
-        weight_quantizer = quant_cfg["quant_cfg"]["*weight_quantizer"]
+        from modelopt.torch.quantization.config import find_quant_cfg_entry_by_path
+
+        weight_quantizer_entry = find_quant_cfg_entry_by_path(
+            quant_cfg["quant_cfg"], "*weight_quantizer"
+        )
+        weight_quantizer = weight_quantizer_entry.get("cfg") or {}
         if isinstance(weight_quantizer, list):
             weight_quantizer = weight_quantizer[0]
         # If awq_block_size argument is provided, update weight_quantizer
@@ -236,10 +247,10 @@ def build_quant_cfg(
 
     if model_type == "phi4mm":
         # Only quantize the language model
-        quant_cfg["quant_cfg"]["*speech*"] = {"enable": False}
-        quant_cfg["quant_cfg"]["*audio*"] = {"enable": False}
-        quant_cfg["quant_cfg"]["*image*"] = {"enable": False}
-        quant_cfg["quant_cfg"]["*vision*"] = {"enable": False}
+        quant_cfg["quant_cfg"].append({"quantizer_name": "*speech*", "enable": False})
+        quant_cfg["quant_cfg"].append({"quantizer_name": "*audio*", "enable": False})
+        quant_cfg["quant_cfg"].append({"quantizer_name": "*image*", "enable": False})
+        quant_cfg["quant_cfg"].append({"quantizer_name": "*vision*", "enable": False})
 
     return quant_cfg
 
@@ -364,6 +375,11 @@ def load_mtp_weights(
         mtp_layer_prefixes = set()
         for key in keys:
             parts = key.split(".")
+            # Capture the top-level MTP module prefix (e.g., "mtp" from "mtp.fc.weight")
+            # so that non-layer MTP weights like mtp.fc, mtp.norm are also excluded
+            if parts:
+                mtp_layer_prefixes.add(parts[0])
+            # Also capture specific layer prefixes (e.g., "mtp.layers.0")
             for i, part in enumerate(parts):
                 if part == "layers" and i + 1 < len(parts) and parts[i + 1].isdigit():
                     prefix = ".".join(parts[: i + 2])
@@ -567,7 +583,7 @@ def get_model(
     model_kwargs = config_kwargs.copy()
     # Don't set torch_dtype for VILA models as they handle it explicitly in their builder
     if "vila" not in ckpt_path.lower():
-        model_kwargs.setdefault("torch_dtype", "auto")
+        model_kwargs.setdefault("dtype", "auto")
 
     if "vila" in ckpt_path.lower():
         hf_vila = AutoModel.from_pretrained(
@@ -618,7 +634,7 @@ def get_model(
                     ckpt_path,
                     device_map="auto",
                     trust_remote_code=trust_remote_code,
-                    torch_dtype="auto",
+                    dtype="auto",
                 )
         else:
             architecture = hf_config.architectures[0]
@@ -650,7 +666,7 @@ def get_model(
                 model_kwargs2 = model_kwargs.copy()
                 if auto_model_module not in [AutoModelForCausalLM, AutoModel]:
                     model_kwargs2.pop("trust_remote_code", None)
-                model_kwargs2["torch_dtype"] = torch_dtype
+                model_kwargs2["dtype"] = torch_dtype
                 model_kwargs2.pop("max_memory", None)
                 model = from_config(hf_config, **model_kwargs2)
 

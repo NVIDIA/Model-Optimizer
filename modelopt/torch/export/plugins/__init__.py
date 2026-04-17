@@ -25,3 +25,6 @@ from .vllm_fakequant_hf import *
 
 with import_plugin("vllm_fakequant_megatron"):
     from .vllm_fakequant_megatron import *
+
+with import_plugin("hf_checkpoint_utils"):
+    from .hf_checkpoint_utils import *

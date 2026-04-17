@@ -274,7 +274,7 @@ def get_wikitext2():
     """
     # Load the Wikitext-2 test split using HuggingFace datasets
     print("\n[INFO] Loading Wikitext-2 'test' split ...")
-    test = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
+    test = load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1", split="test")
     if DEBUG:
         print(f"[DATASET] Number of raw samples: {len(test)}")
         for i in range(3):

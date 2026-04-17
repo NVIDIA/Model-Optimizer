@@ -27,6 +27,7 @@ from torch.distributed.fsdp import FSDPModule, MixedPrecisionPolicy, fully_shard
 from torch.distributed.fsdp._fully_shard._fsdp_param import FSDPParam
 from torch.distributed.tensor import Replicate
 
+from modelopt.torch.quantization.config import QuantizerCfgEntry
 from modelopt.torch.utils import get_unwrapped_name, print_rank_0
 
 if TYPE_CHECKING:
@@ -213,7 +214,7 @@ def weight_attr_names(module: nn.Module) -> "Generator[str, None, None]":
     # the standard weight and quantizer case
     weight = getattr(module, "weight", None)
     weight_quantizer = getattr(module, "weight_quantizer", None)
-    if isinstance(weight_quantizer, (TensorQuantizer, SequentialQuantizer)):
+    if weight is not None and isinstance(weight_quantizer, (TensorQuantizer, SequentialQuantizer)):
         yield "weight"
 
     # other weight and quantizer case
@@ -310,11 +311,15 @@ def calibrate_with_adapters(model, args):
 
 def disable_lora_quantizers_in_config(config, layers):
     """Turns off input, weight, and output quantizers for LoRA weights and LoRALinear layers in config."""
-    config["quant_cfg"]["*lora*"] = {"enable": False}
+    config["quant_cfg"].append({"quantizer_name": "*lora*", "enable": False})
     for layer in layers:
-        config["quant_cfg"][f"*{layer}.input_quantizer"] = {"enable": False}
-        config["quant_cfg"][f"*{layer}.weight_quantizer"] = {"enable": False}
-        config["quant_cfg"][f"*{layer}.output_quantizer"] = {"enable": False}
+        config["quant_cfg"].append({"quantizer_name": f"*{layer}.input_quantizer", "enable": False})
+        config["quant_cfg"].append(
+            {"quantizer_name": f"*{layer}.weight_quantizer", "enable": False}
+        )
+        config["quant_cfg"].append(
+            {"quantizer_name": f"*{layer}.output_quantizer", "enable": False}
+        )
     return config
 
 
@@ -516,25 +521,27 @@ def set_quantizer_state_dict(model: nn.Module, quantizer_state_dict: dict):
             module.load_state_dict(quantizer_state_dict[key])
 
 
-def sync_moe_expert_amax(experts):
-    """Sync input_quantizer amax across MoE experts and fix missing weight amax.
+def sync_moe_expert_amax(experts, sync_weight_amax=False):
+    """Sync quantizer amax across MoE experts and fix missing weight amax.
 
     1. Takes the element-wise max of each ``input_quantizer`` amax across all experts
        and writes it back, so every expert shares the same input amax.
-    2. For any ``weight_quantizer`` that is enabled but has ``amax is None`` (expert
+    2. If ``sync_weight_amax`` is True, also syncs ``weight_quantizer`` amax across
+       experts (max across experts). This matches TEGroupedMLP behavior where all
+       experts share a single weight quantizer.
+    3. For any ``weight_quantizer`` that is enabled but has ``amax is None`` (expert
        received no tokens during calibration), runs a weight-only ``max_calibrate``
        to populate the missing amax.
     """
+    from ..model_calib import max_calibrate
     from ..nn import TensorQuantizer
 
     amax_dict: dict[str, torch.Tensor] = {}
     for expert in experts:
         for name, module in expert.named_modules():
-            if (
-                isinstance(module, TensorQuantizer)
-                and module.amax is not None
-                and "input_quantizer" in name
-            ):
+            if not isinstance(module, TensorQuantizer) or module.amax is None:
+                continue
+            if "input_quantizer" in name or (sync_weight_amax and "weight_quantizer" in name):
                 stored_amax = amax_dict.get(name)
                 amax_tensor = module.amax.detach().clone()
                 amax_dict[name] = (
@@ -545,8 +552,6 @@ def sync_moe_expert_amax(experts):
         for name, module in expert.named_modules():
             if isinstance(module, TensorQuantizer) and name in amax_dict:
                 module.amax = amax_dict[name].detach().clone()
-
-    from ..model_calib import max_calibrate
 
     for expert in experts:
         for name, module in expert.named_modules():
@@ -823,16 +828,57 @@ def fsdp2_aware_weight_update(root_model, modules_to_update, reshard=True):
 
 
 def update_quant_cfg_with_kv_cache_quant(
-    quant_cfg: dict[str, Any], kv_cache_quant_cfg: dict[str, Any]
+    quant_cfg: dict[str, Any], kv_cache_quant_cfg: list[QuantizerCfgEntry]
 ) -> dict[str, Any]:
-    """Update the quant_cfg with the kv cache quant_cfg."""
+    """Update the quant_cfg with the kv cache quant_cfg.
+
+    Args:
+        quant_cfg: The outer quantization config dict (with ``"quant_cfg"`` and ``"algorithm"`` keys).
+        kv_cache_quant_cfg: A list of :class:`QuantizerCfgEntry
+            <modelopt.torch.quantization.config.QuantizerCfgEntry>` dicts for KV cache quantization,
+            typically ``some_kv_cfg["quant_cfg"]``.
+
+    Returns:
+        A deep copy of ``quant_cfg`` with the KV cache entries appended to ``quant_cfg["quant_cfg"]``.
+    """
     # If quant_cfg["quant_cfg"] is None, it corresponds to only kv cache quantization case
     quant_cfg = copy.deepcopy(quant_cfg)
-    quant_cfg["quant_cfg"] = quant_cfg.get("quant_cfg") or {"default": {"enable": False}}
-    quant_cfg["quant_cfg"].update(kv_cache_quant_cfg)
+    inner: list[QuantizerCfgEntry] = quant_cfg.get("quant_cfg") or [
+        {"quantizer_name": "*", "enable": False}
+    ]
+    quant_cfg["quant_cfg"] = inner + list(kv_cache_quant_cfg)
 
     # Set default algorithm for kv cache quantization if not provided.
     if not quant_cfg.get("algorithm"):
         quant_cfg["algorithm"] = "max"
     print_rank_0(f"Updated quant_cfg with KV cache quantization: {quant_cfg}")
     return quant_cfg
+
+
+def promote_nvfp4_static_quantizers(model: nn.Module) -> int:
+    """Convert eligible TensorQuantizers to NVFP4StaticQuantizer in-place.
+
+    After max calibration sets per-block amax values, NVFP4 static quantizers
+    need to be promoted so they use the two-level scaling path (global amax +
+    per-block amax) instead of the generic E4M3 path.
+
+    Returns the number of quantizers converted.
+    """
+    from modelopt.torch.quantization.nn import NVFP4StaticQuantizer, TensorQuantizer
+
+    converted = 0
+    for _name, module in list(model.named_modules()):
+        if isinstance(module, TensorQuantizer) and not module._disabled:
+            if module._calibrator is not None and not module._dynamic and hasattr(module, "_amax"):
+                is_nvfp4_static = (
+                    module.is_static_block_quant
+                    and module._num_bits == (2, 1)
+                    and module._block_sizes is not None
+                    and module._block_sizes.get("scale_bits") == (4, 3)
+                )
+                if is_nvfp4_static:
+                    initial_amax = module._amax.clone().detach()
+                    global_amax = reduce_amax(initial_amax, axis=None)
+                    NVFP4StaticQuantizer.from_tensor_quantizer(module, global_amax=global_amax)
+                    converted += 1
+    return converted

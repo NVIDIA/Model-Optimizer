@@ -1162,9 +1162,12 @@ def cast_initializer_to_dtype(
     node: onnx.NodeProto, dtype: str, initializer_map: dict[str, onnx.TensorProto]
 ):
     """Casts the initializer to the given dtype."""
+    input_id = None
     for id, input_name in enumerate(node.input):
         if input_name in initializer_map:
             input_id = id
+    if input_id is None:
+        return
     input_name = node.input[input_id]
     input = numpy_helper.to_array(initializer_map[input_name])
     input = input.astype(np_dtype_map[dtype])
