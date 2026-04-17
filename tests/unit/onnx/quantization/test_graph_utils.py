@@ -113,23 +113,23 @@ def _make_matmul_model(m, k, n, name="MatMul_0", inp_b_constant=True):
     return model
 
 
-def _get_matmul_nodes(model):
-    """Import an ONNX model and return its MatMul gs.Nodes."""
+def _get_nodes_by_op(model, op):
+    """Import an ONNX model and return its gs.Nodes whose op matches ``op``."""
     graph = gs.import_onnx(model)
-    return [n for n in graph.nodes if n.op == "MatMul"]
+    return [n for n in graph.nodes if n.op == op]
 
 
 def test_get_inp_b_k_dim_constant():
     """K dimension should be read from the Constant weight shape."""
     model = _make_matmul_model(m=32, k=8, n=64)
-    nodes = _get_matmul_nodes(model)
+    nodes = _get_nodes_by_op(model, "MatMul")
     assert _get_inp_b_k_dim(nodes[0]) == 8
 
 
 def test_get_inp_b_k_dim_variable_with_output_map():
     """K dimension should be read from output_map for Variable inputs."""
     model = _make_matmul_model(m=32, k=10, n=64, inp_b_constant=False)
-    nodes = _get_matmul_nodes(model)
+    nodes = _get_nodes_by_op(model, "MatMul")
     output_map = {"B": np.zeros((10, 64))}
     assert _get_inp_b_k_dim(nodes[0], output_map=output_map) == 10
 
@@ -137,7 +137,7 @@ def test_get_inp_b_k_dim_variable_with_output_map():
 def test_get_inp_b_k_dim_returns_none_when_unknown():
     """Should return None if K cannot be determined."""
     model = _make_matmul_model(m=32, k=8, n=64, inp_b_constant=False)
-    nodes = _get_matmul_nodes(model)
+    nodes = _get_nodes_by_op(model, "MatMul")
     assert _get_inp_b_k_dim(nodes[0]) is None
 
 
@@ -158,7 +158,7 @@ def test_get_inp_b_k_dim_returns_none_when_unknown():
 def test_matmul_small_gemm_exclusion(m, k, n, expected_excluded):
     """MatMuls with N or K < 16 should be excluded by shape inference."""
     model = _make_matmul_model(m=m, k=k, n=n)
-    nodes = _get_matmul_nodes(model)
+    nodes = _get_nodes_by_op(model, "MatMul")
     calibration_shapes = {"A": [m, k]}
     excluded = _exclude_matmuls_by_shape_inference(model, nodes, calibration_shapes)
     if expected_excluded:
@@ -170,7 +170,7 @@ def test_matmul_small_gemm_exclusion(m, k, n, expected_excluded):
 def test_matmul_gemv_excluded():
     """MatMul with N=1 (GEMV) should be excluded regardless of other dims."""
     model = _make_matmul_model(m=32, k=64, n=1)
-    nodes = _get_matmul_nodes(model)
+    nodes = _get_nodes_by_op(model, "MatMul")
     calibration_shapes = {"A": [32, 64]}
     excluded = _exclude_matmuls_by_shape_inference(model, nodes, calibration_shapes)
     assert "MatMul_0" in excluded
@@ -179,7 +179,7 @@ def test_matmul_gemv_excluded():
 def test_matmul_large_dims_not_excluded():
     """MatMul with all large dims should not be excluded."""
     model = _make_matmul_model(m=128, k=256, n=64)
-    nodes = _get_matmul_nodes(model)
+    nodes = _get_nodes_by_op(model, "MatMul")
     calibration_shapes = {"A": [128, 256]}
     excluded = _exclude_matmuls_by_shape_inference(model, nodes, calibration_shapes)
     assert "MatMul_0" not in excluded
@@ -202,11 +202,6 @@ def _make_gemm_model(m, k, n, trans_b, name="Gemm_0"):
     graph = helper.make_graph([gemm], "test", [inp_a], [out], initializer=[b_init])
     model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
     return model
-
-
-def _get_nodes_by_op(model, op):
-    graph = gs.import_onnx(model)
-    return [n for n in graph.nodes if n.op == op]
 
 
 @pytest.mark.parametrize("trans_b", [0, 1])
@@ -271,7 +266,7 @@ def test_matmul_small_k_graph_input_b_excluded():
     missing graph inputs, so K was undetectable and the MatMul wasn't excluded.
     """
     model = _make_matmul_model_graph_input_b(m=32, k=8, n=64)
-    nodes = _get_matmul_nodes(model)
+    nodes = _get_nodes_by_op(model, "MatMul")
     calibration_shapes = {"A": [32, 8], "B": [8, 64]}
     excluded = _exclude_matmuls_by_shape_inference(model, nodes, calibration_shapes)
     assert "MatMul_0" in excluded
@@ -289,7 +284,7 @@ def test_exclude_matmuls_by_inference_runtime_path(k, n, expected_excluded):
     """Exercise the runtime-inference path with B as a graph input (read from output_map)."""
     m = 32
     model = _make_matmul_model_graph_input_b(m=m, k=k, n=n)
-    nodes = _get_matmul_nodes(model)
+    nodes = _get_nodes_by_op(model, "MatMul")
 
     # Mock get_extended_model_outputs to return a synthetic output_map so we don't
     # need an actual ORT session.
@@ -329,7 +324,7 @@ def test_exclude_matmuls_by_inference_dedupes_added_outputs():
     mm2 = helper.make_node("MatMul", ["A2", "B"], ["Y2"], name="MatMul_1")
     graph = helper.make_graph([mm1, mm2], "test", [inp_a1, inp_a2, inp_b], [out1, out2])
     model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
-    nodes = _get_matmul_nodes(model)
+    nodes = _get_nodes_by_op(model, "MatMul")
 
     fake_output_map = {
         "Y1": np.zeros((m, n), dtype=np.float32),
