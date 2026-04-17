@@ -38,7 +38,7 @@ EXPORT_EXE="bash modules/Megatron-LM/examples/post_training/modelopt/export.sh"
 export MLM_EXTRA_ARGS=${@}
 ${QUANTIZE_EXE} ${MLM_MODEL_CFG} ${QUANT_CFG}
 
-export MLM_EXTRA_ARGS="--mmlu-dataset ${MMLU_DATASET:-/hf-local/cais/mmlu} --fraction 0.01 --lower-bound 0.38 --disable-tqdm"
+export MLM_EXTRA_ARGS="--mmlu-dataset ${MMLU_DATASET:-/hf-local/cais/mmlu} --fraction 0.01 --lower-bound ${MMLU_LOWER_BOUND:-0.38} --disable-tqdm"
 MLM_MODEL_CKPT=${MLM_MODEL_SAVE} ${MMLU_EXE} ${MLM_MODEL_CFG}
 
 ###################################################################################################

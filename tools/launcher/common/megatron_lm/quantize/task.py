@@ -102,4 +102,5 @@ class MegatronLMQuantizeTask(SandboxTask):
                 {"HF_MODEL_CKPT": f"{c.hf_local}{c.model}"},
                 {"MMLU_DATASET": f"{c.hf_local}{c.mmlu_dataset}"},
                 {"TP": str(c.tp)},
+                {"MMLU_LOWER_BOUND": str(c.mmlu_lower_bound)},
             ]
