@@ -217,8 +217,7 @@ To use your own datasets, please preprocess your data into a `.jsonl` file with 
 
 ```json
 {
-    "conversation_id": <unique id>,
-    "conversations": [{"role":<user or assistant>, "content":<content>}]
+    "messages": [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]
 }
 ```
 
@@ -350,3 +349,46 @@ More models coming soon!
 - 💡 [Release Notes](https://nvidia.github.io/Model-Optimizer/reference/0_changelog.html)
 - 🐛 [File a bug](https://github.com/NVIDIA/Model-Optimizer/issues/new?template=1_bug_report.md)
 - ✨ [File a Feature Request](https://github.com/NVIDIA/Model-Optimizer/issues/new?template=2_feature_request.md)
+
+## DFlash (Block Diffusion for Speculative Decoding)
+
+DFlash is a parallel speculative decoding method based on [Block Diffusion](https://arxiv.org/abs/2602.06036).
+Unlike autoregressive draft models (EAGLE3), DFlash predicts an entire block of tokens in a single forward pass
+using masked parallel prediction with KV injection from the target model's hidden states.
+
+### Quick Start
+
+For a complete end-to-end example (training + evaluation), see the
+[launcher example](../../tools/launcher/examples/Qwen/Qwen3-8B/hf_online_dflash.yaml):
+
+```bash
+uv run launch.py --yaml examples/Qwen/Qwen3-8B/hf_online_dflash.yaml --yes
+```
+
+### Key Configuration ([dflash.yaml](../../modelopt_recipes/general/speculative_decoding/dflash.yaml))
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `dflash.dflash_block_size` | 8 | Block size for parallel prediction |
+| `dflash.dflash_num_anchors` | 512 | Number of anchor positions per sample |
+| `dflash.dflash_loss_decay_factor` | 4.0 | Exponential decay gamma (0 disables) |
+| `dflash.dflash_self_logit_distillation` | true | Use logit distillation from target |
+| `dflash.dflash_architecture_config.num_hidden_layers` | 5 | Draft decoder layers |
+| `dflash.dflash_architecture_config.mask_token_id` | auto | Token ID for masked positions |
+| `training.answer_only_loss` | false | Mask loss on non-assistant tokens |
+
+Qwen3 sliding window attention is automatically supported — draft layers inherit
+`layer_types` and `sliding_window` from the config, matching the target model's
+attention pattern.
+
+### Export
+
+```bash
+python scripts/export_hf_checkpoint.py \
+    --model_path /path/to/training/output \
+    --export_path /path/to/exported/model
+```
+
+### Results
+
+See [doc/dflash.md](doc/dflash.md) for design details, benchmark results, and open items.

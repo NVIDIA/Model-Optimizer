@@ -1,4 +1,9 @@
-# Qwen3-8B NVFP4 quantization (4 GPUs, for Slurm clusters).
+# Qwen3-8B PTQ quantization (8 GPUs, for Slurm clusters).
+#
+# 3-step pipeline:
+#   task_0: NVFP4 quantize → MMLU → export
+#   task_1: FP8 quantize → MMLU → export
+#   task_2: TRT-LLM eval MMLU on all exported checkpoints
 #
 # Uses MegatronLMQuantizeTask with typed config — see common/megatron_lm/quantize/task.py
 # for all available fields.
@@ -8,7 +13,7 @@
 #
 # For single-GPU local Docker, use megatron_lm_ptq_local.yaml instead.
 
-job_name: Qwen3-8B_NVFP4_DEFAULT_CFG
+job_name: Qwen3-8B_PTQ
 pipeline:
   skip: false
   allow_to_fail: false
@@ -19,13 +24,44 @@ pipeline:
     config:
       model: Qwen/Qwen3-8B
       quant_cfg: NVFP4_DEFAULT_CFG
-      tp: 4
+      tp: 8
       calib_dataset: abisee/cnn_dailymail
       calib_size: 32
       mmlu_dataset: cais/mmlu
+      mmlu_lower_bound: 0.68
       hf_local: /hf-local/
     slurm_config:
       _factory_: "slurm_factory"
       nodes: 1
-      ntasks_per_node: 4
-      gpus_per_node: 4
+      ntasks_per_node: 8
+      gpus_per_node: 8
+
+  task_1:
+    _target_: common.megatron_lm.quantize.task.MegatronLMQuantizeTask
+    config:
+      model: Qwen/Qwen3-8B
+      quant_cfg: FP8_DEFAULT_CFG
+      tp: 8
+      calib_dataset: abisee/cnn_dailymail
+      calib_size: 32
+      mmlu_dataset: cais/mmlu
+      mmlu_lower_bound: 0.68
+      hf_local: /hf-local/
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 8
+      gpus_per_node: 8
+
+  # Step 3: TRT-LLM eval MMLU on all exported checkpoints
+  task_2:
+    script: common/tensorrt_llm/eval.sh
+    environment:
+      - HF_MODEL_CKPT: /scratchspace/export
+      - TP: "8"
+      - EP: "1"
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 8

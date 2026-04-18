@@ -15,8 +15,11 @@
 
 """Support quantization for VLLM layers."""
 
+import contextvars
 import importlib
+from collections.abc import Callable
 from contextlib import contextmanager
+from functools import partial
 from itertools import chain
 
 import torch
@@ -85,6 +88,21 @@ _ATTENTION_TYPES = tuple(
 )
 
 vllm_fused_moe_package = importlib.import_module("vllm.model_executor.layers.fused_moe.fused_moe")
+# vLLM may call one entry (e.g. ``dispatch_fused_moe_kernel``) which then calls another on the same
+# module (e.g. ``invoke_fused_moe_triton_kernel``). Patching every name would otherwise apply fakequant
+# twice; see ``_moe_fakequant_active`` in ``invoke_fused_moe_quantized``.
+_FUSED_MOE_KERNEL_CANDIDATES = (
+    "invoke_fused_moe_kernel",
+    "invoke_fused_moe_triton_kernel",
+    "dispatch_fused_moe_kernel",
+)
+_FUSED_MOE_KERNEL_FUNCS = tuple(
+    n for n in _FUSED_MOE_KERNEL_CANDIDATES if hasattr(vllm_fused_moe_package, n)
+)
+
+_moe_fakequant_active: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "moe_fakequant_active", default=False
+)
 
 
 @contextmanager
@@ -340,29 +358,64 @@ class _QuantFusedMoEBase(QuantModule):
         B: torch.Tensor,  # noqa: N803
         C: torch.Tensor,  # noqa: N803
         *args,
+        original_kernel: Callable,
+        **kwargs,
+    ):
+        # Nested module-level entry (e.g. dispatch -> triton): call the real kernel once, no second quant.
+        if _moe_fakequant_active.get():
+            return original_kernel(A, B, C, *args, **kwargs)
+        token = _moe_fakequant_active.set(True)
+        try:
+            return self._invoke_fused_moe_quantized_function(
+                A, B, C, *args, original_kernel=original_kernel, **kwargs
+            )
+        finally:
+            _moe_fakequant_active.reset(token)
+
+    def _invoke_fused_moe_quantized_function(
+        self,
+        A: torch.Tensor,  # noqa: N803
+        B: torch.Tensor,  # noqa: N803
+        C: torch.Tensor,  # noqa: N803
+        *args,
+        original_kernel: Callable,
         **kwargs,
     ):
         if B is self.w13_weight:
             # First layer of expert
             A = self.w13_input_quantizer(A)  # noqa: N806
-            if self.w13_weight_quantizer.is_enabled:
-                original_weight = self.w13_weight
-                self.w13_weight = self.w13_weight_quantizer(self.w13_weight)
-                vllm_fused_moe_package._invoke_fused_moe_kernel(A, B, C, *args, **kwargs)
-                self.w13_weight = original_weight
+            if self.w13_weight_quantizer.is_enabled:  # pragma: no cover
+                original_weight, self.w13_weight = (
+                    self.w13_weight,
+                    self.w13_weight_quantizer(self.w13_weight),
+                )
+                # In case the weight quantizer isn't folded yet in vllm_serve_fakequant, pass the
+                # quantized weight to the kernel.
+                B = self.w13_weight  # noqa: N806
+                try:
+                    original_kernel(A, B, C, *args, **kwargs)
+                finally:
+                    self.w13_weight = original_weight
             else:
-                vllm_fused_moe_package._invoke_fused_moe_kernel(A, B, C, *args, **kwargs)
+                original_kernel(A, B, C, *args, **kwargs)
             if self.w13_output_quantizer.is_enabled:
                 C[:] = self.w13_output_quantizer(C)
         elif B is self.w2_weight:
             A = self.w2_input_quantizer(A)  # noqa: N806
-            if self.w2_weight_quantizer.is_enabled:
-                original_weight = self.w2_weight
-                self.w2_weight = self.w2_weight_quantizer(self.w2_weight)
-                vllm_fused_moe_package._invoke_fused_moe_kernel(A, B, C, *args, **kwargs)
-                self.w2_weight = original_weight
+            if self.w2_weight_quantizer.is_enabled:  # pragma: no cover
+                original_weight, self.w2_weight = (
+                    self.w2_weight,
+                    self.w2_weight_quantizer(self.w2_weight),
+                )
+                # In case the weight quantizer isn't folded yet in vllm_serve_fakequant, pass the
+                # quantized weight to the kernel.
+                B = self.w2_weight  # noqa: N806
+                try:
+                    original_kernel(A, B, C, *args, **kwargs)
+                finally:
+                    self.w2_weight = original_weight
             else:
-                vllm_fused_moe_package._invoke_fused_moe_kernel(A, B, C, *args, **kwargs)
+                original_kernel(A, B, C, *args, **kwargs)
             if self.w2_output_quantizer.is_enabled:
                 C[:] = self.w2_output_quantizer(C)
         else:
@@ -372,24 +425,31 @@ class _QuantFusedMoEBase(QuantModule):
         # This is again due to the bad coding of vLLM
         # fused_moe submodule is overwritten by the fused_moe function
         # so we need to import the fused_moe module explicitly
-        assert vllm_fused_moe_package.invoke_fused_moe_kernel is not None
+        assert _FUSED_MOE_KERNEL_FUNCS and all(
+            getattr(vllm_fused_moe_package, n, None) is not None for n in _FUSED_MOE_KERNEL_FUNCS
+        )
         # This context manager will conflict with torch.compile
         # with replace_function(
         #     vllm_fused_moe_package,
         #     "invoke_fused_moe_kernel",
         #     self.invoke_fused_moe_quantized,
         # ):
+        originals = {n: getattr(vllm_fused_moe_package, n) for n in _FUSED_MOE_KERNEL_FUNCS}
         try:
-            vllm_fused_moe_package._invoke_fused_moe_kernel = (  # type: ignore[attr-defined]
-                vllm_fused_moe_package.invoke_fused_moe_kernel
-            )
-            vllm_fused_moe_package.invoke_fused_moe_kernel = self.invoke_fused_moe_quantized  # type: ignore[attr-defined]
+            for n in _FUSED_MOE_KERNEL_FUNCS:
+                setattr(
+                    vllm_fused_moe_package,
+                    n,
+                    partial(
+                        self.invoke_fused_moe_quantized,
+                        original_kernel=originals[n],
+                    ),
+                )
             output = super().forward(hidden_states, router_logits)
             return output
         finally:
-            vllm_fused_moe_package.invoke_fused_moe_kernel = (  # type: ignore[attr-defined]
-                vllm_fused_moe_package._invoke_fused_moe_kernel
-            )
+            for n in _FUSED_MOE_KERNEL_FUNCS:
+                setattr(vllm_fused_moe_package, n, originals[n])
 
     @torch.no_grad()
     def fold_weight(self, keep_attrs: bool = False):
@@ -409,7 +469,8 @@ class _QuantFusedMoEBase(QuantModule):
             )
         self.w2_weight_quantizer.disable()
 
-        torch.cuda.empty_cache()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
 
 @QuantModuleRegistry.register({vllm_fused_moe_layer.FusedMoE: "vllm_FusedMoE"})

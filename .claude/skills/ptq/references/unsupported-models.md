@@ -347,4 +347,5 @@ tokenizer.save_pretrained(output_path)
 - **Check quantizer summary**: `mtq.print_quant_summary(model)` shows which quantizers are enabled/disabled
 - **Inspect dtypes**: After loading, iterate `model.named_parameters()` and check for unexpected FP8 tensors
 - **Watch for silent disabling**: A misconfigured wildcard pattern can silently disable quantizers — always verify the summary
+- **Validate quantization pattern after export**: Run the validation script from SKILL.md Step 5 on the exported checkpoint. It checks every linear layer is either quantized (has scale params) or explicitly excluded. Layers that are neither were silently skipped — common for models with non-standard naming (e.g., Gemma4 `experts.*` missed by `*mlp*` patterns). This causes deployment failures when the framework tries to load BF16 weights as quantized
 - **Read pip errors carefully**: `ResolutionImpossible` means dependency conflict (try `--no-deps`), NOT network failure. Check for `Connection refused`/`Name resolution failed` before concluding network is down

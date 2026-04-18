@@ -12,13 +12,13 @@ uv run launch.py --yaml <config.yaml> hf_local=<cache> --yes  # Local Docker
 
 ## HF Transformers PTQ Config
 
-The launcher provides `common/hf_ptq/hf_ptq.sh` which wraps `hf_ptq.py`. Configure via environment variables:
+The launcher provides `common/hf/ptq.sh` which wraps `hf_ptq.py`. Configure via environment variables:
 
 ```yaml
 job_name: <Model>_<Format>
 pipeline:
   task_0:
-    script: common/hf_ptq/hf_ptq.sh
+    script: common/hf/ptq.sh
     environment:
       - HF_MODEL: <HuggingFace model ID, e.g. Qwen/Qwen3-0.6B>
       - QFORMAT: <format, e.g. nvfp4, fp8, int4_awq>
@@ -75,7 +75,7 @@ The launcher SSHes to `SLURM_HOST` via `nemo_run.SSHTunnel`. If `identity` is om
 ## Known Issues
 
 - **UID mapping in Docker**: May cause `getpwuid` failures. Add `USER=user` and `LOGNAME=user` to environment.
-- **Megatron-LM submodule**: Only needed for `MegatronLMQuantizeTask` (Megatron models). HF PTQ via `common/hf_ptq/hf_ptq.sh` does not require it.
+- **Megatron-LM submodule**: Only needed for `MegatronLMQuantizeTask` (Megatron models). HF PTQ via `common/hf/ptq.sh` does not require it.
 
 ## Dry Run
 

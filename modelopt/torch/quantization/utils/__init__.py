@@ -16,8 +16,8 @@
 # ruff: noqa: F405
 """Quantization utilities."""
 
-from .activation_collector import LayerActivationCollector
 from .core_utils import *
+from .layerwise_calib import LayerActivationCollector
 
 __all__ = [
     "EXPORT_MODE",

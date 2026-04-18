@@ -46,6 +46,9 @@ Note that the default dataset for pruning and quantization is [`nemotron-post-tr
 hf auth login --token <your token>
 ```
 
+> [!WARNING]
+> Use `python -m pip` instead of `pip` to avoid conflicts with the system-wide installed packages in the NeMo containers.
+
 ## Pruning
 
 This section shows how to prune a HuggingFace model using Minitron algorithm in Megatron-Bridge framework. Checkout other available pruning algorithms, supported frameworks and models, and general pruning getting-started in the [pruning README](../pruning/README.md).
@@ -92,7 +95,7 @@ This section shows how to distill a student model from a teacher model in the Me
 
 This can be used stand-alone or after [Pruning](#pruning) / [Post-Training Quantization](#post-training-quantization) to recover accuracy of the model by distilling from the original model (teacher).
 
-The [distill.py](distill.py) script loads student and teacher models from HuggingFace checkpoints and saves the distilled model to `<output_dir>/checkpoints` in Megatron distributed checkpoint format.
+The [distill.py](distill.py) script supports both standard HuggingFace checkpoints and [Puzzletron AnyModel](../puzzletron/README.md) checkpoints as student/teacher inputs. Just pass the checkpoint path via `--student_hf_path` / `--teacher_hf_path`. The distilled model is saved to `<output_dir>/checkpoints` in Megatron distributed checkpoint format.
 
 ### Data Preparation
 
@@ -158,9 +161,22 @@ torchrun --nproc_per_node 8 distill.py \
 
 To run the distillation script on a Slurm cluster for multi-node training, you just need use `python` instead of `torchrun` and set the number of nodes using `#SBATCH --nodes=<num_nodes>` clause in your Slurm script.
 
-### Convert Megatron checkpoint to Hugging Face format
+### Converting to Hugging Face format (optional)
 
-To convert the Megatron checkpoint from last iteration (or any intermediate iteration) to Hugging Face format, you need the pruned model config (`--output_hf_path` from `prune_minitron.py` script) and the distilled megatron checkpoint dir (`<distill_output_dir>/checkpoints/iter_<iter_number>`) to run the following command:
+The distilled checkpoint is saved in Megatron distributed format. If you need a HuggingFace checkpoint, there are two ways to convert it:
+
+**Inline** -- add `--hf_export_path` and `--student_hf_model` to the `distill.py` command to automatically convert the final checkpoint after distillation:
+
+```bash
+torchrun --nnodes 1 --nproc_per_node 8 distill.py \
+    ... \
+    --hf_export_path /path/to/save/distilled_hf_ckpt \
+    --student_hf_model Qwen/Qwen3-4B
+```
+
+`--student_hf_model` should match the base architecture of the student (used as a template for export). For non-Puzzletron (i.e. standard) models, it should be same as `--student_hf_path`.
+
+**Separate conversion** -- convert any saved iteration using the Megatron-Bridge conversion script:
 
 ```bash
 uv run python /opt/Megatron-Bridge/examples/conversion/convert_checkpoints.py export \
@@ -169,7 +185,11 @@ uv run python /opt/Megatron-Bridge/examples/conversion/convert_checkpoints.py ex
     --hf-path <path_to_save_distilled_hf_ckpt>
 ```
 
-For more details, you can refer to the checkpoint conversion scripts in the [Megatron-Bridge README](https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/main/examples/conversion).
+For more details, see the [Megatron-Bridge conversion README](https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/main/examples/conversion).
+
+### Distillation Results
+
+See [results/puzzletron.md](results/puzzletron.md) for MMLU results demonstrating knowledge distillation on Puzzletron-compressed student models.
 
 ## Post-Training Quantization
 

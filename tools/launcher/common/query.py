@@ -103,6 +103,13 @@ parser.add_argument("--temperature", type=float, default=0.0, help="temperature.
 parser.add_argument(
     "--max-tokens", type=int, default=None, help="maximum tokens to generate per response."
 )
+parser.add_argument(
+    "--max-total-length",
+    type=int,
+    default=8192,
+    help="maximum total length (prompt + output). Stops synthesizing remaining turns "
+    "when context exceeds this limit.",
+)
 args = parser.parse_args()
 
 llm = LLM(args)
@@ -117,7 +124,7 @@ def disable_thinking_column(data):
 
 
 def synthesize(data):
-    messages = data.get("conversations") or data.get("messages")
+    messages = data.get("messages") or data.get("conversations")
     if messages is None:
         raise ValueError(
             "No conversations or messages in the data. Only OAI chat data is supported."
@@ -128,6 +135,7 @@ def synthesize(data):
 
     current_messages = []
     last_full_message = None  # tracks the most recent generated response (unstripped)
+    max_total = args.max_total_length
 
     for msg in messages:
         role = msg["role"]
@@ -140,6 +148,16 @@ def synthesize(data):
                 msg["content"] = msg["content"] + " /no_think"
 
             current_messages.append(msg)
+
+            # Estimate context length; stop if remaining budget is too small.
+            if max_total is not None and args.max_tokens is not None:
+                ctx_chars = sum(len(m.get("content", "")) for m in current_messages)
+                est_tokens = ctx_chars // 3  # rough char-to-token estimate
+                if est_tokens + args.max_tokens > max_total:
+                    # Drop this user turn — context too long for another generation
+                    current_messages.pop()
+                    break
+
             new_message = llm.generate(current_messages, verbose=False)
             if new_message is None:
                 break
@@ -178,7 +196,7 @@ def synthesize(data):
                 current_messages[i] = last_full_message
                 break
 
-    return {"conversations": current_messages}
+    return {"messages": current_messages}
 
 
 # Support both HF Hub repo IDs and local file paths (.jsonl, .json, .parquet, etc.)

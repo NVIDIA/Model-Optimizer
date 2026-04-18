@@ -85,21 +85,21 @@ def test_load_config_missing_file_raises(tmp_path):
 
 def test_load_recipe_builtin_with_suffix():
     """load_recipe loads a built-in PTQ recipe given the full YAML path."""
-    recipe = load_recipe("general/ptq/fp8_default-fp8_kv.yml")
+    recipe = load_recipe("general/ptq/fp8_default-fp8_kv.yaml")
     assert recipe.recipe_type == RecipeType.PTQ
     assert isinstance(recipe, ModelOptPTQRecipe)
     assert recipe.quantize
 
 
 def test_load_recipe_builtin_without_suffix():
-    """load_recipe resolves the .yml suffix automatically."""
+    """load_recipe resolves the .yaml suffix automatically."""
     recipe = load_recipe("general/ptq/fp8_default-fp8_kv")
     assert recipe.recipe_type == RecipeType.PTQ
 
 
 def test_load_recipe_builtin_description():
     """The description field is loaded from the YAML metadata."""
-    recipe = load_recipe("general/ptq/fp8_default-fp8_kv.yml")
+    recipe = load_recipe("general/ptq/fp8_default-fp8_kv.yaml")
     assert isinstance(recipe.description, str)
     assert len(recipe.description) > 0
 
@@ -196,10 +196,10 @@ def test_load_recipe_dir_missing_quantize_raises(tmp_path):
 @pytest.mark.parametrize(
     ("yaml_path", "model_cfg_name", "kv_cfg_name"),
     [
-        ("general/ptq/fp8_default-fp8_kv.yml", "FP8_DEFAULT_CFG", "FP8_KV_CFG"),
-        ("general/ptq/nvfp4_default-fp8_kv.yml", "NVFP4_DEFAULT_CFG", "FP8_KV_CFG"),
-        ("general/ptq/nvfp4_mlp_only-fp8_kv.yml", "NVFP4_MLP_ONLY_CFG", "FP8_KV_CFG"),
-        ("general/ptq/nvfp4_omlp_only-fp8_kv.yml", "NVFP4_OMLP_ONLY_CFG", "FP8_KV_CFG"),
+        ("general/ptq/fp8_default-fp8_kv.yaml", "FP8_DEFAULT_CFG", "FP8_KV_CFG"),
+        ("general/ptq/nvfp4_default-fp8_kv.yaml", "NVFP4_DEFAULT_CFG", "FP8_KV_CFG"),
+        ("general/ptq/nvfp4_mlp_only-fp8_kv.yaml", "NVFP4_MLP_ONLY_CFG", "FP8_KV_CFG"),
+        ("general/ptq/nvfp4_omlp_only-fp8_kv.yaml", "NVFP4_OMLP_ONLY_CFG", "FP8_KV_CFG"),
     ],
 )
 def test_general_ptq_yaml_matches_config_dicts(yaml_path, model_cfg_name, kv_cfg_name):

@@ -1,0 +1,5 @@
+lm-eval==0.4.8
+math-verify
+ray
+# Likely works for transformers v5 also, but we need to test it
+transformers<5.0

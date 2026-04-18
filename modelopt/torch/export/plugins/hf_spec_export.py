@@ -27,7 +27,7 @@ from safetensors.torch import save_file
 
 from .hf_spec_configs import kimik2_eagle_template_config, llama_eagle_template_config
 
-ALL_SPEC_MODES = ["eagle"]
+ALL_SPEC_MODES = ["eagle", "dflash"]
 
 LLAMA_EAGLE_SINGLE_LAYER = {
     "required": {
@@ -116,11 +116,17 @@ class EagleExporter(SpeculativeDecodingExporter):
             "llama": LLAMA_EAGLE_SINGLE_LAYER,
             "kimik2": KIMIK2_EAGLE_SINGLE_LAYER,
         }[self.eagle_decoder_type]
+        # fc and hidden_norm are only present when use_aux_hidden_state=True
+        use_aux = getattr(self.model.eagle_config, "use_aux_hidden_state", False)
+        aux_only_keys = {"fc", "layers.0.hidden_norm"}
+        required_keys = set(expected_keys_single_layer["required"])
+        if not use_aux:
+            required_keys -= aux_only_keys
         # Check that export sd has required keys
-        for key in expected_keys_single_layer["required"]:
+        for key in required_keys:
             assert f"{key}.weight" in export_sd, f"Missing required key: {key}.weight"
         for i in range(1, self.num_hidden_layers):
-            for key in expected_keys_single_layer["required"] - {
+            for key in required_keys - {
                 "layers.0.hidden_norm",
                 "layers.0.input_layernorm",
                 "norm",
@@ -201,6 +207,42 @@ class EagleExporter(SpeculativeDecodingExporter):
 
         return template_config
 
+    def _export_lora(self, export_dir: Path, full_sd: dict):
+        """Export base model LoRA adapter weights alongside the eagle module artifacts."""
+        from peft import LoraConfig
+
+        lora_sd = {k: v for k, v in full_sd.items() if ".lora_A." in k or ".lora_B." in k}
+        if not lora_sd:
+            raise RuntimeError(
+                "No LoRA adapter tensors found in the model state dict. "
+                "Ensure eagle_base_lora=True and the model was converted with LoRA adapters."
+            )
+        # Reformat keys to match peft's standard adapter file format:
+        # 1. Strip the adapter name (e.g. ".default") — peft re-inserts it on load.
+        # 2. Add "base_model.model." prefix — peft expects this in saved adapters.
+        lora_sd = {
+            re.sub(r"(lora_[AB])\.\w+\.weight$", r"\1.weight", k): v for k, v in lora_sd.items()
+        }
+        lora_sd = {f"base_model.model.{k}": v for k, v in lora_sd.items()}
+        save_file(lora_sd, export_dir / "adapter_model.safetensors")
+
+        # Infer target modules from the exported LoRA keys (e.g., "q_proj", "v_proj")
+        # Keys are like: base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight
+        target_modules = sorted({k.split(".")[-3] for k in lora_sd if ".lora_A." in k})
+        lora_config = LoraConfig(
+            r=self.model.eagle_base_lora_rank,
+            lora_alpha=self.model.eagle_base_lora_alpha,
+            target_modules=target_modules,
+            bias="none",
+        )
+        with open(export_dir / "adapter_config.json", "w") as f:
+            json.dump(
+                lora_config.to_dict(),
+                f,
+                indent=4,
+                default=lambda o: sorted(o) if isinstance(o, set) else o,
+            )
+
     def export(
         self,
         export_dir: Path | str,
@@ -235,6 +277,10 @@ class EagleExporter(SpeculativeDecodingExporter):
             with open(f"{export_dir}/hf_quant_config.json", "w") as file:
                 json.dump(hf_quant_config, file, indent=4)
 
+        # Export LoRA adapter weights separately
+        if getattr(self.model, "eagle_base_lora", False):
+            self._export_lora(export_dir, full_sd)
+
 
 class EagleMedusaExporter(EagleExporter):
     """Draft model exporter for EagleMedusa."""
@@ -263,3 +309,129 @@ class EagleMedusaExporter(EagleExporter):
                         export_sd.pop(f"parallel_draft_heads.medusa_heads.{i}.{j}.linear.bias")
                     )
         return export_sd
+
+
+class DFlashExporter(SpeculativeDecodingExporter):
+    """Draft model exporter for DFlash.
+
+    Exports in z-lab compatible format:
+    - model.safetensors: draft module weights (no prefix)
+    - config.json: Qwen3-style config with dflash_config field
+    """
+
+    def _extract_state_dict(self, full_state_dict: dict):
+        """Extract DFlash module weights, stripping the dflash_module prefix."""
+        export_sd = {}
+        for key, value in full_state_dict.items():
+            if "dflash_module." in key:
+                export_key = key.split("dflash_module.", 1)[1]
+                # Skip rotary embedding buffers (not needed, recomputed)
+                if "rotary_emb" in export_key:
+                    continue
+                export_sd[export_key] = value.clone()
+        return export_sd
+
+    def _export_config(self):
+        """Build config.json matching z-lab DFlash format."""
+        model = self.model
+        base_config = (
+            getattr(model.config, "text_config", None)
+            or getattr(model.config, "llm_config", None)
+            or model.config
+        )
+        draft_config = model.dflash_config
+
+        config = {
+            "architectures": ["DFlashDraftModel"],
+            # DFlash draft uses Qwen3 architecture regardless of base model type.
+            # Use "qwen3" as default; base model types like "qwen3_5_text" are not
+            # recognized by vLLM for draft model loading.
+            "model_type": "qwen3",
+            "block_size": model.dflash_block_size,
+            "dflash_config": {
+                "mask_token_id": model.mask_token_id,
+                "target_layer_ids": list(model.target_layer_ids),
+            },
+            # Architecture dimensions
+            "hidden_size": getattr(draft_config, "hidden_size", base_config.hidden_size),
+            "num_hidden_layers": draft_config.num_hidden_layers,
+            "num_attention_heads": getattr(
+                draft_config, "num_attention_heads", base_config.num_attention_heads
+            ),
+            "num_key_value_heads": getattr(
+                draft_config, "num_key_value_heads", base_config.num_key_value_heads
+            ),
+            "head_dim": getattr(
+                draft_config,
+                "head_dim",
+                base_config.hidden_size // base_config.num_attention_heads,
+            ),
+            "intermediate_size": getattr(
+                draft_config, "intermediate_size", base_config.intermediate_size
+            ),
+            "hidden_act": getattr(draft_config, "hidden_act", "silu"),
+            "rms_norm_eps": getattr(draft_config, "rms_norm_eps", 1e-6),
+            "vocab_size": base_config.vocab_size,
+            "max_position_embeddings": getattr(base_config, "max_position_embeddings", 32768),
+            "initializer_range": getattr(base_config, "initializer_range", 0.02),
+            "attention_bias": getattr(draft_config, "attention_bias", False),
+            "attention_dropout": getattr(draft_config, "attention_dropout", 0.0),
+            "rope_theta": getattr(
+                draft_config, "rope_theta", getattr(base_config, "rope_theta", 1000000.0)
+            ),
+            # DFlash draft uses standard Qwen3 RoPE, not M-RoPE from multimodal models.
+            # z-lab uses null; vLLM handles null rope_scaling correctly.
+            "rope_scaling": None,
+            "tie_word_embeddings": False,
+            "torch_dtype": str(getattr(base_config, "torch_dtype", torch.bfloat16)).replace(
+                "torch.", ""
+            ),
+            "num_target_layers": base_config.num_hidden_layers,
+        }
+
+        # Add layer_types if present (Qwen3-style)
+        if hasattr(draft_config, "layer_types"):
+            config["layer_types"] = draft_config.layer_types
+        else:
+            config["layer_types"] = ["full_attention"] * draft_config.num_hidden_layers
+
+        return config
+
+    def export(self, export_dir: Path | str, dtype: torch.dtype | None = None):
+        """Export the DFlash draft model to deployment format."""
+        export_dir = Path(export_dir)
+        export_dir.mkdir(parents=True, exist_ok=True)
+
+        # Export quantized modules if applicable
+        if has_quant_opt(self.model):
+            from ..unified_export_hf import _export_transformers_checkpoint
+
+            full_sd, hf_quant_config = _export_transformers_checkpoint(self.model, dtype)
+        else:
+            full_sd, hf_quant_config = self.model.state_dict(), None
+
+        # Export state dict
+        drafter_sd = self._extract_state_dict(full_sd)
+        assert drafter_sd, "No dflash_module weights found in state dict"
+        if dtype is not None and hf_quant_config is None:
+            drafter_sd = {k: v.to(dtype) for k, v in drafter_sd.items()}
+        save_file(drafter_sd, f"{export_dir}/model.safetensors")
+
+        # Export config
+        drafter_config = self._export_config()
+        # Update torch_dtype to match actual exported weights
+        if dtype is not None:
+            drafter_config["torch_dtype"] = str(dtype).replace("torch.", "")
+        if hf_quant_config is not None:
+            drafter_config["quantization_config"] = hf_quant_config
+        with open(f"{export_dir}/config.json", "w") as f:
+            json.dump(drafter_config, f, indent=2)
+
+        if hf_quant_config is not None:
+            with open(f"{export_dir}/hf_quant_config.json", "w") as f:
+                json.dump(hf_quant_config, f, indent=2)
+
+        print(
+            f"Exported DFlash draft model: {len(drafter_sd)} tensors, "
+            f"config keys: {list(drafter_config.keys())[:5]}..."
+        )

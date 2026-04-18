@@ -49,7 +49,9 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     with open(args.data) as f:
         lines = islice(f, args.calibrate_size) if args.calibrate_size else f
-        conversations = [json.loads(line)["conversations"] for line in lines]
+        conversations = [
+            (d := json.loads(line)).get("messages") or d["conversations"] for line in lines
+        ]
         conversations = [item for sublist in conversations for item in sublist]
 
     d2t = calibrate_frequent_vocab(tokenizer, conversations, args.draft_vocab_size)

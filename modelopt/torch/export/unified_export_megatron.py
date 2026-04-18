@@ -45,7 +45,7 @@ from .model_config import (
     QUANTIZATION_NONE,
     QUANTIZATION_NVFP4,
 )
-from .plugins.hf_checkpoint_utils import copy_remote_code, load_multimodal_components
+from .plugins.hf_checkpoint_utils import copy_hf_ckpt_remote_code, load_multimodal_components
 from .plugins.mcore_common import all_mcore_hf_export_mapping
 from .plugins.mcore_custom import (
     CustomModuleMapping,
@@ -349,7 +349,7 @@ class GPTModelExporter:
         torch.distributed.barrier()
 
         if is_last_stage_main_rank and self._hf_config is not None:
-            copy_remote_code(pretrained_model_name_or_path, save_directory)
+            copy_hf_ckpt_remote_code(pretrained_model_name_or_path, save_directory)
 
         # Newer versions of VLLM expect config.json with hf_quant_config
         config_json_file = save_directory + "/config.json"
