@@ -24,7 +24,7 @@ pipeline:
     config:
       model: Qwen/Qwen3-8B
       quant_cfg: NVFP4_DEFAULT_CFG
-      tp: 8
+      tp: 1
       calib_dataset: abisee/cnn_dailymail
       calib_size: 32
       mmlu_dataset: cais/mmlu
@@ -33,15 +33,15 @@ pipeline:
     slurm_config:
       _factory_: "slurm_factory"
       nodes: 1
-      ntasks_per_node: 8
-      gpus_per_node: 8
+      ntasks_per_node: 1
+      gpus_per_node: 1
 
   task_1:
     _target_: common.megatron_lm.quantize.task.MegatronLMQuantizeTask
     config:
       model: Qwen/Qwen3-8B
       quant_cfg: FP8_DEFAULT_CFG
-      tp: 8
+      tp: 1
       calib_dataset: abisee/cnn_dailymail
       calib_size: 32
       mmlu_dataset: cais/mmlu
@@ -50,18 +50,18 @@ pipeline:
     slurm_config:
       _factory_: "slurm_factory"
       nodes: 1
-      ntasks_per_node: 8
-      gpus_per_node: 8
+      ntasks_per_node: 1
+      gpus_per_node: 1
 
   # Step 3: TRT-LLM eval MMLU on all exported checkpoints
   task_2:
     script: common/tensorrt_llm/eval.sh
     environment:
       - HF_MODEL_CKPT: /scratchspace/export
-      - TP: "8"
+      - TP: "1"
       - EP: "1"
     slurm_config:
       _factory_: "slurm_factory"
       nodes: 1
       ntasks_per_node: 1
-      gpus_per_node: 8
+      gpus_per_node: 1
