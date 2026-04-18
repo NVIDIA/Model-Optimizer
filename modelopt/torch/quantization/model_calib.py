@@ -54,7 +54,6 @@ from .utils.calib_utils import GPTQHelper
 
 __all__ = [
     "CalibratorFactory",
-    "_register_fp8_sweep_calibrator",
     "awq",
     "local_hessian_calibrate",
     "max_calibrate",
