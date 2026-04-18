@@ -25,7 +25,6 @@ import modelopt.torch.quantization as mtq
 from modelopt.torch.export.unified_export_hf import _export_quantized_weight
 from modelopt.torch.quantization.model_calib import gptq
 from modelopt.torch.quantization.qtensor.nvfp4_tensor import NVFP4QTensor
-from modelopt.torch.quantization.triton.fp4_kernel import compute_fp4_scales
 from modelopt.torch.quantization.utils.calib_utils import update_hessian
 from modelopt.torch.utils.dataset_utils import create_forward_loop, get_dataset_dataloader
 
@@ -257,6 +256,8 @@ def _compute_h_inv(hessian, weight, percdamp=0.01):
 
 def _make_nvfp4_test_data(quant_block_size, out_features, dim):
     """Create weight, h_inv, and scales_2d for NVFP4 GPTQ tests."""
+    from modelopt.torch.quantization.triton.fp4_kernel import compute_fp4_scales
+
     weight = torch.randn(out_features, dim, device="cuda", dtype=torch.float32)
     n_blocks = dim // quant_block_size
     amax = weight.reshape(out_features, n_blocks, quant_block_size).abs().amax(dim=-1)
@@ -393,24 +394,12 @@ _NVFP4_BENCH_CONFIGS = [
     (128, 128, 256, 4096),
 ]
 
-_NVFP4_BENCH_IDS = [f"qbs{qbs}_gbs{gbs}_{of}x{d}" for qbs, gbs, of, d in _NVFP4_BENCH_CONFIGS]
 
+def bench_fused_nvfp4():
+    """Benchmark fused Triton NVFP4 GPTQ vs unfused production loop (informational-only).
 
-@requires_triton
-@pytest.mark.parametrize(
-    ("quant_block_size", "gptq_block_size", "out_features", "dim"),
-    _NVFP4_BENCH_CONFIGS,
-    ids=_NVFP4_BENCH_IDS,
-)
-def test_fused_nvfp4_benchmark(quant_block_size, gptq_block_size, out_features, dim):
-    """Benchmark fused Triton NVFP4 GPTQ vs unfused production loop."""
-    torch.manual_seed(42)
-
-    weight, scales_2d, h_inv = _make_nvfp4_test_data(
-        quant_block_size,
-        out_features,
-        dim,
-    )
+    Not collected by pytest. Run directly: ``python tests/gpu/torch/quantization/test_gptq.py``
+    """
 
     def _bench(fn, n_warmup=2, n_iters=5):
         for _ in range(n_warmup):
@@ -425,30 +414,30 @@ def test_fused_nvfp4_benchmark(quant_block_size, gptq_block_size, out_features, 
             total += time.perf_counter() - t0
         return total / n_iters
 
-    def run_fused():
-        return _run_fused_gptq_nvfp4(
-            weight,
-            scales_2d,
-            h_inv,
-            gptq_block_size,
-            quant_block_size,
+    for quant_block_size, gptq_block_size, out_features, dim in _NVFP4_BENCH_CONFIGS:
+        torch.manual_seed(42)
+        weight, scales_2d, h_inv = _make_nvfp4_test_data(quant_block_size, out_features, dim)
+
+        def run_fused():
+            return _run_fused_gptq_nvfp4(
+                weight, scales_2d, h_inv, gptq_block_size, quant_block_size
+            )
+
+        def run_unfused():
+            return _run_unfused_gptq_nvfp4(
+                weight, scales_2d, h_inv, gptq_block_size, quant_block_size
+            )
+
+        t_fused = _bench(run_fused)
+        t_unfused = _bench(run_unfused)
+        speedup = t_unfused / t_fused if t_fused > 0 else float("inf")
+
+        tag = f"qbs{quant_block_size}_gbs{gptq_block_size}_{out_features}x{dim}"
+        print(
+            f"[{tag}] Fused: {t_fused * 1e3:8.2f} ms | "
+            f"Unfused: {t_unfused * 1e3:8.2f} ms | Speedup: {speedup:.1f}x"
         )
 
-    def run_unfused():
-        return _run_unfused_gptq_nvfp4(
-            weight,
-            scales_2d,
-            h_inv,
-            gptq_block_size,
-            quant_block_size,
-        )
 
-    t_fused = _bench(run_fused)
-    t_unfused = _bench(run_unfused)
-    speedup = t_unfused / t_fused if t_fused > 0 else float("inf")
-
-    tag = f"qbs{quant_block_size}_gbs{gptq_block_size}_{out_features}x{dim}"
-    print(
-        f"\n[{tag}] Fused: {t_fused * 1e3:8.2f} ms | "
-        f"Unfused: {t_unfused * 1e3:8.2f} ms | Speedup: {speedup:.1f}x"
-    )
+if __name__ == "__main__":
+    bench_fused_nvfp4()
