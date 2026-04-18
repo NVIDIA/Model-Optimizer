@@ -743,6 +743,38 @@ class GPTModelExporter:
 
         return all_rules
 
+    def _get_weight_bias(
+        self,
+        module: torch.nn.Module,
+        dtype: torch.dtype = torch.float16,
+        name_to_value: dict[str, torch.Tensor] = {},
+    ) -> dict[str, torch.Tensor]:
+        """Get the weight and bias of the module.
+
+        Args:
+            module: The target module to get the weight and bias.
+            dtype: The data type of the weight and bias.
+            name_to_value: The dictionary to store the weight and bias.
+
+        Returns:
+            The dictionary containing the weight and bias.
+        """
+        if hasattr(module, "weight") and module.weight is not None and module.weight.numel() > 0:
+            weight = module.weight.to(dtype).cpu()
+            name_to_value["weight"] = weight
+
+        if hasattr(module, "bias") and module.bias is not None and module.bias.numel() > 0:
+            name_to_value["bias"] = module.bias.to(dtype).cpu()
+
+        if (
+            hasattr(module, "expert_bias")
+            and module.expert_bias is not None
+            and module.expert_bias.numel() > 0
+        ):
+            name_to_value["expert_bias"] = module.expert_bias.to(dtype).cpu()
+
+        return name_to_value
+
     def _get_quantized_state(
         self,
         module: torch.nn.Module,
@@ -767,21 +799,12 @@ class GPTModelExporter:
             self.exclude_modules.append(prefix.removesuffix("."))
         block_size = get_weight_block_size(module)
 
-        if hasattr(module, "weight") and module.weight is not None and module.weight.numel() > 0:
-            weight = module.weight.to(dtype).cpu()
-            name_to_value["weight"] = weight
-        else:
-            return name_to_value, qformat, block_size
+        name_to_value = self._get_weight_bias(module, dtype, name_to_value)
 
-        if hasattr(module, "bias") and module.bias is not None and module.bias.numel() > 0:
-            name_to_value["bias"] = module.bias.to(dtype).cpu()
-
-        if (
-            hasattr(module, "expert_bias")
-            and module.expert_bias is not None
-            and module.expert_bias.numel() > 0
+        if not (
+            hasattr(module, "weight") and module.weight is not None and module.weight.numel() > 0
         ):
-            name_to_value["expert_bias"] = module.expert_bias.to(dtype).cpu()
+            return name_to_value, qformat, block_size
 
         if qformat == QUANTIZATION_NONE:
             return name_to_value, qformat, block_size
