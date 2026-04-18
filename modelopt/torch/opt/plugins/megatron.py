@@ -15,14 +15,16 @@
 """Support quantization and save/resore for Megatron."""
 
 import contextlib
-import pickle  # nosec
 import types
+from io import BytesIO
 from typing import Any
 
 import megatron.core.transformer.mlp as megatron_mlp
 import regex as re
 import torch
 from megatron.core.parallel_state import get_data_parallel_group
+
+from modelopt.torch.utils import safe_load
 
 from ..dynamic import DynamicModule
 
@@ -82,8 +84,10 @@ def _modelopt_get_extra_state(self):
 
     # Serialize state into byte tensor
     torch.cuda.synchronize()
-    state_serialized = bytearray(pickle.dumps(extra_state))  # nosec
-    state_serialized = torch.frombuffer(state_serialized, dtype=torch.uint8)
+    # Use torch.save for serialization to match safe_load
+    buffer = BytesIO()
+    torch.save(extra_state, buffer)
+    state_serialized = torch.frombuffer(buffer.getvalue(), dtype=torch.uint8)
 
     return state_serialized
 
@@ -102,10 +106,7 @@ def _modelopt_set_extra_state(self, state: Any):
         if state.numel() == 0:
             return
         # Default format: byte tensor with pickled data
-        #
-        # TODO: possible deserialization improvement
-        # https://github.com/NVIDIA/TensorRT-LLM/blob/main/tensorrt_llm/serialization.py
-        extra_state = pickle.loads(state.detach().cpu().numpy().tobytes())  # nosec
+        extra_state = safe_load(state.detach().cpu().numpy().tobytes())
     else:
         raise RuntimeError("Unsupported extra_state format.")
 

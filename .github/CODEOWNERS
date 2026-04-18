@@ -24,11 +24,13 @@ modelopt/torch/nas @NVIDIA/modelopt-torch-nas-prune-codeowners
 modelopt/torch/opt @NVIDIA/modelopt-torch-opt-codeowners
 modelopt/torch/peft @NVIDIA/modelopt-torch-peft-codeowners
 modelopt/torch/prune @NVIDIA/modelopt-torch-nas-prune-codeowners
+modelopt/torch/puzzletron @NVIDIA/modelopt-torch-puzzletron-codeowners
 modelopt/torch/quantization @NVIDIA/modelopt-torch-quantization-codeowners
 modelopt/torch/sparsity @NVIDIA/modelopt-torch-sparsity-codeowners
 modelopt/torch/speculative @NVIDIA/modelopt-torch-speculative-codeowners
 modelopt/torch/trace @NVIDIA/modelopt-torch-nas-prune-codeowners
 modelopt/torch/utils @NVIDIA/modelopt-torch-utils-codeowners
+modelopt_recipes @NVIDIA/modelopt-recipes-codeowners
 
 # Examples
 /README.md @NVIDIA/modelopt-examples-codeowners
@@ -48,9 +50,13 @@ modelopt/torch/utils @NVIDIA/modelopt-torch-utils-codeowners
 /examples/model_hub @NVIDIA/modelopt-examples-model_hub-codeowners
 /examples/onnx_ptq @NVIDIA/modelopt-onnx-codeowners
 /examples/pruning @NVIDIA/modelopt-torch-nas-prune-codeowners
+/examples/puzzletron @NVIDIA/modelopt-torch-puzzletron-codeowners
 /examples/specdec_bench @NVIDIA/modelopt-torch-speculative-codeowners
 /examples/speculative_decoding @NVIDIA/modelopt-torch-speculative-codeowners
 /examples/torch_onnx @NVIDIA/modelopt-onnx-codeowners
 /examples/vlm_ptq @NVIDIA/modelopt-examples-vlm-codeowners
 /examples/vllm_serve @NVIDIA/modelopt-examples-llm_ptq-codeowners
 /examples/windows @NVIDIA/modelopt-windows-codeowners
+
+# Requirements files are owned by the setup team regardless of location
+requirements*.txt @NVIDIA/modelopt-setup-codeowners

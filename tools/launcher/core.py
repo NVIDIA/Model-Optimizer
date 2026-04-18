@@ -157,6 +157,8 @@ class SandboxPipeline:
     task_4: SandboxTask4 = None
     tasks: list[SandboxTask] = None
 
+    assets: list[str] = None  # HF repo paths (relative to hf_local) to verify before submission
+
     test_level: int = 0
     allow_to_fail: bool = False
     skip: bool = False
@@ -235,15 +237,24 @@ def build_slurm_executor(
         f"{job_dir}/{experiment_title}/{experiment_id}"
         f"/{task_name}/code/modules/Model-Optimizer/modelopt"
     )
+    modelopt_recipes_dst = os.path.join(
+        os.path.dirname(os.path.normpath(slurm_config.modelopt_install_path)),
+        "modelopt_recipes",
+    )
+    modelopt_recipes_src = (
+        f"{job_dir}/{experiment_title}/{experiment_id}"
+        f"/{task_name}/code/modules/Model-Optimizer/modelopt_recipes"
+    )
     container_mounts += [
         f"{scratch_src}:{scratch_dst}",
         f"{modelopt_src}:{modelopt_dst}",
+        f"{modelopt_recipes_src}:{modelopt_recipes_dst}",
         f"{job_dir}/{experiment_title}:/{experiment_title}",
     ]
 
     tunnel = run.SSHTunnel(
         host=slurm_config.host,
-        user=getpass.getuser() if user is None else user,
+        user=user or getattr(slurm_config, "user", None) or getpass.getuser(),
         port=slurm_config.port,
         job_dir=job_dir,
         identity=identity,
@@ -259,7 +270,7 @@ def build_slurm_executor(
         container_image=slurm_config.container,
         container_mounts=container_mounts,
         array=slurm_config.array,
-        time="04:00:00",
+        time=slurm_config.time,
         mem="0",
         retries=0,
         packager=packager,
@@ -286,16 +297,22 @@ def build_docker_executor(
     container_mounts += [f"{hf_local}:/hf-local"]
 
     scratch_dst = "/scratchspace"
-    scratch_src = os.path.join(job_dir, experiment_title, experiment_id, task_name)
+    scratch_src = os.path.join(job_dir, experiment_title, experiment_id)
     os.makedirs(scratch_src, exist_ok=True)
     modelopt_dst = slurm_config.modelopt_install_path
     if modelopt_src_path is None:
         modelopt_src_path = os.path.join(os.getcwd(), "modules/Model-Optimizer/modelopt")
+    modelopt_recipes_dst = os.path.join(
+        os.path.dirname(os.path.normpath(slurm_config.modelopt_install_path)),
+        "modelopt_recipes",
+    )
+    modelopt_recipes_src_path = os.path.join(os.path.dirname(modelopt_src_path), "modelopt_recipes")
     exp_title_src = os.path.join(job_dir, experiment_title)
     os.makedirs(exp_title_src, exist_ok=True)
     container_mounts += [
         f"{scratch_src}:{scratch_dst}",
         f"{modelopt_src_path}:{modelopt_dst}",
+        f"{modelopt_recipes_src_path}:{modelopt_recipes_dst}",
         f"{exp_title_src}:/{experiment_title}",
     ]
 
@@ -305,7 +322,7 @@ def build_docker_executor(
         ipc_mode="host",
         container_image=slurm_config.container,
         volumes=container_mounts,
-        additional_kwargs={"user": f"{os.getuid()}:{os.getgid()}"},
+        additional_kwargs={"user": f"{os.getuid()}:{os.getgid()}", "entrypoint": ""},
         packager=packager,
     )
     return executor

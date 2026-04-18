@@ -16,14 +16,20 @@
 """Provides basic ORT inference utils, should be replaced by modelopt.torch.ort_client."""
 
 import glob
+import io
 import os
 import platform
+import re
+import shutil
+import subprocess  # nosec B404
+import sys
 from collections.abc import Sequence
+from contextlib import redirect_stderr, redirect_stdout
 
 import onnxruntime as ort
 from onnxruntime.quantization.operators.qdq_base_operator import QDQOperatorBase
 from onnxruntime.quantization.registry import QDQRegistry, QLinearOpsRegistry
-from packaging.version import Version
+from packaging.version import InvalidVersion, Version
 
 from modelopt.onnx.logging_config import logger
 from modelopt.onnx.quantization.operators import QDQConvTranspose, QDQCustomOp, QDQNormalization
@@ -36,6 +42,70 @@ def _check_lib_in_ld_library_path(ld_library_path, lib_pattern):
         if matches:
             return True, matches[0]
     return False, None
+
+
+def _check_for_trtexec(min_version: str = "10.0") -> str:
+    """Check if the `trtexec` CLI tool is available in PATH and is >= min_version.
+
+    Args:
+        min_version (str): Minimum required version (e.g., "10.0")
+
+    Returns:
+        str: The resolved path to the `trtexec` binary.
+
+    Raises:
+        ImportError: If `trtexec` is not found or the version is too low.
+    """
+
+    def _parse_version_from_string(version_str: str) -> str | None:
+        # Try canonical TensorRT x.x.x.x strings first
+        match = re.search(
+            r"TensorRT(?:\s+version)?\s*[:=]\s*(\d+(?:\.\d+)+)",
+            version_str,
+            flags=re.IGNORECASE,
+        )
+        if match:
+            return match.group(1)
+
+        # Fallback: look for "[TensorRT v101502]" pattern and convert to "10.15"
+        match = re.search(r"\[TensorRT v(\d{6,8})\]", version_str)
+        if match:
+            vnum = match.group(1)
+            # Use only major and minor, e.g., v101502 -> 10.15
+            if len(vnum) >= 4:
+                major = int(vnum[0:2])
+                minor = int(vnum[2:4])
+                return f"{major}.{minor}"
+            return None
+        return None
+
+    trtexec_path = shutil.which("trtexec")
+    if trtexec_path is None:
+        logger.error("trtexec executable not found in PATH.")
+        raise ImportError(
+            "Could not find the `trtexec` executable. Please install TensorRT and ensure `trtexec` is in your PATH."
+        )
+
+    try:
+        result = subprocess.run([trtexec_path], capture_output=True, text=True, timeout=5)  # nosec B603
+        banner_output = result.stdout + result.stderr
+        parsed_version = _parse_version_from_string(banner_output)
+
+        if not parsed_version:
+            raise ValueError("Could not parse version from trtexec output.")
+
+        if Version(parsed_version) < Version(min_version):
+            logger.error(
+                f"trtexec version found ({parsed_version}) is lower than required ({min_version})"
+            )
+            raise ImportError(f"`trtexec` version must be >= {min_version}, found {parsed_version}")
+        logger.info(f"trtexec found at {trtexec_path} (version {parsed_version})")
+        return trtexec_path
+    except (subprocess.SubprocessError, FileNotFoundError, ValueError, InvalidVersion) as err:
+        logger.error(f"Failed to check trtexec version: {err}")
+        raise ImportError(
+            "Could not determine the version of `trtexec`. Please ensure the CLI is installed and available."
+        )
 
 
 def _check_for_tensorrt(min_version: str = "10.0"):
@@ -70,11 +140,54 @@ def _check_for_libcudnn():
             f" for your ORT version at https://onnxruntime.ai/docs/execution-providers/CUDA-ExecutionProvider.html#requirements."
         )
     else:
-        logger.error(f"cuDNN library not found in {env_variable}")
+        # Fallback: ORT >=1.20 ships a preload_dlls() helper that loads CUDA/cuDNN
+        # DLLs bundled inside pip packages (e.g. nvidia-cudnn-cu12) so they don't
+        # need to be on the system PATH / LD_LIBRARY_PATH.
+        # However, preload_dlls() is broken on Python 3.10 (missing os.add_dll_directory
+        # behaviour), so we skip it for that version.
+        if hasattr(ort, "preload_dlls") and sys.version_info[:2] != (3, 10):
+            logger.warning(
+                f"cuDNN not found in {env_variable}. "
+                "Attempting onnxruntime.preload_dlls() to load from site-packages..."
+            )
+            # preload_dlls() does not raise on failure — it silently prints
+            # "Failed to load ..." messages.  Capture its output and check
+            # whether the key cuDNN DLL actually loaded.
+            cudnn_dll = "cudnn" if platform.system() == "Windows" else "libcudnn_adv"
+            captured = io.StringIO()
+            try:
+                with redirect_stdout(captured), redirect_stderr(captured):
+                    ort.preload_dlls()
+            except Exception as e:
+                logger.warning(f"onnxruntime.preload_dlls() raised an exception: {e}")
+
+            preload_output = captured.getvalue()
+            if preload_output:
+                logger.debug(f"preload_dlls() output:\n{preload_output}")
+
+            if f"Failed to load {cudnn_dll}" in preload_output:
+                logger.error(
+                    f"onnxruntime.preload_dlls() was called but {cudnn_dll} failed to load. "
+                    "cuDNN DLLs were NOT successfully loaded from site-packages."
+                )
+            else:
+                logger.info(
+                    "onnxruntime.preload_dlls() succeeded — CUDA/cuDNN DLLs loaded"
+                    " from site-packages. Verify version compatibility at"
+                    " https://onnxruntime.ai/docs/execution-providers/CUDA-ExecutionProvider.html#requirements."
+                )
+                return True
+
         raise FileNotFoundError(
-            f"{lib_pattern} is not accessible in {env_variable}! Please make sure that the path to that library"
-            f" is in the env var to use the CUDA or TensorRT EP and ensure that the correct version is available."
-            f" Versioning compatibility can be checked at https://onnxruntime.ai/docs/execution-providers/CUDA-ExecutionProvider.html#requirements."
+            f"{lib_pattern} is not accessible via {env_variable} or site-packages.\n"
+            f"To fix this, either:\n"
+            f"  1. Add the directory containing {lib_pattern} to your"
+            f" {env_variable} env var, or\n"
+            f"  2. Install the cuDNN pip package (Python>=3.11 only):"
+            f" pip install nvidia-cudnn-cu12 (or nvidia-cudnn-cu13)\n"
+            f"This is required for the CUDA / TensorRT execution provider.\n"
+            f"Check version compatibility at"
+            f" https://onnxruntime.ai/docs/execution-providers/CUDA-ExecutionProvider.html#requirements."
         )
     return found
 
@@ -280,6 +393,7 @@ def configure_ort(
     logger.debug("Registering custom QDQ operators")
     QDQRegistry["BatchNormalization"] = QDQNormalization
     QDQRegistry["ConvTranspose"] = QDQConvTranspose
+    QDQRegistry["LayerNormalization"] = QDQNormalization  # Conv->LayerNorm quantization
     QDQRegistry["LRN"] = QDQNormalization  # Example: caffenet-12.onnx
     QDQRegistry["HardSwish"] = (
         QDQOperatorBase  # Example: mobilenet_v3_opset17, efficientvit_b3_opset17

@@ -48,12 +48,14 @@ pip install -r requirements.txt
 We support a range of input datasets. In this example, we will use the [UltraChat-200k](https://huggingface.co/datasets/HuggingFaceH4/ultrachat_200k) dataset.
 
 ```bash
-python prepare_input_conversations/make_dataset.py -f prepare_input_conversations/example_data_config.yaml --full-conversations
+python ../dataset/make_dataset.py -f ../dataset/example_data_config.yaml --full-conversations
 ```
 
 See [other-datasets](#other-datasets) section for other dataset options and instruction for user-provided data.
 
 Omit `--full-conversations` if you plan to run synthetic data generation (see [data-synthesis](#data-synthesis)).
+
+For large-scale training with NVIDIA's Nemotron datasets, use the dedicated scripts described in [Nemotron Datasets](#nemotron-datasets).
 
 ## Getting Started: Simplified Workflow
 
@@ -73,14 +75,16 @@ This one-line command runs a minimal example workflow of training and exporting 
 For small base models that fit in GPU memory, we can collocate them with draft models and train with the following command:
 
 ```bash
-./launch_train.sh --model $BASE_MODEL \
-            --output_dir $OUTPUT_DIR \
-            --data input_conversations/train.jsonl  \
-            --num_epochs $NUM_EPOCH \
-            --eagle_config eagle_config.json
+./launch_train.sh \
+    --config ../../modelopt_recipes/general/speculative_decoding/eagle3.yaml \
+    model.model_name_or_path=meta-llama/Llama-3.2-1B \
+    data.data_path=input_conversations/train.jsonl \
+    training.output_dir=ckpts/llama-3.2-1b-online
 ```
 
-FSDP2 is used by default. To enable context parallelism for long-context training, specify `--cp_size n`.
+All default training settings are in `eagle3.yaml`. You can adjust them by editing the YAML file or by specifying command-line overrides with OmegaConf dotlist arguments.
+
+To enable context parallelism for long-context training, add `training.cp_size=<N>`.
 The saved modelopt checkpoint is similar in architecture to HF models. It can be further optimized through **ModelOpt**, e.g., PTQ and QAT.
 
 ## Training Draft Model with Offline Base Model
@@ -113,15 +117,14 @@ python collect_hidden_states/compute_hidden_states_hf.py \
 
 ### Train Draft Model with Dumped Hidden States
 
-Once we finish dumping hidden states, launch offline training with an extra `--offline-data` argument:
+Once we finish dumping hidden states, launch offline training pointing to the hidden states directory:
 
 ```bash
-./launch_train.sh --model $BASE_MODEL \
-            --output_dir $OUTPUT_DIR \
-            --data $DATA \
-            --num_epochs $NUM_EPOCH \
-            --eagle_config eagle_config.json \
-            --offline-data $HIDDEN_STATES_DIR
+./launch_train.sh \
+    --config ../../modelopt_recipes/general/speculative_decoding/eagle3.yaml \
+    model.model_name_or_path=meta-llama/Llama-3.2-1B \
+    data.offline_data_path=$HIDDEN_STATES_DIR \
+    training.output_dir=ckpts/llama-3.2-1b-offline
 ```
 
 ## Model Validation
@@ -201,7 +204,7 @@ See more details on deployment of quantized model to TRTLLM [here](../llm_ptq/RE
 
 ### Other Datasets
 
-In addition to the default dataset, we support adding several other commonly used datasets in `prepare_input_conversations/make_dataset.py`:
+In addition to the default dataset, we support adding several other commonly used datasets in `../dataset/make_dataset.py`:
 
 - MTBench (for debugging)
 - ShareGPT
@@ -214,16 +217,54 @@ To use your own datasets, please preprocess your data into a `.jsonl` file with 
 
 ```json
 {
-    "conversation_id": <unique id>,
-    "conversations": [{"role":<user or assistant>, "content":<content>}]
+    "messages": [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]
 }
+```
+
+### Nemotron Datasets
+
+For large-scale training we provide dedicated scripts for NVIDIA's Nemotron Post-Training dataset collections. Both scripts support two modes:
+
+- **`generate` (default)** — strips all assistant turns, producing a conversation skeleton (`system` + `user` turns only) for synthetic data generation. The downstream pipeline feeds these to the target model turn-by-turn, appending each generated response before sending the next user turn. Optional augmentation adds language-redirect and style-hint variants to diversify prompts.
+- **`train`** — keeps all turns in clean OpenAI message format (`role` + `content`) for direct SFT training. Prompt-only rows are dropped. Tool-call context (`tool_calls`, `tool_call_id`) is preserved for agentic datasets.
+
+**Nemotron Post-Training Dataset V2** ([`nvidia/Nemotron-Post-Training-Dataset-v2`](https://huggingface.co/datasets/nvidia/Nemotron-Post-Training-Dataset-v2)):
+
+```bash
+# Synthetic data generation (~3.3M rows):
+python ../dataset/make_nemotron_ptv2_dataset.py --output-dir /tmp/ptv2_gen
+
+# Direct SFT training mix (~1.9M rows):
+python ../dataset/make_nemotron_ptv2_dataset.py --mode train --output-dir /tmp/ptv2_train
+```
+
+Covers: `stem`, `chat`, `math`, `code` + 5 multilingual splits (ja/de/it/es/fr, capped at 100K each).
+
+**Nemotron Post-Training V3 collection** ([16 datasets](https://huggingface.co/collections/nvidia/nemotron-post-training-v3)):
+
+```bash
+# Synthetic data generation (~3.4M rows):
+python ../dataset/make_nemotron_ptv3_dataset.py --output-dir /tmp/ptv3_gen
+
+# Direct SFT training mix (~3.9M rows, includes agentic/tool-use datasets):
+python ../dataset/make_nemotron_ptv3_dataset.py --mode train --output-dir /tmp/ptv3_train
+```
+
+Covers: math, code, science, instruction-following, agentic/tool-use, safety, finance, and multilingual data. The dataset mix and per-split row caps are configurable via `../dataset/nemotron_ptv3_datasets.yaml`.
+
+**Augmentation** (generate mode only) is controlled by `../dataset/augmentations.yaml`. By default it includes 12 language-redirect variants and several style/format hints. The `/no_think` system-prompt variant is disabled by default (enable it for models that support it, e.g. Qwen3):
+
+```bash
+# Custom augmentation config:
+python ../dataset/make_nemotron_ptv2_dataset.py \
+    --augmentations-config my_augs.yaml --output-dir /tmp/ptv2_gen
 ```
 
 ### Data Synthesis
 
 To achieve higher acceptance rates during speculative decoding, it is beneficial to use conversations generated by the base model as training data. This ensures that the draft model's output distribution closely aligns with that of the base model.
 
-To prepare such data, we launch an inference server with the base model:
+First, prepare input conversation skeletons using `--mode generate` (default) from the Nemotron scripts above, or with `make_dataset.py` (omitting `--full-conversations`). Then launch an inference server with the base model:
 
 ```bash
 pip install vllm
@@ -244,13 +285,13 @@ For large scale data generation, please see [SLURM prepare data](SLURM_prepare_d
 
 ### Configuring Draft Model
 
-For EAGLE‑1 and EAGLE‑3 we provide a [default model architecture config](https://github.com/NVIDIA/Model-Optimizer/blob/main/modelopt/torch/speculative/config.py#L37) in ModelOpt. You can override default settings by providing an additional JSON dict. E.g. To use 2-layer eagle with 8192 intermediate size for MLP, set `eagle_config.json` to:
+For EAGLE‑1 and EAGLE‑3 we provide a [default model architecture config](https://github.com/NVIDIA/Model-Optimizer/blob/main/modelopt/torch/speculative/config.py#L37) in ModelOpt. You can override default settings via `eagle.eagle_architecture_config` in the YAML. E.g. to use a 2-layer EAGLE head with 8192 intermediate size:
 
-```json
-{
-    "num_hidden_layers": 2,
-    "intermediate_size":8192
-}
+```yaml
+eagle:
+  eagle_architecture_config:
+    num_hidden_layers: 2
+    intermediate_size: 8192
 ```
 
 ### Draft Vocabulary Compression
@@ -263,61 +304,26 @@ python scripts/calibrate_draft_vocab.py --model meta-llama/Llama-3.2-1B-Instruct
 
 This will produce a `d2t.pt` file in `save_dir`, which is the mapping from draft token to target token. During inference, draft tokens can be mapped back to target tokens by `target_token = draft_token + d2t[draft_token]`.
 
-Then, simply set `{"draft_vocab_size":32000}` in `eagle_config.json` and include `--draft_vocab_cache <path_to_d2t.pt>` when running `./launch_train.sh`. The draft model will use this provided vocab table during training and export.
+Then, set `eagle_architecture_config.draft_vocab_size: 32000` and `data.draft_vocab_cache: <path_to_d2t.pt>` in your YAML. The draft model will use this provided vocab table during training and export.
 
 ### Interact with `modelopt.torch.speculative`
 
-`main.py` provides an example for converting a HF base model for speculative decoding and training it. It consists of a few simple steps:
-First, load the base model and tokenizer from Hugging Face:
+`main.py` provides a complete example for converting a HF base model for speculative decoding and training it. The core steps are loading the base model, converting it with an eagle config dict, and training with HF Trainer:
 
 ```python
-model = transformers.AutoModelForCausalLM.from_pretrained(
-    "<path to your pretrained model>"
-)
+import modelopt.torch.speculative as mtsp
+
+# Convert base model in-place to an EAGLE speculative decoding model
+eagle_cfg = {"eagle_decoder_type": "llama", ...}  # fields from EagleConfig
+mtsp.convert(model, [("eagle", eagle_cfg)])
+
+# Train with HF Trainer as usual
+trainer = transformers.Trainer(model=model, ...)
+trainer.train()
+trainer.save_model("<output_dir>")
 ```
 
-Then, load default eagle config and make necessary overwrites:
-
-```python
-# Load default config
-config = {
-    "eagle1": EAGLE1_DEFAULT_CFG,
-    "eagle3": EAGLE3_DEFAULT_CFG,
-}[training_args.mode]["config"]
-
-# overwrite config with custom config
-config["eagle_architecture_config"].update({"<overwrite_keys>": "<overwrite_values>"})
-
-# Mandatory: hidden size, vocab size and max position embeddings must match base model
-config["eagle_architecture_config"].update(
-    {
-        "hidden_size": model.config.hidden_size,
-        "vocab_size": model.config.vocab_size,
-        "max_position_embeddings": model.config.max_position_embeddings,
-    }
-)
-```
-
-Then, we convert model to a speculative decoding model:
-
-```python
-mtsp.convert(model, [("eagle", config)])
-```
-
-This will modify the model in-place with eagle training forward, making it compatible with HF trainer:
-
-```python
-# Create a trainer
-trainer = transformers.Trainer(model=model, tokenizer=tokenizer, args=training_args, **data_module)
-trainer._move_model_to_device(model, trainer.args.device)
-
-# Enable HF checkpointing so that the saved model will contain the speculative decoding module
-mto.enable_huggingface_checkpointing()
-
-trainer.train(resume_from_checkpoint=checkpoint)
-trainer.save_state()
-trainer.save_model("<path to the output directory>")
-```
+See `main.py` for the full example including tokenizer setup, dataset loading, and checkpoint handling.
 
 ## Support Matrix
 
@@ -343,3 +349,46 @@ More models coming soon!
 - 💡 [Release Notes](https://nvidia.github.io/Model-Optimizer/reference/0_changelog.html)
 - 🐛 [File a bug](https://github.com/NVIDIA/Model-Optimizer/issues/new?template=1_bug_report.md)
 - ✨ [File a Feature Request](https://github.com/NVIDIA/Model-Optimizer/issues/new?template=2_feature_request.md)
+
+## DFlash (Block Diffusion for Speculative Decoding)
+
+DFlash is a parallel speculative decoding method based on [Block Diffusion](https://arxiv.org/abs/2602.06036).
+Unlike autoregressive draft models (EAGLE3), DFlash predicts an entire block of tokens in a single forward pass
+using masked parallel prediction with KV injection from the target model's hidden states.
+
+### Quick Start
+
+For a complete end-to-end example (training + evaluation), see the
+[launcher example](../../tools/launcher/examples/Qwen/Qwen3-8B/hf_online_dflash.yaml):
+
+```bash
+uv run launch.py --yaml examples/Qwen/Qwen3-8B/hf_online_dflash.yaml --yes
+```
+
+### Key Configuration ([dflash.yaml](../../modelopt_recipes/general/speculative_decoding/dflash.yaml))
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `dflash.dflash_block_size` | 8 | Block size for parallel prediction |
+| `dflash.dflash_num_anchors` | 512 | Number of anchor positions per sample |
+| `dflash.dflash_loss_decay_factor` | 4.0 | Exponential decay gamma (0 disables) |
+| `dflash.dflash_self_logit_distillation` | true | Use logit distillation from target |
+| `dflash.dflash_architecture_config.num_hidden_layers` | 5 | Draft decoder layers |
+| `dflash.dflash_architecture_config.mask_token_id` | auto | Token ID for masked positions |
+| `training.answer_only_loss` | false | Mask loss on non-assistant tokens |
+
+Qwen3 sliding window attention is automatically supported — draft layers inherit
+`layer_types` and `sliding_window` from the config, matching the target model's
+attention pattern.
+
+### Export
+
+```bash
+python scripts/export_hf_checkpoint.py \
+    --model_path /path/to/training/output \
+    --export_path /path/to/exported/model
+```
+
+### Results
+
+See [doc/dflash.md](doc/dflash.md) for design details, benchmark results, and open items.

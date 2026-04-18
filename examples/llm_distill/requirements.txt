@@ -1,4 +1,3 @@
 pyarrow
 torchao>=0.14.1
-transformers<5.0
 trl>=0.23.0

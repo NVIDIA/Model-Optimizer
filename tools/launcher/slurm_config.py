@@ -41,6 +41,7 @@ class SlurmConfig:
     nodes: int = 1
     ntasks_per_node: int = 1
     gpus_per_node: int = 1
+    time: str = "04:00:00"
     local: bool = False
 
 
@@ -49,17 +50,18 @@ class SlurmConfig:
 def slurm_factory(
     host: str = os.environ.get("SLURM_HOST", ""),
     account: str = os.environ.get("SLURM_ACCOUNT", ""),
-    partition: str = "batch",
+    partition: str = os.environ.get("SLURM_PARTITION", "batch"),
     nodes: int = 1,
     ntasks_per_node: int = 1,
     gpus_per_node: int = 1,
-    container: str = "nvcr.io/nvidia/tensorrt-llm/release:1.2.0",
+    container: str = "nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc8",
     modelopt_install_path: str = "/usr/local/lib/python3.12/dist-packages/modelopt",
     container_mounts: list[str] = [
         "{}:/hf-local".format(os.environ.get("SLURM_HF_LOCAL", "/hf-local")),
     ],
     srun_args: list[str] = ["--no-container-mount-home"],
     array: str = None,  # noqa: RUF013
+    time: str = "04:00:00",
 ) -> SlurmConfig:
     """Generic Slurm factory — configure via environment variables or CLI overrides."""
     return SlurmConfig(
@@ -74,4 +76,5 @@ def slurm_factory(
         container_mounts=container_mounts,
         srun_args=srun_args,
         array=array,
+        time=time,
     )

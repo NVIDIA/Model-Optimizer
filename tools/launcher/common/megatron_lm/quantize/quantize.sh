@@ -36,10 +36,18 @@ CONVERT_EXE="bash modules/Megatron-LM/examples/post_training/modelopt/convert.sh
 EXPORT_EXE="bash modules/Megatron-LM/examples/post_training/modelopt/export.sh"
 
 export MLM_EXTRA_ARGS=${@}
-${QUANTIZE_EXE} ${MLM_MODEL_CFG} ${QUANT_CFG}
+TP=${TP:-1} PP=${PP:-1} EP=${EP:-1} ETP=${ETP:-1} ${QUANTIZE_EXE} ${MLM_MODEL_CFG} ${QUANT_CFG}
 
-export MLM_EXTRA_ARGS="--mmlu-dataset ${MMLU_DATASET:-/hf-local/cais/mmlu} --fraction 0.01 --lower-bound 0.38 --disable-tqdm"
-MLM_MODEL_CKPT=${MLM_MODEL_SAVE} ${MMLU_EXE} ${MLM_MODEL_CFG}
+export MLM_EXTRA_ARGS="--mmlu-dataset ${MMLU_DATASET:-/hf-local/cais/mmlu} --fraction 0.01 --lower-bound ${MMLU_LOWER_BOUND:-0.38} --disable-tqdm"
+TP=${TP:-1} PP=${PP:-1} EP=${EP:-1} ETP=${ETP:-1} MLM_MODEL_CKPT=${MLM_MODEL_SAVE} ${MMLU_EXE} ${MLM_MODEL_CFG}
+
+# Export quantized checkpoint to HF format (PP=all GPUs)
+TOTAL_GPUS=$(python3 -c "import torch; print(torch.cuda.device_count())" 2>/dev/null || echo ${NUM_GPUS:-1})
+echo "=== Exporting ${MLM_MODEL_CFG} ${QUANT_CFG} (PP=${TOTAL_GPUS}) ==="
+export MLM_EXTRA_ARGS=
+TP=1 PP=${TOTAL_GPUS} EP=1 ETP=1 MLM_MODEL_CKPT=${MLM_MODEL_SAVE} ${EXPORT_EXE} ${MLM_MODEL_CFG}
+ls ${EXPORT_DIR}
+cat ${EXPORT_DIR}/hf_quant_config.json
 
 ###################################################################################################
 

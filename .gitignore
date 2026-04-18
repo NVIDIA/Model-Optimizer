@@ -58,3 +58,6 @@ venv/
 **.pkl
 **.pickle
 **.tar.gz
+
+# Ignore claude local settings
+.claude/settings.local.json

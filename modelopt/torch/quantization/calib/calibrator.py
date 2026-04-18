@@ -15,6 +15,10 @@
 
 """Abstract base class for calibrators."""
 
+from typing import Any
+
+import torch
+
 __all__ = ["_Calibrator"]
 
 
@@ -35,6 +39,14 @@ class _Calibrator:
         self._num_bits = num_bits
         self._axis = axis
         self._unsigned = unsigned
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        """Register the calibrator classes as a safe global for torch serialization.
+
+        It can be used to load the calibrator with torch.load(weights_only=True) in safe_load().
+        """
+        super().__init_subclass__(**kwargs)
+        torch.serialization.add_safe_globals([cls])
 
     def collect(self, x):
         """Abstract method: collect tensor statistics used to compute amax.

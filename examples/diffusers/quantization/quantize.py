@@ -137,7 +137,12 @@ class Quantizer:
         else:
             raise NotImplementedError(f"Unknown format {self.config.format}")
         if self.config.quantize_mha:
-            quant_config["quant_cfg"]["*[qkv]_bmm_quantizer"] = {"num_bits": (4, 3), "axis": None}  # type: ignore[index]
+            quant_config["quant_cfg"].append(
+                {
+                    "quantizer_name": "*[qkv]_bmm_quantizer",
+                    "cfg": {"num_bits": (4, 3), "axis": None},
+                }
+            )
         set_quant_config_attr(
             quant_config,
             self.model_config.trt_high_precision_dtype.value,

@@ -218,7 +218,10 @@ def _collect_shared_input_modules(
 
     # Run dummy forward pass to collect modules sharing same input
     try:
-        with torch.no_grad(), set_quantizer_by_cfg_context(model, {"*": {"enable": False}}):
+        with (
+            torch.no_grad(),
+            set_quantizer_by_cfg_context(model, [{"quantizer_name": "*", "enable": False}]),
+        ):
             dummy_forward_fn()
     finally:
         # Always remove hooks
@@ -378,6 +381,9 @@ def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
         elif getattr(model.config, "is_encoder_decoder", False):
             # For other encoder-decoder models (non-VL), pass both encoder and decoder input ids
             model(fake_input, decoder_input_ids=decoder_fake_input)
+        elif hasattr(model, "get_dummy_inputs"):
+            # For speculative decoding models (EAGLE, etc.), use model-provided dummy inputs
+            model(**model.get_dummy_inputs())
         else:
             model(fake_input)
 
@@ -641,6 +647,9 @@ def _process_quantized_modules(
         ):
             sub_module.unpack_weight()
         if get_quantization_format(sub_module) != QUANTIZATION_NONE:
+            # Skip QuantMoELinear - it's handled separately in _reconstruct_fused_moe_linear
+            if type(sub_module).__name__ == "QuantMoELinear":
+                continue
             if is_quantlinear(sub_module):
                 try:
                     with fsdp2_aware_weight_update(model, sub_module, reshard=False):
@@ -668,6 +677,13 @@ def _process_quantized_modules(
                 with fsdp2_aware_weight_update(model, sub_module, reshard=False):
                     for weight_name in ["gate_up_proj", "down_proj"]:
                         _export_quantized_weight(sub_module, dtype, weight_name)
+            elif hasattr(sub_module, "gate_up_proj_weight_quantizers"):
+                # Generic fused MoE experts (_QuantFusedExperts) with per-expert
+                # quantizer ModuleLists. Split into per-expert modules and export.
+                from modelopt.torch.export.moe_utils import _export_fused_experts
+
+                with fsdp2_aware_weight_update(model, sub_module, reshard=False):
+                    _export_fused_experts(sub_module, dtype)
 
 
 def _export_transformers_checkpoint(
@@ -712,6 +728,9 @@ def _export_transformers_checkpoint(
                                 modules=list(linear_modulelist),
                                 quantizer_attrs=["input_quantizer"],
                             )
+                elif hasattr(sub_module.experts, "gate_up_proj_weight_quantizers"):
+                    # _QuantFusedExperts: amax fallback is handled in _export_fused_experts
+                    break
                 elif "QuantGptOssExperts" in type(sub_module.experts).__name__:
                     # Handle GPT-OSS experts specifically
                     # GPT-OSS experts use gate_up_proj and down_proj
@@ -790,6 +809,11 @@ def _export_transformers_checkpoint(
 
     # Process all quantized modules and export weights
     _process_quantized_modules(model, dtype, is_modelopt_qlora)
+
+    # Reconstruct fused MoELinear: per-expert _QuantLinear weights → original 3D format
+    from modelopt.torch.quantization.plugins.huggingface import _reconstruct_fused_moe_linear
+
+    _reconstruct_fused_moe_linear(model)
 
     if accelerator is not None:
         # Gather state_dict from all ranks

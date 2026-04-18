@@ -115,7 +115,7 @@ def enable_hf_checkpointing():
     mto.enable_huggingface_checkpointing()
 
 
-@pytest.fixture
+@pytest.fixture(scope="session")
 def project_root_path(request: pytest.FixtureRequest) -> Path:
     """Fixture providing the project root path for tests."""
     return Path(request.config.rootpath)
