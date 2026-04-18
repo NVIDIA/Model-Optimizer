@@ -49,7 +49,7 @@ from .utils import (
     reduce_amax,
     weight_attr_names,
 )
-from .utils.calib_utils import GPTQHelper
+from .utils.calib_utils import _GPTQ_HELPER_REGISTRY, GPTQHelper
 
 __all__ = [
     "awq",
@@ -1589,6 +1589,21 @@ def sequential_calibrate(
 
             def _layer_forward_loop(m, _inputs=layer_inputs):
                 for args, kwargs_input in _inputs:
+                    # Reset past_key_values to prevent the KV cache from
+                    # accumulating across multiple forward replays (e.g.
+                    # max_calibrate then Hessian collection in GPTQ).
+                    # The layer doesn't need stale KV data — each replay
+                    # should start with a fresh cache.
+                    if (
+                        "past_key_values" in kwargs_input
+                        and kwargs_input["past_key_values"] is not None
+                    ):
+                        kwargs_input = dict(kwargs_input)
+                        cache = kwargs_input["past_key_values"]
+                        if hasattr(cache, "reset"):
+                            cache.reset()
+                        else:
+                            kwargs_input["past_key_values"] = None
                     m(*args, **kwargs_input)
 
             calib_func(layer, _layer_forward_loop, **calib_kwargs)
@@ -1648,7 +1663,15 @@ def gptq(
         print_rank_0("No quantized linear layers found, skipping GPTQ")
         return
 
-    gptq_handles = {name: GPTQHelper(m, name, offload_to_cpu=True) for name, m in quantized_layers}
+    def _make_gptq_handle(name, m):
+        backend = getattr(m.weight_quantizer, "backend", None)
+        if backend is None:
+            cls = GPTQHelper
+        else:
+            cls = _GPTQ_HELPER_REGISTRY.get(backend, GPTQHelper)
+        return cls(m, name, offload_to_cpu=True)
+
+    gptq_handles = {name: _make_gptq_handle(name, m) for name, m in quantized_layers}
     for handle in gptq_handles.values():
         handle.setup()
 

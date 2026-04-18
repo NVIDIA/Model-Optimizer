@@ -143,9 +143,7 @@ class GPTQHelper:
         hessian = self.hessian.to(self.module.weight.device)
         self.weight = self.module.weight.data.float().clone()
         self._prepare_hessian_inverse(hessian, perc_damp)
-
         self._blockwise_update(block_size)
-
         self._print_mse_error(hessian)
         self.module.weight.data = self.weight.reshape(self.module.weight.shape).to(
             self.module.weight.data.dtype
@@ -231,3 +229,16 @@ class GPTQHelper:
         mse = (delta).mm(hessian).mul(delta).mean() / (w_orig.mm(hessian).mul(w_orig).mean() + 1e-6)
         suffix = f", n_hessian_samples: {self.n_samples}" if self.n_samples else ""
         print_rank_0(f"[{self.name}] Relative MSE error: {mse.item():.2e}{suffix}")
+
+
+_GPTQ_HELPER_REGISTRY: dict[str, type[GPTQHelper]] = {}
+
+
+def register_gptq_helper(backend: str, factory: type[GPTQHelper]) -> None:
+    """Register a :class:`GPTQHelper` subclass for a quantizer backend.
+
+    When :func:`modelopt.torch.quantization.model_calib.gptq` encounters a
+    module whose ``weight_quantizer.backend`` matches ``backend``, it will
+    construct ``factory`` instead of the default ``GPTQHelper``.
+    """
+    _GPTQ_HELPER_REGISTRY[backend] = factory
