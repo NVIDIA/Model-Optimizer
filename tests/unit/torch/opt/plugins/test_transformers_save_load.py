@@ -24,6 +24,8 @@ from _test_utils.torch.transformers_models import (
 )
 from transformers import AutoConfig, AutoModelForCausalLM, LlamaForCausalLM
 
+import modelopt.torch.opt as mto
+
 
 @pytest.mark.parametrize("model_cls", [LlamaForCausalLM, AutoModelForCausalLM])
 def test_causal_lm_save_restore(tmp_path, model_cls):
@@ -47,13 +49,20 @@ def test_causal_lm_from_config(tmp_path):
     model_ref = apply_mode_with_sampling(
         model_ref, ["sparse_magnitude", "export_sparse", "quantize"]
     )
-    model_ref.save_pretrained(tiny_llama_dir / "modelopt_model")
+    save_dir = tiny_llama_dir / "modelopt_model"
+    model_ref.save_pretrained(save_dir)
 
-    config = AutoConfig.from_pretrained(tiny_llama_dir / "modelopt_model")
+    config = AutoConfig.from_pretrained(save_dir)
 
     model_test = AutoModelForCausalLM.from_config(config)
 
-    # from_config doesn't load weights, need to load state_dict separately
+    # ``_from_config`` is patched with ``restore_after_init=False`` (nested submodules), so unlike
+    # ``from_pretrained`` we must load ``modelopt_state.pth`` explicitly, then weights — same order
+    # as HF init-hook restore followed by checkpoint load.
+    modelopt_path = save_dir / "modelopt_state.pth"
+    assert modelopt_path.is_file()
+    mto.restore_from_modelopt_state(model_test, modelopt_state_path=str(modelopt_path))
+
     state_dict = model_ref.state_dict()
     model_test.load_state_dict(state_dict)
 

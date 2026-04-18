@@ -36,10 +36,34 @@ from modelopt.torch.utils.network import bind_forward_method
 from .config import ModeloptBaseRule, RulesDict
 from .hparam import Hparam
 
-__all__ = ["DynamicModule", "DynamicSpace", "_DMRegistryCls"]
+__all__ = ["DynamicModule", "DynamicSpace", "_DMRegistryCls", "unwrap_shadowing_slots_before_register_parameter"]
 
 _pytorch_managed = type("_pytorch_managed", (), {})  # pylint: disable=invalid-name
 _da_val_default = type("_da_val_default", (), {})  # pylint: disable=invalid-name
+
+
+def unwrap_shadowing_slots_before_register_parameter(module: nn.Module, name: str) -> None:
+    """Drop ``name`` from ad-hoc storage so :meth:`torch.nn.Module.register_parameter` can succeed.
+
+    PyTorch raises ``KeyError: attribute 'bias' already exists`` when ``hasattr(module, name)`` is
+    true but ``name`` is not in ``module._parameters`` (e.g. a tensor stuck in ``__dict__`` during
+    meta init or Hugging Face weight assignment). Safe to call when ``name`` is already a proper
+    registered parameter (no-op).
+    """
+    if name in ("_parameters", "_buffers", "_modules", "_dm_attribute_manager"):
+        return
+    od = module.__dict__
+    params = od.get("_parameters")
+    if isinstance(params, dict) and name in params:
+        return
+    if name in od:
+        del od[name]
+    bufs = od.get("_buffers")
+    if isinstance(bufs, dict) and name in bufs:
+        del bufs[name]
+    mods = od.get("_modules")
+    if isinstance(mods, dict) and name in mods:
+        del mods[name]
 
 
 DynamicAttributeCallback = Callable[["DynamicModule", Any], Any]
@@ -747,6 +771,10 @@ class DynamicModule(nn.Module):
             for key in nn_special:
                 del self.__dict__[key]
 
+    def _unwrap_shadowing_before_parameter_assign(self, name: str) -> None:
+        """See :func:`unwrap_shadowing_slots_before_register_parameter`."""
+        unwrap_shadowing_slots_before_register_parameter(self, name)
+
     def __setattr__(self, name: str, value: Any):
         """Set attr and specifically handle hparams as well as dynamic & temporary attributes."""
         # retrieve manager
@@ -759,6 +787,8 @@ class DynamicModule(nn.Module):
         elif name in manager.da_keys() and manager.get_da_value(name) is not _pytorch_managed:
             manager.set_da(name, value)
         else:
+            if isinstance(value, Parameter):
+                self._unwrap_shadowing_before_parameter_assign(name)
             if name in manager.attr_keys():
                 manager.get_attr_set_hook(name)(self, name, value)
             with self._dict_with_special():

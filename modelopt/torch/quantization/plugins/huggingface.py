@@ -118,6 +118,16 @@ class _QuantAttention(QuantModule):
         )
 
     @staticmethod
+    def _apply_bmm_quantizer(tq, x):
+        """Skip ``TensorQuantizer.__call__`` when disabled (reload / inference bypass).
+
+        Avoids any remaining hooks or edge cases; matches true identity on disabled quantizers.
+        """
+        if getattr(tq, "_disabled", False):
+            return x
+        return tq(x)
+
+    @staticmethod
     def _quantized_attention(
         original_attention_interface,
         self,
@@ -130,9 +140,9 @@ class _QuantAttention(QuantModule):
         if kitchen is not None and self.kitchen_attn_fn is None:
             self._init_kitchen_attn_fn()
 
-        query_states = self.q_bmm_quantizer(query_states)
-        key_states = self.k_bmm_quantizer(key_states)
-        value_states = self.v_bmm_quantizer(value_states)
+        query_states = _QuantAttention._apply_bmm_quantizer(self.q_bmm_quantizer, query_states)
+        key_states = _QuantAttention._apply_bmm_quantizer(self.k_bmm_quantizer, key_states)
+        value_states = _QuantAttention._apply_bmm_quantizer(self.v_bmm_quantizer, value_states)
         if not self.use_kitchen:
             return original_attention_interface(
                 self, query_states, key_states, value_states, *args, **kwargs

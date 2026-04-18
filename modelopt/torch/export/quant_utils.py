@@ -929,7 +929,20 @@ def to_quantized_weight(
             # Clear GPU cache to avoid pontential GPU OOM issues for large models.
             clear_cuda_cache()
             return (weight / weights_scaling_factor.unsqueeze(-1)).to(torch.float8_e4m3fn)
-        return (weight / weights_scaling_factor).to(torch.float8_e4m3fn)
+        # 2D Linear: ``amax`` / scale is usually per output row ``(out_features,)`` — same as INT8,
+        # must divide with ``(out, 1)`` so ``(out, in) / (out,)`` does not mis-broadcast (5 vs 4).
+        if weight.dim() == 2 and weights_scaling_factor.dim() == 1:
+            o, i = weight.shape
+            s1 = weights_scaling_factor.shape[0]
+            if s1 == o:
+                denom = weights_scaling_factor[:, None]
+            elif s1 == i:
+                denom = weights_scaling_factor[None, :]
+            else:
+                denom = weights_scaling_factor
+        else:
+            denom = weights_scaling_factor
+        return (weight / denom).to(torch.float8_e4m3fn)
 
     if quantization in [QUANTIZATION_INT8_SQ, QUANTIZATION_INT8_WO]:
         return (weight / weights_scaling_factor[:, None]).round().clamp(-128, 127).to(torch.int8)
@@ -1015,10 +1028,18 @@ def from_quantized_weight(
         return weight.to(torch_dtype)
 
     if quantization == QUANTIZATION_FP8:
-        # safe tensors does not support fp8 yet. So we pack the tensors as int8
-        return weight.view(torch.float8_e4m3fn).to(torch_dtype) * weights_scaling_factor.to(
-            torch_dtype
-        )
+        # Inverse of ``to_quantized_weight`` for FP8: match INT8 row/column broadcast, not raw ``*``.
+        # HF safetensors often store E4M3 weights as ``uint8`` (same bits); ``view`` requires contiguous.
+        w = weight.contiguous()
+        wdq = w.view(torch.float8_e4m3fn).to(torch_dtype)
+        sf = weights_scaling_factor.to(torch_dtype)
+        if wdq.dim() == 2 and sf.dim() == 1:
+            o, i = wdq.shape
+            if sf.shape[0] == o:
+                sf = sf[:, None]
+            elif sf.shape[0] == i:
+                sf = sf[None, :]
+        return wdq * sf
 
     if quantization in [QUANTIZATION_INT8_SQ, QUANTIZATION_INT8_WO]:
         return weight.to(torch_dtype) * weights_scaling_factor[:, None].to(torch_dtype)

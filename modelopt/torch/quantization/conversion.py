@@ -21,6 +21,7 @@ from collections.abc import Callable
 from contextlib import contextmanager
 from typing import Any
 
+import torch
 import torch.nn as nn
 
 from modelopt.torch.opt.conversion import ApplyModeError, ModelLikeModule, ModeloptStateManager
@@ -42,7 +43,8 @@ from .nn import (
     SVDQuantLinear,
     TensorQuantizer,
 )
-from .utils import is_quantized, is_quantized_linear
+from .nn.modules.quant_module import register_hf_nvfp4_export_scale_buffer_placeholders
+from .utils import is_quantized, is_quantized_linear, reduce_block_padding
 
 __all__ = [
     "register",
@@ -94,6 +96,198 @@ def restore_quantized_model(
     return restore_quantizer_state(model, config, metadata)
 
 
+def _remap_saved_quantizer_keys_to_model(
+    saved: dict[str, Any], model: nn.Module
+) -> dict[str, Any]:
+    """Align saved ``quantizer_state`` keys with :func:`quantizer_state` names on ``model``.
+
+    VLMs may store paths relative to inner modules (``blocks.*``, ``layers.*``) while restore
+    uses the full HF root (``model.visual.blocks.*``, ``model.language_model.layers.*``).
+
+    Assignment is **one-to-one** on model keys: process **longest saved keys first** so
+    specific paths are not stolen by short ambiguous suffixes (e.g. ``weight_quantizer``).
+    When several model paths share a suffix, prefer the **longest** model path (full hierarchy).
+    """
+    target_keys = list(quantizer_state(model).keys())
+    target_set = set(target_keys)
+    if not saved or set(saved) <= target_set:
+        return saved
+
+    out: dict[str, Any] = {}
+    assigned_mk: set[str] = set()
+    used_saved_sk: set[str] = set()
+
+    for sk, val in saved.items():
+        if sk in target_set:
+            out[sk] = val
+            assigned_mk.add(sk)
+            used_saved_sk.add(sk)
+
+    remaining = sorted((sk for sk in saved if sk not in used_saved_sk), key=len, reverse=True)
+
+    for sk in remaining:
+        val = saved[sk]
+        dotted = "." + sk
+        candidates = [mk for mk in target_keys if mk not in assigned_mk and mk.endswith(dotted)]
+        if not candidates:
+            candidates = [
+                mk
+                for mk in target_keys
+                if mk not in assigned_mk and mk.endswith(sk) and len(mk) > len(sk)
+            ]
+        if not candidates:
+            continue
+        if len(candidates) == 1:
+            mk = candidates[0]
+        else:
+            mk = max(candidates, key=len)
+            warnings.warn(
+                f"Ambiguous quantizer_state key {sk!r}: using longest module path {mk!r} "
+                f"among {len(candidates)} suffix matches.",
+                stacklevel=3,
+            )
+        out[mk] = val
+        assigned_mk.add(mk)
+        used_saved_sk.add(sk)
+
+    orphan = [sk for sk in saved if sk not in used_saved_sk]
+    if orphan:
+        warnings.warn(
+            f"{len(orphan)} saved quantizer_state keys could not be mapped to any model "
+            f"quantizer (e.g. {orphan[:4]}).",
+            stacklevel=3,
+        )
+
+    return out
+
+
+def _iter_weight_quantizer_chain(
+    wq: TensorQuantizer | SequentialQuantizer,
+):
+    if isinstance(wq, SequentialQuantizer):
+        yield from wq
+    else:
+        yield wq
+
+
+def _last_axis_block_size(bs: dict | None) -> int | None:
+    if not bs:
+        return None
+    v = bs.get(-1)
+    if v is None:
+        v = bs.get("-1")
+    return int(v) if v is not None else None
+
+
+def _tensor_quantizer_is_nvfp4_packed_weight_format(tq: TensorQuantizer) -> bool:
+    if isinstance(tq, NVFP4StaticQuantizer):
+        return True
+    if getattr(tq, "_is_nvfp4_static_quantizer", False):
+        return True
+    bs = tq.block_sizes
+    if (
+        getattr(tq, "_num_bits", None) == (2, 1)
+        and bs
+        and bs.get("scale_bits") == (4, 3)
+        and _last_axis_block_size(bs) is not None
+    ):
+        return True
+    return False
+
+
+def _nvfp4_pack_block_size_for_weight_quantizer(
+    wq: TensorQuantizer | SequentialQuantizer,
+) -> int | None:
+    for tq in _iter_weight_quantizer_chain(wq):
+        if not _tensor_quantizer_is_nvfp4_packed_weight_format(tq):
+            continue
+        bs = tq.block_sizes
+        b = _last_axis_block_size(bs)
+        if b is not None:
+            return b
+    return None
+
+
+def _nvfp4_packed_in_dim(logical_in_features: int, block_size: int) -> int:
+    padded = reduce_block_padding(
+        torch.empty(1, logical_in_features),
+        block_sizes={-1: block_size},
+    ).shape[-1]
+    return padded // 2
+
+
+def _resize_nvfp4_packed_linear_weights_for_hf_load(model: nn.Module) -> None:
+    """Resize ``weight`` to NVFP4 packed layout before HF ``load_state_dict``.
+
+    :func:`modelopt.torch.export.unified_export_hf._export_quantized_weight` replaces linear
+    weights with packed ``uint8`` tensors (last dim halved after block padding). A fresh
+    ``nn.Linear``/``QuantLinear`` still has logical ``(out_features, in_features)`` until
+    weights load, which makes ``from_pretrained`` fail with a shape mismatch.
+    """
+    for module in model.modules():
+        if not is_quantized_linear(module):
+            continue
+        wq = module.weight_quantizer
+        block_size = _nvfp4_pack_block_size_for_weight_quantizer(wq)
+        if block_size is None:
+            continue
+        out_f, in_f = int(module.out_features), int(module.in_features)
+        packed_in = _nvfp4_packed_in_dim(in_f, block_size)
+        expected = (out_f, packed_in)
+        for weight_name in ("weight", "weight0"):
+            if not hasattr(module, weight_name):
+                continue
+            w = getattr(module, weight_name)
+            if not isinstance(w, nn.Parameter) or w.dim() != 2:
+                continue
+            if w.shape == expected:
+                continue
+            if w.shape != (out_f, in_f):
+                continue
+            new_w = torch.empty(expected, dtype=torch.uint8, device=w.device)
+            setattr(module, weight_name, nn.Parameter(new_w, requires_grad=False))
+
+
+def _resize_int4_awq_packed_linear_weights_for_hf_load(model: nn.Module) -> None:
+    """Resize ``weight`` to INT4 AWQ HF packed layout before ``load_state_dict``.
+
+    :func:`modelopt.torch.export.quant_utils.pack_int4_in_uint8` stores linear weights as
+    ``uint8`` with shape ``(out_features // 2, in_features)``. A restored ``QuantLinear``
+    still has logical ``(out_features, in_features)`` parameters until shards load, which
+    makes ``from_pretrained`` fail (e.g. ``[1024, 11008]`` checkpoint vs ``[2048, 11008]``).
+    """
+    from modelopt.torch.export.quant_utils import (
+        QUANTIZATION_INT4_AWQ,
+        QUANTIZATION_W4A8_AWQ,
+        get_quantization_format,
+    )
+
+    for module in model.modules():
+        if not is_quantized_linear(module):
+            continue
+        fmt = get_quantization_format(module)
+        if fmt not in (QUANTIZATION_INT4_AWQ, QUANTIZATION_W4A8_AWQ):
+            continue
+        out_f, in_f = int(module.out_features), int(module.in_features)
+        if out_f % 2 != 0:
+            continue
+        expected = (out_f // 2, in_f)
+        for weight_name in ("weight", "weight0"):
+            if not hasattr(module, weight_name):
+                continue
+            w = getattr(module, weight_name)
+            if not isinstance(w, nn.Parameter) or w.dim() != 2:
+                continue
+            if tuple(w.shape) == expected and w.dtype == torch.uint8:
+                continue
+            if tuple(w.shape) != (out_f, in_f):
+                continue
+            if not w.dtype.is_floating_point:
+                continue
+            new_w = torch.empty(expected, dtype=torch.uint8, device=w.device)
+            setattr(module, weight_name, nn.Parameter(new_w, requires_grad=False))
+
+
 def restore_quantizer_state(model: nn.Module, config: QuantizeConfig, metadata: MetadataDict):
     """Restore the quantizer states from the given state dict.
 
@@ -114,18 +308,25 @@ def restore_quantizer_state(model: nn.Module, config: QuantizeConfig, metadata: 
         # QuantModule.set_extra_state().
         return model
 
-    quantizer_state_dict = metadata["quantizer_state"]
-    unmatched_keys = quantizer_state_dict.keys() - quantizer_state(model).keys()
-    extra_keys = quantizer_state(model).keys() - quantizer_state_dict.keys()
+    quantizer_state_dict = _remap_saved_quantizer_keys_to_model(metadata["quantizer_state"], model)
+    model_qs = quantizer_state(model)
+    unmatched_keys = set(quantizer_state_dict.keys()) - set(model_qs.keys())
+    extra_keys = set(model_qs.keys()) - set(quantizer_state_dict.keys())
 
     if unmatched_keys:
         raise ApplyModeError(f"Unmatched keys in quantizer state_dict: {unmatched_keys}")
     if extra_keys:
-        raise ApplyModeError(f"Extra keys in quantizer state_dict: {extra_keys}")
+        warnings.warn(
+            f"{len(extra_keys)} quantizer(s) on model have no entry in saved quantizer_state "
+            f"(leaving post-convert defaults); e.g. {list(extra_keys)[:6]}",
+            stacklevel=2,
+        )
 
     for name, module in model.named_modules():
         if isinstance(module, TensorQuantizer):
             name = get_unwrapped_name(name, model)
+            if name not in quantizer_state_dict:
+                continue
             state = quantizer_state_dict[name]
             # TODO: Add a registry for TensorQuantizers and avoid this manual conversion.
             if state.get("_is_nvfp4_static_quantizer") and not isinstance(
@@ -133,6 +334,10 @@ def restore_quantizer_state(model: nn.Module, config: QuantizeConfig, metadata: 
             ):
                 NVFP4StaticQuantizer.from_tensor_quantizer(module)
             module.set_from_modelopt_state(quantizer_state_dict[name])
+
+    register_hf_nvfp4_export_scale_buffer_placeholders(model)
+    _resize_nvfp4_packed_linear_weights_for_hf_load(model)
+    _resize_int4_awq_packed_linear_weights_for_hf_load(model)
 
     for name, module in model.named_modules():
         if isinstance(module, QuantModule):

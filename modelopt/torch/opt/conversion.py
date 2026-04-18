@@ -51,6 +51,7 @@ from .mode import (
 __all__ = [
     "ModeloptStateManager",
     "apply_mode",
+    "collapse_modelopt_state_to_hf_root",
     "load_modelopt_state",
     "modelopt_state",
     "restore",
@@ -59,6 +60,16 @@ __all__ = [
 ]
 
 ModeloptStateList = list[tuple[str, ModeState]]  # state data structure for multiple modes
+
+
+def _module_has_instance_modelopt_state(module: nn.Module, state_key: str) -> bool:
+    """True if *state_key* is on the module instance ``__dict__`` (not only a class attribute).
+
+    ``hasattr(m, "_modelopt_state")`` is true for every submodule when a modeling class defines
+    ``_modelopt_state`` at class level; that must not count as an extra ModelOpt state holder.
+    """
+    d = getattr(module, "__dict__", None)
+    return isinstance(d, dict) and state_key in d
 
 
 class ModeloptStateManager:
@@ -113,9 +124,12 @@ class ModeloptStateManager:
         This method raises an assertion when multiple modelopt_states are detected or when is_root is
         set to True but the module with state is not the root module.
         """
-        # check for submodules with state
-        mods_with_state = [name for name, m in model.named_modules() if hasattr(m, cls._state_key)]
-        # check if there is multiple submodules with state
+        # Instance state only (align with collapse_modelopt_state_to_hf_root / HF save path).
+        mods_with_state = [
+            name
+            for name, m in model.named_modules()
+            if _module_has_instance_modelopt_state(m, cls._state_key)
+        ]
         assert len(mods_with_state) <= 1, "Model has multiple modelopt states!"
         is_converted = bool(mods_with_state)
 
@@ -440,6 +454,155 @@ def get_mode(model: nn.Module) -> ModeDescriptor | None:
     if ModeloptStateManager.is_converted(model):
         return ModeloptStateManager(model).last_mode
     return None
+
+
+def _safe_remove_modelopt_state_attr(module: nn.Module) -> None:
+    key = ModeloptStateManager._state_key
+    ver = ModeloptStateManager._state_version_key
+    d = getattr(module, "__dict__", None)
+    if isinstance(d, dict):
+        d.pop(key, None)
+        d.pop(ver, None)
+        return
+    try:
+        ModeloptStateManager.remove_state(module)
+    except Exception:
+        try:
+            delattr(module, key)
+        except Exception:
+            pass
+    try:
+        delattr(module, ver)
+    except Exception:
+        pass
+
+
+def _merge_quantizer_state_metadata(keep: nn.Module, donor: nn.Module, state_key: str) -> None:
+    """Merge ``metadata['quantizer_state']`` from donor's modelopt list into keep's (in-place).
+
+    VLMs often hold separate ``_modelopt_state`` on the HF root and on ``language_model``; collapse
+    used to drop the donor's metadata while weights for both towers stay in one checkpoint.
+    """
+    st_keep = getattr(keep, state_key, None)
+    st_donor = getattr(donor, state_key, None)
+    if not isinstance(st_keep, list) or not isinstance(st_donor, list):
+        return
+
+    for mode_d, state_d in st_donor:
+        if not isinstance(state_d, dict):
+            continue
+        meta_d = state_d.get("metadata")
+        if not isinstance(meta_d, dict):
+            continue
+        q_donor = meta_d.get("quantizer_state")
+        if not isinstance(q_donor, dict) or not q_donor:
+            continue
+
+        merged = False
+        for mode_k, state_k in st_keep:
+            if not isinstance(state_k, dict):
+                continue
+            if mode_k != mode_d:
+                continue
+            meta_k = state_k.setdefault("metadata", {})
+            q_keep = meta_k.setdefault("quantizer_state", {})
+            overlap = set(q_keep) & set(q_donor)
+            if overlap:
+                warnings.warn(
+                    f"Merging quantizer_state: {len(overlap)} overlapping keys when collapsing "
+                    f"ModelOpt holders (keeping donor values for overlaps).",
+                    stacklevel=3,
+                )
+            q_keep.update(q_donor)
+            merged = True
+            break
+
+        if not merged:
+            warnings.warn(
+                f"Donor ModelOpt state had mode {mode_d!r} with quantizer_state but keeper had "
+                f"no matching mode entry; donor quantizer metadata not merged.",
+                stacklevel=3,
+            )
+
+
+def collapse_modelopt_state_to_hf_root(model: nn.Module) -> None:
+    """Ensure a single ``_modelopt_state`` lives on ``model`` (HF checkpoint root).
+
+    VLMs and export-time fusion can register multiple holders;
+    :meth:`ModeloptStateManager.is_converted` allows at most one.
+
+    .. note::
+        Do **not** unwrap the module here. ``PreTrainedModel.save_pretrained`` passes the same
+        ``self`` into :meth:`ModeloptStateManager.is_converted`; stripping a different object graph
+        (e.g. after ``unwrap_model``) leaves duplicate holders on ``self`` and trips the assert.
+    """
+    key = ModeloptStateManager._state_key
+
+    def _state_len(mod: nn.Module) -> int:
+        st = getattr(mod, key, None)
+        return len(st) if isinstance(st, list) else 0
+
+    def _collect_holders() -> list[nn.Module]:
+        return [m for m in model.modules() if _module_has_instance_modelopt_state(m, key)]
+
+    ver = ModeloptStateManager._state_version_key
+
+    for _ in range(128):
+        holders = _collect_holders()
+        if len(holders) <= 1:
+            break
+        keep = max(holders, key=_state_len)
+        if all(_state_len(m) == 0 for m in holders):
+            keep = holders[0]
+        for m in holders:
+            if m is not keep:
+                _merge_quantizer_state_metadata(keep, m, key)
+                _safe_remove_modelopt_state_attr(m)
+    else:
+        warnings.warn(
+            "collapse_modelopt_state_to_hf_root: exceeded iteration limit while stripping extra holders"
+        )
+
+    holders = _collect_holders()
+    if len(holders) > 1:
+        # Last resort: keep the richest state list and strip instance keys from every other module.
+        keep = max(holders, key=_state_len)
+        for m in model.modules():
+            if m is not keep and _module_has_instance_modelopt_state(m, key):
+                _merge_quantizer_state_metadata(keep, m, key)
+                _safe_remove_modelopt_state_attr(m)
+        holders = _collect_holders()
+
+    if len(holders) != 1:
+        if len(holders) > 1:
+            warnings.warn(
+                f"collapse_modelopt_state_to_hf_root: still {len(holders)} state holders after collapse"
+            )
+        return
+
+    holder = holders[0]
+    if holder is model:
+        return
+
+    # Do not use ModeloptStateManager.transfer_state_dict(holder, model): its constructor requires
+    # is_converted(holder, is_root=True), i.e. state must live on ``holder`` itself, not only on a
+    # descendant. VLMs often leave state only on inner blocks—copy onto the HF root manually.
+    st = getattr(holder, key, None)
+    if not isinstance(st, list):
+        warnings.warn(
+            "collapse_modelopt_state_to_hf_root: canonical holder has no valid _modelopt_state list"
+        )
+        return
+
+    _safe_remove_modelopt_state_attr(model)
+    setattr(model, key, copy.deepcopy(st))
+    setattr(model, ver, copy.deepcopy(getattr(holder, ver, [__version__])))
+    _safe_remove_modelopt_state_attr(holder)
+
+    for m in model.modules():
+        if m is not model and _module_has_instance_modelopt_state(m, key):
+            _merge_quantizer_state_metadata(model, m, key)
+            _safe_remove_modelopt_state_attr(m)
 
 
 def modelopt_state(model: nn.Module) -> dict[str, Any]:

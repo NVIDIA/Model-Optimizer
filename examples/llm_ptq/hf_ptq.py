@@ -162,6 +162,24 @@ def extract_and_prepare_language_model_from_vl(full_model):
     return None, None
 
 
+def _vl_lm_head_for_auto_quant(full_model: torch.nn.Module) -> torch.nn.Module | None:
+    """Resolve ``lm_head`` on the Hugging Face root when AutoQuantize runs on the text trunk only.
+
+    VLMs (e.g. Qwen2.5-VL) expose ``model.model.language_model`` without logits; ``lm_head`` stays
+    on ``ForConditionalGeneration`` (or under ``.model``). Score estimation needs logits from
+    ``lm_head(last_hidden_state)``.
+    """
+    h = getattr(full_model, "lm_head", None)
+    if isinstance(h, torch.nn.Module):
+        return h
+    inner = getattr(full_model, "model", None)
+    if inner is not None:
+        h = getattr(inner, "lm_head", None)
+        if isinstance(h, torch.nn.Module):
+            return h
+    return None
+
+
 def make_calib_dataloader(
     args: argparse.Namespace,
     language_model: torch.nn.Module,
@@ -249,6 +267,7 @@ def auto_quantize(
     auto_quantize_method="gradient",
     auto_quantize_score_size=128,
     auto_quantize_checkpoint=None,
+    lm_head: torch.nn.Module | None = None,
 ):
     """Auto search quantization of multiple formats."""
 
@@ -287,9 +306,37 @@ def auto_quantize(
     ), "One or more quantization formats provided are not supported for unified checkpoint export"
 
     def loss_func(output, data):
-        # For transformers AutoModelForCausalLM models, the outputs are wrapped in `CausalLMOutputWithPast`
-        # which contains the loss attribute.
-        return output.loss
+        # ``AutoModelForCausalLM`` may return ``CausalLMOutputWithPast`` with ``loss`` when ``labels`` are passed.
+        # VL paths often pass the **text trunk** only (e.g. ``Qwen2_5_VLTextModel``): ``BaseModelOutputWithPast``
+        # with ``last_hidden_state`` but no ``logits`` — apply root ``lm_head`` when provided.
+        loss = getattr(output, "loss", None)
+        if loss is not None:
+            return loss
+        logits = getattr(output, "logits", None)
+        if logits is None and isinstance(output, tuple):
+            logits = output[0]
+        if logits is None:
+            hidden = getattr(output, "last_hidden_state", None)
+            if hidden is not None and lm_head is not None:
+                logits = lm_head(hidden)
+        if logits is None:
+            raise AttributeError(
+                "AutoQuantize loss_func: output has no loss, logits, or (last_hidden_state + lm_head). "
+                f"type={type(output).__name__}, has_lm_head={lm_head is not None}."
+            )
+        labels = data.get("labels")
+        if labels is None:
+            labels = data["input_ids"].clone()
+            attn = data.get("attention_mask")
+            if attn is not None:
+                labels = labels.masked_fill(attn.to(labels.device) == 0, -100)
+        else:
+            labels = labels.to(device=logits.device, dtype=torch.long)
+        return torch.nn.functional.cross_entropy(
+            logits[:, :-1, :].contiguous().reshape(-1, logits.size(-1)),
+            labels[:, 1:].contiguous().reshape(-1),
+            ignore_index=-100,
+        )
 
     if auto_quantize_method == "gradient":
         # For gradient-based method, return full output with loss
@@ -298,7 +345,17 @@ def auto_quantize(
     elif auto_quantize_method == "kl_div":
         # For KL divergence method, return only logits
         def forward_step(model, batch):
-            return model(**batch).logits
+            out = model(**batch)
+            logits = getattr(out, "logits", None)
+            if logits is None:
+                hidden = getattr(out, "last_hidden_state", None)
+                if hidden is not None and lm_head is not None:
+                    logits = lm_head(hidden)
+            if logits is None:
+                raise AttributeError(
+                    "AutoQuantize kl_div forward_step: need logits or last_hidden_state + lm_head."
+                )
+            return logits
     else:
         raise ValueError(
             f"Invalid auto_quantize_method: {auto_quantize_method}. Must be 'gradient' or 'kl_div'"
@@ -644,11 +701,22 @@ def export_quantized(
             setattr(full_model.config, "architectures", full_model_config.architectures)
 
         start_time = time.time()
-        if (
+        use_trt_llm_export = (
             model_type in ["t5", "bart", "whisper"]
             or args.sparsity_fmt != "dense"
             or "int8_sq" in args.qformat
-        ):
+        )
+        # TensorRT-LLM config export only supports a small set of VLMs (e.g. Mllama). Qwen2.5-VL
+        # and most other multimodal stacks must use unified HF export + TRT-LLM PyTorch backend / vLLM.
+        if is_vlm and model_type != "mllama" and use_trt_llm_export:
+            warnings.warn(
+                "TensorRT-LLM structured checkpoint export is not supported for this VLM "
+                f"({type(full_model).__name__}); using unified Hugging Face export instead. "
+                "Deploy with TensorRT-LLM's PyTorch backend or vLLM as in ModelOpt HF docs."
+            )
+            use_trt_llm_export = False
+
+        if use_trt_llm_export:
             if (
                 args.inference_tensor_parallel != 1 or args.inference_pipeline_parallel != 1
             ) and args.qformat == "nvfp4_svdquant":
@@ -698,6 +766,7 @@ def export_quantized(
                     full_model,
                     export_dir=export_path,
                     extra_state_dict=mtp_state_dict,
+                    save_modelopt_state=args.save_modelopt_state,
                 )
 
         # Restore default padding and export the tokenizer as well.
@@ -932,6 +1001,7 @@ def quantize_main(
             args,
             language_model,
             calib_dataloader,
+            lm_head=_vl_lm_head_for_auto_quant(full_model),
         )
 
     else:
@@ -1237,6 +1307,15 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Export as vLLM fake-quant checkpoint (produces vllm_fq_modelopt_state.pth "
         "for use with vllm_serve_fakequant.py).",
+    )
+    parser.add_argument(
+        "--save-modelopt-state",
+        default=True,
+        action=argparse.BooleanOptionalAction,
+        help=(
+            "Write modelopt_state.pth next to the HF export so from_pretrained can restore "
+            "fake-quant / packed layouts (default: true). Use --no-save-modelopt-state to skip."
+        ),
     )
 
     args = parser.parse_args()

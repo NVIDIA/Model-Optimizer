@@ -637,6 +637,17 @@ class TensorQuantizer(nn.Module):
             amax = quant_utils.reduce_amax(inputs, axis=reduce_axis, keepdims=True).detach()
 
         amax = amax.detach() if is_torch_export_mode() else amax.data
+        # ``fake_tensor_quant`` CUDA kernels assert ``amax >= 0`` (see tensor_quant_gpu.cu).
+        # HF reload / partial ``quantizer_state`` can leave negative or non-finite amax.
+        if isinstance(amax, torch.Tensor) and not amax.is_meta and amax.dtype.is_floating_point:
+            dtype = amax.dtype
+            amax = torch.nan_to_num(
+                amax.float(),
+                nan=0.0,
+                posinf=torch.finfo(torch.float32).max,
+                neginf=0.0,
+            )
+            amax = torch.clamp(amax, min=0.0).to(dtype)
         return amax
 
     def validate_attr(
@@ -1022,6 +1033,15 @@ class TensorQuantizer(nn.Module):
         if inputs.numel() == 0:
             return inputs
 
+        # Fully bypass the quantizer when disabled: do **not** apply smoothquant pre-scale or RHT
+        # first — those can still distort activations and break downstream kernels (e.g. SDPA).
+        if self._disabled:
+            # if quantizer is disabled, we still need to track the input dtype for saving the model
+            # TODO: This is a temporary solution and needs to be removed once megatron supports
+            # non-homogeneous layers
+            self._input_dtype = inputs.dtype if hasattr(inputs, "dtype") else None
+            return inputs
+
         # Activation scaling for smoothquant
         if self.pre_quant_scale is not None:
             inputs = inputs * self.pre_quant_scale
@@ -1033,13 +1053,6 @@ class TensorQuantizer(nn.Module):
                 rotate_fp32=self.rotate_is_fp32,
                 block_size=self.rotate_block_size,
             )
-
-        if self._disabled:
-            # if quantizer is disabled, we still need to track the input dtype for saving the model
-            # TODO: This is a temporary solution and needs to be removed once megatron supports
-            # non-homogeneous layers
-            self._input_dtype = inputs.dtype if hasattr(inputs, "dtype") else None
-            return inputs
 
         if (
             not is_torch_export_mode()
