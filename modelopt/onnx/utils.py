@@ -1666,9 +1666,7 @@ def fold_qdq_scale_fp16_to_fp32_casts(onnx_model: onnx.ModelProto) -> onnx.Model
         # other ops would silently receive FP16 instead of the FP32 they requested.
         cast_output = cast_node.output[0]
         consumers = consumer_map.get(cast_output, [])
-        if not consumers or not all(
-            c.op_type in qdq_ops and i == 1 for c, i in consumers
-        ):
+        if not consumers or not all(c.op_type in qdq_ops and i == 1 for c, i in consumers):
             continue
 
         # Bypass the cast so the scale stays FP16
