@@ -122,8 +122,8 @@ def gpu(session):
 # Container: nvcr.io/nvidia/nemo:26.04 or later
 @nox.session(venv_backend="none")
 def gpu_megatron(session):
-    # nemo:26.04 has transformers 5.x but tensorrt_llm 1.2.0 which does not support it causing import errors
-    session.run("python", "-m", "pip", "uninstall", "-y", "tensorrt_llm")
+    # nemo:26.04 has transformers 5.x but system-wide installed trtllm 1.2.0 which does not support it causing import errors
+    session.run("pip", "uninstall", "-y", "tensorrt_llm")
     session.run("python", "-m", "pip", "install", "-e", ".[hf,dev-test]")
     session.run("python", "-m", "pytest", "tests/gpu_megatron", *_cov_args())
 
