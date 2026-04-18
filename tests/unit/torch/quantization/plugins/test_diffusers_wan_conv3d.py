@@ -25,7 +25,7 @@ covered by the GPU tests under ``tests/gpu/torch/quantization/kernels``.
 import pytest
 import torch
 
-pytest.importorskip("diffusers")
+pytest.importorskip("onnx")
 
 from diffusers.models.autoencoders.autoencoder_kl_wan import WanCausalConv3d
 
