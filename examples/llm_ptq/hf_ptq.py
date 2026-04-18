@@ -337,6 +337,7 @@ def auto_quantize(
             "nvfp4_mlp_only",
             "nvfp4_experts_only",
             "nvfp4_omlp_only",
+            "nvfp4_local_hessian",
             "mxfp8",
         ]
         for qformat in qformat_list
