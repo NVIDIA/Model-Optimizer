@@ -621,19 +621,20 @@ def export_hf_vllm_fq_checkpoint(
                         qstate_val["_amax"] = max_input_amax
 
         modelopt_state = mto.modelopt_state(model)
-        # ``modelopt_state`` may be stale if another mode (e.g. calibrate) ran last. Rebuild
-        # ``quantizer_state`` and strip weight-quantizer entries (same policy as
-        # ``modelopt_state_weights``). Reload synthesizes missing WQ rows with ``_disabled``.
         _check_all_weight_quantizers_disabled(model)
+        # Rebuild quantizer_state from the live model (post-disable) and strip weight-quantizer
+        # entries. Apply to every mode that carries quantizer_state so that stale entries from
+        # a calibrate pass (which also stores quantizer_state in its metadata) are cleaned up.
+        # Reload synthesizes missing WQ rows with ``_disabled`` via
+        # ``filter_modelopt_state_quantizer_state_for_model``.
         qstate = quantizer_state(model)
         for key in list(qstate):
             if is_weight_quantizer_state_key(key):
                 qstate.pop(key)
-
-        for mode_str, m_state in modelopt_state.get("modelopt_state_dict", []):
-            if mode_str == "quantize" and "metadata" in m_state:
-                m_state["metadata"]["quantizer_state"] = qstate
-                break
+        for _mode_str, m_state in modelopt_state.get("modelopt_state_dict", []):
+            md = m_state.get("metadata", {})
+            if "quantizer_state" in md:
+                md["quantizer_state"] = qstate
 
         # Per-quantizer tensor dict loaded alongside metadata on reload.
         modelopt_state["modelopt_state_weights"] = quantizer_state_dict
