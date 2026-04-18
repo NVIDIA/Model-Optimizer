@@ -28,7 +28,10 @@ import torch.nn.functional as F
 from tqdm import tqdm
 
 from modelopt.torch.opt.searcher import ForwardLoop
-from modelopt.torch.quantization.utils.activation_collector import LayerActivationCollector
+from modelopt.torch.quantization.utils.layerwise_calib import (
+    LayerActivationCollector,
+    _CheckpointState,
+)
 from modelopt.torch.utils import print_rank_0
 from modelopt.torch.utils.distributed import DistributedProcessGroup, ParallelState
 from modelopt.torch.utils.network import bind_forward_method, unpatch_forward_method
@@ -44,6 +47,7 @@ from .utils import (
     is_quantized_column_parallel_linear,
     is_quantized_linear,
     is_quantized_row_parallel_linear,
+    persistent_materialization,
     promote_nvfp4_static_quantizers,
     quantizer_attr_names,
     reduce_amax,
@@ -53,9 +57,9 @@ from .utils.calib_utils import _GPTQ_HELPER_REGISTRY, GPTQHelper
 
 __all__ = [
     "awq",
+    "layerwise_calibrate",
     "local_hessian_calibrate",
     "max_calibrate",
-    "sequential_calibrate",
     "smoothquant",
     "svdquant",
 ]
@@ -1552,21 +1556,27 @@ def svdquant(
 
 
 @torch.no_grad()
-def sequential_calibrate(
+def layerwise_calibrate(
     model: nn.Module,
     forward_loop: ForwardLoop,
     calib_func: Callable,
     **calib_kwargs,
 ):
-    """Sequential calibration - a sequential layer-by-layer calibration algorithm.
+    """Layerwise calibration - a layer-by-layer calibration algorithm.
 
     Runs the full model forward per layer but patches decoder layers with a
     skip / run / capture strategy so that inter-layer logic in parent modules
     (e.g. mask construction) executes naturally without model-specific hooks.
+
+    If ``checkpoint_dir`` is passed (via ``calib_kwargs``), per-layer checkpoints
+    are saved after each layer completes. On restart, calibration resumes from
+    the last completed layer.
     """
+    checkpoint_dir = calib_kwargs.pop("checkpoint_dir", None)
+
     if forward_loop is None:
         raise ValueError(
-            "forward_loop must not be None for sequential calibration. "
+            "forward_loop must not be None for layerwise calibration. "
             "Please provide a valid forward_loop callable."
         )
 
@@ -1574,18 +1584,28 @@ def sequential_calibrate(
     if transformer_layers is None or len(transformer_layers) == 0:
         raise ValueError(
             "Could not find transformer layers in model. "
-            "Sequential calibration requires a model with identifiable transformer layers."
+            "Layerwise calibration requires a model with identifiable transformer layers."
         )
 
-    print_rank_0(f"Sequential calibration: Found {len(transformer_layers)} transformer layers")
+    num_layers = len(transformer_layers)
+    print_rank_0(f"Layerwise calibration: Found {num_layers} transformer layers")
+
+    ckpt = _CheckpointState.from_folder(checkpoint_dir, num_layers)
+    start_layer = ckpt.start_layer if ckpt else 0
 
     input_getter = LayerActivationCollector(model)
     input_getter._patch_all_layers(decoder_layers=transformer_layers)
 
+    resumed_inputs = ckpt.setup_resume(transformer_layers) if ckpt and start_layer > 0 else None
+
     try:
-        for layer_idx, layer in enumerate(transformer_layers):
-            print_rank_0(f"Calibrating layer {layer_idx + 1}/{len(transformer_layers)}")
-            layer_inputs = input_getter.get_input_activations(layer, forward_loop)
+        # Bootstrap: get first layer's inputs (or use resumed inputs).
+        layer_inputs = input_getter.get_first_layer_inputs(
+            start_layer, resumed_inputs, forward_loop
+        )
+
+        for layer_idx in range(start_layer, num_layers):
+            layer = transformer_layers[layer_idx]
 
             def _layer_forward_loop(m, _inputs=layer_inputs):
                 for args, kwargs_input in _inputs:
@@ -1606,14 +1626,30 @@ def sequential_calibrate(
                             kwargs_input["past_key_values"] = None
                     m(*args, **kwargs_input)
 
-            calib_func(layer, _layer_forward_loop, **calib_kwargs)
+            with persistent_materialization(layer):
+                calib_func(layer, _layer_forward_loop, **calib_kwargs)
+
+            # Run one more forward to get next layer's inputs and set
+            # output_meta on the just-calibrated layer (via "run" mode).
+            is_last = layer_idx + 1 >= num_layers
+            if not is_last:
+                next_inputs = input_getter.cache_outputs_for_next_layer_calib(layer, forward_loop)
+            else:
+                next_inputs = None
+
+            if ckpt:
+                ckpt.save(layer_idx, layer, model, transformer_layers, next_inputs)
 
             del layer_inputs
             torch.cuda.empty_cache()
+            layer_inputs = next_inputs  # noqa: F841 (used in next iteration's closure)
     finally:
         input_getter._unpatch_all_layers()
 
-    print_rank_0("Sequential calibration completed")
+    if ckpt:
+        ckpt.full_restore(transformer_layers, model)
+
+    print_rank_0("Layerwise calibration completed")
 
 
 @torch.no_grad()
@@ -1625,12 +1661,12 @@ def gptq(
 ):
     """GPTQ quantization.
 
-    Works in two modes depending on ``use_sequential`` in the config:
+    Works in two modes depending on ``layerwise`` in the config:
 
-    * **Sequential** (``use_sequential=True``): ``sequential_calibrate`` calls this
+    * **Layerwise** (``layerwise=True``): ``layerwise_calibrate`` calls this
       function once per decoder layer with updated activations, producing more
       accurate Hessian estimates.
-    * **Non-sequential** (``use_sequential=False``): called once on the full model.
+    * **Non-layerwise** (``layerwise=False``): called once on the full model.
       All layers are quantized in parallel from the original activations.
 
     Per-module steps:
@@ -1643,7 +1679,7 @@ def gptq(
 
     Args:
         model: The module to quantize — either the full model or a single decoder
-            layer when invoked by ``sequential_calibrate``.
+            layer when invoked by ``layerwise_calibrate``.
         forward_loop: Callable that replays calibration inputs through *model*.
         perc_damp: Percentage of avg Hessian diagonal for damping (default: 0.01).
         block_size: Block size for GPTQ weight update.
@@ -1686,8 +1722,10 @@ def gptq(
         handle.cleanup()
 
     print_rank_0("Updating weights using GPTQ algorithm...")
+    name_to_module = dict(model.named_modules())
     for handle in gptq_handles.values():
-        handle.update_weights(block_size, perc_damp)
+        with enable_weight_access_and_writeback(handle.module, model, name_to_module):
+            handle.update_weights(block_size, perc_damp)
         handle.free()
     del gptq_handles
 

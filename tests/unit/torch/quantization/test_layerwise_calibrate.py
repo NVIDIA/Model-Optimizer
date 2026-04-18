@@ -13,16 +13,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for sequential_calibrate and LayerActivationCollector."""
+"""Unit tests for layerwise_calibrate and LayerActivationCollector."""
 
+import copy
 from collections import deque
 
 import pytest
 import torch
 import torch.nn as nn
 
-from modelopt.torch.quantization.model_calib import sequential_calibrate
-from modelopt.torch.quantization.utils.activation_collector import LayerActivationCollector
+import modelopt.torch.quantization as mtq
+from modelopt.torch.quantization.model_calib import layerwise_calibrate
+from modelopt.torch.quantization.nn import TensorQuantizer
+from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector, _SkipLayer
 
 
 class _DecoderBlock(nn.Module):
@@ -60,7 +63,7 @@ class _SimpleTransformerModel(nn.Module):
 
 
 class _FlatMLP(nn.Module):
-    """No decoder-layer structure -- should be rejected by sequential_calibrate."""
+    """No decoder-layer structure -- should be rejected by layerwise_calibrate."""
 
     def __init__(self, dim=16):
         super().__init__()
@@ -180,7 +183,7 @@ def test_collector_forward_is_restored_after_collection(monkeypatch):
     collector._unpatch_all_layers()
 
     assert not hasattr(model, "_original_forward")
-    assert not hasattr(model.layers[0], "_seq_calib")
+    assert not hasattr(model.layers[0], "_layerwise_calib")
     assert not hasattr(model.layers[0], "_original_forward")
 
 
@@ -201,38 +204,38 @@ def test_collector_cleanup_on_forward_loop_error(monkeypatch):
         collector._unpatch_all_layers()
 
     assert not hasattr(model, "_original_forward")
-    assert not hasattr(model.layers[0], "_seq_calib")
+    assert not hasattr(model.layers[0], "_layerwise_calib")
 
 
-# sequential_calibrate tests
-def test_seq_calib_raises_on_none_forward_loop(monkeypatch):
+# layerwise_calibrate tests
+def test_layerwise_calib_raises_on_none_forward_loop(monkeypatch):
     _register_test_discoverer(monkeypatch)
     model, data = _make_model_and_data(n_layers=2)
     with pytest.raises(ValueError, match="forward_loop must not be None"):
-        sequential_calibrate(
+        layerwise_calibrate(
             model,
             forward_loop=None,
             calib_func=lambda *a, **kw: None,
         )
 
 
-def test_seq_calib_raises_on_unrecognized_model():
+def test_layerwise_calib_raises_on_unrecognized_model():
     model = _FlatMLP()
     with pytest.raises(ValueError, match="Could not find transformer layers"):
-        sequential_calibrate(
+        layerwise_calibrate(
             model,
             forward_loop=lambda m: m(torch.randn(2, 16)),
             calib_func=lambda *a, **kw: None,
         )
 
 
-def test_seq_calib_empty_forward_loop_raises(monkeypatch):
-    """If forward_loop feeds no data, sequential_calibrate raises RuntimeError."""
+def test_layerwise_calib_empty_forward_loop_raises(monkeypatch):
+    """If forward_loop feeds no data, layerwise_calibrate raises RuntimeError."""
     _register_test_discoverer(monkeypatch)
     model = _SimpleTransformerModel(n_layers=2, dim=16)
 
     with pytest.raises(RuntimeError, match="collected no inputs during forward_loop"):
-        sequential_calibrate(
+        layerwise_calibrate(
             model,
             forward_loop=lambda m: None,
             calib_func=lambda *a, **kw: None,
@@ -344,11 +347,11 @@ def test_run_layer_populates_output_meta(monkeypatch):
     try:
         # Layer 0 starts as capture — no output_meta yet
         collector.get_input_activations(model.layers[0], forward_loop)
-        assert model.layers[0]._seq_calib.output_meta is None
+        assert model.layers[0]._layerwise_calib.output_meta is None
 
         # Calibrating layer 1 puts layer 0 into run, which sets output_meta
         collector.get_input_activations(model.layers[1], forward_loop)
-        meta = model.layers[0]._seq_calib.output_meta
+        meta = model.layers[0]._layerwise_calib.output_meta
         assert meta is not None
         assert meta[0] == "tuple", "Tuple-returning layer should produce tuple metadata"
     finally:
@@ -375,11 +378,11 @@ def test_run_layer_consumes_cached_inputs(monkeypatch):
         # Before calibrating layer 2, layer 1 transitions to run.
         # Its cached_inputs should be populated from collected_inputs.
         collector._set_layer_states(2)
-        assert len(model.layers[1]._seq_calib.cached_inputs) == n_batches
+        assert len(model.layers[1]._layerwise_calib.cached_inputs) == n_batches
 
         # After the forward loop, all cached inputs should be consumed
         forward_loop(model)
-        assert len(model.layers[1]._seq_calib.cached_inputs) == 0
+        assert len(model.layers[1]._layerwise_calib.cached_inputs) == 0
     finally:
         collector._unpatch_all_layers()
 
@@ -399,24 +402,24 @@ def test_set_layer_states_transitions(monkeypatch):
     try:
 
         def modes():
-            return [model.layers[i]._seq_calib.mode for i in range(5)]
+            return [model.layers[i]._layerwise_calib.mode for i in range(5)]
 
         collector._set_layer_states(0)
         assert modes() == ["capture", "original", "original", "original", "original"]
 
-        model.layers[0]._seq_calib.collected_inputs = [fake_inp]
+        model.layers[0]._layerwise_calib.collected_inputs = [fake_inp]
         collector._set_layer_states(1)
         assert modes() == ["run", "capture", "original", "original", "original"]
 
-        model.layers[1]._seq_calib.collected_inputs = [fake_inp]
+        model.layers[1]._layerwise_calib.collected_inputs = [fake_inp]
         collector._set_layer_states(2)
         assert modes() == ["skip", "run", "capture", "original", "original"]
 
-        model.layers[2]._seq_calib.collected_inputs = [fake_inp]
+        model.layers[2]._layerwise_calib.collected_inputs = [fake_inp]
         collector._set_layer_states(3)
         assert modes() == ["skip", "skip", "run", "capture", "original"]
 
-        model.layers[3]._seq_calib.collected_inputs = [fake_inp]
+        model.layers[3]._layerwise_calib.collected_inputs = [fake_inp]
         collector._set_layer_states(4)
         assert modes() == ["skip", "skip", "skip", "run", "capture"]
     finally:
@@ -446,8 +449,8 @@ def test_run_asserts_on_empty_cached_inputs(monkeypatch):
     collector = LayerActivationCollector(model)
     collector._patch_all_layers()
     try:
-        model.layers[0]._seq_calib.mode = "run"
-        model.layers[0]._seq_calib.cached_inputs = deque()
+        model.layers[0]._layerwise_calib.mode = "run"
+        model.layers[0]._layerwise_calib.cached_inputs = deque()
 
         with pytest.raises(AssertionError, match="no cached inputs to replay"):
             model(torch.randn(2, 16))
@@ -455,8 +458,8 @@ def test_run_asserts_on_empty_cached_inputs(monkeypatch):
         collector._unpatch_all_layers()
 
 
-def test_cleanup_removes_seq_calib_attr(monkeypatch):
-    """After unpatch, no layer should have the _seq_calib attribute."""
+def test_cleanup_removes_layerwise_calib_attr(monkeypatch):
+    """After unpatch, no layer should have the _layerwise_calib attribute."""
     _register_test_discoverer(monkeypatch)
     model = _TupleUnpackingModel(n_layers=3, dim=16)
     data = [torch.randn(2, 16)]
@@ -472,7 +475,9 @@ def test_cleanup_removes_seq_calib_attr(monkeypatch):
     collector._unpatch_all_layers()
 
     for i, layer in enumerate(model.layers):
-        assert not hasattr(layer, "_seq_calib"), f"Layer {i} still has _seq_calib after cleanup"
+        assert not hasattr(layer, "_layerwise_calib"), (
+            f"Layer {i} still has _layerwise_calib after cleanup"
+        )
         assert not hasattr(layer, "_original_forward"), (
             f"Layer {i} still has _original_forward after cleanup"
         )
@@ -517,15 +522,17 @@ def test_skip_output_meta_not_shared_across_heterogeneous_layers(monkeypatch):
         for d in data:
             m(d)
 
+    originals = list(model.layers)
     collector = LayerActivationCollector(model)
     collector._patch_all_layers()
     try:
-        for layer in model.layers:
+        for layer in originals:
             collector.get_input_activations(layer, forward_loop)
 
-        # After full calibration, layers 0 and 1 have been through 'run' and have output_meta
-        meta_0 = model.layers[0]._seq_calib.output_meta
-        meta_1 = model.layers[1]._seq_calib.output_meta
+        # After full calibration, layers 0 and 1 have been through 'run' and have output_meta.
+        # Access via originals since skip-position entries are now _SkipLayer dummies.
+        meta_0 = originals[0]._layerwise_calib.output_meta
+        meta_1 = originals[1]._layerwise_calib.output_meta
         assert meta_0 is not None
         assert meta_1 is not None
         # SmallBlock returns 3-element tuple, BigBlock returns 1-element tuple
@@ -533,3 +540,182 @@ def test_skip_output_meta_not_shared_across_heterogeneous_layers(monkeypatch):
         assert len(meta_1[1]) == 1
     finally:
         collector._unpatch_all_layers()
+
+
+# ---------------------------------------------------------------------------
+# _SkipLayer swap / restore tests
+# ---------------------------------------------------------------------------
+
+
+def test_skip_layers_replaced_with_dummy(monkeypatch):
+    """After calibrating enough layers, skip-position entries must be _SkipLayer with no params."""
+    _register_test_discoverer(monkeypatch)
+    model = _TupleUnpackingModel(n_layers=5, dim=16)
+    data = [torch.randn(2, 16) for _ in range(2)]
+
+    def forward_loop(m):
+        for d in data:
+            m(d)
+
+    collector = LayerActivationCollector(model)
+    collector._patch_all_layers()
+    try:
+        for layer in list(model.layers):
+            collector.get_input_activations(layer, forward_loop)
+
+        # Layers 0..2 should be dummies (swapped when calibrating layers 2..4)
+        for i in range(3):
+            assert isinstance(model.layers[i], _SkipLayer), f"Layer {i} should be _SkipLayer"
+            assert list(model.layers[i].parameters()) == [], (
+                f"Layer {i} dummy should have no params"
+            )
+        # Layers 3 (run) and 4 (original) remain real
+        for i in range(3, 5):
+            assert not isinstance(model.layers[i], _SkipLayer), f"Layer {i} should still be real"
+    finally:
+        collector._unpatch_all_layers()
+
+
+def test_cleanup_restores_original_layers(monkeypatch):
+    """After _unpatch_all_layers, all ModuleList entries must be the original modules."""
+    _register_test_discoverer(monkeypatch)
+    model = _TupleUnpackingModel(n_layers=5, dim=16)
+    originals = list(model.layers)
+    data = [torch.randn(2, 16)]
+
+    def forward_loop(m):
+        for d in data:
+            m(d)
+
+    collector = LayerActivationCollector(model)
+    collector._patch_all_layers()
+    for layer in originals:
+        collector.get_input_activations(layer, forward_loop)
+    collector._unpatch_all_layers()
+
+    for i, orig in enumerate(originals):
+        assert model.layers[i] is orig, f"Layer {i} not restored to original after cleanup"
+        assert not hasattr(orig, "_layerwise_calib"), f"Layer {i} still has _layerwise_calib"
+
+
+def _int8_layerwise_config(algorithm: dict) -> dict:
+    """Start from the shipped INT8 config and enable layerwise in the algorithm block.
+
+    Using a real shipped config guarantees the same include/exclude rules
+    production PTQ relies on, so algorithm dispatch matches real usage.
+    """
+    cfg = copy.deepcopy(mtq.INT8_SMOOTHQUANT_CFG)
+    cfg["algorithm"] = algorithm
+    return cfg
+
+
+def _awq_layerwise_config() -> dict:
+    """INT4 weight-only AWQ config sized for the _DecoderBlock test model."""
+    cfg = copy.deepcopy(mtq.INT4_AWQ_CFG)
+    # Resize AWQ block to fit dim=16 hidden.
+    for entry in cfg["quant_cfg"]:
+        if entry.get("quantizer_name") == "*weight_quantizer":
+            entry.setdefault("cfg", {})["block_sizes"] = {-1: 8, "type": "static"}
+    cfg["algorithm"] = {"method": "awq_lite", "alpha_step": 0.5, "layerwise": True}
+    return cfg
+
+
+def _svdquant_layerwise_config() -> dict:
+    """SVDQuant config sized for the _DecoderBlock test model."""
+    cfg = copy.deepcopy(mtq.INT4_AWQ_CFG)
+    for entry in cfg["quant_cfg"]:
+        if entry.get("quantizer_name") == "*weight_quantizer":
+            entry.setdefault("cfg", {})["block_sizes"] = {-1: 8, "type": "static"}
+    cfg["algorithm"] = {"method": "svdquant", "lowrank": 4, "layerwise": True}
+    return cfg
+
+
+def test_mtq_quantize_layerwise_e2e_max(monkeypatch):
+    """End-to-end: mtq.quantize with layerwise=True produces populated amax values.
+
+    ``max`` is the representative algorithm for the layerwise happy path because
+    every other algorithm seeds amax via max_calibrate first — if max works, the
+    shared skip/run/capture machinery is sound. Other algorithms are covered by
+    the dispatch-only test below to avoid hardware requirements (e.g. gptq needs
+    CUDA) or unnecessary duplication.
+    """
+    _register_test_discoverer(monkeypatch)
+    config = _int8_layerwise_config({"method": "max", "layerwise": True})
+
+    torch.manual_seed(0)
+    model = _SimpleTransformerModel(n_layers=3, dim=16)
+    calib_data = [torch.randint(0, 32, (2, 8)) for _ in range(2)]
+
+    def forward_loop(m):
+        for batch in calib_data:
+            m(batch)
+
+    model = mtq.quantize(model, config, forward_loop=forward_loop)
+
+    for i, layer in enumerate(model.layers):
+        assert not isinstance(layer, _SkipLayer), f"layer {i} left as _SkipLayer"
+        assert not hasattr(layer, "_layerwise_calib"), f"layer {i} leaked _layerwise_calib"
+
+    amax_count = sum(
+        1
+        for layer in model.layers
+        for module in layer.modules()
+        if (
+            isinstance(module, TensorQuantizer)
+            and module.is_enabled
+            and getattr(module, "_amax", None) is not None
+        )
+    )
+    assert amax_count > 0, "no TensorQuantizer in decoder layers had _amax populated"
+
+    with torch.no_grad():
+        model(calib_data[0])
+
+
+@pytest.mark.parametrize(
+    "algorithm",
+    ["gptq", "awq_lite", "smoothquant", "mse"],
+)
+def test_mtq_quantize_layerwise_dispatches_for_algorithm(monkeypatch, algorithm):
+    """Every layerwise-supporting algorithm must route through layerwise_calibrate.
+
+    Stubs layerwise_calibrate to a spy so the dispatch contract is checked without
+    running the algorithm's full calibration — lets ``gptq`` (CUDA-only at runtime)
+    and other expensive algorithms participate in CPU unit tests.
+    """
+    spy: dict = {}
+
+    def stub(model, forward_loop, calib_func, **kwargs):
+        spy["calib_func"] = calib_func
+        spy["kwargs"] = kwargs
+
+    monkeypatch.setattr("modelopt.torch.quantization.mode.layerwise_calibrate", stub)
+
+    if algorithm == "awq_lite":
+        config = _awq_layerwise_config()
+    else:
+        config = _int8_layerwise_config({"method": algorithm, "layerwise": True})
+
+    torch.manual_seed(0)
+    model = _SimpleTransformerModel(n_layers=2, dim=16)
+    mtq.quantize(
+        model,
+        config,
+        forward_loop=lambda m: m(torch.randint(0, 32, (2, 8))),
+    )
+
+    assert "calib_func" in spy, f"{algorithm} did not dispatch through layerwise_calibrate"
+    assert callable(spy["calib_func"])
+
+
+def test_mtq_quantize_layerwise_raises_for_unsupported_algorithm():
+    """Modes with ``_supports_layerwise = False`` must raise a clear ValueError."""
+    config = _svdquant_layerwise_config()
+    torch.manual_seed(0)
+    model = _SimpleTransformerModel(n_layers=2, dim=16)
+    with pytest.raises(ValueError, match="does not support layerwise=True"):
+        mtq.quantize(
+            model,
+            config,
+            forward_loop=lambda m: m(torch.randint(0, 32, (2, 8))),
+        )
