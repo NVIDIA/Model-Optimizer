@@ -147,6 +147,13 @@ python quantize.py \
     --extra-param merged_base_safetensor_path=./ltx-2-19b-dev-fp8.safetensors
 ```
 
+To additionally apply NVFP4 scale swizzle and padding , add:
+
+```sh
+    --extra-param enable_swizzle_layout=true \
+    --extra-param padding_strategy=row_col
+```
+
 #### Important Parameters
 
 - `percentile`: Control quantization scaling factors (amax) collecting range, meaning that we will collect the chosen amax in the range of `(n_steps * percentile)` steps. Recommendation: 1.0

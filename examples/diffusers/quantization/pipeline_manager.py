@@ -218,6 +218,9 @@ class PipelineManager:
             "fp8transformer", False
         )
         params.pop("merged_base_safetensor_path", None)
+        params.pop("enable_swizzle_layout", None)
+        params.pop("padding_strategy", None)
+        params.pop("enable_layerwise_quant_metadata", None)
 
         if not checkpoint_path:
             raise ValueError("Missing required extra_param: checkpoint_path.")

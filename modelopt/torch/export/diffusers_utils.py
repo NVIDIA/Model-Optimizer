@@ -777,6 +777,39 @@ DIFFUSION_MERGE_FUNCTIONS: dict[str, Callable] = {
 }
 
 
+def build_layerwise_quant_metadata(
+    state_dict: dict[str, torch.Tensor],
+    hf_quant_config: dict,
+) -> str:
+    """Build per-layer ``_quantization_metadata`` JSON from scale keys in state dict.
+
+    Scans the state dict for ``weight_scale`` / ``weight_scale_2`` suffixes and
+    maps each quantized layer to its quantization format.
+
+    Args:
+        state_dict: The (possibly merged) state dict with quantization scale tensors.
+        hf_quant_config: The quantization config dict (must contain ``quant_algo``).
+
+    Returns:
+        JSON string with ``format_version`` and ``layers`` mapping.
+    """
+    quant_algo = hf_quant_config.get("quant_algo", "unknown").lower()
+    layer_metadata = {}
+    for k in state_dict:
+        if k.endswith((".weight_scale", ".weight_scale_2")):
+            layer_name = k.rsplit(".", 1)[0]
+            if layer_name.endswith(".weight"):
+                layer_name = layer_name.rsplit(".", 1)[0]
+            if layer_name not in layer_metadata:
+                layer_metadata[layer_name] = {"format": quant_algo}
+    return json.dumps(
+        {
+            "format_version": "1.0",
+            "layers": layer_metadata,
+        }
+    )
+
+
 def merge_diffusion_checkpoint(
     state_dict: dict[str, torch.Tensor],
     merged_base_safetensor_path: str,
@@ -786,8 +819,8 @@ def merge_diffusion_checkpoint(
     """Merge transformer weights with a base checkpoint and build ComfyUI metadata.
 
     Dispatches to the model-specific merge function in ``DIFFUSION_MERGE_FUNCTIONS``
-    and, when ``hf_quant_config`` is provided, embeds ``quantization_config`` and
-    per-layer ``_quantization_metadata`` in the safetensors metadata for ComfyUI.
+    and, when ``hf_quant_config`` is provided, embeds ``quantization_config`` in the
+    safetensors metadata for ComfyUI.
 
     Args:
         state_dict: The transformer state dict (already on CPU).
@@ -795,8 +828,8 @@ def merge_diffusion_checkpoint(
             containing all components (transformer, VAE, vocoder, etc.),
             e.g. ``"path/to/ltx-2-19b-dev.safetensors"``.
         model_type: Key into ``DIFFUSION_MERGE_FUNCTIONS`` for the model-specific merge.
-        hf_quant_config: If provided, embed quantization config and per-layer
-            ``_quantization_metadata`` in the returned metadata dict.
+        hf_quant_config: If provided, embed quantization config in the returned
+            metadata dict.
 
     Returns:
         Tuple of (merged_state_dict, metadata) where *metadata* is the base checkpoint's
@@ -808,23 +841,123 @@ def merge_diffusion_checkpoint(
     if hf_quant_config is not None:
         metadata["quantization_config"] = json.dumps(hf_quant_config)
 
-        quant_algo = hf_quant_config.get("quant_algo", "unknown").lower()
-        layer_metadata = {}
-        for k in merged_state_dict:
-            if k.endswith((".weight_scale", ".weight_scale_2")):
-                layer_name = k.rsplit(".", 1)[0]
-                if layer_name.endswith(".weight"):
-                    layer_name = layer_name.rsplit(".", 1)[0]
-                if layer_name not in layer_metadata:
-                    layer_metadata[layer_name] = {"format": quant_algo}
-        metadata["_quantization_metadata"] = json.dumps(
-            {
-                "format_version": "1.0",
-                "layers": layer_metadata,
-            }
+    return merged_state_dict, metadata
+
+
+def _find_nvfp4_layers(state_dict: dict[str, torch.Tensor]) -> set[str]:
+    """Find all NVFP4 layer prefixes in a state dict.
+
+    A layer is NVFP4 if it has ``weight`` (uint8), ``weight_scale`` (float8_e4m3fn),
+    and ``weight_scale_2`` (float32) entries.
+    """
+    layers: set[str] = set()
+    for key in state_dict:
+        if key.endswith(".weight_scale_2"):
+            layer = key[: -len(".weight_scale_2")]
+            w_key = f"{layer}.weight"
+            s_key = f"{layer}.weight_scale"
+            if s_key not in state_dict or w_key not in state_dict:
+                continue
+            if (
+                state_dict[w_key].dtype == torch.uint8
+                and state_dict[s_key].dtype == torch.float8_e4m3fn
+            ):
+                layers.add(layer)
+    return layers
+
+
+def pad_nvfp4_weights(
+    state_dict: dict[str, torch.Tensor],
+    padding_strategy: str = "row",
+) -> dict[str, torch.Tensor]:
+    """Pad NVFP4 weight and scale tensors so dimensions are multiples of 16.
+
+    Args:
+        state_dict: The state dict to pad (modified in-place and returned).
+        padding_strategy: ``"row"`` (default) pads only rows to multiples of 16;
+            ``"row_col"`` pads both rows and columns.
+    """
+    if padding_strategy not in ("row", "row_col"):
+        raise ValueError(f"padding_strategy must be 'row' or 'row_col', got '{padding_strategy}'")
+
+    def _roundup(a: int, b: int) -> int:
+        return ((a + b - 1) // b) * b
+
+    nvfp4_layers = _find_nvfp4_layers(state_dict)
+    padded_count = 0
+
+    for layer in sorted(nvfp4_layers):
+        w_key = f"{layer}.weight"
+        s_key = f"{layer}.weight_scale"
+
+        weight = state_dict[w_key]
+        scale = state_dict[s_key]
+
+        rows, cols_w = weight.shape
+        pad_r = _roundup(rows, 16) - rows
+        pad_c_w = (_roundup(cols_w, 16) - cols_w) if padding_strategy == "row_col" else 0
+        pad_c_s = (
+            (_roundup(scale.shape[1], 16) - scale.shape[1]) if padding_strategy == "row_col" else 0
         )
 
-    return merged_state_dict, metadata
+        if pad_r > 0 or pad_c_w > 0 or pad_c_s > 0:
+            state_dict[w_key] = torch.nn.functional.pad(weight, (0, pad_c_w, 0, pad_r))
+            state_dict[s_key] = torch.nn.functional.pad(scale, (0, pad_c_s, 0, pad_r))
+            padded_count += 1
+
+    return state_dict
+
+
+def swizzle_nvfp4_scales(
+    state_dict: dict[str, torch.Tensor],
+) -> dict[str, torch.Tensor]:
+    """Swizzle NVFP4 block scales to cuBLAS 2-D tiled layout.
+
+    Converts the flat ``weight_scale`` tensors ``[rows, cols // 16]`` produced by
+    ModelOpt into the cuBLAS 2-D block-scaling-factors layout.
+
+    Reference: https://docs.nvidia.com/cuda/cublas/index.html#d-block-scaling-factors-layout
+
+    Note: Weights and scales should be padded *before* calling this function
+    (see :func:`pad_nvfp4_weights`).
+
+    Args:
+        state_dict: The state dict to transform (modified in-place and returned).
+    """
+
+    def _ceil_div(a: int, b: int) -> int:
+        return (a + b - 1) // b
+
+    def _to_blocked(input_matrix: torch.Tensor) -> torch.Tensor:
+        """Rearrange scale matrix to cuBLAS 2-D block-scaling-factors layout.
+
+        Note: rows are padded to multiples of 128 for cuBLAS alignment, so the
+        output shape may differ from the input (e.g. (16, 4) -> (128, 4)).
+        """
+        rows, cols = input_matrix.shape
+        n_row_blocks = _ceil_div(rows, 128)
+        n_col_blocks = _ceil_div(cols, 4)
+        padded_rows = n_row_blocks * 128
+        padded_cols = n_col_blocks * 4
+        padded = input_matrix
+        if (rows, cols) != (padded_rows, padded_cols):
+            padded = torch.zeros(
+                (padded_rows, padded_cols),
+                device=input_matrix.device,
+                dtype=input_matrix.dtype,
+            )
+            padded[:rows, :cols] = input_matrix
+        blocks = padded.view(n_row_blocks, 128, n_col_blocks, 4).permute(0, 2, 1, 3)
+        rearranged = blocks.reshape(-1, 4, 32, 4).transpose(1, 2).reshape(-1, 32, 16)
+        return rearranged.reshape(padded_rows, padded_cols)
+
+    nvfp4_layers = _find_nvfp4_layers(state_dict)
+
+    for layer in sorted(nvfp4_layers):
+        s_key = f"{layer}.weight_scale"
+        state_dict[s_key] = _to_blocked(state_dict[s_key].to(torch.float8_e4m3fn))
+
+    return state_dict
 
 
 def get_diffusion_model_type(pipe: Any) -> str:

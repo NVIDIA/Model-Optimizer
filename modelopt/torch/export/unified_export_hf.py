@@ -28,7 +28,10 @@ from typing import Any
 
 import torch
 import torch.nn as nn
+from safetensors import safe_open
 from safetensors.torch import save_file
+
+from .diffusers_utils import build_layerwise_quant_metadata, pad_nvfp4_weights, swizzle_nvfp4_scales
 
 try:
     import diffusers
@@ -121,46 +124,129 @@ def _is_enabled_quantizer(quantizer):
 def _save_component_state_dict_safetensors(
     component: nn.Module,
     component_export_dir: Path,
-    merged_base_safetensor_path: str | None = None,
-    hf_quant_config: dict | None = None,
-    model_type: str | None = None,
 ) -> None:
-    """Save component state dict as safetensors with optional base checkpoint merge.
+    """Save component state dict as a plain safetensors file.
 
     Args:
         component: The nn.Module to save.
         component_export_dir: Directory to save model.safetensors and config.json.
-        merged_base_safetensor_path: If provided, merge the exported transformer weights
-            with non-transformer components (VAE, vocoder, text encoders, etc.) from this
-            base safetensors file and add quantization metadata to produce a single-file
-            checkpoint compatible with ComfyUI. This should be the path to a full base
-            model ``.safetensors`` file, e.g. ``"path/to/ltx-2-19b-dev.safetensors"``.
-        hf_quant_config: If provided, embed quantization config in safetensors metadata
-            and per-layer _quantization_metadata for ComfyUI.
-        model_type: Key into ``DIFFUSION_MERGE_FUNCTIONS`` for the model-specific merge.
-            Required when ``merged_base_safetensor_path`` is not None.
     """
     cpu_state_dict = {k: v.detach().contiguous().cpu() for k, v in component.state_dict().items()}
-    metadata: dict[str, str] = {}
-    metadata_full: dict[str, str] = {}
-
-    if merged_base_safetensor_path is not None and model_type is not None:
-        cpu_state_dict, metadata_full = merge_diffusion_checkpoint(
-            cpu_state_dict, merged_base_safetensor_path, model_type, hf_quant_config
-        )
-
-    metadata["_export_format"] = "safetensors_state_dict"
-    metadata["_class_name"] = type(component).__name__
-    metadata_full.update(metadata)
+    metadata = {
+        "_export_format": "safetensors_state_dict",
+        "_class_name": type(component).__name__,
+    }
 
     save_file(
         cpu_state_dict,
         str(component_export_dir / "model.safetensors"),
-        metadata=metadata_full if merged_base_safetensor_path is not None else None,
+        metadata=metadata,
     )
 
     with open(component_export_dir / "config.json", "w") as f:
         json.dump(metadata, f, indent=4)
+
+
+def _postprocess_safetensors(
+    export_dir: Path,
+    pipe: Any | None = None,
+    hf_quant_config: dict | None = None,
+    **kwargs,
+) -> None:
+    """Post-process saved safetensors files for deployment compatibility.
+
+    Loads each ``.safetensors`` file in *export_dir* and applies all requested
+    transformations in order, then re-saves in-place with updated metadata:
+
+    1. **Merge** with base checkpoint — combines quantized transformer weights with
+       non-transformer components (VAE, vocoder, text encoders) from a base
+       ``.safetensors`` file to produce a single-file checkpoint (e.g., for ComfyUI).
+    2. **Pad** NVFP4 weight/scale tensors — ensures dimensions are multiples of 16
+       for hardware alignment requirements.
+    3. **Swizzle** NVFP4 block scales — rearranges from flat layout to cuBLAS 2-D
+       block-scaling-factors tiled layout for optimized inference.
+    4. **Inject metadata** — embeds ``quantization_config`` and per-layer
+       ``_quantization_metadata`` so inference runtimes can detect and handle
+       quantized layers.
+
+    Args:
+        export_dir: Directory containing the saved ``.safetensors`` file(s).
+        pipe: The diffusion pipeline / model.  Used to infer the model type
+            (via :func:`get_diffusion_model_type`) when
+            ``merged_base_safetensor_path`` is set.
+        hf_quant_config: Quantization config dict to embed in metadata.
+        **kwargs: Runtime-specific keyword arguments:
+            merged_base_safetensor_path (str, optional): When provided, merges
+                the exported transformer weights with non-transformer components
+                (VAE, vocoder, text encoders, etc.) from this base safetensors
+                file to produce a single-file checkpoint compatible with ComfyUI.
+                Value should be the path to a full base model ``.safetensors``
+                file (e.g. ``"path/to/ltx-2-19b-dev.safetensors"``).
+            enable_layerwise_quant_metadata (bool, optional): When True
+                (default), includes per-layer ``_quantization_metadata`` in the
+                checkpoint metadata so that inference runtimes (e.g., ComfyUI)
+                can identify which layers are quantized and in what format. Set
+                to False to skip.
+            enable_swizzle_layout (bool, optional): When True, rearranges NVFP4
+                block scales from ModelOpt's flat layout to cuBLAS 2-D tiled
+                layout. Required for runtimes that consume cuBLAS block-scaled
+                GEMM (e.g., comfy_kitchen). Defaults to False.
+            padding_strategy (str | None, optional): Padding strategy for NVFP4
+                weight and scale tensors. ``"row"`` pads rows to multiples of
+                16 (columns assumed already aligned). ``"row_col"`` pads both
+                dimensions. ``None`` (default) disables padding. Independent of
+                ``enable_swizzle_layout``.
+
+    """
+    merged_base_safetensor_path: str | None = kwargs.get("merged_base_safetensor_path")
+    enable_layerwise_quant_metadata: bool = kwargs.get("enable_layerwise_quant_metadata", True)
+    enable_swizzle_layout: bool = kwargs.get("enable_swizzle_layout", False)
+    padding_strategy: str | None = kwargs.get("padding_strategy")
+
+    safetensor_files = sorted(export_dir.glob("*.safetensors"))
+    if not safetensor_files:
+        return
+
+    if list(export_dir.glob("*.safetensors.index.json")) and (
+        merged_base_safetensor_path is not None or enable_layerwise_quant_metadata
+    ):
+        raise NotImplementedError(
+            "Post-processing sharded safetensors is not supported. "
+            "Export with a larger max_shard_size or disable merge/metadata options."
+        )
+
+    model_type: str | None = None
+    if merged_base_safetensor_path is not None:
+        if pipe is None:
+            raise ValueError("`pipe` must be provided when `merged_base_safetensor_path` is set.")
+        model_type = get_diffusion_model_type(pipe)
+
+    for sf_path in safetensor_files:
+        with safe_open(str(sf_path), framework="pt") as f:
+            metadata = dict(f.metadata() or {})
+            sd = {k: f.get_tensor(k).clone() for k in f.keys()}  # noqa: SIM118
+
+        if merged_base_safetensor_path is not None and model_type is not None:
+            sd, base_metadata = merge_diffusion_checkpoint(
+                sd, merged_base_safetensor_path, model_type, hf_quant_config=None
+            )
+            base_metadata.update(metadata)
+            metadata = base_metadata
+
+        if padding_strategy is not None:
+            sd = pad_nvfp4_weights(sd, padding_strategy)
+
+        if enable_swizzle_layout:
+            sd = swizzle_nvfp4_scales(sd)
+
+        if hf_quant_config is not None:
+            metadata["quantization_config"] = json.dumps(hf_quant_config)
+            if enable_layerwise_quant_metadata:
+                metadata["_quantization_metadata"] = build_layerwise_quant_metadata(
+                    sd, hf_quant_config
+                )
+
+        save_file(sd, str(sf_path), metadata=metadata)
 
 
 def _collect_shared_input_modules(
@@ -890,8 +976,8 @@ def _export_diffusers_checkpoint(
     dtype: torch.dtype | None,
     export_dir: Path,
     components: list[str] | None,
-    merged_base_safetensor_path: str | None = None,
     max_shard_size: int | str = "10GB",
+    **kwargs,
 ) -> None:
     """Internal: Export diffusion(-like) model/pipeline checkpoint.
 
@@ -905,14 +991,11 @@ def _export_diffusers_checkpoint(
         export_dir: The directory to save the exported checkpoint.
         components: Optional list of component names to export. Only used for pipelines.
             If None, all components are exported.
-        merged_base_safetensor_path: If provided, merge the exported transformer weights
-            with non-transformer components (VAE, vocoder, text encoders, etc.) from this
-            base safetensors file and add quantization metadata to produce a single-file
-            checkpoint compatible with ComfyUI. This should be the path to a full base
-            model ``.safetensors`` file, e.g. ``"path/to/ltx-2-19b-dev.safetensors"``.
         max_shard_size: Maximum size of each shard file. If the model exceeds this size,
             it will be sharded into multiple files and a .safetensors.index.json will be
             created. Use smaller values like "5GB" or "2GB" to force sharding.
+        **kwargs: Runtime-specific post-processing options forwarded to
+            :func:`_postprocess_safetensors`. See its docstring for details.
     """
     export_dir = Path(export_dir)
 
@@ -922,9 +1005,6 @@ def _export_diffusers_checkpoint(
     if not all_components:
         warnings.warn("No exportable components found in the model.")
         return
-
-    # Resolve model type once (only needed when merging with a base checkpoint)
-    model_type = get_diffusion_model_type(pipe) if merged_base_safetensor_path else None
 
     # Separate nn.Module components for quantization-aware export
     module_components = {
@@ -981,14 +1061,17 @@ def _export_diffusers_checkpoint(
                     component.save_pretrained(component_export_dir, max_shard_size=max_shard_size)
             else:
                 with hide_quantizers_from_state_dict(component):
-                    _save_component_state_dict_safetensors(
-                        component,
-                        component_export_dir,
-                        merged_base_safetensor_path,
-                        hf_quant_config,
-                        model_type,
-                    )
-            # Step 7: Update config.json with quantization info
+                    _save_component_state_dict_safetensors(component, component_export_dir)
+
+            # Step 7: Post-process — merge, metadata, padding, swizzle
+            _postprocess_safetensors(
+                component_export_dir,
+                pipe,
+                hf_quant_config=hf_quant_config,
+                **kwargs,
+            )
+
+            # Step 8: Update config.json with quantization info
             if hf_quant_config is not None:
                 config_path = component_export_dir / "config.json"
                 if config_path.exists():
@@ -1001,12 +1084,7 @@ def _export_diffusers_checkpoint(
         elif hasattr(component, "save_pretrained"):
             component.save_pretrained(component_export_dir, max_shard_size=max_shard_size)
         else:
-            _save_component_state_dict_safetensors(
-                component,
-                component_export_dir,
-                merged_base_safetensor_path,
-                model_type=model_type,
-            )
+            _save_component_state_dict_safetensors(component, component_export_dir)
 
         print(f"  Saved to: {component_export_dir}")
 
@@ -1162,15 +1240,10 @@ def export_hf_checkpoint(
             to export. If None, all quantized components are exported.
         extra_state_dict: Extra state dictionary to add to the exported model.
         max_shard_size: Maximum size of each safetensors shard file. Defaults to "10GB".
-        **kwargs: Internal-only keyword arguments. Supported key: merged_base_safetensor_path
-            (str, optional). When provided, merges the exported diffusion transformer
-            weights with non-transformer components (VAE, vocoder, text encoders, etc.)
-            from this base safetensors file to produce a single-file checkpoint
-            compatible with ComfyUI. Value should be the path to a full base model
-            ``.safetensors`` file (e.g. ``"path/to/ltx-2-19b-dev.safetensors"``).
-            Only used for diffusion model exports.
+        **kwargs: Runtime-specific post-processing options forwarded to
+            :func:`_postprocess_safetensors` for diffusion model exports.
+            See its docstring for supported keys.
     """
-    merged_base_safetensor_path: str | None = kwargs.get("merged_base_safetensor_path")
     export_dir = Path(export_dir)
     export_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1179,7 +1252,12 @@ def export_hf_checkpoint(
         is_diffusers_obj = is_diffusers_object(model)
     if is_diffusers_obj:
         _export_diffusers_checkpoint(
-            model, dtype, export_dir, components, merged_base_safetensor_path, max_shard_size
+            model,
+            dtype,
+            export_dir,
+            components,
+            max_shard_size,
+            **kwargs,
         )
         return
 
