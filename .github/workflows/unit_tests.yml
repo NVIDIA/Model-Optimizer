@@ -32,6 +32,26 @@ jobs:
     secrets: inherit
     with:
       match_pattern: "^DCO$"
+  check-file-changes:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    outputs:
+      any_changed: ${{ steps.changed.outputs.any_changed }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Check for changes in test-relevant paths
+        id: changed
+        uses: step-security/changed-files@v46.0.5
+        with:
+          files: |
+            .github/workflows/unit_tests.yml
+            modelopt/**
+            noxfile.py
+            pyproject.toml
+            tests/unit/**
+            tools/launcher/**
   linux:
     needs: [check-dco]
     runs-on: ubuntu-latest
@@ -52,8 +72,8 @@ jobs:
           fail_ci_if_error: true
           verbose: true
   windows:
-    if: github.event_name == 'pull_request'
-    needs: [linux]
+    if: github.event_name == 'pull_request' && needs.check-file-changes.outputs.any_changed == 'true'
+    needs: [linux, check-file-changes]
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
@@ -63,53 +83,46 @@ jobs:
           python-version: "3.12"
       - name: Run unit tests (without coverage)
         run: pip install nox uv && nox -s "unit-3.12(torch_211, tf_latest)"
-  multi-py:
-    if: github.event_name == 'pull_request'
-    needs: [linux]
+  multi-version:
+    if: github.event_name == 'pull_request' && needs.check-file-changes.outputs.any_changed == 'true'
+    needs: [linux, check-file-changes]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        py: [10, 11, 13]
+        include:
+          - {nox_session: "unit-3.10(torch_211, tf_latest)", python_version: "3.10"}
+          - {nox_session: "unit-3.11(torch_211, tf_latest)", python_version: "3.11"}
+          - {nox_session: "unit-3.13(torch_211, tf_latest)", python_version: "3.13"}
+          - {nox_session: "unit-3.12(torch_28, tf_latest)", python_version: "3.12"}
+          - {nox_session: "unit-3.12(torch_29, tf_latest)", python_version: "3.12"}
+          - {nox_session: "unit-3.12(torch_210, tf_latest)", python_version: "3.12"}
+          - {nox_session: "unit-3.12(torch_211, tf_min)", python_version: "3.12"}
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/ubuntu-setup
         with:
-          python-version: "3.${{ matrix.py }}"
+          python-version: ${{ matrix.python_version }}
       - name: Run unit tests
-        run: pip install nox uv && nox -s "unit-3.${{ matrix.py }}(torch_211, tf_latest)"
-  multi-torch:
-    if: github.event_name == 'pull_request'
-    needs: [linux]
+        run: pip install nox uv && nox -s "${{ matrix.nox_session }}"
+  partial-install:
+    if: github.event_name == 'pull_request' && needs.check-file-changes.outputs.any_changed == 'true'
+    needs: [linux, check-file-changes]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        torch: [28, 29, 210]
+        test-env: [onnx, torch]
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/ubuntu-setup
       - name: Run unit tests
-        run: pip install nox uv && nox -s "unit-3.12(torch_${{ matrix.torch }}, tf_latest)"
-  multi-transformers:
-    if: github.event_name == 'pull_request'
-    needs: [linux]
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        tf: [min]
-    steps:
-      - uses: actions/checkout@v6
-      - uses: ./.github/actions/ubuntu-setup
-      - name: Run unit tests
-        run: pip install nox uv && nox -s "unit-3.12(torch_211, tf_min)"
+        run: pip install nox uv && nox -s "partial_unit(subset='${{ matrix.test-env }}')"
   launcher:
-    if: github.event_name == 'pull_request'
-    needs: [linux]
+    if: github.event_name == 'pull_request' && needs.check-file-changes.outputs.any_changed == 'true'
+    needs: [linux, check-file-changes]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -124,33 +137,18 @@ jobs:
           uv venv .venv
           uv pip install -e . pytest
           uv run python3 -m pytest -v
-  partial-install:
-    if: github.event_name == 'pull_request'
-    needs: [linux]
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        test-env: [onnx, torch]
-    steps:
-      - uses: actions/checkout@v6
-      - uses: ./.github/actions/ubuntu-setup
-      - name: Run unit tests
-        run: pip install nox uv && nox -s "partial_unit(subset='${{ matrix.test-env }}')"
   unit-pr-required-check:
     # Run even if some jobs are skipped
     if: ${{ github.event_name == 'pull_request' && always() }}
-    needs: [linux, windows, multi-py, multi-torch, multi-transformers, partial-install, launcher]
+    needs: [check-file-changes, linux, windows, multi-version, partial-install, launcher]
     runs-on: ubuntu-latest
     steps:
       - name: Required unit tests did not succeed
         if: >-
-          ${{ needs.linux.result != 'success' ||
-          needs.windows.result != 'success' ||
-          needs.multi-py.result != 'success' ||
-          needs.multi-torch.result != 'success' ||
-          needs.multi-transformers.result != 'success' ||
-          needs.partial-install.result != 'success' ||
-          needs.launcher.result != 'success' }}
+          ${{ needs.linux.result != 'success' || (needs.check-file-changes.outputs.any_changed == 'true' && (
+            needs.windows.result != 'success' ||
+            needs.multi-version.result != 'success' ||
+            needs.partial-install.result != 'success' ||
+            needs.launcher.result != 'success'
+          )) }}
         run: exit 1

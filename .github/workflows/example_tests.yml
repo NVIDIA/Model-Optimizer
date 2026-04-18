@@ -16,52 +16,23 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  check-file-changes:
-    if: startsWith(github.ref, 'refs/heads/pull-request/')
-    runs-on: ubuntu-latest
-    outputs:
-      any_changed: ${{ steps.changed-tests.outputs.any_changed }}
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-      - id: get-pr-info
-        uses: nv-gha-runners/get-pr-info@main
-      # Get commit from main branch that is present in the PR to use as base for changed files
-      - id: calculate-merge-base
-        env:
-          PR_SHA: ${{ fromJSON(steps.get-pr-info.outputs.pr-info).head.sha }}
-          BASE_SHA: ${{ fromJSON(steps.get-pr-info.outputs.pr-info).base.sha }}
-        run: |
-          (echo -n "merge-base="; git merge-base "$BASE_SHA" "$PR_SHA") | tee --append "${GITHUB_OUTPUT}"
-      - name: Check for changes in test-relevant directories
-        id: changed-tests
-        uses: step-security/changed-files@v46.0.5
-        with:
-          base_sha: ${{ steps.calculate-merge-base.outputs.merge-base }}
-          sha: ${{ fromJSON(steps.get-pr-info.outputs.pr-info).head.sha }}
-          files: |
-            .github/workflows/example_tests.yml
-            examples/**
-            modelopt/**
-            pyproject.toml
-            tests/examples/**
-          fail_on_initial_diff_error: true
-  wait-checks:
-    needs: [check-file-changes]
-    if: needs.check-file-changes.outputs.any_changed == 'true'
-    uses: ./.github/workflows/_wait_for_checks.yml
+  pr-gate:
+    uses: ./.github/workflows/_pr_gate.yml
     permissions:
       checks: read
     secrets: inherit
     with:
-      match_pattern: "^DCO$|^linux$" # Wait for DCO and Unit tests / linux to pass
-      delay: 300s
+      files: |
+        .github/workflows/example_tests.yml
+        examples/**
+        modelopt/**
+        pyproject.toml
+        tests/examples/**
 
   ##### PyTorch Example Tests (speculative_decoding requires 26.01 image) #####
   torch-pr:
-    needs: [check-file-changes, wait-checks]
-    if: startsWith(github.ref, 'refs/heads/pull-request/') && needs.check-file-changes.outputs.any_changed == 'true'
+    needs: [pr-gate]
+    if: startsWith(github.ref, 'refs/heads/pull-request/') && needs.pr-gate.outputs.any_changed == 'true'
     strategy: &torch_strategy
       fail-fast: false
       matrix:
@@ -92,8 +63,8 @@ jobs:
 
   ##### TensorRT-LLM Example Tests #####
   trtllm-pr:
-    needs: [check-file-changes, wait-checks]
-    if: startsWith(github.ref, 'refs/heads/pull-request/') && needs.check-file-changes.outputs.any_changed == 'true'
+    needs: [pr-gate]
+    if: startsWith(github.ref, 'refs/heads/pull-request/') && needs.pr-gate.outputs.any_changed == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -122,8 +93,8 @@ jobs:
 
   ##### Megatron Example Tests #####
   megatron-pr:
-    needs: [check-file-changes, wait-checks]
-    if: startsWith(github.ref, 'refs/heads/pull-request/') && needs.check-file-changes.outputs.any_changed == 'true'
+    needs: [pr-gate]
+    if: startsWith(github.ref, 'refs/heads/pull-request/') && needs.pr-gate.outputs.any_changed == 'true'
     strategy: &nemo_strategy
       fail-fast: false
       matrix:
@@ -151,8 +122,8 @@ jobs:
 
   ##### ONNX/TensorRT Example Tests #####
   onnx-pr:
-    needs: [check-file-changes, wait-checks]
-    if: startsWith(github.ref, 'refs/heads/pull-request/') && needs.check-file-changes.outputs.any_changed == 'true'
+    needs: [pr-gate]
+    if: startsWith(github.ref, 'refs/heads/pull-request/') && needs.pr-gate.outputs.any_changed == 'true'
     strategy: &onnx_strategy
       fail-fast: false
       matrix:
@@ -180,13 +151,13 @@ jobs:
   example-pr-required-check:
     # Run even if example tests are skipped
     if: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && always() }}
-    needs: [check-file-changes, torch-pr, trtllm-pr, megatron-pr, onnx-pr]
+    needs: [pr-gate, torch-pr, trtllm-pr, megatron-pr, onnx-pr]
     runs-on: ubuntu-latest
     steps:
       - name: Required GPU tests did not succeed
         if: |
-          needs.check-file-changes.result != 'success' ||
-          (needs.check-file-changes.outputs.any_changed == 'true' && (
+          needs.pr-gate.result != 'success' ||
+          (needs.pr-gate.outputs.any_changed == 'true' && (
             needs.torch-pr.result != 'success' ||
             needs.trtllm-pr.result != 'success' ||
             needs.megatron-pr.result != 'success' ||
