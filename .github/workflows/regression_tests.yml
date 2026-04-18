@@ -32,25 +32,19 @@ jobs:
         examples/dataset/**
         modelopt_recipes/general/speculative_decoding/**
         tools/launcher/**
-  regression-tests-pr:
+
+  regression-tests:
     needs: [pr-gate]
     if: needs.pr-gate.outputs.any_changed == 'true'
-    strategy: &regression_strategy
-      fail-fast: false
-      matrix:
-        include:
-          - example: regression
-            timeout: 15
-            container_image: pytorch:26.01-py3
-    runs-on: linux-amd64-gpu-rtxpro6000-latest-1
-    timeout-minutes: ${{ matrix.timeout }}
-    container: &regression_container
-      image: nvcr.io/nvidia/${{ matrix.container_image }}
+    runs-on: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && 'linux-amd64-gpu-rtxpro6000-latest-1' || 'linux-amd64-gpu-rtxpro6000-latest-2' }}
+    timeout-minutes: 15
+    container:
+      image: nvcr.io/nvidia/pytorch:26.01-py3
       env:
         GIT_DEPTH: 1000 # For correct version
         PIP_CONSTRAINT: "" # Disable pip constraint for upgrading packages
         HF_TOKEN: ${{ secrets.HF_TOKEN }}
-    steps: &regression_steps
+    steps:
       - uses: actions/checkout@v6
       - uses: nv-gha-runners/setup-proxy-cache@main
       - name: Setup environment variables
@@ -60,9 +54,7 @@ jobs:
         env:
           COVERAGE_PROCESS_START: ${{ github.workspace }}/pyproject.toml
           COVERAGE_FILE: ${{ github.workspace }}/.coverage
-        run: |
-          pip install nox
-          nox -s ${{ matrix.example }}
+        run: python -m pip install nox && nox -s regression
       - name: Upload regression coverage to Codecov
         uses: codecov/codecov-action@v5
         with:
@@ -71,21 +63,15 @@ jobs:
           flags: regression
           fail_ci_if_error: false # test may be skipped if relevant file changes are not detected
           verbose: true
-  regression-tests-non-pr:
-    if: ${{ !startsWith(github.ref, 'refs/heads/pull-request/') }}
-    strategy: *regression_strategy
-    runs-on: linux-amd64-gpu-rtxpro6000-latest-2
-    timeout-minutes: ${{ matrix.timeout }}
-    container: *regression_container
-    steps: *regression_steps
+
   regression-pr-required-check:
-    # Run even if regression-tests-pr is skipped
+    # Run even if regression-tests is skipped
     if: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && always() }}
-    needs: [pr-gate, regression-tests-pr]
+    needs: [pr-gate, regression-tests]
     runs-on: ubuntu-latest
     steps:
       - name: Required regression tests did not succeed
         if: |
           needs.pr-gate.result != 'success' ||
-          (needs.pr-gate.outputs.any_changed == 'true' && needs.regression-tests-pr.result != 'success')
+          (needs.pr-gate.outputs.any_changed == 'true' && needs.regression-tests.result != 'success')
         run: exit 1

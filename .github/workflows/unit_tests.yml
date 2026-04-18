@@ -33,15 +33,19 @@ jobs:
     with:
       match_pattern: "^DCO$"
   check-file-changes:
-    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     outputs:
-      any_changed: ${{ steps.changed.outputs.any_changed }}
+      any_changed: ${{ steps.changed.outputs.any_changed || steps.non-pr.outputs.any_changed }}
     steps:
-      - uses: actions/checkout@v6
+      - id: non-pr
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: echo "any_changed=true" >> $GITHUB_OUTPUT
+      - if: github.event_name == 'pull_request'
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
-      - name: Check for changes in test-relevant paths
+      - if: github.event_name == 'pull_request'
+        name: Check for changes in test-relevant paths
         id: changed
         uses: step-security/changed-files@v46.0.5
         with:
@@ -72,7 +76,7 @@ jobs:
           fail_ci_if_error: true
           verbose: true
   windows:
-    if: github.event_name == 'pull_request' && needs.check-file-changes.outputs.any_changed == 'true'
+    if: needs.check-file-changes.outputs.any_changed == 'true'
     needs: [linux, check-file-changes]
     runs-on: windows-latest
     timeout-minutes: 30
@@ -84,7 +88,7 @@ jobs:
       - name: Run unit tests (without coverage)
         run: pip install nox uv && nox -s "unit-3.12(torch_211, tf_latest)"
   multi-version:
-    if: github.event_name == 'pull_request' && needs.check-file-changes.outputs.any_changed == 'true'
+    if: needs.check-file-changes.outputs.any_changed == 'true'
     needs: [linux, check-file-changes]
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -107,7 +111,7 @@ jobs:
       - name: Run unit tests
         run: pip install nox uv && nox -s "${{ matrix.nox_session }}"
   partial-install:
-    if: github.event_name == 'pull_request' && needs.check-file-changes.outputs.any_changed == 'true'
+    if: needs.check-file-changes.outputs.any_changed == 'true'
     needs: [linux, check-file-changes]
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -121,7 +125,7 @@ jobs:
       - name: Run unit tests
         run: pip install nox uv && nox -s "partial_unit(subset='${{ matrix.test-env }}')"
   launcher:
-    if: github.event_name == 'pull_request' && needs.check-file-changes.outputs.any_changed == 'true'
+    if: needs.check-file-changes.outputs.any_changed == 'true'
     needs: [linux, check-file-changes]
     runs-on: ubuntu-latest
     timeout-minutes: 15
