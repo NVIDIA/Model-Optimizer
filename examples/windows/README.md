@@ -5,7 +5,7 @@
 A Library to Quantize and Compress Deep Learning Models for Optimized Inference on Native Windows RTX GPUs
 
 [![Documentation](https://img.shields.io/badge/Documentation-latest-brightgreen.svg?style=flat)](https://nvidia.github.io/Model-Optimizer/)
-[![version](https://img.shields.io/badge/v0.33.0-orange?label=Release)](https://pypi.org/project/nvidia-modelopt/)
+[![version](https://img.shields.io/pypi/v/nvidia-modelopt?label=Release)](https://pypi.org/project/nvidia-modelopt/)
 [![license](https://img.shields.io/badge/License-Apache%202.0-blue)](../../LICENSE)
 
 [Examples](#examples) |
@@ -51,15 +51,14 @@ pip install nvidia-modelopt[onnx]
 
 ### Installation with Olive
 
-To install ModelOpt-Windows through Microsoft's Olive, use the following commands:
+The ModelOpt-Windows is integrated into Microsoft's [Olive](https://microsoft.github.io/Olive/) framework. Run the following commands to install ModelOpt through Olive.
 
 ```bash
 pip install olive-ai[nvmo]
-pip install onnxruntime-genai-directml>=0.4.0
-pip install onnxruntime-directml==1.20.0
+pip install onnxruntime-genai-cuda
 ```
 
-For more details, please refer to the [detailed installation instructions](https://nvidia.github.io/Model-Optimizer/getting_started/windows/_installation_for_Windows.html).
+For more details, or to use different [ONNX Runtime Execution Providers](https://onnxruntime.ai/docs/execution-providers/), refer to the [detailed installation instructions](https://nvidia.github.io/Model-Optimizer/getting_started/windows/_installation_for_Windows.html).
 
 ## Techniques
 

@@ -17,18 +17,13 @@
 
 import argparse
 import copy
-import os
 from functools import partial
 
-import pytest
-
-pytest.importorskip("deepspeed")
-pytest.importorskip("accelerate")
-
 import deepspeed
+import pytest
 import torch
 import torch.nn as nn
-from _test_utils.torch.distributed.utils import spawn_multiprocess_job, synchronize_state_dict
+from _test_utils.torch.distributed.utils import synchronize_state_dict
 from accelerate import Accelerator
 from accelerate.utils import DeepSpeedPlugin
 
@@ -48,10 +43,6 @@ def get_ds_config(zero_stage: int = 3):
 
 def _test_deepspeed_simple_linear(zero_stage, rank, size):
     deepspeed.init_distributed()
-
-    os.environ["LOCAL_RANK"] = str(rank)
-    os.environ["RANK"] = str(rank)
-    os.environ["WORLD_SIZE"] = str(size)
 
     dim = 32
     model = nn.Linear(dim, dim).cuda(rank)
@@ -101,11 +92,6 @@ def _test_deepspeed_simple_linear(zero_stage, rank, size):
 
 
 def _test_nested_deepspeed_backward(zero_stage, rank, size, quant_cfg):
-    # Set required environment variables for DeepSpeed
-    os.environ["LOCAL_RANK"] = str(rank)
-    os.environ["RANK"] = str(rank)
-    os.environ["WORLD_SIZE"] = str(size)
-
     dim = 32
     torch.manual_seed(1)
     model = nn.Sequential(
@@ -175,19 +161,11 @@ def _test_nested_deepspeed_backward(zero_stage, rank, size, quant_cfg):
 
 
 @pytest.mark.parametrize("zero_stage", [1, 2, 3])
-def test_deepspeed_simple_linear(zero_stage):
-    spawn_multiprocess_job(
-        size=torch.cuda.device_count(),
-        job=partial(_test_deepspeed_simple_linear, zero_stage),
-        backend="nccl",
-    )
+def test_deepspeed_simple_linear(zero_stage, dist_workers):
+    dist_workers.run(partial(_test_deepspeed_simple_linear, zero_stage))
 
 
 @pytest.mark.parametrize("quant_cfg", [mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG])
 @pytest.mark.parametrize("zero_stage", [1, 2, 3])
-def test_nested_deepspeed_backward(quant_cfg, zero_stage):
-    spawn_multiprocess_job(
-        size=torch.cuda.device_count(),
-        job=partial(_test_nested_deepspeed_backward, zero_stage, quant_cfg=quant_cfg),
-        backend="nccl",
-    )
+def test_nested_deepspeed_backward(quant_cfg, zero_stage, dist_workers):
+    dist_workers.run(partial(_test_nested_deepspeed_backward, zero_stage, quant_cfg=quant_cfg))

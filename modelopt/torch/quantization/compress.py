@@ -30,7 +30,7 @@ from modelopt.torch.opt.mode import ConvertReturnType, MetadataDict
 
 from .backends.gemm_registry import disable_real_quant_gemm, enable_real_quant_gemm
 from .config import CompressCfgType, CompressConfig
-from .conversion import _replace_quant_module, set_quantizer_attribute
+from .conversion import _replace_quant_module, set_quantizer_attributes_partial
 from .nn.modules.quant_linear import RealQuantLinear
 from .qtensor import QTensorWrapper, pack_real_quantize_weight
 from .utils import is_quantized_linear
@@ -87,7 +87,7 @@ def compress_convert(
 
     compress_cfg = config.compress
     if "default" in compress_cfg and isinstance(compress_cfg["default"], bool):
-        set_quantizer_attribute(
+        set_quantizer_attributes_partial(
             model, "*weight_quantizer*", {"fake_quant": not compress_cfg["default"]}
         )
 
@@ -99,7 +99,7 @@ def compress_convert(
             def filter_func(name):
                 return fnmatch.fnmatch(name, pattern) and "weight_quantizer" in name
 
-            set_quantizer_attribute(model, filter_func, {"fake_quant": not to_compress})
+            set_quantizer_attributes_partial(model, filter_func, {"fake_quant": not to_compress})
         else:
             raise ValueError(
                 f"Invalid compression configuration: {to_compress}, expected a boolean as value."

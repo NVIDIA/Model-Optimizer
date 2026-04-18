@@ -15,7 +15,7 @@
 
 """This module defines the model_config format.
 
-This format can be converted from huggingface, nemo or modelopt-quantized model.
+This format can be converted from huggingface, megatron or modelopt-quantized model.
 And we will build tensorrt_llm engine from the context saved with this format.
 """
 
@@ -633,3 +633,26 @@ class ModelConfig:
     def hidden_act(self):
         """Returns the hidden_act of the model."""
         return self.layers[0].mlp.hidden_act
+
+
+# Register all config classes as safe globals
+torch.serialization.add_safe_globals(
+    [
+        EmbeddingConfig,
+        LayernormConfig,
+        LinearConfig,
+        LinearActConfig,
+        ConvConfig,
+        QKVConfig,
+        RelativeAttentionTableConfig,
+        AttentionConfig,
+        MLPConfig,
+        ExpertConfig,
+        RgLruConfig,
+        RecurrentConfig,
+        MOEConfig,
+        DecoderLayerConfig,
+        MedusaHeadConfig,
+        ModelConfig,
+    ]
+)

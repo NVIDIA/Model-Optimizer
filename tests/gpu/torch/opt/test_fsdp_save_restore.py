@@ -18,11 +18,7 @@ from functools import partial
 import pytest
 import torch
 import torch.nn as nn
-from _test_utils.torch.distributed.utils import (
-    get_device_counts,
-    spawn_multiprocess_job,
-    synchronize_state_dict,
-)
+from _test_utils.torch.distributed.utils import synchronize_state_dict
 from torch.distributed.fsdp import FullStateDictConfig, StateDictType
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP  # noqa: N817
 from torch.distributed.fsdp.wrap import ModuleWrapPolicy
@@ -74,8 +70,5 @@ def _test_fsdp_save_restore(mode, rank, size):
 
 
 @pytest.mark.parametrize("mode", ["quantize", "autonas", "fastnas"])
-@pytest.mark.parametrize("device_count", get_device_counts())
-def test_fsdp_save_restore(mode, device_count):
-    spawn_multiprocess_job(
-        size=device_count, job=partial(_test_fsdp_save_restore, mode), backend="nccl"
-    )
+def test_fsdp_save_restore(dist_workers, mode):
+    dist_workers.run(partial(_test_fsdp_save_restore, mode))

@@ -16,10 +16,14 @@
 """Utility functions for getting samples and forward loop function for different datasets."""
 
 import copy
+import json
+import os
 from collections.abc import Callable
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from warnings import warn
 
+import requests
 import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -47,9 +51,9 @@ SUPPORTED_DATASET_CONFIG: dict[str, Any] = {
             "name": "SFT",
             "split": ["code", "math", "science", "chat", "safety"],
         },
-        "preprocess": lambda sample: "\n".join(turn["content"] for turn in sample["input"])
-        + "\n"
-        + sample["output"],
+        "preprocess": lambda sample: (
+            "\n".join(turn["content"] for turn in sample["input"]) + "\n" + sample["output"]
+        ),
     },
     "nemotron-post-training-dataset-v2": {
         "config": {
@@ -103,11 +107,108 @@ SUPPORTED_DATASET_CONFIG: dict[str, Any] = {
 
 __all__ = [
     "create_forward_loop",
+    "download_hf_dataset_as_jsonl",
     "get_dataset_dataloader",
     "get_dataset_samples",
+    "get_jsonl_text_samples",
     "get_max_batch_size",
     "get_supported_datasets",
 ]
+
+
+def get_jsonl_text_samples(jsonl_path: str, num_samples: int, key: str = "text") -> list[str]:
+    """Load up to ``num_samples`` entries from a JSONL file using the ``text`` field.
+
+    Each non-empty line must be a JSON object containing a ``text`` field.
+    """
+    if num_samples <= 0:
+        return []
+
+    samples: list[str] = []
+
+    with open(jsonl_path, encoding="utf-8") as f:
+        for line_idx, line in enumerate(f, start=1):
+            if len(samples) >= num_samples:
+                break
+            line = line.strip()
+            if not line:
+                continue
+
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError as e:
+                raise ValueError(
+                    f"Invalid JSON in JSONL file {jsonl_path} at line {line_idx}: {e}"
+                ) from e
+
+            if not isinstance(obj, dict):
+                raise ValueError(
+                    f"Expected a JSON object in JSONL file {jsonl_path} at line {line_idx}, "
+                    f"got {type(obj)}."
+                )
+
+            if key not in obj:
+                raise ValueError(
+                    f"Missing required field '{key}' in JSONL file {jsonl_path} at line {line_idx}."
+                )
+
+            samples.append(str(obj[key]))
+
+    return samples
+
+
+def _normalize_splits(split: str | list[str]) -> list[str]:
+    """Ensure split is always a list."""
+    return [split] if isinstance(split, str) else list(split)
+
+
+def _auto_preprocess_sample(
+    sample: dict, dataset_name: str, tokenizer: "PreTrainedTokenizerBase | None" = None
+) -> str:
+    """Auto-detect dataset format and preprocess a single sample based on column conventions.
+
+    Column detection order (first match wins):
+        1. ``messages`` / ``conversations`` -> ``tokenizer.apply_chat_template`` (with ``tools`` if present)
+        2. ``prompt`` (+ optional ``completion`` / ``response`` / ``output``) -> concatenate
+        3. ``text`` -> use as-is
+        4. ``input`` (+ optional ``output``) -> concatenate
+
+    Raises:
+        ValueError: If the tokenizer is missing/incompatible for chat-format datasets,
+            or if no recognized column is found.
+    """
+    chat_key = next((k for k in ("messages", "conversations") if sample.get(k)), None)
+    if chat_key is not None:
+        if tokenizer is None or not hasattr(tokenizer, "apply_chat_template"):
+            raise ValueError(
+                f"Dataset '{dataset_name}' has a '{chat_key}' column but no tokenizer with "
+                "apply_chat_template was provided."
+            )
+        kwargs: dict[str, Any] = {}
+        tools = sample.get("tools")
+        if tools:
+            kwargs["tools"] = tools
+        return tokenizer.apply_chat_template(sample[chat_key], tokenize=False, **kwargs)
+
+    if "prompt" in sample:
+        parts = [sample["prompt"]]
+        parts.extend(sample[k] for k in ("completion", "response", "output") if sample.get(k))
+        return "\n".join(parts)
+
+    if "text" in sample:
+        return sample["text"]
+
+    if "input" in sample:
+        parts = [sample["input"]]
+        if sample.get("output"):
+            parts.append(sample["output"])
+        return "\n".join(parts)
+
+    raise ValueError(
+        f"Cannot auto-detect format for dataset '{dataset_name}'. "
+        f"Found columns: {list(sample.keys())}. "
+        "Expected one of: 'messages', 'conversations', 'prompt', 'text', or 'input'."
+    )
 
 
 def get_dataset_samples(
@@ -116,71 +217,101 @@ def get_dataset_samples(
     *,
     apply_chat_template: bool = False,
     tokenizer: "PreTrainedTokenizerBase | None" = None,
+    split: str | list[str] | None = None,
 ) -> list[str]:
-    """Load a portion of train dataset with the dataset name and a given size.
+    """Load a portion of a dataset with the dataset name and a given size.
+
+    Supports both registered datasets (in ``SUPPORTED_DATASET_CONFIG``) and arbitrary
+    HuggingFace datasets.  Unregistered datasets are auto-detected by column names:
+    ``messages``/``conversations`` (chat), ``prompt``, ``text``, or ``input``.
 
     Args:
-        dataset_name: Name of the dataset to load.
+        dataset_name: Name or HuggingFace path of the dataset to load, a local directory path,
+            or a path to a ``.jsonl`` file.  For local directory paths, the
+            predefined config from ``SUPPORTED_DATASET_CONFIG`` is matched if the base folder name
+            matches a registered key (e.g. ``/hf-local/abisee/cnn_dailymail`` matches ``cnn_dailymail`` key).
         num_samples: Number of samples to load from the dataset.
-        apply_chat_template: Whether to apply the chat template to the samples (if supported by the dataset).
+        apply_chat_template: Whether to apply the chat template to the samples
+            (if supported by the dataset).  For unregistered datasets with a
+            ``messages`` column, chat template is always applied regardless of
+            this flag.
         tokenizer: Tokenizer to use for applying the chat template to the samples.
             No tokenization is done and plain text is still returned.
+        split: Override the split(s) to load.  Accepts a single split name or a list.
+            If ``None``, uses the splits defined in ``SUPPORTED_DATASET_CONFIG`` for
+            registered datasets, or ``["train"]`` for unregistered datasets.
 
     Returns:
         Samples: The list of samples.
     """
-    # Load the dataset
-    if dataset_name not in SUPPORTED_DATASET_CONFIG:
-        raise NotImplementedError(
-            f"dataset {dataset_name} is not supported. Please use one of the following:"
-            f" {get_supported_datasets()}."
-        )
+    # Local JSONL file path support (each line is a JSON object with a `text` field).
+    if dataset_name.endswith(".jsonl"):
+        return get_jsonl_text_samples(dataset_name, num_samples, key="text")
 
     from datasets import load_dataset
 
-    dataset_config = SUPPORTED_DATASET_CONFIG[dataset_name]
-    if apply_chat_template:
-        if "chat_key" not in dataset_config:
-            warn(
-                f"Dataset {dataset_name} does not support chat template. Chat template will not be applied."
-            )
-        elif tokenizer is None:
-            raise ValueError("Tokenizer is required when applying chat template.")
-        print(f"Applying chat template to dataset {dataset_name}")
+    local_dataset_path = None
+    if os.path.exists(dataset_name):  # Local path
+        local_dataset_path = dataset_name
+        dataset_name = os.path.basename(os.path.normpath(local_dataset_path))
 
-    # It's unfortunate that the load_dataset function does not support split a list while streaming.
-    # So we need to load the dataset for each split.
-    config = dataset_config["config"].copy()
-    splits = config.pop("split", [None])
-    dataset_splits = [
-        load_dataset(
-            streaming=True,
-            **config,
-            split=split,
-        )
-        for split in splits
-    ]
+    is_registered = dataset_name in SUPPORTED_DATASET_CONFIG
 
-    # Split the samples evenly across the splits
-    # For streaming datasets, there is no reliable way to get the number of samples in each split
-    # other than loading the entire dataset. So, we just use the same number of samples for each split.
-    num_samples_splits = [num_samples // len(dataset_splits) for _ in dataset_splits]
-    num_samples_splits[-1] += num_samples - sum(num_samples_splits)
-    samples = []
-    for dataset, num_samples_split in zip(dataset_splits, num_samples_splits):
-        for i, sample in enumerate(dataset):
-            if i >= num_samples_split:
-                break
+    if is_registered:
+        dataset_config = SUPPORTED_DATASET_CONFIG[dataset_name]
+        config = dataset_config["config"].copy()
+        if local_dataset_path:
+            config["path"] = local_dataset_path
+        splits = _normalize_splits(split) if split is not None else config.pop("split", [None])
+        if split is not None:
+            config.pop("split", None)
 
-            # Apply preprocess function to the sample
-            if apply_chat_template and "chat_key" in dataset_config:
-                sample = tokenizer.apply_chat_template(  # type: ignore[union-attr]
-                    sample[dataset_config["chat_key"]], tokenize=False
+        if apply_chat_template:
+            if "chat_key" not in dataset_config:
+                warn(
+                    f"Dataset {dataset_name} does not support chat template."
+                    " Chat template will not be applied."
                 )
-            else:
-                sample = dataset_config["preprocess"](sample)
-            if sample != "":  # wikitext has some empty samples
-                samples.append(sample)
+            elif tokenizer is None:
+                raise ValueError("Tokenizer is required when applying chat template.")
+
+        def _preprocess(sample: dict) -> str:
+            if apply_chat_template and "chat_key" in dataset_config:
+                kwargs: dict[str, Any] = {}
+                tools = sample.get("tools")
+                if tools:
+                    kwargs["tools"] = tools
+                return tokenizer.apply_chat_template(  # type: ignore[union-attr]
+                    sample[dataset_config["chat_key"]], tokenize=False, **kwargs
+                )
+            return dataset_config["preprocess"](sample)
+
+    else:
+        print(
+            f"Dataset '{dataset_name}' is not in SUPPORTED_DATASET_CONFIG. "
+            "Auto-detecting format from column names."
+        )
+        config = {"path": local_dataset_path or dataset_name}
+        splits = _normalize_splits(split) if split is not None else ["train"]
+
+        def _preprocess(sample: dict) -> str:
+            return _auto_preprocess_sample(sample, dataset_name, tokenizer)
+
+    # load_dataset does not support a list of splits while streaming, so load each separately.
+    print(f"Loading dataset with {config=} and {splits=}")
+    dataset_splits = [load_dataset(streaming=True, **config, split=s) for s in splits]
+
+    num_per_split = [num_samples // len(dataset_splits)] * len(dataset_splits)
+    num_per_split[-1] += num_samples - sum(num_per_split)
+
+    samples: list[str] = []
+    for dataset, n in zip(dataset_splits, num_per_split):
+        for i, sample in enumerate(dataset):
+            if i >= n:
+                break
+            text = _preprocess(sample)
+            if text:
+                samples.append(text)
 
     return samples
 
@@ -208,23 +339,27 @@ def get_dataset_dataloader(
     max_sample_length: int = 512,
     device: torch.device | None = None,
     include_labels: bool = False,
+    apply_chat_template: bool = False,
 ) -> DataLoader:
-    """Get a dataloader with the dataset name and toknizer of the target model.
+    """Get a dataloader with the dataset name and tokenizer of the target model.
 
     Args:
-        dataset_name: Name of the dataset to load.
-        tokenizer: Instancne of Hugginface tokenizer.
+        dataset_name: Name of the dataset to load, or a path to a ``.jsonl`` file.
+            If a ``.jsonl`` file is provided, each line must be a JSON object with a ``text`` field.
+        tokenizer: Instance of HuggingFace tokenizer.
         batch_size: Batch size of the returned dataloader.
         num_samples: Number of samples from the dataset.
         max_sample_length: Maximum length of a sample.
         device: Target device for the returned dataloader.
         include_labels: Whether to include labels in the dataloader.
+        apply_chat_template: Whether to apply the chat template to the samples
+            (if supported by the dataset).
 
     Returns:
-        A instance of dataloader.
+        An instance of dataloader.
     """
     assert tokenizer is not None, "Please provide a tokenizer."
-    # batch_encode_plus will modify the tokenizer in place, so we need to clone it.
+    # Tokenizer encoding may modify the tokenizer in place, so we need to clone it.
     tokenizer = copy.deepcopy(tokenizer)
 
     if tokenizer.padding_side != "left":
@@ -244,10 +379,12 @@ def get_dataset_dataloader(
 
     all_samples = []
     for ds_name, num_sample in zip(dataset_name, num_samples):
-        samples = get_dataset_samples(ds_name, num_sample)
+        samples = get_dataset_samples(
+            ds_name, num_sample, apply_chat_template=apply_chat_template, tokenizer=tokenizer
+        )
         all_samples.extend(samples)
 
-    batch_encoded = tokenizer.batch_encode_plus(
+    batch_encoded = tokenizer(
         all_samples,
         return_tensors="pt",
         padding=True,
@@ -268,8 +405,15 @@ def get_dataset_dataloader(
         )
         tokenized_dataset = _CustomDataset(batch_encoded)
     else:
-        # For backward compatibility, if labels are not needed, we only return the input_ids.
-        tokenized_dataset = _CustomDataset({"input_ids": batch_encoded["input_ids"]})
+        # Always include attention_mask so the model correctly ignores padding tokens
+        # during calibration. Without it, HF models create a full causal mask and
+        # padding tokens participate in attention, skewing calibration statistics.
+        tokenized_dataset = _CustomDataset(
+            {
+                "input_ids": batch_encoded["input_ids"],
+                "attention_mask": batch_encoded["attention_mask"],
+            }
+        )
 
     calib_dataloader = DataLoader(tokenized_dataset, batch_size=batch_size, shuffle=False)
 
@@ -371,20 +515,25 @@ def get_max_batch_size(
         return 512
 
 
-def _process_batch(batch_data, infer_method, max_working_batch_size=None):
+def _process_batch(
+    batch_data, infer_method, max_working_batch_size=None, allowed_non_tensor_keys=None
+):
     """Process a batch of data through the model's inference method.
 
     Args:
         batch_data: Dictionary containing the batch data
         infer_method: Model's inference method (either forward or generate)
         max_working_batch_size: Maximum batch size known to work without OOM
+        allowed_non_tensor_keys: Set of key names whose values may be non-tensor types
 
     Returns:
         The maximum batch size that worked successfully
     """
-    assert all(torch.is_tensor(data) or data is None for data in batch_data.values()), (
-        "batch_data values must be tensors"
-    )
+    allowed_non_tensor_keys = allowed_non_tensor_keys or set()
+    assert all(
+        torch.is_tensor(data) or data is None or key in allowed_non_tensor_keys
+        for key, data in batch_data.items()
+    ), f"batch_data values must be tensors or None, except for keys: {allowed_non_tensor_keys}."
     # Get the batch size of current data
     batch_size = batch_data[next(iter(batch_data.keys()))].shape[0]
 
@@ -401,7 +550,7 @@ def _process_batch(batch_data, infer_method, max_working_batch_size=None):
                     split_data[key] = batch_data[key][i:end_idx, ...]
 
             max_working_batch_size = _process_batch(
-                split_data, infer_method, max_working_batch_size
+                split_data, infer_method, max_working_batch_size, allowed_non_tensor_keys
             )
 
         return max_working_batch_size
@@ -429,28 +578,51 @@ def _process_batch(batch_data, infer_method, max_working_batch_size=None):
     split_data_2 = {key: batch_data[key][mid:, ...] for key in batch_data}
 
     # Recursively process each half and track max working batch size
-    max_working_batch_size = _process_batch(split_data_1, infer_method)
-    max_working_batch_size = _process_batch(split_data_2, infer_method, max_working_batch_size)
+    max_working_batch_size = _process_batch(
+        split_data_1, infer_method, allowed_non_tensor_keys=allowed_non_tensor_keys
+    )
+    max_working_batch_size = _process_batch(
+        split_data_2, infer_method, max_working_batch_size, allowed_non_tensor_keys
+    )
 
     # Return the minimum of the two (to be conservative)
     return max_working_batch_size
 
 
-def _forward_loop(model: torch.nn.Module, dataloader: DataLoader) -> None:
+def _forward_loop(
+    model: torch.nn.Module,
+    dataloader: DataLoader,
+    allowed_non_tensor_keys: set | None = None,
+) -> None:
     """Runs forward passes through the model using data from the dataloader.
 
     Args:
         model: The PyTorch model to run inference on
         dataloader: DataLoader containing the batched input data
+        allowed_non_tensor_keys: Set of key names whose values may be non-tensor types
     """
-    with torch.no_grad():
-        is_enc_dec = model_type_is_enc_dec(model)
-        infer_method = model.generate if is_enc_dec else model.forward
-        max_working_batch_size = None  # Initialize max working batch size as None
+    # Disable KV caching during calibration — it is unnecessary overhead and causes
+    # correctness issues with hybrid Mamba/attention models whose cache state is mutated
+    # in-place (e.g., NemotronH).
+    config = getattr(model, "config", None)
+    prev_use_cache = getattr(config, "use_cache", None)
+    if config is not None and prev_use_cache is not None:
+        config.use_cache = False
 
-        for _, data in enumerate(tqdm(dataloader)):
-            # Process batch and update max working batch size
-            max_working_batch_size = _process_batch(data, infer_method, max_working_batch_size)
+    try:
+        with torch.no_grad():
+            is_enc_dec = model_type_is_enc_dec(model)
+            infer_method = model.generate if is_enc_dec else model.forward
+            max_working_batch_size = None  # Initialize max working batch size as None
+
+            for _, data in enumerate(tqdm(dataloader)):
+                # Process batch and update max working batch size
+                max_working_batch_size = _process_batch(
+                    data, infer_method, max_working_batch_size, allowed_non_tensor_keys
+                )
+    finally:
+        if config is not None and prev_use_cache is not None:
+            config.use_cache = prev_use_cache
 
 
 def create_forward_loop(
@@ -463,6 +635,7 @@ def create_forward_loop(
     device: str | None = None,
     include_labels: bool = False,
     dataloader: DataLoader | None = None,
+    allowed_non_tensor_keys: set | None = None,
 ) -> Callable:
     """Creates and returns a forward loop function configured for a specific model, dataset, and tokenizer.
 
@@ -481,6 +654,9 @@ def create_forward_loop(
         device: Target device for the returned dataloader.
         include_labels: Whether to include labels in the dataloader.
         dataloader: If provided, use the provided dataloader instead.
+        allowed_non_tensor_keys: Set of key names whose batch values may be non-tensor types.
+            Useful when the dataloader yields batches with non-standard fields (e.g., nested
+            model outputs).
 
     Example usage for quantization:
 
@@ -520,9 +696,95 @@ def create_forward_loop(
             include_labels=include_labels,
         )
 
-    return lambda model: _forward_loop(model, dataloader)
+    return lambda model: _forward_loop(model, dataloader, allowed_non_tensor_keys)
 
 
 def model_type_is_enc_dec(model):
     enc_dec_model_list = ["t5", "bart", "whisper"]
     return any(model_name in model.__class__.__name__.lower() for model_name in enc_dec_model_list)
+
+
+def download_hf_dataset_as_jsonl(
+    dataset_name: str,
+    output_dir: str | Path,
+    json_keys: str | list[str] = ["text"],
+    name: str | None = None,
+    split: str | None = None,
+    max_samples_per_split: int | None = None,
+    num_proc: int | None = None,
+) -> list[str]:
+    """Download a Hugging Face dataset and save as JSONL files.
+
+    Args:
+        dataset_name: Name or HuggingFace path of the dataset to download
+        output_dir: Directory to save the JSONL files
+        json_keys: Key or list of keys to extract from the dataset. Defaults to ["text"].
+        name: Name of the subset to download
+        split: Split of the dataset to download. Defaults to None (all splits).
+        max_samples_per_split: Maximum number of samples to download per split. Defaults to None.
+        num_proc: Number of processes to use for parallel processing. Defaults to None.
+
+    Returns:
+        List of paths to downloaded JSONL files.
+    """
+    from datasets import load_dataset
+    from huggingface_hub.utils import build_hf_headers
+
+    print(f"Downloading dataset {dataset_name} from Hugging Face")
+    if isinstance(json_keys, str):
+        json_keys = [json_keys]
+    jsonl_paths: list[str] = []
+
+    try:
+        response = requests.get(
+            f"https://datasets-server.huggingface.co/splits?dataset={dataset_name}",
+            headers=build_hf_headers(),
+            timeout=10,
+        )
+        response.raise_for_status()
+    except requests.RequestException as e:
+        raise RuntimeError(f"Failed to fetch dataset splits for {dataset_name}: {e}") from e
+
+    response_json = response.json()
+    print(f"\nFound {len(response_json['splits'])} total splits for {dataset_name}:")
+    for entry in response_json["splits"]:
+        print(f"\t{entry}")
+
+    splits_to_process = []
+    for entry in response_json["splits"]:
+        if name is not None and name != entry.get("config", None):
+            continue
+        if split is not None and split != entry["split"]:
+            continue
+        splits_to_process.append(entry)
+
+    print(f"\nFound {len(splits_to_process)} splits to process:")
+    for entry in splits_to_process:
+        print(f"\t{entry}")
+
+    for entry in splits_to_process:
+        path = entry["dataset"]
+        name = entry.get("config", None)
+        split = entry["split"]
+        if max_samples_per_split is not None:
+            split = f"{split}[:{max_samples_per_split}]"
+        jsonl_file_path = f"{output_dir}/{path.replace('/', '--')}_{name}_{split}.jsonl"
+
+        print(f"\nLoading HF dataset {path=}, {name=}, {split=}")
+        if os.path.exists(jsonl_file_path):
+            jsonl_paths.append(jsonl_file_path)
+            print(f"\t[SKIP] Raw dataset {jsonl_file_path} already exists")
+            continue
+        ds = load_dataset(path=path, name=name, split=split)
+
+        for key in json_keys:
+            if key not in ds.features:
+                raise KeyError(
+                    f"{key=} not found in dataset features. Available: {list(ds.features)}"
+                )
+
+        print(f"Saving raw dataset to {jsonl_file_path}")
+        ds.to_json(jsonl_file_path, num_proc=num_proc)
+        jsonl_paths.append(jsonl_file_path)
+
+    return jsonl_paths

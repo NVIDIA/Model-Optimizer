@@ -21,11 +21,7 @@ from functools import partial
 import pytest
 import torch
 import torch.nn as nn
-from _test_utils.torch.distributed.utils import (
-    get_device_counts,
-    spawn_multiprocess_job,
-    synchronize_state_dict,
-)
+from _test_utils.torch.distributed.utils import synchronize_state_dict
 from torch.distributed._composable.fsdp.fully_shard import fully_shard
 
 import modelopt.torch.quantization as mtq
@@ -123,18 +119,145 @@ def _test_nested_fsdp2_backward(rank, size, quant_cfg):
     assert torch.allclose(out_ref_1, out_quant_after_1, rtol=1e-4)
 
 
-@pytest.mark.parametrize("device_count", get_device_counts())
-def test_fsdp_simple_linear(device_count):
-    spawn_multiprocess_job(size=device_count, job=_test_fsdp2_simple_linear, backend="nccl")
+def test_fsdp_simple_linear(dist_workers):
+    dist_workers.run(_test_fsdp2_simple_linear)
 
 
-@pytest.mark.parametrize("device_count", get_device_counts())
 @pytest.mark.parametrize(
     "quant_cfg", [mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG, mtq.INT8_SMOOTHQUANT_CFG, mtq.INT4_AWQ_CFG]
 )
-def test_nested_fsdp2_backward(device_count, quant_cfg):
-    spawn_multiprocess_job(
-        size=device_count,
-        job=partial(_test_nested_fsdp2_backward, quant_cfg=quant_cfg),
-        backend="nccl",
+def test_nested_fsdp2_backward(quant_cfg, dist_workers):
+    dist_workers.run(partial(_test_nested_fsdp2_backward, quant_cfg=quant_cfg))
+
+
+class _DecoderBlock(nn.Module):
+    """Minimal decoder block for FSDP2 sequential tests."""
+
+    def __init__(self, dim=32):
+        super().__init__()
+        self.attn = nn.Linear(dim, dim, bias=False)
+        self.ffn = nn.Sequential(
+            nn.Linear(dim, dim, bias=False), nn.ReLU(), nn.Linear(dim, dim, bias=False)
+        )
+        self.norm = nn.LayerNorm(dim)
+
+    def forward(self, x):
+        x = x + self.attn(self.norm(x))
+        x = x + self.ffn(x)
+        return x
+
+
+class _SimpleTransformerModel(nn.Module):
+    """Model with ``model.layers`` for layerwise calibration discovery."""
+
+    def __init__(self, n_layers=3, dim=32):
+        super().__init__()
+        self.layers = nn.ModuleList([_DecoderBlock(dim) for _ in range(n_layers)])
+
+    def forward(self, x):
+        for layer in self.layers:
+            x = layer(x)
+        return x
+
+
+def _test_layerwise_calibrate_fsdp2(rank, size):
+    """Layerwise calibration on FSDP2-wrapped model matches non-FSDP reference."""
+    from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
+
+    dim = 32
+    torch.manual_seed(1)
+    model = _SimpleTransformerModel(n_layers=3, dim=dim).cuda()
+    inputs = torch.randn(2, 2, dim).cuda()
+    synchronize_state_dict(model)
+
+    # Register discoverer for our simple model
+    old_support = LayerActivationCollector._decoder_layer_support[:]
+    LayerActivationCollector._decoder_layer_support = [
+        (
+            lambda m: hasattr(m, "layers") and isinstance(m.layers, nn.ModuleList),
+            lambda m: m.layers,
+        ),
+        *old_support,
+    ]
+
+    try:
+        # Reference: non-FSDP layerwise calibration
+        ref_model = copy.deepcopy(model)
+        seq_cfg = copy.deepcopy(mtq.INT8_DEFAULT_CFG)
+        seq_cfg["algorithm"] = {"method": "max", "layerwise": True}
+        mtq.quantize(ref_model, seq_cfg, lambda m: m(inputs))
+        output_ref = ref_model(inputs)
+
+        # Test: FSDP2-wrapped layerwise calibration
+        for layer in model.layers:
+            fully_shard(layer)
+        model = fully_shard(model)
+        mtq.quantize(model, seq_cfg, lambda m: m(inputs))
+        output_test = model(inputs)
+
+        assert torch.allclose(output_ref, output_test)
+    finally:
+        LayerActivationCollector._decoder_layer_support = old_support
+
+
+def test_layerwise_calibrate_fsdp2(dist_workers):
+    dist_workers.run(_test_layerwise_calibrate_fsdp2)
+
+
+def _test_persistent_materialization(rank, size):
+    """persistent_materialization keeps weights accessible and writes back modifications."""
+    from torch.distributed.tensor import DTensor
+
+    from modelopt.torch.quantization.utils import (
+        enable_weight_access_and_writeback,
+        persistent_materialization,
     )
+
+    dim = 32
+    torch.manual_seed(1)
+    model = nn.Sequential(
+        nn.Sequential(nn.Linear(dim, dim), nn.Linear(dim, dim)),
+        nn.Sequential(nn.Linear(dim, dim), nn.Linear(dim, dim)),
+    ).cuda(rank)
+    synchronize_state_dict(model)
+
+    fully_shard(model[0])
+    fully_shard(model[1])
+    model = fully_shard(model)
+
+    layer = model[0]
+    inputs = torch.randn(2, dim).cuda(rank)
+
+    # Warmup forward to trigger FSDP2's lazy_init (mirrors real usage where
+    # layerwise_calibrate always runs get_first_layer_inputs first).
+    model(inputs)
+
+    # Save reference weight (gathered)
+    with enable_weight_access_and_writeback(layer[0], model):
+        ref_weight = layer[0].weight.clone()
+
+    # Verify sharded before context
+    assert isinstance(next(iter(layer.parameters())), DTensor)
+
+    with persistent_materialization(layer):
+        # Params are local tensors (not DTensors)
+        assert not isinstance(layer[0].weight, DTensor)
+        assert layer[0].weight.device.type == "cuda"
+
+        # Run multiple forward passes (FSDP hooks fire, unshard/reshard are no-ops)
+        for _ in range(3):
+            layer(inputs)
+
+        # Modify a weight
+        layer[0].weight.data.add_(1.0)
+
+    # After context: params restored to DTensors (sharded)
+    assert isinstance(next(iter(layer.parameters())), DTensor)
+
+    # Verify modification persisted
+    with enable_weight_access_and_writeback(layer[0], model):
+        assert torch.allclose(layer[0].weight, ref_weight + 1.0)
+
+
+def test_persistent_materialization(dist_workers):
+    dist_workers.run(_test_persistent_materialization)

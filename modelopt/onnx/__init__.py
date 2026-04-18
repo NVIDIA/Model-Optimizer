@@ -16,6 +16,7 @@
 """Model optimization subpackage for onnx."""
 
 import sys
+import warnings
 
 MIN_PYTHON_VERSION = (3, 10)
 
@@ -25,6 +26,12 @@ try:
 except ImportError as e:
     raise ImportError(f"{e}\nPlease install optional ``[onnx]`` dependencies.")
 
+
+if sys.version_info < (3, 11):
+    warnings.warn(
+        "`modelopt.onnx` package will drop python<3.11 support in a future release",
+        DeprecationWarning,
+    )
 
 # Check the current Python version
 if sys.version_info < MIN_PYTHON_VERSION:

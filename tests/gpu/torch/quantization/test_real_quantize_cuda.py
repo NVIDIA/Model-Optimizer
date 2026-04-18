@@ -15,11 +15,11 @@
 
 """High-level tests for real weight-only quantization."""
 
+import copy
 import fnmatch
 
 import pytest
 import torch
-from _test_utils.torch.distributed.utils import get_device_counts, spawn_multiprocess_job
 from _test_utils.torch.quantization.models import SimpleConv, SimpleConvLinear, SimpleLinear
 from _test_utils.torch.quantization.quant_utils import get_model_size
 from _test_utils.torch.quantization.quantize_common import save_restore_test
@@ -48,10 +48,14 @@ def test_real_quantize(model_cls, config):
     # update config to fit test cases
     if config == mtq.INT4_AWQ_CFG:
         # reduce block sizes for simple testing models
-        config["quant_cfg"]["*weight_quantizer"]["block_sizes"] = {
-            -1: 16,
-            "scale_bits": 8,
-        }
+        config = copy.deepcopy(config)
+        for entry in config["quant_cfg"]:
+            if entry.get("quantizer_name") == "*weight_quantizer":
+                entry.setdefault("cfg", {})["block_sizes"] = {
+                    -1: 16,
+                    "scale_bits": 8,
+                }
+                break
         if model_cls is SimpleConv or model_cls is SimpleConvLinear:
             pytest.skip(
                 "INT4_AWQ_CFG requires even number of elements on last dimension for weights."
@@ -102,10 +106,14 @@ def test_save_restore(model_cls, config):
     # update config to fit test cases
     if config == mtq.INT4_AWQ_CFG:
         # reduce block sizes for simple testing models
-        config["quant_cfg"]["*weight_quantizer"]["block_sizes"] = {
-            -1: 16,
-            "scale_bits": 8,
-        }
+        config = copy.deepcopy(config)
+        for entry in config["quant_cfg"]:
+            if entry.get("quantizer_name") == "*weight_quantizer":
+                entry.setdefault("cfg", {})["block_sizes"] = {
+                    -1: 16,
+                    "scale_bits": 8,
+                }
+                break
         if model_cls is SimpleConv or model_cls is SimpleConvLinear:
             pytest.skip(
                 "INT4_AWQ_CFG requires even number of elements on last dimension for weights."
@@ -264,6 +272,5 @@ def _test_mtq_compress_fsdp_module(
     model(model.get_input().to(torch.bfloat16).cuda())
 
 
-@pytest.mark.parametrize("device_count", get_device_counts())
-def test_compress_fsdp_module(device_count):
-    spawn_multiprocess_job(size=device_count, job=_test_mtq_compress_fsdp_module, backend="nccl")
+def test_compress_fsdp_module(dist_workers):
+    dist_workers.run(_test_mtq_compress_fsdp_module)

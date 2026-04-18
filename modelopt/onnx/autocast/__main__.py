@@ -66,8 +66,12 @@ def get_parser() -> argparse.ArgumentParser:
         "--calibration_data",
         "-d",
         type=str,
-        help="File path to inputs for reference runner, either NPZ or Polygraphy JSON file. "
-        "If not provided, random inputs will be used",
+        help="File path to inputs for reference runner. Supports: "
+        "(1) NPZ file for single batch, "
+        "(2) Directory containing multiple NPZ files for multi-batch calibration, "
+        "(3) Polygraphy JSON file (supports multiple batches). "
+        "Multi-batch calibration aggregates statistics across all batches for more robust "
+        "precision conversion decisions. If not provided, random inputs will be used.",
     )
     parser.add_argument(
         "--nodes_to_exclude",

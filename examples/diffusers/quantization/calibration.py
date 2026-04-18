@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import logging
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -120,7 +121,21 @@ class Calibrator:
         self.pipe(prompt=prompt_batch, **kwargs).frames
 
     def _run_ltx2_calibration(self, prompt_batch: list[str], extra_args: dict[str, Any]) -> None:
+        warnings.warn(
+            "LTX-2 packages (ltx-core, ltx-pipelines, ltx-trainer) are provided by Lightricks and are NOT "
+            "covered by the Apache 2.0 license governing NVIDIA Model Optimizer. You MUST comply "
+            "with the LTX Community License Agreement when installing and using LTX-2 with NVIDIA "
+            "Model Optimizer. Any derivative models or fine-tuned weights from LTX-2 remain "
+            "subject to the LTX Community License Agreement, not Apache 2.0. "
+            "See: https://github.com/Lightricks/LTX-2/blob/main/LICENSE",
+            UserWarning,
+            stacklevel=2,
+        )
         from ltx_core.model.video_vae import TilingConfig
+        from ltx_pipelines.utils.constants import (
+            DEFAULT_AUDIO_GUIDER_PARAMS,
+            DEFAULT_VIDEO_GUIDER_PARAMS,
+        )
 
         prompt = prompt_batch[0]
         extra_params = self.pipeline_manager.config.extra_params
@@ -134,9 +149,8 @@ class Calibrator:
             "num_frames": extra_params.get("num_frames", extra_args.get("num_frames", 121)),
             "frame_rate": extra_params.get("frame_rate", extra_args.get("frame_rate", 24.0)),
             "num_inference_steps": self.config.n_steps,
-            "cfg_guidance_scale": extra_params.get(
-                "cfg_guidance_scale", extra_args.get("cfg_guidance_scale", 4.0)
-            ),
+            "video_guider_params": DEFAULT_VIDEO_GUIDER_PARAMS,
+            "audio_guider_params": DEFAULT_AUDIO_GUIDER_PARAMS,
             "images": extra_params.get("images", []),
             "tiling_config": extra_params.get("tiling_config", TilingConfig.default()),
         }

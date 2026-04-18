@@ -43,6 +43,7 @@ from modelopt.torch.utils.distributed import ParallelState
 from ..nn import QuantModule, QuantModuleRegistry, TensorQuantizer
 from ..nn.modules.quant_linear import RealQuantLinear
 from ..qtensor import QTensorWrapper
+from ..utils import sync_moe_expert_amax
 from .custom import CUSTOM_MODEL_PLUGINS, _ParallelLinear
 
 try:
@@ -92,7 +93,7 @@ def quant_module_get_extra_state(self) -> dict:
 
     quantizer_state, real_quantizer_state, and q_tensor_state are usually stored
     with in the modelopt_state metadata where the keys are the full module name. The issue
-    is that NeMo-MCore model's full module name can change
+    is that MCore model's full module name can change
     if pipeline-parallelism (PP) and expert-parallelism (EP)
     are changing. Alternatively, we store quantizer_state in
     QuantModule's extra_state with QuantModule.get_extra_state()
@@ -161,10 +162,10 @@ def real_quant_module_set_extra_state(self, state: Any):
 def quant_module_set_extra_state(self, state: Any):
     """Restore quantizer_state when load_state_dict() is called.
 
-    With quantizer_state stored in extra_state (NeMo-MCore `torch-dist`),
+    With quantizer_state stored in extra_state (MCore `torch-dist`),
     set_extra_state() is used to perform the functionality
     conversion.restore_quantizer_state().
-    load_state_dict() are called twice during NeMo-MCore resume.
+    load_state_dict() is called twice during MCore resume.
     The state_dict only contains the extra_state in the first time.
     set_extra_state() is trigger by the end of the load_state_dict()
     where QuantModule.modelopt_post_restore() will reinitialize
@@ -338,7 +339,7 @@ class _MegatronParallelLinear(_ParallelLinear):
         # [WAR]: although we disable output_layer quantization by default but it will
         # still be picked up by mtq.quantize since it is a ColumnParallelLinear. We need
         # to further ensure that its sharded state_dict has no scalars or amax since
-        # 1) NeMo-MCore's vocabulary padding may change but we didn't support this feature
+        # 1) MCore's vocabulary padding may change but we didn't support this feature
         # 2) When embedding and output_layer are sharing weights, PP>1 will have
         #    output_layer.input_quantizer._amax but TP-only does not. This lead to
         #    state_dict mismatch.
@@ -574,40 +575,28 @@ class _MegatronSequentialMLP(DynamicModule):
             expert.linear_fc1.parallel_state = self.parallel_state
             expert.linear_fc2.parallel_state = self.parallel_state
 
-    def layer_sync_moe_local_experts_amax(self):
-        """Sync amax across local experts in a SequentialMLP.
+    def layer_sync_moe_local_experts_amax(self, sync_weight_amax=False):
+        """Sync quantizer amax across local experts in a SequentialMLP.
 
-        Synchronize the amax values across local experts in a lyaer such that all local experts will
-        share the same amax. This function operates on a single rank and does not require distributed sync.
+        Always syncs input quantizer amax across experts. Optionally syncs weight
+        quantizer amax as well, which matches TEGroupedMLP behavior where all
+        experts are fused into a single GEMM with one quantizer per linear layer.
 
-        Distributed amax sync across EP and ETP (for RowParallel) happens in model_calib.max_calibrate().
-        This function should be called before the distributed sync to ensure the amax values
-        are synchronized across the layer first.
+        Args:
+            sync_weight_amax: If True, also sync weight quantizer amax across experts.
+
+        This function operates on a single rank and does not require distributed sync.
+        Distributed amax sync across EP and ETP (for RowParallel) happens in
+        model_calib.max_calibrate(). This function should be called before the
+        distributed sync to ensure the amax values are synchronized across the layer first.
 
         Note:
             Because there are logic which calls collective communication based on whether amax is not None,
-            We need to garuantee that all experts must have amax. Otherwise, there will be deadlock
-            when synchroizing over EP since some ranks may have amax None and not calling the collective
+            we need to guarantee that all experts must have amax. Otherwise, there will be deadlock
+            when synchronizing over EP since some ranks may have amax None and not calling the collective
             communication.
         """
-        # Collect amax from all local experts
-        amax_dict = {}
-        for expert in self.local_experts:
-            for name, module in expert.named_modules():
-                if isinstance(module, TensorQuantizer) and module.amax is not None:
-                    stored_amax = amax_dict.get(name)
-                    amax_tensor = module.amax.detach().clone()
-                    amax_dict[name] = (
-                        amax_tensor
-                        if stored_amax is None
-                        else torch.maximum(stored_amax, amax_tensor)
-                    )
-
-        # Apply synchronized amax values back to all local experts
-        for expert in self.local_experts:
-            for name, module in expert.named_modules():
-                if isinstance(module, TensorQuantizer) and name in amax_dict:
-                    module.amax = amax_dict[name].detach().clone()
+        sync_moe_expert_amax(self.local_experts, sync_weight_amax=sync_weight_amax)
 
     def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
         """Override the default to enable singleton_local_shards.

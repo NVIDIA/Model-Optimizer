@@ -25,6 +25,7 @@ from collections import Counter, defaultdict, deque
 
 import torch
 import torch.distributed
+import transformers
 from huggingface_hub import snapshot_download
 from torch import nn
 from torch.nn.attention import SDPBackend, sdpa_kernel
@@ -42,6 +43,9 @@ REMOVE_THINK_CHAT_TEMPLATE = (
 def calibrate_frequent_vocab(tokenizer, text, target_vocab_size, output_file=None):
     """Given a calibration text, find the most common vocabs and return the mapping."""
     conversations = tokenizer.apply_chat_template(text)
+    # Transformers5.x returns a BatchEncoding from apply_chat_template
+    if hasattr(conversations, "input_ids"):
+        conversations = conversations.input_ids
     counter = Counter(conversations)
     vocab = counter.most_common(target_vocab_size)
     mapping = torch.zeros(target_vocab_size, dtype=torch.int64)
@@ -372,6 +376,86 @@ class AcceptanceRateValidation:
 
         return ground_truth, ar
 
+    def validate_online(
+        self,
+        osl,
+        prompt=None,
+        input_ids=None,
+        steps=1,
+    ):
+        """Validate AR with online (context-dependent) ground truth.
+
+        Instead of pre-computing a fixed ground truth, this method verifies
+        draft tokens against the target model's response to the current
+        sequence (including previously accepted draft tokens). This matches
+        the actual speculative decoding verification loop.
+
+        Args:
+            osl: output sequence length
+            prompt: text prompt (alternative to input_ids)
+            input_ids: tokenized input
+            steps: number of draft tokens per step
+        """
+        if input_ids is None:
+            input_ids = self.tokenize(prompt)
+
+        if input_ids.shape[0] != 1:
+            raise ValueError("validate_online only supports batch_size=1")
+
+        isl = input_ids.shape[1]
+        max_len = isl + osl
+        total_accepted = 0
+        cnt = 0
+
+        while input_ids.shape[1] < max_len:
+            cnt += 1
+
+            # Generate base token + draft tokens
+            input_id, draft_tokens = self.model.pseudo_speculative_generate(input_ids, steps=steps)
+            draft_tokens = self.check_data_consistency_across_ranks(draft_tokens)
+            input_id = self.check_data_consistency_across_ranks(input_id)
+
+            # Append base token
+            input_ids = torch.cat((input_ids, input_id), dim=-1)
+
+            if draft_tokens is None or input_ids.shape[1] >= max_len:
+                total_accepted += 1  # base token
+                continue
+
+            # Build candidate sequence with draft tokens appended
+            candidate = torch.cat((input_ids, draft_tokens), dim=-1)
+
+            # Get target model's response to the candidate sequence
+            with torch.no_grad():
+                target_output = self.model._base_model(candidate)
+                target_logits = self.model._base_model_lm_head(target_output.last_hidden_state)
+                # posterior[i] = target's prediction given candidate[:i+1]
+                # For positions where we placed draft tokens, compare
+                # target's prediction at position i-1 with draft token at i
+                posterior = target_logits.argmax(dim=-1)
+
+            # Check acceptance: compare draft[i] with posterior at input_ids_len-1+i
+            accepted = 0
+            pos = input_ids.shape[1] - 1  # position of base token in candidate
+            for i in range(draft_tokens.shape[-1]):
+                if pos + i >= candidate.shape[1] - 1:
+                    break
+                if posterior[:, pos + i] == draft_tokens[:, i]:
+                    accepted += 1
+                    input_ids = torch.cat((input_ids, draft_tokens[:, i : i + 1]), dim=-1)
+                else:
+                    # Rejected — append target's correction token (not counted as accepted)
+                    input_ids = torch.cat((input_ids, posterior[:, pos + i : pos + i + 1]), dim=-1)
+                    break
+
+                if input_ids.shape[1] >= max_len:
+                    break
+
+            total_accepted += 1 + accepted  # base token + accepted drafts
+
+        ar = total_accepted / cnt if cnt > 0 else 0.0
+        return input_ids, ar
+
 
 @contextlib.contextmanager
 def temporary_set_config_value(config, field, value):
@@ -439,6 +523,16 @@ def _setup_kimi_k2_decoder():
     kimi_k2_module.DeepseekV3Attention._init_rope = lambda self: None
     kimi_k2_module.DeepseekV3Attention.forward = patched_fwd_with_lazy_rope_init
 
+    # Kimi implementation is based on older transformers which use "past_key_value" argument
+    # We patch it to "past_key_values" for compatibility
+    original_decoder_layer_forward = kimi_k2_module.DeepseekV3DecoderLayer.forward
+
+    def patched_decoder_layer_fwd(self, *args, **kwargs):
+        kwargs["past_key_value"] = kwargs.pop("past_key_values", None)
+        return original_decoder_layer_forward(self, *args, **kwargs)
+
+    kimi_k2_module.DeepseekV3DecoderLayer.forward = patched_decoder_layer_fwd
+
     return getattr(kimi_k2_module, "DeepseekV3DecoderLayer")
 
 
@@ -463,8 +557,110 @@ def enable_cp_ttt_patch():
     import modelopt.torch.speculative.plugins.transformers
 
     modelopt.torch.speculative.plugins.transformers.ENABLE_CP_TTT_PATCH = True
-    with sdpa_kernel(SDPBackend.CUDNN_ATTENTION):
+    with sdpa_kernel([SDPBackend.CUDNN_ATTENTION, SDPBackend.MATH]):
         try:
             yield
         finally:
             modelopt.torch.speculative.plugins.transformers.ENABLE_CP_TTT_PATCH = False
+
+
+def load_vlm_or_llm(
+    model_name_or_path: str,
+    use_fake_base: bool = False,
+    use_offline_training: bool = False,
+    dtype: str | torch.dtype | None = None,
+    device_map: str | None = None,
+    trust_remote_code: bool = False,
+):
+    """Load a VLM or LLM. Returns the model.
+
+    When ``use_offline_training=True``, returns a
+    :class:`~modelopt.torch.speculative.plugins.modeling_fakebase.FakeBaseModel` containing only
+    ``lm_head`` and ``embed_tokens``, auto-detecting weight paths from the checkpoint.
+    Otherwise, falls back to loading with ``num_hidden_layers=0`` for memory efficiency.
+
+    Args:
+        model_name_or_path: Local path or HuggingFace repo ID of the model.
+        use_offline_training: Whether to load a memory-efficient model for offline training.
+        dtype: dtype to use when loading the model.
+        device_map: Device map passed to ``from_pretrained``.
+        trust_remote_code: Whether to trust remote code.
+    """
+    if use_offline_training and use_fake_base:
+        from modelopt.torch.speculative.plugins.modeling_fakebase import FakeBaseModel
+
+        return FakeBaseModel.from_source(model_name_or_path, trust_remote_code=trust_remote_code)
+
+    model_config = transformers.AutoConfig.from_pretrained(
+        model_name_or_path,
+        trust_remote_code=trust_remote_code,
+    )
+    if "vl" in model_config.model_type.lower():
+        model_cls = transformers.AutoModelForVision2Seq
+    else:
+        model_cls = transformers.AutoModelForCausalLM
+
+    extra = {}
+    if use_offline_training:
+        extra["num_hidden_layers"] = 0
+        if hasattr(model_config, "layer_types"):
+            extra["layer_types"] = []
+
+    model = model_cls.from_pretrained(
+        model_name_or_path,
+        trust_remote_code=trust_remote_code,
+        torch_dtype=dtype,
+        device_map=device_map,
+        **extra,
+    )
+
+    if use_offline_training:
+        # Preserve the original layer count since we loaded with num_hidden_layers=0
+        model.config.num_orig_hidden_layers = model_config.num_hidden_layers
+
+    return model
+
+
+@contextlib.contextmanager
+def patch_transformers5_params_loading():
+    """Patch transformers 5.x parameter loading to preserve original `requires_grad` settings.
+
+    In transformers v5.x, loading a checkpoint forcibly sets parameters' requires_grad,
+    which may unintentionally unfreeze frozen parameters. This monkey-patch restores the original
+    `requires_grad` after loading parameters.
+
+    Reference:
+        https://github.com/huggingface/transformers/blob/v5.0.0.rc1-release/src/transformers/core_model_loading.py#L640
+    """
+    # Skip patching for non-applicable transformers version
+    if importlib.util.find_spec("transformers.core_model_loading") is None:
+        yield
+        return
+    from transformers import core_model_loading
+
+    if not hasattr(core_model_loading, "set_param_for_module"):
+        yield
+        return
+
+    orig_set_param_for_module = core_model_loading.set_param_for_module
+
+    def patched_set_param_for_module(*args, **kwargs):
+        """Monkey-patch set_param_for_module to restore original requires_grad."""
+        model, target_name = args[:2]
+        module_path, _, param_name = target_name.rpartition(".")
+        module_obj = model.get_submodule(module_path) if module_path else model
+
+        # Get original requires_grad value
+        orig_requires_grad = getattr(module_obj, param_name).requires_grad
+
+        # Call set_param_for_module
+        orig_set_param_for_module(*args, **kwargs)
+
+        # Restore original requires_grad value
+        getattr(module_obj, param_name).requires_grad = orig_requires_grad
+
+    try:
+        core_model_loading.set_param_for_module = patched_set_param_for_module
+        yield
+    finally:
+        core_model_loading.set_param_for_module = orig_set_param_for_module

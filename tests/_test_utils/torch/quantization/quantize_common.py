@@ -29,28 +29,34 @@ from modelopt.torch.quantization.nn.modules.tensor_quantizer import SequentialQu
 from modelopt.torch.quantization.utils import is_quantized_linear
 from modelopt.torch.utils import torch_to
 
-INT4_AWQ_FULL_CFG = mtq.INT4_AWQ_CFG.copy()
+INT4_AWQ_FULL_CFG = copy.deepcopy(mtq.INT4_AWQ_CFG)
 
 INT4_AWQ_FULL_CFG["algorithm"] = "awq_full"
 
-INT4_AWQ_CLIP_CFG = mtq.INT4_AWQ_CFG.copy()
+INT4_AWQ_CLIP_CFG = copy.deepcopy(mtq.INT4_AWQ_CFG)
 INT4_AWQ_CLIP_CFG["algorithm"] = "awq_clip"
 
 # SVDQuant test cfg
-INT4_SVDQUANT_CFG = mtq.INT4_AWQ_CFG.copy()
+INT4_SVDQUANT_CFG = copy.deepcopy(mtq.INT4_AWQ_CFG)
 INT4_SVDQUANT_CFG["algorithm"] = {"method": "svdquant", "lowrank": 8}
 
 # SVDQuant test cfg
-FP4_SVDQUANT_CFG = mtq.NVFP4_AWQ_LITE_CFG.copy()
+FP4_SVDQUANT_CFG = copy.deepcopy(mtq.NVFP4_AWQ_LITE_CFG)
 FP4_SVDQUANT_CFG["algorithm"] = {"method": "svdquant", "lowrank": 8}
 
 
 def get_awq_config(algorithm="awq_lite", block_size=8):
     config = copy.deepcopy(mtq.INT4_AWQ_CFG)
-    config["quant_cfg"]["*weight_quantizer"]["block_sizes"] = {-1: block_size}
+    for entry in config["quant_cfg"]:
+        if entry["quantizer_name"] == "*weight_quantizer":
+            entry.setdefault("cfg", {})["block_sizes"] = {-1: block_size}
+            break
+    if "algorithm" not in config or not isinstance(config["algorithm"], dict):
+        config["algorithm"] = {}
+
     config["algorithm"]["method"] = algorithm
     config["algorithm"]["debug"] = True
-    if algorithm == "awq_clip":
+    if algorithm == "awq_clip" and "alpha_step" in config["algorithm"]:
         config["algorithm"].pop("alpha_step")
     return config
 
@@ -255,12 +261,20 @@ def auto_quantize_helper(model):
         num_score_steps=2,
         verbose=True,
     )
+    # Verify that the search outcome is consistent across all ranks.
+    # quantizer_states holds per-rank calibration tensors legitimately
+    # differ across TP shards, so it is excluded from the comparison.
+    keys_to_compare = [k for k in search_state if k != "quantizer_states"]
+
     search_state_list = [None] * torch.distributed.get_world_size()
     torch.distributed.all_gather_object(search_state_list, search_state)
 
     search_state_rank0 = search_state_list[0]
     for search_state in search_state_list[1:]:
-        assert search_state == search_state_rank0
+        for key in keys_to_compare:
+            assert search_state[key] == search_state_rank0[key], (
+                f"Mismatch in search_state['{key}'] across ranks"
+            )
 
 
 def compute_backward_grad(

@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import math
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -110,7 +111,7 @@ class CalibrationConfig:
     @property
     def num_batches(self) -> int:
         """Calculate number of calibration batches."""
-        return self.calib_size // self.batch_size
+        return math.ceil(self.calib_size / self.batch_size)
 
 
 @dataclass

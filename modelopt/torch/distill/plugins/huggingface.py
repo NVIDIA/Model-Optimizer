@@ -15,11 +15,15 @@
 
 """ModelOpt plugin to train HuggingFace models with knowledge distillation."""
 
+from torch import Tensor
 from transformers.modeling_outputs import CausalLMOutputWithPast
+from transformers.trainer_pt_utils import LabelSmoother
 
 import modelopt.torch.distill as mtd
 from modelopt.torch.opt.plugins import ModelOptHFTrainer
 from modelopt.torch.utils import print_rank_0
+
+IGNORE_TOKEN_ID = LabelSmoother.ignore_index  # equals -100
 
 
 class KDTrainer(ModelOptHFTrainer):
@@ -98,12 +102,37 @@ class KDTrainer(ModelOptHFTrainer):
 
     def train(self, *args, **kwargs):
         """Train the model."""
-        self.compute_loss_func = lambda *args, **kwargs: self.model.compute_kd_loss()
+
+        def _compute_kd_loss(outputs: Tensor, labels: Tensor | None, **kwargs):
+            def loss_reduction_fn(loss: Tensor):
+                if labels is None:
+                    return loss.mean()
+                loss_mask = labels != IGNORE_TOKEN_ID
+                return (loss * loss_mask).sum() / loss_mask.sum().clamp(min=1)
+
+            return self.model.compute_kd_loss(loss_reduction_fn=loss_reduction_fn)
+
+        self.compute_loss_func = _compute_kd_loss
         return super().train(*args, **kwargs)
 
 
 class LMLogitsLoss(mtd.LogitsDistillationLoss):
-    """Logits loss for knowledge distillation."""
+    """Logits loss for language-model knowledge distillation.
+
+    Defaults to ``reduction="none"`` to support per-token loss masking via ``loss_reduction_fn``
+    in :meth:`DistillationModel.compute_kd_loss`. This allows masking out padding and non-assistant
+    tokens before reducing the loss.
+    """
+
+    def __init__(self, temperature: float = 1.0, reduction: str = "none"):
+        """Constructor.
+
+        Args:
+            temperature: A value used to soften the logits before computing loss.
+            reduction: How to reduce the final pointwise loss. Defaults to ``"none"`` to
+                allow loss-masking via ``loss_reduction_fn`` in ``compute_kd_loss``.
+        """
+        super().__init__(temperature=temperature, reduction=reduction)
 
     def forward(self, out_student: CausalLMOutputWithPast, out_teacher: CausalLMOutputWithPast):
         """Forward pass for logits distillation loss.
@@ -112,4 +141,5 @@ class LMLogitsLoss(mtd.LogitsDistillationLoss):
             out_student: The student model output.
             out_teacher: The teacher model output.
         """
-        return super().forward(out_student.logits, out_teacher.logits)
+        student_logits, teacher_logits = out_student.logits.float(), out_teacher.logits.float()
+        return super().forward(student_logits, teacher_logits)

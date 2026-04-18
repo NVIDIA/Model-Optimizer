@@ -17,6 +17,7 @@
 import pytest
 import torch
 from _test_utils.examples.run_command import run_example_command
+from _test_utils.torch.misc import minimum_sm
 
 
 # fmt: off
@@ -98,7 +99,7 @@ def test_llama_lora_qat_nvfp4(tiny_llama_path, tmp_path):
         ]
     )
 
-
+@minimum_sm(90)
 def test_llama_qlora_nvfp4(tiny_llama_path, tmp_path):
     _run_command(
         [

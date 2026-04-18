@@ -151,7 +151,8 @@ def torch_to_tensorrt_llm_checkpoint(
         model_metadata_config = model.config.__dict__
         vocab_size = model.config.vocab_size
         hf_config = model.config
-        architecture = model.config.architectures[0]
+        architectures = getattr(model.config, "architectures", None)
+        architecture = architectures[0] if architectures else ""
 
         # For Baichuan 13B, we check if alibi is used with the alibi_mask property.
         if hasattr(model, "model") and hasattr(model.model, "alibi_mask"):
@@ -164,11 +165,6 @@ def torch_to_tensorrt_llm_checkpoint(
                 model_metadata_config.update(
                     config_value if isinstance(config_value, dict) else config_value.to_dict()
                 )
-
-    elif hasattr(model, "cfg"):
-        # NeMo MegatronGPTModel
-        model_metadata_config = dict(model.cfg)
-        vocab_size = model.tokenizer.vocab_size
     else:
         raise ValueError("Cannot find valid model metadata config in model")
 
@@ -189,7 +185,7 @@ def torch_to_tensorrt_llm_checkpoint(
     model_metadata_config["training_tensor_parallel"] = training_tensor_parallel
 
     if "make_vocab_size_divisible_by" in model_metadata_config:
-        # For some nemo models, the vocab_size is pre-padded.
+        # For some mcore models, the vocab_size is pre-padded.
         # We calculate the pre-padded vocab_size with this config: make_vocab_size_divisible_by.
         make_vocab_size_divisible_by = model_metadata_config["make_vocab_size_divisible_by"]
         make_vocab_size_divisible_by_with_tp = (
@@ -312,7 +308,7 @@ def torch_to_tensorrt_llm_checkpoint(
                     config.ln_f = build_layernorm_config(module)
             elif is_linear(module):
                 if model_metadata_config.get("share_embeddings_and_output_weights", False):
-                    # NeMo/MCore models with shared embeddings - for example Gemma -
+                    # MCore models with shared embeddings - for example Gemma -
                     # the model head weight is None so we just skip processing
                     config.share_embedding_table = True
                     continue

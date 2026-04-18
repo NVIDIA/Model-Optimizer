@@ -361,7 +361,7 @@ can be converted into searchable units:
     # search over the number of layers (depth) in the sequential layer.
     nn.Sequential
 
-    # We convert Megatron-core / NeMo GPT or MoE or Mamba Hybrid style models (e.g. Llama3, Nemotron-H, Qwen3-30B-A3B)
+    # We convert Megatron-core / Megatron-Bridge GPT or MoE or Mamba Hybrid style models (e.g. Llama3, Nemotron-3-Nano, Qwen3-30B-A3B)
     # to automatically search over the
     # MLP hidden size, number of attention heads
     # number of mamba heads, mamba head dimension,
@@ -369,7 +369,6 @@ can be converted into searchable units:
     # and depth of the model.
     megatron.core.models.gpt.GPTModel
     megatron.core.models.mamba.MambaModel
-    nemo.collections.llm.gpt.model.base.GPTModel
 
     # We convert Hugging Face Attention layers to automatically search over the number of heads
     # and MLP hidden size.

@@ -20,7 +20,6 @@
 
 import json
 import os
-import shutil
 import tempfile
 from collections import OrderedDict
 from pathlib import Path
@@ -28,9 +27,10 @@ from typing import Any
 
 import torch
 import torch.distributed
-from huggingface_hub import hf_hub_download, snapshot_download
-from safetensors.torch import safe_open, save_file
-from tqdm import tqdm
+from huggingface_hub import hf_hub_download
+from huggingface_hub.errors import EntryNotFoundError
+from safetensors import safe_open
+from safetensors.torch import save_file
 
 from modelopt import __version__
 from modelopt.torch.utils import import_plugin
@@ -45,8 +45,13 @@ from .model_config import (
     QUANTIZATION_NONE,
     QUANTIZATION_NVFP4,
 )
+from .plugins.hf_checkpoint_utils import copy_hf_ckpt_remote_code, load_multimodal_components
 from .plugins.mcore_common import all_mcore_hf_export_mapping
-from .plugins.mcore_custom import CustomModuleMapping, get_safetensor, save_safetensors
+from .plugins.mcore_custom import (
+    CustomModuleMapping,
+    get_safetensor,
+    save_safetensors_by_layer_index,
+)
 from .plugins.megatron_importer import GPTModelImporter
 from .quant_utils import (
     get_activation_scaling_factor,
@@ -119,6 +124,7 @@ class GPTModelExporter:
             raise ValueError("Input to GPTModelExport must be a megatron.core.models.GPTModel!")
 
         self._state_dict = OrderedDict()
+        self._layer_state_dicts = OrderedDict()
         self._hf_pretrained_model_name = pretrained_model_name_or_path
         self._hf_config = transformers.AutoConfig.from_pretrained(
             pretrained_model_name_or_path, trust_remote_code=trust_remote_code
@@ -221,10 +227,29 @@ class GPTModelExporter:
 
                     self._hf_extra_config.update(eagle_config_update)
 
+    def save_pretrained_extra_modules(
+        self,
+        save_directory: str | os.PathLike,
+    ):
+        """Save a EAGLE or Medusa checkpoints which can be deployed by vLLM and TensorRT-LLM."""
+        # We use the last PP rank to write the config because
+        # medusa_heads and eagle_module only exist in the last stage.
+        pp_rank = get_pipeline_model_parallel_rank()
+        pp_size = get_pipeline_model_parallel_world_size()
+        is_last_stage_main_rank = pp_rank == pp_size - 1
+
+        state_dict = self.extra_state_dict
+
+        if is_last_stage_main_rank and self._hf_extra_config is not None:
+            self._hf_extra_config.save_pretrained(save_directory)
+            save_file(state_dict, save_directory + "/model.safetensors", metadata={"format": "pt"})
+
+        torch.distributed.barrier()
+
     def save_pretrained(
         self,
         save_directory: str | os.PathLike,
-        pretrained_model_name_or_path: str | os.PathLike | None = None,
+        pretrained_model_name_or_path: str | os.PathLike,
     ):
         """Save a unified checkpoint which can be deployed by vLLM and TensorRT-LLM.
 
@@ -242,7 +267,7 @@ class GPTModelExporter:
         is_last_stage_main_rank = pp_rank == pp_size - 1
 
         # Main export process
-        state_dict = self.extra_state_dict if self.export_extra_modules else self.state_dict
+        layer_state_dicts = self.layer_state_dicts
 
         quantization_format = self._get_quantization_format(self.model)
         quantization = None
@@ -259,39 +284,38 @@ class GPTModelExporter:
         # We use the last PP rank and the 1st EP rank to write the config because
         # medusa_heads and eagle_module only exist in the last stage.
         if is_last_stage_main_rank:
-            if self.export_extra_modules and self._hf_extra_config is not None:
-                self._hf_extra_config.save_pretrained(save_directory)
-            else:
-                self._hf_config.save_pretrained(save_directory)
-                try:
-                    generation_config = transformers.GenerationConfig.from_pretrained(
-                        self._hf_pretrained_model_name
-                    )
-                    generation_config.save_pretrained(save_directory)
-                except OSError:
-                    pass
-                try:
-                    tokenizer = transformers.AutoTokenizer.from_pretrained(
-                        self._hf_pretrained_model_name
-                    )
-                    tokenizer.save_pretrained(save_directory)
-                except OSError:
-                    pass
-                except TypeError:
-                    pass
-                try:
-                    # Load and save preprocessor config from the original model
-                    processor = AutoProcessor.from_pretrained(
-                        self._hf_pretrained_model_name, trust_remote_code=self.trust_remote_code
-                    )
-                    if hasattr(processor, "image_processor"):
-                        processor.image_processor.save_pretrained(save_directory)
-                except (OSError, ValueError, ImportError):
-                    pass
+            self._hf_config.save_pretrained(save_directory)
+            try:
+                generation_config = transformers.GenerationConfig.from_pretrained(
+                    self._hf_pretrained_model_name,
+                    trust_remote_code=self.trust_remote_code,
+                )
+                generation_config.save_pretrained(save_directory)
+            except OSError:
+                pass
+            try:
+                tokenizer = transformers.AutoTokenizer.from_pretrained(
+                    self._hf_pretrained_model_name,
+                    trust_remote_code=self.trust_remote_code,
+                )
+                tokenizer.save_pretrained(save_directory)
+            except OSError:
+                pass
+            except TypeError:
+                pass
+            try:
+                # Load and save preprocessor config from the original model
+                processor = AutoProcessor.from_pretrained(
+                    self._hf_pretrained_model_name, trust_remote_code=self.trust_remote_code
+                )
+                if hasattr(processor, "image_processor"):
+                    processor.image_processor.save_pretrained(save_directory)
+            except (OSError, ValueError, ImportError):
+                pass
 
             mtp_state_dict = self._get_mtp_state_dict()
             if len(mtp_state_dict) > 0:
-                state_dict.update(mtp_state_dict)
+                layer_state_dicts[self.model.config.num_layers].update(mtp_state_dict)
                 print(f"Successfully loaded {len(mtp_state_dict)} MTP tensors")
 
         combined_exclude_modules = self._gather_exclude_modules()
@@ -314,121 +338,18 @@ class GPTModelExporter:
             with open(save_directory + "/hf_quant_config.json", "w") as f:
                 json.dump(self._hf_quant_config, f, indent=4)
 
-        if (
-            is_first_stage_main_rank
-            and self.is_multimodal
-            and pretrained_model_name_or_path is not None
-        ):
-            hf_checkpoint_path = Path(pretrained_model_name_or_path)
-            if not hf_checkpoint_path.is_dir():
-                hf_checkpoint_path = tempfile.gettempdir() + "/" + pretrained_model_name_or_path
-                if not Path(hf_checkpoint_path).exists():
-                    snapshot_download(
-                        repo_id=pretrained_model_name_or_path,
-                        local_dir=hf_checkpoint_path,
-                    )
-
-            safetensors_file = Path(hf_checkpoint_path) / "model.safetensors"
-            safetensors_index_file = Path(hf_checkpoint_path) / "model.safetensors.index.json"
-
-            multimodal_state_dict = {}
-
-            if safetensors_file.is_file():
-                print(f"Loading multimodal components from single file: {safetensors_file}")
-                with safe_open(safetensors_file, framework="pt") as f:
-                    multimodal_keys = [
-                        key
-                        for key in f.keys()  # noqa: SIM118
-                        if key.startswith(("multi_modal_projector", "vision_model"))
-                    ]
-                    for key in tqdm(multimodal_keys, desc="Loading multimodal tensors"):
-                        multimodal_state_dict[key] = f.get_tensor(key)
-
-            elif safetensors_index_file.is_file():
-                print(f"Loading multimodal components from sharded model: {hf_checkpoint_path}")
-                with open(safetensors_index_file) as f:
-                    safetensors_index = json.load(f)
-
-                # For multimodal models, vision_model and multi_modal_projector are in the first shard
-                all_shard_files = sorted(set(safetensors_index["weight_map"].values()))
-                first_shard_file = all_shard_files[0]  # e.g., "model-00001-of-00050.safetensors"
-
-                # Load multimodal components from the first shard file
-                safetensors_filepath = Path(hf_checkpoint_path) / first_shard_file
-                print(f"Loading multimodal components from {first_shard_file}")
-
-                with safe_open(safetensors_filepath, framework="pt") as f:
-                    shard_keys = list(f.keys())
-                    multimodal_keys_in_shard = [
-                        k
-                        for k in shard_keys
-                        if k.startswith(("multi_modal_projector", "vision_model"))
-                    ]
-
-                    if multimodal_keys_in_shard:
-                        print(
-                            f"Found {len(multimodal_keys_in_shard)} multimodal tensors in {first_shard_file}"
-                        )
-                        for key in tqdm(
-                            multimodal_keys_in_shard, desc="Loading multimodal tensors"
-                        ):
-                            multimodal_state_dict[key] = f.get_tensor(key)
-                    else:
-                        print(f"No multimodal components found in {first_shard_file}")
-
-            else:
-                print(f"Warning: No safetensors files found in {hf_checkpoint_path}")
-
-            print(f"Successfully loaded {len(multimodal_state_dict)} multimodal tensors")
-            # Add multimodal components to state_dict
-            state_dict.update(multimodal_state_dict)
+        # Add multimodal components to state_dict. Since only support decoder model quantization,
+        # no changes will be made to the multimodal components. We copy the multimodal components
+        # from the pretrained model directly to the state_dict to avoid implementing the export logic.
+        if is_first_stage_main_rank and self.is_multimodal:
+            multimodal_state_dict = load_multimodal_components(pretrained_model_name_or_path)
+            layer_state_dicts[0].update(multimodal_state_dict)
 
         # Barrier to ensure the export_dir has been created.
         torch.distributed.barrier()
 
-        if self.export_extra_modules:
-            if is_last_stage_main_rank:
-                save_file(
-                    state_dict, save_directory + "/model.safetensors", metadata={"format": "pt"}
-                )
-            torch.distributed.barrier()
-            return
-
-        if (
-            is_last_stage_main_rank
-            and self._hf_config is not None
-            and pretrained_model_name_or_path is not None
-        ):
-            # For models that keep configuration and modeling files as part of the checkpoint,
-            # we need to copy them to the export directory for seamless integration with inference
-            # frameworks.
-            hf_checkpoint_path = Path(pretrained_model_name_or_path)
-            model_type = getattr(self._hf_config, "model_type", None)
-
-            if hf_checkpoint_path.is_dir():
-                # Local directory - files should be there
-                config_file = hf_checkpoint_path / f"configuration_{model_type}.py"
-                modeling_file = hf_checkpoint_path / f"modeling_{model_type}.py"
-            else:
-                # Remote model ID - download from HuggingFace Hub (cached automatically)
-                try:
-                    config_file = hf_hub_download(
-                        repo_id=pretrained_model_name_or_path,
-                        filename=f"configuration_{model_type}.py",
-                    )
-                except Exception:
-                    config_file = ""
-                try:
-                    modeling_file = hf_hub_download(
-                        repo_id=pretrained_model_name_or_path, filename=f"modeling_{model_type}.py"
-                    )
-                except Exception:
-                    modeling_file = ""
-
-            if config_file and os.path.exists(config_file):
-                shutil.copy(config_file, f"{save_directory}/configuration_{model_type}.py")
-            if modeling_file and os.path.exists(modeling_file):
-                shutil.copy(modeling_file, f"{save_directory}/modeling_{model_type}.py")
+        if is_last_stage_main_rank and self._hf_config is not None:
+            copy_hf_ckpt_remote_code(pretrained_model_name_or_path, save_directory)
 
         # Newer versions of VLLM expect config.json with hf_quant_config
         config_json_file = save_directory + "/config.json"
@@ -440,7 +361,13 @@ class GPTModelExporter:
             with open(config_json_file, "w") as f:
                 json.dump(config_dict, f, indent=4)
 
-        save_safetensors(state_dict, save_directory)
+        # save_safetensors(state_dict, save_directory)
+        save_safetensors_by_layer_index(
+            layer_state_dicts=layer_state_dicts,
+            total_layers=self.model.config.num_layers,
+            save_directory=save_directory,
+            name_template="model-{:05d}-of-{:05d}",
+        )
 
     @property
     def state_dict(self):
@@ -448,6 +375,12 @@ class GPTModelExporter:
         if len(self._state_dict) == 0:
             self._get_state_dict()
         return self._state_dict
+
+    @property
+    def layer_state_dicts(self):
+        if len(self._layer_state_dicts) == 0:
+            self._get_state_dict()
+        return self._layer_state_dicts
 
     @property
     def extra_state_dict(self):
@@ -463,6 +396,20 @@ class GPTModelExporter:
         if hasattr(model, "embedding"):
             self.rules["word_embeddings"](model.embedding.word_embeddings)
 
+        # Decoder layers
+        for layer in model.decoder.layers:
+            layer_id = layer.layer_number - 1
+            if isinstance(layer, MambaLayer):
+                self._get_mamba_layer_state_dict(layer, layer_id)
+            elif isinstance(layer, TransformerLayer):
+                self._get_transformer_layer_state_dict(layer, layer_id)
+            else:
+                raise ValueError("Only TransformerLayer or MambaLayer are supported.")
+
+            self._layer_state_dicts[layer.layer_number] = self._state_dict
+            if layer.layer_number != self.model.config.num_layers:
+                self._state_dict = OrderedDict()
+
         # Final layernorm
         if hasattr(model.decoder, "final_layernorm") and model.decoder.final_layernorm:
             self.rules["final_layernorm"](model.decoder.final_layernorm)
@@ -474,21 +421,25 @@ class GPTModelExporter:
         if hasattr(model, "output_layer") and not model.share_embeddings_and_output_weights:
             self.rules["output_layer"](model.output_layer)
 
-        # Decoder layers
-        for layer in model.decoder.layers:
-            layer_id = layer.layer_number - 1
-            if isinstance(layer, MambaLayer):
-                self._get_mamba_layer_state_dict(layer, layer_id)
-            elif isinstance(layer, TransformerLayer):
-                self._get_transformer_layer_state_dict(layer, layer_id)
-            else:
-                raise ValueError("Only TransformerLayer or MambaLayer are supported.")
+    def _get_fused_norm_weight(self, module):
+        """Return ``module.layer_norm_weight`` when TE fuses the norm into a linear layer.
 
-        # TODO export MTP layer in the future
+        Returns ``None`` when the ``"fused_norm"`` rule is absent or the module has no
+        ``layer_norm_weight`` attribute (or its value is ``None``).
+        """
+        if "fused_norm" not in self.rules:
+            return None
+        return getattr(module, "layer_norm_weight", None)
 
     def _get_transformer_layer_state_dict(self, layer, layer_id):
         if not isinstance(layer.input_layernorm, IdentityOp):
             self.rules["input_layernorm"](layer.input_layernorm, layer_id)
+        elif (
+            norm_weight := self._get_fused_norm_weight(
+                getattr(layer.self_attention, "linear_qkv", None)
+            )
+        ) is not None:
+            self.rules["fused_norm"](norm_weight, layer_id)
 
         if not isinstance(layer.self_attention, IdentityOp):
             if "MLASelfAttention" in str(type(layer.self_attention)):
@@ -527,6 +478,13 @@ class GPTModelExporter:
 
         if not isinstance(layer.pre_mlp_layernorm, IdentityOp):
             self.rules["pre_mlp_layernorm"](layer.pre_mlp_layernorm, layer_id)
+        elif (
+            not isinstance(layer.mlp, IdentityOp)
+            and "MoE" not in str(type(layer.mlp))
+            and (norm_weight := self._get_fused_norm_weight(getattr(layer.mlp, "linear_fc1", None)))
+            is not None
+        ):
+            self.rules["fused_norm"](norm_weight, layer_id)
 
         if not isinstance(layer.mlp, IdentityOp):
             if "MoE" in str(type(layer.mlp)):
@@ -542,22 +500,30 @@ class GPTModelExporter:
                     self.rules["shared_experts.linear_fc2"](
                         layer.mlp.shared_experts.linear_fc2, layer_id
                     )
-                if not self.rules.get("use_packed_local_experts", False):
-                    for expert_id, expert in enumerate(layer.mlp.experts.local_experts):
+                if hasattr(layer.mlp.experts, "local_experts"):
+                    if not self.rules.get("use_packed_local_experts", False):
+                        for expert_id, expert in enumerate(layer.mlp.experts.local_experts):
+                            self.rules["local_experts.linear_fc1"](
+                                expert.linear_fc1, layer_id, expert_id
+                            )
+                            self.rules["local_experts.linear_fc2"](
+                                expert.linear_fc2, layer_id, expert_id
+                            )
+                    else:
+                        # For llama 4, in hf unified checkpoint, all local experts share one scale
                         self.rules["local_experts.linear_fc1"](
-                            expert.linear_fc1, layer_id, expert_id
+                            layer.mlp.experts.local_experts, layer_id
                         )
                         self.rules["local_experts.linear_fc2"](
-                            expert.linear_fc2, layer_id, expert_id
+                            layer.mlp.experts.local_experts, layer_id
                         )
-                else:
-                    # For llama 4, in hf unified checkpoint, all local experts share one scale
-                    self.rules["local_experts.linear_fc1"](
-                        layer.mlp.experts.local_experts, layer_id
-                    )
-                    self.rules["local_experts.linear_fc2"](
-                        layer.mlp.experts.local_experts, layer_id
-                    )
+                elif "experts.linear_fc1" in self.rules:
+                    # TEGroupedMLP: experts use fused grouped GEMM with a single
+                    # linear_fc1/linear_fc2 for all experts (no local_experts attribute).
+                    # Uses "experts.linear_fc1" rule (GroupedMLPMerging) instead of
+                    # "local_experts.linear_fc1" which expects per-expert iteration.
+                    self.rules["experts.linear_fc1"](layer.mlp.experts.linear_fc1, layer_id)
+                    self.rules["experts.linear_fc2"](layer.mlp.experts.linear_fc2, layer_id)
             else:
                 self.rules["linear_fc1"](layer.mlp.linear_fc1, layer_id)
                 self.rules["linear_fc2"](layer.mlp.linear_fc2, layer_id)
@@ -570,34 +536,65 @@ class GPTModelExporter:
         # TODO Implement MTP export for quantized MTP
         # Hacky version for now: copy MTP weights from pretrained model
         mtp_state_dict = {}
-        if self._hf_pretrained_model_name:
-            if os.path.isdir(self._hf_pretrained_model_name):
-                safetensors_index_file = (
-                    Path(self._hf_pretrained_model_name) / "model.safetensors.index.json"
-                )
-            else:
-                safetensors_index_file = hf_hub_download(
-                    repo_id=self._hf_pretrained_model_name, filename="model.safetensors.index.json"
-                )
+        if not self._hf_pretrained_model_name:
+            return mtp_state_dict
 
+        mtp_exists = False
+
+        if os.path.isdir(self._hf_pretrained_model_name):
+            safetensors_index_file = (
+                Path(self._hf_pretrained_model_name) / "model.safetensors.index.json"
+            )
+            single_safetensors_file = Path(self._hf_pretrained_model_name) / "model.safetensors"
+        else:
+            try:
+                safetensors_index_file = Path(
+                    hf_hub_download(
+                        repo_id=self._hf_pretrained_model_name,
+                        filename="model.safetensors.index.json",
+                    )
+                )
+                single_safetensors_file = None
+            except EntryNotFoundError:
+                # Model uses a single unsharded safetensors file — check it for MTP weights.
+                safetensors_index_file = None
+                try:
+                    single_safetensors_file = Path(
+                        hf_hub_download(
+                            repo_id=self._hf_pretrained_model_name,
+                            filename="model.safetensors",
+                        )
+                    )
+                except EntryNotFoundError:
+                    return mtp_state_dict
+
+        if safetensors_index_file is not None and safetensors_index_file.exists():
             print(f"Exporting MTP: using safetensors_index_file: {safetensors_index_file}")
-            mtp_exists = False
-            if safetensors_index_file and os.path.exists(safetensors_index_file):
-                with open(safetensors_index_file) as f:
-                    safetensors_index = json.load(f)
-                model_dir = Path(safetensors_index_file).parent
-                for key in safetensors_index["weight_map"]:
+            with open(safetensors_index_file) as f:
+                safetensors_index = json.load(f)
+            model_dir = safetensors_index_file.parent
+            for key in safetensors_index["weight_map"]:
+                if key.startswith("mtp.") and key not in self._state_dict:
+                    mtp_state_dict[key] = get_safetensor(model_dir, key)
+                    mtp_exists = True
+        elif single_safetensors_file is not None and single_safetensors_file.exists():
+            print(f"Exporting MTP: using single safetensors file: {single_safetensors_file}")
+            with safe_open(str(single_safetensors_file), framework="pt", device="cpu") as f:
+                for key in f.keys():  # noqa: SIM118
                     if key.startswith("mtp.") and key not in self._state_dict:
-                        mtp_state_dict[key] = get_safetensor(model_dir, key)
+                        mtp_state_dict[key] = f.get_tensor(key)
                         mtp_exists = True
 
-            if mtp_exists:
-                self.exclude_modules.append("mtp*")
+        if mtp_exists:
+            self.exclude_modules.append("mtp*")
         return mtp_state_dict
 
     def _get_mamba_layer_state_dict(self, layer, layer_id):
         if not isinstance(layer.norm, IdentityOp):
             self.rules["norm"](layer.norm, layer_id)
+        elif (norm_weight := self._get_fused_norm_weight(layer.mixer.in_proj)) is not None:
+            # TE spec: norm is fused into in_proj (QuantTELayerNormColumnParallelLinear).
+            self.rules["fused_norm"](norm_weight, layer_id)
 
         self.rules["mixer_norm"](layer.mixer.norm, layer_id)
         self.rules["A_log"](layer.mixer.A_log, layer_id)
@@ -724,6 +721,7 @@ class GPTModelExporter:
                 "qkv_slicing": self._qkv_slicing,
                 "self_attention_scaling": self._self_attention_scaling,
                 "gated_mlp_slicing": self._gated_mlp_slicing,
+                "grouped_mlp_slicing": self._grouped_mlp_slicing,
                 "pack_name_remapping": self._pack_name_remapping,
                 "pack_name_remapping_gpt_oss": self._pack_name_remapping_gpt_oss,
             }
@@ -761,8 +759,10 @@ class GPTModelExporter:
         """
         name_to_value = {}
         qformat: str = self._get_quantization_format(module)
-        if qformat is None and "norm" not in prefix:  # Add exclude layers for hf_quant_config
-            self.exclude_modules.append(prefix)
+        if qformat is None and "norm" not in prefix:
+            # Add exclude layers for hf_quant_config. Note that if the prefix is not an empty
+            # string then it usually ends with "." which needs to be removed.
+            self.exclude_modules.append(prefix.removesuffix("."))
         block_size = get_weight_block_size(module)
 
         if hasattr(module, "weight") and module.weight is not None and module.weight.numel() > 0:
@@ -922,6 +922,67 @@ class GPTModelExporter:
                 self._state_dict[gate_proj_key] = val.detach().clone()
                 self._state_dict[up_proj_key] = val.detach().clone()
 
+    def _grouped_mlp_slicing(self, module, prefix, parallel_config=None):
+        """Export TEGroupedMLP weights by splitting per-expert weights into individual HF weights.
+
+        TEGroupedMLP (via TEGroupedLinear) stores weights as weight0, weight1, ..., weight{N-1}
+        in its state_dict, where each weight{i} corresponds to one expert. This method extracts
+        quantization state from the module, then iterates over experts and saves each expert's
+        weight (and scales if quantized) under the HF-style per-expert prefix.
+
+        This is the reverse of _grouped_mlp_merging in the importer.
+        """
+        num_experts = module.num_gemms
+
+        # TEGroupedLinear doesn't have module.weight (it has weight0, weight1, ...).
+        # Temporarily assign weight = weight0 so _get_quantized_state can extract
+        # qformat, scales, and input_scale from the module's quantizers.
+        has_weight = hasattr(module, "weight")
+        if not has_weight:
+            module.weight = module.weight0
+        try:
+            name_to_value, qformat, block_size = self._get_quantized_state(
+                module, self.dtype, prefix=prefix
+            )
+            weight_scale, weight_scale_2 = self._get_weight_scales(name_to_value, qformat)
+            name_to_value.pop("weight", None)
+        finally:
+            if not has_weight and hasattr(module, "weight"):
+                delattr(module, "weight")
+
+        state_dict = module.state_dict()
+
+        for expert_id in range(num_experts):
+            expert_prefix = prefix.format(expert_id) + "."
+            weight_key = f"weight{expert_id}"
+
+            if weight_key not in state_dict:
+                raise ValueError(f"Missing expected TEGroupedMLP expert weight: {weight_key}")
+
+            weight = state_dict[weight_key].to(self.dtype).cpu()
+
+            if weight_scale is None:
+                self._state_dict[expert_prefix + "weight"] = weight
+            else:
+                self._state_dict[expert_prefix + "weight"] = to_quantized_weight(
+                    weight,
+                    weight_scale,
+                    qformat,
+                    weight_scale_2,
+                    block_size,
+                )
+                self._state_dict[expert_prefix + "weight_scale"] = weight_scale.detach().clone()
+
+            if weight_scale_2 is not None:
+                self._state_dict[expert_prefix + "weight_scale_2"] = weight_scale_2.detach().clone()
+
+        for key, val in name_to_value.items():
+            if key == "output_scale":
+                continue
+            for expert_id in range(num_experts):
+                expert_prefix = prefix.format(expert_id) + "."
+                self._state_dict[expert_prefix + key] = val.detach().clone()
+
     def _qkv_slicing(
         self,
         module,
@@ -956,17 +1017,22 @@ class GPTModelExporter:
             )
             hidden_size = 2 * hidden_size
 
-        weight = weight.reshape([qkv_total_dim, head_size, hidden_size])
+        # When TP > 1 the weight tensor is already sharded: shape[0] = per_rank_qkv_dim, not
+        # qkv_total_dim.  Derive the per-rank dimensions from the actual tensor shape so that
+        # all subsequent reshape/slice operations are correct regardless of TP degree.
+        per_rank_qkv_dim = weight.shape[0] // head_size
+        num_query_groups_local = num_query_groups * per_rank_qkv_dim // qkv_total_dim
+        weight = weight.reshape([per_rank_qkv_dim, head_size, hidden_size])
         weight_scale, weight_scale_2 = self._get_weight_scales(name_to_value, qformat)
 
         q_slice = torch.cat(
             [
                 torch.arange((heads_per_group + 2) * i, (heads_per_group + 2) * i + heads_per_group)
-                for i in range(num_query_groups)
+                for i in range(num_query_groups_local)
             ]
         )
-        k_slice = torch.arange(heads_per_group, qkv_total_dim, (heads_per_group + 2))
-        v_slice = torch.arange(heads_per_group + 1, qkv_total_dim, (heads_per_group + 2))
+        k_slice = torch.arange(heads_per_group, per_rank_qkv_dim, (heads_per_group + 2))
+        v_slice = torch.arange(heads_per_group + 1, per_rank_qkv_dim, (heads_per_group + 2))
         ## Example of slices
         ## 7b: num_query_groups = head_num = 32,
         ## q_slice = [0, 3, 6, 9 , ... 90, 93]
@@ -991,7 +1057,7 @@ class GPTModelExporter:
                 weight_scale_dtype = weight_scale.dtype
                 weight_scale_hidden_size = weight_scale.shape[-1]
                 weight_scale = weight_scale.to(dtype=float).reshape(
-                    [qkv_total_dim, head_size, weight_scale_hidden_size]
+                    [per_rank_qkv_dim, head_size, weight_scale_hidden_size]
                 )
                 proj_weight_scales = [
                     weight_scale[s]
@@ -1032,7 +1098,7 @@ class GPTModelExporter:
             if key == "bias":
                 # Slice bias similar to weight
                 bias = val.detach().clone()
-                bias = bias.reshape([qkv_total_dim, head_size])
+                bias = bias.reshape([per_rank_qkv_dim, head_size])
                 proj_biases = [bias[s].reshape(-1) for s in slices]
                 proj_bias_keys = [q_proj_prefix + key, k_proj_prefix + key, v_proj_prefix + key]
                 for bias_tensor, bias_key in zip(proj_biases, proj_bias_keys):
@@ -1085,7 +1151,7 @@ class GPTModelExporter:
         merged_weight = torch.stack(weight_list, dim=0)
 
         # Transpose the last two dimensions to match HuggingFace format
-        # NeMo format: [num_experts, out_features, in_features]
+        # Megatron format: [num_experts, out_features, in_features]
         # HF format: [num_experts, in_features, out_features]
         merged_weight = merged_weight.transpose(-2, -1).contiguous()
 
@@ -1153,7 +1219,7 @@ class GPTModelExporter:
         merged_weight = torch.stack(weight_list, dim=0)
 
         # Transpose the last two dimensions to match HuggingFace format (except for GptOssForCausalLM)
-        # NeMo format: [num_experts, out_features, in_features]
+        # Megatron format: [num_experts, out_features, in_features]
         # HF format: [num_experts, in_features, out_features]
 
         # TODO: Need to decide if we want to transpose the weight or not.
@@ -1254,7 +1320,7 @@ class GPTModelExporter:
 
 def export_mcore_gpt_to_hf(
     model: torch.nn.Module,
-    pretrained_model_name_or_path: str | os.PathLike | None = None,
+    pretrained_model_name_or_path: str | os.PathLike,
     export_extra_modules: bool = False,
     dtype: torch.dtype = torch.bfloat16,
     export_dir: Path | str = tempfile.gettempdir(),
@@ -1282,7 +1348,10 @@ def export_mcore_gpt_to_hf(
         trust_remote_code=trust_remote_code,
         moe_router_dtype=moe_router_dtype,
     )
-    exporter.save_pretrained(export_dir, pretrained_model_name_or_path)
+    if exporter.export_extra_modules:
+        exporter.save_pretrained_extra_modules(export_dir)
+    else:
+        exporter.save_pretrained(export_dir, pretrained_model_name_or_path)
 
 
 def import_mcore_gpt_from_hf(

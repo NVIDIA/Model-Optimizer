@@ -20,6 +20,6 @@
 export TLLM_LOG_LEVEL="error";
 python3 collect_hidden_states/compute_hidden_states_trtllm.py \
   --model meta-llama/Llama-3.2-1B-Instruct \
-  --input-file synthetic_conversations/daring-anteater.jsonl \
+  --input-data synthetic_conversations/daring-anteater.jsonl \
   --output-dir /mnt/md0/eagle-hidden-states/llama1b/daring_anteater/
   

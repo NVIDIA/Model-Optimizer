@@ -38,7 +38,12 @@ from .base import Model
 
 class TRTLLMPYTModel(Model):
     def __init__(
-        self, model_path, max_concurrent_requests, sampling_kwargs, use_draft_logits=False, **kwargs
+        self,
+        model_path,
+        max_concurrent_requests,
+        sampling_kwargs,
+        use_draft_logits=False,
+        **kwargs,
     ):
         self.model = create_executor(model_path, max_concurrent_requests, kwargs)
         self.sampling_kwargs = sampling_kwargs
@@ -80,16 +85,23 @@ def create_executor(model_path: str, max_concurrent_requests, kwargs):
             max_draft_len=kwargs.get("speculative_num_steps", 3),
             speculative_model_dir=kwargs.get("draft_model_dir", None),
         )
-        disable_overlap_schedule = True
 
     elif kwargs.get("speculative_algorithm", None) == "EAGLE3":
+        extra_params = {}
+        if "allow_advanced_sampling" in EagleDecodingConfig.model_fields:
+            extra_params["allow_advanced_sampling"] = kwargs.get("allow_advanced_sampling", False)
+        elif "allow_advanced_sampling" in kwargs:
+            print(
+                f"WARNING: allow_advanced_sampling unsupported in tensorrt_llm version: {trtllm.__version__}"
+            )
         specdec = EagleDecodingConfig(
             max_draft_len=kwargs.get("speculative_num_steps", 3),
             speculative_model_dir=kwargs.get("draft_model_dir", None),
             eagle3_one_model=kwargs.get("use_one_model", True),
             eagle3_layers_to_capture=kwargs.get("eagle3_layers_to_capture", None),
+            num_eagle_layers=kwargs.get("num_eagle_layers", 1),
+            **extra_params,
         )
-        disable_overlap_schedule = not kwargs.get("use_one_model", True)
 
     elif kwargs.get("speculative_algorithm", None) == "MTP":
         specdec = MTPDecodingConfig(
@@ -127,13 +139,15 @@ def create_executor(model_path: str, max_concurrent_requests, kwargs):
         moe_expert_parallel_size=kwargs.get("moe_expert_parallel_size", 2),
         disable_overlap_scheduler=disable_overlap_schedule,
         cuda_graph_config=cuda_graph_config,
-        enable_chunked_prefill=kwargs.get("enable_chunked_prefill", False),
+        enable_chunked_prefill=kwargs.get("enable_chunked_prefill", True),
         kv_cache_config=kv_cache_config,
         speculative_config=specdec,
         enable_attention_dp=kwargs.get("enable_attention_dp", False),
         max_batch_size=max_concurrent_requests,
         moe_config=MoeConfig(backend=kwargs.get("moe_backend", "TRTLLM")),
         sampler_type="TorchSampler",
+        max_seq_len=kwargs.get("max_seq_len", None),
+        max_num_tokens=kwargs.get("max_num_tokens", 8192),
     )
     return model
 

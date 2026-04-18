@@ -22,25 +22,53 @@ consistent logging behavior across all components of the AutoCast tool.
 
 import logging
 import os
+import sys
 
-# Create a parent logger for all AutoCast components
-logger = logging.getLogger("autocast")
+# Create a logger for all AutoCast components as a child of modelopt.onnx
+# This ensures autocast inherits log level and format when called from quantization
+logger = logging.getLogger("modelopt.onnx.autocast")
 
 
-def configure_logging(level=logging.INFO, log_file=None):
+def configure_logging(level=None, log_file=None):
     """Configure logging for all AutoCast components.
 
+    If logging level is provided, it will be used regardless of parent logger log level.
+    Otherwise, inherits from parent logger if exists, or fallback to default: logging.INFO.
+
     Args:
-        level: The logging level to use (default: logging.INFO).
+        level: The logging level to use. Can be a string (e.g., "DEBUG", "INFO") or
+               a logging constant (e.g., logging.DEBUG) default: None.
         log_file: Optional path to a log file. If provided, logs will be written to this file
                  in addition to stdout (default: None).
     """
-    # Set level for the parent logger and all child loggers
+    # Check if parent logger (modelopt.onnx) already has handlers configured
+    parent_logger = logging.getLogger("modelopt.onnx")
+    parent_has_handlers = len(parent_logger.handlers) > 0
+
+    # Determine the logging level to use
+    if level is None:
+        # No explicit level provided - inherit from parent or use default
+        if parent_has_handlers:
+            level = parent_logger.level
+        else:
+            level = logging.INFO
+    # else: use the provided level as-is
+
+    # Set level for the autocast logger (accepts both string and int)
     logger.setLevel(level)
+
+    # If parent has handlers (standalone mode), also update parent's level
+    # so the parent's console handler respects the autocast log level
+    if parent_has_handlers:
+        parent_logger.setLevel(level)
 
     # Remove any existing handlers to ensure clean configuration
     for handler in logger.handlers[:]:
         logger.removeHandler(handler)
+
+    formatter = logging.Formatter(
+        "%(asctime)s - %(name)s - %(levelname)s - %(filename)s - %(message)s"
+    )
 
     # Add file handler if log_file is specified
     if log_file:
@@ -50,9 +78,6 @@ def configure_logging(level=logging.INFO, log_file=None):
             if log_dir:
                 os.makedirs(log_dir, exist_ok=True)
 
-            formatter = logging.Formatter(
-                "%(asctime)s - %(name)s - %(levelname)s - %(filename)s - %(message)s"
-            )
             file_handler = logging.FileHandler(log_file)
             file_handler.setFormatter(formatter)
             logger.addHandler(file_handler)
@@ -60,14 +85,22 @@ def configure_logging(level=logging.INFO, log_file=None):
         except Exception as e:
             logging.error(f"Failed to setup file logging to {log_file}: {e!s}")
 
-    # Allow log messages to propagate to the root logger for testing compatibility
-    # This enables pytest's caplog fixture to capture logs while still maintaining
-    # our custom formatting through the handlers above
-    logger.propagate = True
+    if parent_has_handlers:
+        # Parent logger is configured (called from quantization/other onnx modules)
+        # Propagate to parent to use its handlers and format
+        logger.propagate = True
+    else:
+        # Standalone mode (called directly via python3 -m modelopt.onnx.autocast)
+        # Add our own console handler with autocast-specific format
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setFormatter(formatter)
+        logger.addHandler(console_handler)
+        # Always propagate to support pytest's caplog fixture in tests
+        logger.propagate = True
 
     # Ensure all child loggers inherit the level setting
     for name in logging.root.manager.loggerDict:
-        if name.startswith("autocast"):
+        if name.startswith("modelopt.onnx.autocast"):
             logging.getLogger(name).setLevel(level)
 
 

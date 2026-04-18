@@ -14,9 +14,11 @@
 # limitations under the License.
 
 import argparse
+import copy
 import random
 import time
 import warnings
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -32,6 +34,8 @@ from example_utils import (
     is_enc_dec,
     is_nemotron_vl,
     load_mtp_weights,
+    needs_checkpoint_path_update,
+    resolve_checkpoint_dir,
     run_nemotron_vl_preview,
 )
 from torch.utils.data import DataLoader
@@ -49,15 +53,24 @@ from transformers import (
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 import modelopt.torch.sparsity as mts
+from modelopt.recipe import ModelOptPTQRecipe, load_recipe
 from modelopt.torch.export import (
     export_hf_checkpoint,
+    export_hf_vllm_fq_checkpoint,
+    export_speculative_decoding,
     export_tensorrt_llm_checkpoint,
     get_model_type,
+    has_spec_opt,
+    save_expert_token_count_table,
 )
 from modelopt.torch.export.model_utils import get_language_model_from_vl, is_multimodal_model
 from modelopt.torch.quantization.config import _default_disabled_quantizer_cfg, need_calibration
 from modelopt.torch.quantization.plugins.accelerate import init_quantized_weights
 from modelopt.torch.quantization.utils import is_quantized
+from modelopt.torch.speculative.eagle.utils import (
+    EagleOfflineDataCollator,
+    OfflineSupervisedDataset,
+)
 from modelopt.torch.utils.dataset_utils import (
     create_forward_loop,
     get_dataset_dataloader,
@@ -71,6 +84,21 @@ from modelopt.torch.utils.vlm_dataset_utils import get_vlm_dataset_dataloader
 
 RAND_SEED = 1234
 
+
+def _set_kv_cache_constant_amax(quant_cfg: list) -> None:
+    """Set use_constant_amax on KV cache quantizers.
+
+    Creates a new dict for the KV bmm quantizer config to avoid mutating shared references.
+    """
+    for i, entry in enumerate(quant_cfg):
+        if entry.get("quantizer_name") != "*[kv]_bmm_quantizer":
+            continue
+        cfg = entry.get("cfg") or {}
+        assert isinstance(cfg, dict)
+        quant_cfg[i] = {**entry, "cfg": {**cfg, "use_constant_amax": True}}
+        break
+
+
 QUANT_CFG_CHOICES: dict[str, dict[str, Any]] = {
     "int8": mtq.INT8_DEFAULT_CFG,
     "int8_sq": mtq.INT8_SMOOTHQUANT_CFG,
@@ -80,23 +108,32 @@ QUANT_CFG_CHOICES: dict[str, dict[str, Any]] = {
     "w4a8_awq": mtq.W4A8_AWQ_BETA_CFG,
     "nvfp4": mtq.NVFP4_DEFAULT_CFG,
     "nvfp4_awq": mtq.NVFP4_AWQ_LITE_CFG,
+    "nvfp4_mse": mtq.NVFP4_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG,
     "fp8_pb_wo": mtq.FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG,
     "fp8_pc_pt": mtq.FP8_PER_CHANNEL_PER_TOKEN_CFG,
     "w4a8_nvfp4_fp8": mtq.W4A8_NVFP4_FP8_CFG,
     "w4a8_mxfp4_fp8": mtq.W4A8_MXFP4_FP8_CFG,
     "nvfp4_mlp_only": mtq.NVFP4_MLP_ONLY_CFG,
+    "nvfp4_experts_only": mtq.NVFP4_EXPERTS_ONLY_CFG,
+    "nvfp4_omlp_only": mtq.NVFP4_OMLP_ONLY_CFG,
     "nvfp4_svdquant": mtq.NVFP4_SVDQUANT_DEFAULT_CFG,
     "mxfp8": mtq.MXFP8_DEFAULT_CFG,
+    "nvfp4_local_hessian": mtq.NVFP4_W4A4_WEIGHT_LOCAL_HESSIAN_CFG,
 }
 
 KV_QUANT_CFG_CHOICES = {
     "none": "none",
+    "fp8_cast": "FP8_KV_CFG",
     "fp8": "FP8_KV_CFG",
     "fp8_affine": "FP8_AFFINE_KV_CFG",
+    "nvfp4_cast": "NVFP4_KV_CFG",
     "nvfp4": "NVFP4_KV_CFG",
     "nvfp4_affine": "NVFP4_AFFINE_KV_CFG",
     "nvfp4_rotate": "NVFP4_KV_ROTATE_CFG",
 }
+
+# Formats that use use_constant_amax (no calibration needed).
+_KV_CAST_FORMATS = {"fp8_cast", "nvfp4_cast"}
 
 mto.enable_huggingface_checkpointing()
 
@@ -117,7 +154,7 @@ def extract_and_prepare_language_model_from_vl(full_model):
         # Apply disabled quant to all modules that are not part of language_model
         # This excludes them during HF export
         disabled_quant_cfg = {
-            "quant_cfg": {"default": {"enable": False}},
+            "quant_cfg": [{"quantizer_name": "*", "enable": False}],
             "algorithm": "max",
         }
 
@@ -134,6 +171,34 @@ def extract_and_prepare_language_model_from_vl(full_model):
     return None, None
 
 
+class _DeviceDataLoader:
+    """Wrapper around a DataLoader that moves each batch to a target device."""
+
+    def __init__(self, dataloader: DataLoader, device: torch.device):
+        self.dataloader = dataloader
+        self.device = device
+
+    def __iter__(self):
+        for batch in self.dataloader:
+            yield _move_batch_to_device(batch, self.device)
+
+    def __len__(self):
+        return len(self.dataloader)
+
+
+def _move_batch_to_device(batch: dict, device: torch.device) -> dict:
+    """Recursively move all tensors in a batch dict to the given device."""
+
+    def _to_device(value):
+        if isinstance(value, torch.Tensor):
+            return value.to(device)
+        if isinstance(value, dict):
+            return {k: _to_device(v) for k, v in value.items()}
+        return value
+
+    return {k: _to_device(v) for k, v in batch.items()}
+
+
 def make_calib_dataloader(
     args: argparse.Namespace,
     language_model: torch.nn.Module,
@@ -141,10 +206,28 @@ def make_calib_dataloader(
     tokenizer: PreTrainedTokenizerBase | None,
     device: torch.device,
     model_type: str | None,
-) -> tuple[DataLoader, str | None]:
+) -> tuple[DataLoader | _DeviceDataLoader, str | None]:
     calib_dataloader = None
     first_text_speech_dataset = None
-    if args.calib_with_images:
+    if args.specdec_offline_dataset is not None:
+        offline_data_path = Path(args.specdec_offline_dataset)
+        dumped_files = sorted(str(p) for p in offline_data_path.glob("*.pt"))
+        if not dumped_files:
+            raise ValueError(f"No .pt files found in {args.specdec_offline_dataset}")
+        if args.calib_size[0] > 0:
+            dumped_files = dumped_files[: args.calib_size[0]]
+        dataset = OfflineSupervisedDataset(dumped_files)
+        collator = EagleOfflineDataCollator(train_len=args.calib_seq)
+        raw_loader = DataLoader(
+            dataset,
+            batch_size=args.batch_size,
+            shuffle=False,
+            collate_fn=collator,
+        )
+        # Wrap to move batches to the target device; device-transfer logic is kept
+        # out of the data collator to avoid interference with dataloader prefetching.
+        calib_dataloader = _DeviceDataLoader(raw_loader, device)
+    elif args.calib_with_images:
         # VLM image-text calibration path: assume Nemotron VLM dataset by default.
         assert processor is not None, (
             "Please provide a processor (e.g., AutoProcessor) for image calibration."
@@ -203,6 +286,7 @@ def make_calib_dataloader(
         include_labels = (
             args.auto_quantize_bits is not None and args.auto_quantize_method == "gradient"
         )
+
         calib_dataloader = get_dataset_dataloader(
             dataset_name=args.dataset,
             tokenizer=tokenizer,
@@ -238,7 +322,7 @@ def auto_quantize(
     assert qformat_list, "No quantization formats provided"
     # Check if all provided quantization formats are supported
     assert all(
-        args.qformat
+        qformat
         in [
             "fp8",
             "int8_sq",
@@ -246,13 +330,17 @@ def auto_quantize(
             "int4_awq",
             "nvfp4",
             "nvfp4_awq",
+            "nvfp4_mse",
             "w4a8_awq",
             "fp8_pb_wo",
             "w4a8_mxfp4_fp8",
             "nvfp4_mlp_only",
+            "nvfp4_experts_only",
+            "nvfp4_omlp_only",
+            "nvfp4_local_hessian",
             "mxfp8",
         ]
-        for args.qformat in qformat_list
+        for qformat in qformat_list
     ), "One or more quantization formats provided are not supported for unified checkpoint export"
 
     def loss_func(output, data):
@@ -288,35 +376,45 @@ def auto_quantize(
         ),
         verbose=True,
         # Disable all default disabled layers such as lm_head, mlp.gate, router etc.
-        disabled_layers=list(_default_disabled_quantizer_cfg.keys()),
+        disabled_layers=[
+            entry["quantizer_name"]
+            for entry in _default_disabled_quantizer_cfg
+            if "parent_class" not in entry
+        ],
         method=auto_quantize_method,
         checkpoint=auto_quantize_checkpoint,
     )
 
     calibrate_loop = create_forward_loop(dataloader=calib_dataloader)
-    # We need to explicitly calibrate for kv cache quantization
+    # We need to explicitly set up KV cache quantization after auto_quantize
     enable_quant_kv_cache = args.kv_cache_qformat != "none"
     print(f"{'Enable' if enable_quant_kv_cache else 'Disable'} KV cache quantization")
     if enable_quant_kv_cache:
-        kv_cache_quant_cfg = getattr(mtq, KV_QUANT_CFG_CHOICES[args.kv_cache_qformat])["quant_cfg"]
-        kv_cache_quant_cfg.pop("default")  # keep other quantizers from auto_quantize
-
-        mtq.set_quantizer_by_cfg(
-            language_model,
-            quant_cfg=kv_cache_quant_cfg,
+        kv_cache_quant_cfg = copy.deepcopy(
+            getattr(mtq, KV_QUANT_CFG_CHOICES[args.kv_cache_qformat])["quant_cfg"]
         )
-        # Lets calibrate only the quantizers for kv cache quantization this time. Let's disable all others.
-        with mtq.set_quantizer_by_cfg_context(
-            language_model, {"*": {"enable": False}, **kv_cache_quant_cfg}
-        ):
-            mtq.calibrate(language_model, algorithm="max", forward_loop=calibrate_loop)
+        kv_cache_quant_cfg = [
+            e for e in kv_cache_quant_cfg if e["quantizer_name"] != "*"
+        ]  # keep other quantizers from auto_quantize
+
+        if args.kv_cache_qformat in _KV_CAST_FORMATS:
+            _set_kv_cache_constant_amax(kv_cache_quant_cfg)
+
+        mtq.set_quantizer_by_cfg(language_model, quant_cfg=kv_cache_quant_cfg)
+        if args.kv_cache_qformat not in _KV_CAST_FORMATS:
+            # Calibrate only the KV cache quantizers; disable all others.
+            with mtq.set_quantizer_by_cfg_context(
+                language_model,
+                [{"quantizer_name": "*", "enable": False}, *kv_cache_quant_cfg],
+            ):
+                mtq.calibrate(language_model, algorithm="max", forward_loop=calibrate_loop)
     return language_model
 
 
 def load_model(args: argparse.Namespace):
     # If low memory mode is enabled, we compress the model while loading the HF checkpoint.
     calibration_only = False
-    if not args.low_memory_mode:
+    if args.specdec_offline_dataset is not None or not args.low_memory_mode:
         full_model = get_model(
             args.pyt_ckpt_path,
             args.device,
@@ -335,6 +433,13 @@ def load_model(args: argparse.Namespace):
                 quant_cfg,
                 getattr(mtq, KV_QUANT_CFG_CHOICES[args.kv_cache_qformat])["quant_cfg"],
             )
+            # Mirror the use_constant_amax logic from quantize_main so that init_quantized_weights
+            # builds the KV quantizers with use_constant_amax already set. In calibration_only mode
+            # mtq.calibrate() does not re-apply quant_cfg, so this must happen before
+            # init_quantized_weights runs.
+            if args.kv_cache_qformat in _KV_CAST_FORMATS:
+                quant_cfg = copy.deepcopy(quant_cfg)
+                _set_kv_cache_constant_amax(quant_cfg["quant_cfg"])
 
         # Do not use real quant GEMM so the calibration can be more accurate.
         with init_quantized_weights(
@@ -361,6 +466,12 @@ def load_model(args: argparse.Namespace):
     default_pad_token = None
 
     is_nemotron_vl_model = is_nemotron_vl(full_model)
+
+    # Default to image-text calibration for VLM models
+    if is_nemotron_vl_model and not args.calib_with_images:
+        print("Nemotron VL model detected. Enabling image-text calibration by default.")
+        args.calib_with_images = True
+
     if model_type == "mllama":
         processor = get_processor(
             args.pyt_ckpt_path,
@@ -379,7 +490,9 @@ def load_model(args: argparse.Namespace):
     elif is_nemotron_vl_model and args.calib_with_images:
         # For Nemotron VL image calibration, we need an AutoProcessor to build multimodal inputs.
         processor = AutoProcessor.from_pretrained(
-            args.pyt_ckpt_path, trust_remote_code=args.trust_remote_code, padding_side="left"
+            args.pyt_ckpt_path,
+            trust_remote_code=args.trust_remote_code,
+            padding_side="left",
         )
 
         if hasattr(processor, "tokenizer") and processor.tokenizer is not None:
@@ -402,27 +515,33 @@ def load_model(args: argparse.Namespace):
             language_model = extracted_lm
             model_type = extracted_model_type
     else:
-        if args.dataset is None:
-            args.dataset = ["cnn_dailymail", "nemotron-post-training-dataset-v2"]
-            warnings.warn(
-                "No dataset specified. Defaulting to cnn_dailymail and nemotron-post-training-dataset-v2."
+        if args.specdec_offline_dataset is not None:
+            language_model = full_model
+        else:
+            if args.dataset is None:
+                args.dataset = ["cnn_dailymail", "nemotron-post-training-dataset-v2"]
+                warnings.warn(
+                    "No dataset specified. Defaulting to cnn_dailymail and nemotron-post-training-dataset-v2."
+                )
+            # Adjust calib_size to match dataset length by extending or truncating as needed
+            args.calib_size = (args.calib_size + [args.calib_size[-1]] * len(args.dataset))[
+                : len(args.dataset)
+            ]
+
+            # We only quantize the language model for VLMs other than the type supported above.
+            extracted_lm, extracted_model_type = extract_and_prepare_language_model_from_vl(
+                full_model
             )
-        # Adjust calib_size to match dataset length by extending or truncating as needed
-        args.calib_size = (args.calib_size + [args.calib_size[-1]] * len(args.dataset))[
-            : len(args.dataset)
-        ]
+            if extracted_lm is not None:
+                language_model = extracted_lm
+                model_type = extracted_model_type
+
         tokenizer = get_tokenizer(args.pyt_ckpt_path, trust_remote_code=args.trust_remote_code)
 
         default_padding_side = tokenizer.padding_side
         default_pad_token = tokenizer.pad_token
         # Left padding usually provides better calibration result.
         tokenizer.padding_side = "left"
-
-        # We only quantize the language model for VLMs other than the type supported above.
-        extracted_lm, extracted_model_type = extract_and_prepare_language_model_from_vl(full_model)
-        if extracted_lm is not None:
-            language_model = extracted_lm
-            model_type = extracted_model_type
 
     if model_type == "phi4mm":
         warnings.warn("Please set the default input_mode to InputMode.LANGUAGE before quantizing.")
@@ -497,16 +616,20 @@ def mono_quantize(
     # For Nemotron VL models, disable quantization of vision components
     if is_nemotron_vl_model:
         print("Disabling quantization for vision components in Nemotron VL model")
-        quant_cfg["quant_cfg"]["*vision*"] = {"enable": False}
-        quant_cfg["quant_cfg"]["*image*"] = {"enable": False}
-        # Also disable radio model components specifically
-        quant_cfg["quant_cfg"]["*radio*"] = {"enable": False}
-        quant_cfg["quant_cfg"]["*visual*"] = {"enable": False}
+        quant_cfg["quant_cfg"].append({"quantizer_name": "*vision*", "enable": False})
+        quant_cfg["quant_cfg"].append({"quantizer_name": "*image*", "enable": False})
+        # Also disable radio model components specifically (for Nemotron-Parse)
+        quant_cfg["quant_cfg"].append({"quantizer_name": "*radio*", "enable": False})
+        quant_cfg["quant_cfg"].append({"quantizer_name": "*visual*", "enable": False})
+        quant_cfg["quant_cfg"].append(
+            {"quantizer_name": "*encoder*", "enable": False}
+        )  # Disable encoder
+        quant_cfg["quant_cfg"].append(
+            {"quantizer_name": "*model_encoder*", "enable": False}
+        )  # Nemotron-Parse specific
+        print("Quantization will only be applied to the decoder (text generation) component")
 
     if not model_is_already_quantized or calibration_only:
-        if model_type == "gptoss" and args.qformat == "nvfp4_mlp_only":
-            print("Applying nvfp4 quantization (MoE only) for gpt-oss")
-
         # quantize the model
 
         use_calibration = need_calibration(quant_cfg)
@@ -520,7 +643,12 @@ def mono_quantize(
             if args.calib_with_images and is_nemotron_vl_model:
                 calibrate_loop = create_vlm_calibration_loop(full_model, calib_dataloader)
             else:
-                calibrate_loop = create_forward_loop(dataloader=calib_dataloader)
+                calibrate_loop = create_forward_loop(
+                    dataloader=calib_dataloader,
+                    allowed_non_tensor_keys={"base_model_outputs"}
+                    if args.specdec_offline_dataset is not None
+                    else None,
+                )
 
         if calibration_only:
             language_model = mtq.calibrate(
@@ -555,6 +683,13 @@ def export_quantized(
             model_type = f"unknown:{type(language_model).__name__}"
 
         export_path = args.export_path
+
+        # Early exit for speculative decoding checkpoints
+        # No tokenizer saving needed for spec ckpts
+        if has_spec_opt(full_model):
+            export_speculative_decoding(full_model, export_dir=export_path)
+            print(f"Quantized speculative decoding checkpoint exported to: {export_path}")
+            return
 
         # Check if the model is a multimodal/VLM model
         is_vlm = is_multimodal_model(full_model)
@@ -628,19 +763,23 @@ def export_quantized(
 
             # Load any missing weights from non-standard safetensors (handled in get_model for non-low-memory mode)
             # Store the MTP layer prefixes on the model for later exclusion from quantization
-            mtp_layer_prefixes, mtp_state_dict = load_mtp_weights(full_model, args.pyt_ckpt_path)
+            if args.vllm_fakequant_export:
+                export_hf_vllm_fq_checkpoint(
+                    full_model, export_dir=export_path, inplace_mem_efficient=True
+                )
+            else:
+                mtp_layer_prefixes, mtp_state_dict = load_mtp_weights(
+                    full_model, args.pyt_ckpt_path
+                )
 
-            if mtp_layer_prefixes:
-                full_model._mtp_layer_prefixes = mtp_layer_prefixes
+                if mtp_layer_prefixes:
+                    full_model._mtp_layer_prefixes = mtp_layer_prefixes
 
-            export_hf_checkpoint(
-                full_model,
-                export_dir=export_path,
-                extra_state_dict=mtp_state_dict,
-            )
-
-        # Copy custom model files (Python files and JSON configs) if trust_remote_code is used
-        copy_custom_model_files(args.pyt_ckpt_path, export_path, args.trust_remote_code)
+                export_hf_checkpoint(
+                    full_model,
+                    export_dir=export_path,
+                    extra_state_dict=mtp_state_dict,
+                )
 
         # Restore default padding and export the tokenizer as well.
         if tokenizer is not None:
@@ -648,6 +787,12 @@ def export_quantized(
             if default_pad_token is not None:
                 tokenizer.pad_token = default_pad_token
             tokenizer.save_pretrained(export_path)
+
+        # Copy custom model files (Python files and JSON configs) if trust_remote_code is used.
+        # This must run AFTER tokenizer.save_pretrained() so original tokenizer files
+        # from the source checkpoint take precedence over regenerated ones (which may
+        # differ in format due to newer transformers versions).
+        copy_custom_model_files(args.pyt_ckpt_path, export_path, args.trust_remote_code)
 
         end_time = time.time()
         print(
@@ -660,7 +805,7 @@ def pre_quantize(
     full_model: torch.nn.Module,
     model_type: str | None,
     tokenizer: PreTrainedTokenizerBase | None,
-    calib_dataloader: DataLoader,
+    calib_dataloader: DataLoader | None,
     is_nemotron_vl_model: bool,
 ):
     """
@@ -670,14 +815,26 @@ def pre_quantize(
     post-quantize generation.
 
     """
+    # Offline specdec models skip pre-quantize preview (no tokenizer or standard dataloader)
+    if args.specdec_offline_dataset is not None:
+        return None, None
+
     # Only run single sample for preview
+    assert calib_dataloader is not None, "calib_dataloader is required for pre-quantize preview"
     preview_input_ids = next(iter(calib_dataloader))[
         "input_features" if model_type == "whisper" else "input_ids"
     ][0:1]
 
     # Generate preview before quantization
-    if model_type == "deepseek":
+    if args.skip_generate:
+        generated_ids_before_ptq = None
+    elif model_type == "deepseek":
         # DeepSeek generation may go OOM, so we skip it
+        generated_ids_before_ptq = None
+    elif model_type == "nemotron_h":
+        # NemotronH (SSM/Mamba hybrid) modeling code does not work with accelerate's big model inference
+        # when multiple GPUs are used. So we skip generation for NemotronH models. The issue presents in
+        # the remote code and also in transformers library integration code from v5.3
         generated_ids_before_ptq = None
     elif is_nemotron_vl_model and tokenizer is not None:
         generated_ids_before_ptq = run_nemotron_vl_preview(
@@ -686,13 +843,11 @@ def pre_quantize(
             preview_input_ids,
             args.pyt_ckpt_path,
             "before quantization",
-            allow_fallback=True,
+            allow_fallback=False,
+            trust_remote_code=args.trust_remote_code,
         )
     else:
-        # Standard generation for non-Nemotron VL models
         generated_ids_before_ptq = full_model.generate(preview_input_ids, max_new_tokens=100)
-    if model_type == "gptoss" and args.qformat == "nvfp4_mlp_only":
-        print("Applying nvfp4 quantization (MoE only) for gpt-oss")
 
     return preview_input_ids, generated_ids_before_ptq
 
@@ -700,6 +855,7 @@ def pre_quantize(
 def post_quantize(
     args: argparse.Namespace,
     full_model: torch.nn.Module,
+    language_model: torch.nn.Module,
     model_type: str | None,
     tokenizer: PreTrainedTokenizerBase | None,
     processor: BaseImageProcessor | ProcessorMixin | None,
@@ -707,17 +863,39 @@ def post_quantize(
     generated_ids_before_ptq,
     is_nemotron_vl_model,
     first_text_speech_dataset,
+    default_padding_side,
+    default_pad_token,
+    calib_dataloader: DataLoader,
 ):
     """
-    Processing after the quantization.
+    Processing after the quantization, then export.
 
-    Currently we run one round of generation using the quantized model for a sample prompt,
-    and compare it with pre-quantize generation.
+    For offline speculative decoding models, skip generation comparison and proceed
+    directly to export.  For standard models, run one round of generation using the
+    quantized model for a sample prompt and compare it with pre-quantize generation.
 
     """
+    # Early exit for offline speculative decoding: skip generation comparison and export directly.
+    # The model's get_dummy_inputs() provides the right input format for the export forward pass.
+    if args.specdec_offline_dataset is not None:
+        export_quantized(
+            args,
+            full_model,
+            language_model,
+            model_type,
+            tokenizer,
+            default_padding_side,
+            default_pad_token,
+        )
+        return
 
     if args.verbose:
-        mtq.print_quant_summary(full_model)
+        try:
+            mtq.print_quant_summary(full_model, args.export_path)
+            save_expert_token_count_table(full_model, args.export_path)
+        except Exception as e:
+            print(f"Error saving quant summary: {e}")
+            print("Continuing with generation...")
 
     # Run some samples
     torch.cuda.empty_cache()
@@ -735,6 +913,7 @@ def post_quantize(
             args.pyt_ckpt_path,
             "after quantization",
             allow_fallback=False,
+            trust_remote_code=args.trust_remote_code,
         )
     else:
         warnings.warn(
@@ -786,6 +965,16 @@ def post_quantize(
                 f"example outputs after ptq: {output_decode(generated_ids_after_ptq, preview_input_ids.shape[1])}"
             )
 
+    export_quantized(
+        args,
+        full_model,
+        language_model,
+        model_type,
+        tokenizer,
+        default_padding_side,
+        default_pad_token,
+    )
+
 
 def quantize_main(
     args: argparse.Namespace,
@@ -800,36 +989,49 @@ def quantize_main(
     device: torch.device,
 ):
     if args.batch_size == 0:
-        # Calibration/sparsification will actually take much more memory than regular inference
-        # due to intermediate tensors for fake quantization. Setting sample_memory_usage_ratio
-        # to 2 to avoid OOM for AWQ/SmoothQuant fake quantization as it will take more memory than inference.
-        sample_memory_usage_ratio = 2 if "awq" in args.qformat or "sq" in args.qformat else 1.1
-        # Whisper model expects mel-spectrogram input features of length 3000
-        # Whisper model needs input of shape (batch_size, num_mel_bins, 3000)
-        # As the encoder of Whisper doesn't have embedding layer, input dtype has to be float
-        # For non-Whisper models (language models), sample_input will be set up inside get_max_batch_size()
-        if model_type == "whisper":
-            max_sample_length = 3000
-            num_mel_bins = language_model.config.num_mel_bins
-            sample_input_single_batch = (
-                torch.ones([1, num_mel_bins, max_sample_length], dtype=language_model.dtype).to(
-                    language_model.device
-                )
-                * 100
+        # For VL models with image-text calibration, skip automatic batch size detection
+        # since get_max_batch_size can't handle multimodal inputs
+        if args.calib_with_images:
+            print("Image-text calibration enabled. Using default batch_size=1 for calibration.")
+            args.batch_size = 1
+        # Speculative decoding offline model dost not support get_max_batch_size() because of
+        # the customized dataloader, so we set batch_size to 1 to avoid OOM.
+        elif args.specdec_offline_dataset is not None:
+            print(
+                "Offline speculative decoding calibration enabled. Using default batch_size=1 for calibration."
             )
+            args.batch_size = 1
         else:
-            sample_input_single_batch = None
+            # Calibration/sparsification will actually take much more memory than regular inference
+            # due to intermediate tensors for fake quantization. Setting sample_memory_usage_ratio
+            # to 2 to avoid OOM for AWQ/SmoothQuant fake quantization as it will take more memory than inference.
+            sample_memory_usage_ratio = 2 if "awq" in args.qformat or "sq" in args.qformat else 1.1
+            # Whisper model expects mel-spectrogram input features of length 3000
+            # Whisper model needs input of shape (batch_size, num_mel_bins, 3000)
+            # As the encoder of Whisper doesn't have embedding layer, input dtype has to be float
+            # For non-Whisper models (language models), sample_input will be set up inside get_max_batch_size()
+            if model_type == "whisper":
+                max_sample_length = 3000
+                num_mel_bins = language_model.config.num_mel_bins
+                sample_input_single_batch = (
+                    torch.ones([1, num_mel_bins, max_sample_length], dtype=language_model.dtype).to(
+                        language_model.device
+                    )
+                    * 100
+                )
+            else:
+                sample_input_single_batch = None
 
-        run_auto_quant = args.auto_quantize_bits is not None
+            run_auto_quant = args.auto_quantize_bits is not None
 
-        args.batch_size = get_max_batch_size(
-            language_model,
-            max_sample_length=args.calib_seq,
-            sample_memory_usage_ratio=sample_memory_usage_ratio if not run_auto_quant else 1.0,
-            sample_input_single_batch=sample_input_single_batch,
-            enable_grad=run_auto_quant,
-        )
-        args.batch_size = min(args.batch_size, sum(args.calib_size))
+            args.batch_size = get_max_batch_size(
+                language_model,
+                max_sample_length=args.calib_seq,
+                sample_memory_usage_ratio=sample_memory_usage_ratio if not run_auto_quant else 1.0,
+                sample_input_single_batch=sample_input_single_batch,
+                enable_grad=run_auto_quant,
+            )
+            args.batch_size = min(args.batch_size, sum(args.calib_size))
 
     print(f"Use calib batch_size {args.batch_size}")
 
@@ -857,48 +1059,63 @@ def quantize_main(
 
     else:
         # mono quantization
-        assert len(args.qformat.split(",")) == 1, (
-            "Plain quantization supports only one quantization format."
-        )
 
-        assert (
-            args.qformat
-            in [
-                "int8_wo",
-                "int4_awq",
-                "fp8",
-                "nvfp4",
-                "nvfp4_awq",
-                "w4a8_awq",
-                "fp8_pb_wo",
-                "w4a8_mxfp4_fp8",
-                "nvfp4_mlp_only",
-                "mxfp8",
-            ]
-            or args.kv_cache_qformat in KV_QUANT_CFG_CHOICES
-        ), f"Plain quantization format {args.qformat} not supported for HF export path"
+        if args.recipe is not None:
+            print(f"Use recipe {args.recipe} for quantization")
+            recipe = load_recipe(args.recipe)
+            assert isinstance(recipe, ModelOptPTQRecipe), (
+                f"Expected PTQ recipe, but got {type(recipe).__name__} from {args.recipe}"
+            )
+            quant_cfg = recipe.quantize.model_dump()
 
-        quant_cfg = build_quant_cfg(
-            args.qformat,
-            args.kv_cache_qformat,
-            args.awq_block_size,
-            model_type,
-            QUANT_CFG_CHOICES,
-            KV_QUANT_CFG_CHOICES,
-        )
+        else:
+            assert len(args.qformat.split(",")) == 1, (
+                "Plain quantization supports only one quantization format."
+            )
+
+            assert args.qformat in QUANT_CFG_CHOICES, (
+                f"Unsupported quantization format: {args.qformat}, choices are: {list(QUANT_CFG_CHOICES.keys())}"
+            )
+            quant_cfg = QUANT_CFG_CHOICES[args.qformat]
+
+            quant_cfg = build_quant_cfg(
+                args.qformat,
+                quant_cfg,
+                args.awq_block_size,
+                model_type,
+                args.moe_calib_experts_ratio,
+            )
+
+            enable_quant_kv_cache = args.kv_cache_qformat != "none"
+            print(f"{'Enable' if enable_quant_kv_cache else 'Disable'} KV cache quantization")
+
+            # Check if any bmm_quantizer is in the quant_cfg. If so, we need to enable the bmm_quantizer.
+            if enable_quant_kv_cache:
+                quant_cfg = mtq.update_quant_cfg_with_kv_cache_quant(
+                    quant_cfg,
+                    getattr(mtq, KV_QUANT_CFG_CHOICES[args.kv_cache_qformat])["quant_cfg"],
+                )
 
         # Exclude MTP layers from quantization if detected (e.g., GLM-4.7's layer 92)
         # These layers are typically speculative decoding layers that should be exported as-is
         mtp_layer_prefixes = getattr(full_model, "_mtp_layer_prefixes", None)
         if mtp_layer_prefixes:
-            import copy
-
             quant_cfg = copy.deepcopy(quant_cfg)
             for prefix in mtp_layer_prefixes:
-                # Add exclusion pattern for this MTP layer (e.g., "*layers.92*")
-                pattern = f"*{prefix.split('.')[-2]}.{prefix.split('.')[-1]}*"
-                quant_cfg["quant_cfg"][pattern] = {"enable": False}
+                pattern = f"*{prefix}*"
+                quant_cfg["quant_cfg"].append({"quantizer_name": pattern, "enable": False})
                 print(f"Excluding MTP layer from quantization: {pattern}")
+
+        # Use constant amax for KV quantizers when a cast format is selected.
+        if args.kv_cache_qformat in _KV_CAST_FORMATS:
+            quant_cfg = copy.deepcopy(quant_cfg)
+            _set_kv_cache_constant_amax(quant_cfg["quant_cfg"])
+
+        if needs_checkpoint_path_update(quant_cfg):
+            quant_cfg = resolve_checkpoint_dir(quant_cfg, args.pyt_ckpt_path)
+            print(
+                f"Auto-resolved layerwise_checkpoint_dir: {quant_cfg['algorithm']['layerwise_checkpoint_dir']}"
+            )
 
         if args.qformat in QUANT_CFG_CHOICES:
             mono_quantize(
@@ -918,6 +1135,7 @@ def quantize_main(
     post_quantize(
         args,
         full_model,
+        language_model,
         model_type,
         tokenizer,
         processor,
@@ -925,15 +1143,9 @@ def quantize_main(
         generated_ids_before_ptq,
         is_nemotron_vl_model,
         first_text_speech_dataset,
-    )
-    export_quantized(
-        args,
-        full_model,
-        language_model,
-        model_type,
-        tokenizer,
         default_padding_side,
         default_pad_token,
+        calib_dataloader,
     )
 
 
@@ -941,9 +1153,21 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--pyt_ckpt_path",
-        help="Specify where the PyTorch checkpoint path is",
+        "--model",
+        help=(
+            "Model name or path to the PyTorch checkpoint to be quantized. "
+            "Can be a local path or a Huggingface model name."
+        ),
         required=True,
     )
+    parser.add_argument(
+        "--recipe",
+        help=(
+            "PTQ recipe YAML file or name without suffix (e.g. general/ptq/nvfp4_default-fp8_kv)."
+        ),
+        default=None,
+    )
+
     parser.add_argument("--device", default="cuda")
     parser.add_argument(
         "--qformat",
@@ -986,6 +1210,14 @@ def parse_args() -> argparse.Namespace:
         default=None,
     )
     parser.add_argument(
+        "--specdec_offline_dataset",
+        help=(
+            "If set, the model is a speculative decoding model,"
+            "which uses offline dataset for calibration. "
+        ),
+        default=None,
+    )
+    parser.add_argument(
         "--calib_with_images",
         action="store_true",
         help=(
@@ -1014,9 +1246,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--kv_cache_qformat",
         required=False,
-        default="fp8",
+        default="fp8_cast",
         choices=KV_QUANT_CFG_CHOICES.keys(),
-        help="Specify KV cache quantization format, default to fp8 if not provided",
+        help=(
+            "Specify KV cache quantization format. Default: fp8_cast. "
+            "Formats ending in '_cast' (fp8_cast, nvfp4_cast) set the amax to FP8 range "
+            "without data-driven calibration. "
+            "Other formats (fp8, nvfp4, etc.) use data-driven calibration."
+        ),
     )
     parser.add_argument(
         "--export_fmt",
@@ -1056,6 +1293,16 @@ def parse_args() -> argparse.Namespace:
         help="Print verbose output (e.g. quantization summary). Disable by --no-verbose.",
         default=True,
         action=argparse.BooleanOptionalAction,
+    )
+    parser.add_argument(
+        "--skip_generate",
+        help=(
+            "Skip pre/post-quantization preview calls that invoke model.generate(). "
+            "Note: this does not skip calibration or batch-size probing. "
+            "For very large models, pair with --batch_size 1 to avoid max-batch probing."
+        ),
+        default=False,
+        action="store_true",
     )
     parser.add_argument(
         "--low_memory_mode",
@@ -1105,8 +1352,35 @@ def parse_args() -> argparse.Namespace:
             "(sensitivity scores, costs, etc.). Only used when auto_quantize_bits is specified."
         ),
     )
+    parser.add_argument(
+        "--moe_calib_experts_ratio",
+        type=float,
+        default=None,
+        help=(
+            "Fraction of experts to calibrate during forward pass (ratio in (0.0, 1.0]). "
+            "Only used for MOE models; used to reduce the number of experts calibrated during the forward pass. "
+            "Does not impact non-MOE models."
+        ),
+    )
+    parser.add_argument(
+        "--vllm_fakequant_export",
+        default=False,
+        action="store_true",
+        help="Export as vLLM fake-quant checkpoint (produces vllm_fq_modelopt_state.pth "
+        "for use with vllm_serve_fakequant.py).",
+    )
 
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.moe_calib_experts_ratio is not None and not (0.0 < args.moe_calib_experts_ratio <= 1.0):
+        parser.error("--moe_calib_experts_ratio must be in the range (0.0, 1.0].")
+
+    if args.specdec_offline_dataset is not None and args.sparsity_fmt != "dense":
+        parser.error("--specdec_offline_dataset is only supported with --sparsity_fmt dense (PTQ).")
+
+    if args.specdec_offline_dataset is not None and args.low_memory_mode:
+        parser.error("--specdec_offline_dataset is not compatible with --low_memory_mode.")
+
+    return args
 
 
 def main(args: argparse.Namespace):
@@ -1161,4 +1435,10 @@ if __name__ == "__main__":
 
     args.dataset = args.dataset.split(",") if isinstance(args.dataset, str) else args.dataset
     args.calib_size = [int(num_sample) for num_sample in args.calib_size.split(",")]
+
+    if args.specdec_offline_dataset is not None and len(args.calib_size) != 1:
+        raise ValueError(
+            "--specdec_offline_dataset expects a single --calib value, not a comma-separated list."
+        )
+
     main(args)

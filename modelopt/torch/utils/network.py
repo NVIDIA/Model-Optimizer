@@ -90,12 +90,43 @@ def is_parallel(model: nn.Module) -> bool:
     return isinstance(model, (nn.parallel.DataParallel, nn.parallel.DistributedDataParallel))
 
 
+def _get_execution_device_from_hook(module: nn.Module) -> torch.device | None:
+    """Extract the execution device from an accelerate ``_hf_hook``, if present.
+
+    Handles both ``AlignDevicesHook`` (direct) and ``SequentialHook`` (which
+    may wrap one or more ``AlignDevicesHook`` instances).  Returns ``None``
+    when no hook is found or the hook carries no ``execution_device``.
+    """
+    hook = getattr(module, "_hf_hook", None)
+    if hook is None:
+        return None
+
+    dev = getattr(hook, "execution_device", None)
+    if dev is not None:
+        return torch.device("cuda", dev) if isinstance(dev, int) else torch.device(dev)
+
+    for h in getattr(hook, "hooks", ()):
+        dev = getattr(h, "execution_device", None)
+        if dev is not None:
+            return torch.device("cuda", dev) if isinstance(dev, int) else torch.device(dev)
+
+    return None
+
+
 def get_module_device(module: nn.Module) -> torch.device:
-    """Get the device of a PyTorch module."""
+    """Get the device of a PyTorch module.
+
+    For modules managed by accelerate (``_hf_hook``), returns the hook's
+    ``execution_device`` which is the authoritative device even when
+    parameters are offloaded to CPU/meta between forward calls.
+    """
+    hook_device = _get_execution_device_from_hook(module)
+    if hook_device is not None:
+        return hook_device
+
     try:
         return next(module.parameters()).device
     except StopIteration:
-        # For modules without parameters
         return torch.device("cpu")
 
 
@@ -590,21 +621,29 @@ def get_unwrapped_name(name: str, model: nn.Module | None = None) -> str:
 
 @contextmanager
 def temporarily_remove_accelerate_hook(module):
-    """Context manager to temporarily remove accelerate hook from a module."""
-    accelerate_hook = None
-    if hasattr(module, "_hf_hook"):
-        # A module with forward method patched by accelerate
-        from accelerate.hooks import add_hook_to_module, remove_hook_from_module
+    """Context manager to temporarily bypass the accelerate hook on a module.
 
-        accelerate_hook = module._hf_hook
-        remove_hook_from_module(module)
+    Swaps ``module.forward`` with the pre-hook forward (``_old_forward``) so
+    that code inside the context sees the un-hooked forward.  On exit the
+    hook-wrapped forward is restored and ``_old_forward`` is updated to
+    reflect any changes made inside the context.
+
+    This avoids ``remove_hook_from_module`` / ``add_hook_to_module`` entirely,
+    sidestepping ``init_hook`` which would call ``set_module_tensor_to_device``
+    and fail when newly-added quantizer modules have weights on the meta device.
+    """
+    hooked_forward = None
+    cached_old_forward = None
+    if hasattr(module, "_hf_hook"):
+        hooked_forward = module.forward
+        cached_old_forward = module._old_forward
+        module.forward = cached_old_forward
     try:
         yield
     finally:
-        if accelerate_hook is not None:
-            from accelerate.hooks import add_hook_to_module
-
-            add_hook_to_module(module, accelerate_hook)
+        if hooked_forward is not None:
+            module._old_forward = module.forward
+            module.forward = hooked_forward
 
 
 def bind_forward_method(

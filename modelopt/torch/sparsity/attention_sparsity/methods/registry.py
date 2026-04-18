@@ -18,6 +18,7 @@
 import re
 import warnings
 from abc import ABC, abstractmethod
+from typing import Any
 
 import torch
 
@@ -25,25 +26,110 @@ import torch
 class SparseAttentionMethod(ABC):
     """Base class for sparse attention methods."""
 
-    @abstractmethod
-    def apply_sparsity(
+    def __init__(self):
+        """Initialize base sparse attention method."""
+        # Flag to indicate calibration mode (set by calibrator)
+        # Instance attribute to prevent shared state across multiple models
+        self._calibration_mode: bool = False
+
+        # Calibration parameters set by the calibrator after calibration.
+        # Exponential model params per phase: {"prefill": {"a": ..., "b": ...}, ...}
+        self.calibration_params: dict[str, dict[str, float]] | None = None
+        # Target sparsity ratio per phase: {"prefill": 0.5, "decode": 0.5}
+        self.target_sparse_ratio: dict[str, float] | None = None
+        # Video shape for VSA (T, H, W). None for non-VSA methods.
+        self.video_shape: tuple[int, int, int] | None = None
+
+    def set_calibration_mode(self, enabled: bool) -> None:
+        """Enable or disable calibration mode (called by DynamicThresholdCalibrator)."""
+        self._calibration_mode = enabled
+
+    def forward_attention(
         self,
-        query: torch.Tensor | None = None,
-        key: torch.Tensor | None = None,
-        value: torch.Tensor | None = None,
-        attention_scores: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
-        """Apply sparsity to attention computation.
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        **kwargs,
+    ) -> tuple[torch.Tensor, dict]:
+        """Compute full attention replacement (e.g. VSA).
+
+        Default: raises NotImplementedError. Override for methods that replace
+        the entire attention computation rather than patching softmax.
 
         Args:
-            query: Query tensor
-            key: Key tensor
-            value: Value tensor
-            attention_scores: Pre-computed attention scores
+            query: Query tensor [batch, heads, seq_len, dim].
+            key: Key tensor [batch, heads, seq_len, dim].
+            value: Value tensor [batch, heads, seq_len, dim].
+            **kwargs: Method-specific arguments.
 
         Returns:
-            Tuple of (query, key, value, attention_scores) with sparsity applied
+            Tuple of (attention_output, stats_dict).
         """
+        raise NotImplementedError(f"{type(self).__name__} does not implement forward_attention.")
+
+    def calculate_sparsity(
+        self,
+        attention_scores: torch.Tensor,
+    ) -> tuple[torch.Tensor, dict]:
+        """Calculate sparsity mask and statistics without applying.
+
+        Default: no-op (keep all). Override for methods that compute masks
+        outside the kernel (e.g. pytorch-backend softmax patching).
+        Kernel-fused methods (Triton backend) can use this default.
+
+        Args:
+            attention_scores: Pre-softmax attention scores [batch, heads, seq_q, seq_k]
+
+        Returns:
+            Tuple of (sparse_mask, stats_dict) where:
+            - sparse_mask: Boolean tensor indicating which elements to keep
+            - stats_dict: Dictionary with sparsity statistics
+        """
+        return torch.ones_like(attention_scores, dtype=torch.bool), {}
+
+    def apply_sparsity(
+        self,
+        attention_scores: torch.Tensor,
+        sparse_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Apply sparsity mask to attention scores.
+
+        Default: raises NotImplementedError. Override for methods that apply
+        masks outside the kernel. Kernel-fused methods (Triton backend)
+        don't need this — sparsity is applied inside the kernel.
+
+        Args:
+            attention_scores: Pre-softmax attention scores [batch, heads, seq_q, seq_k]
+            sparse_mask: Optional pre-computed mask. If None, calculates internally.
+
+        Returns:
+            Masked attention scores with sparse elements set to -inf
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not implement apply_sparsity.")
+
+    def get_sparse_context(self, module: torch.nn.Module):
+        """Return a context manager that activates this method's sparsity during forward.
+
+        Each method subclass implements its own activation mechanism:
+        - Softmax-patching methods replace F.softmax during the forward pass.
+        - Kernel-fused methods set flags on ``module`` that the kernel reads.
+
+        Args:
+            module: The SparseAttentionModule wrapping the attention layer.
+        """
+        raise NotImplementedError(f"{type(self).__name__} must implement get_sparse_context()")
+
+    def get_threshold_info(self) -> dict[str, Any]:
+        """Get threshold information for display/debugging.
+
+        Returns:
+            Dictionary with threshold information. Should include:
+            - 'type': 'static', 'dynamic', or 'none'
+            - 'value': threshold value (for static)
+            - 'scale_factor': scale factor (for dynamic)
+            - Other method-specific info
+        """
+        return {"type": "none", "value": None}
 
     @property
     @abstractmethod

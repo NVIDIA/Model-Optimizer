@@ -27,6 +27,7 @@ from collections.abc import Callable
 
 import onnx
 
+import modelopt.onnx.utils as onnx_utils
 from modelopt.onnx.utils import get_opset_version
 
 
@@ -60,32 +61,6 @@ def setup_mappings(model: onnx.ModelProto) -> tuple[dict, dict, dict]:
     return value_info_map, initializer_map, node_to_init_map
 
 
-def get_consumer_nodes(model: onnx.ModelProto, tensor_name: str) -> list[onnx.NodeProto]:
-    """Get all consumer nodes for a given tensor name.
-
-    Args:
-        model: The ONNX model to search.
-        tensor_name: Name of the tensor to find consumers for.
-
-    Returns:
-        list[onnx.NodeProto]: List of nodes that consume the tensor.
-    """
-    return [n for n in model.graph.node if tensor_name in n.input]
-
-
-def get_producer_nodes(model: onnx.ModelProto, tensor_name: str) -> list[onnx.NodeProto]:
-    """Get all producer nodes for a given tensor name.
-
-    Args:
-        model: The ONNX model to search.
-        tensor_name: Name of the tensor to find producers for.
-
-    Returns:
-        list[onnx.NodeProto]: List of nodes that produce the tensor.
-    """
-    return [n for n in model.graph.node if tensor_name in n.output]
-
-
 def get_unique_consumer_node(model: onnx.ModelProto, tensor_name: str) -> onnx.NodeProto:
     """Get a single consumer node and raise exception if there are multiple consumers.
 
@@ -99,28 +74,10 @@ def get_unique_consumer_node(model: onnx.ModelProto, tensor_name: str) -> onnx.N
     Raises:
         Exception: If there is not exactly one consumer node.
     """
-    consumers = get_consumer_nodes(model, tensor_name)
+    consumers = onnx_utils.get_consumer_nodes(model, tensor_name)
     if len(consumers) != 1:
         raise Exception(f"Expected single consumer for {tensor_name}, found {len(consumers)}")
     return consumers[0]
-
-
-def get_cast_to_type(cast_node: onnx.NodeProto) -> int:
-    """Get the target type from a Cast node.
-
-    Args:
-        cast_node: The Cast node to extract type from.
-
-    Returns:
-        int: The target type value from the Cast node's 'to' attribute.
-
-    Raises:
-        ValueError: If the Cast node does not have a 'to' attribute.
-    """
-    for attr in cast_node.attribute:
-        if attr.name == "to":
-            return attr.i
-    raise ValueError("Cast node does not have 'to' attribute")
 
 
 def walk_subgraphs_recursive(

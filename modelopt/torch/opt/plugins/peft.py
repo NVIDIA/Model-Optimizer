@@ -21,7 +21,7 @@ from collections.abc import Callable
 import torch
 from peft import PeftModel
 
-from modelopt.torch.utils import get_unwrapped_name, print_rank_0
+from modelopt.torch.utils import get_unwrapped_name, print_rank_0, safe_load
 
 from ..conversion import ModeloptStateManager, modelopt_state, restore_from_modelopt_state
 from .huggingface import register_for_patching
@@ -72,10 +72,7 @@ def _new_load_adapter(self, model_id, adapter_name, *args, **kwargs):
         assert adapter_name in self.peft_config, (
             f"ModelOpt modified model should have adapter_name={adapter_name} in peft_config"
         )
-        # Security NOTE: weights_only=False is used here on ModelOpt-generated state_dict, not on untrusted user input
-        restore_from_modelopt_state(
-            self, torch.load(modelopt_state_path, map_location="cpu", weights_only=False)
-        )
+        restore_from_modelopt_state(self, modelopt_state_path=modelopt_state_path)
 
     outputs = self._modelopt_cache["load_adapter"](self, model_id, adapter_name, *args, **kwargs)
 
@@ -86,9 +83,8 @@ def _new_load_adapter(self, model_id, adapter_name, *args, **kwargs):
     if os.path.isfile(_get_quantizer_state_save_path(model_id)):
         from modelopt.torch.quantization.nn import TensorQuantizer
 
-        # Security NOTE: weights_only=False is used here on ModelOpt-generated state_dict, not on untrusted user input
-        quantizer_state_dict = torch.load(
-            _get_quantizer_state_save_path(model_id), map_location="cpu", weights_only=False
+        quantizer_state_dict = safe_load(
+            _get_quantizer_state_save_path(model_id), map_location="cpu"
         )
         for name, module in self.named_modules():
             if isinstance(module, TensorQuantizer):

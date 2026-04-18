@@ -208,7 +208,7 @@ def test_get_scaling_factor_from_weight(weight, group_size, expected):
             KV_CACHE_FP8,
             128.0,
             {
-                "layer1.k_proj.k_scale": torch.tensor([1.0]),
+                "layer1.k_proj.k_scale": torch.tensor([0.001]),
                 "layer1.v_proj.v_scale": torch.tensor([2.0]),
                 "layer1.pre_quant_scale": torch.tensor([0.128]),
             },
@@ -222,7 +222,7 @@ def test_get_scaling_factor_from_weight(weight, group_size, expected):
             KV_CACHE_FP8,
             128.0,
             {
-                "layer1.k_proj.k_scale": torch.tensor([1.0]),
+                "layer1.k_proj.k_scale": torch.tensor([0.001]),
                 "layer1.v_proj.v_scale": torch.tensor([2.0]),
             },
         ),
@@ -415,7 +415,7 @@ def test_get_scaling_factor(
         (
             partial_nvfp4_config,
             {
-                "exclude_modules": ["linears.0", "linears.2"],
+                "exclude_modules": ["linears.0"],
                 "group_size": 16,
                 "kv_cache_quant_algo": None,
                 "quant_algo": "NVFP4",

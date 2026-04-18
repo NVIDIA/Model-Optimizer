@@ -81,10 +81,13 @@ class TestTensorQuantizerfp4:
 
         assert fp4_quantizer._get_amax(x) == x.abs().amax()
 
-    def test_fp4_backward(self):
+    @pytest.mark.parametrize("pass_through_bwd", [True, False])
+    def test_fp4_backward(self, pass_through_bwd):
         fp4_quantizer = tensor_quantizer.TensorQuantizer(
             QuantizerAttributeConfig(
-                num_bits=(2, 1), block_sizes={-1: 16, "type": "dynamic", "scale_bits": (4, 3)}
+                num_bits=(2, 1),
+                block_sizes={-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+                pass_through_bwd=pass_through_bwd,
             )
         ).cuda()
 
@@ -96,7 +99,11 @@ class TestTensorQuantizerfp4:
         loss = fp4_quantizer(x).sum()
         loss.backward()
 
-        assert torch.allclose(x.grad, torch.ones_like(x.grad) * (x.abs() <= fp4_quantizer.amax))
+        if pass_through_bwd:
+            expected_grad = torch.ones_like(x.grad)
+        else:
+            expected_grad = torch.ones_like(x.grad) * (x.abs() <= fp4_quantizer.amax)
+        assert torch.allclose(x.grad, expected_grad)
 
     def test_fp4_non_contiguous_input(self):
         contiguous_tensor = torch.ones(2, 16).cuda()

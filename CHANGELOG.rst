@@ -1,7 +1,84 @@
-NVIDIA Model Optimizer Changelog (Linux)
-========================================
+Changelog
+=========
 
-0.42 (2026-02-xx)
+0.44 (2026-05-xx)
+^^^^^^^^^^^^^^^^^
+
+**New Features**
+
+- Support full Transformer Engine spec for Minitron pruning (``mcore_minitron``). Now we no longer need to use custom ModelOpt spec. Note that this does not affect the usage of the pruning workflow but makes pruning slightly faster and may result in slightly different pruned model because of different kernel and numerics.
+- Add Puzzletron - a new algorithm for heterogeneous pruning of LLM and VLM models. See `examples/puzzletron/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/puzzletron>`_ for more details.
+- Added iterator interface using CalibrationDataReader in ONNX quantization workflow.
+- Add N:M sparse softmax support to the Triton flash attention kernel (``modelopt.torch.kernels.triton_fa``). See `examples/llm_sparsity/attention_sparsity/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_sparsity/attention_sparsity>`_ for usage.
+- Add skip-softmax skipping to the Triton flash attention kernel (``modelopt.torch.kernels.triton_fa``). See `examples/llm_sparsity/attention_sparsity/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_sparsity/attention_sparsity>`_ for usage.
+- Add Video Sparse Attention (VSA) method for video diffusion models (``modelopt.torch.sparsity.attention_sparsity``). VSA uses 3D block tiling with a two-branch architecture for attention speedup.
+- Enable PTQ workflow for the Step3.5-Flash MoE model with NVFP4 W4A4 + FP8 KV cache quantization. See `modelopt_recipes/models/Step3.5-Flash/nvfp4-mlp-only.yaml <https://github.com/NVIDIA/Model-Optimizer/blob/main/modelopt_recipes/models/Step3.5-Flash/nvfp4-mlp-only.yaml>`_ for more details.
+- Add support for vLLM fakequant reload using ModelOpt state for HF models. See `examples/vllm_serve/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/vllm_serve#load-qatptq-model-and-serve-in-vllm-wip>`_ for more details.
+- [Early Testing] Add Claude Code PTQ skill (``.claude/skills/ptq/``) for agent-assisted post-training quantization. The skill guides the agent through environment detection, model support checking, format selection, and execution via the launcher or manual SLURM/Docker/bare GPU paths. Includes handling for unlisted models with custom module patching. This feature is in early testing — use with caution.
+- Add performant layerwise calibration for large models that don't fit on GPU (e.g. DeepSeek-R1, Kimi-K2). See `modelopt_recipes/general/ptq/nvfp4_experts_only-fp8_kv.yaml <https://github.com/NVIDIA/Model-Optimizer/blob/main/modelopt_recipes/general/ptq/nvfp4_experts_only-fp8_kv.yaml>`_ for usage. Layerwise calibration also supports PTQ with intermediate progress saving — useful when long PTQ runs get hit with Slurm timeouts. See `modelopt_recipes/general/ptq/nvfp4_default-none_kv_gptq.yaml <https://github.com/NVIDIA/Model-Optimizer/blob/main/modelopt_recipes/general/ptq/nvfp4_default-none_kv_gptq.yaml>`_ for usage.
+
+**Backward Breaking Changes**
+
+- The ``quant_cfg`` field in quantization configs is now an **ordered list** of ``QuantizerCfgEntry`` dicts instead of a flat dictionary. Each entry specifies a ``quantizer_name`` wildcard, an optional ``parent_class`` filter, a ``cfg`` dict of quantizer attributes, and/or an ``enable`` flag. Entries are applied in list order with later entries overriding earlier ones. The old dict-based format is still accepted and automatically converted via ``normalize_quant_cfg_list()``, but now emits a ``DeprecationWarning``; new code should use the list format. All built-in configs (e.g. ``FP8_DEFAULT_CFG``, ``INT4_AWQ_CFG``, ``NVFP4_DEFAULT_CFG``), examples, and YAML recipes have been updated. See the :ref:`quant-cfg` documentation for the new format reference and migration guide.
+
+**Bug Fixes**
+
+- Fix Megatron utility functions for generation (with pipeline parallelism) and ~10x speedup in MMLU score evaluation (by batching prefill passes).
+- Fix Minitron pruning (``mcore_minitron``) for MoE models. Importance estimation hooks were incorrectly registered for MoE modules and NAS step was hanging before this.
+- Fix TRT support for remote autotuning in ONNX Autotune from 10.16+ to 10.15+ and fix TRT versioning check to the ``trtexec`` version instead of the TRT Python API when using ``trtexec`` backend.
+
+**Misc**
+
+- [Security] Changed the default of ``weights_only`` to ``True`` in ``torch.load`` for secure checkpoint loading. If you need to load a checkpoint that requires unpickling arbitrary objects, first register the class in ``torch.serialization.add_safe_globals([cls])`` before loading. Added :meth:`safe_save <modelopt.torch.utils.serialization.safe_save>` and :meth:`safe_load <modelopt.torch.utils.serialization.safe_load>` API to save and load checkpoints securely.
+- Bump minimum required PyTorch version to 2.8.
+- [Experimental] Add support for transformers>=5.0, including generic PTQ and unified HF checkpoint export for fused MoE expert modules (Mixtral, Qwen2-MoE, Qwen3-MoE, Qwen3.5-MoE, DeepSeek-V3, Jamba, OLMoE, etc.).
+- Improve ``megatron_preprocess_data``: add ``--reasoning_content`` support for Nemotron v3 datasets, eliminate intermediate JSONL for HuggingFace datasets, return output file prefixes from the Python API, add gzip input support (``.jsonl.gz``), add ``--strip_newlines`` flag for plain-text pretraining data, add ``--hf_streaming`` for very large datasets (only consumed rows downloaded), and auto-shuffle when ``--hf_max_samples_per_split`` is set to avoid biased sampling.
+
+0.43 (2026-04-16)
+^^^^^^^^^^^^^^^^^
+
+**Bug Fixes**
+
+- ONNX Runtime dependency upgraded to 1.24 to solve missing graph outputs when using the TensorRT Execution Provider.
+
+**Backward Breaking Changes**
+
+- Default ``--kv_cache_qformat`` in ``hf_ptq.py`` changed from ``fp8`` to ``fp8_cast``. Existing scripts that rely on the default will now skip KV cache calibration and use a constant amax instead. To restore the previous calibrated behavior, explicitly pass ``--kv_cache_qformat fp8``.
+- Removed KV cache scale clamping (``clamp_(min=1.0)``) in the HF checkpoint export path. Calibrated KV cache scales below 1.0 are now exported as-is. If you observe accuracy degradation with calibrated KV cache (``--kv_cache_qformat fp8`` or ``nvfp4``), consider using the casting methods (``fp8_cast`` or ``nvfp4_cast``) instead.
+
+**New Features**
+
+- Add ``fp8_cast`` and ``nvfp4_cast`` modes for ``--kv_cache_qformat`` in ``hf_ptq.py``. These use a constant amax (FP8 E4M3 max, 448.0) without data-driven calibration, since the downstream engine uses FP8 attention math for both FP8 and NVFP4 quantization. A new ``use_constant_amax`` field in :class:`QuantizerAttributeConfig <modelopt.torch.quantization.config.QuantizerAttributeConfig>` controls this behavior.
+- User does not need to manually register MOE modules to cover experts calibration coverage in PTQ workflow.
+- ``hf_ptq.py`` now saves the quantization summary and moe expert token count table to the export directory.
+- Add ``--moe_calib_experts_ratio`` flag in ``hf_ptq.py`` to specify the ratio of experts to calibrate during forward pass to improve expert coverage during calibration. Default to None (not enabled).
+- Add sparse attention optimization for transformer models (``modelopt.torch.sparsity.attention_sparsity``). This reduces computational cost by skipping attention computation. Supports calibration for threshold selection on HuggingFace models. See `examples/llm_sparsity/attention_sparsity/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_sparsity/attention_sparsity>`_ for usage.
+- Add support for rotating the input before quantization for RHT.
+- Add support for advanced weight scale search for NVFP4 quantization and its export path.
+- Enable PTQ workflow for Qwen3.5 MoE models.
+- Enable PTQ workflow for the Kimi-K2.5 model.
+- Add ``nvfp4_omlp_only`` quantization format for NVFP4 quantization. This is similar to ``nvfp4_mlp_only`` but also quantizes the output projection layer in attention.
+- Add ``nvfp4_experts_only`` quantization config that targets only MoE routed expert layers (excluding shared) with NVFP4 quantization.
+- ``pass_through_bwd`` in the quantization config is now default to True. Please set it to False if you want to use STE with zeroed outlier gradients for potentially better QAT accuracy.
+- Add :meth:`compute_quantization_mse <modelopt.torch.quantization.model_quant.compute_quantization_mse>` API to measure per-quantizer mean-squared quantization error, with flexible wildcard and callable filtering.
+- **Autotune**: New tool for automated Q/DQ (Quantize/Dequantize) placement optimization for ONNX models. Uses TensorRT latency measurements to choose insertion schemes that minimize inference time. Discovers regions automatically, groups them by structural pattern, and tests multiple Q/DQ schemes per pattern. Supports INT8 and FP8 quantization, pattern cache for warm-start on similar models, checkpoint/resume, and importing patterns from an existing QDQ baseline. CLI: ``python -m modelopt.onnx.quantization.autotune``. See the Autotune guide in the documentation.
+- Add ``get_auto_quantize_config`` API to extract a flat quantization config from ``auto_quantize`` search results, enabling re-quantization at different effective bit targets without re-running calibration.
+- Improve ``auto_quantize`` checkpoint/resume: calibration state is now saved and restored across runs, avoiding redundant calibration when resuming a search.
+- Add support for Nemotron-3 (NemotronHForCausalLM) model quantization and support for NemotronH MoE expert support in ``auto_quantize`` grouping and scoring rules.
+- Add support for block-granular RHT for non-power-of-2 dimensions.
+- Replace modelopt FP8 QDQ nodes with native ONNX QDQ nodes.
+
+**Deprecations**
+
+- Removed MT-Bench (FastChat) support from ``examples/llm_eval``. The ``run_fastchat.sh`` and ``gen_model_answer.py`` scripts have been deleted, and the ``mtbench`` task has been removed from the ``llm_ptq`` example scripts.
+- Remove deprecated NeMo-2.0 Framework references.
+
+**Misc**
+
+- Migrated project metadata from ``setup.py`` to a fully declarative ``pyproject.toml``.
+- Enable experimental Python 3.13 wheel support and unit tests in CI/CD.
+
+0.42 (2026-03-10)
 ^^^^^^^^^^^^^^^^^
 
 **Bug Fixes**
@@ -13,7 +90,7 @@ NVIDIA Model Optimizer Changelog (Linux)
 - Add standalone type inference option (``--use_standalone_type_inference``) in ONNX AutoCast as an alternative to ONNX's ``infer_shapes``. This experimental feature performs type-only inference without shape inference, useful as a workaround when shape inference fails or to avoid unnecessary shape inference overhead.
 - Add support for Kimi K2 Thinking model quantization from the original int4 checkpoint.
 - Add support for ``params`` constraint based automatic neural architecture search in Minitron pruning (``mcore_minitron``) as an alternative to manual pruning (using ``export_config``). See `examples/pruning/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning>`_ for more details on its usage.
-- New example for Minitron pruning with Megatron-Bridge framework along with advanced pruning usage with new ``params`` constraint based pruning. Check `examples/megatron_bridge/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/megatron_bridge>`_ for example scripts.
+- New example for Minitron pruning with Megatron-Bridge framework along with advanced pruning usage with new ``params`` constraint based pruning. Also add example for distillation with Megatron-Bridge framework. Check `examples/megatron_bridge/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/megatron_bridge>`_ for example scripts.
 - Add support for calibration data with multiple samples in ``npz`` format in the ONNX Autocast workflow.
 - Add ``--opset`` option to ONNX quantization CLI to specify the target opset version for the quantized model.
 - Add support for context parallelism in Eagle speculative decoding for huggingface and megatron core models.
@@ -21,6 +98,9 @@ NVIDIA Model Optimizer Changelog (Linux)
 - Add LTX-2 and Wan2.2 (T2V) support in the diffusers quantization workflow.
 - Add PTQ support for GLM-4.7, including loading MTP layer weights from a separate ``mtp.safetensors`` file and export as-is.
 - Add support for image-text data calibration in PTQ for Nemotron VL models.
+- Add support for advanced weight scale search for NVFP4 quantization and its export path.
+- Add PTQ support for Nemotron Parse.
+- Add distillation support for LTX-2. See `examples/diffusers/distillation/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/diffusers/distillation>`_ for more details.
 
 0.41 (2026-01-19)
 ^^^^^^^^^^^^^^^^^
@@ -47,6 +127,13 @@ NVIDIA Model Optimizer Changelog (Linux)
 **Backward Breaking Changes**
 
 - Remove ``torchprofile`` as a default dependency from ModelOpt as its used only for flops-based FastNAS pruning (computer vision models). It can be installed separately if needed.
+
+**Windows Support**
+
+- Fix ONNX 1.19 compatibility issues with CuPy during ONNX INT4 AWQ quantization. ONNX 1.19 uses ml_dtypes.int4 instead of numpy.int8 which caused CuPy failures.
+- Add support for ONNX Mixed Precision Weight-only quantization using INT4 and INT8 precisions. Refer quantization `example for GenAI LLMs <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows/onnx_ptq/genai_llm>`_.
+- Add support for some diffusion models' quantization on Windows. Refer `example script <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows/torch_onnx/diffusers>`_ for details.
+- Add `Perplexity <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows/accuracy_benchmark/perplexity_metrics>`_ and `KL-Divergence <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows/accuracy_benchmark/kl_divergence_metrics>`_ accuracy benchmarks.
 
 0.40 (2025-12-12)
 ^^^^^^^^^^^^^^^^^
@@ -175,6 +262,10 @@ NVIDIA Model Optimizer Changelog (Linux)
 - Add NeMo 2 Simplified Flow examples for quantization aware training/distillation (QAT/QAD), speculative decoding, pruning & distillation.
 - Fix a Qwen3 MOE model export issue.
 
+**Windows Support**
+
+- Model Optimizer for Windows now supports `NvTensorRtRtx <https://onnxruntime.ai/docs/execution-providers/TensorRTRTX-ExecutionProvider.html>`_ execution-provider.
+
 0.31 (2025-06-04)
 ^^^^^^^^^^^^^^^^^
 
@@ -256,6 +347,11 @@ NVIDIA Model Optimizer Changelog (Linux)
 - (Experimental) Improve support for ONNX models with custom TensorRT op:
    - Add support for ``--calibration_shapes`` flag.
    - Add automatic type and shape tensor propagation for full ORT support with TensorRT EP.
+
+**Windows Support**
+
+- New LLM models like DeepSeek etc. are supported with ONNX INT4 AWQ quantization on Windows. Refer `Windows Support Matrix <https://nvidia.github.io/Model-Optimizer/guides/0_support_matrix.html>`_ for details about supported features and models.
+- Model Optimizer for Windows now supports ONNX INT8 and FP8 quantization (W8A8) of SAM2 and Whisper models. Check `example scripts <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows/onnx_ptq>`_ for getting started with quantizing these models.
 
 **Known Issues**
 
@@ -359,6 +455,18 @@ NVIDIA Model Optimizer Changelog (Linux)
 - :meth:`mtq.auto_quantize <modelopt.torch.quantization.model_quant.auto_quantize>` now supports search based automatic
   quantization for NeMo & MCore models (in addition to HuggingFace models).
 - Add ``num_layers`` and ``hidden_size`` pruning support for NeMo / Megatron-core models.
+
+**Windows Support**
+
+- This is the first official release of Model Optimizer for Windows
+- **ONNX INT4 Quantization:** :meth:`modelopt.onnx.quantization.quantize_int4 <modelopt.onnx.quantization.int4.quantize>` now supports ONNX INT4 quantization for DirectML and TensorRT* deployment. See :ref:`Support_Matrix` for details about supported features and models.
+- **LLM Quantization with Olive:** Enabled LLM quantization through Olive, streamlining model optimization workflows. Refer `Olive example <https://github.com/microsoft/Olive/tree/main/examples/phi3#quantize-models-with-nvidia-Model-Optimizer>`_.
+- **DirectML Deployment Guide:** Added DML deployment guide. Refer :ref:`Onnxruntime_Deployment` deployment guide for details.
+- **MMLU Benchmark for Accuracy Evaluations:** Introduced `MMLU benchmarking <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows/accuracy_benchmark/README.md>`_ for accuracy evaluation of ONNX models on DirectML (DML).
+- **Published quantized ONNX models collection:** Published quantized ONNX models at HuggingFace `NVIDIA collections <https://huggingface.co/collections/nvidia/optimized-onnx-models-for-nvidia-rtx-gpus>`_.
+
+
+\* *This version includes experimental features such as TensorRT deployment of ONNX INT4 models, PyTorch quantization and sparsity. These are currently unverified on Windows.*
 
 
 0.17 (2024-09-11)

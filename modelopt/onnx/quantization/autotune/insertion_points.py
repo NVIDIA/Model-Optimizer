@@ -40,6 +40,7 @@ from modelopt.onnx.op_types import (
     get_set_ops,
     get_value_check_ops,
     is_fusible_reduction_op,
+    is_linear_op,
 )
 from modelopt.onnx.quantization.graph_utils import get_tensor_consumer_node_indices
 
@@ -127,13 +128,15 @@ class NodeInputInsertionPoint(InsertionPoint):
         assert self.input_index < len(node.inputs), "Input index out of range"
 
         resolved_ips = set()
-        # Determine which input indices to resolve (include weights for Conv/ConvTranspose)
+        # Determine which input indices to resolve (include weights for Conv/ConvTranspose/Gemm/MatMul)
         input_indices = [self.input_index]
-        if node.op in ["Conv", "ConvTranspose"]:
+        if is_linear_op(node.op):
             assert self.input_index == 0, (
-                "Conv/ConvTranspose inputs and weights must be quantized together"
+                "Conv/ConvTranspose/Gemm/MatMul inputs and weights must be quantized together"
             )
-            assert len(node.inputs) >= 2, "Conv/ConvTranspose should have at least 2 inputs"
+            assert len(node.inputs) >= 2, (
+                "Conv/ConvTranspose/Gemm/MatMul should have at least 2 inputs"
+            )
             input_indices.append(1)
 
         for idx in input_indices:
@@ -345,7 +348,7 @@ def skip_invalid_insertion_points(
         for input_idx, inp in enumerate(node.inputs):
             if hasattr(inp, "name") and inp.name == tensor_name:
                 # Skip weights of Conv and ConvTranspose, they should be quantized with inputs at same time
-                if node.op in ["Conv", "ConvTranspose"] and input_idx >= 1:
+                if is_linear_op(node.op) and input_idx >= 1:
                     return True
                 # Conv -> ReLU/Softmax or Conv -> BatchNormalization -> ReLU/Softmax
                 if node.op in ["Relu", "Softmax"]:

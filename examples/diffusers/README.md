@@ -13,6 +13,7 @@ Cache Diffusion is a technique that reuses cached outputs from previous diffusio
 | Pre-Requisites | Required & optional packages to use this technique | \[[Link](#pre-requisites)\] | |
 | Getting Started | Learn how to optimize your models using quantization/cache diffusion to reduce precision and improve inference efficiency | \[[Link](#getting-started)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/1_quantization.html)\] |
 | Support Matrix | View the support matrix to see quantization/cahce diffusion compatibility and feature availability across different models | \[[Link](#support-matrix)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/1_quantization.html)\] |
+| Sparse Attention (Skip-Softmax) | Skip-softmax sparse attention for diffusion models | \[[Link](#sparse-attention-skip-softmax)\] | |
 | Cache Diffusion | Caching technique to accelerate inference without compromising quality | \[[Link](#cache-diffusion)\] | |
 | Post Training Quantization (PTQ) | Example scripts on how to run PTQ on diffusion models | \[[Link](#post-training-quantization-ptq)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/1_quantization.html)\] |
 | Quantization Aware Training (QAT) | Example scripts on how to run QAT on diffusion models | \[[Link](#quantization-aware-training-qat)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/1_quantization.html)\] |
@@ -29,7 +30,7 @@ Cache Diffusion is a technique that reuses cached outputs from previous diffusio
 
 ### Docker
 
-Please use the TensorRT docker image (e.g., `nvcr.io/nvidia/tensorrt:25.08-py3`) or visit our [installation docs](https://nvidia.github.io/Model-Optimizer/getting_started/2_installation.html) for more information.
+Please use the TensorRT docker image (e.g., `nvcr.io/nvidia/tensorrt:26.02-py3`) or visit our [installation docs](https://nvidia.github.io/Model-Optimizer/getting_started/2_installation.html) for more information.
 
 Also follow the installation steps below to upgrade to the latest version of Model Optimizer and install example-specific dependencies.
 
@@ -116,7 +117,23 @@ python quantize.py \
     --hf-ckpt-dir ./hf_ckpt
 ```
 
-#### [LTX-2](https://github.com/Lightricks/LTX-2) FP4 (torch checkpoint export)
+#### [LTX-2](https://github.com/Lightricks/LTX-2) FP4
+
+> [!WARNING]
+> **Third-Party License Notice — LTX-2**
+>
+> LTX-2 is a third-party model and set of packages developed and provided by Lightricks. LTX-2
+> is **not** covered by the Apache 2.0 license that governs NVIDIA Model Optimizer.
+>
+> By installing and using LTX-2 packages (`ltx-core`, `ltx-pipelines`, `ltx-trainer`) with
+> NVIDIA Model Optimizer, you **must** comply with the
+> [LTX Community License Agreement](https://github.com/Lightricks/LTX-2/blob/main/LICENSE).
+>
+> Any derivative models or fine-tuned weights produced from LTX-2 using NVIDIA Model Optimizer
+> (including quantized or distilled checkpoints) remain subject to the LTX Community License
+> Agreement and are **not** covered by Apache 2.0.
+
+This example produces three outputs: a PyTorch checkpoint (`--quantized-torch-ckpt-save-path`), a Hugging Face checkpoint (`--hf-ckpt-dir`), and a ComfyUI-compatible merged safetensor (`--extra-param merged_base_safetensor_path`).
 
 ```sh
 python quantize.py \
@@ -126,7 +143,9 @@ python quantize.py \
     --extra-param spatial_upsampler_path=./ltx-2-spatial-upscaler-x2-1.0.safetensors \
     --extra-param gemma_root=./gemma-3-12b-it-qat-q4_0-unquantized \
     --extra-param fp8transformer=true \
-    --quantized-torch-ckpt-save-path ./ltx-2-transformer.pt
+    --quantized-torch-ckpt-save-path ./ltx-2-transformer.pt \
+    --hf-ckpt-dir ./LTX2-NVFP4/ \
+    --extra-param merged_base_safetensor_path=./ltx-2-19b-dev-fp8.safetensors
 ```
 
 #### Important Parameters
@@ -271,6 +290,59 @@ mto.restore(pipe.unet, your_quantized_ckpt)
 ```
 
 By following these steps, your PEFT LoRA model should be efficiently quantized using ModelOpt, ready for deployment while maximizing performance.
+
+## Sparse Attention (Skip-Softmax)
+
+Skip-softmax sparse attention skips KV tiles whose attention scores are negligible during the softmax computation, reducing FLOPs without retraining. An exponential model (`scale_factor = a * exp(b * target_sparsity)`) is calibrated once, then the target sparsity can be adjusted at runtime without recalibration.
+
+### Getting Started
+
+```python
+import modelopt.torch.sparsity.attention_sparsity as mtsa
+
+# 1. Define config with calibration
+config = {
+    "sparse_cfg": {
+        "calibration": {
+            "target_sparse_ratio": {"prefill": 0.5},
+        },
+        "*.attn1": {
+            "method": "triton_skip_softmax",
+            "backend": "triton",
+            "is_causal": False,
+            "collect_stats": True,
+            "enable": True,
+        },
+        "*.attn2": {"enable": False},
+        "default": {"enable": False},
+    },
+}
+
+# 2. Provide a calibration forward loop
+def forward_loop(model):
+    pipeline(prompt="a cat", num_frames=81, num_inference_steps=40, ...)
+
+# 3. Sparsify + calibrate
+mtsa.sparsify(transformer, config, forward_loop=forward_loop)
+
+# 4. Generate as usual — sparsity is applied automatically
+output = pipeline(prompt="a dog on the beach", ...)
+```
+
+### Example Scripts
+
+#### Wan 2.2 [Script](./sparsity/wan22_skip_softmax.py)
+
+The 14B model automatically sparsifies both `transformer` and `transformer_2`.
+
+```bash
+
+# 5B/14B model
+python sparsity/wan22_skip_softmax.py \
+    --model-path Wan-AI/Wan2.2-T2V-A14B-Diffusers|Wan-AI/Wan2.2-TI2V-5B-Diffusers \
+    --calibrate --target-sparsity 0.5 --calib-size 4 \
+    --prompt "A sunset over mountains" --output out.mp4
+```
 
 ## Cache Diffusion
 

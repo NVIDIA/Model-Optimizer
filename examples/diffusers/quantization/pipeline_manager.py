@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import logging
+import warnings
 from collections.abc import Iterator
 from typing import Any
 
@@ -213,7 +214,10 @@ class PipelineManager:
         distilled_lora_strength = params.pop("distilled_lora_strength", 0.8)
         spatial_upsampler_path = params.pop("spatial_upsampler_path", None)
         gemma_root = params.pop("gemma_root", None)
-        fp8transformer = params.pop("fp8transformer", False)
+        fp8_quantization = params.pop("fp8_quantization", None) or params.pop(
+            "fp8transformer", False
+        )
+        params.pop("merged_base_safetensor_path", None)
 
         if not checkpoint_path:
             raise ValueError("Missing required extra_param: checkpoint_path.")
@@ -224,7 +228,18 @@ class PipelineManager:
         if not gemma_root:
             raise ValueError("Missing required extra_param: gemma_root.")
 
+        warnings.warn(
+            "LTX-2 packages (ltx-core, ltx-pipelines, ltx-trainer) are provided by Lightricks and are NOT "
+            "covered by the Apache 2.0 license governing NVIDIA Model Optimizer. You MUST comply "
+            "with the LTX Community License Agreement when installing and using LTX-2 with NVIDIA "
+            "Model Optimizer. Any derivative models or fine-tuned weights from LTX-2 remain "
+            "subject to the LTX Community License Agreement, not Apache 2.0. "
+            "See: https://github.com/Lightricks/LTX-2/blob/main/LICENSE",
+            UserWarning,
+            stacklevel=2,
+        )
         from ltx_core.loader import LTXV_LORA_COMFY_RENAMING_MAP, LoraPathStrengthAndSDOps
+        from ltx_core.quantization import QuantizationPolicy
         from ltx_pipelines.ti2vid_two_stages import TI2VidTwoStagesPipeline
 
         distilled_lora = [
@@ -240,7 +255,7 @@ class PipelineManager:
             "spatial_upsampler_path": str(spatial_upsampler_path),
             "gemma_root": str(gemma_root),
             "loras": [],
-            "fp8transformer": bool(fp8transformer),
+            "quantization": QuantizationPolicy.fp8_cast() if fp8_quantization else None,
         }
         pipeline_kwargs.update(params)
         return TI2VidTwoStagesPipeline(**pipeline_kwargs)

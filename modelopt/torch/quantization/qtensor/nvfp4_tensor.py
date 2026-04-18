@@ -53,11 +53,86 @@ class NVFP4QTensor(BaseQuantizedTensor):
         return cls.e2m1_bounds_on_device[device]
 
     @classmethod
+    def _is_static_quantizer(cls, weight_quantizer) -> bool:
+        """Check if the weight quantizer is a static NVFP4 quantizer with pre-computed amax."""
+        return hasattr(weight_quantizer, "global_amax") and weight_quantizer.global_amax is not None
+
+    @classmethod
     def get_weights_scaling_factor_2_from_quantizer(cls, weight_quantizer):
-        """Returns per tensor weight scaling factor from the weight_quantizer amax."""
-        # Assert that weight_quantizer has attribute amax
-        assert hasattr(weight_quantizer, "_amax"), "Weight quantizer does not have attribute amax"
-        return weight_quantizer._amax.float() / (6.0 * 448.0)
+        """Returns per tensor weight scaling factor from the weight_quantizer.
+
+        Handles both static NVFP4 quantizers (using global_amax) and
+        dynamic quantizers (using _amax).
+
+        Args:
+            weight_quantizer: The weight quantizer (static or dynamic).
+
+        Returns:
+            The global scaling factor as a float tensor.
+        """
+        if cls._is_static_quantizer(weight_quantizer):
+            return weight_quantizer.global_amax.float() / (6.0 * 448.0)
+        else:
+            assert hasattr(weight_quantizer, "_amax"), (
+                "Weight quantizer does not have attribute amax"
+            )
+            return weight_quantizer._amax.float() / (6.0 * 448.0)
+
+    @classmethod
+    def get_weights_scaling_factor_from_quantizer(
+        cls,
+        weight_quantizer,
+        weight: torch.Tensor,
+        weights_scaling_factor_2: torch.Tensor | None = None,
+        keep_high_precision: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Returns quantized per block weight scaling factor from quantizer.
+
+        Handles both static NVFP4 quantizers (with pre-computed per-block amax)
+        and dynamic quantizers (computing from weight tensor).
+
+        Args:
+            weight_quantizer: The weight quantizer (static or dynamic).
+            weight: The weight tensor (used for shape in static, values in dynamic).
+            weights_scaling_factor_2: Optional pre-computed global scale.
+            keep_high_precision: Whether to keep scales in high precision.
+
+        Returns:
+            Tuple of (per_block_scale, weights_scaling_factor_2).
+        """
+        block_size = weight_quantizer.block_sizes[-1]
+
+        if weights_scaling_factor_2 is None:
+            weights_scaling_factor_2 = cls.get_weights_scaling_factor_2_from_quantizer(
+                weight_quantizer
+            )
+
+        if cls._is_static_quantizer(weight_quantizer):
+            # Static path: use pre-computed per-block amax values from quantizer
+            global_amax = weight_quantizer.global_amax.float()
+            per_block_amax = weight_quantizer._amax.float()
+
+            # Compute scales in float
+            per_block_scale_max = global_amax / 6.0
+            per_block_scale = per_block_amax / 6.0
+            per_block_scale[per_block_scale == 0] = 1.0
+
+            # Reshape per_block_scale to match weight's block structure
+            num_blocks_per_row = weight.shape[-1] // block_size
+            expected_shape = (*weight.shape[:-1], num_blocks_per_row)
+            per_block_scale = per_block_scale.view(expected_shape)
+
+            # Quantize scales to FP8
+            if not keep_high_precision:
+                per_block_scale = (per_block_scale * 448.0 / per_block_scale_max).to(
+                    torch.float8_e4m3fn
+                )
+            return per_block_scale, weights_scaling_factor_2
+        else:
+            # Dynamic path: compute from weight tensor
+            return cls.get_weights_scaling_factor(
+                weight, block_size, weights_scaling_factor_2, keep_high_precision
+            )
 
     @classmethod
     def get_weights_scaling_factor(
@@ -67,7 +142,11 @@ class NVFP4QTensor(BaseQuantizedTensor):
         weights_scaling_factor_2: torch.Tensor | None = None,
         keep_high_precision: bool = False,
     ):
-        """Returns quantized per block weight scaling factor."""
+        """Returns quantized per block weight scaling factor from weight tensor.
+
+        This is the dynamic path that computes scales directly from the weight values.
+        For quantizers with pre-computed amax, use get_weights_scaling_factor_from_quantizer.
+        """
         if weights_scaling_factor_2 is None:
             weights_scaling_factor_2 = cls.get_weights_scaling_factor_2(input)
 

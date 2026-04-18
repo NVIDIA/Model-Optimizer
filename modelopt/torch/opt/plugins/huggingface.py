@@ -23,6 +23,8 @@ from contextlib import contextmanager, nullcontext
 from typing import Any
 
 import torch
+from huggingface_hub import try_to_load_from_cache
+from huggingface_hub.errors import HFValidationError
 
 from modelopt.torch.utils import print_rank_0
 
@@ -57,7 +59,16 @@ def register_for_patching(name: str, cls: type, patch_methods: list[tuple[str, A
 
 
 def _get_modelopt_state_path(model_name_or_path: str) -> str:
-    return os.path.join(model_name_or_path, _MODELOPT_STATE_SAVE_NAME)
+    """Get the path to the ModelOpt state file or empty string if not found.
+
+    Also handles HF model card as input path. However for hf hub models, we dont have modelopt_state at the moment.
+    """
+    if os.path.isdir(model_name_or_path):
+        return os.path.join(model_name_or_path, _MODELOPT_STATE_SAVE_NAME)
+    try:
+        return try_to_load_from_cache(model_name_or_path, _MODELOPT_STATE_SAVE_NAME) or ""
+    except HFValidationError:
+        return ""
 
 
 @contextmanager
@@ -79,10 +90,8 @@ def _patch_model_init_for_modelopt(cls, model_path, extra_context=None):
         modelopt_state_path = _get_modelopt_state_path(model_path)
         _original__init__(self, *args, **kwargs)
         if os.path.isfile(modelopt_state_path):
-            # Security NOTE: weights_only=False is used on ModelOpt-generated state_dict, not on untrusted user input
-            modelopt_state = torch.load(modelopt_state_path, map_location="cpu", weights_only=False)
             with extra_context() if extra_context else nullcontext():
-                restore_from_modelopt_state(self, modelopt_state)
+                restore_from_modelopt_state(self, modelopt_state_path=modelopt_state_path)
 
             print_rank_0(f"Restored ModelOpt state from {modelopt_state_path}")
 

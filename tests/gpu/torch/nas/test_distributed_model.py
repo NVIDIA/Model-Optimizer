@@ -19,11 +19,7 @@ import pytest
 import torch
 import torch.distributed
 from _test_utils.torch.distributed.fsdp_test import run_fsdp2_test, run_fsdp_test
-from _test_utils.torch.distributed.utils import (
-    get_device_counts,
-    spawn_multiprocess_job,
-    synchronize_state_dict,
-)
+from _test_utils.torch.distributed.utils import synchronize_state_dict
 from torch import nn
 from torchvision.models.resnet import Bottleneck
 
@@ -67,28 +63,20 @@ def _sample_subnet(model):
     SearchSpace(model).sample(sample_func=min)
 
 
-@pytest.mark.parametrize("device_count", get_device_counts())
 @pytest.mark.parametrize("use_orig_params", [False, True])
-def test_fsdp(device_count, use_orig_params):
-    # run test
-    spawn_multiprocess_job(
-        size=device_count,
-        job=partial(
+def test_fsdp(need_2_gpus, dist_workers, use_orig_params):
+    dist_workers.run(
+        partial(
             run_fsdp_test,
             _get_test_case,
             "conv1",
             _sample_subnet,
             fsdp_kwargs={"use_orig_params": use_orig_params},
         ),
-        backend="nccl",
     )
 
 
-@pytest.mark.parametrize("device_count", get_device_counts())
-def test_fsdp2(device_count):
-    # run test
-    spawn_multiprocess_job(
-        size=device_count,
-        job=partial(run_fsdp2_test, _get_test_case, "conv1", _sample_subnet),
-        backend="nccl",
+def test_fsdp2(need_2_gpus, dist_workers):
+    dist_workers.run(
+        partial(run_fsdp2_test, _get_test_case, "conv1", _sample_subnet),
     )

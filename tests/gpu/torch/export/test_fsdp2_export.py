@@ -12,15 +12,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from __future__ import annotations
-
 import copy
 from functools import partial
 
 import pytest
 import torch
-from _test_utils.torch.distributed.utils import get_device_counts, spawn_multiprocess_job
 from _test_utils.torch.export.utils import SmallQKVModel, ToyModel
+from _test_utils.torch.misc import minimum_sm
 from torch.distributed._composable.fsdp import fully_shard
 
 import modelopt.torch.quantization as mtq
@@ -72,8 +70,6 @@ def _update_weight_test(rank, size):
 
 def _compress_weight_test(rank, size):
     """Test fsdp2 weight update context for weight compression -> only value,shape and dtype changed"""
-    from torch.distributed._composable.fsdp import fully_shard
-
     with patch_fsdp_mp_dtypes():
         # Define and shard model
         model = ToyModel(dims=[6, 6], bias=False).to("cuda")
@@ -160,10 +156,6 @@ def _fuse_layers(rank, size, quant_config, bias):
 
 
 def _export_quantized_weight_test(rank, size, quant_config, bias):
-    import copy
-
-    from torch.distributed._composable.fsdp import fully_shard
-
     with patch_fsdp_mp_dtypes():
         # Initialize model
         model = SmallQKVModel(dim=32, bias=bias).to("cuda")
@@ -214,22 +206,13 @@ def _export_quantized_weight_test(rank, size, quant_config, bias):
         _compare_parameters_and_buffers(model, non_fsdp_model)
 
 
-@pytest.mark.parametrize("device_count", get_device_counts())
-def test_fsdp2_weight_compress_context_for_export(device_count):
-    spawn_multiprocess_job(
-        size=device_count,
-        job=_compress_weight_test,
-        backend="nccl",
-    )
+@minimum_sm(90)
+def test_fsdp2_weight_compress_context_for_export(dist_workers):
+    dist_workers.run(_compress_weight_test)
 
 
-@pytest.mark.parametrize("device_count", get_device_counts())
-def test_fsdp2_weight_update_context_for_export(device_count):
-    spawn_multiprocess_job(
-        size=device_count,
-        job=_update_weight_test,
-        backend="nccl",
-    )
+def test_fsdp2_weight_update_context_for_export(dist_workers):
+    dist_workers.run(_update_weight_test)
 
 
 @pytest.mark.parametrize(
@@ -244,16 +227,12 @@ def test_fsdp2_weight_update_context_for_export(device_count):
         # mtq.FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG, #TODO: Fix unit test for this case
         mtq.W4A8_MXFP4_FP8_CFG,
         mtq.NVFP4_MLP_ONLY_CFG,
+        mtq.NVFP4_OMLP_ONLY_CFG,
     ],
 )
-@pytest.mark.parametrize("device_count", get_device_counts())
 @pytest.mark.parametrize("bias", [True, False])
-def test_fsdp2_weight_update_context_for_fuse_layers(device_count, quant_config, bias):
-    spawn_multiprocess_job(
-        size=device_count,
-        job=partial(_fuse_layers, quant_config=quant_config, bias=bias),
-        backend="nccl",
-    )
+def test_fsdp2_weight_update_context_for_fuse_layers(dist_workers, quant_config, bias):
+    dist_workers.run(partial(_fuse_layers, quant_config=quant_config, bias=bias))
 
 
 @pytest.mark.parametrize(
@@ -268,13 +247,9 @@ def test_fsdp2_weight_update_context_for_fuse_layers(device_count, quant_config,
         # mtq.FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG, #TODO: Fix unit test for this case
         mtq.W4A8_MXFP4_FP8_CFG,
         mtq.NVFP4_MLP_ONLY_CFG,
+        mtq.NVFP4_OMLP_ONLY_CFG,
     ],
 )
-@pytest.mark.parametrize("device_count", get_device_counts())
 @pytest.mark.parametrize("bias", [True, False])
-def test_fsdp2_weight_update_context_for_export_quantized_weight(device_count, quant_config, bias):
-    spawn_multiprocess_job(
-        size=device_count,
-        job=partial(_export_quantized_weight_test, quant_config=quant_config, bias=bias),
-        backend="nccl",
-    )
+def test_fsdp2_weight_update_context_for_export_quantized_weight(dist_workers, quant_config, bias):
+    dist_workers.run(partial(_export_quantized_weight_test, quant_config=quant_config, bias=bias))

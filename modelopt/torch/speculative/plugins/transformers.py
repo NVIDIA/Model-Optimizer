@@ -31,15 +31,14 @@
 
 import contextlib
 import copy
+from dataclasses import dataclass
 from typing import Any
 
 import torch
-import transformers
-from packaging.version import Version
 from torch import nn
 from torch.nn import CrossEntropyLoss
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask
-from transformers import Cache, DynamicCache, PretrainedConfig, PreTrainedModel
+from transformers import Cache, DynamicCache, PreTrainedModel
 from transformers.models.llama.modeling_llama import (
     LlamaDecoderLayer,
     LlamaRMSNorm,
@@ -47,8 +46,12 @@ from transformers.models.llama.modeling_llama import (
 )
 from transformers.trainer_pt_utils import LabelSmoother
 from transformers.utils import ModelOutput
-from transformers.utils.quantization_config import QuantizationMethod
 
+from ...export.plugins.hf_spec_export import (
+    EagleExporter,
+    EagleMedusaExporter,
+    SpeculativeDecodingExporter,
+)
 from ..eagle.conversion import EagleDMRegistry
 from ..eagle.eagle_model import EagleModel
 from ..eagle.utils import expand_mask, make_causal_mask
@@ -62,6 +65,7 @@ from ..utils import (
     get_ttt_msk_func,
     temporary_set_config_value,
 )
+from .modeling_fakebase import _BASE_MODEL_PATHS, _EMBED_TOKENS_PATHS, _LM_HEAD_PATHS
 
 __all__ = ["HFARValidation", "HFEagleModel", "HFMedusaModel"]
 
@@ -69,14 +73,6 @@ IGNORE_TOKEN_ID = LabelSmoother.ignore_index
 ENABLE_CP_TTT_PATCH = False
 # module variable to cache attention mask for cp ttt
 CACHED_SHARD_TTT_MASKS = {}
-
-
-def _get_empty_cache(config):
-    """Return an empty cache. Handle different versions of transformers for unit tests."""
-    if Version(transformers.__version__) >= Version("4.54"):
-        return DynamicCache(config=config)
-    else:
-        return DynamicCache()
 
 
 @MedusaDMRegistry.register({PreTrainedModel: "hf.PreTrainedModel"})
@@ -244,7 +240,6 @@ class EagleModule(nn.Module):
             assert config.draft_vocab_size <= config.vocab_size, (
                 "EAGLE module's vocab size should be <= base model vocab size!"
             )
-
             # Initialize the buffers to zero.
             # Their values depend on specific tokenzier and calibrate dataset, and should be set in training script.
             if config.draft_vocab_size < config.vocab_size:
@@ -255,10 +250,7 @@ class EagleModule(nn.Module):
                 bias=False,
             )
 
-        if not config.use_aux_hidden_state:
-            # In Eagle-1, the FC concentrate input embeddings and hidden states
-            self.fc = nn.Linear(2 * config.hidden_size, config.hidden_size, bias=bias)
-        else:
+        if config.use_aux_hidden_state:
             # In EAGLE-3, the FC concentrate hidden states from multiple base model layers
             self.fc = nn.Linear(
                 len(config.eagle_aux_hidden_state_layer_ids) * config.hidden_size,
@@ -289,6 +281,10 @@ class EagleModule(nn.Module):
                 num_heads=self.config.parallel_draft_step - 1,
                 num_layers=self.config.parallel_draft_heads_num_layers,
             )
+
+    def _maybe_init_rope(self, device=None):
+        if self.config.eagle_decoder_type == "llama" and not hasattr(self, "rotary_emb"):
+            self.rotary_emb = LlamaRotaryEmbedding(config=self.config, device=device)
 
     def _expand_first_attn_in_dim(self, first_layer_attn):
         """Modify qkv projection in first layer to accept 2h hidden size."""
@@ -364,20 +360,12 @@ class EagleModule(nn.Module):
             position_ids = position_ids.view(-1, seq_length).long()
 
         inputs_embeds = inputs_embeds.to(hidden_states.dtype).to(hidden_states.device)
-        if self.config.use_aux_hidden_state:
-            # In EAGLE-3, we save input embeddings to attribute, and use it in first decoder layer by hook function
-            # Also, we normalize input embeddings and hidden states before concatenating them.
-            # The default input norm in first layer attn will be disabled.
-            self._input_embeds = self.layers[0].input_layernorm(inputs_embeds)
-        else:  # EAGLE-1
-            hidden_states = self.fc(torch.cat((inputs_embeds, hidden_states), dim=-1))
+        # In EAGLE-3, we save input embeddings to attribute, and use it in first decoder layer by hook function
+        # Also, we normalize input embeddings and hidden states before concatenating them.
+        # The default input norm in first layer attn will be disabled.
+        self._input_embeds = self.layers[0].input_layernorm(inputs_embeds)
 
         if self.config.eagle_decoder_type == "llama":
-            # Lazy init rope to avoid save/load meta tensor error
-            if not hasattr(self, "rotary_emb"):
-                self.rotary_emb = LlamaRotaryEmbedding(
-                    config=self.config, device=hidden_states.device
-                )
             position_embeddings = self.rotary_emb(hidden_states, position_ids)
         else:
             position_embeddings = None
@@ -405,6 +393,25 @@ class EagleModule(nn.Module):
         return post_norm_h, pre_norm_h, past_key_values
 
 
+@dataclass
+class EagleBaseModelOutput:
+    out_hiddens: torch.Tensor
+    aux_hiddens: torch.Tensor | None = None
+    logits: torch.Tensor | None = None
+    input_embeds: torch.Tensor | None = None
+    loss: torch.Tensor | None = None
+
+    @classmethod
+    def from_offline_dict(cls, d: dict):
+        return cls(
+            out_hiddens=d.get("base_model_hidden_states"),
+            aux_hiddens=d.get("aux_hidden_states"),
+            logits=d.get("base_model_logits"),
+            input_embeds=d.get("base_model_input_embeds"),
+            loss=None,
+        )
+
+
 @EagleDMRegistry.register({PreTrainedModel: "hf.PreTrainedModel"})
 class HFEagleModel(EagleModel):
     """Eagle Model Class for huggingface models."""
@@ -425,18 +432,77 @@ class HFEagleModel(EagleModel):
     @property
     def _base_llm_config(self):
         """Return the llm config for the base model, from LLM or VLM."""
-        return self.config.llm_config if hasattr(self.config, "llm_config") else self.config
+        return (
+            getattr(self.config, "text_config", None)
+            or getattr(self.config, "llm_config", None)
+            or self.config
+        )
+
+    @property
+    def _draft_model_config(self):
+        """Return the llm config for the draft model."""
+        return self.eagle_config
+
+    def _enable_cp_ttt(self):
+        if self.training and not self.eagle_mix_hidden_states:
+            return enable_cp_ttt_patch()
+        return contextlib.nullcontext()
+
+    def _nvtx_range(self, name):
+        """Optionally create an NVTX range for the given name when config.eagle_enable_nvtx is set."""
+        if not self.eagle_enable_nvtx:
+            return contextlib.nullcontext()
+        try:
+            import torch.cuda.nvtx as nvtx
+
+            return nvtx.range(name)
+        except Exception as e:
+            print(f"Failed to create NVTX range {name}: {e}")
+            return contextlib.nullcontext()
+
+    def get_dummy_inputs(self) -> dict:
+        """Construct dummy inputs for export forward pass.
+
+        Returns a dict of kwargs that can be passed to forward(). For offline EAGLE models,
+        this includes dummy base_model_outputs with the right tensor shapes so the export
+        pipeline doesn't need to thread real calibration data through multiple layers.
+        """
+        device = self.device
+        dtype = next(self.parameters()).dtype
+        hidden_size = self._base_llm_config.hidden_size
+        dummy_inputs = {
+            "input_ids": torch.ones(1, 2, dtype=torch.long, device=device),
+        }
+        if self.eagle_offline:
+            base_model_outputs = {
+                "base_model_hidden_states": torch.zeros(
+                    1, 2, hidden_size, dtype=dtype, device=device
+                ),
+                "base_model_input_embeds": torch.zeros(
+                    1, 2, hidden_size, dtype=dtype, device=device
+                ),
+            }
+            if self.eagle_config.use_aux_hidden_state:
+                num_aux = len(self.eagle_config.eagle_aux_hidden_state_layer_ids)
+                base_model_outputs["aux_hidden_states"] = torch.zeros(
+                    1, 2, hidden_size * num_aux, dtype=dtype, device=device
+                )
+            dummy_inputs["base_model_outputs"] = base_model_outputs
+        return dummy_inputs
+
+    def get_exporter(self) -> SpeculativeDecodingExporter:
+        """Get the exporter for the draft model."""
+        exporter_cls = (
+            EagleExporter if self.eagle_config.parallel_draft_step <= 1 else EagleMedusaExporter
+        )
+        return exporter_cls(self)
 
     def _find_base_model_parts(self):
         """Find model parts from different models and set base_{part}_path attributes."""
         base_model_parts_mapping = {
-            "base_model_path": ["model", "backbone", "language_model.backbone"],
-            "base_model_embeddings_path": [
-                "model.embed_tokens",
-                "backbone.embeddings",
-                "language_model.backbone.embeddings",
-            ],
-            "base_model_lm_head_path": ["lm_head", "language_model.lm_head"],
+            "base_model_path": _BASE_MODEL_PATHS,
+            "base_model_embeddings_path": _EMBED_TOKENS_PATHS,
+            "base_model_lm_head_path": _LM_HEAD_PATHS,
         }
 
         for name, paths in base_model_parts_mapping.items():
@@ -471,15 +537,18 @@ class HFEagleModel(EagleModel):
 
     def _collect_aux_hidden_states_forward_hook(self, module, input, output) -> None:
         """Collect auxiliary hidden states from base model intermediate layers, save them in attribute."""
-        hidden_states = (
-            output.clone().detach()
-            if isinstance(output, torch.Tensor)
-            else output[0].clone().detach()
-        )
-        self._aux_hidden_states.append(hidden_states)
+        raw = output if isinstance(output, torch.Tensor) else output[0]
+        # With LoRA co-training (after warmup), keep grad so EAGLE loss
+        # backpropagates through hidden states to LoRA.
+        if self.training and getattr(self, "_lora_cotraining_active", False):
+            self._aux_hidden_states.append(raw.clone())
+        else:
+            self._aux_hidden_states.append(raw.clone().detach())
 
     def pop_and_gather_aux_hiddens(self):
         """Pop auxiliary hidden states from base model and gather them on the draft model device."""
+        if not self.eagle_config.use_aux_hidden_state:
+            return None
         # In PTQ, forward method will be called with try and except to find max batch size.
         # This leads to uncleared aux hidden states in the front of the list.
         # To fix it, we only return the last num_aux_h items in the list.
@@ -488,9 +557,11 @@ class HFEagleModel(EagleModel):
         self._aux_hidden_states.clear()
 
         # Gather aux hidden states on the draft model device
-        aux_h_list = [h.to(self.eagle_module.fc.weight.device) for h in aux_h_list]
+        aux_hiddens = torch.cat(
+            [h.to(self.eagle_module.fc.weight.device) for h in aux_h_list], dim=-1
+        )
 
-        return aux_h_list
+        return aux_hiddens
 
     def _get_eagle_device(self):
         """Return the device where we should place eagle module."""
@@ -503,47 +574,76 @@ class HFEagleModel(EagleModel):
             base_model_last_layer = self._base_model.layers[-1]
             return next(base_model_last_layer.parameters()).device
 
+    def _inject_base_lora(self):
+        """Inject HF PEFT LoRA adapters into the base model in-place and unfreeze them."""
+        from peft import LoraConfig
+        from peft.mapping import inject_adapter_in_model
+
+        target_modules = self.eagle_base_lora_target_modules or None
+        lora_config = LoraConfig(
+            r=self.eagle_base_lora_rank,
+            lora_alpha=self.eagle_base_lora_alpha,
+            target_modules=target_modules,
+            bias="none",
+        )
+        inject_adapter_in_model(lora_config, self._base_model, adapter_name="default")
+        # Unfreeze LoRA parameters unless we have a warmup phase
+        freeze_lora = self.eagle_base_lora_warmup_steps > 0
+        for name, param in self._base_model.named_parameters():
+            if "lora_" in name:
+                param.requires_grad = not freeze_lora
+
+    def _set_base_lora_enabled(self, enabled: bool) -> None:
+        """Enable or disable LoRA adapters in the base model."""
+        from peft.tuners.lora import LoraLayer
+
+        for module in self._base_model.modules():
+            if isinstance(module, LoraLayer):
+                module.enable_adapters(enabled)
+
+    def _preservation_loss(
+        self, ref_logits: torch.Tensor, lora_logits: torch.Tensor
+    ) -> torch.Tensor:
+        """KL divergence encouraging LoRA output to stay close to the original base model.
+
+        KL(softmax(ref) || log_softmax(lora)) weighted by eagle_base_lora_preservation_loss_weight.
+        """
+        loss = nn.Softmax(dim=-1)(ref_logits.detach()) * nn.LogSoftmax(dim=-1)(lora_logits)
+        return -loss.sum(dim=-1).mean() * self.eagle_base_lora_preservation_loss_weight
+
     def modify(
         self,
-        eagle_offline,
-        eagle_hidden_state_distillation,
-        eagle_self_logit_distillation,
-        eagle_freeze_base_model,
-        eagle_report_acc,
-        eagle_reuse_base_decoder,
-        eagle_loss_decay_factor,
-        eagle_architecture_config,
-        eagle_decoder_type,
+        config,
     ):
         """Constructor.
 
         Args:
             config: The config for eagle decoder layers.
         """
-        super().modify(
-            eagle_offline=eagle_offline,
-            eagle_hidden_state_distillation=eagle_hidden_state_distillation,
-            eagle_self_logit_distillation=eagle_self_logit_distillation,
-            eagle_freeze_base_model=eagle_freeze_base_model,
-            eagle_report_acc=eagle_report_acc,
-            eagle_reuse_base_decoder=eagle_reuse_base_decoder,
-            eagle_loss_decay_factor=eagle_loss_decay_factor,
-            eagle_architecture_config=eagle_architecture_config,
-            eagle_decoder_type=eagle_decoder_type,
-        )
+        super().modify(config)
 
-        if eagle_decoder_type == "llama":
+        if self.eagle_decoder_type == "llama":
             # Use default eagle config
             decoder_cls = LlamaDecoderLayer
-        elif eagle_decoder_type == "kimik2":
+        elif self.eagle_decoder_type == "kimik2":
             decoder_cls = _setup_kimi_k2_decoder()
 
-        self.eagle_config = PretrainedConfig.from_dict(eagle_architecture_config)
-        self.eagle_config.eagle_decoder_type = eagle_decoder_type
-        # Hidden size and vocab size must match base model
-        self.eagle_config.hidden_size = self._base_llm_config.hidden_size
-        self.eagle_config.vocab_size = self._base_llm_config.vocab_size
-        self.eagle_config.max_position_embeddings = self._base_llm_config.max_position_embeddings
+        arch_config = config.eagle_architecture_config
+
+        # Populate base-model-dependent fields before constructing PretrainedConfig,
+        # since transformers >=5.4 validates rope_scaling during __init__.
+        arch_config["hidden_size"] = self._base_llm_config.hidden_size
+        arch_config["vocab_size"] = self._base_llm_config.vocab_size
+        arch_config["max_position_embeddings"] = self._base_llm_config.max_position_embeddings
+        rope_scaling = arch_config.get("rope_scaling")
+        if rope_scaling and "rope_theta" not in rope_scaling and "rope_theta" in arch_config:
+            rope_scaling["rope_theta"] = arch_config["rope_theta"]
+
+        # Use the base model's config class so fields like max_position_embeddings are declared
+        # before transformers>=5.5 rope standardization runs in __post_init__.
+        base_config_cls = type(self._base_llm_config)
+        self.eagle_config = base_config_cls.from_dict(arch_config)
+        self.eagle_config.eagle_decoder_type = self.eagle_decoder_type
         self.eagle_config.draft_vocab_size = getattr(
             self.eagle_config, "draft_vocab_size", self.eagle_config.vocab_size
         )
@@ -551,32 +651,16 @@ class HFEagleModel(EagleModel):
         if self.eagle_config._attn_implementation is None:
             self.eagle_config._attn_implementation = "sdpa"
 
-        # Patch for Kimi-K2-Thinking, avoid quantizing drafter
-        if (
-            hasattr(self.config, "quantization_config")
-            and self.config.quantization_config.quant_method
-            == QuantizationMethod.COMPRESSED_TENSORS
-        ):
-            self.config.quantization_config.quantization_config.ignore.append("re:.*eagle_module.*")
-
-        # Use default aux_hidden_state layers if use_aux_hidden_state is True
-        # but no layer id is given
+        # Set default aux_hidden_state layers
         if (
             self.eagle_config.use_aux_hidden_state
             and len(self.eagle_config.eagle_aux_hidden_state_layer_ids) == 0
         ):
             self._set_default_aux_hidden_state_layers()
 
-        if self._base_llm_config.hidden_size != self.eagle_config.hidden_size:
-            raise ValueError(
-                "EAGLE module hidden size "
-                f"{self.eagle_config.hidden_size} must match base model hidden size "
-                f"{self._base_llm_config.hidden_size}!"
-            )
-
         # Freeze all parameters
         if self.eagle_freeze_base_model:
-            for name, param in self.named_parameters():
+            for _, param in self.named_parameters():
                 param.requires_grad = False
 
         self.eagle_module = EagleModule(
@@ -589,22 +673,50 @@ class HFEagleModel(EagleModel):
         self.eagle_module.to(self._base_model.dtype).to(self._get_eagle_device())
 
         # EAGLE-3 auxiliary hidden_states
-        if (not eagle_offline) and self.eagle_config.use_aux_hidden_state:
+        if (not self.eagle_offline) and self.eagle_config.use_aux_hidden_state:
             self._aux_hidden_states = []
             for layer_idx, layer in enumerate(self._base_model.layers):
                 if layer_idx in self.eagle_config.eagle_aux_hidden_state_layer_ids:
                     layer.register_forward_hook(self._collect_aux_hidden_states_forward_hook)
 
+        # Inject HF PEFT LoRA adapters into the base model for co-training
+        if self.eagle_base_lora:
+            if self.eagle_offline:
+                raise ValueError("eagle_base_lora is incompatible with eagle_offline=True")
+            self._inject_base_lora()
+            # Whether LoRA co-training is active this step. Controlled by the
+            # trainer based on warmup schedule. When False, LoRA params are
+            # frozen and logits are always detached (eagle-only training).
+            self._lora_cotraining_active = self.eagle_base_lora_warmup_steps == 0
+
         # delete base model layers for offline training
-        if eagle_offline:
+        if self.eagle_offline:
             self._base_model._modules.pop("layers")
 
         # NOTE: this is a temporary hack to bypass hf trainer check:
         # https://github.com/huggingface/transformers/blob/v4.56-release/src/transformers/trainer.py#L566
         self.is_quantized = False
 
-        self.num_ttt_steps = 4  # NOTE: (hg) hardcoded for now. Might add to config later.
+        if self.eagle_use_torch_compile:
+            self._activate_torch_compile()
+
         self._cached_attn_blk_masks = {}
+
+    def _activate_torch_compile(self):
+        import torch._dynamo
+
+        torch._dynamo.config.suppress_errors = True  # Allow fallback to eager mode
+
+        compile_targets = [
+            ("_prepare_eagle_inputs", {}),
+            ("_eagle_forward", {"mode": "max-autotune"}),
+            ("_eagle_loss", {"fullgraph": True}),
+        ]
+        for name, kwargs in compile_targets:
+            try:
+                setattr(self, name, torch.compile(getattr(self, name), dynamic=False, **kwargs))
+            except Exception:  # noqa: PERF203
+                print(f"Disabling torch.compile for {name} due to compilation error.")
 
     def _get_ttt_attention_mask(self, batch_size, seq_length, ttt_step):
         # compile and cached flex attention masks in first call
@@ -615,25 +727,26 @@ class HFEagleModel(EagleModel):
         return self._cached_attn_blk_masks[ttt_step]
 
     def _prepare_decoder_attention_mask(
-        self, attention_mask, input_shape, inputs_embeds, past_key_values_length
+        self, attention_mask, input_shape, past_key_values_length, device, dtype
     ):
         """Expand the 2-D attention mask to 4-D and apply causal mask."""
         # create causal mask
         # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
         combined_attention_mask = None
+        # construct causal mask
         if input_shape[-1] > 1:
             combined_attention_mask = make_causal_mask(
                 input_shape,
-                inputs_embeds.dtype,
-                device=inputs_embeds.device,
+                dtype,
+                device=device,
                 past_key_values_length=past_key_values_length,
             )
-
+        # merge causal mask with padding mask
         if attention_mask is not None:
             # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
-            expanded_attn_mask = expand_mask(
-                attention_mask, inputs_embeds.dtype, tgt_len=input_shape[-1]
-            ).to(inputs_embeds.device)
+            expanded_attn_mask = expand_mask(attention_mask, dtype, tgt_len=input_shape[-1]).to(
+                device
+            )
             combined_attention_mask = (
                 expanded_attn_mask
                 if combined_attention_mask is None
@@ -642,64 +755,102 @@ class HFEagleModel(EagleModel):
 
         return combined_attention_mask
 
-    def _get_eagle_module_inputs(
+    def _prepare_eagle_inputs(
         self,
         input_ids,
-        eagle_input_hidden_states,
         attention_mask,
         position_ids,
         eagle_cache,
+        base_outputs,
     ):
         """Helper function to prepare eagle inputs for the 0th eagle forward pass."""
-        b, seq_length, _ = eagle_input_hidden_states.shape
-        past_key_values_length = eagle_cache.get_seq_length() if eagle_cache is not None else 0
-        seq_length_with_past = seq_length + past_key_values_length
+        b, seq_length = input_ids.shape
+        past_kv_len = eagle_cache.get_seq_length() if eagle_cache is not None else 0
+        seq_len_with_past = seq_length + past_kv_len
 
-        # Prepare eagle_input_ids: Shift left 1 token
-        zeropadding = torch.zeros(
-            input_ids.shape[0], 1, dtype=input_ids.dtype, device=input_ids.device
-        )
-        eagle_input_ids = torch.cat((input_ids[:, 1:], zeropadding), dim=1)
+        # Prepare eagle_input_embeds: Shift left 1 token
+        with torch.no_grad():
+            if base_outputs.input_embeds is None:
+                eagle_input_embeds = self._base_model_embeddings(input_ids.roll(-1, 1))
+            else:
+                eagle_input_embeds = base_outputs.input_embeds.roll(-1, 1)
+
+        # Prepare eagle_input_hiddens
+        if self.eagle_config.use_aux_hidden_state:
+            # concat base model intermediate (pre-norm) hiddens
+            eagle_input_hiddens = self.eagle_module.fc(base_outputs.aux_hiddens)
+        else:
+            # use base model output (post-norm)hiddens
+            eagle_input_hiddens = base_outputs.out_hiddens
 
         # Prepare attention_mask
-        if attention_mask is not None:  # Shift left 1 token for attention_mask
-            zeropadding = torch.zeros(
-                attention_mask.shape[0], 1, dtype=attention_mask.dtype, device=attention_mask.device
+        if attention_mask is None:
+            eagle_attention_mask = torch.ones(  # default: all tokens are valid
+                (b, seq_len_with_past), dtype=torch.bool, device=eagle_input_hiddens.device
             )
-            attention_mask = torch.cat((attention_mask[:, 1:], zeropadding), dim=1)
         else:
-            attention_mask = torch.ones(  # Initialize default attention_mask
-                (b, seq_length_with_past), dtype=torch.bool, device=eagle_input_hidden_states.device
-            )
-
+            eagle_attention_mask = attention_mask.roll(-1, 1)  # Shift left 1 token
         # Expand the 2-D attention mask to 4-D and apply causal mask.
-        attention_mask = self._prepare_decoder_attention_mask(
-            attention_mask, (b, seq_length), eagle_input_hidden_states, past_key_values_length
+        eagle_attention_mask = self._prepare_decoder_attention_mask(
+            eagle_attention_mask,
+            (b, seq_length),
+            past_kv_len,
+            eagle_input_hiddens.device,
+            eagle_input_hiddens.dtype,
         )
 
         # Prepare position_ids
         if position_ids is None:
-            position_ids = torch.arange(
-                past_key_values_length,
-                seq_length + past_key_values_length,
-                dtype=torch.long,
-                device=eagle_input_hidden_states.device,
+            eagle_position_ids = (
+                torch.arange(
+                    past_kv_len,
+                    seq_len_with_past,
+                    dtype=torch.long,
+                    device=eagle_input_hiddens.device,
+                )
+                .unsqueeze(0)
+                .view(-1, seq_length)
             )
-            position_ids = position_ids.unsqueeze(0).view(-1, seq_length)
         else:
-            position_ids = position_ids.view(-1, seq_length).long()
+            eagle_position_ids = position_ids.view(-1, seq_length).long()
 
-        return eagle_input_ids, attention_mask, position_ids
+        base_model_logits = base_outputs.logits
+        if self.eagle_config.draft_vocab_size != self.eagle_config.vocab_size:
+            base_model_logits = self._map_logits_to_draft_vocab(base_model_logits)
+        base_output_predict_tok = base_model_logits.argmax(dim=-1).detach()
+        base_output_softmax_logits = torch.softmax(base_model_logits, dim=2)
+        # After LoRA warmup, stochastically detach logits — acts as dropout
+        # regularization on the eagle-loss-to-LoRA gradient path, preventing
+        # LoRA from degenerating to maximize EAGLE acc at cost of base quality.
+        # During warmup or when LoRA is off, always detach.
+        lora_active = getattr(self, "_lora_cotraining_active", False) and self.training
+        if lora_active and torch.rand(1).item() >= self.eagle_base_lora_logits_detach_prob:
+            pass  # keep gradients flowing through logits to LoRA
+        else:
+            base_output_softmax_logits = base_output_softmax_logits.detach()
+
+        return (
+            eagle_input_embeds,
+            eagle_input_hiddens,
+            eagle_attention_mask,
+            eagle_position_ids,
+            base_output_predict_tok,
+            base_output_softmax_logits,
+        )
 
     def _compute_ttt_attention_mask(
         self, batch_size, seq_length, ttt_step
     ) -> BlockMask | torch.Tensor:
         """Return TTT attention_mask tensor of type BlockMask or Tensor depends on eagle attn impl."""
         msk_func = get_ttt_msk_func(seq_length, ttt_step)
-        dtypemin = torch.finfo(self._base_llm_config.dtype).min
+        dtype = (
+            getattr(self._base_llm_config, "dtype", None)
+            or self.eagle_module.layers[0].input_layernorm.weight.dtype
+        )
+        dtypemin = torch.finfo(dtype).min
         q_len = seq_length
         kv_len = seq_length * (1 + ttt_step)
-        if self.eagle_module.config._attn_implementation == "flex_attention":
+        if self.eagle_config._attn_implementation == "flex_attention":
             # Return block mask for flex attention
             block_mask = create_block_mask(msk_func, B=None, H=None, Q_LEN=q_len, KV_LEN=kv_len)
             return block_mask
@@ -712,42 +863,10 @@ class HFEagleModel(EagleModel):
                 torch.arange(kv_len).view(1, 1, 1, kv_len),
             ).to(self.device)
             tensor_mask = torch.full_like(
-                tensor_mask, 0, dtype=self._base_llm_config.dtype, device=self.device
+                tensor_mask, 0, dtype=dtype, device=self.device
             ).masked_fill(~tensor_mask, dtypemin)
 
-            tensor_mask = tensor_mask.repeat(batch_size, 1, 1, 1)
             return tensor_mask
-
-    def _llm_or_vlm_embedding(self, input_ids, kwargs):
-        """Return input embeddings with possibly vision embeddings for VLM."""
-        tok_embeds = self._base_model_embeddings(input_ids)
-
-        # LLM only have token embeddings
-        if "pixel_values" not in kwargs:
-            return tok_embeds
-
-        # Otherwise, insert vision embeddings in tok_embeds
-        if self.config.model_type == "NemotronH_Nano_VL_V2":
-            vit_embeds = self.extract_feature(kwargs["pixel_values"])
-            vit_embeds = vit_embeds[kwargs["image_flags"] == 1]
-            bs, seq_len, hid_size = tok_embeds.shape
-            tok_embeds = tok_embeds.reshape(bs * seq_len, hid_size)
-            input_ids = input_ids.reshape(bs * seq_len)
-            selected = input_ids == self.img_context_token_id
-            try:
-                tok_embeds[selected] = tok_embeds[selected] * 0.0 + vit_embeds.reshape(-1, hid_size)
-            except Exception as e:
-                vit_embeds = vit_embeds.reshape(-1, hid_size)
-                print(
-                    f"warning: {e}, tok_embeds[selected].shape={tok_embeds[selected].shape}, "
-                    f"vit_embeds.shape={vit_embeds.shape}"
-                )
-                n_token = selected.sum()
-                tok_embeds[selected] = tok_embeds[selected] * 0.0 + vit_embeds[:n_token]
-            del vit_embeds
-            return tok_embeds.reshape(bs, seq_len, hid_size)
-        else:
-            raise ValueError(f"VLM model type {self.config.model_type} not supported")
 
     def _base_model_forward(
         self,
@@ -759,30 +878,56 @@ class HFEagleModel(EagleModel):
         labels,
         **kwargs,
     ):
-        with torch.no_grad() if freeze_base_model else contextlib.nullcontext():
-            outputs = super().forward(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                position_ids=position_ids,
-                past_key_values=past_key_values,
-                output_hidden_states=True,
-                **kwargs,
+        def _run_forward(no_grad):
+            with torch.no_grad() if no_grad else contextlib.nullcontext():
+                return super(HFEagleModel, self).forward(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
+                    past_key_values=past_key_values,
+                    output_hidden_states=True,
+                    **kwargs,
+                )
+
+        # With LoRA co-training, run a reference forward (LoRA disabled, no grad)
+        # to get the original base model logits for preservation loss, then run
+        # the main forward with LoRA enabled and gradients flowing.
+        # During warmup (_lora_cotraining_active=False), skip entirely.
+        lora_active = getattr(self, "_lora_cotraining_active", False) and self.training
+        ref_logits = None
+        if lora_active:
+            self._set_base_lora_enabled(False)
+            try:
+                ref_logits = _run_forward(no_grad=True).logits
+            finally:
+                if hasattr(self, "_aux_hidden_states"):
+                    self._aux_hidden_states.clear()
+                self._set_base_lora_enabled(True)
+
+        outputs = _run_forward(no_grad=freeze_base_model and not lora_active)
+        past_key_values = getattr(outputs, "past_key_values", None)
+        base_model_logits = outputs.logits
+
+        if ref_logits is not None:
+            base_model_loss = self._preservation_loss(ref_logits, base_model_logits)
+        elif not freeze_base_model and labels is not None:
+            loss_fct = CrossEntropyLoss()
+            base_model_loss = loss_fct(
+                base_model_logits.view(-1, base_model_logits.shape[-1]), labels.view(-1)
             )
-            past_key_values = getattr(outputs, "past_key_values", None)
-            base_model_hidden_states = outputs.hidden_states[-1]
-            base_model_logits = outputs.logits
-
-            # Optionally, compute base model loss when we want to tune the base model.
+        else:
             base_model_loss = None
-            if not freeze_base_model and labels is not None:  # Base model loss
-                loss_fct = CrossEntropyLoss()
-                loss_logits = base_model_logits.view(-1, base_model_logits.shape[-1])
-                labels = labels.view(-1)
-                base_model_loss = loss_fct(loss_logits, labels)
 
-        return base_model_hidden_states, base_model_logits, base_model_loss, past_key_values
+        return EagleBaseModelOutput(
+            input_embeds=outputs.hidden_states[0],
+            aux_hiddens=self.pop_and_gather_aux_hiddens(),
+            out_hiddens=outputs.hidden_states[-1],
+            logits=base_model_logits,
+            loss=base_model_loss,
+        ), past_key_values
 
     def _map_logits_to_draft_vocab(self, full_logits):
+        assert hasattr(self.eagle_module, "d2t"), "d2t buffer not initialized"
         reverse_mapping = (
             torch.arange(len(self.eagle_module.d2t)).to(self.eagle_module.d2t.device)
             + self.eagle_module.d2t
@@ -839,36 +984,36 @@ class HFEagleModel(EagleModel):
         """Forward pass of the EagleModel.
 
         Returns:
-            hidden_states: The hidden state from the base model.
-            logits: logits from the base model.
-            eagle_hidden_states: The hidden state from eagle_module.
-            eagle_logits: logits from the eagle_module.
+            loss: Loss of base model or eagle model.
+            logits: Base model logits.
+            past_key_values: Base model past key values with eagle cache attached.
+            hidden_states: Base model hidden states.
+            train_acc: Drafter training accuracies.
         """
-        if past_key_values is not None and hasattr(past_key_values, "eagle_cache"):
-            eagle_cache = past_key_values.eagle_cache
-        else:
-            eagle_cache = None
+        eagle_cache = getattr(past_key_values, "eagle_cache", None)
 
         if self.training:
-            assert eagle_cache is None, "eagle_cache should be None in training"
             assert past_key_values is None, "past_key_values should be None in training"
 
         if loss_mask is None:
-            loss_mask = torch.ones_like(input_ids, dtype=torch.bool, device=input_ids.device)
+            # By default, mask out padding tokens in loss computation
+            loss_mask = (
+                attention_mask.clone().detach()
+                if attention_mask is not None
+                else torch.ones_like(input_ids, dtype=torch.bool)
+            )
 
-        # ====First, we run base model forward====
-        if "base_model_outputs" in kwargs:
+        # ====First, run base model forward====
+        if self.eagle_offline:
             # Parse base model outputs forwarded from teacher
-            base_outputs = kwargs["base_model_outputs"]
-            base_model_hidden_states = base_outputs["base_model_hidden_states"]
-            if "base_model_logits" in base_outputs:
-                base_model_logits = base_outputs["base_model_logits"]
-            else:
-                base_model_logits = self.lm_head(base_model_hidden_states)
-            base_model_loss, past_key_values = None, None
+            assert "base_model_outputs" in kwargs
+            base_outputs = EagleBaseModelOutput.from_offline_dict(kwargs["base_model_outputs"])
+            if base_outputs.logits is None:
+                base_outputs.logits = self._base_model_lm_head(base_outputs.out_hiddens)
+            past_key_values = None
         else:
-            base_model_hidden_states, base_model_logits, base_model_loss, past_key_values = (
-                self._base_model_forward(
+            with self._nvtx_range("base_model_forward"):
+                base_outputs, past_key_values = self._base_model_forward(
                     input_ids,
                     attention_mask,
                     position_ids,
@@ -877,140 +1022,131 @@ class HFEagleModel(EagleModel):
                     labels,
                     **kwargs,
                 )
-            )
 
         if not isinstance(past_key_values, Cache):
-            past_key_values = _get_empty_cache(self._base_llm_config)
+            past_key_values = DynamicCache(config=self._base_llm_config)
         if not isinstance(eagle_cache, Cache):
-            eagle_cache = _get_empty_cache(self.eagle_module.config)
-
-        # ====Run eagle forward====
-        eagle_loss = None
-        train_accs = [[] for _ in range(self.eagle_config.parallel_draft_step)]
-        # In EAGLE-3, we have an additional FC layer to concentrate hidden states from multiple base model layers
-        b, seq_length, h = base_model_hidden_states.shape
-        if self.eagle_config.use_aux_hidden_state:
-            if "base_model_outputs" in kwargs:
-                aux_hidden_states = kwargs["base_model_outputs"]["aux_hidden_states"]
-            else:
-                aux_hidden_states = torch.cat(self.pop_and_gather_aux_hiddens(), dim=-1)
-            eagle_input_hidden_states = self.eagle_module.fc(aux_hidden_states)
-        else:
-            eagle_input_hidden_states = base_model_hidden_states
-
-        # Get eagle inputs for the first eagle forward pass
-        eagle_input_ids, attention_mask_0, position_ids = self._get_eagle_module_inputs(
-            input_ids,
-            eagle_input_hidden_states,
-            attention_mask,
-            position_ids,
-            eagle_cache,
-        )
-        with torch.no_grad():
-            inputs_embeds = self._llm_or_vlm_embedding(eagle_input_ids, kwargs)
-
+            eagle_cache = DynamicCache(config=self.eagle_module.config)
         past_key_values.eagle_cache = eagle_cache
 
-        # ====Perform training-time-testing with 3 extra eagle forward passes====
-        for ttt_step in range(self.num_ttt_steps):
+        # ====Prepare inputs for the first eagle forward pass====
+        eagle_loss = None
+        num_parallel = self.eagle_config.parallel_draft_step
+        num_ttt = self.eagle_ttt_steps
+        train_accs = torch.zeros(num_parallel, num_ttt, device=input_ids.device)
+        b, seq_length, _ = base_outputs.out_hiddens.shape
+        with self._nvtx_range("prepare_eagle_inputs"):
+            (
+                eagle_input_embeds,
+                eagle_input_hiddens,
+                eagle_attn_mask_0,
+                eagle_position_ids,
+                base_output_predict_tok,
+                base_output_softmax_logits,
+            ) = self._prepare_eagle_inputs(
+                input_ids,
+                attention_mask,
+                position_ids,
+                eagle_cache,
+                base_outputs,
+            )
+
+        self.eagle_module._maybe_init_rope(device=eagle_input_hiddens.device)
+
+        # ====Run eagle forward with extra training-time-test steps====
+        for ttt_step in range(self.eagle_ttt_steps):
             # TODO: (hg) during cp training, this mask is not used. Maybe turn it off then.
-            attention_mask = (
-                attention_mask_0
-                if ttt_step == 0
+            eagle_attention_mask = (
+                eagle_attn_mask_0
+                if self.eagle_mix_hidden_states or ttt_step == 0
                 else self._get_ttt_attention_mask(b, seq_length, ttt_step)
             )
-            with enable_cp_ttt_patch() if self.training else contextlib.nullcontext():
-                _, eagle_input_hidden_states, eagle_logits, eagle_cache = self._eagle_forward(
-                    eagle_input_hidden_states,
-                    inputs_embeds,
-                    attention_mask,
-                    position_ids,
-                    eagle_cache,
+            with self._enable_cp_ttt(), self._nvtx_range("eagle_forward"):
+                _, eagle_output_hiddens, eagle_logits, eagle_cache = self._eagle_forward(
+                    eagle_input_hiddens,
+                    eagle_input_embeds,
+                    eagle_attention_mask,
+                    eagle_position_ids,
+                    None if self.eagle_mix_hidden_states else eagle_cache,
                 )
-            eagle_input_hidden_states = torch.cat(
-                (
-                    torch.zeros(
-                        (b, 1, h),
-                        dtype=eagle_input_hidden_states.dtype,
-                        device=eagle_input_hidden_states.device,
-                    ),
-                    eagle_input_hidden_states[:, :-1, :],
-                ),
-                dim=1,
-            )
+            eagle_output_hiddens = eagle_output_hiddens.roll(1, 1)
+
+            if self.eagle_mix_hidden_states:
+                batch_size, seq_len_s, _ = eagle_input_hiddens.shape
+                num_to_replace = max(1, seq_len_s // (2**ttt_step + 1))
+
+                # Randomly select positions for each batch to replace
+                rand_indices = torch.rand(
+                    batch_size, seq_len_s, device=eagle_input_hiddens.device
+                ).argsort(dim=1)[:, :num_to_replace]
+
+                batch_indices = torch.arange(batch_size)[:, None]
+                eagle_input_hiddens[batch_indices, rand_indices] = eagle_output_hiddens[
+                    batch_indices, rand_indices
+                ]
+            else:
+                eagle_input_hiddens = eagle_output_hiddens
+
             for i in range(self.eagle_config.parallel_draft_step):
                 eagle_logit = eagle_logits[i]
-                classification_loss, acc = self._eagle_loss(
-                    # base model predict +1 tok, while eagle predict +2
-                    # so we shift base model outputs compared to eagle outputs
-                    base_model_logits[:, 1 + i :],
-                    eagle_logit[:, : -(1 + i)],
-                    # additionally, we mask the first n tok of eagle outputs at nth TTT step
-                    torch.cat(
-                        (
-                            torch.zeros(
-                                b, ttt_step, dtype=loss_mask.dtype, device=loss_mask.device
-                            ),
-                            loss_mask[:, 1 + ttt_step :]
-                            if i == 0
-                            else loss_mask[:, 1 + ttt_step : -i],
-                        ),
-                        dim=1,
-                    ),
-                )
+                with self._nvtx_range("eagle_loss"):
+                    classification_loss, acc = self._eagle_loss(
+                        # base model predict +1 tok, while eagle predict +2
+                        # so we shift base model outputs compared to eagle outputs
+                        # additionally, we mask the first n tok of eagle outputs at nth TTT step
+                        base_output_softmax_logits[:, 1 + i + ttt_step :],
+                        base_output_predict_tok[:, 1 + i + ttt_step :],
+                        eagle_logit[:, ttt_step : -(1 + i)],
+                        loss_mask[:, 1 + ttt_step :] if i == 0 else loss_mask[:, 1 + ttt_step : -i],
+                    )
+                # Apply loss decay factor to focus on early steps
                 classification_loss *= self.eagle_loss_decay_factor ** (ttt_step + i)
                 eagle_loss = (
                     classification_loss if eagle_loss is None else eagle_loss + classification_loss
                 )
-                train_accs[i].append(acc)
+                train_accs[i, ttt_step] = acc
             if not self.training:
                 break
-        # Finally, we merge base model loss and eagle loss, raise error if both are None
-        if base_model_loss is not None and eagle_loss is not None:
-            loss = base_model_loss + eagle_loss
-        elif base_model_loss is not None:
-            loss = base_model_loss
-        elif eagle_loss is not None:
-            loss = eagle_loss
-        else:
+
+        # Slice by actual number of steps taken, in case of early return
+        train_accs = train_accs[:, : ttt_step + 1].tolist()
+
+        # Merge eagle loss and preservation loss (if LoRA co-training)
+        if base_outputs.loss is None and eagle_loss is None:
             loss = None
-            assert not self.training, ValueError(
-                "Both base_model_loss and eagle_loss are skipped. At least one loss must be computed."
-            )
+            assert not self.training, "At least one loss must be computed for training."
+        else:
+            loss = (base_outputs.loss or 0) + (eagle_loss or 0)
 
         return ModelOutput(
             loss=loss,
-            logits=base_model_logits,
+            logits=base_outputs.logits,
             past_key_values=past_key_values,
-            hidden_states=base_model_hidden_states,
+            hidden_states=base_outputs.out_hiddens,
             train_acc=train_accs,
+            eagle_loss=eagle_loss,
+            preservation_loss=base_outputs.loss if self.eagle_base_lora else None,
         )
 
     def _eagle_loss(
         self,
-        base_model_logits,
+        base_output_softmax_logits,
+        base_output_predict_tok,
         eagle_logits,
         loss_mask,
     ):
         """Function for EAGLE loss computing."""
-        if self.eagle_config.draft_vocab_size != self.eagle_config.vocab_size:
-            assert hasattr(self.eagle_module, "d2t"), "d2t buffer not initialized"
-            base_model_logits = self._map_logits_to_draft_vocab(base_model_logits)
-        loss_mask = loss_mask[:, :, None]
-        loss_mask = loss_mask[:, : eagle_logits.shape[1]]
-        classification_loss = nn.Softmax(dim=2)(base_model_logits) * nn.LogSoftmax(dim=2)(
-            eagle_logits
-        )
-        classification_loss = -torch.sum(torch.sum(loss_mask * classification_loss, 2)) / (
-            loss_mask.sum() + 1e-5
-        )
-        # Compute accuracy
-        base_predict_tok = base_model_logits.clone().detach().argmax(dim=-1)
-        eagle_predict_tok = eagle_logits.clone().detach().argmax(dim=-1)
+        loss_mask = loss_mask[:, : eagle_logits.shape[1], None]
+        eagle_logsoft = torch.log_softmax(eagle_logits, dim=2)
+        classification_loss = -torch.sum(
+            torch.sum(loss_mask * base_output_softmax_logits * eagle_logsoft, 2)
+        ) / (loss_mask.sum() + 1e-5)
+        # Compute accuracy (returned as tensor to avoid sync; .item() called after TTT loop)
+        eagle_predict_tok = eagle_logits.detach().argmax(dim=-1)
         valid = loss_mask[:, :, 0].bool()
-        correct = (base_predict_tok == eagle_predict_tok) & valid
+        correct = (base_output_predict_tok == eagle_predict_tok) & valid
         denom = valid.sum().clamp_min(1).float()
-        accuracy = round(correct.sum().float().div(denom).item(), 3)
+        accuracy = correct.sum().float() / denom
 
         return classification_loss, accuracy
 
@@ -1044,37 +1180,34 @@ class HFEagleModel(EagleModel):
         eagle_ids = torch.cat((input_ids[:, 1:], base_token), dim=-1)
 
         if self.eagle_config.use_aux_hidden_state:
-            # EAGLE-3
             # Only the first iteration input_hidden_states are from aux_hidden_state layers
             # Gather _aux_hidden_states from all devices before concatenation
-            gathered_aux_hidden_states = self.pop_and_gather_aux_hiddens()
-            eagle_input_hidden_states = self.eagle_module.fc(
-                torch.cat(gathered_aux_hidden_states, dim=-1)
-            )
-
+            eagle_input_hidden_states = self.eagle_module.fc(self.pop_and_gather_aux_hiddens())
         else:
             eagle_input_hidden_states = base_model_hidden_states
 
+        self.eagle_module._maybe_init_rope(device=eagle_input_hidden_states.device)
         draft_tokens = []
         for step in range(steps):
-            # Get eagle inputs for the first eagle forward pass
-            _, eagle_attention_mask, eagle_position_ids = self._get_eagle_module_inputs(
-                input_ids,
-                eagle_input_hidden_states,
+            b, seq_length = eagle_ids.shape
+            eagle_attention_mask = self._prepare_decoder_attention_mask(
                 None,
-                None,
-                None,
+                (b, seq_length),
+                0,
+                eagle_input_hidden_states.device,
+                eagle_input_hidden_states.dtype,
             )
 
             # Use SDPA attention during generation for both stability and performance
-            with temporary_set_config_value(
-                self.eagle_module.config, "_attn_implementation", "sdpa"
+            with (
+                temporary_set_config_value(self.eagle_config, "_attn_implementation", "sdpa"),
+                self._nvtx_range("eagle_forward"),
             ):
                 _, eagle_prenorm_h, eagle_logits, _ = self._eagle_forward(
                     eagle_input_hidden_states,
                     self._base_model_embeddings(eagle_ids),
                     eagle_attention_mask,
-                    eagle_position_ids,
+                    None,
                 )
 
             # parallel logits are only used after the last step

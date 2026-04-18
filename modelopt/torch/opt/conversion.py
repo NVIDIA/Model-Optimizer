@@ -34,7 +34,7 @@ import torch
 import torch.nn as nn
 
 from modelopt import __version__
-from modelopt.torch.utils import ModelLike, init_model_from_model_like, unwrap_model
+from modelopt.torch.utils import ModelLike, init_model_from_model_like, safe_load, unwrap_model
 
 from .config import ConfigDict, ModeloptBaseConfig
 from .mode import (
@@ -51,6 +51,7 @@ from .mode import (
 __all__ = [
     "ModeloptStateManager",
     "apply_mode",
+    "load_modelopt_state",
     "modelopt_state",
     "restore",
     "restore_from_modelopt_state",
@@ -512,7 +513,25 @@ def save(model: nn.Module, f: str | os.PathLike | BinaryIO, **kwargs) -> None:
     torch.save(ckpt_dict, f, **kwargs)
 
 
-def restore_from_modelopt_state(model: ModelLike, modelopt_state: dict[str, Any]) -> nn.Module:
+def load_modelopt_state(modelopt_state_path: str | os.PathLike, **kwargs) -> dict[str, Any]:
+    """Load the modelopt state from a file.
+
+    Args:
+        modelopt_state_path: Target file location.
+        **kwargs: additional args for ``torch.load()``.
+
+    Returns:
+        A modelopt state dictionary describing the modifications to the model.
+    """
+    kwargs.setdefault("map_location", "cpu")
+    return safe_load(modelopt_state_path, **kwargs)
+
+
+def restore_from_modelopt_state(
+    model: ModelLike,
+    modelopt_state: dict[str, Any] | None = None,
+    modelopt_state_path: str | os.PathLike | None = None,
+) -> nn.Module:
     """Restore the model architecture from the modelopt state dictionary based on the user-provided model.
 
     This method does not restore the model parameters such as weights, biases and quantization scales.
@@ -522,15 +541,13 @@ def restore_from_modelopt_state(model: ModelLike, modelopt_state: dict[str, Any]
     .. code-block:: python
 
         import modelopt.torch.opt as mto
+        from modelopt.torch.utils import safe_load
 
         model = ...  # Create the model-like object
 
         # Restore the previously saved modelopt state followed by model weights
-        # Security NOTE: weights_only=False is used here on ModelOpt-generated state_dict, not on untrusted user input
-        mto.restore_from_modelopt_state(
-            model, torch.load("modelopt_state.pt", weights_only=False)
-        )  # Restore modelopt state
-        model.load_state_dict(torch.load("model_weights.pt"), ...)  # Load the model weights
+        mto.restore_from_modelopt_state(model, modelopt_state_path="modelopt_state.pt")
+        model.load_state_dict(safe_load("model_weights.pt"), ...)  # Load the model weights
 
     If you want to restore the model weights and the modelopt state with saved scales, please use
     :meth:`mto.restore()<modelopt.torch.opt.conversion.restore>`.
@@ -543,11 +560,21 @@ def restore_from_modelopt_state(model: ModelLike, modelopt_state: dict[str, Any]
         modelopt_state: The modelopt state dict describing the modelopt modifications to the model. The
             ``modelopt_state`` can be generated via
             :meth:`mto.modelopt_state()<modelopt.torch.opt.conversion.modelopt_state>`.
+            Cannot be used with modelopt_state_path.
+        modelopt_state_path: The path to the modelopt state file.
+            Cannot be used with modelopt_state.
 
     Returns:
         A modified model architecture based on the restored modifications with the unmodified
         weights as stored in the provided ``model`` argument.
     """
+    assert (modelopt_state is not None) != (modelopt_state_path is not None), (
+        "Either modelopt_state or modelopt_state_path must be provided, but not both."
+    )
+    if modelopt_state_path is not None:
+        modelopt_state = load_modelopt_state(modelopt_state_path)
+    assert modelopt_state, "modelopt_state is required!"
+
     # initialize ModelLikeModule if needed.
     model = model if isinstance(model, nn.Module) else ModelLikeModule(model)
 
@@ -598,8 +625,7 @@ def restore(model: ModelLike, f: str | os.PathLike | BinaryIO, **kwargs) -> nn.M
 
     # load checkpoint
     kwargs.setdefault("map_location", "cpu")
-    kwargs.setdefault("weights_only", False)
-    objs = torch.load(f, **kwargs)
+    objs = safe_load(f, **kwargs)
 
     # restore model architecture
     model_restored = restore_from_modelopt_state(model, objs["modelopt_state"])

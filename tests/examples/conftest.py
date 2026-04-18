@@ -15,18 +15,7 @@
 
 
 import pytest
-import torch
 from _test_utils.torch.transformers_models import create_tiny_llama_dir
-
-
-@pytest.fixture(scope="session")
-def num_gpus():
-    return torch.cuda.device_count()
-
-
-@pytest.fixture(scope="session")
-def cuda_capability():
-    return torch.cuda.get_device_capability()
 
 
 @pytest.fixture(scope="session")

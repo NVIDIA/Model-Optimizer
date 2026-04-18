@@ -21,7 +21,7 @@ from PIL import Image
 from transformers import AutoImageProcessor, AutoProcessor
 
 
-def run_vl_preview_generation(model, tokenizer, model_path, stage_name):
+def run_vl_preview_generation(model, tokenizer, model_path, stage_name, trust_remote_code=False):
     """Run preview generation for VL models using sample images.
 
     Args:
@@ -29,7 +29,7 @@ def run_vl_preview_generation(model, tokenizer, model_path, stage_name):
         tokenizer: The tokenizer
         model_path: Path to the model (for loading image processor)
         stage_name: Description of the stage (e.g., "before quantization")
-
+        trust_remote_code: Whether to trust remote code for Huggingface models and tokenizers
     Returns:
         Generated response text for logging/comparison
     """
@@ -85,7 +85,9 @@ def run_vl_preview_generation(model, tokenizer, model_path, stage_name):
 
         # Try to detect the VL model has chat method or generate method
         if hasattr(model, "chat"):
-            image_processor = AutoImageProcessor.from_pretrained(model_path, trust_remote_code=True)
+            image_processor = AutoImageProcessor.from_pretrained(
+                model_path, trust_remote_code=trust_remote_code
+            )
 
             image_features = image_processor([image])  # Pass as list with single image
 
@@ -103,29 +105,35 @@ def run_vl_preview_generation(model, tokenizer, model_path, stage_name):
                 **image_features,
             )
         else:
-            processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
-
-            messages = [
-                {"role": "system", "content": "/no_think"},
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image",
-                            "image": "",
-                        },
-                        {
-                            "type": "text",
-                            "text": question,
-                        },
-                    ],
-                },
-            ]
-
-            # Apply chat template
-            prompt = tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True
+            processor = AutoProcessor.from_pretrained(
+                model_path, trust_remote_code=trust_remote_code
             )
+
+            # Use chat template if available, otherwise fall back to default task prompt
+            if hasattr(tokenizer, "chat_template") and tokenizer.chat_template is not None:
+                messages = [
+                    {"role": "system", "content": "/no_think"},
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image",
+                                "image": "",
+                            },
+                            {
+                                "type": "text",
+                                "text": question,
+                            },
+                        ],
+                    },
+                ]
+                prompt = tokenizer.apply_chat_template(
+                    messages, tokenize=False, add_generation_prompt=True
+                )
+            else:
+                # For models without chat templates (e.g., encoder-decoder VL models),
+                # use the tokenizer's bos/eos tokens as a minimal prompt
+                prompt = (tokenizer.bos_token or "") + question
 
             # Process inputs using the processor with single image
             inputs = processor(
@@ -139,6 +147,12 @@ def run_vl_preview_generation(model, tokenizer, model_path, stage_name):
             inputs = inputs.to(model_device)
             print(f"    Moved inputs to {model_device}")
 
+            # Verify we have pixel_values for the vision encoder
+            if not hasattr(inputs, "pixel_values") or inputs.pixel_values is None:
+                raise ValueError(
+                    "Processor did not generate pixel_values. Check processor configuration."
+                )
+
             # Generate response using model.generate
             generated_ids = model.generate(
                 pixel_values=inputs.pixel_values,
@@ -148,12 +162,23 @@ def run_vl_preview_generation(model, tokenizer, model_path, stage_name):
             )
 
             # Decode the response (trim input tokens like in the working example)
+            if generated_ids is None:
+                raise ValueError("Model generate returned None")
+
             generated_ids_trimmed = [
                 out_ids[len(in_ids) :] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
             ]
-            output_text = processor.batch_decode(
-                generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
+            # Use processor.batch_decode if available, otherwise fall back to tokenizer
+            decoder = processor if hasattr(processor, "batch_decode") else tokenizer
+            output_text = decoder.batch_decode(
+                generated_ids_trimmed,
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=False,
             )
+
+            if output_text is None or len(output_text) == 0:
+                raise ValueError("Decoding returned empty output")
+
             response = output_text[0]
 
         print(f"✅ VL generation {stage_name} successful!")
@@ -169,7 +194,9 @@ def run_vl_preview_generation(model, tokenizer, model_path, stage_name):
         return None
 
 
-def run_text_only_generation(model, tokenizer, question, generation_config, model_path):
+def run_text_only_generation(
+    model, tokenizer, question, generation_config, model_path, trust_remote_code=False
+):
     """Run text-only generation for VL models, supporting both chat and generate methods.
 
     Args:
@@ -178,7 +205,7 @@ def run_text_only_generation(model, tokenizer, question, generation_config, mode
         question: The text question to ask
         generation_config: Generation configuration
         model_path: Path to the model (for loading processor if needed)
-
+        trust_remote_code: Whether to trust remote code for Huggingface models and tokenizers
     Returns:
         Generated response text or None if failed
     """
@@ -188,7 +215,9 @@ def run_text_only_generation(model, tokenizer, question, generation_config, mode
             response = model.chat(tokenizer, None, question, generation_config, history=None)
             return response
         else:
-            processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
+            processor = AutoProcessor.from_pretrained(
+                model_path, trust_remote_code=trust_remote_code
+            )
 
             # Create text-only messages
             messages = [

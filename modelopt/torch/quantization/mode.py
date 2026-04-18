@@ -37,7 +37,8 @@ from .config import (
     AWQFullCalibConfig,
     AWQLiteCalibConfig,
     CompressConfig,
-    GPTQLiteConfig,
+    GPTQCalibConfig,
+    LocalHessianCalibConfig,
     MaxCalibConfig,
     MseCalibConfig,
     QuantizeAlgoCfgType,
@@ -56,7 +57,16 @@ from .conversion import (
     restore_svdquant_model,
     update_quantize_metadata,
 )
-from .model_calib import awq, gptq_lite, max_calibrate, mse_calibrate, smoothquant, svdquant
+from .model_calib import (
+    awq,
+    gptq,
+    layerwise_calibrate,
+    local_hessian_calibrate,
+    max_calibrate,
+    mse_calibrate,
+    smoothquant,
+    svdquant,
+)
 
 __all__ = ["BaseCalibrateModeDescriptor"]
 
@@ -203,6 +213,7 @@ def wrapped_calib_func(
     config: QuantizeAlgorithmConfig,
     forward_loop: ForwardLoop | None = None,
     func: Callable | None = None,
+    supports_layerwise: bool = True,
 ) -> ConvertReturnType:
     """Wrap the calibration function to be compatible with the ModelOpt convert entrypoint.
 
@@ -212,13 +223,45 @@ def wrapped_calib_func(
     """
     kwargs = config.model_dump()
     method = kwargs.pop("method")
+    layerwise = kwargs.pop("layerwise", False)
+    checkpoint_dir = kwargs.pop("layerwise_checkpoint_dir", None)
     if method is not None and "awq" in method:
         # For backward compatibility
         kwargs["algorithm"] = method
 
+    moe_calib_experts_ratio = kwargs.pop("moe_calib_experts_ratio", None)
+    if moe_calib_experts_ratio is not None:
+        assert (
+            isinstance(moe_calib_experts_ratio, (int, float)) and 0 < moe_calib_experts_ratio <= 1
+        ), f"Invalid moe_calib_experts_ratio {moe_calib_experts_ratio!r}"
+        for module in model.modules():
+            if hasattr(module, "_moe_calib_experts_ratio"):
+                module._moe_calib_experts_ratio = moe_calib_experts_ratio
+
     if func is not None:
-        # Call the function with forward_loop as a separate argument
-        func(model, forward_loop=forward_loop, **kwargs)
+        if layerwise:
+            # All currently implemented PTQ algorithms support layerwise calibration;
+            # future algorithms that need full-model context must add a guard here.
+            if not supports_layerwise:
+                raise ValueError(
+                    f"Calibration algorithm '{method}' does not support layerwise=True. "
+                    "Set layerwise=False, or override `_supports_layerwise = True` on the "
+                    "corresponding CalibrateModeDescriptor once the algorithm is made "
+                    "compatible with per-layer calibration."
+                )
+            if forward_loop is None:
+                raise ValueError("forward_loop is required for calibration but got None.")
+            # Wrap with layerwise processing
+            layerwise_calibrate(
+                model,
+                forward_loop=forward_loop,
+                calib_func=func,
+                checkpoint_dir=checkpoint_dir,
+                **kwargs,
+            )
+        else:
+            # Direct calibration (existing behavior)
+            func(model, forward_loop=forward_loop, **kwargs)
 
     # Lets get the latest metadata for the quantizer states
     metadata = {}
@@ -246,6 +289,10 @@ class BaseCalibrateModeDescriptor(ModeDescriptor):
     """
 
     _calib_func: Callable | None
+
+    # Override to False when the algorithm requires full-model context and
+    # cannot run per decoder layer (e.g. needs ModeloptStateManager on the root).
+    _supports_layerwise: bool = True
 
     def __init__(self, *args, **kwargs):
         """Initialize Base calibrate mode descriptor."""
@@ -292,7 +339,13 @@ class BaseCalibrateModeDescriptor(ModeDescriptor):
         def wrapped_func(model, config, forward_loop=None):
             # Access _calib_func as a class attribute to avoid binding
             # Check if _calib_func is defined as a class attribute
-            return wrapped_calib_func(model, config, forward_loop, func=self.__class__._calib_func)
+            return wrapped_calib_func(
+                model,
+                config,
+                forward_loop,
+                func=self.__class__._calib_func,
+                supports_layerwise=self.__class__._supports_layerwise,
+            )
 
         return wrapped_func
 
@@ -378,6 +431,22 @@ class MseCalibrateModeDescriptor(BaseCalibrateModeDescriptor):
 
 
 @CalibrateModeRegistry.register_mode
+class LocalHessianModeDescriptor(BaseCalibrateModeDescriptor):
+    """Mode for local Hessian-weighted MSE calibration algorithm.
+
+    This algorithm uses activation information to optimize per-block scales for weight
+    quantization by minimizing output reconstruction error instead of weight reconstruction error.
+    """
+
+    @property
+    def config_class(self) -> type[QuantizeAlgorithmConfig]:
+        """Specifies the config class for the mode."""
+        return LocalHessianCalibConfig
+
+    _calib_func = local_hessian_calibrate
+
+
+@CalibrateModeRegistry.register_mode
 class SmoothQuantModeDescriptor(BaseCalibrateModeDescriptor):
     """Mode for smoothquant calibration algorithm."""
 
@@ -435,6 +504,9 @@ class SVDQuantModeDescriptor(BaseCalibrateModeDescriptor):
         return SVDQuantConfig
 
     _calib_func = svdquant
+    # create_and_replace_svdquant_linear_on_the_fly reads ModeloptStateManager from the
+    # root model, which is not present when layerwise_calibrate dispatches per decoder layer.
+    _supports_layerwise = False
 
     @property
     def restore(self) -> RestoreEntrypoint:
@@ -443,12 +515,12 @@ class SVDQuantModeDescriptor(BaseCalibrateModeDescriptor):
 
 
 @CalibrateModeRegistry.register_mode
-class GPTQLiteModeDescriptor(BaseCalibrateModeDescriptor):
+class GPTQModeDescriptor(BaseCalibrateModeDescriptor):
     """Mode for GPTQ calibration algorithm."""
 
     @property
     def config_class(self) -> type[QuantizeAlgorithmConfig]:
         """Specifies the config class for the mode."""
-        return GPTQLiteConfig
+        return GPTQCalibConfig
 
-    _calib_func = gptq_lite
+    _calib_func = gptq

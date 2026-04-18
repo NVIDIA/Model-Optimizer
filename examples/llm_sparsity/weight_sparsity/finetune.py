@@ -1,5 +1,6 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
+# Adapted from https://github.com/tatsu-lab/stanford_alpaca/blob/3783d18/train.py
+
+# Copyright 2023 Rohan Taori, Ishaan Gulrajani, Tianyi Zhang, Yann Dubois, Xuechen Li
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,15 +14,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Adapted from https://github.com/tatsu-lab/stanford_alpaca/blob/3783d18/train.py
-
-# Copyright 2023 Rohan Taori, Ishaan Gulrajani, Tianyi Zhang, Yann Dubois, Xuechen Li
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -303,13 +297,12 @@ def train():
     )
 
     last_checkpoint = None
-    if os.path.isdir(args.output_dir) and args.do_train and not args.overwrite_output_dir:
+    if os.path.isdir(args.output_dir) and args.do_train and args.resume_from_checkpoint is None:
         last_checkpoint = get_last_checkpoint(args.output_dir)
-        if last_checkpoint is not None and args.resume_from_checkpoint is None:
+        if last_checkpoint is not None:
             print_rank_0(
                 f"Checkpoint detected, resuming training at {last_checkpoint}. To avoid this"
-                " behavior, change the `--output_dir` or add `--overwrite_output_dir` to train"
-                " from scratch."
+                " behavior, change the `--output_dir` or pass `--resume_from_checkpoint`."
             )
 
     model = transformers.AutoModelForCausalLM.from_pretrained(
@@ -341,18 +334,12 @@ def train():
 
     # Detecting last checkpoint.
     last_checkpoint = None
-    if os.path.isdir(args.output_dir) and args.do_train and not args.overwrite_output_dir:
+    if os.path.isdir(args.output_dir) and args.do_train and args.resume_from_checkpoint is None:
         last_checkpoint = get_last_checkpoint(args.output_dir)
-        if last_checkpoint is None and len(os.listdir(args.output_dir)) > 0:
-            raise ValueError(
-                f"Output directory ({args.output_dir}) already exists and is not empty. "
-                "Use --overwrite_output_dir to overcome."
-            )
-        elif last_checkpoint is not None and args.resume_from_checkpoint is None:
+        if last_checkpoint is not None:
             print_rank_0(
                 f"Checkpoint detected, resuming training at {last_checkpoint}. To avoid this"
-                " behavior, change the `--output_dir` or add `--overwrite_output_dir` to train"
-                " from scratch."
+                " behavior, change the `--output_dir` or pass `--resume_from_checkpoint`."
             )
 
     # Training

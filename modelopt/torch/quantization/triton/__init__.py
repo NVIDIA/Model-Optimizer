@@ -32,6 +32,7 @@ if torch.cuda.is_available():
     ):
         # fp4_kernel works on any CUDA GPU with triton
         from .fp4_kernel import *
+        from .fp8_kernel import *
 
         # fp4_kernel_hopper requires compute >= 8.9 (uses tl.float8e4nv)
         if torch.cuda.get_device_capability() >= (8, 9):

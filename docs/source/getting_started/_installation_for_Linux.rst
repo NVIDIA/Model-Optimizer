@@ -12,15 +12,15 @@ Latest Model Optimizer (``nvidia-modelopt``) currently has the following system 
 +-------------------------+-----------------------------+
 | Architecture            |  x86_64, aarch64 (SBSA)     |
 +-------------------------+-----------------------------+
-| Python                  |  >=3.10,<3.13               |
+| Python                  |  >=3.10,<3.14               |
 +-------------------------+-----------------------------+
-| CUDA                    |  >=12.0                     |
+| CUDA                    |  12.x, 13.x                 |
 +-------------------------+-----------------------------+
-| PyTorch                 |  >=2.6                      |
+| PyTorch                 |  >=2.8                      |
 +-------------------------+-----------------------------+
-| TensorRT-LLM (Optional) |  1.2.0rc4                   |
+| TensorRT-LLM (Optional) |  >=1.0                      |
 +-------------------------+-----------------------------+
-| ONNX Runtime (Optional) |  1.22                       |
+| ONNX Runtime (Optional) |  1.24                       |
 +-------------------------+-----------------------------+
 | TensorRT (Optional)     |  >=10.0                     |
 +-------------------------+-----------------------------+
@@ -48,7 +48,7 @@ Environment setup
     **Alternative NVIDIA docker images**
 
     For PyTorch, you can also use `NVIDIA NGC PyTorch container <https://catalog.ngc.nvidia.com/orgs/nvidia/containers/pytorch/tags>`_
-    and for NVIDIA NeMo framework, you can use the `NeMo container <https://catalog.ngc.nvidia.com/orgs/nvidia/containers/nemo/tags>`_.
+    and for NVIDIA Megatron-Bridge or Megatron-LM framework, you can use the `NeMo container <https://catalog.ngc.nvidia.com/orgs/nvidia/containers/nemo/tags>`_.
     Both of these containers come with Model Optimizer pre-installed. Make sure to update the Model Optimizer to the latest version if not already.
 
     For ONNX / TensorRT use cases, you can also use the `TensorRT container <https://catalog.ngc.nvidia.com/orgs/nvidia/containers/tensorrt/tags>`_
@@ -74,7 +74,7 @@ Environment setup
 
     (Optional) **Install other NVIDIA dependencies**
 
-    If you wish to use ModelOpt in conjunction with other NVIDIA libraries (e.g. TensorRT, TensorRT-LLM, NeMo, Triton, etc.),
+    If you wish to use ModelOpt in conjunction with other NVIDIA libraries (e.g. TensorRT, TensorRT-LLM, Megatron-Bridge, Megatron-LM, Triton, etc.),
     please make sure to check the ease of installation of these libraries in a local environment. If you face any
     issues, we recommend using a docker image for a seamless experience. You may still choose to use other ModelOpt's
     features locally for example, quantizing a HuggingFace model and then use a docker image for deployment.
@@ -125,6 +125,10 @@ Additionally, we support installing dependencies for following 3rd-party package
         - Optional dependencies
     *   - Huggingface (``transformers``, ``diffusers``, etc.)
         - ``[hf]``
+
+**CUDA specific dependencies**
+
+* By default, ``cupy-cuda12x`` is installed for INT4 ONNX quantization. If you have CUDA 13, you need to run ``pip uninstall -y cupy-cuda12x`` and ``pip install cupy-cuda13x`` after installing ``nvidia-modelopt[onnx]``.
 
 **Accelerated Quantization with Triton Kernels**
 

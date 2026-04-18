@@ -16,11 +16,11 @@
 """Dynamic sparse attention registration for HuggingFace models."""
 
 import torch.nn as nn
-import transformers
 
 from modelopt.torch.opt.dynamic import DynamicModule
 
 from ..sparse_attention import SparseAttentionModule, SparseAttentionRegistry
+from . import CUSTOM_MODEL_PLUGINS
 
 
 class _GenericSparseAttention(SparseAttentionModule):
@@ -111,10 +111,25 @@ def _is_supported_model(model: nn.Module) -> bool:
     """
     # Check for HuggingFace PreTrainedModel
     try:
+        import transformers
+
         if isinstance(model, transformers.PreTrainedModel):
+            return True
+    except ImportError:
+        pass
+
+    # Check for diffusers ModelMixin
+    try:
+        from diffusers.models.modeling_utils import ModelMixin
+
+        if isinstance(model, ModelMixin):
             return True
     except ImportError:
         pass
 
     # Support any PyTorch model with attention modules
     return isinstance(model, nn.Module)
+
+
+# Register plugins
+CUSTOM_MODEL_PLUGINS.append(register_sparse_attention_on_the_fly)

@@ -66,14 +66,14 @@ class MaxCalibrator(_Calibrator):
         if x.device.type == "meta":
             self._calib_amax = local_amax
             return
+        assert not torch.any(torch.isnan(local_amax)), (
+            f"detected nan values in amax. nan in original tensor: {torch.any(torch.isnan(x))}"
+        )
         assert torch.all(local_amax >= 0), (
             "detected negative values after abs, could be torch or cuda bug"
         )
         assert not torch.any(torch.isinf(local_amax)), (
             f"detected inf values in amax. inf in original tensor: {torch.any(torch.isinf(x))}"
-        )
-        assert not torch.any(torch.isnan(local_amax)), (
-            f"detected nan values in amax. nan in original tensor: {torch.any(torch.isnan(x))}"
         )
         if self._calib_amax is None:
             self._calib_amax = local_amax

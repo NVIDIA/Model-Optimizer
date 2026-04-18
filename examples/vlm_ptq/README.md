@@ -14,7 +14,7 @@ This section focuses on Post-training quantization for VLM (Vision Language Mode
 | Pre-Requisites | Required & optional packages to use this technique | \[[Link](#pre-requisites)\] | |
 | Getting Started | Learn how to optimize your models using PTQ to reduce precision and improve inference efficiency | \[[Link](#getting-started)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/1_quantization.html)\] |
 | Support Matrix | View the support matrix to see quantization compatibility and feature availability across different models | \[[Link](#support-matrix)\] | |
-| Framework Scripts | Example scripts demonstrating quantization techniques for optimizing Hugging Face / NeMo / Megatron-LM models | \[[Link](#framework-scripts)\] | |
+| Framework Scripts | Example scripts demonstrating quantization techniques for optimizing Hugging Face / Megatron-Bridge / Megatron-LM models | \[[Link](#framework-scripts)\] | |
 | Pre-Quantized Checkpoints | Ready to deploy Hugging Face pre-quantized checkpoints | \[[Link](#pre-quantized-checkpoints)\] | |
 | Resources | Extra links to relevant resources | \[[Link](#resources)\] | |
 
@@ -59,6 +59,10 @@ The following scripts provide an all-in-one and step-by-step model quantization 
 ```bash
 scripts/huggingface_example.sh --model <Hugging Face model card or checkpoint> --quant [fp8|nvfp4|int8_sq|int4_awq|w4a8_awq]
 ```
+
+### Megatron-Bridge Example
+
+Please refer to the [examples/megatron_bridge/](../megatron_bridge/README.md) for example scripts for PTQ with Megatron-Bridge.
 
 ## Pre-Quantized Checkpoints
 

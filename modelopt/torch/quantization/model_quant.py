@@ -17,6 +17,7 @@
 
 import fnmatch
 import inspect
+import os
 import warnings
 from collections.abc import Callable, Iterable
 from typing import Any
@@ -29,21 +30,27 @@ from modelopt.torch.opt import apply_mode
 from modelopt.torch.opt.searcher import ForwardLoop
 from modelopt.torch.opt.utils import forward_with_reshard
 from modelopt.torch.quantization.config import QuantizeConfig
-from modelopt.torch.quantization.conversion import set_quantizer_by_cfg
+from modelopt.torch.quantization.conversion import (
+    set_quantizer_attributes_partial,
+    set_quantizer_by_cfg,
+)
 from modelopt.torch.utils import atomic_print
 
 from .algorithms import AutoQuantizeGradientSearcher, AutoQuantizeKLDivSearcher, QuantRecipe
+from .algorithms import get_auto_quantize_config as _get_auto_quantize_config
 from .config import QuantizeAlgoCfgType
-from .conversion import set_quantizer_attribute
 from .mode import QuantizeModeRegistry, get_modelike_from_algo_cfg
 from .nn import QuantModule, TensorQuantizer
+from .utils import is_quantized
 
 __all__ = [
     "auto_quantize",
     "calibrate",
+    "compute_quantization_mse",
     "disable_quantizer",
     "enable_quantizer",
     "fold_weight",
+    "get_auto_quantize_config",
     "postprocess_amax",
     "print_quant_summary",
     "quantize",
@@ -145,19 +152,24 @@ def quantize(
     performs calibration as specified by ``quant_cfg``.
     ``forward_loop`` is used to forward data through the model and gather statistics for calibration.
 
+    If the model is already quantized, the provided ``config`` is applied to the existing
+    quantizers and calibration is run.
+
     Args:
         model: A pytorch model
         config: A dictionary or an instance of
             :class:`QuantizeConfig <modelopt.torch.quantization.config.QuantizeConfig>` specifying the
             values for keys ``"quant_cfg"`` and ``"algorithm"``.
             It is basically a dictionary specifying the values for keys ``"quant_cfg"`` and ``"algorithm"``.
-            The ``"quant_cfg"`` key specifies the quantization configurations.
+            The ``"quant_cfg"`` key specifies the quantization configurations as an ordered list of
+            :class:`QuantizerCfgEntry <modelopt.torch.quantization.config.QuantizerCfgEntry>` dicts.
             The ``"algorithm"`` key specifies the ``algorithm`` argument to
             :meth:`calibrate <modelopt.torch.quantization.model_quant.calibrate>`.
 
-            Quantization configurations is a dictionary mapping wildcards or filter functions
-            to its quantizer attributes. The wildcards or filter functions  are matched
-            against the quantizer module names. The quantizer modules have names ending with
+            Each entry in the ``"quant_cfg"`` list has a ``"quantizer_name"`` wildcard matched
+            against quantizer module names, an optional ``"cfg"`` dict of quantizer attributes,
+            and an optional ``"enable"`` toggle. Entries are applied in list order; later entries
+            override earlier ones. The quantizer modules have names ending with
             ``weight_quantizer`` and ``input_quantizer`` and they perform weight quantization and
             input quantization (or activation quantization) respectively. The quantizer modules
             are instances of
@@ -170,17 +182,15 @@ def quantize(
             .. code-block::python
 
                 config = {
-
-                    "quant_cfg": {
+                    "quant_cfg": [
+                        # Disable all quantizers by default
+                        {"quantizer_name": "*", "enable": False},
                         # "num_bits" specifies the number of bits for quantization
                         # "axis" specifies the axis for quantization
-                        "*weight_quantizer": {"num_bits": 8, "axis": 0},
-                        "*input_quantizer": {"num_bits": 8, "axis": -1},
-
-                        # Default quantization settings
-                        "default": {"num_bits": 8, "axis": None},
-                    }
-                    "algorithm": "max"
+                        {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+                        {"quantizer_name": "*input_quantizer", "cfg": {"num_bits": 8, "axis": -1}},
+                    ],
+                    "algorithm": "max",
                 }
 
             See :ref:`Quantization Formats <quantization-formats>` to learn more about the supported
@@ -228,7 +238,12 @@ def quantize(
 
     Returns: A pytorch model which has been quantized and calibrated.
     """
-    model = apply_mode(model, mode=[("quantize", config)], registry=QuantizeModeRegistry)
+    if not is_quantized(model):
+        model = apply_mode(model, mode=[("quantize", dict(config))], registry=QuantizeModeRegistry)
+    else:
+        # Already quantized, so lets apply the quant_cfg from the config
+        quant_cfg = QuantizeConfig(**dict(config)).quant_cfg
+        set_quantizer_by_cfg(model, quant_cfg)
     return calibrate(model, config.get("algorithm"), forward_loop=forward_loop)
 
 
@@ -238,6 +253,19 @@ def quantize(
 # This way wecan limit the granularity of quantization search. For example,
 #  - limit the quantization format search to decoder block level (instead of each linear layer level)
 #  - Same format for all self attention layers of a model etc.
+
+_AUTO_QUANTIZE_SUPPORTED_ALGORITHMS = {
+    None,
+    "max",
+    "mse",
+    "local_hessian",
+    "smoothquant",
+    "awq_lite",
+    "awq_full",
+    "awq_clip",
+}
+
+
 def auto_quantize(
     model: nn.Module,
     constraints: dict[str, float | str] = {"effective_bits": 4.8},
@@ -297,10 +325,13 @@ def auto_quantize(
             .. code-block:: python
 
                 INT8_CUSTOM_QUANT_CFG = {
-                    "quant_cfg": {
-                        "*weight_quantizer": {"num_bits": 8, "axis": 0},
-                        "*input_quantizer": {"num_bits": 8, "axis": None},
-                    },
+                    "quant_cfg": [
+                        {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+                        {
+                            "quantizer_name": "*input_quantizer",
+                            "cfg": {"num_bits": 8, "axis": None},
+                        },
+                    ],
                     "algorithm": "smoothquant",
                 }
 
@@ -465,6 +496,16 @@ def auto_quantize(
 
     assert len(processed_quantization_formats) > 0, "`quantization_formats` should not be empty"
 
+    for quant_cfg, name in processed_quantization_formats:
+        algo = QuantRecipe(quant_cfg, name=name).config.algorithm
+        algo_method = algo["method"] if isinstance(algo, dict) else algo
+        if algo_method not in _AUTO_QUANTIZE_SUPPORTED_ALGORITHMS:
+            raise ValueError(
+                f"Algorithm '{algo_method}' in '{name}' is not supported by auto_quantize yet. "
+                "Please run auto_quantize with 'max' or 'mse' calibration and use "
+                "get_auto_quantize_config() to obtain a config for mtq.quantize()."
+            )
+
     # Select the appropriate searcher based on method
     if method == "gradient":
         searcher = AutoQuantizeGradientSearcher()
@@ -491,35 +532,155 @@ def auto_quantize(
         "checkpoint": checkpoint,
     }
     # Disable all quantizers; AutoQuantize will enable the needed ones
-    set_quantizer_by_cfg(model, {"*": {"enable": False}})
+    set_quantizer_by_cfg(model, [{"quantizer_name": "*", "enable": False}])
     searcher.search(model, constraints, config=search_config)  # type: ignore[arg-type]
 
     return model, searcher.state_dict()
 
 
+def get_auto_quantize_config(search_state, constraints=None, verbose=False):
+    """Build a flat quant config from auto_quantize search_state.
+
+    Re-solves for ``constraints`` if provided, otherwise uses the stored best recipe.
+
+    Args:
+        search_state: The state dict returned by :func:`auto_quantize`.
+        constraints: Optional dict, e.g. ``{"effective_bits": 5.5}``, to re-solve for a
+            different target without re-running calibration or scoring.
+        verbose: If True, prints the per-layer recipe assignments.
+
+    Returns:
+        A config dict suitable for :func:`quantize`.
+
+    Example:
+
+        .. code-block:: python
+
+            model, search_state = mtq.auto_quantize(model, ...)
+
+            # Re-solve for a different effective_bits target (cheap, no GPU needed)
+            config = mtq.get_auto_quantize_config(search_state, {"effective_bits": 5.5})
+
+            # Or use the original result
+            config = mtq.get_auto_quantize_config(search_state)
+
+            # Reuse on the same model (e.g. run a longer calibration pass)
+            model = mtq.quantize(model, config, forward_loop=calibrate_loop)
+
+            # Or apply the same/customized config on a fresh model instance
+            # fresh_model = load_model(...)
+            # fresh_model = mtq.quantize(fresh_model, config, forward_loop=calibrate_loop)
+    """
+    return _get_auto_quantize_config(search_state, constraints, verbose=verbose)
+
+
 def disable_quantizer(model: nn.Module, wildcard_or_filter_func: str | Callable):
     """Disable quantizer by wildcard or filter function."""
-    set_quantizer_attribute(model, wildcard_or_filter_func, {"enable": False})
+    set_quantizer_attributes_partial(model, wildcard_or_filter_func, {"enable": False})
 
 
 def enable_quantizer(model: nn.Module, wildcard_or_filter_func: str | Callable):
     """Enable quantizer by wildcard or filter function."""
-    set_quantizer_attribute(model, wildcard_or_filter_func, {"enable": True})
+    set_quantizer_attributes_partial(model, wildcard_or_filter_func, {"enable": True})
 
 
 @atomic_print
-def print_quant_summary(model: nn.Module):
+def print_quant_summary(model: nn.Module, output_dir: str | None = None):
     """Print summary of all quantizer modules in the model."""
-    count = 0
-    for name, mod in model.named_modules():
-        if isinstance(mod, TensorQuantizer):
-            print(f"{name:80} {mod}")
-            count += 1
-    print(f"{count} TensorQuantizers found in model")
+    lines = [
+        f"{name:80} {mod}"
+        for name, mod in model.named_modules()
+        if isinstance(mod, TensorQuantizer)
+    ]
+    lines.append(f"{len(lines)} TensorQuantizers found in model")
+
+    if output_dir:
+        path = os.path.join(output_dir, ".quant_summary.txt")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+        print(f"\033[1mQuant summary saved to {path}\033[0m")
+    else:
+        print("\n".join(lines))
 
 
-def fold_weight(model: nn.Module):
+def fold_weight(model: nn.Module, keep_attrs: bool = False):
     """Fold weight quantizer for fast evaluation."""
     for name, module in model.named_modules():
         if isinstance(module, QuantModule):
-            module.fold_weight()
+            module.fold_weight(keep_attrs)
+
+
+@torch.no_grad()
+def compute_quantization_mse(
+    model: nn.Module,
+    forward_loop: ForwardLoop,
+    wildcards: str | Callable | list[str | Callable] = "*",
+) -> dict[str, float]:
+    """Compute the mean-squared quantization error for selected quantizers.
+
+    Runs ``forward_loop`` through the model while recording, for every matching
+    :class:`TensorQuantizer`, the MSE between the original float tensor and
+    its fake-quantized (Q→DQ) counterpart. Values are averaged over all
+    calibration batches.
+
+    Args:
+        model: A quantized model (output of :func:`quantize`).
+        forward_loop: Callable that takes ``model`` and runs data through it.
+        wildcards: One or more fnmatch glob patterns (or callable filters)
+            matched against :class:`TensorQuantizer` module names in
+            ``model.named_modules()``.  Follows the same convention as
+            ``quant_cfg`` wildcard keys.  Defaults to ``"*"`` (all quantizers).
+
+    Returns:
+        A dict mapping each matched quantizer's fully-qualified name to its
+        mean MSE (float).  Quantizers that are disabled or not in fake-quant
+        mode are skipped and absent from the output.
+
+    Example::
+
+        mse = mtq.compute_quantization_mse(
+            model,
+            forward_loop,
+            wildcards=["*k_bmm_quantizer", "*v_bmm_quantizer"],
+        )
+        for name, err in sorted(mse.items()):
+            print(f"{name}: {err:.4e}")
+    """
+    if not isinstance(wildcards, list):
+        wildcards = [wildcards]
+
+    def _matches(name: str) -> bool:
+        return any(fnmatch.fnmatch(name, w) if isinstance(w, str) else w(name) for w in wildcards)
+
+    accumulators: dict[str, dict] = {}  # name -> {"sum": float, "count": int}
+    hooks = []
+
+    for name, module in model.named_modules():
+        if not isinstance(module, TensorQuantizer):
+            continue
+        if not _matches(name):
+            continue
+        if not (module._if_quant and module._fake_quant) or module._disabled:
+            continue
+        accumulators[name] = {"sum": 0.0, "count": 0}
+
+        def _make_hook(acc):
+            def hook(mod, inp, out):
+                original = inp[0].detach().float()
+                quantized = out.detach().float()
+                acc["sum"] += torch.mean((original - quantized) ** 2).item()
+                acc["count"] += 1
+
+            return hook
+
+        hooks.append(module.register_forward_hook(_make_hook(accumulators[name])))
+
+    try:
+        forward_loop(model)
+    finally:
+        for h in hooks:
+            h.remove()
+
+    return {
+        name: acc["sum"] / acc["count"] for name, acc in accumulators.items() if acc["count"] > 0
+    }

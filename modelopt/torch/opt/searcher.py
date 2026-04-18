@@ -26,16 +26,24 @@ import os
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from contextlib import nullcontext
-from typing import Any, final
-from warnings import warn
+from typing import TYPE_CHECKING, Any, final
 
 import numpy as np
 import pulp
-import torch
 import torch.nn as nn
 
 from modelopt.torch.utils import distributed as dist
-from modelopt.torch.utils import no_stdout, print_rank_0, run_forward_loop
+from modelopt.torch.utils import (
+    no_stdout,
+    print_rank_0,
+    run_forward_loop,
+    safe_load,
+    safe_save,
+    warn_rank_0,
+)
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 LimitsTuple = tuple[float, float]
 ConstraintsDict = dict[str, str | float | dict | None]
@@ -237,40 +245,68 @@ class BaseSearcher(ABC):
         """The state dictionary that can be stored/loaded."""
         return {key: getattr(self, key) for key in self.default_state_dict}
 
-    def load_search_checkpoint(self) -> bool:
+    def _get_checkpoint_path(self) -> str | None:
+        """Get per-rank checkpoint path when distributed, otherwise the original path."""
+        checkpoint: str | Path | None = self.config["checkpoint"]
+        if checkpoint is None:
+            return None
+        checkpoint = str(checkpoint)
+        # Detect directory: exists as dir, ends with separator, or has no file extension
+        is_dir_path = (
+            os.path.isdir(checkpoint)
+            or checkpoint.endswith(os.sep)
+            or not os.path.splitext(checkpoint)[1]
+        )
+        if is_dir_path:
+            return os.path.join(checkpoint, f"rank{dist.rank()}.pth")
+        if dist.is_initialized():
+            dirname, basename = os.path.split(checkpoint)
+            name, ext = os.path.splitext(basename)
+            return os.path.join(dirname, f"{name}{dist.rank()}{ext}")
+        return checkpoint
+
+    def load_search_checkpoint(self, strict=True) -> bool:
         """Load function for search checkpoint returning indicator whether checkpoint was loaded."""
-        # check if checkpoint exists
-        checkpoint: str | None = self.config["checkpoint"]
+        checkpoint = self._get_checkpoint_path()
         if checkpoint is None:
             return False
+        # Backward compat: fall back to the original single-file path
         if not os.path.exists(checkpoint):
-            if dist.is_master():
-                warn(f"Checkpoint {checkpoint} does not exist! Initializing from scratch.")
+            warn_rank_0(
+                f"Per-rank checkpoint {checkpoint} not found, falling back to "
+                f"{self.config['checkpoint']}. Ensure world size matches the original run."
+            )
+            checkpoint = self.config["checkpoint"]
+        if not os.path.exists(checkpoint):
+            warn_rank_0(f"Checkpoint {checkpoint} does not exist! Initializing from scratch.")
             return False
 
-        # iterate through state dict and load keys
-        print(f"Loading searcher state from {checkpoint}...")
-        # Security NOTE: weights_only=False is used here on ModelOpt-generated ckpt, not on untrusted user input
-        state_dict = torch.load(checkpoint, weights_only=False)
-        assert state_dict.keys() == self.state_dict().keys(), "Keys in checkpoint don't match!"
-        for key, state in state_dict.items():
-            setattr(self, key, state)
+        print_rank_0(f"Loading searcher state from {checkpoint}...")
+        state_dict = safe_load(checkpoint)
+        if strict:
+            assert state_dict.keys() == self.state_dict().keys(), "Keys in checkpoint don't match!"
+        for key, default_val in self.default_state_dict.items():
+            setattr(self, key, state_dict.get(key, default_val))
         return True
 
     def save_search_checkpoint(self, verbose=False) -> None:
         """Save function for search checkpoint."""
-        # check if save requirements are satisfied
-        checkpoint: str | None = self.config["checkpoint"]
-        if checkpoint is None or not dist.is_master():
+        checkpoint = self._get_checkpoint_path()
+        if checkpoint is None:
             return
 
-        # save state dict
+        if dist.is_initialized():
+            warn_rank_0(
+                "torch.distributed is initialized. Please maintain the same parallelism "
+                "configuration (world size, TP, EP, etc.) across search save and restore sessions."
+            )
+
         if verbose:
             print(f"Saving searcher state to {checkpoint}...")
         save_dirname, _ = os.path.split(checkpoint)
         if save_dirname:
             os.makedirs(save_dirname, exist_ok=True)
-        torch.save(self.state_dict(), checkpoint)
+        safe_save(self.state_dict(), checkpoint)
 
 
 class LPS:

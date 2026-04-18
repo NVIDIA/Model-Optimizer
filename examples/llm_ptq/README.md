@@ -15,7 +15,7 @@ This section focuses on Post-training quantization, a technique that reduces mod
 | Support Matrix | View the support matrix to see quantization compatibility and feature availability across different models | \[[Link](#support-matrix)\] | |
 | AutoQuantize | Automatically chooses layers/precisions for mixed precision quantization to enhanced inference performance and accuracy tradeoffs | \[[Link](#autoquantize)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/_pytorch_quantization.html#optimal-partial-quantization-using-auto-quantize)\] |
 | Real Quant | Real Quant compresses model weights in a low-precision format to reduce memory requirements of quantization. | \[[Link](https://nvidia.github.io/Model-Optimizer/guides/_compress_quantized_models.html)\] | |
-| Framework Scripts | Example scripts demonstrating quantization techniques for optimizing Hugging Face / NeMo / Megatron-LM models | \[[Link](#framework-scripts)\] | |
+| Framework Scripts | Example scripts demonstrating quantization techniques for optimizing Hugging Face / Megatron-Bridge / Megatron-LM models | \[[Link](#framework-scripts)\] | |
 | Evaluate Accuracy | Evaluate your model's accuracy! | \[[Link](#evaluate-accuracy)\] | |
 | Exporting Checkpoints | Export to Hugging Face Unified Checkpoint and deploy on TRT-LLM/vLLM/SGLang | \[[Link](#exporting-checkpoints)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/deployment/3_unified_hf.html)\] |
 | Pre-Quantized Checkpoints | Ready to deploy Hugging Face pre-quantized checkpoints | \[[Link](#pre-quantized-checkpoints)\] | |
@@ -27,8 +27,8 @@ This section focuses on Post-training quantization, a technique that reduces mod
 
 ### Docker
 
-For Hugging Face models, please use the TensorRT-LLM docker image (e.g., `nvcr.io/nvidia/tensorrt-llm/release:1.2.0rc4`).
-For NeMo models, use the NeMo container (e.g., `nvcr.io/nvidia/nemo:25.09`).
+For Hugging Face models, please use the TensorRT-LLM docker image (e.g., `nvcr.io/nvidia/tensorrt-llm/release:1.2.0`).
+For Megatron-Bridge or Megatron-LM models, use the NeMo container (e.g., `nvcr.io/nvidia/nemo:26.02`).
 Visit our [installation docs](https://nvidia.github.io/Model-Optimizer/getting_started/2_installation.html) for more information.
 
 Also follow the installation steps below to upgrade to the latest version of Model Optimizer and install example-specific dependencies.
@@ -69,6 +69,8 @@ def forward_loop(model):
 model = mtq.quantize(model, mtq.NVFP4_DEFAULT_CFG, forward_loop)
 ```
 
+> *For higher NVFP4 PTQ accuracy, we recommend using `mtq.NVFP4_MLP_ONLY_CFG`, `mtq.NVFP4_EXPERTS_ONLY_CFG`, or `mtq.NVFP4_OMLP_ONLY_CFG` instead of `mtq.NVFP4_DEFAULT_CFG`. `NVFP4_MLP_ONLY_CFG` applies NVFP4 quantization to MLP (and MoE) layers, leaving attention layers unquantized. `NVFP4_EXPERTS_ONLY_CFG` quantizes only expert layers (`*mlp.experts*` and `*block_sparse_moe*`), useful for MoE models where dense MLP and attention stay in higher precision. `NVFP4_OMLP_ONLY_CFG` additionally quantizes the `o_proj` layer. All preserve accuracy in the sensitive attention QKV projections while still providing significant compression.*
+
 ### 2. Export Quantized Model
 
 Once your model is quantized, you can now export that model to a checkpoint for easy deployment. \
@@ -106,13 +108,15 @@ Please reference our [framework scripts](#framework-scripts) and our [docs](http
 | Llama-Nemotron Ultra | ✅ | ❌ | ❌ | ❌ | ❌ |
 | Gemma 3 | ✅<sup>2</sup> | - | ✅ | - | - |
 | QWen 2, 2.5 <sup>4</sup> | ✅ | ✅ | ✅ | ✅ | ✅ |
-| QWen3 MOE, Next <sup>6</sup> | ✅ | - | - | - | ✅ |
+| QWen3, 3.5 MOE, Next <sup>6</sup> | ✅ | - | - | - | ✅ |
 | QwQ | ✅ | - | - | - | ✅ |
 | DeepSeek V3, R1, V3.1, V3.2<sup>7</sup> | - | - | - | - | ✅ |
 | GLM-4.7<sup>8</sup> | ✅ | - | - | - | ✅ |
 | Kimi K2 | - | - | - | - | ✅ |
+| MiniMax M2.1 | - | - | - | - | ✅ |
 | T5 | ✅ | ✅ | ✅ | ✅ | - |
-| Whisper | ✅ | ❌ | ❌ | ❌ | - |
+| Whisper<sup>9</sup> | ✅ | ❌ | ❌ | ❌ | - |
+| Nemotron-3 | ✅ | ❌ | ❌ | ❌ | ✅ |
 
 > *This is a subset of the models supported. For the full list please check the [TensorRT-LLM support matrix](https://nvidia.github.io/TensorRT-LLM/reference/precision.html#support-matrix)*
 
@@ -123,15 +127,12 @@ Please reference our [framework scripts](#framework-scripts) and our [docs](http
 > *<sup>5.</sup>A selective set of the popular models are internally tested. The actual model support list may be longer. NVFP4 inference requires Blackwell GPUs and TensorRT-LLM v0.17 or later* \
 > *<sup>6.</sup>Some models currently support export to HF format only.* \
 > *<sup>7.</sup>[PTQ for DeepSeek](../deepseek/README.md)* \
-> *<sup>8.</sup>GLM-4.7 has MTP (Multi-Token Prediction) layers that are automatically loaded and excluded from quantization.*
+> *<sup>8.</sup>GLM-4.7 has MTP (Multi-Token Prediction) layers that are automatically loaded and excluded from quantization.* \
+> *<sup>9.</sup>Running Whisper model with transformers>=5.0 requires [torchcodec](https://github.com/meta-pytorch/torchcodec?tab=readme-ov-file#installing-cuda-enabled-torchcodec) and other system packages (e.g. ffmpeg).*
 
-> *The accuracy loss after PTQ may vary depending on the actual model and the quantization method. Different models may have different accuracy loss and usually the accuracy loss is more significant when the base model is small. If the accuracy after PTQ is not meeting the requirement, please try either modifying [hf_ptq.py](./hf_ptq.py) and disabling the KV cache quantization or using the [QAT](./../llm_qat/README.md) instead.*
+> *The accuracy loss after PTQ may vary depending on the actual model and the quantization method. Different models may have different accuracy loss and usually the accuracy loss is more significant when the base model is small. If the accuracy after PTQ is not meeting the requirement, please try either modifying [hf_ptq.py](./hf_ptq.py) and disabling the KV cache quantization or using the [QAT](./../llm_qat/README.md) instead. For NVFP4 quantization specifically, we recommend `nvfp4_mlp_only`, `nvfp4_experts_only`, or `nvfp4_omlp_only` to achieve higher accuracy by restricting quantization to the MLP/expert layers (and optionally the `o_proj` layer) while keeping the attention QKV projections unquantized.*
 
 > You can also create your own custom config using [this](https://nvidia.github.io/Model-Optimizer/guides/_pytorch_quantization.html#custom-calibration-algorithm) guide.
-
-### NeMo Supported Models
-
-Please refer to the [NeMo 2.0 PTQ documentation](https://docs.nvidia.com/nemo-framework/user-guide/latest/model-optimization/quantization/quantization.html#support-matrix) for supported models.
 
 ## Framework Scripts
 
@@ -143,8 +144,10 @@ For LLM models like [Llama-3](https://huggingface.co/meta-llama):
 # Install model specific pip dependencies if needed
 
 export HF_PATH=<the downloaded LLaMA checkpoint from the Hugging Face hub, or simply the model card>
-scripts/huggingface_example.sh --model $HF_PATH --quant [fp8|nvfp4|int8_sq|int4_awq|w4a8_awq] --tp [1|2|4|8]
+scripts/huggingface_example.sh --model $HF_PATH --quant <QFORMAT> --tp [1|2|4|8]
 ```
+
+Supported `QFORMAT` values: `fp8`, `fp8_pc_pt`, `fp8_pb_wo`, `int8`, `int8_sq`, `int8_wo`, `int4_awq`, `w4a8_awq`, `nvfp4`, `nvfp4_awq`, `nvfp4_mse`, `nvfp4_mlp_only`, `nvfp4_experts_only`, `nvfp4_omlp_only`, `nvfp4_svdquant`, `nvfp4_local_hessian`, `w4a8_nvfp4_fp8`, `w4a8_mxfp4_fp8`, `mxfp8`.
 
 > *By default `trust_remote_code` is set to false. Please turn it on if model calibration and eval requires it using `--trust_remote_code`.*
 
@@ -159,6 +162,64 @@ scripts/huggingface_example.sh --model $HF_PATH --quant [fp8|nvfp4|int8_sq|int4_
 > *If a GPU OOM error occurs during model quantization despite sufficient memory, setting the --use_seq_device_map flag can help. This enforces sequential device mapping, distributing the model across GPUs and utilizing up to 80% of each GPU's memory.*
 
 > *You can add `--low_memory_mode` to the command to lower the memory requirements of the PTQ process. With this mode, the script will compress model weights to low precision before calibration. This mode is only supported for FP8 and NVFP4 with max calibration.*
+
+#### Recipe-based Quantization
+
+Instead of specifying `--qformat` and `--kv_cache_qformat` separately, you can use a **recipe** — a declarative YAML file that bundles the full quantization configuration. Recipes are loaded via `--recipe` and take precedence over `--qformat`.
+
+```bash
+# Using a built-in recipe name (without .yaml suffix)
+python hf_ptq.py \
+  --pyt_ckpt_path <huggingface_model_card> \
+  --recipe general/ptq/nvfp4_default-fp8_kv \
+  --export_path <quantized_ckpt_path>
+
+# Using a custom recipe YAML file path
+python hf_ptq.py \
+  --pyt_ckpt_path <huggingface_model_card> \
+  --recipe /path/to/my_recipe.yaml \
+  --export_path <quantized_ckpt_path>
+```
+
+Built-in recipes are located in `modelopt_recipes/general/ptq/`. You can also provide a path to your own custom YAML recipe file or directory. See the [recipe documentation](https://nvidia.github.io/Model-Optimizer) for details on the YAML schema and available recipes.
+
+> *When `--recipe` is specified, `--qformat` and `--kv_cache_qformat` are ignored. The recipe fully defines the quantization configuration.*
+
+#### KV Cache Quantization
+
+KV cache quantization reduces memory usage during inference by quantizing the key-value cache. This is controlled via the `--kv_cache_qformat` flag (default: `fp8_cast`).
+
+```bash
+# FP8 KV cache with cast (no calibration needed, fast)
+python hf_ptq.py --pyt_ckpt_path <model> --qformat fp8 --kv_cache_qformat fp8_cast --export_path <path>
+
+# NVFP4 KV cache with data-driven calibration
+python hf_ptq.py --pyt_ckpt_path <model> --qformat nvfp4 --kv_cache_qformat nvfp4 --export_path <path>
+
+# Disable KV cache quantization
+python hf_ptq.py --pyt_ckpt_path <model> --qformat fp8 --kv_cache_qformat none --export_path <path>
+```
+
+Via the shell script:
+
+```bash
+scripts/huggingface_example.sh --model $HF_PATH --quant fp8 --kv_cache_quant nvfp4
+```
+
+Available KV cache formats:
+
+| Format | Description |
+| :---: | :--- |
+| `fp8_cast` (default) | FP8 KV cache without data-driven calibration (amax set to FP8 range) |
+| `fp8` | FP8 KV cache with data-driven calibration |
+| `fp8_affine` | FP8 KV cache with affine quantization |
+| `nvfp4_cast` | NVFP4 KV cache without data-driven calibration |
+| `nvfp4` | NVFP4 KV cache with data-driven calibration |
+| `nvfp4_affine` | NVFP4 KV cache with affine quantization |
+| `nvfp4_rotate` | NVFP4 KV cache with rotation |
+| `none` | Disable KV cache quantization |
+
+> *Formats ending in `_cast` (fp8_cast, nvfp4_cast) are fast — they set the amax to the format's full range without data-driven calibration. Other formats use data-driven calibration for potentially better accuracy.*
 
 #### Deepseek R1
 
@@ -181,9 +242,9 @@ python hf_ptq.py \
 > Note: when `--calib_with_images` is set, `--calib_size` must be a single value, and the calibration dataset is nvidia/nemotron_vlm_dataset_v2.
 This functionality is currently in beta and has been tested on `nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16`.
 
-### NeMo Example Script
+### Megatron-Bridge Example Script
 
-NeMo 2.0 framework PTQ and TensorRT-LLM deployment examples are maintained in the NeMo GitHub repo. Please refer to the [NeMo PTQ documentation](https://docs.nvidia.com/nemo-framework/user-guide/latest/model-optimization/quantization/quantization.html) for more details.
+Please refer to [examples/megatron_bridge/README.md](../megatron_bridge/README.md) for example scripts for PTQ with Megatron-Bridge.
 
 ### Megatron-LM Example Script
 
@@ -237,7 +298,7 @@ Here is an example usage for `AutoQuantize` algorithm (Please see [auto_quantize
 
 ### AutoQuantize for Hugging Face models
 
-`AutoQuantize` can be performed for Huggingface LLM models like [Llama-3](https://huggingface.co/meta-llama) as shown below:
+`AutoQuantize` can be performed for Huggingface LLM models like [Qwen](https://huggingface.co/Qwen/Qwen3-8B) / [Nemotron](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16) as shown below:
 
 [Script](./scripts/huggingface_example.sh)
 
@@ -246,17 +307,31 @@ export HF_PATH=<the downloaded LLaMA checkpoint from the Hugging Face hub, or si
 # --auto_quantize_bits specifies the constraint for `AutoQuantize`
 # --quant specifies the formats to be searched for `AutoQuantize`
 # NOTE: auto_quantize_bits cannot be lower than the number of bits for the smallest quantization format in --quant
-scripts/huggingface_example.sh --model $HF_PATH --quant w4a8_awq,fp8 --auto_quantize_bits 4.8 --calib_batch_size 4
+scripts/huggingface_example.sh --model $HF_PATH --quant nvfp4_mse,fp8 --auto_quantize_bits 4.75 --calib_batch_size 4
 ```
 
-The above example perform `AutoQuantize` where the less quantization accuracy sensitive layers are quantized with `w4a8_awq` (specified by `--quant w4a8_awq`) and the more sensitive layers
-are kept un-quantized such that the effective bits is 4.8 (specified by `--auto_quantize_bits 4.8`).
+The above example perform `AutoQuantize` where the less quantization accuracy sensitive layers are quantized with `nvfp4_mse` (specified by `--quant nvfp4_mse`) and the more sensitive layers
+are kept un-quantized such that the effective bits is 4.75 (specified by `--auto_quantize_bits 4.75`).
 
-The example scripts above also have an additional flag `--tasks`, where the actual tasks run in the script can be customized. The allowed tasks are `quant,mmlu,lm_eval,livecodebench` specified in the script [parser](./scripts/parser.sh). The tasks combo can be specified with a comma-separated task list. Some tasks like mmlu can take a long time to run. To run lm_eval tasks, please also specify the `--lm_eval_tasks` flag with comma separated lm_eval tasks [here](https://github.com/EleutherAI/lm-evaluation-harness/tree/main/lm_eval/tasks).
+#### AutoQuantize Advanced Options
+
+| Flag | Default | Description |
+| :--- | :---: | :--- |
+| `--auto_quantize_method` | `gradient` | Sensitivity analysis method. `gradient` uses gradient-based scoring (requires labels). `kl_div` uses KL divergence between original and quantized outputs (no labels required). |
+| `--auto_quantize_score_size` | `128` | Number of samples for sensitivity scoring. Reducing this speeds up the search while only minimally affecting accuracy (compared to reducing `--calib_size`). |
+| `--auto_quantize_checkpoint` | auto-generated | Path to save/restore search state (sensitivity scores, costs). Useful for resuming interrupted searches. |
+
+```bash
+# Use KL divergence method with smaller scoring set for faster search
+scripts/huggingface_example.sh --model $HF_PATH --quant nvfp4_mse,fp8 \
+  --auto_quantize_bits 4.75 --auto_quantize_method kl_div --auto_quantize_score_size 64
+```
+
+The example scripts above also have an additional flag `--tasks`, where the actual tasks run in the script can be customized. The allowed tasks are `quant,mmlu,lm_eval,livecodebench,simple_eval` specified in the script [parser](./scripts/parser.sh). The tasks combo can be specified with a comma-separated task list. Some tasks like mmlu can take a long time to run. To run lm_eval tasks, please also specify the `--lm_eval_tasks` flag with comma separated lm_eval tasks [here](https://github.com/EleutherAI/lm-evaluation-harness/tree/main/lm_eval/tasks).
 
 > *If GPU out-of-memory error is reported running the scripts, please try editing the scripts and reducing the max batch size to save GPU memory.*
 
-> *NOTE: AutoQuantize requires backpropagation of the model. Models without backpropagation support (e.g., Llama-4) will not work with AutoQuantize.*
+> *NOTE: AutoQuantize requires backpropagation of the model. Models without backpropagation support (e.g., Llama-4) will not work with AutoQuantize when using the `gradient` method. The `kl_div` method does not require backpropagation.*
 
 ## Real Quant
 
@@ -294,7 +369,7 @@ accelerate launch --config_file fsdp2.yaml \
     --fsdp_transformer_layer_cls_to_wrap=<decoder_layer_name>
      multinode_ptq.py \
     --pyt_ckpt_path <path_to_model> \
-    --qformat <fp8/nvfp4/nvfp4_awq/int8> \
+    --qformat <fp8/nvfp4/nvfp4_mlp_only/nvfp4_experts_only/nvfp4_omlp_only/nvfp4_awq/int8> \
     --kv_cache_qformat <fp8/nvfp4/nvfp4_affine/none> \
     --batch_size <calib_batch_size> \
     --calib_size <num_calib_samples> \
@@ -311,7 +386,7 @@ The exported checkpoint can be deployed using TensorRT-LLM/ vLLM/ SGLang. For mo
 
 ### TensorRT-LLM Validation
 
-A list of accuracy validation benchmarks are provided in the [llm_eval](../llm_eval/README.md) directory. Right now MMLU, and MTbench are supported in this example by specifying the `--tasks` flag running the scripts mentioned above. For MTBench, the task only runs the answer generation stage. Please follow [fastchat](https://github.com/lm-sys/FastChat/tree/main/fastchat/llm_judge) to get the evaluation judge score.
+A list of accuracy validation benchmarks are provided in the [llm_eval](../llm_eval/README.md) directory. Right now MMLU is supported in this example by specifying the `--tasks` flag running the scripts mentioned above.
 
 The `benchmark_suite.py` script is used as a fast performance benchmark. For details, please refer to the [TensorRT-LLM documentation](https://github.com/NVIDIA/TensorRT-LLM/blob/main/benchmarks/)
 
@@ -345,6 +420,8 @@ with torch.inference_mode():
 ```bash
 python hf_ptq.py --pyt_ckpt_path <huggingface_model_card> --qformat fp8 --export_path <quantized_ckpt_path> --trust_remote_code
 ```
+
+> *For exporting fake-quantized models for vLLM serving (e.g., for research or kernels not yet supported in real-quant), use the `--vllm_fakequant_export` flag. See [vllm_serve/README.md](../vllm_serve/README.md) for details.*
 
 ### Hugging Face framework [Script](./scripts/huggingface_example.sh)
 
@@ -401,6 +478,7 @@ print(llm_fp8.generate(["What's the age of the earth? "]))
 | QWen3 | FP4 | ✅ | ✅ | - |
 | QWen3 MoE | FP8 | ✅ | ✅ | ✅ |
 | QWen3 MoE | FP4 | ✅ | - | - |
+| QWen3.5 MoE | FP4 | - | - | ✅ |
 | QWen2.5 | FP8 | ✅ | ✅ | ✅ |
 | QWen2.5 | FP4 | ✅ | ✅ | - |
 | QwQ-32B | FP8 | ✅ | ✅ | ✅ |
@@ -458,4 +536,4 @@ There are many quantization schemes supported in the example scripts:
 
 1. The W4A8 AWQ is an extension of the INT4 AWQ quantization that it also uses FP8 for activation for more speed up and acceleration.
 
-1. The [NVFP4](https://blogs.nvidia.com/blog/generative-ai-studio-ces-geforce-rtx-50-series/) is one of the new FP4 formats supported by NVIDIA Blackwell GPU and demonstrates good accuracy compared with other 4-bit alternatives. NVFP4 can be applied to both model weights as well as activations, providing the potential for both a significant increase in math throughput and reductions in memory footprint and memory bandwidth usage compared to the FP8 data format on Blackwell.
+1. The [NVFP4](https://blogs.nvidia.com/blog/generative-ai-studio-ces-geforce-rtx-50-series/) is one of the new FP4 formats supported by NVIDIA Blackwell GPU and demonstrates good accuracy compared with other 4-bit alternatives. NVFP4 can be applied to both model weights as well as activations, providing the potential for both a significant increase in math throughput and reductions in memory footprint and memory bandwidth usage compared to the FP8 data format on Blackwell. For higher accuracy with NVFP4 PTQ, we recommend `nvfp4_mlp_only`, `nvfp4_experts_only`, or `nvfp4_omlp_only`. `nvfp4_mlp_only` restricts NVFP4 quantization to MLP (and MoE) layers only, leaving attention layers in higher precision. `nvfp4_experts_only` quantizes only expert layers (`*mlp.experts*` and `*block_sparse_moe*`), ideal for MoE models. `nvfp4_omlp_only` extends MLP-only by also quantizing the `o_proj` layer, providing a middle ground between full NVFP4 and MLP-only quantization.

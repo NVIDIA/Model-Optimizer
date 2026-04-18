@@ -200,6 +200,12 @@ class GPTModelImporter:
                 state_dict[key] = val
             else:
                 source_key = mapping.get(key, key)
+                # A mapping value of None means "skip this key" (keep existing value).
+                # This is used for fused TE modules where layer_norm_weight is loaded
+                # separately from a different HF path.
+                if source_key is None:
+                    state_dict[key] = val
+                    continue
                 # For bias tensors in ROW_TP layers, don't use parallel config to avoid sharding
                 # since bias should always be replicated, not sharded
                 if (
@@ -537,6 +543,15 @@ class GPTModelImporter:
         self.rules["in_proj"](layer.mixer.in_proj, layer_id)
         self.rules["out_proj"](layer.mixer.out_proj, layer_id)
 
+        # TE spec: layer norm is fused into in_proj (TELayerNormColumnParallelLinear).
+        # Load the fused layer_norm_weight from the HF norm path.
+        if (
+            isinstance(layer.norm, IdentityOp)
+            and hasattr(layer.mixer.in_proj, "layer_norm_weight")
+            and "fused_norm" in self.rules
+        ):
+            self.rules["fused_norm"](layer.mixer.in_proj.layer_norm_weight, layer_id)
+
     def _import_transformer_layer(self, layer, layer_id, layer_pbar, is_mtp: bool = False):
         if not isinstance(layer.input_layernorm, IdentityOp):
             self.rules["input_layernorm"](layer.input_layernorm, layer_id, is_mtp=is_mtp)
@@ -577,6 +592,18 @@ class GPTModelImporter:
                     self.rules["softmax_offset"](
                         attention.core_attention.softmax_offset, layer_id, is_mtp=is_mtp
                     )
+
+            # TE spec: input_layernorm is fused into linear_qkv (TELayerNormColumnParallelLinear).
+            # Load the fused layer_norm_weight from the HF norm path.
+            if (
+                isinstance(layer.input_layernorm, IdentityOp)
+                and hasattr(attention, "linear_qkv")
+                and hasattr(attention.linear_qkv, "layer_norm_weight")
+                and "fused_norm" in self.rules
+            ):
+                self.rules["fused_norm"](
+                    attention.linear_qkv.layer_norm_weight, layer_id, is_mtp=is_mtp
+                )
 
         if not isinstance(layer.pre_mlp_layernorm, IdentityOp):
             self.rules["pre_mlp_layernorm"](layer.pre_mlp_layernorm, layer_id, is_mtp=is_mtp)
@@ -671,6 +698,18 @@ class GPTModelImporter:
                 self.rules["linear_fc1"](layer.mlp.linear_fc1, layer_id, is_mtp=is_mtp)
                 self.rules["linear_fc2"](layer.mlp.linear_fc2, layer_id, is_mtp=is_mtp)
 
+                # TE spec: pre_mlp_layernorm is fused into linear_fc1
+                # (TELayerNormColumnParallelLinear).
+                # Load the fused layer_norm_weight from the HF norm path.
+                if (
+                    isinstance(layer.pre_mlp_layernorm, IdentityOp)
+                    and hasattr(layer.mlp.linear_fc1, "layer_norm_weight")
+                    and "fused_norm" in self.rules
+                ):
+                    self.rules["fused_norm"](
+                        layer.mlp.linear_fc1.layer_norm_weight, layer_id, is_mtp=is_mtp
+                    )
+
     def _import_state_dict(self):
         model = self.model
         layer_pbar = tqdm(model.decoder.layers, disable=self.disable_tqdm)
@@ -707,6 +746,17 @@ class GPTModelImporter:
         # Output layer
         if hasattr(model, "output_layer") and not model.share_embeddings_and_output_weights:
             self.rules["output_layer"](model.output_layer)
+
+        # For PP with shared embedding/output weights, re-sync the output layer on the last
+        # pipeline stage from stage 0's (now HF-loaded) embedding. At model init,
+        # setup_embeddings_and_output_layer() zeros out the last stage's weight and all-reduces
+        # from stage 0. After importing HF weights into stage 0's embedding, that sync is stale,
+        # so we re-run it here.
+        if (
+            model.share_embeddings_and_output_weights
+            and model.config.pipeline_model_parallel_size > 1
+        ):
+            model.setup_embeddings_and_output_layer()
 
         # MTP
         if hasattr(model, "mtp"):

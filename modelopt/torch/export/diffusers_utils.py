@@ -15,6 +15,7 @@
 
 """Code that export quantized Hugging Face models for deployment."""
 
+import json
 import warnings
 from collections.abc import Callable
 from contextlib import contextmanager
@@ -23,6 +24,7 @@ from typing import Any
 
 import torch
 import torch.nn as nn
+from safetensors.torch import load_file, safe_open
 
 from .layer_utils import is_quantlinear
 
@@ -44,6 +46,17 @@ TI2VidTwoStagesPipeline: type[Any] | None
 try:  # optional for LTX-2 export paths
     from ltx_pipelines.ti2vid_two_stages import TI2VidTwoStagesPipeline as _TI2VidTwoStagesPipeline
 
+    warnings.warn(
+        "LTX-2 packages (ltx-core, ltx-pipelines, ltx-trainer) are provided by Lightricks "
+        "and are NOT covered by the Apache 2.0 license governing NVIDIA Model Optimizer. "
+        "You MUST comply with the LTX Community License Agreement when installing and using "
+        "LTX-2 with NVIDIA Model Optimizer. Any derivative models or fine-tuned weights from "
+        "LTX-2 (including quantized or distilled checkpoints) remain subject to the LTX "
+        "Community License Agreement, not Apache 2.0. "
+        "See: https://github.com/Lightricks/LTX-2/blob/main/LICENSE",
+        UserWarning,
+        stacklevel=2,
+    )
     TI2VidTwoStagesPipeline = _TI2VidTwoStagesPipeline
 except Exception:  # pragma: no cover
     TI2VidTwoStagesPipeline = None
@@ -99,7 +112,12 @@ def generate_diffusion_dummy_inputs(
         except (ImportError, AttributeError):
             return fallback
 
-    is_flux = _is_model_type(
+    is_flux2 = _is_model_type(
+        "diffusers.models.transformers",
+        "Flux2Transformer2DModel",
+        model_class_name == "Flux2Transformer2DModel",
+    )
+    is_flux = not is_flux2 and _is_model_type(
         "diffusers.models.transformers",
         "FluxTransformer2DModel",
         "flux" in model_class_name.lower(),
@@ -156,6 +174,37 @@ def generate_diffusion_dummy_inputs(
         }
         if guidance_embeds:
             dummy_inputs["guidance"] = torch.tensor([3.5], device=device, dtype=torch.float32)
+        return dummy_inputs
+
+    def _flux2_inputs() -> dict[str, torch.Tensor]:
+        # Flux2Transformer2DModel: 3D hidden_states (batch, seq_len, in_channels)
+        # Requires: hidden_states, encoder_hidden_states, timestep, img_ids, txt_ids
+        # Unlike Flux1, Flux2 does NOT use pooled_projections.
+        # RoPE uses 4 axes (32,32,32,32) so img_ids/txt_ids have 4 columns.
+        in_channels = getattr(cfg, "in_channels", 128)
+        joint_attention_dim = getattr(cfg, "joint_attention_dim", 15360)
+        axes_dims_rope = getattr(cfg, "axes_dims_rope", (32, 32, 32, 32))
+        guidance_embeds = getattr(cfg, "guidance_embeds", True)
+
+        # Use small dimensions for dummy forward
+        img_seq_len = 16  # 4x4 latent grid
+        text_seq_len = 8
+        rope_ndim = len(axes_dims_rope)
+
+        dummy_inputs = {
+            "hidden_states": torch.randn(
+                batch_size, img_seq_len, in_channels, device=device, dtype=dtype
+            ),
+            "encoder_hidden_states": torch.randn(
+                batch_size, text_seq_len, joint_attention_dim, device=device, dtype=dtype
+            ),
+            "timestep": torch.tensor([0.5], device=device, dtype=dtype).expand(batch_size),
+            "img_ids": torch.zeros(img_seq_len, rope_ndim, device=device, dtype=torch.float32),
+            "txt_ids": torch.zeros(text_seq_len, rope_ndim, device=device, dtype=torch.float32),
+            "return_dict": False,
+        }
+        if guidance_embeds:
+            dummy_inputs["guidance"] = torch.tensor([4.0], device=device, dtype=torch.float32)
         return dummy_inputs
 
     def _sd3_inputs() -> dict[str, torch.Tensor]:
@@ -311,6 +360,7 @@ def generate_diffusion_dummy_inputs(
         return dummy_inputs
 
     model_input_builders = [
+        ("flux2", is_flux2, _flux2_inputs),
         ("flux", is_flux, _flux_inputs),
         ("sd3", is_sd3, _sd3_inputs),
         ("dit", is_dit, _dit_inputs),
@@ -342,6 +392,17 @@ def generate_diffusion_dummy_forward_fn(model: nn.Module) -> Callable[[], None]:
     if velocity_model is not None:
 
         def _ltx2_dummy_forward() -> None:
+            warnings.warn(
+                "LTX-2 packages (ltx-core, ltx-pipelines, ltx-trainer) are provided by Lightricks "
+                "and are NOT covered by the Apache 2.0 license governing NVIDIA Model Optimizer. "
+                "You MUST comply with the LTX Community License Agreement when installing and using "
+                "LTX-2 with NVIDIA Model Optimizer. Any derivative models or fine-tuned weights from "
+                "LTX-2 (including quantized or distilled checkpoints) remain subject to the LTX "
+                "Community License Agreement, not Apache 2.0. "
+                "See: https://github.com/Lightricks/LTX-2/blob/main/LICENSE",
+                UserWarning,
+                stacklevel=2,
+            )
             try:
                 from ltx_core.guidance.perturbations import BatchedPerturbationConfig
                 from ltx_core.model.transformer.modality import Modality
@@ -656,3 +717,146 @@ def infer_dtype_from_model(model: nn.Module) -> torch.dtype:
     for param in model.parameters():
         return param.dtype
     return torch.float16
+
+
+def _merge_ltx2(
+    diffusion_transformer_state_dict: dict[str, torch.Tensor],
+    merged_base_safetensor_path: str,
+) -> tuple[dict[str, torch.Tensor], dict[str, str]]:
+    """Merge LTX-2 transformer weights with non-transformer components.
+
+    Non-transformer components (VAE, vocoder, text encoders) and embeddings
+    connectors are taken from the base checkpoint.  Transformer keys are
+    re-prefixed with ``model.diffusion_model.`` for ComfyUI compatibility.
+
+    Args:
+        diffusion_transformer_state_dict: The diffusion transformer state dict (already on CPU).
+        merged_base_safetensor_path: Path to the full base model safetensors file containing
+            all components (transformer, VAE, vocoder, etc.).
+
+    Returns:
+        Tuple of (merged_state_dict, base_metadata) where base_metadata is the original
+        safetensors metadata from the base checkpoint.
+    """
+    base_state = load_file(merged_base_safetensor_path)
+
+    non_transformer_prefixes = [
+        "vae.",
+        "audio_vae.",
+        "vocoder.",
+        "text_embedding_projection.",
+        "text_encoders.",
+        "first_stage_model.",
+        "cond_stage_model.",
+        "conditioner.",
+    ]
+    correct_prefix = "model.diffusion_model."
+    strip_prefixes = ["diffusion_model.", "transformer.", "_orig_mod.", "model.", "velocity_model."]
+
+    base_non_transformer = {
+        k: v
+        for k, v in base_state.items()
+        if any(k.startswith(p) for p in non_transformer_prefixes)
+    }
+    base_connectors = {
+        k: v
+        for k, v in base_state.items()
+        if "embeddings_connector" in k and k.startswith(correct_prefix)
+    }
+
+    prefixed = {}
+    for k, v in diffusion_transformer_state_dict.items():
+        clean_k = k
+        for prefix in strip_prefixes:
+            if clean_k.startswith(prefix):
+                clean_k = clean_k[len(prefix) :]
+                break
+        prefixed[f"{correct_prefix}{clean_k}"] = v
+
+    merged = dict(base_non_transformer)
+    merged.update(base_connectors)
+    merged.update(prefixed)
+    with safe_open(merged_base_safetensor_path, framework="pt", device="cpu") as f:
+        base_metadata = f.metadata() or {}
+
+    del base_state
+    return merged, base_metadata
+
+
+DIFFUSION_MERGE_FUNCTIONS: dict[str, Callable] = {
+    "ltx2": _merge_ltx2,
+}
+
+
+def merge_diffusion_checkpoint(
+    state_dict: dict[str, torch.Tensor],
+    merged_base_safetensor_path: str,
+    model_type: str,
+    hf_quant_config: dict | None = None,
+) -> tuple[dict[str, torch.Tensor], dict[str, str]]:
+    """Merge transformer weights with a base checkpoint and build ComfyUI metadata.
+
+    Dispatches to the model-specific merge function in ``DIFFUSION_MERGE_FUNCTIONS``
+    and, when ``hf_quant_config`` is provided, embeds ``quantization_config`` and
+    per-layer ``_quantization_metadata`` in the safetensors metadata for ComfyUI.
+
+    Args:
+        state_dict: The transformer state dict (already on CPU).
+        merged_base_safetensor_path: Path to the full base model ``.safetensors`` file
+            containing all components (transformer, VAE, vocoder, etc.),
+            e.g. ``"path/to/ltx-2-19b-dev.safetensors"``.
+        model_type: Key into ``DIFFUSION_MERGE_FUNCTIONS`` for the model-specific merge.
+        hf_quant_config: If provided, embed quantization config and per-layer
+            ``_quantization_metadata`` in the returned metadata dict.
+
+    Returns:
+        Tuple of (merged_state_dict, metadata) where *metadata* is the base checkpoint's
+        original metadata augmented with any quantization entries.
+    """
+    merge_fn = DIFFUSION_MERGE_FUNCTIONS[model_type]
+    merged_state_dict, metadata = merge_fn(state_dict, merged_base_safetensor_path)
+
+    if hf_quant_config is not None:
+        metadata["quantization_config"] = json.dumps(hf_quant_config)
+
+        quant_algo = hf_quant_config.get("quant_algo", "unknown").lower()
+        layer_metadata = {}
+        for k in merged_state_dict:
+            if k.endswith((".weight_scale", ".weight_scale_2")):
+                layer_name = k.rsplit(".", 1)[0]
+                if layer_name.endswith(".weight"):
+                    layer_name = layer_name.rsplit(".", 1)[0]
+                if layer_name not in layer_metadata:
+                    layer_metadata[layer_name] = {"format": quant_algo}
+        metadata["_quantization_metadata"] = json.dumps(
+            {
+                "format_version": "1.0",
+                "layers": layer_metadata,
+            }
+        )
+
+    return merged_state_dict, metadata
+
+
+def get_diffusion_model_type(pipe: Any) -> str:
+    """Detect the diffusion model type for merge function dispatch.
+
+    To add a new model type, add a detection clause here and a corresponding
+    merge function in ``DIFFUSION_MERGE_FUNCTIONS``.
+
+    Args:
+        pipe: The pipeline or component being exported.
+
+    Returns:
+        A string key into ``DIFFUSION_MERGE_FUNCTIONS``.
+
+    Raises:
+        ValueError: If the model type is not supported.
+    """
+    if TI2VidTwoStagesPipeline is not None and isinstance(pipe, TI2VidTwoStagesPipeline):
+        return "ltx2"
+
+    raise ValueError(
+        f"No merge function for model type '{type(pipe).__name__}'. "
+        "Add an entry to DIFFUSION_MERGE_FUNCTIONS in diffusers_utils.py."
+    )

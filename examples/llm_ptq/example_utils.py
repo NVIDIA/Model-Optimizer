@@ -15,8 +15,10 @@
 
 import copy
 import glob
+import hashlib
 import inspect
 import json
+import logging
 import os
 import shutil
 import sys
@@ -31,6 +33,7 @@ from accelerate.utils import get_max_memory
 from safetensors.torch import load_file
 from transformers import (
     AutoConfig,
+    AutoModel,
     AutoModelForCausalLM,
     AutoProcessor,
     AutoTokenizer,
@@ -43,14 +46,21 @@ try:
 except ImportError:
     snapshot_download = None
 
-import modelopt.torch.quantization as mtq
 from modelopt.torch.utils.image_processor import BaseImageProcessor, MllamaImageProcessor
+
+logger = logging.getLogger(__name__)
 
 SPECULATIVE_MODEL_LIST = ["Eagle", "Medusa"]
 
 
 def run_nemotron_vl_preview(
-    full_model, tokenizer, input_ids, pyt_ckpt_path, stage_name, allow_fallback=False
+    full_model,
+    tokenizer,
+    input_ids,
+    pyt_ckpt_path,
+    stage_name,
+    allow_fallback=False,
+    trust_remote_code=False,
 ):
     """Run text-only and VL preview generation for Nemotron VL models.
 
@@ -61,7 +71,7 @@ def run_nemotron_vl_preview(
         pyt_ckpt_path: Path to the model checkpoint
         stage_name: Description of the stage (e.g., "before quantization", "after quantization")
         allow_fallback: Whether to allow fallback to standard generate on failure
-
+        trust_remote_code: Whether to trust remote code for Huggingface models and tokenizers
     Returns:
         Generated text response or None if generation failed
     """
@@ -75,23 +85,22 @@ def run_nemotron_vl_preview(
         "eos_token_id": tokenizer.eos_token_id,
     }
 
-    # Try text-only generation
+    # Try text-only generation (may fail for encoder-decoder models like Nemotron-Parse)
     text_response = run_text_only_generation(
-        full_model, tokenizer, question, generation_config, pyt_ckpt_path
+        full_model, tokenizer, question, generation_config, pyt_ckpt_path, trust_remote_code
     )
 
+    generated_ids = None
     if text_response is not None:
         print(f"✅ Text-only generation successful: {text_response[:100]}...")
         generated_ids = text_response
     elif allow_fallback:
         print("Text-only generation failed, falling back to standard generate...")
         generated_ids = full_model.generate(input_ids, max_new_tokens=100)
-    else:
-        generated_ids = None
 
     # Run additional VL test with images
     print(f"Running additional VL test with images ({stage_name})...")
-    run_vl_preview_generation(full_model, tokenizer, pyt_ckpt_path, stage_name)
+    run_vl_preview_generation(full_model, tokenizer, pyt_ckpt_path, stage_name, trust_remote_code)
 
     return generated_ids
 
@@ -106,6 +115,10 @@ def _is_multimodal_config(config):
         or (
             hasattr(config, "embd_layer") and hasattr(config.embd_layer, "image_embd_layer")
         )  # Image embedding layers
+        or getattr(config, "is_encoder_decoder", False)  # Encoder-decoder VL models
+        or any(  # Architecture-based detection for custom VL models (e.g., Nemotron-Parse)
+            "conditionalgeneration" in arch.lower() for arch in getattr(config, "architectures", [])
+        )
     )
 
 
@@ -158,9 +171,20 @@ def create_vlm_calibration_loop(full_model, calib_dataloader):
         )
         allowed_keys = set(forward_params.keys())
 
+        # Check if model is encoder-decoder (needs decoder_input_ids instead of input_ids)
+        is_enc_dec = getattr(full_model.config, "is_encoder_decoder", False)
+
         full_model.eval()
         with torch.no_grad():
             for batch in calib_dataloader:
+                # For encoder-decoder models, rename input_ids → decoder_input_ids
+                # and disable KV caching to avoid tuple index errors in decoder layers
+                if is_enc_dec and "input_ids" in batch and "pixel_values" in batch:
+                    batch["decoder_input_ids"] = batch.pop("input_ids")
+                    if "attention_mask" in batch:
+                        batch["decoder_attention_mask"] = batch.pop("attention_mask")
+                    batch["use_cache"] = False
+
                 # Filter batch to only include parameters the model accepts
                 if accepts_kwargs:
                     call_kwargs = batch
@@ -172,10 +196,8 @@ def create_vlm_calibration_loop(full_model, calib_dataloader):
                 # Use safe_nemotron_vl_forward for Nemotron Nano VL (embedding-injection style)
                 # For other VLMs (like Nemotron-Parse), use standard forward
                 if hasattr(full_model, "img_context_token_id"):
-                    # Nemotron Nano VL style
                     safe_nemotron_vl_forward(full_model, call_kwargs)
                 else:
-                    # Standard encoder-decoder or other VLM architectures
                     full_model(**call_kwargs)
 
     return calibrate_loop
@@ -183,22 +205,19 @@ def create_vlm_calibration_loop(full_model, calib_dataloader):
 
 def build_quant_cfg(
     qformat,
-    kv_cache_qformat,
+    quant_cfg,
     awq_block_size,
     model_type,
-    quant_cfg_choices,
-    kv_quant_cfg_choices,
+    moe_calib_experts_ratio: float | None = None,
 ) -> dict[str, Any]:
-    quant_cfg = {}
-    assert qformat in quant_cfg_choices, (
-        f"Unsupported quantization format: {qformat} with {kv_cache_qformat} KV cache"
-    )
+    quant_cfg = copy.deepcopy(quant_cfg)
+    if "awq" in str(quant_cfg.get("algorithm")):
+        from modelopt.torch.quantization.config import find_quant_cfg_entry_by_path
 
-    quant_cfg = quant_cfg_choices[qformat]
-
-    if "awq" in qformat:
-        quant_cfg = copy.deepcopy(quant_cfg_choices[qformat])
-        weight_quantizer = quant_cfg["quant_cfg"]["*weight_quantizer"]
+        weight_quantizer_entry = find_quant_cfg_entry_by_path(
+            quant_cfg["quant_cfg"], "*weight_quantizer"
+        )
+        weight_quantizer = weight_quantizer_entry.get("cfg") or {}
         if isinstance(weight_quantizer, list):
             weight_quantizer = weight_quantizer[0]
         # If awq_block_size argument is provided, update weight_quantizer
@@ -209,15 +228,19 @@ def build_quant_cfg(
         if qformat == "w4a8_awq" and model_type in ["gemma", "mpt"]:
             quant_cfg["algorithm"] = {"method": "awq_lite", "alpha_step": 1}
 
-    enable_quant_kv_cache = kv_cache_qformat != "none"
-    print(f"{'Enable' if enable_quant_kv_cache else 'Disable'} KV cache quantization")
-
-    # Check if any bmm_quantizer is in the quant_cfg. If so, we need to enable the bmm_quantizer.
-    if enable_quant_kv_cache:
-        quant_cfg = mtq.update_quant_cfg_with_kv_cache_quant(
-            quant_cfg,
-            getattr(mtq, kv_quant_cfg_choices[kv_cache_qformat])["quant_cfg"],
-        )
+    if moe_calib_experts_ratio:
+        assert 0 < moe_calib_experts_ratio <= 1, "moe_calib_experts_ratio must be between 0 and 1"
+        if isinstance(quant_cfg["algorithm"], str):
+            quant_cfg["algorithm"] = {
+                "method": quant_cfg["algorithm"],
+                "moe_calib_experts_ratio": moe_calib_experts_ratio,
+            }
+        elif isinstance(quant_cfg["algorithm"], dict):
+            quant_cfg["algorithm"]["moe_calib_experts_ratio"] = moe_calib_experts_ratio
+        else:
+            warnings.warn(
+                f"Quantization algorithm: {quant_cfg['algorithm']} does not support setting moe_calib_experts_ratio"
+            )
 
     # Gemma 7B has accuracy regression using alpha 1. We set 0.5 instead.
     if model_type == "gemma" and "int8_sq" in qformat:
@@ -225,22 +248,10 @@ def build_quant_cfg(
 
     if model_type == "phi4mm":
         # Only quantize the language model
-        quant_cfg["quant_cfg"]["*speech*"] = {"enable": False}
-        quant_cfg["quant_cfg"]["*audio*"] = {"enable": False}
-        quant_cfg["quant_cfg"]["*image*"] = {"enable": False}
-        quant_cfg["quant_cfg"]["*vision*"] = {"enable": False}
-
-    if model_type in ["qwen3moe", "qwen3next"] and qformat == "nvfp4":
-        # Disable the attention projection layers to retain accuracy
-        quant_cfg["quant_cfg"]["model*.*attn*in_proj*"] = {"enable": False}
-        quant_cfg["quant_cfg"]["model*.*attn*q_proj*"] = {"enable": False}
-        quant_cfg["quant_cfg"]["model*.*attn*k_proj*"] = {"enable": False}
-        quant_cfg["quant_cfg"]["model*.*attn*v_proj*"] = {"enable": False}
-
-    if model_type == "deepseek":
-        # Disable MLA quantization for accuracy.
-        quant_cfg["quant_cfg"]["*self_attn.q*"] = {"enable": False}
-        quant_cfg["quant_cfg"]["*self_attn.kv*"] = {"enable": False}
+        quant_cfg["quant_cfg"].append({"quantizer_name": "*speech*", "enable": False})
+        quant_cfg["quant_cfg"].append({"quantizer_name": "*audio*", "enable": False})
+        quant_cfg["quant_cfg"].append({"quantizer_name": "*image*", "enable": False})
+        quant_cfg["quant_cfg"].append({"quantizer_name": "*vision*", "enable": False})
 
     return quant_cfg
 
@@ -263,7 +274,6 @@ def get_tokenizer(ckpt_path, trust_remote_code=False, **kwargs) -> PreTrainedTok
     )
 
     # can't set attribute 'pad_token' for "<unk>"
-    # We skip this step for Nemo models
     if tokenizer.pad_token != "<unk>" or tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
@@ -312,8 +322,15 @@ def get_processor(
         )
 
         return MllamaImageProcessor(processor, device)
-
-    return None
+    else:
+        # Try to load AutoProcessor for other VL models (e.g., Nemotron-Parse)
+        try:
+            processor = AutoProcessor.from_pretrained(ckpt_path, **model_kwargs)
+            print(f"Loaded AutoProcessor for model type: {model_type}")
+            return processor
+        except Exception as e:
+            print(f"Could not load processor for {model_type}: {e}")
+            return None
 
 
 def load_mtp_weights(
@@ -359,6 +376,11 @@ def load_mtp_weights(
         mtp_layer_prefixes = set()
         for key in keys:
             parts = key.split(".")
+            # Capture the top-level MTP module prefix (e.g., "mtp" from "mtp.fc.weight")
+            # so that non-layer MTP weights like mtp.fc, mtp.norm are also excluded
+            if parts:
+                mtp_layer_prefixes.add(parts[0])
+            # Also capture specific layer prefixes (e.g., "mtp.layers.0")
             for i, part in enumerate(parts):
                 if part == "layers" and i + 1 < len(parts) and parts[i + 1].isdigit():
                     prefix = ".".join(parts[: i + 2])
@@ -420,6 +442,104 @@ def get_dtype(dtype):
     return dtype
 
 
+def _unpack_compressed_linear_weights(model, ckpt_path=None):
+    """Hybrid restoration: restores BF16 layers and fixes expert metadata.
+
+    1. BF16 layers (vision, lm_head) are restored from checkpoint and marked non-compressed.
+    2. INT4 experts stay compressed in HBM to save memory (decompressed on-the-fly).
+    3. Metadata (weight_shape) is fixed to avoid decompression errors.
+    """
+    try:
+        from compressed_tensors.linear.compressed_linear import CompressedLinear
+        from compressed_tensors.quantization import QuantizationStatus
+    except ImportError:
+        return
+
+    if ckpt_path is None:
+        ckpt_path = getattr(model.config, "_name_or_path", None)
+    if not ckpt_path:
+        return
+
+    from huggingface_hub import hf_hub_download
+    from safetensors import safe_open
+
+    is_local = os.path.isdir(ckpt_path)
+
+    def _resolve_file(filename):
+        if is_local:
+            local = os.path.join(ckpt_path, filename)
+            return local if os.path.exists(local) else None
+        try:
+            return hf_hub_download(repo_id=ckpt_path, filename=filename)
+        except Exception:
+            return None
+
+    # Load non-expert weights and metadata from safetensors
+    checkpoint_weights = {}
+    index_file = _resolve_file("model.safetensors.index.json")
+    if index_file:
+        with open(index_file) as f:
+            index = json.load(f)
+        st_filenames = list(set(index.get("weight_map", {}).values()))
+    else:
+        st_filenames = ["model.safetensors"]
+
+    for fname in st_filenames:
+        sf_path = _resolve_file(fname)
+        if sf_path is None:
+            continue
+        with safe_open(sf_path, framework="pt") as f:
+            for key in f.keys():  # noqa: SIM118 - safe_open is not iterable
+                if ".mlp.experts." not in key or "weight_shape" in key:
+                    checkpoint_weights[key] = f.get_tensor(key)
+
+    # Hybrid restoration
+    for name, module in model.named_modules():
+        if not isinstance(module, CompressedLinear):
+            continue
+
+        with torch.no_grad():
+            target_device = next(module.parameters()).device
+
+            # CASE A: Real BF16 weight exists (vision, lm_head)
+            if f"{name}.weight" in checkpoint_weights:
+                w = checkpoint_weights[f"{name}.weight"].to(target_device)
+                module._parameters.pop("weight", None)
+                module._buffers.pop("weight", None)
+                module.__dict__.pop("weight", None)
+                param = torch.nn.Parameter(w, requires_grad=False)
+                module._parameters["weight"] = param
+                module.__dict__["weight"] = param
+                module.quantization_status = QuantizationStatus.FROZEN
+                logger.debug("Restored BF16 layer: %s", name)
+
+            # CASE B: Expert (stay compressed, fix metadata)
+            elif f"{name}.weight_shape" in checkpoint_weights:
+                ws = checkpoint_weights[f"{name}.weight_shape"]
+                if f"{name}.weight_packed" in checkpoint_weights:
+                    module.weight_packed = checkpoint_weights[f"{name}.weight_packed"].to(
+                        torch.int32
+                    )
+                module._parameters.pop("weight", None)
+                module._buffers.pop("weight", None)
+                module.__dict__.pop("weight", None)
+                shape_param = torch.nn.Parameter(ws.to(torch.int32), requires_grad=False)
+                module._parameters.pop("weight_shape", None)
+                module.__dict__.pop("weight_shape", None)
+                module._parameters["weight_shape"] = shape_param
+                module.__dict__["weight_shape"] = shape_param
+
+    # Ensure compressed experts do not carry a stale weight attribute
+    for name, module in model.named_modules():
+        if not isinstance(module, CompressedLinear):
+            continue
+        if getattr(module, "quantization_status", None) != QuantizationStatus.COMPRESSED:
+            continue
+        module._parameters.pop("weight", None)
+        module._buffers.pop("weight", None)
+        module.__dict__.pop("weight", None)
+
+
 def get_model(
     ckpt_path,
     device="cuda",
@@ -447,6 +567,7 @@ def get_model(
     # Load config once and handle VL model detection
     try:
         hf_config = AutoConfig.from_pretrained(ckpt_path, **config_kwargs)
+
         if is_nemotron_vl(hf_config):
             print(
                 "Detected Nemotron VL model from config. "
@@ -463,11 +584,9 @@ def get_model(
     model_kwargs = config_kwargs.copy()
     # Don't set torch_dtype for VILA models as they handle it explicitly in their builder
     if "vila" not in ckpt_path.lower():
-        model_kwargs.setdefault("torch_dtype", "auto")
+        model_kwargs.setdefault("dtype", "auto")
 
     if "vila" in ckpt_path.lower():
-        from transformers import AutoModel
-
         hf_vila = AutoModel.from_pretrained(
             ckpt_path,
             device_map=device_map,
@@ -486,23 +605,38 @@ def get_model(
             # device_map "auto" and "cuda" triggers error regarding meta tensor from safetensors
             device_map = None
 
+        # Helper function to check if model has pack-quantized config
+        def has_pack_quantized_config(config):
+            # Check top-level quantization_config
+            if hasattr(config, "quantization_config"):
+                if config.quantization_config.get("format", None) == "pack-quantized":
+                    return True
+            # Check nested text_config.quantization_config (for multi-modal models like kimi k2.5)
+            if hasattr(config, "text_config") and hasattr(
+                config.text_config, "quantization_config"
+            ):
+                if config.text_config.quantization_config.get("format", None) == "pack-quantized":
+                    return True
+            return False
+
         if is_speculative(hf_config):
             model = AutoModelForCausalLM.from_pretrained(
                 ckpt_path,
                 device_map=device_map,
                 **model_kwargs,
             )
-        elif (
-            hasattr(hf_config, "quantization_config")
-            and hf_config.quantization_config.get("format", None) == "pack-quantized"
-        ):
-            torch_dtype = getattr(hf_config, "torch_dtype", torch.bfloat16)
-            model = AutoModelForCausalLM.from_pretrained(
-                ckpt_path,
-                device_map="auto",
-                trust_remote_code=trust_remote_code,
-                torch_dtype=torch_dtype,
+        elif has_pack_quantized_config(hf_config):
+            from modelopt.torch.quantization.plugins.huggingface import (
+                patch_compressed_linear_loading,
             )
+
+            with patch_compressed_linear_loading():
+                model = AutoModelForCausalLM.from_pretrained(
+                    ckpt_path,
+                    device_map="auto",
+                    trust_remote_code=trust_remote_code,
+                    dtype="auto",
+                )
         else:
             architecture = hf_config.architectures[0]
 
@@ -510,26 +644,30 @@ def get_model(
                 if not hasattr(transformers, architecture):
                     warnings.warn(
                         f"Architecture {architecture} not found in transformers: {transformers.__version__}. "
-                        "Falling back to AutoModelForCausalLM."
+                        "Falling back to AutoModelForCausalLM (or AutoModel for non-causal architectures)."
                     )
                 assert trust_remote_code, (
                     "Please set trust_remote_code to True if you want to use this architecture"
                 )
 
-                auto_model_module = AutoModelForCausalLM
+                # Use AutoModelForCausalLM for causal LMs, AutoModel for encoder-decoder models
+                if getattr(hf_config, "is_encoder_decoder", False):
+                    auto_model_module = AutoModel
+                else:
+                    auto_model_module = AutoModelForCausalLM
                 from_config = auto_model_module.from_config
             else:
                 auto_model_module = getattr(transformers, architecture)
                 from_config = auto_model_module._from_config
 
-            with init_empty_weights():
+            with init_empty_weights(include_buffers=True):
                 # When computing the device_map, assuming bfloat16 precision by default,
                 # unless specified by the hf_config.
                 torch_dtype = getattr(hf_config, "torch_dtype", torch.bfloat16)
                 model_kwargs2 = model_kwargs.copy()
-                if auto_model_module != AutoModelForCausalLM:
+                if auto_model_module not in [AutoModelForCausalLM, AutoModel]:
                     model_kwargs2.pop("trust_remote_code", None)
-                model_kwargs2["torch_dtype"] = torch_dtype
+                model_kwargs2["dtype"] = torch_dtype
                 model_kwargs2.pop("max_memory", None)
                 model = from_config(hf_config, **model_kwargs2)
 
@@ -557,6 +695,8 @@ def get_model(
                 **model_kwargs,
             )
     model.eval()
+    if has_pack_quantized_config(hf_config):
+        _unpack_compressed_linear_weights(model, ckpt_path)
 
     # If device_map was disabled (None), manually move model to target device
     if device_map is None and device != "cpu":
@@ -715,3 +855,35 @@ def copy_custom_model_files(source_path: str, export_path: str, trust_remote_cod
         print(f"Successfully copied {len(copied_files)} custom model files to {export_path}")
     else:
         print("No custom model files found to copy")
+
+
+def needs_checkpoint_path_update(quant_cfg: dict) -> bool:
+    """Check if quant_cfg has a layerwise_checkpoint_dir that should be auto-resolved to a unique subpath."""
+    algorithm = quant_cfg.get("algorithm")
+    if not isinstance(algorithm, dict):
+        return False
+    return algorithm.get("layerwise_checkpoint_dir") is not None
+
+
+def resolve_checkpoint_dir(quant_cfg: dict, model_path: str) -> dict:
+    """Append a unique ``<model_name>_<config_hash>`` subdirectory to layerwise_checkpoint_dir.
+
+    Allows a single recipe to be reused across models without checkpoint collisions.
+    Must only be called when :func:`needs_checkpoint_path_update` returns True.
+    """
+    algorithm = quant_cfg["algorithm"]
+    base_dir = algorithm["layerwise_checkpoint_dir"]
+
+    name = model_path.rstrip("/")
+    if "/" in name and not os.path.isabs(name):
+        name = name.replace("/", "--")
+    else:
+        name = Path(name).name
+
+    config_hash = hashlib.sha256(json.dumps(quant_cfg, default=str).encode()).hexdigest()[:8]
+
+    quant_cfg = copy.deepcopy(quant_cfg)
+    quant_cfg["algorithm"]["layerwise_checkpoint_dir"] = os.path.join(
+        base_dir, f"{name}_{config_hash}"
+    )
+    return quant_cfg

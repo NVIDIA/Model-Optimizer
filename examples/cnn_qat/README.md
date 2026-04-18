@@ -143,4 +143,4 @@ Your actual results will vary based on the dataset, specific hyperparameters, an
 
 ## Deployment with TensorRT
 
-The final model after QAT, saved using `mto.save()`, contains both the model weights and the quantization metadata. This model can be deployed to TensorRT for inference after ONNX export. The process is generally similar to [deploying a ONNX PTQ](../onnx_ptq/README.md#evaluate-the-quantized-onnx-model) model from ModelOpt.
+The final model after QAT, saved using `mto.save()`, contains both the model weights and the quantization metadata. This model can be deployed to TensorRT for inference after ONNX export. The process is generally similar to [deploying an ONNX PTQ](../onnx_ptq/README.md#evaluate-the-quantized-onnx-model) model from ModelOpt.

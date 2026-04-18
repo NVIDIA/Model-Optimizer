@@ -38,7 +38,7 @@ def configure_logging(level=logging.INFO, log_file=None):
     for handler in logger.handlers[:]:
         logger.removeHandler(handler)
 
-    formatter = logging.Formatter("[modelopt][onnx] - %(levelname)s - %(message)s")
+    formatter = logging.Formatter("%(asctime)s - [modelopt][onnx] - %(levelname)s - %(message)s")
 
     # Add file handler if log_file is specified
     if log_file:
@@ -64,8 +64,10 @@ def configure_logging(level=logging.INFO, log_file=None):
     console_handler.setFormatter(formatter)
     logger.addHandler(console_handler)
 
-    # Prevent log messages from propagating to the root logger
-    logger.propagate = False
+    # Allow log messages to propagate to the root logger for testing compatibility
+    # This enables pytest's caplog fixture to capture logs while still maintaining
+    # our custom formatting through the handlers above
+    logger.propagate = True
 
     # Ensure all child loggers inherit the level setting
     for name in logging.root.manager.loggerDict:

@@ -53,6 +53,7 @@ class Timing(Metric):
         if tpot_time:
             self.out["Request Generation Step Time"] = compute_statistics(tpot_time)
             self.out["Request Generation Tokens Per Second"] = compute_statistics(gen_tp_time)
+        self.out["Number of Output Tokens"] = compute_statistics(self.total_tokens)
         for k, v in self.out.items():
             print(k, v)
         self.write()

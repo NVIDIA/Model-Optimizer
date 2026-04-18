@@ -13,12 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Export package. So far it only supports selected nemo and huggingface LLMs."""
+"""Export package for Hugging Face and Megatron-based models."""
 
 from .convert_hf_config import *
 from .model_config import *
 from .model_config_export import *
 from .model_utils import *
+from .moe_utils import *
 from .plugins import *
 from .transformer_engine import *
 from .unified_export_hf import *

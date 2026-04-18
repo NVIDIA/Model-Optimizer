@@ -13,28 +13,43 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
+import json
+from pathlib import Path
 
 import pytest
-from _test_utils.examples.run_command import MODELOPT_ROOT, run_example_command
+
+
+@pytest.fixture(scope="session")
+def tiny_conversations_path(tmp_path_factory):
+    """Tiny JSONL with short synthetic conversations for compute_hidden_states_hf tests.
+
+    Uses minimal single-turn conversations so that tokenized lengths stay well
+    within the tiny test model's max_position_embeddings (32) even after chat
+    template formatting.
+    """
+    tmp_dir = tmp_path_factory.mktemp("tiny_convs")
+    output_file = tmp_dir / "train.jsonl"
+    conversations = [
+        {
+            "conversation_id": f"test-{i}",
+            "conversations": [
+                {"role": "user", "content": "What is 2 plus 2?"},
+                {"role": "assistant", "content": "4"},
+            ],
+        }
+        for i in range(5)
+    ]
+    with open(output_file, "w") as f:
+        f.writelines(json.dumps(conv) + "\n" for conv in conversations)
+    return output_file
 
 
 @pytest.fixture(scope="session", autouse=True)
-def tiny_daring_anteater_path(tmp_path_factory):
-    dataset_path = MODELOPT_ROOT / "examples/speculative_decoding/Daring-Anteater"
-    if not os.path.exists(dataset_path):
-        try:
-            run_example_command(
-                ["git", "clone", "https://huggingface.co/datasets/nvidia/Daring-Anteater"],
-                "speculative_decoding",
-            )
-        except Exception as e:
-            # Ignore rate-limiting errors
-            pytest.skip(f"Failed to clone Daring-Anteater dataset: {e}")
-    output_path = tmp_path_factory.mktemp("daring_anteater") / "train.jsonl"
-    with open(dataset_path / "train.jsonl") as src, open(output_path, "w") as dst:
-        for i, line in enumerate(src):
-            if i >= 128:
-                break
-            dst.write(line)
-    return output_path
+def tiny_daring_anteater_path():
+    """Return path to synthetic test data in OpenAI messages format.
+
+    Uses examples/dataset/synthetic_conversations_1k.jsonl (1000 samples,
+    900 single-turn + 100 two-turn). Synthesized by Claude (Anthropic),
+    Apache-2.0 licensed.
+    """
+    return Path(__file__).parents[3] / "examples" / "dataset" / "synthetic_conversations_1k.jsonl"

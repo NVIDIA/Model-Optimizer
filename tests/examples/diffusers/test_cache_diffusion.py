@@ -59,19 +59,3 @@ def test_pixart_cachify():
     # Clear cuda memory as pytest doesnt clear it between tests
     del pipe
     torch.cuda.empty_cache()
-
-
-def test_sdxl_benchmarks(tmp_path):
-    # fmt: off
-    subprocess.run(
-        [
-            "python", "benchmarks.py",
-            "--model-id", "sdxl",
-            "--batch-size", "1",
-            "--num-iter", "2",
-            "--output-dir", tmp_path,
-        ],
-        cwd=MODELOPT_ROOT / "examples/diffusers/cache_diffusion",
-        check=True,
-    )
-    # fmt: on

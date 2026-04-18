@@ -18,11 +18,7 @@ from functools import partial
 import pytest
 import torch
 import torch.nn as nn
-from _test_utils.torch.distributed.utils import (
-    get_device_counts,
-    spawn_multiprocess_job,
-    synchronize_state_dict,
-)
+from _test_utils.torch.distributed.utils import synchronize_state_dict
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP  # noqa: N817
 from torch.distributed.fsdp.wrap import ModuleWrapPolicy
 
@@ -79,14 +75,10 @@ def _test_nested_fsdp(use_orig_params, rank, size):
     assert torch.allclose(out_ref, out_test)
 
 
-@pytest.mark.parametrize("device_count", get_device_counts())
-def test_fsdp_simple_linear(device_count):
-    spawn_multiprocess_job(size=device_count, job=_test_fsdp_simple_linear, backend="nccl")
+def test_fsdp_simple_linear(dist_workers):
+    dist_workers.run(_test_fsdp_simple_linear)
 
 
 @pytest.mark.parametrize("use_orig_params", [True, False])
-@pytest.mark.parametrize("device_count", get_device_counts())
-def test_nested_fsdp(use_orig_params, device_count):
-    spawn_multiprocess_job(
-        size=device_count, job=partial(_test_nested_fsdp, use_orig_params), backend="nccl"
-    )
+def test_nested_fsdp(use_orig_params, dist_workers):
+    dist_workers.run(partial(_test_nested_fsdp, use_orig_params))

@@ -23,7 +23,7 @@ import pytest
 from onnx import TensorProto, helper
 
 import modelopt.onnx.utils as onnx_utils
-from modelopt.onnx.autocast.referencerunner import ReferenceRunner
+from modelopt.onnx.autocast.referencerunner import ReferenceRunner, TensorStats
 
 
 def create_multi_io_model():
@@ -141,7 +141,7 @@ def test_run_with_dict_inputs(reference_runner):
 
 def test_invalid_input_format(reference_runner):
     """Test error handling for invalid input format."""
-    with pytest.raises(ValueError, match="Supported input file types:.*"):
+    with pytest.raises(ValueError, match=r"Supported input types:.*"):
         reference_runner.run("invalid.txt")
 
 
@@ -175,7 +175,7 @@ def test_invalid_json(reference_runner):
         json.dump(inputs, f)
         input_path = f.name
     try:
-        with pytest.raises(ValueError, match="Invalid input file."):
+        with pytest.raises(ValueError, match=r"Invalid input file\."):
             reference_runner.run(input_path)
     finally:
         os.remove(input_path)
@@ -189,7 +189,7 @@ def test_invalid_npz_file(reference_runner):
         np.save(f, data)
         input_path = f.name
     try:
-        with pytest.raises(ValueError, match="Invalid input file."):
+        with pytest.raises(ValueError, match=r"Invalid input file\."):
             reference_runner.run(input_path)
     finally:
         os.remove(input_path)
@@ -240,3 +240,152 @@ def test_compare_outputs(reference_runner):
         np.testing.assert_allclose(outputs2["Y2"], expected_y2)
     finally:
         os.remove(input_path)
+
+
+def test_tensor_stats():
+    """Test TensorStats dataclass functionality."""
+    stats = TensorStats(absmax=10.5, min_val=-5.0, max_val=10.5, shape=(2, 3))
+
+    assert stats.absmax == 10.5
+    assert stats.min_val == -5.0
+    assert stats.max_val == 10.5
+    assert stats.shape == (2, 3)
+    assert stats.size == 6
+    assert abs(stats) == 10.5  # Test __abs__ method
+
+
+def test_run_with_multi_batch_npz_directory(reference_runner):
+    """Test running inference with directory containing multiple NPZ files."""
+    # Create temporary directory with multiple NPZ files
+    with tempfile.TemporaryDirectory() as temp_dir:
+        # Create batch 1
+        inputs1 = {
+            "X1": np.array([[1.0, 2.0, 3.0]], dtype=np.float32),
+            "X2": np.array([[4.0, 5.0, 6.0]], dtype=np.float32),
+        }
+        np.savez(os.path.join(temp_dir, "batch_001.npz"), **inputs1)
+
+        # Create batch 2
+        inputs2 = {
+            "X1": np.array([[2.0, 3.0, 4.0]], dtype=np.float32),
+            "X2": np.array([[1.0, 2.0, 3.0]], dtype=np.float32),
+        }
+        np.savez(os.path.join(temp_dir, "batch_002.npz"), **inputs2)
+
+        # Create batch 3
+        inputs3 = {
+            "X1": np.array([[5.0, 6.0, 7.0]], dtype=np.float32),
+            "X2": np.array([[8.0, 9.0, 10.0]], dtype=np.float32),
+        }
+        np.savez(os.path.join(temp_dir, "batch_003.npz"), **inputs3)
+
+        # Run with directory path
+        results = reference_runner.run(temp_dir)
+
+        # Should return TensorStats objects for multi-batch
+        assert isinstance(results, OrderedDict)
+        assert "Y1" in results
+        assert "Y2" in results
+
+        # Check that results are TensorStats objects
+        assert isinstance(results["Y1"], TensorStats)
+        assert isinstance(results["Y2"], TensorStats)
+
+        # Verify aggregated statistics
+        # Y1 = X1 + X2
+        # Batch 1: [5.0, 7.0, 9.0]
+        # Batch 2: [3.0, 5.0, 7.0]
+        # Batch 3: [13.0, 15.0, 17.0]
+        assert results["Y1"].absmax == 17.0
+        assert results["Y1"].min_val == 3.0
+        assert results["Y1"].max_val == 17.0
+        assert results["Y1"].shape == (1, 3)
+
+        # Y2 = X1 * X2
+        # Batch 1: [4.0, 10.0, 18.0]
+        # Batch 2: [2.0, 6.0, 12.0]
+        # Batch 3: [40.0, 54.0, 70.0]
+        assert results["Y2"].absmax == 70.0
+        assert results["Y2"].min_val == 2.0
+        assert results["Y2"].max_val == 70.0
+        assert results["Y2"].shape == (1, 3)
+
+
+def test_run_with_empty_npz_directory(reference_runner):
+    """Test error handling for empty NPZ directory."""
+    with (
+        tempfile.TemporaryDirectory() as temp_dir,
+        pytest.raises(ValueError, match="No NPZ files found in directory"),
+    ):
+        reference_runner.run(temp_dir)
+
+
+def test_single_batch_backward_compatibility(reference_runner):
+    """Test that single batch still returns raw numpy arrays (backward compatibility)."""
+    inputs = {
+        "X1": np.array([[1.0, 2.0, 3.0]], dtype=np.float32),
+        "X2": np.array([[4.0, 5.0, 6.0]], dtype=np.float32),
+    }
+
+    with tempfile.NamedTemporaryFile(suffix=".npz", delete=False) as f:
+        np.savez(f, **inputs)
+        input_path = f.name
+
+    try:
+        results = reference_runner.run(input_path)
+        # Single batch should return raw numpy arrays, not TensorStats
+        assert isinstance(results, OrderedDict)
+        assert "Y1" in results
+        assert "Y2" in results
+        assert isinstance(results["Y1"], np.ndarray)
+        assert isinstance(results["Y2"], np.ndarray)
+        assert not isinstance(results["Y1"], TensorStats)
+        assert not isinstance(results["Y2"], TensorStats)
+    finally:
+        os.remove(input_path)
+
+
+def test_multi_batch_aggregation_statistics(reference_runner):
+    """Test that multi-batch aggregation correctly computes statistics across batches."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        # Create batches with different value ranges
+        # Batch 1: small values
+        inputs1 = {
+            "X1": np.array([[-1.0, 0.0, 1.0]], dtype=np.float32),
+            "X2": np.array([[1.0, 2.0, 3.0]], dtype=np.float32),
+        }
+        np.savez(os.path.join(temp_dir, "batch_001.npz"), **inputs1)
+
+        # Batch 2: large values
+        inputs2 = {
+            "X1": np.array([[-10.0, 0.0, 10.0]], dtype=np.float32),
+            "X2": np.array([[5.0, 6.0, 7.0]], dtype=np.float32),
+        }
+        np.savez(os.path.join(temp_dir, "batch_002.npz"), **inputs2)
+
+        # Batch 3: mixed values
+        inputs3 = {
+            "X1": np.array([[5.0, -5.0, 0.0]], dtype=np.float32),
+            "X2": np.array([[2.0, 3.0, 4.0]], dtype=np.float32),
+        }
+        np.savez(os.path.join(temp_dir, "batch_003.npz"), **inputs3)
+
+        results = reference_runner.run(temp_dir)
+
+        # Y1 = X1 + X2
+        # Batch 1: [0.0, 2.0, 4.0] -> absmax=4.0, min=0.0, max=4.0
+        # Batch 2: [-5.0, 6.0, 17.0] -> absmax=17.0, min=-5.0, max=17.0
+        # Batch 3: [7.0, -2.0, 4.0] -> absmax=7.0, min=-2.0, max=7.0
+        # Aggregated: absmax=17.0, min=-5.0, max=17.0
+        assert results["Y1"].absmax == 17.0
+        assert results["Y1"].min_val == -5.0
+        assert results["Y1"].max_val == 17.0
+
+        # Y2 = X1 * X2
+        # Batch 1: [-1.0, 0.0, 3.0] -> absmax=3.0, min=-1.0, max=3.0
+        # Batch 2: [-50.0, 0.0, 70.0] -> absmax=70.0, min=-50.0, max=70.0
+        # Batch 3: [10.0, -15.0, 0.0] -> absmax=15.0, min=-15.0, max=10.0
+        # Aggregated: absmax=70.0, min=-50.0, max=70.0
+        assert results["Y2"].absmax == 70.0
+        assert results["Y2"].min_val == -50.0
+        assert results["Y2"].max_val == 70.0

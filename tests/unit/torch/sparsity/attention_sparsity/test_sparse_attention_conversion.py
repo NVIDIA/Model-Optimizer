@@ -19,6 +19,8 @@ import pytest
 
 pytest.importorskip("transformers")
 
+from unittest.mock import MagicMock, patch
+
 import torch.nn as nn
 from _test_utils.torch.sparsity.sparse_attention_common import (
     FLASH_SKIP_SOFTMAX_DEFAULT_CFG,
@@ -29,8 +31,11 @@ from _test_utils.torch.sparsity.sparse_attention_common import (
 import modelopt.torch.opt as mto
 import modelopt.torch.sparsity.attention_sparsity as sparse_attn
 from modelopt.torch.sparsity.attention_sparsity.conversion import (
+    _set_attn_implementation,
     disable_sparse_attention,
     enable_sparse_attention,
+    export_sparse_attention_config,
+    print_sparse_attention_summary,
 )
 from modelopt.torch.sparsity.attention_sparsity.sparse_attention import SparseAttentionModule
 
@@ -59,28 +64,6 @@ class TestSparseAttentionReplacement:
         # Verify replacement occurred
         assert sparse_attention_count > 0
 
-    def test_enable_disable_toggle(self):
-        """Test enabling and disabling sparse attention."""
-        model = SimpleAttentionModel()
-        model = sparse_attn.sparsify(model, FLASH_SKIP_SOFTMAX_DEFAULT_CFG)
-
-        # Check initially enabled
-        for module in model.modules():
-            if isinstance(module, SparseAttentionModule):
-                assert module.is_enabled
-
-        # Disable all sparse attention modules
-        disable_sparse_attention(model, "*")
-        for module in model.modules():
-            if isinstance(module, SparseAttentionModule):
-                assert not module.is_enabled
-
-        # Re-enable all sparse attention modules
-        enable_sparse_attention(model, "*")
-        for module in model.modules():
-            if isinstance(module, SparseAttentionModule):
-                assert module.is_enabled
-
     def test_pattern_based_replacement(self):
         """Test pattern-based selective replacement."""
         model = SimpleTransformerEncoderLayer()
@@ -90,7 +73,7 @@ class TestSparseAttentionReplacement:
             "sparse_cfg": {
                 "*self_attn*": {
                     "method": "flash_skip_softmax",
-                    "threshold": 1e-4,
+                    "thresholds": {"prefill": [1e-4], "decode": [1e-4]},
                     "br": 128,
                     "bc": 128,
                     "enable": True,
@@ -121,7 +104,7 @@ class TestConversionEdgeCases:
             "sparse_cfg": {
                 filter_func: {
                     "method": "flash_skip_softmax",
-                    "threshold": 1e-3,
+                    "thresholds": {"prefill": [1e-3], "decode": [1e-4]},
                     "enable": True,
                 },
             },
@@ -139,7 +122,7 @@ class TestConversionEdgeCases:
             "sparse_cfg": {
                 "*nonexistent*": {
                     "method": "flash_skip_softmax",
-                    "threshold": 1e-3,
+                    "thresholds": {"prefill": [1e-3], "decode": [1e-4]},
                     "enable": True,
                 },
             },
@@ -150,10 +133,6 @@ class TestConversionEdgeCases:
 
     def test_disable_enable_functions(self):
         """Test disable/enable utility functions."""
-        from modelopt.torch.sparsity.attention_sparsity.conversion import (
-            disable_sparse_attention,
-            enable_sparse_attention,
-        )
 
         model = SimpleAttentionModel()
         model = sparse_attn.sparsify(model, FLASH_SKIP_SOFTMAX_DEFAULT_CFG)
@@ -169,6 +148,19 @@ class TestConversionEdgeCases:
         for module in model.modules():
             if isinstance(module, SparseAttentionModule):
                 assert module.is_enabled
+
+    def test_print_sparse_attention_summary(self, capsys):
+        """Test print_sparse_attention_summary function."""
+        model = SimpleAttentionModel()
+        model = sparse_attn.sparsify(model, FLASH_SKIP_SOFTMAX_DEFAULT_CFG)
+
+        # Print summary
+        print_sparse_attention_summary(model)
+
+        # Capture output
+        captured = capsys.readouterr()
+        assert "Sparse attention:" in captured.out
+        assert "modules enabled" in captured.out
 
     def test_restore_sparse_attention_model(self):
         """Test save/restore via modelopt_state."""
@@ -192,3 +184,196 @@ class TestConversionEdgeCases:
             if isinstance(module, SparseAttentionModule):
                 assert hasattr(module, "_method")
                 assert module._method == "flash_skip_softmax"
+
+
+class TestSparseAttentionModuleMethods:
+    """Test SparseAttentionModule methods."""
+
+    def test_get_stats_with_stats_manager(self):
+        """Test get_stats() when stats manager exists and is enabled."""
+        model = SimpleAttentionModel()
+        config = {
+            "sparse_cfg": {
+                "*attention*": {
+                    "method": "flash_skip_softmax",
+                    "thresholds": {"prefill": [0.001], "decode": [0.0001]},
+                    "br": 64,
+                    "bc": 64,
+                    "collect_stats": True,  # Enable stats collection
+                    "enable": True,
+                }
+            },
+        }
+
+        sparse_model = sparse_attn.sparsify(model, config)
+
+        # Find sparse module
+        sparse_module = None
+        for module in sparse_model.modules():
+            if isinstance(module, SparseAttentionModule):
+                sparse_module = module
+                break
+
+        assert sparse_module is not None
+        assert sparse_module._stats_manager is not None
+
+        # Get stats (should return summary)
+        stats = sparse_module.get_stats()
+
+        assert isinstance(stats, dict)
+        assert "module" in stats
+        assert "total_calls" in stats
+        assert "average_sparsity" in stats
+
+    def test_get_stats_without_stats_manager(self):
+        """Test get_stats() when stats manager is None."""
+        model = SimpleAttentionModel()
+        config = {
+            "sparse_cfg": {
+                "*attention*": {
+                    "method": "flash_skip_softmax",
+                    "thresholds": {"prefill": [0.001], "decode": [0.0001]},
+                    "br": 64,
+                    "bc": 64,
+                    "collect_stats": False,  # Disable stats collection
+                    "enable": True,
+                }
+            },
+        }
+
+        sparse_model = sparse_attn.sparsify(model, config)
+
+        # Find sparse module
+        for module in sparse_model.modules():
+            if isinstance(module, SparseAttentionModule):
+                # Stats manager should be None
+                assert module._stats_manager is None
+
+                # get_stats should return empty dict
+                stats = module.get_stats()
+                assert stats == {}
+                break
+
+
+class TestSetAttnImplementation:
+    """Cover the _set_attn_implementation logic in conversion.py."""
+
+    def test_triton_backend_sets_attn_impl(self):
+        """triton backend sets _attn_implementation=modelopt_triton on model.config."""
+        model = type(
+            "M",
+            (),
+            {"config": type("C", (), {"_attn_implementation": "eager"})()},
+        )()
+        config = type("Cfg", (), {"sparse_cfg": {}})()
+        config.sparse_cfg = {
+            "*": {"method": "triton_skip_softmax", "backend": "triton"},
+        }
+        with patch(
+            "modelopt.torch.sparsity.attention_sparsity.kernels.register_triton_attention",
+            MagicMock(return_value=True),
+        ):
+            _set_attn_implementation(model, config)
+        assert model.config._attn_implementation == "modelopt_triton"
+
+    def test_triton_backend_register_failure_raises(self):
+        """When register_triton_attention returns False, a RuntimeError is raised."""
+        model = type(
+            "M",
+            (),
+            {"config": type("C", (), {"_attn_implementation": "eager"})()},
+        )()
+        config = type("Cfg", (), {"sparse_cfg": {}})()
+        config.sparse_cfg = {"*": {"method": "triton_skip_softmax", "backend": "triton"}}
+        with (
+            patch(
+                "modelopt.torch.sparsity.attention_sparsity.kernels.register_triton_attention",
+                MagicMock(return_value=False),
+            ),
+            pytest.raises(RuntimeError, match="Failed to register"),
+        ):
+            _set_attn_implementation(model, config)
+
+    def test_triton_backend_no_triton_raises(self):
+        """When register_triton_attention is None, ImportError is raised."""
+        model = type(
+            "M",
+            (),
+            {"config": type("C", (), {"_attn_implementation": "eager"})()},
+        )()
+        config = type("Cfg", (), {"sparse_cfg": {}})()
+        config.sparse_cfg = {"*": {"method": "triton_skip_softmax", "backend": "triton"}}
+        with (
+            patch(
+                "modelopt.torch.sparsity.attention_sparsity.kernels.register_triton_attention",
+                None,
+            ),
+            pytest.raises(ImportError, match="Triton backend requires"),
+        ):
+            _set_attn_implementation(model, config)
+
+    def test_mixed_backends_raises(self):
+        """Mixing pytorch and triton backends is not supported."""
+        model = type("M", (), {"config": None})()
+        config = type("Cfg", (), {"sparse_cfg": {}})()
+        config.sparse_cfg = {
+            "layer1": {"method": "triton_skip_softmax", "backend": "triton"},
+            "layer2": {"method": "flash_skip_softmax", "backend": "pytorch"},
+        }
+        with pytest.raises(ValueError, match="Mixed backends"):
+            _set_attn_implementation(model, config)
+
+    def test_vsa_only_is_noop(self):
+        """VSA-only configs do not change _attn_implementation."""
+        model = type(
+            "M",
+            (),
+            {"config": type("C", (), {"_attn_implementation": "eager"})()},
+        )()
+        config = type("Cfg", (), {"sparse_cfg": {}})()
+        config.sparse_cfg = {"*": {"method": "vsa"}}
+        _set_attn_implementation(model, config)
+        # Should remain eager — VSA patches SDPA directly
+        assert model.config._attn_implementation == "eager"
+
+    def test_mixed_vsa_and_non_vsa_raises(self):
+        """VSA + non-VSA methods are rejected."""
+        model = type("M", (), {"config": None})()
+        config = type("Cfg", (), {"sparse_cfg": {}})()
+        config.sparse_cfg = {
+            "layer1": {"method": "vsa"},
+            "layer2": {"method": "flash_skip_softmax", "backend": "pytorch"},
+        }
+        with pytest.raises(ValueError, match="Cannot mix VSA"):
+            _set_attn_implementation(model, config)
+
+
+class TestExportSparseAttentionConfig:
+    """Cover export_sparse_attention_config branches."""
+
+    def test_returns_none_without_calibration(self):
+        """When no module has calibration params, returns None."""
+        model = SimpleAttentionModel()
+        model = sparse_attn.sparsify(model, FLASH_SKIP_SOFTMAX_DEFAULT_CFG)
+        out = export_sparse_attention_config(model)
+        assert out is None
+
+    def test_exports_when_calibration_present(self):
+        """Calibration params are reflected in the exported config."""
+        model = SimpleAttentionModel()
+        model = sparse_attn.sparsify(model, FLASH_SKIP_SOFTMAX_DEFAULT_CFG)
+
+        for module in model.modules():
+            if isinstance(module, SparseAttentionModule):
+                module._sparse_method_instance.calibration_params = {
+                    "prefill": {"a": 3.14, "b": 7.5},
+                    "decode": {"a": 0.5, "b": 9.0},
+                }
+
+        out = export_sparse_attention_config(model)
+        assert out is not None
+        assert "config_groups" in out
+        tsf = out["threshold_scale_factor"]
+        assert tsf["prefill"] == {"a": 3.14, "b": 7.5}
+        assert tsf["decode"] == {"a": 0.5, "b": 9.0}
+        assert out["producer"]["name"] == "modelopt"

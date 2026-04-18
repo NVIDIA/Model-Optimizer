@@ -41,11 +41,12 @@ from modelopt.torch.quantization.qtensor import (
 from modelopt.torch.quantization.utils import (
     QuantizerAttrNames,
     quantizer_attr_names,
+    reduce_block_amax,
     weight_attr_names,
 )
 from modelopt.torch.utils import clear_cuda_cache
 
-from ..quantization.nn import SequentialQuantizer, TensorQuantizer
+from ..quantization.nn import NVFP4StaticQuantizer, SequentialQuantizer, TensorQuantizer
 from .model_config import (
     KV_CACHE_FP8,
     KV_CACHE_INT8,
@@ -238,6 +239,36 @@ def get_scaling_factor(quantizer: TensorQuantizer) -> torch.Tensor:
     return scaling_factor
 
 
+def _get_nvfp4_block_size(
+    weight_quantizer: NVFP4StaticQuantizer, weight: torch.Tensor, module_name: str = ""
+) -> int:
+    """Return block size for NVFP4 from quantizer's block_sizes; raise if missing."""
+    prefix = f"NVFP4StaticQuantizer{f' for {module_name}' if module_name else ''}"
+    block_sizes = weight_quantizer.block_sizes
+    if block_sizes is None:
+        raise ValueError(f"{prefix} has no block_sizes; cannot compute per-block amax from weight.")
+    block_size = block_sizes.get(-1) or block_sizes.get(weight.dim() - 1)
+    if block_size is None:
+        raise ValueError(
+            f"{prefix} block_sizes has no -1 or last-dim key; cannot compute per-block amax."
+        )
+    return block_size
+
+
+def _set_amax_from_tensor(weight_quantizer: TensorQuantizer, tensor: torch.Tensor) -> None:
+    """Set quantizer _amax buffer from tensor; copy in-place if same shape, else replace buffer."""
+    if (
+        hasattr(weight_quantizer, "_amax")
+        and weight_quantizer._amax is not None
+        and weight_quantizer._amax.shape == tensor.shape
+    ):
+        weight_quantizer._amax.data.copy_(tensor.to(weight_quantizer._amax.device))
+    else:
+        if hasattr(weight_quantizer, "_amax"):
+            delattr(weight_quantizer, "_amax")
+        weight_quantizer.register_buffer("_amax", tensor.clone().detach())
+
+
 def _ensure_weight_quantizer_calibrated(
     weight_quantizer: TensorQuantizer, weight: torch.Tensor, module_name: str = ""
 ) -> None:
@@ -246,11 +277,34 @@ def _ensure_weight_quantizer_calibrated(
     This is a lazy calibration pattern used during export when weight quantizers
     may not have been calibrated during the main calibration phase.
 
+    For NVFP4StaticQuantizer, _amax is per-block amax and _global_amax is the max over
+    blocks; both are computed from the weight when missing.
+
     Args:
         weight_quantizer: The weight quantizer to calibrate
         weight: The weight tensor to use for calibration
         module_name: Optional module name for better warning messages
     """
+    if isinstance(weight_quantizer, NVFP4StaticQuantizer):
+        need_per_block = not hasattr(weight_quantizer, "_amax") or weight_quantizer._amax is None
+        need_global = (
+            not hasattr(weight_quantizer, "_global_amax") or weight_quantizer.global_amax is None
+        )
+        if not (need_per_block or need_global):
+            return
+        block_size = _get_nvfp4_block_size(weight_quantizer, weight, module_name)
+        warn(
+            f"NVFP4StaticQuantizer{f' for {module_name}' if module_name else ''} was not fully calibrated. "
+            f"Computing per-block amax and global_amax from weights. This may occur if: "
+            f"some experts were not activated during calibration (expected for MoE models), try increasing --calib_size"
+        )
+        per_block_amax = reduce_block_amax(weight, block_sizes={-1: block_size})
+        if need_per_block:
+            _set_amax_from_tensor(weight_quantizer, per_block_amax.to(weight.device))
+        if need_global:
+            weight_quantizer.global_amax = per_block_amax.max()
+        return
+
     if not hasattr(weight_quantizer, "_amax") or weight_quantizer._amax is None:
         warn(
             f"Weight quantizer{f' for {module_name}' if module_name else ''} was not calibrated. "
@@ -299,7 +353,7 @@ def get_weight_scaling_factor(module: nn.Module, weight_name: str = "weight") ->
         return get_scaling_factor(weight_quantizer[0])
 
     quantization_format = get_quantization_format(module)
-    # If NVFP4, we need to return quantized per_block scaling factors
+
     if quantization_format in [
         QUANTIZATION_NVFP4,
         QUANTIZATION_NVFP4_AWQ,
@@ -318,9 +372,10 @@ def get_weight_scaling_factor(module: nn.Module, weight_name: str = "weight") ->
             weight_scaling_factor_2 = NVFP4QTensor.get_weights_scaling_factor_2_from_quantizer(
                 weight_quantizer
             )
-        return NVFP4QTensor.get_weights_scaling_factor(
+        # Unified method handles both static and dynamic quantizers
+        return NVFP4QTensor.get_weights_scaling_factor_from_quantizer(
+            weight_quantizer,
             weight,
-            weight_quantizer.block_sizes[-1],
             weight_scaling_factor_2.to(weight.device),
         )[0]
 
@@ -343,27 +398,24 @@ def get_weight_scaling_factor_2(module: nn.Module, weight_name: str = "weight") 
 
     quantization_format = get_quantization_format(module)
 
-    # Calibrate weight quantizer if amax is not set for all NVFP4 variants
     if quantization_format in [
         QUANTIZATION_NVFP4,
         QUANTIZATION_NVFP4_AWQ,
         QUANTIZATION_NVFP4_SVDQUANT,
         QUANTIZATION_W4A8_NVFP4_FP8,
     ]:
+        # Calibrate weight quantizer if amax is not set
         weight = getattr(module, weight_name)
         module_name = f"{type(module).__name__}.{weight_name}"
         _ensure_weight_quantizer_calibrated(weight_quantizer, weight, module_name)
 
-    if quantization_format in [
-        QUANTIZATION_NVFP4,
-        QUANTIZATION_NVFP4_AWQ,
-        QUANTIZATION_NVFP4_SVDQUANT,
-    ]:
-        return NVFP4QTensor.get_weights_scaling_factor_2_from_quantizer(weight_quantizer)
-    elif quantization_format == QUANTIZATION_W4A8_NVFP4_FP8:
-        # weight_scaling_factor_2 for w4a8 needs to be amax/448, so that the wsf is in range 448/6.
-        # This is because the kernel dequantizes weight to fp8, which is in range 448.
-        return weight_quantizer._amax.float() / 448.0
+        if quantization_format == QUANTIZATION_W4A8_NVFP4_FP8:
+            # weight_scaling_factor_2 for w4a8 needs to be amax/448, so that the wsf is in range 448/6.
+            # This is because the kernel dequantizes weight to fp8, which is in range 448.
+            return weight_quantizer._amax.float() / 448.0
+        else:
+            # Unified method handles both static and dynamic quantizers
+            return NVFP4QTensor.get_weights_scaling_factor_2_from_quantizer(weight_quantizer)
 
     # SequentialQuantizer is required
     if not isinstance(weight_quantizer, SequentialQuantizer) or not weight_quantizer[-1].is_enabled:
@@ -422,6 +474,8 @@ def get_kv_cache_scaling_factor(self_attention_module: nn.Module) -> list[torch.
     # For FP8, we recommend default kv cache scaling factor to be 1.
     if get_kv_cache_dtype(self_attention_module) == KV_CACHE_FP8:
         for i, factor in enumerate(scaling_factors):
+            if factor is None:
+                continue
             if factor.item() > 0.5:
                 warn(
                     f"Warning: Large KV activation detected: {factor.item()}, "
@@ -460,23 +514,24 @@ def get_kv_cache_dtype(modules: list[nn.Module] | nn.Module) -> str | None:
                 num_bits_list.append(quantizer_attr.num_bits)
                 is_affine &= hasattr(quantizer_attr, "_bias_value")
 
-    return _compute_kv_cache_dtype(num_bits_list)
+    return _compute_kv_cache_dtype(num_bits_list, is_affine)
 
 
-def _compute_kv_cache_dtype(num_bits_list: list[int | tuple[int, int]]) -> str | None:
+def _compute_kv_cache_dtype(
+    num_bits_list: list[int | tuple[int, int]], is_affine: bool = False
+) -> str | None:
     """Returns the kv_cache dtype.
 
     If num_bits of output_quantizer is (4, 3) then returns FP8; if it is 8, returns int8,
     otherwise returns None.
 
     Args:
-        modules: The module or list of modules to inspect.
+        num_bits_list: The list of num_bits from quantizers.
+        is_affine: Whether the quantizers have bias (affine mode).
 
     Returns:
         The kv_cache dtype.
     """
-    is_affine = True
-
     if (4, 3) in num_bits_list:
         return KV_CACHE_FP8
     elif 8 in num_bits_list:
@@ -685,7 +740,15 @@ def _prefix_wildcard_summarize_exclude_modules(unquantized_layers, quantized_lay
                 f"Unquantized layer {layer}, prefix wildcards {wildcards} identified as a new match"
             )
             break
-        res_summary.update(candidate_wildcards)
+        # When candidate is the pair [prefix, prefix+".*"], emit only prefix+".*" for deployment.
+        if len(candidate_wildcards) == 2:
+            a, b = sorted(candidate_wildcards, key=len)
+            if b == a + ".*":
+                res_summary.add(b)
+            else:
+                res_summary.update(candidate_wildcards)
+        else:
+            res_summary.update(candidate_wildcards)
     return res_summary
 
 
@@ -735,7 +798,7 @@ def process_layer_quant_config(layer_config_dict):
             layer_config = {"quant_algo": "W8A16"}
         elif v == "int8_sq":
             layer_config = {"quant_algo": "W8A8_SQ_PER_CHANNEL"}
-        elif v == "nvfp4":
+        elif v in ["nvfp4", "nvfp4_static"]:
             layer_config = {
                 "quant_algo": "NVFP4",
                 "group_size": block_size_value,
@@ -1035,14 +1098,8 @@ def postprocess_state_dict(
                     # Warn if scale exceeds threshold
                     if quantization == KV_CACHE_FP8 and value.item() > 0.5:
                         logger.warning(
-                            "Large KV activations detected. Quantized KV cache may lead to higher accuracy drop. "
-                            "Setting KV cache scaling factor to at least 1."
+                            "Large KV activations detected. Quantized KV cache may lead to higher accuracy drop."
                         )
-
-                    # Ensure scale is at least 1 for KV_CACHE_FP8
-                    # We export real value for KV_CACHE_NVFP4
-                    if quantization == KV_CACHE_FP8:
-                        value.clamp_(min=1.0)
                 post_state_dict[prefix + new_suffix] = value
                 break
 
@@ -1339,6 +1396,18 @@ def preprocess_linear_fusion(modules: list[torch.nn.Module], resmooth_only=False
                 for module in modules:
                     module.weight_quantizer[-1].amax = weight_amax
 
+        # Handle NVFP4StaticQuantizer: unify global_amax for fused layers
+        elif isinstance(modules[0].weight_quantizer, NVFP4StaticQuantizer):
+            global_amax_list = [
+                m.weight_quantizer.global_amax
+                for m in modules
+                if m.weight_quantizer.global_amax is not None
+            ]
+            if global_amax_list:
+                unified_global_amax = torch.max(torch.stack(global_amax_list))
+                for module in modules:
+                    module.weight_quantizer.global_amax = unified_global_amax
+
         elif (
             modules[0].weight_quantizer.is_enabled
             and modules[0].weight_quantizer.amax is not None
@@ -1422,6 +1491,22 @@ def get_quant_config(
             # Fallback to default weight quantizer if no specific weight quantizer found
             if block_size == 0:
                 block_size = get_weight_block_size(module)
+
+            # Static NVFP4 uses pre-computed per-block scales from MSE calibration
+            if quantization_format == QUANTIZATION_NVFP4:
+                weight_quantizer = getattr(module, "weight_quantizer", None)
+                if weight_quantizer is None:
+                    # Try to get from first weight attribute
+                    for wn in weight_names:
+                        weight_quantizer = getattr(
+                            module, quantizer_attr_names(wn).weight_quantizer, None
+                        )
+                        if weight_quantizer is not None:
+                            break
+                if weight_quantizer is not None:
+                    is_static = isinstance(weight_quantizer, NVFP4StaticQuantizer)
+                    if is_static:
+                        quantization_format = "nvfp4_static"
 
             # Construct per layer config dictionary
             layer_config_dict[name + ".quantization"] = quantization_format
