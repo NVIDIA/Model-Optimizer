@@ -6,10 +6,12 @@ on:
     # NOTE: paths cannot be used since push happens to copied PR and only latest commit to PR is used
   schedule:
     - cron: "0 0 * * *" # Nightly
-  workflow_dispatch: # On-demand
+  workflow_dispatch:
+    # On-demand
 
-# Cancel previous runs if new commit is pushed to the same PR
+
 concurrency:
+  # Cancel previous runs if new commit is pushed to the same PR
   group: ${{ github.workflow }}-${{ startsWith(github.ref, 'refs/heads/pull-request/') && github.ref || github.sha }}
   cancel-in-progress: true
 
@@ -101,8 +103,7 @@ jobs:
           COVERAGE_PROCESS_START: ${{ github.workspace }}/pyproject.toml
           COVERAGE_FILE: ${{ github.workspace }}/.coverage
         run: |
-          pip install nox
-          nox -s ${{ matrix.example }}
+          python -m pip install nox && nox -s ${{ matrix.example }}
       - name: Upload GPU coverage to Codecov
         uses: codecov/codecov-action@v5
         with:
