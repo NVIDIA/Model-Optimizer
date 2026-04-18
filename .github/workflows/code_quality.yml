@@ -24,4 +24,4 @@ jobs:
         with:
           extra_args: --results=verified,unknown
       - name: Run code quality checks
-        run: pip install tox && tox -e pre-commit-all
+        run: pip install nox uv && nox -s pre_commit_all
