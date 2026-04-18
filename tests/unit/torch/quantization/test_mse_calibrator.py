@@ -529,7 +529,7 @@ class TestMseCalibrator:
 
 
 class TestRegisterFP8SweepCalibrator:
-    """Tests for register_fp8_sweep_calibrator and its dispatch in mse_calibrate."""
+    """Tests for _register_fp8_sweep_calibrator and its dispatch in mse_calibrate."""
 
     def setup_method(self):
         from modelopt.torch.quantization.model_calib import _FP8_SWEEP_CALIBRATOR_REGISTRY
@@ -575,10 +575,10 @@ class TestRegisterFP8SweepCalibrator:
         return model
 
     def test_register(self):
-        """register_fp8_sweep_calibrator stores factories by backend key and allows overwrite."""
+        """_register_fp8_sweep_calibrator stores factories by backend key and allows overwrite."""
         from modelopt.torch.quantization.model_calib import (
             _FP8_SWEEP_CALIBRATOR_REGISTRY,
-            register_fp8_sweep_calibrator,
+            _register_fp8_sweep_calibrator,
         )
 
         def factory_a(amax, axis, qf):
@@ -587,16 +587,16 @@ class TestRegisterFP8SweepCalibrator:
         def factory_b(amax, axis, qf):
             return None
 
-        register_fp8_sweep_calibrator("backend_x", factory_a)
+        _register_fp8_sweep_calibrator("backend_x", factory_a)
         assert _FP8_SWEEP_CALIBRATOR_REGISTRY["backend_x"] is factory_a
 
-        register_fp8_sweep_calibrator("backend_x", factory_b)
+        _register_fp8_sweep_calibrator("backend_x", factory_b)
         assert _FP8_SWEEP_CALIBRATOR_REGISTRY["backend_x"] is factory_b
 
     def test_mse_calibrate_dispatches_to_registered_factory(self):
         """mse_calibrate with fp8_scale_sweep=True calls the registered factory once per quantizer."""
         from modelopt.torch.quantization.calib.mse import MseCalibrator
-        from modelopt.torch.quantization.model_calib import register_fp8_sweep_calibrator
+        from modelopt.torch.quantization.model_calib import _register_fp8_sweep_calibrator
 
         factory_calls: list = []
 
@@ -611,14 +611,14 @@ class TestRegisterFP8SweepCalibrator:
             factory_calls.append(amax)
             return _RecordingCalibrator(amax=amax, axis=axis, quant_func=quant_func)
 
-        register_fp8_sweep_calibrator("_test_dispatch", my_factory)
+        _register_fp8_sweep_calibrator("_test_dispatch", my_factory)
         self._quantize_and_calibrate("_test_dispatch", fp8_scale_sweep=True)
 
         assert len(factory_calls) == 1
 
     def test_mse_calibrate_skips_registry_when_fp8_sweep_false(self):
         """Registry factory is not invoked when fp8_scale_sweep=False."""
-        from modelopt.torch.quantization.model_calib import register_fp8_sweep_calibrator
+        from modelopt.torch.quantization.model_calib import _register_fp8_sweep_calibrator
 
         factory_calls: list = []
 
@@ -626,7 +626,7 @@ class TestRegisterFP8SweepCalibrator:
             factory_calls.append(amax)
             return calib.MseCalibrator(amax=amax, axis=axis, quant_func=quant_func)
 
-        register_fp8_sweep_calibrator("_test_no_sweep", my_factory)
+        _register_fp8_sweep_calibrator("_test_no_sweep", my_factory)
         self._quantize_and_calibrate("_test_no_sweep", fp8_scale_sweep=False)
 
         assert len(factory_calls) == 0

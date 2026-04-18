@@ -54,10 +54,10 @@ from .utils.calib_utils import GPTQHelper
 
 __all__ = [
     "CalibratorFactory",
+    "_register_fp8_sweep_calibrator",
     "awq",
     "local_hessian_calibrate",
     "max_calibrate",
-    "register_fp8_sweep_calibrator",
     "sequential_calibrate",
     "smoothquant",
     "svdquant",
@@ -70,7 +70,7 @@ CalibratorFactory: TypeAlias = Callable[
 _FP8_SWEEP_CALIBRATOR_REGISTRY: dict[str, CalibratorFactory] = {}
 
 
-def register_fp8_sweep_calibrator(backend: str, calibrator_factory: CalibratorFactory) -> None:
+def _register_fp8_sweep_calibrator(backend: str, calibrator_factory: CalibratorFactory) -> None:
     """Register a custom calibrator factory for a quantization backend.
 
     When ``fp8_scale_sweep=True`` is passed to :func:`mse_calibrate`, any weight
