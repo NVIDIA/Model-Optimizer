@@ -76,6 +76,7 @@ with import_plugin("megatron"):
     from megatron.core.parallel_state import (
         get_pipeline_model_parallel_rank,
         get_pipeline_model_parallel_world_size,
+        get_tensor_model_parallel_rank,
     )
     from megatron.core.ssm.mamba_layer import MambaLayer
     from megatron.core.transformer.identity_op import IdentityOp
@@ -258,13 +259,14 @@ class GPTModelExporter:
         """
         pp_rank = get_pipeline_model_parallel_rank()
         pp_size = get_pipeline_model_parallel_world_size()
+        tp_rank = get_tensor_model_parallel_rank()
 
         # We use the 1st PP rank to handle VLM because vision_models
         # and vision_proj only exist in the first stage.
-        is_first_stage_main_rank = pp_rank == 0
+        is_first_stage_main_rank = pp_rank == 0 and tp_rank == 0
         # We use the last PP rank to write the config because
         # medusa_heads and eagle_module only exist in the last stage.
-        is_last_stage_main_rank = pp_rank == pp_size - 1
+        is_last_stage_main_rank = pp_rank == pp_size - 1 and tp_rank == 0
 
         # Main export process
         layer_state_dicts = self.layer_state_dicts

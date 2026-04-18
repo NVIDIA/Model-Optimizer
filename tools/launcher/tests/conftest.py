@@ -21,7 +21,7 @@ Run from the launcher directory:
     uv run python3 -m pytest tests/ -v
 
 Or via nox from Model-Optimizer root:
-    nox -s "unit-3.12(torch_211-tf_latest)"
+    nox -s "unit-3.12(torch_211, tf_latest)"
 """
 
 import os
