@@ -1,6 +1,9 @@
 # Qwen3-8B PTQ quantization (8 GPUs, for Slurm clusters).
 #
-# 2-step pipeline: NVFP4 then FP8, each followed by MMLU evaluation.
+# 3-step pipeline:
+#   task_0: NVFP4 quantize → MMLU → export
+#   task_1: FP8 quantize → MMLU → export
+#   task_2: TRT-LLM eval MMLU on all exported checkpoints
 #
 # Uses MegatronLMQuantizeTask with typed config — see common/megatron_lm/quantize/task.py
 # for all available fields.
@@ -48,4 +51,17 @@ pipeline:
       _factory_: "slurm_factory"
       nodes: 1
       ntasks_per_node: 8
+      gpus_per_node: 8
+
+  # Step 3: TRT-LLM eval MMLU on all exported checkpoints
+  task_2:
+    script: common/tensorrt_llm/eval.sh
+    environment:
+      - HF_MODEL_CKPT: /scratchspace/export
+      - TP: "8"
+      - EP: "1"
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
       gpus_per_node: 8

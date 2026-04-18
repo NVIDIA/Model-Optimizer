@@ -21,7 +21,6 @@ pipeline:
       pp: 1
       ep: 8
       etp: 1
-      extra_args: ""
       calib_dataset: abisee/cnn_dailymail
       calib_size: 32
       mmlu_dataset: cais/mmlu
@@ -42,7 +41,6 @@ pipeline:
       pp: 1
       ep: 8
       etp: 1
-      extra_args: ""
       calib_dataset: abisee/cnn_dailymail
       calib_size: 32
       mmlu_dataset: cais/mmlu
