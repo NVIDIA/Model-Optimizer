@@ -20,8 +20,11 @@ import pytest
 import torch
 import torch.nn.init as init
 from _test_utils.torch.megatron.models import get_mcore_gpt_model
-from _test_utils.torch.megatron.utils import initialize_for_megatron
-from megatron.core import dist_checkpointing
+from _test_utils.torch.megatron.utils import (
+    initialize_for_megatron,
+    load_distributed_checkpoint,
+    save_distributed_checkpoint,
+)
 
 import modelopt.torch.peft as mtpeft
 import modelopt.torch.quantization as mtq
@@ -146,20 +149,6 @@ SELECTIVE_LAYER_LORA_CFG = {
         "*output_layer*": {"enable": False},
     },
 }
-
-
-def save_distributed_checkpoint(checkpoint_path, gpt_model):
-    sharded_state_dict = gpt_model.sharded_state_dict(prefix="")
-    dist_checkpointing.save(sharded_state_dict=sharded_state_dict, checkpoint_dir=checkpoint_path)
-
-
-def load_distributed_checkpoint(checkpoint_path, gpt_model):
-    sharded_state_dict = gpt_model.sharded_state_dict(prefix="")
-    checkpoint = dist_checkpointing.load(
-        sharded_state_dict=sharded_state_dict, checkpoint_dir=checkpoint_path
-    )
-    gpt_model.load_state_dict(checkpoint)
-    return gpt_model
 
 
 def _gpt_model_provider(tp_size: int, hidden_size=256, vocab_size=64, meta_device=False):

@@ -82,7 +82,7 @@ hf = [
     "peft>=0.17.0",
     "sentencepiece>=0.2.1",                                                           # Also implicitly used in test_unified_export_megatron, test_vllm_fakequant_megatron_export
     "tiktoken",
-    "transformers>=4.56",                                                             # Should match modelopt/torch/__init__.py and tox.ini
+    "transformers>=4.56",                                                             # Should match modelopt/torch/__init__.py and noxfile.py
     "wonderwords",
 ]
 
@@ -111,17 +111,18 @@ dev-docs = [
     "sphinx-togglebutton>=0.3.2",
 ]
 dev-test = [
-    "coverage[toml]>=7.13.0",  # a1_coverage.pth for subprocess tracking requires this
+    "coverage[toml]>=7.13.0", # a1_coverage.pth for subprocess tracking requires this
+    "nox",
     "pytest",
     "pytest-cov",
     "pytest-instafail",
     "pytest-timeout",
+    "uv",
+    # test-specific dependencies
     "timm",
-    "torchprofile==0.0.4",     # optional dependency for modelopt.torch
+    "torchprofile==0.0.4", # optional dependency for modelopt.torch
     "torchvision",
     "torch-geometric",
-    "tox>4.18",
-    "tox-current-env>=0.0.12",
 ]
 # Compound extras via self-references
 all = ["nvidia-modelopt[onnx,hf,puzzletron]"]
@@ -208,6 +209,7 @@ extend-ignore = [
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401", "F403"]
 "examples/*" = ["D"]
+"noxfile.py" = ["D", "E501"]
 "tests/*" = ["B017", "D", "E402", "PT012"]
 "*/_[a-zA-Z]*" = ["D"] # Private packages (_abc/*.py) or modules (_xyz.py)
 "*.ipynb" = [
@@ -279,7 +281,7 @@ module = ["examples.*"]
 disable_error_code = ["attr-defined"]
 
 [tool.bandit]
-exclude_dirs = [".github/", "examples/", "tests/"]
+exclude_dirs = [".github/", "examples/", "noxfile.py", "tests/"]
 # Do not change `skips`. It should be consistent with NVIDIA's Wheel-CI-CD bandit.yml config.
 # Use of `# nosec BXXX` requires special approval
 skips = [

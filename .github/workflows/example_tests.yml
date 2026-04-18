@@ -6,61 +6,34 @@ on:
     # NOTE: paths cannot be used since push happens to copied PR and only latest commit to PR is used
   schedule:
     - cron: "0 0 * * *" # Nightly
-  workflow_dispatch: # On-demand
+  workflow_dispatch:
+    # On-demand
 
-# Cancel previous runs if new commit is pushed to the same PR
+
 concurrency:
+  # Cancel previous runs if new commit is pushed to the same PR
   group: ${{ github.workflow }}-${{ startsWith(github.ref, 'refs/heads/pull-request/') && github.ref || github.sha }}
   cancel-in-progress: true
 
 jobs:
-  check-file-changes:
-    if: startsWith(github.ref, 'refs/heads/pull-request/')
-    runs-on: ubuntu-latest
-    outputs:
-      any_changed: ${{ steps.changed-tests.outputs.any_changed }}
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-      - id: get-pr-info
-        uses: nv-gha-runners/get-pr-info@main
-      # Get commit from main branch that is present in the PR to use as base for changed files
-      - id: calculate-merge-base
-        env:
-          PR_SHA: ${{ fromJSON(steps.get-pr-info.outputs.pr-info).head.sha }}
-          BASE_SHA: ${{ fromJSON(steps.get-pr-info.outputs.pr-info).base.sha }}
-        run: |
-          (echo -n "merge-base="; git merge-base "$BASE_SHA" "$PR_SHA") | tee --append "${GITHUB_OUTPUT}"
-      - name: Check for changes in test-relevant directories
-        id: changed-tests
-        uses: step-security/changed-files@v46.0.5
-        with:
-          base_sha: ${{ steps.calculate-merge-base.outputs.merge-base }}
-          sha: ${{ fromJSON(steps.get-pr-info.outputs.pr-info).head.sha }}
-          files: |
-            .github/workflows/example_tests.yml
-            examples/**
-            modelopt/**
-            pyproject.toml
-            tests/examples/**
-          fail_on_initial_diff_error: true
-  wait-checks:
-    needs: [check-file-changes]
-    if: needs.check-file-changes.outputs.any_changed == 'true'
-    uses: ./.github/workflows/_wait_for_checks.yml
+  pr-gate:
+    uses: ./.github/workflows/_pr_gate.yml
     permissions:
       checks: read
     secrets: inherit
     with:
-      match_pattern: "^DCO$|^linux$" # Wait for DCO and Unit tests / linux to pass
-      delay: 300s
+      files: |
+        .github/workflows/example_tests.yml
+        examples/**
+        modelopt/**
+        pyproject.toml
+        tests/examples/**
 
   ##### PyTorch Example Tests (speculative_decoding requires 26.01 image) #####
-  torch-pr:
-    needs: [check-file-changes, wait-checks]
-    if: startsWith(github.ref, 'refs/heads/pull-request/') && needs.check-file-changes.outputs.any_changed == 'true'
-    strategy: &torch_strategy
+  torch:
+    needs: [pr-gate]
+    if: needs.pr-gate.outputs.any_changed == 'true'
+    strategy:
       fail-fast: false
       matrix:
         example: [llm_distill, llm_qat, llm_sparsity, diffusers_sparsity]
@@ -74,24 +47,12 @@ jobs:
       example: ${{ matrix.example }}
       timeout_minutes: 30
       pip_install_extras: "[hf,dev-test]"
-      runner: linux-amd64-gpu-rtxpro6000-latest-1
+      runner: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && 'linux-amd64-gpu-rtxpro6000-latest-1' || 'linux-amd64-gpu-rtxpro6000-latest-2' }}
 
-  torch-non-pr:
-    if: ${{ !startsWith(github.ref, 'refs/heads/pull-request/') }}
-    strategy: *torch_strategy
-    uses: ./.github/workflows/_example_tests_runner.yml
-    secrets: inherit
-    with:
-      docker_image: "nvcr.io/nvidia/pytorch:${{ matrix.docker_image || '26.03' }}-py3"
-      example: ${{ matrix.example }}
-      timeout_minutes: 30
-      pip_install_extras: "[hf,dev-test]"
-      runner: linux-amd64-gpu-rtxpro6000-latest-2
-
-  ##### TensorRT-LLM Example Tests #####
+  ##### TensorRT-LLM Example Tests (pr/non-pr split: non-pr runs extra autodeploy+eval examples) #####
   trtllm-pr:
-    needs: [check-file-changes, wait-checks]
-    if: startsWith(github.ref, 'refs/heads/pull-request/') && needs.check-file-changes.outputs.any_changed == 'true'
+    needs: [pr-gate]
+    if: startsWith(github.ref, 'refs/heads/pull-request/') && needs.pr-gate.outputs.any_changed == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -118,40 +79,24 @@ jobs:
       pip_install_extras: "[hf,dev-test]"
       runner: linux-amd64-gpu-rtxpro6000-latest-2
 
-  ##### NeMo Example Tests #####
-  nemo-pr:
-    needs: [check-file-changes, wait-checks]
-    if: startsWith(github.ref, 'refs/heads/pull-request/') && needs.check-file-changes.outputs.any_changed == 'true'
-    strategy: &nemo_strategy
-      fail-fast: false
-      matrix:
-        example: [megatron_bridge]
+  ##### Megatron Example Tests #####
+  megatron:
+    needs: [pr-gate]
+    if: needs.pr-gate.outputs.any_changed == 'true'
     uses: ./.github/workflows/_example_tests_runner.yml
     secrets: inherit
     with:
       docker_image: "nvcr.io/nvidia/nemo:26.02"
-      example: ${{ matrix.example }}
+      example: megatron_bridge
       timeout_minutes: 30
       pip_install_extras: "[hf,puzzletron,dev-test]"
-      runner: linux-amd64-gpu-rtxpro6000-latest-1
-
-  nemo-non-pr:
-    if: ${{ !startsWith(github.ref, 'refs/heads/pull-request/') }}
-    strategy: *nemo_strategy
-    uses: ./.github/workflows/_example_tests_runner.yml
-    secrets: inherit
-    with:
-      docker_image: "nvcr.io/nvidia/nemo:26.02"
-      example: ${{ matrix.example }}
-      timeout_minutes: 30
-      pip_install_extras: "[hf,puzzletron,dev-test]"
-      runner: linux-amd64-gpu-rtxpro6000-latest-2
+      runner: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && 'linux-amd64-gpu-rtxpro6000-latest-1' || 'linux-amd64-gpu-rtxpro6000-latest-2' }}
 
   ##### ONNX/TensorRT Example Tests #####
-  onnx-pr:
-    needs: [check-file-changes, wait-checks]
-    if: startsWith(github.ref, 'refs/heads/pull-request/') && needs.check-file-changes.outputs.any_changed == 'true'
-    strategy: &onnx_strategy
+  onnx:
+    needs: [pr-gate]
+    if: needs.pr-gate.outputs.any_changed == 'true'
+    strategy:
       fail-fast: false
       matrix:
         example: [diffusers, torch_onnx]
@@ -160,34 +105,23 @@ jobs:
     with:
       docker_image: "nvcr.io/nvidia/tensorrt:26.02-py3"
       example: ${{ matrix.example }}
-      pip_install_extras: "[all,dev-test]"
-      runner: linux-amd64-gpu-rtxpro6000-latest-1
-
-  onnx-non-pr:
-    if: ${{ !startsWith(github.ref, 'refs/heads/pull-request/') }}
-    strategy: *onnx_strategy
-    uses: ./.github/workflows/_example_tests_runner.yml
-    secrets: inherit
-    with:
-      docker_image: "nvcr.io/nvidia/tensorrt:26.02-py3"
-      example: ${{ matrix.example }}
-      pip_install_extras: "[all,dev-test]"
-      runner: linux-amd64-gpu-rtxpro6000-latest-2
+      pip_install_extras: "[onnx,hf,dev-test]"
+      runner: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && 'linux-amd64-gpu-rtxpro6000-latest-1' || 'linux-amd64-gpu-rtxpro6000-latest-2' }}
 
   ##### Required Check for PR #####
   example-pr-required-check:
     # Run even if example tests are skipped
     if: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && always() }}
-    needs: [check-file-changes, torch-pr, trtllm-pr, nemo-pr, onnx-pr]
+    needs: [pr-gate, torch, trtllm-pr, megatron, onnx]
     runs-on: ubuntu-latest
     steps:
-      - name: Required GPU tests did not succeed
+      - name: Required example tests did not succeed
         if: |
-          needs.check-file-changes.result != 'success' ||
-          (needs.check-file-changes.outputs.any_changed == 'true' && (
-            needs.torch-pr.result != 'success' ||
+          needs.pr-gate.result != 'success' ||
+          (needs.pr-gate.outputs.any_changed == 'true' && (
+            needs.torch.result != 'success' ||
             needs.trtllm-pr.result != 'success' ||
-            needs.nemo-pr.result != 'success' ||
-            needs.onnx-pr.result != 'success'
+            needs.megatron.result != 'success' ||
+            needs.onnx.result != 'success'
           ))
         run: exit 1

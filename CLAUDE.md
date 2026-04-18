@@ -37,9 +37,9 @@ Primarily Python codebase with optional C++/CUDA extensions supporting PyTorch, 
 | Pattern match | `pytest tests/unit -k "test_quantize"` |
 | Lint + format (all files) | `pre-commit run --all-files` |
 | Lint (diff only) | `pre-commit run --from-ref origin/main --to-ref HEAD` |
-| Run via tox (CPU unit) | `tox -e py312-torch210-tf_latest-unit` |
-| Build docs | `tox -e build-docs` |
-| Build wheel | `tox -e build-wheel` |
+| Run via nox (CPU unit) | `nox -s "unit-3.12(torch_211, tf_latest)"` |
+| Build docs | `nox -s docs` |
+| Build wheel | `nox -s build_wheel` |
 
 ## Architecture
 
@@ -104,7 +104,7 @@ A **recipe** is a declarative YAML specification of an optimization configuratio
 | `modelopt_recipes/general/ptq/` | Built-in PTQ recipe YAML files |
 | `pyproject.toml` | Optional dependency groups (`[onnx]`, `[hf]`, `[all]`, `[dev]`); ruff, mypy, pytest, bandit, and coverage config |
 | `.pre-commit-config.yaml` | Pre-commit hooks (ruff, mypy, clang-format, license headers) |
-| `tox.ini` | Test environment definitions |
+| `noxfile.py` | Test session definitions |
 
 ## Design Patterns
 
