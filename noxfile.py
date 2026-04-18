@@ -128,18 +128,18 @@ def gpu_megatron(session):
     session.run("python", "-m", "pytest", "tests/gpu_megatron", *_cov_args())
 
 
-# Container: nvcr.io/nvidia/pytorch:26.01-py3 or later
-@nox.session(venv_backend="none")
-def gpu_regression(session):
-    session.run("python", "-m", "pip", "install", "-e", ".[hf,dev-test]")
-    session.run("python", "-m", "pytest", "tests/gpu_regression", *_cov_args())
-
-
 # Container: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc10 or later
 @nox.session(venv_backend="none")
 def gpu_trtllm(session):
     session.run("python", "-m", "pip", "install", "-e", ".[hf,dev-test]")
     session.run("python", "-m", "pytest", "tests/gpu_trtllm", *_cov_args())
+
+
+# Container: nvcr.io/nvidia/pytorch:26.01-py3 or later
+@nox.session(venv_backend="none")
+def regression(session):
+    session.run("python", "-m", "pip", "install", "-e", ".[hf,dev-test]")
+    session.run("python", "-m", "pytest", "tests/regression", *_cov_args())
 
 
 # ─── Code quality ─────────────────────────────────────────────────────────────

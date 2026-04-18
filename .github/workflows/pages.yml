@@ -8,16 +8,18 @@ on:
     branches: [main]
   schedule:
     - cron: "0 0 * * *" # Nightly
-  workflow_dispatch: # On-demand
+  workflow_dispatch:
+    # On-demand
 
-# Cancel previous runs if new commit is pushed
+
 concurrency:
+  # Cancel previous runs if new commit is pushed
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: true
 
 permissions:
-  contents: write       # push to gh-pages branch
-  pull-requests: write  # post/update preview URL comment on PRs
+  contents: write # push to gh-pages branch
+  pull-requests: write # post/update preview URL comment on PRs
 
 jobs:
   build-docs:

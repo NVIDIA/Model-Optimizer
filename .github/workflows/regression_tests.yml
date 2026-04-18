@@ -1,4 +1,4 @@
-name: GPU tests
+name: Regression tests
 
 on:
   push:
@@ -41,13 +41,15 @@ jobs:
           base_sha: ${{ steps.calculate-merge-base.outputs.merge-base }}
           sha: ${{ fromJSON(steps.get-pr-info.outputs.pr-info).head.sha }}
           files: |
-            .github/workflows/gpu_tests.yml
-            modelopt/**
+            .github/workflows/regression_tests.yml
+            modelopt/torch/**
             noxfile.py
             pyproject.toml
-            tests/gpu/**
-            tests/gpu_megatron/**
-            tests/gpu_trtllm/**
+            tests/regression/**
+            examples/speculative_decoding/**
+            examples/dataset/**
+            modelopt_recipes/general/speculative_decoding/**
+            tools/launcher/**
           fail_on_initial_diff_error: true
   wait-checks:
     needs: [check-file-changes]
@@ -59,64 +61,60 @@ jobs:
     with:
       match_pattern: "^DCO$|^linux$" # Wait for DCO and Unit tests / linux to pass
       delay: 300s
-  gpu-tests-pr:
+  regression-tests-pr:
     needs: [check-file-changes, wait-checks]
     if: needs.check-file-changes.outputs.any_changed == 'true'
-    strategy: &gpu_strategy
+    strategy: &regression_strategy
       fail-fast: false
       matrix:
         include:
-          - example: gpu
-            timeout: 60
+          - example: regression
+            timeout: 15
             container_image: pytorch:26.01-py3
-            # tests/gpu/_extensions/test_onnx_extensions.py fails for newer containers until https://github.com/tbenthompson/cppimport/pull/98
-          - example: gpu_megatron
-            timeout: 45
-            container_image: nemo:26.04
-          - example: gpu_trtllm
-            timeout: 30
-            container_image: tensorrt-llm/release:1.3.0rc10
     runs-on: linux-amd64-gpu-rtxpro6000-latest-1
     timeout-minutes: ${{ matrix.timeout }}
-    container: &gpu_container
+    container: &regression_container
       image: nvcr.io/nvidia/${{ matrix.container_image }}
       env:
         GIT_DEPTH: 1000 # For correct version
         PIP_CONSTRAINT: "" # Disable pip constraint for upgrading packages
         HF_TOKEN: ${{ secrets.HF_TOKEN }}
-    steps: &gpu_steps
+    steps: &regression_steps
       - uses: actions/checkout@v6
       - uses: nv-gha-runners/setup-proxy-cache@main
       - name: Setup environment variables
         run: |
           echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}:/usr/include:/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
-      - name: Run gpu tests
+      - name: Run regression tests
         env:
           COVERAGE_PROCESS_START: ${{ github.workspace }}/pyproject.toml
           COVERAGE_FILE: ${{ github.workspace }}/.coverage
         run: |
-          python -m pip install nox && nox -s ${{ matrix.example }}
-      - name: Upload GPU coverage to Codecov
+          pip install nox
+          nox -s ${{ matrix.example }}
+      - name: Upload regression coverage to Codecov
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage.xml
-          flags: gpu
+          flags: regression
           fail_ci_if_error: false # test may be skipped if relevant file changes are not detected
           verbose: true
-  gpu-tests-non-pr:
+  regression-tests-non-pr:
     if: ${{ !startsWith(github.ref, 'refs/heads/pull-request/') }}
-    strategy: *gpu_strategy
+    strategy: *regression_strategy
     runs-on: linux-amd64-gpu-rtxpro6000-latest-2
     timeout-minutes: ${{ matrix.timeout }}
-    container: *gpu_container
-    steps: *gpu_steps
-  gpu-pr-required-check:
-    # Run even if gpu-tests-pr is skipped
+    container: *regression_container
+    steps: *regression_steps
+  regression-pr-required-check:
+    # Run even if regression-tests-pr is skipped
     if: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && always() }}
-    needs: [check-file-changes, gpu-tests-pr]
+    needs: [check-file-changes, regression-tests-pr]
     runs-on: ubuntu-latest
     steps:
-      - name: Required GPU tests did not succeed
-        if: ${{ needs.check-file-changes.result != 'success' || (needs.check-file-changes.outputs.any_changed == 'true' && needs.gpu-tests-pr.result != 'success') }}
+      - name: Required regression tests did not succeed
+        if: |
+          needs.check-file-changes.result != 'success' ||
+          (needs.check-file-changes.outputs.any_changed == 'true' && needs.regression-tests-pr.result != 'success')
         run: exit 1
