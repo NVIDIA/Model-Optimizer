@@ -63,7 +63,7 @@ jobs:
     strategy: &torch_strategy
       fail-fast: false
       matrix:
-        example: [llm_distill, llm_qat, llm_sparsity]
+        example: [llm_distill, llm_qat, llm_sparsity, diffusers_sparsity]
         include:
           - example: speculative_decoding
             docker_image: "26.01"

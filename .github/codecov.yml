@@ -11,3 +11,15 @@ coverage:
         target: auto
         threshold: 1% # Allow atmost 1% coverage drop from main branch.
     patch: false
+
+# Exclude GPU-only Triton kernel files from ALL codecov calculations (project
+# and patch checks, all flags). Rationale: these files are dominated by
+# @triton.jit kernel bodies that CPU unit tests cannot exercise. GPU tests
+# cover them end-to-end (see tests/gpu/torch/sparsity/attention_sparsity/) but
+# the `gpu`-flag upload may race with the PR status check, so relying on flag
+# combination alone leaves the project check flaky. Dropping these files here
+# makes the check deterministic — local `pytest --cov` and GPU runs still
+# measure them; only the codecov PR status ignores them.
+ignore:
+  - "modelopt/torch/kernels/triton_fa.py"
+  - "modelopt/torch/kernels/hf_triton_attention.py"
