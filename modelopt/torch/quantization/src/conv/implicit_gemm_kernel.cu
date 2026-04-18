@@ -145,6 +145,10 @@ __global__ void __launch_bounds__(WARPS_M * WARPS_N * 32, 2)
                               const float *__restrict__ act_amax, int Cin, int Dp, int Hp, int Wp,
                               int Cout, int OD, int OH, int OW, int kD, int kH, int kW, int sd,
                               int sh, int sw, int dd, int dh, int dw, int M, int K) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+  // BF16 WMMA fragments are only available on sm_80+. On earlier archs this
+  // kernel compiles as an empty stub; the runtime gate in _get_cuda_module()
+  // prevents dispatching it on unsupported hardware.
   // Derived constants
   constexpr int NUM_WARPS = WARPS_M * WARPS_N;
   constexpr int NUM_THREADS = NUM_WARPS * 32;
@@ -469,6 +473,7 @@ __global__ void __launch_bounds__(WARPS_M * WARPS_N * 32, 2)
       y[m_idx * Cout + n_idx] = result;
     }
   }
+#endif // __CUDA_ARCH__ >= 800
 }
 
 // =============================================================================

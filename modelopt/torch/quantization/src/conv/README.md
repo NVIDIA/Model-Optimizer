@@ -125,6 +125,7 @@ Known limitations:
 - Output shape matches `torch.nn.functional.conv3d`.
 - FP4 path applies quantize-dequantize in-kernel for activation tiles (no extra global memory pass).
 - Tile config: BLOCK_M=64, BLOCK_N=64, BLOCK_K=256, 8 warps (256 threads), ~70 KB shared memory per block.
+- The kernel body is guarded by `#if __CUDA_ARCH__ >= 800` so it compiles as an empty stub when nvcc targets pre-Ampere archs (PyTorch's default `-gencode` list can include sm_75, which lacks BF16 WMMA fragments). Dispatch is enforced at runtime by `_get_cuda_module()` via `_MIN_SM_MAJOR = 8`.
 
 ## Files
 
