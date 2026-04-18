@@ -256,7 +256,7 @@ def main(args: argparse.Namespace) -> None:
         for entry in dataset:
             conversation_id = entry.get("conversation_id", entry.get("uuid"))
 
-            conversations = entry["conversations"]
+            conversations = entry.get("messages") or entry.get("conversations")
             if not conversations or not isinstance(conversations, list):
                 num_invalid += 1
                 continue
