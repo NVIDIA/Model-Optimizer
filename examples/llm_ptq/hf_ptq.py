@@ -34,6 +34,8 @@ from example_utils import (
     is_enc_dec,
     is_nemotron_vl,
     load_mtp_weights,
+    needs_checkpoint_path_update,
+    resolve_checkpoint_dir,
     run_nemotron_vl_preview,
 )
 from torch.utils.data import DataLoader
@@ -91,8 +93,9 @@ def _set_kv_cache_constant_amax(quant_cfg: list) -> None:
     for i, entry in enumerate(quant_cfg):
         if entry.get("quantizer_name") != "*[kv]_bmm_quantizer":
             continue
-        assert isinstance(entry.get("cfg", {}), dict)
-        quant_cfg[i] = {**entry, "cfg": {**entry.get("cfg", {}), "use_constant_amax": True}}
+        cfg = entry.get("cfg") or {}
+        assert isinstance(cfg, dict)
+        quant_cfg[i] = {**entry, "cfg": {**cfg, "use_constant_amax": True}}
         break
 
 
@@ -760,7 +763,9 @@ def export_quantized(
             # Load any missing weights from non-standard safetensors (handled in get_model for non-low-memory mode)
             # Store the MTP layer prefixes on the model for later exclusion from quantization
             if args.vllm_fakequant_export:
-                export_hf_vllm_fq_checkpoint(full_model, export_dir=export_path)
+                export_hf_vllm_fq_checkpoint(
+                    full_model, export_dir=export_path, inplace_mem_efficient=True
+                )
             else:
                 mtp_layer_prefixes, mtp_state_dict = load_mtp_weights(
                     full_model, args.pyt_ckpt_path
@@ -1104,6 +1109,12 @@ def quantize_main(
         if args.kv_cache_qformat in _KV_CAST_FORMATS:
             quant_cfg = copy.deepcopy(quant_cfg)
             _set_kv_cache_constant_amax(quant_cfg["quant_cfg"])
+
+        if needs_checkpoint_path_update(quant_cfg):
+            quant_cfg = resolve_checkpoint_dir(quant_cfg, args.pyt_ckpt_path)
+            print(
+                f"Auto-resolved layerwise_checkpoint_dir: {quant_cfg['algorithm']['layerwise_checkpoint_dir']}"
+            )
 
         if args.qformat in QUANT_CFG_CHOICES:
             mono_quantize(
