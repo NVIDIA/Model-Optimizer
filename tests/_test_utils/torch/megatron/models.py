@@ -139,7 +139,6 @@ def get_mcore_gpt_model(
     transformer_impl: str = "modelopt" if HAS_TE else "local",
     use_cpu_initialization: bool = False,
     bf16: bool = True,
-    use_te: bool = False,
     # MoE-specific parameters
     moe_grouped_gemm: bool = False,
     moe_ffn_hidden_size: int | None = None,
@@ -147,6 +146,11 @@ def get_mcore_gpt_model(
     num_moe_experts: int | None = None,
     **config_kwargs: dict,
 ) -> GPTModel:
+    """
+    Args:
+        transformer_impl: The implementation of the transformer layer.
+            Can be "local", "transformer_engine", or "modelopt".
+    """
     assert activation_func in ["swiglu", "squared_relu"]
     assert normalization in ["LayerNorm", "RMSNorm"]
     assert transformer_impl in ["local", "transformer_engine", "modelopt"]
@@ -163,12 +167,14 @@ def get_mcore_gpt_model(
     def squared_relu(x):
         return torch.pow(F.relu(x), 2)
 
+    # Use sequence parallel if MoE is enabled and tensor model parallel size is greater than 1
+    use_sp = num_moe_experts and num_moe_experts > 0 and tensor_model_parallel_size > 1
     config = TransformerConfig(
         tensor_model_parallel_size=tensor_model_parallel_size,
         pipeline_model_parallel_size=pipeline_model_parallel_size,
         expert_model_parallel_size=expert_model_parallel_size,
         expert_tensor_parallel_size=expert_tensor_parallel_size,
-        sequence_parallel=False,
+        sequence_parallel=use_sp,
         num_layers=num_layers,
         num_layers_in_first_pipeline_stage=num_layers_in_first_pipeline_stage,
         num_layers_in_last_pipeline_stage=num_layers_in_last_pipeline_stage,

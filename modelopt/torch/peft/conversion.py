@@ -15,6 +15,8 @@
 
 """PEFT conversion and restore utilities for LoRA modules."""
 
+import torch
+import torch.distributed as dist
 import torch.nn as nn
 
 from modelopt.torch.opt.conversion import ModelLikeModule, ModeloptStateManager
@@ -28,6 +30,7 @@ from .lora.layer import LoRAModule, LoRAModuleRegistry
 __all__ = [
     "freeze_lora_weights",
     "replace_lora_module",
+    "sync_lora_weights",
 ]
 
 
@@ -36,15 +39,17 @@ def convert_to_peft_model(model: ModelLikeModule, config: PEFTConfig) -> Convert
     # initialize the true module if necessary
     model = model.init_modellike() if isinstance(model, ModelLikeModule) else model
 
-    # Freeze all base model weights before replacing modules if freeze_base_model is True
-    if config.freeze_base_model:
-        for param in model.parameters():
-            param.requires_grad = False
-
     replace_lora_module(model, version=ModeloptStateManager(model).state_version, config=config)
 
     metadata = {}
     add_adapter(model, config)
+
+    # Freeze base weights based on config flags (mutually exclusive)
+    if config.freeze_base_layers:
+        _freeze_base_weights_of_lora_layers(model)
+    elif config.freeze_base_model:
+        _freeze_all_base_weights(model)
+
     # Update gradient settings for LoRA parameters only
     _update_lora_grads(model, config)
 
@@ -226,6 +231,64 @@ def unfreeze_lora_weights(model, *, layer_patterns=None, adapter_patterns=None):
         layer_patterns=layer_patterns,
         adapter_patterns=adapter_patterns,
     )
+
+
+def sync_lora_weights(model, group=None):
+    """Broadcast LoRA adapter weights from src rank 0 to all other ranks in the group.
+
+    This ensures LoRA weights are identical across data-parallel replicas after
+    random initialization. Should be called after LoRA adapters are added to the model.
+
+    Args:
+        model: Model containing LoRA modules to synchronize.
+        group: The process group to broadcast over (e.g., the data-parallel group).
+            If None, uses the default process group.
+    """
+    if not dist.is_initialized():
+        return
+
+    src = dist.get_global_rank(group, 0) if group is not None else 0
+
+    for _, module in model.named_modules():
+        if isinstance(module, LoRAModule):
+            for adapter in module._lora_adapters.values():
+                for submodule in ("lora_a", "lora_b"):
+                    for param in adapter[submodule].parameters():
+                        dist.broadcast(param.data, src=src, group=group)
+
+
+def _freeze_all_base_weights(model):
+    """Freeze all non-LoRA parameters in the model."""
+    lora_param_ids = set()
+    for _, module in model.named_modules():
+        if isinstance(module, LoRAModule):
+            for adapter in module._lora_adapters.values():
+                for submodule in ("lora_a", "lora_b"):
+                    for param in adapter[submodule].parameters():
+                        lora_param_ids.add(id(param))
+
+    for param in model.parameters():
+        if id(param) not in lora_param_ids:
+            param.requires_grad = False
+
+
+def _freeze_base_weights_of_lora_layers(model):
+    """Freeze base (non-LoRA) parameters only in modules that have active LoRA adapters."""
+    # Collect parameter IDs of all LoRA adapter weights
+    lora_param_ids = set()
+    for _, module in model.named_modules():
+        if isinstance(module, LoRAModule):
+            for adapter in module._lora_adapters.values():
+                for submodule in ("lora_a", "lora_b"):
+                    for param in adapter[submodule].parameters():
+                        lora_param_ids.add(id(param))
+
+    # For each LoRA module that has at least one active adapter, freeze its base parameters
+    for _, module in model.named_modules():
+        if isinstance(module, LoRAModule) and module._lora_adapters:
+            for param in module.parameters():
+                if id(param) not in lora_param_ids:
+                    param.requires_grad = False
 
 
 def _update_lora_grads(model, config: PEFTConfig):

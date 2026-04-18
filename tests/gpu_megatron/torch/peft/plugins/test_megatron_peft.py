@@ -19,7 +19,7 @@ from functools import partial
 import pytest
 import torch
 import torch.nn.init as init
-from _test_utils.torch.megatron.models import get_mcore_gpt_model
+from _test_utils.torch.megatron.models import HAS_TE, get_mcore_gpt_model
 from _test_utils.torch.megatron.utils import initialize_for_megatron
 from megatron.core import dist_checkpointing
 
@@ -29,8 +29,18 @@ from modelopt.torch.opt.plugins.mcore_dist_checkpointing import (
     restore_sharded_modelopt_state,
     save_sharded_modelopt_state,
 )
+from modelopt.torch.peft.lora.config import MOE_LORA_CFG, MOE_LORA_RANDOM_INIT_CFG
 from modelopt.torch.peft.lora.layer import LoRAModule
 from modelopt.torch.utils.plugins import megatron_prefill
+
+from modelopt.torch.peft.lora.config import MOE_LORA_CFG
+
+if HAS_TE:
+    from megatron.core.extensions.transformer_engine import (
+        TEColumnParallelLinear,
+        TELayerNormColumnParallelLinear,
+        TERowParallelLinear,
+    )
 
 NVFP4_DEFAULT_CONFIG = {
     "quant_cfg": [
@@ -133,6 +143,7 @@ DEFAULT_LORA_CFG_RANDOM_INIT_SMALL_RANK_TEST = {
     },
 }
 
+
 SELECTIVE_LAYER_LORA_CFG = {
     "adapter_type": "lora",
     "adapter_name": "selective",
@@ -162,8 +173,18 @@ def load_distributed_checkpoint(checkpoint_path, gpt_model):
     return gpt_model
 
 
-def _gpt_model_provider(tp_size: int, hidden_size=256, vocab_size=64, meta_device=False):
+def _gpt_model_provider(
+    tp_size: int,
+    hidden_size=256,
+    vocab_size=64,
+    meta_device=False,
+    num_moe_experts=None,
+    use_te=False,
+    moe_grouped_gemm=False,
+):
     """Build the model."""
+
+    transformer_impl = "transformer_engine" if use_te else "modelopt"
 
     if meta_device:
         with torch.device("meta"):
@@ -173,10 +194,11 @@ def _gpt_model_provider(tp_size: int, hidden_size=256, vocab_size=64, meta_devic
                 ffn_hidden_size=None,
                 num_attention_heads=4,
                 activation_func="squared_relu",
-                transformer_impl="local",
+                transformer_impl=transformer_impl,
                 hidden_size=hidden_size,
                 vocab_size=vocab_size,
                 use_cpu_initialization=meta_device,
+                num_moe_experts=num_moe_experts,
             )
     else:
         gpt_model = get_mcore_gpt_model(
@@ -185,9 +207,11 @@ def _gpt_model_provider(tp_size: int, hidden_size=256, vocab_size=64, meta_devic
             ffn_hidden_size=None,
             num_attention_heads=4,
             activation_func="squared_relu",
-            transformer_impl="local",
+            transformer_impl=transformer_impl,
+            moe_grouped_gemm=moe_grouped_gemm,
             hidden_size=hidden_size,
             vocab_size=vocab_size,
+            num_moe_experts=num_moe_experts,
         ).cuda()
     return gpt_model.eval()
 
@@ -440,6 +464,118 @@ def _test_adapter_gradient_flow_freeze_base_model(lora_config, tmp_path, rank, s
 def test_adapter_gradient_flow_freeze_base_model(dist_workers, lora_config, tmp_path):
     dist_workers.run(
         partial(_test_adapter_gradient_flow_freeze_base_model, lora_config, str(tmp_path))
+    )
+
+
+def _test_moe_freeze_base_layers_only_lora_layers(lora_config, base_layer_frozen, rank, size):
+    """Test that freeze_base_layers only freezes base weights of layers with LoRA adapters.
+
+    With the MOE LoRA config, only local_experts linear_fc1/fc2 get LoRA adapters.
+    All other layers (attention, embeddings, output_layer, router weights) should
+    remain trainable.
+    """
+    import torch._dynamo
+
+    torch._dynamo.reset()
+    torch._dynamo.config.disable = True
+
+    hidden_size = 64
+    initialize_for_megatron(tensor_model_parallel_size=size, pipeline_model_parallel_size=1)
+    model = _gpt_model_provider(
+        tp_size=size,
+        hidden_size=hidden_size,
+        num_moe_experts=8,
+    )
+    prompt_tokens = torch.randint(0, model.vocab_size, (2, model.max_sequence_length)).cuda()
+
+    mtpeft.update_model(model, lora_config)
+    model.train()
+
+    # Forward pass
+    batch_size = prompt_tokens.shape[0]
+    seq_len = prompt_tokens.shape[-1]
+    device = prompt_tokens.device
+
+    attention_mask = (
+        torch.triu(torch.ones((batch_size, seq_len, seq_len), device=device), diagonal=1)
+        .bool()
+        .view(batch_size, 1, seq_len, seq_len)
+    )
+
+    # With standard LoRA init (lora_b=0), lora_a gets zero gradients on the first pass.
+    # An optimizer step makes lora_b non-zero, so the second pass gives non-zero gradients
+    # for both lora_a and lora_b. Running two steps is harmless for random init configs.
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
+    optimizer.zero_grad()
+    output = model(prompt_tokens, position_ids=None, attention_mask=attention_mask)
+    loss = output.sum()
+    loss.backward()
+    optimizer.step()
+
+    optimizer.zero_grad()
+    output = model(prompt_tokens, position_ids=None, attention_mask=attention_mask)
+    loss = output.sum()
+    loss.backward()
+
+    has_lora_params = False
+    lora_nonzero_grad_count = 0
+    has_frozen_expert_base = False
+    has_trainable_non_expert = False
+
+    for name, param in model.named_parameters():
+        if "lora" in name:
+            # LoRA adapter weights should be trainable
+            has_lora_params = True
+            assert param.grad is not None, f"LoRA param {name} should have grad"
+            # MoE routing may send zero tokens to some experts, so individual
+            # expert LoRA params can legitimately have zero gradients.
+            if torch.any(param.grad != 0):
+                lora_nonzero_grad_count += 1
+        elif "local_experts" in name and ("linear_fc1" in name or "linear_fc2" in name):
+            # Base weights of local_experts linear layers (which have LoRA) should be frozen
+            if base_layer_frozen:
+                has_frozen_expert_base = True
+                assert param.grad is None, (
+                    f"Base param {name} in LoRA-adapted layer should be frozen (grad=None)"
+                )
+        else:
+            # All other params (attention, embeddings, output_layer,
+            # router weights, etc.) should NOT be frozen
+            has_trainable_non_expert = True
+            assert param.grad is not None, (
+                f"Non-LoRA-adapted param {name} should be trainable (have grad)"
+            )
+
+    # Sanity checks: ensure we actually tested all three categories
+    assert has_lora_params, "No LoRA params found — test config may be wrong"
+    assert lora_nonzero_grad_count > 0, (
+        "All LoRA params have zero grad — no experts received tokens"
+    )
+    assert has_frozen_expert_base == base_layer_frozen, (
+        "No frozen expert base params found — test config may be wrong"
+    )
+    assert has_trainable_non_expert, "No trainable non-expert params found — model may be wrong"
+
+
+MOE_LORA_CFG_UNFROZEN = copy.deepcopy(MOE_LORA_CFG)
+MOE_LORA_CFG_UNFROZEN["freeze_base_layers"] = False
+
+MOE_LORA_RANDOM_INIT_CFG_UNFROZEN = copy.deepcopy(MOE_LORA_RANDOM_INIT_CFG)
+MOE_LORA_RANDOM_INIT_CFG_UNFROZEN["freeze_base_layers"] = False
+
+
+@pytest.mark.parametrize(
+    ("lora_config", "base_layer_frozen"),
+    [
+        (MOE_LORA_CFG, True),  # Frozen base layers, standard init
+        (MOE_LORA_CFG_UNFROZEN, False),  # Unfrozen base layers, standard init
+        (MOE_LORA_RANDOM_INIT_CFG, True),  # Frozen base layers, random init
+        (MOE_LORA_RANDOM_INIT_CFG_UNFROZEN, False),  # Unfrozen base layers, random init
+    ],
+)
+def test_moe_freeze_base_layers_only_lora_layers(dist_workers, lora_config, base_layer_frozen):
+    dist_workers.run(
+        partial(_test_moe_freeze_base_layers_only_lora_layers, lora_config, base_layer_frozen)
     )
 
 
@@ -841,3 +977,152 @@ def test_mcore_lora_then_quantize_save_restore(dist_workers, lora_config, tmp_pa
     dist_workers.run(
         partial(_test_mcore_lora_then_quantize_save_restore, lora_config, str(tmp_path))
     )
+
+
+# ---------------------------------------------------------------------------
+# TE LoRA tests
+# ---------------------------------------------------------------------------
+
+
+def _test_te_lora_module_types(lora_config, rank, size):
+    """Verify TEColumnParallelLinear and TERowParallelLinear get the right LoRA adapter types."""
+    hidden_size = 256
+    initialize_for_megatron(tensor_model_parallel_size=size, pipeline_model_parallel_size=1)
+    model = _gpt_model_provider(tp_size=size, hidden_size=hidden_size, use_te=True)
+    mtpeft.update_model(model, lora_config)
+
+    adapter_name = lora_config["adapter_name"]
+    col_lora_count = 0
+    row_lora_count = 0
+
+    for name, module in model.named_modules():
+        if not isinstance(module, LoRAModule):
+            continue
+        if adapter_name not in module._lora_adapters:
+            continue
+
+        adapter = module._lora_adapters[adapter_name]
+
+        if isinstance(module, (TEColumnParallelLinear, TELayerNormColumnParallelLinear)):
+            col_lora_count += 1
+            # lora_b must be a TEColumnParallelLinear (sharded along output dim)
+            assert isinstance(adapter["lora_b"], TEColumnParallelLinear), (
+                f"{name}: expected lora_b to be TEColumnParallelLinear, "
+                f"got {type(adapter['lora_b'])}"
+            )
+            # lora_a is a plain nn.Linear (replicated, not TE-parallel)
+            assert isinstance(adapter["lora_a"], torch.nn.Linear)
+            assert not isinstance(adapter["lora_a"], TEColumnParallelLinear)
+
+        elif isinstance(module, TERowParallelLinear):
+            row_lora_count += 1
+            # lora_a must be a TERowParallelLinear (sharded along input dim)
+            assert isinstance(adapter["lora_a"], TERowParallelLinear), (
+                f"{name}: expected lora_a to be TERowParallelLinear, got {type(adapter['lora_a'])}"
+            )
+            # lora_b is a plain nn.Linear (replicated, not TE-parallel)
+            assert isinstance(adapter["lora_b"], torch.nn.Linear)
+            assert not isinstance(adapter["lora_b"], TERowParallelLinear)
+
+    assert col_lora_count > 0, "No TEColumnParallelLinear LoRA modules found"
+    assert row_lora_count > 0, "No TERowParallelLinear LoRA modules found"
+
+
+@pytest.mark.skipif(not HAS_TE, reason="Transformer Engine not installed")
+@pytest.mark.parametrize("lora_config", [DEFAULT_LORA_CFG_RANDOM_INIT_TEST])
+def test_te_lora_module_types(dist_workers, lora_config):
+    dist_workers.run(partial(_test_te_lora_module_types, lora_config))
+
+
+def _test_te_lora_forward(lora_config, rank, size):
+    """Test forward pass and enable/disable with TE LoRA adapters."""
+    hidden_size = 320
+    initialize_for_megatron(tensor_model_parallel_size=size, pipeline_model_parallel_size=1)
+    model = _gpt_model_provider(tp_size=size, hidden_size=hidden_size, use_te=True)
+    prompt_tokens = torch.randint(0, model.vocab_size, (2, model.max_sequence_length)).cuda()
+
+    original_output = megatron_prefill(model, prompt_tokens)
+    mtpeft.update_model(model, lora_config)
+
+    lora_output = megatron_prefill(model, prompt_tokens)
+    assert lora_output.shape == original_output.shape
+    assert not torch.allclose(lora_output, original_output, rtol=1e-5)
+
+    mtpeft.disable_adapters(model)
+    disabled_output = megatron_prefill(model, prompt_tokens)
+    assert torch.allclose(disabled_output, original_output, rtol=1e-5)
+
+    mtpeft.enable_adapters(model)
+    reenabled_output = megatron_prefill(model, prompt_tokens)
+    assert torch.allclose(reenabled_output, lora_output, rtol=1e-5)
+
+
+@pytest.mark.skipif(not HAS_TE, reason="Transformer Engine not installed")
+@pytest.mark.parametrize("lora_config", [DEFAULT_LORA_CFG_RANDOM_INIT_TEST])
+def test_te_lora_forward(dist_workers, lora_config):
+    dist_workers.run(partial(_test_te_lora_forward, lora_config))
+
+
+def _test_te_lora_save_restore(lora_config, tmp_path, rank, size):
+    """Test that TE LoRA checkpoints save and restore correctly."""
+    hidden_size = 512
+    initialize_for_megatron(tensor_model_parallel_size=size, pipeline_model_parallel_size=1)
+    model_ref = _gpt_model_provider(tp_size=size, hidden_size=hidden_size, use_te=True)
+    model_test = _gpt_model_provider(tp_size=size, hidden_size=hidden_size, use_te=True)
+    prompt_tokens = torch.randint(
+        0, model_ref.vocab_size, (2, model_ref.max_sequence_length)
+    ).cuda()
+
+    mtpeft.update_model(model_ref, lora_config)
+    lora_output_ref = megatron_prefill(model_ref, prompt_tokens)
+
+    save_distributed_checkpoint(tmp_path, model_ref)
+    save_sharded_modelopt_state([model_ref], tmp_path)
+
+    restore_sharded_modelopt_state([model_test], tmp_path)
+    model_test = load_distributed_checkpoint(tmp_path, model_test)
+
+    lora_output_test = megatron_prefill(model_test, prompt_tokens)
+    assert torch.allclose(lora_output_test, lora_output_ref)
+
+
+@pytest.mark.skipif(not HAS_TE, reason="Transformer Engine not installed")
+@pytest.mark.parametrize("lora_config", [DEFAULT_LORA_CFG_RANDOM_INIT_TEST])
+def test_te_lora_save_restore(dist_workers, lora_config, tmp_path):
+    dist_workers.run(partial(_test_te_lora_save_restore, lora_config, str(tmp_path)))
+
+
+def _test_te_quantize_then_lora(lora_config, rank, size):
+    """Test quantize-then-LoRA on a TE model: base layer is quantized, adapters are not."""
+    hidden_size = 512
+    initialize_for_megatron(tensor_model_parallel_size=size, pipeline_model_parallel_size=1)
+    model = _gpt_model_provider(tp_size=size, hidden_size=hidden_size, use_te=True)
+    prompt_tokens = torch.randint(0, model.vocab_size, (2, model.max_sequence_length)).cuda()
+
+    def forward_func(mod):
+        megatron_prefill(model, prompt_tokens)
+
+    mtq.quantize(model, NVFP4_DEFAULT_CONFIG, forward_func)
+    mtpeft.update_model(model, lora_config)
+
+    for name, module in model.named_modules():
+        if not isinstance(module, LoRAModule) or "output_layer" in name:
+            continue
+        assert hasattr(module, "input_quantizer")
+        assert hasattr(module, "weight_quantizer")
+        for aname in module._lora_adapters:
+            lora_a = module._lora_adapters[aname]["lora_a"]
+            lora_b = module._lora_adapters[aname]["lora_b"]
+            assert not hasattr(lora_a, "input_quantizer")
+            assert not hasattr(lora_b, "weight_quantizer")
+
+    quantized_lora_output = megatron_prefill(model, prompt_tokens)
+    mtq.disable_quantizer(model, "*")
+    unquantized_lora_output = megatron_prefill(model, prompt_tokens)
+    assert not torch.allclose(quantized_lora_output, unquantized_lora_output)
+
+
+@pytest.mark.skipif(not HAS_TE, reason="Transformer Engine not installed")
+@pytest.mark.parametrize("lora_config", [LARGE_LORA_CFG_RANDOM_INIT_TEST])
+def test_te_quantize_then_lora(dist_workers, lora_config):
+    dist_workers.run(partial(_test_te_quantize_then_lora, lora_config))

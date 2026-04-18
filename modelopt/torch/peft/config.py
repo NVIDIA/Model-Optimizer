@@ -21,7 +21,7 @@ from collections.abc import Callable
 from typing import Annotated, Any
 
 import torch.nn.init as init
-from pydantic import PlainSerializer, WithJsonSchema, field_validator
+from pydantic import PlainSerializer, WithJsonSchema, field_validator, model_validator
 
 from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
 
@@ -188,9 +188,15 @@ class PEFTConfig(ModeloptBaseConfig):
 
     freeze_base_model: bool = ModeloptField(
         default=True,
-        title="Freeze base weights during training",
-        description="Whether to freeze the base model weights; in most cases, this should be set to True.",
-        validate_default=True,
+        title="Freeze all base model weights during training",
+        description="Whether to freeze all base model weights. Mutually exclusive with freeze_base_layers.",
+    )
+
+    freeze_base_layers: bool = ModeloptField(
+        default=False,
+        title="Freeze base weights only for layers with LoRA adapters",
+        description="Whether to freeze the base weights of only the layers that have LoRA adapters applied. "
+        "Layers without LoRA adapters are left unchanged. Mutually exclusive with freeze_base_model.",
     )
 
     freeze_lora_weights: bool = ModeloptField(
@@ -199,6 +205,16 @@ class PEFTConfig(ModeloptBaseConfig):
         description="Whether to freeze the lora model weights; in most cases, this should be set to False.",
         validate_default=True,
     )
+
+    @model_validator(mode="after")
+    def validate_freeze_flags(self):
+        """Ensure freeze_base_model and freeze_base_layers are not both enabled."""
+        if self.freeze_base_model and self.freeze_base_layers:
+            raise ValueError(
+                "freeze_base_model and freeze_base_layers are mutually exclusive. "
+                "Only one can be True."
+            )
+        return self
 
     @field_validator("adapter_type")
     @classmethod
