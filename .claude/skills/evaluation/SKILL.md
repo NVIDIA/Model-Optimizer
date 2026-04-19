@@ -256,7 +256,7 @@ After the dry-run, check the output from `nel` for any problems with the config.
 
 **Monitoring Progress**
 
-After job submission, register the job and set up monitoring per the **monitor skill**.
+After job submission, register the job per the **monitor skill** for durable cross-session tracking. For one-off queries (live status, debugging a failed run, analyzing results) use the **launching-evals skill**; for querying past runs in MLflow use **accessing-mlflow**.
 
 **NEL-specific diagnostics** (for debugging failures):
 
