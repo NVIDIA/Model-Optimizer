@@ -24,6 +24,7 @@ import transformers
 from _test_utils.torch.megatron.models import get_mcore_gpt_model
 from _test_utils.torch.megatron.utils import get_forward
 from _test_utils.torch.transformers_models import create_tiny_llama_dir
+from safetensors import safe_open
 from safetensors.torch import save_file
 
 import modelopt.torch.quantization as mtq
@@ -275,8 +276,6 @@ def _test_qkv_slicing_gqa_tp2(tmp_path, rank, size):
 
     # Verify Q/K/V projections were exported (collect keys from all shard files)
     if rank == 0:
-        from safetensors import safe_open
-
         safetensors_files = list(export_dir.glob("*.safetensors"))
         assert safetensors_files, "no safetensors files found in export dir"
         keys = []

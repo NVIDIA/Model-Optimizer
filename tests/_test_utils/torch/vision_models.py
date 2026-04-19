@@ -117,6 +117,7 @@ MODELS = {
             # "dm_nfnet_f0",
             "efficientnet_b0",
             "swin_tiny_patch4_window7_224",
+            "resnet50",
         ],
         _create_timm_fn,
     ),

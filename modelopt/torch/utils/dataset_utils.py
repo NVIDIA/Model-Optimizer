@@ -601,16 +601,28 @@ def _forward_loop(
         dataloader: DataLoader containing the batched input data
         allowed_non_tensor_keys: Set of key names whose values may be non-tensor types
     """
-    with torch.no_grad():
-        is_enc_dec = model_type_is_enc_dec(model)
-        infer_method = model.generate if is_enc_dec else model.forward
-        max_working_batch_size = None  # Initialize max working batch size as None
+    # Disable KV caching during calibration — it is unnecessary overhead and causes
+    # correctness issues with hybrid Mamba/attention models whose cache state is mutated
+    # in-place (e.g., NemotronH).
+    config = getattr(model, "config", None)
+    prev_use_cache = getattr(config, "use_cache", None)
+    if config is not None and prev_use_cache is not None:
+        config.use_cache = False
 
-        for _, data in enumerate(tqdm(dataloader)):
-            # Process batch and update max working batch size
-            max_working_batch_size = _process_batch(
-                data, infer_method, max_working_batch_size, allowed_non_tensor_keys
-            )
+    try:
+        with torch.no_grad():
+            is_enc_dec = model_type_is_enc_dec(model)
+            infer_method = model.generate if is_enc_dec else model.forward
+            max_working_batch_size = None  # Initialize max working batch size as None
+
+            for _, data in enumerate(tqdm(dataloader)):
+                # Process batch and update max working batch size
+                max_working_batch_size = _process_batch(
+                    data, infer_method, max_working_batch_size, allowed_non_tensor_keys
+                )
+    finally:
+        if config is not None and prev_use_cache is not None:
+            config.use_cache = prev_use_cache
 
 
 def create_forward_loop(

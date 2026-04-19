@@ -27,7 +27,7 @@ from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.model_calib import (
     apply_pre_quant_scale_and_smooth,
     disable_pre_quant_scale_and_resmooth,
-    sequential_calibrate,
+    layerwise_calibrate,
 )
 from modelopt.torch.quantization.nn import TensorQuantizer
 
@@ -379,7 +379,7 @@ def test_svdquant_lora_weights():
             assert lora_residual.shape == module.weight.shape
 
 
-def test_sequential_calibrate_support_gate():
+def test_layerwise_calibrate_support_gate():
     class _UnsupportedModel(nn.Module):
         def __init__(self):
             super().__init__()
@@ -392,17 +392,17 @@ def test_sequential_calibrate_support_gate():
 
     with (
         torch.no_grad(),
-        pytest.raises(ValueError, match="Sequential calibration requires a model"),
+        pytest.raises(ValueError, match="Layerwise calibration requires a model"),
     ):
-        sequential_calibrate(
+        layerwise_calibrate(
             model,
             forward_loop=lambda m: m(torch.randn(2, 4)),
             calib_func=lambda layer, loop: loop(layer),
         )
 
 
-def test_sequential_calibrate_propagates_inputs_without_replaying_full_model(monkeypatch):
-    from modelopt.torch.quantization.utils.activation_collector import LayerActivationCollector
+def test_layerwise_calibrate_propagates_inputs_without_replaying_full_model(monkeypatch):
+    from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 
     class _ToyLayer(nn.Module):
         def __init__(self, scale: float, bias: float):
@@ -463,7 +463,7 @@ def test_sequential_calibrate_propagates_inputs_without_replaying_full_model(mon
             handle.remove()
         observed_layer_inputs.append(captured)
 
-    sequential_calibrate(model, _forward_loop, _calib_func)
+    layerwise_calibrate(model, _forward_loop, _calib_func)
 
     assert forward_loop_calls == len(model.layers)
     assert len(observed_layer_inputs) == len(model.layers)
@@ -482,9 +482,9 @@ def test_sequential_calibrate_propagates_inputs_without_replaying_full_model(mon
         assert torch.allclose(observed, expected)
 
 
-def test_sequential_calibrate_handles_inter_layer_logic(monkeypatch):
+def test_layerwise_calibrate_handles_inter_layer_logic(monkeypatch):
     """Verify that parent-level inter-layer logic (e.g. mask selection) works correctly."""
-    from modelopt.torch.quantization.utils.activation_collector import LayerActivationCollector
+    from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 
     class _ToyLayer(nn.Module):
         def __init__(self, scale: float):
@@ -537,7 +537,7 @@ def test_sequential_calibrate_handles_inter_layer_logic(monkeypatch):
             handle.remove()
         observed_layer_inputs.append(captured)
 
-    sequential_calibrate(model, _forward_loop, _calib_func)
+    layerwise_calibrate(model, _forward_loop, _calib_func)
 
     assert len(observed_layer_inputs) == 3
     # Layer 0 gets raw batch

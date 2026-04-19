@@ -8,16 +8,18 @@ on:
     branches: [main]
   schedule:
     - cron: "0 0 * * *" # Nightly
-  workflow_dispatch: # On-demand
+  workflow_dispatch:
+    # On-demand
 
-# Cancel previous runs if new commit is pushed
+
 concurrency:
+  # Cancel previous runs if new commit is pushed
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: true
 
 permissions:
-  contents: write       # push to gh-pages branch
-  pull-requests: write  # post/update preview URL comment on PRs
+  contents: write # push to gh-pages branch
+  pull-requests: write # post/update preview URL comment on PRs
 
 jobs:
   build-docs:
@@ -27,7 +29,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/ubuntu-setup
       - name: Build docs
-        run: pip install tox && tox -e build-docs
+        run: pip install nox uv && nox -s docs
       - name: Upload docs artifact
         if: github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v4
@@ -47,7 +49,7 @@ jobs:
       - uses: ./.github/actions/ubuntu-setup
       - name: Build docs
         if: github.event.action != 'closed'
-        run: pip install tox && tox -e build-docs
+        run: pip install nox uv && nox -s docs
       - name: Deploy / remove PR preview
         uses: rossjrw/pr-preview-action@v1
         with:
