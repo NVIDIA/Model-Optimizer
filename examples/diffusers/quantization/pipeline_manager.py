@@ -42,6 +42,7 @@ class PipelineManager:
         self.pipe: Any | None = None
         self.pipe_upsample: LTXLatentUpsamplePipeline | None = None  # For LTX-Video upsampling
         self._transformer: torch.nn.Module | None = None
+        self._video_decoder: torch.nn.Module | None = None
 
     @staticmethod
     def create_pipeline_from(
@@ -58,23 +59,20 @@ class PipelineManager:
         Raises:
             ValueError: If model type is unsupported
         """
-        try:
-            pipeline_cls = MODEL_PIPELINE[model_type]
-            if pipeline_cls is None:
-                raise ValueError(f"Model type {model_type.value} does not use diffusers pipelines.")
-            model_id = (
-                MODEL_REGISTRY[model_type] if override_model_path is None else override_model_path
-            )
-            pipe = pipeline_cls.from_pretrained(
-                model_id,
-                torch_dtype=torch_dtype,
-                use_safetensors=True,
-                **MODEL_DEFAULTS[model_type].get("from_pretrained_extra_args", {}),
-            )
-            pipe.set_progress_bar_config(disable=True)
-            return pipe
-        except Exception as e:
-            raise e
+        pipeline_cls = MODEL_PIPELINE[model_type]
+        if pipeline_cls is None:
+            raise ValueError(f"Model type {model_type.value} does not use diffusers pipelines.")
+        model_id = (
+            MODEL_REGISTRY[model_type] if override_model_path is None else override_model_path
+        )
+        pipe = pipeline_cls.from_pretrained(
+            model_id,
+            torch_dtype=torch_dtype,
+            use_safetensors=True,
+            **MODEL_DEFAULTS[model_type].get("from_pretrained_extra_args", {}),
+        )
+        pipe.set_progress_bar_config(disable=True)
+        return pipe
 
     def create_pipeline(self) -> Any:
         """
@@ -157,41 +155,31 @@ class PipelineManager:
                 self.logger.info("Enabling VAE tiling for LTX-Video")
                 self.pipe.vae.enable_tiling()
 
-    def get_backbone(self) -> torch.nn.Module:
-        """
-        Get the backbone model (transformer or UNet).
-
-        Returns:
-            Backbone model module
-        """
-        if not self.pipe:
-            raise RuntimeError("Pipeline not created. Call create_pipeline() first.")
-
-        backbone_pairs = list(self.iter_backbones())
-        if len(backbone_pairs) == 1:
-            return backbone_pairs[0][1]
-        return torch.nn.ModuleList([module for _, module in backbone_pairs])
-
     def iter_backbones(self) -> Iterator[tuple[str, torch.nn.Module]]:
         """
-        Yield backbone modules by name, based on a backbone spec.
-
-        Yields:
-            (backbone_name, module) pairs
+        Yield (backbone_name, module) pairs.
         """
         if not self.pipe:
             raise RuntimeError("Pipeline not created. Call create_pipeline() first.")
 
         names = list(self.config.backbone)
-
-        if self.config.model_type == ModelType.LTX2:
-            self._ensure_ltx2_transformer_cached()
-            name = names[0] if names else "transformer"
-            yield name, self._transformer
-            return
-
         if not names:
             raise RuntimeError("No backbone names provided.")
+
+        if self.config.model_type == ModelType.LTX2:
+            for name in names:
+                if name == "video_decoder":
+                    self._ensure_ltx2_video_decoder_cached()
+                    yield name, self._video_decoder
+                elif name == "transformer":
+                    self._ensure_ltx2_transformer_cached()
+                    yield name, self._transformer
+                else:
+                    raise ValueError(
+                        f"Unsupported LTX-2 backbone name '{name}'. "
+                        "Expected 'transformer' or 'video_decoder'."
+                    )
+            return
 
         for name in names:
             module = getattr(self.pipe, name, None)
@@ -206,6 +194,16 @@ class PipelineManager:
             transformer = self.pipe.stage_1_model_ledger.transformer()
             self.pipe.stage_1_model_ledger.transformer = lambda: transformer
             self._transformer = transformer
+
+    def _ensure_ltx2_video_decoder_cached(self) -> None:
+        if not self.pipe:
+            raise RuntimeError("Pipeline not created. Call create_pipeline() first.")
+        if self._video_decoder is None:
+            video_decoder = self.pipe.stage_1_model_ledger.video_decoder()
+            # Cache it so subsequent calls return the same (quantized) instance
+            self.pipe.stage_1_model_ledger.video_decoder = lambda: video_decoder
+            self.pipe.stage_2_model_ledger.video_decoder = lambda: video_decoder
+            self._video_decoder = video_decoder
 
     def _create_ltx2_pipeline(self) -> Any:
         params = dict(self.config.extra_params)
@@ -261,7 +259,6 @@ class PipelineManager:
         return TI2VidTwoStagesPipeline(**pipeline_kwargs)
 
     def print_quant_summary(self):
-        backbone_pairs = list(self.iter_backbones())
-        for name, backbone in backbone_pairs:
+        for name, backbone in self.iter_backbones():
             self.logger.info(f"{name} quantization info:")
             mtq.print_quant_summary(backbone)
