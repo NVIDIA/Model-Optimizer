@@ -50,12 +50,10 @@ Draft model components:
            lazy rope pattern needed for MLA models.
 """
 
-import contextlib
 import logging
 
 import torch
 import torch.nn.functional as F
-from torch.nn import CrossEntropyLoss
 from transformers import PreTrainedModel
 from transformers.models.qwen3.configuration_qwen3 import Qwen3Config as _Qwen3Config
 from transformers.trainer_pt_utils import LabelSmoother
@@ -63,12 +61,7 @@ from transformers.utils import ModelOutput
 
 from ..dflash.conversion import DFlashDMRegistry
 from ..dflash.dflash_model import DFlashModel
-from .modeling_dflash import (  # noqa: F401
-    DFlashAttention,
-    DFlashBaseModelOutput,
-    DFlashModule,
-    build_target_layer_ids,
-)
+from .modeling_dflash import DFlashAttention, DFlashModule, build_target_layer_ids  # noqa: F401
 from .modeling_fakebase import _BASE_MODEL_PATHS, _EMBED_TOKENS_PATHS, _LM_HEAD_PATHS
 
 logger = logging.getLogger(__name__)
@@ -120,25 +113,6 @@ class HFDFlashModel(DFlashModel):
                     continue
             else:
                 raise ValueError(f"Part {name} not found in model")
-
-    def _base_model_forward(self, input_ids, attention_mask, freeze=True, labels=None, **kwargs):
-        """Run the base model forward pass with optional freeze and base-model loss."""
-        ctx = torch.no_grad() if freeze else contextlib.nullcontext()
-        with ctx:
-            outputs = super().forward(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                output_hidden_states=True,
-                **kwargs,
-            )
-            base_loss = None
-            if not freeze and labels is not None:
-                loss_fct = CrossEntropyLoss()
-                base_loss = loss_fct(
-                    outputs.logits.view(-1, outputs.logits.shape[-1]),
-                    labels.view(-1),
-                )
-        return outputs, base_loss
 
     def modify(self, config):
         """Initialize DFlash draft module."""
@@ -406,16 +380,6 @@ class HFDFlashModel(DFlashModel):
 
         return loss, accuracy
 
-    def _dflash_base_model_forward(
-        self, input_ids, attention_mask, freeze=True
-    ) -> DFlashBaseModelOutput:
-        """Run base model and extract target hidden states for DFlash."""
-        outputs, _ = self._base_model_forward(input_ids, attention_mask, freeze=freeze)
-        # hidden_states[0] is the embedding output; layer i output is at index i+1
-        selected = [outputs.hidden_states[lid + 1] for lid in self.target_layer_ids]
-        target_hidden = torch.cat(selected, dim=-1)
-        return DFlashBaseModelOutput(target_hidden=target_hidden, logits=outputs.logits)
-
     def forward(
         self,
         input_ids=None,
@@ -464,10 +428,18 @@ class HFDFlashModel(DFlashModel):
                 f"Adjust training_seq_len or use padding."
             )
 
-        # 1. Run base model → extract target hidden states
-        base_outputs = self._dflash_base_model_forward(
-            input_ids, attention_mask, freeze=self.dflash_freeze_base_model
-        )
+        # 1. Run base model → hidden states
+        # TODO: For co-training the base model, remove no_grad and eval() switch.
+        with torch.no_grad():
+            base_outputs = super().forward(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                output_hidden_states=True,
+            )
+
+        offset = 1
+        selected = [base_outputs.hidden_states[lid + offset] for lid in self.target_layer_ids]
+        target_hidden = torch.cat(selected, dim=-1)  # [B, seq, num_layers * H]
 
         # 2. Build loss mask.
         # When labels are provided (answer_only_loss), they already encode both
@@ -497,18 +469,13 @@ class HFDFlashModel(DFlashModel):
         )
         full_pos = self._build_position_ids(seq_len, anchor_positions, device)
         attn_mask = self._build_draft_attention_mask(
-            seq_len,
-            anchor_positions,
-            block_keep_mask,
-            n_blocks,
-            base_outputs.target_hidden.dtype,
-            device,
+            seq_len, anchor_positions, block_keep_mask, n_blocks, target_hidden.dtype, device
         )
 
         # 5. Draft forward
         hidden = self.dflash_module(
             noise_embedding=noise_embedding,
-            target_hidden=base_outputs.target_hidden,
+            target_hidden=target_hidden,
             position_ids=full_pos,
             attention_mask=attn_mask,
         )
@@ -582,14 +549,29 @@ class HFDFlashModel(DFlashModel):
             base_token: Next token from base model [B, 1].
             draft_tokens: Draft tokens [B, min(steps, block_size-1)] or None if steps < 1.
         """
-        base_outputs = self._dflash_base_model_forward(input_ids, attention_mask=None, freeze=True)
-        assert base_outputs.logits is not None
-        base_token = base_outputs.logits[:, -1:, :].argmax(dim=-1).to(input_ids.device)
+        # Call the base model's inner model directly (avoids DynamicModule dispatch)
+        model_output = self._base_model(
+            input_ids=input_ids,
+            output_hidden_states=True,
+        )
+        # Compute logits via lm_head
+        base_logits = self._base_model_lm_head(model_output.last_hidden_state)
+        # Build output with hidden_states
+        base_outputs = ModelOutput(
+            logits=base_logits,
+            hidden_states=model_output.hidden_states,
+        )
+        base_logits = base_outputs.logits
+        base_token = base_logits[:, -1:, :].argmax(dim=-1).to(input_ids.device)
 
         if steps < 1:
             return base_token, None
 
-        target_hidden = base_outputs.target_hidden
+        # Extract target hidden states (raw, before FC projection)
+        hid_offset = 1
+        selected = [base_outputs.hidden_states[lid + hid_offset] for lid in self.target_layer_ids]
+        target_hidden = torch.cat(selected, dim=-1)
+
         block_size = self.dflash_block_size
         bsz = input_ids.shape[0]
         device = input_ids.device

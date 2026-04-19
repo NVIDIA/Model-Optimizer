@@ -85,20 +85,25 @@ class HFEagleModel(EagleModel):
 
     def _find_base_model_parts(self):
         """Find model parts from different models and set base_{part}_path attributes."""
-        for name, paths in {
+        base_model_parts_mapping = {
             "base_model_path": _BASE_MODEL_PATHS,
             "base_model_embeddings_path": _EMBED_TOKENS_PATHS,
             "base_model_lm_head_path": _LM_HEAD_PATHS,
-        }.items():
+        }
+
+        for name, paths in base_model_parts_mapping.items():
+            found_submodule = False
             for path in paths:
                 try:
                     submodule = self.get_submodule(path)
                     assert isinstance(submodule, torch.nn.Module)
+                    print(f"Found {name} at {path}")
+                    found_submodule = True
                     setattr(self, name, path)
                     break
                 except Exception:
                     continue
-            else:
+            if not found_submodule:
                 raise ValueError(f"Part {name} not found in model")
 
     def _activate_torch_compile(self):
