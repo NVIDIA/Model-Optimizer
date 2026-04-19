@@ -1,0 +1,53 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+metadata:
+  recipe_type: ptq
+  description: NVFP4 LAQ post-only learnable amax (W4A16), MSE init with FP8 scale sweep, FP8 KV cache.
+quantize:
+  algorithm:
+    method: laq
+    learnable_amax:
+      - post
+    tied_amax: false
+    scale_algorithm:
+      method: mse
+      fp8_scale_sweep: true
+  quant_cfg:
+    - quantizer_name: '*'
+      enable: false
+    - quantizer_name: '*weight_quantizer'
+      enable: true
+      cfg:
+        block_sizes:
+          -1: 16
+          type: static
+          scale_bits: e4m3
+        num_bits: e2m1
+    - quantizer_name: '*input_quantizer'
+      enable: true
+      cfg:
+        block_sizes:
+          -1: 16
+          type: dynamic
+          scale_bits: e4m3
+        num_bits: e2m1
+    - quantizer_name: '*[kv]_bmm_quantizer'
+      enable: true
+      cfg:
+        num_bits: e4m3
+        axis:
+    - quantizer_name: '*lm_head*'
+      enable: false

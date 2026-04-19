@@ -642,7 +642,65 @@ def _tensor_quant(inputs, amax, num_bits=8, unsigned=False, narrow_range=True):
     return outputs
 
 
+class FP4CastSTEFunction(Function):
+    """FP4 cast with STE backward -- no scale/descale, just rounding."""
+
+    @staticmethod
+    def forward(ctx, x, out_dtype=None, rounding="rne"):
+        """Forward pass: cast to FP4 using triton kernel.
+
+        Args:
+            x: Input tensor of shape [NUM_BLOCKS, BLOCK_SIZE].
+            out_dtype: Output dtype. Defaults to x.dtype.
+            rounding: Rounding mode -- ``"rne"`` (round to nearest even, default)
+                or ``"down"`` (floor toward zero).
+        """
+        if not triton_kernel.IS_AVAILABLE:
+            raise RuntimeError("FP4CastSTEFunction requires triton.")
+        ctx.save_for_backward(x)
+        return triton_kernel.static_blockwise_fp4_cast(x, out_dtype, rounding=rounding)
+
+    @staticmethod
+    def backward(ctx, grad_outputs):
+        """Backward pass: STE with clip mask at |x| <= 6.0."""
+        (x,) = ctx.saved_tensors
+        grad = torch.where(x.abs() <= 6.0, grad_outputs, torch.zeros_like(grad_outputs))
+        return grad, None, None
+
+
+class IntCastSTEFunction(Function):
+    """Integer quantization cast with STE backward, analogous to FP4CastSTEFunction."""
+
+    @staticmethod
+    def forward(ctx, x, num_bits, unsigned=False, narrow_range=True):
+        """Forward pass: clamp-round to integer range."""
+        max_bound = (2.0 ** (num_bits - 1 + int(unsigned))) - 1.0
+        if unsigned:
+            min_bound = 0
+        elif narrow_range:
+            min_bound = -max_bound
+        else:
+            min_bound = -max_bound - 1
+        ctx.save_for_backward(x)
+        ctx.min_bound = min_bound
+        ctx.max_bound = max_bound
+        return torch.clamp(x.round(), min_bound, max_bound)
+
+    @staticmethod
+    def backward(ctx, grad_outputs):
+        """Backward pass: STE with clip mask."""
+        (x,) = ctx.saved_tensors
+        grad = torch.where(
+            (x >= ctx.min_bound) & (x <= ctx.max_bound),
+            grad_outputs,
+            torch.zeros_like(grad_outputs),
+        )
+        return grad, None, None, None
+
+
 fake_tensor_quant = FakeTensorQuantFunction.apply
 scaled_e4m3 = ScaledE4M3Function.apply
 dynamic_block_quant = DynamicBlockQuantizationFunction.apply
 static_blockwise_fp4_fake_quant = StaticBlockwiseFP4FakeQuantFunction.apply
+fp4_cast_ste = FP4CastSTEFunction.apply
+int_cast_ste = IntCastSTEFunction.apply
