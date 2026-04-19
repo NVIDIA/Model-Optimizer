@@ -28,16 +28,15 @@ clusters:
 default_cluster: my-cluster
 ```
 
-### Checkpoint and storage availability
+### Staging checkpoints from your workstation
 
-Cluster compute nodes may not share the same filesystem as login nodes or other clusters. Before running any workload that references a checkpoint path, verify the path is accessible from compute nodes:
+Workstation filesystems (`/home/scratch.*`, local NFS) are **not** mounted on the cluster. If a checkpoint was produced on your workstation, copy it to the cluster's own storage before submitting any job that references it — NEL and SLURM do NOT sync checkpoints automatically.
 
-| Cluster type | Compute-node storage | NOT accessible from compute nodes |
-|-------------|---------------------|----------------------------------|
-| JET clusters (oci-hsg, cw, oci-nrt) | `/lustre/fsw/...` | Workstation NFS (`/home/scratch.*`), other cluster mounts |
-| dlcluster | `/home/omniml_data_*`, `/home/scratch.*` | `/lustre/` paths |
+```bash
+rsync -av /path/to/local/checkpoint <cluster-login>:<cluster-workspace>/checkpoints/
+```
 
-If a checkpoint was produced on a different cluster or workstation, copy it to the target cluster's accessible storage before submitting jobs. NEL and SLURM do NOT sync checkpoints automatically.
+Use the `workspace` path from your cluster config as the destination. Compute nodes on a given cluster share the same storage as its login node, so once staged, the path works everywhere on that cluster.
 
 See `.claude/clusters.yaml.example` for a fully annotated example with multiple cluster types.
 
