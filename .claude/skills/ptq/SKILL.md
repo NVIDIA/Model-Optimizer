@@ -118,9 +118,7 @@ For SLURM, see `skills/common/slurm-setup.md` and `references/slurm-setup-ptq.md
 
 ### Monitoring
 
-- **Launcher**: blocks and tails logs automatically
-- **SLURM (manual)**: poll with `squeue -u $USER` + `sleep` (not cron or background tasks)
-- **Local**: watch stdout
+After job submission, register the job and set up monitoring per the **monitor skill**.
 
 ## Step 5 — Verify output
 
