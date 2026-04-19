@@ -319,19 +319,6 @@ After job submission, you can monitor progress using:
 
 ---
 
-### NEL CI and Cluster-Specific Notes
-
-For running evaluations on NVIDIA JET clusters (oci-hsg, cw, oci-nrt) or SLURM clusters like dlcluster, read `references/nel-ci-guide.md`. It covers:
-- NEL CI GitLab trigger pattern vs NEL SLURM executor
-- Cluster-specific GPU counts and storage paths
-- Checkpoint availability (compute nodes may not share login node filesystems)
-- Environment variable prefixes (`host:`, `lit:`) for SLURM executor
-- SGLang must bind `--host 0.0.0.0` for health checks
-- Directory setup and `chmod 777` for JET service account access
-- Common issues (NGC auth, gated datasets, walltime, `NEL_OTHER_OVERRIDES` space-splitting)
-
----
-
 Direct users with issues to:
 
 - **GitHub Issues:** <https://github.com/NVIDIA-NeMo/Evaluator/issues>
