@@ -37,6 +37,9 @@ def _make_exporter(
     model = MagicMock()
     model.eagle_config.eagle_decoder_type = "llama"
     model.eagle_config.rope_scaling = {"rope_type": rope_type, "rope_theta": rope_theta}
+    # rope_theta lives inside rope_scaling in transformers 5.x; clear the top-level attr
+    # so the fallback path is exercised instead of MagicMock's auto-attr.
+    model.eagle_config.rope_theta = None
     model.eagle_export_rope_scaling = eagle_export_rope_scaling
     model._draft_model_config = None
     model.config.rope_scaling = None
@@ -55,16 +58,18 @@ def test_yarn_rope_injected_with_correct_config():
     assert config["rope_scaling"] == DEFAULT_ROPE_SCALING
 
 
-def test_rope_not_injected_when_non_default_training_rope():
-    """rope_scaling is not overridden when training rope_type is not 'default'."""
+def test_rope_not_overridden_when_non_default_training_rope():
+    """Export override is not applied when training rope_type is not 'default';
+    rope_scaling falls through to the training config."""
     config = _make_exporter(rope_type="llama3")._export_config()
-    assert config.get("rope_scaling") is None
+    assert config["rope_scaling"] == {"rope_type": "llama3", "rope_theta": 10000}
 
 
-def test_rope_not_injected_when_eagle_export_rope_scaling_is_empty():
-    """rope_scaling is not injected when eagle_export_rope_scaling is empty dict."""
+def test_rope_not_overridden_when_eagle_export_rope_scaling_is_empty():
+    """Export override is not applied when eagle_export_rope_scaling is empty;
+    rope_scaling falls through to the training config."""
     config = _make_exporter(eagle_export_rope_scaling={})._export_config()
-    assert config.get("rope_scaling") is None
+    assert config["rope_scaling"] == {"rope_type": "default", "rope_theta": 10000}
 
 
 def test_rope_theta_fallback_from_rope_scaling():
