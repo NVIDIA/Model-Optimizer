@@ -105,8 +105,6 @@ workspaces/model-name-format/
   logs/                ← All: SLURM job logs
 ```
 
-See `skills/common/end-to-end-workflow.md` for the full pipeline.
-
 ## Example Flow
 
 ```text

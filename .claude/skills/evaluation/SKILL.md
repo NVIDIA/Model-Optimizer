@@ -16,7 +16,7 @@ You're an expert in NeMo Evaluator Launcher! Guide the user through creating pro
 
 If `MODELOPT_WORKSPACE_ROOT` is set, read `skills/common/workspace-management.md`. Check for existing workspaces — especially if evaluating a model from a prior PTQ or deployment step. Reuse the existing workspace so you have access to the quantized checkpoint and any code modifications.
 
-This skill is often the final stage of the PTQ → Deploy → Eval pipeline. If the model required runtime patches during deployment (transformers upgrade, framework source fixes), carry those patches into the NEL config via `deployment.command`. See `skills/common/end-to-end-workflow.md` for the full pipeline.
+This skill is often the final stage of the PTQ → Deploy → Eval pipeline. If the model required runtime patches during deployment (transformers upgrade, framework source fixes), carry those patches into the NEL config via `deployment.command`.
 
 ### Workflow
 
