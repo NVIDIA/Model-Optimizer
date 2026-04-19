@@ -35,6 +35,7 @@ import gc
 import json
 import os
 import time
+import warnings
 from pathlib import Path
 from typing import Literal
 
@@ -50,6 +51,17 @@ from torch import Tensor
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
+
+warnings.warn(
+    "LTX-2 packages (ltx-core, ltx-pipelines, ltx-trainer) are provided by Lightricks and are "
+    "NOT covered by the Apache 2.0 license governing NVIDIA Model Optimizer. You MUST comply "
+    "with the LTX Community License Agreement when installing and using LTX-2 with NVIDIA Model "
+    "Optimizer. Any derivative models or fine-tuned weights from LTX-2 (including quantized or "
+    "distilled checkpoints) remain subject to the LTX Community License Agreement, not Apache "
+    "2.0. See: https://github.com/Lightricks/LTX-2/blob/main/LICENSE",
+    UserWarning,
+    stacklevel=1,
+)
 
 # Custom quantization configs. Checked before mtq built-in configs.
 # Add your own configs here; they take precedence over mtq.* attributes.

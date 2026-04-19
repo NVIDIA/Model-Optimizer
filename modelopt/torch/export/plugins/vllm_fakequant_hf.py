@@ -24,6 +24,8 @@ from modelopt.torch.quantization.config import RotateConfig
 from modelopt.torch.quantization.conversion import quantizer_state
 from modelopt.torch.quantization.nn import QuantModule, TensorQuantizer
 from modelopt.torch.quantization.utils import get_quantizer_state_dict
+from modelopt.torch.quantization.utils.core_utils import enable_weight_access_and_writeback
+from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 from modelopt.torch.utils import get_unwrapped_name
 
 __all__ = ["export_hf_vllm_fq_checkpoint"]
@@ -38,9 +40,75 @@ def disable_rotate(quantizer: TensorQuantizer):
     return False
 
 
+def _fakequant_module_weights(
+    module: nn.Module,
+    module_name: str,
+    model: nn.Module,
+    state_dict: dict | None,
+    input_quantizers_folded_pqs: set,
+    fakequant_weights: set,
+    inplace: bool,
+):
+    """Apply fake-quant to a single QuantModule's weights.
+
+    When ``inplace=False``, reads/writes weights from/to ``state_dict``.
+    When ``inplace=True``, modifies the module's weight parameters directly.
+    """
+    if not isinstance(module, QuantModule):
+        return
+    for attr_name, quantizer in module.named_children():
+        if not (
+            attr_name.endswith("weight_quantizer")
+            and isinstance(quantizer, TensorQuantizer)
+            and quantizer.fake_quant
+            and quantizer.is_enabled
+        ):
+            continue
+        weight_name = attr_name.removesuffix("_quantizer")
+        prefix = f"{module_name}." if module_name else ""
+        sd_key = f"{prefix}{weight_name}"
+        assert sd_key not in fakequant_weights, f"Weight {sd_key} has already been fakequantized"
+
+        if inplace:
+            w = getattr(module, weight_name)
+            w_quant = quantizer(w.float()).to(w.dtype)
+        else:
+            assert state_dict is not None
+            if sd_key not in state_dict:
+                continue
+            w = state_dict[sd_key]
+            w_quant = quantizer(w.float()).to(w.dtype)
+
+        # Fold pre_quant_scale: (x*s)@fake_quant(W) = x@(fake_quant(W)*s)
+        # Only valid when input_quantizer does NOT fake-quant activations. If it does
+        # fake_quant(x*s), the non-linearity prevents folding s into W.
+        inp_attr = attr_name.replace("weight_quantizer", "input_quantizer")
+        if hasattr(module, inp_attr):
+            inp_q = getattr(module, inp_attr)
+            if (
+                hasattr(inp_q, "_pre_quant_scale")
+                and inp_q._pre_quant_scale is not None
+                and inp_q._disabled
+            ):
+                scale = inp_q._pre_quant_scale.squeeze().to(device=w_quant.device)
+                w_quant = (w_quant * scale[None, :]).to(w_quant.dtype)
+                inp_q_key = get_unwrapped_name(
+                    f"{module_name}.{inp_attr}" if module_name else inp_attr, model
+                )
+                input_quantizers_folded_pqs.add(inp_q_key)
+
+        if inplace:
+            w.data.copy_(w_quant)
+        else:
+            assert state_dict is not None
+            state_dict[sd_key] = w_quant.cpu()
+        fakequant_weights.add(sd_key)
+
+
 def export_hf_vllm_fq_checkpoint(
     model: nn.Module,
     export_dir: Path | str,
+    inplace_mem_efficient: bool = False,
 ):
     """Export quantized HF weights + ``vllm_fq_modelopt_state.pth`` for vLLM fake-quant reload.
 
@@ -53,62 +121,66 @@ def export_hf_vllm_fq_checkpoint(
     Args:
         model: In-memory quantized model.
         export_dir: Output dir for HF files and ``vllm_fq_modelopt_state.pth``.
+        inplace_mem_efficient: When True, applies fake-quant inplace one decoder layer at
+            a time using ``enable_weight_access_and_writeback``, avoiding full state
+            dict materialization. This is destructive — model weights are permanently
+            modified and weight quantizers are not re-enabled after export.
     """
     export_dir = Path(export_dir)
     export_dir.mkdir(parents=True, exist_ok=True)
 
     # Step 1: Build the folded HF state dict.
-    # model.state_dict() returns detached copies of all tensors, so model
-    # parameters are never modified. Apply each weight quantizer's fake-quant
-    # to the corresponding weight tensor in the copy.
-    state_dict = model.state_dict()
     fakequant_weights = set()
-    input_quantizers_folded_pqs = (
-        set()
-    )  # keys for input_quantizers where pre_quant_scale was folded
+    input_quantizers_folded_pqs = set()
     with torch.inference_mode():
-        for module_name, module in model.named_modules():
-            if not isinstance(module, QuantModule):
-                continue
-            for attr_name, quantizer in module.named_children():
-                if not (
-                    attr_name.endswith("weight_quantizer")
-                    and isinstance(quantizer, TensorQuantizer)
-                    and quantizer.fake_quant
-                    and quantizer.is_enabled
-                ):
+        if inplace_mem_efficient:
+            # Inplace path: iterate decoder layers, one offload<->onload per layer.
+            decoder_layers = LayerActivationCollector.get_decoder_layers(model)
+            assert decoder_layers is not None, (
+                "inplace_mem_efficient=True requires a model with discoverable decoder layers"
+            )
+            for name, module in model.named_modules():
+                if module not in decoder_layers:
                     continue
-                weight_name = attr_name.removesuffix("_quantizer")
-                prefix = f"{module_name}." if module_name else ""
-                sd_key = f"{prefix}{weight_name}"
-                assert sd_key not in fakequant_weights, (
-                    f"Weight {sd_key} has already been fakequantized"
-                )
-                if sd_key in state_dict:
-                    w = state_dict[sd_key]
-                    w_quant = quantizer(w.float()).to(w.dtype).cpu()
-                    # Fold pre_quant_scale: (x*s)@fake_quant(W) = x@(fake_quant(W)*s)
-                    # Only valid when input_quantizer does NOT fake-quant activations. If it does
-                    # fake_quant(x*s), the non-linearity prevents folding s into W.
-                    inp_attr = attr_name.replace("weight_quantizer", "input_quantizer")
-                    if hasattr(module, inp_attr):
-                        inp_q = getattr(module, inp_attr)
-                        if (
-                            hasattr(inp_q, "_pre_quant_scale")
-                            and inp_q._pre_quant_scale is not None
-                            and inp_q._disabled
-                        ):
-                            scale = inp_q._pre_quant_scale.squeeze().to(device=w_quant.device)
-                            w_quant = (w_quant * scale[None, :]).to(w_quant.dtype)
-                            inp_q_key = get_unwrapped_name(
-                                f"{module_name}.{inp_attr}" if module_name else inp_attr, model
-                            )
-                            input_quantizers_folded_pqs.add(inp_q_key)
-                    state_dict[sd_key] = w_quant
-                    fakequant_weights.add(sd_key)
+                with enable_weight_access_and_writeback(module, module):
+                    for sub_name, sub_mod in module.named_modules():
+                        full_name = f"{name}.{sub_name}" if sub_name else name
+                        _fakequant_module_weights(
+                            sub_mod,
+                            full_name,
+                            model,
+                            None,
+                            input_quantizers_folded_pqs,
+                            fakequant_weights,
+                            inplace=True,
+                        )
+            # Meta tensors for offloaded weights (free); offload maps now have
+            # fakequanted values via writeback.
+            state_dict = model.state_dict()
+        else:
+            # Default path: full state_dict copy, fakequant into the copy.
+            state_dict = model.state_dict()
+            for module_name, module in model.named_modules():
+                with enable_weight_access_and_writeback(module, model):
+                    _fakequant_module_weights(
+                        module,
+                        module_name,
+                        model,
+                        state_dict,
+                        input_quantizers_folded_pqs,
+                        fakequant_weights,
+                        inplace=False,
+                    )
 
-    # Filter quantizer tensors out for a clean HF checkpoint.
-    clean_sd = {k: v for k, v in state_dict.items() if "quantizer" not in k}
+    if inplace_mem_efficient:
+        # Let save_pretrained build its own state_dict so offloaded params go through
+        # its module_map / get_state_dict_from_offload path (modeling_utils.py:3967+).
+        # Passing state_dict= bypasses that path and crashes on meta tensors.
+        quantizer_keys = [k for k in state_dict if "quantizer" in k]
+        clean_sd = None
+    else:
+        clean_sd = {k: v for k, v in state_dict.items() if "quantizer" not in k}
+        quantizer_keys = None
 
     # Step 2: Disable weight quantizers, save modelopt state + quantizer state
     # dict, then re-enable. The _disabled=True flag is captured in modelopt_state
@@ -161,9 +233,18 @@ def export_hf_vllm_fq_checkpoint(
     modelopt_state["modelopt_state_weights"] = quantizer_state_dict
     torch.save(modelopt_state, export_dir / "vllm_fq_modelopt_state.pth")
 
-    # Step 3: Save HF weights using the pre-built folded state dict.
-    model.save_pretrained(export_dir, state_dict=clean_sd, save_modelopt_state=False)
+    # Step 3: Save HF weights.
+    if inplace_mem_efficient:
+        prev_ignore = getattr(model, "_keys_to_ignore_on_save", None)
+        model._keys_to_ignore_on_save = quantizer_keys
+        try:
+            model.save_pretrained(export_dir, save_modelopt_state=False)
+        finally:
+            model._keys_to_ignore_on_save = prev_ignore
+    else:
+        model.save_pretrained(export_dir, state_dict=clean_sd, save_modelopt_state=False)
 
-    for wq, orig_rotate in wqs_to_restore:
-        wq.enable()
-        wq._rotate = orig_rotate
+    if not inplace_mem_efficient:
+        for wq, orig_rotate in wqs_to_restore:
+            wq.enable()
+            wq._rotate = orig_rotate

@@ -24,6 +24,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, SchedulerOutput
 
 import modelopt.torch.quantization as mtq
+from modelopt.recipe import ModelOptPTQRecipe, load_recipe
 
 
 def _create_new_data_cls(data_cls, **kwargs):
@@ -141,22 +142,31 @@ def update_kv_cfg_for_mla(model: torch.nn.Module, kv_quant_cfg: list) -> list:
 def get_quant_config(quant_config: dict[str, Any], model: Any) -> dict[str, Any]:
     import copy
 
-    quant_cfg = (
-        copy.deepcopy(getattr(mtq, quant_config["quant_cfg"])) if quant_config["quant_cfg"] else {}
-    )
-    quant_kv_cfg = (
-        copy.deepcopy(getattr(mtq, quant_config["kv_quant_cfg"]))
-        if quant_config["kv_quant_cfg"]
-        else {}
-    )
-
-    # Check if model has MLA and update KV config accordingly
-    if quant_kv_cfg:
-        quant_kv_cfg["quant_cfg"] = update_kv_cfg_for_mla(model, quant_kv_cfg["quant_cfg"])
-
-    if quant_kv_cfg:
-        quant_cfg = mtq.utils.update_quant_cfg_with_kv_cache_quant(
-            quant_cfg, quant_kv_cfg["quant_cfg"]
+    if quant_config["recipe_path"]:
+        recipe = load_recipe(quant_config["recipe_path"])
+        assert isinstance(recipe, ModelOptPTQRecipe), (
+            f"Expected PTQ recipe, but got {type(recipe).__name__} from {quant_config['recipe_path']}"
         )
+        quant_cfg = recipe.quantize
+    else:
+        quant_cfg = (
+            copy.deepcopy(getattr(mtq, quant_config["quant_cfg"]))
+            if quant_config["quant_cfg"]
+            else {}
+        )
+        quant_kv_cfg = (
+            copy.deepcopy(getattr(mtq, quant_config["kv_quant_cfg"]))
+            if quant_config["kv_quant_cfg"]
+            else {}
+        )
+
+        # Check if model has MLA and update KV config accordingly
+        if quant_kv_cfg:
+            quant_kv_cfg["quant_cfg"] = update_kv_cfg_for_mla(model, quant_kv_cfg["quant_cfg"])
+
+        if quant_kv_cfg:
+            quant_cfg = mtq.utils.update_quant_cfg_with_kv_cache_quant(
+                quant_cfg, quant_kv_cfg["quant_cfg"]
+            )
 
     return quant_cfg

@@ -57,6 +57,12 @@ repos:
 
   - repo: local
     hooks:
+      - id: normalize-yaml-ext
+        name: normalize .yml to .yaml in required places, right now only yaml files in modelopt_recipes
+        entry: python tools/precommit/normalize_yaml_ext.py
+        language: system
+        files: ^modelopt_recipes/.*\.yml$
+
       - id: check-modelopt-recipes
         name: validate modelopt recipes
         entry: python tools/precommit/check_modelopt_recipes.py
@@ -88,6 +94,7 @@ repos:
               modelopt/onnx/quantization/ort_patching.py|
               modelopt/torch/_deploy/utils/onnx_utils.py|
               modelopt/torch/export/transformer_engine.py|
+              modelopt/torch/puzzletron/anymodel/models/gpt_oss/gpt_oss_pruned_to_mxfp4.py|
               modelopt/torch/quantization/export_onnx.py|
               modelopt/torch/quantization/plugins/attention.py|
               modelopt/torch/sparsity/attention_sparsity/methods/vsa_utils.py|

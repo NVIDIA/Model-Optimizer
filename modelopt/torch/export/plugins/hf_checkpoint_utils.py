@@ -21,14 +21,13 @@ import shutil
 from pathlib import Path
 
 import torch
-from huggingface_hub import hf_hub_download, list_repo_files
+from huggingface_hub import snapshot_download
 from safetensors.torch import safe_open
 from tqdm import tqdm
 
 
-def copy_remote_code(
-    pretrained_model_path: str | os.PathLike,
-    save_directory: str | os.PathLike,
+def copy_hf_ckpt_remote_code(
+    pretrained_model_path: str | os.PathLike, save_directory: str | os.PathLike
 ):
     """Copy remote code from pretrained model to save directory.
 
@@ -37,7 +36,7 @@ def copy_remote_code(
     frameworks.
 
     If ``pretrained_model_path`` is a local directory, Python files are copied directly.
-    If it is a HuggingFace Hub model ID, Python files are downloaded from the Hub first.
+    If it's a HF Hub model ID (e.g. ``nvidia/NVIDIA-Nemotron-Nano-12B-v2``), files are downloaded from the Hub.
 
     Args:
         pretrained_model_path: Local path to the pretrained model or HuggingFace Hub model ID.
@@ -45,18 +44,17 @@ def copy_remote_code(
     """
     hf_checkpoint_path = Path(pretrained_model_path)
     save_dir = Path(save_directory)
+    save_dir.mkdir(parents=True, exist_ok=True)
 
     if hf_checkpoint_path.is_dir():
         for py_file in hf_checkpoint_path.glob("*.py"):
-            if py_file.is_file():
-                shutil.copy(py_file, save_dir / py_file.name)
+            shutil.copy2(py_file, save_dir / py_file.name)
     else:
-        # Hub model ID: download any top-level .py files (custom modeling code)
-        repo_id = str(pretrained_model_path)
-        for filename in list_repo_files(repo_id):
-            if "/" not in filename and filename.endswith(".py"):
-                local_path = hf_hub_download(repo_id=repo_id, filename=filename)
-                shutil.copy(local_path, save_dir / filename)
+        snapshot_download(
+            repo_id=str(pretrained_model_path),
+            local_dir=str(save_dir),
+            allow_patterns=["*.py"],
+        )
 
 
 def load_multimodal_components(

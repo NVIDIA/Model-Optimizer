@@ -109,12 +109,13 @@ class LLM(TRTLLM):
         if tp < 1:
             tp = torch.cuda.device_count()
 
-        # Check if any key in config contains both "num" and "experts"
+        # Force ep=1 to avoid TRT-LLM DeepEP kernel failures on unsupported GPUs
+        # (e.g. Blackwell SM 12.0). Expert parallelism can be enabled explicitly
+        # by the caller when the environment is known to support it.
         ep = 1
         enable_attention_dp = False
         for k in config:
             if "num" in k and "experts" in k:
-                ep = torch.cuda.device_count()
                 enable_attention_dp = True
                 break
 

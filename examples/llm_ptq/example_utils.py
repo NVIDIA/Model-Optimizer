@@ -15,6 +15,7 @@
 
 import copy
 import glob
+import hashlib
 import inspect
 import json
 import logging
@@ -854,3 +855,35 @@ def copy_custom_model_files(source_path: str, export_path: str, trust_remote_cod
         print(f"Successfully copied {len(copied_files)} custom model files to {export_path}")
     else:
         print("No custom model files found to copy")
+
+
+def needs_checkpoint_path_update(quant_cfg: dict) -> bool:
+    """Check if quant_cfg has a layerwise_checkpoint_dir that should be auto-resolved to a unique subpath."""
+    algorithm = quant_cfg.get("algorithm")
+    if not isinstance(algorithm, dict):
+        return False
+    return algorithm.get("layerwise_checkpoint_dir") is not None
+
+
+def resolve_checkpoint_dir(quant_cfg: dict, model_path: str) -> dict:
+    """Append a unique ``<model_name>_<config_hash>`` subdirectory to layerwise_checkpoint_dir.
+
+    Allows a single recipe to be reused across models without checkpoint collisions.
+    Must only be called when :func:`needs_checkpoint_path_update` returns True.
+    """
+    algorithm = quant_cfg["algorithm"]
+    base_dir = algorithm["layerwise_checkpoint_dir"]
+
+    name = model_path.rstrip("/")
+    if "/" in name and not os.path.isabs(name):
+        name = name.replace("/", "--")
+    else:
+        name = Path(name).name
+
+    config_hash = hashlib.sha256(json.dumps(quant_cfg, default=str).encode()).hexdigest()[:8]
+
+    quant_cfg = copy.deepcopy(quant_cfg)
+    quant_cfg["algorithm"]["layerwise_checkpoint_dir"] = os.path.join(
+        base_dir, f"{name}_{config_hash}"
+    )
+    return quant_cfg

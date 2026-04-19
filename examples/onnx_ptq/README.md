@@ -56,7 +56,7 @@ Most of the examples in this doc use `vit_base_patch16_224.onnx` as the input mo
 
 ```bash
 python download_example_onnx.py \
-    --vit \
+    --timm_model_name=vit_base_patch16_224 \
     --onnx_save_path=vit_base_patch16_224.onnx \
     --fp16 # <Optional, if the desired output ONNX precision is FP16>
 ```

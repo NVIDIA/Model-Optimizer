@@ -44,6 +44,7 @@ import logging
 import os
 import struct
 import sys
+import warnings
 from collections import Counter
 from pathlib import Path
 
@@ -66,6 +67,17 @@ import modelopt.torch.quantization as mtq
 from modelopt.torch.distill.distillation_model import DistillationModel
 from modelopt.torch.quantization.config import NVFP4_DEFAULT_CFG
 from modelopt.torch.utils import safe_load
+
+warnings.warn(
+    "LTX-2 packages (ltx-core, ltx-pipelines, ltx-trainer) are provided by Lightricks and are "
+    "NOT covered by the Apache 2.0 license governing NVIDIA Model Optimizer. You MUST comply "
+    "with the LTX Community License Agreement when installing and using LTX-2 with NVIDIA Model "
+    "Optimizer. Any derivative models or fine-tuned weights from LTX-2 (including quantized or "
+    "distilled checkpoints) remain subject to the LTX Community License Agreement, not Apache "
+    "2.0. See: https://github.com/Lightricks/LTX-2/blob/main/LICENSE",
+    UserWarning,
+    stacklevel=1,
+)
 
 logger = logging.getLogger(__name__)
 

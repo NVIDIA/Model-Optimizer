@@ -18,11 +18,11 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any
 
 from pydantic import field_validator
 
 from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
+from modelopt.torch.quantization.config import QuantizeConfig
 
 
 class RecipeType(str, Enum):
@@ -66,8 +66,8 @@ class ModelOptRecipeBase(ModeloptBaseConfig):
 class ModelOptPTQRecipe(ModelOptRecipeBase):
     """Our config class for PTQ recipes."""
 
-    quantize: dict[str, Any] = ModeloptField(
-        default={},
+    quantize: QuantizeConfig = ModeloptField(
+        default=QuantizeConfig(),
         title="PTQ config",
         description="PTQ config containing quant_cfg and algorithm.",
         validate_default=True,

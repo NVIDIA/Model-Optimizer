@@ -1,0 +1,91 @@
+# DFlash online speculative decoding training for Qwen3-8B.
+#
+# 3-step pipeline:
+#   task_0: Online DFlash training
+#   task_1: vLLM smoke test with DFlash speculative decoding
+#   task_2: MT-Bench per-category HF AR evaluation (1 GPU)
+#
+# Convergence baseline (8x B200, batch_size=1, seq_len=4096, 5-layer draft, block_size=16):
+#   100K samples, 1 epoch (~12,500 steps)
+#   Step   100 (epoch 0.01): loss=8.900  acc=0.029
+#   Step  1000 (epoch 0.08): loss=5.845  acc=0.096
+#   Step  2500 (epoch 0.20): loss=4.981  acc=0.138
+#   Step  5000 (epoch 0.40): loss=4.383  acc=0.176
+#   Step  7500 (epoch 0.60): loss=4.040  acc=0.196
+#   Step 10000 (epoch 0.80): loss=3.900  acc=0.210
+#   Step 12500 (epoch 1.00): loss=3.821  acc=0.200
+#   Average train_loss=4.493, training time=5094s
+#
+# Regression criteria (set via environment):
+#   MAX_FINAL_LOSS: final loss must be below this (default: 5.0)
+#   MIN_FINAL_ACC:  final accuracy must be above this (default: 0.15)
+#
+# Reference: "DFlash: Block Diffusion for Flash Speculative Decoding" (arXiv:2602.06036)
+#
+# Usage:
+#   uv run launch.py --yaml examples/Qwen/Qwen3-8B/hf_online_dflash.yaml --yes
+#   uv run slurm.py --yaml modules/Model-Optimizer/tools/launcher/examples/Qwen/Qwen3-8B/hf_online_dflash.yaml --yes
+
+job_name: Qwen3-8B_DFlash_online
+pipeline:
+  global_vars:
+    hf_model: /hf-local/Qwen/Qwen3-8B
+
+  # Step 1: Online DFlash training
+  task_0:
+    script: common/specdec/dflash_online_training.sh
+    args:
+      - --config modules/Model-Optimizer/modelopt_recipes/general/speculative_decoding/dflash.yaml
+      - model.model_name_or_path=<<global_vars.hf_model>>
+      - data.data_path=/hf-local/modelopt/Speculative-Decoding-Dataset-v1-Qwen3-8B/sample-100K-openai.jsonl
+      - data.chat_template=examples/Qwen/Qwen3-8B/chat_template_train.jinja
+      - training.output_dir=/scratchspace/dflash_bs16
+      - training.per_device_train_batch_size=1
+      - training.num_train_epochs=1
+      - training.training_seq_len=4096
+      - training.save_steps=5000
+      - training.logging_steps=100
+      - training.disable_tqdm=true
+      - training.answer_only_loss=true
+      - dflash.dflash_block_size=16
+      - dflash.dflash_num_anchors=512
+      - dflash.dflash_loss_decay_factor=7
+      - dflash.dflash_mask_token_id=151669
+      - dflash.dflash_architecture_config.num_hidden_layers=5
+    environment:
+      - MAX_FINAL_LOSS: "5.0"
+      - MIN_FINAL_ACC: "0.15"
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 8
+
+  # Step 2: vLLM smoke test (uses exported checkpoint from training)
+  task_1:
+    script: common/specdec/vllm_smoke_test.sh
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+      - DRAFT_CKPT_DIR: /scratchspace/dflash_bs16
+      - SPEC_METHOD: "dflash"
+      - NUM_SPEC_TOKENS: "7"
+      - MIN_ACCEPTANCE_LENGTH: "1.4"
+    slurm_config:
+      _factory_: "slurm_factory"
+      container: "vllm/vllm-openai:nightly"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 1
+
+  # Step 3: HF AR evaluation
+  task_2:
+    script: common/specdec/ar_eval_mtbench.sh
+    args:
+      - --ckpt_dir /scratchspace/dflash_bs16
+      - --osl 512
+      - --steps 15
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 1

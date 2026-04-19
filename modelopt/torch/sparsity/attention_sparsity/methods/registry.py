@@ -40,6 +40,10 @@ class SparseAttentionMethod(ABC):
         # Video shape for VSA (T, H, W). None for non-VSA methods.
         self.video_shape: tuple[int, int, int] | None = None
 
+    def set_calibration_mode(self, enabled: bool) -> None:
+        """Enable or disable calibration mode (called by DynamicThresholdCalibrator)."""
+        self._calibration_mode = enabled
+
     def forward_attention(
         self,
         query: torch.Tensor,

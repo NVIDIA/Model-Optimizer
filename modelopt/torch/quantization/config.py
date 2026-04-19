@@ -1217,15 +1217,35 @@ class QuantizeAlgorithmConfig(ModeloptBaseConfig):
         ),
     )
 
-    use_sequential: bool = ModeloptField(
+    layerwise: bool = ModeloptField(
         default=False,
-        title="Enable sequential layer-by-layer calibration.",
+        title="Enable layerwise (layer-by-layer) calibration.",
         description=(
-            "If True, the calibration algorithm is applied sequentially to each decoder block. "
-            "The current approach recomputes a full forward pass per layer to propagate updated activations,"
-            "incurring O(N²) cost. Future revisions will add caching to eliminate redundant passes."
+            "If True, the calibration algorithm is applied layer by layer. "
+            "Each layer's inputs are captured via a forward pass that reflects the "
+            "quantization of all preceding layers, incurring O(N) forward passes for N layers."
         ),
     )
+
+    layerwise_checkpoint_dir: str | None = ModeloptField(
+        default=None,
+        title="Checkpoint directory for layerwise calibration.",
+        description=(
+            "If set together with layerwise=True, per-layer checkpoints are saved to this "
+            "directory during calibration. On restart, calibration resumes from the last "
+            "completed layer."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def validate_layerwise_checkpoint_dir(self):
+        """Raise if layerwise_checkpoint_dir is set but layerwise is False."""
+        if self.layerwise_checkpoint_dir is not None and not self.layerwise:
+            raise ValueError(
+                "layerwise_checkpoint_dir requires layerwise=True. "
+                "Set layerwise=True or remove layerwise_checkpoint_dir."
+            )
+        return self
 
 
 class MaxCalibConfig(QuantizeAlgorithmConfig):
