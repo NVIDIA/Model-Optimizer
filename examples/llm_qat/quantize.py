@@ -73,10 +73,14 @@ def quantize():
 
     # Load model and tokenizer
     print_rank_0(f"Loading model: {model_args.model_name_or_path}")
+    model_kwargs = {}
+    if model_args.attn_implementation:
+        model_kwargs["attn_implementation"] = model_args.attn_implementation
     model = transformers.AutoModelForCausalLM.from_pretrained(
         model_args.model_name_or_path,
         dtype=torch.bfloat16,
         device_map="auto",
+        **model_kwargs,
     )
     tokenizer = transformers.AutoTokenizer.from_pretrained(
         model_args.model_name_or_path, model_max_length=model_args.model_max_length

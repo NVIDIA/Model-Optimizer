@@ -19,21 +19,28 @@ from dataclasses import field
 
 import transformers
 
-from modelopt.torch.opt.plugins.transformers import ModelOptHFArguments
+from modelopt.torch.opt.plugins.transformers import ModelOptHFArguments, ModelOptTrainerArguments
 
 
 class ModelArguments(ModelOptHFArguments):
     model_name_or_path: str = field(
         default="meta-llama/Llama-2-7b-hf",
-        metadata={
-            "help": "HuggingFace model name or local path to the base model to quantize/train."
-        },
+        metadata={"help": "HuggingFace model ID or local path to a pretrained model."},
     )
     model_max_length: int = field(
-        default=4096,
+        default=8192,
         metadata={
             "help": (
                 "Maximum sequence length. Sequences will be right-padded (and possibly truncated)."
+            )
+        },
+    )
+    attn_implementation: str | None = field(
+        default=None,
+        metadata={
+            "help": (
+                "Attention implementation: 'flash_attention_2', 'flash_attention_3', "
+                "'sdpa', or 'eager'."
             )
         },
     )
@@ -74,10 +81,13 @@ class DataArguments(ModelOptHFArguments):
     )
 
 
-class TrainingArguments(ModelOptHFArguments, transformers.TrainingArguments):
-    cache_dir: str | None = field(default=None)
+class TrainingArguments(ModelOptTrainerArguments, transformers.TrainingArguments):
     dataloader_drop_last: bool = field(default=True)
     bf16: bool = field(default=True)
+    use_liger_kernel: bool = field(
+        default=True,
+        metadata={"help": "Use Liger kernel for fused loss computation. Reduces memory usage."},
+    )
     lora: bool = field(
         default=False,
         metadata={

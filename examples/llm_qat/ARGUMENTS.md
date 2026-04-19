@@ -7,8 +7,10 @@ _Auto-generated — do not edit by hand._
 | Argument | Type | Default | Description |
 |----------|------|---------|-------------|
 | `--distill` | `bool` | `False` | Enable training with knowledge distillation. |
-| `--teacher_model` | `str` | `None` | The name or path of the teacher model to use for distillation. |
+| `--teacher_model` | `str` | `None` | The name or path of the teacher model. |
 | `--criterion` | `str` | `"logits_loss"` | Distillation loss criterion. Currently only 'logits_loss' is supported. |
+| `--temperature` | `float` | `1.0` | Softmax temperature for softening logits in KD loss. Used by both standard and Liger KD loss. |
+| `--liger_jsd_beta` | `float` | `0.0` | JSD beta coefficient in [0, 1]. 0=forward KL, 1=reverse KL. Only used when --use_liger_kernel is enabled. |
 
 ## DataArguments
 
@@ -27,8 +29,9 @@ _Auto-generated — do not edit by hand._
 
 | Argument | Type | Default | Description |
 |----------|------|---------|-------------|
-| `--model_name_or_path` | `str` | `"meta-llama/Llama-2-7b-hf"` | HuggingFace model name or local path to the base model to quantize/train. |
-| `--model_max_length` | `int` | `4096` | Maximum sequence length. Sequences will be right-padded (and possibly truncated). |
+| `--model_name_or_path` | `str` | `"meta-llama/Llama-2-7b-hf"` | HuggingFace model ID or local path to a pretrained model. |
+| `--model_max_length` | `int` | `8192` | Maximum sequence length. Sequences will be right-padded (and possibly truncated). |
+| `--attn_implementation` | `str` | `None` | Attention implementation: 'flash_attention_2', 'flash_attention_3', 'sdpa', or 'eager'. |
 
 ## QuantizeArguments
 
@@ -46,5 +49,10 @@ Extends [HuggingFace TrainingArguments](https://huggingface.co/docs/transformers
 
 | Argument | Type | Default | Description |
 |----------|------|---------|-------------|
-| `--cache_dir` | `str` | `None` |  |
+| `--trainable_params` | `list[str]` | `None` | Glob patterns (fnmatch) for parameters that should be trainable. All other parameters will be frozen. Mutually exclusive with frozen_params. |
+| `--frozen_params` | `list[str]` | `None` | Glob patterns (fnmatch) for parameters that should be frozen. Mutually exclusive with trainable_params. |
+| `--lr_config` | `str` | `None` | Path to a YAML file mapping fnmatch patterns to optimizer kwargs (e.g. lr, weight_decay). First matching pattern wins per parameter. See examples/llm_qat/configs/train/lr_config_example.yaml. |
+| `--save_dtype` | `str` | `"bfloat16"` | Dtype string to write into the saved model's config.json (e.g. 'bfloat16', 'float16'). Set to None to preserve the original dtype. |
+| `--manual_gc` | `bool` | `False` | Run `gc.collect()` before each training/prediction step to work around GPU memory leaks during QAT/distillation. |
+| `--liger_ce_label_smoothing` | `float` | `0.0` | Label smoothing for Liger fused CE loss. Only used when --use_liger_kernel is enabled. |
 | `--lora` | `bool` | `False` | Whether to add LoRA (Low-Rank Adaptation) adapter before training. When using real quantization, the LoRA adapter must be set, as quantized weights will be frozen during training. |

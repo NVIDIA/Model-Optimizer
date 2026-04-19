@@ -140,22 +140,23 @@ trainer.train()
 trainer.save_model()
 ```
 
-`QADTrainer` extends `QATTrainer` with distillation:
+`QADTrainer` extends `QATTrainer` with distillation. Pass the teacher model and a `DistillArguments` instance:
 
 ```python
-from modelopt.torch.distill.plugins.huggingface import LMLogitsLoss
+from modelopt.torch.distill.plugins.huggingface import DistillArguments
 from modelopt.torch.quantization.plugins.transformers_trainer import QADTrainer
 
-distill_config = {
-    "teacher_model": teacher_model,
-    "criterion": LMLogitsLoss(),
-}
+distill_args = DistillArguments(
+    distill=True,
+    teacher_model="Qwen/Qwen3-8B",
+    criterion="logits_loss",
+)
 
 trainer = QADTrainer(
     model=model,            # pre-quantized model
     processing_class=tokenizer,
     args=training_args,
-    distill_config=distill_config,
+    distill_args=distill_args,
     **data_module,
 )
 trainer.train()

@@ -78,6 +78,7 @@ hf = [
     "deepspeed>=0.9.6; platform_system != 'Darwin' and platform_system != 'Windows'",
     "diffusers>=0.32.2",
     "huggingface_hub>=0.24.0",
+    "liger-kernel>=0.5.0",
     "nltk",
     "peft>=0.17.0",
     "sentencepiece>=0.2.1",                                                           # Also implicitly used in test_unified_export_megatron, test_vllm_fakequant_megatron_export
