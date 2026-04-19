@@ -240,6 +240,7 @@ def test_gptq_e2e_flow(quant_cfg):
 # ---------------------------------------------------------------------------
 
 
+# TODO(shiychen): This should be extracted out from production code path
 def _compute_h_inv(hessian, weight, percdamp=0.01):
     """Compute damped upper-Cholesky inverse Hessian."""
     h = hessian.clone()
@@ -272,6 +273,7 @@ def _make_nvfp4_test_data(quant_block_size, out_features, dim):
     return weight, scales_2d, h_inv
 
 
+# TODO(shiychen): This should be extracted out from production code path
 def _run_unfused_gptq_nvfp4(weight, scales_2d, h_inv, gptq_block_size, quant_block_size):
     """Unfused NVFP4 GPTQ using the production Triton FP4 kernel per column.
 
@@ -319,18 +321,16 @@ def _run_fused_gptq_nvfp4(weight, scales_2d, h_inv, gptq_block_size, quant_block
     w = weight.float().clone()
     for bs in range(0, dim, gptq_block_size):
         be = min(bs + gptq_block_size, dim)
-        nc = be - bs
         qw, err = gptq_fused_block_scalar(
             w[:, bs:be].clone().contiguous(),
             scales_2d,
             h_inv[bs:be, bs:be].contiguous(),
             quant_block_size,
             bs,
-            nc,
         )
         w[:, bs:be] = qw
         if be < dim:
-            w[:, be:].addmm_(err[:, :nc], h_inv[bs:be, be:], alpha=-1)
+            w[:, be:].addmm_(err, h_inv[bs:be, be:], alpha=-1)
     return w
 
 

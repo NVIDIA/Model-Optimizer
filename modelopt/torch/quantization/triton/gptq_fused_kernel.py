@@ -53,7 +53,6 @@ def _gptq_scalar_kernel(
     n_scale_blocks,
     quant_block_size,
     block_start,
-    n_cols,
     BLOCK_SIZE: tl.constexpr,
 ):
     row = tl.program_id(0)
@@ -66,7 +65,7 @@ def _gptq_scalar_kernel(
     scales_base = scales_ptr + row * n_scale_blocks
 
     j_range = tl.arange(0, BLOCK_SIZE)
-    w_full = tl.load(w_base + j_range, mask=j_range < n_cols, other=0.0)
+    w_full = tl.load(w_base + j_range)
 
     for col in range(0, BLOCK_SIZE, 1):
         scale = tl.load(scales_base + (block_start + col) // quant_block_size)
@@ -85,7 +84,7 @@ def _gptq_scalar_kernel(
         tl.store(err_base + col, err_val)
         tl.store(qw_base + col, q_scalar)
 
-        remaining = (j_range > col) & (j_range < n_cols)
+        remaining = j_range > col
         hinv_row = tl.load(hinv_ptr + col * BLOCK_SIZE + j_range, mask=remaining, other=0.0)
         w_full = w_full - err_val * hinv_row
 
@@ -96,7 +95,6 @@ def gptq_fused_block_scalar(
     h_inv_cho_blk: torch.Tensor,
     quant_block_size: int,
     block_start: int,
-    n_cols: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Run scalar GPTQ (NVFP4) column loop for one block in a single Triton kernel launch.
 
@@ -106,7 +104,6 @@ def gptq_fused_block_scalar(
         h_inv_cho_blk:   Block of upper-Cholesky inverse Hessian ``[block_size, block_size]``.
         quant_block_size: Number of elements sharing one scale factor.
         block_start:     Column offset of this block in the full weight matrix.
-        n_cols:          Number of active columns in this block.
 
     Returns:
         ``(qw_block, err_block)`` each ``[num_rows, block_size]``.
@@ -126,7 +123,6 @@ def gptq_fused_block_scalar(
         scales_2d.shape[1],
         quant_block_size,
         block_start,
-        n_cols,
         BLOCK_SIZE=block_size,
     )
 
