@@ -4,7 +4,7 @@ description: Query and browse evaluation results stored in MLflow. Use when the 
 license: Apache-2.0
 # Vendored verbatim from NVIDIA NeMo Evaluator (commit 01899f8)
 # https://github.com/NVIDIA-NeMo/Evaluator/tree/01899f89e8f31116efbca56e8f87fbd8513e24ac/packages/nemo-evaluator-launcher/.claude/skills/accessing-mlflow
-# To re-sync: scripts/sync-upstream-skills.sh
+# To re-sync: .claude/scripts/sync-upstream-skills.sh
 # Note: this skill depends on the mlflow-mcp MCP server (https://github.com/kkruglik/mlflow-mcp)
 # configured in the user's Claude Code setup.
 ---

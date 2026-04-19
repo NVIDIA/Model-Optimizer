@@ -4,7 +4,7 @@ description: Run, monitor, analyze, and debug LLM evaluations via nemo-evaluator
 license: Apache-2.0
 # Vendored verbatim from NVIDIA NeMo Evaluator (commit 01899f8)
 # https://github.com/NVIDIA-NeMo/Evaluator/tree/01899f89e8f31116efbca56e8f87fbd8513e24ac/packages/nemo-evaluator-launcher/.claude/skills/launching-evals
-# To re-sync: scripts/sync-upstream-skills.sh
+# To re-sync: .claude/scripts/sync-upstream-skills.sh
 ---
 
 # NeMo Evaluator Skill
