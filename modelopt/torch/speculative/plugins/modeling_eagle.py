@@ -46,7 +46,7 @@ class EagleModule(nn.Module):
                 "EAGLE module's vocab size should be <= base model vocab size!"
             )
             # Initialize the buffers to zero.
-            # Their values depend on specific tokenzier and calibrate dataset, and should be set in training script.
+            # Their values depend on specific tokenizer and calibration dataset, and should be set in training script.
             if config.draft_vocab_size < config.vocab_size:
                 self.register_buffer("d2t", torch.zeros(config.draft_vocab_size, dtype=torch.int64))
             self.lm_head = nn.Linear(
