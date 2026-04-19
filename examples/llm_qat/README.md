@@ -1,363 +1,338 @@
-# Quantization Aware Training (QAT)
+# Quantization Aware Training (QAT) and Distillation (QAD)
 
-Quantization Aware Training (QAT) helps to improve the model accuracy beyond post training quantization (PTQ). QAT can further preserve model accuracy at low precisions (e.g., INT4, or FP4 in [NVIDIA Blackwell platform](https://www.nvidia.com/en-us/data-center/technologies/blackwell-architecture/)).
+Quantization Aware Training (QAT) improves model accuracy beyond post-training quantization (PTQ) at low precisions (e.g., INT4, FP4 on [NVIDIA Blackwell](https://www.nvidia.com/en-us/data-center/technologies/blackwell-architecture/)). Quantization Aware Distillation (QAD) further improves accuracy by using the original full-precision model as a teacher.
+
+For background on how QAT enables low-precision accuracy recovery, see the [QAT/QAD blog post](https://developer.nvidia.com/blog/how-quantization-aware-training-enables-low-precision-accuracy-recovery/).
 
 <div align="center">
 
 | **Section** | **Description** | **Link** | **Docs** |
-| :------------: | :------------: | :------------: | :------------: |
-| Pre-Requisites | Required & optional packages to use this technique | \[[Link](#pre-requisites)\] | |
-| Getting Started | Learn how to optimize your models using QAT to reduce precision and improve model accuracy post quantization | \[[Link](#getting-started)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/1_quantization.html)\] |
-| Support Matrix | View the support matrix to see quantization compatibility and feature availability across different models | \[[Link](#support-matrix)\] | |
-| End to End QAT | Example scripts demonstrating quantization techniques for optimizing Hugging Face models | \[[Link](#end-to-end-qat-example)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/1_quantization.html)\] |
-| End to End QAD | Example scripts demonstrating quantization aware distillation techniques for optimizing Hugging Face models | \[[Link](#end-to-end-qad-example)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/1_quantization.html)\] |
-| Evaluate Accuracy | Evaluating model accuracy after QAT/QAD (with fake quantization) | \[[Link](#testing-qat-model-with-llm-benchmarks-for-accuracy-evaluation)\] | |
-| Deployment | Deploying the model after QAT/QAD | \[[Link](#deployment)\] | |
-| QLoRA | Model training with reduced GPU memory | \[[Link](#end-to-end-qlora-with-real-quantization)\] | |
-| Pre-Quantized Checkpoints | Ready to deploy Hugging Face pre-quantized checkpoints | \[[Link](#pre-quantized-checkpoints)\] | |
-| Resources | Extra links to relevant resources | \[[Link](#resources)\] | |
+| :---: | :---: | :---: | :---: |
+| Quick Start | Prerequisites and setup | \[[Link](#quick-start)\] | |
+| End-to-End Example | Run QAT/QAD in 3 steps: quantize, train, export | \[[Link](#run-end-to-end-qatqad-example)\] | |
+| Background | How QAT/QAD work and when to use each | \[[Link](#background)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/1_quantization.html)\] |
+| Support Matrix | Supported models, quantization formats, and backends | \[[Link](#support-matrix)\] | |
+| QLoRA | Model training with reduced GPU memory | \[[Link](#qlora-real-quantization)\] | |
+| Advanced Topics | FSDP2 config, YAML options | \[[Link](#advanced-topics)\] | |
+| Results | Accuracy benchmarks | \[[Link](#results)\] | |
+| Resources | Extra links and references | \[[Link](#resources)\] | |
 
 </div>
 
-## Pre-Requisites
+## Quick Start
 
-Please refer to the [llm_ptq/README.md](../llm_ptq/README.md#pre-requisites) for the pre-requisites.
+### Prerequisites
 
-## Getting Started
+Please refer to [llm_ptq/README.md](../llm_ptq/README.md#pre-requisites) for prerequisites.
 
-In QAT, a model quantized using [mtq.quantize()](https://nvidia.github.io/Model-Optimizer/reference/generated/modelopt.torch.quantization.model_quant.html#modelopt.torch.quantization.model_quant.quantize) can be directly fine-tuned with the original training pipeline. During QAT, the scaling factors inside quantizers are frozen and the model weights are fine-tuned.
+The Qwen3-8B example below requires a minimum of **2 x 80GB GPUs**.
 
-To learn more about the QAT feature, please refer to the [documentation](https://nvidia.github.io/Model-Optimizer/guides/_pytorch_quantization.html#quantization-aware-training-qat).
+## Run End-to-End QAT/QAD Example
 
-Quantization aware distillation (QAD) can be used to further improve accuracy of the model using the original full precision model as a teacher model in cases where QAT is not enough.
+All arguments can be specified via YAML config, CLI flags, or both (CLI overrides YAML). See [Advanced Topics](#advanced-topics).
 
-### Hugging Face QAT / QAD
+### QAT
 
-> **_NOTE:_** In this example, a QAT and QAD workflow is demonstrated for Huggingface text generation model for supervised fine-tuning (SFT). However, the workflow is general and can be extended to frameworks such as [Megatron-Bridge](https://github.com/NVIDIA-NeMo/Megatron-Bridge) and models beyond LLMs such as CNN-based vision models.
+Quantize, fine-tune on labeled data, and export:
 
-#### System Requirements
+```sh
+# 1. Quantize
+python quantize.py \
+  --model_name_or_path Qwen/Qwen3-8B \
+  --dataset_config configs/dataset/blend.yaml \
+  --recipe general/ptq/nvfp4_default-fp8_kv \
+  --quantize_output_dir qwen3-8b-quantized
 
-The Llama3-8B fine-tuning and QAT below requires a minimum of 2 x 80GB GPUs per machine.
+# 2. Train
+accelerate launch --config-file configs/accelerate/fsdp2.yaml train.py \
+  --config configs/train/qat_nvfp4.yaml \
+  --model_name_or_path qwen3-8b-quantized \
+  --output_dir qwen3-8b-qat-nvfp4
 
-#### QAT Example Workflow
+# 3. Export
+python export.py --pyt_ckpt_path qwen3-8b-qat-nvfp4 --export_path qwen3-8b-qat-deploy
+```
 
-In QAT, a model quantized using [mtq.quantize()](https://nvidia.github.io/Model-Optimizer/reference/generated/modelopt.torch.quantization.model_quant.html#modelopt.torch.quantization.model_quant.quantize) can be directly fine-tuned with the original training pipeline. During QAT, the scaling factors inside quantizers are frozen and the model weights are fine-tuned.
+### QAD
 
-Here is the recommended QAT workflow:
+Quantize, recover accuracy using the original model as teacher, and export:
 
-Step 1: Train/fine-tune the model in the original precision without quantization.
+```sh
+# 1. Quantize
+python quantize.py \
+  --model_name_or_path Qwen/Qwen3-8B \
+  --dataset_config configs/dataset/blend.yaml \
+  --recipe general/ptq/nvfp4_default-fp8_kv \
+  --quantize_output_dir qwen3-8b-quantized
 
-Step 2: Quantize the model from step 1 with `mtq.quantize()`
+# 2. Train with distillation
+accelerate launch --config-file configs/accelerate/fsdp2.yaml train.py \
+  --config configs/train/qad_nvfp4.yaml \
+  --model_name_or_path qwen3-8b-quantized \
+  --teacher_model Qwen/Qwen3-8B \
+  --output_dir qwen3-8b-qad-nvfp4
 
-Step 3: Train/fine-tune the quantized model with a small learning rate, e.g. 1e-5 for Adam optimizer.
+# 3. Export
+python export.py --pyt_ckpt_path qwen3-8b-qad-nvfp4 --export_path qwen3-8b-qad-deploy
+```
 
-> **_NOTE:_** `Step 3` listed above is the actual 'Quantization Aware Training' step. The optimal hyperparameter setting for QAT can vary depending on the model and training dataset. The optimal QAT duration depends on the dataset, model etc.
+Exported checkpoints can be deployed on [TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM), [vLLM](https://github.com/vllm-project/vllm), or [SGLang](https://github.com/sgl-project/sglang). See [llm_ptq/README.md](../llm_ptq/README.md#deployment) for deployment instructions. For quick accuracy evaluation without exporting, see [Native Fake-Quantized Evaluation](#native-fake-quantized-evaluation).
 
-> **_NOTE:_** We find QAT without the original precision training/fine-tuning (i.e skipping `Step 1` of the QAT workflow from above) to give worse accuracy. Therefore, we recommend un-quantized original precision training/fine-tuning followed by QAT for best accuracy.
+> **Note:** To see the full QAT flow in a single script (quantize + train + save), see [simple_qat_train.py](simple_qat_train.py):
+>
+> ```sh
+> python simple_qat_train.py --model-path meta-llama/Llama-3.2-3B --recipe general/ptq/nvfp4_default-fp8_kv
+> ```
 
-> **_NOTE:_** Huggingface models trained with `modelopt.torch.speculative` (mtsp) can be used in QAT directly like regular Huggingface models.
+## Background
+
+### What is QAT?
+
+**Quantization Aware Training (QAT)** inserts simulated quantization operations into the model graph and then fine-tunes the model so its weights learn to compensate for quantization error. During training, quantization scales are frozen while weights are updated. QAT is a general technique — it learns from labeled data on a quantized model.
 
 ```python
-import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
+from modelopt.recipe import load_recipe
 
-...
+# 1. Load a quantization recipe
+recipe = load_recipe("general/ptq/nvfp4_default-fp8_kv")
 
-# [Not shown] load model, tokenizer, data loaders etc
-trainer = Trainer(model=model, processing_class=tokenizer, args=training_args, **data_module)
+# 2. Quantize the model in-place
+model = mtq.quantize(model, recipe.quantize, forward_loop)
 
-
-def forward_loop(model):
-    for i, data in enumerate(calib_dataloader):
-        model(data)
-
-
-# Quantize the model in-place; The model should be unwrapped from any distributed wrapper
-model = mtq.quantize(model, mtq.INT8_DEFAULT_CFG, forward_loop)
-
-# Save the modelopt quantizer states
-torch.save(mto.modelopt_state(model), "modelopt_quantizer_states.pt")
-
-# To resume training from a checkpoint or load the final QAT model for evaluation,
-# load the quantizer states before loading the model weights
-# mto.restore_from_modelopt_state(model, modelopt_state_path="modelopt_quantizer_states.pt")
-# After loading the quantizer states, load the model weights
-# model.load_state_dict(state_dict_from_last_checkpoint)
-
-trainer.train()  # Train the quantized model (i.e, QAT)
-
-# Save the final model weights; An example usage
+# 3. Fine-tune the quantized model
+trainer.train()
 trainer.save_model()
 ```
 
-> **_NOTE:_** The example above uses [mto.modelopt_state](https://nvidia.github.io/Model-Optimizer/reference/generated/modelopt.torch.opt.conversion.html#modelopt.torch.opt.conversion.modelopt_state) and [mto.restore_from_modelopt_state](https://nvidia.github.io/Model-Optimizer/reference/generated/modelopt.torch.opt.conversion.html#modelopt.torch.opt.conversion.restore_from_modelopt_state) for saving and restoring of ModelOpt
-> modified model. ModelOpt provides additional methods/workflows for saving and restoring ModelOpt modified model. Please see [saving & restoring](https://nvidia.github.io/Model-Optimizer/guides/2_save_load.html) to learn more.
+> ModelOpt provides accelerated quantization kernels using Triton for NVFP4 QAT. See the [installation guide](https://nvidia.github.io/Model-Optimizer/getting_started/_installation_for_Linux.html#accelerated-quantization-with-triton-kernels).
 
-> **_NOTE:_** ModelOpt provides accelerated quantization kernels using Triton that significantly speed up NVFP4 format QAT. For details, see the [installation guide](https://nvidia.github.io/Model-Optimizer/getting_started/_installation_for_Linux.html#accelerated-quantization-with-triton-kernels).
+### What is QAD?
 
-A simple QAT training example can be found in [simple_qat_train.py](simple_qat_train.py). It can train the model using a single GPU on [Daring-Anteater](https://huggingface.co/datasets/nvidia/Daring-Anteater) dataset. To run:
+**Quantization Aware Distillation (QAD)** is a special case of QAT that uses a teacher model (typically the original unquantized model) to guide the quantized student via a distillation loss. QAD is a **pure accuracy recovery technique** — its goal is to recover accuracy lost from quantization, not to teach the model a new task.
 
-```sh
-python simple_qat_train.py --model meta-llama/Llama-3.2-3B
-```
+To learn more, read the [QAT/QAD blog post](https://developer.nvidia.com/blog/how-quantization-aware-training-enables-low-precision-accuracy-recovery/).
 
-To train larger models with distributed training, please refer to [End-to-end QAT Example](#end-to-end-qat-example).
+### When to Use QAT vs QAD
 
-#### QAD Example Workflow
+| | **QAT** (without distillation) | **QAD** (with distillation) |
+|-|---------|----------------------|
+| **What it does** | Fine-tunes a quantized model on labeled data | Recovers quantization accuracy using the original model as teacher |
+| **When to use** | The model is already quantized and you want to fine-tune it for a **new task** (e.g., fine-tuning a [GPT-OSS](../gpt-oss/) quantized checkpoint) | You want the **best possible accuracy recovery** after quantization |
+| **Recommended workflow** | Start from a quantized checkpoint, fine-tune with task-specific data | Full-precision fine-tuning first, then QAD to recover quantization loss |
 
-Here is an example workflow for performing QAD:
+**QAD is Model Optimizer's recommended strategy for accuracy recovery after quantization.** In our experiments, full-precision fine-tuning followed by QAD delivers the best accuracy, especially at aggressive quantization levels (e.g., NVFP4). The optimal balance between QAT and QAD for a given model and task is an active area of research.
 
-> **_NOTE:_** QAD workflow is experimental and is subject to change.
+### Using `QATTrainer` and `QADTrainer`
+
+`QATTrainer` is a drop-in replacement for HuggingFace's `Trainer` that handles quantization-aware training seamlessly with various distributed backends (FSDP2, DeepSpeed, DDP):
 
 ```python
-import modelopt.torch.opt as mto
-import modelopt.torch.distill as mtd
-import modelopt.torch.quantization as mtq
+from modelopt.torch.quantization.plugins.transformers_trainer import QATTrainer
+
+trainer = QATTrainer(
+    model=model,            # pre-quantized model
+    processing_class=tokenizer,
+    args=training_args,
+    **data_module,
+)
+trainer.train()
+trainer.save_model()
+```
+
+`QADTrainer` extends `QATTrainer` with distillation:
+
+```python
 from modelopt.torch.distill.plugins.huggingface import LMLogitsLoss
 from modelopt.torch.quantization.plugins.transformers_trainer import QADTrainer
 
-
-...
-
-# [Not shown] load model, tokenizer, data loaders etc
-# Create the distillation config
 distill_config = {
-   "teacher_model": teacher_model,
-   "criterion": LMLogitsLoss(),
+    "teacher_model": teacher_model,
+    "criterion": LMLogitsLoss(),
 }
 
 trainer = QADTrainer(
-   model=model,
-   processing_class=tokenizer,
-   args=training_args,
-   quant_args=quant_args,
-   distill_config=distill_config,
-   **data_module,
+    model=model,            # pre-quantized model
+    processing_class=tokenizer,
+    args=training_args,
+    distill_config=distill_config,
+    **data_module,
 )
-
-trainer.train()  # Train the quantized model using distillation (i.e, QAD)
-
-# Save the final student model weights; An example usage
+trainer.train()
 trainer.save_model()
 ```
 
+### Quantization Recipes
+
+Recipes are declarative YAML files that specify the quantization configuration. Built-in recipes are available in [`modelopt_recipes/`](../../modelopt_recipes/):
+
+```sh
+# List available built-in recipes
+ls modelopt_recipes/general/ptq/
+```
+
+See [custom calibration](https://nvidia.github.io/Model-Optimizer/guides/_pytorch_quantization.html#advanced-configuration-creation) for creating your own recipe.
+
 ## Support Matrix
 
-### Model Support List
+### Supported Models
 
-This script supports the following models out of the box.
+| Model | Chat Template | Support |
+|-------|---------------|---------|
+| Qwen2, 2.5, 3, 3.5 dense models | ChatML | Yes (chat + pretrain) |
+| Llama 2, 3, 3.1 | Llama | Yes (pretrain only) |
 
-| Model | Support |
-| :---: | :---: |
-| LLAMA 2 | ✅ |
-| LLAMA 3, 3.1 | ✅ |
-| CodeLlama | ✅ |
-| Qwen2, 2.5, 3 dense models | ✅ |
+> **Note:** Chat-template-based assistant masking (`apply_chat_template`) is supported for ChatML models (Qwen, Nemotron). For other model families, use `apply_chat_template: false` in your dataset config to use pretrain-style tokenization where all tokens are trainable.
 
-### Supported quantization configuration for QAT
+### Supported Quantization Formats
 
-Current quantization configs can be found [here](https://github.com/NVIDIA/Model-Optimizer/blob/main/modelopt/torch/quantization/config.py).
+| Format | Precision | Recipe | Use Case |
+|--------|-----------|--------|----------|
+| **NVFP4** | W4A4 + FP8 KV | `general/ptq/nvfp4_default-fp8_kv` | Maximum compression for Blackwell GPUs |
+| **FP8** | W8A8 + FP8 KV | `general/ptq/fp8_default-fp8_kv` | Balanced speed and accuracy |
+| **INT4** weight-only | W4A16 | `general/ptq/int4_blockwise_weight_only` | Deployable on all Ampere or later GPUs |
 
-These are the recommended quantization configurations for QAT:
+> **NVFP4** uses 4-bit FP weights and activations (E2M1 with FP8 dynamic scales) plus FP8 KV cache. Partial variants are available for quantizing only specific layers (e.g., MLP-only, MoE experts-only) — see [`modelopt_recipes/general/ptq/`](../../modelopt_recipes/general/ptq/) for all options.
 
-```python
-import modelopt.torch.quantization as mtq
+### Supported Backends
 
-mtq.INT8_DEFAULT_CFG  # INT8 Per-channel weight with INT8 per-tensor activation quantization
-mtq.FP8_DEFAULT_CFG  # FP8 per-tensor weight & activation quantization
-mtq.FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG  # FP8 2D blockwise weightly only quantization
-mtq.FP8_PER_CHANNEL_PER_TOKEN_CFG  # FP8 per channel weight with per-token activation quantization
-mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG  # INT4 blockwise weight only quantization
-mtq.NVFP4_DEFAULT_CFG  # NVFP4 dynamic block weight & activation quantization
-mtq.MXFP8_DEFAULT_CFG  # MXFP8 per-tensor weight and activation quantization
-```
+| Backend | Config File | Notes |
+|---------|------------|-------|
+| FSDP2 | `configs/accelerate/fsdp2.yaml` | **Recommended** |
+| DDP | `configs/accelerate/ddp.yaml` | Add `--gradient_checkpointing True` |
+| DeepSpeed | `configs/accelerate/deepspeed.yaml` | Add `--gradient_checkpointing True` |
 
-You can also create your own custom config using [this](https://nvidia.github.io/Model-Optimizer/guides/_pytorch_quantization.html#custom-calibration-algorithm) guide.
+Replace `--config-file configs/accelerate/fsdp2.yaml` with the desired backend config in any of the commands above.
 
-## End-to-end QAT Example
+## QLoRA (Real Quantization)
 
-This folder contains end-to-end runnable fine-tuning/QAT pipeline where Llama3-8B from huggingface is trained on
-[Daring-Anteater](https://huggingface.co/datasets/nvidia/Daring-Anteater) dataset.
-
-First, we need to run un-quantized fine-tuning. Here is the command for that:
+[QLoRA](https://arxiv.org/pdf/2305.14314) reduces training memory by quantizing LoRA backbone weights with real quantization via `mtq.compress()`.
 
 ```sh
-./launch.sh --model meta-llama/Meta-Llama-3-8B \
-   --num_epochs 2.0 \
-   --lr 1e-5 \
-   --do_train True \
-   --output_dir llama3-finetune
+# 1. Quantize with compression
+python quantize.py \
+  --model_name_or_path Qwen/Qwen3-8B \
+  --dataset_config configs/dataset/blend.yaml \
+  --recipe general/ptq/nvfp4_default-fp8_kv \
+  --compress True \
+  --quantize_output_dir qwen3-8b-quantized
+
+# 2. Train with QLoRA
+accelerate launch --config-file configs/accelerate/ddp.yaml train.py \
+  --config configs/train/qlora_nvfp4.yaml \
+  --model_name_or_path qwen3-8b-quantized \
+  --output_dir qwen3-8b-fp4-qlora
+
+# 3. Export
+python export.py \
+  --pyt_ckpt_path qwen3-8b-fp4-qlora \
+  --export_path qwen3-8b-fp4-qlora-hf
+
+# 4. Serve with vLLM
+vllm serve qwen3-8b-fp4-qlora-hf/base_model --enable-lora \
+  --lora-modules adapter=qwen3-8b-fp4-qlora-hf --port 8000 \
+  --tokenizer qwen3-8b-fp4-qlora-hf
 ```
 
-This will generate a fine-tuned checkpoint in `output_dir` specified above. You can load this checkpoint, quantize the model, evaluate PTQ results or run additional QAT.
-This can be accomplished by specifying the quantization format to the `launch.sh` script.
-In this example, we are quantizing the model with INT4 block-wise weights and INT8 per-tensor activation quantization.
+> QLoRA export is not currently supported with FSDP2.
 
-To perform PTQ evaluation, run:
+## Advanced Topics
+
+<details>
+<summary><b>FSDP2 and Model-Specific Layer Wrapping</b></summary>
+
+The default `fsdp2.yaml` uses `TRANSFORMER_BASED_WRAP` with `fsdp_transformer_layer_cls_to_wrap: Qwen3DecoderLayer`. This setting is **model-specific** — if you are training a different model architecture, you must update it to match your model's decoder layer class.
+
+You can either:
+
+1. **Override via CLI** (recommended for one-off runs):
+
+   ```sh
+   accelerate launch --config-file configs/accelerate/fsdp2.yaml \
+     --fsdp_transformer_layer_cls_to_wrap LlamaDecoderLayer \
+     train.py --config configs/train/qat_nvfp4.yaml ...
+   ```
+
+2. **Create a custom config** (recommended for repeated use):
+
+   ```sh
+   cp configs/accelerate/fsdp2.yaml configs/accelerate/fsdp2_llama.yaml
+   # Edit fsdp2_llama.yaml: change Qwen3DecoderLayer -> LlamaDecoderLayer
+   ```
+
+Common layer class names:
+
+| Model Family | `fsdp_transformer_layer_cls_to_wrap` |
+|---|---|
+| Qwen2, Qwen2.5, Qwen3 | `Qwen3DecoderLayer` (or `Qwen2DecoderLayer`) |
+| Llama 2, 3, 3.1 | `LlamaDecoderLayer` |
+
+</details>
+
+<details>
+<summary><b>Configuration</b></summary>
+
+There are two types of configs:
+
+- **Dataset configs** (`configs/dataset/`): Define the dataset blend — sources, `blend_size` (total samples), and `splits` (train/eval/test ratios). These are self-contained and determine what gets cached.
+- **Training configs** (`configs/train/`): Define training hyperparameters plus runtime caps (`train_samples`, `eval_samples`) that subset the pre-built dataset without retriggering caching.
+
+`quantize.py` only needs `--dataset_config` and `--recipe`. `train.py` uses a full training config via `--config`. All arguments can be specified via YAML, CLI flags, or both (CLI overrides YAML). See [ARGUMENTS.md](ARGUMENTS.md) for the full reference.
 
 ```sh
-# Load the checkpoint from previous fine-tuning stage, quantize the model and evaluate without additional training
-./launch.sh --model llama3-finetune \
-   --do_train False \
-   --quant_cfg NVFP4_DEFAULT_CFG
+# YAML + CLI override
+accelerate launch --config-file configs/accelerate/fsdp2.yaml train.py \
+  --config configs/train/qat_nvfp4.yaml --learning_rate 5e-5
 ```
 
-To perform QAT, run:
+See [Dataset Configuration](configs/dataset/README.md) for custom dataset blends and adding new datasets.
+
+</details>
+
+<details>
+<summary><b>Pre-Building the Dataset</b></summary>
+
+You can pre-tokenize and cache the dataset before training using `dataset_utils.py`. This is useful for large blends or multi-node setups where you want to build the cache once and reuse it across experiments.
 
 ```sh
-# Load the quantized checkpoint from previous fine-tuning stage and run additional training (QAT)
-./launch.sh --model llama3-finetune \
-   --num_epochs 2.0 \
-   --lr 1e-5 \
-   --do_train True \
-   --quant_cfg NVFP4_DEFAULT_CFG \
-   --output_dir llama3-qat
+python dataset_utils.py \
+  --dataset_config configs/dataset/blend.yaml \
+  --model_name_or_path Qwen/Qwen3-8B
 ```
 
-You may alternatively perform QAT with any other quantization formats from **ModelOpt**. Please see more details on the supported quantization formats and how to use them as shown below:
+The cached dataset is stored under `.dataset_cache/tokenized/` by default (configurable via `--dataset_cache_dir`). The cache key depends on the dataset config (`blend_size`, `splits`, sources) and tokenizer — changing `train_samples` or `eval_samples` in the training config does **not** invalidate the cache.
 
-```python
-import modelopt.torch.quantization as mtq
+</details>
 
-# To learn about the quantization formats and quantization config from modelopt
-help(mtq.config)
-```
+## Results
 
-You could also add your own customized quantization format to `CUSTOM_QUANT_CFG` from `main.py` and perform QAT.
+\[Coming Soon\]
 
-> **_NOTE:_** QAT requires higher memory than the full-precision fine-tuning. A solution to avoid this extra memory usage is to use [activation checkpointing](https://pytorch.org/docs/stable/checkpoint.html) or gradient checkpointing. Activation checkpointing can be enabled easily with training frameworks such as Huggingface by adding an additional argument `gradient_checkpointing True`. Learn more [here](https://huggingface.co/docs/transformers/v4.20.1/en/perf_train_gpu_one#gradient-checkpointing). Activation checkpointing or gradient checkpointing is enabled by default in this example.
+## Native Fake-Quantized Evaluation
 
-> **_NOTE:_** Like any other model training, the QAT model accuracy can be further improved by optimizing the training
-> hyper-parameters such as learning rate, training duration etc.
-
-> **_NOTE:_** `launch.sh` defaults to use `LlamaDecoderLayer` as the transformer layer class. If your model uses a different class, you need to pass `--fsdp_transformer_layer_cls_to_wrap <your_layer_class>` to the `launch.sh` script. For example, for `Qwen/Qwen3-8B`, specify `--fsdp_transformer_layer_cls_to_wrap Qwen3DecoderLayer` as an additional argument.
-
-### Results
-
-Here is an example result following the workflow above with slightly different hyper-parameters (We used an effective batch size of 128 by adjusting `--train_bs` and `--accum_steps` as per the available GPU memory).
-As we can see below, QAT has improved the validation perplexity.
-
-You could get slightly different numbers depending on your hyper-parameters - however you should be able to see consistent improvement
-for QAT over PTQ alone.
-
-| | Validation perplexity on `nvidia/Daring-Anteater` dataset |
-|-----------------|--------------------|
-| Fine-tuned BF16 (No quantization) | 1.45 |
-| PTQ with NVFP4 weights & NVFP4 activations on the Fine-tuned BF16 model | 1.56 |
-| QAT with NVFP4 weights & NVFP4 activations | 1.49 |
-
-> **_NOTE:_** From our experience, the QAT performs better with a larger batch size, so we recommend using a larger batch size if your hardware allows it.
-
-> **_NOTE:_** If you only use part of the dataset for fine-tuning/QAT, we recommend to use different data samples for fine-tuning and QAT, otherwise there may appear overfitting issues during the QAT stage.
-
-## End-to-end QAD Example
-
-To perform QAD with logits loss, run:
-
-```sh
-./launch.sh --model llama3-finetune \
-   --num_epochs 3 \
-   --lr 4e-5 \
-   --quant_cfg NVFP4_DEFAULT_CFG \
-   --do_train True \
-   --output_dir llama-qad \
-   --distill True
-```
-
-> **_NOTE:_** QAD doesn't support FSDP1 (<https://docs.pytorch.org/docs/stable/fsdp.html>) backend - only FSDP2.
-
-## Testing QAT model with LLM benchmarks for accuracy evaluation
-
-The model generated after QAT can be tested for LLM accuracy evaluation for various LLM benchmarks. After running the fine-tuning, following code can be used to run LLM evaluation for [supported tasks](https://github.com/EleutherAI/lm-evaluation-harness/tree/main/lm_eval/tasks).
-
-To run the llm_eval tasks on QAT model, run:
+ModelOpt quantized models can be saved and restored without exporting to a deployment platform. This is useful for fast evaluation with fake quantization using standard LLM benchmarks (MMLU, WikiText, etc.). See [HuggingFace checkpointing](https://nvidia.github.io/Model-Optimizer/guides/2_save_load.html#modelopt-save-restore-using-huggingface-checkpointing-apis) for details.
 
 ```sh
 cd ../llm_eval
 
 python lm_eval_hf.py --model hf \
-    --tasks <comma separated tasks> \
-    --model_args pretrained=../llm_qat/llama3-qat \
-    --quant_cfg NVFP4_DEFAULT_CFG \
+    --tasks mmlu,wikitext \
+    --model_args pretrained=../llm_qat/qwen3-8b-qat-nvfp4 \
     --batch_size 4
 ```
 
-See more details on running LLM evaluation benchmarks [here](../llm_eval/README.md).
+See [llm_eval/README.md](../llm_eval/README.md) for supported tasks.
 
-## Deployment
-
-The final model after QAT/QAD is similar in architecture to that of PTQ model. QAT model simply have updated weights as compared to the PTQ model. It can be deployed to TensorRT-LLM (TRTLLM)/TensorRT/vLLM/SGLang just like a regular **ModelOpt** PTQ model if the quantization format is supported for deployment.
-
-To export TRTLLM/vLLM/SGLang compatible checkpoint for the model after QAT (or QAD) model, run:
-
-```sh
-python export.py --pyt_ckpt_path llama3-qat --export_path llama3-qat-deploy
-```
-
-Note: The QAT checkpoint for `w4a8_awq` config can be created by using `--quant_cfg W4A8_AWQ_BETA_CFG` in [QAT example](#end-to-end-qat-example).
-
-See more details on deployment of quantized model [here](../llm_ptq/README.md).
-
-## End-to-end QLoRA with Real Quantization
-
-[QLoRA](https://arxiv.org/pdf/2305.14314) is a technique mainly intended for further reducing the training memory requirement of LoRA. In QLoRA, the LoRA backbone weights are quantized to reduce the model footprint. Unlike QAT which uses simulated quantization, QLoRA requires real quantization. To compress the model weights after quantization, we use the `mtq.compress()` function, which currently supports FP8, FP4, and INT4 formats. This feature can be enabled by passing `--compress True` to the `launch.sh` script. For detailed configuration options and patterns, please refer to the `modelopt.torch.quantization.compress` documentation.
-
-To evaluate QLoRA quantized model before training, run:
-
-```sh
-# Load the HF checkpoint, quantize the model and evaluate without additional training
-# Also compress the model after quantization
-./launch.sh --model meta-llama/Meta-Llama-3-8B \
-   --do_train False \
-   --quant_cfg NVFP4_DEFAULT_CFG \
-   --compress True
-```
-
-To perform QLoRA training, run:
-
-```sh
-# Load the HF checkpoint, quantize the model, add LoRA adapter, and run additional training
-# Also compress the model after quantization
-./launch.sh --model meta-llama/Meta-Llama-3-8B \
-   --num_epochs 0.5 \
-   --lr 1e-3 \
-   --do_train True \
-   --output_dir llama3-fp4-qlora \
-   --quant_cfg NVFP4_DEFAULT_CFG \
-   --compress True \
-   --lora True
-```
-
-## QLoRA deployment
-
-After performing QLoRA training the final checkpoint can be exported for deployment with vLLM using the following command.
-
-```sh
-python export.py \
-   --pyt_ckpt_path llama3-fp4-qlora \
-   --export_path llama3-fp4-qlora-hf \
-
-```
-
-To deploy with vLLM, run the following command. For more details about QLoRA deployment using vLLM refer to the documentation [here](https://docs.vllm.ai/en/latest/features/lora.html).
-
-```sh
-vllm serve llama3-fp4-qlora-hf/base_model --enable-lora --lora-modules adapter=llama3-fp4-qlora-hf --port 8000 --tokenizer llama3-fp4-qlora-hf
-```
-
-> _Note: We currently do not support export option for QLoRA models generated using FSDP2._
->
 ## Pre-Quantized Checkpoints
 
-- Ready-to-deploy checkpoints \[[🤗 Hugging Face - Nvidia Model Optimizer Collection](https://huggingface.co/collections/nvidia/inference-optimized-checkpoints-with-model-optimizer)\]
+- Ready-to-deploy checkpoints: [Hugging Face - NVIDIA Model Optimizer Collection](https://huggingface.co/collections/nvidia/inference-optimized-checkpoints-with-model-optimizer)
 - Deployable on [TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM), [vLLM](https://github.com/vllm-project/vllm) and [SGLang](https://github.com/sgl-project/sglang)
-- More models coming soon!
 
 ## Resources
 
-- 📅 [Roadmap](https://github.com/NVIDIA/Model-Optimizer/issues/146)
-- 📖 [Documentation](https://nvidia.github.io/Model-Optimizer)
-- 🎯 [Benchmarks](../benchmark.md)
-- 💡 [Release Notes](https://nvidia.github.io/Model-Optimizer/reference/0_changelog.html)
-- 🐛 [File a bug](https://github.com/NVIDIA/Model-Optimizer/issues/new?template=1_bug_report.md)
-- ✨ [File a Feature Request](https://github.com/NVIDIA/Model-Optimizer/issues/new?template=2_feature_request.md)
+- [Roadmap](https://github.com/NVIDIA/Model-Optimizer/issues/146)
+- [Documentation](https://nvidia.github.io/Model-Optimizer)
+- [Benchmarks](../benchmark.md)
+- [Release Notes](https://nvidia.github.io/Model-Optimizer/reference/0_changelog.html)
+- [File a bug](https://github.com/NVIDIA/Model-Optimizer/issues/new?template=1_bug_report.md)
+- [Feature Request](https://github.com/NVIDIA/Model-Optimizer/issues/new?template=2_feature_request.md)

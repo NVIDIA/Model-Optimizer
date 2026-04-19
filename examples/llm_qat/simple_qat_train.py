@@ -18,23 +18,28 @@ import argparse
 
 import torch
 import torch.nn as nn
+from dataset_utils import build_blend_dataset, load_blend_config
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from utils import get_daring_anteater
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
+from modelopt.recipe import ModelOptPTQRecipe, load_recipe
 
 
 def get_dataloader(args, tokenizer):
-    train_dataset = get_daring_anteater(
-        tokenizer, "train", args.max_length, args.train_size, args.calib_size
-    )
-    calib_dataset = get_daring_anteater(
-        tokenizer, "test", args.max_length, args.train_size, args.calib_size
-    )
+    config = load_blend_config("configs/dataset/blend.yaml")
+    ds = build_blend_dataset(config, tokenizer, args.max_length)
+
+    train_dataset = ds["train"]
+    if 0 < args.train_size < len(train_dataset):
+        train_dataset = train_dataset.select(range(args.train_size))
+
+    calib_dataset = ds["eval"]
+    if 0 < args.calib_size < len(calib_dataset):
+        calib_dataset = calib_dataset.select(range(args.calib_size))
 
     def collate_fn(batch):
         return {
@@ -59,7 +64,9 @@ def train(model, optimizer, train_dataloader, tokenizer, epochs, output_dir, dev
             inputs = batch["input_ids"].to(device)
             attention_mask = batch["attention_mask"].to(device)
 
-            outputs = model(input_ids=inputs, attention_mask=attention_mask, labels=inputs)
+            outputs = model(
+                input_ids=inputs, attention_mask=attention_mask, labels=batch["labels"].to(device)
+            )
             loss = outputs.loss
 
             optimizer.zero_grad()
@@ -85,11 +92,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--epochs", type=int, default=2, help="Number of epochs")
     parser.add_argument("--lr", type=float, default=1e-5, help="Learning rate")
     parser.add_argument(
-        "--quant-cfg",
+        "--recipe",
         type=str,
-        default="NVFP4_DEFAULT_CFG",
-        choices=mtq.config.choices,
-        help="Quantization configuration",
+        default="general/ptq/nvfp4_default-fp8_kv",
+        help="Path to a quantization recipe YAML (built-in or custom)",
     )
     # Reproducibility
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
@@ -118,10 +124,16 @@ def main() -> None:
     # Calibrate the model
     def calibrate(m: nn.Module):
         for batch in calib_dataloader:
-            m(batch["input_ids"].to(device))
+            m(
+                input_ids=batch["input_ids"].to(device),
+                attention_mask=batch["attention_mask"].to(device),
+            )
 
-    # Quantize the model
-    model = mtq.quantize(model, getattr(mtq, args.quant_cfg), calibrate)
+    # Load recipe and quantize the model
+    recipe = load_recipe(args.recipe)
+    if not isinstance(recipe, ModelOptPTQRecipe):
+        raise ValueError(f"Expected PTQ recipe, but got {type(recipe).__name__} from {args.recipe}")
+    model = mtq.quantize(model, recipe.quantize, calibrate)
 
     # Initialize optimizer
     optimizer = AdamW(model.parameters(), lr=args.lr)

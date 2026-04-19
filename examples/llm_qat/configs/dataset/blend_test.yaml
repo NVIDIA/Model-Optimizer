@@ -1,0 +1,15 @@
+# Tiny fast blend for unit tests.
+# Uses cnn_dailymail (small, fast to download) with no shuffle for speed.
+
+blend_size: 200
+splits:
+  train: 0.80
+  eval: 0.10
+  test: 0.10
+
+sources:
+  - hf_path: abisee/cnn_dailymail
+    dataset_kwargs: {name: "3.0.0"}
+    split: train
+    ratio: 1
+    apply_chat_template: false

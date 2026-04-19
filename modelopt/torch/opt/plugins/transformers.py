@@ -15,12 +15,16 @@
 
 """ModelOpt plugin for enabling automatic save/restore of ModelOpt state for HuggingFace models."""
 
+import dataclasses
 import os
+import sys
 import types
 from contextlib import contextmanager
+from pathlib import Path
 
 import torch
-from transformers import PreTrainedModel, Trainer, TrainerCallback
+import transformers
+from transformers import HfArgumentParser, PreTrainedModel, Trainer, TrainerCallback
 from transformers import modeling_utils as tf_modeling_utils
 
 from modelopt.torch.utils import report_memory
@@ -34,7 +38,7 @@ from .huggingface import (
     register_for_patching,
 )
 
-__all__ = ["ModelOptHFTrainer"]
+__all__ = ["ModelOptArgParser", "ModelOptHFArguments", "ModelOptHFTrainer"]
 
 
 @contextmanager
@@ -153,6 +157,169 @@ register_for_patching(
     tf_modeling_utils,
     [("_load_state_dict_into_zero3_model", _load_params_and_buffers_into_zero3_model)],
 )
+
+
+@dataclasses.dataclass
+class ModelOptHFArguments:
+    """Base for all ModelOpt argument dataclasses used with :class:`ModelOptArgParser`.
+
+    Subclasses are automatically treated as dataclasses (no ``@dataclass`` decorator needed).
+    """
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        dataclasses.dataclass(cls)
+
+
+class ModelOptArgParser(HfArgumentParser):
+    """HfArgumentParser with ``--config`` YAML support and ``--generate_docs`` for ARGUMENTS.md."""
+
+    def parse_args_into_dataclasses(self, args=None, **kwargs):
+        """Parse args with optional YAML config defaults and doc generation."""
+        if args is None:
+            args = list(sys.argv[1:])
+
+        # --generate_docs [output_path]: generate markdown and exit
+        if "--generate_docs" in args:
+            idx = args.index("--generate_docs")
+            output = (
+                args[idx + 1]
+                if idx + 1 < len(args) and not args[idx + 1].startswith("--")
+                else "ARGUMENTS.md"
+            )
+            self._generate_docs(output)
+            sys.exit(0)
+
+        # --config <yaml_file>: load YAML as defaults, CLI args override
+        if "--config" in args:
+            idx = args.index("--config")
+            if idx + 1 >= len(args):
+                raise ValueError("--config requires a path argument")
+            config_path = args[idx + 1]
+            args = args[:idx] + args[idx + 2 :]  # strip --config <path> from argv
+            import yaml
+
+            with open(config_path) as f:
+                config = yaml.safe_load(f)
+            if config:
+                known_by_parser = {a.dest for a in self._actions}
+                all_modelopt_fields = self._all_modelopt_fields()
+                applicable = {}
+                for k, v in config.items():
+                    if k in known_by_parser:
+                        applicable[k] = v
+                    elif k not in all_modelopt_fields:
+                        raise ValueError(
+                            f"Unknown config key '{k}' in {config_path}. "
+                            f"Not recognized by any ModelOptHFArguments subclass."
+                        )
+                self.set_defaults(**applicable)
+
+        return super().parse_args_into_dataclasses(args=args, **kwargs)
+
+    @staticmethod
+    def _all_modelopt_fields():
+        """Collect all field names from every ModelOptHFArguments subclass."""
+        fields = set()
+        queue = list(ModelOptHFArguments.__subclasses__())
+        while queue:
+            cls = queue.pop()
+            if dataclasses.is_dataclass(cls):
+                fields.update(f.name for f in dataclasses.fields(cls))
+            queue.extend(cls.__subclasses__())
+        return fields
+
+    def _generate_docs(self, output_path: str) -> None:
+        """Generate a markdown argument reference from registered dataclass types."""
+        lines = ["# Argument Reference", "", "_Auto-generated — do not edit by hand._", ""]
+
+        # Sort: modelopt library classes first, then example-specific
+        def _sort_key(dc):
+            mod = dc.__module__ or ""
+            return (0 if mod.startswith("modelopt.") else 1, mod, dc.__name__)
+
+        sorted_types = sorted(self.dataclass_types, key=_sort_key)
+
+        # Fields belonging to HF TrainingArguments (used to detect "own" fields)
+        hf_training_fields: set[str] = set()
+        if hasattr(transformers, "TrainingArguments"):
+            hf_training_fields = {
+                f.name for f in dataclasses.fields(transformers.TrainingArguments)
+            }
+
+        for dc in sorted_types:
+            group_name = dc.__name__
+            lines.append(f"## {group_name}")
+            lines.append("")
+
+            is_hf_subclass = (
+                hasattr(transformers, "TrainingArguments")
+                and issubclass(dc, transformers.TrainingArguments)
+                and dc is not transformers.TrainingArguments
+            )
+
+            if is_hf_subclass:
+                own_fields = [f for f in dataclasses.fields(dc) if f.name not in hf_training_fields]
+                lines.append(
+                    "Extends [HuggingFace TrainingArguments]"
+                    "(https://huggingface.co/docs/transformers/main_classes/trainer#transformers.TrainingArguments)."
+                    " Only additional arguments are shown below."
+                )
+                lines.append("")
+            else:
+                own_fields = list(dataclasses.fields(dc))
+
+            if not own_fields:
+                lines.append("_No additional arguments._")
+                lines.append("")
+                continue
+
+            lines.append("| Argument | Type | Default | Description |")
+            lines.append("|----------|------|---------|-------------|")
+
+            for f in own_fields:
+                name = f"`--{f.name}`"
+                type_str = self._format_type(f.type)
+                default_str = self._format_default(f.default, f.default_factory)
+                help_text = dict(f.metadata).get("help", "")
+                # Collapse multi-line help into single line
+                help_text = " ".join(help_text.split())
+                lines.append(f"| {name} | {type_str} | {default_str} | {help_text} |")
+
+            lines.append("")
+
+        # Remove trailing blank lines so markdownlint won't modify the file
+        while lines and lines[-1] == "":
+            lines.pop()
+        Path(output_path).write_text("\n".join(lines) + "\n")
+        print(f"Generated {output_path}")
+
+    @staticmethod
+    def _format_type(type_hint) -> str:
+        """Format a type hint for display in markdown."""
+        s = str(type_hint)
+        # Clean up common type representations
+        for old, new in [
+            ("typing.", ""),
+            ("typing_extensions.", ""),
+            ("<class '", ""),
+            ("'>", ""),
+        ]:
+            s = s.replace(old, new)
+        return f"`{s}`"
+
+    @staticmethod
+    def _format_default(default, default_factory) -> str:
+        """Format a default value for display in markdown."""
+        if default is not dataclasses.MISSING:
+            if default is None:
+                return "`None`"
+            if isinstance(default, str):
+                return f'`"{default}"`'
+            return f"`{default}`"
+        if default_factory is not dataclasses.MISSING:
+            return "_factory_"
+        return "_required_"
 
 
 def _report_memory(msg):

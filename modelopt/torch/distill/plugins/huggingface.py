@@ -15,15 +15,54 @@
 
 """ModelOpt plugin to train HuggingFace models with knowledge distillation."""
 
+from dataclasses import field
+
 from torch import Tensor
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.trainer_pt_utils import LabelSmoother
 
 import modelopt.torch.distill as mtd
 from modelopt.torch.opt.plugins import ModelOptHFTrainer
+from modelopt.torch.opt.plugins.transformers import ModelOptHFArguments
 from modelopt.torch.utils import print_rank_0
 
 IGNORE_TOKEN_ID = LabelSmoother.ignore_index  # equals -100
+
+_SUPPORTED_CRITERIA = {"logits_loss"}
+
+
+class DistillArguments(ModelOptHFArguments):
+    """Distillation arguments for knowledge distillation training."""
+
+    distill: bool = field(
+        default=False,
+        metadata={"help": "Enable training with knowledge distillation."},
+    )
+    teacher_model: str | None = field(
+        default=None,
+        metadata={"help": "The name or path of the teacher model to use for distillation."},
+    )
+    criterion: str = field(
+        default="logits_loss",
+        metadata={
+            "help": "Distillation loss criterion. Currently only 'logits_loss' is supported."
+        },
+    )
+
+    def to_distill_kwargs(self, teacher_model) -> dict:
+        """Convert distill args to kwargs for KDTrainer/QADTrainer.
+
+        Args:
+            teacher_model: The loaded teacher model instance.
+
+        Returns:
+            Dict with ``distill_config`` ready to pass to the trainer.
+        """
+        if self.criterion not in _SUPPORTED_CRITERIA:
+            raise ValueError(
+                f"Unsupported criterion: {self.criterion!r}. Supported: {_SUPPORTED_CRITERIA}"
+            )
+        return {"distill_config": {"teacher_model": teacher_model, "criterion": LMLogitsLoss()}}
 
 
 class KDTrainer(ModelOptHFTrainer):

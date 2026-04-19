@@ -1,0 +1,59 @@
+# Example dataset blend config demonstrating all mixing options.
+# This file is a reference -- not used by any training config by default.
+# See configs/dataset/README.md for full schema documentation.
+
+blend_size: 10000
+splits:
+  train: 0.80
+  eval: 0.10
+  test: 0.10
+
+sources:
+  # --- Single split, auto train/eval ---
+  # Loads one split, shuffles, takes proportional samples, then train_test_split.
+  - hf_path: nvidia/Nemotron-SWE-v1
+    split: r2e_gym
+    ratio: 3000
+    category: code
+
+  # --- Comma-separated splits (equal weight per split) ---
+  # Loads each split, takes equal samples from each, concatenates, then train_test_split.
+  - hf_path: nvidia/Nemotron-Post-Training-Dataset-v2
+    split: code,math,stem
+    ratio: 2000
+    category: mixed
+
+  # --- Per-split ratios (dict form) ---
+  # Loads each split, takes weighted samples (3:2:1 here), concatenates, then train_test_split.
+  - hf_path: nvidia/Nemotron-Post-Training-Dataset-v2
+    split:
+      code: 3
+      math: 2
+      stem: 1
+    ratio: 2000
+    category: mixed_weighted
+
+  # --- Pretrain-style (plain text, no chat template) ---
+  # For datasets with a "text" field. All non-pad tokens become labels.
+  # Extra load_dataset kwargs (like HF config name) go in dataset_kwargs.
+  - hf_path: abisee/cnn_dailymail
+    dataset_kwargs: {name: "3.0.0"}
+    split: train
+    ratio: 500
+    apply_chat_template: false
+    category: pretrain
+
+  # --- Custom chat_key ---
+  # For datasets where conversations are under a different key than "messages".
+  - hf_path: Magpie-Align/Magpie-Pro-MT-300K-v0.1
+    split: train
+    ratio: 500
+    chat_key: conversations
+    category: chat_alt
+
+  # --- Local dataset path (load_from_disk) ---
+  # Uncomment to use a local pre-downloaded dataset.
+  # - hf_path: /local/path/to/dataset
+  #   split: train
+  #   ratio: 1000
+  #   apply_chat_template: false

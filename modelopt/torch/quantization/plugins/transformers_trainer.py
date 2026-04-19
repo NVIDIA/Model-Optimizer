@@ -20,7 +20,8 @@ import gc
 import json
 import os
 import types
-from dataclasses import dataclass, field
+import warnings
+from dataclasses import field
 
 import torch
 from tqdm import tqdm
@@ -29,6 +30,7 @@ import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.distill.plugins.huggingface import KDTrainer
 from modelopt.torch.opt.plugins import ModelOptHFTrainer
+from modelopt.torch.opt.plugins.transformers import ModelOptHFArguments
 from modelopt.torch.utils import get_module_device, print_rank_0
 
 from ..config import QuantizeConfig
@@ -44,8 +46,7 @@ from ..utils import (
 # TODO: Enable documentation rendering for this class
 
 
-@dataclass
-class QuantizationArguments:
+class QuantizationArguments(ModelOptHFArguments):
     """Quantization arguments for quantization aware training.
 
     This classes is intended to be used with ModelOpt's QAT/QAD trainers for HuggingFace models.
@@ -53,12 +54,22 @@ class QuantizationArguments:
     from the command line to the taining script.
     """
 
-    quant_cfg: str | None = field(
+    recipe: str | None = field(
         default=None,
         metadata={
             "help": (
-                "Specify the quantization format for PTQ/QAT. if specified, PTQ/QAT will be enabled"
-                " with the specified quantization format"
+                "Path to a quantization recipe YAML file (built-in or custom). "
+                "Built-in recipes can be specified by relative path, e.g. "
+                "'general/ptq/nvfp4_default-fp8_kv'. Replaces the deprecated --quant_cfg flag."
+            ),
+        },
+    )
+    quant_cfg: str | QuantizeConfig | None = field(
+        default=None,
+        metadata={
+            "help": (
+                "Deprecated: use --recipe instead. "
+                "Specify the quantization format for PTQ/QAT by name (e.g. NVFP4_DEFAULT_CFG)."
             ),
         },
     )
@@ -78,24 +89,6 @@ class QuantizationArguments:
                 "Whether to compress the model weights after quantization for QLoRA. "
                 "This is useful for reducing the model size."
             )
-        },
-    )
-
-
-class QuantizationArgumentsWithConfig(QuantizationArguments):
-    """Quantization arguments for quantization aware training with config.
-
-    This class is intended to be used with ModelOpt's QAT/QAD trainers for HuggingFace models,
-    however, it cannot be used for command line parsing.
-    """
-
-    quant_cfg: str | QuantizeConfig | None = field(
-        default=None,
-        metadata={
-            "help": (
-                "Specify the quantization format for PTQ/QAT. if specified, PTQ/QAT will be enabled"
-                " with the specified quantization format"
-            ),
         },
     )
 
@@ -164,28 +157,21 @@ class QATTrainer(ModelOptHFTrainer):
     """A drop-in replacement of HuggingFace's Trainer for quantization aware training with ModelOpt.
 
     This class takes an additional optional argument `quant_args` of type
-    :class:`QuantizationArgumentsWithConfig <QuantizationArgumentsWithConfig>`
+    :class:`QuantizationArguments <QuantizationArguments>`
     to specify the quantization arguments.
     """
 
     def __init__(
         self,
         *args,
-        quant_args: QuantizationArgumentsWithConfig | QuantizationArguments | None = None,
+        quant_args: QuantizationArguments | None = None,
         **kwargs,
     ):
         """Initialize the trainer with modelopt states."""
         super().__init__(*args, **kwargs)
 
         self.quant_args = quant_args
-        quant_cfg = None
-        if quant_args is not None and getattr(quant_args, "quant_cfg", None):
-            quant_cfg = (
-                getattr(mtq, quant_args.quant_cfg)
-                if isinstance(quant_args.quant_cfg, str)
-                else quant_args.quant_cfg
-            )
-        self.quant_cfg = quant_cfg
+        self.quant_cfg = self._resolve_quant_cfg(quant_args)
 
         # Add lora adapter before quantizing the model
         if getattr(self.args, "lora_config", None) is not None and not hasattr(
@@ -209,7 +195,7 @@ class QATTrainer(ModelOptHFTrainer):
         self._patch_accelerate_for_fsdp2_fix()
 
         self._modelopt_state_path = os.path.join(self.args.output_dir, "modelopt_state_train.pth")
-        if os.path.exists(self._modelopt_state_path):
+        if os.path.exists(self._modelopt_state_path) and not is_quantized(self.model):
             self._restore_modelopt_state_with_weights()
         elif is_quantized(self.model):
             self._save_modelopt_state_with_weights()
@@ -218,12 +204,36 @@ class QATTrainer(ModelOptHFTrainer):
             getattr(self.model, "config", None), "dtype", None
         ) or getattr(getattr(self.model, "config", None), "torch_dtype", None)
 
+    @staticmethod
+    def _resolve_quant_cfg(quant_args):
+        """Resolve quant_cfg from quant_args, supporting both recipe and legacy quant_cfg."""
+        if quant_args is None:
+            return None
+
+        if getattr(quant_args, "recipe", None):
+            from modelopt.recipe import ModelOptPTQRecipe, load_recipe
+
+            recipe = load_recipe(quant_args.recipe)
+            if not isinstance(recipe, ModelOptPTQRecipe):
+                raise ValueError(
+                    f"Expected PTQ recipe, but got {type(recipe).__name__} from {quant_args.recipe}"
+                )
+            return recipe.quantize
+
+        quant_cfg = getattr(quant_args, "quant_cfg", None)
+        if quant_cfg is None:
+            return None
+        return getattr(mtq, quant_cfg) if isinstance(quant_cfg, str) else quant_cfg
+
     def _save_modelopt_state_with_weights(self):
         """Save the modelopt weights for fsdp2 models."""
         if torch.distributed.is_initialized():
             torch.distributed.barrier()
 
         modelopt_state = mto.modelopt_state(self.model)
+
+        # FSDP2 does correctly save the buffer states,
+        # so lets save the quantizer state dict separately.
         modelopt_state["modelopt_state_weights"] = get_quantizer_state_dict(self.model)
 
         if self.args.should_save:
@@ -232,6 +242,7 @@ class QATTrainer(ModelOptHFTrainer):
         print_rank_0(f"Saved modelopt state to {self._modelopt_state_path}")
 
     def _restore_modelopt_state_with_weights(self):
+        """Restore the modelopt state with weights."""
         modelopt_state = mto.load_modelopt_state(self._modelopt_state_path)
         modelopt_weights = modelopt_state.pop("modelopt_state_weights", None)
         mto.restore_from_modelopt_state(self.model, modelopt_state)
@@ -257,7 +268,7 @@ class QATTrainer(ModelOptHFTrainer):
         # TODO: Remove calibrate_with_adapters - this should not be needed
         with calibrate_with_adapters(self.model, self.args):
             print_rank_0("Quantizing the model...")
-            mtq.quantize(self.model, self.quant_cfg, forward_loop)  # type: ignore [arg-type]
+            mtq.quantize(self.model, self.quant_cfg, forward_loop)
 
         # Save modelopt state
         self._save_modelopt_state_with_weights()
@@ -277,6 +288,13 @@ class QATTrainer(ModelOptHFTrainer):
     def training_step(self, *args, **kwargs):
         """Training step."""
         if self.quant_cfg is not None and not is_quantized(self.model):
+            warnings.warn(
+                "In-trainer quantization via quant_args is deprecated and will be removed in a "
+                "future release. Pre-quantize your model with a separate quantization step instead. "
+                "See examples/llm_qat/quantize.py for reference.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
             self._quantize_model()
         return super().training_step(*args, **kwargs)
 
@@ -378,11 +396,19 @@ class QATTrainer(ModelOptHFTrainer):
             print_rank_0(f"[warn] Failed to update dtype in config.json: {e}")
 
     def _patch_accelerate_for_fsdp2_fix(self):
-        """Fixes for accelerate prepare.
+        """Fix accelerate's FSDP2 prepare for quantized models.
 
-        Accelerate fsdp2 prepare assumes that all parameters and buffers are sharded. This assumption
-        is causing issues with quantized models since quantization modules adds buffers which are not sharded.
-        This patch hides the buffers added by quantization modules from the original accelerate prepare.
+        With cpu_ram_efficient_loading, accelerate moves the model to meta device, calls
+        fully_shard() (which converts parameters to DTensors but leaves buffers as regular
+        tensors), then calls fsdp2_load_full_state_dict() to distribute weights from rank 0.
+        That function iterates over the model's state_dict and assumes every entry is a
+        DTensor (accesses .device_mesh), which crashes on persistent buffers like TQ's _amax.
+
+        Workaround: before prepare(), mark all TQ buffers as non-persistent so they are
+        excluded from state_dict. This lets accelerate handle parameter distribution normally.
+        After prepare(), restore the original buffer persistence and broadcast TQ buffers
+        from rank 0 to all ranks (since non-rank-0 processes have uninitialized values from
+        the meta-device model).
         """
         _patch_fsdp2_post_backward()
 
@@ -394,17 +420,38 @@ class QATTrainer(ModelOptHFTrainer):
             if model is None:
                 return self._original_prepare(*args, **kwargs)
 
+            # Hide TQ buffers from accelerate's FSDP2 state_dict handling.
             tq_og_non_prsist_buffers = {}
             for tq in (m for m in model.modules() if isinstance(m, TensorQuantizer)):
-                tq.to_empty(device=self.device)
+                # With fsdp_cpu_ram_efficient_loading=true, non-rank-0 processes
+                # hold meta-device buffers which cannot be moved with .to().
+                # Allocate empty tensors on the target device for those; real
+                # values are broadcast from rank 0 after _original_prepare below.
+                for name, buf in list(tq._buffers.items()):
+                    if buf is None:
+                        continue
+                    tq._buffers[name] = (
+                        torch.empty_like(buf, device=self.device)
+                        if buf.is_meta
+                        else buf.to(self.device)
+                    )
                 tq_og_non_prsist_buffers[tq] = tq._non_persistent_buffers_set.copy()
                 tq._non_persistent_buffers_set.update(tq._buffers.keys())
 
             outputs = self._original_prepare(*args, **kwargs)
 
+            # Restore original buffer persistence.
             for tq in (m for m in model.modules() if isinstance(m, TensorQuantizer)):
                 tq._non_persistent_buffers_set.clear()
                 tq._non_persistent_buffers_set.update(tq_og_non_prsist_buffers[tq])
+
+            # Sync TQ buffers across ranks. With cpu_ram_efficient_loading, only rank 0
+            # has valid buffer values; other ranks have uninitialized meta-device values.
+            if torch.distributed.is_initialized():
+                for tq in (m for m in model.modules() if isinstance(m, TensorQuantizer)):
+                    for buf in tq._buffers.values():
+                        if buf is not None:
+                            torch.distributed.broadcast(buf, src=0)
 
             return outputs
 
