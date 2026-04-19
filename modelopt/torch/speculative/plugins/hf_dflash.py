@@ -61,7 +61,12 @@ from transformers.utils import ModelOutput
 
 from ..dflash.conversion import DFlashDMRegistry
 from ..dflash.dflash_model import DFlashModel
-from .modeling_dflash import DFlashAttention, DFlashModule, build_target_layer_ids  # noqa: F401
+from .modeling_dflash import (  # noqa: F401
+    DFlashAttention,
+    DFlashBaseModelOutput,
+    DFlashModule,
+    build_target_layer_ids,
+)
 from .modeling_fakebase import _BASE_MODEL_PATHS, _EMBED_TOKENS_PATHS, _LM_HEAD_PATHS
 
 logger = logging.getLogger(__name__)
@@ -155,20 +160,17 @@ class HFDFlashModel(DFlashModel):
         self.dflash_config.block_size = self.dflash_block_size
 
         # Target layer IDs
-        num_target_layers = base_config.num_hidden_layers
+        num_target_layers = (
+            base_config.num_orig_hidden_layers
+            if self.dflash_offline
+            else base_config.num_hidden_layers
+        )
         num_draft_layers = self.dflash_config.num_hidden_layers
         self.target_layer_ids = build_target_layer_ids(num_target_layers, num_draft_layers)
         self.dflash_config.target_layer_ids = self.target_layer_ids
 
-        # mask_token_id: set in DFlashConfig (or auto-detected by main.py from tokenizer)
-        mask_id = config.dflash_mask_token_id
-        if mask_id is None:
-            raise ValueError(
-                "dflash_mask_token_id is required. Set it in the config YAML "
-                "(dflash.dflash_mask_token_id=TOKEN_ID) or let main.py auto-detect "
-                "from tokenizer.mask_token_id."
-            )
-        self.mask_token_id = mask_id
+        # mask_token_id: validated by DFlashConfig, auto-detected from tokenizer context
+        self.mask_token_id = config.dflash_mask_token_id
         logger.info("DFlash mask_token_id: %s", self.mask_token_id)
 
         # Freeze base model
@@ -181,9 +183,16 @@ class HFDFlashModel(DFlashModel):
         self.dflash_module = DFlashModule(self.dflash_config)
         # Match base model dtype/device. Skip if base is on meta (during from_pretrained
         # restore — the model will be moved to the correct device after weight loading).
-        base_device = next(self._base_model.layers[-1].parameters()).device
+        if self.dflash_offline:
+            base_device = self._base_model_lm_head.weight.device
+        else:
+            base_device = next(self._base_model.layers[-1].parameters()).device
         if base_device.type != "meta":
             self.dflash_module.to(self._base_model.dtype).to(base_device)
+
+        # Delete base model layers for offline training (save memory)
+        if self.dflash_offline:
+            self._base_model._modules.pop("layers")
 
         self.is_quantized = False
         self._num_anchors = self.dflash_num_anchors
@@ -428,18 +437,29 @@ class HFDFlashModel(DFlashModel):
                 f"Adjust training_seq_len or use padding."
             )
 
-        # 1. Run base model → hidden states
-        # TODO: For co-training the base model, remove no_grad and eval() switch.
-        with torch.no_grad():
-            base_outputs = super().forward(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                output_hidden_states=True,
+        # 1. Run base model → extract target hidden states
+        if self.dflash_offline:
+            assert "base_model_outputs" in kwargs
+            base_outputs = DFlashBaseModelOutput.from_offline_dict(kwargs["base_model_outputs"])
+            if base_outputs.logits is None and self.dflash_self_logit_distillation:
+                # Compute logits from last-layer hidden states for KD loss
+                out_hiddens = kwargs["base_model_outputs"].get("base_model_hidden_states")
+                base_outputs.logits = self._base_model_lm_head(out_hiddens)
+            target_hidden = base_outputs.target_hidden
+        else:
+            # TODO: For co-training the base model, remove no_grad and eval() switch.
+            with torch.no_grad():
+                raw_outputs = super().forward(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    output_hidden_states=True,
+                )
+            offset = 1
+            selected = [raw_outputs.hidden_states[lid + offset] for lid in self.target_layer_ids]
+            target_hidden = torch.cat(selected, dim=-1)  # [B, seq, num_layers * H]
+            base_outputs = DFlashBaseModelOutput(
+                target_hidden=target_hidden, logits=raw_outputs.logits
             )
-
-        offset = 1
-        selected = [base_outputs.hidden_states[lid + offset] for lid in self.target_layer_ids]
-        target_hidden = torch.cat(selected, dim=-1)  # [B, seq, num_layers * H]
 
         # 2. Build loss mask.
         # When labels are provided (answer_only_loss), they already encode both
