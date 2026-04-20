@@ -20,8 +20,8 @@ Run from the launcher directory:
     uv pip install pytest
     uv run python3 -m pytest tests/ -v
 
-Or via tox from Model-Optimizer root:
-    tox -e py312-launcher
+Or via nox from Model-Optimizer root:
+    nox -s "unit-3.12(torch_211, tf_latest)"
 """
 
 import os

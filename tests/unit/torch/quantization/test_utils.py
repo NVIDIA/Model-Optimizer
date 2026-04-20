@@ -20,7 +20,7 @@ from modelopt.torch.quantization.utils import (
     convert_quantization_axis_to_reduce_axis,
     reduce_block_amax,
 )
-from modelopt.torch.quantization.utils.activation_collector import LayerActivationCollector
+from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 
 
 @pytest.mark.parametrize(

@@ -79,6 +79,7 @@ class QuantizationConfig:
     lowrank: int = 32  # SVDQuant lowrank
     quantize_mha: bool = False
     compress: bool = False
+    block_size: int = 16  # NVFP4 block size
 
     def validate(self) -> None:
         """Validate configuration consistency."""
@@ -120,7 +121,7 @@ class ModelConfig:
 
     model_type: ModelType = ModelType.FLUX_DEV
     model_dtype: dict[str, torch.dtype] = field(default_factory=lambda: {"default": torch.float16})
-    backbone: str = ""
+    backbone: list[str] = field(default_factory=list)
     trt_high_precision_dtype: DataType = DataType.HALF
     override_model_path: Path | None = None
     cpu_offloading: bool = False

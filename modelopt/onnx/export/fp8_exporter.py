@@ -102,12 +102,86 @@ class FP8QuantExporter(ONNXQuantExporter):
         return gs.export_onnx(graph)
 
     @staticmethod
+    def _quantize_conv_weights_to_fp8(graph: gs.Graph) -> int:
+        """Add FP8 weight DequantizeLinear for Conv layers with unquantized weights.
+
+        Conv weight quantizers are disabled during TorchScript ONNX export because the
+        TRT_FP8DequantizeLinear custom op produces outputs with unknown shapes, causing
+        the _convolution symbolic to fail. This method restores FP8 weight quantization
+        by inserting DQ nodes in the ONNX graph, mirroring the compress_weights logic.
+
+        For each Conv node with an unquantized constant weight:
+        1. Compute per-tensor scale = max(abs(weight)) / 448.0
+        2. Quantize weights to FP8E4M3FN
+        3. Insert a DequantizeLinear(fp8_weights, scale) before the Conv weight input
+
+        Args:
+            graph: The onnx-graphsurgeon graph to modify in-place.
+
+        Returns:
+            Number of Conv weight DQ nodes inserted.
+        """
+        fp8_max = 448.0
+        count = 0
+
+        for node in list(graph.nodes):
+            if node.op != "Conv":
+                continue
+            if len(node.inputs) < 2:
+                continue
+
+            weight_input = node.inputs[1]
+            if not isinstance(weight_input, gs.Constant):
+                continue
+
+            # Skip if weight already has a DQ producer
+            if any(out.op == "DequantizeLinear" for out in weight_input.outputs):
+                continue
+
+            torch_weights = torch.from_numpy(weight_input.values.copy())
+            amax = torch_weights.abs().max().float()
+            if amax == 0:
+                continue
+            scale_val = (amax / fp8_max).item()
+
+            # Quantize weights to FP8 (WAR: numpy doesn't support fp8)
+            fp8_data = (torch_weights / scale_val).to(torch.float8_e4m3fn).view(torch.uint8).numpy()
+            fp8_tensor = onnx.TensorProto()
+            fp8_tensor.data_type = onnx.TensorProto.FLOAT8E4M3FN
+            fp8_tensor.dims.extend(fp8_data.shape)
+            fp8_tensor.raw_data = fp8_data.tobytes()
+            fp8_constant = gs.Constant(
+                node.name + "/weight_quantizer/fp8_weights", LazyValues(fp8_tensor)
+            )
+
+            # Scale in FP16 — DQ output type matches scale dtype, must match activation type
+            import numpy as np
+
+            scale_constant = gs.Constant(
+                node.name + "/weight_quantizer/scale",
+                np.array(scale_val, dtype=np.float16),
+            )
+
+            dq_output = gs.Variable(node.name + "/weight_quantizer/dq_output")
+            dq_node = gs.Node(
+                op="DequantizeLinear",
+                name=node.name + "/weight_quantizer/DequantizeLinear",
+                inputs=[fp8_constant, scale_constant],
+                outputs=[dq_output],
+            )
+            graph.nodes.append(dq_node)
+            node.inputs[1] = dq_output
+            count += 1
+
+        return count
+
+    @staticmethod
     def post_process(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
         """Post-processes the ONNX model for FP8 quantization.
 
-        Converts TRT_FP8 QDQ ops to native ONNX QuantizeLinear/DequantizeLinear:
-        - TRT_FP8QuantizeLinear -> QuantizeLinear with FP8E4M3FN zero_point and saturate=1
-        - TRT_FP8DequantizeLinear -> DequantizeLinear
+        Converts TRT_FP8 QDQ ops to native ONNX QuantizeLinear/DequantizeLinear and
+        adds FP8 weight DQ for Conv layers whose weight quantizers were disabled during
+        TorchScript export.
 
         Args:
             onnx_model: The ONNX model containing TRT_FP8 quantization nodes.
@@ -143,6 +217,11 @@ class FP8QuantExporter(ONNXQuantExporter):
                 logger.debug(
                     f"Converted {node.name} from TRT_FP8DequantizeLinear to DequantizeLinear"
                 )
+
+        # Add FP8 weight DQ for Conv layers that had weight quantizers disabled during export
+        count = FP8QuantExporter._quantize_conv_weights_to_fp8(graph)
+        if count > 0:
+            logger.info(f"Inserted FP8 weight DequantizeLinear for {count} Conv nodes")
 
         graph.cleanup().toposort()
         return gs.export_onnx(graph)

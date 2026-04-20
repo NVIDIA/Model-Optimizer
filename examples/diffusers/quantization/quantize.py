@@ -116,33 +116,48 @@ class Quantizer:
 
         if self.config.format == QuantFormat.INT8:
             if self.config.algo == QuantAlgo.SMOOTHQUANT:
-                quant_config = mtq.INT8_SMOOTHQUANT_CFG
+                base_cfg = mtq.INT8_SMOOTHQUANT_CFG
             else:
-                quant_config = INT8_DEFAULT_CONFIG
+                base_cfg = INT8_DEFAULT_CONFIG
             if self.config.collect_method != CollectMethod.DEFAULT:
                 reset_set_int8_config(
-                    quant_config,
+                    base_cfg,
                     self.config.percentile,
                     n_steps,
                     collect_method=self.config.collect_method.value,
                     backbone=backbone,
                 )
         elif self.config.format == QuantFormat.FP8:
-            quant_config = FP8_DEFAULT_CONFIG
+            base_cfg = FP8_DEFAULT_CONFIG
         elif self.config.format == QuantFormat.FP4:
             if self.model_config.model_type.value.startswith("flux"):
-                quant_config = NVFP4_FP8_MHA_CONFIG
+                base_cfg = NVFP4_FP8_MHA_CONFIG
             else:
-                quant_config = NVFP4_DEFAULT_CONFIG
+                base_cfg = NVFP4_DEFAULT_CONFIG
         else:
             raise NotImplementedError(f"Unknown format {self.config.format}")
+
+        # Build a fresh config dict so we never mutate the global constants.
+        quant_cfg_list = list(base_cfg["quant_cfg"])
+
+        if self.config.format == QuantFormat.FP4:
+            for i, entry in enumerate(quant_cfg_list):
+                if isinstance(entry, dict) and "block_sizes" in entry.get("cfg", {}):
+                    new_block_sizes = {**entry["cfg"]["block_sizes"], -1: self.config.block_size}
+                    quant_cfg_list[i] = {
+                        **entry,
+                        "cfg": {**entry["cfg"], "block_sizes": new_block_sizes},
+                    }
+
         if self.config.quantize_mha:
-            quant_config["quant_cfg"].append(
+            quant_cfg_list.append(
                 {
                     "quantizer_name": "*[qkv]_bmm_quantizer",
                     "cfg": {"num_bits": (4, 3), "axis": None},
                 }
             )
+
+        quant_config = {**base_cfg, "quant_cfg": quant_cfg_list}
         set_quant_config_attr(
             quant_config,
             self.model_config.trt_high_precision_dtype.value,
@@ -158,6 +173,7 @@ class Quantizer:
         backbone: torch.nn.Module,
         quant_config: Any,
         forward_loop: callable,  # type: ignore[valid-type]
+        backbone_name: str = "transformer",
     ) -> torch.nn.Module:
         """
         Apply quantization to the model.
@@ -166,15 +182,18 @@ class Quantizer:
             backbone: Model backbone to quantize
             quant_config: Quantization configuration
             forward_loop: Forward pass function for calibration
+            backbone_name: Name of the backbone being quantized
         """
         self.logger.info("Checking for LoRA layers...")
         check_lora(backbone)
 
-        self.logger.info("Starting model quantization...")
+        self.logger.info(f"Starting model quantization for {backbone_name}...")
         mtq.quantize(backbone, quant_config, forward_loop)
         # Get model-specific filter function
-        model_filter_func = get_model_filter_func(self.model_config.model_type)
-        self.logger.info(f"Using filter function for {self.model_config.model_type.value}")
+        model_filter_func = get_model_filter_func(self.model_config.model_type, backbone_name)
+        self.logger.info(
+            f"Using filter function for {self.model_config.model_type.value}/{backbone_name}"
+        )
 
         self.logger.info("Disabling specific quantizers...")
         mtq.disable_quantizer(backbone, model_filter_func)
@@ -221,20 +240,27 @@ class ExportManager:
                 return True
         return False
 
-    def save_checkpoint(self, backbone: torch.nn.Module) -> None:
+    def save_checkpoint(
+        self,
+        backbone: torch.nn.Module,
+        backbone_name: str | None = None,
+    ) -> None:
         """
         Save quantized model checkpoint.
 
         Args:
             backbone: The quantized backbone module to save (must be the same instance
                 that was passed to mtq.quantize, as it carries the _modelopt_state).
+            backbone_name: Optional name for the backbone file (defaults to "backbone").
         """
         if not self.config.quantized_torch_ckpt_path:
             return
 
         ckpt_path = self.config.quantized_torch_ckpt_path
         ckpt_path.mkdir(parents=True, exist_ok=True)
-        target_path = ckpt_path / "backbone.pt"
+        filename = f"{backbone_name}.pt" if backbone_name else "backbone.pt"
+        target_path = ckpt_path / filename
+
         self.logger.info(f"Saving backbone to {target_path}")
         mto.save(backbone, str(target_path))
 
@@ -292,14 +318,19 @@ class ExportManager:
         if self.pipeline_manager is None:
             raise RuntimeError("Pipeline manager is required for per-backbone checkpoints.")
 
-        backbone = self.pipeline_manager.get_backbone()
-        if restore_path.exists() and restore_path.is_dir():
-            source_path = restore_path / "backbone.pt"
+        if not restore_path.exists() or not restore_path.is_dir():
+            raise FileNotFoundError(f"Checkpoint directory not found: {restore_path}")
+
+        for backbone_name, backbone in self.pipeline_manager.iter_backbones():
+            source_path = restore_path / f"{backbone_name}.pt"
             if not source_path.exists():
-                raise FileNotFoundError(f"Backbone checkpoint not found: {source_path}")
-            self.logger.info(f"Restoring backbone from {source_path}")
+                raise FileNotFoundError(
+                    f"Checkpoint not found for '{backbone_name}' in {restore_path}"
+                )
+            self.logger.info(f"Restoring {backbone_name} from {source_path}")
             mto.restore(backbone, str(source_path))
-        self.logger.info("Backbone checkpoints restored successfully")
+
+        self.logger.info("Checkpoints restored successfully")
 
     # TODO: should not do the any data type
     def export_hf_ckpt(self, pipe: Any, model_config: ModelConfig | None = None) -> None:
@@ -368,9 +399,9 @@ def create_argument_parser() -> argparse.ArgumentParser:
         nargs="+",
         default=None,
         help=(
-            "Model backbone(s) in the DiffusionPipeline to work on. "
-            "Provide one name or multiple names separated by space or comma. "
-            "If not provided use default based on model type."
+            "Model backbone(s) in the DiffusionPipeline to quantize. "
+            "Provide one or more names (e.g., 'transformer', 'video_decoder'). "
+            "If not provided, uses default based on model type."
         ),
     )
     model_group.add_argument(
@@ -447,6 +478,12 @@ def create_argument_parser() -> argparse.ArgumentParser:
         "--compress",
         action="store_true",
         help="Compress quantized weights to reduce memory footprint (FP8/FP4 only)",
+    )
+    quant_group.add_argument(
+        "--block-size",
+        type=int,
+        default=16,
+        help="Block size for NVFP4 quantization (default: 16)",
     )
 
     calib_group = parser.add_argument_group("Calibration Configuration")
@@ -535,6 +572,7 @@ def main() -> None:
             lowrank=args.lowrank,
             quantize_mha=args.quantize_mha,
             compress=args.compress,
+            block_size=args.block_size,
         )
 
         if args.prompts_file is not None:
@@ -571,7 +609,6 @@ def main() -> None:
         pipe = pipeline_manager.create_pipeline()
         pipeline_manager.setup_device()
 
-        backbone = pipeline_manager.get_backbone()
         export_manager = ExportManager(export_config, logger, pipeline_manager)
 
         if export_config.restore_from and export_config.restore_from.exists():
@@ -581,37 +618,48 @@ def main() -> None:
             logger.info("Initializing calibration...")
             calibrator = Calibrator(pipeline_manager, calib_config, model_config.model_type, logger)
             batched_prompts = calibrator.load_and_batch_prompts()
-
             quantizer = Quantizer(quant_config, model_config, logger)
-            backbone_quant_config = quantizer.get_quant_config(calib_config.n_steps, backbone)
 
-            # Pipe loads the ckpt just before the inference.
-            def forward_loop(mod):
-                calibrator.run_calibration(batched_prompts)
+            for backbone_name, backbone in pipeline_manager.iter_backbones():
+                logger.info(f"Quantizing backbone: {backbone_name}")
+                backbone_quant_config = quantizer.get_quant_config(calib_config.n_steps, backbone)
 
-            quantizer.quantize_model(backbone, backbone_quant_config, forward_loop)
+                # Calibration runs the full pipeline (not just `mod`), so the
+                # closure intentionally ignores the backbone argument.
+                def forward_loop(mod):
+                    calibrator.run_calibration(batched_prompts)
 
-            # Compress model weights if requested (only for FP8/FP4)
-            if quant_config.compress:
-                logger.info("Compressing model weights to reduce memory footprint...")
-                mtq.compress(backbone)
-                logger.info("Model compression completed")
+                quantizer.quantize_model(
+                    backbone,
+                    backbone_quant_config,
+                    forward_loop,
+                    backbone_name=backbone_name,
+                )
 
-            export_manager.save_checkpoint(backbone)
+                # Compress model weights if requested (only for FP8/FP4)
+                if quant_config.compress:
+                    logger.info(f"Compressing {backbone_name} weights...")
+                    mtq.compress(backbone)
+                    logger.info(f"{backbone_name} compression completed")
 
-        # TODO (Jingyu): To update this function, as we are focusing more on the torch deployment side.
-        check_conv_and_mha(
-            backbone, quant_config.format == QuantFormat.FP4, quant_config.quantize_mha
-        )
+                # For VAE backbones, skip check_conv_and_mha — the whole point
+                # of VAE quantization is to quantize Conv layers.
+                if backbone_name not in ("video_decoder", "vae"):
+                    check_conv_and_mha(
+                        backbone, quant_config.format == QuantFormat.FP4, quant_config.quantize_mha
+                    )
+
+                export_manager.save_checkpoint(backbone, backbone_name)
 
         pipeline_manager.print_quant_summary()
 
-        export_manager.export_onnx(
-            pipe,
-            backbone,
-            model_config.model_type,
-            quant_config.format,
-        )
+        for backbone_name, backbone in pipeline_manager.iter_backbones():
+            export_manager.export_onnx(
+                pipe,
+                backbone,
+                model_config.model_type,
+                quant_config.format,
+            )
 
         export_manager.export_hf_ckpt(pipe, model_config)
 

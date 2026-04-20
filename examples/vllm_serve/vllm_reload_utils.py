@@ -22,6 +22,11 @@ from typing import Any
 import torch
 from vllm.distributed.parallel_state import get_tp_group
 
+from modelopt.torch.export.plugins.vllm_fakequant_hf import (
+    infer_quantizer_prefix_remap,
+    is_weight_quantizer_state_key,
+    merge_amax_tensors_for_group,
+)
 from modelopt.torch.opt.conversion import (
     ModelLikeModule,
     ModeloptStateManager,
@@ -84,7 +89,7 @@ def _convert_key_for_vllm(key: str, value: Any) -> tuple[str, str | None, Any]:
     if "quantizer" not in key:
         return ("copy", key, value)
 
-    # Skip softmax_quantizer and lm_head quantizers(not needed in vLLM)
+    # Skip softmax_quantizer and lm_head quantizers (not needed in vLLM).
     if "softmax_quantizer" in key or (key.startswith("lm_head.") and "quantizer" in key):
         return ("skip", None, None)
 
@@ -95,8 +100,7 @@ def _convert_key_for_vllm(key: str, value: Any) -> tuple[str, str | None, Any]:
         group_key = qkv_match.group(1) + "qkv_proj." + qkv_match.group(3) + suffix
         return ("group", group_key, value)
 
-    # Check if this is an expert gate/up projection
-    # if "mixer" not in key:
+    # Expert gate/up (per-expert) → w13 merge
     expert_gate_up_match = re.search(
         r"(.*\.experts)\.\d+\.(gate|up)_proj\.([^.]+_quantizer)(\..+)?$", key
     )
@@ -113,8 +117,6 @@ def _convert_key_for_vllm(key: str, value: Any) -> tuple[str, str | None, Any]:
             group_key = gate_up_match.group(1) + "gate_up_proj." + gate_up_match.group(3) + suffix
             return ("group", group_key, value)
 
-    # Check if this is an expert down_proj
-    # if "mixer" not in key:
     expert_down_match = re.search(r"(.*\.experts)\.\d+\.down_proj\.([^.]+_quantizer)(\..+)?$", key)
     if expert_down_match:
         suffix = expert_down_match.group(3) or ""
@@ -148,9 +150,10 @@ def _group_keys_for_vllm(
     for key, value in state_dict.items():
         action, new_key, new_value = _convert_key_for_vllm(key, value)
         if new_key is None or new_value is None:
-            assert action == "skip", (
-                f"Expected action to be 'skip' for key {key}, value {value}, got {action}"
-            )
+            if action != "skip":
+                raise RuntimeError(
+                    f"Expected action to be 'skip' for key {key}, value {value}, got {action}"
+                )
             continue
         if action == "copy":
             vllm_state_dict[new_key] = new_value
@@ -176,7 +179,7 @@ def _merge_values_by_max_or_concat(merged_key: str, key_value_pairs: list[tuple[
         for dict_key in values[0]:
             tensors = [v[dict_key] for v in values]
             if "_amax" in dict_key:
-                merged_value[dict_key] = torch.stack(tensors).max(dim=0)[0]
+                merged_value[dict_key] = merge_amax_tensors_for_group(tensors)
             elif "_pre_quant_scale" in dict_key:
                 # _pre_quant_scale is per-input-channel: identical across q/k/v projections
                 # since they share the same input. Do not concatenate; take the first value.
@@ -187,7 +190,7 @@ def _merge_values_by_max_or_concat(merged_key: str, key_value_pairs: list[tuple[
     else:
         # Values are tensors directly
         if "_amax" in merged_key:
-            merged_value = torch.stack(values).max(dim=0)[0]
+            merged_value = merge_amax_tensors_for_group(values)
         else:
             merged_value = torch.cat(values, dim=0)
         return merged_value
@@ -231,6 +234,25 @@ def convert_dict_to_vllm(
         max_or_concat: Whether to merge grouped values by taking max/concatenate or require identical
         map_fun: Function to map the state dict to vLLM format
     """
+    # If map_fun is provided, pre-transform quantizer key module-path prefixes so that
+    # HF→vLLM model renames (e.g. backbone.layers → model.layers) are applied before
+    # key grouping (q/k/v → qkv, experts.N.up_proj → experts.w13, etc.).
+    # This is necessary for models where the HF root module differs from vLLM's (e.g.
+    # NemotronH uses backbone.layers in HF but model.layers in vLLM), and for
+    # modelopt_state_weights where ALL keys are quantizer keys so map_fun is never
+    # invoked on non-quantizer keys.
+    if map_fun is not None:
+        q_only = {k: v for k, v in state_dict.items() if "_quantizer" in k}
+        prefix_remap = infer_quantizer_prefix_remap(q_only, map_fun)
+        if prefix_remap:
+            renamed = {}
+            for k, v in state_dict.items():
+                if "_quantizer" in k:
+                    first = k.split(".")[0]
+                    k = prefix_remap.get(first, first) + k[len(first) :]
+                renamed[k] = v
+            state_dict = renamed
+
     vllm_state_dict, merge_groups = _group_keys_for_vllm(state_dict)
 
     merge_fn = _merge_values_by_max_or_concat if max_or_concat else _merge_values_require_identical
@@ -340,7 +362,26 @@ def filter_modelopt_state_quantizer_state_for_model(
             }
             # Add state for quantizers in model but not in metadata (e.g. disabled/excluded)
             for k in model_keys - filtered.keys():
-                filtered[k] = model_qstate[k]
+                state = model_qstate[k]
+                # Weight quantizers absent from exported metadata were disabled during export
+                # (weights are already fake-quantized and pre_quant_scale is folded in).
+                # Keep them disabled on reload so fold_weight does not re-quantize the
+                # already-folded weights (re-quantizing distorts the pqs-scaled values).
+                if is_weight_quantizer_state_key(k) and not state.get("_disabled"):
+                    state = {**state, "_disabled": True}
+                filtered[k] = state
+
+            # Invariant: weight quantizers absent from export must be _disabled.
+            for wq_k in model_keys:
+                if not is_weight_quantizer_state_key(wq_k):
+                    continue
+                wq_state = filtered[wq_k]
+                if wq_k not in saved and not wq_state.get("_disabled"):
+                    raise RuntimeError(
+                        f"Weight quantizer {wq_k!r} is missing from saved quantizer_state but "
+                        f"is not marked _disabled (got _disabled={wq_state.get('_disabled')!r}). "
+                        f"vLLM fakequant export omits weight quantizer keys when weights are folded."
+                    )
             metadata["quantizer_state"] = filtered
 
 
@@ -379,8 +420,121 @@ def restore_from_modelopt_state_vllm(
 
     if not manager.has_state and isinstance(model, ModelLikeModule):
         model = model.init_modellike()
-    assert not isinstance(model, ModelLikeModule), "Model must be a regular Module now!"
+    if isinstance(model, ModelLikeModule):
+        raise RuntimeError("Model must be a regular Module after restore, got ModelLikeModule")
     return model
+
+
+def _tp_concat_shard_dims(
+    value_shape: tuple[int, ...],
+    expected_shape: tuple[int, ...],
+    tp_world_size: int,
+) -> list[int]:
+    """Dims ``d`` where checkpoint looks like TP concat: ``value[d] == expected[d] * tp_world_size``."""
+    return [
+        d for d in range(len(expected_shape)) if value_shape[d] == expected_shape[d] * tp_world_size
+    ]
+
+
+def _narrow_tensor_to_tp_local_shard(
+    value: torch.Tensor,
+    expected_shape: tuple[int, ...] | torch.Size,
+    tp_rank: int,
+    tp_world_size: int,
+    *,
+    context: str,
+) -> torch.Tensor:
+    """Slice ``value`` to this TP rank when it is the concat of per-rank shards along one dim."""
+    value_shape = value.shape
+    expected_shape = tuple(expected_shape)
+    if value_shape == expected_shape:
+        return value
+    if len(value_shape) != len(expected_shape):
+        raise ValueError(
+            f"{context}: rank mismatch (checkpoint={tuple(value_shape)}, expected={tuple(expected_shape)})"
+        )
+    shard_dims = _tp_concat_shard_dims(value_shape, expected_shape, tp_world_size)
+    if len(shard_dims) != 1:
+        raise ValueError(
+            f"{context}: cannot infer TP shard dim "
+            f"(expected={tuple(expected_shape)}, checkpoint={tuple(value_shape)}, tp={tp_world_size})"
+        )
+    d = shard_dims[0]
+    shard_size = expected_shape[d]
+    start = tp_rank * shard_size
+    if start + shard_size > value_shape[d]:
+        raise ValueError(
+            f"{context}: TP shard out of bounds "
+            f"(expected={tuple(expected_shape)}, checkpoint={tuple(value_shape)})"
+        )
+    return value.narrow(d, start, shard_size).contiguous()
+
+
+def _pqs_local_expected_shape(pqs: torch.Tensor, expected_in: int) -> tuple[int, ...] | None:
+    """Local per-rank shape for ``_pre_quant_scale`` (1-D ``[H]`` or broadcast 2-D ``[1, H]``)."""
+    if pqs.ndim == 1:
+        return (expected_in,)
+    if pqs.ndim == 2 and pqs.shape[0] == 1:
+        return (1, expected_in)
+    return None
+
+
+def _expected_in_features_for_input_quantizer(parent: Any, input_quantizer_attr: str) -> int | None:
+    """Input feature count for the weight paired with ``*_input_quantizer`` (Linear or FusedMoE)."""
+    stem = input_quantizer_attr[: -len("_input_quantizer")]
+    w = getattr(parent, (stem + "_weight") if stem else "weight", None)
+    if w is None or not isinstance(w, torch.Tensor) or w.is_meta:
+        return None
+    return int(w.shape[-1] if w.ndim == 3 else w.shape[1])
+
+
+def shard_pre_quant_scale_for_tp(model: Any) -> None:
+    """Shard ``_pre_quant_scale`` in-place for the local TP rank (row-parallel inputs).
+
+    HF exports often store full (unsharded) scales; after load, row-parallel layers need
+    ``pqs`` narrowed to ``H_in / tp`` when ``len(pqs) == H_in * tp_world_size``.
+
+    Call after parallel linear modules expose TP-sharded weight shapes (e.g.
+    ``post_restore_vllm_parallel_linears``). If run earlier, ``expected_in`` inferred from
+    weights can match an unsharded checkpoint and a second call becomes a no-op even when
+    pqs should still be narrowed.
+
+    Args:
+        model: vLLM model with ``TensorQuantizer`` submodules.
+    """
+    from modelopt.torch.quantization.nn import TensorQuantizer
+
+    tp_group = get_tp_group()
+    tp_rank, tp_world_size = tp_group.rank_in_group, tp_group.world_size
+    if tp_world_size == 1:
+        return
+
+    for qname, quantizer in model.named_modules():
+        if not isinstance(quantizer, TensorQuantizer):
+            continue
+        pqs = getattr(quantizer, "_pre_quant_scale", None)
+        if pqs is None:
+            continue
+        last = qname.rfind(".")
+        if last == -1 or not qname[last + 1 :].endswith("input_quantizer"):
+            continue
+        try:
+            parent = model.get_submodule(qname[:last])
+        except (AttributeError, LookupError):
+            continue
+        expected_in = _expected_in_features_for_input_quantizer(parent, qname[last + 1 :])
+        if expected_in is None:
+            continue
+        expected_shape = _pqs_local_expected_shape(pqs, expected_in)
+        if expected_shape is None:
+            continue
+        quantizer._pre_quant_scale = _narrow_tensor_to_tp_local_shard(
+            pqs,
+            expected_shape,
+            tp_rank,
+            tp_world_size,
+            context=f"{qname}._pre_quant_scale",
+        )
 
 
 def process_state_dict_for_tp(saved_qstate_dict, current_state_dict):
@@ -393,42 +547,14 @@ def process_state_dict_for_tp(saved_qstate_dict, current_state_dict):
     for key, value in saved_qstate_dict.items():
         if key in current_state_dict:
             expected = current_state_dict[key]
-            if not hasattr(value, "shape") or not hasattr(expected, "shape"):
-                result[key] = value
-                continue
-            expected_shape = expected.shape
-            value_shape = value.shape
-            if value_shape != expected_shape:
-                # Verify compatible rank before indexing
-                if len(value_shape) != len(expected_shape):
-                    raise ValueError(
-                        f"Cannot infer TP shard dim for {key}: rank mismatch "
-                        f"(checkpoint rank={len(value_shape)}, expected rank={len(expected_shape)})"
-                    )
-                # Find the dimension that was tensor-parallel sharded.
-                # We expect exactly one dimension to satisfy:
-                #   checkpoint_dim == expected_dim * tp_world_size
-                shard_dims = [
-                    d
-                    for d in range(len(expected_shape))
-                    if value_shape[d] == expected_shape[d] * tp_world_size
-                ]
-                if len(shard_dims) != 1:
-                    raise ValueError(
-                        f"Cannot infer TP shard dim for {key}: "
-                        f"expected_shape={tuple(expected_shape)}, checkpoint_shape={tuple(value_shape)}"
-                    )
-
-                shard_dim = shard_dims[0]
-                shard_size = expected_shape[shard_dim]
-                start = tp_rank * shard_size
-                end = start + shard_size
-                if end > value_shape[shard_dim]:
-                    raise ValueError(
-                        f"TP shard out of bounds for {key}: "
-                        f"expected_shape={tuple(expected_shape)}, checkpoint_shape={tuple(value_shape)}"
-                    )
-                value = value.narrow(shard_dim, start, shard_size).contiguous()
+            if hasattr(value, "shape") and hasattr(expected, "shape"):
+                value = _narrow_tensor_to_tp_local_shard(
+                    value,
+                    expected.shape,
+                    tp_rank,
+                    tp_world_size,
+                    context=f"Key {key!r}",
+                )
         result[key] = value
 
     return result
@@ -437,12 +563,8 @@ def process_state_dict_for_tp(saved_qstate_dict, current_state_dict):
 def load_state_dict_from_path(
     fakequant_runner: Any, quantizer_file_path: str, model: Any
 ) -> dict[str, Any]:
-    fakequant_runner.model_runner._dummy_run(1)
-    print(f"Loading quantizer values from {quantizer_file_path}")
-    # Load on CPU to avoid failures when the checkpoint was saved from a different
-    # GPU mapping
+    # Load on CPU to avoid failures when the checkpoint was saved from a different GPU mapping.
     saved_quant_dict = torch.load(quantizer_file_path, weights_only=True, map_location="cpu")
-    # convert quant keys to vLLM format
     if hasattr(fakequant_runner.model_runner.model, "hf_to_vllm_mapper"):
         saved_quant_dict = fakequant_runner.model_runner.model.hf_to_vllm_mapper.apply_dict(
             saved_quant_dict
@@ -455,7 +577,6 @@ def load_state_dict_from_path(
     saved_quant_dict = convert_dict_to_vllm(saved_quant_dict)
 
     current_state_dict = model.state_dict()
-    # Count quant keys in checkpoint and model
     checkpoint_quant_keys = [key for key in saved_quant_dict if "quantizer" in key]
     model_quant_keys = [key for key in current_state_dict if "quantizer" in key]
     ckpt_key_set = set(checkpoint_quant_keys)

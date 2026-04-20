@@ -124,7 +124,7 @@ This mode can be useful when you don't know the exact dimensions you want to pru
 from modelopt.torch.utils.plugins.megatron_mmlu import megatron_mmlu
 
 def score_func(m):
-    return megatron_mmlu(m, tokenizer, percentage=0.05)  # 5% sampled data for faster eval
+    return megatron_mmlu(m, tokenizer, fraction=0.1, batch_size=4)  # 10% sampled data for faster eval
 
 # Specify target parameter count and configure the auto pruning algorithm
 # Save minitron scores at checkpoint so we can resume pruning without running the forward loop again
@@ -147,7 +147,7 @@ mtp.prune(...)
 
 1. **Importance Scoring**: Same as manual pruning - computes activation magnitudes for all parameters (takes ~5 minutes for an 8B model)
 2. **Search Space Construction**: Generates a search space of possible architectures based search space config and other configs (`max_width_pruning`, `max_depth_pruning`, `hparams_to_skip`)
-3. **Architecture Search**: Find candidate architectures that meet the parameter constraint and evaluate `top_k` (based on number of parameters) of them using `score_func` e.g. MMLU, negative validation loss, etc. (takes ~10 mins per candidate for an 8B model pruning)
+3. **Architecture Search**: Find candidate architectures that meet the parameter constraint and evaluate `top_k` (based on number of parameters) of them using `score_func` e.g. MMLU, negative validation loss, etc. (takes ~5 min per candidate for an 8B model MMLU score with 10% sampled data)
 4. **Best Architecture Selection**: Returns the architecture (best `export_config`) with the highest actual score from the top-K evaluated architectures
 5. **Weight Slicing**: Slices the model weights according to the best pruned architecture found
 

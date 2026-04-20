@@ -13,13 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Integration tests for sequential_calibrate and LayerActivationCollector."""
+"""Integration tests for layerwise_calibrate and LayerActivationCollector."""
 
 import torch
 import torch.nn as nn
 
-from modelopt.torch.quantization.model_calib import sequential_calibrate
-from modelopt.torch.quantization.utils.activation_collector import LayerActivationCollector
+from modelopt.torch.quantization.model_calib import layerwise_calibrate
+from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 
 
 class _DecoderBlock(nn.Module):
@@ -101,7 +101,7 @@ def _register_test_discoverer(monkeypatch):
     )
 
 
-def test_seq_calib_func_called_per_layer(monkeypatch):
+def test_layerwise_calib_func_called_per_layer(monkeypatch):
     _register_test_discoverer(monkeypatch)
     model, data = _make_model_and_data(n_layers=4)
     call_count = [0]
@@ -109,7 +109,7 @@ def test_seq_calib_func_called_per_layer(monkeypatch):
     def counting_calib(layer, forward_loop, **kwargs):
         call_count[0] += 1
 
-    sequential_calibrate(
+    layerwise_calibrate(
         model,
         forward_loop=lambda m: _run_forward(m, data),
         calib_func=counting_calib,
@@ -118,7 +118,7 @@ def test_seq_calib_func_called_per_layer(monkeypatch):
     assert call_count[0] == 4
 
 
-def test_seq_calib_func_receives_correct_layer(monkeypatch):
+def test_layerwise_calib_func_receives_correct_layer(monkeypatch):
     _register_test_discoverer(monkeypatch)
     model, data = _make_model_and_data(n_layers=3)
     called_layers = []
@@ -126,7 +126,7 @@ def test_seq_calib_func_receives_correct_layer(monkeypatch):
     def track_layers(layer, forward_loop, **kwargs):
         called_layers.append(layer)
 
-    sequential_calibrate(
+    layerwise_calibrate(
         model,
         forward_loop=lambda m: _run_forward(m, data),
         calib_func=track_layers,
@@ -136,7 +136,7 @@ def test_seq_calib_func_receives_correct_layer(monkeypatch):
         assert called_layers[i] is layer
 
 
-def test_seq_calib_kwargs_forwarded(monkeypatch):
+def test_layerwise_calib_kwargs_forwarded(monkeypatch):
     _register_test_discoverer(monkeypatch)
     model, data = _make_model_and_data(n_layers=2)
     received_kwargs = []
@@ -144,7 +144,7 @@ def test_seq_calib_kwargs_forwarded(monkeypatch):
     def capture_kwargs(layer, forward_loop, **kwargs):
         received_kwargs.append(kwargs)
 
-    sequential_calibrate(
+    layerwise_calibrate(
         model,
         forward_loop=lambda m: _run_forward(m, data),
         calib_func=capture_kwargs,
@@ -158,7 +158,7 @@ def test_seq_calib_kwargs_forwarded(monkeypatch):
         assert kw["method"] == "max"
 
 
-def test_seq_calib_layer_forward_loop_runs_all_batches(monkeypatch):
+def test_layerwise_calib_layer_forward_loop_runs_all_batches(monkeypatch):
     """The per-layer forward loop passed to calib_func should replay all batches."""
     _register_test_discoverer(monkeypatch)
     n_batches = 5
@@ -178,7 +178,7 @@ def test_seq_calib_layer_forward_loop_runs_all_batches(monkeypatch):
         layer.forward = orig_forward
         batch_counts.append(counter["n"])
 
-    sequential_calibrate(
+    layerwise_calibrate(
         model,
         forward_loop=lambda m: _run_forward(m, data),
         calib_func=count_batches,
@@ -188,13 +188,13 @@ def test_seq_calib_layer_forward_loop_runs_all_batches(monkeypatch):
         assert count == n_batches
 
 
-def test_seq_calib_does_not_alter_weights(monkeypatch):
-    """sequential_calibrate itself should not modify model weights."""
+def test_layerwise_calib_does_not_alter_weights(monkeypatch):
+    """layerwise_calibrate itself should not modify model weights."""
     _register_test_discoverer(monkeypatch)
     model, data = _make_model_and_data(n_layers=3)
     weights_before = {n: p.clone() for n, p in model.named_parameters()}
 
-    sequential_calibrate(
+    layerwise_calibrate(
         model,
         forward_loop=lambda m: _run_forward(m, data),
         calib_func=lambda layer, forward_loop, **kw: None,
@@ -204,7 +204,7 @@ def test_seq_calib_does_not_alter_weights(monkeypatch):
         assert torch.equal(p, weights_before[n]), f"Weight {n} was modified"
 
 
-def test_seq_calib_activations_update_across_layers(monkeypatch):
+def test_layerwise_calib_activations_update_across_layers(monkeypatch):
     """Subsequent layers should see activations transformed by prior layers."""
     _register_test_discoverer(monkeypatch)
     torch.manual_seed(0)
@@ -228,7 +228,7 @@ def test_seq_calib_activations_update_across_layers(monkeypatch):
         layer_idx = list(model.layers).index(layer)
         layer_inputs_record[layer_idx] = activations
 
-    sequential_calibrate(
+    layerwise_calibrate(
         model,
         forward_loop=lambda m: [m(t) for t in tokens],
         calib_func=record_inputs,
@@ -240,7 +240,7 @@ def test_seq_calib_activations_update_across_layers(monkeypatch):
 
 
 def test_mode_transitions_across_calibration_steps(monkeypatch):
-    """Verify layer modes after each sequential calibration step.
+    """Verify layer modes after each layerwise calibration step.
 
     After get_input_activations(layers[i]) returns, the current layer is reset
     to 'original'.  Layers further back are left in 'run' (just calibrated) or
@@ -259,7 +259,7 @@ def test_mode_transitions_across_calibration_steps(monkeypatch):
     try:
 
         def modes():
-            return [model.layers[i]._seq_calib.mode for i in range(5)]
+            return [model.layers[i]._layerwise_calib.mode for i in range(5)]
 
         collector.get_input_activations(model.layers[0], forward_loop)
         assert modes() == ["original", "original", "original", "original", "original"]
@@ -316,7 +316,7 @@ def test_run_layer_reflects_weight_updates(monkeypatch):
             layer.weight.mul_(2.0)
         layer_forward_loop(layer)
 
-    sequential_calibrate(
+    layerwise_calibrate(
         model,
         forward_loop=forward_loop,
         calib_func=weight_doubling_calib,
