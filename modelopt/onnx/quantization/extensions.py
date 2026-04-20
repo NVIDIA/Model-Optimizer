@@ -18,7 +18,7 @@
 import os
 import sys
 
-# TODO: cppimport is no longer maintained, switch to a different library
+# TODO: cppimport is not actively maintained, consider a better alternative library
 import cppimport
 
 from modelopt.onnx.logging_config import logger
@@ -32,7 +32,5 @@ try:
 except Exception as e:
     logger.warning(
         f"{e}\nUnable to load `modelopt_round_and_pack_ext', falling back to python based optimized version. "
-        "If you see `copy_file() got an unexpected keyword argument 'dry_run'`, you will need "
-        "https://github.com/tbenthompson/cppimport/pull/98 or downgrade setuptools until we have a workaround"
     )
     round_and_pack_ext = None
