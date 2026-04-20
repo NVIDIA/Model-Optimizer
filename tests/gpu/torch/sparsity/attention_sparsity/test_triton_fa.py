@@ -26,10 +26,10 @@ pytestmark = [
     pytest.mark.filterwarnings("ignore::DeprecationWarning"),
 ]
 
-from modelopt.torch.kernels import IS_AVAILABLE as TRITON_KERNEL_AVAILABLE
+from modelopt.torch.kernels.common import IS_AVAILABLE as TRITON_KERNEL_AVAILABLE
 
 if TRITON_KERNEL_AVAILABLE:
-    from modelopt.torch.kernels import attention, register_triton_attention
+    from modelopt.torch.kernels.common import attention, register_triton_attention
 
     if register_triton_attention is not None:
         register_triton_attention()

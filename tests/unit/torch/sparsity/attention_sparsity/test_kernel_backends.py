@@ -34,12 +34,12 @@ pytest.importorskip("diffusers")
 
 class TestSkipSoftmaxContext:
     def test_default_is_false(self):
-        from modelopt.torch.sparsity.attention_sparsity.kernels import get_skip_softmax_context
+        from modelopt.torch.kernels.sparsity.attention import get_skip_softmax_context
 
         assert get_skip_softmax_context() is False
 
     def test_set_and_get(self):
-        from modelopt.torch.sparsity.attention_sparsity.kernels import (
+        from modelopt.torch.kernels.sparsity.attention import (
             get_skip_softmax_context,
             set_skip_softmax_context,
         )
@@ -60,9 +60,7 @@ class TestDiffusersTritonBackend:
 
     @pytest.fixture(autouse=True)
     def _reset(self):
-        from modelopt.torch.sparsity.attention_sparsity.kernels import (
-            diffusers_triton_attention as mod,
-        )
+        from modelopt.torch.kernels.sparsity.attention import diffusers_triton_attention as mod
 
         mod._BACKEND_REGISTERED = False
         mod.clear_triton_skip_softmax_config()
@@ -70,7 +68,7 @@ class TestDiffusersTritonBackend:
         mod.clear_triton_skip_softmax_config()
 
     def test_set_clear_config(self):
-        from modelopt.torch.sparsity.attention_sparsity.kernels.diffusers_triton_attention import (
+        from modelopt.torch.kernels.sparsity.attention.diffusers_triton_attention import (
             clear_triton_skip_softmax_config,
             set_triton_skip_softmax_config,
         )
@@ -79,7 +77,7 @@ class TestDiffusersTritonBackend:
         clear_triton_skip_softmax_config()
 
     def test_register_idempotent(self):
-        from modelopt.torch.sparsity.attention_sparsity.kernels.diffusers_triton_attention import (
+        from modelopt.torch.kernels.sparsity.attention.diffusers_triton_attention import (
             register_diffusers_triton_attention,
         )
 
@@ -87,7 +85,7 @@ class TestDiffusersTritonBackend:
         register_diffusers_triton_attention()  # Should be a no-op
 
     def test_get_backend_before_register_raises(self):
-        from modelopt.torch.sparsity.attention_sparsity.kernels.diffusers_triton_attention import (
+        from modelopt.torch.kernels.sparsity.attention.diffusers_triton_attention import (
             get_triton_attention_backend,
         )
 
@@ -113,11 +111,9 @@ class TestRegisterDiffusersBackends:
         """A ModelMixin subclass triggers diffusers backend registration."""
         from diffusers.models.modeling_utils import ModelMixin
 
+        from modelopt.torch.kernels.sparsity.attention import diffusers_triton_attention as mod
         from modelopt.torch.sparsity.attention_sparsity.conversion import (
             _register_diffusers_backends_if_needed,
-        )
-        from modelopt.torch.sparsity.attention_sparsity.kernels import (
-            diffusers_triton_attention as mod,
         )
 
         mod._BACKEND_REGISTERED = False

@@ -32,7 +32,7 @@ When NVFP4 quantization is configured on a `Conv3d` layer via ModelOpt PTQ, the 
 ```python
 import torch
 
-from modelopt.torch.quantization.src.conv.implicit_gemm_cuda import conv3d_implicit_gemm_cuda
+from modelopt.torch.kernels.quantization.conv.implicit_gemm_cuda import conv3d_implicit_gemm_cuda
 from modelopt.torch.quantization.tensor_quant import dynamic_block_quantize_op
 
 x = torch.randn(1, 128, 21, 60, 106, device="cuda")
@@ -75,7 +75,7 @@ out_q = conv3d_implicit_gemm_cuda(
 
 ### `conv3d_implicit_gemm_cuda`
 
-`from modelopt.torch.quantization.src.conv.implicit_gemm_cuda import conv3d_implicit_gemm_cuda`
+`from modelopt.torch.kernels.quantization.conv.implicit_gemm_cuda import conv3d_implicit_gemm_cuda`
 
 | Parameter | Description |
 |-----------|-------------|
@@ -91,7 +91,7 @@ out_q = conv3d_implicit_gemm_cuda(
 
 ### `fp4_fake_quant`
 
-`from modelopt.torch.quantization.src.conv.implicit_gemm_cuda import fp4_fake_quant`
+`from modelopt.torch.kernels.quantization.conv.implicit_gemm_cuda import fp4_fake_quant`
 
 Standalone FP4 (E2M1) blockwise fake quantization with FP8 E4M3 scale quantization. Uses the same CUDA device functions as the fused path inside the GEMM kernel.
 

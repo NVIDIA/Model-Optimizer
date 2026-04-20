@@ -32,7 +32,7 @@ import torch
 @pytest.fixture
 def ltx_mod():
     """Import ltx_triton_attention and ensure thread-local state is reset."""
-    from modelopt.torch.sparsity.attention_sparsity.kernels import ltx_triton_attention as mod
+    from modelopt.torch.kernels.sparsity.attention import ltx_triton_attention as mod
 
     mod.clear_ltx_triton_context()
     try:
@@ -119,7 +119,7 @@ class TestRegisterLTXTritonAttention:
             parent = Parent()
             ltx_mod.register_ltx_triton_attention(parent)
 
-            from modelopt.torch.sparsity.attention_sparsity.kernels.ltx_triton_attention import (
+            from modelopt.torch.kernels.sparsity.attention.ltx_triton_attention import (
                 _TritonLTXAttentionWrapper,
             )
 

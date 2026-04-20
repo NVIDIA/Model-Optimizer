@@ -18,7 +18,7 @@
 import contextlib
 import threading
 
-from modelopt.torch.kernels import IS_AVAILABLE, attention, register_triton_attention
+from modelopt.torch.kernels.common import IS_AVAILABLE, attention, register_triton_attention
 
 # ---------------------------------------------------------------------------
 # Optional backend registrations (depend on diffusers / ltx_core)

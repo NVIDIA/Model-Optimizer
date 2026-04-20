@@ -36,7 +36,7 @@ from diffusers.models.attention_dispatch import (
     attention_backend,
 )
 
-from modelopt.torch.kernels import attention, attention_calibrate
+from modelopt.torch.kernels.common import attention, attention_calibrate
 
 _BACKEND_NAME = "modelopt_triton"
 _BACKEND_REGISTERED = False

@@ -26,11 +26,9 @@ pytestmark = [
 
 diffusers = pytest.importorskip("diffusers")
 
-from modelopt.torch.kernels import IS_AVAILABLE as TRITON_KERNEL_AVAILABLE
-from modelopt.torch.sparsity.attention_sparsity.kernels import (
-    diffusers_triton_attention as diffusers_mod,
-)
-from modelopt.torch.sparsity.attention_sparsity.kernels import ltx_triton_attention as ltx_mod
+from modelopt.torch.kernels.common import IS_AVAILABLE as TRITON_KERNEL_AVAILABLE
+from modelopt.torch.kernels.sparsity.attention import diffusers_triton_attention as diffusers_mod
+from modelopt.torch.kernels.sparsity.attention import ltx_triton_attention as ltx_mod
 
 
 @pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="Need CUDA + triton")

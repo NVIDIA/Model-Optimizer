@@ -94,7 +94,9 @@ def bench_fn(fn, warmup: int, iters: int) -> float:
 
 def run_benchmark(shapes_name: str, warmup: int, iters: int, fp4_block_size: int):
     """Run latency benchmark for the given shapes."""
-    from modelopt.torch.quantization.src.conv.implicit_gemm_cuda import conv3d_implicit_gemm_cuda
+    from modelopt.torch.kernels.quantization.conv.implicit_gemm_cuda import (
+        conv3d_implicit_gemm_cuda,
+    )
 
     shapes = get_shapes(shapes_name)
 

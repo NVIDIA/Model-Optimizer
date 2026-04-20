@@ -33,7 +33,7 @@ def test_triton_fa_importable_on_cpu():
     except ImportError:
         pytest.skip("triton is not installed")
 
-    from modelopt.torch.kernels import triton_fa
+    from modelopt.torch.kernels.common import triton_fa
 
     assert "attention" in triton_fa.__all__
     assert "attention_calibrate" in triton_fa.__all__

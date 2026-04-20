@@ -25,7 +25,7 @@ import threading
 
 import torch
 
-from modelopt.torch.kernels import attention, attention_calibrate
+from modelopt.torch.kernels.common import attention, attention_calibrate
 from modelopt.torch.utils.logging import warn_rank_0
 
 # Thread-local storage for skip-softmax configuration

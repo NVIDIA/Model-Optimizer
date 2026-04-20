@@ -25,7 +25,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from modelopt.torch.kernels.triton_fa import attention
+from modelopt.torch.kernels.common.triton_fa import attention
 
 
 def _seq_lens_from_mask(

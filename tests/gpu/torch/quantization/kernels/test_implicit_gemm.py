@@ -28,7 +28,9 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not 
 @pytest.fixture(scope="module")
 def cuda_conv3d():
     """Import and return the CUDA implicit GEMM conv3d function."""
-    from modelopt.torch.quantization.src.conv.implicit_gemm_cuda import conv3d_implicit_gemm_cuda
+    from modelopt.torch.kernels.quantization.conv.implicit_gemm_cuda import (
+        conv3d_implicit_gemm_cuda,
+    )
 
     return conv3d_implicit_gemm_cuda
 
@@ -36,7 +38,7 @@ def cuda_conv3d():
 def _triton_fp4_available():
     """Check if the Triton FP4 fake quant kernel is available (requires compute >= 8.9)."""
     try:
-        import modelopt.torch.quantization.triton as triton_kernel
+        import modelopt.torch.kernels.quantization.gemm as triton_kernel
 
         return hasattr(triton_kernel, "fp4_fake_quant_block")
     except ImportError:
@@ -305,7 +307,7 @@ class TestConv3dDeterminism:
 @pytest.fixture(scope="module")
 def cuda_fp4():
     """Import and return the CUDA FP4 fake quant function."""
-    from modelopt.torch.quantization.src.conv.implicit_gemm_cuda import fp4_fake_quant
+    from modelopt.torch.kernels.quantization.conv.implicit_gemm_cuda import fp4_fake_quant
 
     return fp4_fake_quant
 
@@ -780,7 +782,7 @@ class TestFP4FakeQuantVsTriton:
     @pytest.mark.parametrize("num_blocks", [4, 16, 64])
     def test_vs_triton(self, cuda_fp4, block_size, num_blocks):
         """CUDA kernel should match the Triton fp4_fake_quant_block."""
-        from modelopt.torch.quantization.triton import fp4_fake_quant_block
+        from modelopt.torch.kernels.quantization.gemm import fp4_fake_quant_block
 
         torch.manual_seed(42)
         x = torch.randn(num_blocks, block_size, device="cuda", dtype=torch.float32) * 10
@@ -865,7 +867,7 @@ class TestFP4FakeQuantVsModelopt:
     @pytest.mark.parametrize("seed", [42, 123, 999])
     def test_vs_triton_fp4_fake_quant_block(self, cuda_fp4, block_size, seed):
         """Compare against modelopt Triton fp4_fake_quant_block."""
-        from modelopt.torch.quantization.triton import fp4_fake_quant_block
+        from modelopt.torch.kernels.quantization.gemm import fp4_fake_quant_block
 
         torch.manual_seed(seed)
         num_blocks = 16
@@ -957,7 +959,7 @@ class TestFP4FakeQuantVsModelopt:
         x = torch.randn(num_blocks, block_size, device="cuda", dtype=torch.float32) * 5
         global_amax = x.abs().max()
 
-        from modelopt.torch.quantization.triton import fp4_fake_quant_block
+        from modelopt.torch.kernels.quantization.gemm import fp4_fake_quant_block
 
         ours = cuda_fp4(x, global_amax.unsqueeze(0), block_size)
         theirs = fp4_fake_quant_block(
@@ -983,7 +985,7 @@ class TestFP4FakeQuantVsModelopt:
         Our kernel casts to float32 internally, so the result should match
         Triton's output when both receive the same dtype input.
         """
-        from modelopt.torch.quantization.triton import fp4_fake_quant_block
+        from modelopt.torch.kernels.quantization.gemm import fp4_fake_quant_block
 
         torch.manual_seed(42)
         block_size = 16
