@@ -39,11 +39,19 @@ from ..utils import (
 from .modeling_eagle import EagleBaseModelOutput, EagleModule
 from .modeling_fakebase import _BASE_MODEL_PATHS, _EMBED_TOKENS_PATHS, _LM_HEAD_PATHS
 
-__all__ = ["HFARValidation", "HFEagleModel"]
+__all__ = ["HFARValidation", "HFEagleModel", "default_eagle_aux_layer_ids"]
 
 ENABLE_CP_TTT_PATCH = False
 # module variable to cache attention mask for cp ttt
 CACHED_SHARD_TTT_MASKS = {}
+
+
+def default_eagle_aux_layer_ids(num_layers: int) -> list[int]:
+    """Default EAGLE-3 auxiliary hidden-state layer IDs (0-based).
+
+    Three layers near the start, middle, and end of the stack.
+    """
+    return sorted({1, max(0, num_layers // 2 - 1), max(0, num_layers - 4)})
 
 
 @EagleDMRegistry.register({PreTrainedModel: "hf.PreTrainedModel"})
@@ -162,15 +170,7 @@ class HFEagleModel(EagleModel):
         num_layers = self._base_llm_config.num_hidden_layers
         if self.eagle_offline and (num_layers is None or num_layers <= 0):
             num_layers = getattr(self.config, "num_orig_hidden_layers", 0)
-
-        self.eagle_config.eagle_aux_hidden_state_layer_ids = [
-            1,
-            max(0, num_layers // 2 - 1),
-            max(0, num_layers - 4),
-        ]
-        self.eagle_config.eagle_aux_hidden_state_layer_ids = list(
-            set(self.eagle_config.eagle_aux_hidden_state_layer_ids)
-        )
+        self.eagle_config.eagle_aux_hidden_state_layer_ids = default_eagle_aux_layer_ids(num_layers)
 
     def _collect_aux_hidden_states_forward_hook(self, module, input, output) -> None:
         """Collect auxiliary hidden states from base model intermediate layers, save them in attribute."""
