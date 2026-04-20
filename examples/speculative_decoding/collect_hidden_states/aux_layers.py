@@ -18,7 +18,8 @@
 Supports a shared ``--aux-layers`` flag that accepts:
 
 - ``"eagle"``  — ``default_eagle_aux_layer_ids(num_hidden_layers)`` from modelopt.
-- ``"dflash"`` — ``build_target_layer_ids(num_hidden_layers, num_draft_layers)`` from modelopt.
+- ``"dflash"`` — ``build_target_layer_ids(num_hidden_layers, 5)`` from modelopt
+  (5 draft layers; use the explicit list form for other counts).
 - ``"2,5,8"`` — explicit comma-separated layer indices.
 
 Convention: returned values are **0-based transformer layer IDs**. Callers that
@@ -29,9 +30,11 @@ TRT-LLM / vLLM configs should use the values directly.
 
 import argparse
 
+_DFLASH_DEFAULT_NUM_DRAFT_LAYERS = 5
+
 
 def add_aux_layers_args(parser: argparse.ArgumentParser) -> None:
-    """Register ``--aux-layers`` and ``--num-draft-layers`` on ``parser``."""
+    """Register the ``--aux-layers`` flag on ``parser``."""
     parser.add_argument(
         "--aux-layers",
         type=str,
@@ -39,15 +42,9 @@ def add_aux_layers_args(parser: argparse.ArgumentParser) -> None:
         help=(
             "Aux layer indices to capture. One of: "
             "'eagle' (EAGLE-3 default from modelopt), "
-            "'dflash' (build_target_layer_ids with --num-draft-layers), "
-            "or a comma-separated list like '2,5,8'. Default: eagle."
+            f"'dflash' ({_DFLASH_DEFAULT_NUM_DRAFT_LAYERS}-layer DFlash default from modelopt), "
+            "or a comma-separated list like '2,5,8' to override. Default: eagle."
         ),
-    )
-    parser.add_argument(
-        "--num-draft-layers",
-        type=int,
-        default=5,
-        help="Number of draft layers (used only when --aux-layers dflash). Default: 5.",
     )
 
 
@@ -61,7 +58,9 @@ def resolve_aux_layers(args: argparse.Namespace, num_hidden_layers: int) -> list
     if value == "dflash":
         from modelopt.torch.speculative.plugins.modeling_dflash import build_target_layer_ids
 
-        return sorted(set(build_target_layer_ids(num_hidden_layers, args.num_draft_layers)))
+        return sorted(
+            set(build_target_layer_ids(num_hidden_layers, _DFLASH_DEFAULT_NUM_DRAFT_LAYERS))
+        )
     try:
         indices = [int(tok) for tok in args.aux_layers.split(",") if tok.strip()]
     except ValueError as e:
