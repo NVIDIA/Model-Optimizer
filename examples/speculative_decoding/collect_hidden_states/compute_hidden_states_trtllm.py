@@ -23,7 +23,7 @@ import asyncio
 from pathlib import Path
 
 import torch
-from aux_layers import add_aux_layers_args, resolve_aux_layers
+from common import add_aux_layers_args, resolve_aux_layers
 from datasets import load_dataset
 from tensorrt_llm import LLM, SamplingParams
 from tensorrt_llm.llmapi import CudaGraphConfig, KvCacheConfig, SaveHiddenStatesDecodingConfig
