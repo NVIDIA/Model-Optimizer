@@ -20,6 +20,7 @@ import time
 import warnings
 from collections.abc import Callable
 from functools import partial
+from typing import TypeAlias
 
 import torch
 import torch.distributed as dist
@@ -36,7 +37,7 @@ from modelopt.torch.utils import print_rank_0
 from modelopt.torch.utils.distributed import DistributedProcessGroup, ParallelState
 from modelopt.torch.utils.network import bind_forward_method, unpatch_forward_method
 
-from .calib import MseCalibrator, NVFP4MSECalibrator
+from .calib import MseCalibrator, NVFP4MSECalibrator, _Calibrator
 from .conversion import create_and_replace_svdquant_linear_on_the_fly, set_quantizer_by_cfg_context
 from .nn import NVFP4StaticQuantizer, QuantModule, SequentialQuantizer, TensorQuantizer
 from .utils import (
@@ -56,6 +57,7 @@ from .utils import (
 from .utils.calib_utils import _GPTQ_HELPER_REGISTRY, GPTQHelper
 
 __all__ = [
+    "CalibratorFactory",
     "awq",
     "layerwise_calibrate",
     "local_hessian_calibrate",
@@ -63,6 +65,28 @@ __all__ = [
     "smoothquant",
     "svdquant",
 ]
+
+CalibratorFactory: TypeAlias = Callable[
+    [torch.Tensor, int | tuple | list | None, Callable[..., torch.Tensor]], _Calibrator
+]
+
+_FP8_SWEEP_CALIBRATOR_REGISTRY: dict[str, CalibratorFactory] = {}
+
+
+def _register_fp8_sweep_calibrator(backend: str, calibrator_factory: CalibratorFactory) -> None:
+    """Register a custom calibrator factory for a quantization backend.
+
+    When ``fp8_scale_sweep=True`` is passed to :func:`mse_calibrate`, any weight
+    quantizer whose ``backend`` attribute matches a registered key will use the
+    corresponding factory instead of the default :class:`MseCalibrator`.
+
+    Args:
+        backend: Backend name string (must match ``TensorQuantizer.backend``).
+        calibrator_factory: Callable with signature
+            ``(amax: Tensor, axis: int | tuple | list | None, quant_func: Callable)``
+            that returns a :class:`_Calibrator` instance.
+    """
+    _FP8_SWEEP_CALIBRATOR_REGISTRY[backend] = calibrator_factory
 
 
 def weight_only_quantize(model: nn.Module):
@@ -340,6 +364,22 @@ def mse_calibrate(
 
                     # Convert to NVFP4StaticQuantizer in-place
                     NVFP4StaticQuantizer.from_tensor_quantizer(module, global_amax=global_amax)
+
+                if fp8_scale_sweep:
+                    # Check if backend has a registered custom calibrator factory.
+                    _backend: str | None = getattr(module, "backend", None)
+                    backend_factory = (
+                        _FP8_SWEEP_CALIBRATOR_REGISTRY.get(_backend)
+                        if _backend is not None
+                        else None
+                    )
+                    if backend_factory is not None:
+                        module._calibrator = backend_factory(
+                            initial_amax,
+                            module._calibrator._axis,
+                            partial(_mse_quant_func, quantizer=module),
+                        )
+                        continue
 
                 if fp8_scale_sweep and is_nvfp4_static:
                     # Replace calibrator with NVFP4MSECalibrator
