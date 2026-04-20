@@ -212,8 +212,15 @@ def train():
             "Either data.data_path or data.offline_data_path must be set in the config."
         )
     if training_args.cp_size > 1 or training_args.dp_shard_size > 1:
+        # Auto-compute dp_replicate_size so that
+        # dp_replicate_size * dp_shard_size * cp_size == world_size.
+        world_size = int(os.environ.get("WORLD_SIZE", torch.cuda.device_count()))
+        parallel_size = training_args.dp_shard_size * training_args.cp_size
+        dp_replicate_size = world_size // parallel_size
         training_args.parallelism_config = ParallelismConfig(
-            cp_size=training_args.cp_size, dp_shard_size=training_args.dp_shard_size
+            cp_size=training_args.cp_size,
+            dp_shard_size=training_args.dp_shard_size,
+            dp_replicate_size=dp_replicate_size,
         )
     if training_args.cp_size > 1:
         patch_ring_attention_for_ttt()
