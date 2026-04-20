@@ -41,11 +41,22 @@ TP=${TP:-1} PP=${PP:-1} EP=${EP:-1} ETP=${ETP:-1} ${QUANTIZE_EXE} ${MLM_MODEL_CF
 export MLM_EXTRA_ARGS="--mmlu-dataset ${MMLU_DATASET:-/hf-local/cais/mmlu} --fraction 0.01 --lower-bound ${MMLU_LOWER_BOUND:-0.38} --disable-tqdm"
 TP=${TP:-1} PP=${PP:-1} EP=${EP:-1} ETP=${ETP:-1} MLM_MODEL_CKPT=${MLM_MODEL_SAVE} ${MMLU_EXE} ${MLM_MODEL_CFG}
 
-# Export quantized checkpoint to HF format (PP=all GPUs)
+# Export quantized checkpoint to HF format
+# Use largest PP <= total GPUs that divides the model's num_hidden_layers
 TOTAL_GPUS=$(python3 -c "import torch; print(torch.cuda.device_count())" 2>/dev/null || echo ${NUM_GPUS:-1})
-echo "=== Exporting ${MLM_MODEL_CFG} ${QUANT_CFG} (PP=${TOTAL_GPUS}) ==="
+EXPORT_PP=$(python3 -c "
+import json, os
+cfg = os.path.join('${HF_MODEL_CKPT}', 'config.json')
+n_layers = json.load(open(cfg)).get('num_hidden_layers', 1) if os.path.exists(cfg) else 1
+gpus = ${TOTAL_GPUS}
+pp = gpus
+while pp > 1 and n_layers % pp != 0:
+    pp -= 1
+print(pp)
+" 2>/dev/null || echo ${TOTAL_GPUS})
+echo "=== Exporting ${MLM_MODEL_CFG} ${QUANT_CFG} (PP=${EXPORT_PP}, ${TOTAL_GPUS} GPUs) ==="
 export MLM_EXTRA_ARGS=
-TP=1 PP=${TOTAL_GPUS} EP=1 ETP=1 MLM_MODEL_CKPT=${MLM_MODEL_SAVE} ${EXPORT_EXE} ${MLM_MODEL_CFG}
+TP=1 PP=${EXPORT_PP} EP=1 ETP=1 MLM_MODEL_CKPT=${MLM_MODEL_SAVE} ${EXPORT_EXE} ${MLM_MODEL_CFG}
 ls ${EXPORT_DIR}
 cat ${EXPORT_DIR}/hf_quant_config.json
 
