@@ -20,6 +20,7 @@ import asyncio
 from pathlib import Path
 
 import torch
+from aux_layers import add_aux_layers_args, resolve_aux_layers
 from datasets import load_dataset
 from tqdm import tqdm as tqdm
 from transformers import AutoModel, AutoTokenizer
@@ -90,6 +91,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Set trust_remote_code for Huggingface models and tokenizers",
     )
+    add_aux_layers_args(parser)
 
     return parser.parse_args()
 
@@ -165,16 +167,12 @@ def main(args: argparse.Namespace) -> None:
                 assert num_hidden_layers + 1 == len(outputs.hidden_states), (
                     f"Expected {num_hidden_layers}+1 layers of hidden states, but got {len(outputs.hidden_states)}."
                 )
-            # Extract hidden states from layers with index (2, N/2, N-3), and the output hidden states
+            # Select aux layer IDs per --aux-layers flag.
+            # outputs.hidden_states[0] is the embedding output; layer k output is at index k+1.
             hidden_states = outputs.hidden_states
-            selected_layer_indices = [
-                2,
-                max(0, num_hidden_layers // 2),
-                max(1, num_hidden_layers - 3),
-            ]
-            selected_layer_indices = sorted(set(selected_layer_indices))
+            selected_layer_ids = resolve_aux_layers(args, num_hidden_layers)
             aux_hidden_states = torch.cat(
-                [hidden_states[i].squeeze(0).cpu() for i in selected_layer_indices], dim=-1
+                [hidden_states[lid + 1].squeeze(0).cpu() for lid in selected_layer_ids], dim=-1
             )
             output_hidden_states = hidden_states[-1].squeeze(0).cpu()
         output_file = output_dir / f"{conversation_id}.pt"
