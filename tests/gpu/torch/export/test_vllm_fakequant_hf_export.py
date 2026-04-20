@@ -17,7 +17,8 @@ from copy import deepcopy
 
 import pytest
 import torch
-from _test_utils.torch.transformers_models import create_tiny_llama_dir
+import transformers
+from _test_utils.torch.transformers_models import create_tiny_llama_dir, create_tiny_qwen3_moe_dir
 from accelerate import init_empty_weights, load_checkpoint_and_dispatch
 from transformers import AutoConfig, AutoModelForCausalLM
 
@@ -28,8 +29,7 @@ from modelopt.torch.quantization.utils import enable_weight_access_and_writeback
 from modelopt.torch.utils import safe_load
 
 
-@pytest.mark.parametrize("quant_cfg", [mtq.FP8_DEFAULT_CFG])
-def test_hf_vllm_export(tmp_path, quant_cfg):
+def _test_hf_vllm_export(tmp_path, quant_cfg, model_dir):
     """Test HuggingFace model export for vLLM with fake quantization.
 
     This test verifies:
@@ -39,11 +39,8 @@ def test_hf_vllm_export(tmp_path, quant_cfg):
     4. Weight quantizer states are empty in saved state dict; input quantizer amaxes preserved
     """
 
-    # Create a tiny LLaMA model for testing
-    tiny_model_dir = create_tiny_llama_dir(tmp_path, num_hidden_layers=2)
-
     # Load the model
-    model = AutoModelForCausalLM.from_pretrained(tiny_model_dir)
+    model = AutoModelForCausalLM.from_pretrained(model_dir)
     model = model.cuda()
     model.eval()
 
@@ -60,6 +57,23 @@ def test_hf_vllm_export(tmp_path, quant_cfg):
     folded_model = deepcopy(model)
     fold_weight(folded_model)
     expected_weights = {k: v for k, v in folded_model.state_dict().items() if "quantizer" not in k}
+    # fold_weight only applies the weight quantizer's fake-quant; it does NOT fold
+    # input_quantizer.pre_quant_scale into the weight. The export path does:
+    #   w_exported = fake_quant(W) * pqs[None, :]
+    # for modules where input_quantizer is disabled but has pqs (AWQ weight-only).
+    # Apply the same pqs fold here so expected_weights matches the export output.
+    for module_name, module in folded_model.named_modules():
+        inp_q = getattr(module, "input_quantizer", None)
+        if (
+            inp_q is not None
+            and not inp_q.is_enabled
+            and getattr(inp_q, "_pre_quant_scale", None) is not None
+        ):
+            w_key = f"{module_name}.weight" if module_name else "weight"
+            if w_key in expected_weights:
+                w = expected_weights[w_key]
+                scale = inp_q._pre_quant_scale.squeeze().to(device=w.device)
+                expected_weights[w_key] = (w * scale[None, :]).to(w.dtype)
     del folded_model
 
     # Snapshot model state before export to verify it is not mutated
@@ -231,3 +245,17 @@ def test_hf_vllm_export_offload(tmp_path, quant_cfg):
             "_amax" in k for k in quantizer_state_dict_before[name]
         ):
             assert any("_amax" in k for k in state), f"input quantizer {name} should preserve _amax"
+
+
+@pytest.mark.parametrize("quant_cfg", [mtq.FP8_DEFAULT_CFG, mtq.INT4_AWQ_CFG])
+def test_hf_vllm_export_tiny_llama(tmp_path, quant_cfg):
+    tiny_model_dir = create_tiny_llama_dir(tmp_path, num_hidden_layers=2)
+    _test_hf_vllm_export(tmp_path, quant_cfg, tiny_model_dir)
+
+
+@pytest.mark.parametrize("quant_cfg", [mtq.FP8_DEFAULT_CFG, mtq.INT4_AWQ_CFG])
+def test_hf_vllm_export_tiny_qwen3_moe(tmp_path, quant_cfg):
+    if quant_cfg == mtq.INT4_AWQ_CFG and transformers.__version__.startswith("5."):
+        pytest.skip("INT4_AWQ_CFG is not supported for Qwen3 MoE in transformers > 5.x")
+    tiny_model_dir = create_tiny_qwen3_moe_dir(tmp_path, num_hidden_layers=2)
+    _test_hf_vllm_export(tmp_path, quant_cfg, tiny_model_dir)
