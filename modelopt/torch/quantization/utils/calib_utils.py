@@ -74,6 +74,42 @@ def update_hessian(input, hessian, n_samples):
     return hessian, n_samples
 
 
+def compute_hessian_inverse(hessian, weight, perc_damp):
+    """Compute damped upper-Cholesky inverse Hessian.
+
+    Dead-neuron columns (all-zero in ``weight``) are zeroed in the
+    Hessian before inversion, matching the FP-Quant reference:
+    https://github.com/IST-DASLab/FP-Quant/blob/d2e3092f968262c4de5fb050e1aef568a280dadd/src/quantization/gptq.py#L200
+
+    Args:
+        hessian: Hessian matrix ``[in_features, in_features]``.
+        weight: Weight matrix ``[out_features, in_features]`` for dead-neuron detection.
+        perc_damp: Percentage of average Hessian diagonal for damping.
+
+    Returns:
+        Upper-triangular Cholesky factor of the damped inverse Hessian
+        ``[in_features, in_features]``.  Falls back to the identity matrix
+        when the Hessian is not positive definite.
+    """
+    h = hessian.clone()
+    zero_cols = torch.nonzero(weight.eq(0).all(dim=0)).unsqueeze(-1)
+
+    h[zero_cols, :] = 0
+    h[:, zero_cols] = 0
+    h[zero_cols, zero_cols] = 1
+
+    damp = perc_damp * torch.mean(torch.diag(h))
+    diag_indices = torch.arange(h.shape[0], device=h.device)
+    h[diag_indices, diag_indices] += damp
+
+    try:
+        h = torch.cholesky_inverse(torch.linalg.cholesky(h))
+        return torch.linalg.cholesky(h, upper=True)
+    except (RuntimeError, torch.linalg.LinAlgError):
+        print_rank_0("Warning: Hessian is not positive definite, using identity matrix")
+        return torch.eye(h.shape[0], device=h.device, dtype=h.dtype)
+
+
 class GPTQHelper:
     """Encapsulates per-module GPTQ state and operations.
 
@@ -154,38 +190,14 @@ class GPTQHelper:
     # ------------------------------------------------------------------
 
     def _prepare_hessian_inverse(self, hessian, perc_damp):
-        """Compute damped inverse Hessian and store as ``self.h_inv``.
-
-        Dead-neuron columns (all-zero in ``self.weight``) are zeroed in the
-        Hessian before inversion, matching the FP-Quant reference:
-        https://github.com/IST-DASLab/FP-Quant/blob/d2e3092f968262c4de5fb050e1aef568a280dadd/src/quantization/gptq.py#L200
-        """
+        """Compute damped inverse Hessian and store as ``self.h_inv``."""
         assert self.weight is not None, "_prepare_hessian_inverse called before update_weights()"
-        h = hessian.clone()
-        zero_cols = torch.nonzero(self.weight.eq(0).all(dim=0)).unsqueeze(-1)
-
-        h[zero_cols, :] = 0
-        h[:, zero_cols] = 0
-        h[zero_cols, zero_cols] = 1
-
-        damp = perc_damp * torch.mean(torch.diag(h))
-        diag_indices = torch.arange(h.shape[0], device=h.device)
-        h[diag_indices, diag_indices] += damp
-
-        try:
-            h = torch.cholesky_inverse(torch.linalg.cholesky(h))
-            self.h_inv = torch.linalg.cholesky(h, upper=True)
-        except (RuntimeError, torch.linalg.LinAlgError):
-            print_rank_0("Warning: Hessian is not positive definite, using identity matrix")
-            self.h_inv = torch.eye(h.shape[0], device=h.device, dtype=h.dtype)
+        self.h_inv = compute_hessian_inverse(hessian, self.weight, perc_damp)
 
     def _blockwise_update(self, block_size):
         """Column-wise GPTQ update using full-matrix QDQ.
 
-        For each column, quantizes the full weight matrix via the quantizer and
-        extracts the quantized column. This is the standard GPTQ approach.
-
-        Reads/writes ``self.weight`` and ``self.h_inv`` in-place.
+        Delegates to :func:`gptq_blockwise_update` with the module's weight quantizer.
         """
         assert self.weight is not None and self.h_inv is not None, (
             "_blockwise_update called before _prepare_hessian_inverse()"
@@ -199,28 +211,7 @@ class GPTQHelper:
                     f"GPTQ block_size ({block_size}) must be divisible by the quantizer"
                     f" group_size ({group_size})"
                 )
-        num_cols = self.weight.shape[1]
-
-        for block_start in range(0, num_cols, block_size):
-            block_end = min(block_start + block_size, num_cols)
-            n_cols_blk = block_end - block_start
-            h_inv_cho_blk = self.h_inv[block_start:block_end, block_start:block_end]
-
-            wblk = self.weight.clone()
-            errs = torch.zeros_like(wblk[:, block_start:block_end])
-
-            for i in range(n_cols_blk):
-                w_ci = wblk[:, block_start + i]
-                d = h_inv_cho_blk[i, i]
-                qdq = quantizer(wblk)
-                self.weight[:, block_start + i] = qdq[:, block_start + i]
-                err = (w_ci - qdq[:, block_start + i]) / d
-                wblk[:, block_start + i : block_end].addr_(err, h_inv_cho_blk[i, i:], alpha=-1)
-                errs[:, i] = err
-
-            self.weight[:, block_end:].addmm_(
-                errs, self.h_inv[block_start:block_end, block_end:], alpha=-1
-            )
+        gptq_blockwise_update(self.weight, self.h_inv, block_size, quantizer)
 
     def _print_mse_error(self, hessian):
         """Log Hessian-weighted relative MSE between ``self.weight`` and original weights."""
@@ -229,6 +220,115 @@ class GPTQHelper:
         mse = (delta).mm(hessian).mul(delta).mean() / (w_orig.mm(hessian).mul(w_orig).mean() + 1e-6)
         suffix = f", n_hessian_samples: {self.n_samples}" if self.n_samples else ""
         print_rank_0(f"[{self.name}] Relative MSE error: {mse.item():.2e}{suffix}")
+
+
+def gptq_blockwise_update(weight, h_inv, block_size, quantize_fn):
+    """Column-wise GPTQ update using full-matrix fake quantization.
+
+    For each column, quantizes the full weight matrix via ``quantize_fn`` and
+    extracts the quantized column.  Error is propagated to remaining columns
+    within the block and then to all subsequent columns via the inverse Hessian.
+
+    Args:
+        weight: Weight tensor ``[out_features, in_features]``, modified **in-place**
+            with fake-quantized values.
+        h_inv: Upper-triangular Cholesky factor of the damped inverse Hessian
+            ``[in_features, in_features]``.
+        block_size: Number of columns to process per GPTQ block.
+        quantize_fn: Callable ``(weight) -> qdq_weight`` that fake-quantizes
+            the full weight matrix.
+    """
+    num_cols = weight.shape[1]
+
+    for block_start in range(0, num_cols, block_size):
+        block_end = min(block_start + block_size, num_cols)
+        n_cols_blk = block_end - block_start
+        h_inv_cho_blk = h_inv[block_start:block_end, block_start:block_end]
+
+        wblk = weight.clone()
+        errs = torch.zeros_like(weight[:, block_start:block_end])
+
+        for i in range(n_cols_blk):
+            w_ci = wblk[:, block_start + i]
+            d = h_inv_cho_blk[i, i]
+            qdq = quantize_fn(wblk)
+            weight[:, block_start + i] = qdq[:, block_start + i]
+            err = (w_ci - qdq[:, block_start + i]) / d
+            wblk[:, block_start + i : block_end].addr_(err, h_inv_cho_blk[i, i:], alpha=-1)
+            errs[:, i] = err
+
+        weight[:, block_end:].addmm_(errs, h_inv[block_start:block_end, block_end:], alpha=-1)
+
+
+def gptq_blockwise_update_fused_scalar(weight, scales_2d, h_inv, block_size, quant_block_size):
+    """Fused GPTQ blockwise update for NVFP4 scalar quantization.
+
+    Uses a fused Triton kernel that combines quantization and per-column
+    error propagation into one launch per GPTQ block, avoiding the
+    Python-level per-column loop in :func:`gptq_blockwise_update`.
+
+    Args:
+        weight: Weight tensor ``[out_features, in_features]``, modified **in-place**
+            with fake-quantized values.
+        scales_2d: Pre-computed per-block scales ``[out_features, n_scale_blocks]``.
+        h_inv: Upper-triangular Cholesky factor of the damped inverse Hessian
+            ``[in_features, in_features]``.
+        block_size: Number of columns to process per GPTQ block.
+        quant_block_size: Number of elements sharing one quantization scale factor.
+    """
+    from modelopt.torch.quantization.triton.gptq_fused_kernel import gptq_fused_block_scalar
+
+    num_cols = weight.shape[1]
+    for bs in range(0, num_cols, block_size):
+        be = min(bs + block_size, num_cols)
+        qw, err = gptq_fused_block_scalar(
+            weight[:, bs:be].clone().contiguous(),
+            scales_2d,
+            h_inv[bs:be, bs:be].contiguous(),
+            quant_block_size,
+            bs,
+        )
+        weight[:, bs:be] = qw
+        if be < num_cols:
+            weight[:, be:].addmm_(err, h_inv[bs:be, be:], alpha=-1)
+
+
+class FusedScalarGPTQHelper(GPTQHelper):
+    """GPTQHelper using the fused Triton kernel for NVFP4 scalar quantization.
+
+    Overrides :meth:`_blockwise_update` to extract pre-computed scales from the
+    ``NVFP4StaticQuantizer`` and delegate to :func:`gptq_blockwise_update_fused_scalar`.
+    """
+
+    def _blockwise_update(self, block_size):
+        """Fused GPTQ using Triton kernel for NVFP4 scalar quantization."""
+        assert self.weight is not None and self.h_inv is not None, (
+            "_blockwise_update called before _prepare_hessian_inverse()"
+        )
+        from modelopt.torch.quantization.triton.fp4_kernel import compute_fp4_scales
+
+        quantizer = self.module.weight_quantizer
+        block_sizes = getattr(quantizer, "block_sizes", None)
+        quant_block_size = None
+        if block_sizes is not None:
+            quant_block_size = block_sizes.get(-1) or block_sizes.get(1)
+
+        if quant_block_size is not None and block_size % quant_block_size != 0:
+            raise ValueError(
+                f"GPTQ block_size ({block_size}) must be divisible by the quantizer"
+                f" group_size ({quant_block_size})"
+            )
+
+        out_features, num_cols = self.weight.shape
+        n_blocks = num_cols // quant_block_size
+
+        # Pre-compute scales from the calibrated amax (frozen during GPTQ).
+        amax = quantizer.amax.reshape(out_features, n_blocks)
+        scales_2d = compute_fp4_scales(amax, quantizer.global_amax, quantize_block_scales=True)
+
+        gptq_blockwise_update_fused_scalar(
+            self.weight, scales_2d, self.h_inv, block_size, quant_block_size
+        )
 
 
 _GPTQ_HELPER_REGISTRY: dict[str, type[GPTQHelper]] = {}
@@ -242,3 +342,7 @@ def register_gptq_helper(backend: str, factory: type[GPTQHelper]) -> None:
     construct ``factory`` instead of the default ``GPTQHelper``.
     """
     _GPTQ_HELPER_REGISTRY[backend] = factory
+
+
+# Built-in registrations
+register_gptq_helper("fused_gptq_nvfp4", FusedScalarGPTQHelper)

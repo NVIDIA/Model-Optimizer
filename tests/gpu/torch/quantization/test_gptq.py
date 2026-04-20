@@ -25,7 +25,12 @@ import modelopt.torch.quantization as mtq
 from modelopt.torch.export.unified_export_hf import _export_quantized_weight
 from modelopt.torch.quantization.model_calib import gptq
 from modelopt.torch.quantization.qtensor.nvfp4_tensor import NVFP4QTensor
-from modelopt.torch.quantization.utils.calib_utils import update_hessian
+from modelopt.torch.quantization.utils.calib_utils import (
+    compute_hessian_inverse,
+    gptq_blockwise_update,
+    gptq_blockwise_update_fused_scalar,
+    update_hessian,
+)
 from modelopt.torch.utils.dataset_utils import create_forward_loop, get_dataset_dataloader
 
 RAND_SEED = 42
@@ -240,21 +245,6 @@ def test_gptq_e2e_flow(quant_cfg):
 # ---------------------------------------------------------------------------
 
 
-# TODO(shiychen): This should be extracted out from production code path
-def _compute_h_inv(hessian, weight, percdamp=0.01):
-    """Compute damped upper-Cholesky inverse Hessian."""
-    h = hessian.clone()
-    zero_cols = torch.nonzero(weight.eq(0).all(dim=0)).unsqueeze(-1)
-    h[zero_cols, :] = 0
-    h[:, zero_cols] = 0
-    h[zero_cols, zero_cols] = 1
-    damp = percdamp * torch.mean(torch.diag(h))
-    diag_idx = torch.arange(h.shape[0], device=h.device)
-    h[diag_idx, diag_idx] += damp
-    h = torch.cholesky_inverse(torch.linalg.cholesky(h))
-    return torch.linalg.cholesky(h, upper=True)
-
-
 def _make_nvfp4_test_data(quant_block_size, out_features, dim):
     """Create weight, h_inv, and scales_2d for NVFP4 GPTQ tests."""
     from modelopt.torch.quantization.triton.fp4_kernel import compute_fp4_scales
@@ -268,14 +258,13 @@ def _make_nvfp4_test_data(quant_block_size, out_features, dim):
     hessian = torch.zeros(dim, dim, dtype=torch.float32)
     hessian, _ = update_hessian(inp, hessian, 0)
     hessian = hessian.to("cuda")
-    h_inv = _compute_h_inv(hessian, weight)
+    h_inv = compute_hessian_inverse(hessian, weight, perc_damp=0.01)
 
     return weight, scales_2d, h_inv
 
 
-# TODO(shiychen): This should be extracted out from production code path
 def _run_unfused_gptq_nvfp4(weight, scales_2d, h_inv, gptq_block_size, quant_block_size):
-    """Unfused NVFP4 GPTQ using the production Triton FP4 kernel per column.
+    """Unfused NVFP4 GPTQ using the production blockwise update with Triton FP4 kernel.
 
     Both fused and unfused use the same frozen pre-computed scales so the
     test verifies the fused kernel's correctness (not scale computation).
@@ -285,52 +274,23 @@ def _run_unfused_gptq_nvfp4(weight, scales_2d, h_inv, gptq_block_size, quant_blo
     out_features, num_cols = weight.shape
     n_blocks = num_cols // quant_block_size
     w = weight.float().clone()
-    q = torch.zeros_like(w)
     # Recover amax from scales (scales = amax / 6.0, already FP8-quantized)
     amax_flat = (scales_2d * 6.0).reshape(out_features * n_blocks)
 
-    for i in range(0, num_cols, gptq_block_size):
-        j_end = min(i + gptq_block_size, num_cols)
-        e = torch.zeros(out_features, j_end - i, dtype=w.dtype, device=w.device)
+    def quantize_fn(w_input):
+        w_blocked = w_input.reshape(out_features * n_blocks, quant_block_size)
+        return static_blockwise_fp4_fake_quant(
+            w_blocked, amax_flat, quantize_block_scales=False
+        ).reshape(out_features, num_cols)
 
-        for j in range(i, j_end):
-            # Quantize full weight using production Triton FP4 kernel
-            w_blocked = w.reshape(out_features * n_blocks, quant_block_size)
-            qdq = static_blockwise_fp4_fake_quant(
-                w_blocked,
-                amax_flat,
-                quantize_block_scales=False,
-            ).reshape(out_features, num_cols)
-            q[:, j] = qdq[:, j]
-
-            err = (w[:, j] - q[:, j]) / h_inv[j, j]
-            e[:, j - i] = err
-            w[:, j:j_end] -= err.unsqueeze(1) * h_inv[j, j:j_end].unsqueeze(0)
-
-        if j_end < num_cols:
-            w[:, j_end:] -= e @ h_inv[i:j_end, j_end:]
-
-    return q
+    gptq_blockwise_update(w, h_inv, gptq_block_size, quantize_fn)
+    return w
 
 
 def _run_fused_gptq_nvfp4(weight, scales_2d, h_inv, gptq_block_size, quant_block_size):
-    """Fused Triton GPTQ for NVFP4."""
-    from modelopt.torch.quantization.triton.gptq_fused_kernel import gptq_fused_block_scalar
-
-    dim = weight.shape[1]
+    """Fused Triton GPTQ for NVFP4 using the production fused update."""
     w = weight.float().clone()
-    for bs in range(0, dim, gptq_block_size):
-        be = min(bs + gptq_block_size, dim)
-        qw, err = gptq_fused_block_scalar(
-            w[:, bs:be].clone().contiguous(),
-            scales_2d,
-            h_inv[bs:be, bs:be].contiguous(),
-            quant_block_size,
-            bs,
-        )
-        w[:, bs:be] = qw
-        if be < dim:
-            w[:, be:].addmm_(err, h_inv[bs:be, be:], alpha=-1)
+    gptq_blockwise_update_fused_scalar(w, scales_2d, h_inv, gptq_block_size, quant_block_size)
     return w
 
 
