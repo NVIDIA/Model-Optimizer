@@ -140,6 +140,9 @@ def main(args: argparse.Namespace) -> None:
         args.model, dtype="auto", device_map="auto", trust_remote_code=args.trust_remote_code
     )
     num_hidden_layers = getattr(model.config, "num_hidden_layers", None)
+    if num_hidden_layers is None:
+        raise ValueError(f"model.config has no 'num_hidden_layers' attribute: {model.config}")
+    selected_layer_ids = resolve_aux_layers(args, num_hidden_layers)
 
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=args.trust_remote_code)
     if tokenizer.pad_token is None:
@@ -156,21 +159,12 @@ def main(args: argparse.Namespace) -> None:
 
     async def dump_hidden_states(idx: int, conversation_id: int, input_ids: torch.Tensor):
         nonlocal num_success
-        nonlocal num_hidden_layers
 
         # Get hidden states
         with torch.inference_mode():
             outputs = model(input_ids=input_ids.to(model.device), output_hidden_states=True)
-            if num_hidden_layers is None:
-                num_hidden_layers = len(outputs.hidden_states) - 1
-            else:
-                assert num_hidden_layers + 1 == len(outputs.hidden_states), (
-                    f"Expected {num_hidden_layers}+1 layers of hidden states, but got {len(outputs.hidden_states)}."
-                )
-            # Select aux layer IDs per --aux-layers flag.
             # outputs.hidden_states[0] is the embedding output; layer k output is at index k+1.
             hidden_states = outputs.hidden_states
-            selected_layer_ids = resolve_aux_layers(args, num_hidden_layers)
             aux_hidden_states = torch.cat(
                 [hidden_states[lid + 1].squeeze(0).cpu() for lid in selected_layer_ids], dim=-1
             )
