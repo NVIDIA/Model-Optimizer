@@ -108,7 +108,7 @@ def make_speculative_data_module(
             raise ValueError("sample_size must be -1 (use all samples) or a positive integer")
         if data_args.sample_size > 0:
             dumped_files = dumped_files[: data_args.sample_size]
-        train_dataset = OfflineSupervisedDataset(dumped_files)
+        train_dataset = OfflineSupervisedDataset(dumped_files, answer_only_loss=answer_only_loss)
         data_collator = EagleOfflineDataCollator(train_len=train_len)
 
     return {
