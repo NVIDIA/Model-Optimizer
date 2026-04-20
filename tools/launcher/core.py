@@ -301,6 +301,10 @@ def build_slurm_executor(
     )
     if getattr(slurm_config, "requeue", False):
         executor.additional_parameters["requeue"] = True
+        # The nemo-run sbatch wrapper only calls `scontrol requeue` when
+        # TORCHX_MAX_RETRIES > SLURM_RESTART_COUNT.  retries=0 (the default)
+        # disables this, so bump it when requeue is requested.
+        executor.retries = max(executor.retries, 3)
     return executor
 
 
