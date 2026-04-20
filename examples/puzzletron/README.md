@@ -270,14 +270,10 @@ For a quick smoke test, add `--limit 10`.
 > **Alternative:** For server-based evaluation via an OpenAI-compatible endpoint,
 > see [evaluation/nemo_evaluator_instructions.md](./evaluation/nemo_evaluator_instructions.md).
 
-## Inference Performance Benchmarking
+## Deploy compressed model in vLLM
 
-Now let's evaluate how much speedup we get with the compressed model in terms of throughput and latency.
-
-- Install [vLLM from source](https://docs.vllm.ai/en/latest/getting_started/installation/gpu/index.html#build-wheel-from-source).
-
-- Modify the model's `config.json` file to support vLLM, see [AnyModel Guide](../../modelopt/torch/puzzletron/anymodel/README.md#deploy-compressed-model-in-vllm) for details.
-
+To deploy a compressed model in vLLM, install [vLLM from source](https://docs.vllm.ai/en/latest/getting_started/installation/gpu/index.html#build-wheel-from-source).
+Then, add the following to the model's `config.json` file (here we use Llama as an example):
 
 ```json
 {
@@ -287,6 +283,33 @@ Now let's evaluate how much speedup we get with the compressed model in terms of
   ...
 }
 ```
+
+For new architectures that are not supported by vLLM, you additionally need to add the following to the `config.json` file (using Llama3 as an example):
+
+```json
+{
+  ...
+  "anymodel_arch_info": {
+    "decoder_layer_module": ".<module_name>",
+    "decoder_layer_class": "<decoder_layer_class_name>",
+    "base_model_module": ".<base_model_module_name>",
+    "layers_path": "<layers_path>",
+    "init_prefix": "model",
+    "Layer_hf_config": "<Layer_hf_config>",
+  }
+  ...
+}
+```
+
+With these changes it is now possible to load the compressed model in vLLM for inference:
+
+```bash
+vllm serve <model_name_or_path>
+```
+
+### Inference Performance Benchmarking
+
+Now let's evaluate how much speedup we get with the compressed model in terms of throughput and latency.
 
 - Benchmark latency
 
