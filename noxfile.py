@@ -164,6 +164,8 @@ def docs(session):
     with session.chdir("docs"):
         session.run(
             "sphinx-build",
+            "-d",
+            "/tmp/doctrees",
             "source",
             "build/html",
             "--fail-on-warning",
