@@ -7,6 +7,7 @@ on:
     paths:
       - "docs/**"
       - "modelopt/**"
+      - ".github/workflows/pages.yml"
   push:
     branches: [main]
   schedule:
