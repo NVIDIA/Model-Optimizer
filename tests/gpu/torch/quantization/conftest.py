@@ -13,9 +13,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+
 import pytest
+
+from modelopt.torch.quantization import triton as triton_kernel
 
 
 @pytest.fixture(autouse=True)
 def env_setup(monkeypatch):
     monkeypatch.setenv("NVIDIA_TF32_OVERRIDE", "0")
+
+
+requires_triton = pytest.mark.skipif(
+    not triton_kernel.IS_AVAILABLE,
+    reason="Triton not available",
+)
