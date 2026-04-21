@@ -385,13 +385,8 @@ class _QuantFusedMoEBase(QuantModule):
             # First layer of expert
             A = self.w13_input_quantizer(A)  # noqa: N806
             if self.w13_weight_quantizer.is_enabled:  # pragma: no cover
-                original_weight, self.w13_weight = (
-                    self.w13_weight,
-                    self.w13_weight_quantizer(self.w13_weight),
-                )
-                # In case the weight quantizer isn't folded yet in vllm_serve_fakequant, pass the
-                # quantized weight to the kernel.
-                B = self.w13_weight  # noqa: N806
+                original_weight = self.w13_weight
+                B = self.w13_weight_quantizer(original_weight)  # noqa: N806
                 try:
                     original_kernel(A, B, C, *args, **kwargs)
                 finally:
@@ -403,13 +398,8 @@ class _QuantFusedMoEBase(QuantModule):
         elif B is self.w2_weight:
             A = self.w2_input_quantizer(A)  # noqa: N806
             if self.w2_weight_quantizer.is_enabled:  # pragma: no cover
-                original_weight, self.w2_weight = (
-                    self.w2_weight,
-                    self.w2_weight_quantizer(self.w2_weight),
-                )
-                # In case the weight quantizer isn't folded yet in vllm_serve_fakequant, pass the
-                # quantized weight to the kernel.
-                B = self.w2_weight  # noqa: N806
+                original_weight = self.w2_weight
+                B = self.w2_weight_quantizer(original_weight)  # noqa: N806
                 try:
                     original_kernel(A, B, C, *args, **kwargs)
                 finally:
