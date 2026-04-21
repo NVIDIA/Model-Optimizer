@@ -4,10 +4,6 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, closed]
     branches: [main, release/*, feature/*]
-    paths:
-      - "docs/**"
-      - "modelopt/**"
-      - ".github/workflows/pages.yml"
   push:
     branches: [main]
   schedule:
@@ -42,9 +38,27 @@ jobs:
           path: docs/build/html
           retention-days: 1
 
+  changes:
+    if: github.event_name == 'pull_request' && github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    outputs:
+      docs: ${{ steps.filter.outputs.docs }}
+    steps:
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            docs:
+              - 'docs/**'
+              - 'modelopt/**'
+              - '.github/workflows/pages.yml'
+
   deploy-preview:
-    if: always() && github.event_name == 'pull_request'
-    needs: build-docs
+    if: |
+      always() &&
+      github.event_name == 'pull_request' &&
+      (github.event.action == 'closed' || needs.changes.outputs.docs == 'true')
+    needs: [build-docs, changes]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     # Per-PR concurrency without cancel-in-progress so 'closed' cleanup always runs
