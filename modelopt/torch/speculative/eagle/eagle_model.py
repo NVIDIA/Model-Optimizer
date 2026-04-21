@@ -42,3 +42,12 @@ class EagleModel(DynamicModule):
         self.eagle_use_torch_compile = config.eagle_use_torch_compile
         self.eagle_enable_nvtx = config.eagle_enable_nvtx
         self.eagle_export_rope_scaling = config.eagle_export_rope_scaling
+        self.eagle_base_lora = config.eagle_base_lora
+        self.eagle_base_lora_rank = config.eagle_base_lora_rank
+        self.eagle_base_lora_alpha = config.eagle_base_lora_alpha
+        self.eagle_base_lora_target_modules = config.eagle_base_lora_target_modules
+        self.eagle_base_lora_preservation_loss_weight = (
+            config.eagle_base_lora_preservation_loss_weight
+        )
+        self.eagle_base_lora_warmup_steps = config.eagle_base_lora_warmup_steps
+        self.eagle_base_lora_logits_detach_prob = config.eagle_base_lora_logits_detach_prob

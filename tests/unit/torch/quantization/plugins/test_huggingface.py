@@ -35,7 +35,7 @@ from modelopt.torch.quantization.plugins.huggingface import (
     get_homogeneous_hf_decoder_layers,
     is_homogeneous_hf_model,
 )
-from modelopt.torch.quantization.utils.activation_collector import LayerActivationCollector
+from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 
 pytest.importorskip("transformers")
 

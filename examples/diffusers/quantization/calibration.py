@@ -108,11 +108,12 @@ class Calibrator:
     def _run_wan_video_calibration(
         self, prompt_batch: list[str], extra_args: dict[str, Any]
     ) -> None:
+        extra_params = self.pipeline_manager.config.extra_params
         kwargs = {}
         kwargs["negative_prompt"] = extra_args["negative_prompt"]
-        kwargs["height"] = extra_args["height"]
-        kwargs["width"] = extra_args["width"]
-        kwargs["num_frames"] = extra_args["num_frames"]
+        kwargs["height"] = extra_params.get("height", extra_args["height"])
+        kwargs["width"] = extra_params.get("width", extra_args["width"])
+        kwargs["num_frames"] = extra_params.get("num_frames", extra_args["num_frames"])
         kwargs["guidance_scale"] = extra_args["guidance_scale"]
         if "guidance_scale_2" in extra_args:
             kwargs["guidance_scale_2"] = extra_args["guidance_scale_2"]
@@ -154,7 +155,11 @@ class Calibrator:
             "images": extra_params.get("images", []),
             "tiling_config": extra_params.get("tiling_config", TilingConfig.default()),
         }
-        self.pipe(prompt=prompt, **kwargs)
+        decoded_video, decoded_audio = self.pipe(prompt=prompt, **kwargs)
+        # vae_decode_video returns a lazy generator — consume it so the
+        # video decoder's forward() actually runs during calibration.
+        for _ in decoded_video:
+            pass
 
     def _run_ltx_video_calibration(
         self, prompt_batch: list[str], extra_args: dict[str, Any]

@@ -40,62 +40,60 @@
 
 """A simple MMLU evaluation for Megatron LM models."""
 
-import requests
 import torch
-import transformers
 from datasets import load_dataset
+from tqdm import tqdm
+from transformers import PreTrainedTokenizer
 
-from .megatron_generate import megatron_generate
+from .. import distributed as dist
+from .. import print_rank_0
+from .megatron_generate import megatron_prefill
 
 __all__ = ["megatron_mmlu"]
 
-
-def _get_all_subjects():
-    """All subjects (anatomy, ...) can be acquired from querying all subsets and splits."""
-    response = requests.get(
-        "https://datasets-server.huggingface.co/splits?dataset=cais/mmlu", timeout=10
-    )
-    data = response.json()
-    all_subjects = set()
-    for split in data["splits"]:
-        all_subjects.add(split["config"])
-    for name in ["all", "auxiliary_train"]:
-        all_subjects.discard(name)
-    return sorted(all_subjects)
+_CHOICES = ["A", "B", "C", "D"]
 
 
 def megatron_mmlu(
     model,
-    tokenizer: transformers.PreTrainedTokenizer,
+    tokenizer: PreTrainedTokenizer,
     few_shots: int = 0,
-    percentage: float = 0.05,
-    enable_kv_cache: bool = False,
+    fraction: float = 0.05,
+    batch_size: int = 1,
 ) -> float:
-    """Evaluate the model on MMLU.
+    """Evaluate the model on MMLU using log-likelihood scoring over batched prefill passes.
+
+    Instead of autoregressively generating tokens, a single prefill forward pass is run per
+    batch and the answer is selected as argmax over the four choice token logits at the last
+    prompt position. This is the same approach used by lm-evaluation-harness.
 
     Args:
         model: The model to evaluate.
         tokenizer: The tokenizer to use.
         few_shots: The number of few-shot examples to use.
-        percentage: The percentage of the test set to evaluate on.
-        enable_kv_cache: Whether to disable KV-cache.
+        fraction: The fraction of the test set to evaluate on.
+        batch_size: Number of examples to process in one forward pass.
     """
-    all_correct = {}
-    all_subjects = _get_all_subjects()
+    print_rank_0(
+        f"\nMMLU ({fraction * 100}%, {few_shots}-shot, Batch Size: {batch_size}) evaluation started...\n"
+        "First batch may take longer to evaluate for Pipeline Parallel models."
+    )
+    assert 0 < fraction <= 1, "Fraction must be between 0 and 1"
+
+    # Token IDs for " A", " B", " C", " D" — the last subword handles edge cases.
+    choice_ids = [tokenizer.encode(f" {c}", add_special_tokens=False)[-1] for c in _CHOICES]
 
     def _format_example(example, include_answer: bool = True):
-        """Format an example into a multi-choices problem."""
         prompt = example["question"]
-        for choice, answer in zip(["A", "B", "C", "D"], example["choices"]):
+        for choice, answer in zip(_CHOICES, example["choices"]):
             prompt += f"\n{choice}. {answer}"
         if include_answer:
-            prompt += "Answer: {}\n\n".format(example["answer"])
+            prompt += "Answer: {}\n\n".format(_CHOICES[example["answer"]])
         else:
             prompt += "\nAnswer:"
         return prompt
 
     def _generate_prompt(test_example, dev_examples, few_shots=0):
-        """Generating few-shot prompts."""
         prompt = "The following are multiple choice questions (with answers) about {}.\n\n".format(
             " ".join(test_example["subject"].split("_"))
         )
@@ -104,51 +102,92 @@ def megatron_mmlu(
         prompt += _format_example(test_example, include_answer=False)
         return prompt
 
-    if torch.distributed.get_rank() == 0:
-        print(f"\nMMLU ({percentage * 100}%, {few_shots}-shot) evaluation started...\n", flush=True)
-        print("{:48} | (ACC) | Count/Total".format("Subject"), flush=True)
-        print("{:48} | {:5} | {:11}".format("-" * 48, "-" * 5, "-" * 11), flush=True)
+    # Load all subjects in two dataset calls instead of 2x num_subjects calls.
+    # The "all" config includes a "subject" field for per-subject reporting.
+    test_dataset = load_dataset("cais/mmlu", "all", split="test")
+    dev_dataset = load_dataset("cais/mmlu", "all", split="dev") if few_shots > 0 else None
 
-    for subject in all_subjects:
-        test_data = load_dataset("cais/mmlu", subject, split="test")
-        dev_data = load_dataset("cais/mmlu", subject, split="dev")
+    # Group dev examples by subject for few-shot prompt construction.
+    dev_by_subject: dict = {}
+    if dev_dataset is not None:
+        for ex in dev_dataset:
+            dev_by_subject.setdefault(ex["subject"], []).append(ex)
 
-        correct = []
-        for idx, test_example in enumerate(test_data):
-            if idx > percentage * len(test_data):
-                break
-            prompt = _generate_prompt(test_example, dev_data, few_shots=few_shots)
-            label = ["A", "B", "C", "D"][test_example["answer"]]
-            tokens = tokenizer(prompt, return_tensors="pt")
-            generated_ids = megatron_generate(
-                model,
-                tokens.input_ids.cuda(),
-                osl=2,
-                disable_tqdm=True,
-                enable_kv_cache=enable_kv_cache,
-            )
-            predict = tokenizer.batch_decode(generated_ids)[0].strip()
-            correct += [True] if predict.startswith(label) else [False]
-        all_correct[subject] = correct
+    # Collect all examples, tracking subject membership for per-subject reporting.
+    all_subjects_seen: list[str] = []
+    all_prompts: list[str] = []
+    all_labels: list[str] = []
 
-        if torch.distributed.get_rank() == 0:
-            print(
-                f"{subject:48} | {sum(correct) / len(correct):.3f} | {sum(correct):5}/{len(correct):5}",
-                flush=True,
-            )
+    # Count test examples per subject to apply the fraction cutoff correctly.
+    subject_counts: dict[str, int] = {}
+    for ex in test_dataset:
+        subject_counts[ex["subject"]] = subject_counts.get(ex["subject"], 0) + 1
 
-        avg_correct = []
+    subject_idx: dict[str, int] = {}
+    for ex in test_dataset:
+        subj = ex["subject"]
+        idx = subject_idx.get(subj, 0)
+        if idx >= fraction * subject_counts[subj]:
+            continue
+        subject_idx[subj] = idx + 1
+        prompt = _generate_prompt(ex, dev_by_subject.get(subj, []), few_shots=few_shots)
+        all_prompts.append(prompt)
+        all_labels.append(_CHOICES[ex["answer"]])
+        all_subjects_seen.append(subj)
 
-    for subject, correct in all_correct.items():
-        avg_correct += correct
+    # Tokenize all prompts and sort by length to minimise padding waste within batches.
+    encoded = [tokenizer(p, return_tensors="pt").input_ids[0] for p in all_prompts]
+    lengths = [e.shape[0] for e in encoded]
+    order = sorted(range(len(encoded)), key=lambda i: lengths[i], reverse=True)
 
-    if torch.distributed.get_rank() == 0:
-        print("{:48} | {:5} | {:11}".format("-" * 48, "-" * 5, "-" * 11), flush=True)
-        print(
-            "{:48} | {:.3f} | {:5}/{:5}".format(
-                "average", sum(avg_correct) / len(avg_correct), sum(avg_correct), len(avg_correct)
-            ),
-            flush=True,
-        )
+    sorted_encoded = [encoded[i] for i in order]
+    sorted_lengths = [lengths[i] for i in order]
 
-    return sum(avg_correct) / len(avg_correct)
+    # Run inference in global batches.
+    predictions: list[str] = [""] * len(encoded)
+    n_batches = (len(sorted_encoded) + batch_size - 1) // batch_size
+    pbar = tqdm(
+        range(0, len(sorted_encoded), batch_size),
+        total=n_batches,
+        desc="MMLU",
+        unit="batch",
+        disable=not dist.is_master(),
+    )
+    for batch_start in pbar:
+        batch_enc = sorted_encoded[batch_start : batch_start + batch_size]
+        batch_len = sorted_lengths[batch_start : batch_start + batch_size]
+        max_len = max(batch_len)
+
+        # Right-pad to max_len; causal mask means the last real token is unaffected by padding.
+        padded = torch.zeros(len(batch_enc), max_len, dtype=torch.long)
+        for i, (e, seq_len) in enumerate(zip(batch_enc, batch_len)):
+            padded[i, :seq_len] = e
+
+        logits = megatron_prefill(model, padded.cuda())  # [B, max_len, vocab]
+
+        for i, seq_len in enumerate(batch_len):
+            answer_logits = logits[i, seq_len - 1, choice_ids]
+            predictions[order[batch_start + i]] = _CHOICES[answer_logits.argmax().item()]
+
+        examples_done = min(batch_start + batch_size, len(sorted_encoded))
+        pbar.set_postfix(examples=f"{examples_done}/{len(sorted_encoded)}")
+
+    # Compute per-subject accuracy and overall average.
+    subject_correct: dict[str, list[bool]] = {}
+    for pred, label, subj in zip(predictions, all_labels, all_subjects_seen):
+        subject_correct.setdefault(subj, []).append(pred == label)
+
+    all_correct = [pred == label for pred, label in zip(predictions, all_labels)]
+    n_total = len(all_correct)
+    avg = sum(all_correct) / n_total
+
+    print_rank_0("{:48} | (ACC) | Count/Total".format("Subject"))
+    print_rank_0("{:48} | {:5} | {:11}".format("-" * 48, "-" * 5, "-" * 11))
+    for subj in sorted(subject_correct):
+        correct = subject_correct[subj]
+        n = len(correct)
+        print_rank_0(f"{subj:48} | {sum(correct) / n:.3f} | {sum(correct):5}/{n:5}")
+    print_rank_0("{:48} | {:5} | {:11}".format("-" * 48, "-" * 5, "-" * 11))
+    print_rank_0("{:48} | {:.3f} | {:5}/{:5}".format("average", avg, sum(all_correct), n_total))
+
+    return avg

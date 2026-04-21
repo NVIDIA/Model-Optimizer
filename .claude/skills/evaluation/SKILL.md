@@ -28,6 +28,7 @@ Config Generation Progress:
 - [ ] Step 5: Confirm tasks (iterative)
 - [ ] Step 6: Advanced - Multi-node (Data Parallel)
 - [ ] Step 7: Advanced - Interceptors
+- [ ] Step 7.5: Check container registry auth (SLURM only)
 - [ ] Step 8: Run the evaluation
 ```
 
@@ -74,9 +75,9 @@ Prompt the user with "I'll ask you 5 questions to build the base config we'll ad
 4. Safety & Security (like Garak and Safety Harness)
 5. Multilingual (like MMATH, Global MMLU, MMLU-Prox)
 
-DON'T ALLOW FOR ANY OTHER OPTIONS, only the ones listed above under each category (Execution, Deployment, Auto-export, Model type, Benchmarks). YOU HAVE TO GATHER THE ANSWERS for the 5 questions before you can build the base config.
+Only accept options from the categories listed above (Execution, Deployment, Auto-export, Model type, Benchmarks). YOU HAVE TO GATHER THE ANSWERS for the 5 questions before you can build the base config.
 
-> **Note:** These categories come from NEL's `build-config` CLI. If `nel skills build-config --help` shows different options than listed above, use the CLI's current options instead.
+> **Note:** These categories come from NEL's `build-config` CLI. **Always run `nel skills build-config --help` first** to get the current options — they may differ from this list (e.g., `chat_reasoning` instead of separate `chat`/`reasoning`, `general_knowledge` instead of `standard`). When the CLI's current options differ from this list, prefer the CLI's options.
 
 When you have all the answers, run the script to build the base config:
 
@@ -181,6 +182,36 @@ If the user needs multi-node evaluation (model >120B, or more throughput), read 
 
 - The docs may show incorrect parameter names for logging. Use `max_logged_requests` and `max_logged_responses` (NOT `max_saved_*` or `max_*`).
 
+**Step 7.5: Check container registry authentication (SLURM only)**
+
+NEL's default deployment images by framework:
+
+| Framework | Default image | Registry |
+| --- | --- | --- |
+| vLLM | `vllm/vllm-openai:latest` | DockerHub |
+| SGLang | `lmsysorg/sglang:latest` | DockerHub |
+| TRT-LLM | `nvcr.io/nvidia/tensorrt-llm/release:...` | NGC |
+| Evaluation tasks | `nvcr.io/nvidia/eval-factory/*:26.03` | NGC |
+
+Before submitting, verify the cluster has credentials for the deployment image. See `skills/common/slurm-setup.md` section 6 for the full procedure.
+
+```bash
+ssh <host> "grep -E '^\s*machine\s+' ~/.config/enroot/.credentials 2>/dev/null"
+```
+
+**Decision flow (check before submitting):**
+1. Check if the cluster has credentials for the default DockerHub image (see command above)
+2. If DockerHub credentials exist → use the default image and submit
+3. If DockerHub credentials are missing but can be added → add them (see `slurm-setup.md` section 6), then submit
+4. If DockerHub credentials cannot be added → override `deployment.image` to the NGC alternative and submit:
+
+   ```yaml
+   deployment:
+     image: nvcr.io/nvidia/vllm:<YY.MM>-py3  # check https://catalog.ngc.nvidia.com/orgs/nvidia/containers/vllm for latest tag
+   ```
+
+5. **Do not retry more than once** without fixing the auth issue
+
 **Step 8: Run the evaluation**
 
 Print the following commands to the user. Propose to execute them in order to confirm the config works as expected before the full run.
@@ -225,64 +256,24 @@ After the dry-run, check the output from `nel` for any problems with the config.
 
 **Monitoring Progress**
 
-After job submission, you can monitor progress using:
+After job submission, register the job per the **monitor skill** for durable cross-session tracking. For one-off queries (live status, debugging a failed run, analyzing results) use the **launching-evals skill**; for querying past runs in MLflow use **accessing-mlflow**.
 
-1. **Check job status:**
+**NEL-specific diagnostics** (for debugging failures):
 
-   ```bash
-   nel status <invocation_id>
-   nel info <invocation_id>
-   ```
+```bash
+# Quick status check
+nel status <invocation_id>
+nel info <invocation_id>
 
-2. **Stream logs** (Local execution only):
+# Get log paths
+nel info <invocation_id> --logs
 
-   ```bash
-   nel logs <invocation_id>
-   ```
-
-   Note: `nel logs` is not supported for SLURM execution.
-
-3. **Inspect logs via SSH** (SLURM workaround):
-
-   When `nel logs` is unavailable (SLURM), use SSH to inspect logs directly:
-
-   First, get log locations:
-
-   ```bash
-   nel info <invocation_id> --logs
-   ```
-
-   Then, use SSH to view logs:
-
-   **Check server deployment logs:**
-
-   ```bash
-   ssh <username>@<hostname> "tail -100 <log path from `nel info <invocation_id> --logs`>/server-<slurm_job_id>-*.log"
-   ```
-
-   Shows vLLM server startup, model loading, and deployment errors (e.g., missing wget/curl).
-
-   **Check evaluation client logs:**
-
-   ```bash
-   ssh <username>@<hostname> "tail -100 <log path from `nel info <invocation_id> --logs`>/client-<slurm_job_id>.log"
-   ```
-
-   Shows evaluation progress, task execution, and results.
-
-   **Check SLURM scheduler logs:**
-
-   ```bash
-   ssh <username>@<hostname> "tail -100 <log path from `nel info <invocation_id> --logs`>/slurm-<slurm_job_id>.log"
-   ```
-
-   Shows job scheduling, health checks, and overall execution flow.
-
-   **Search for errors:**
-
-   ```bash
-   ssh <username>@<hostname> "grep -i 'error\|warning\|failed' <log path from `nel info <invocation_id> --logs`>/*.log"
-   ```
+# Inspect logs via SSH
+ssh <user>@<host> "tail -100 <log_path>/server-<slurm_job_id>-*.log"   # deployment errors
+ssh <user>@<host> "tail -100 <log_path>/client-<slurm_job_id>.log"     # evaluation errors
+ssh <user>@<host> "tail -100 <log_path>/slurm-<slurm_job_id>.log"      # scheduling/walltime
+ssh <user>@<host> "grep -i 'error\|failed' <log_path>/*.log"           # search all logs
+```
 
 ---
 
@@ -303,5 +294,6 @@ Config Generation Progress:
 - [ ] Step 5: Confirm tasks (iterative)
 - [ ] Step 6: Advanced - Multi-node (Data Parallel)
 - [ ] Step 7: Advanced - Interceptors
+- [ ] Step 7.5: Check container registry auth (SLURM only)
 - [ ] Step 8: Run the evaluation
 ```

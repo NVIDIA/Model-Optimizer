@@ -17,11 +17,15 @@
 
 import torch
 from megatron.core import mpu
-from megatron.core.inference.communication_utils import broadcast_from_last_pipeline_stage
+from megatron.core.inference.communication_utils import (
+    broadcast_from_last_pipeline_stage,
+    recv_from_prev_pipeline_rank_,
+    send_to_next_pipeline_rank,
+)
 from megatron.core.inference.contexts import StaticInferenceContext
-from megatron.core.pipeline_parallel import get_forward_backward_func
 from megatron.core.timers import Timer
 from megatron.core.transformer import MegatronModule
+from megatron.core.utils import get_attr_wrapped_model
 from tqdm import tqdm
 
 __all__ = ["megatron_generate", "megatron_prefill"]
@@ -48,81 +52,105 @@ def megatron_prefill(
     image_sizes: torch.LongTensor | None = None,
     skip_return_logits: bool = False,
 ) -> torch.Tensor:
-    """A simple prefill function for Megatron Core V(LM) models."""
+    """A simple prefill function for Megatron Core V(LM) models.
+
+    Supports TP, PP, SP, and combinations thereof. For PP, activations are communicated
+    explicitly between pipeline stages (rather than through get_forward_backward_func)
+    so that the training pipeline scheduler does not interfere with inference.
+    """
     if not isinstance(model, MegatronModule):
         raise ValueError("megatron_prefill only supports Megatron Core models.")
 
     model.eval()
 
-    # Create a static inference context if KV-cache is enabled.
-    max_batch_size = input_ids.shape[0]
+    batch_size = input_ids.shape[0]
     seq_length = input_ids.shape[-1]
+    device = input_ids.device
 
-    def _dummy_loss_func(output_tensor, non_loss_data=True):
-        """Need a dummy loss function."""
-        return output_tensor
-
-    def _forward_step_func(data, model):
-        """Forward step function."""
-        batch_size = data["tokens"].shape[0]
-        seq_len = data["tokens"].shape[-1]
-        device = data["tokens"].device
-
-        # ModelOpt transoformer_spec by default use arbitrary attention mask type; hence we need to
-        # compute the attention_mask for prefilling. Alternatively, if "causal" attention mask type
-        # is used, the attention_mask is not needed. During generation, the attn_mask_type is overridden
-        # to "no_mask" by SelfAttention.forward() if inference_context is provided.
-        attention_mask = (
-            torch.triu(torch.ones((batch_size, seq_len, seq_len), device=device), diagonal=1)
-            .bool()
-            .view(batch_size, 1, seq_len, seq_len)
-        )
-
-        position_ids = (
-            torch.arange(seq_len, dtype=torch.long, device=device)
-            .unsqueeze(0)
-            .expand(batch_size, -1)
-        )
-
-        output_tensor = model(
-            data["tokens"],
-            position_ids,
-            attention_mask,
-            runtime_gather_output=True,
-        )
-        return output_tensor, _dummy_loss_func
+    pp_first = mpu.is_pipeline_first_stage()
+    pp_last = mpu.is_pipeline_last_stage()
+    is_pp = not (pp_first and pp_last)
+    pp_dtype = model.config.pipeline_dtype or (
+        torch.bfloat16 if model.config.bf16 else torch.float32
+    )
 
     if model.config.sequence_parallel:
         tp = model.config.tensor_model_parallel_size
-        num_pad_tokens = (tp - input_ids.shape[-1] % tp) % tp
+        num_pad_tokens = (tp - seq_length % tp) % tp
     else:
         num_pad_tokens = 0
 
     if num_pad_tokens > 0:
-        padding_shape = (input_ids.shape[0], num_pad_tokens)
-        padded_tokens = torch.full(padding_shape, 0, dtype=input_ids.dtype, device=input_ids.device)
-        tokens = torch.cat((input_ids, padded_tokens), dim=-1)
+        tokens = torch.cat(
+            [
+                input_ids,
+                torch.zeros(batch_size, num_pad_tokens, dtype=input_ids.dtype, device=device),
+            ],
+            dim=-1,
+        )
     else:
         tokens = input_ids
 
-    list_of_logits = get_forward_backward_func()(
-        forward_step_func=_forward_step_func,
-        data_iterator=[{"tokens": tokens}],
-        model=model,
-        num_microbatches=1,
-        seq_length=tokens.shape[-1],
-        micro_batch_size=max_batch_size,
-        decoder_seq_length=tokens.shape[-1],
-        forward_only=True,
-        collect_non_loss_data=True,
-    )
-    if skip_return_logits:
-        return None
+    padded_seq_len = tokens.shape[-1]
 
-    if mpu.is_pipeline_last_stage():
-        logits = list_of_logits[0][:, :seq_length, :].detach()
+    # ModelOpt transformer_spec uses arbitrary attention mask type by default; the causal mask
+    # must be supplied explicitly for prefill.
+    attention_mask = (
+        torch.triu(
+            torch.ones((batch_size, padded_seq_len, padded_seq_len), device=device), diagonal=1
+        )
+        .bool()
+        .view(batch_size, 1, padded_seq_len, padded_seq_len)
+    )
+    position_ids = (
+        torch.arange(padded_seq_len, dtype=torch.long, device=device)
+        .unsqueeze(0)
+        .expand(batch_size, -1)
+    )
+
+    # For PP, receive activations from the previous stage before calling forward.
+    if is_pp and not pp_first:
+        pp_dtype = model.config.pipeline_dtype or (
+            torch.bfloat16 if model.config.bf16 else torch.float32
+        )
+        recv_buffer = torch.empty(
+            (padded_seq_len, batch_size, model.config.hidden_size),
+            dtype=pp_dtype,
+            device=device,
+        )
+        recv_from_prev_pipeline_rank_(recv_buffer)
+        get_attr_wrapped_model(model, "set_input_tensor")(recv_buffer)
+
+    has_vision_inputs = (
+        pixel_values is not None or image_grid_thw is not None or image_sizes is not None
+    )
+    if has_vision_inputs:
+        forward_kwargs: dict = {
+            "input_ids": tokens,
+            "position_ids": position_ids,
+            "attention_mask": torch.ones(
+                (batch_size, padded_seq_len), dtype=torch.bool, device=device
+            ),
+            "runtime_gather_output": True,
+        }
+        if pixel_values is not None:
+            forward_kwargs["pixel_values"] = pixel_values
+        if image_grid_thw is not None:
+            forward_kwargs["image_grid_thw"] = image_grid_thw
+        if image_sizes is not None:
+            forward_kwargs["image_sizes"] = image_sizes
+        output = model(**forward_kwargs)
     else:
-        logits = None
+        output = model(tokens, position_ids, attention_mask, runtime_gather_output=True)
+
+    # For PP non-last stages, forward activations to the next stage and return early.
+    if is_pp and not pp_last:
+        pp_dtype = model.config.pipeline_dtype or (
+            torch.bfloat16 if model.config.bf16 else torch.float32
+        )
+        send_to_next_pipeline_rank(output.to(dtype=pp_dtype))
+
+    logits = output[:, :seq_length, :].detach() if pp_last else None
 
     if model.config.bf16:
         logits_dtype = torch.bfloat16
@@ -130,11 +158,12 @@ def megatron_prefill(
         logits_dtype = torch.float16
     else:
         logits_dtype = torch.float32
-    logits = broadcast_from_last_pipeline_stage(
-        [max_batch_size, seq_length, model.vocab_size], logits_dtype, logits
-    )
 
-    return logits
+    # All PP ranks must participate in the broadcast to stay in sync.
+    result = broadcast_from_last_pipeline_stage(
+        [batch_size, seq_length, model.vocab_size], logits_dtype, logits
+    )
+    return None if skip_return_logits else result
 
 
 def megatron_generate(
@@ -182,85 +211,19 @@ def megatron_generate(
 
     model.eval()
 
+    pp_first = mpu.is_pipeline_first_stage()
+    pp_last = mpu.is_pipeline_last_stage()
+    is_pp = not (pp_first and pp_last)
+    pp_dtype = model.config.pipeline_dtype or (
+        torch.bfloat16 if model.config.bf16 else torch.float32
+    )
+
     # Create a static inference context if KV-cache is enabled.
     max_batch_size = input_ids.shape[0]
     max_seq_len = input_ids.shape[-1] + osl
     inference_context = (
         StaticInferenceContext(max_batch_size, max_seq_len) if enable_kv_cache else None
     )
-
-    def _dummy_loss_func(output_tensor, non_loss_data=True):
-        """Need a dummy loss function."""
-        return output_tensor
-
-    def _forward_step_func(data, model):
-        """Forward step function."""
-        batch_size = data["tokens"].shape[0]
-        seq_len = data["tokens"].shape[-1]
-        device = data["tokens"].device
-
-        # ModelOpt transoformer_spec by default use arbitrary attention mask type; hence we need to
-        # compute the attention_mask for prefilling. Alternatively, if "causal" attention mask type
-        # is used, the attention_mask is not needed. During generation, the attn_mask_type is overridden
-        # to "no_mask" by SelfAttention.forward() if inference_context is provided.
-        if seq_len > 1:
-            attention_mask = (
-                torch.triu(torch.ones((batch_size, seq_len, seq_len), device=device), diagonal=1)
-                .bool()
-                .view(batch_size, 1, seq_len, seq_len)
-            )
-        else:
-            attention_mask = None
-
-        position_ids = (
-            torch.arange(seq_len, dtype=torch.long, device=device)
-            .unsqueeze(0)
-            .expand(batch_size, -1)
-        )
-
-        # Check if this is a VLM model (has vision inputs)
-        _has_pixel_values = data.get("pixel_values") is not None
-        _has_image_grid_thw = data.get("image_grid_thw") is not None
-        _has_image_sizes = data.get("image_sizes") is not None
-        has_vision_inputs = _has_pixel_values or _has_image_grid_thw or _has_image_sizes
-
-        if has_vision_inputs:
-            # For VLM models:
-            # - position_ids: [batch, seq_len] (required for RoPE with multi-modal positions)
-            # - attention_mask: [batch, seq_len] (simple 1D boolean mask, not 4D causal)
-            vlm_position_ids = (
-                torch.arange(seq_len, dtype=torch.long, device=device)
-                .unsqueeze(0)
-                .expand(batch_size, -1)
-            )
-            vlm_attention_mask = torch.ones((batch_size, seq_len), dtype=torch.bool, device=device)
-
-            forward_args = {
-                "input_ids": data["tokens"],
-                "position_ids": vlm_position_ids,
-                "attention_mask": vlm_attention_mask,
-                "inference_context": inference_context,
-                "runtime_gather_output": True,
-            }
-            # Add vision inputs
-            if _has_pixel_values:
-                forward_args["pixel_values"] = data["pixel_values"]
-            if _has_image_grid_thw:
-                forward_args["image_grid_thw"] = data["image_grid_thw"]
-            if _has_image_sizes:
-                forward_args["image_sizes"] = data["image_sizes"]
-
-            output_tensor = model(**forward_args)
-        else:
-            # For text-only LLM models
-            output_tensor = model(
-                data["tokens"],
-                position_ids,
-                attention_mask,
-                inference_context=inference_context,
-                runtime_gather_output=True,
-            )
-        return output_tensor, _dummy_loss_func
 
     disable_tqdm = disable_tqdm or torch.distributed.get_rank() > 0
 
@@ -284,6 +247,7 @@ def megatron_generate(
         if inference_context is not None and step > 0:
             tokens = input_ids[:, -1:]
             inference_context.enable_decode_mode()
+            num_pad_tokens = 0
         elif num_pad_tokens > 0:
             padding_shape = (input_ids.shape[0], num_pad_tokens)
             padded_tokens = torch.full(
@@ -293,34 +257,79 @@ def megatron_generate(
         else:
             tokens = input_ids
 
-        data_dict = {"tokens": tokens}
-        # Vision inputs should only be passed during prefill (step 0), not during decode steps
-        if pixel_values is not None:
-            data_dict["pixel_values"] = pixel_values
-        if image_grid_thw is not None:
-            data_dict["image_grid_thw"] = image_grid_thw
-        if image_sizes is not None:
-            data_dict["image_sizes"] = image_sizes
+        batch_size = tokens.shape[0]
+        seq_len = tokens.shape[-1]
+        device = tokens.device
 
-        list_of_logits = get_forward_backward_func()(
-            forward_step_func=_forward_step_func,
-            data_iterator=[data_dict],
-            model=model,
-            num_microbatches=1,
-            seq_length=tokens.shape[-1],
-            micro_batch_size=max_batch_size,
-            decoder_seq_length=tokens.shape[-1],
-            forward_only=True,
-            collect_non_loss_data=True,
+        # ModelOpt transformer_spec uses arbitrary attention mask type by default; compute causal
+        # mask for prefill. During decode, attn_mask_type is overridden to "no_mask" by
+        # SelfAttention.forward() when inference_context is provided.
+        if seq_len > 1:
+            attention_mask = (
+                torch.triu(torch.ones((batch_size, seq_len, seq_len), device=device), diagonal=1)
+                .bool()
+                .view(batch_size, 1, seq_len, seq_len)
+            )
+        else:
+            attention_mask = None
+
+        position_ids = (
+            torch.arange(seq_len, dtype=torch.long, device=device)
+            .unsqueeze(0)
+            .expand(batch_size, -1)
         )
 
-        if inference_context is not None:
-            inference_context.sequence_len_offset += tokens.shape[-1]
+        # Check if this is a VLM model (vision inputs only passed at step 0 / prefill)
+        _has_pixel_values = step == 0 and pixel_values is not None
+        _has_image_grid_thw = step == 0 and image_grid_thw is not None
+        _has_image_sizes = step == 0 and image_sizes is not None
+        has_vision_inputs = _has_pixel_values or _has_image_grid_thw or _has_image_sizes
 
-        if mpu.is_pipeline_last_stage():
-            eager_ids = (
-                list_of_logits[0][:, -(num_pad_tokens + 1), :].argmax(dim=-1, keepdim=True).detach()
+        # For PP, receive activations from the previous stage before calling forward.
+        if is_pp and not pp_first:
+            recv_buffer = torch.empty(
+                (seq_len, batch_size, model.config.hidden_size),
+                dtype=pp_dtype,
+                device=device,
             )
+            recv_from_prev_pipeline_rank_(recv_buffer)
+            get_attr_wrapped_model(model, "set_input_tensor")(recv_buffer)
+
+        if has_vision_inputs:
+            forward_args = {
+                "input_ids": tokens,
+                "position_ids": position_ids,
+                "attention_mask": torch.ones(
+                    (batch_size, seq_len), dtype=torch.bool, device=device
+                ),
+                "inference_context": inference_context,
+                "runtime_gather_output": True,
+            }
+            if _has_pixel_values:
+                forward_args["pixel_values"] = pixel_values
+            if _has_image_grid_thw:
+                forward_args["image_grid_thw"] = image_grid_thw
+            if _has_image_sizes:
+                forward_args["image_sizes"] = image_sizes
+            output = model(**forward_args)
+        else:
+            output = model(
+                tokens,
+                position_ids,
+                attention_mask,
+                inference_context=inference_context,
+                runtime_gather_output=True,
+            )
+
+        if inference_context is not None:
+            inference_context.sequence_len_offset += seq_len
+
+        # For PP non-last stages, forward activations to the next stage.
+        if is_pp and not pp_last:
+            send_to_next_pipeline_rank(output.to(dtype=pp_dtype))
+
+        if pp_last:
+            eager_ids = output[:, -(num_pad_tokens + 1), :].argmax(dim=-1, keepdim=True).detach()
         else:
             eager_ids = None
 

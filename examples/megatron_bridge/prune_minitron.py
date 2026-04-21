@@ -18,7 +18,7 @@ Example usage to prune Qwen3-8B to 6B on 2-GPUs (Pipeline Parallelism = 2)
 while skipping pruning of num_attention_heads using following defaults:
     1024 samples from nemotron-post-training-dataset-v2 for calibration,
     at-most 20% depth (num_layers) and 40% width is pruned per prunable hparam (hidden_size, ffn_hidden_size, ...),
-    top-10 candidates are evaluated for MMLU score (5% sampled data) to select the best model.
+    top-10 candidates are evaluated for MMLU score (10% sampled data) to select the best model.
 
     torchrun --nproc_per_node 2 prune_minitron.py \
         --hf_model_name_or_path Qwen/Qwen3-8B \
@@ -140,11 +140,11 @@ def get_args() -> argparse.Namespace:
     parser.add_argument(
         "--prune_score_func",
         type=str,
-        default="mmlu_5pct",
+        default="mmlu_10pct",
         help=(
             "Score function to use for NAS-based pruning (--prune_target_params). Only supports MMLU at the moment. "
             "Format: mmlu_<N>pct where <N> is the percentage of MMLU data to sample per subject "
-            "(e.g. mmlu_5pct for 5%, mmlu_100pct for full eval)."
+            "(e.g. mmlu_10pct for 10%, mmlu_100pct for full eval)."
         ),
     )
     parser.add_argument(
@@ -299,16 +299,14 @@ def main(args: argparse.Namespace):
         match = re.fullmatch(r"mmlu_(\d+)pct", args.prune_score_func)
         if not match:
             raise ValueError(
-                f"Invalid score function: {args.prune_score_func}. "
-                "Expected format: mmlu_<N>pct (e.g. mmlu_5pct)"
+                f"Invalid score function: {args.prune_score_func}. Expected format: mmlu_<N>pct (e.g. mmlu_10pct)"
             )
-        mmlu_pct = int(match.group(1))
-        if not 0 < mmlu_pct <= 100:
-            raise ValueError("--prune_score_func percentage must be in the range [1, 100].")
-        _mmlu_pct = mmlu_pct / 100.0
+        mmlu_frac = float(match.group(1)) / 100.0
 
         def score_func(m):
-            return megatron_mmlu(m, tokenizer, percentage=_mmlu_pct)
+            return megatron_mmlu(
+                m, tokenizer, few_shots=0, fraction=mmlu_frac, batch_size=args.calib_mbs
+            )
 
         pruning_config["score_func"] = score_func
         pruning_config["max_width_pruning"] = args.max_width_pruning

@@ -105,8 +105,9 @@ def no_stdout():
 
 def print_rank_0(*args, **kwargs):
     """Prints only on the master process."""
+    kwargs.setdefault("flush", True)
     if dist.is_master():
-        print(*args, **kwargs, flush=True)
+        print(*args, **kwargs)
 
 
 def warn_rank_0(message, *args, **kwargs):

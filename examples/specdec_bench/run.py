@@ -157,6 +157,7 @@ def run_simple(args):
         tensor_parallel_size=args.tp_size,
         moe_expert_parallel_size=args.ep_size,
         trust_remote_code=args.trust_remote_code,
+        tokenizer_path=args.tokenizer,
         **engine_args,
     )
 

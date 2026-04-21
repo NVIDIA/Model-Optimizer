@@ -52,7 +52,8 @@ Step 2\: Compare outputs from different model variants\:
     python compare_module_outputs.py \
         --reference output_unpruned.pt \
         --compare output_l2norm.pt \
-        --output-json comparison_stats.json
+        --output-json comparison_stats.json \
+        --no-weights-only
 
 The saved file format\:
 

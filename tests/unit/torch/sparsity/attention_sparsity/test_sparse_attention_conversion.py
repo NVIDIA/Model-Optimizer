@@ -19,6 +19,8 @@ import pytest
 
 pytest.importorskip("transformers")
 
+from unittest.mock import MagicMock, patch
+
 import torch.nn as nn
 from _test_utils.torch.sparsity.sparse_attention_common import (
     FLASH_SKIP_SOFTMAX_DEFAULT_CFG,
@@ -29,8 +31,10 @@ from _test_utils.torch.sparsity.sparse_attention_common import (
 import modelopt.torch.opt as mto
 import modelopt.torch.sparsity.attention_sparsity as sparse_attn
 from modelopt.torch.sparsity.attention_sparsity.conversion import (
+    _set_attn_implementation,
     disable_sparse_attention,
     enable_sparse_attention,
+    export_sparse_attention_config,
     print_sparse_attention_summary,
 )
 from modelopt.torch.sparsity.attention_sparsity.sparse_attention import SparseAttentionModule
@@ -249,3 +253,127 @@ class TestSparseAttentionModuleMethods:
                 stats = module.get_stats()
                 assert stats == {}
                 break
+
+
+class TestSetAttnImplementation:
+    """Cover the _set_attn_implementation logic in conversion.py."""
+
+    def test_triton_backend_sets_attn_impl(self):
+        """triton backend sets _attn_implementation=modelopt_triton on model.config."""
+        model = type(
+            "M",
+            (),
+            {"config": type("C", (), {"_attn_implementation": "eager"})()},
+        )()
+        config = type("Cfg", (), {"sparse_cfg": {}})()
+        config.sparse_cfg = {
+            "*": {"method": "triton_skip_softmax", "backend": "triton"},
+        }
+        with patch(
+            "modelopt.torch.sparsity.attention_sparsity.kernels.register_triton_attention",
+            MagicMock(return_value=True),
+        ):
+            _set_attn_implementation(model, config)
+        assert model.config._attn_implementation == "modelopt_triton"
+
+    def test_triton_backend_register_failure_raises(self):
+        """When register_triton_attention returns False, a RuntimeError is raised."""
+        model = type(
+            "M",
+            (),
+            {"config": type("C", (), {"_attn_implementation": "eager"})()},
+        )()
+        config = type("Cfg", (), {"sparse_cfg": {}})()
+        config.sparse_cfg = {"*": {"method": "triton_skip_softmax", "backend": "triton"}}
+        with (
+            patch(
+                "modelopt.torch.sparsity.attention_sparsity.kernels.register_triton_attention",
+                MagicMock(return_value=False),
+            ),
+            pytest.raises(RuntimeError, match="Failed to register"),
+        ):
+            _set_attn_implementation(model, config)
+
+    def test_triton_backend_no_triton_raises(self):
+        """When register_triton_attention is None, ImportError is raised."""
+        model = type(
+            "M",
+            (),
+            {"config": type("C", (), {"_attn_implementation": "eager"})()},
+        )()
+        config = type("Cfg", (), {"sparse_cfg": {}})()
+        config.sparse_cfg = {"*": {"method": "triton_skip_softmax", "backend": "triton"}}
+        with (
+            patch(
+                "modelopt.torch.sparsity.attention_sparsity.kernels.register_triton_attention",
+                None,
+            ),
+            pytest.raises(ImportError, match="Triton backend requires"),
+        ):
+            _set_attn_implementation(model, config)
+
+    def test_mixed_backends_raises(self):
+        """Mixing pytorch and triton backends is not supported."""
+        model = type("M", (), {"config": None})()
+        config = type("Cfg", (), {"sparse_cfg": {}})()
+        config.sparse_cfg = {
+            "layer1": {"method": "triton_skip_softmax", "backend": "triton"},
+            "layer2": {"method": "flash_skip_softmax", "backend": "pytorch"},
+        }
+        with pytest.raises(ValueError, match="Mixed backends"):
+            _set_attn_implementation(model, config)
+
+    def test_vsa_only_is_noop(self):
+        """VSA-only configs do not change _attn_implementation."""
+        model = type(
+            "M",
+            (),
+            {"config": type("C", (), {"_attn_implementation": "eager"})()},
+        )()
+        config = type("Cfg", (), {"sparse_cfg": {}})()
+        config.sparse_cfg = {"*": {"method": "vsa"}}
+        _set_attn_implementation(model, config)
+        # Should remain eager — VSA patches SDPA directly
+        assert model.config._attn_implementation == "eager"
+
+    def test_mixed_vsa_and_non_vsa_raises(self):
+        """VSA + non-VSA methods are rejected."""
+        model = type("M", (), {"config": None})()
+        config = type("Cfg", (), {"sparse_cfg": {}})()
+        config.sparse_cfg = {
+            "layer1": {"method": "vsa"},
+            "layer2": {"method": "flash_skip_softmax", "backend": "pytorch"},
+        }
+        with pytest.raises(ValueError, match="Cannot mix VSA"):
+            _set_attn_implementation(model, config)
+
+
+class TestExportSparseAttentionConfig:
+    """Cover export_sparse_attention_config branches."""
+
+    def test_returns_none_without_calibration(self):
+        """When no module has calibration params, returns None."""
+        model = SimpleAttentionModel()
+        model = sparse_attn.sparsify(model, FLASH_SKIP_SOFTMAX_DEFAULT_CFG)
+        out = export_sparse_attention_config(model)
+        assert out is None
+
+    def test_exports_when_calibration_present(self):
+        """Calibration params are reflected in the exported config."""
+        model = SimpleAttentionModel()
+        model = sparse_attn.sparsify(model, FLASH_SKIP_SOFTMAX_DEFAULT_CFG)
+
+        for module in model.modules():
+            if isinstance(module, SparseAttentionModule):
+                module._sparse_method_instance.calibration_params = {
+                    "prefill": {"a": 3.14, "b": 7.5},
+                    "decode": {"a": 0.5, "b": 9.0},
+                }
+
+        out = export_sparse_attention_config(model)
+        assert out is not None
+        assert "config_groups" in out
+        tsf = out["threshold_scale_factor"]
+        assert tsf["prefill"] == {"a": 3.14, "b": 7.5}
+        assert tsf["decode"] == {"a": 0.5, "b": 9.0}
+        assert out["producer"]["name"] == "modelopt"

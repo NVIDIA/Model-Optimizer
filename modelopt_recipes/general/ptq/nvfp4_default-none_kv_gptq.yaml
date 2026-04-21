@@ -15,11 +15,12 @@
 
 metadata:
   recipe_type: ptq
-  description: NVFP4 weight and activation (W4A4), gptq sequential calibration.
+  description: NVFP4 weight and activation (W4A4), gptq layerwise calibration.
 quantize:
   algorithm:
     method: gptq
-    use_sequential: true
+    layerwise: true
+    layerwise_checkpoint_dir: output/layerwise_ckpts/
   quant_cfg:
     - quantizer_name: '*'
       enable: false
