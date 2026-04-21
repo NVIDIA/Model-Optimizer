@@ -14,12 +14,6 @@ model:
   # Heterogeneous AnyModel / per-layer MoE: distinct checkpoint keys per global layer.
   hetereogenous_dist_checkpoint: true
 
-  tensor_model_parallel_size: 2
-  pipeline_model_parallel_size: 2
-  context_parallel_size: 1
-  expert_model_parallel_size: 2
-  expert_tensor_parallel_size: 1
-  sequence_parallel: true
   pipeline_dtype: torch.bfloat16
   seq_length: 4096
 
@@ -37,8 +31,8 @@ model:
 # Training
 # ---------------------------------------------------------------------------
 train:
-  train_iters: 10
-  global_batch_size: 30
+  train_iters: 1000
+  global_batch_size: 256
   micro_batch_size: 1
   manual_gc: true
   manual_gc_interval: 100
@@ -47,7 +41,7 @@ train:
 # Validation (preferred over deprecated train.eval_* fields)
 # ---------------------------------------------------------------------------
 validation:
-  eval_interval: 10
+  eval_interval: 100
   eval_iters: 10
 
 # ---------------------------------------------------------------------------
@@ -93,18 +87,46 @@ ddp:
 # ---------------------------------------------------------------------------
 dataset:
   seq_length: 4096
+  per_split_data_args_path: /lustre/fsw/portfolios/coreai/projects/coreai_nvfm_llm/datasets/datablends/nemortron_sft_dataset_v0-gptoss_120b_full_thinking_high_tokenized.json
+  path_to_cache: "/lustre/fsw/portfolios/llmservice/users/mchochowski/puzzletron/workspaces/datasets_cache"
   random_seed: 1234
-  reset_attention_mask: false
-  reset_position_ids: false
-  eod_mask_loss: false
+  reset_attention_mask: False
+  reset_position_ids: False
+  eod_mask_loss: False
   num_dataset_builder_threads: 1
-  data_sharding: true
-  dataloader_type: single
-  skip_getting_attention_mask_from_dataset: true
+  data_sharding: True
+  dataloader_type: "cyclic"
+  skip_getting_attention_mask_from_dataset: True
+  num_workers: 1
   blend: null
-  blend_per_split: null
-  split: "9999,8,2"
-  path_to_cache: ./dataset_cache
+  split: null
+  blend_per_split:
+    # Train: 8 shards high + 8 shards medium, equal weights (16 × 0.0625 = 1.0)
+    - - - /lustre/fsw/portfolios/coreai/projects/coreai_nvfm_llm/datasets/nemortron_sft_dataset_v0-gptoss_120b_full_thinking_high/tokenized/train/shard_00000_of_00008_text_document
+        - /lustre/fsw/portfolios/coreai/projects/coreai_nvfm_llm/datasets/nemortron_sft_dataset_v0-gptoss_120b_full_thinking_high/tokenized/train/shard_00001_of_00008_text_document
+        - /lustre/fsw/portfolios/coreai/projects/coreai_nvfm_llm/datasets/nemortron_sft_dataset_v0-gptoss_120b_full_thinking_high/tokenized/train/shard_00002_of_00008_text_document
+        - /lustre/fsw/portfolios/coreai/projects/coreai_nvfm_llm/datasets/nemortron_sft_dataset_v0-gptoss_120b_full_thinking_high/tokenized/train/shard_00003_of_00008_text_document
+        - /lustre/fsw/portfolios/coreai/projects/coreai_nvfm_llm/datasets/nemortron_sft_dataset_v0-gptoss_120b_full_thinking_high/tokenized/train/shard_00004_of_00008_text_document
+        - /lustre/fsw/portfolios/coreai/projects/coreai_nvfm_llm/datasets/nemortron_sft_dataset_v0-gptoss_120b_full_thinking_high/tokenized/train/shard_00005_of_00008_text_document
+        - /lustre/fsw/portfolios/coreai/projects/coreai_nvfm_llm/datasets/nemortron_sft_dataset_v0-gptoss_120b_full_thinking_high/tokenized/train/shard_00006_of_00008_text_document
+        - /lustre/fsw/portfolios/coreai/projects/coreai_nvfm_llm/datasets/nemortron_sft_dataset_v0-gptoss_120b_full_thinking_high/tokenized/train/shard_00007_of_00008_text_document
+        - /lustre/fsw/portfolios/coreai/projects/coreai_nvfm_llm/datasets/nemortron_sft_dataset_v0-gptoss_120b_full_thinking_medium/tokenized_templated/train/shard_00000_of_00008_text_document
+        - /lustre/fsw/portfolios/coreai/projects/coreai_nvfm_llm/datasets/nemortron_sft_dataset_v0-gptoss_120b_full_thinking_medium/tokenized_templated/train/shard_00001_of_00008_text_document
+        - /lustre/fsw/portfolios/coreai/projects/coreai_nvfm_llm/datasets/nemortron_sft_dataset_v0-gptoss_120b_full_thinking_medium/tokenized_templated/train/shard_00002_of_00008_text_document
+        - /lustre/fsw/portfolios/coreai/projects/coreai_nvfm_llm/datasets/nemortron_sft_dataset_v0-gptoss_120b_full_thinking_medium/tokenized_templated/train/shard_00003_of_00008_text_document
+        - /lustre/fsw/portfolios/coreai/projects/coreai_nvfm_llm/datasets/nemortron_sft_dataset_v0-gptoss_120b_full_thinking_medium/tokenized_templated/train/shard_00004_of_00008_text_document
+        - /lustre/fsw/portfolios/coreai/projects/coreai_nvfm_llm/datasets/nemortron_sft_dataset_v0-gptoss_120b_full_thinking_medium/tokenized_templated/train/shard_00005_of_00008_text_document
+        - /lustre/fsw/portfolios/coreai/projects/coreai_nvfm_llm/datasets/nemortron_sft_dataset_v0-gptoss_120b_full_thinking_medium/tokenized_templated/train/shard_00006_of_00008_text_document
+        - /lustre/fsw/portfolios/coreai/projects/coreai_nvfm_llm/datasets/nemortron_sft_dataset_v0-gptoss_120b_full_thinking_medium/tokenized_templated/train/shard_00007_of_00008_text_document
+      - [0.0625, 0.0625, 0.0625, 0.0625, 0.0625, 0.0625, 0.0625, 0.0625, 0.0625, 0.0625, 0.0625, 0.0625, 0.0625, 0.0625, 0.0625, 0.0625]
+    # Validation
+    - - - /lustre/fsw/portfolios/coreai/projects/coreai_nvfm_llm/datasets/nemortron_sft_dataset_v0-gptoss_120b_full_thinking_high/tokenized/valid/valid_text_document
+        - /lustre/fsw/portfolios/coreai/projects/coreai_nvfm_llm/datasets/nemortron_sft_dataset_v0-gptoss_120b_full_thinking_medium/tokenized_templated/valid/shard_00000_of_00001_text_document
+      - [0.5, 0.5]
+    # Test (same blend as validation in source tuple)
+    - - - /lustre/fsw/portfolios/coreai/projects/coreai_nvfm_llm/datasets/nemortron_sft_dataset_v0-gptoss_120b_full_thinking_high/tokenized/valid/valid_text_document
+        - /lustre/fsw/portfolios/coreai/projects/coreai_nvfm_llm/datasets/nemortron_sft_dataset_v0-gptoss_120b_full_thinking_medium/tokenized_templated/valid/shard_00000_of_00001_text_document
+      - [0.5, 0.5]  # blend_per_split: [(['/lustre/fsw/portfolios/coreai/projects/coreai_nvfm_llm/datasets/nemortron_sft_dataset_v0-gptoss_120b_full_thinking_high/tokenized/train/shard_00000_of_00008_text_document', '/lustre/fsw/portfolios/coreai/projects/coreai_nvfm_llm/datasets/nemortron_sft_dataset_v0-gptoss_120b_full_thinking_high/tokenized/train/shard_00001_of_00008_text_document', '/lustre/fsw/portfolios/coreai/projects/coreai_nvfm_llm/datasets/nemortron_sft_dataset_v0-gptoss_120b_full_thinking_high/tokenized/train/shard_00002_of_00008_text_document', '/lustre/fsw/portfolios/coreai/projects/coreai_nvfm_llm/datasets/nemortron_sft_dataset_v0-gptoss_120b_full_thinking_high/tokenized/train/shard_00003_of_00008_text_document', '/lustre/fsw/portfolios/coreai/projects/coreai_nvfm_llm/datasets/nemortron_sft_dataset_v0-gptoss_120b_full_thinking_high/tokenized/train/shard_00004_of_00008_text_document', '/lustre/fsw/portfolios/coreai/projects/coreai_nvfm_llm/datasets/nemortron_sft_dataset_v0-gptoss_120b_full_thinking_high/tokenized/train/shard_00005_of_00008_text_document', '/lustre/fsw/portfolios/coreai/projects/coreai_nvfm_llm/datasets/nemortron_sft_dataset_v0-gptoss_120b_full_thinking_high/tokenized/train/shard_00006_of_00008_text_document', '/lustre/fsw/portfolios/coreai/projects/coreai_nvfm_llm/datasets/nemortron_sft_dataset_v0-gptoss_120b_full_thinking_high/tokenized/train/shard_00007_of_00008_text_document', '/lustre/fsw/portfolios/coreai/projects/coreai_nvfm_llm/datasets/nemortron_sft_dataset_v0-gptoss_120b_full_thinking_medium/tokenized_templated/train/shard_00000_of_00008_text_document', '/lustre/fsw/portfolios/coreai/projects/coreai_nvfm_llm/datasets/nemortron_sft_dataset_v0-gptoss_120b_full_thinking_medium/tokenized_templated/train/shard_00001_of_00008_text_document', '/lustre/fsw/portfolios/coreai/projects/coreai_nvfm_llm/datasets/nemortron_sft_dataset_v0-gptoss_120b_full_thinking_medium/tokenized_templated/train/shard_00002_of_00008_text_document', '/lustre/fsw/portfolios/coreai/projects/coreai_nvfm_llm/datasets/nemortron_sft_dataset_v0-gptoss_120b_full_thinking_medium/tokenized_templated/train/shard_00003_of_00008_text_document', '/lustre/fsw/portfolios/coreai/projects/coreai_nvfm_llm/datasets/nemortron_sft_dataset_v0-gptoss_120b_full_thinking_medium/tokenized_templated/train/shard_00004_of_00008_text_document', '/lustre/fsw/portfolios/coreai/projects/coreai_nvfm_llm/datasets/nemortron_sft_dataset_v0-gptoss_120b_full_thinking_medium/tokenized_templated/train/shard_00005_of_00008_text_document', '/lustre/fsw/portfolios/coreai/projects/coreai_nvfm_llm/datasets/nemortron_sft_dataset_v0-gptoss_120b_full_thinking_medium/tokenized_templated/train/shard_00006_of_00008_text_document', '/lustre/fsw/portfolios/coreai/projects/coreai_nvfm_llm/datasets/nemortron_sft_dataset_v0-gptoss_120b_full_thinking_medium/tokenized_templated/train/shard_00007_of_00008_text_document'], [0.0625, 0.0625, 0.0625, 0.0625, 0.0625, 0.0625, 0.0625, 0.0625, 0.0625, 0.0625, 0.0625, 0.0625, 0.0625, 0.0625, 0.0625, 0.0625]), (['/lustre/fsw/portfolios/coreai/projects/coreai_nvfm_llm/datasets/nemortron_sft_dataset_v0-gptoss_120b_full_thinking_high/tokenized/valid/valid_text_document', '/lustre/fsw/portfolios/coreai/projects/coreai_nvfm_llm/datasets/nemortron_sft_dataset_v0-gptoss_120b_full_thinking_medium/tokenized_templated/valid/shard_00000_of_00001_text_document'], [0.5, 0.5]), (['/lustre/fsw/portfolios/coreai/projects/coreai_nvfm_llm/datasets/nemortron_sft_dataset_v0-gptoss_120b_full_thinking_high/tokenized/valid/valid_text_document', '/lustre/fsw/portfolios/coreai/projects/coreai_nvfm_llm/datasets/nemortron_sft_dataset_v0-gptoss_120b_full_thinking_medium/tokenized_templated/valid/shard_00000_of_00001_text_document'], [0.5, 0.5])]
 
 # ---------------------------------------------------------------------------
 # Tokenizer (override to NullTokenizer + vocab_size for mock-token runs)
@@ -117,7 +139,7 @@ tokenizer:
 # Checkpoint
 # ---------------------------------------------------------------------------
 checkpoint:
-  save_interval: 5
+  save_interval: 100
   save: ./outputs/kd-checkpoints
   load: ./outputs/kd-checkpoints
   most_recent_k: 5
@@ -133,6 +155,10 @@ logger:
   log_interval: 1
   tensorboard_dir: ./outputs/tb
   log_timers_to_tensorboard: true
+  wandb_project: gpt_oss_distillation
+  wandb_exp_name: any_model_gpt_oss_120b-kd-mbridge-v6
+  wandb_entity: nv-aim
+  wandb_save_dir: /lustre/fsw/portfolios/llmservice/users/mchochowski/puzzletron/workspaces/any_model_gpt_oss_20b/kd/puzzle_solutions/stats_num_params_11914757184/from-120B-mbridge-v6/wandb   # optional
 
 # ---------------------------------------------------------------------------
 # RNG / distributed / precision

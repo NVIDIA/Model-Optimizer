@@ -88,6 +88,12 @@ Usage
         train.train_iters=50000 \\
         optimizer.lr=1e-4
 
+    # Parallelism flags (convenience; same fields can be set via YAML or Hydra dotlist):
+    torchrun --nproc_per_node=8 distill.py \\
+        --student llama --teacher nemo \\
+        --tensor-model-parallel-size 4 --pipeline-model-parallel-size 1 \\
+        --expert-model-parallel-size 4 --expert-tensor-parallel-size 1
+
     # All-heterogeneous: GPT-OSS teacher → Nemotron-H student
     torchrun --nproc_per_node=8 distill.py \\
         --student nemo  --student-checkpoint /path/to/student \\
@@ -372,13 +378,13 @@ def main(args: argparse.Namespace) -> None:  # noqa: C901 (complexity OK for an 
     logger.info("  teacher provider: %s", type(teacher_provider).__name__)
 
     student_provider.seq_length = 4096
-    student_provider.tensor_model_parallel_size = 1
+    student_provider.tensor_model_parallel_size = args.tensor_model_parallel_size
     student_provider.sequence_parallel = student_provider.tensor_model_parallel_size > 1
-    student_provider.pipeline_model_parallel_size = 2
+    student_provider.pipeline_model_parallel_size = args.pipeline_model_parallel_size
     student_provider.pipeline_dtype = torch.bfloat16
     student_provider.context_parallel_size = 1
-    student_provider.expert_model_parallel_size = 1
-    student_provider.expert_tensor_parallel_size = 1
+    student_provider.expert_model_parallel_size = args.expert_model_parallel_size
+    student_provider.expert_tensor_parallel_size = args.expert_tensor_parallel_size
     student_provider.hetereogenous_dist_checkpoint = True
 
     # Fix teacher to match student
@@ -502,6 +508,13 @@ def _log_config(
     logger.info("  teacher key:        %s  (converter=%s)", args.teacher, teacher_converter)
     logger.info("  teacher load path:  %s", teacher_path)
     logger.info("  config file:        %s", args.config_file)
+    logger.info(
+        "  parallelism:        TP=%s PP=%s EP=%s ETP=%s",
+        args.tensor_model_parallel_size,
+        args.pipeline_model_parallel_size,
+        args.expert_model_parallel_size,
+        args.expert_tensor_parallel_size,
+    )
     logger.info("  CLI overrides:      %s", args.overrides)
 
 
@@ -571,6 +584,40 @@ def _parse_args() -> argparse.Namespace:
         "--trust-remote-code",
         action="store_true",
         help="Pass trust_remote_code=True to HuggingFace config/model loading.",
+    )
+
+    # --- Megatron parallelism (student + teacher providers; YAML / Hydra can still override) ---
+    parser.add_argument(
+        "--tensor-model-parallel-size",
+        type=int,
+        default=1,
+        metavar="N",
+        dest="tensor_model_parallel_size",
+        help="Tensor model parallel size (TP). Also enables sequence parallel when > 1.",
+    )
+    parser.add_argument(
+        "--pipeline-model-parallel-size",
+        type=int,
+        default=1,
+        metavar="N",
+        dest="pipeline_model_parallel_size",
+        help="Pipeline model parallel size (PP).",
+    )
+    parser.add_argument(
+        "--expert-model-parallel-size",
+        type=int,
+        default=1,
+        metavar="N",
+        dest="expert_model_parallel_size",
+        help="Expert model parallel size (EP) for MoE.",
+    )
+    parser.add_argument(
+        "--expert-tensor-parallel-size",
+        type=int,
+        default=1,
+        metavar="N",
+        dest="expert_tensor_parallel_size",
+        help="Expert tensor parallel size (ETP) for MoE.",
     )
 
     # --- Hydra-style pass-through overrides ---
