@@ -747,18 +747,24 @@ class GPTModelExporter:
         self,
         module: torch.nn.Module,
         dtype: torch.dtype = torch.float16,
-        name_to_value: dict[str, torch.Tensor] = {},
+        name_to_value: dict[str, torch.Tensor] | None = None,
     ) -> dict[str, torch.Tensor]:
         """Get the weight and bias of the module.
 
         Args:
             module: The target module to get the weight and bias.
             dtype: The data type of the weight and bias.
-            name_to_value: The dictionary to store the weight and bias.
+            name_to_value: The dictionary to store the weight and bias. A new dict is created
+                if not provided.
 
         Returns:
             The dictionary containing the weight and bias.
         """
+        if name_to_value is None:
+            name_to_value = {}
+        # numel() > 0 intentionally excludes zero-element weight tensors (e.g. MoE routing
+        # layers whose weight is a placeholder) so callers can use "weight" in name_to_value
+        # as a reliable guard without re-inspecting module.weight.
         if hasattr(module, "weight") and module.weight is not None and module.weight.numel() > 0:
             weight = module.weight.to(dtype).cpu()
             name_to_value["weight"] = weight
@@ -801,9 +807,7 @@ class GPTModelExporter:
 
         name_to_value = self._get_weight_bias(module, dtype, name_to_value)
 
-        if not (
-            hasattr(module, "weight") and module.weight is not None and module.weight.numel() > 0
-        ):
+        if "weight" not in name_to_value:
             return name_to_value, qformat, block_size
 
         if qformat == QUANTIZATION_NONE:

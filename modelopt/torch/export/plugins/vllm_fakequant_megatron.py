@@ -137,7 +137,9 @@ class VllmFqGPTModelExporter(GPTModelExporter):
         block_size = 0
         name_to_value = self._get_weight_bias(module, dtype, name_to_value)
         if "weight" in name_to_value:
-            weight = name_to_value["weight"]
+            # Use the original device (avoid the CPU round-trip introduced by _get_weight_bias;
+            # fake-quantization runs on CUDA and the result is moved to CPU below).
+            weight = module.weight.to(dtype)
             # Fold the weight_quantizer into the weight by applying fake-quantization
             # (quantize then dequantize). The weight_quantizer amax is not exported;
             # the vLLM fakequant reload path disables the weight quantizer when absent.
