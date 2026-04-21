@@ -72,11 +72,48 @@ def register_attention_for_kv_quant(attention_cls: type) -> bool:
     def is_bin_matmul(node):
         return isinstance(node, ast.BinOp) and isinstance(node.op, ast.MatMult)
 
-    def patch(node, quantizer_names, transpose=False):
-        for index, quantizer_name in enumerate(quantizer_names):
+    def collect_attention_nodes(node):
+        """Collect attention operators in runtime evaluation order.
+
+        ``ast.walk`` traverses breadth-first, which visits an outer matmul before the inner
+        q/k score matmul in nested attention expressions. Visiting children first preserves the
+        execution order for both nested expressions and sequential assignments.
+        """
+        bmm_nodes = []
+        sdpa_nodes = []
+        bin_matmul_nodes = []
+
+        def visit(current_node):
+            for child in ast.iter_child_nodes(current_node):
+                visit(child)
+            if is_bmm(current_node):
+                bmm_nodes.append(current_node)
+            if is_sdpa(current_node):
+                sdpa_nodes.append(current_node)
+            if is_bin_matmul(current_node):
+                bin_matmul_nodes.append(current_node)
+
+        visit(node)
+        return bmm_nodes, sdpa_nodes, bin_matmul_nodes
+
+    def get_operand_indices(node, num_operands):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "baddbmm"
+            and num_operands == 2
+        ):
+            return (1, 2)
+        return tuple(range(num_operands))
+
+    def patch(node, quantizer_names, transpose_quantizers=()):
+        for index, quantizer_name in zip(
+            get_operand_indices(node, len(quantizer_names)), quantizer_names
+        ):
             if quantizer_name is None:
                 continue
             arg = node.args[index]
+            transpose = quantizer_name in transpose_quantizers
 
             if not transpose:
                 node.args[index] = ast.Call(
@@ -158,20 +195,11 @@ def register_attention_for_kv_quant(attention_cls: type) -> bool:
                 )
             node.right = quant_arg
 
-    nodes = list(ast.walk(head))
-    org_class_name = nodes[1].name  # type: ignore[attr-defined]
-    new_class_name = nodes[1].name = "_Quant" + nodes[1].name  # type: ignore[attr-defined]
+    class_def = next(node for node in head.body if isinstance(node, ast.ClassDef))
+    org_class_name = class_def.name
+    new_class_name = class_def.name = "_Quant" + class_def.name
 
-    bmm_nodes = []
-    sdpa_nodes = []
-    bin_matmul_nodes = []
-    for node in ast.walk(head):
-        if is_bmm(node):
-            bmm_nodes.append(node)
-        if is_sdpa(node):
-            sdpa_nodes.append(node)
-        if is_bin_matmul(node):
-            bin_matmul_nodes.append(node)
+    bmm_nodes, sdpa_nodes, bin_matmul_nodes = collect_attention_nodes(head)
     if len(bmm_nodes) != 2 and len(sdpa_nodes) != 1 and len(bin_matmul_nodes) != 2:
         print(f"Expect 2 bmm/matmul op in the {org_class_name}, found {len(bmm_nodes)}")
         print(f"Or expect 1 sdpa op in the {org_class_name}, found {len(sdpa_nodes)}")
@@ -180,22 +208,23 @@ def register_attention_for_kv_quant(attention_cls: type) -> bool:
         return False
 
     if len(bmm_nodes) == 2:
-        # transpose k cache here to enable per-token quantization
-        # without transpose, the quantization will be per-channel, i.e.,
-        # self.k_bmm_quantizer(key_states.transpose(-1, -2))
-        # after transpose, the quantization will be per-token, i.e.,
-        # self.k_bmm_quantizer(key_states.transpose(-1, -2).transpose(-1, -2)).transpose(-1, -2)
-        # removing the additional transpose is doable but not trivial
-        patch(bmm_nodes[0], quantizer_names=(None, "v_bmm_quantizer"))
-        patch(bmm_nodes[1], quantizer_names=("q_bmm_quantizer", "k_bmm_quantizer"), transpose=True)
+        # The first matmul computes attention scores from q and k, while the second one combines
+        # attention probabilities with v. The transpose wrapper keeps the key quantizer on the
+        # original cache layout so per-token quantization still works when the matmul expects k^T.
+        patch(
+            bmm_nodes[0],
+            quantizer_names=("q_bmm_quantizer", "k_bmm_quantizer"),
+            transpose_quantizers=("k_bmm_quantizer",),
+        )
+        patch(bmm_nodes[1], quantizer_names=(None, "v_bmm_quantizer"))
         print("Patching 2 BMM/Matmul operators with quantizers")
     if len(bin_matmul_nodes) == 2:
         patch_binop(
-            bin_matmul_nodes[1],
+            bin_matmul_nodes[0],
             quantizer_names=("q_bmm_quantizer", "k_bmm_quantizer"),
             transpose=True,
         )
-        patch_binop(bin_matmul_nodes[0], quantizer_names=(None, "v_bmm_quantizer"))
+        patch_binop(bin_matmul_nodes[1], quantizer_names=(None, "v_bmm_quantizer"))
         print("Patching 2 @ operators with quantizers")
 
     if len(sdpa_nodes) == 1:

@@ -60,6 +60,37 @@ class SDPAAttention(nn.Module):
         return F.scaled_dot_product_attention(q, k, v), None
 
 
+class SequentialMatmulAttention(nn.Module):
+    def forward(self, q, k, v):
+        scores = torch.matmul(q, k.transpose(-2, -1))
+        probs = torch.softmax(scores, dim=-1)
+        return torch.matmul(probs, v), None
+
+
+class SequentialBMMAttention(nn.Module):
+    def forward(self, q, k, v):
+        scores = torch.bmm(q, k.transpose(-2, -1))
+        probs = torch.softmax(scores, dim=-1)
+        return torch.bmm(probs, v), None
+
+
+class SequentialBinMatmulAttention(nn.Module):
+    def forward(self, q, k, v):
+        scores = q @ k.transpose(-2, -1)
+        probs = scores.softmax(dim=-1)
+        return probs @ v, None
+
+
+class RecordingIdentityQuantizer(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.inputs = []
+
+    def forward(self, tensor):
+        self.inputs.append(tensor.detach().clone())
+        return tensor
+
+
 kv_cache_config = {
     "quant_cfg": [
         {"quantizer_name": "*[kv]_bmm_quantizer", "cfg": {"num_bits": 4}, "enable": True},
@@ -157,6 +188,44 @@ def test_kv_quant_bert():
     assert output is not None
     assert output.start_logits is not None
     assert output.end_logits is not None
+
+
+@pytest.mark.parametrize(
+    "attn_cls",
+    [SequentialMatmulAttention, SequentialBMMAttention, SequentialBinMatmulAttention],
+)
+def test_kv_quant_sequential_attention_wiring(attn_cls):
+    q = torch.arange(24, dtype=torch.float32).reshape(2, 3, 4) / 100
+    k = (torch.arange(24, dtype=torch.float32).reshape(2, 3, 4) + 100) / 100
+    v = (torch.arange(24, dtype=torch.float32).reshape(2, 3, 4) + 200) / 100
+
+    original_attention = attn_cls()
+    quant_attention = attn_cls()
+
+    assert mtq.plugins.register_attention_for_kv_quant(attn_cls)
+
+    try:
+        mtq.replace_quant_module(quant_attention)
+
+        q_bmm_quantizer = RecordingIdentityQuantizer()
+        k_bmm_quantizer = RecordingIdentityQuantizer()
+        v_bmm_quantizer = RecordingIdentityQuantizer()
+        quant_attention.q_bmm_quantizer = q_bmm_quantizer
+        quant_attention.k_bmm_quantizer = k_bmm_quantizer
+        quant_attention.v_bmm_quantizer = v_bmm_quantizer
+
+        expected, _ = original_attention(q, k, v)
+        actual, _ = quant_attention(q, k, v)
+
+        torch.testing.assert_close(actual, expected)
+        assert len(q_bmm_quantizer.inputs) == 1
+        assert len(k_bmm_quantizer.inputs) == 1
+        assert len(v_bmm_quantizer.inputs) == 1
+        torch.testing.assert_close(q_bmm_quantizer.inputs[0], q)
+        torch.testing.assert_close(k_bmm_quantizer.inputs[0], k)
+        torch.testing.assert_close(v_bmm_quantizer.inputs[0], v)
+    finally:
+        mtq.unregister(attn_cls)
 
 
 @pytest.mark.skipif(kitchen is None, reason="kitchen is not installed.")
