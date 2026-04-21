@@ -13,4 +13,4 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Common (non-domain-specific) kernels. Base FA lives in ``common/attention``."""
+"""Quantization-specific attention kernel pieces (placeholder for combined sparse+quant path)."""

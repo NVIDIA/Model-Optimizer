@@ -25,7 +25,10 @@ import threading
 
 import torch
 
-from modelopt.torch.kernels.common import attention, attention_calibrate
+# ``attention`` and ``attention_calibrate`` are resolved lazily inside the
+# call-site functions below. Capturing them at module top-level would fetch
+# ``None`` from the partially-loaded ``common.attention`` package during the
+# sparsity↔common circular import chain.
 from modelopt.torch.utils.logging import warn_rank_0
 
 # Thread-local storage for skip-softmax configuration
@@ -126,6 +129,8 @@ def _ltx_triton_attention(
     calib_mode = getattr(_thread_local, "calibration_mode", False)
     if calib_mode:
         trials = getattr(_thread_local, "threshold_trials", None)
+        from modelopt.torch.kernels.common.attention import attention_calibrate
+
         if trials and attention_calibrate is not None:
             o, counters = attention_calibrate(q_flat, k_flat, v_flat, **kw, threshold_trials=trials)
 
@@ -149,6 +154,8 @@ def _ltx_triton_attention(
         kw["skip_softmax_threshold"] = scale_factor / seq_k
     elif threshold is not None and threshold > 0.0:
         kw["skip_softmax_threshold"] = threshold
+
+    from modelopt.torch.kernels.common.attention import attention
 
     assert attention is not None, "Triton attention kernel not available (requires CUDA + triton)"
     o = attention(q_flat, k_flat, v_flat, **kw)

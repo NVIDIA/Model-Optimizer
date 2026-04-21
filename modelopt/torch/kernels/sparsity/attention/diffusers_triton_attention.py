@@ -36,7 +36,10 @@ from diffusers.models.attention_dispatch import (
     attention_backend,
 )
 
-from modelopt.torch.kernels.common import attention, attention_calibrate
+# ``attention`` and ``attention_calibrate`` are resolved lazily inside the
+# call-site functions below. Capturing them at module top-level would fetch
+# ``None`` from the partially-loaded ``common.attention`` package during the
+# sparsity↔common circular import chain.
 
 _BACKEND_NAME = "modelopt_triton"
 _BACKEND_REGISTERED = False
@@ -166,6 +169,8 @@ def _diffusers_triton_attention(
     calib_mode = getattr(_thread_local, "calibration_mode", False)
     if calib_mode:
         trials = getattr(_thread_local, "threshold_trials", None)
+        from modelopt.torch.kernels.common.attention import attention_calibrate
+
         if trials and attention_calibrate is not None:
             o, counters = attention_calibrate(q, k, v, **kw, threshold_trials=trials)
 
@@ -195,6 +200,8 @@ def _diffusers_triton_attention(
             threshold = getattr(_thread_local, "skip_threshold", None)
             if threshold is not None and threshold > 0.0:
                 kw["skip_softmax_threshold"] = threshold
+
+    from modelopt.torch.kernels.common.attention import attention
 
     assert attention is not None, "Triton attention kernel not available (requires CUDA + triton)"
     do_measure = getattr(_thread_local, "measure_sparsity", False)

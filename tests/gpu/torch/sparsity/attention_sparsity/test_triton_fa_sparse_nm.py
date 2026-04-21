@@ -27,14 +27,16 @@ pytestmark = [
     pytest.mark.filterwarnings("ignore::DeprecationWarning"),
 ]
 
-from modelopt.torch.kernels.common import IS_AVAILABLE as TRITON_KERNEL_AVAILABLE
+from modelopt.torch.kernels.common.attention import IS_AVAILABLE as TRITON_KERNEL_AVAILABLE
 
 if TRITON_KERNEL_AVAILABLE:
     import triton
     import triton.language as tl
 
-    from modelopt.torch.kernels.common import attention
-    from modelopt.torch.kernels.common.triton_fa import _apply_sparse_nm_to_qk_tile
+    from modelopt.torch.kernels.common.attention import attention
+    from modelopt.torch.kernels.sparsity.attention.skip_softmax_helpers import (
+        _apply_sparse_nm_to_qk_tile,
+    )
 
     @triton.jit
     def _test_apply_sparse_nm(
