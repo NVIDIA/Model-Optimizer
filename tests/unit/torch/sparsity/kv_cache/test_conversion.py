@@ -52,7 +52,7 @@ def test_convert_returns_model_and_metadata():
     """Convert returns (model, metadata) without modifying weights."""
     model = nn.Linear(16, 16)
     original_weight = model.weight.data.clone()
-    config = TriAttentionConfig()
+    config = TriAttentionConfig(budget=2048)
 
     converted_model, metadata = convert_triattention(model, config)
 
@@ -74,7 +74,7 @@ def test_convert_metadata_contains_config():
 def test_restore_returns_model():
     """Restore returns the model."""
     model = nn.Linear(16, 16)
-    config = TriAttentionConfig()
+    config = TriAttentionConfig(budget=2048)
     _, metadata = convert_triattention(model, config)
 
     restored = restore_triattention(model, config, metadata)
@@ -90,3 +90,39 @@ def test_update_metadata():
     update_triattention_metadata(model, config, metadata)
 
     assert metadata["triattention_config"]["budget"] == 512
+
+
+def test_convert_metadata_with_sparsity_ratio():
+    """Metadata serializes target_sparsity_ratio when set."""
+    model = nn.Linear(16, 16)
+    config = TriAttentionConfig(target_sparsity_ratio=0.7)
+
+    _, metadata = convert_triattention(model, config)
+
+    serialized = metadata["triattention_config"]
+    assert serialized["target_sparsity_ratio"] == 0.7
+    assert serialized["budget"] is None
+
+
+def test_convert_metadata_with_budget():
+    """Metadata has budget set and target_sparsity_ratio None."""
+    model = nn.Linear(16, 16)
+    config = TriAttentionConfig(budget=1024)
+
+    _, metadata = convert_triattention(model, config)
+
+    serialized = metadata["triattention_config"]
+    assert serialized["budget"] == 1024
+    assert serialized["target_sparsity_ratio"] is None
+
+
+def test_update_metadata_with_sparsity_ratio():
+    """update_triattention_metadata serializes target_sparsity_ratio."""
+    model = nn.Linear(16, 16)
+    config = TriAttentionConfig(target_sparsity_ratio=0.5)
+    metadata = {}
+
+    update_triattention_metadata(model, config, metadata)
+
+    assert metadata["triattention_config"]["target_sparsity_ratio"] == 0.5
+    assert metadata["triattention_config"]["budget"] is None

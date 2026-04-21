@@ -24,13 +24,17 @@ Demonstrates the TriAttention calibration pipeline:
 5. Optionally save calibration data
 
 Usage:
-    python hf_triattention.py --model Qwen/Qwen3-0.6B
+    # Fixed-size budget (retain top-K tokens per head)
+    python hf_triattention.py --model Qwen/Qwen3-0.6B --budget 2048
+
+    # Percentile-based eviction (evict 70% at each prune step)
+    python hf_triattention.py --model Qwen/Qwen3-0.6B --target-sparsity-ratio 0.7
 
     # With custom budget and calibration length
     python hf_triattention.py --model Qwen/Qwen3-0.6B --budget 1024 --calib-seq-len 4096
 
     # Save calibration data
-    python hf_triattention.py --model Qwen/Qwen3-0.6B --output calibration.pt
+    python hf_triattention.py --model Qwen/Qwen3-0.6B --budget 2048 --output calibration.pt
 """
 
 import argparse
@@ -115,11 +119,20 @@ def main(args):
     print(f"  Calibration complete in {elapsed:.1f}s")
 
     # Step 2: Apply KV cache sparsity mode
-    print(f"\nApplying TriAttention mode (budget={args.budget})...")
-    triattention_config = TriAttentionConfig(
-        budget=args.budget,
-        prune_interval=args.prune_interval,
-    )
+    if args.target_sparsity_ratio is not None:
+        print(
+            f"\nApplying TriAttention mode (target_sparsity_ratio={args.target_sparsity_ratio})..."
+        )
+        triattention_config = TriAttentionConfig(
+            target_sparsity_ratio=args.target_sparsity_ratio,
+            prune_interval=args.prune_interval,
+        )
+    else:
+        print(f"\nApplying TriAttention mode (budget={args.budget})...")
+        triattention_config = TriAttentionConfig(
+            budget=args.budget,
+            prune_interval=args.prune_interval,
+        )
     model = mtskv.sparsify(model, triattention_config)
     print("  Mode applied (no-op on weights).")
 
@@ -171,11 +184,22 @@ if __name__ == "__main__":
         default="Qwen/Qwen3-0.6B",
         help="HuggingFace model name or local path.",
     )
-    parser.add_argument(
+    policy = parser.add_mutually_exclusive_group()
+    policy.add_argument(
         "--budget",
         type=int,
-        default=2048,
-        help="KV token budget (tokens to retain per head).",
+        default=None,
+        help="KV token budget (tokens to retain per head). "
+        "Mutually exclusive with --target-sparsity-ratio. "
+        "Defaults to 2048 if neither is set.",
+    )
+    policy.add_argument(
+        "--target-sparsity-ratio",
+        type=float,
+        default=None,
+        help="Fraction of tokens to evict at each prune step, in (0, 1). "
+        "Example: 0.7 evicts 70%% of tokens (keeps top 30%% by score). "
+        "Mutually exclusive with --budget.",
     )
     parser.add_argument(
         "--prune-interval",
@@ -205,4 +229,6 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
+    if args.budget is None and args.target_sparsity_ratio is None:
+        args.budget = 2048
     main(args)

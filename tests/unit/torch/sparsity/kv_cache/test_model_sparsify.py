@@ -25,7 +25,7 @@ from modelopt.torch.sparsity.kv_cache.model_sparsify import calibrate, sparsify
 def test_sparsify_returns_model():
     """sparsify() returns the model."""
     model = nn.Linear(16, 16)
-    result = sparsify(model, TriAttentionConfig())
+    result = sparsify(model, TriAttentionConfig(budget=2048))
     assert result is model
 
 
@@ -40,14 +40,14 @@ def test_sparsify_preserves_weights():
     """sparsify() does not modify model weights."""
     model = nn.Linear(16, 16)
     original_weight = model.weight.data.clone()
-    sparsify(model, TriAttentionConfig())
+    sparsify(model, TriAttentionConfig(budget=2048))
     torch.testing.assert_close(model.weight.data, original_weight)
 
 
 def test_calibrate_returns_model():
     """calibrate() returns the model."""
     model = nn.Linear(16, 16)
-    sparsify(model, TriAttentionConfig())
+    sparsify(model, TriAttentionConfig(budget=2048))
     result = calibrate(model)
     assert result is model
 

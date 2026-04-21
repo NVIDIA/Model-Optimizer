@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 
 from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
 
@@ -32,13 +32,31 @@ class TriAttentionConfig(ModeloptBaseConfig):
     TriAttention scores cached KV entries using a trigonometric model derived from
     pre-RoPE Q/K concentration. Calibration computes per-head frequency statistics;
     at runtime, the serving engine scores and evicts tokens periodically.
+
+    Exactly one of ``budget`` or ``target_sparsity_ratio`` must be set:
+
+    - ``budget``: absolute token count to retain per head (fixed-size cache).
+    - ``target_sparsity_ratio``: fraction of tokens to evict at each pruning step.
+      Cache size auto-scales with generation length. Value in (0, 1).
     """
 
-    # Budget
-    budget: int = ModeloptField(
-        default=2048,
-        title="KV token budget.",
-        description="Number of KV tokens to retain per head after pruning.",
+    # Eviction policy (exactly one must be set)
+    budget: int | None = ModeloptField(
+        default=None,
+        title="KV token budget (absolute).",
+        description=(
+            "Number of KV tokens to retain per head after pruning. "
+            "Mutually exclusive with target_sparsity_ratio."
+        ),
+    )
+    target_sparsity_ratio: float | None = ModeloptField(
+        default=None,
+        title="Target sparsity ratio (percentile-based).",
+        description=(
+            "Fraction of tokens to evict at each pruning step, in (0, 1). "
+            "Example: 0.7 means evict 70% of tokens (keep top 30% by score). "
+            "Mutually exclusive with budget."
+        ),
     )
 
     # Pruning schedule
@@ -107,3 +125,18 @@ class TriAttentionConfig(ModeloptBaseConfig):
         if v not in valid:
             raise ValueError(f"score_aggregation must be one of {valid}, got '{v}'")
         return v
+
+    @model_validator(mode="after")
+    def validate_budget_or_sparsity(self) -> TriAttentionConfig:
+        """Exactly one of budget or target_sparsity_ratio must be set."""
+        budget_set = self.budget is not None
+        sparsity_set = self.target_sparsity_ratio is not None
+        if not budget_set and not sparsity_set:
+            raise ValueError("Must set exactly one of 'budget' or 'target_sparsity_ratio'")
+        if budget_set and sparsity_set:
+            raise ValueError("Cannot set both 'budget' and 'target_sparsity_ratio'; pick one")
+        if sparsity_set and not (0.0 < self.target_sparsity_ratio < 1.0):
+            raise ValueError(
+                f"target_sparsity_ratio must be in (0, 1), got {self.target_sparsity_ratio}"
+            )
+        return self

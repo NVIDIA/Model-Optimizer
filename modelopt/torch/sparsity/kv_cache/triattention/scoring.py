@@ -31,6 +31,7 @@ __all__ = [
     "HeadFrequencyStats",
     "compute_frequency_statistics_from_means",
     "score_keys_for_round",
+    "select_keys_to_keep",
 ]
 
 
@@ -128,3 +129,48 @@ def score_keys_for_round(
     if aggregation == "mean":
         return combined.mean(dim=1)
     return combined.max(dim=1).values
+
+
+def select_keys_to_keep(
+    scores: torch.Tensor,
+    *,
+    kv_budget: int | None = None,
+    target_sparsity_ratio: float | None = None,
+) -> torch.Tensor:
+    """Select which keys to retain based on importance scores.
+
+    Exactly one of ``kv_budget`` or ``target_sparsity_ratio`` must be provided.
+
+    Args:
+        scores: Importance scores, shape (num_keys,). Higher = more important.
+        kv_budget: Absolute number of tokens to retain. Keeps top-K.
+            If budget >= num_keys, keeps all.
+        target_sparsity_ratio: Fraction of tokens to evict, in (0, 1).
+            Keeps top (1 - ratio) fraction. Example: 0.7 → keep top 30%.
+
+    Returns:
+        Boolean mask, shape (num_keys,). True = keep, False = evict.
+    """
+    budget_set = kv_budget is not None
+    sparsity_set = target_sparsity_ratio is not None
+    if budget_set == sparsity_set:
+        raise ValueError(
+            "select_keys_to_keep requires exactly one of kv_budget or target_sparsity_ratio"
+        )
+
+    num_keys = scores.shape[0]
+    if num_keys == 0:
+        return torch.zeros(0, dtype=torch.bool, device=scores.device)
+
+    if budget_set:
+        k = min(kv_budget, num_keys)
+    else:
+        k = max(1, round(num_keys * (1.0 - target_sparsity_ratio)))
+
+    if k >= num_keys:
+        return torch.ones(num_keys, dtype=torch.bool, device=scores.device)
+
+    top_indices = torch.topk(scores, k=k, largest=True).indices
+    mask = torch.zeros(num_keys, dtype=torch.bool, device=scores.device)
+    mask[top_indices] = True
+    return mask

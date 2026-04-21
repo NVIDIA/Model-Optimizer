@@ -18,10 +18,20 @@
 """TriAttention: Trigonometric KV cache compression."""
 
 from .rope_utils import build_geometric_offsets, invert_rope, rotate_half, to_complex_pairs
+from .scoring import (
+    HeadFrequencyStats,
+    compute_frequency_statistics_from_means,
+    score_keys_for_round,
+    select_keys_to_keep,
+)
 
 __all__ = [
+    "HeadFrequencyStats",
     "build_geometric_offsets",
+    "compute_frequency_statistics_from_means",
     "invert_rope",
     "rotate_half",
+    "score_keys_for_round",
+    "select_keys_to_keep",
     "to_complex_pairs",
 ]
