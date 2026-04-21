@@ -387,10 +387,7 @@ class _QuantFusedMoEBase(QuantModule):
             if self.w13_weight_quantizer.is_enabled:  # pragma: no cover
                 original_weight = self.w13_weight
                 B = self.w13_weight_quantizer(original_weight)  # noqa: N806
-                try:
-                    original_kernel(A, B, C, *args, **kwargs)
-                finally:
-                    self.w13_weight = original_weight
+                original_kernel(A, B, C, *args, **kwargs)
             else:
                 original_kernel(A, B, C, *args, **kwargs)
             if self.w13_output_quantizer.is_enabled:
@@ -400,10 +397,7 @@ class _QuantFusedMoEBase(QuantModule):
             if self.w2_weight_quantizer.is_enabled:  # pragma: no cover
                 original_weight = self.w2_weight
                 B = self.w2_weight_quantizer(original_weight)  # noqa: N806
-                try:
-                    original_kernel(A, B, C, *args, **kwargs)
-                finally:
-                    self.w2_weight = original_weight
+                original_kernel(A, B, C, *args, **kwargs)
             else:
                 original_kernel(A, B, C, *args, **kwargs)
             if self.w2_output_quantizer.is_enabled:
