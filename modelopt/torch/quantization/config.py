@@ -1549,6 +1549,12 @@ class GPTQCalibConfig(QuantizeAlgorithmConfig):
         description="""The block size for GPTQ weight update, which must be a multiple of the
         group_size used in the quantization.""",
     )
+    fused: bool = ModeloptField(
+        default=False,
+        title="Use fused Triton kernel for GPTQ.",
+        description="""When True, use a fused Triton kernel that combines quantization and
+        per-column error propagation into one launch per GPTQ block.""",
+    )
 
 
 QuantizeQuantCfgType = list[QuantizerCfgEntry]

@@ -126,10 +126,11 @@ class GPTQHelper:
 
     CACHE_NAME = "_forward_no_gptq_hessian"
 
-    def __init__(self, module, name, offload_to_cpu=False):
+    def __init__(self, module, name, offload_to_cpu=False, fused=False):
         """Initialize GPTQHelper with module state and Hessian storage."""
         self.module = module
         self.name = name
+        self.fused = fused
         in_features = module.weight.shape[-1]
         device = module.weight.device
         if device.type == "meta" or (offload_to_cpu and get_used_gpu_mem_fraction(device) > 0.65):
@@ -195,23 +196,35 @@ class GPTQHelper:
         self.h_inv = compute_hessian_inverse(hessian, self.weight, perc_damp)
 
     def _blockwise_update(self, block_size):
-        """Column-wise GPTQ update using full-matrix QDQ.
+        """Column-wise GPTQ update.
 
-        Delegates to :func:`gptq_blockwise_update` with the module's weight quantizer.
+        When ``self.fused`` is True and the weight quantizer is an
+        ``NVFP4StaticQuantizer``, uses :func:`gptq_blockwise_update_fused_scalar`
+        (a fused Triton kernel).  Otherwise falls back to
+        :func:`gptq_blockwise_update` (unfused column-by-column loop).
         """
         assert self.weight is not None and self.h_inv is not None, (
             "_blockwise_update called before _prepare_hessian_inverse()"
         )
         quantizer = self.module.weight_quantizer
-        block_sizes = getattr(quantizer, "block_sizes", None)
-        if block_sizes is not None:
-            group_size = block_sizes.get(-1)
-            if group_size is not None and block_size % group_size != 0:
+
+        if self.fused and getattr(quantizer, "_is_nvfp4_static_quantizer", False):
+            block_sizes = quantizer.block_sizes
+            quant_block_size = block_sizes.get(-1) or block_sizes.get(1)
+            if quant_block_size is not None and block_size % quant_block_size != 0:
                 raise ValueError(
                     f"GPTQ block_size ({block_size}) must be divisible by the quantizer"
-                    f" group_size ({group_size})"
+                    f" group_size ({quant_block_size})"
                 )
-        gptq_blockwise_update(self.weight, self.h_inv, block_size, quantizer)
+            out_features, num_cols = self.weight.shape
+            n_blocks = num_cols // quant_block_size
+            block_amax = quantizer.amax.reshape(out_features, n_blocks).float()
+            global_scale = quantizer.global_amax.float().item() / (6.0 * 448.0)
+            gptq_blockwise_update_fused_scalar(
+                self.weight, block_amax, global_scale, self.h_inv, block_size, quant_block_size
+            )
+        else:
+            gptq_blockwise_update(self.weight, self.h_inv, block_size, quantizer)
 
     def _print_mse_error(self, hessian):
         """Log Hessian-weighted relative MSE between ``self.weight`` and original weights."""
@@ -260,17 +273,20 @@ def gptq_blockwise_update(weight, h_inv, block_size, quantize_fn):
         weight[:, block_end:].addmm_(errs, h_inv[block_start:block_end, block_end:], alpha=-1)
 
 
-def gptq_blockwise_update_fused_scalar(weight, scales_2d, h_inv, block_size, quant_block_size):
+def gptq_blockwise_update_fused_scalar(
+    weight, block_amax, global_scale, h_inv, block_size, quant_block_size
+):
     """Fused GPTQ blockwise update for NVFP4 scalar quantization.
 
-    Uses a fused Triton kernel that combines quantization and per-column
-    error propagation into one launch per GPTQ block, avoiding the
-    Python-level per-column loop in :func:`gptq_blockwise_update`.
+    Uses a fused Triton kernel that combines scale computation, quantization,
+    and per-column error propagation into one launch per GPTQ block, avoiding
+    the Python-level per-column loop in :func:`gptq_blockwise_update`.
 
     Args:
         weight: Weight tensor ``[out_features, in_features]``, modified **in-place**
             with fake-quantized values.
-        scales_2d: Pre-computed per-block scales ``[out_features, n_scale_blocks]``.
+        block_amax: Per-block amax values ``[out_features, n_amax_blocks]``.
+        global_scale: Pre-computed ``global_amax / (6.0 * 448.0)`` (scalar).
         h_inv: Upper-triangular Cholesky factor of the damped inverse Hessian
             ``[in_features, in_features]``.
         block_size: Number of columns to process per GPTQ block.
@@ -283,7 +299,8 @@ def gptq_blockwise_update_fused_scalar(weight, scales_2d, h_inv, block_size, qua
         be = min(bs + block_size, num_cols)
         qw, err = gptq_fused_block_scalar(
             weight[:, bs:be].clone().contiguous(),
-            scales_2d,
+            block_amax,
+            global_scale,
             h_inv[bs:be, bs:be].contiguous(),
             quant_block_size,
             bs,
@@ -291,44 +308,6 @@ def gptq_blockwise_update_fused_scalar(weight, scales_2d, h_inv, block_size, qua
         weight[:, bs:be] = qw
         if be < num_cols:
             weight[:, be:].addmm_(err, h_inv[bs:be, be:], alpha=-1)
-
-
-class FusedScalarGPTQHelper(GPTQHelper):
-    """GPTQHelper using the fused Triton kernel for NVFP4 scalar quantization.
-
-    Overrides :meth:`_blockwise_update` to extract pre-computed scales from the
-    ``NVFP4StaticQuantizer`` and delegate to :func:`gptq_blockwise_update_fused_scalar`.
-    """
-
-    def _blockwise_update(self, block_size):
-        """Fused GPTQ using Triton kernel for NVFP4 scalar quantization."""
-        assert self.weight is not None and self.h_inv is not None, (
-            "_blockwise_update called before _prepare_hessian_inverse()"
-        )
-        from modelopt.torch.quantization.triton.fp4_kernel import compute_fp4_scales
-
-        quantizer = self.module.weight_quantizer
-        block_sizes = getattr(quantizer, "block_sizes", None)
-        quant_block_size = None
-        if block_sizes is not None:
-            quant_block_size = block_sizes.get(-1) or block_sizes.get(1)
-
-        if quant_block_size is not None and block_size % quant_block_size != 0:
-            raise ValueError(
-                f"GPTQ block_size ({block_size}) must be divisible by the quantizer"
-                f" group_size ({quant_block_size})"
-            )
-
-        out_features, num_cols = self.weight.shape
-        n_blocks = num_cols // quant_block_size
-
-        # Pre-compute scales from the calibrated amax (frozen during GPTQ).
-        amax = quantizer.amax.reshape(out_features, n_blocks)
-        scales_2d = compute_fp4_scales(amax, quantizer.global_amax, quantize_block_scales=True)
-
-        gptq_blockwise_update_fused_scalar(
-            self.weight, scales_2d, self.h_inv, block_size, quant_block_size
-        )
 
 
 _GPTQ_HELPER_REGISTRY: dict[str, type[GPTQHelper]] = {}
@@ -342,7 +321,3 @@ def register_gptq_helper(backend: str, factory: type[GPTQHelper]) -> None:
     construct ``factory`` instead of the default ``GPTQHelper``.
     """
     _GPTQ_HELPER_REGISTRY[backend] = factory
-
-
-# Built-in registrations
-register_gptq_helper("fused_gptq_nvfp4", FusedScalarGPTQHelper)

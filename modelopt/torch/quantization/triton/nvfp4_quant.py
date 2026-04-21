@@ -93,3 +93,52 @@ def nvfp4_scalar_quant(
     x_rescaled = q_val * scale_safe
     x_quant = tl.where(x >= 0, x_rescaled, -x_rescaled)
     return x_quant
+
+
+@triton.jit
+def fp8_quantize_scale(block_amax, global_scale):
+    """FP8 E4M3 fake-quantize the per-block NVFP4 scale.
+
+    Computes ``scale = block_amax / 6.0``, then round-trips it through
+    FP8 E4M3 using ``global_scale`` for the second-level scaling.
+
+    Works with any tensor shape (scalar, 1-D, or higher) since all ops
+    are element-wise.
+
+    Args:
+        block_amax:   Per-block amax value(s).
+        global_scale: Pre-computed ``global_amax / (6.0 * 448.0)``.
+
+    Returns:
+        FP8-quantized per-block scale(s), same shape as ``block_amax``.
+    """
+    FP8_E4M3_MAX: tl.constexpr = 448.0
+    scale_in_fp8_range = block_amax / (6.0 * global_scale)
+    scale_clamped = tl.minimum(scale_in_fp8_range, FP8_E4M3_MAX)
+    return scale_clamped.to(tl.float8e4nv).to(tl.float32) * global_scale
+
+
+@triton.jit
+def nvfp4_scalar_qdq(
+    x,  # [N] float32, already loaded
+    block_amax,  # float32 scalar: per-block amax
+    global_scale,  # float32 scalar: pre-computed global_amax / (6.0 * 448.0)
+    N: tl.constexpr,
+):
+    """NVFP4 scalar fake quantization with inline two-level scale computation.
+
+    Computes the per-block FP8-quantized scale from ``block_amax`` via
+    :func:`fp8_quantize_scale`, then quantizes each element to the nearest
+    FP4 (E2M1) value.
+
+    Args:
+        x:            [N] float32 tensor of values to quantize.
+        block_amax:   Per-block amax (absolute maximum of the block).
+        global_scale: Pre-computed ``global_amax / (6.0 * 448.0)``.
+        N:            Compile-time number of elements.
+
+    Returns:
+        x_quant: [N] float32, fake-quantized values.
+    """
+    scale = fp8_quantize_scale(block_amax, global_scale)
+    return nvfp4_scalar_quant(x, scale, N)
