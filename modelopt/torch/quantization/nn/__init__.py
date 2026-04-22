@@ -18,6 +18,7 @@
 from .modules.quant_activations import *
 from .modules.quant_batchnorm import *
 from .modules.quant_conv import *
+from .modules.quant_embedding import *
 from .modules.quant_instancenorm import *
 from .modules.quant_linear import *
 from .modules.quant_module import *

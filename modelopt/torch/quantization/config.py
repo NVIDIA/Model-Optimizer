@@ -588,6 +588,8 @@ def _nvfp4_selective_quant_cfg(
 
 NVFP4_DEFAULT_CFG = _nvfp4_selective_quant_cfg(["*"])
 
+NVFP4_DEFAULT_WEIGHT_ONLY_CFG = _nvfp4_selective_quant_cfg(["*"], weight_only=True)
+
 NVFP4_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG = {
     "quant_cfg": [
         *_base_disable_all,
@@ -816,6 +818,7 @@ choices: set[str] = {
     "NVFP4_AWQ_FULL_CFG",
     "NVFP4_AWQ_LITE_CFG",
     "NVFP4_DEFAULT_CFG",
+    "NVFP4_DEFAULT_WEIGHT_ONLY_CFG",
     "NVFP4_FP8_MHA_CONFIG",
     "NVFP4_KV_CFG",
     "NVFP4_KV_ROTATE_CFG",

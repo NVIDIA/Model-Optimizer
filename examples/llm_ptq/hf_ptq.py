@@ -107,6 +107,7 @@ QUANT_CFG_CHOICES: dict[str, dict[str, Any]] = {
     "int4_awq": mtq.INT4_AWQ_CFG,
     "w4a8_awq": mtq.W4A8_AWQ_BETA_CFG,
     "nvfp4": mtq.NVFP4_DEFAULT_CFG,
+    "nvfp4_wo": mtq.NVFP4_DEFAULT_WEIGHT_ONLY_CFG,
     "nvfp4_awq": mtq.NVFP4_AWQ_LITE_CFG,
     "nvfp4_mse": mtq.NVFP4_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG,
     "fp8_pb_wo": mtq.FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG,
@@ -593,6 +594,59 @@ def sparsity_main(
     mts.export(full_model)
 
 
+def _enable_lm_head_and_embedding_quantization(
+    quant_cfg: dict[str, Any],
+    weight_quantizer_cfg: dict[str, Any],
+) -> None:
+    """Re-enable quantization of ``lm_head`` and the input embedding table.
+
+    ModelOpt's default PTQ recipes exclude ``*lm_head*`` and never touch ``nn.Embedding``
+    because most LLM deployment runtimes keep those layers at full precision. For Nemotron-H
+    (and similar SSM+Attention hybrids) the embedding and lm_head are a large fraction of the
+    total parameters — quantizing them recovers most of the promised memory savings. This
+    helper appends two entries to the cfg list that override earlier ``*lm_head*`` disables
+    and explicitly target the embedding weight quantizer.
+
+    Args:
+        quant_cfg: the primary quant_cfg dict (``{"quant_cfg": [...], "algorithm": ...}``).
+        weight_quantizer_cfg: the weight-quantizer attribute dict to apply (e.g. ``_nvfp4_cfg``).
+    """
+    # Ordering matters: these entries must come AFTER the _default_disabled_quantizer_cfg
+    # entries (which set *lm_head* → disabled) so they take effect.
+    quant_cfg["quant_cfg"].append(
+        {"quantizer_name": "*lm_head*weight_quantizer", "cfg": copy.deepcopy(weight_quantizer_cfg)}
+    )
+    # nn.Embedding quantizers only exist once `quant_embedding.py` registers the class.
+    # Nemotron-H's backbone attribute name differs between the remote-code ("backbone.embeddings")
+    # and transformers built-in ("model.embeddings") paths; both are weight-only vocab
+    # embeddings here. The broad "*embeddings*" wildcard covers both and does not match
+    # any other layer in a Nemotron-H model (no positional/rotary embeddings exist).
+    quant_cfg["quant_cfg"].append(
+        {
+            "quantizer_name": "*embeddings*weight_quantizer",
+            "cfg": copy.deepcopy(weight_quantizer_cfg),
+        }
+    )
+    # Also keep the standard HF "embed_tokens" naming in case future Nemotron-H variants
+    # rename the attribute.
+    quant_cfg["quant_cfg"].append(
+        {
+            "quantizer_name": "*embed_tokens*weight_quantizer",
+            "cfg": copy.deepcopy(weight_quantizer_cfg),
+        }
+    )
+
+
+def _extract_weight_quantizer_cfg(quant_cfg: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the first ``*weight_quantizer`` cfg dict from an ordered quant_cfg list."""
+    for entry in quant_cfg.get("quant_cfg", []):
+        if entry.get("quantizer_name") == "*weight_quantizer" and isinstance(
+            entry.get("cfg"), dict
+        ):
+            return entry["cfg"]
+    return None
+
+
 def mono_quantize(
     args: argparse.Namespace,
     quant_cfg: dict[str, Any],
@@ -628,6 +682,24 @@ def mono_quantize(
             {"quantizer_name": "*model_encoder*", "enable": False}
         )  # Nemotron-Parse specific
         print("Quantization will only be applied to the decoder (text generation) component")
+
+    # For Nemotron-H (Mamba-2 + MLP + Attention hybrid, e.g. NVIDIA-Nemotron-3-Nano-4B),
+    # extend quantization coverage to the lm_head and the input token embedding. On this
+    # architecture those two 131072x3136 tables account for ~21% of parameters, so leaving
+    # them at bf16 wastes most of the NVFP4 memory benefit.
+    if model_type == "nemotron_h":
+        weight_quantizer_cfg = _extract_weight_quantizer_cfg(quant_cfg)
+        if weight_quantizer_cfg is not None:
+            print(
+                "Nemotron-H detected: extending quantization to lm_head and input embedding "
+                "(backbone.embeddings)."
+            )
+            _enable_lm_head_and_embedding_quantization(quant_cfg, weight_quantizer_cfg)
+        else:
+            warnings.warn(
+                "Nemotron-H detected but quant_cfg has no wildcard '*weight_quantizer' entry; "
+                "skipping lm_head/embedding extension (model-specific or non-standard recipe)."
+            )
 
     if not model_is_already_quantized or calibration_only:
         # quantize the model
