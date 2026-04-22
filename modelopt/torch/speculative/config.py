@@ -69,7 +69,10 @@ class DFlashConfig(ModeloptBaseConfig):
 
     dflash_offline: bool = ModeloptField(
         default=False,
-        description="Whether to use detached DFlash (offline training from pre-computed hidden states).",
+        description=(
+            "Whether to use detached DFlash (offline training from pre-computed hidden states). "
+            "Auto-derived from data_args.offline_data_path during validation — not user-configurable."
+        ),
     )
 
     dflash_block_size: int = ModeloptField(
@@ -118,11 +121,15 @@ class DFlashConfig(ModeloptBaseConfig):
     @model_validator(mode="before")
     @classmethod
     def _derive_dflash_offline(cls, data: Any, info: ValidationInfo) -> Any:
-        """Derive ``dflash_offline`` from ``data_args.offline_data_path`` when provided in context."""
+        """Derive ``dflash_offline`` from ``data_args.offline_data_path``.
+
+        This field is auto-derived, not user-configurable: when context provides
+        ``data_args``, the derived value overrides any user-supplied value.
+        """
         ctx = info.context if info.context else {}
         data_args = ctx.get("data_args")
         if data_args is not None and isinstance(data, dict):
-            data["dflash_offline"] = data_args.offline_data_path is not None
+            data["dflash_offline"] = getattr(data_args, "offline_data_path", None) is not None
         return data
 
     @model_validator(mode="before")
