@@ -658,6 +658,16 @@ def _process_quantized_modules(
                     raise AssertionError(
                         f"Failed to export module '{name}' (type={type(sub_module).__name__}): {e}"
                     ) from e
+            elif hasattr(sub_module, "gate_up_proj_weight_quantizers"):
+                # Generic fused MoE experts (_QuantFusedExperts) with per-expert
+                # quantizer ModuleLists. Split into per-expert modules and export.
+                # NOTE: This check must come before type-name checks (e.g. Llama4,
+                # GptOss) because _QuantFusedExperts wrapping renames quantizers
+                # to plural ModuleLists (e.g. gate_up_proj_weight_quantizers).
+                from modelopt.torch.export.moe_utils import _export_fused_experts
+
+                with fsdp2_aware_weight_update(model, sub_module, reshard=False):
+                    _export_fused_experts(sub_module, dtype)
             elif (
                 "Llama4TextExperts" in type(sub_module).__name__
                 or "GptOssExperts" in type(sub_module).__name__
@@ -677,13 +687,6 @@ def _process_quantized_modules(
                 with fsdp2_aware_weight_update(model, sub_module, reshard=False):
                     for weight_name in ["gate_up_proj", "down_proj"]:
                         _export_quantized_weight(sub_module, dtype, weight_name)
-            elif hasattr(sub_module, "gate_up_proj_weight_quantizers"):
-                # Generic fused MoE experts (_QuantFusedExperts) with per-expert
-                # quantizer ModuleLists. Split into per-expert modules and export.
-                from modelopt.torch.export.moe_utils import _export_fused_experts
-
-                with fsdp2_aware_weight_update(model, sub_module, reshard=False):
-                    _export_fused_experts(sub_module, dtype)
 
 
 def _export_transformers_checkpoint(

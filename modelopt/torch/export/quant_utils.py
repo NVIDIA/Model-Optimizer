@@ -665,6 +665,25 @@ def get_quantization_format(module) -> str | None:
             f"Unsupported quantizer with num_bits: {weight_quantizer.num_bits}"
         )
 
+    # Handle _QuantFusedExperts modules (e.g. Qwen3.x MoE) which use plural
+    # ModuleList quantizers (gate_up_proj_weight_quantizers, down_proj_weight_quantizers)
+    # instead of singular weight_quantizer attributes.
+    for quantizer_list_name in ["gate_up_proj_weight_quantizers", "down_proj_weight_quantizers"]:
+        quantizer_list = getattr(module, quantizer_list_name, None)
+        if quantizer_list is not None and len(quantizer_list) > 0:
+            # Check the first quantizer in the list — all share the same config
+            q = quantizer_list[0]
+            if hasattr(q, "is_enabled") and q.is_enabled:
+                num_bits = getattr(q, "num_bits", None)
+                block_sizes = getattr(q, "block_sizes", None)
+                scale_bits = (
+                    block_sizes.get("scale_bits", (8, 0))
+                    if isinstance(block_sizes, dict) and "scale_bits" in block_sizes
+                    else (8, 0)
+                )
+                if num_bits == (2, 1) and scale_bits == (4, 3):
+                    return QUANTIZATION_NVFP4
+
     for weight_name in weight_attr_names(module):
         quantization = _get_quantization_from_layer(module, quantizer_attr_names(weight_name))
         if quantization != QUANTIZATION_NONE:
