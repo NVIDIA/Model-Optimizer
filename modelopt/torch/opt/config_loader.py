@@ -81,18 +81,15 @@ def _parse_exmy(s: str) -> tuple[int, int] | str:
     return s
 
 
-def _load_raw_config(
-    config_file: str | Path | Traversable,
-) -> dict[str, Any] | list[Any] | _ListSnippet:
-    """Load a config YAML without resolving ``$import`` references.
+def _resolve_config_path(config_file: str | Path | Traversable) -> Path | Traversable:
+    """Probe the filesystem and built-in library to locate a config file.
 
-    config_file: Path to a config yaml file. The path suffix can be omitted.
+    Return type mirrors the input family: filesystem paths return ``Path``;
+    built-in package resources return a ``Traversable``. Raises ``ValueError``
+    if no candidate exists.
 
-    Return type:
-        * ``dict`` — single-document or two-document-dict YAML.
-        * ``list`` — single-document list YAML.
-        * :class:`_ListSnippet` — two-document YAML with a list body;
-          carries the header's ``imports`` alongside the list content.
+    Factored out of :func:`_load_raw_config` so :func:`_resolve_imports` can
+    compute a canonical cycle-detection key without reading the file twice.
     """
     # Probe order: filesystem first, then built-in library.
     # This lets users override built-in configs by placing a file locally.
@@ -122,16 +119,42 @@ def _load_raw_config(
     else:
         raise ValueError(f"Invalid config file of {config_file}")
 
-    config_path = None
     for path in paths_to_check:
         if path.is_file():
-            config_path = path
-            break
-    if not config_path:
-        raise ValueError(
-            f"Cannot find config file of {config_file}, paths checked: {paths_to_check}"
-        )
+            return path
+    raise ValueError(f"Cannot find config file of {config_file}, paths checked: {paths_to_check}")
 
+
+def _canonical_key(path: Path | Traversable) -> str:
+    """Stable cycle-detection key for :func:`_resolve_imports`.
+
+    Filesystem paths are resolved (``Path.resolve()``) so that aliases like
+    ``foo/bar``, ``./foo/bar``, and their absolute form produce the same key.
+    Built-in ``Traversable`` resources are already canonical — their ``str()``
+    points into the installed package.
+    """
+    if isinstance(path, Path):
+        try:
+            return str(path.resolve())
+        except OSError:
+            return str(path)
+    return str(path)
+
+
+def _load_raw_config(
+    config_file: str | Path | Traversable,
+) -> dict[str, Any] | list[Any] | _ListSnippet:
+    """Load a config YAML without resolving ``$import`` references.
+
+    config_file: Path to a config yaml file. The path suffix can be omitted.
+
+    Return type:
+        * ``dict`` — single-document or two-document-dict YAML.
+        * ``list`` — single-document list YAML.
+        * :class:`_ListSnippet` — two-document YAML with a list body;
+          carries the header's ``imports`` alongside the list content.
+    """
+    config_path = _resolve_config_path(config_file)
     text = config_path.read_text(encoding="utf-8")
     docs = list(yaml.safe_load_all(text))
 
@@ -217,21 +240,27 @@ def _resolve_imports(
     if _loading is None:
         _loading = frozenset()
 
-    # Build name → config mapping (recursively resolve nested imports)
+    # Build name → config mapping (recursively resolve nested imports).
+    # Cycle detection uses the *resolved* file path as the key so that aliases
+    # such as ``foo/bar``, ``./foo/bar``, and its absolute form all map to the
+    # same cycle entry.
     import_map: dict[str, Any] = {}
     for name, config_path in imports_dict.items():
         if not config_path:
             raise ValueError(f"Import {name!r} has an empty config path.")
-        if config_path in _loading:
+        resolved_path = _resolve_config_path(config_path)
+        cycle_key = _canonical_key(resolved_path)
+        if cycle_key in _loading:
             raise ValueError(
-                f"Circular import detected: {config_path!r} is already being loaded. "
+                f"Circular import detected: {config_path!r} (resolves to "
+                f"{cycle_key!r}) is already being loaded. "
                 f"Import chain: {sorted(_loading)}"
             )
         snippet = _load_raw_config(config_path)
         if isinstance(snippet, _ListSnippet) or (
             isinstance(snippet, dict) and "imports" in snippet
         ):
-            snippet = _resolve_imports(snippet, _loading | {config_path})
+            snippet = _resolve_imports(snippet, _loading | {cycle_key})
         import_map[name] = snippet
 
     def _lookup(ref_name: str, context: str) -> Any:

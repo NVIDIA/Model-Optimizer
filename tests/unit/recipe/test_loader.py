@@ -889,6 +889,38 @@ def test_import_circular_raises(tmp_path):
         load_recipe(recipe_file)
 
 
+def test_import_circular_via_path_aliases_raises(tmp_path):
+    """Circular detection survives path aliases (absolute vs relative vs no-suffix).
+
+    ``a.yml`` imports ``b`` using the absolute path with ``.yml`` suffix, while
+    ``b.yml`` imports back using the relative path without suffix. Without path
+    canonicalization these are distinct strings, and the cycle goes undetected.
+    """
+    (tmp_path / "a.yml").write_text(f"imports:\n  b: {tmp_path / 'b.yml'}\nnum_bits: 8\n")
+    # b imports a via a sibling-relative path + no suffix, so the import key
+    # differs textually from the absolute path a was loaded under.
+    (tmp_path / "b.yml").write_text("imports:\n  a: ./a\nnum_bits: 4\n")
+    recipe_file = tmp_path / "recipe.yml"
+    recipe_file.write_text(
+        f"imports:\n"
+        f"  a: {tmp_path / 'a.yml'}\n"
+        f"metadata:\n"
+        f"  recipe_type: ptq\n"
+        f"quantize:\n"
+        f"  algorithm: max\n"
+        f"  quant_cfg: []\n"
+    )
+    import os
+
+    cwd = os.getcwd()
+    os.chdir(tmp_path)
+    try:
+        with pytest.raises(ValueError, match="Circular import"):
+            load_recipe(recipe_file)
+    finally:
+        os.chdir(cwd)
+
+
 def test_import_cross_file_same_name_no_conflict(tmp_path):
     """Same import name in parent and child resolve independently (scoped).
 
