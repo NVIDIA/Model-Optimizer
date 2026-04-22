@@ -272,7 +272,14 @@ For a quick smoke test, add `--limit 10`.
 
 ## Deploy compressed model in vLLM
 
-To deploy a compressed model in vLLM, install [vLLM from source](https://docs.vllm.ai/en/latest/getting_started/installation/gpu/index.html#build-wheel-from-source).
+To deploy a compressed model in vLLM, install vLLM fork with AnyModel enabled:
+
+```bash
+git clone -b feature/add_anymodel_to_vllm https://github.com/askliar/vllm.git
+cd vllm
+VLLM_USE_PRECOMPILED=1 uv pip install --editable . --torch-backend=auto
+```
+
 Then, add the following to the model's `config.json` file (here we use Llama as an example):
 
 ```json
