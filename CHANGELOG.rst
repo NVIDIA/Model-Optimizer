@@ -6,7 +6,14 @@ Changelog
 
 **Backward Breaking Changes**
 
-- Reorganize custom CUDA / Triton kernels under ``modelopt.torch.kernels`` into ``common/attention``, ``quantization/{conv,gemm}``, and ``sparsity/attention``. Direct imports from the old paths (``quantization.conv_gemm``, ``quantization.src``, ``sparsity.attention_sparsity.kernels``, flat ``kernels.triton_fa`` / ``kernels.hf_triton_attention``) must be updated; high-level APIs are unchanged.
+- Reorganize custom CUDA / Triton kernels under ``modelopt.torch.kernels`` into ``common/attention``, ``quantization/{conv,gemm}``, and ``sparsity/attention``. High-level APIs are unchanged. Migration:
+
+  - ``from modelopt.torch.kernels import IS_AVAILABLE, attention, attention_calibrate, register_triton_attention`` → these four names continue to work at the old location via a ``__getattr__`` shim that emits a ``DeprecationWarning``; update to ``from modelopt.torch.kernels.common.attention import ...``. The shim will be removed in a future release.
+  - ``from modelopt.torch.kernels.triton_fa import ...`` → ``from modelopt.torch.kernels.common.attention.triton_fa import ...``
+  - ``from modelopt.torch.kernels.hf_triton_attention import ...`` → ``from modelopt.torch.kernels.common.attention.hf_triton_attention import ...``
+  - ``from modelopt.torch.quantization.triton import ...`` → ``from modelopt.torch.kernels.quantization.gemm import ...``
+  - ``from modelopt.torch.quantization.src.conv.implicit_gemm_cuda import ...`` → ``from modelopt.torch.kernels.quantization.conv.implicit_gemm_cuda import ...``
+  - ``from modelopt.torch.sparsity.attention_sparsity.kernels import ...`` → ``from modelopt.torch.kernels.sparsity.attention import ...``
 
 0.44 (2026-05-xx)
 ^^^^^^^^^^^^^^^^^
