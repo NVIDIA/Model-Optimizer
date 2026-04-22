@@ -57,6 +57,11 @@ def _quant_algo_to_group_config(quant_algo: str, group_size: int | None = None) 
         return {
             "weights": {"dynamic": False, "num_bits": 4, "type": "int", "group_size": gs},
         }
+    elif quant_algo == "NVFP4_W4A16":
+        gs = group_size or 16
+        return {
+            "weights": {"dynamic": False, "num_bits": 4, "type": "float", "group_size": gs},
+        }
     elif quant_algo in ("NVFP4_AWQ", "W4A8_AWQ"):
         gs = group_size or 128
         return {
@@ -179,6 +184,14 @@ def convert_hf_quant_config_format(input_config: dict[str, Any]) -> dict[str, An
                 "type": "float",
                 "group_size": group_size,
             },
+            "weights": {"dynamic": False, "num_bits": 4, "type": "float", "group_size": group_size},
+            "targets": ["Linear"],
+        }
+        new_config["config_groups"] = {"group_0": config_group_details}
+    elif quant_algo_value == "NVFP4_W4A16":
+        # Weight-only FP4
+        group_size = original_quantization_details.get("group_size", 16)
+        config_group_details = {
             "weights": {"dynamic": False, "num_bits": 4, "type": "float", "group_size": group_size},
             "targets": ["Linear"],
         }

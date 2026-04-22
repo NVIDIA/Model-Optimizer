@@ -119,6 +119,7 @@ QUANT_CFG_CHOICES: dict[str, dict[str, Any]] = {
     "nvfp4_svdquant": mtq.NVFP4_SVDQUANT_DEFAULT_CFG,
     "mxfp8": mtq.MXFP8_DEFAULT_CFG,
     "nvfp4_local_hessian": mtq.NVFP4_W4A4_WEIGHT_LOCAL_HESSIAN_CFG,
+    "nvfp4_w4a16": mtq.NVFP4_W4A16_CFG,
 }
 
 KV_QUANT_CFG_CHOICES = {
@@ -781,6 +782,12 @@ def export_quantized(
                     extra_state_dict=mtp_state_dict,
                 )
 
+                if args.qformat == "nvfp4_w4a16":
+                    warnings.warn(
+                        "TensorRT-LLM and SGLang do not support this format. "
+                        "To serve on vLLM, convert the NVFP4 W4A16 checkpoint to compressed-tensors format."
+                    )
+
         # Restore default padding and export the tokenizer as well.
         if tokenizer is not None:
             tokenizer.padding_side = default_padding_side
@@ -1106,6 +1113,15 @@ def quantize_main(
                 quant_cfg["quant_cfg"].append({"quantizer_name": pattern, "enable": False})
                 print(f"Excluding MTP layer from quantization: {pattern}")
 
+        # Apply user-requested per-module exclusions (--exclude_modules).
+        if args.exclude_modules:
+            quant_cfg = copy.deepcopy(quant_cfg)
+            for mod in args.exclude_modules:
+                quant_cfg["quant_cfg"].append(
+                    {"quantizer_name": f"*{mod}*_quantizer", "enable": False}
+                )
+                print(f"Excluding module from quantization: {mod}")
+
         # Use constant amax for KV quantizers when a cast format is selected.
         if args.kv_cache_qformat in _KV_CAST_FORMATS:
             quant_cfg = copy.deepcopy(quant_cfg)
@@ -1267,6 +1283,17 @@ def parse_args() -> argparse.Namespace:
         help="Set trust_remote_code for Huggingface models and tokenizers",
         default=False,
         action="store_true",
+    )
+    parser.add_argument(
+        "--exclude_modules",
+        nargs="+",
+        default=[],
+        metavar="MODULE",
+        help=(
+            "Module name patterns to exclude from quantization "
+            "(e.g. lm_head backbone.layers.0.mixer). "
+            "Appends a disable rule for each pattern's weight and input quantizers."
+        ),
     )
     parser.add_argument(
         "--gpu_max_mem_percentage",
