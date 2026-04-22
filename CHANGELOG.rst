@@ -6,9 +6,9 @@ Changelog
 
 **Backward Breaking Changes**
 
-- Reorganize custom CUDA / Triton kernels under ``modelopt.torch.kernels`` into ``common/attention``, ``quantization/{conv,gemm}``, and ``sparsity/attention``. High-level APIs are unchanged. Migration:
+- Reorganize custom CUDA / Triton kernels under ``modelopt.torch.kernels`` into ``common/attention``, ``quantization/{conv,gemm}``, and ``sparsity/attention``. High-level APIs (``mtq.quantize``, ``mtsa.sparsify``, etc.) are unchanged, but **any code importing directly from the kernel subpackages must be updated**: there is no backwards-compatibility shim; the old import paths will raise ``ImportError`` / ``ModuleNotFoundError``. Migration table:
 
-  - ``from modelopt.torch.kernels import IS_AVAILABLE, attention, attention_calibrate, register_triton_attention`` → these four names continue to work at the old location via a ``__getattr__`` shim that emits a ``DeprecationWarning``; update to ``from modelopt.torch.kernels.common.attention import ...``. The shim will be removed in a future release.
+  - ``from modelopt.torch.kernels import IS_AVAILABLE, attention, attention_calibrate, register_triton_attention`` → ``from modelopt.torch.kernels.common.attention import ...``
   - ``from modelopt.torch.kernels.triton_fa import ...`` → ``from modelopt.torch.kernels.common.attention.triton_fa import ...``
   - ``from modelopt.torch.kernels.hf_triton_attention import ...`` → ``from modelopt.torch.kernels.common.attention.hf_triton_attention import ...``
   - ``from modelopt.torch.quantization.triton import ...`` → ``from modelopt.torch.kernels.quantization.gemm import ...``
