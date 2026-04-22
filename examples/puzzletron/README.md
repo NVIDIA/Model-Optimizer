@@ -302,7 +302,7 @@ For new architectures that are not supported by vLLM, you additionally need to a
     "base_model_module": ".<base_model_module_name>",
     "layers_path": "<layers_path>",
     "init_prefix": "model",
-    "Layer_hf_config": "<Layer_hf_config>",
+    "Layer_hf_config": "<Layer_hf_config>"
   }
   ...
 }
