@@ -30,7 +30,10 @@ jobs:
           t['tool']['uv']['override-dependencies'] = ['torch; sys_platform == \"never\"']
           toml.dump(t, open('pyproject.toml', 'w'))
           "
-      - run: uv lock --upgrade
+      - name: Run uv lock upgrade
+        run: |
+          set -o pipefail
+          uv lock --upgrade 2>&1 | tee /tmp/uv_lock_output.txt
       - name: Check for changes
         id: changes
         run: |
@@ -53,12 +56,22 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git commit -s -m "[chore]: bump uv.lock"
           git push origin "$BRANCH"
+          UV_OUTPUT=$(cat /tmp/uv_lock_output.txt)
           gh pr create \
             --title "[chore]: weekly bump of uv.lock on ${BASE} ($(date +%Y-%m-%d))" \
-            --body "$(cat <<'EOF'
+            --body "$(cat <<EOF
           ## Summary
           Automated weekly update of uv.lock file for nSpect Scanning:
-          - `uv.lock` — upgraded all transitive dependencies to latest compatible versions
+          - \`uv.lock\` — upgraded all transitive dependencies to latest compatible versions
+
+          <details>
+          <summary>uv lock --upgrade output</summary>
+
+          \`\`\`
+          ${UV_OUTPUT}
+          \`\`\`
+
+          </details>
           EOF
           )" \
             --base "$BASE"
