@@ -102,7 +102,7 @@ Puzzletron's per-layer search space is much broader than Minitron's. The trade-o
 ---
 
 <a id="part-i--setup--experiments"></a>
-# Part I — Setup & Experiments
+## Part I — Setup & Experiments
 
 ---
 
@@ -185,7 +185,7 @@ hf download Qwen/Qwen3-8B --local-dir /workspace/models/Qwen3-8B
 From within the container, copy the notebooks to your local workspace:
 
 ```bash
-cp -r /workspace/Model-Optimizer/examples/pruning_demo/* /workspace
+cp -r /workspace/Model-Optimizer/examples/pruning/demo/* /workspace
 ```
 
 If this doesn't work, upload the notebooks manually in Jupyter after launching it.
@@ -317,7 +317,7 @@ The pre-distillation accuracy is near-random (MMLU has a 25% baseline for 4-choi
 
 #### Puzzletron architecture details
 
-```
+```text
 block_0:   attention  kv_heads_8    ffn  intermediate_12288
 block_1:   attention  kv_heads_8    ffn  intermediate_5120
 block_2:   attention  kv_heads_8    ffn  intermediate_5120
@@ -378,7 +378,7 @@ At this extreme compression level, Minitron's strategy of dropping entire layers
 ---
 
 <a id="part-ii--results-analysis--insights"></a>
-# Part II — Results, Analysis & Insights
+## Part II — Results, Analysis & Insights
 
 ---
 
