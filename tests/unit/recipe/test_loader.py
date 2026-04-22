@@ -890,11 +890,25 @@ def test_import_circular_raises(tmp_path):
 
 
 def test_import_cross_file_same_name_no_conflict(tmp_path):
-    """Same import name in parent and child resolve independently (scoped)."""
+    """Same import name in parent and child resolve independently (scoped).
+
+    This test intentionally exercises both sides of the scope boundary:
+
+    * Parent's ``fmt`` → fp8 (resolved when the recipe's own ``$import: fmt``
+      fires).
+    * Child's ``fmt`` → nvfp4 (resolved inside ``child.yml`` before the parent
+      ever sees the snippet).
+
+    Both values must survive together in the final recipe — if the names were
+    accidentally shared across files, one would clobber the other.
+    """
     (tmp_path / "fp8.yml").write_text("num_bits: e4m3\n")
-    (tmp_path / "nvfp4.yml").write_text("num_bits: e2m1\nblock_sizes:\n  -1: 16\n")
+    (tmp_path / "nvfp4.yml").write_text("num_bits: e2m1\n")
+    # child.yml uses its own "fmt" (→ nvfp4) via an inline $import.  When the
+    # parent imports `child`, the snippet it sees has inner.$import already
+    # resolved in child's scope.
     (tmp_path / "child.yml").write_text(
-        f"imports:\n  fmt: {tmp_path / 'nvfp4.yml'}\nweight_format: fmt\n"
+        f"imports:\n  fmt: {tmp_path / 'nvfp4.yml'}\ninner:\n  $import: fmt\n"
     )
     recipe_file = tmp_path / "recipe.yml"
     recipe_file.write_text(
@@ -909,11 +923,15 @@ def test_import_cross_file_same_name_no_conflict(tmp_path):
         f"    - quantizer_name: '*weight_quantizer'\n"
         f"      cfg:\n"
         f"        $import: fmt\n"
+        f"    - quantizer_name: '*input_quantizer'\n"
+        f"      cfg:\n"
+        f"        $import: child\n"
     )
     recipe = load_recipe(recipe_file)
-    # Parent's "fmt" resolves to fp8 (e4m3), not child's nvfp4
-    cfg = recipe.quantize["quant_cfg"][0]["cfg"]
-    assert cfg == {"num_bits": (4, 3)}
+    # Parent's "fmt" resolves to fp8 (e4m3), not child's nvfp4.
+    assert recipe.quantize["quant_cfg"][0]["cfg"] == {"num_bits": (4, 3)}
+    # Child's "fmt" resolves to nvfp4 (e2m1), not parent's fp8.
+    assert recipe.quantize["quant_cfg"][1]["cfg"] == {"inner": {"num_bits": (2, 1)}}
 
 
 # ---------------------------------------------------------------------------

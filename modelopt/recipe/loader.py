@@ -93,6 +93,9 @@ def _load_recipe_from_file(recipe_file: Path | Traversable) -> ModelOptRecipeBas
             f"Recipe file {recipe_file} must be a YAML mapping, got {type(raw).__name__}."
         )
     data = _resolve_imports(raw)
+    assert isinstance(data, dict), (
+        f"Recipe file {recipe_file} resolved to {type(data).__name__}; expected dict."
+    )
 
     metadata = data.get("metadata", {})
     recipe_type = metadata.get("recipe_type")
@@ -111,7 +114,24 @@ def _load_recipe_from_file(recipe_file: Path | Traversable) -> ModelOptRecipeBas
 
 
 def _load_recipe_from_dir(recipe_dir: Path | Traversable) -> ModelOptRecipeBase:
-    """Load a recipe from a directory containing ``recipe.yml`` and ``quantize.yml``."""
+    """Load a recipe from a directory containing ``recipe.yml`` and ``quantize.yml``.
+
+    Import resolution is deliberately two-pass:
+
+    1. ``quantize.yaml`` is resolved first against its own ``imports:`` section
+       (if any). After this pass, every ``$import`` that references a
+       ``quantize.yaml``-declared name is already expanded.
+    2. The resolved ``quantize`` dict is then wrapped under a ``quantize:`` key
+       and merged with ``recipe.yaml``'s ``imports:``, and ``_resolve_imports``
+       is called again. This second pass only fires ``$import`` markers that
+       name imports declared in ``recipe.yaml`` — which, by step 1, cannot
+       alias a ``quantize.yaml`` import name.
+
+    Practical consequence: each file's ``imports:`` section defines names
+    scoped to that file; there is no cross-file import sharing. If
+    ``recipe.yaml`` and ``quantize.yaml`` both declare an import with the
+    same name but different paths, each file sees only its own.
+    """
     recipe_file = None
     for name in ("recipe.yml", "recipe.yaml"):
         candidate = recipe_dir.joinpath(name)
@@ -152,13 +172,21 @@ def _load_recipe_from_dir(recipe_dir: Path | Traversable) -> ModelOptRecipeBase:
             )
         # Resolve quantize.yaml's own imports first (if any)
         if "imports" in quantize_data:
-            quantize_data = _resolve_imports(quantize_data)
+            resolved = _resolve_imports(quantize_data)
+            assert isinstance(resolved, dict), (
+                f"{quantize_file} resolved to {type(resolved).__name__}; expected dict."
+            )
+            quantize_data = resolved
         # Then resolve recipe.yaml's imports applied to the quantize data
         combined: dict[str, Any] = {"quantize": quantize_data}
         imports = recipe_data.get("imports")
         if imports:
             combined["imports"] = imports
-            combined = _resolve_imports(combined)
+            resolved = _resolve_imports(combined)
+            assert isinstance(resolved, dict), (
+                f"Recipe {recipe_dir} resolved to {type(resolved).__name__}; expected dict."
+            )
+            combined = resolved
         return ModelOptPTQRecipe(
             recipe_type=RecipeType.PTQ,
             description=metadata.get("description", "PTQ recipe."),

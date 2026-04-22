@@ -21,6 +21,7 @@ in ``modelopt.torch.opt`` (the lowest dependency layer) to avoid circular
 imports.
 """
 
+from dataclasses import dataclass, field
 from importlib.resources import files
 
 try:
@@ -32,6 +33,23 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+
+
+@dataclass
+class _ListSnippet:
+    """Multi-document YAML: a header dict (with optional ``imports:``) + a list body.
+
+    YAML requires one root node per document, so a file that is "a list with an
+    ``imports`` section" has to use two documents separated by ``---``. This
+    wrapper is the internal transport carrying both pieces from
+    :func:`_load_raw_config` to :func:`_resolve_imports` without smuggling them
+    through a sentinel dict key (which would collide if a user happened to
+    choose the same key name).
+    """
+
+    imports: dict[str, Any] = field(default_factory=dict)
+    content: list[Any] = field(default_factory=list)
+
 
 # Root to all built-in configs and recipes.
 BUILTIN_CONFIG_ROOT = files("modelopt_recipes")
@@ -63,10 +81,18 @@ def _parse_exmy(s: str) -> tuple[int, int] | str:
     return s
 
 
-def _load_raw_config(config_file: str | Path | Traversable) -> dict[str, Any] | list[Any]:
+def _load_raw_config(
+    config_file: str | Path | Traversable,
+) -> dict[str, Any] | list[Any] | _ListSnippet:
     """Load a config YAML without resolving ``$import`` references.
 
     config_file: Path to a config yaml file. The path suffix can be omitted.
+
+    Return type:
+        * ``dict`` — single-document or two-document-dict YAML.
+        * ``list`` — single-document list YAML.
+        * :class:`_ListSnippet` — two-document YAML with a list body;
+          carries the header's ``imports`` alongside the list content.
     """
     # Probe order: filesystem first, then built-in library.
     # This lets users override built-in configs by placing a file locally.
@@ -127,8 +153,14 @@ def _load_raw_config(config_file: str | Path | Traversable) -> dict[str, Any] | 
         if isinstance(content, dict):
             _raw = {**header, **content}
         elif isinstance(content, list):
-            # List content with a header dict — attach imports via wrapper
-            _raw = {**header, "_list_content": content}
+            # List body with a header dict (for declaring ``imports:``).
+            # Only ``imports`` from the header is carried forward; any other
+            # header keys are meaningless alongside a list body.
+            imports = header.get("imports", {}) or {}
+            return _ListSnippet(
+                imports=imports,
+                content=_parse_exmy_num_bits(content),
+            )
         else:
             raise ValueError(
                 f"Config file {config_path}: second YAML document must be a mapping or list, "
@@ -154,17 +186,28 @@ _IMPORT_KEY = "$import"
 
 
 def _resolve_imports(
-    data: dict[str, Any], _loading: frozenset[str] | None = None
-) -> dict[str, Any]:
+    data: dict[str, Any] | _ListSnippet, _loading: frozenset[str] | None = None
+) -> dict[str, Any] | list[Any]:
     """Resolve the ``imports`` section and ``$import`` references.
+
+    Accepts either a raw dict (with optional top-level ``imports:``) or a
+    :class:`_ListSnippet` (a list body carrying its own ``imports``). Returns
+    a dict for the former and a list for the latter — the imports section is
+    consumed.
 
     See ``modelopt.recipe.loader`` module docstring for the full specification.
     This function lives in ``_config_loader`` (not ``loader``) so that it can be
     used from ``modelopt.torch.quantization.config`` without circular imports.
     """
-    imports_dict = data.pop("imports", None)
+    if isinstance(data, _ListSnippet):
+        imports_dict = data.imports
+        body: dict[str, Any] | list[Any] = data.content
+    else:
+        imports_dict = data.get("imports")
+        body = {k: v for k, v in data.items() if k != "imports"}
+
     if not imports_dict:
-        return data
+        return body
 
     if not isinstance(imports_dict, dict):
         raise ValueError(
@@ -185,11 +228,10 @@ def _resolve_imports(
                 f"Import chain: {sorted(_loading)}"
             )
         snippet = _load_raw_config(config_path)
-        if isinstance(snippet, dict) and "imports" in snippet:
+        if isinstance(snippet, _ListSnippet) or (
+            isinstance(snippet, dict) and "imports" in snippet
+        ):
             snippet = _resolve_imports(snippet, _loading | {config_path})
-        # Unwrap _list_content (multi-document YAML: imports + list content)
-        if isinstance(snippet, dict) and "_list_content" in snippet:
-            snippet = snippet["_list_content"]
         import_map[name] = snippet
 
     def _lookup(ref_name: str, context: str) -> Any:
@@ -210,9 +252,12 @@ def _resolve_imports(
         """
         if isinstance(obj, dict):
             if _IMPORT_KEY in obj:
-                # {$import: name, ...inline} → import, merge, override
-                ref = obj.pop(_IMPORT_KEY)
-                inline_keys = dict(obj)
+                # {$import: name, ...inline} → import, merge, override.
+                # Read without mutating ``obj`` so _resolve_value stays pure and
+                # idempotent — double resolution must be a no-op on the first
+                # result, not silently corrupt it.
+                ref = obj[_IMPORT_KEY]
+                inline_keys = {k: v for k, v in obj.items() if k != _IMPORT_KEY}
                 ref_names = ref if isinstance(ref, list) else [ref]
 
                 merged: dict[str, Any] = {}
@@ -246,13 +291,7 @@ def _resolve_imports(
             return resolved
         return obj
 
-    data = _resolve_value(data)
-
-    # Unwrap _list_content (multi-document snippets)
-    if isinstance(data, dict) and "_list_content" in data:
-        data["_list_content"] = _resolve_value(data["_list_content"])
-
-    return data
+    return _resolve_value(body)
 
 
 def load_config(config_path: str | Path | Traversable) -> dict[str, Any] | list[Any]:
@@ -263,6 +302,6 @@ def load_config(config_path: str | Path | Traversable) -> dict[str, Any] | list[
     config dict or list.
     """
     data = _load_raw_config(config_path)
-    if isinstance(data, dict) and "imports" in data:
+    if isinstance(data, _ListSnippet) or (isinstance(data, dict) and "imports" in data):
         data = _resolve_imports(data)
     return data
