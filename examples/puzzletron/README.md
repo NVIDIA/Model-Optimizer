@@ -275,8 +275,9 @@ For a quick smoke test, add `--limit 10`.
 To deploy a compressed model in vLLM, install vLLM fork with AnyModel enabled:
 
 ```bash
-git clone -b feature/add_anymodel_to_vllm https://github.com/askliar/vllm.git
+git clone https://github.com/askliar/vllm.git
 cd vllm
+git checkout 6a5ea42e55b85444da1a511a007f2d627845536f
 VLLM_USE_PRECOMPILED=1 uv pip install --editable . --torch-backend=auto
 ```
 
