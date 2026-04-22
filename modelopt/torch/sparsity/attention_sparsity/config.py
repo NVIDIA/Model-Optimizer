@@ -139,6 +139,17 @@ class SparseAttentionAttributeConfig(ModeloptBaseConfig):
         ),
     )
 
+    skip_softmax_raw_threshold: float | None = ModeloptField(
+        default=None,
+        title="Raw skip-softmax threshold (skip_threshold_log2).",
+        description=(
+            "Raw value passed directly to the Triton kernel as skip_threshold_log2. "
+            "The kernel skips tiles where tile_row_max < row_max + raw_threshold. "
+            "Typical values are negative (e.g., -5.0). Takes precedence over "
+            "skip_softmax_threshold and calibration when set."
+        ),
+    )
+
     @field_validator("method")
     @classmethod
     def validate_method(cls, v):
@@ -323,6 +334,15 @@ class CalibrationConfig(ModeloptBaseConfig):
             "If None, uses default: [1e-6, 5e-6, 1e-5, 5e-5, 1e-4, 5e-4, 1e-3, 5e-3, "
             "1e-2, 2e-2, 5e-2, 1e-1, 2e-1, 3e-1, 5e-1, 7e-1]. "
             "Increasing the number of trials improves calibration accuracy but slows down calibration."
+        ),
+    )
+
+    fit_logspace: bool = ModeloptField(
+        default=False,
+        title="Fit in log space",
+        description=(
+            "If True, fit the exponential model in log space (minimizes relative error). "
+            "Recommended for diffusion models where scale_factors span many orders of magnitude."
         ),
     )
 

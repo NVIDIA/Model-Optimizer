@@ -27,8 +27,8 @@ pipeline:
     script: common/tensorrt_llm/query.sh
     args:
       - --model <<global_vars.hf_model>>
-      - --tp_size 4
-      - --ep_size 4
+      - --tp_size 8
+      - --ep_size 8
       - --max_num_tokens 32000
       - --port 8000
       - --host 0.0.0.0
@@ -41,8 +41,8 @@ pipeline:
     slurm_config:
       _factory_: "slurm_factory"
       nodes: 1
-      ntasks_per_node: 4
-      gpus_per_node: 4
+      ntasks_per_node: 8
+      gpus_per_node: 8
       container: nvcr.io/nvidia/tensorrt-llm/release:1.2.0
 
   # Step 2: Dump hidden states from target model
@@ -52,15 +52,15 @@ pipeline:
       - --input-data /scratchspace/data
       - --output-dir /scratchspace/offline_hidden_states
       - --max-seq-len 8192
-      - --tp 4
-      - --moe-ep 4
+      - --tp 8
+      - --moe-ep 8
     environment:
       - HF_MODEL_CKPT: <<global_vars.hf_model>>
     slurm_config:
       _factory_: "slurm_factory"
       nodes: 1
-      ntasks_per_node: 4
-      gpus_per_node: 4
+      ntasks_per_node: 8
+      gpus_per_node: 8
       container: nvcr.io/nvidia/tensorrt-llm/release:1.2.0
 
   # Step 3: Train EAGLE3 draft head (offline, single task)
@@ -78,7 +78,7 @@ pipeline:
       _factory_: "slurm_factory"
       nodes: 1
       ntasks_per_node: 1
-      gpus_per_node: 4
+      gpus_per_node: 8
       container: nvcr.io/nvidia/tensorrt-llm/release:1.2.0
 
   # Step 4: Benchmark speculative decoding (VLLM backend)
@@ -89,7 +89,7 @@ pipeline:
       - --draft_length 3
       - --output_length 4096
       - --engine VLLM
-      - --tp_size 4
+      - --tp_size 8
       - --ep_size 1
       - --speculative_algorithm EAGLE3
       - --mtbench /hf-local/HuggingFaceH4/mt_bench_prompts/raw/question.jsonl
@@ -100,5 +100,5 @@ pipeline:
       _factory_: "slurm_factory"
       nodes: 1
       ntasks_per_node: 1
-      gpus_per_node: 4
+      gpus_per_node: 8
       container: vllm/vllm-openai:latest

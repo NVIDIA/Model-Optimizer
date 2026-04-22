@@ -16,6 +16,7 @@
 """Utility functions related to Onnx."""
 
 import base64
+import contextlib
 import inspect
 import json
 import logging
@@ -46,6 +47,8 @@ from modelopt.onnx.quantization.qdq_utils import qdq_to_dq, replace_zero_scale_w
 from modelopt.onnx.utils import (
     change_casts_to_fp16,
     check_model_uses_external_data,
+    fold_dq_fp32_to_fp16_casts,
+    fold_qdq_scale_fp16_to_fp32_casts,
     get_input_names,
     get_input_shapes,
     get_node_names,
@@ -402,6 +405,29 @@ def is_fp8_quantized(model: nn.Module) -> bool:
     return False
 
 
+@contextlib.contextmanager
+def _disable_fp8_conv_weight_quantizers(model: nn.Module):
+    """Temporarily disable FP8 weight quantizers on Conv layers during ONNX export.
+
+    The TorchScript ONNX exporter requires static kernel shapes for Conv operations,
+    but the TRT_FP8DequantizeLinear custom op produces outputs with unknown shapes in
+    the TorchScript IR, causing the _convolution symbolic to fail. Disabling Conv weight
+    quantizers during export allows the Conv to export with static-shape FP16/FP32 weights.
+    FP8 weight quantization is restored as a post-processing step in FP8QuantExporter.
+    """
+    disabled = []
+    for _, module in model.named_modules():
+        if isinstance(module, (nn.Conv1d, nn.Conv2d, nn.Conv3d)):
+            if hasattr(module, "weight_quantizer") and module.weight_quantizer.is_enabled:
+                module.weight_quantizer.disable()
+                disabled.append(module)
+    try:
+        yield
+    finally:
+        for module in disabled:
+            module.weight_quantizer.enable()
+
+
 def quantize_weights(model: nn.Module, onnx_model: onnx.ModelProto) -> onnx.ModelProto:
     """Real quantizes the weights in the onnx model.
 
@@ -522,7 +548,11 @@ def get_onnx_bytes_and_metadata(
     input_none_names = list(set(tree_spec_input.names) - set(input_names))
 
     use_torch_autocast = not (
-        is_fp4_quantized(model) or is_mxfp8_quantized(model) or weights_dtype == "fp32"
+        is_fp4_quantized(model)
+        or is_mxfp8_quantized(model)
+        or is_fp8_quantized(model)
+        or is_int8_quantized(model)
+        or weights_dtype == "fp32"
     )
     autocast = torch.autocast("cuda") if use_torch_autocast else nullcontext()
 
@@ -556,7 +586,13 @@ def get_onnx_bytes_and_metadata(
         if is_fp4_quantized(model) or is_mxfp8_quantized(model)
         else nullcontext()
     )
-    with torch.inference_mode(), autocast, quantizer_context:
+    # Disable FP8 Conv weight quantizers: TorchScript custom ops produce outputs with
+    # unknown shapes, causing _convolution symbolic to fail. Conv weights are quantized
+    # to FP8 in post-processing by FP8QuantExporter instead.
+    conv_wq_context = (
+        _disable_fp8_conv_weight_quantizers(model) if is_fp8_quantized(model) else nullcontext()
+    )
+    with torch.inference_mode(), autocast, quantizer_context, conv_wq_context:
         additional_kwargs = {}
         if not dynamo_export:
             additional_kwargs["dynamic_axes"] = dynamic_axes
@@ -598,7 +634,12 @@ def get_onnx_bytes_and_metadata(
         onnx_opt_graph = qdq_to_dq(onnx_opt_graph)
 
     if weights_dtype in ["fp16", "bf16"]:
-        if is_int4_quantized(model) or is_mxfp8_quantized(model) or is_fp8_quantized(model):
+        if (
+            is_int4_quantized(model)
+            or is_mxfp8_quantized(model)
+            or is_fp8_quantized(model)
+            or is_int8_quantized(model)
+        ):
             assert weights_dtype == "fp16", "BF16 + MXFP8/INT4 mixed precision is not supported yet"
             onnx_opt_graph = convert_float_to_float16(
                 onnx_opt_graph,
@@ -610,6 +651,11 @@ def get_onnx_bytes_and_metadata(
             # Change FP32 cast nodes feeding into Concat/Add to FP16
             op_list = ["Concat", "Add", "Sqrt", "LayerNormalization", "Clip", "Mul", "Exp"]
             onnx_opt_graph = change_casts_to_fp16(onnx_opt_graph, op_list)
+            # Remove Cast(FP32->FP16) nodes after DQ by setting DQ output to FP16 directly
+            onnx_opt_graph = fold_dq_fp32_to_fp16_casts(onnx_opt_graph)
+            # Remove Cast(FP16->FP32) feeding Q/DQ scales so DQ stays FP16 for downstream
+            # MatMul/Add layers under strongly-typed TRT parsing.
+            onnx_opt_graph = fold_qdq_scale_fp16_to_fp32_casts(onnx_opt_graph)
         else:
             onnx_opt_graph = convert_to_f16(
                 onnx_opt_graph, low_precision_type=weights_dtype, keep_io_types=False

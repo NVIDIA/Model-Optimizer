@@ -48,7 +48,6 @@ jobs:
       - name: Install dependencies
         run: |
           # use `python -m pip` instead of `pip` to avoid conflicts with system pip for nemo containers
-          pip uninstall -y nvidia-modelopt
           python -m pip install ".${{ inputs.pip_install_extras }}"
 
           if [[ "${{ inputs.example }}" == *"diffusers"* ]]; then

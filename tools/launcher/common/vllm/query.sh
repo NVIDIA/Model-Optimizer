@@ -58,6 +58,9 @@ source ${SCRIPT_DIR}/../service_utils.sh
 #     gpus_per_node: 4
 ###################################################################################################
 
+# Ensure pandas is available (missing in some vLLM nightly builds)
+pip install pandas 2>/dev/null || true
+
 export OPENAI_API_KEY="token-abc123"
 
 if [ -z ${SLURM_ARRAY_TASK_ID} ]; then
@@ -108,13 +111,26 @@ SERVER_PID=$!
 
 # Wait for server to start up by polling the health endpoint
 echo "Waiting for server to start..."
+MAX_WAIT=${VLLM_STARTUP_TIMEOUT:-600}
+WAITED=0
 while true; do
+    if ! kill -0 $SERVER_PID 2>/dev/null; then
+        echo "ERROR: vLLM server process died during startup"
+        wait $SERVER_PID 2>/dev/null
+        exit 1
+    fi
     response=$(curl -s -o /dev/null -w "%{http_code}" "http://$(hostname -f):8000/health" || true)
     if [ "$response" -eq 200 ]; then
-        echo "Server is up!"
+        echo "Server is up! (waited ${WAITED}s)"
         break
     fi
-    echo "Server not ready yet, retrying in 10 seconds..."
+    WAITED=$((WAITED + 10))
+    if [ $WAITED -ge $MAX_WAIT ]; then
+        echo "ERROR: vLLM server failed to start within ${MAX_WAIT}s"
+        kill $SERVER_PID 2>/dev/null
+        exit 1
+    fi
+    echo "Server not ready yet (${WAITED}/${MAX_WAIT}s), retrying in 10 seconds..."
     sleep 10
 done
 

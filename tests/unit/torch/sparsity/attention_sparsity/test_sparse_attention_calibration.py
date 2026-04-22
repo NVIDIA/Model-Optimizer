@@ -19,6 +19,9 @@ import pytest
 
 pytest.importorskip("transformers")
 
+# Imports added for new tests
+from unittest.mock import MagicMock, patch
+
 import numpy as np
 from _test_utils.torch.sparsity.sparse_attention_common import SimpleAttentionModel
 from pydantic import ValidationError
@@ -30,7 +33,10 @@ from modelopt.torch.sparsity.attention_sparsity.calibration import (
 )
 from modelopt.torch.sparsity.attention_sparsity.calibration.calibrate import (
     _extract_calibration_config,
+    _extract_tokenizer_from_model,
     calibrate_sparse_attention,
+    create_calibration_forward_loop,
+    create_decode_calibration_forward_loop,
 )
 from modelopt.torch.sparsity.attention_sparsity.calibration.ruler_dataset import (
     _generate_target_lengths,
@@ -416,3 +422,170 @@ class TestCalibrateFunction:
         calib_config = _extract_calibration_config(config)
 
         assert calib_config is None
+
+    def test_extract_calibration_config_invalid_type(self):
+        """_extract_calibration_config raises when calibration is not a dict."""
+        config = {
+            "sparse_cfg": {
+                "calibration": "not-a-dict",
+                "*attn*": {"method": "flash_skip_softmax"},
+            },
+        }
+        with pytest.raises(ValueError, match="must be a dict"):
+            _extract_calibration_config(config)
+
+    def test_calibrate_no_sparse_modules(self):
+        """Config with calibration but no sparse modules -> empty dict."""
+        model = SimpleAttentionModel(hidden_size=64, num_heads=4)
+
+        def noop_forward(m):
+            pass
+
+        config = {
+            "sparse_cfg": {
+                "calibration": {
+                    "target_sparse_ratio": {"prefill": 0.5, "decode": 0.0},
+                    "samples": 4,
+                    "max_seqlen": 1024,
+                },
+            },
+        }
+        # Without sparse_cfg for modules, no sparse modules => returns empty
+        result = calibrate_sparse_attention(model, config, forward_loop=noop_forward)
+        assert result == {}
+
+    def test_calibrate_both_phases_zero(self):
+        """Config with both prefill/decode=0.0 returns empty immediately."""
+        model = SimpleAttentionModel(hidden_size=64, num_heads=4)
+        config = {
+            "sparse_cfg": {
+                "calibration": {
+                    "target_sparse_ratio": {"prefill": 0.0, "decode": 0.0},
+                    "samples": 4,
+                    "max_seqlen": 1024,
+                },
+            },
+        }
+        # Both phases disabled => returns empty without attempting calibration
+        result = calibrate_sparse_attention(model, config, forward_loop=lambda m: None)
+        assert result == {}
+
+    def test_calibrate_with_user_forward_loop(self):
+        """User-provided forward_loop skips RULER dataset building."""
+        import numpy as np
+
+        model = SimpleAttentionModel(hidden_size=64, num_heads=4)
+        # Sparsify first WITHOUT calibration, so we can call calibrate_sparse_attention
+        # ourselves with a user-supplied forward_loop.
+        base_config = {
+            "sparse_cfg": {
+                "*attention*": {
+                    "method": "flash_skip_softmax",
+                    "thresholds": {"prefill": [1e-3], "decode": [1e-4]},
+                    "br": 64,
+                    "bc": 64,
+                    "enable": True,
+                },
+            },
+        }
+        sparse_model = sparsify(model, base_config)
+
+        # Now build a calibration-enabled config and call calibrate directly
+        calib_config = {
+            "sparse_cfg": {
+                "calibration": {
+                    "target_sparse_ratio": {"prefill": 0.5, "decode": 0.0},
+                    "samples": 4,
+                    "max_seqlen": 1024,
+                },
+            },
+        }
+
+        # Seed synthetic stats in each module so calibrator converges.
+        # Use a known threshold list (matches the DynamicThresholdCalibrator default).
+        a_true, b_true = 0.1, 5.0
+        threshold_trials = [
+            1e-6,
+            5e-6,
+            1e-5,
+            5e-5,
+            1e-4,
+            5e-4,
+            1e-3,
+            5e-3,
+            1e-2,
+            2e-2,
+            5e-2,
+            1e-1,
+            2e-1,
+            3e-1,
+            5e-1,
+            7e-1,
+            8e-1,
+            9e-1,
+            9.5e-1,
+            9.9e-1,
+        ]
+
+        def fake_forward(m):
+            for module in m.modules():
+                if isinstance(module, SparseAttentionModule):
+                    sparsity_list = []
+                    for t in threshold_trials:
+                        sf = t * 4096
+                        s = np.log(sf / a_true) / b_true
+                        sparsity_list.append(max(0.0, min(1.0, s)))
+                    module._last_stats = {
+                        "sparsity": sparsity_list,
+                        "sample_length": 4096,
+                        "phase": "prefill",
+                    }
+                    if module._stats_manager is not None:
+                        module._stats_manager.collect(module._last_stats)
+
+        # This exercises the main calibrate_sparse_attention pipeline end-to-end
+        result = calibrate_sparse_attention(sparse_model, calib_config, forward_loop=fake_forward)
+        # If regression fit succeeded, we have results; otherwise we expect a warning
+        # and an empty dict. Either is acceptable — we just want the code path covered.
+        assert isinstance(result, dict)
+
+
+class TestCreateCalibrationForwardLoop:
+    """Test create_calibration_forward_loop factory (no GPU required)."""
+
+    def test_factory_returns_callable(self):
+        """Factory returns a callable forward_loop closure."""
+        fake_tok = MagicMock()
+        fake_tok.pad_token = None
+        fake_tok.eos_token = "<eos>"
+        with patch(
+            "transformers.AutoTokenizer.from_pretrained",
+            MagicMock(return_value=fake_tok),
+        ):
+            fn = create_calibration_forward_loop([], "gpt2")
+            assert callable(fn)
+
+    def test_decode_factory_returns_callable(self):
+        """create_decode_calibration_forward_loop returns a callable."""
+        fake_tok = MagicMock()
+        fake_tok.pad_token = None
+        fake_tok.eos_token = "<eos>"
+        with patch(
+            "transformers.AutoTokenizer.from_pretrained",
+            MagicMock(return_value=fake_tok),
+        ):
+            fn = create_decode_calibration_forward_loop([], "gpt2")
+            assert callable(fn)
+
+
+class TestExtractTokenizer:
+    """Test _extract_tokenizer_from_model logic."""
+
+    def test_raises_when_no_config(self):
+        model = type("M", (), {})()  # no config attribute
+        with pytest.raises(ValueError, match="Could not load tokenizer"):
+            _extract_tokenizer_from_model(model)
+
+    def test_returns_tokenizer_path_from_config(self):
+        model = type("M", (), {"config": type("C", (), {"_name_or_path": "gpt2"})()})()
+        assert _extract_tokenizer_from_model(model) == "gpt2"

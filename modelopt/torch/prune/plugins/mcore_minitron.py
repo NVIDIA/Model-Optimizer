@@ -171,6 +171,9 @@ class CandidateSubnet:
     score: float | None
 
 
+torch.serialization.add_safe_globals([CandidateSubnet])
+
+
 class MCoreMinitronSearcher(BaseSearcher):
     """Searcher for Minitron pruning algorithm.
 

@@ -1,0 +1,65 @@
+name: PR Gate
+
+on:
+  workflow_call:
+    inputs:
+      files:
+        description: "Newline-separated list of file patterns to watch for changes"
+        required: true
+        type: string
+    outputs:
+      any_changed:
+        description: "Whether any relevant files changed"
+        value: ${{ jobs.check-file-changes.outputs.any_changed }}
+
+jobs:
+  check-file-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      any_changed: ${{ steps.changed-tests.outputs.any_changed || steps.non-pr.outputs.any_changed }}
+    steps:
+      # For non-PR triggers (schedule, workflow_dispatch), always run tests
+      - id: non-pr
+        if: "!startsWith(github.ref, 'refs/heads/pull-request/')"
+        run: echo "any_changed=true" >> $GITHUB_OUTPUT
+      - if: startsWith(github.ref, 'refs/heads/pull-request/')
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - if: startsWith(github.ref, 'refs/heads/pull-request/')
+        id: get-pr-info
+        uses: nv-gha-runners/get-pr-info@main
+      # Extract SHAs from pr-info JSON via shell to avoid fromJSON on potentially-empty outputs
+      - if: startsWith(github.ref, 'refs/heads/pull-request/')
+        id: pr-shas
+        env:
+          PR_INFO: ${{ steps.get-pr-info.outputs.pr-info }}
+        run: |
+          echo "head_sha=$(echo "$PR_INFO" | jq -r '.head.sha')" >> $GITHUB_OUTPUT
+          echo "base_sha=$(echo "$PR_INFO" | jq -r '.base.sha')" >> $GITHUB_OUTPUT
+      # Get commit from main branch that is present in the PR to use as base for changed files
+      - if: startsWith(github.ref, 'refs/heads/pull-request/')
+        id: calculate-merge-base
+        run: |
+          (echo -n "merge-base="; git merge-base "${{ steps.pr-shas.outputs.base_sha }}" "${{ steps.pr-shas.outputs.head_sha }}") | tee --append "${GITHUB_OUTPUT}"
+      - if: startsWith(github.ref, 'refs/heads/pull-request/')
+        name: Check for changes in test-relevant directories
+        id: changed-tests
+        uses: step-security/changed-files@v46.0.5
+        with:
+          base_sha: ${{ steps.calculate-merge-base.outputs.merge-base }}
+          sha: ${{ steps.pr-shas.outputs.head_sha }}
+          files: ${{ inputs.files }}
+          fail_on_initial_diff_error: true
+  wait-checks:
+    needs: [check-file-changes]
+    if: >-
+      startsWith(github.ref, 'refs/heads/pull-request/') &&
+      needs.check-file-changes.outputs.any_changed == 'true'
+    uses: ./.github/workflows/_wait_for_checks.yml
+    permissions:
+      checks: read
+    secrets: inherit
+    with:
+      match_pattern: "^linux$" # Wait for Unit tests / linux (DCO is a prerequisite of linux)
+      delay: 300s

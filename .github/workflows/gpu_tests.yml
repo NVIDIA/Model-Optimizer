@@ -6,89 +6,56 @@ on:
     # NOTE: paths cannot be used since push happens to copied PR and only latest commit to PR is used
   schedule:
     - cron: "0 0 * * *" # Nightly
-  workflow_dispatch: # On-demand
+  workflow_dispatch:
+    # On-demand
 
-# Cancel previous runs if new commit is pushed to the same PR
+
 concurrency:
+  # Cancel previous runs if new commit is pushed to the same PR
   group: ${{ github.workflow }}-${{ startsWith(github.ref, 'refs/heads/pull-request/') && github.ref || github.sha }}
   cancel-in-progress: true
 
 jobs:
-  check-file-changes:
-    if: startsWith(github.ref, 'refs/heads/pull-request/')
-    runs-on: ubuntu-latest
-    outputs:
-      any_changed: ${{ steps.changed-tests.outputs.any_changed }}
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-      - id: get-pr-info
-        uses: nv-gha-runners/get-pr-info@main
-      # Get commit from main branch that is present in the PR to use as base for changed files
-      - id: calculate-merge-base
-        env:
-          PR_SHA: ${{ fromJSON(steps.get-pr-info.outputs.pr-info).head.sha }}
-          BASE_SHA: ${{ fromJSON(steps.get-pr-info.outputs.pr-info).base.sha }}
-        run: |
-          (echo -n "merge-base="; git merge-base "$BASE_SHA" "$PR_SHA") | tee --append "${GITHUB_OUTPUT}"
-      - name: Check for changes in test-relevant directories
-        id: changed-tests
-        uses: step-security/changed-files@v46.0.5
-        with:
-          base_sha: ${{ steps.calculate-merge-base.outputs.merge-base }}
-          sha: ${{ fromJSON(steps.get-pr-info.outputs.pr-info).head.sha }}
-          files: |
-            .github/workflows/gpu_tests.yml
-            modelopt/**
-            tests/gpu/**
-            tests/gpu_regression/**
-            examples/speculative_decoding/**
-            examples/dataset/**
-            modelopt_recipes/general/speculative_decoding/**
-            tools/launcher/**
-            pyproject.toml
-            tox.ini
-          fail_on_initial_diff_error: true
-  wait-checks:
-    needs: [check-file-changes]
-    if: needs.check-file-changes.outputs.any_changed == 'true'
-    uses: ./.github/workflows/_wait_for_checks.yml
+  pr-gate:
+    uses: ./.github/workflows/_pr_gate.yml
     permissions:
       checks: read
     secrets: inherit
     with:
-      match_pattern: "^DCO$|^linux$" # Wait for DCO and Unit tests / linux to pass
-      delay: 300s
-  gpu-tests-pr:
-    needs: [check-file-changes, wait-checks]
-    if: needs.check-file-changes.outputs.any_changed == 'true'
-    strategy: &gpu_strategy
+      files: |
+        .github/workflows/gpu_tests.yml
+        modelopt/**
+        noxfile.py
+        pyproject.toml
+        tests/gpu/**
+        tests/gpu_megatron/**
+        tests/gpu_trtllm/**
+
+  gpu-tests:
+    needs: [pr-gate]
+    if: needs.pr-gate.outputs.any_changed == 'true'
+    strategy:
       fail-fast: false
       matrix:
         include:
           - example: gpu
             timeout: 60
-            container_image: pytorch:26.01-py3
-            # tests/gpu/_extensions/test_onnx_extensions.py fails for newer containers until https://github.com/tbenthompson/cppimport/pull/98
-          - example: gpu-regression
-            timeout: 15
-            container_image: pytorch:26.01-py3
-          - example: gpu-megatron
+            container_image: pytorch:26.03-py3
+          - example: gpu_megatron
             timeout: 45
-            container_image: pytorch:26.01-py3
-          - example: gpu-trtllm
+            container_image: nemo:26.04
+          - example: gpu_trtllm
             timeout: 30
-            container_image: tensorrt-llm/release:1.3.0rc10
-    runs-on: linux-amd64-gpu-rtxpro6000-latest-1
+            container_image: tensorrt-llm/release:1.3.0rc12
+    runs-on: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && 'linux-amd64-gpu-rtxpro6000-latest-1' || 'linux-amd64-gpu-rtxpro6000-latest-2' }}
     timeout-minutes: ${{ matrix.timeout }}
-    container: &gpu_container
+    container:
       image: nvcr.io/nvidia/${{ matrix.container_image }}
       env:
         GIT_DEPTH: 1000 # For correct version
         PIP_CONSTRAINT: "" # Disable pip constraint for upgrading packages
         HF_TOKEN: ${{ secrets.HF_TOKEN }}
-    steps: &gpu_steps
+    steps:
       - uses: actions/checkout@v6
       - uses: nv-gha-runners/setup-proxy-cache@main
       - name: Setup environment variables
@@ -99,8 +66,7 @@ jobs:
           COVERAGE_PROCESS_START: ${{ github.workspace }}/pyproject.toml
           COVERAGE_FILE: ${{ github.workspace }}/.coverage
         run: |
-          pip install tox-current-env
-          COV_ARGS="--cov" tox -e cuda13-${{ matrix.example }} --current-env
+          python -m pip install nox && nox -s ${{ matrix.example }}
       - name: Upload GPU coverage to Codecov
         uses: codecov/codecov-action@v5
         with:
@@ -109,19 +75,13 @@ jobs:
           flags: gpu
           fail_ci_if_error: false # test may be skipped if relevant file changes are not detected
           verbose: true
-  gpu-tests-non-pr:
-    if: ${{ !startsWith(github.ref, 'refs/heads/pull-request/') }}
-    strategy: *gpu_strategy
-    runs-on: linux-amd64-gpu-rtxpro6000-latest-2
-    timeout-minutes: ${{ matrix.timeout }}
-    container: *gpu_container
-    steps: *gpu_steps
+
   gpu-pr-required-check:
-    # Run even if gpu-tests-pr is skipped
+    # Run even if gpu-tests is skipped
     if: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && always() }}
-    needs: [check-file-changes, gpu-tests-pr]
+    needs: [pr-gate, gpu-tests]
     runs-on: ubuntu-latest
     steps:
       - name: Required GPU tests did not succeed
-        if: ${{ needs.check-file-changes.result != 'success' || (needs.check-file-changes.outputs.any_changed == 'true' && needs.gpu-tests-pr.result != 'success') }}
+        if: ${{ needs.pr-gate.result != 'success' || (needs.pr-gate.outputs.any_changed == 'true' && needs.gpu-tests.result != 'success') }}
         run: exit 1
