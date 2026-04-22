@@ -27,6 +27,7 @@ Changelog
 - Fix Megatron utility functions for generation (with pipeline parallelism) and ~10x speedup in MMLU score evaluation (by batching prefill passes).
 - Fix Minitron pruning (``mcore_minitron``) for MoE models. Importance estimation hooks were incorrectly registered for MoE modules and NAS step was hanging before this.
 - Fix TRT support for remote autotuning in ONNX Autotune from 10.16+ to 10.15+ and fix TRT versioning check to the ``trtexec`` version instead of the TRT Python API when using ``trtexec`` backend.
+- Exclude MatMul/Gemm nodes with K or N < 16 from ONNX INT8 and FP8 quantization. Such small-dimension GEMMs cannot efficiently use INT8/FP8 Tensor Cores and the added Q/DQ layers cause perf regressions in TensorRT. Honors Gemm ``transB`` when deriving K.
 
 **Misc**
 
