@@ -280,6 +280,10 @@ cd vllm
 VLLM_USE_PRECOMPILED=1 uv pip install --editable . --torch-backend=auto
 ```
 
+See [vLLM documentation](https://docs.vllm.ai/en/latest/getting_started/installation/gpu/index.html#build-wheel-from-source) for more details on installation.
+
+**NOTE:** This a temporary workaround pending official vLLM integration. You can track merge status [here](https://github.com/vllm-project/vllm/pull/36512).
+
 Then, add the following to the model's `config.json` file (here we use Llama as an example):
 
 ```json
