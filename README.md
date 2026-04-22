@@ -69,6 +69,8 @@ To install stable release packages for Model Optimizer with `pip` from [PyPI](ht
 pip install -U nvidia-modelopt[all]
 ```
 
+Model Optimizer will download and install additional third-party open source software projects. Review the license terms of these open source projects before use.
+
 To install from source in editable mode with all development dependencies or to use the latest features, run:
 
 ```bash
@@ -79,8 +81,14 @@ cd Model-Optimizer
 pip install -e .[dev]
 ```
 
-You can also directly use the [TensorRT-LLM docker images](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/tensorrt-llm/containers/release/tags)
-(e.g., `nvcr.io/nvidia/tensorrt-llm/release:<version>`), which have Model Optimizer pre-installed.
+You can also directly use NVIDIA container images, which have Model Optimizer pre-installed:
+
+- `nvcr.io/nvidia/pytorch:<version>-py3`
+- `nvcr.io/nvidia/nemo:<version>`
+- `nvcr.io/nvidia/tensorrt-llm/release:<version>`
+- `nvcr.io/nvidia/tensorrt:<version>-py3`
+
+Before pulling and using the container images, please review their respective license terms.
 Make sure to upgrade Model Optimizer to the latest version as described above.
 Visit our [installation guide](https://nvidia.github.io/Model-Optimizer/getting_started/2_installation.html) for
 more fine-grained control on installed dependencies or for alternative docker images and environment variables to setup.

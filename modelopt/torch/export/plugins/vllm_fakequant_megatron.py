@@ -135,8 +135,10 @@ class VllmFqGPTModelExporter(GPTModelExporter):
             # string then it usually ends with "." which needs to be removed.
             self.exclude_modules.append(prefix.removesuffix("."))
         block_size = 0
-
-        if hasattr(module, "weight") and module.weight is not None:
+        name_to_value = self._get_weight_bias(module, dtype, name_to_value)
+        if "weight" in name_to_value:
+            # Use the original device (avoid the CPU round-trip introduced by _get_weight_bias;
+            # fake-quantization runs on CUDA and the result is moved to CPU below).
             weight = module.weight.to(dtype)
             # Fold the weight_quantizer into the weight by applying fake-quantization
             # (quantize then dequantize). The weight_quantizer amax is not exported;
@@ -170,9 +172,6 @@ class VllmFqGPTModelExporter(GPTModelExporter):
             name_to_value["weight"] = weight.cpu()
         else:
             return name_to_value, qformat, block_size
-
-        if hasattr(module, "bias") and module.bias is not None:
-            name_to_value["bias"] = module.bias.to(dtype).cpu()
 
         # Only save input/output quantizer state; weight_quantizer amax is not exported
         # since it has been folded into the weight above.

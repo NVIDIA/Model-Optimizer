@@ -32,11 +32,11 @@ Environment setup
 
     To use Model Optimizer with full dependencies (e.g. TensorRT/TensorRT-LLM deployment), we recommend using the
     `TensorRT-LLM docker image <https://catalog.ngc.nvidia.com/orgs/nvidia/teams/tensorrt-llm/containers/release/tags>`_,
-    e.g., ``nvcr.io/nvidia/tensorrt-llm/release:<version>``.
+    e.g., ``nvcr.io/nvidia/tensorrt-llm/release:<version>`` (Model Optimizer pre-installed).
 
     Make sure to upgrade Model Optimizer to the latest version using ``pip`` as described in the next section.
 
-    You would also need to setup appropriate environment variables for the TensorRT binaries as follows:
+    If relevant, you would also need to setup appropriate environment variables for the TensorRT binaries as follows:
 
     .. code-block:: shell
 
@@ -48,11 +48,16 @@ Environment setup
     **Alternative NVIDIA docker images**
 
     For PyTorch, you can also use `NVIDIA NGC PyTorch container <https://catalog.ngc.nvidia.com/orgs/nvidia/containers/pytorch/tags>`_
-    and for NVIDIA Megatron-Bridge or Megatron-LM framework, you can use the `NeMo container <https://catalog.ngc.nvidia.com/orgs/nvidia/containers/nemo/tags>`_.
-    Both of these containers come with Model Optimizer pre-installed. Make sure to update the Model Optimizer to the latest version if not already.
+    (``nvcr.io/nvidia/pytorch:<version>-py3``, Model Optimizer pre-installed)
+    and for NVIDIA Megatron-Bridge or Megatron-LM framework, you can use the `NeMo container <https://catalog.ngc.nvidia.com/orgs/nvidia/containers/nemo/tags>`_
+    (``nvcr.io/nvidia/nemo:<version>``, Model Optimizer pre-installed).
+    Make sure to update the Model Optimizer to the latest version if not already.
 
     For ONNX / TensorRT use cases, you can also use the `TensorRT container <https://catalog.ngc.nvidia.com/orgs/nvidia/containers/tensorrt/tags>`_
-    which provides superior performance to the PyTorch container.
+    (``nvcr.io/nvidia/tensorrt:<version>-py3``), which provides superior performance to the PyTorch container.
+
+    .. note::
+        Before pulling and using the container images, please review their respective license terms.
 
 .. tab:: Local environment (PIP / Conda)
 
@@ -82,8 +87,8 @@ Environment setup
 Install Model Optimizer
 =======================
 
-ModelOpt including its dependencies can be installed via ``pip``. Please review the license terms of ModelOpt and any
-dependencies before use.
+Model Optimizer will download and install additional third-party open source software projects. Review the license
+terms of these open source projects before use.
 
 If you build and use ModelOpt's docker image, you can skip this step as the image already contains ModelOpt and all
 optional dependencies pre-installed.
