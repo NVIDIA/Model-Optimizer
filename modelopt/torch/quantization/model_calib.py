@@ -1698,6 +1698,7 @@ def gptq(
     forward_loop: ForwardLoop,
     perc_damp: float = 0.01,
     block_size: int = 128,
+    fused: bool = False,
 ):
     """GPTQ quantization.
 
@@ -1723,6 +1724,7 @@ def gptq(
         forward_loop: Callable that replays calibration inputs through *model*.
         perc_damp: Percentage of avg Hessian diagonal for damping (default: 0.01).
         block_size: Block size for GPTQ weight update.
+        fused: If True, use fused Triton kernel for NVFP4 static quantization.
     """
     total_start = time.time()
 
@@ -1745,7 +1747,7 @@ def gptq(
             cls = GPTQHelper
         else:
             cls = _GPTQ_HELPER_REGISTRY.get(backend, GPTQHelper)
-        return cls(m, name, offload_to_cpu=True)
+        return cls(m, name, offload_to_cpu=True, fused=fused)
 
     gptq_handles = {name: _make_gptq_handle(name, m) for name, m in quantized_layers}
     for handle in gptq_handles.values():
