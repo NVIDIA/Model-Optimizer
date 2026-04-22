@@ -220,6 +220,10 @@ python -m modelopt.torch.utils.plugins.megatron_preprocess_data \
     --reasoning_content inline
 ```
 
+### Ready-to-run tokenization commands for Nemotron Pre/Post-Training Datasets
+
+For ready-to-run tokenization commands covering all Nemotron Pre/Post-Training datasets used in Megatron-Bridge distillation scripts, see **[MEGATRON_DATA_PREP.md](MEGATRON_DATA_PREP.md)**.
+
 ## Synthetic Test Dataset
 
 `synthetic_conversations_1k.jsonl` is a 1,000-sample dataset in OpenAI messages format

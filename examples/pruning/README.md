@@ -20,6 +20,7 @@ This section focuses on applying Model Optimizer's state-of-the-art complementar
 | Support Matrix | View the support matrix to see available pruning algorithms and their compatibility with different models and frameworks | \[[Link](#support-matrix)\] | |
 | Examples | Examples of different pruning methods | \[[Link](#examples)\] | |
 | Pruning Guidelines | Guidelines for choosing how and how much to prune for best results | \[[Link](#pruning-guidelines)\] | |
+| Results | End-to-end distillation results after Minitron and Puzzletron pruning | \[[Link](#results)\] | |
 | Resources | Extra links to relevant resources | \[[Link](#resources)\] | |
 
 </div>
@@ -196,6 +197,16 @@ Some of the models pruned using Minitron method followed by distillation and pos
 - [Minitron Collection on Hugging Face](https://huggingface.co/collections/nvidia/minitron)
 - [NVIDIA-Nemotron-Nano-9B-v2](https://huggingface.co/nvidia/NVIDIA-Nemotron-Nano-9B-v2)
 
+For end-to-end distillation results after Minitron pruning, see [Nemotron-Nano-9B-v2 → Pruned 7B](../megatron_bridge/results/minitron/nemotron_nano_9b_v2_pruned_7b/README.md).
+
+### Puzzletron Pruning for LLMs (e.g. Llama, Qwen, Nemotron)
+
+Checkout the [Puzzletron example](../puzzletron/README.md) which showcases MIP-based NAS pruning that produces heterogeneous model architectures — varying FFN intermediate sizes per layer and selectively removing attention layers — to meet a target parameter count or memory budget.
+
+Supported models include Llama-3.1-8B-Instruct, Qwen3-8B, Qwen2.5-7B-Instruct, Nemotron-Nano-12B-v2, Mistral-Small-24B-Instruct-2501, and others via the [configs](../puzzletron/configs/) directory.
+
+After compression, use [Megatron-Bridge distillation](../megatron_bridge/README.md#distillation) to recover accuracy. For distillation results on Puzzletron-compressed models, see [results/puzzletron.md](../megatron_bridge/results/puzzletron.md).
+
 ### FastNAS Pruning for PyTorch Computer Vision Models
 
 Check out the FastNAS pruning example usage in the [documentation](https://nvidia.github.io/Model-Optimizer/guides/3_pruning.html#pruning-and-subnet-search).
@@ -288,6 +299,13 @@ After pruning, distillation is required to recover model accuracy. Below are rec
 
 > [!TIP]
 > If you know the maximum learning rate used during the original training, a good rule of thumb for knowledge distillation is to use **1/5th of that maximum LR** when compressing by ~50%.
+
+## Results
+
+End-to-end distillation results with Megatron-Bridge after Minitron and Puzzletron pruning are tracked in the [Megatron-Bridge results directory](../megatron_bridge/results/README.md):
+
+- **[Minitron — Nemotron-Nano-9B-v2 → Pruned 7B](../megatron_bridge/results/minitron/nemotron_nano_9b_v2_pruned_7b/README.md)**: Structured pruning of Nemotron-Nano-9B-v2 to 7B followed by knowledge distillation up to 80B tokens. Achieves near-parity with the official 9B model across MMLU, MMLU Pro, GPQA, LCB, AIME, Math 500, IFEval, and SciCode.
+- **[Puzzletron — Qwen3-8B and Llama-3.1-8B-Instruct](../megatron_bridge/results/puzzletron.md)**: MIP-based compression followed by short distillation runs on WikiText-103. Shows MMLU recovery and illustrates the importance of using larger datasets to avoid overfitting.
 
 ## Resources
 

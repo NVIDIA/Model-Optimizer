@@ -54,6 +54,7 @@ Changelog
 - Bump minimum required PyTorch version to 2.8.
 - [Experimental] Add support for transformers>=5.0, including generic PTQ and unified HF checkpoint export for fused MoE expert modules (Mixtral, Qwen2-MoE, Qwen3-MoE, Qwen3.5-MoE, DeepSeek-V3, Jamba, OLMoE, etc.).
 - Improve ``megatron_preprocess_data``: add ``--reasoning_content`` support for Nemotron v3 datasets, eliminate intermediate JSONL for HuggingFace datasets, return output file prefixes from the Python API, add gzip input support (``.jsonl.gz``), add ``--strip_newlines`` flag for plain-text pretraining data, add ``--hf_streaming`` for very large datasets (only consumed rows downloaded), and auto-shuffle when ``--hf_max_samples_per_split`` is set to avoid biased sampling.
+- Add end-to-end Minitron pruning and distillation results for Nemotron-Nano-9B-v2 → Pruned 7B with data blend preparation, blend ablation study, and a nemo-evaluator evaluation config. See `examples/megatron_bridge/results/minitron/nemotron_nano_9b_v2_pruned_7b/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/megatron_bridge/results/minitron/nemotron_nano_9b_v2_pruned_7b>`_ for details.
 
 0.43 (2026-04-16)
 ^^^^^^^^^^^^^^^^^

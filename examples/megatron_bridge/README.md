@@ -10,6 +10,7 @@ This directory contains examples of using Model Optimizer with [NeMo Megatron-Br
 | Pruning | Examples of pruning a model using Minitron algorithm | \[[Link](#pruning)\] |
 | Distillation | Examples of distillation a pruned or quantized model | \[[Link](#distillation)\] |
 | Post-Training Quantization | Examples of quantizing a model | \[[Link](#post-training-quantization)\] |
+| Results | Distillation experiment results for Minitron and Puzzletron pruning | \[[Link](results/README.md)\] |
 | Resources | Extra links to relevant resources | \[[Link](#resources)\] |
 
 </div>
@@ -189,7 +190,7 @@ For more details, see the [Megatron-Bridge conversion README](https://github.com
 
 ### Distillation Results
 
-See [results/puzzletron.md](results/puzzletron.md) for MMLU results demonstrating knowledge distillation on Puzzletron-compressed student models.
+See [results/](results/README.md) for distillation experiment results covering Minitron and Puzzletron pruning algorithms.
 
 ## Post-Training Quantization
 

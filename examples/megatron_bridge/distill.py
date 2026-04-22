@@ -303,7 +303,7 @@ def main(args: argparse.Namespace):
             save_interval=args.eval_interval,
             save=checkpoint_dir,
             load=checkpoint_dir,  # Resume from this directory (if exists)
-            most_recent_k=5,  # Keeps 5 most recent checkpoints (not metric-based)
+            most_recent_k=50,  # Keeps 50 most recent checkpoints (not metric-based)
             ckpt_format="torch_dist",
             async_save=True,
             fully_parallel_save=True,
