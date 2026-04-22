@@ -155,8 +155,11 @@ def _attn_fwd_calibrate(
         row_max = m_new
 
     # --- Write per-program counters (no atomics, just stores) ---
-    # Compute unique flat program index for this (batch, head, q_tile)
-    num_q_tiles = tl.cdiv(tl.load(b_seq_len + 0), BLOCK_M)  # conservative upper bound
+    # Compute unique flat program index for this (batch, head, q_tile).
+    # Use tl.num_programs(2) (grid z dim = cdiv(max_input_len, BLOCK_M)) so the
+    # stride matches the wrapper's buffer layout for any batch order. Loading
+    # b_seq_len[0] would collide with later batches when batch 0 is shorter.
+    num_q_tiles = tl.num_programs(2)
     num_heads = tl.num_programs(1)
     prog_idx = batch_idx * num_heads * num_q_tiles + head_idx * num_q_tiles + tile_q
     base = prog_idx * NUM_THRESHOLDS
@@ -213,6 +216,33 @@ def attention_calibrate(
     """
     if threshold_trials is None or len(threshold_trials) == 0:
         raise ValueError("threshold_trials must be a non-empty list")
+
+    # Calibration has only been validated with uniform-length batches (current
+    # diffusion + RULER paths). Varlen inputs would exercise code paths in the
+    # kernel that have not been tested — fail loudly rather than silently
+    # produce wrong sparsity counts.
+    if b_seq_len.numel() > 1 and not torch.all(b_seq_len == b_seq_len[0]).item():
+        raise NotImplementedError(
+            "attention_calibrate currently supports only uniform-length batches. "
+            f"Got b_seq_len={b_seq_len.tolist()}. Varlen calibration is untested — "
+            "validate the kernel against a reference before removing this guard."
+        )
+    if int(b_seq_len[0].item()) != max_input_len:
+        raise ValueError(
+            "attention_calibrate expects max_input_len to equal b_seq_len[0] "
+            f"(uniform batching). Got max_input_len={max_input_len}, "
+            f"b_seq_len[0]={int(b_seq_len[0].item())}."
+        )
+    if (
+        b_seq_len_k is not None
+        and b_seq_len_k.data_ptr() != b_seq_len.data_ptr()
+        and b_seq_len_k.numel() > 1
+        and not torch.all(b_seq_len_k == b_seq_len_k[0]).item()
+    ):
+        raise NotImplementedError(
+            "attention_calibrate currently supports only uniform-length batches. "
+            f"Got b_seq_len_k={b_seq_len_k.tolist()}. Varlen calibration is untested."
+        )
 
     HEAD_DIM = q.shape[2]
     num_q_heads = q.shape[1]
