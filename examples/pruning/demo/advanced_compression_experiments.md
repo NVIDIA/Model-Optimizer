@@ -167,7 +167,7 @@ All experiments so far use Qwen3-8B, a dense Transformer-only model. Here we tes
 
 **At moderate compression (~10B), Minitron dominates.** Minitron retains 93.8% of teacher MMLU vs. Puzzletron's 62.2%. This is consistent with the Qwen3-8B pattern where Minitron wins at moderate compression, but the gap is much larger here.
 
-**At aggressive compression (~34k MiB), Puzzletron slightly leads.** Puzzletron edges ahead (54.3 vs. 51.8 MMLU), similarly to the pattern observed on Qwen3-8B. 
+**At aggressive compression (~34k MiB), Puzzletron slightly leads.** Puzzletron edges ahead (54.3 vs. 51.8 MMLU), similarly to the pattern observed on Qwen3-8B.
 
 **Hybrid architectures present unique challenges for Puzzletron.** On dense Transformers, Puzzletron's strength is heterogeneous per-layer optimization. On hybrids, the Mamba blocks are effectively frozen — Puzzletron can only optimize the attention/FFN half of the model. This reduces its effective search space and may explain why Minitron's simpler uniform approach outperforms at moderate compression levels.
 

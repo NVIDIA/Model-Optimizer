@@ -2,7 +2,7 @@
 
 ## Table of Contents
 
-1.[ Introduction](#1-introduction)
+1.[Introduction](#1-introduction)
 
 [Part I — Setup & Experiments](#part-i--setup--experiments)
 
@@ -18,7 +18,7 @@
 8. [Limitations & Practical Tips](#8-limitations--practical-tips)
 9. [Open Questions](#9-open-questions)
 
-10.[ References](#10-references)
+10.[References](#10-references)
 
 ---
 
@@ -102,6 +102,7 @@ Puzzletron's per-layer search space is much broader than Minitron's. The trade-o
 ---
 
 <a id="part-i--setup--experiments"></a>
+
 ## Part I — Setup & Experiments
 
 ---
@@ -358,7 +359,7 @@ block_35:  attention  kv_heads_8    ffn  intermediate_9984
 
 ### 4.4 Comparison with Minitron at the same memory target
 
-To validate that Puzzletron is the right choice for this scenario, we also ran Minitron at the same memory budget. To match ~78,000 MiB, Minitron drops 14 of 36 layers (keeping 22), producing a 5.49B parameter model. 
+To validate that Puzzletron is the right choice for this scenario, we also ran Minitron at the same memory budget. To match ~78,000 MiB, Minitron drops 14 of 36 layers (keeping 22), producing a 5.49B parameter model.
 
 ▶ See notebook `scenario2_minitron.ipynb` to reproduce this run.
 
@@ -378,6 +379,7 @@ At this extreme compression level, Minitron's strategy of dropping entire layers
 ---
 
 <a id="part-ii--results-analysis--insights"></a>
+
 ## Part II — Results, Analysis & Insights
 
 ---
@@ -405,7 +407,7 @@ On MMLU, Minitron outperforms Puzzletron at this level (+3.43pp post-distill). I
 
 Moreover, Minitron can be applied **iteratively**: for example, prune 10%, distill, then prune another 10% and distill again. This staged schedule typically preserves more quality than a single, more aggressive pruning step at the same overall parameter reduction.
 
-**Scenario 2 (aggressive memory compression):** 
+**Scenario 2 (aggressive memory compression):**
 
 Puzzletron becomes essential. When the target is a hard memory budget, Puzzletron can optimize for it directly via MIP constraints, whereas Minitron optimizes for a parameter count, and mapping parameter targets to memory budgets is indirect and suboptimal. More importantly, at this level of compression, Minitron acts like a butcher (dropping entire layers), while Puzzletron acts like a surgeon (selectively thinning FFN widths and removing attention per-layer). The surgical approach preserves far more model structure, giving distillation more to work with. This is why Puzzletron recovers to 74.9% of the teacher vs. Minitron's 61.7%.
 
@@ -521,7 +523,7 @@ Sections 5 and 6 focused on accuracy. But for deployment, throughput and latency
 
 **Hardware:** 1x NVIDIA H200 NVL GPU.
 
-**Models benchmarked (all post-distillation):** Qwen3-8B (baseline), Minitron 7B (Scenario 1), Puzzletron 7B (Scenario 1), Minitron 78k (Scenario 2), Puzzletron 78k (Scenario 2) 
+**Models benchmarked (all post-distillation):** Qwen3-8B (baseline), Minitron 7B (Scenario 1), Puzzletron 7B (Scenario 1), Minitron 78k (Scenario 2), Puzzletron 78k (Scenario 2)
 
 > **How to reproduce:** Serving Puzzletron's heterogeneous models with vLLM requires a few extra setup steps. See [Appendix](#appendix-serving-a-puzzletron-model-with-vllm) for the full procedure.
 
