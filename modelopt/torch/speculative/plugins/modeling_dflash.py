@@ -44,9 +44,13 @@ class DFlashBaseModelOutput:
 
     @classmethod
     def from_offline_dict(cls, d: dict):
-        """Construct from a dict of pre-computed base model outputs (offline training)."""
+        """Construct from a dict of pre-computed base model outputs (offline training).
+
+        ``aux_hidden_states`` is required — missing it raises KeyError at the entry point
+        rather than producing a cryptic failure deeper in the forward.
+        """
         return cls(
-            target_hidden=d.get("aux_hidden_states"),
+            target_hidden=d["aux_hidden_states"],
             logits=d.get("base_model_logits"),
         )
 

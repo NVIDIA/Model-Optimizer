@@ -412,6 +412,12 @@ class HFDFlashModel(DFlashModel):
         - Optional loss decay weighting
         """
         if not self.training:
+            if self.dflash_offline:
+                raise RuntimeError(
+                    "DFlash offline model cannot run eval/inference forward — base model "
+                    "layers were deleted during offline conversion to save memory. "
+                    "Reload the full base model before running evaluation."
+                )
             # Don't pass labels to base model — DFlash uses unshifted labels
             # which are incompatible with the base model's shifted loss.
             return super().forward(
@@ -442,8 +448,10 @@ class HFDFlashModel(DFlashModel):
             assert "base_model_outputs" in kwargs
             base_outputs = DFlashBaseModelOutput.from_offline_dict(kwargs["base_model_outputs"])
             if base_outputs.logits is None and self.dflash_self_logit_distillation:
-                # Compute logits from last-layer hidden states for KD loss
-                out_hiddens = kwargs["base_model_outputs"].get("base_model_hidden_states")
+                # Compute logits from last-layer hidden states for KD loss.
+                # base_model_hidden_states is required on this path — fail fast
+                # with KeyError rather than lm_head(None).
+                out_hiddens = kwargs["base_model_outputs"]["base_model_hidden_states"]
                 base_outputs.logits = self._base_model_lm_head(out_hiddens)
             target_hidden = base_outputs.target_hidden
         else:
@@ -573,6 +581,12 @@ class HFDFlashModel(DFlashModel):
             base_token: Next token from base model [B, 1].
             draft_tokens: Draft tokens [B, min(steps, block_size-1)] or None if steps < 1.
         """
+        if self.dflash_offline:
+            raise RuntimeError(
+                "DFlash offline model cannot run AR validation / pseudo_speculative_generate — "
+                "base model layers were deleted during offline conversion to save memory. "
+                "Reload the full base model before running AR validation."
+            )
         # Call the base model's inner model directly (avoids DynamicModule dispatch)
         model_output = self._base_model(
             input_ids=input_ids,
