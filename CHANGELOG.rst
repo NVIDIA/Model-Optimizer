@@ -1,6 +1,13 @@
 Changelog
 =========
 
+0.45 (2026-06-xx)
+^^^^^^^^^^^^^^^^^
+
+**Backward Breaking Changes**
+
+- Reorganize custom CUDA / Triton kernels under ``modelopt.torch.kernels`` into ``common/attention``, ``quantization/{conv,gemm}``, and ``sparsity/attention``. Direct imports from the old paths (``quantization.conv_gemm``, ``quantization.src``, ``sparsity.attention_sparsity.kernels``, flat ``kernels.triton_fa`` / ``kernels.hf_triton_attention``) must be updated; high-level APIs are unchanged.
+
 0.44 (2026-05-xx)
 ^^^^^^^^^^^^^^^^^
 
