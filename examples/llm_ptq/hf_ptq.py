@@ -1118,7 +1118,10 @@ def quantize_main(
             quant_cfg = copy.deepcopy(quant_cfg)
             for mod in args.exclude_modules:
                 quant_cfg["quant_cfg"].append(
-                    {"quantizer_name": f"*{mod}*_quantizer", "enable": False}
+                    {"quantizer_name": f"*{mod}*.weight_quantizer", "enable": False}
+                )
+                quant_cfg["quant_cfg"].append(
+                    {"quantizer_name": f"*{mod}*.input_quantizer", "enable": False}
                 )
                 print(f"Excluding module from quantization: {mod}")
 
