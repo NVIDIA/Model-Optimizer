@@ -13,4 +13,4 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""ModelOpt kernel library: common, quantization (conv, gemm), sparsity (attention, gemm)."""
+"""Quantization-specific attention kernel pieces (placeholder for combined sparse+quant path)."""

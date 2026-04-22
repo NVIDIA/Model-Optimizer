@@ -33,7 +33,7 @@ pytestmark = [
 
 diffusers = pytest.importorskip("diffusers")
 
-from modelopt.torch.kernels import IS_AVAILABLE as TRITON_KERNEL_AVAILABLE
+from modelopt.torch.kernels.common.attention import IS_AVAILABLE as TRITON_KERNEL_AVAILABLE
 
 if TRITON_KERNEL_AVAILABLE:
     import modelopt.torch.sparsity.attention_sparsity as mtsa
