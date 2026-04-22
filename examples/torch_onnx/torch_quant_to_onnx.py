@@ -147,6 +147,9 @@ def filter_func(name):
 
     ``downsample.reduction`` (Swin/SwinV2) is excluded because it operates on 4D tensors
     and TRT's DynamicQuantize layer (used for MXFP8/NVFP4) requires 2D/3D input.
+    Other 4D-input layers (e.g. Swin's ``norm1``, ``downsample.norm``, top-level ``norm``)
+    are handled dynamically by ``_disable_high_rank_input_quantizers`` via a forward-pass
+    rank probe — that avoids false positives on ViT, whose same-named ``norm`` sees 3D input.
     """
     pattern = re.compile(
         r".*(time_emb_proj|time_embedding|conv_in|conv_out|conv_shortcut|add_embedding|"
@@ -154,6 +157,41 @@ def filter_func(name):
         r"maxpool|global_pool|downsample\.reduction).*"
     )
     return pattern.match(name) is not None
+
+
+def _disable_high_rank_input_quantizers(model, input_shape, device):
+    """Disable quantizers on Linear/LayerNorm modules that receive 4D+ input.
+
+    TRT's MXFP8/NVFP4 ``DynamicQuantize`` op only supports 2D/3D input, so Swin's
+    per-block ``norm1``, ``downsample.norm``, and top-level ``norm`` (all 4D in Swin
+    but 3D in ViT) must be skipped. A forward pass with hooks identifies them at
+    runtime, so this works across architectures without hardcoded paths.
+    """
+    high_rank: set[str] = set()
+    handles = []
+    for name, mod in model.named_modules():
+        if isinstance(mod, (torch.nn.Linear, torch.nn.LayerNorm)):
+
+            def hook(m, inp, out, _n=name):
+                if inp and hasattr(inp[0], "ndim") and inp[0].ndim > 3:
+                    high_rank.add(_n)
+
+            handles.append(mod.register_forward_hook(hook))
+
+    was_training = model.training
+    model.eval()
+    try:
+        with torch.no_grad():
+            model(torch.randn(input_shape, device=device))
+    finally:
+        for h in handles:
+            h.remove()
+        model.train(was_training)
+
+    if not high_rank:
+        return
+    prefixes = tuple(n + "." for n in high_rank)
+    mtq.disable_quantizer(model, lambda n: n.startswith(prefixes))
 
 
 def load_calibration_data(model, data_size, batch_size, device, with_labels=False):
@@ -188,6 +226,28 @@ def load_calibration_data(model, data_size, batch_size, device, with_labels=Fals
         return torch.utils.data.DataLoader(
             calib_tensor, batch_size=batch_size, shuffle=True, num_workers=4
         )
+
+
+def _disable_dead_quantizers(model):
+    """Disable quantizers whose calibrated ``amax`` is non-positive or NaN.
+
+    ``export_fp8`` computes ``scale = 448 / amax`` and blows up on ``amax == 0``.
+    This shows up on SwinV2 with ``--no_pretrained``: timm's ``res-post-norm`` scheme
+    zero-inits each block's ``norm1``/``norm2`` weight and bias, so those LayerNorm
+    outputs are exactly zero at init and the MHA override's output_quantizer
+    calibrates to ``amax == 0``. Disable such dead quantizers — they have nothing
+    meaningful to quantize and would otherwise break ONNX export.
+    """
+    for _, mod in model.named_modules():
+        for attr in ("input_quantizer", "output_quantizer", "weight_quantizer"):
+            q = getattr(mod, attr, None)
+            if q is None or not q.is_enabled:
+                continue
+            amax = q.amax
+            if amax is None or not torch.is_tensor(amax):
+                continue
+            if torch.any(torch.isnan(amax)) or torch.all(amax <= 0):
+                q.disable()
 
 
 def _calibrate_uncalibrated_quantizers(model, data_loader):
@@ -239,6 +299,10 @@ def quantize_model(model, config, data_loader=None):
     # Calibrate any FP8 override quantizers that weren't calibrated by mtq.quantize().
     if data_loader is not None:
         _calibrate_uncalibrated_quantizers(quantized_model, data_loader)
+
+    # Drop quantizers whose calibration saw only zeros (e.g. SwinV2 zero-init norm1/norm2)
+    # so ``export_fp8`` doesn't divide by zero.
+    _disable_dead_quantizers(quantized_model)
 
     return quantized_model
 
@@ -323,6 +387,8 @@ def auto_quantize_model(
 
     # Disable quantization for specified layers
     mtq.disable_quantizer(quantized_model, filter_func)
+
+    _disable_dead_quantizers(quantized_model)
 
     return quantized_model, search_state
 
@@ -489,6 +555,16 @@ def main():
         )
 
         quantized_model = quantize_model(model, config, data_loader)
+
+    # MXFP8/NVFP4 lower their input quantizers to TRT DynamicQuantize (2D/3D only).
+    # Disable quantizers on 4D-input layers (Swin's norm1 / downsample.norm / top-level norm).
+    # Auto mode also needs this when an MXFP8/NVFP4 candidate format is in the search set.
+    uses_dynamic_quantize = args.quantize_mode in ("mxfp8", "nvfp4") or (
+        args.quantize_mode == "auto"
+        and any(fmt in _NEEDS_FP8_CONV_OVERRIDE for fmt in args.auto_quantization_formats)
+    )
+    if uses_dynamic_quantize:
+        _disable_high_rank_input_quantizers(quantized_model, input_shape, device)
 
     # Print quantization summary
     print("\nQuantization Summary:")
