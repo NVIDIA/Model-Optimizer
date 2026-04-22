@@ -472,6 +472,10 @@ class HFDFlashModel(DFlashModel):
         else:
             loss_mask = torch.ones(bsz, seq_len, device=device)
 
+        # In offline training, assistant mask is dumped and passed as kwarg.
+        if kwargs.get("loss_mask") is not None:
+            loss_mask = loss_mask * kwargs["loss_mask"]
+
         # 3. Random anchor sampling
         anchor_positions, block_keep_mask = self._sample_anchor_positions(
             seq_len, loss_mask, device
