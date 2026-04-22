@@ -572,7 +572,7 @@ def load_state_dict_from_path(
         saved_quant_dict = {
             key.replace("quantizer_", "quantizer._"): value
             for key, value in saved_quant_dict.items()
-            if "quantizer_" in key
+            if "quantizer" in key
         }
     saved_quant_dict = convert_dict_to_vllm(saved_quant_dict)
 
