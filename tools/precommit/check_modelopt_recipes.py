@@ -65,9 +65,40 @@ def _check_quant_cfg(quant_cfg, label: str) -> list[str]:
 
 
 def _load_yaml(path: Path) -> dict | None:
-    """Load a YAML file, returning None on parse failure."""
+    """Load a YAML file, returning None on parse failure.
+
+    Uses :func:`modelopt.recipe.load_config` when available so that the
+    ``!include`` and ``!concat`` custom tags resolve to their effective
+    values. Falls back to a tag-tolerant loader (which substitutes empty
+    values for the custom tags) when modelopt is not importable, so that
+    pre-commit can still run in stripped-down environments and structural
+    checks remain best-effort.
+    """
     try:
-        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        from modelopt.recipe import load_config
+
+        try:
+            data = load_config(path)
+        except Exception:
+            return None
+        return data if isinstance(data, dict) else None
+    except ImportError:
+        pass
+
+    class _TagTolerantLoader(yaml.SafeLoader):
+        pass
+
+    def _noop_scalar(loader, node):  # !include returns an empty mapping
+        return {}
+
+    def _noop_sequence(loader, node):  # !concat returns an empty sequence
+        return []
+
+    _TagTolerantLoader.add_constructor("!include", _noop_scalar)
+    _TagTolerantLoader.add_constructor("!concat", _noop_sequence)
+
+    try:
+        data = yaml.load(path.read_text(encoding="utf-8"), Loader=_TagTolerantLoader)
     except Exception:
         return None
     return data if isinstance(data, dict) else None
@@ -147,16 +178,43 @@ def _is_recipe_file(path: Path) -> bool:
     Currently only PTQ recipes are checked; other recipe types (e.g. QAT) can
     be added here in the future.
 
-    Malformed or unparseable files return True so that ``load_recipe()`` can
-    report the actual error.
+    Malformed mappings return True so that ``load_recipe()`` can report the
+    actual error. Files that parse to non-mapping nodes (e.g. the shared
+    list-shaped fragments under ``modelopt_recipes/_base/``) are explicitly
+    treated as non-recipes and skipped.
     """
     data = _load_yaml(path)
     if data is None:
-        return True  # let load_recipe report the parse error
+        # Distinguish "parse failed" from "parsed to a non-mapping node"; only
+        # the latter is a known non-recipe (shared fragment) we should skip.
+        try:
+            raw = yaml.load(
+                path.read_text(encoding="utf-8"),
+                Loader=_make_introspection_loader(),
+            )
+        except Exception:
+            return True  # genuine parse failure: let load_recipe surface it
+        return isinstance(raw, dict)
     metadata = data.get("metadata")
     if not isinstance(metadata, dict) or "recipe_type" not in metadata:
         return False  # not a recipe file at all
     return metadata["recipe_type"] == "ptq"
+
+
+def _make_introspection_loader() -> type[yaml.SafeLoader]:
+    """SafeLoader that tolerates the modelopt custom tags for shape inspection only.
+
+    Used solely to determine whether a fragment is a YAML mapping (potentially
+    a recipe) or a sequence (definitely a shared fragment). The tag values are
+    irrelevant here, so they are stubbed.
+    """
+
+    class _IntrospectionLoader(yaml.SafeLoader):
+        pass
+
+    _IntrospectionLoader.add_constructor("!include", lambda loader, node: {})
+    _IntrospectionLoader.add_constructor("!concat", lambda loader, node: [])
+    return _IntrospectionLoader
 
 
 def _resolve_recipes(changed_files: list[str]) -> dict[Path, str]:

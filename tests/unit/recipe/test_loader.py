@@ -18,6 +18,7 @@
 import re
 
 import pytest
+import yaml
 
 from modelopt.recipe.config import ModelOptPTQRecipe, RecipeType
 from modelopt.recipe.loader import load_config, load_recipe
@@ -154,6 +155,91 @@ def test_load_recipe_unsupported_type_raises(tmp_path):
     bad.write_text(CFG_RECIPE_UNSUPPORTED_TYPE)
     with pytest.raises(ValueError, match="Unsupported recipe type"):
         load_recipe(bad)
+
+
+# ---------------------------------------------------------------------------
+# load_config — !include / !concat custom tags
+# ---------------------------------------------------------------------------
+
+
+def test_include_relative_path(tmp_path):
+    """!include resolves a path relative to the including file."""
+    (tmp_path / "child.yml").write_text("a: 1\nb: 2\n")
+    (tmp_path / "parent.yml").write_text("payload: !include child.yml\n")
+    assert load_config(tmp_path / "parent.yml") == {"payload": {"a": 1, "b": 2}}
+
+
+def test_include_suffix_optional(tmp_path):
+    """!include probes .yml / .yaml when the suffix is omitted."""
+    (tmp_path / "child.yaml").write_text("k: v\n")
+    (tmp_path / "parent.yml").write_text("payload: !include child\n")
+    assert load_config(tmp_path / "parent.yml") == {"payload": {"k": "v"}}
+
+
+def test_include_builtin_recipe_fragment(tmp_path):
+    """!include resolves built-in fragments under modelopt_recipes/."""
+    (tmp_path / "parent.yml").write_text("disable_all: !include _base/disable_all\n")
+    out = load_config(tmp_path / "parent.yml")
+    assert out == {"disable_all": [{"quantizer_name": "*", "enable": False}]}
+
+
+def test_include_inside_concat(tmp_path):
+    """!include nested under !concat splices its sequence; inline mappings are appended."""
+    (tmp_path / "head.yml").write_text("- {quantizer_name: '*', enable: false}\n")
+    (tmp_path / "tail.yml").write_text("- {quantizer_name: '*lm_head*', enable: false}\n")
+    (tmp_path / "parent.yml").write_text(
+        "quant_cfg: !concat\n"
+        "  - !include head.yml\n"
+        "  - {quantizer_name: '*weight_quantizer', cfg: {num_bits: 8}}\n"
+        "  - !include tail.yml\n"
+    )
+    out = load_config(tmp_path / "parent.yml")
+    assert out == {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8}},
+            {"quantizer_name": "*lm_head*", "enable": False},
+        ]
+    }
+
+
+def test_concat_passes_through_non_sequence_items(tmp_path):
+    """!concat splices sequences and passes mappings/scalars through as-is."""
+    (tmp_path / "parent.yml").write_text(
+        "values: !concat\n  - [1, 2]\n  - 3\n  - {a: 1}\n  - [4, 5]\n"
+    )
+    out = load_config(tmp_path / "parent.yml")
+    assert out == {"values": [1, 2, 3, {"a": 1}, 4, 5]}
+
+
+def test_concat_requires_sequence_node(tmp_path):
+    """!concat must be applied to a YAML sequence, not a scalar/mapping."""
+    (tmp_path / "parent.yml").write_text("values: !concat 42\n")
+    with pytest.raises(yaml.YAMLError, match="!concat expects a sequence"):
+        load_config(tmp_path / "parent.yml")
+
+
+def test_include_cycle_detected(tmp_path):
+    """A self-including chain raises ValueError instead of recursing forever."""
+    (tmp_path / "a.yml").write_text("payload: !include b.yml\n")
+    (tmp_path / "b.yml").write_text("payload: !include a.yml\n")
+    with pytest.raises(ValueError, match="Cycle detected"):
+        load_config(tmp_path / "a.yml")
+
+
+def test_include_missing_target_raises(tmp_path):
+    """!include with an unresolvable target raises ValueError."""
+    (tmp_path / "parent.yml").write_text("payload: !include nope\n")
+    with pytest.raises(ValueError, match="Cannot find config file"):
+        load_config(tmp_path / "parent.yml")
+
+
+def test_include_preserves_exmy_parsing(tmp_path):
+    """ExMy strings inside an included fragment are still converted to tuples."""
+    (tmp_path / "child.yml").write_text("cfg:\n  num_bits: e4m3\n")
+    (tmp_path / "parent.yml").write_text("entry: !include child.yml\n")
+    out = load_config(tmp_path / "parent.yml")
+    assert out == {"entry": {"cfg": {"num_bits": (4, 3)}}}
 
 
 # ---------------------------------------------------------------------------
