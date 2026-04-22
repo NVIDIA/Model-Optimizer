@@ -242,7 +242,7 @@ def make_calib_dataloader(
             batch_size=args.batch_size,
             num_samples=args.calib_size[0],
             device=device,
-            max_length=args.calib_seq,
+            max_sample_length=args.calib_seq,
             require_image=True,
             subsets=["sparsetables", "plotqa_cot", "wiki_en"],
             shuffle_buffer_size=10_000,
