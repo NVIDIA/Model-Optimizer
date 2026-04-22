@@ -13,18 +13,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
 import pytest
 
-from modelopt.torch.quantization import triton as triton_kernel
 
+@pytest.fixture(scope="session")
+def tiny_wan22_path(tmp_path_factory):
+    """Create a tiny Wan 2.2 (14B-style) pipeline and return its path.
 
-@pytest.fixture(autouse=True)
-def env_setup(monkeypatch):
-    monkeypatch.setenv("NVIDIA_TF32_OVERRIDE", "0")
+    Built once per session and shared across all tests that need it.
+    """
+    try:
+        from _test_utils.torch.diffusers_models import create_tiny_wan22_pipeline_dir
+    except ImportError:
+        pytest.skip("Wan 2.2 diffusers models not available (requires diffusers with WanPipeline)")
 
-
-requires_triton = pytest.mark.skipif(
-    not triton_kernel.IS_AVAILABLE,
-    reason="Triton not available",
-)
+    tmp_path = tmp_path_factory.mktemp("wan22")
+    return str(create_tiny_wan22_pipeline_dir(tmp_path))

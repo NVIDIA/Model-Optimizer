@@ -128,3 +128,84 @@ def test_diffusers_hf_ckpt_export(model: DiffuserHfExportModel, tmp_path: Path) 
 
     weight_files = list(hf_ckpt_dir.rglob("*.safetensors")) + list(hf_ckpt_dir.rglob("*.bin"))
     assert len(weight_files) > 0, f"No weight files (.safetensors or .bin) found in {hf_ckpt_dir}"
+
+
+class Wan22HfExportModel(NamedTuple):
+    model: str
+    backbone: str | None
+    format_type: str
+    quant_algo: str
+    collect_method: str
+
+    def _suffix(self) -> str:
+        stem = self.model.replace("wan2.2-t2v-", "")
+        parts = [stem, *([self.backbone] if self.backbone else []), self.format_type]
+        return "_".join(parts)
+
+    def quantize_and_export_hf(self, tiny_wan22_path: str, tmp_path: Path) -> Path:
+        hf_ckpt_dir = tmp_path / f"wan22_{self._suffix()}_hf_ckpt"
+        cmd_args = [
+            "python",
+            "quantize.py",
+            "--model",
+            self.model,
+            "--override-model-path",
+            tiny_wan22_path,
+            "--format",
+            self.format_type,
+            "--quant-algo",
+            self.quant_algo,
+            "--collect-method",
+            self.collect_method,
+            "--model-dtype",
+            "BFloat16",
+            "--trt-high-precision-dtype",
+            "BFloat16",
+            "--calib-size",
+            "2",
+            "--batch-size",
+            "1",
+            "--n-steps",
+            "2",
+            # Tiny video dims — override MODEL_DEFAULTS for fast CI.
+            "--extra-param",
+            "height=16",
+            "--extra-param",
+            "width=16",
+            "--extra-param",
+            "num_frames=5",
+            "--hf-ckpt-dir",
+            str(hf_ckpt_dir),
+        ]
+        if self.backbone is not None:
+            cmd_args.extend(["--backbone", self.backbone])
+        run_example_command(cmd_args, "diffusers/quantization")
+        return hf_ckpt_dir
+
+
+@pytest.mark.parametrize(
+    "wan_model",
+    [
+        Wan22HfExportModel("wan2.2-t2v-14b", None, "int8", "smoothquant", "min-mean"),
+        pytest.param(
+            Wan22HfExportModel("wan2.2-t2v-14b", None, "fp8", "max", "default"),
+            marks=minimum_sm(89),
+        ),
+    ],
+    ids=[
+        "wan22_14b_transformer_int8_smoothquant",
+        "wan22_14b_transformer_fp8_max",
+    ],
+)
+def test_wan22_hf_ckpt_export(
+    wan_model: Wan22HfExportModel, tiny_wan22_path: str, tmp_path: Path
+) -> None:
+    hf_ckpt_dir = wan_model.quantize_and_export_hf(tiny_wan22_path, tmp_path)
+
+    assert hf_ckpt_dir.exists(), f"HF checkpoint directory was not created: {hf_ckpt_dir}"
+
+    config_files = list(hf_ckpt_dir.rglob("config.json"))
+    assert len(config_files) > 0, f"No config.json found in {hf_ckpt_dir}"
+
+    weight_files = list(hf_ckpt_dir.rglob("*.safetensors")) + list(hf_ckpt_dir.rglob("*.bin"))
+    assert len(weight_files) > 0, f"No weight files (.safetensors or .bin) found in {hf_ckpt_dir}"
