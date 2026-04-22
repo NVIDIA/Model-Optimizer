@@ -271,6 +271,91 @@ For entirely custom recipes, compose the list directly:
 
     model = mtq.quantize(model, MY_CUSTOM_CFG, forward_loop)
 
+.. tip::
+
+    The boilerplate ``_base_disable_all`` prepend and ``_default_disabled_quantizer_cfg``
+    suffix can be replaced with the :ref:`disable-sensitive-layers <disable-sensitive-layers>`
+    field, which is friendlier for YAML recipes and Pydantic-validated configs:
+
+    .. code-block:: python
+
+        MY_CUSTOM_CFG = {
+            "quant_cfg": [
+                {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 4, "block_sizes": {-1: 128}}},
+                {"quantizer_name": "*input_quantizer", "cfg": {"num_bits": 8, "axis": None}},
+            ],
+            "algorithm": "max",
+            "disable_sensitive_layers": True,
+        }
+
+----------
+
+.. _disable-sensitive-layers:
+
+Auto-Expanding with ``disable_sensitive_layers``
+=================================================
+
+Most PTQ recipes use the same bracket pattern: a leading deny-all, then the user's enable rules,
+then a trailing list of always-disabled "sensitive" layers (``lm_head``, MoE routers, BatchNorm,
+Mamba ``conv1d``, etc.). Writing all three layers by hand is verbose and easy to get wrong,
+especially in YAML.
+
+The :class:`QuantizeConfig <modelopt.torch.quantization.config.QuantizeConfig>` schema accepts a
+top-level ``disable_sensitive_layers`` field that drives a Pydantic
+:func:`model_validator` to wrap the user-provided ``quant_cfg`` automatically:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 25 75
+
+   * - Value
+     - Behavior
+   * - ``None`` (default)
+     - **Backward-compatible passthrough.** ``quant_cfg`` is left untouched. Use this if you
+       are hand-composing the full bracket (as ``FP8_DEFAULT_CFG`` and other built-in Python
+       constants do).
+   * - ``True``
+     - Auto-prepend ``{quantizer_name: '*', enable: False}`` and auto-append
+       :data:`_default_disabled_quantizer_cfg <modelopt.torch.quantization.config._default_disabled_quantizer_cfg>`
+       (lm_head, MoE routers, BatchNorm, Mamba conv1d, output layers, …).
+   * - ``False``
+     - Auto-prepend the deny-all only. No sensitive-layer suffix. Useful when you want a clean
+       start without ModelOpt's opinionated sensitive-layer set.
+   * - ``list[str]``
+     - Auto-prepend the deny-all and append a custom suffix where each pattern in the list is
+       disabled (``{quantizer_name: <pattern>, enable: False}``).
+
+The expansion is performed by :func:`expand_quant_cfg
+<modelopt.torch.quantization.config.expand_quant_cfg>` once during
+``QuantizeConfig`` validation. After expansion the field is reset to ``None`` so a round-trip
+through ``model_dump()`` does **not** double-expand.
+
+YAML example
+------------
+
+.. code-block:: yaml
+
+    quantize:
+      algorithm: max
+      disable_sensitive_layers: true
+      quant_cfg:
+        - quantizer_name: '*input_quantizer'
+          cfg:
+            num_bits: e4m3
+            axis:
+        - quantizer_name: '*weight_quantizer'
+          cfg:
+            num_bits: e4m3
+            axis:
+        - quantizer_name: '*[kv]_bmm_quantizer'
+          enable: true
+          cfg:
+            num_bits: e4m3
+
+is equivalent to the hand-built form (see ``modelopt.torch.quantization.config.FP8_DEFAULT_CFG``)
+where ``_base_disable_all`` is prepended and ``_default_disabled_quantizer_cfg`` is appended
+explicitly.
+
 ----------
 
 .. _sequential-quantizers:
@@ -390,4 +475,5 @@ Reference
 - :class:`QuantizerCfgEntry <modelopt.torch.quantization.config.QuantizerCfgEntry>`
 - :class:`QuantizerAttributeConfig <modelopt.torch.quantization.config.QuantizerAttributeConfig>`
 - :class:`QuantizeConfig <modelopt.torch.quantization.config.QuantizeConfig>`
+- :func:`expand_quant_cfg <modelopt.torch.quantization.config.expand_quant_cfg>`
 - :func:`set_quantizer_by_cfg <modelopt.torch.quantization.conversion.set_quantizer_by_cfg>`

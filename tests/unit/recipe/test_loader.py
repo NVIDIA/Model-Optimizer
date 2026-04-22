@@ -109,6 +109,8 @@ _BUILTIN_PTQ_RECIPES = [
     "general/ptq/nvfp4_default-fp8_kv",
     "general/ptq/nvfp4_mlp_only-fp8_kv",
     "general/ptq/nvfp4_omlp_only-fp8_kv",
+    "general/ptq/nvfp4_experts_only-fp8_kv",
+    "general/ptq/nvfp4_default-none_kv_gptq",
 ]
 
 
@@ -203,7 +205,15 @@ def test_load_recipe_dir_missing_quantize_raises(tmp_path):
     ],
 )
 def test_general_ptq_yaml_matches_config_dicts(yaml_path, model_cfg_name, kv_cfg_name):
-    """Each general/ptq YAML's quant_cfg list matches the merged Python config dicts."""
+    """Each general/ptq YAML's expanded quant_cfg matches the merged Python config dicts.
+
+    The YAML side is loaded through ``load_recipe`` so that
+    ``QuantizeConfig.disable_sensitive_layers`` triggers the same disable-all-prepend +
+    sensitive-layer-suffix expansion that ``mtq.quantize`` will see at runtime. The
+    Python side is the historical hand-built form (``_base_disable_all`` + user entries +
+    ``_default_disabled_quantizer_cfg``) which has the same shape post-normalize, so the
+    two should be set-equivalent.
+    """
     import json
 
     import modelopt.torch.quantization.config as qcfg
@@ -211,7 +221,7 @@ def test_general_ptq_yaml_matches_config_dicts(yaml_path, model_cfg_name, kv_cfg
 
     model_cfg = getattr(qcfg, model_cfg_name)
     kv_cfg = getattr(qcfg, kv_cfg_name)
-    yaml_data = load_config(yaml_path)
+    recipe = load_recipe(yaml_path)
 
     def _normalize_fpx(val):
         """Normalize FPx representations to a canonical ``[E, M]`` list.
@@ -245,7 +255,9 @@ def test_general_ptq_yaml_matches_config_dicts(yaml_path, model_cfg_name, kv_cfg
         return json.dumps(entry, sort_keys=True, default=str)
 
     python_entries = _normalize_entries(model_cfg["quant_cfg"] + kv_cfg["quant_cfg"])
-    yaml_entries = _normalize_entries(yaml_data["quantize"]["quant_cfg"])
+    yaml_entries = _normalize_entries(recipe.quantize.quant_cfg)
 
     assert sorted(python_entries, key=_sort_key) == sorted(yaml_entries, key=_sort_key)
-    assert model_cfg["algorithm"] == yaml_data["quantize"]["algorithm"]
+    assert model_cfg["algorithm"] == recipe.quantize.algorithm
+    # disable_sensitive_layers is consumed by the model_validator and reset to None.
+    assert recipe.quantize.disable_sensitive_layers is None

@@ -1723,6 +1723,63 @@ def normalize_quant_cfg_list(v: dict | list) -> list[QuantizerCfgEntry]:
     return result
 
 
+def expand_quant_cfg(
+    quant_cfg: list[QuantizerCfgEntry],
+    disable_sensitive_layers: bool | list[str],
+) -> list[QuantizerCfgEntry]:
+    """Wrap a user ``quant_cfg`` with the standard PTQ defaults.
+
+    This produces the well-known "managed" PTQ ordering:
+
+    1. **Disable everything** (``{quantizer_name: '*', enable: False}``) — auto-prepended.
+    2. **User entries** — applied verbatim.
+    3. **Re-disable sensitive layers** — appended only when
+       ``disable_sensitive_layers`` is truthy.
+
+    Because :func:`set_quantizer_by_cfg` applies entries in list order with
+    last-match-wins semantics per quantizer, the bracket pattern (disable →
+    enable specific → re-disable sensitive) is what protects ``lm_head``,
+    BatchNorm, MoE routers, etc. from the broad enable wildcards in the
+    middle.
+
+    Args:
+        quant_cfg: The user-provided list of :class:`QuantizerCfgEntry` dicts
+            (already normalized via :func:`normalize_quant_cfg_list`).
+        disable_sensitive_layers: Controls the appended suffix.
+
+            * ``True`` — append the curated ModelOpt sensitive-layer disables
+              (:data:`_default_disabled_quantizer_cfg`).
+            * ``False`` — append nothing; only the leading disable-all entry
+              is added. Useful when the user wants the "start clean" behavior
+              without ModelOpt's opinionated sensitive-layer set.
+            * ``list[str]`` — append a custom set of quantizer-name patterns,
+              each disabled.
+
+    Returns:
+        The expanded list, re-normalized via :func:`normalize_quant_cfg_list`
+        so every returned entry is in canonical form regardless of the input
+        shape of the splice constants.
+    """
+    out: list[QuantizerCfgEntry] = list(_base_disable_all)
+    out.extend(quant_cfg)
+    if disable_sensitive_layers is True:
+        out.extend(_default_disabled_quantizer_cfg)
+    elif isinstance(disable_sensitive_layers, list):
+        invalid = [p for p in disable_sensitive_layers if not isinstance(p, str)]
+        if invalid:
+            raise TypeError(
+                "disable_sensitive_layers list entries must all be strings (quantizer-name "
+                f"patterns); got non-str values {invalid!r}."
+            )
+        out.extend({"quantizer_name": p, "enable": False} for p in disable_sensitive_layers)
+    elif disable_sensitive_layers is not False:
+        raise TypeError(
+            "disable_sensitive_layers must be a bool or a list of quantizer-name "
+            f"patterns; got {type(disable_sensitive_layers).__name__}."
+        )
+    return normalize_quant_cfg_list(out)
+
+
 class QuantizeConfig(ModeloptBaseConfig):
     """Default configuration for ``quantize`` mode."""
 
@@ -1737,6 +1794,25 @@ class QuantizeConfig(ModeloptBaseConfig):
         title="Calibration algorithm, see :meth:`calibrate <modelopt.torch.quantization.model_quant.calibrate>` "
         "for more details.",
         validate_default=True,
+    )
+
+    disable_sensitive_layers: bool | list[str] | None = ModeloptField(
+        default=None,
+        title="Auto-expand quant_cfg with the standard PTQ defaults.",
+        description=(
+            "When set (any non-``None`` value), :func:`expand_quant_cfg` is invoked to "
+            "rewrite ``quant_cfg`` into "
+            "``[{'quantizer_name': '*', 'enable': False}] + quant_cfg + suffix`` "
+            "before quantization runs. The value controls the suffix:\n\n"
+            "* ``True`` — append ModelOpt's curated sensitive-layer disables "
+            "(:data:`_default_disabled_quantizer_cfg`: ``lm_head``, BatchNorm, MoE "
+            "routers, Mamba conv1d, etc.).\n"
+            "* ``False`` — append nothing; only the leading disable-all is added.\n"
+            "* ``list[str]`` — append the given quantizer-name patterns, each disabled.\n\n"
+            "When unset (``None``, the default), ``quant_cfg`` is passed through verbatim "
+            "for backward compatibility with hand-built configs that already include their "
+            "own disable-all and sensitive-layer entries (e.g. ``FP8_DEFAULT_CFG``)."
+        ),
     )
 
     @field_validator("quant_cfg", mode="before")
@@ -1761,6 +1837,29 @@ class QuantizeConfig(ModeloptBaseConfig):
                 if isinstance(c, dict) and qac_fields & set(c.keys()):
                     QuantizerAttributeConfig.model_validate(c)
         return v
+
+    @model_validator(mode="after")
+    def expand_quant_cfg_with_defaults(self):
+        """Expand ``quant_cfg`` with PTQ defaults when ``disable_sensitive_layers`` is set.
+
+        After this validator runs ``disable_sensitive_layers`` is reset to ``None`` so that a
+        round-trip through ``model_dump()`` -> ``QuantizeConfig(**dump)`` does **not**
+        re-prepend / re-append the defaults a second time.
+
+        Note: we use ``object.__setattr__`` to bypass ``validate_assignment=True`` on
+        :class:`ModeloptBaseConfig`. The expanded list returned by :func:`expand_quant_cfg`
+        is already in canonical form (it calls :func:`normalize_quant_cfg_list` internally),
+        so re-running the field validators on assignment would just be wasted work.
+        """
+        if self.disable_sensitive_layers is None:
+            return self
+        object.__setattr__(
+            self,
+            "quant_cfg",
+            expand_quant_cfg(self.quant_cfg, self.disable_sensitive_layers),
+        )
+        object.__setattr__(self, "disable_sensitive_layers", None)
+        return self
 
 
 class CompressConfig(ModeloptBaseConfig):

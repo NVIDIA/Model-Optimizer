@@ -26,6 +26,9 @@ from modelopt.torch.quantization.config import (
     NVFP4_DEFAULT_CFG,
     W4A8_AWQ_BETA_CFG,
     QuantizeConfig,
+    _base_disable_all,
+    _default_disabled_quantizer_cfg,
+    expand_quant_cfg,
     find_quant_cfg_entry_by_path,
     need_calibration,
     normalize_quant_cfg_list,
@@ -525,3 +528,119 @@ class TestQuantizeConfigValidators:
             algorithm="max",
         )
         assert len(cfg.quant_cfg) == 2
+
+
+class TestExpandQuantCfg:
+    """Tests for ``expand_quant_cfg`` and the ``disable_sensitive_layers`` field."""
+
+    USER_ENTRIES = [
+        {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
+        {"quantizer_name": "*input_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
+    ]
+
+    def test_expand_true_prepends_disable_all_and_appends_defaults(self):
+        out = expand_quant_cfg(normalize_quant_cfg_list(self.USER_ENTRIES), True)
+        assert out[0] == {"quantizer_name": "*", "enable": False, "cfg": None}
+        # User entries follow the disable-all
+        assert out[1]["quantizer_name"] == "*weight_quantizer"
+        assert out[2]["quantizer_name"] == "*input_quantizer"
+        # Sensitive disables follow user entries
+        names = {e["quantizer_name"] for e in out[3:]}
+        assert "*lm_head*" in names
+        assert "*router*" in names
+        assert len(out) == len(_base_disable_all) + 2 + len(_default_disabled_quantizer_cfg)
+
+    def test_expand_false_prepends_disable_all_only(self):
+        out = expand_quant_cfg(normalize_quant_cfg_list(self.USER_ENTRIES), False)
+        assert out[0] == {"quantizer_name": "*", "enable": False, "cfg": None}
+        assert len(out) == 1 + 2  # only the prepend, no sensitive-disabled suffix
+
+    def test_expand_list_appends_custom_disables(self):
+        out = expand_quant_cfg(
+            normalize_quant_cfg_list(self.USER_ENTRIES), ["*custom*", "*another*"]
+        )
+        assert {"quantizer_name": "*custom*", "enable": False, "cfg": None} in out
+        assert {"quantizer_name": "*another*", "enable": False, "cfg": None} in out
+        # No ModelOpt sensitive-defaults appended in list mode.
+        assert not any(e.get("quantizer_name") == "*lm_head*" for e in out)
+        assert len(out) == 1 + 2 + 2
+
+    def test_expand_invalid_type_raises(self):
+        with pytest.raises(TypeError, match="disable_sensitive_layers must be"):
+            expand_quant_cfg(normalize_quant_cfg_list(self.USER_ENTRIES), 42)  # type: ignore[arg-type]
+
+    def test_expand_returns_canonical_normalized_entries(self):
+        """Every entry returned by expand_quant_cfg has both ``enable`` and ``cfg`` keys."""
+        out = expand_quant_cfg(normalize_quant_cfg_list(self.USER_ENTRIES), True)
+        for entry in out:
+            assert "enable" in entry
+            assert "cfg" in entry
+            assert "quantizer_name" in entry
+
+
+class TestQuantizeConfigDisableSensitiveLayers:
+    """Tests for the ``disable_sensitive_layers`` field on ``QuantizeConfig``."""
+
+    USER_ENTRIES = [
+        {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
+        {"quantizer_name": "*input_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
+    ]
+
+    def test_default_passthrough(self):
+        """When unset, quant_cfg is passed through verbatim (backward compat)."""
+        cfg = QuantizeConfig(quant_cfg=list(self.USER_ENTRIES), algorithm="max")
+        assert cfg.disable_sensitive_layers is None
+        assert len(cfg.quant_cfg) == 2
+
+    def test_true_matches_legacy_fp8_default(self):
+        """``disable_sensitive_layers=True`` reproduces FP8_DEFAULT_CFG semantics.
+
+        Compares ``quant_cfg`` order-sensitively: ``set_quantizer_by_cfg`` applies
+        entries in list order with last-match-wins per quantizer, so the bracket
+        ordering (disable-all → user entries → sensitive-layer disables) is
+        semantically meaningful and must be preserved exactly.
+        """
+        legacy = QuantizeConfig(**FP8_DEFAULT_CFG)
+        managed = QuantizeConfig(
+            quant_cfg=list(self.USER_ENTRIES),
+            algorithm="max",
+            disable_sensitive_layers=True,
+        )
+        # Field is consumed by the model_validator and reset to None.
+        assert managed.disable_sensitive_layers is None
+        assert legacy.quant_cfg == managed.quant_cfg
+
+    def test_false_only_prepends_disable_all(self):
+        cfg = QuantizeConfig(
+            quant_cfg=list(self.USER_ENTRIES),
+            algorithm="max",
+            disable_sensitive_layers=False,
+        )
+        assert cfg.disable_sensitive_layers is None
+        assert cfg.quant_cfg[0] == {"quantizer_name": "*", "enable": False, "cfg": None}
+        # No lm_head/BatchNorm appended.
+        assert not any(e.get("quantizer_name") == "*lm_head*" for e in cfg.quant_cfg)
+
+    def test_list_appends_custom_patterns(self):
+        cfg = QuantizeConfig(
+            quant_cfg=list(self.USER_ENTRIES),
+            algorithm="max",
+            disable_sensitive_layers=["*custom*"],
+        )
+        assert any(
+            e.get("quantizer_name") == "*custom*" and e.get("enable") is False
+            for e in cfg.quant_cfg
+        )
+
+    def test_round_trip_through_model_dump_is_idempotent(self):
+        """A round-trip through ``model_dump()`` -> ``QuantizeConfig(**dump)`` must not double-expand."""
+        cfg = QuantizeConfig(
+            quant_cfg=list(self.USER_ENTRIES),
+            algorithm="max",
+            disable_sensitive_layers=True,
+        )
+        dump = cfg.model_dump()
+        # The field is dumped (as None now) but re-validation is a no-op since it's None.
+        assert dump.get("disable_sensitive_layers") is None
+        cfg2 = QuantizeConfig(**dump)
+        assert len(cfg2.quant_cfg) == len(cfg.quant_cfg)

@@ -69,9 +69,10 @@ The simplest form is a single ``.yml`` or ``.yaml`` file.  Here is a PTQ example
 
    quantize:
      algorithm: max
+     # Auto-prepend a deny-all and auto-append ModelOpt's curated sensitive-layer disables
+     # (lm_head, MoE routers, BatchNorm, Mamba conv1d, ...). See :ref:`disable-sensitive-layers`.
+     disable_sensitive_layers: true
      quant_cfg:
-       - quantizer_name: '*'
-         enable: false
        - quantizer_name: '*input_quantizer'
          cfg:
            num_bits: e4m3
@@ -84,7 +85,6 @@ The simplest form is a single ``.yml`` or ``.yaml`` file.  Here is a PTQ example
          enable: true
          cfg:
            num_bits: e4m3
-       # ... standard exclusions omitted for brevity
 
 Directory format
 ----------------
@@ -112,9 +112,8 @@ example:
 .. code-block:: yaml
 
    algorithm: max
+   disable_sensitive_layers: true
    quant_cfg:
-     - quantizer_name: '*'
-       enable: false
      - quantizer_name: '*weight_quantizer'
        cfg:
          num_bits: e2m1
@@ -175,6 +174,13 @@ PTQ recipes contain a ``quantize`` mapping with:
      - The calibration algorithm: ``"max"`` (default), ``"mse"``, ``"smoothquant"``,
        ``"awq_lite"``, ``"awq_full"``, ``"awq_clip"``, ``"gptq"``, or ``null`` for
        formats that need no calibration (e.g. MX formats).
+   * - ``disable_sensitive_layers``
+     - No
+     - When set, automatically wraps ``quant_cfg`` with a leading deny-all and a trailing
+       set of sensitive-layer disables. ``true`` appends ModelOpt's curated defaults
+       (lm_head, MoE routers, BatchNorm, Mamba conv1d, ...); ``false`` only prepends the
+       deny-all; a list of patterns appends a custom suffix. Defaults to ``null``
+       (passthrough). See :ref:`disable-sensitive-layers`.
 
 
 ExMy floating-point notation
@@ -366,9 +372,10 @@ Example -- creating a custom PTQ recipe (INT8 per-channel):
 
    quantize:
      algorithm: max
+     # Auto-prepend deny-all and auto-append the curated sensitive-layer disables
+     # (which already includes ``*lm_head*`` and ``*output_layer*``).
+     disable_sensitive_layers: true
      quant_cfg:
-       - quantizer_name: '*'
-         enable: false
        - quantizer_name: '*weight_quantizer'
          cfg:
            num_bits: 8
@@ -377,10 +384,6 @@ Example -- creating a custom PTQ recipe (INT8 per-channel):
          cfg:
            num_bits: 8
            axis:
-       - quantizer_name: '*lm_head*'
-         enable: false
-       - quantizer_name: '*output_layer*'
-         enable: false
 
 
 Recipe repository layout
