@@ -286,9 +286,21 @@ class VSA(SparseAttentionMethod):
         query_tiled = self._tile_tensor(query, metadata)
         key_tiled = self._tile_tensor(key, metadata)
         value_tiled = self._tile_tensor(value, metadata)
-        gate_tiled = (
-            self._tile_tensor(gate_compress, metadata) if gate_compress is not None else None
-        )
+        if gate_compress is not None:
+            gate_tiled = self._tile_tensor(gate_compress, metadata)
+        else:
+            # The fastvideo kernel's default behaviour when
+            # ``compress_attn_weight is None`` is ``out_c + out_s`` — i.e. it
+            # *adds* the compression branch at full strength on top of the
+            # sparse branch.  For models without a learned ``gate_compress``
+            # (e.g. Wan 2.2), this doubles the attention signal and corrupts
+            # the output.  The intended "no gate" semantics is
+            # ``gate_compress = 0`` → ``out = 0 * out_c + out_s = out_s``,
+            # which (a) matches an untrained LTX-2 whose ``to_gate_compress``
+            # is zero-initialised, and (b) makes VSA at ``top_k_ratio=1.0``
+            # reduce to dense attention (since ``out_s`` with all blocks
+            # selected is mathematically equivalent to dense SDPA).
+            gate_tiled = torch.zeros((), dtype=query_tiled.dtype, device=query_tiled.device)
 
         # ========== TRITON VSA KERNEL ==========
         # Kernel operates on tiled tensors in [batch, heads, padded_seq, dim] format
