@@ -28,7 +28,7 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not 
 @pytest.fixture(scope="module")
 def cuda_conv3d():
     """Import and return the CUDA implicit GEMM conv3d function."""
-    from experimental.conv.implicit_gemm_cuda import conv3d_implicit_gemm_cuda
+    from modelopt.torch.quantization.src.conv.implicit_gemm_cuda import conv3d_implicit_gemm_cuda
 
     return conv3d_implicit_gemm_cuda
 
@@ -303,9 +303,9 @@ class TestConv3dDeterminism:
 
 
 @pytest.fixture(scope="module")
-def cuda_fp4_quant():
-    """Import FP4 fake quant for reference comparisons."""
-    from experimental.conv.implicit_gemm_cuda import fp4_fake_quant
+def cuda_fp4():
+    """Import and return the CUDA FP4 fake quant function."""
+    from modelopt.torch.quantization.src.conv.implicit_gemm_cuda import fp4_fake_quant
 
     return fp4_fake_quant
 
@@ -361,7 +361,7 @@ class TestConv3dFP4QuantBlockSizes:
         assert torch.equal(out1, out2), f"Non-deterministic for fp4_block_size={fp4_block_size}"
 
     @pytest.mark.parametrize("fp4_block_size", [16, 32, 64, 128, 256])
-    def test_quant_vs_unfused_reference(self, cuda_conv3d, cuda_fp4_quant, fp4_block_size):
+    def test_quant_vs_unfused_reference(self, cuda_conv3d, cuda_fp4, fp4_block_size):
         """Compare fused kernel vs unfused: fp4(im2col) @ fp4(weight).
 
         Uses a shape where K is a multiple of 256 so all K-tiles are full
@@ -382,9 +382,9 @@ class TestConv3dFP4QuantBlockSizes:
         im2col = x.permute(0, 2, 3, 4, 1).reshape(-1, cin)  # [M, K]
 
         # 2. FP4 fake-quant both matrices along K with the same block_size
-        im2col_q = cuda_fp4_quant(im2col, act_amax, fp4_block_size)
+        im2col_q = cuda_fp4(im2col, act_amax, fp4_block_size)
         w_flat = w.reshape(cout, cin).transpose(0, 1).contiguous()  # [K, Cout]
-        w_flat_q = cuda_fp4_quant(w_flat, w_amax, fp4_block_size)
+        w_flat_q = cuda_fp4(w_flat, w_amax, fp4_block_size)
 
         # 3. Matmul (in BF16 to match kernel's WMMA path)
         ref_out = (im2col_q.bfloat16() @ w_flat_q.bfloat16()).float()
@@ -421,81 +421,33 @@ class TestConv3dFP4QuantBlockSizes:
         """Smaller FP4 block sizes should generally produce lower quantization error.
 
         Finer-grained blocks capture local ranges better, reducing quant error vs cuDNN.
-        Test monotonicity: error(16) <= error(32) <= ... <= error(256) (with some tolerance).
-        Reports detailed accuracy metrics for each block size vs cuDNN baseline.
+        Test monotonicity on a medium config: error(16) <= error(64) <= error(256) (with 1.2x slack).
         """
         torch.manual_seed(42)
 
-        # Test multiple shapes to get a comprehensive picture
-        configs = [
-            ("Small K=432", 1, 16, 8, 8, 8, 32, 3, 3, 3),
-            ("Medium K=1728", 1, 64, 8, 8, 8, 64, 3, 3, 3),
-            ("Large K=3456", 1, 128, 5, 8, 8, 256, 3, 3, 3),
-        ]
+        # Medium K=1728: Cin=64, 3x3x3 kernel
+        cin, cout = 64, 64
+        x = torch.randn(1, cin, 8, 8, 8, device="cuda", dtype=torch.float32)
+        w = torch.randn(cout, cin, 3, 3, 3, device="cuda", dtype=torch.float32)
+        act_amax = x.abs().max().unsqueeze(0)
+        ref = F.conv3d(x, w, stride=(1, 1, 1), padding=(1, 1, 1), dilation=(1, 1, 1))
 
         block_sizes = [16, 32, 64, 128, 256]
-        all_errors = {}
-
-        for desc, n, cin, d, h, w_s, cout, kd, kh, kw in configs:
-            x = torch.randn(n, cin, d, h, w_s, device="cuda", dtype=torch.float32)
-            w = torch.randn(cout, cin, kd, kh, kw, device="cuda", dtype=torch.float32)
-            act_amax = x.abs().max().unsqueeze(0)
-            k_size = cin * kd * kh * kw
-
-            ref = F.conv3d(x, w, stride=(1, 1, 1), padding=(1, 1, 1), dilation=(1, 1, 1))
-            ref_abs_mean = ref.abs().mean().item()
-
-            # Also compute no-quant baseline (BF16 rounding only)
-            out_nq = cuda_conv3d(
+        errors = {}
+        for bs in block_sizes:
+            out = cuda_conv3d(
                 x,
                 w,
                 stride=(1, 1, 1),
                 padding=(1, 1, 1),
                 dilation=(1, 1, 1),
-                quant_act=False,
+                act_amax=act_amax,
+                quant_act=True,
+                fp4_block_size=bs,
             )
-            nq_diff = (out_nq - ref).abs()
+            errors[bs] = (out - ref).abs().mean().item()
 
-            print(
-                f"\n  {desc} (K={k_size}), output range [{ref.min().item():.1f}, {ref.max().item():.1f}]"
-            )
-            print(
-                f"  {'Block Size':>10} | {'Max Diff':>10} | {'Mean Diff':>10} | {'RMSE':>10} | {'Rel Err%':>8}"
-            )
-            print(f"  {'-' * 10}-+-{'-' * 10}-+-{'-' * 10}-+-{'-' * 10}-+-{'-' * 8}")
-            print(
-                f"  {'no-quant':>10} | {nq_diff.max().item():>10.4f} | "
-                f"{nq_diff.mean().item():>10.6f} | "
-                f"{((out_nq - ref) ** 2).mean().sqrt().item():>10.4f} | "
-                f"{nq_diff.mean().item() / ref_abs_mean * 100:>7.3f}%"
-            )
-
-            errors = {}
-            for bs in block_sizes:
-                out = cuda_conv3d(
-                    x,
-                    w,
-                    stride=(1, 1, 1),
-                    padding=(1, 1, 1),
-                    dilation=(1, 1, 1),
-                    act_amax=act_amax,
-                    quant_act=True,
-                    fp4_block_size=bs,
-                )
-                diff = (out - ref).abs()
-                max_d = diff.max().item()
-                mean_d = diff.mean().item()
-                rmse = ((out - ref) ** 2).mean().sqrt().item()
-                rel_err = mean_d / ref_abs_mean * 100
-                errors[bs] = mean_d
-                print(
-                    f"  {bs:>10} | {max_d:>10.4f} | {mean_d:>10.6f} | "
-                    f"{rmse:>10.4f} | {rel_err:>7.3f}%"
-                )
-            all_errors[desc] = errors
-
-        # Monotonicity check on the medium config
-        errors = all_errors["Medium K=1728"]
+        # Monotonicity: smaller blocks should have equal or lower error
         for smaller, larger in [(16, 64), (16, 256), (32, 256), (64, 256)]:
             assert errors[smaller] <= errors[larger] * 1.2, (
                 f"Expected error({smaller})={errors[smaller]:.6f} <= "
@@ -588,14 +540,6 @@ class TestConv3dFP4QuantBlockSizes:
 # =============================================================================
 # FP4 Fake Quantization Tests
 # =============================================================================
-
-
-@pytest.fixture(scope="module")
-def cuda_fp4():
-    """Import and return the CUDA FP4 fake quant function."""
-    from experimental.conv.implicit_gemm_cuda import fp4_fake_quant
-
-    return fp4_fake_quant
 
 
 def _py_fp4_fake_quant_ref(x_flat, global_amax, block_size):
@@ -909,8 +853,8 @@ requires_dynamic_block_quantize = pytest.mark.skipif(
 class TestFP4FakeQuantVsModelopt:
     """Compare experimental CUDA FP4 fake quant against all modelopt FP4 implementations.
 
-    This ensures the standalone FP4 kernel in experimental/conv produces the same
-    results as the official modelopt quantization paths:
+    This ensures the standalone FP4 kernel produces the same results as the
+    other modelopt quantization paths:
     1. Triton fp4_fake_quant_block (Hopper+ dynamic blockwise)
     2. cuda_ext_mx.fused_amax_convert (CUDA extension fallback)
     3. dynamic_block_quantize_op (high-level API that dispatches to either)
@@ -1065,3 +1009,484 @@ class TestFP4FakeQuantVsModelopt:
         # BF16/FP16 input rounding may cause small diffs
         tol = 1e-2 if dtype != torch.float32 else 1e-5
         assert max_diff < tol, f"dtype={dtype}: experimental vs Triton max diff: {max_diff:.6e}"
+
+
+# =============================================================================
+# Input Validation / Error Path Tests
+# =============================================================================
+
+
+class TestConv3dInputValidation:
+    """Verify error paths raise appropriate exceptions."""
+
+    def test_invalid_fp4_block_size(self, cuda_conv3d):
+        """fp4_block_size not in {16, 32, 64, 128, 256} should raise ValueError."""
+        x = torch.randn(1, 4, 4, 4, 4, device="cuda")
+        w = torch.randn(8, 4, 3, 3, 3, device="cuda")
+        with pytest.raises(ValueError, match="fp4_block_size"):
+            cuda_conv3d(x, w, stride=(1, 1, 1), padding=(1, 1, 1), fp4_block_size=7)
+
+    def test_non_5d_input(self, cuda_conv3d):
+        """Non-5D tensors should raise ValueError."""
+        x = torch.randn(1, 4, 4, 4, device="cuda")  # 4D
+        w = torch.randn(8, 4, 3, 3, 3, device="cuda")
+        with pytest.raises(ValueError, match="5D"):
+            cuda_conv3d(x, w)
+
+    def test_non_5d_weight(self, cuda_conv3d):
+        """Non-5D weight should raise ValueError."""
+        x = torch.randn(1, 4, 4, 4, 4, device="cuda")
+        w = torch.randn(8, 4, 3, 3, device="cuda")  # 4D
+        with pytest.raises(ValueError, match="5D"):
+            cuda_conv3d(x, w)
+
+    def test_grouped_conv_error(self, cuda_conv3d):
+        """Mismatched Cin (groups > 1) should raise ValueError."""
+        x = torch.randn(1, 8, 4, 4, 4, device="cuda")
+        w = torch.randn(8, 4, 3, 3, 3, device="cuda")  # Cin=4 != x.Cin=8
+        with pytest.raises(ValueError, match="Grouped convolution"):
+            cuda_conv3d(x, w, stride=(1, 1, 1), padding=(1, 1, 1))
+
+    def test_quant_act_without_amax(self, cuda_conv3d):
+        """quant_act=True without act_amax should raise ValueError."""
+        x = torch.randn(1, 4, 4, 4, 4, device="cuda")
+        w = torch.randn(8, 4, 3, 3, 3, device="cuda")
+        with pytest.raises(ValueError, match="act_amax"):
+            cuda_conv3d(x, w, stride=(1, 1, 1), padding=(1, 1, 1), quant_act=True, act_amax=None)
+
+    def test_fp4_numel_not_divisible(self, cuda_fp4):
+        """fp4_fake_quant should error when numel is not divisible by block_size."""
+        inp = torch.randn(17, device="cuda")
+        amax = torch.tensor([1.0], device="cuda")
+        with pytest.raises(AssertionError, match="divisible"):
+            cuda_fp4(inp, amax, block_size=16)
+
+
+# =============================================================================
+# Input Dtype Tests
+# =============================================================================
+
+
+class TestConv3dInputDtypes:
+    """Verify conv3d works with non-float32 inputs and preserves output dtype."""
+
+    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+    def test_dtype_preservation(self, cuda_conv3d, dtype):
+        """Output dtype should match input dtype."""
+        x = torch.randn(1, 16, 8, 8, 8, device="cuda", dtype=dtype)
+        w = torch.randn(32, 16, 3, 3, 3, device="cuda", dtype=dtype)
+        out = cuda_conv3d(x, w, stride=(1, 1, 1), padding=(1, 1, 1), quant_act=False)
+        assert out.dtype == dtype, f"Expected {dtype}, got {out.dtype}"
+
+    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+    def test_dtype_correctness(self, cuda_conv3d, dtype):
+        """Non-float32 inputs should produce correct results (vs F.conv3d in float32)."""
+        torch.manual_seed(42)
+        x_fp32 = torch.randn(1, 16, 8, 8, 8, device="cuda")
+        w_fp32 = torch.randn(32, 16, 3, 3, 3, device="cuda")
+        x = x_fp32.to(dtype)
+        w = w_fp32.to(dtype)
+
+        out = cuda_conv3d(x, w, stride=(1, 1, 1), padding=(1, 1, 1), quant_act=False)
+        ref = F.conv3d(x_fp32, w_fp32, stride=(1, 1, 1), padding=(1, 1, 1))
+
+        # Both BF16 input rounding and internal BF16 WMMA contribute to error
+        max_diff = (out.float() - ref).abs().max().item()
+        k_size = 16 * 27
+        scaled_atol = ATOL * (k_size / 1000.0) ** 0.5 * 2  # extra slack for input rounding
+        assert max_diff < scaled_atol, f"dtype={dtype}: max diff {max_diff:.4f} > {scaled_atol:.4f}"
+
+    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+    def test_dtype_quant_path(self, cuda_conv3d, dtype):
+        """FP4 quantized path should also work with non-float32 inputs."""
+        x = torch.randn(1, 16, 8, 8, 8, device="cuda", dtype=dtype)
+        w = torch.randn(32, 16, 3, 3, 3, device="cuda", dtype=dtype)
+        act_amax = x.float().abs().max().unsqueeze(0)
+
+        out = cuda_conv3d(
+            x,
+            w,
+            stride=(1, 1, 1),
+            padding=(1, 1, 1),
+            act_amax=act_amax,
+            quant_act=True,
+            fp4_block_size=16,
+        )
+        assert out.dtype == dtype
+        assert not torch.isnan(out).any()
+        assert out.abs().max() > 0
+
+
+# =============================================================================
+# Non-Contiguous Input Tests
+# =============================================================================
+
+
+class TestConv3dNonContiguous:
+    """Verify kernel handles non-contiguous tensors (via internal .contiguous() calls)."""
+
+    def test_non_contiguous_input(self, cuda_conv3d):
+        """Permuted (non-contiguous) input should produce correct results."""
+        torch.manual_seed(42)
+        # Create non-contiguous tensor via permute + permute back
+        x_base = torch.randn(1, 8, 8, 8, 16, device="cuda")
+        x = x_base.permute(0, 4, 1, 2, 3)  # [1, 16, 8, 8, 8] but non-contiguous
+        assert not x.is_contiguous()
+
+        w = torch.randn(32, 16, 3, 3, 3, device="cuda")
+        x_contig = x.contiguous()
+
+        out = cuda_conv3d(x, w, stride=(1, 1, 1), padding=(1, 1, 1), quant_act=False)
+        ref = cuda_conv3d(x_contig, w, stride=(1, 1, 1), padding=(1, 1, 1), quant_act=False)
+        assert torch.equal(out, ref), "Non-contiguous input produced different results"
+
+    def test_non_contiguous_weight(self, cuda_conv3d):
+        """Transposed (non-contiguous) weight should produce correct results."""
+        torch.manual_seed(42)
+        x = torch.randn(1, 16, 8, 8, 8, device="cuda")
+        # Create non-contiguous weight
+        w_base = torch.randn(16, 32, 3, 3, 3, device="cuda")
+        w = w_base.transpose(0, 1)  # [32, 16, ...] but non-contiguous
+        assert not w.is_contiguous()
+
+        w_contig = w.contiguous()
+        out = cuda_conv3d(x, w, stride=(1, 1, 1), padding=(1, 1, 1), quant_act=False)
+        ref = cuda_conv3d(x, w_contig, stride=(1, 1, 1), padding=(1, 1, 1), quant_act=False)
+        assert torch.equal(out, ref), "Non-contiguous weight produced different results"
+
+
+# =============================================================================
+# Combined Conv Parameter Tests
+# =============================================================================
+
+
+class TestConv3dCombinedParams:
+    """Test combinations of stride + dilation + padding that were never combined."""
+
+    def test_stride_and_dilation(self, cuda_conv3d):
+        """Stride > 1 and dilation > 1 simultaneously."""
+        x = torch.randn(1, 16, 16, 16, 16, device="cuda")
+        w = torch.randn(32, 16, 3, 3, 3, device="cuda")
+        _run_conv3d_test(cuda_conv3d, x, w, None, (2, 2, 2), (1, 1, 1), (2, 2, 2))
+
+    def test_asymmetric_stride_and_padding(self, cuda_conv3d):
+        """Asymmetric stride with asymmetric padding."""
+        x = torch.randn(1, 16, 16, 16, 16, device="cuda")
+        w = torch.randn(32, 16, 3, 3, 3, device="cuda")
+        _run_conv3d_test(cuda_conv3d, x, w, None, (1, 2, 2), (0, 1, 2), (1, 1, 1))
+
+    def test_all_non_default(self, cuda_conv3d):
+        """Non-default stride + padding + dilation all at once."""
+        x = torch.randn(1, 16, 16, 16, 16, device="cuda")
+        w = torch.randn(32, 16, 3, 3, 3, device="cuda")
+        _run_conv3d_test(cuda_conv3d, x, w, None, (1, 2, 1), (1, 0, 1), (1, 2, 1))
+
+    def test_bias_with_stride(self, cuda_conv3d):
+        """Bias with non-default stride."""
+        x = torch.randn(1, 16, 16, 16, 16, device="cuda")
+        w = torch.randn(32, 16, 3, 3, 3, device="cuda")
+        b = torch.randn(32, device="cuda")
+        _run_conv3d_test(cuda_conv3d, x, w, b, (2, 2, 2), (1, 1, 1), (1, 1, 1))
+
+    def test_bias_with_dilation(self, cuda_conv3d):
+        """Bias with non-default dilation."""
+        x = torch.randn(1, 16, 16, 16, 16, device="cuda")
+        w = torch.randn(32, 16, 3, 3, 3, device="cuda")
+        b = torch.randn(32, device="cuda")
+        _run_conv3d_test(cuda_conv3d, x, w, b, (1, 1, 1), (2, 2, 2), (2, 2, 2))
+
+
+# =============================================================================
+# FP4 Quantized Path: Advanced Conv Params
+# =============================================================================
+
+
+def _run_quant_smoke_test(cuda_conv3d, x, w, bias, stride, padding, dilation, fp4_block_size=16):
+    """Helper: run FP4-quantized conv and verify basic sanity."""
+    act_amax = x.abs().max().unsqueeze(0)
+    out = cuda_conv3d(
+        x,
+        w,
+        bias=bias,
+        stride=stride,
+        padding=padding,
+        dilation=dilation,
+        act_amax=act_amax,
+        quant_act=True,
+        fp4_block_size=fp4_block_size,
+    )
+    ref = F.conv3d(x, w, bias=bias, stride=stride, padding=padding, dilation=dilation)
+    assert out.shape == ref.shape, f"Shape mismatch: {out.shape} vs {ref.shape}"
+    assert not torch.isnan(out).any(), "Output contains NaN"
+    assert not torch.isinf(out).any(), "Output contains Inf"
+    # Quantized output should be in a reasonable range relative to reference
+    if ref.abs().max() > 0:
+        ratio = out.abs().max().item() / ref.abs().max().item()
+        assert 0.01 < ratio < 100, f"Output magnitude ratio {ratio:.2f} is unreasonable"
+    return out
+
+
+class TestConv3dFP4QuantAdvanced:
+    """FP4 quantized path with non-trivial stride, dilation, and kernel shapes."""
+
+    def test_quant_with_stride(self, cuda_conv3d):
+        """FP4 quant with stride=(2,2,2)."""
+        torch.manual_seed(42)
+        x = torch.randn(1, 16, 16, 16, 16, device="cuda")
+        w = torch.randn(32, 16, 3, 3, 3, device="cuda")
+        _run_quant_smoke_test(cuda_conv3d, x, w, None, (2, 2, 2), (1, 1, 1), (1, 1, 1))
+
+    def test_quant_with_dilation(self, cuda_conv3d):
+        """FP4 quant with dilation=(2,2,2)."""
+        torch.manual_seed(42)
+        x = torch.randn(1, 16, 16, 16, 16, device="cuda")
+        w = torch.randn(32, 16, 3, 3, 3, device="cuda")
+        _run_quant_smoke_test(cuda_conv3d, x, w, None, (1, 1, 1), (2, 2, 2), (2, 2, 2))
+
+    def test_quant_with_asymmetric_kernel(self, cuda_conv3d):
+        """FP4 quant with 1x3x3 kernel."""
+        torch.manual_seed(42)
+        x = torch.randn(1, 16, 8, 16, 16, device="cuda")
+        w = torch.randn(32, 16, 1, 3, 3, device="cuda")
+        _run_quant_smoke_test(cuda_conv3d, x, w, None, (1, 1, 1), (0, 1, 1), (1, 1, 1))
+
+    def test_quant_with_stride_and_dilation(self, cuda_conv3d):
+        """FP4 quant with both stride>1 and dilation>1."""
+        torch.manual_seed(42)
+        x = torch.randn(1, 16, 16, 16, 16, device="cuda")
+        w = torch.randn(32, 16, 3, 3, 3, device="cuda")
+        _run_quant_smoke_test(cuda_conv3d, x, w, None, (2, 2, 2), (1, 1, 1), (2, 2, 2))
+
+    def test_quant_with_no_padding(self, cuda_conv3d):
+        """FP4 quant with padding=(0,0,0)."""
+        torch.manual_seed(42)
+        x = torch.randn(1, 16, 8, 8, 8, device="cuda")
+        w = torch.randn(32, 16, 3, 3, 3, device="cuda")
+        _run_quant_smoke_test(cuda_conv3d, x, w, None, (1, 1, 1), (0, 0, 0), (1, 1, 1))
+
+    def test_quant_bias_reference(self, cuda_conv3d, cuda_fp4):
+        """FP4 quant + bias: verify bias is added correctly by comparing with/without.
+
+        The difference between bias and no-bias output should equal the bias broadcast.
+        """
+        torch.manual_seed(42)
+        cin, cout = 256, 64
+        x = torch.randn(1, cin, 4, 4, 4, device="cuda")
+        w = torch.randn(cout, cin, 1, 1, 1, device="cuda")
+        b = torch.randn(cout, device="cuda")
+        act_amax = x.abs().max().unsqueeze(0)
+
+        kwargs = {
+            "stride": (1, 1, 1),
+            "padding": (0, 0, 0),
+            "dilation": (1, 1, 1),
+            "act_amax": act_amax,
+            "quant_act": True,
+            "fp4_block_size": 16,
+        }
+        out_bias = cuda_conv3d(x, w, bias=b, **kwargs)
+        out_no_bias = cuda_conv3d(x, w, bias=None, **kwargs)
+
+        # Difference should be the bias broadcast over spatial dims
+        diff = out_bias - out_no_bias  # [1, Cout, D, H, W]
+        expected_bias = b.view(1, -1, 1, 1, 1).expand_as(diff)
+        assert torch.allclose(diff, expected_bias, atol=1e-5), (
+            f"Bias diff mismatch: max {(diff - expected_bias).abs().max().item():.6e}"
+        )
+
+
+# =============================================================================
+# Zero / Degenerate Input Tests
+# =============================================================================
+
+
+class TestConv3dZeroInputs:
+    """Tests with zero and degenerate inputs."""
+
+    def test_zero_input(self, cuda_conv3d):
+        """Zero activation tensor should produce zero (or bias-only) output."""
+        x = torch.zeros(1, 16, 8, 8, 8, device="cuda")
+        w = torch.randn(32, 16, 3, 3, 3, device="cuda")
+        ref = F.conv3d(x, w, stride=(1, 1, 1), padding=(1, 1, 1))
+        out = cuda_conv3d(x, w, stride=(1, 1, 1), padding=(1, 1, 1), quant_act=False)
+        assert torch.allclose(out, ref, atol=1e-5), f"Max diff: {(out - ref).abs().max().item()}"
+
+    def test_zero_weight(self, cuda_conv3d):
+        """Zero weight tensor should produce zero output."""
+        x = torch.randn(1, 16, 8, 8, 8, device="cuda")
+        w = torch.zeros(32, 16, 3, 3, 3, device="cuda")
+        out = cuda_conv3d(x, w, stride=(1, 1, 1), padding=(1, 1, 1), quant_act=False)
+        assert torch.allclose(out, torch.zeros_like(out), atol=1e-5)
+
+    def test_zero_input_quant(self, cuda_conv3d):
+        """Zero input with FP4 quant should not produce NaN."""
+        x = torch.zeros(1, 16, 8, 8, 8, device="cuda")
+        w = torch.randn(32, 16, 3, 3, 3, device="cuda")
+        # act_amax=0 is a tricky edge case — the kernel's scale guard should handle it
+        act_amax = torch.tensor([1e-10], device="cuda")  # near-zero but not exactly 0
+        out = cuda_conv3d(
+            x,
+            w,
+            stride=(1, 1, 1),
+            padding=(1, 1, 1),
+            act_amax=act_amax,
+            quant_act=True,
+            fp4_block_size=16,
+        )
+        assert not torch.isnan(out).any(), "Zero input with quant produced NaN"
+
+
+# =============================================================================
+# Numerical Stability Tests
+# =============================================================================
+
+
+class TestConv3dNumericalStability:
+    """Test with extreme value ranges."""
+
+    def test_large_values(self, cuda_conv3d):
+        """Large input values (randn * 100)."""
+        torch.manual_seed(42)
+        x = torch.randn(1, 16, 8, 8, 8, device="cuda") * 100
+        w = torch.randn(32, 16, 3, 3, 3, device="cuda") * 100
+        ref = F.conv3d(x, w, stride=(1, 1, 1), padding=(1, 1, 1))
+        out = cuda_conv3d(x, w, stride=(1, 1, 1), padding=(1, 1, 1), quant_act=False)
+        # With large values, BF16 rounding error scales proportionally
+        rel_err = (out - ref).abs().max().item() / ref.abs().max().item()
+        assert rel_err < 0.05, f"Relative error {rel_err:.4f} too high for large values"
+
+    def test_small_values(self, cuda_conv3d):
+        """Small input values (randn * 1e-3)."""
+        torch.manual_seed(42)
+        x = torch.randn(1, 16, 8, 8, 8, device="cuda") * 1e-3
+        w = torch.randn(32, 16, 3, 3, 3, device="cuda") * 1e-3
+        ref = F.conv3d(x, w, stride=(1, 1, 1), padding=(1, 1, 1))
+        out = cuda_conv3d(x, w, stride=(1, 1, 1), padding=(1, 1, 1), quant_act=False)
+        assert out.shape == ref.shape
+        # Small values: absolute error is small, relative error may be larger due to BF16
+        max_diff = (out - ref).abs().max().item()
+        assert max_diff < 1e-5, f"Max diff {max_diff:.6e} for small values"
+
+    def test_uniform_input(self, cuda_conv3d):
+        """Uniform input (all ones) — exposes accumulation patterns."""
+        x = torch.ones(1, 16, 8, 8, 8, device="cuda")
+        w = torch.ones(32, 16, 3, 3, 3, device="cuda")
+        ref = F.conv3d(x, w, stride=(1, 1, 1), padding=(1, 1, 1))
+        out = cuda_conv3d(x, w, stride=(1, 1, 1), padding=(1, 1, 1), quant_act=False)
+        k_size = 16 * 27
+        scaled_atol = ATOL * (k_size / 1000.0) ** 0.5
+        max_diff = (out - ref).abs().max().item()
+        assert max_diff < scaled_atol, f"Uniform input: max diff {max_diff:.4f}"
+
+
+# =============================================================================
+# Exact Block Boundary Tests
+# =============================================================================
+
+
+class TestConv3dExactBoundaries:
+    """Shapes that land exactly on BLOCK_M=64, BLOCK_N=64, BLOCK_K=256 boundaries."""
+
+    def test_m_exact_128(self, cuda_conv3d):
+        """M = 128 = 2 * BLOCK_M (exactly 2 M-tiles, no remainder)."""
+        # batch=1, output 4x4x8 = 128 with kernel 1x1x1
+        x = torch.randn(1, 32, 4, 4, 8, device="cuda")
+        w = torch.randn(64, 32, 1, 1, 1, device="cuda")
+        _run_conv3d_test(cuda_conv3d, x, w, None, (1, 1, 1), (0, 0, 0), (1, 1, 1))
+
+    def test_k_exact_512(self, cuda_conv3d):
+        """K = 512 = 2 * BLOCK_K (exactly 2 K-tiles, no remainder)."""
+        # Cin=512, kernel 1x1x1 -> K=512
+        x = torch.randn(1, 512, 4, 4, 4, device="cuda")
+        w = torch.randn(64, 512, 1, 1, 1, device="cuda")
+        _run_conv3d_test(cuda_conv3d, x, w, None, (1, 1, 1), (0, 0, 0), (1, 1, 1))
+
+    def test_cout_exact_64(self, cuda_conv3d):
+        """Cout = 64 = 1 * BLOCK_N (exactly 1 N-tile)."""
+        x = torch.randn(1, 16, 8, 8, 8, device="cuda")
+        w = torch.randn(64, 16, 3, 3, 3, device="cuda")
+        _run_conv3d_test(cuda_conv3d, x, w, None, (1, 1, 1), (1, 1, 1), (1, 1, 1))
+
+    def test_all_exact_multiples(self, cuda_conv3d):
+        """M=64, N=64, K=256 — single tile in each dimension."""
+        # batch=1, Cin=256, kernel 1x1x1 -> K=256; output 4x4x4=64; Cout=64
+        x = torch.randn(1, 256, 4, 4, 4, device="cuda")
+        w = torch.randn(64, 256, 1, 1, 1, device="cuda")
+        _run_conv3d_test(cuda_conv3d, x, w, None, (1, 1, 1), (0, 0, 0), (1, 1, 1))
+
+
+# =============================================================================
+# FP4 Fake Quant: Shape and Edge Case Tests
+# =============================================================================
+
+
+class TestFP4FakeQuantShapes:
+    """Test fp4_fake_quant with multi-dimensional inputs."""
+
+    def test_3d_shape_preservation(self, cuda_fp4):
+        """3D input should preserve shape after quantization."""
+        inp = torch.randn(4, 8, 32, device="cuda")  # numel=1024
+        amax = inp.abs().max().unsqueeze(0)
+        out = cuda_fp4(inp, amax, block_size=16)
+        assert out.shape == (4, 8, 32)
+
+    def test_4d_shape_preservation(self, cuda_fp4):
+        """4D input should preserve shape."""
+        inp = torch.randn(2, 4, 8, 16, device="cuda")  # numel=1024
+        amax = inp.abs().max().unsqueeze(0)
+        out = cuda_fp4(inp, amax, block_size=16)
+        assert out.shape == (2, 4, 8, 16)
+
+    def test_5d_shape_preservation(self, cuda_fp4):
+        """5D input (like a Conv3D activation) should preserve shape."""
+        inp = torch.randn(1, 4, 4, 4, 16, device="cuda")  # numel=1024
+        amax = inp.abs().max().unsqueeze(0)
+        out = cuda_fp4(inp, amax, block_size=16)
+        assert out.shape == (1, 4, 4, 4, 16)
+
+    def test_multidim_correctness(self, cuda_fp4):
+        """Multi-dim quantization should equal flatten -> quant -> reshape."""
+        torch.manual_seed(42)
+        inp = torch.randn(4, 8, 32, device="cuda")
+        amax = inp.abs().max().unsqueeze(0)
+
+        out_3d = cuda_fp4(inp, amax, block_size=16)
+        out_flat = cuda_fp4(inp.reshape(-1), amax, block_size=16).reshape(4, 8, 32)
+        assert torch.equal(out_3d, out_flat)
+
+
+class TestFP4FakeQuantEdgeCases:
+    """Edge cases for fp4_fake_quant."""
+
+    def test_very_large_values(self, cuda_fp4):
+        """Very large input values should saturate to max E2M1 level, not produce NaN."""
+        inp = torch.tensor([1e6, -1e6, 5e5, -5e5, 1e4, -1e4, 100, -100], device="cuda")
+        amax = inp.abs().max().unsqueeze(0)
+        out = cuda_fp4(inp, amax, block_size=8)
+        assert not torch.isnan(out).any()
+        assert not torch.isinf(out).any()
+
+    def test_very_small_values(self, cuda_fp4):
+        """Very small input values should quantize to zero or near-zero."""
+        inp = torch.tensor([1e-8, -1e-8, 1e-10, -1e-10, 1e-6, -1e-6, 0, 0], device="cuda")
+        amax = torch.tensor([1.0], device="cuda")
+        out = cuda_fp4(inp, amax, block_size=8)
+        assert not torch.isnan(out).any()
+        # Very small values relative to amax should quantize to ~0
+        assert out.abs().max() < 1e-3
+
+    def test_uniform_block(self, cuda_fp4):
+        """All-same-value block."""
+        inp = torch.full((16,), 3.0, device="cuda")
+        amax = inp.abs().max().unsqueeze(0)
+        out = cuda_fp4(inp, amax, block_size=16)
+        # All elements are the same, so they should all quantize to the same E2M1 level
+        assert (out == out[0]).all(), f"Uniform block produced non-uniform output: {out}"
+
+    def test_near_zero_amax(self, cuda_fp4):
+        """Very small global_amax should not produce NaN/Inf."""
+        inp = torch.randn(16, device="cuda") * 1e-8
+        amax = torch.tensor([1e-10], device="cuda")
+        out = cuda_fp4(inp, amax, block_size=16)
+        assert not torch.isnan(out).any(), "Near-zero amax produced NaN"
+        assert not torch.isinf(out).any(), "Near-zero amax produced Inf"

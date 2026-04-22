@@ -656,9 +656,36 @@ def export_fp4(
 
 @contextlib.contextmanager
 def configure_linear_module_onnx_quantizers(model):
-    """Sets the onnx export attributes for the given model."""
+    """Sets the onnx export attributes for the given model.
+
+    For modules with block quantization (NVFP4/MXFP8):
+    - Weight quantizers use "static" export (TRT_FP4QDQ for NVFP4, DQ-only for MXFP8)
+    - Input/activation quantizers use "dynamic" export (TRT_FP4DynamicQuantize, etc.)
+
+    This must be set for ALL modules with block quantization, not just nn.Linear,
+    because models like ResNet have non-Linear modules (e.g., MaxPool2d) with NVFP4/MXFP8
+    input quantizers that would otherwise default to the static path and produce
+    TRT_FP4QDQ nodes on activations (which the NVFP4 exporter cannot handle).
+    """
+    sentinel = object()
+    originals: list[tuple] = []
     for _, module in model.named_modules():
-        if isinstance(module, torch.nn.Linear):
-            module.input_quantizer._onnx_quantizer_type = "dynamic"
-            module.weight_quantizer._onnx_quantizer_type = "static"
-    yield
+        for attr_name, new_value in (
+            ("input_quantizer", "dynamic"),
+            ("weight_quantizer", "static"),
+        ):
+            quantizer = getattr(module, attr_name, None)
+            if quantizer is None or not quantizer.block_sizes:
+                continue
+            original = getattr(quantizer, "_onnx_quantizer_type", sentinel)
+            originals.append((quantizer, original))
+            quantizer._onnx_quantizer_type = new_value
+    try:
+        yield
+    finally:
+        for quantizer, original in originals:
+            if original is sentinel:
+                if hasattr(quantizer, "_onnx_quantizer_type"):
+                    delattr(quantizer, "_onnx_quantizer_type")
+            else:
+                quantizer._onnx_quantizer_type = original

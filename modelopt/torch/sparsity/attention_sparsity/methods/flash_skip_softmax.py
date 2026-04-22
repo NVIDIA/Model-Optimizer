@@ -20,6 +20,7 @@ processing pattern for optimal performance.
 """
 
 import math
+from contextlib import ExitStack
 from typing import Any
 
 import numpy as np
@@ -369,7 +370,11 @@ class FlashSkipSoftmax(SparseAttentionMethod):
             }
 
     def get_sparse_context(self, module: torch.nn.Module):
-        """Return a context manager that patches F.softmax with sparse masking."""
+        """Return a context manager that patches F.softmax with sparse masking.
+
+        Also registers the diffusers eager backend so that diffusion models
+        (which don't call F.softmax directly) route through the patched path.
+        """
         original_softmax = F.softmax
 
         def sparse_softmax(input, dim=-1, *args, **kwargs):
@@ -379,7 +384,14 @@ class FlashSkipSoftmax(SparseAttentionMethod):
                 input = self.apply_sparsity(input, sparse_mask)
             return original_softmax(input, dim, *args, **kwargs)
 
-        return replace_function(torch.nn.functional, "softmax", sparse_softmax)
+        from ..kernels import set_skip_softmax_context
+
+        stack = ExitStack()
+        set_skip_softmax_context(True)
+        stack.callback(set_skip_softmax_context, False)
+
+        stack.enter_context(replace_function(torch.nn.functional, "softmax", sparse_softmax))
+        return stack
 
     @property
     def name(self) -> str:

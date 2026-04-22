@@ -73,10 +73,20 @@ class ShardedDataset(torch.utils.data.Dataset):
         return self._raw_samples[index]
 
     def _load_dataset(self):
+        # datasets' resolve_pattern only matches entries with type=="file", so passing
+        # a bare directory path as data_files results in FileNotFoundError.
+        # Use data_dir for directory paths instead.
+        data_dir = None
+        data_files = self.data_files
+        if data_files and os.path.isdir(data_files):
+            data_dir = data_files
+            data_files = None
+
         dataset = load_dataset(
             self.name,
             self.subset,
-            data_files=self.data_files,
+            data_files=data_files,
+            data_dir=data_dir,
             split=self.split,
             # num_proc=4,  # TODO: Make this configurable
             streaming=self.num_streaming_samples is not None,

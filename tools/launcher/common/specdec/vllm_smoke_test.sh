@@ -32,7 +32,10 @@
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source ${SCRIPT_DIR}/../service_utils.sh 2>/dev/null || true
 
-cleanup() { kill $SERVER_PID 2>/dev/null; sleep 2; kill -9 $SERVER_PID 2>/dev/null; }
+# Ensure pandas is available (missing in some vLLM nightly builds)
+pip install pandas 2>/dev/null || true
+
+cleanup() { kill $SERVER_PID 2>/dev/null; sleep 2; kill -9 $SERVER_PID 2>/dev/null; rm -f "${VLLM_LOG:-}" 2>/dev/null; }
 trap cleanup EXIT
 
 MODEL=${HF_MODEL_CKPT}
@@ -72,7 +75,8 @@ if [ "${DISABLE_PREFIX_CACHING:-}" = "1" ]; then
     OPTIONAL_ARGS="${OPTIONAL_ARGS} --no-enable-prefix-caching"
 fi
 
-# Start vLLM server
+# Start vLLM server (capture output for regression check parsing)
+VLLM_LOG=$(mktemp /tmp/vllm_server_XXXXXX.log)
 if [ -n "$SPEC_CONFIG" ]; then
     vllm serve ${MODEL} \
         --speculative-config "${SPEC_CONFIG}" \
@@ -80,14 +84,14 @@ if [ -n "$SPEC_CONFIG" ]; then
         --tensor-parallel-size ${TP} \
         --port ${PORT} \
         ${OPTIONAL_ARGS} \
-        &
+        > >(tee -a "$VLLM_LOG") 2>&1 &
 else
     vllm serve ${MODEL} \
         --max-num-batched-tokens 32768 \
         --tensor-parallel-size ${TP} \
         --port ${PORT} \
         ${OPTIONAL_ARGS} \
-        &
+        > >(tee -a "$VLLM_LOG") 2>&1 &
 fi
 SERVER_PID=$!
 
@@ -166,6 +170,29 @@ fi
 if [ $FAIL -gt 0 ]; then
     echo "ERROR: Some prompts failed"
     exit 1
+fi
+
+# Regression check: minimum acceptance length for speculative decoding
+if [ -n "${MIN_ACCEPTANCE_LENGTH:-}" ]; then
+    # Parse mean acceptance length from vLLM's SpecDecoding metrics log.
+    # vLLM logs: "SpecDecoding metrics: Mean acceptance length: X.XX, ..."
+    # Take the last reported value (most accurate, covers all prompts).
+    AVG_ACCEPT=$(grep -oP 'Mean acceptance length: \K[0-9.]+' "$VLLM_LOG" 2>/dev/null | tail -1 || true)
+    if [ -n "$AVG_ACCEPT" ]; then
+        echo ""
+        echo "=== Acceptance Length Regression Check ==="
+        echo "  Mean acceptance length: ${AVG_ACCEPT}"
+        echo "  Threshold: ${MIN_ACCEPTANCE_LENGTH}"
+        PASS_CHECK=$(python3 -c "print('yes' if float('${AVG_ACCEPT}') >= float('${MIN_ACCEPTANCE_LENGTH}') else 'no')")
+        if [ "$PASS_CHECK" = "yes" ]; then
+            echo "  PASS: ${AVG_ACCEPT} >= ${MIN_ACCEPTANCE_LENGTH}"
+        else
+            echo "  REGRESSION: ${AVG_ACCEPT} < ${MIN_ACCEPTANCE_LENGTH}"
+            exit 1
+        fi
+    else
+        echo "WARNING: Could not parse acceptance length from vLLM log, skipping regression check"
+    fi
 fi
 
 echo "Done"

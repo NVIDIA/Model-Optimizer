@@ -252,6 +252,9 @@ def _attn_fwd(
     DENSE_WINDOW_SIZE: tl.constexpr = 64,  # Tokens near diagonal kept dense (absolute, BLOCK_N-independent)
     APPLY_SKIP_SOFTMAX: tl.constexpr = False,  # Skip KV tiles with negligible scores
     SKIP_THRESHOLD_LOG2: tl.constexpr = 0.0,  # log2(lambda) * sm_scale, pre-scaled for comparison on scaled scores
+    Sparsity_total=None,  # Optional int64 scalar for counting total tiles (atomic)
+    Sparsity_skipped=None,  # Optional int64 scalar for counting skipped tiles (atomic)
+    MEASURE_SPARSITY: tl.constexpr = False,  # When True, count total/skipped tiles via atomic adds
 ):
     # --- Grid: (batch, num_q_heads, num_q_tiles) ---
     # Example: batch=2, num_q_heads=32, seq_len=256, BLOCK_M=128
@@ -347,6 +350,12 @@ def _attn_fwd(
             # Per-tile: skip entire tile only if ALL rows are negligible
             skip_tile = tl.min(can_skip.to(tl.int32)) == 1
 
+            # Optional runtime sparsity measurement via atomic counters
+            if MEASURE_SPARSITY:
+                tl.atomic_add(Sparsity_total, 1)  # count every tile
+                if skip_tile:
+                    tl.atomic_add(Sparsity_skipped, 1)  # count skipped tiles
+
             if not skip_tile:
                 m_new = tl.maximum(row_max, tile_row_max)
                 p = tl.math.exp2(scores - m_new[:, None])
@@ -385,7 +394,9 @@ def _attn_fwd(
             row_max = m_new
 
     # --- Final normalization: output = acc / row_sum ---
-    acc = acc / row_sum[:, None]
+    # Clamp denominator to avoid 0/0 NaN when skip-softmax skips all KV tiles.
+    # Safe because acc is also 0 in that case (never accumulated), so 0/eps = 0.
+    acc = acc / tl.maximum(row_sum[:, None], 1e-6)
 
     # Save LSE for backward pass (log2-space: lse = max + log2(sum))
     if STORE_LSE:
@@ -768,6 +779,8 @@ class _Attention(torch.autograd.Function):
         num_sink_tokens,
         dense_window_size,
         skip_softmax_threshold,
+        skip_softmax_raw_threshold,
+        measure_sparsity,
     ):
         HEAD_DIM = q.shape[2]
         num_q_heads = q.shape[1]
@@ -788,19 +801,35 @@ class _Attention(torch.autograd.Function):
         # Triton tiles must be powers of 2; pad head dim
         BLOCK_D = triton.next_power_of_2(HEAD_DIM)
 
-        # Skip-softmax: convert threshold to scaled log2 space for the kernel.
-        # The BLASST reference (https://arxiv.org/pdf/2512.12087) checks
-        # ln(lambda) on unscaled scores. Our kernel works in log2-scaled space
-        # (scores pre-multiplied by qk_scale = sm_scale * LOG2E), so we
-        # pre-scale: threshold_scaled = log2(lambda) * sm_scale.
-        apply_skip = skip_softmax_threshold is not None and skip_softmax_threshold > 0.0
-        if apply_skip:
+        # Skip-softmax threshold in scaled log2 space for the kernel.
+        # Two modes:
+        #   1. raw_threshold: passed directly as skip_threshold_log2 (for testing)
+        #   2. lambda threshold: converted via log2(lambda) * sm_scale
+        if skip_softmax_raw_threshold is not None:
+            apply_skip = True
+            skip_threshold_log2 = skip_softmax_raw_threshold
+        elif skip_softmax_threshold is not None and skip_softmax_threshold > 0.0:
+            apply_skip = True
+            # The BLASST reference (https://arxiv.org/pdf/2512.12087) checks
+            # ln(lambda) on unscaled scores. Our kernel works in log2-scaled space
+            # (scores pre-multiplied by qk_scale = sm_scale * LOG2E), so we
+            # pre-scale: threshold_scaled = log2(lambda) * sm_scale.
             skip_threshold_log2 = math.log2(skip_softmax_threshold) * sm_scale
         else:
+            apply_skip = False
             skip_threshold_log2 = 0.0
 
         o = torch.empty_like(q)
         lse = torch.empty(q.shape[0], num_q_heads, device=q.device, dtype=torch.float32)
+
+        # Optional runtime sparsity counters (single int64 scalars for atomic adds)
+        do_measure = measure_sparsity and apply_skip
+        if do_measure:
+            sparsity_total = torch.zeros(1, dtype=torch.int64, device=q.device)
+            sparsity_skipped = torch.zeros(1, dtype=torch.int64, device=q.device)
+        else:
+            sparsity_total = None
+            sparsity_skipped = None
 
         # Grid: (batch, q_heads, q_tiles). Uses a function because BLOCK_M is autotuned.
         def grid(META):
@@ -839,8 +868,16 @@ class _Attention(torch.autograd.Function):
             DENSE_WINDOW_SIZE=dense_window_size,
             APPLY_SKIP_SOFTMAX=apply_skip,
             SKIP_THRESHOLD_LOG2=skip_threshold_log2,
+            Sparsity_total=sparsity_total,
+            Sparsity_skipped=sparsity_skipped,
+            MEASURE_SPARSITY=do_measure,
             # BLOCK_M, BLOCK_N, num_warps, num_stages chosen by autotune
         )
+
+        # Store sparsity counters on the output tensor for retrieval by callers
+        if do_measure:
+            o._sparsity_total = sparsity_total.item()
+            o._sparsity_skipped = sparsity_skipped.item()
 
         ctx.save_for_backward(q, k, v, o, lse, b_start_loc, b_seq_len, b_start_loc_k, b_seq_len_k)
         ctx.max_input_len = max_input_len
@@ -985,6 +1022,8 @@ class _Attention(torch.autograd.Function):
             None,
             None,
             None,
+            None,
+            None,
         )
 
 
@@ -1006,6 +1045,8 @@ def attention(
     num_sink_tokens: int = 0,
     dense_window_size: int = 64,
     skip_softmax_threshold: float | None = None,
+    skip_softmax_raw_threshold: float | None = None,
+    measure_sparsity: bool = False,
 ) -> torch.Tensor:
     """Variable-length flash attention with GQA, autograd, and optional N:M sparse softmax and skip-softmax.
 
@@ -1037,6 +1078,16 @@ def attention(
             softmax contribution is negligible. Tiles are skipped entirely
             (no softmax, V load, or BMM2). The threshold is applied on
             unscaled scores. Set to ``None`` or ``0`` to disable.
+        skip_softmax_raw_threshold: Raw ``skip_threshold_log2`` value passed
+            directly to the kernel without conversion. The kernel skips tiles
+            where ``tile_row_max < row_max + raw_threshold``. Typical values
+            are negative (e.g., ``-5.0`` means tiles must be within 5 units of
+            the running max in the kernel's scaled score space). Takes
+            precedence over ``skip_softmax_threshold`` when both are set.
+        measure_sparsity: When True and skip-softmax is active, count total
+            and skipped tiles via atomic counters. The counts are stored as
+            ``_sparsity_total`` and ``_sparsity_skipped`` attributes on the
+            returned output tensor.
 
     Returns:
         Output tensor [total_q_tokens, num_q_heads, head_dim].
@@ -1059,7 +1110,271 @@ def attention(
         num_sink_tokens,
         dense_window_size,
         skip_softmax_threshold,
+        skip_softmax_raw_threshold,
+        measure_sparsity,
     )
 
 
-__all__ = ["attention"]
+# ---------------------------------------------------------------------------
+# Calibration kernel: collect multi-threshold skip-softmax sparsity stats
+# ---------------------------------------------------------------------------
+@triton.jit
+def _attn_fwd_calibrate(
+    Q,
+    K,
+    V,
+    qk_scale,
+    b_start_loc,
+    b_seq_len,
+    b_start_loc_k,
+    b_seq_len_k,
+    Out,
+    stride_qbs,
+    stride_qh,
+    stride_kbs,
+    stride_kh,
+    stride_vbs,
+    stride_vh,
+    stride_obs,
+    stride_oh,
+    Threshold_trials,  # [NUM_THRESHOLDS] float32 — pre-scaled to log2 space
+    Per_program_totals,  # [num_programs * NUM_THRESHOLDS] int32 — per-program tile counts
+    Per_program_skipped,  # [num_programs * NUM_THRESHOLDS] int32 — per-program skip counts
+    kv_group_num: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    IS_CAUSAL: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    NUM_THRESHOLDS: tl.constexpr,
+    PADDED_THRESHOLDS: tl.constexpr,  # next_power_of_2(NUM_THRESHOLDS) for tl.arange
+):
+    """Forward kernel with multi-threshold sparsity measurement.
+
+    Computes full attention (no skipping) while counting how many KV tiles
+    would be skipped at each threshold. Each program writes its local counts
+    to ``Per_program_totals`` and ``Per_program_skipped``; the Python wrapper
+    sums across programs afterward. This avoids global atomic contention.
+    """
+    batch_idx = tl.program_id(0)
+    head_idx = tl.program_id(1)
+    tile_q = tl.program_id(2)
+    kv_head_idx = head_idx // kv_group_num
+
+    seq_len_q = tl.load(b_seq_len + batch_idx)
+    seq_len_kv = tl.load(b_seq_len_k + batch_idx)
+    q_offset = tl.load(b_start_loc + batch_idx)
+    kv_offset = tl.load(b_start_loc_k + batch_idx)
+
+    if tile_q * BLOCK_M >= seq_len_q:
+        return
+
+    q_pos = tile_q * BLOCK_M + tl.arange(0, BLOCK_M)
+    kv_pos = tl.arange(0, BLOCK_N)
+    dim_pos = tl.arange(0, BLOCK_D)
+    d_mask = dim_pos < HEAD_DIM
+
+    q_ptrs = (q_offset + q_pos[:, None]) * stride_qbs + head_idx * stride_qh + dim_pos[None, :]
+    q = tl.load(Q + q_ptrs, mask=(q_pos[:, None] < seq_len_q) & d_mask[None, :], other=0.0)
+
+    k_base = K + kv_head_idx * stride_kh
+    v_base = V + kv_head_idx * stride_vh
+
+    row_max = tl.zeros([BLOCK_M], dtype=tl.float32) - float("inf")
+    row_sum = tl.zeros([BLOCK_M], dtype=tl.float32)
+    acc = tl.zeros([BLOCK_M, BLOCK_D], dtype=tl.float32)
+
+    # Pre-load all thresholds once (vectorized, stays in registers).
+    # tl.arange requires power-of-2 size, so use PADDED_THRESHOLDS with masking.
+    thresh_offs = tl.arange(0, PADDED_THRESHOLDS)
+    thresh_mask = thresh_offs < NUM_THRESHOLDS
+    thresholds = tl.load(Threshold_trials + thresh_offs, mask=thresh_mask, other=float("inf"))
+
+    # Per-program local counters: avoid global atomic contention in inner loop.
+    # Each program accumulates locally, then writes once to Per_program buffers.
+    local_skipped = tl.zeros([PADDED_THRESHOLDS], dtype=tl.int32)
+    num_tiles = 0
+
+    kv_bound = seq_len_kv if not IS_CAUSAL else tl.minimum((tile_q + 1) * BLOCK_M, seq_len_kv)
+
+    for kv_start in range(0, kv_bound, BLOCK_N):
+        kv_start = tl.multiple_of(kv_start, BLOCK_N)
+
+        k_offs = (kv_offset + kv_start + kv_pos[None, :]) * stride_kbs + dim_pos[:, None]
+        k = tl.load(
+            k_base + k_offs,
+            mask=((kv_start + kv_pos[None, :]) < seq_len_kv) & d_mask[:, None],
+            other=0.0,
+        )
+
+        scores = tl.dot(q, k) * qk_scale
+        scores = _apply_mask(scores, q_pos, kv_pos, seq_len_q, seq_len_kv, kv_start, IS_CAUSAL)
+
+        tile_row_max = tl.max(scores, 1)
+
+        # --- Vectorized multi-threshold sparsity measurement ---
+        # A tile is skipped iff ALL Q rows satisfy: tile_row_max < row_max + thresh.
+        # Equivalently: max(tile_row_max - row_max) < thresh (worst-case row
+        # must still be below threshold for the tile to be skippable).
+        max_gap = tl.max(tile_row_max - row_max)  # scalar
+        skip_mask = (max_gap < thresholds).to(tl.int32)  # [PADDED_THRESHOLDS]
+        local_skipped += skip_mask
+        num_tiles += 1
+
+        # --- Always compute full attention (no skipping) ---
+        m_new = tl.maximum(row_max, tile_row_max)
+        p = tl.math.exp2(scores - m_new[:, None])
+        l_new = tl.sum(p, 1)
+        correction = tl.math.exp2(row_max - m_new)
+        row_sum = row_sum * correction + l_new
+        acc = acc * correction[:, None]
+
+        v_offs = (kv_offset + kv_start + kv_pos[:, None]) * stride_vbs + dim_pos[None, :]
+        v = tl.load(
+            v_base + v_offs,
+            mask=((kv_start + kv_pos[:, None]) < seq_len_kv) & d_mask[None, :],
+            other=0.0,
+        )
+        acc = tl.dot(p.to(v.dtype), v, acc)
+        row_max = m_new
+
+    # --- Write per-program counters (no atomics, just stores) ---
+    # Compute unique flat program index for this (batch, head, q_tile)
+    num_q_tiles = tl.cdiv(tl.load(b_seq_len + 0), BLOCK_M)  # conservative upper bound
+    num_heads = tl.num_programs(1)
+    prog_idx = batch_idx * num_heads * num_q_tiles + head_idx * num_q_tiles + tile_q
+    base = prog_idx * NUM_THRESHOLDS
+    tl.store(
+        Per_program_totals + base + thresh_offs,
+        tl.full([PADDED_THRESHOLDS], num_tiles, dtype=tl.int32),
+        mask=thresh_mask,
+    )
+    tl.store(
+        Per_program_skipped + base + thresh_offs,
+        local_skipped,
+        mask=thresh_mask,
+    )
+
+    acc = acc / tl.maximum(row_sum[:, None], 1e-6)
+    o_ptrs = (q_offset + q_pos[:, None]) * stride_obs + head_idx * stride_oh + dim_pos[None, :]
+    tl.store(Out + o_ptrs, acc, mask=(q_pos[:, None] < seq_len_q) & d_mask[None, :])
+
+
+def attention_calibrate(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    b_start_loc: torch.Tensor,
+    b_seq_len: torch.Tensor,
+    max_input_len: int,
+    is_causal: bool = True,
+    softmax_scale: float | None = None,
+    b_start_loc_k: torch.Tensor | None = None,
+    b_seq_len_k: torch.Tensor | None = None,
+    max_input_len_k: int | None = None,
+    *,
+    threshold_trials: list[float] | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Flash attention with multi-threshold skip-softmax sparsity measurement.
+
+    Computes full attention (identical output to dense attention) while
+    measuring how many KV tiles would be skipped at each threshold in
+    ``threshold_trials``. No autograd — forward only.
+
+    Args:
+        q, k, v, b_start_loc, b_seq_len, max_input_len, is_causal,
+        softmax_scale, b_start_loc_k, b_seq_len_k, max_input_len_k:
+            Same as :func:`attention`.
+        threshold_trials: List of threshold values to measure sparsity for.
+            Each value is converted to log2-scaled space for the kernel.
+
+    Returns:
+        Tuple of (output, sparsity_counters):
+        - output: ``[total_q_tokens, num_q_heads, head_dim]``
+        - sparsity_counters: ``[num_thresholds, 2]`` int64 tensor where
+          ``[:, 0]`` = total tile evaluations, ``[:, 1]`` = skipped tiles.
+          Sparsity per threshold = ``counters[:, 1] / counters[:, 0]``.
+    """
+    if threshold_trials is None or len(threshold_trials) == 0:
+        raise ValueError("threshold_trials must be a non-empty list")
+
+    HEAD_DIM = q.shape[2]
+    num_q_heads = q.shape[1]
+    num_kv_heads = k.shape[1]
+    kv_group_num = num_q_heads // num_kv_heads
+    batch = b_seq_len.shape[0]
+    sm_scale = 1.0 / (HEAD_DIM**0.5) if softmax_scale is None else softmax_scale
+    qk_scale = sm_scale * LOG2E
+    BLOCK_D = triton.next_power_of_2(HEAD_DIM)
+    BLOCK_M = 128
+    BLOCK_N = 64
+
+    if b_seq_len_k is None:
+        b_seq_len_k = b_seq_len
+        b_start_loc_k = b_start_loc
+
+    num_thresholds = len(threshold_trials)
+
+    # Convert thresholds to log2-scaled space: log2(lambda) * sm_scale
+    threshold_tensor = torch.tensor(
+        [math.log2(t) * sm_scale for t in threshold_trials],
+        dtype=torch.float32,
+        device=q.device,
+    )
+
+    o = torch.empty_like(q)
+
+    num_q_tiles = triton.cdiv(max_input_len, BLOCK_M)
+    grid = (batch, num_q_heads, num_q_tiles)
+    num_programs = batch * num_q_heads * num_q_tiles
+
+    # Per-program output buffers (no atomics needed — each program writes its own row)
+    per_program_totals = torch.zeros(
+        num_programs * num_thresholds, dtype=torch.int32, device=q.device
+    )
+    per_program_skipped = torch.zeros(
+        num_programs * num_thresholds, dtype=torch.int32, device=q.device
+    )
+
+    _attn_fwd_calibrate[grid](
+        q,
+        k,
+        v,
+        qk_scale,
+        b_start_loc,
+        b_seq_len,
+        b_start_loc_k,
+        b_seq_len_k,
+        o,
+        q.stride(0),
+        q.stride(1),
+        k.stride(0),
+        k.stride(1),
+        v.stride(0),
+        v.stride(1),
+        o.stride(0),
+        o.stride(1),
+        threshold_tensor,
+        per_program_totals,
+        per_program_skipped,
+        kv_group_num=kv_group_num,
+        BLOCK_M=BLOCK_M,
+        BLOCK_D=BLOCK_D,
+        BLOCK_N=BLOCK_N,
+        IS_CAUSAL=is_causal,
+        HEAD_DIM=HEAD_DIM,
+        NUM_THRESHOLDS=num_thresholds,
+        PADDED_THRESHOLDS=triton.next_power_of_2(num_thresholds),
+        num_warps=4,
+        num_stages=1,
+    )
+
+    # Reduce across programs: sum per-program counts → [num_thresholds]
+    totals = per_program_totals.view(num_programs, num_thresholds).sum(dim=0).to(torch.int64)
+    skipped = per_program_skipped.view(num_programs, num_thresholds).sum(dim=0).to(torch.int64)
+    sparsity_counters = torch.stack([totals, skipped], dim=1)  # [num_thresholds, 2]
+
+    return o, sparsity_counters
+
+
+__all__ = ["attention", "attention_calibrate"]

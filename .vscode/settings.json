@@ -19,7 +19,6 @@
         ".mypy_cache": true,
         ".pytest_cache": true,
         ".ruff_cache": true,
-        ".tox": true,
         "**/__pycache__/**": true,
         "**/*.pyc": true,
         "**/runs": true,
