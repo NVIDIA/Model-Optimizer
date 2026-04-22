@@ -6,7 +6,7 @@ Changelog
 
 **New Features**
 
-- Add NVFP4 W4A16 weight-only quantization (``nvfp4_w4a16``): FP4 weights with group_size=16, BF16 activations, no calibration forward pass required. Use ``mtq.NVFP4_W4A16_CFG`` or ``--qformat nvfp4_w4a16`` in ``hf_ptq.py``. Exported checkpoints can be served on vLLM after conversion to compressed-tensors format (see ``examples/llm_ptq/scripts/huggingface_example.sh``). Example with Qwen3-8B:
+- Add NVFP4 W4A16 weight-only quantization (``nvfp4_w4a16``): FP4 weights with group_size=16, BF16 activations, no calibration forward pass required. Use ``mtq.NVFP4_W4A16_CFG`` or ``--qformat nvfp4_w4a16`` in ``hf_ptq.py``. Exported checkpoints can be served on vLLM after conversion to compressed-tensors format
 - Support full Transformer Engine spec for Minitron pruning (``mcore_minitron``). Now we no longer need to use custom ModelOpt spec. Note that this does not affect the usage of the pruning workflow but makes pruning slightly faster and may result in slightly different pruned model because of different kernel and numerics.
 - Add Puzzletron - a new algorithm for heterogeneous pruning of LLM and VLM models. See `examples/puzzletron/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/puzzletron>`_ for more details.
 - Added iterator interface using CalibrationDataReader in ONNX quantization workflow.
