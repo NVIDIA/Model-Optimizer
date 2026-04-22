@@ -15,7 +15,10 @@
 
 """Tests for the per-instance nested-attention skip in the HF quantization plugin."""
 
+import pytest
 import torch.nn as nn
+
+pytest.importorskip("transformers")
 
 from modelopt.torch.quantization.plugins.huggingface import _wraps_nested_attention
 
