@@ -194,6 +194,30 @@ def _disable_high_rank_input_quantizers(model, input_shape, device):
     mtq.disable_quantizer(model, lambda n: n.startswith(prefixes))
 
 
+def _disable_low_channel_conv_input_quantizers(model):
+    """Disable ``input_quantizer`` on Conv2d modules whose ``in_channels <= 3``.
+
+    The first Conv2d of an image backbone (e.g. ResNet50's ``conv1``) consumes raw
+    RGB input, so ``in_channels == 3``. On Blackwell (compute capability 12.0) TRT
+    fails to find an FP8/MXFP8/NVFP4 tactic for this first-layer Q→Conv fusion:
+
+        Error Code 10: Could not find any implementation for node
+        /conv1/input_quantizer/TRT_FP8QuantizeLinear ... [ElementWise]
+
+    Ada (8.9) happens to have a tactic, which is why local runs pass. Disabling the
+    input quantizer on the raw-RGB conv is also standard quantization practice —
+    first/last layers are typically left in higher precision. Weight quantization
+    still applies. Swin/ViT's ``patch_embed.proj`` is already excluded via
+    ``filter_func``'s ``patch_embed`` pattern, so this helper is effectively the
+    ResNet-shaped analogue.
+    """
+    for _, mod in model.named_modules():
+        if isinstance(mod, torch.nn.Conv2d) and mod.in_channels <= 3:
+            q = getattr(mod, "input_quantizer", None)
+            if q is not None and q.is_enabled:
+                q.disable()
+
+
 def load_calibration_data(model, data_size, batch_size, device, with_labels=False):
     """Load and prepare calibration data.
 
@@ -565,6 +589,15 @@ def main():
     )
     if uses_dynamic_quantize:
         _disable_high_rank_input_quantizers(quantized_model, input_shape, device)
+
+    # FP8-family modes emit TRT_FP8QuantizeLinear on the first-layer conv; Blackwell has
+    # no tactic for that 3-channel Q→Conv fusion. Skip for pure INT8 (unaffected).
+    uses_fp8_conv_input = args.quantize_mode in ("fp8", "mxfp8", "nvfp4") or (
+        args.quantize_mode == "auto"
+        and any(fmt != "INT8_DEFAULT_CFG" for fmt in args.auto_quantization_formats)
+    )
+    if uses_fp8_conv_input:
+        _disable_low_channel_conv_input_quantizers(quantized_model)
 
     # Print quantization summary
     print("\nQuantization Summary:")
