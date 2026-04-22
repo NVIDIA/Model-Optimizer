@@ -176,6 +176,16 @@ def test_matmul_gemv_excluded():
     assert "MatMul_0" in excluded
 
 
+def test_matmul_gemv_variable_b_excluded():
+    """All-Variable MatMul with N=1 should be excluded via the all-Variable GEMV branch."""
+    # inp_b_constant=False makes B a graph input (Variable) so the all-Variable path is taken.
+    model = _make_matmul_model(m=32, k=64, n=1, inp_b_constant=False)
+    nodes = _get_nodes_by_op(model, "MatMul")
+    calibration_shapes = {"A": [32, 64], "B": [64, 1]}
+    excluded = _exclude_matmuls_by_shape_inference(model, nodes, calibration_shapes)
+    assert "MatMul_0" in excluded
+
+
 def test_matmul_large_dims_not_excluded():
     """MatMul with all large dims should not be excluded."""
     model = _make_matmul_model(m=128, k=256, n=64)
@@ -309,6 +319,54 @@ def test_exclude_matmuls_by_inference_runtime_path(k, n, expected_excluded):
         assert "MatMul_0" in excluded
     else:
         assert "MatMul_0" not in excluded
+
+
+def test_exclude_matmuls_by_inference_gemv_variable_b():
+    """All-Variable GEMV (N=1) should be excluded via the runtime-inference all-Variable path."""
+    m, k, n = 32, 64, 1
+    model = _make_matmul_model_graph_input_b(m=m, k=k, n=n)
+    nodes = _get_nodes_by_op(model, "MatMul")
+    fake_output_map = {
+        "Y": np.zeros((m, n), dtype=np.float32),
+        "B": np.zeros((k, n), dtype=np.float32),
+    }
+    with mock.patch(
+        "modelopt.onnx.quantization.graph_utils.get_extended_model_outputs",
+        return_value=fake_output_map,
+    ):
+        excluded = _exclude_matmuls_by_inference(
+            onnx_path="unused.onnx",
+            model=model,
+            matmul_nodes=nodes,
+            use_external_data_format=False,
+            intermediate_generated_files=[],
+            calibration_data_reader=None,
+            calibration_eps=["cpu"],
+        )
+    assert "MatMul_0" in excluded
+
+
+def test_exclude_matmuls_by_inference_gemv_constant_b():
+    """Constant-B GEMV (N=1) should be excluded via the runtime-inference elif path."""
+    m, k, n = 32, 64, 1
+    model = _make_matmul_model(m=m, k=k, n=n, inp_b_constant=True)
+    nodes = _get_nodes_by_op(model, "MatMul")
+    # B is a Constant (initializer) so only the matmul output is added to graph outputs.
+    fake_output_map = {"Y": np.zeros((m, n), dtype=np.float32)}
+    with mock.patch(
+        "modelopt.onnx.quantization.graph_utils.get_extended_model_outputs",
+        return_value=fake_output_map,
+    ):
+        excluded = _exclude_matmuls_by_inference(
+            onnx_path="unused.onnx",
+            model=model,
+            matmul_nodes=nodes,
+            use_external_data_format=False,
+            intermediate_generated_files=[],
+            calibration_data_reader=None,
+            calibration_eps=["cpu"],
+        )
+    assert "MatMul_0" in excluded
 
 
 def test_exclude_matmuls_by_inference_dedupes_added_outputs():
