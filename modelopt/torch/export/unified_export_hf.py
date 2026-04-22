@@ -85,6 +85,7 @@ from .model_config import (
     QUANTIZATION_NVFP4,
     QUANTIZATION_NVFP4_AWQ,
     QUANTIZATION_NVFP4_SVDQUANT,
+    QUANTIZATION_NVFP4_W4A16,
     QUANTIZATION_W4A8_AWQ,
     QUANTIZATION_W4A8_NVFP4_FP8,
 )
@@ -521,6 +522,7 @@ def _export_quantized_weight(
         QUANTIZATION_NVFP4_AWQ,
         QUANTIZATION_NVFP4_SVDQUANT,
         QUANTIZATION_NVFP4,
+        QUANTIZATION_NVFP4_W4A16,
         QUANTIZATION_W4A8_AWQ,
         QUANTIZATION_W4A8_NVFP4_FP8,
     ]:
@@ -549,6 +551,7 @@ def _export_quantized_weight(
         QUANTIZATION_NVFP4,
         QUANTIZATION_NVFP4_AWQ,
         QUANTIZATION_NVFP4_SVDQUANT,
+        QUANTIZATION_NVFP4_W4A16,
     ]:
         # Transpose weight from (num_experts, input_dim, output_dim) to (num_experts, output_dim, input_dim)
         # for NVFP4 quantization functions that expect input_dim as the last dimension for block quantization

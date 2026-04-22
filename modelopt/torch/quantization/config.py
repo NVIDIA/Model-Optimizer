@@ -588,8 +588,6 @@ def _nvfp4_selective_quant_cfg(
 
 NVFP4_DEFAULT_CFG = _nvfp4_selective_quant_cfg(["*"])
 
-NVFP4_DEFAULT_WEIGHT_ONLY_CFG = _nvfp4_selective_quant_cfg(["*"], weight_only=True)
-
 NVFP4_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG = {
     "quant_cfg": [
         *_base_disable_all,
@@ -796,6 +794,7 @@ NVFP4_MLP_WEIGHT_ONLY_CFG = _nvfp4_selective_quant_cfg(
 NVFP4_EXPERTS_ONLY_CFG = _nvfp4_selective_quant_cfg(["*mlp.experts*", "*block_sparse_moe*"])
 NVFP4_MLP_ONLY_CFG = _nvfp4_selective_quant_cfg(["*mlp*", "*block_sparse_moe*"])
 NVFP4_OMLP_ONLY_CFG = _nvfp4_selective_quant_cfg(["*o_proj*", "*mlp*", "*block_sparse_moe*"])
+NVFP4_W4A16_CFG = _nvfp4_selective_quant_cfg(["*"], weight_only=True)
 
 # DO NOT ADD NEW CONFIGS HERE. If you want to add a new general recipe, add it to
 # modelopt_recipes/general/ptq/ as a yaml file
@@ -818,7 +817,6 @@ choices: set[str] = {
     "NVFP4_AWQ_FULL_CFG",
     "NVFP4_AWQ_LITE_CFG",
     "NVFP4_DEFAULT_CFG",
-    "NVFP4_DEFAULT_WEIGHT_ONLY_CFG",
     "NVFP4_FP8_MHA_CONFIG",
     "NVFP4_KV_CFG",
     "NVFP4_KV_ROTATE_CFG",
@@ -831,6 +829,7 @@ choices: set[str] = {
     "NVFP4_MLP_ONLY_CFG",
     "NVFP4_EXPERTS_ONLY_CFG",
     "NVFP4_OMLP_ONLY_CFG",
+    "NVFP4_W4A16_CFG",
     "MAMBA_MOE_NVFP4_CONSERVATIVE_CFG",
     "MAMBA_MOE_NVFP4_AGGRESSIVE_CFG",
     "MAMBA_MOE_FP8_CONSERVATIVE_CFG",

@@ -47,6 +47,7 @@ from safetensors import safe_open
         ("w4a8_awq", "tiny_llama-w4a8-awq", True, False, True, True, False),
         ("int8_wo", "tiny_llama-int8-wo", False, False, False, False, False),
         ("nvfp4_svdquant", "tiny_llama-nvfp4-svdquant", True, False, True, True, True),
+        ("nvfp4_w4a16", "tiny_llama-nvfp4-w4a16", False, False, False, False, False),
         # MoE models (fused experts: Qwen3 MoE, GPT-OSS)
         ("nvfp4", "tiny_qwen3_moe-nvfp4", True, False, True, True, False),
         ("fp8", "tiny_gpt_oss-fp8", True, False, True, True, False),

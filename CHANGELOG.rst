@@ -6,6 +6,8 @@ Changelog
 
 **New Features**
 
+- Add NVFP4 W4A16 weight-only quantization (``nvfp4_w4a16``): FP4 weights with group_size=16, BF16 activations, no calibration forward pass required. Use ``mtq.NVFP4_W4A16_CFG`` or ``--qformat nvfp4_w4a16`` in ``hf_ptq.py``. Exported checkpoints can be served on vLLM after conversion to compressed-tensors format.
+- Register ``nn.Embedding`` with ``QuantModuleRegistry`` (weight-only wrapper) and extend the unified HF exporter to pack quantized embedding weights. Enables NVFP4 quantization of ``lm_head`` and the input token embedding on hybrid SSM+Attention models such as Nemotron-H, where those two tables are a sizeable fraction of parameters and leaving them in bf16 wastes most of the compression. Nemotron-H-specific enablement + ``--exclude_modules`` CLI flag wired up in ``examples/llm_ptq/hf_ptq.py``.
 - Support full Transformer Engine spec for Minitron pruning (``mcore_minitron``). Now we no longer need to use custom ModelOpt spec. Note that this does not affect the usage of the pruning workflow but makes pruning slightly faster and may result in slightly different pruned model because of different kernel and numerics.
 - Add Puzzletron - a new algorithm for heterogeneous pruning of LLM and VLM models. See `examples/puzzletron/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/puzzletron>`_ for more details.
 - Added iterator interface using CalibrationDataReader in ONNX quantization workflow.
