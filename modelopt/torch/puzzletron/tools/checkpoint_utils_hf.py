@@ -225,14 +225,18 @@ def save_checkpoint_from_shards(
     local_sd = {k: v.cpu() for k, v in model.state_dict().items()}
     if dist_utils.size() > 1:
         if dist_utils.is_master():
-            gathered: list[dict] = [{}] * dist_utils.size()
+            gathered: list[dict] = [None] * dist_utils.size()
             tdist.gather_object(local_sd, gathered, dst=0)
             full_sd: dict[str, torch.Tensor] = {}
             for shard_sd in gathered:
+                if shard_sd is None:
+                    continue
                 full_sd.update(shard_sd)
             _save_checkpoint(model.config, full_sd, checkpoint_dir, descriptor)
         else:
             tdist.gather_object(local_sd, dst=0)
+        # Barrier ensures all ranks wait until file I/O completes before continuing
+        dist_utils.barrier()
     else:
         _save_checkpoint(model.config, local_sd, checkpoint_dir, descriptor)
 
