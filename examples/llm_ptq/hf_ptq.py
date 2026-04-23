@@ -77,7 +77,6 @@ from modelopt.torch.utils.dataset_utils import (
     get_max_batch_size,
     get_supported_datasets,
 )
-from modelopt.torch.utils.image_processor import BaseImageProcessor, MllamaImageProcessor
 from modelopt.torch.utils.memory_monitor import launch_memory_monitor
 from modelopt.torch.utils.speech_dataset_utils import get_speech_dataset_dataloader
 from modelopt.torch.utils.vlm_dataset_utils import get_vlm_dataset_dataloader
@@ -203,7 +202,7 @@ def _move_batch_to_device(batch: dict, device: torch.device) -> dict:
 def make_calib_dataloader(
     args: argparse.Namespace,
     language_model: torch.nn.Module,
-    processor: BaseImageProcessor | ProcessorMixin | None,
+    processor: ProcessorMixin | None,
     tokenizer: PreTrainedTokenizerBase | None,
     device: torch.device,
     model_type: str | None,
@@ -250,19 +249,6 @@ def make_calib_dataloader(
             seed=42,
             use_media_shards=True,
             max_shards=1,
-        )
-    elif model_type == "mllama":
-        assert processor is not None and isinstance(processor, MllamaImageProcessor), (
-            "The MllamaImageProcessor must be set."
-        )
-        assert len(args.calib_size) == 1, (
-            "mllama only supports one dataset for calibration, can extend this in the future"
-        )
-        calib_dataloader = get_vlm_dataset_dataloader(
-            dataset_name=args.dataset[0] if args.dataset else "scienceqa",
-            processor=processor,
-            batch_size=args.batch_size,
-            num_samples=args.calib_size[0],
         )
     elif model_type == "whisper":
         assert processor is not None and isinstance(processor, WhisperProcessor), (
@@ -474,19 +460,10 @@ def load_model(args: argparse.Namespace):
         print("Nemotron VL model detected. Enabling image-text calibration by default.")
         args.calib_with_images = True
 
-    if model_type == "mllama":
+    if model_type == "whisper":
         processor = get_processor(
             args.pyt_ckpt_path,
             model_type,
-            device,
-            trust_remote_code=args.trust_remote_code,
-            attn_implementation=args.attn_implementation,
-        )
-    elif model_type == "whisper":
-        processor = get_processor(
-            args.pyt_ckpt_path,
-            model_type,
-            device,
             trust_remote_code=args.trust_remote_code,
         )
     elif is_nemotron_vl_model and args.calib_with_images:
@@ -717,13 +694,6 @@ def export_quantized(
                 print(f"Warning: Could not save processor config: {e}")
                 print("This is normal for some VLM architectures that don't use AutoProcessor")
 
-        if model_type == "mllama":
-            full_model_config = full_model.config
-            # TRT-LLM expects both the vision_config and text_config to be set for export.
-            setattr(full_model.config, "vision_config", full_model_config.vision_config)
-            setattr(full_model.config, "text_config", full_model_config.text_config)
-            setattr(full_model.config, "architectures", full_model_config.architectures)
-
         start_time = time.time()
         if (
             model_type in ["t5", "bart", "whisper"]
@@ -866,7 +836,7 @@ def post_quantize(
     language_model: torch.nn.Module,
     model_type: str | None,
     tokenizer: PreTrainedTokenizerBase | None,
-    processor: BaseImageProcessor | ProcessorMixin | None,
+    processor: ProcessorMixin | None,
     preview_input_ids,
     generated_ids_before_ptq,
     is_nemotron_vl_model,
@@ -929,9 +899,7 @@ def post_quantize(
         )
 
     def input_decode(input_ids):
-        if processor is not None and isinstance(processor, MllamaImageProcessor):
-            return processor.tokenizer.batch_decode(input_ids)
-        elif processor is not None and isinstance(processor, WhisperProcessor):
+        if processor is not None and isinstance(processor, WhisperProcessor):
             return first_text_speech_dataset
         elif tokenizer is not None:
             return tokenizer.batch_decode(input_ids)
@@ -944,8 +912,6 @@ def post_quantize(
                 return processor.tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
             elif tokenizer is not None:
                 return tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
-        elif processor is not None and isinstance(processor, MllamaImageProcessor):
-            return processor.tokenizer.batch_decode(generated_ids[:, input_shape:])
         elif tokenizer is not None:
             return tokenizer.batch_decode(generated_ids[:, input_shape:])
         else:
@@ -990,7 +956,7 @@ def quantize_main(
     language_model: torch.nn.Module,
     model_type: str | None,
     calibration_only: bool,
-    processor: BaseImageProcessor | ProcessorMixin | None,
+    processor: ProcessorMixin | None,
     tokenizer: PreTrainedTokenizerBase | None,
     default_padding_side,
     default_pad_token,
@@ -1127,7 +1093,10 @@ def quantize_main(
                 print(f"Excluding module from quantization: {mod}")
 
         # Use constant amax for KV quantizers when a cast format is selected.
-        if args.kv_cache_qformat in _KV_CAST_FORMATS:
+        # Recipes are authoritative for KV cache config (including use_constant_amax),
+        # so skip this post-hoc override when --recipe is used; rely on the YAML instead
+        # (see modelopt_recipes/general/ptq/*_cast_kv.yaml).
+        if args.recipe is None and args.kv_cache_qformat in _KV_CAST_FORMATS:
             quant_cfg = copy.deepcopy(quant_cfg)
             _set_kv_cache_constant_amax(quant_cfg["quant_cfg"])
 
@@ -1183,7 +1152,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--recipe",
         help=(
-            "PTQ recipe YAML file or name without suffix (e.g. general/ptq/nvfp4_default-fp8_kv)."
+            "PTQ recipe YAML file or name without suffix (e.g. general/ptq/nvfp4_default-fp8_cast_kv, "
+            "general/ptq/nvfp4_default-fp8_kv, general/ptq/nvfp4_default-nvfp4_cast_kv). "
+            "When set, --kv_cache_qformat is ignored; the recipe fully determines KV cache config."
         ),
         default=None,
     )
@@ -1272,7 +1243,9 @@ def parse_args() -> argparse.Namespace:
             "Specify KV cache quantization format. Default: fp8_cast. "
             "Formats ending in '_cast' (fp8_cast, nvfp4_cast) set the amax to FP8 range "
             "without data-driven calibration. "
-            "Other formats (fp8, nvfp4, etc.) use data-driven calibration."
+            "Other formats (fp8, nvfp4, etc.) use data-driven calibration. "
+            "Ignored when --recipe is given: the recipe YAML is authoritative for KV "
+            "cache config (use the *_cast_kv.yaml recipes for the cast variants)."
         ),
     )
     parser.add_argument(
