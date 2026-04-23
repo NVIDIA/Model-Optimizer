@@ -106,7 +106,10 @@ def test_load_recipe_builtin_description():
 
 _BUILTIN_PTQ_RECIPES = [
     "general/ptq/fp8_default-fp8_kv",
+    "general/ptq/fp8_default-fp8_cast_kv",
     "general/ptq/nvfp4_default-fp8_kv",
+    "general/ptq/nvfp4_default-fp8_cast_kv",
+    "general/ptq/nvfp4_default-nvfp4_cast_kv",
     "general/ptq/nvfp4_mlp_only-fp8_kv",
     "general/ptq/nvfp4_omlp_only-fp8_kv",
 ]
