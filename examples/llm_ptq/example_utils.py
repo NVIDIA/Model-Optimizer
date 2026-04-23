@@ -45,8 +45,6 @@ try:
 except ImportError:
     snapshot_download = None
 
-from modelopt.torch.utils.image_processor import BaseImageProcessor, MllamaImageProcessor
-
 logger = logging.getLogger(__name__)
 
 SPECULATIVE_MODEL_LIST = ["Eagle", "Medusa"]
@@ -284,13 +282,10 @@ def get_tokenizer(ckpt_path, trust_remote_code=False, **kwargs) -> PreTrainedTok
 def get_processor(
     ckpt_path,
     model_type,
-    device: torch.device = "auto",
     trust_remote_code=False,
     attn_implementation=None,
-) -> BaseImageProcessor | ProcessorMixin | None:
-    """
-    Returns a :class:`modelopt.torch.utils.image_processor.MllamaImageProcessor` object.
-    """
+) -> ProcessorMixin | None:
+    """Load a processor appropriate for the given model type."""
     model_kwargs = {"trust_remote_code": trust_remote_code}
     if attn_implementation is not None:
         model_kwargs["attn_implementation"] = attn_implementation
@@ -308,19 +303,6 @@ def get_processor(
         )
 
         return processor
-    elif model_type == "mllama":
-        processor = AutoProcessor.from_pretrained(
-            ckpt_path,
-            padding_side="left",
-            **model_kwargs,
-        )
-        if processor.tokenizer.pad_token is None:
-            processor.tokenizer.pad_token = processor.tokenizer.eos_token
-        assert processor.tokenizer.pad_token is not None, (
-            f"Pad token for {ckpt_path} cannot be set!"
-        )
-
-        return MllamaImageProcessor(processor, device)
     else:
         # Try to load AutoProcessor for other VL models (e.g., Nemotron-Parse)
         try:
