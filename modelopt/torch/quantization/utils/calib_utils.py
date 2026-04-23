@@ -292,7 +292,7 @@ def gptq_blockwise_update_fused_scalar(
         block_size: Number of columns to process per GPTQ block.
         quant_block_size: Number of elements sharing one quantization scale factor.
     """
-    from modelopt.torch.quantization.triton.gptq_fused_kernel import gptq_fused_block_scalar
+    from modelopt.torch.kernels.quantization.gemm.gptq_fused_kernel import gptq_fused_block_scalar
 
     num_cols = weight.shape[1]
     for bs in range(0, num_cols, block_size):

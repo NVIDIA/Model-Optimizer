@@ -13,4 +13,4 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""ModelOpt kernel library: common, quantization (conv, gemm), sparsity (attention, gemm)."""
+"""Quantization kernels: conv (implicit GEMM) and gemm (tensor_quant + Triton FP4/FP8)."""
