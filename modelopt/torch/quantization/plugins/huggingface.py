@@ -30,6 +30,7 @@ from torch import Tensor
 from torch.nn.functional import linear
 from transformers.models.t5.modeling_t5 import T5Attention
 
+from modelopt.torch.kernels.quantization.gemm import IS_AVAILABLE as IS_TRITON_AVAILABLE
 from modelopt.torch.opt.dynamic import DynamicModule
 from modelopt.torch.utils.distributed import ParallelState
 
@@ -37,7 +38,6 @@ from ..algorithms import AutoQuantizeGradientSearcher
 from ..conversion import register
 from ..nn import QuantInputBase, QuantModule, QuantModuleRegistry, TensorQuantizer
 from ..nn.modules.quant_linear import _QuantLinear
-from ..triton import IS_AVAILABLE as IS_TRITON_AVAILABLE
 from ..utils import replace_function, sync_moe_expert_amax
 from ..utils.layerwise_calib import LayerActivationCollector
 from .attention import register_attention_for_kv_quant
@@ -58,7 +58,7 @@ except ImportError:
     kitchen = None
 
 if IS_TRITON_AVAILABLE:
-    from ..triton import weight_dequant
+    from modelopt.torch.kernels.quantization.gemm import weight_dequant
 else:
     weight_dequant = None
 
