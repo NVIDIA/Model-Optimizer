@@ -332,8 +332,12 @@ class DMDPipeline(DistillationPipeline):
         if cfg.student_sample_steps == 1:
             max_t = cfg.sample_t_cfg.max_t
             t_student = torch.full((batch_size,), max_t, device=device, dtype=torch.float32)
-            # Under RF, ``sigma(max_t) = max_t``; scalar-multiply is fine (no per-sample shape needed).
-            input_student = noise * max_t
+            # Under RF, ``sigma(max_t) = max_t``. Do the scaling in fp64 and cast back
+            # to mirror FastGen's ``BaseNoiseSchedule.latents`` — matters for bf16
+            # student input at ``max_t ≈ 0.999`` where naive bf16 multiply loses
+            # ~10 bits of mantissa relative to the fp64 path.
+            original_dtype = noise.dtype
+            input_student = (noise.to(torch.float64) * float(max_t)).to(original_dtype)
         else:
             if cfg.sample_t_cfg.t_list is None:
                 raise ValueError(

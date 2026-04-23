@@ -397,9 +397,15 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
         ema_path = os.path.join(ckpt_dir, "ema_shadow.pt")
         state_path = os.path.join(ckpt_dir, "dmd_state.pt")
 
-        if os.path.isdir(fs_weights_dir):
-            self.checkpointer.load_model(model=self._fake_score, weights_path=fs_weights_dir)
-        if os.path.isdir(fs_opt_dir):
+        # Checkpointer.save_model writes DCP shards to ``<weights_path>/model/``;
+        # load_model expects that *inner* ``model/`` dir as ``model_path`` (see
+        # ``BaseRecipe.load_checkpoint`` which passes ``os.path.join(ckpt_dir, "model")``).
+        # The kwarg name differs between save (``weights_path``) and load (``model_path``).
+        fs_weights_model_dir = os.path.join(fs_weights_dir, "model")
+        if os.path.isdir(fs_weights_model_dir):
+            self.checkpointer.load_model(model=self._fake_score, model_path=fs_weights_model_dir)
+        # load_optimizer, in contrast, appends ``optim/`` internally — pass the base dir.
+        if os.path.isdir(os.path.join(fs_opt_dir, "optim")):
             self.checkpointer.load_optimizer(
                 self._fake_score_optimizer, self._fake_score, fs_opt_dir, None
             )

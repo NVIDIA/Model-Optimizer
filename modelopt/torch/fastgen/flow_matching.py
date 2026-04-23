@@ -93,7 +93,7 @@ def pred_noise_to_pred_x0(
     t_64 = t.to(torch.float64)
     alpha = expand_like(rf_alpha(t_64), x_t)
     sigma = expand_like(rf_sigma(t_64), x_t)
-    x0 = (x_t - sigma * pred_noise_64) / alpha.clamp_min(1e-12)
+    x0 = (x_t - sigma * pred_noise_64) / alpha.clamp_min(1e-6)
     return x0.to(original_dtype)
 
 
@@ -132,7 +132,7 @@ def x0_to_eps(
     t_64 = t.to(torch.float64)
     alpha = expand_like(rf_alpha(t_64), x0_64)
     sigma = expand_like(rf_sigma(t_64), x0_64)
-    eps = (x_t_64 - alpha * x0_64) / sigma.clamp_min(1e-12)
+    eps = (x_t_64 - alpha * x0_64) / sigma.clamp_min(1e-6)
     return eps.to(original_dtype)
 
 
@@ -156,7 +156,7 @@ def x0_to_flow(
     x_t_64 = x_t.to(torch.float64)
     t_64 = t.to(torch.float64)
     sigma = expand_like(rf_sigma(t_64), x0_64)
-    flow = (x_t_64 - x0_64) / sigma.clamp_min(1e-12)
+    flow = (x_t_64 - x0_64) / sigma.clamp_min(1e-6)
     return flow.to(original_dtype)
 
 
