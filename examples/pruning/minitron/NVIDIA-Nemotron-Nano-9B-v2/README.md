@@ -9,7 +9,7 @@ End-to-end optimization of [Nemotron-Nano-9B-v2](https://huggingface.co/nvidia/N
 5. **[Quantization](#5-quantization)** — FP8 PTQ on the distilled checkpoint using ModelOpt's `examples/llm_ptq/hf_ptq.py` script
 6. **[vLLM Inference Benchmarking](#6-vllm-inference-benchmarking)** — throughput comparison of BF16 vs FP8 on a single H100
 
-**Environment:** Container `nvcr.io/nvidia/nemo:26.02`, ModelOpt 0.44.0. See the [Megatron Bridge README](../../README.md) for environment setup (including ModelOpt mount path) and container usage.
+**Environment:** Container `nvcr.io/nvidia/nemo:26.02`, ModelOpt 0.44.0. See the [Megatron-Bridge README](../../../megatron_bridge/README.md) for environment setup (including ModelOpt mount path) and container usage.
 
 ## Results
 
@@ -50,7 +50,8 @@ Distillation uses the **30% Pretraining (Code 5, General 20, MATH 5) + 70% Post-
 
 > [!NOTE]
 > Exact numbers may vary depending on deployment and evaluation setup. All models above — including the official 9B and 12B — were evaluated with the same [nemo_evaluator.yaml](nemo_evaluator.yaml) for fair comparison. These numbers may differ from those reported on the official [Nemotron-Nano-9B-v2](https://huggingface.co/nvidia/NVIDIA-Nemotron-Nano-9B-v2) and [Nemotron-Nano-12B-v2](https://huggingface.co/nvidia/NVIDIA-Nemotron-Nano-12B-v2) HuggingFace model cards.
->
+
+> [!NOTE]
 > The official Nemotron-Nano-9B-v2 model was itself produced by pruning Nemotron-Nano-12B-v2 using Minitron. See [arxiv:2508.14444](https://arxiv.org/abs/2508.14444) for details on the exact steps used there.
 
 ---
@@ -59,7 +60,7 @@ Distillation uses the **30% Pretraining (Code 5, General 20, MATH 5) + 70% Post-
 
 ### 1. Data Preparation
 
-See [examples/dataset/MEGATRON_DATA_PREP.md](../../../../dataset/MEGATRON_DATA_PREP.md) for tokenization commands for all datasets used in this blend.
+See [examples/dataset/MEGATRON_DATA_PREP.md](../../../dataset/MEGATRON_DATA_PREP.md) for tokenization commands for all datasets used in this blend.
 
 For this experiment: `TOKENIZER=nvidia/NVIDIA-Nemotron-Nano-9B-v2`, `OUTPUT_DIR=tokenized_nano_v2`.
 
@@ -87,23 +88,23 @@ DATA_BLEND=" \
 
 | Dataset | Tokens | Weight | Notes |
 | --- | --- | --- | --- |
-| Nemotron-Pretraining-SFT-v1 / Code | 6.7B | 5 | Pretraining code |
-| Nemotron-Pretraining-SFT-v1 / General | 15.9B | 20 | Upweighted to better close MMLU gap |
-| Nemotron-Pretraining-SFT-v1 / MATH | 12.1B | 5 | Pretraining math |
-| Nemotron-Math-v2 / high part00 | 9.3B | 15 | Hard math reasoning |
-| Nemotron-Math-v2 / high part01 | 10.6B | 10 | Hard math reasoning |
-| Nemotron-SFT-Math-v3 | 2.1B | 5 | TIR reasoning traces |
-| Nemotron-SFT-Competitive-Programming-v2 / python | 6.7B | 15 | Python reasoning traces |
-| Nemotron-SFT-Competitive-Programming-v2 / cpp | 6.7B | 5 | C++ reasoning traces |
-| Nemotron-Post-Training-Dataset-v1 / stem | ~60B | 10 | Broad STEM |
-| Nemotron-Science-v1 / MCQ | 497M | 3 | GPQA MCQ format alignment |
-| Nemotron-Science-v1 / RQA | 278M | 2 | GPQA format diversity |
-| Nemotron-SFT-IF-Chat-v2 / reasoning_on | 2.2B | 3 | Instruction following (thinking on) |
-| Nemotron-SFT-IF-Chat-v2 / reasoning_off | 1.4B | 2 | Instruction following (thinking off) |
+| Nemotron-Pretraining-SFT-v1 / Code (10M samples) | 7B | 5 | Pretraining code |
+| Nemotron-Pretraining-SFT-v1 / General (10M samples) | 16B | 20 | Upweighted to better close MMLU gap |
+| Nemotron-Pretraining-SFT-v1 / MATH (10M samples) | 12B | 5 | Pretraining math |
+| Nemotron-Math-v2 / high_part00 | 9B | 15 | Hard math reasoning |
+| Nemotron-Math-v2 / high_part01 | 11B | 10 | Hard math reasoning |
+| Nemotron-SFT-Math-v3 | 2B | 5 | Tool-Integrated Reasoning (TIR) traces |
+| Nemotron-SFT-Competitive-Programming-v2 / python_00 | 7B | 15 | Python reasoning traces |
+| Nemotron-SFT-Competitive-Programming-v2 / cpp_00 | 7B | 5 | C++ reasoning traces |
+| Nemotron-Post-Training-Dataset-v1 / stem (5M samples) | 20B | 10 | Broad STEM |
+| Nemotron-Science-v1 / MCQ | 0.5B | 3 | GPQA MCQ format alignment |
+| Nemotron-Science-v1 / RQA | 0.3B | 2 | GPQA format diversity |
+| Nemotron-SFT-IF-Chat-v2 / reasoning_on | 2B | 3 | Instruction following (thinking on) |
+| Nemotron-SFT-IF-Chat-v2 / reasoning_off | 1B | 2 | Instruction following (thinking off) |
 
 #### General Guidelines
 
-Always use 30% pretraining and 70% post-training data as optimal blend. Exact proportions may vary depending on the benchmarks you care about. The blend above was designed to maximize recovery on important benchmarks reported in the Nemotron-Nano-9B-v2 model card. The key design decisions were:
+The optimal blend is 30% pretraining and 70% post-training data. Exact proportions may vary depending on the benchmarks you care about. The blend above was designed to maximize recovery on important benchmarks reported in the Nemotron-Nano-9B-v2 model card. The key design decisions were:
 
 - **30% pretraining data** closes the MMLU gap that arises from training exclusively on reasoning-heavy post-training data. The General split (20%) is upweighted specifically to recover general knowledge recall.
 - **Math (30%)** is the largest post-training category because AIME and MMLU Pro respond strongly to more math reasoning tokens. Two `Nemotron-Math-v2` splits are used to avoid repetition at longer token budgets.
@@ -126,7 +127,7 @@ When adding new datasets, reduce weights of lower-priority categories proportion
 
 ### 2. Pruning
 
-Run on **1 node × 8x H100** (~1 hours)
+Run on **1 node × 8x H100** (~1 hour)
 
 Non-default arguments: `--hparams_to_skip num_attention_heads` (default: none; attention heads pruning is harder to recover hence skipped), `--seq_length 8192` (default: 4096) since dataset has longer sequences. All other arguments use defaults i.e. we optimize for MMLU (10% subset, 0-shot) for the pruned model (without distillation).
 
@@ -144,7 +145,7 @@ torchrun --nproc_per_node 8 /opt/Model-Optimizer/examples/megatron_bridge/prune_
 Important pruning logs:
 
 ```text
-"Only considering atmost 40% for width and 20% for depth pruning hparams
+Only considering atmost 40% for width and 20% for depth pruning hparams
 Skipping hparams_to_skip=['num_attention_heads'] during search space generation...
         Search space for num_layers: [46, 48, 50, 52, 54, 56]
         Search space for hidden_size: [2816, 3072, 3328, 3584, 3840, 4096, 4352, 4480]
@@ -167,7 +168,7 @@ Top 10 candidates with scores:
 
 Dropping decoder layers [43, 44, 45, 46, 47, 48, 50, 52] from model.
 Original hybrid_override_pattern: M-M-M-MM-M-M-M*-M-M-M*-M-M-M-M*-M-M-M-M*-M-MM-M-M-M-M-M-
-Pruned hybrid_override_pattern: M-M-M-MM-M-M-M*-M-M-M*-M-M-M-M*-M-M-M-M*-MMMM-M-"
+Pruned hybrid_override_pattern: M-M-M-MM-M-M-M*-M-M-M*-M-M-M-M*-M-M-M-M*-MMMM-M-
 ```
 
 ---
@@ -205,9 +206,9 @@ torchrun --nproc_per_node 8 /opt/Model-Optimizer/examples/megatron_bridge/distil
 #     --wandb_exp_name <wandb_exp_name>
 ```
 
-For multi-node Slurm runs, see the [Megatron Bridge README](../../README.md#slurm-usage) for details.
+For multi-node Slurm runs, see the [Megatron-Bridge README](../../../megatron_bridge/README.md#slurm-usage) for details.
 
-Distillation saves checkpoints in Megatron distributed format under `<output_dir>/checkpoints/iter_XXXXXXX`. To evaluate, convert a checkpoint to HuggingFace format using the Megatron-Bridge conversion script (see [Megatron Bridge README](../../README.md) for full details):
+Distillation saves checkpoints in Megatron distributed format under `<output_dir>/checkpoints/iter_XXXXXXX`. To evaluate, convert a checkpoint to HuggingFace format using the Megatron-Bridge conversion script (see [Megatron Bridge README](../../../megatron_bridge/README.md) for full details):
 
 ```bash
 python /opt/Megatron-Bridge/examples/conversion/convert_checkpoints.py export \
@@ -220,7 +221,7 @@ python /opt/Megatron-Bridge/examples/conversion/convert_checkpoints.py export \
 
 ### 4. Evaluation
 
-The eval config in [nemo_evaluator.yaml](nemo_evaluator.yaml) is for Slurm-based evaluation — it submits a vLLM serving job and runs evals against it. For local model hosting and evaluation, refer to the [NeMo Evaluator documentation](https://docs.nvidia.com/nemo/evaluator/latest/).
+The eval config in [nemo_evaluator.yaml](nemo_evaluator.yaml) is for Slurm-based evaluation — it submits a vLLM serving job and runs evals against it. For local model execution and evaluation, refer to the [NeMo Evaluator documentation](https://docs.nvidia.com/nemo/evaluator/latest/).
 
 Before running, update the following fields in the yaml:
 
@@ -270,43 +271,53 @@ For more details on NeMo Evaluator, see the [GitHub repo](https://github.com/NVI
 
 ### 5. Quantization
 
-ModelOpt allows stacking multiple optimization techniques. Here we stack FP8 quantization on top of the pruned and distilled model to get an even more optimized model. See [examples/llm_ptq/README.md](../../../../llm_ptq/README.md) for the full PTQ documentation.
+ModelOpt allows stacking multiple optimization techniques. Here we stack FP8 quantization on top of the pruned and distilled model to get an even more optimized model. See [examples/llm_ptq/README.md](../../../llm_ptq/README.md) for the full PTQ documentation.
+
+Similar to the official [Nemotron-Nano-9B-v2-FP8](https://huggingface.co/nvidia/NVIDIA-Nemotron-Nano-9B-v2-FP8) model, if you want to quantize the pruned 7B model to FP8, the Mamba and MLP layers are quantized to FP8, while all 4 attention layers and the Conv1d components within the Mamba layers are kept in BF16 to avoid accuracy degradation.
+
+This is done with the `mtq.MAMBA_MOE_FP8_AGGRESSIVE_CFG` config defined in [`modelopt/torch/quantization/config.py`](../../../../modelopt/torch/quantization/config.py). To apply this, you need to modify `QUANT_CFG_CHOICES["fp8"]` in [`examples/llm_ptq/hf_ptq.py`](../../../llm_ptq/hf_ptq.py) to use `mtq.MAMBA_MOE_FP8_AGGRESSIVE_CFG`. You may also consider using `mtq.MAMBA_MOE_FP8_CONSERVATIVE_CFG` for more conservative quantization.
 
 > [!NOTE]
-> You can also quantize to NVFP4, which may require further distillation to recover accuracy (QAD).
+> You can also quantize to NVFP4 using `mtq.MAMBA_MOE_NVFP4_AGGRESSIVE_CFG` or `mtq.MAMBA_MOE_NVFP4_CONSERVATIVE_CFG`, which may require further distillation (QAD) to recover accuracy and Blackwell GPU for deployment.
 
 Calibrate and export the HF checkpoint from iteration 12800 to FP8 (takes 1-2 mins on 8x H100):
 
 ```bash
 python /opt/Model-Optimizer/examples/llm_ptq/hf_ptq.py \
     --pyt_ckpt_path <output_dir>/checkpoints/hf_iter_12800 \
-    --export_path <output_dir>/checkpoints/hf_iter_12800_fp8 \
+    --export_path <output_dir>/checkpoints/hf_iter_12800_fp8_aggressive \
     --qformat fp8 \
     --trust_remote_code
 ```
 
-This calibrates on 512 samples and writes a quantized HF checkpoint to `<output_dir>/checkpoints/hf_iter_12800_fp8`. The checkpoint is directly deployable with [vLLM](https://github.com/vllm-project/vllm), [TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM) and [SGLang](https://github.com/sgl-project/sglang).
+The quantized checkpoint is directly deployable with [vLLM](https://github.com/vllm-project/vllm), [TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM) and [SGLang](https://github.com/sgl-project/sglang).
+
+> [!TIP]
+> You can run the evaluation using the same `nemo_evaluator.yaml` file for the quantized checkpoint also!
 
 ### 6. vLLM Inference Benchmarking
 
-Benchmark throughput using [vLLM](https://github.com/vllm-project/vllm) on a single H100 GPU. Run the command once for each huggingface checkpoint — vLLM automatically detects and applies FP8 quantization for the FP8 checkpoint from the embedded `quantization_config` in the model's `config.json`, with no extra flags needed:
+Benchmark throughput using [vLLM](https://github.com/vllm-project/vllm) on a single H100 GPU. Run the command once for each HuggingFace checkpoint. vLLM automatically detects FP8 quantization from the embedded `quantization_config` in `config.json` and applies it with no extra flags needed.
+
+Results on a single H100 (ISL=32768, OSL=1024):
 
 ```bash
 vllm bench throughput \
     --model <checkpoint_path> \
-    --random-input-len 2048 \
-    --random-output-len 8192 \
+    --random-input-len 32768 \
+    --random-output-len 1024 \
     --trust-remote-code \
     --mamba_ssm_cache_dtype float32 \
+    --kv-cache-dtype fp8 \
     --load-format safetensors
 ```
 
-Results on a single H100 (ISL=2048, OSL=8192):
-
-| Checkpoint | Requests/s | Total tokens/s | Output tokens/s |
+| Checkpoint | Model loading memory | Output tokens/s | Speedup vs Nemotron-Nano-9B-v2 BF16 |
 | --- | --- | --- | --- |
-| Pruned 7B BF16 (13.1 GiB) | 0.72 | 7,346 | 5,877 |
-| Pruned 7B FP8 (7.6 GiB) | **0.83** | **8,457** | **6,765** |
-| **Speedup** | **1.15×** | **1.15×** | **1.15×** |
+| Nemotron-Nano-12B-v2 (official) | 22.9 GiB | 585 | 0.74× |
+| Nemotron-Nano-9B-v2 (official) | 16.6 GiB | 794 | 1.00× |
+| Nemotron-Nano-9B-v2-FP8 (official) | 9.6 GiB | 1,012 | 1.27× |
+| Nemotron-Nano-9B-v2-Pruned-7B | 13.1 GiB | 963 | 1.21× |
+| Nemotron-Nano-9B-v2-Pruned-7B-FP8 | 7.8 GiB | 1,147 | 1.44× |
 
-FP8 delivers a ~15% throughput improvement in this long-context decode-heavy workload. The NemotronH hybrid architecture (Mamba + attention) means a portion of compute is in Mamba SSM layers, which are not weight-quantized the same way as linear layers, moderating the throughput gain relative to pure-transformer models where FP8 can deliver larger improvements.
+In this case, FP8 delivers a ~20-30% throughput gain over BF16 at the same parameter count. The NemotronH hybrid architecture (Mamba + attention) moderates this gain relative to pure-transformer models, since Attention and Conv1d layers are not quantized.

@@ -60,7 +60,6 @@ deployment:
   extra_args: "--trust-remote-code --no-enable-prefix-caching --mamba_ssm_cache_dtype float32 --model-loader-extra-config '{\"enable_multithread_load\"\
     : true, \"num_threads\": 96}' --kv-cache-dtype fp8 "
   env_vars:
-    VLLM_FLASHINFER_MOE_BACKEND: throughput
     VLLM_ATTENTION_BACKEND: FLASH_ATTN
   endpoints:
     chat: /v1/chat/completions

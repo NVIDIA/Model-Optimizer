@@ -341,7 +341,7 @@ To recover degradation in the quality of the compressed model, we can use knowle
 
 See [Megatron-Bridge distillation](../megatron_bridge/README.md#distillation) for instructions on using Megatron-Bridge for knowledge distillation. The distillation script supports both standard HuggingFace and Puzzletron AnyModel checkpoints.
 
-For distillation results on Puzzletron-compressed models, see [results/puzzletron.md](../megatron_bridge/results/puzzletron.md).
+For distillation results on Puzzletron-compressed models, see [examples/pruning/puzzletron/](../pruning/puzzletron/README.md).
 
 ## Advanced Usage
 
