@@ -29,12 +29,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, BinaryIO
 
 import torch
+import torch.distributed as tdist
 import transformers
 from safetensors.torch import save_file as safe_save_file
 from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig, PreTrainedModel
 from transformers.dynamic_module_utils import get_class_from_dynamic_module
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
+import modelopt.torch.utils.distributed as dist_utils
 from modelopt.torch.utils import json_dumps
 
 from ..block_config import maybe_cast_block_configs
@@ -211,12 +213,9 @@ def save_checkpoint_from_shards(
     ``model.safetensors.index.json`` is built from the *complete* weight map.
     Falls back to :func:`save_checkpoint` when running on a single process.
     """
-    import modelopt.torch.utils.distributed as dist_utils
 
     local_sd = {k: v.cpu() for k, v in model.state_dict().items()}
     if dist_utils.size() > 1:
-        import torch.distributed as tdist
-
         if dist_utils.is_master():
             gathered: list[dict] = [{}] * dist_utils.size()
             tdist.gather_object(local_sd, gathered, dst=0)
