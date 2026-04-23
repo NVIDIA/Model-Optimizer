@@ -11,7 +11,8 @@ OUTPUT_DIR=tokenized_nano_v2                   # Output directory for tokenized 
 
 Output files are written in Megatron binary format (`.bin` / `.idx`). See [examples/dataset/README.md](../dataset/README.md) for full tokenization documentation.
 
-> **Tip:** Token count for a `.bin` file = file size in bytes ÷ 4. This is also printed by the tokenization script on completion.
+> [!TIP]
+> Token count for a `.bin` file = file size in bytes ÷ 4. This is also printed by the tokenization script on completion.
 
 > Tokenizing each of the datasets below will take anywhere between 10 minutes to 1 hour. You can tokenize all in parallel to speed up the process.
 
@@ -40,7 +41,7 @@ python -m modelopt.torch.utils.plugins.megatron_preprocess_data \
 
 ## Nemotron Post-training v1 dataset
 
-**[nvidia/Nemotron-Post-Training-Dataset-v1](https://huggingface.co/datasets/nvidia/Nemotron-Post-Training-Dataset-v1)** — STEM subset, capped at 5M samples. v1 data does not contain reasoning traces; `--reasoning_content strip` drops any if present:
+**[nvidia/Nemotron-Post-Training-Dataset-v1](https://huggingface.co/datasets/nvidia/Nemotron-Post-Training-Dataset-v1)** — STEM subset, capped at 5M samples. v1 data does not contain reasoning traces:
 
 ```bash
 python -m modelopt.torch.utils.plugins.megatron_preprocess_data \

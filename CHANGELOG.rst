@@ -25,6 +25,7 @@ Changelog
 **New Features**
 
 - Support full Transformer Engine spec for Minitron pruning (``mcore_minitron``). Now we no longer need to use custom ModelOpt spec. Note that this does not affect the usage of the pruning workflow but makes pruning slightly faster and may result in slightly different pruned model because of different kernel and numerics.
+- Add end-to-end tutorial for Minitron pruning + distillation + quantization + vLLM deployment for Nemotron-Nano-9B-v2 → Pruned 7B with data blend preparation (and ablation study), a nemo-evaluator evaluation config, quantization and vLLM benchmarking. See `examples/megatron_bridge/results/minitron/NVIDIA-Nemotron-Nano-9B-v2/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/megatron_bridge/results/minitron/NVIDIA-Nemotron-Nano-9B-v2>`_ for details.
 - Add Puzzletron - a new algorithm for heterogeneous pruning of LLM and VLM models. See `examples/puzzletron/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/puzzletron>`_ for more details.
 - Added iterator interface using CalibrationDataReader in ONNX quantization workflow.
 - Add N:M sparse softmax support to the Triton flash attention kernel (``modelopt.torch.kernels.common.attention.triton_fa``). See `examples/llm_sparsity/attention_sparsity/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_sparsity/attention_sparsity>`_ for usage.
@@ -54,7 +55,6 @@ Changelog
 - Bump minimum required PyTorch version to 2.8.
 - [Experimental] Add support for transformers>=5.0, including generic PTQ and unified HF checkpoint export for fused MoE expert modules (Mixtral, Qwen2-MoE, Qwen3-MoE, Qwen3.5-MoE, DeepSeek-V3, Jamba, OLMoE, etc.).
 - Improve ``megatron_preprocess_data``: add ``--reasoning_content`` support for Nemotron v3 datasets, eliminate intermediate JSONL for HuggingFace datasets, return output file prefixes from the Python API, add gzip input support (``.jsonl.gz``), add ``--strip_newlines`` flag for plain-text pretraining data, add ``--hf_streaming`` for very large datasets (only consumed rows downloaded), and auto-shuffle when ``--hf_max_samples_per_split`` is set to avoid biased sampling.
-- Add end-to-end Minitron pruning and distillation results for Nemotron-Nano-9B-v2 → Pruned 7B with data blend preparation, blend ablation study, and a nemo-evaluator evaluation config. See `examples/megatron_bridge/results/minitron/NVIDIA-Nemotron-Nano-9B-v2/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/megatron_bridge/results/minitron/NVIDIA-Nemotron-Nano-9B-v2>`_ for details.
 
 0.43 (2026-04-16)
 ^^^^^^^^^^^^^^^^^
