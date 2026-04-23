@@ -667,6 +667,9 @@ class HFEagleModel(EagleModel):
                 base_outputs,
             )
 
+        # Init rotary_emb outside _eagle_forward so inv_freq is not captured by CUDAGraph.
+        self.eagle_module._maybe_init_rope(device=eagle_input_hiddens.device)
+
         # ====Run eagle forward with extra training-time-test steps====
         num_ttt_steps = self.eagle_ttt_steps if self.training else 1
         for ttt_step in range(num_ttt_steps):
@@ -797,6 +800,9 @@ class HFEagleModel(EagleModel):
             eagle_input_hidden_states = self.eagle_module.fc(self.pop_and_gather_aux_hiddens())
         else:
             eagle_input_hidden_states = base_model_hidden_states
+
+        # Init rotary_emb outside _eagle_forward so inv_freq is not captured by CUDAGraph.
+        self.eagle_module._maybe_init_rope(device=eagle_input_hidden_states.device)
 
         draft_tokens = []
         for step in range(steps):

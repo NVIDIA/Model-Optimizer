@@ -163,7 +163,9 @@ class EagleModule(nn.Module):
         self._input_embeds = self.layers[0].input_layernorm(inputs_embeds)
 
         if self.config.eagle_decoder_type == "llama":
-            self._maybe_init_rope(device=hidden_states.device)
+            # rotary_emb must be pre-initialized by the caller (see HFEagleModel);
+            # lazy init here would allocate inv_freq inside the torch.compile/CUDAGraph
+            # capture region and get overwritten by subsequent runs.
             position_embeddings = self.rotary_emb(hidden_states, position_ids)
         else:
             position_embeddings = None
