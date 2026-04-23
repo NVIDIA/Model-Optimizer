@@ -30,7 +30,6 @@ from typing import Any
 import torch
 from torch.utils.data import DataLoader
 
-from .image_processor import MllamaImageProcessor
 from .nemotron_vlm_dataset_utils import NemotronTarPlusJsonlIterable, list_repo_files_cached
 
 # Use dict to store the config for each dataset.
@@ -378,18 +377,6 @@ def get_vlm_dataset_dataloader(
         use_media_shards=use_media_shards,
         max_shards=max_shards,
     )
-
-    # Legacy path: our internal image processor wrapper (e.g., Mllama).
-    if isinstance(processor, MllamaImageProcessor):
-        processed_dataset = dataset.map(
-            processor.preprocess_function, batched=False, remove_columns=dataset.column_names
-        )
-        return DataLoader(
-            processed_dataset,
-            batch_size=batch_size,
-            shuffle=False,
-            collate_fn=processor.collate_function,
-        )
 
     # Generic HF ProcessorMixin / AutoProcessor path: tokenize & process images at collate-time.
     # For Nemotron VLM datasets, we prefer to follow the model-card flow:
