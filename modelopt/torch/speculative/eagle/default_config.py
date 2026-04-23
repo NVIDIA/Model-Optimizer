@@ -37,6 +37,9 @@ default_eagle_config = {
     "use_aux_hidden_state": False,
     "eagle_aux_hidden_state_layer_ids": [],
     "use_mtp_layernorm": False,
+    # Deprecated on the HF flow; TODO: remove once the Megatron flow stops reading these.
+    "parallel_draft_step": 1,
+    "parallel_draft_heads_num_layers": 1,
     "has_lm_head": False,
     "head_dim": 128,
 }
@@ -105,5 +108,8 @@ default_kimik2_eagle_config = {
     "use_aux_hidden_state": True,
     "eagle_aux_hidden_state_layer_ids": [],
     "use_mtp_layernorm": False,
+    # Deprecated on the HF flow; TODO: remove once the Megatron flow stops reading these.
+    "parallel_draft_step": 1,
+    "parallel_draft_heads_num_layers": 1,
     "has_lm_head": False,
 }
