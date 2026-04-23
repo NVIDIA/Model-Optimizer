@@ -162,3 +162,36 @@ Please refer to [noxfile.py](./noxfile.py) for more details on how to run the te
 - Submit a pull request and let auto-assigned reviewers (based on [CODEOWNERS](./.github/CODEOWNERS)) review your PR.
 - If any CI/CD checks fail, fix the issues and push again.
 - Once your PR is approved and all checks pass, one of the reviewers will merge the PR.
+
+## 🧬 ModelOpt State (Pydantic config) backward compatibility
+
+ModelOpt persists optimization state (e.g. `modelopt_state`) using the Pydantic config classes under `modelopt/torch/**/config.py` and `modelopt/recipe/config.py`. Checkpoints saved with an older version of ModelOpt must continue to load with a newer version, so schema changes to any `ModeloptBaseConfig` subclass (or any other `pydantic.BaseModel`) need to stay backward compatible.
+
+`ModeloptBaseConfig` base class uses `extra="forbid"`: unknown keys raise a `ValidationError` instead of being silently dropped. As a result, **renaming or removing a field is a breaking change** — an old checkpoint that still carries the old field name will fail to load.
+
+Guidelines:
+
+- **Prefer adding fields.** Add a new field with a sensible default rather than renaming an existing one.
+- **Only rename when necessary, and always preserve the old name with `validation_alias=`.** Use Pydantic's [`validation_alias`](https://docs.pydantic.dev/latest/concepts/fields/#field-aliases) so checkpoints written with the old name keep loading:
+
+Example:
+  ```python
+  from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
+
+  class MaxCalibConfig(ModeloptBaseConfig):
+      # Renamed from ``use_sequential`` — keep the old name reachable on load.
+      sequential: bool = ModeloptField(
+          default=False,
+          validation_alias="use_sequential",
+      )
+  ```
+
+  Prefer `validation_alias=` over `alias=` or `AliasChoices`:
+
+  - `alias=` sets both the validation *and* serialization alias, so newly saved checkpoints would keep carrying the old name instead of migrating to the new one.
+  - `AliasChoices(...)` is only needed when you must accept multiple legacy names; if a field has multiple legacy names, that should be a red flag.
+
+- **Do not remove a field outright.** If a field is truly obsolete, keep it defined (you can mark it deprecated and ignore its value) until there is a deliberate breaking release.
+- **Avoid renaming `ModeloptBaseConfig` subclasses.** The class name is recorded in `modelopt_state`; renaming the class is also a breaking change.
+
+Use the pre-commit hook (`check-pydantic-config-compat`) which diffs the pydantic config classes in `modelopt/` against `HEAD` and fails when a field is removed or renamed without preserving the old name via `validation_alias=`. If you hit a legitimate case that the hook can't express, note the justification in your PR description and surface it to the reviewer.
