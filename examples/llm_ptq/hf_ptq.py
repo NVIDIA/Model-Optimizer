@@ -77,7 +77,6 @@ from modelopt.torch.utils.dataset_utils import (
     get_max_batch_size,
     get_supported_datasets,
 )
-from modelopt.torch.utils.image_processor import BaseImageProcessor, MllamaImageProcessor
 from modelopt.torch.utils.memory_monitor import launch_memory_monitor
 from modelopt.torch.utils.speech_dataset_utils import get_speech_dataset_dataloader
 from modelopt.torch.utils.vlm_dataset_utils import get_vlm_dataset_dataloader
@@ -202,7 +201,7 @@ def _move_batch_to_device(batch: dict, device: torch.device) -> dict:
 def make_calib_dataloader(
     args: argparse.Namespace,
     language_model: torch.nn.Module,
-    processor: BaseImageProcessor | ProcessorMixin | None,
+    processor: ProcessorMixin | None,
     tokenizer: PreTrainedTokenizerBase | None,
     device: torch.device,
     model_type: str | None,
@@ -249,19 +248,6 @@ def make_calib_dataloader(
             seed=42,
             use_media_shards=True,
             max_shards=1,
-        )
-    elif model_type == "mllama":
-        assert processor is not None and isinstance(processor, MllamaImageProcessor), (
-            "The MllamaImageProcessor must be set."
-        )
-        assert len(args.calib_size) == 1, (
-            "mllama only supports one dataset for calibration, can extend this in the future"
-        )
-        calib_dataloader = get_vlm_dataset_dataloader(
-            dataset_name=args.dataset[0] if args.dataset else "scienceqa",
-            processor=processor,
-            batch_size=args.batch_size,
-            num_samples=args.calib_size[0],
         )
     elif model_type == "whisper":
         assert processor is not None and isinstance(processor, WhisperProcessor), (
@@ -473,19 +459,10 @@ def load_model(args: argparse.Namespace):
         print("Nemotron VL model detected. Enabling image-text calibration by default.")
         args.calib_with_images = True
 
-    if model_type == "mllama":
+    if model_type == "whisper":
         processor = get_processor(
             args.pyt_ckpt_path,
             model_type,
-            device,
-            trust_remote_code=args.trust_remote_code,
-            attn_implementation=args.attn_implementation,
-        )
-    elif model_type == "whisper":
-        processor = get_processor(
-            args.pyt_ckpt_path,
-            model_type,
-            device,
             trust_remote_code=args.trust_remote_code,
         )
     elif is_nemotron_vl_model and args.calib_with_images:
@@ -716,13 +693,6 @@ def export_quantized(
                 print(f"Warning: Could not save processor config: {e}")
                 print("This is normal for some VLM architectures that don't use AutoProcessor")
 
-        if model_type == "mllama":
-            full_model_config = full_model.config
-            # TRT-LLM expects both the vision_config and text_config to be set for export.
-            setattr(full_model.config, "vision_config", full_model_config.vision_config)
-            setattr(full_model.config, "text_config", full_model_config.text_config)
-            setattr(full_model.config, "architectures", full_model_config.architectures)
-
         start_time = time.time()
         if (
             model_type in ["t5", "bart", "whisper"]
@@ -859,7 +829,7 @@ def post_quantize(
     language_model: torch.nn.Module,
     model_type: str | None,
     tokenizer: PreTrainedTokenizerBase | None,
-    processor: BaseImageProcessor | ProcessorMixin | None,
+    processor: ProcessorMixin | None,
     preview_input_ids,
     generated_ids_before_ptq,
     is_nemotron_vl_model,
@@ -922,9 +892,7 @@ def post_quantize(
         )
 
     def input_decode(input_ids):
-        if processor is not None and isinstance(processor, MllamaImageProcessor):
-            return processor.tokenizer.batch_decode(input_ids)
-        elif processor is not None and isinstance(processor, WhisperProcessor):
+        if processor is not None and isinstance(processor, WhisperProcessor):
             return first_text_speech_dataset
         elif tokenizer is not None:
             return tokenizer.batch_decode(input_ids)
@@ -937,8 +905,6 @@ def post_quantize(
                 return processor.tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
             elif tokenizer is not None:
                 return tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
-        elif processor is not None and isinstance(processor, MllamaImageProcessor):
-            return processor.tokenizer.batch_decode(generated_ids[:, input_shape:])
         elif tokenizer is not None:
             return tokenizer.batch_decode(generated_ids[:, input_shape:])
         else:
@@ -983,7 +949,7 @@ def quantize_main(
     language_model: torch.nn.Module,
     model_type: str | None,
     calibration_only: bool,
-    processor: BaseImageProcessor | ProcessorMixin | None,
+    processor: ProcessorMixin | None,
     tokenizer: PreTrainedTokenizerBase | None,
     default_padding_side,
     default_pad_token,
