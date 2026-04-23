@@ -23,7 +23,7 @@ import torch
 import transformers
 from _test_utils.torch.megatron.models import get_mcore_gpt_model
 from _test_utils.torch.megatron.utils import get_forward
-from _test_utils.torch.transformers_models import create_tiny_llama_dir
+from _test_utils.torch.transformers_models import create_tiny_llama_dir, get_tiny_tokenizer
 from safetensors import safe_open
 from safetensors.torch import save_file
 
@@ -74,13 +74,16 @@ def _verify_model_quant_config(
 def _test_unified_export_megatron(
     tmp_path, model_type, arch, extra_module, quant_config, kv_cache_quant_cfg, rank, size
 ):
+    tokenizer = get_tiny_tokenizer()
+    tokenizer.save_pretrained(tmp_path)
+
     num_layers = 2
     hidden_size = 64
     num_attention_heads = 8
     num_query_groups = size
     ffn_hidden_size = 128
     max_sequence_length = 32
-    vocab_size = 64
+    vocab_size = tokenizer.vocab_size
 
     arch = "NemotronForCausalLM" if model_type == "nemotron" else "LlamaForCausalLM"
     activation_func = "squared_relu" if model_type == "nemotron" else "swiglu"
