@@ -1074,7 +1074,10 @@ def quantize_main(
                 print(f"Excluding MTP layer from quantization: {pattern}")
 
         # Use constant amax for KV quantizers when a cast format is selected.
-        if args.kv_cache_qformat in _KV_CAST_FORMATS:
+        # Recipes are authoritative for KV cache config (including use_constant_amax),
+        # so skip this post-hoc override when --recipe is used; rely on the YAML instead
+        # (see modelopt_recipes/general/ptq/*_cast_kv.yaml).
+        if args.recipe is None and args.kv_cache_qformat in _KV_CAST_FORMATS:
             quant_cfg = copy.deepcopy(quant_cfg)
             _set_kv_cache_constant_amax(quant_cfg["quant_cfg"])
 
@@ -1130,7 +1133,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--recipe",
         help=(
-            "PTQ recipe YAML file or name without suffix (e.g. general/ptq/nvfp4_default-fp8_kv)."
+            "PTQ recipe YAML file or name without suffix (e.g. general/ptq/nvfp4_default-fp8_cast_kv, "
+            "general/ptq/nvfp4_default-fp8_kv, general/ptq/nvfp4_default-nvfp4_cast_kv). "
+            "When set, --kv_cache_qformat is ignored; the recipe fully determines KV cache config."
         ),
         default=None,
     )
@@ -1219,7 +1224,9 @@ def parse_args() -> argparse.Namespace:
             "Specify KV cache quantization format. Default: fp8_cast. "
             "Formats ending in '_cast' (fp8_cast, nvfp4_cast) set the amax to FP8 range "
             "without data-driven calibration. "
-            "Other formats (fp8, nvfp4, etc.) use data-driven calibration."
+            "Other formats (fp8, nvfp4, etc.) use data-driven calibration. "
+            "Ignored when --recipe is given: the recipe YAML is authoritative for KV "
+            "cache config (use the *_cast_kv.yaml recipes for the cast variants)."
         ),
     )
     parser.add_argument(
