@@ -1,6 +1,6 @@
 # Nemotron-Nano-9B-v2 → Pruned 7B
 
-Structured pruning of [Nemotron-Nano-9B-v2](https://huggingface.co/nvidia/Nemotron-Nano-9B-v2) to 7B using Minitron and knowledge distillation.
+Structured pruning of [Nemotron-Nano-9B-v2](https://huggingface.co/nvidia/NVIDIA-Nemotron-Nano-9B-v2) to 7B using Minitron and knowledge distillation.
 
 **Environment:** Container `nvcr.io/nvidia/nemo:26.02`, ModelOpt 0.43.0. See the [Megatron Bridge README](../../README.md) for environment setup and container usage.
 
@@ -8,16 +8,16 @@ Structured pruning of [Nemotron-Nano-9B-v2](https://huggingface.co/nvidia/Nemotr
 
 ![Benchmark Recovery During Knowledge Distillation](figures/learning_curves.png)
 
-| Model | MMLU | MMLU Pro | GPQA | LCB v6 | AIME 2025 | Math 500 | IFEval | SciCode |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Pruned 7B (no distillation) | 67.8 | 11.9 | 17.7 | 1.4 | 0.3 | 6.0 | 41.8 | 0.1 |
-| Pruned 7B + distill 2.5B tokens (400 iters) | 70.7 | 68.4 | 52.7 | 57.0 | 63.0 | 93.7 | 63.2 | 11.6 |
-| Pruned 7B + distill 20B tokens (3200 iters) | 71.3 | 71.7 | 54.8 | 62.0 | 69.1 | 95.2 | 63.8 | 20.9 |
-| Pruned 7B + distill 40B tokens (6400 iters) | 71.1 | 71.6 | 53.7 | 60.9 | 70.4 | 95.6 | 68.0 | 21.1 |
-| Pruned 7B + distill 60B tokens (9600 iters) | 72.1 | 72.1 | 54.9 | 61.6 | 70.3 | 95.4 | 64.7 | 24.1 |
-| Pruned 7B + distill 80B tokens (12800 iters) | 72.2 | 73.0 | 56.9 | 62.6 | 72.0 | 95.8 | 66.2 | 22.2 |
-| Nemotron-Nano-9B-v2 (official, pruned from 12B) | 74.7 | 74.9 | 56.1 | 64.4 | 73.2 | 95.9 | 65.8 | 21.9 |
-| Nemotron-Nano-12B-v2 (official) | 78.5 | 77.9 | 58.2 | 66.6 | 76.1 | 96.9 | 67.9 | 28.4 |
+| Model | MMLU | MMLU Pro | GPQA | LiveCodeBench v6 | AIME 2025 | Math 500 | IFEval | SciCode (Subtask) | Average |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Pruned 7B (no distillation) | 67.8 | 11.9 | 17.7 | 1.4 | 0.3 | 6.0 | 41.8 | 0.1 | 18.4 |
+| Pruned 7B + distill 2.5B tokens (400 iters) | 70.7 | 68.4 | 52.7 | 57.0 | 63.0 | 93.7 | 63.2 | 11.6 | 60.0 |
+| Pruned 7B + distill 20B tokens (3200 iters) | 71.3 | 71.7 | 54.8 | 62.0 | 69.1 | 95.2 | 63.8 | 20.9 | 63.6 |
+| Pruned 7B + distill 40B tokens (6400 iters) | 71.1 | 71.6 | 53.7 | 60.9 | 70.4 | 95.6 | 68.0 | 21.1 | 64.1 |
+| Pruned 7B + distill 60B tokens (9600 iters) | 72.1 | 72.1 | 54.9 | 61.6 | 70.3 | 95.4 | 64.7 | 24.1 | 64.4 |
+| Pruned 7B + distill 80B tokens (12800 iters) | 72.2 | 73.0 | 56.9 | 62.6 | 72.0 | 95.8 | 66.2 | 22.2 | 65.1 |
+| Nemotron-Nano-9B-v2 (official, pruned from 12B) | 74.7 | 74.9 | 56.1 | 64.4 | 73.2 | 95.9 | 65.8 | 21.9 | 65.9 |
+| Nemotron-Nano-12B-v2 (official) | 78.5 | 77.9 | 58.2 | 66.6 | 76.1 | 96.9 | 67.9 | 28.4 | 68.8 |
 
 **Key observations:**
 
@@ -32,15 +32,16 @@ Structured pruning of [Nemotron-Nano-9B-v2](https://huggingface.co/nvidia/Nemotr
 | MMLU | −2.5 | −3.8 |
 | MMLU Pro | −1.9 | −3.0 |
 | GPQA | **+0.8** | −2.1 |
-| LCB v6 | −1.8 | −2.2 |
+| LiveCodeBench v6 | −1.8 | −2.2 |
 | AIME 2025 | −1.2 | −2.9 |
 | Math 500 | −0.1 | −1.0 |
 | IFEval | **+0.4** | −2.1 |
-| SciCode | **+0.3** | −6.5 |
+| SciCode (Subtask) | **+0.3** | −6.5 |
+| Average | −0.8 | −2.9 |
 
 Distillation uses the **30% Pretraining (Code 5, General 20, MATH 5) + 70% Post-training v1/v3 (Math 30, Coding 20, Science 15, IF 5)** blend (see [Data Blend](#data-blend) below). Blend ablations are in [ABLATIONS.md](ABLATIONS.md).
 
-> **Note:** Exact numbers may vary depending on deployment and evaluation setup. All models above — including the official 9B and 12B — were evaluated with the same [nemo_evaluator.yaml](nemo_evaluator.yaml) for fair comparison. These numbers may differ from those reported on the official [Nemotron-Nano-9B-v2](https://huggingface.co/nvidia/Nemotron-Nano-9B-v2) and [Nemotron-Nano-12B-v2](https://huggingface.co/nvidia/Nemotron-Nano-12B-v2) HuggingFace model cards.
+> **Note:** Exact numbers may vary depending on deployment and evaluation setup. All models above — including the official 9B and 12B — were evaluated with the same [nemo_evaluator.yaml](nemo_evaluator.yaml) for fair comparison. These numbers may differ from those reported on the official [Nemotron-Nano-9B-v2](https://huggingface.co/nvidia/NVIDIA-Nemotron-Nano-9B-v2) and [Nemotron-Nano-12B-v2](https://huggingface.co/nvidia/NVIDIA-Nemotron-Nano-12B-v2) HuggingFace model cards.
 >
 > The official Nemotron-Nano-9B-v2 model was itself produced by pruning Nemotron-Nano-12B-v2 using Minitron. See [arxiv:2508.14444](https://arxiv.org/abs/2508.14444) for details on the exact steps used there.
 
@@ -59,22 +60,20 @@ For this experiment: `TOKENIZER=nvidia/NVIDIA-Nemotron-Nano-9B-v2`, `OUTPUT_DIR=
 **30% Pretraining (Code 5, General 20, MATH 5) + 70% Post-training v1/v3 (Math 30, Coding 20, Science 15, IF 5)**
 
 ```bash
-BLEND_DATA_ROOT=/path/to/tokenized/Nemotron-Nano-v2
-
 DATA_BLEND=" \
-5  $BLEND_DATA_ROOT/nvidia--Nemotron-Pretraining-SFT-v1_Nemotron-SFT-Code_train_text_max10000000 \
-20 $BLEND_DATA_ROOT/nvidia--Nemotron-Pretraining-SFT-v1_Nemotron-SFT-General_train_text_max10000000 \
-5  $BLEND_DATA_ROOT/nvidia--Nemotron-Pretraining-SFT-v1_Nemotron-SFT-MATH_train_text_max10000000 \
-15 $BLEND_DATA_ROOT/nvidia--Nemotron-Math-v2_default_high_part00_messages \
-10 $BLEND_DATA_ROOT/nvidia--Nemotron-Math-v2_default_high_part01_messages \
-5  $BLEND_DATA_ROOT/nvidia--Nemotron-SFT-Math-v3_default_train_messages \
-15 $BLEND_DATA_ROOT/nvidia--Nemotron-SFT-Competitive-Programming-v2_competitive_programming_python_00_messages \
-5  $BLEND_DATA_ROOT/nvidia--Nemotron-SFT-Competitive-Programming-v2_competitive_programming_cpp_00_messages \
-10 $BLEND_DATA_ROOT/nvidia--Nemotron-Post-Training-Dataset-v1_default_stem_messages_max5000000 \
-3  $BLEND_DATA_ROOT/nvidia--Nemotron-Science-v1_default_MCQ_messages \
-2  $BLEND_DATA_ROOT/nvidia--Nemotron-Science-v1_default_RQA_messages \
-3  $BLEND_DATA_ROOT/nvidia--Nemotron-SFT-Instruction-Following-Chat-v2_reasoning_on_messages \
-2  $BLEND_DATA_ROOT/nvidia--Nemotron-SFT-Instruction-Following-Chat-v2_reasoning_off_messages \
+5  tokenized_nano_v2/nvidia--Nemotron-Pretraining-SFT-v1_Nemotron-SFT-Code_train_text_max10000000 \
+20 tokenized_nano_v2/nvidia--Nemotron-Pretraining-SFT-v1_Nemotron-SFT-General_train_text_max10000000 \
+5  tokenized_nano_v2/nvidia--Nemotron-Pretraining-SFT-v1_Nemotron-SFT-MATH_train_text_max10000000 \
+15 tokenized_nano_v2/nvidia--Nemotron-Math-v2_default_high_part00_messages \
+10 tokenized_nano_v2/nvidia--Nemotron-Math-v2_default_high_part01_messages \
+5  tokenized_nano_v2/nvidia--Nemotron-SFT-Math-v3_default_train_messages \
+15 tokenized_nano_v2/competitive_programming_python_00_messages \
+5  tokenized_nano_v2/competitive_programming_cpp_00_messages \
+10 tokenized_nano_v2/nvidia--Nemotron-Post-Training-Dataset-v1_default_stem_messages_max5000000 \
+3  tokenized_nano_v2/MCQ_messages \
+2  tokenized_nano_v2/RQA_messages \
+3  tokenized_nano_v2/reasoning_on_messages \
+2  tokenized_nano_v2/reasoning_off_messages \
 "
 ```
 
@@ -136,7 +135,7 @@ torchrun --nproc_per_node 8 /opt/Model-Optimizer/examples/megatron_bridge/prune_
 
 Important pruning logs:
 
-```bash
+```text
 "Only considering atmost 40% for width and 20% for depth pruning hparams
 Skipping hparams_to_skip=['num_attention_heads'] during search space generation...
         Search space for num_layers: [46, 48, 50, 52, 54, 56]
@@ -242,7 +241,19 @@ export VLLM_CACHE_ROOT=<path_to_vllm_cache>
 nemo-evaluator-launcher run --config nemo_evaluator.yaml
 ```
 
-**Tasks:** MMLU Pro, GPQA Diamond, LiveCodeBench v6, AIME 2025, AA Math 500, IFEval, SciCode
+**Tasks and exact metric names reported in the results table:**
+
+| Benchmark | Tool | Metric name |
+| --- | --- | --- |
+| MMLU | [lm-evaluation-harness](https://github.com/EleutherAI/lm-evaluation-harness) (5-shot) | `mmlu` |
+| MMLU Pro | NeMo Evaluator | `mmlu-pro_pass_at_1_symbolic_correct` |
+| GPQA | NeMo Evaluator | `gpqa_pass_at_1_symbolic_correct` |
+| LiveCodeBench v6 | NeMo Evaluator | `livecodebench_pass_at_1_accuracy` |
+| AIME 2025 | NeMo Evaluator | `aime25_pass_at_1_symbolic_correct` |
+| Math 500 | NeMo Evaluator | `AA_math_test_500_score_micro_avg_of_5` |
+| IFEval | NeMo Evaluator | `ifeval_pass_at_1_average_score` |
+| SciCode (Subtask) | NeMo Evaluator | `scicode_pass_at_1_subtask_accuracy` |
+
 **Key vLLM settings:** Tool calling is not enabled in these evals.
 
 For more details on NeMo Evaluator, see the [GitHub repo](https://github.com/NVIDIA-NeMo/evaluator) and [documentation](https://docs.nvidia.com/nemo/evaluator/latest/).

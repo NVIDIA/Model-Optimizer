@@ -78,14 +78,13 @@ for SPLIT in high_part00 high_part01; do
 done
 ```
 
-**[nvidia/Nemotron-SFT-Competitive-Programming-v2](https://huggingface.co/datasets/nvidia/Nemotron-SFT-Competitive-Programming-v2)** — stored as raw JSONL on HuggingFace, download before tokenizing:
+**[nvidia/Nemotron-SFT-Math-v3](https://huggingface.co/datasets/nvidia/Nemotron-SFT-Math-v3)**:
 
 ```bash
-huggingface-cli download nvidia/Nemotron-SFT-Competitive-Programming-v2 \
-    --repo-type dataset \
-    --local-dir datasets/Nemotron-SFT-Competitive-Programming-v2/
 python -m modelopt.torch.utils.plugins.megatron_preprocess_data \
-    --input_dir datasets/Nemotron-SFT-Competitive-Programming-v2/data/ \
+    --hf_dataset nvidia/Nemotron-SFT-Math-v3 \
+    --hf_name default \
+    --hf_split train \
     --json_keys messages \
     --tokenizer ${TOKENIZER} \
     --output_dir ${OUTPUT_DIR} \
@@ -94,18 +93,15 @@ python -m modelopt.torch.utils.plugins.megatron_preprocess_data \
     --reasoning_content inline
 ```
 
-**[nvidia/Nemotron-SFT-Math-v3](https://huggingface.co/datasets/nvidia/Nemotron-SFT-Math-v3) and [nvidia/Nemotron-Science-v1](https://huggingface.co/datasets/nvidia/Nemotron-Science-v1)**:
+**[nvidia/Nemotron-SFT-Competitive-Programming-v2](https://huggingface.co/datasets/nvidia/Nemotron-SFT-Competitive-Programming-v2)** — stored as raw JSONL on HuggingFace, download before tokenizing:
 
 ```bash
-for DATASET in \
-  "nvidia/Nemotron-SFT-Math-v3 default train" \
-  "nvidia/Nemotron-Science-v1 default_MCQ train" \
-  "nvidia/Nemotron-Science-v1 default_RQA train"; do
-  read HF_DATASET HF_NAME HF_SPLIT <<< ${DATASET}
+hf download nvidia/Nemotron-SFT-Competitive-Programming-v2 \
+    --repo-type dataset \
+    --local-dir datasets/Nemotron-SFT-Competitive-Programming-v2/
+for FILE in competitive_programming_python_00 competitive_programming_cpp_00; do
   python -m modelopt.torch.utils.plugins.megatron_preprocess_data \
-    --hf_dataset ${HF_DATASET} \
-    --hf_name ${HF_NAME} \
-    --hf_split ${HF_SPLIT} \
+    --jsonl_paths datasets/Nemotron-SFT-Competitive-Programming-v2/data/${FILE}.jsonl \
     --json_keys messages \
     --tokenizer ${TOKENIZER} \
     --output_dir ${OUTPUT_DIR} \
@@ -115,10 +111,26 @@ for DATASET in \
 done
 ```
 
+**[nvidia/Nemotron-Science-v1](https://huggingface.co/datasets/nvidia/Nemotron-Science-v1)** — stored as raw JSONL on HuggingFace, download before tokenizing:
+
+```bash
+hf download nvidia/Nemotron-Science-v1 \
+    --repo-type dataset \
+    --local-dir datasets/Nemotron-Science-v1/
+python -m modelopt.torch.utils.plugins.megatron_preprocess_data \
+    --input_dir datasets/Nemotron-Science-v1/data/ \
+    --json_keys messages \
+    --tokenizer ${TOKENIZER} \
+    --output_dir ${OUTPUT_DIR} \
+    --workers 96 \
+    --max_sequence_length 256_000 \
+    --reasoning_content inline
+```
+
 **[nvidia/Nemotron-SFT-Instruction-Following-Chat-v2](https://huggingface.co/datasets/nvidia/Nemotron-SFT-Instruction-Following-Chat-v2)** — stored as raw JSONL on HuggingFace, download before tokenizing:
 
 ```bash
-huggingface-cli download nvidia/Nemotron-SFT-Instruction-Following-Chat-v2 \
+hf download nvidia/Nemotron-SFT-Instruction-Following-Chat-v2 \
     --repo-type dataset \
     --local-dir datasets/Nemotron-SFT-Instruction-Following-Chat-v2/
 python -m modelopt.torch.utils.plugins.megatron_preprocess_data \
@@ -138,18 +150,17 @@ python -m modelopt.torch.utils.plugins.megatron_preprocess_data \
 After running all commands above, `${OUTPUT_DIR}/` should contain the following `.bin` / `.idx` file pairs:
 
 ```text
-tokenized_nano_v2/
-  nvidia--Nemotron-Pretraining-SFT-v1_Nemotron-SFT-Code_train_text_max10000000.{bin,idx}
-  nvidia--Nemotron-Pretraining-SFT-v1_Nemotron-SFT-General_train_text_max10000000.{bin,idx}
-  nvidia--Nemotron-Pretraining-SFT-v1_Nemotron-SFT-MATH_train_text_max10000000.{bin,idx}
-  nvidia--Nemotron-Post-Training-Dataset-v1_default_stem_messages_max5000000.{bin,idx}
-  nvidia--Nemotron-Math-v2_default_high_part00_messages.{bin,idx}
-  nvidia--Nemotron-Math-v2_default_high_part01_messages.{bin,idx}
-  nvidia--Nemotron-SFT-Competitive-Programming-v2_competitive_programming_python_00_messages.{bin,idx}
-  nvidia--Nemotron-SFT-Competitive-Programming-v2_competitive_programming_cpp_00_messages.{bin,idx}
-  nvidia--Nemotron-SFT-Math-v3_default_train_messages.{bin,idx}
-  nvidia--Nemotron-Science-v1_default_MCQ_messages.{bin,idx}
-  nvidia--Nemotron-Science-v1_default_RQA_messages.{bin,idx}
-  nvidia--Nemotron-SFT-Instruction-Following-Chat-v2_reasoning_on_messages.{bin,idx}
-  nvidia--Nemotron-SFT-Instruction-Following-Chat-v2_reasoning_off_messages.{bin,idx}
+nvidia--Nemotron-Pretraining-SFT-v1_Nemotron-SFT-Code_train_text_max10000000.{bin,idx}
+nvidia--Nemotron-Pretraining-SFT-v1_Nemotron-SFT-General_train_text_max10000000.{bin,idx}
+nvidia--Nemotron-Pretraining-SFT-v1_Nemotron-SFT-MATH_train_text_max10000000.{bin,idx}
+nvidia--Nemotron-Post-Training-Dataset-v1_default_stem_messages_max5000000.{bin,idx}
+nvidia--Nemotron-Math-v2_default_high_part00_messages.{bin,idx}
+nvidia--Nemotron-Math-v2_default_high_part01_messages.{bin,idx}
+nvidia--Nemotron-SFT-Math-v3_default_train_messages.{bin,idx}
+competitive_programming_python_00_messages.{bin,idx}
+competitive_programming_cpp_00_messages.{bin,idx}
+MCQ_messages.{bin,idx}
+RQA_messages.{bin,idx}
+reasoning_off_messages.{bin,idx}
+reasoning_on_messages.{bin,idx}
 ```

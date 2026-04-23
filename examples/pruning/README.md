@@ -197,7 +197,7 @@ Some of the models pruned using Minitron method followed by distillation and pos
 - [Minitron Collection on Hugging Face](https://huggingface.co/collections/nvidia/minitron)
 - [NVIDIA-Nemotron-Nano-9B-v2](https://huggingface.co/nvidia/NVIDIA-Nemotron-Nano-9B-v2)
 
-For end-to-end distillation results after Minitron pruning, see [Nemotron-Nano-9B-v2 → Pruned 7B](../megatron_bridge/results/minitron/nemotron_nano_9b_v2_pruned_7b/README.md).
+For end-to-end distillation results after Minitron pruning, see [Nemotron-Nano-9B-v2 → Pruned 7B](../megatron_bridge/results/minitron/NVIDIA-Nemotron-Nano-9B-v2/README.md).
 
 ### Puzzletron Pruning for LLMs (e.g. Llama, Qwen, Nemotron)
 
@@ -304,7 +304,7 @@ After pruning, distillation is required to recover model accuracy. Below are rec
 
 End-to-end distillation results with Megatron-Bridge after Minitron and Puzzletron pruning are tracked in the [Megatron-Bridge results directory](../megatron_bridge/results/README.md):
 
-- **[Minitron — Nemotron-Nano-9B-v2 → Pruned 7B](../megatron_bridge/results/minitron/nemotron_nano_9b_v2_pruned_7b/README.md)**: Structured pruning of Nemotron-Nano-9B-v2 to 7B followed by knowledge distillation up to 80B tokens. Achieves near-parity with the official 9B model across MMLU, MMLU Pro, GPQA, LCB, AIME, Math 500, IFEval, and SciCode.
+- **[Minitron — Nemotron-Nano-9B-v2 → Pruned 7B](../megatron_bridge/results/minitron/NVIDIA-Nemotron-Nano-9B-v2/README.md)**: Structured pruning of Nemotron-Nano-9B-v2 to 7B followed by knowledge distillation up to 80B tokens. Achieves near-parity with the official 9B model across MMLU, MMLU Pro, GPQA, LCB, AIME, Math 500, IFEval, and SciCode.
 - **[Puzzletron — Qwen3-8B and Llama-3.1-8B-Instruct](../megatron_bridge/results/puzzletron.md)**: MIP-based compression followed by short distillation runs on WikiText-103. Shows MMLU recovery and illustrates the importance of using larger datasets to avoid overfitting.
 
 ## Resources
