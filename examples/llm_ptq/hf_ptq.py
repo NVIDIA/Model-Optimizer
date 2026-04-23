@@ -262,6 +262,7 @@ def make_calib_dataloader(
             processor=processor,
             batch_size=args.batch_size,
             num_samples=args.calib_size[0],
+            max_length=args.calib_seq,
         )
     elif model_type == "whisper":
         assert processor is not None and isinstance(processor, WhisperProcessor), (
