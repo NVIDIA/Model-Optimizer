@@ -28,7 +28,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Literal
 
-from pydantic import model_validator
+from pydantic import Field, model_validator
 
 from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
 
@@ -184,7 +184,10 @@ class DistillationConfig(ModeloptBaseConfig):
         title="CFG scale",
         description="Classifier-free guidance scale. If ``None`` CFG is disabled.",
     )
-    sample_t_cfg: SampleTimestepConfig = ModeloptField(
+    # ``ModeloptField`` hard-asserts on ``default_factory``; use Pydantic's ``Field``
+    # directly for this mutable sub-config so each DMDConfig instance gets its own
+    # SampleTimestepConfig instead of sharing a single mutable default.
+    sample_t_cfg: SampleTimestepConfig = Field(
         default_factory=SampleTimestepConfig,
         title="Timestep sampling",
         description="Timestep distribution used for both the teacher forward and the VSD / DSM losses.",
