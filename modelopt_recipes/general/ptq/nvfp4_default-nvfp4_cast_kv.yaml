@@ -17,7 +17,9 @@ metadata:
   recipe_type: ptq
   description: >-
     NVFP4 W4A4, NVFP4 KV cache with constant amax (skips KV calibration; amax
-    hardcoded to FP8 E4M3 max 448.0), max calibration.
+    hardcoded to FP8 E4M3 max 448.0 — the deployment kernel upcasts NVFP4 KV
+    values to FP8 before attention, so the scale must land in the FP8 range),
+    max calibration.
 quantize:
   algorithm: max
   quant_cfg:
