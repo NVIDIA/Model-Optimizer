@@ -26,3 +26,4 @@ warnings.warn(
 )
 
 from .hf_eagle import *  # noqa: E402, F403
+from .hf_medusa import *  # noqa: E402, F403
