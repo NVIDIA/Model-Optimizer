@@ -51,6 +51,7 @@ __all__ = [
     "load_model_config",
     "init_model_from_config",
     "save_checkpoint",
+    "save_checkpoint_from_shards",
     "save_subblocks",
     "save_model_config",
 ]
@@ -198,6 +199,35 @@ def save_checkpoint(
     model: PreTrainedModel, checkpoint_dir: Path | str, descriptor: "ModelDescriptor"
 ) -> None:
     _save_checkpoint(model.config, model.state_dict(), checkpoint_dir, descriptor)
+
+
+def save_checkpoint_from_shards(
+    model: PreTrainedModel, checkpoint_dir: Path | str, descriptor: "ModelDescriptor"
+) -> None:
+    """Save a checkpoint whose weights are split across distributed ranks.
+
+    Each rank holds only a subset of the model's layers (via ``load_and_shard_model``).
+    This function gathers every rank's partial state dict onto rank 0 so that
+    ``model.safetensors.index.json`` is built from the *complete* weight map.
+    Falls back to :func:`save_checkpoint` when running on a single process.
+    """
+    import modelopt.torch.utils.distributed as dist_utils
+
+    local_sd = {k: v.cpu() for k, v in model.state_dict().items()}
+    if dist_utils.size() > 1:
+        import torch.distributed as tdist
+
+        if dist_utils.is_master():
+            gathered: list[dict] = [{}] * dist_utils.size()
+            tdist.gather_object(local_sd, gathered, dst=0)
+            full_sd: dict[str, torch.Tensor] = {}
+            for shard_sd in gathered:
+                full_sd.update(shard_sd)
+            _save_checkpoint(model.config, full_sd, checkpoint_dir, descriptor)
+        else:
+            tdist.gather_object(local_sd, dst=0)
+    else:
+        _save_checkpoint(model.config, local_sd, checkpoint_dir, descriptor)
 
 
 def _save_checkpoint(
