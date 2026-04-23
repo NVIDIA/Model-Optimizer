@@ -200,16 +200,6 @@ def init_model_from_config(
 def save_checkpoint(
     model: PreTrainedModel, checkpoint_dir: Path | str, descriptor: "ModelDescriptor"
 ) -> None:
-    """
-    Save a model's configuration and weights to a Hugging Face-compatible checkpoint using the subblocks safetensors layout.
-    
-    This writes the model's configuration and the model's state dictionary partitioned into subblocks suitable for safetensors indexing, placing the resulting files under the specified checkpoint directory.
-    
-    Parameters:
-        model (PreTrainedModel): The model whose config and weights will be saved.
-        checkpoint_dir (Path | str): Destination directory for the checkpoint files.
-        descriptor (ModelDescriptor): Descriptor that determines how model weights are grouped and named into subblocks for the safetensors index.
-    """
     _save_checkpoint(model.config, model.state_dict(), checkpoint_dir, descriptor)
 
 
@@ -218,13 +208,18 @@ def save_checkpoint_from_shards(
 ) -> None:
     """
     Save a checkpoint when the model's weights are sharded across distributed ranks.
-    
-    Gathers each rank's partial state dictionary onto rank 0 and writes a complete checkpoint (including the safetensors index and subblocks) from the merged weights. On a single-process run, saves directly from the local state dict. Only rank 0 performs the filesystem write; non-master ranks only participate in the gather.
-    
+
+    Gathers each rank's partial state dictionary onto rank 0 and writes a complete checkpoint
+    (including the safetensors index and subblocks) from the merged weights. On a single-process
+    run, saves directly from the local state dict. Only rank 0 performs the filesystem write;
+    non-master ranks only participate in the gather.
+
     Parameters:
-        model (PreTrainedModel): The model instance whose local state_dict contains this rank's shard of weights.
+        model (PreTrainedModel): The model instance whose local state_dict contains this rank's
+        shard of weights.
         checkpoint_dir (Path | str): Destination directory for the checkpoint files.
-        descriptor (ModelDescriptor): Descriptor used to partition weights into subblocks and build the safetensors index.
+        descriptor (ModelDescriptor): Descriptor used to partition weights into subblocks and build
+        the safetensors index.
     """
 
     local_sd = {k: v.cpu() for k, v in model.state_dict().items()}
@@ -249,18 +244,6 @@ def _save_checkpoint(
     descriptor: "ModelDescriptor",
     max_workers: int | None = None,  # Now optional - will auto-calculate if None
 ) -> None:
-    """
-    Save a model configuration and its state tensors into a subblocks safetensors checkpoint layout.
-    
-    Saves the provided model config to checkpoint_dir, partitions the given state_dict into subblock files according to the provided descriptor, writes a safetensors index (model.safetensors.index.json) that maps tensor names to subblock filenames, and writes the per-subblock safetensors files. If model_config.tie_word_embeddings is true and the output embedding weight is present, that tensor is removed from the state_dict and index before writing the index so the tied embedding is not duplicated. The checkpoint directory is created if it does not exist.
-    
-    Parameters:
-        model_config (PretrainedConfig): Model configuration to save (written via save_pretrained).
-        state_dict (dict[str, torch.Tensor]): Mapping of tensor names to CPU tensors to be saved; tensors may be filtered (e.g., tied embeddings removed) before writing.
-        checkpoint_dir (Path | str): Target directory where config, index, and subblocks directory will be written; the directory is created if necessary.
-        descriptor (ModelDescriptor): Descriptor used to compute subblock groups and to derive the output embedding tensor name.
-        max_workers (int | None): Maximum number of worker threads to use when writing subblock files. If None, the implementation will choose a sensible default based on CPU count and number of files.
-    """
     if not isinstance(checkpoint_dir, Path):
         checkpoint_dir = Path(checkpoint_dir)
 
