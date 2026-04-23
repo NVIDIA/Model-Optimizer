@@ -16,7 +16,7 @@
 
 import pytest
 
-from modelopt.torch.quantization import triton as triton_kernel
+from modelopt.torch.kernels.quantization import gemm as triton_kernel
 
 
 @pytest.fixture(autouse=True)

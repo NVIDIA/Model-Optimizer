@@ -270,18 +270,58 @@ For a quick smoke test, add `--limit 10`.
 > **Alternative:** For server-based evaluation via an OpenAI-compatible endpoint,
 > see [evaluation/nemo_evaluator_instructions.md](./evaluation/nemo_evaluator_instructions.md).
 
-## Inference Performance Benchmarking
+## Deploy compressed model in vLLM
 
-Now let's evaluate how much speedup we get with the compressed model in terms of throughput and latency.
-
-- Install [vLLM from source](https://docs.vllm.ai/en/latest/getting_started/installation/gpu/index.html#build-wheel-from-source).
-- Rearrange the model safetensors to be used for vLLM.
+To deploy a compressed model in vLLM, install vLLM fork with AnyModel enabled:
 
 ```bash
-cd path/to/model
-mv subblocks_safetensors/* .
-sed -i 's+subblocks_safetensors/++g' model.safetensors.index.json
+git clone https://github.com/askliar/vllm.git
+cd vllm
+git checkout feature/add_anymodel_to_vllm
+VLLM_USE_PRECOMPILED=1 uv pip install --editable . --torch-backend=auto
 ```
+
+See [vLLM documentation](https://docs.vllm.ai/en/latest/getting_started/installation/gpu/index.html#build-wheel-from-source) for more details on installation.
+
+**NOTE:** This is a temporary workaround pending official vLLM integration. You can track merge status [here](https://github.com/vllm-project/vllm/pull/36512).
+
+Then, add the following to the model's `config.json` file (here we use Llama as an example):
+
+```json
+{
+  ...
+  "architectures": ["AnyModel"],
+  "base_architecture": "LlamaForCausalLM",
+  ...
+}
+```
+
+For new architectures that are not supported by vLLM, you additionally need to add the following to the `config.json` file (using Llama3 as an example):
+
+```json
+{
+  ...
+  "anymodel_arch_info": {
+    "decoder_layer_module": ".<module_name>",
+    "decoder_layer_class": "<decoder_layer_class_name>",
+    "base_model_module": ".<base_model_module_name>",
+    "layers_path": "<layers_path>",
+    "init_prefix": "model",
+    "Layer_hf_config": "<Layer_hf_config>"
+  }
+  ...
+}
+```
+
+With these changes it is now possible to load the compressed model in vLLM for inference:
+
+```bash
+vllm serve <model_name_or_path>
+```
+
+### Inference Performance Benchmarking
+
+Now let's evaluate how much speedup we get with the compressed model in terms of throughput and latency.
 
 - Benchmark latency
 
