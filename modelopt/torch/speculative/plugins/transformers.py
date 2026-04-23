@@ -1080,6 +1080,8 @@ class HFEagleModel(EagleModel):
                     batch_size, seq_len_s, device=eagle_input_hiddens.device
                 ).argsort(dim=1)[:, :num_to_replace]
 
+                # Clone to avoid inplace modification that breaks autograd
+                eagle_input_hiddens = eagle_input_hiddens.clone()
                 batch_indices = torch.arange(batch_size)[:, None]
                 eagle_input_hiddens[batch_indices, rand_indices] = eagle_output_hiddens[
                     batch_indices, rand_indices
