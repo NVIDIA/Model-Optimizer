@@ -63,26 +63,57 @@ with an args object containing the required attributes. See the function docstri
 
 @torch.no_grad()
 def validate_puzzle_solutions(args: DictConfig) -> None:
-    """
-    Validate and (optionally) save realized models for a collection of puzzle solutions.
-    
-    Loads puzzle solutions and a replacement library, applies each solution's layer replacements to realize a model, optionally evaluates realized models (including optional teacher-based hidden-state similarity metrics), and optionally saves realized model checkpoints and tokenizer files to disk.
-    
-    Parameters:
-        args (DictConfig): Configuration with fields used by this routine. Key fields:
-            - replacement_library_path (Path): Path to the replacement library JSON.
-            - solutions_path (Path): File or directory containing puzzle solution JSON(s).
-            - solutions_to_validate (list[int], optional): Indices of solutions to process; all solutions if None.
-            - skip_validation (bool): If True, skip model validation steps.
-            - save_models (bool): If True, save realized model checkpoints and tokenizer files.
-            - teacher_dir (Path, optional): Path to a teacher model for hidden-state comparisons.
-            - tokenizer_name (str, optional): Tokenizer name or path; teacher_dir is used if unset.
-            - output_dir (Path, optional): Directory to write validation outputs; auto-derived from solutions_path if unset.
-            - model_dtype (str or torch.dtype, optional): Dtype to set on saved model configs.
-            - (Other dataset/validation options may be read from args when validation is enabled.)
-    
+    """Validate puzzle solutions by applying layer replacements and evaluating model performance.
+
+    Args:
+        args: Configuration object containing the following attributes:
+
+            Puzzle Configuration (Required):
+            - replacement_library_path (Path): Path to the replacement library JSON file.
+            - solutions_path (Path): Path to puzzle solutions JSON file or directory containing solution files.
+            - solutions_to_validate (list[int], optional): Indices of specific solutions to validate. Validates all solutions if None.
+            - sort_solutions_by (str, optional): JSON field path to sort solutions by before validation.
+            - bigger_is_better (bool): If True, sort solutions in descending order. Used with sort_solutions_by.
+            - skip_validation (bool): If True, skip model validation and only save models if requested.
+            - save_models (bool): If True, save realized model checkpoints for each solution.
+
+            Teacher/Tokenizer Configuration:
+            - teacher_dir (Path, optional): Path to teacher model directory. Auto-inferred if not provided.
+            - tokenizer_name (str, optional): Tokenizer name/path. Uses teacher_dir if not specified.
+
+            Model Configuration (Required if skip_validation=False):
+            - model_dtype (str or torch.dtype): Model data type (e.g., "torch.bfloat16", torch.float16).
+            - autocast_dtype (str or torch.dtype): Autocast data type for mixed precision.
+
+            Dataset Configuration (Required if skip_validation=False):
+            - dataset_path (str): Path to the validation dataset.
+            - data_column (str): Column name in dataset containing text data.
+            - block_size (int): Maximum sequence length for tokenization.
+            - eval_samples (int, optional): Number of samples to evaluate.
+            - val_dataset_name (str): Name of validation dataset split.
+            - source_datasets_to_discard (list[str], optional): List of source datasets to exclude.
+            - load_dataset_fn (callable, optional): Custom function to load the dataset.
+
+            Data Processing (Required if skip_validation=False):
+            - micro_batch_size (int): Batch size for evaluation.
+            - seed (int): Random seed for reproducibility.
+            - shuffle_seed (int, optional): Seed for shuffling data.
+            - varlen (bool): Enable variable-length sequences.
+            - bos_rate (float): Rate of adding BOS token.
+            - fim_rate (float): Fill-in-the-middle rate for code completion tasks.
+            - fim_spm_rate (float): SPM-based fill-in-the-middle rate.
+
+            Output Configuration:
+            - output_dir (Path, optional): Directory to save validation results. Auto-generated from solutions_path if not provided.
+
+            Execution Options (Optional if skip_validation=False):
+            - calc_losses_on_cpu (bool): Calculate losses on CPU to avoid OOM.
+            - write_results (bool): Write validation results to file.
+            - activations_log_dir (str, optional): Directory to log activation scores.
+            - activation_hooks_kwargs (str or dict, optional): Arguments for activation hooks.
+
     Returns:
-        None
+        None. Saves validation results and optionally model checkpoints to disk.
     """
     descriptor = ModelDescriptorFactory.get(args.descriptor)
 
