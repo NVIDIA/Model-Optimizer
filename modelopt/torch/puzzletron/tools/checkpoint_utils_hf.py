@@ -206,12 +206,20 @@ def save_checkpoint(
 def save_checkpoint_from_shards(
     model: PreTrainedModel, checkpoint_dir: Path | str, descriptor: "ModelDescriptor"
 ) -> None:
-    """Save a checkpoint whose weights are split across distributed ranks.
+    """
+    Save a checkpoint when the model's weights are sharded across distributed ranks.
 
-    Each rank holds only a subset of the model's layers (via ``load_and_shard_model``).
-    This function gathers every rank's partial state dict onto rank 0 so that
-    ``model.safetensors.index.json`` is built from the *complete* weight map.
-    Falls back to :func:`save_checkpoint` when running on a single process.
+    Gathers each rank's partial state dictionary onto rank 0 and writes a complete checkpoint
+    (including the safetensors index and subblocks) from the merged weights. On a single-process
+    run, saves directly from the local state dict. Only rank 0 performs the filesystem write;
+    non-master ranks only participate in the gather.
+
+    Parameters:
+        model (PreTrainedModel): The model instance whose local state_dict contains this rank's
+        shard of weights.
+        checkpoint_dir (Path | str): Destination directory for the checkpoint files.
+        descriptor (ModelDescriptor): Descriptor used to partition weights into subblocks and build
+        the safetensors index.
     """
 
     local_sd = {k: v.cpu() for k, v in model.state_dict().items()}
