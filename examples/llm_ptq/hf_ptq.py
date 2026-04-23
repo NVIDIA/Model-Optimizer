@@ -1166,8 +1166,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--recipe",
         help=(
-            "PTQ recipe YAML file or name without suffix (e.g. general/ptq/nvfp4_default-fp8_kv, "
-            "general/ptq/nvfp4_default-fp8_cast_kv, general/ptq/nvfp4_default-nvfp4_cast_kv). "
+            "PTQ recipe YAML file or name without suffix (e.g. general/ptq/nvfp4_default-fp8_cast_kv, "
+            "general/ptq/nvfp4_default-fp8_kv, general/ptq/nvfp4_default-nvfp4_cast_kv). "
             "When set, --kv_cache_qformat is ignored; the recipe fully determines KV cache config."
         ),
         default=None,
