@@ -224,6 +224,8 @@ def save_checkpoint_from_shards(
 
     local_sd = {k: v.cpu() for k, v in model.state_dict().items()}
     if dist_utils.size() > 1:
+    if dist_utils.size() > 1:
+        save_err: str | None = None
         if dist_utils.is_master():
             gathered: list[dict] = [None] * dist_utils.size()
             tdist.gather_object(local_sd, gathered, dst=0)
@@ -232,11 +234,18 @@ def save_checkpoint_from_shards(
                 if shard_sd is None:
                     continue
                 full_sd.update(shard_sd)
-            _save_checkpoint(model.config, full_sd, checkpoint_dir, descriptor)
+            try:
+                _save_checkpoint(model.config, full_sd, checkpoint_dir, descriptor)
+            except Exception as e:
+                save_err = repr(e)
         else:
             tdist.gather_object(local_sd, dst=0)
+        err_box = [save_err]
+        tdist.broadcast_object_list(err_box, src=0)
         # Barrier ensures all ranks wait until file I/O completes before continuing
         dist_utils.barrier()
+        if err_box[0] is not None:
+            raise RuntimeError(f"Checkpoint save failed on rank 0: {err_box[0]}")
     else:
         _save_checkpoint(model.config, local_sd, checkpoint_dir, descriptor)
 
