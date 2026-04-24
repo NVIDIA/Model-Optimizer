@@ -79,7 +79,7 @@ def _set_attn_implementation(model: nn.Module, config: SparseAttentionConfig) ->
         )
 
     if "triton" in backends:
-        from .kernels import register_triton_attention
+        from modelopt.torch.kernels.sparsity.attention import register_triton_attention
 
         if register_triton_attention is None:
             raise ImportError(
@@ -128,7 +128,9 @@ def _register_diffusers_backends_if_needed(model: nn.Module) -> None:
         from diffusers.models.modeling_utils import ModelMixin
 
         if isinstance(model, ModelMixin):
-            from .kernels import register_diffusers_triton_attention
+            from modelopt.torch.kernels.sparsity.attention import (
+                register_diffusers_triton_attention,
+            )
 
             if register_diffusers_triton_attention is not None:
                 register_diffusers_triton_attention()
@@ -137,7 +139,7 @@ def _register_diffusers_backends_if_needed(model: nn.Module) -> None:
 
     # Patch ltx_core Attention modules if present (independent of diffusers)
     try:
-        from .kernels import register_ltx_triton_attention
+        from modelopt.torch.kernels.sparsity.attention import register_ltx_triton_attention
     except (ImportError, RuntimeError):
         return
 

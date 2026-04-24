@@ -358,7 +358,7 @@ def get_patched_templated_ring_attn(orig_templated_attn: Callable):
         original_op = args[2]
 
         # This patch is only enabled for eagle model by context manager, not base model.
-        patch_enbabled = modelopt.torch.speculative.plugins.transformers.ENABLE_CP_TTT_PATCH
+        patch_enbabled = modelopt.torch.speculative.plugins.hf_eagle.ENABLE_CP_TTT_PATCH
 
         if patch_enbabled and original_op != torch.ops.aten._scaled_dot_product_cudnn_attention:
             raise ValueError(f"CP TTT only supports cudnn attention now. Got: {original_op}")

@@ -65,6 +65,7 @@ ModelOpt code base is organized into four top-level namespaces:
 | `nas` | `modelopt/torch/nas/` | Neural architecture search |
 | `export` | `modelopt/torch/export/` | Checkpoint export for TRT-LLM / Megatron |
 | `peft` | `modelopt/torch/peft/` | QLoRA and PEFT integration |
+| `kernels` | `modelopt/torch/kernels/` | Custom CUDA/Triton kernels grouped by role: `common/attention` (baseline Triton FA), `quantization/{conv,gemm}` (implicit-GEMM CUDA + tensor-quant C++/CUDA + fp4/fp8 Triton), `sparsity/attention` (skip-softmax / N:M / diffusers+LTX backends) |
 | `_deploy` | `modelopt/torch/_deploy/` | Internal deployment utilities |
 | `utils` | `modelopt/torch/utils/` | Shared utilities and plugin infrastructure |
 
