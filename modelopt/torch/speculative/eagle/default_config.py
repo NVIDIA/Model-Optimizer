@@ -19,10 +19,15 @@ default_eagle_config = {
     "hidden_act": "silu",
     "torch_dtype": "bfloat16",
     "position_embedding_type": "rope",
-    # rope_theta is set both inside rope_scaling and at the top level for cross-version
-    # compatibility: transformers 5.x reads it from rope_scaling, while 4.x reads it top-level.
-    "rope_scaling": {"rope_type": "default", "rope_theta": 10000},
-    "rope_theta": 10000,
+    "rope_scaling": {
+        "factor": 8.0,
+        "low_freq_factor": 1.0,
+        "high_freq_factor": 4.0,
+        "original_max_position_embeddings": 8192,
+        "rope_type": "llama3",
+        "rope_theta": 500000.0,
+    },
+    "rope_theta": 500000.0,
     "num_hidden_layers": 1,
     "intermediate_size": 14336,
     "num_attention_heads": 32,
