@@ -230,9 +230,12 @@ def get_dataset_samples(
             or a path to a ``.jsonl`` file.  For local directory paths, the
             predefined config from ``SUPPORTED_DATASET_CONFIG`` is matched if the base folder name
             matches a registered key (e.g. ``/hf-local/abisee/cnn_dailymail`` matches ``cnn_dailymail`` key).
-            For ``.jsonl`` paths, the file is loaded via HuggingFace's ``json`` builder and
-            routed through the same auto-preprocess path as unregistered HF datasets, so
-            chat / prompt / text columns are handled consistently with live HF datasets.
+            For ``.jsonl`` paths, the file is first loaded via HuggingFace's ``json``
+            builder and routed through the same auto-preprocess path as unregistered HF
+            datasets so chat / prompt / text columns are handled consistently with live
+            HF datasets.  If that path fails (e.g. PyArrow schema unification across
+            heterogeneous rows), it falls back to a line-by-line reader that extracts
+            the legacy ``text`` field for backward compatibility.
         num_samples: Number of samples to load from the dataset.
         apply_chat_template: Whether to apply the chat template to the samples
             (if supported by the dataset).  For unregistered datasets with a
