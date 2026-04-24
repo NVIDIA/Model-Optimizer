@@ -35,6 +35,7 @@ from example_utils import (
     is_nemotron_vl,
     load_mtp_weights,
     needs_checkpoint_path_update,
+    normalized_generation_config_for_export,
     resolve_checkpoint_dir,
     run_nemotron_vl_preview,
 )
@@ -332,6 +333,7 @@ def auto_quantize(
             "nvfp4",
             "nvfp4_awq",
             "nvfp4_mse",
+            "nvfp4_w4a16",
             "w4a8_awq",
             "fp8_pb_wo",
             "w4a8_mxfp4_fp8",
@@ -597,6 +599,8 @@ def sparsity_main(
 def _enable_lm_head_and_embedding_quantization(
     quant_cfg: dict[str, Any],
     weight_quantizer_cfg: dict[str, Any],
+    input_quantizer_cfg: dict[str, Any] | None = None,
+    user_excluded_modules: list[str] | None = None,
 ) -> None:
     """Re-enable quantization of ``lm_head`` and the input embedding table.
 
@@ -604,45 +608,83 @@ def _enable_lm_head_and_embedding_quantization(
     because most LLM deployment runtimes keep those layers at full precision. For Nemotron-H
     (and similar SSM+Attention hybrids) the embedding and lm_head are a large fraction of the
     total parameters — quantizing them recovers most of the promised memory savings. This
-    helper appends two entries to the cfg list that override earlier ``*lm_head*`` disables
+    helper appends entries to the cfg list that override earlier ``*lm_head*`` disables
     and explicitly target the embedding weight quantizer.
+
+    For activation-aware recipes (``fp8``, ``nvfp4``, ...) ``input_quantizer_cfg`` is mirrored
+    onto ``*lm_head*input_quantizer`` so ``lm_head`` keeps the same activation format as the
+    rest of the model. Embedding input quantizers are left alone since
+    ``QuantEmbedding._setup`` disables them by default (embedding inputs are integer indices).
+
+    If ``user_excluded_modules`` is provided, entries matching any user exclusion pattern
+    are skipped so ``--exclude_modules lm_head`` / ``--exclude_modules embeddings`` is not
+    silently overridden.
 
     Args:
         quant_cfg: the primary quant_cfg dict (``{"quant_cfg": [...], "algorithm": ...}``).
         weight_quantizer_cfg: the weight-quantizer attribute dict to apply (e.g. ``_nvfp4_cfg``).
+        input_quantizer_cfg: the activation-quantizer attribute dict to mirror on ``lm_head``.
+            ``None`` for weight-only recipes, in which case no input-quantizer entry is added.
+        user_excluded_modules: raw ``--exclude_modules`` patterns from the CLI; targets
+            matching any of them (bidirectional substring match) are skipped.
     """
+    excluded = user_excluded_modules or []
+
+    def _user_excluded(target_hint: str) -> bool:
+        # Bidirectional substring: "lm_head" user pattern excludes target "lm_head"; a more
+        # specific user pattern (e.g. "backbone.embeddings") also excludes "embeddings".
+        return any(p in target_hint or target_hint in p for p in excluded)
+
     # Ordering matters: these entries must come AFTER the _default_disabled_quantizer_cfg
     # entries (which set *lm_head* → disabled) so they take effect.
-    quant_cfg["quant_cfg"].append(
-        {"quantizer_name": "*lm_head*weight_quantizer", "cfg": copy.deepcopy(weight_quantizer_cfg)}
-    )
+    if not _user_excluded("lm_head"):
+        quant_cfg["quant_cfg"].append(
+            {
+                "quantizer_name": "*lm_head*weight_quantizer",
+                "cfg": copy.deepcopy(weight_quantizer_cfg),
+            }
+        )
+        # For activation-aware recipes, keep lm_head's input format aligned with the rest of
+        # the model — otherwise lm_head silently downgrades to weight-only and gets
+        # reclassified as e.g. NVFP4_W4A16 on export while the rest of the model is NVFP4.
+        if input_quantizer_cfg is not None:
+            quant_cfg["quant_cfg"].append(
+                {
+                    "quantizer_name": "*lm_head*input_quantizer",
+                    "cfg": copy.deepcopy(input_quantizer_cfg),
+                }
+            )
+
     # nn.Embedding quantizers only exist once `quant_embedding.py` registers the class.
     # Nemotron-H's backbone attribute name differs between the remote-code ("backbone.embeddings")
     # and transformers built-in ("model.embeddings") paths; both are weight-only vocab
     # embeddings here. The broad "*embeddings*" wildcard covers both and does not match
     # any other layer in a Nemotron-H model (no positional/rotary embeddings exist).
-    quant_cfg["quant_cfg"].append(
-        {
-            "quantizer_name": "*embeddings*weight_quantizer",
-            "cfg": copy.deepcopy(weight_quantizer_cfg),
-        }
-    )
+    if not _user_excluded("embeddings"):
+        quant_cfg["quant_cfg"].append(
+            {
+                "quantizer_name": "*embeddings*weight_quantizer",
+                "cfg": copy.deepcopy(weight_quantizer_cfg),
+            }
+        )
     # Also keep the standard HF "embed_tokens" naming in case future Nemotron-H variants
     # rename the attribute.
-    quant_cfg["quant_cfg"].append(
-        {
-            "quantizer_name": "*embed_tokens*weight_quantizer",
-            "cfg": copy.deepcopy(weight_quantizer_cfg),
-        }
-    )
+    if not _user_excluded("embed_tokens"):
+        quant_cfg["quant_cfg"].append(
+            {
+                "quantizer_name": "*embed_tokens*weight_quantizer",
+                "cfg": copy.deepcopy(weight_quantizer_cfg),
+            }
+        )
 
 
-def _extract_weight_quantizer_cfg(quant_cfg: dict[str, Any]) -> dict[str, Any] | None:
-    """Return the first ``*weight_quantizer`` cfg dict from an ordered quant_cfg list."""
+def _extract_wildcard_quantizer_cfg(
+    quant_cfg: dict[str, Any], quantizer_attr: str
+) -> dict[str, Any] | None:
+    """Return the first ``*<quantizer_attr>`` cfg dict from an ordered quant_cfg list."""
+    target = f"*{quantizer_attr}"
     for entry in quant_cfg.get("quant_cfg", []):
-        if entry.get("quantizer_name") == "*weight_quantizer" and isinstance(
-            entry.get("cfg"), dict
-        ):
+        if entry.get("quantizer_name") == target and isinstance(entry.get("cfg"), dict):
             return entry["cfg"]
     return None
 
@@ -688,13 +730,22 @@ def mono_quantize(
     # architecture those two 131072x3136 tables account for ~21% of parameters, so leaving
     # them at bf16 wastes most of the NVFP4 memory benefit.
     if model_type == "nemotron_h":
-        weight_quantizer_cfg = _extract_weight_quantizer_cfg(quant_cfg)
+        weight_quantizer_cfg = _extract_wildcard_quantizer_cfg(quant_cfg, "weight_quantizer")
         if weight_quantizer_cfg is not None:
+            # ``input_quantizer_cfg`` is present only for activation-aware recipes (fp8, nvfp4,
+            # ...). For weight-only recipes (nvfp4_w4a16, fp8_pb_wo, ...) this returns None and
+            # ``lm_head`` stays weight-only along with the embedding.
+            input_quantizer_cfg = _extract_wildcard_quantizer_cfg(quant_cfg, "input_quantizer")
             print(
                 "Nemotron-H detected: extending quantization to lm_head and input embedding "
                 "(backbone.embeddings)."
             )
-            _enable_lm_head_and_embedding_quantization(quant_cfg, weight_quantizer_cfg)
+            _enable_lm_head_and_embedding_quantization(
+                quant_cfg,
+                weight_quantizer_cfg,
+                input_quantizer_cfg=input_quantizer_cfg,
+                user_excluded_modules=args.exclude_modules or None,
+            )
         else:
             warnings.warn(
                 "Nemotron-H detected but quant_cfg has no wildcard '*weight_quantizer' entry; "
@@ -749,7 +800,14 @@ def export_quantized(
     default_padding_side,
     default_pad_token,
 ):
-    with torch.inference_mode():
+    # ``normalized_generation_config_for_export`` swaps ``model.generation_config`` with
+    # a deep-copied ``do_sample=True`` variant for the duration of the export so
+    # ``save_pretrained`` passes transformers 5.x's strict validation without affecting
+    # any ``.generate()`` callers outside the export window.
+    with (
+        torch.inference_mode(),
+        normalized_generation_config_for_export(full_model),
+    ):
         if model_type is None:
             print(f"Unknown model type {type(language_model).__name__}. Continue exporting...")
             model_type = f"unknown:{type(language_model).__name__}"

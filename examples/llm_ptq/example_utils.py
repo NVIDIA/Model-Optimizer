@@ -23,6 +23,7 @@ import os
 import shutil
 import sys
 import warnings
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -850,23 +851,39 @@ def get_model(
     if device == "cuda" and not is_model_on_gpu(model):
         print("Warning: Some parameters are not on a GPU. Calibration can be slow or hit OOM")
 
-    # Some model cards ship a generation_config.json that sets sampling hyperparameters
-    # (top_p, temperature) without ``do_sample=True`` (e.g. NVIDIA-Nemotron-3-Nano-4B-BF16).
-    # transformers 5.x strictly validates this on save_pretrained, so the export step
-    # fails with "GenerationConfig is invalid". Normalize by enabling do_sample whenever
-    # a sampling hyperparameter is set — this is only metadata, not behavior during
-    # calibration or export.
-    gen_cfg = getattr(model, "generation_config", None)
-    if gen_cfg is not None and not getattr(gen_cfg, "do_sample", False):
+    return model
+
+
+@contextmanager
+def normalized_generation_config_for_export(model):
+    """Temporarily swap in a normalized generation_config for export.
+
+    Some model cards ship a ``generation_config.json`` that sets sampling hyperparameters
+    (``top_p``/``top_k``/``temperature``) without ``do_sample=True`` (e.g.
+    ``NVIDIA-Nemotron-3-Nano-4B-BF16``). transformers 5.x strictly validates this on
+    ``save_pretrained`` so the export step fails. We normalize by swapping in a deep copy
+    with ``do_sample=True`` for the duration of the export and restoring the original
+    afterwards — leaving ``model.generation_config`` unchanged so any ``.generate()`` calls
+    outside the export window (e.g. the pre-/post-PTQ previews) remain deterministic.
+    """
+    original = getattr(model, "generation_config", None)
+    normalized = None
+    if original is not None and not getattr(original, "do_sample", False):
         has_sampling_hyperparam = (
-            getattr(gen_cfg, "top_p", None) not in (None, 1.0)
-            or getattr(gen_cfg, "top_k", None) not in (None, 0, 50)
-            or getattr(gen_cfg, "temperature", None) not in (None, 1.0)
+            getattr(original, "top_p", None) not in (None, 1.0)
+            or getattr(original, "top_k", None) not in (None, 0, 50)
+            or getattr(original, "temperature", None) not in (None, 1.0)
         )
         if has_sampling_hyperparam:
-            gen_cfg.do_sample = True
-
-    return model
+            normalized = copy.deepcopy(original)
+            normalized.do_sample = True
+    try:
+        if normalized is not None:
+            model.generation_config = normalized
+        yield
+    finally:
+        if normalized is not None:
+            model.generation_config = original
 
 
 def is_model_on_gpu(model) -> bool:

@@ -189,11 +189,15 @@ def convert_hf_quant_config_format(input_config: dict[str, Any]) -> dict[str, An
         }
         new_config["config_groups"] = {"group_0": config_group_details}
     elif quant_algo_value == "NVFP4_W4A16":
-        # Weight-only FP4
+        # Weight-only FP4. Embedding is included alongside Linear because
+        # ``NVFP4_W4A16_CFG`` targets ``["*"]`` with ``weight_only=True``, so any registered
+        # ``QuantEmbedding`` gets weight-quantized too. Compressed-tensors dispatches on the
+        # module's ``__class__.__name__``, so omitting ``Embedding`` would leave quantized
+        # embedding weights orphaned on the consumer side.
         group_size = original_quantization_details.get("group_size", 16)
         config_group_details = {
             "weights": {"dynamic": False, "num_bits": 4, "type": "float", "group_size": group_size},
-            "targets": ["Linear"],
+            "targets": ["Linear", "Embedding"],
         }
         new_config["config_groups"] = {"group_0": config_group_details}
     elif quant_algo_value == "MIXED_PRECISION":
