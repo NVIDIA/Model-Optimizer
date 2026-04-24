@@ -187,7 +187,7 @@ class EagleConfig(ModeloptBaseConfig):
     )
 
     eagle_export_rope_scaling: dict = ModeloptField(
-        default={},
+        default={"rope_type": "yarn", "factor": 32.0, "original_max_position_embeddings": 2048},
         description=(
             "The rope_scaling config to inject into the exported HuggingFace model config. "
             "Applied when the training rope_type is 'default' (no scaling). "
