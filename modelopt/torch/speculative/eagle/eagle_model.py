@@ -49,5 +49,6 @@ class EagleModel(DynamicModule):
         self.eagle_base_lora_preservation_loss_weight = (
             config.eagle_base_lora_preservation_loss_weight
         )
+        self.eagle_base_lora_start_layer = config.eagle_base_lora_start_layer
         self.eagle_base_lora_warmup_steps = config.eagle_base_lora_warmup_steps
         self.eagle_base_lora_logits_detach_prob = config.eagle_base_lora_logits_detach_prob

@@ -237,6 +237,14 @@ class EagleConfig(ModeloptBaseConfig):
         ),
     )
 
+    eagle_base_lora_start_layer: int | None = ModeloptField(
+        default=None,
+        description=(
+            "If set, only inject LoRA into base model layers with index >= this value. "
+            "None means all layers. For example, 17 means LoRA is only applied to layers 17+."
+        ),
+    )
+
     eagle_base_lora_logits_detach_prob: float = ModeloptField(
         default=0.5,
         description=(
