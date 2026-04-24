@@ -64,7 +64,7 @@ jobs:
           COVERAGE_FILE: ${{ github.workspace }}/.coverage
         run: |
           echo "Running tests for: ${{ inputs.example }}"
-          pytest tests/examples/${{ inputs.example }} --cov
+          python -m pytest tests/examples/${{ inputs.example }} --cov
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
         with:

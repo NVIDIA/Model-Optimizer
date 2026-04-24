@@ -21,6 +21,7 @@
 # Usage:
 #   bash client.sh handshake              - Connect to server
 #   bash client.sh run <command...>        - Run a command and print output
+#   bash client.sh cancel                 - Cancel the running command
 #   bash client.sh status                  - Check server status
 #
 # Options:
@@ -53,6 +54,22 @@ RESULT_DIR="$RELAY_DIR/result"
 
 SUBCOMMAND="${1:-}"
 shift || true
+
+# Helper: wait for a specific command to finish (running marker gone or cmd_id changed)
+wait_for_cancel_completion() {
+    local target_id="$1" wait_timeout="$2" elapsed=0 current_info current_id
+    while [[ $elapsed -lt $wait_timeout ]]; do
+        if [[ ! -f "$RELAY_DIR/running" ]]; then
+            return 0
+        fi
+        current_info=$(cat "$RELAY_DIR/running" 2>/dev/null) || true
+        current_id="${current_info%%:*}"
+        [[ "$current_id" != "$target_id" ]] && return 0
+        sleep "$POLL_INTERVAL"
+        elapsed=$((elapsed + POLL_INTERVAL))
+    done
+    return 1
+}
 
 case "$SUBCOMMAND" in
     handshake)
@@ -91,6 +108,8 @@ case "$SUBCOMMAND" in
         # Generate a unique command ID (timestamp + PID to avoid collisions)
         cmd_id="$(date +%s%N)_$$"
 
+        echo "[client] Running: $*"
+
         # Write the command file atomically (tmp + mv)
         echo "$*" > "$CMD_DIR/$cmd_id.sh.tmp"
         mv "$CMD_DIR/$cmd_id.sh.tmp" "$CMD_DIR/$cmd_id.sh"
@@ -107,15 +126,35 @@ case "$SUBCOMMAND" in
             sleep "$POLL_INTERVAL"
             elapsed=$((elapsed + POLL_INTERVAL))
             if [[ $elapsed -ge $TIMEOUT ]]; then
+                # Result might have arrived during the last sleep
+                [[ -f "$RESULT_DIR/$cmd_id.exit" ]] && break
                 echo "ERROR: Command timed out after ${TIMEOUT}s."
-                # Clean up the pending command
+                # Cancel the running command only if it is OUR command
+                if [[ -f "$RELAY_DIR/running" ]]; then
+                    running_info=$(cat "$RELAY_DIR/running" 2>/dev/null) || true
+                    if [[ -n "$running_info" && "$running_info" == *:* ]]; then
+                        running_id="${running_info%%:*}"
+                        if [[ "$running_id" == "$cmd_id" ]]; then
+                            echo "Sending cancel signal..."
+                            echo "$cmd_id" > "$RELAY_DIR/cancel.tmp"
+                            mv "$RELAY_DIR/cancel.tmp" "$RELAY_DIR/cancel"
+                            wait_for_cancel_completion "$cmd_id" 10 || true
+                        fi
+                    fi
+                fi
+                # Clean up command and any orphaned result files
                 rm -f "$CMD_DIR/$cmd_id.sh"
+                rm -f "$RESULT_DIR/$cmd_id.exit" "$RESULT_DIR/$cmd_id.log"
                 exit 1
             fi
         done
 
         # Read and display results
         exit_code=$(cat "$RESULT_DIR/$cmd_id.exit")
+        if ! [[ "$exit_code" =~ ^[0-9]+$ ]]; then
+            echo "WARNING: Invalid exit code '$exit_code', defaulting to 1."
+            exit_code=1
+        fi
         if [[ -f "$RESULT_DIR/$cmd_id.log" ]]; then
             cat "$RESULT_DIR/$cmd_id.log"
         fi
@@ -139,6 +178,12 @@ case "$SUBCOMMAND" in
         else
             echo "Handshake: not started"
         fi
+        if [[ -f "$RELAY_DIR/running" ]]; then
+            running_info=$(cat "$RELAY_DIR/running" 2>/dev/null) || running_info="(disappeared)"
+            echo "Running: $running_info"
+        else
+            echo "Running: (idle)"
+        fi
         if [[ -d "$CMD_DIR" ]]; then
             pending=$(find "$CMD_DIR" -maxdepth 1 -type f -name '*.sh' 2>/dev/null | wc -l)
         else
@@ -148,6 +193,12 @@ case "$SUBCOMMAND" in
         ;;
 
     flush)
+        # Block flush if a command is actually running (server alive + running marker)
+        # Allow flush if server is dead (stale running marker from crash)
+        if [[ -f "$RELAY_DIR/running" ]] && [[ -f "$RELAY_DIR/server.ready" ]]; then
+            echo "ERROR: A command is currently running. Cancel it first or wait for it to finish."
+            exit 1
+        fi
         if [[ -d "$RELAY_DIR" ]]; then
             # Clear handshake and command/result files, but keep server.ready
             rm -f "$RELAY_DIR/client.ready" "$RELAY_DIR/handshake.done"
@@ -159,12 +210,48 @@ case "$SUBCOMMAND" in
         fi
         ;;
 
+    cancel)
+        # Check if there's a running command
+        if [[ -f "$RELAY_DIR/running" ]]; then
+            running_info=$(cat "$RELAY_DIR/running" 2>/dev/null) || true
+            if [[ -z "$running_info" || "$running_info" != *:* ]]; then
+                echo "WARNING: Running marker is corrupt or empty. Cannot identify command to cancel."
+                exit 1
+            fi
+            running_id="${running_info%%:*}"
+            echo "Cancelling running command: $running_id"
+
+            # Write cancel signal atomically with cmd_id so server can verify the target
+            echo "$running_id" > "$RELAY_DIR/cancel.tmp"
+            mv "$RELAY_DIR/cancel.tmp" "$RELAY_DIR/cancel"
+
+            # Wait for the server to process the cancellation
+            if wait_for_cancel_completion "$running_id" 30; then
+                echo "Command cancelled."
+            else
+                echo "WARNING: Cancel signal sent but command still running after 30s."
+                exit 1
+            fi
+        else
+            echo "No command is currently running."
+        fi
+
+        # Report pending commands
+        if [[ -d "$CMD_DIR" ]]; then
+            pending=$(find "$CMD_DIR" -maxdepth 1 -type f -name '*.sh' 2>/dev/null | wc -l)
+            if [[ "$pending" -gt 0 ]]; then
+                echo "$pending pending command(s) in queue. Use 'flush' to clear them."
+            fi
+        fi
+        ;;
+
     *)
         echo "Usage: $0 [--relay-dir <path>] [--timeout <secs>] <subcommand>"
         echo ""
         echo "Subcommands:"
         echo "  handshake   Connect to the server"
         echo "  run <cmd>   Execute a command on the server"
+        echo "  cancel      Cancel the currently running command"
         echo "  status      Check connection status"
         echo "  flush       Clear the relay directory"
         exit 1

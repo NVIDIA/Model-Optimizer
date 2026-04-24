@@ -30,6 +30,7 @@ from torch import Tensor
 from torch.nn.functional import linear
 from transformers.models.t5.modeling_t5 import T5Attention
 
+from modelopt.torch.kernels.quantization.gemm import IS_AVAILABLE as IS_TRITON_AVAILABLE
 from modelopt.torch.opt.dynamic import DynamicModule
 from modelopt.torch.utils.distributed import ParallelState
 
@@ -37,9 +38,8 @@ from ..algorithms import AutoQuantizeGradientSearcher
 from ..conversion import register
 from ..nn import QuantInputBase, QuantModule, QuantModuleRegistry, TensorQuantizer
 from ..nn.modules.quant_linear import _QuantLinear
-from ..triton import IS_AVAILABLE as IS_TRITON_AVAILABLE
 from ..utils import replace_function, sync_moe_expert_amax
-from ..utils.activation_collector import LayerActivationCollector
+from ..utils.layerwise_calib import LayerActivationCollector
 from .attention import register_attention_for_kv_quant
 from .custom import CUSTOM_MODEL_PLUGINS, _ParallelLinear, _QuantFunctionalMixin
 
@@ -58,7 +58,7 @@ except ImportError:
     kitchen = None
 
 if IS_TRITON_AVAILABLE:
-    from ..triton import weight_dequant
+    from modelopt.torch.kernels.quantization.gemm import weight_dequant
 else:
     weight_dequant = None
 
@@ -274,6 +274,22 @@ class _T5QuantAttention(QuantModule):
             return super().forward(*args, **kwargs)
 
 
+def _wraps_nested_attention(module):
+    """Return True when ``module`` contains another Attention child on this specific instance.
+
+    Checked per-instance (not by class) so an attention class reused as both wrapper and
+    leaf is not dropped everywhere. In a 3-level hierarchy (Outer → Middle → Inner), both
+    Outer and Middle are treated as wrappers and only Inner is registered for KV-cache
+    quantization. Used to avoid double-patching ``eager_attention_forward`` when a wrapper
+    attention module (e.g. ``ViTAttention``) delegates to a nested self-attention child
+    (e.g. ``ViTSelfAttention``).
+    """
+    return any(
+        child is not module and type(child).__name__.endswith("Attention")
+        for _, child in module.named_modules()
+    )
+
+
 def register_hf_attentions_on_the_fly(model):
     """Find HF Attention modules in the model and register them for KV Cache quantization.
 
@@ -286,9 +302,12 @@ def register_hf_attentions_on_the_fly(model):
 
     attention_cls = set()
     registered_attn_module = False
+
     for name, module in model.named_modules():
         # Only register attention classes that are from Huggingface transformers
         if type(module).__name__.endswith("Attention"):
+            if _wraps_nested_attention(module):
+                continue
             attention_type = _QuantAttention.get_attn_type(module)
             # Add modules to be registered only if they arent already registered
             if (

@@ -66,6 +66,10 @@ class MegatronLMQuantizeConfig:
     model: str = "Qwen/Qwen3-8B"
     quant_cfg: str = "NVFP4_DEFAULT_CFG"
     tp: int = 4
+    pp: int = 1
+    ep: int = 1
+    etp: int = 1
+    extra_args: str = ""
     calib_dataset: str = "abisee/cnn_dailymail"
     calib_size: int = 32
     mmlu_dataset: str = "cais/mmlu"
@@ -92,14 +96,21 @@ class MegatronLMQuantizeTask(SandboxTask):
         if self.config is not None:
             c = self.config
             self.script = self.script or "common/megatron_lm/quantize/quantize.sh"
-            self.args = [
+            args = [
                 f"--calib-dataset-path-or-name {c.hf_local}{c.calib_dataset}",
                 f"--calib-size {c.calib_size}",
             ]
+            if c.extra_args:
+                args.append(c.extra_args)
+            self.args = args
             self.environment = [
                 {"MLM_MODEL_CFG": c.model},
                 {"QUANT_CFG": c.quant_cfg},
                 {"HF_MODEL_CKPT": f"{c.hf_local}{c.model}"},
                 {"MMLU_DATASET": f"{c.hf_local}{c.mmlu_dataset}"},
                 {"TP": str(c.tp)},
+                {"PP": str(c.pp)},
+                {"EP": str(c.ep)},
+                {"ETP": str(c.etp)},
+                {"MMLU_LOWER_BOUND": str(c.mmlu_lower_bound)},
             ]

@@ -33,7 +33,9 @@ except ImportError:
 from utils import (
     filter_func_default,
     filter_func_flux_dev,
+    filter_func_ltx2_vae,
     filter_func_ltx_video,
+    filter_func_wan_vae,
     filter_func_wan_video,
 )
 
@@ -54,31 +56,30 @@ class ModelType(str, Enum):
     WAN22_T2V_5b = "wan2.2-t2v-5b"
 
 
-def get_model_filter_func(model_type: ModelType) -> Callable[[str], bool]:
-    """
-    Get the appropriate filter function for a given model type.
+_FILTER_FUNC_MAP: dict[ModelType, Callable[[str], bool]] = {
+    ModelType.FLUX_DEV: filter_func_flux_dev,
+    ModelType.FLUX2_DEV: filter_func_flux_dev,
+    ModelType.LTX_VIDEO_DEV: filter_func_ltx_video,
+    ModelType.LTX2: filter_func_ltx_video,
+    ModelType.WAN22_T2V_14b: filter_func_wan_video,
+    ModelType.WAN22_T2V_5b: filter_func_wan_video,
+}
 
-    Args:
-        model_type: The model type enum
+_VAE_FILTER_FUNC_MAP: dict[tuple[ModelType, str], Callable[[str], bool]] = {
+    (ModelType.LTX2, "video_decoder"): filter_func_ltx2_vae,
+    (ModelType.WAN22_T2V_14b, "vae"): filter_func_wan_vae,
+    (ModelType.WAN22_T2V_5b, "vae"): filter_func_wan_vae,
+}
 
-    Returns:
-        A filter function appropriate for the model type
-    """
-    filter_func_map = {
-        ModelType.FLUX_DEV: filter_func_flux_dev,
-        ModelType.FLUX_SCHNELL: filter_func_default,
-        ModelType.FLUX2_DEV: filter_func_flux_dev,
-        ModelType.SDXL_BASE: filter_func_default,
-        ModelType.SDXL_TURBO: filter_func_default,
-        ModelType.SD3_MEDIUM: filter_func_default,
-        ModelType.SD35_MEDIUM: filter_func_default,
-        ModelType.LTX_VIDEO_DEV: filter_func_ltx_video,
-        ModelType.LTX2: filter_func_ltx_video,
-        ModelType.WAN22_T2V_14b: filter_func_wan_video,
-        ModelType.WAN22_T2V_5b: filter_func_wan_video,
-    }
 
-    return filter_func_map.get(model_type, filter_func_default)
+def get_model_filter_func(
+    model_type: ModelType, backbone_name: str = "transformer"
+) -> Callable[[str], bool]:
+    """Get the appropriate filter function for a given model type and backbone."""
+    vae_func = _VAE_FILTER_FUNC_MAP.get((model_type, backbone_name))
+    if vae_func is not None:
+        return vae_func
+    return _FILTER_FUNC_MAP.get(model_type, filter_func_default)
 
 
 # Model registry with HuggingFace model IDs

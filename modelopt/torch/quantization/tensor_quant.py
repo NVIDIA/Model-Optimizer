@@ -21,7 +21,7 @@ import torch
 from torch.autograd import Function
 from torch.onnx import symbolic_helper
 
-import modelopt.torch.quantization.triton as triton_kernel
+import modelopt.torch.kernels.quantization.gemm as triton_kernel
 
 from .config import QuantizerAttributeConfig
 from .extensions import get_cuda_ext, get_cuda_ext_fp8, get_cuda_ext_mx
