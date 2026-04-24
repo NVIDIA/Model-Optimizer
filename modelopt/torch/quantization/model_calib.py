@@ -1636,34 +1636,36 @@ def layerwise_calibrate(
     input_getter = LayerActivationCollector(model)
     input_getter._patch_all_layers(decoder_layers=transformer_layers)
 
-    resumed_inputs = ckpt.setup_resume(transformer_layers) if ckpt and start_layer > 0 else None
+    # When all layers are already done (start_layer == num_layers), skip input setup:
+    resumed_inputs = (
+        ckpt.setup_resume(transformer_layers) if ckpt and 0 < start_layer < num_layers else None
+    )
 
     try:
         # Bootstrap: get first layer's inputs (or use resumed inputs).
-        layer_inputs = input_getter.get_first_layer_inputs(
-            start_layer, resumed_inputs, forward_loop
-        )
+        # Skip entirely when all layers are already calibrated (start_layer == num_layers).
+        if start_layer < num_layers:
+            layer_inputs = input_getter.get_first_layer_inputs(
+                start_layer, resumed_inputs, forward_loop
+            )
+        else:
+            layer_inputs = None
 
         for layer_idx in range(start_layer, num_layers):
             layer = transformer_layers[layer_idx]
 
             def _layer_forward_loop(m, _inputs=layer_inputs):
                 for args, kwargs_input in _inputs:
-                    # Reset past_key_values to prevent the KV cache from
-                    # accumulating across multiple forward replays (e.g.
-                    # max_calibrate then Hessian collection in GPTQ).
-                    # The layer doesn't need stale KV data — each replay
-                    # should start with a fresh cache.
-                    if (
-                        "past_key_values" in kwargs_input
-                        and kwargs_input["past_key_values"] is not None
-                    ):
+                    # Always clear past_key_values for each replay so layers
+                    # that behave differently in decode vs prefill mode (e.g.
+                    # NemotronH SSM/Mamba) always run in prefill mode where
+                    # hidden_states has the full sequence length.
+                    if "past_key_values" in kwargs_input:
                         kwargs_input = dict(kwargs_input)
                         cache = kwargs_input["past_key_values"]
-                        if hasattr(cache, "reset"):
+                        if cache is not None and hasattr(cache, "reset"):
                             cache.reset()
-                        else:
-                            kwargs_input["past_key_values"] = None
+                        kwargs_input["past_key_values"] = None
                     m(*args, **kwargs_input)
 
             with persistent_materialization(layer):
