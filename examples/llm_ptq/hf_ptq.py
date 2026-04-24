@@ -441,23 +441,6 @@ def load_model(args: argparse.Namespace):
             )
         calibration_only = True
 
-    # Force `_experts_implementation = "eager"` so HF's `@use_experts_implementation`
-    # dispatcher calls the original F.linear-based forward (not torch._grouped_mm /
-    # torch.bmm). ModelOpt's `_QuantFusedExperts` intercepts F.linear to feed the
-    # shared input/weight quantizers; non-eager backends bypass the hook entirely,
-    # leaving expert quantizers uncalibrated (no amax → no input_scale).
-    def _force_eager_experts(cfg):
-        if cfg is None:
-            return
-        if hasattr(cfg, "_experts_implementation"):
-            cfg._experts_implementation = "eager"
-        for sub in ("text_config", "vision_config", "audio_config", "speech_config"):
-            if hasattr(cfg, sub):
-                _force_eager_experts(getattr(cfg, sub))
-
-    if hasattr(full_model, "config"):
-        _force_eager_experts(full_model.config)
-
     model_type = get_model_type(full_model)
 
     device = full_model.device

@@ -1438,6 +1438,38 @@ def register_fused_experts_on_the_fly(model):
             QuantModuleRegistry.register({mod_type: f"hf.{mod_type.__name__}"})(_QuantFusedExperts)
 
 
+def force_eager_experts_impl_on_the_fly(model):
+    """Force HF fused-experts modules onto the eager ``F.linear``-based forward.
+
+    HF transformers 5.0+ decorates fused-experts forwards with
+    ``@use_experts_implementation``, which may dispatch to ``torch._grouped_mm``
+    or ``torch.bmm`` backends. Those backends bypass ``F.linear`` and so bypass
+    ``_QuantFusedExperts``'s input/weight quantizer hooks — calibration silently
+    does nothing, no ``input_scale`` / ``amax`` is collected, and the exported
+    checkpoint produces garbage at inference.
+
+    Sets ``config._experts_implementation = "eager"`` on the model config (and
+    recursively on ``text_config`` / ``vision_config`` / ``audio_config`` /
+    ``speech_config``) whenever a fused-experts module is present.
+    """
+    if not any(_is_fused_experts_module(m) for m in model.modules()):
+        return
+
+    nested_cfg_attrs = ("text_config", "vision_config", "audio_config", "speech_config")
+
+    def _force(cfg):
+        if cfg is None:
+            return
+        if hasattr(cfg, "_experts_implementation"):
+            cfg._experts_implementation = "eager"
+        for sub in nested_cfg_attrs:
+            if hasattr(cfg, sub):
+                _force(getattr(cfg, sub))
+
+    if hasattr(model, "config"):
+        _force(model.config)
+
+
 def _is_supported_hf_model(model):
     """Check if the model a valid model for transformers quantization specific support."""
     supported_models = [transformers.PreTrainedModel]
@@ -1665,6 +1697,7 @@ CUSTOM_MODEL_PLUGINS.update(
         register_dbrx_moe_on_the_fly,
         register_step3p5_moe_on_the_fly,
         register_fused_experts_on_the_fly,
+        force_eager_experts_impl_on_the_fly,
         register_sparse_moe_on_the_fly,
         register_hf_attentions_on_the_fly,
         convert_hf_parallel_linears_on_the_fly,
