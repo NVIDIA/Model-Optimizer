@@ -240,10 +240,15 @@ _mamba_moe_disabled_quantizer_cfg: list[QuantizerCfgEntry] = [
     {"quantizer_name": "*k_proj*", "enable": False},  # Skip QKV Linear (HF naming)
     {"quantizer_name": "*v_proj*", "enable": False},  # Skip QKV Linear (HF naming)
     {"quantizer_name": "*o_proj*", "enable": False},  # Skip QKV Output Projection (HF naming)
-    {"quantizer_name": "*self_attention.linear_qkv*", "enable": False},  # Skip QKV Linear (Mcore naming)
-    {"quantizer_name": "*self_attention.linear_proj*", "enable": False},  # Skip QKV Output Projection (Mcore naming)
-
-    ]
+    {
+        "quantizer_name": "*self_attention.linear_qkv*",
+        "enable": False,
+    },  # Skip QKV Linear (Mcore naming)
+    {
+        "quantizer_name": "*self_attention.linear_proj*",
+        "enable": False,
+    },  # Skip QKV Output Projection (Mcore naming)
+]
 
 INT8_DEFAULT_CFG = {
     "quant_cfg": [
