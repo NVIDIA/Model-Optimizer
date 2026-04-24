@@ -955,6 +955,18 @@ def quantize_main(
     default_pad_token,
     device: torch.device,
 ):
+    # Load the recipe up front so we can detect layerwise calibration before batch-size probing.
+    recipe = None
+    if args.recipe is not None and not args.auto_quantize_bits:
+        print(f"Use recipe {args.recipe} for quantization")
+        recipe = load_recipe(args.recipe)
+        assert isinstance(recipe, ModelOptPTQRecipe), (
+            f"Expected PTQ recipe, but got {type(recipe).__name__} from {args.recipe}"
+        )
+
+    recipe_algorithm = recipe.quantize.model_dump().get("algorithm") if recipe else None
+    is_layerwise = isinstance(recipe_algorithm, dict) and recipe_algorithm.get("layerwise", False)
+
     if args.batch_size == 0:
         # For VL models with image-text calibration, skip automatic batch size detection
         # since get_max_batch_size can't handle multimodal inputs
@@ -967,6 +979,11 @@ def quantize_main(
             print(
                 "Offline speculative decoding calibration enabled. Using default batch_size=1 for calibration."
             )
+            args.batch_size = 1
+        # Layerwise calibration processes one layer at a time; auto batch-size probing runs a
+        # full-model forward which defeats the point and can OOM on very large models.
+        elif is_layerwise:
+            print("Layerwise calibration enabled. Using default batch_size=1 for calibration.")
             args.batch_size = 1
         else:
             # Calibration/sparsification will actually take much more memory than regular inference
@@ -1027,12 +1044,7 @@ def quantize_main(
     else:
         # mono quantization
 
-        if args.recipe is not None:
-            print(f"Use recipe {args.recipe} for quantization")
-            recipe = load_recipe(args.recipe)
-            assert isinstance(recipe, ModelOptPTQRecipe), (
-                f"Expected PTQ recipe, but got {type(recipe).__name__} from {args.recipe}"
-            )
+        if recipe is not None:
             quant_cfg = recipe.quantize.model_dump()
 
         else:

@@ -154,7 +154,7 @@ import copy
 import warnings
 from typing import Any, Literal, cast
 
-from pydantic import ValidationInfo, field_validator, model_validator
+from pydantic import AliasChoices, ValidationInfo, field_validator, model_validator
 from typing_extensions import Required, TypedDict
 
 from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
@@ -1219,6 +1219,7 @@ class QuantizeAlgorithmConfig(ModeloptBaseConfig):
 
     layerwise: bool = ModeloptField(
         default=False,
+        validation_alias=AliasChoices("layerwise", "use_sequential"),
         title="Enable layerwise (layer-by-layer) calibration.",
         description=(
             "If True, the calibration algorithm is applied layer by layer. "
