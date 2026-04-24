@@ -960,12 +960,19 @@ def quantize_main(
     if args.recipe is not None and not args.auto_quantize_bits:
         print(f"Use recipe {args.recipe} for quantization")
         recipe = load_recipe(args.recipe)
-        assert isinstance(recipe, ModelOptPTQRecipe), (
-            f"Expected PTQ recipe, but got {type(recipe).__name__} from {args.recipe}"
-        )
+        if not isinstance(recipe, ModelOptPTQRecipe):
+            raise TypeError(
+                f"Expected PTQ recipe, but got {type(recipe).__name__} from {args.recipe}"
+            )
 
-    recipe_algorithm = recipe.quantize.model_dump().get("algorithm") if recipe else None
-    is_layerwise = isinstance(recipe_algorithm, dict) and recipe_algorithm.get("layerwise", False)
+    def _is_layerwise(obj):
+        if isinstance(obj, ModelOptPTQRecipe):
+            return _is_layerwise(obj.quantize.algorithm)
+        if isinstance(obj, list):
+            return any(_is_layerwise(a) for a in obj)
+        return bool(getattr(obj, "layerwise", False))
+
+    is_layerwise = _is_layerwise(recipe)
 
     if args.batch_size == 0:
         # For VL models with image-text calibration, skip automatic batch size detection
