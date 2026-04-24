@@ -314,21 +314,42 @@ def get_dataset_samples(
 
     # load_dataset does not support a list of splits while streaming, so load each separately.
     print(f"Loading dataset with {config=} and {splits=}")
-    dataset_splits = [load_dataset(streaming=True, **config, split=s) for s in splits]
+    try:
+        dataset_splits = [load_dataset(streaming=True, **config, split=s) for s in splits]
 
-    num_per_split = [num_samples // len(dataset_splits)] * len(dataset_splits)
-    num_per_split[-1] += num_samples - sum(num_per_split)
+        num_per_split = [num_samples // len(dataset_splits)] * len(dataset_splits)
+        num_per_split[-1] += num_samples - sum(num_per_split)
 
-    samples: list[str] = []
-    for dataset, n in zip(dataset_splits, num_per_split):
-        for i, sample in enumerate(dataset):
-            if i >= n:
-                break
-            text = _preprocess(sample)
-            if text:
-                samples.append(text)
+        samples: list[str] = []
+        for dataset, n in zip(dataset_splits, num_per_split):
+            for i, sample in enumerate(dataset):
+                if i >= n:
+                    break
+                text = _preprocess(sample)
+                if text:
+                    samples.append(text)
 
-    return samples
+        return samples
+    except Exception as e:
+        # Backward-compat fallback: legacy callers passed JSONL files whose only usable
+        # field is ``text``.  If the HF ``json`` builder or auto-detect can't handle the
+        # file (schema inference error, unrecognized columns, etc.), fall back to a
+        # line-by-line reader that pulls the ``text`` field directly.
+        if is_jsonl:
+            assert local_dataset_path is not None  # is_jsonl implies the path exists
+            try:
+                fallback_samples = get_jsonl_text_samples(
+                    local_dataset_path, num_samples, key="text"
+                )
+            except Exception:
+                # Fallback can't help either — surface the original HF error.
+                raise e from None
+            warn(
+                f"Failed to load {local_dataset_path} via the HF 'json' builder "
+                f"({type(e).__name__}: {e}); fell back to legacy text-field reader."
+            )
+            return fallback_samples
+        raise
 
 
 class _CustomDataset(torch.utils.data.Dataset):

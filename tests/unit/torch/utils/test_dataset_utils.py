@@ -295,7 +295,12 @@ class TestLocalJsonlLoading:
         assert kwargs.get("tools") == [{"name": "calc"}]
 
     def test_unrecognized_columns_raise(self, tmp_path):
-        """Auto-detect raises ValueError when no recognized column is present."""
+        """Auto-detect raises ValueError when no recognized column is present.
+
+        The HF builder loads the rows fine; auto-detect rejects them. There's no
+        ``text`` field to fall back to, so the error propagates instead of being
+        masked by the legacy fallback.
+        """
         pytest.importorskip("datasets")
         path = _write_jsonl(
             tmp_path / "bad.jsonl",
@@ -303,6 +308,21 @@ class TestLocalJsonlLoading:
         )
         with pytest.raises(ValueError, match="Cannot auto-detect format"):
             get_dataset_samples(path, num_samples=1)
+
+    def test_legacy_text_fallback_on_hf_builder_failure(self, tmp_path):
+        """If the HF json builder raises, fall back to the legacy text-field reader."""
+        pytest.importorskip("datasets")
+        # Mixed-type ``meta`` field across rows — int vs string — trips PyArrow
+        # schema unification in the HF json builder. The rows still carry a
+        # ``text`` field, so the legacy reader can recover the samples.
+        rows = [
+            {"text": "row a", "meta": 1},
+            {"text": "row b", "meta": "two"},
+            {"text": "row c", "meta": 3},
+        ]
+        path = _write_jsonl(tmp_path / "mixed.jsonl", rows)
+        samples = get_dataset_samples(path, num_samples=3)
+        assert samples == ["row a", "row b", "row c"]
 
 
 # ---------------------------------------------------------------------------
