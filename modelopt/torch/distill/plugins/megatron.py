@@ -163,7 +163,7 @@ def setup_distillation_config(
 
 def _adjust_layer_index_for_pp(submodule_name, model_cfg):
     """Adjust any sequence-based layer indices found in a submodule name for Pipeline Parallelism."""
-    match = re.search(r"(?<=\.)\d+(?=\.)", submodule_name)
+    match = re.search(r"(?<=\.)\d+(?=\.|$)", submodule_name)
     if not match:
         return submodule_name
 
