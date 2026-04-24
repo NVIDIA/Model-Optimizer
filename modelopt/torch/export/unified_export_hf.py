@@ -646,6 +646,15 @@ def _process_quantized_modules(
             "QuantFP8Linear" in type(sub_module).__name__ and sub_module.weight.element_size() <= 1
         ):
             sub_module.unpack_weight()
+        # _QuantFusedExperts uses plural `gate_up_proj_weight_quantizers` (ModuleList),
+        # which get_quantization_format's singular-weight_quantizer check misses. Handle
+        # it explicitly before the format gate so fused-experts get split + quantized.
+        if hasattr(sub_module, "gate_up_proj_weight_quantizers"):
+            from modelopt.torch.export.moe_utils import _export_fused_experts
+
+            with fsdp2_aware_weight_update(model, sub_module, reshard=False):
+                _export_fused_experts(sub_module, dtype)
+            continue
         if get_quantization_format(sub_module) != QUANTIZATION_NONE:
             # Skip QuantMoELinear - it's handled separately in _reconstruct_fused_moe_linear
             if type(sub_module).__name__ == "QuantMoELinear":

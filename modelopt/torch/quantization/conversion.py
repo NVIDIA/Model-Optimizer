@@ -16,6 +16,7 @@
 """Quantization conversion/restore utilities."""
 
 import fnmatch
+import re
 import warnings
 from collections.abc import Callable
 from contextlib import contextmanager
@@ -286,6 +287,26 @@ def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: QuantizeQuantCfgType
             set_quantizer_attributes_full(quant_model, quantizer_name, attributes, parent_class)
 
 
+_FUSED_EXPERTS_QUANTIZER_LIST_RE = re.compile(r"(weight_quantizers|input_quantizers)\.\d+(?=$|\.)")
+
+
+def _normalize_fused_experts_quantizer_name(name: str) -> str:
+    """Strip the per-expert index from ``_QuantFusedExperts`` ModuleList quantizer names.
+
+    ``_QuantFusedExperts`` registers per-expert weight/input quantizers as
+    ``nn.ModuleList``s named e.g. ``gate_up_proj_weight_quantizers`` — its children
+    get dotted names like ``...gate_up_proj_weight_quantizers.0``. These don't match
+    the singular-suffix wildcards (``*weight_quantizer``) used in the stock configs,
+    so the experts stay at their defaults. Return a normalized name where
+    ``weight_quantizers.N`` / ``input_quantizers.N`` collapse to their singular form
+    so the standard wildcards match.
+    """
+    return _FUSED_EXPERTS_QUANTIZER_LIST_RE.sub(
+        lambda m: m.group(1)[:-1],
+        name,  # "weight_quantizers" -> "weight_quantizer"
+    )
+
+
 def _match_quantizer(
     wildcard_or_filter_func: str | Callable,
     name: str,
@@ -296,7 +317,11 @@ def _match_quantizer(
     if not isinstance(module, (TensorQuantizer, SequentialQuantizer)):
         return False
     if isinstance(wildcard_or_filter_func, str):
-        if not fnmatch.fnmatch(name, wildcard_or_filter_func):
+        normalized = _normalize_fused_experts_quantizer_name(name)
+        if not (
+            fnmatch.fnmatch(name, wildcard_or_filter_func)
+            or (normalized != name and fnmatch.fnmatch(normalized, wildcard_or_filter_func))
+        ):
             return False
     elif callable(wildcard_or_filter_func):
         if not wildcard_or_filter_func(name):
