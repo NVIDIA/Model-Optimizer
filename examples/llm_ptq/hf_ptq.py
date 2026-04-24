@@ -465,8 +465,8 @@ def load_model(args: argparse.Namespace):
             model_type,
             trust_remote_code=args.trust_remote_code,
         )
-    elif is_nemotron_vl_model and args.calib_with_images:
-        # For Nemotron VL image calibration, we need an AutoProcessor to build multimodal inputs.
+    elif args.calib_with_images:
+        # For VLM image calibration, we need an AutoProcessor to build multimodal inputs.
         processor = AutoProcessor.from_pretrained(
             args.pyt_ckpt_path,
             trust_remote_code=args.trust_remote_code,
