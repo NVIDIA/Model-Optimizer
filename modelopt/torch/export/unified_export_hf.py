@@ -643,19 +643,20 @@ def _process_quantized_modules(
         if is_modelopt_qlora and (hasattr(sub_module, "base_layer")):
             continue
 
+        # Preprocessing: restore unpacked weight so the export path can read
+        # the live quantizer state. Falls through to the export branches below.
         if hasattr(sub_module, "weight_packed") or (
             "QuantFP8Linear" in type(sub_module).__name__ and sub_module.weight.element_size() <= 1
         ):
             sub_module.unpack_weight()
-        elif hasattr(sub_module, "gate_up_proj_weight_quantizers"):
+
+        if hasattr(sub_module, "gate_up_proj_weight_quantizers"):
             # _QuantFusedExperts uses plural `gate_up_proj_weight_quantizers` (ModuleList),
             # which get_quantization_format's singular-weight_quantizer check misses. Handle
             # it explicitly before the format gate so fused-experts get split + quantized.
             with fsdp2_aware_weight_update(model, sub_module, reshard=False):
                 _export_fused_experts(sub_module, dtype)
-            continue
-
-        if get_quantization_format(sub_module) != QUANTIZATION_NONE:
+        elif get_quantization_format(sub_module) != QUANTIZATION_NONE:
             # Skip QuantMoELinear - it's handled separately in _reconstruct_fused_moe_linear
             if type(sub_module).__name__ == "QuantMoELinear":
                 continue
