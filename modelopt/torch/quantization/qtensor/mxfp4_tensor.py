@@ -142,3 +142,88 @@ class MXFP4QTensor(BaseQuantizedTensor):
 
         # Reshape back to the original shape
         return x_float.reshape(original_shape).to(dtype)
+
+    # --- Signed E2M1 lookup, indexed by the full 4-bit pattern.
+    # Bit 3 is the sign; bits 2..0 index the 8-entry magnitude table.
+    _E2M1_SIGNED_VALUES = [
+        0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
+        0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0,
+    ]
+    _e2m1_signed_cache: dict = {}
+
+    @classmethod
+    def _get_signed_e2m1_lut(cls, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+        key = (device, dtype)
+        if key not in cls._e2m1_signed_cache:
+            cls._e2m1_signed_cache[key] = torch.tensor(
+                cls._E2M1_SIGNED_VALUES, dtype=dtype, device=device
+            )
+        return cls._e2m1_signed_cache[key]
+
+    @classmethod
+    def dequantize_packed(
+        cls,
+        blocks: torch.Tensor,
+        scales: torch.Tensor,
+        *,
+        block_size: int = 32,
+        dtype: torch.dtype = torch.bfloat16,
+    ) -> torch.Tensor:
+        """Dequantize MXFP4-packed bytes to ``dtype`` without a QTensor wrapper.
+
+        Input layout (DeepSeek-V4 checkpoint convention — group axis and packing
+        axis fused in a single trailing dim):
+
+            blocks : ``[..., K // 2]``, dtype ``uint8`` or ``int8``.
+                     Low nibble = even element, high nibble = odd element.
+            scales : ``[..., K // block_size]``, dtype ``uint8`` or
+                     ``torch.float8_e8m0fnu``. UE8M0: byte ``e`` maps to
+                     ``2 ** (e - 127)``.
+
+        Returns a tensor of shape ``[..., K]`` in the requested ``dtype``.
+
+        The GPT-OSS layout stores blocks and scales as
+        ``blocks.shape == (..., G, 16)`` and ``scales.shape == (..., G)``.
+        To feed such inputs here, reshape blocks to ``(..., G * 16)`` so that
+        ``blocks.shape[:-1] == scales.shape[:-1]`` holds and the last dim of
+        blocks is ``K // 2``. This helper does *no* trailing transpose, so the
+        result is in the natural ``(out, in)`` orientation, suitable for
+        feeding a standard ``nn.Linear`` or a downstream weight quantizer.
+
+        UE8M0 note: per the OCP MX spec byte ``0xFF`` is NaN; we match
+        ``transformers.integrations.mxfp4._convert_moe_packed_tensors`` by
+        treating it as exponent ``+128``, which overflows bf16 to ``+Inf``.
+        Real MXFP4 checkpoints do not use ``0xFF``.
+        """
+        # Local tensor only — DTensor/other wrappers would bypass ``view(uint8)``'s
+        # byte reinterpretation; the caller should unwrap first (see the FP8 plugin
+        # at ``_QuantFP8Linear._get_weight_and_scale_inv``).
+        assert not isinstance(blocks, torch.distributed.tensor.DTensor) and not isinstance(
+            scales, torch.distributed.tensor.DTensor
+        ), "dequantize_packed expects local tensors; unwrap DTensor via ._local_tensor first"
+
+        b = blocks.contiguous().view(torch.uint8)
+        assert b.shape[:-1] == scales.shape[:-1], (
+            f"Prefix shapes must match: blocks {tuple(b.shape)} vs scales {tuple(scales.shape)}"
+        )
+        K_half = b.shape[-1]
+        G = scales.shape[-1]
+        assert 2 * K_half == G * block_size, (
+            f"Incompatible shapes: 2 * blocks.shape[-1] ({2 * K_half}) != "
+            f"scales.shape[-1] * block_size ({G * block_size})"
+        )
+
+        lut = cls._get_signed_e2m1_lut(b.device, dtype)
+
+        low = (b & 0x0F).long()
+        high = (b >> 4).long()
+
+        out = torch.empty(*b.shape[:-1], 2 * K_half, dtype=dtype, device=b.device)
+        out[..., 0::2] = lut[low]
+        out[..., 1::2] = lut[high]
+
+        # Expose the per-group axis, apply the UE8M0 exponent via ldexp, then fold back.
+        out = out.unflatten(-1, (G, block_size))
+        exp = scales.contiguous().view(torch.uint8).to(torch.int32) - 127
+        out = torch.ldexp(out, exp.unsqueeze(-1))
+        return out.flatten(-2)
