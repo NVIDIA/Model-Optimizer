@@ -576,26 +576,22 @@ class HFEagleModel(EagleModel):
 
     def _inject_base_lora(self):
         """Inject HF PEFT LoRA adapters into the base model in-place and unfreeze them."""
-        import re
-
         from peft import LoraConfig
         from peft.mapping import inject_adapter_in_model
 
         target_modules = self.eagle_base_lora_target_modules or None
 
-        # If start_layer is set, build regex patterns that only match layers >= start_layer.
-        if self.eagle_base_lora_start_layer is not None and target_modules is not None:
+        # Use PEFT's built-in layers_to_transform to restrict LoRA to specific layers.
+        layers_to_transform = None
+        if self.eagle_base_lora_start_layer is not None:
             num_layers = len(self._base_model.layers)
-            layer_indices = [i for i in range(self.eagle_base_lora_start_layer, num_layers)]
-            layer_pattern = "|".join(str(i) for i in layer_indices)
-            target_modules = [
-                re.compile(rf".*layers\.({layer_pattern})\..*{mod}.*") for mod in target_modules
-            ]
+            layers_to_transform = list(range(self.eagle_base_lora_start_layer, num_layers))
 
         lora_config = LoraConfig(
             r=self.eagle_base_lora_rank,
             lora_alpha=self.eagle_base_lora_alpha,
             target_modules=target_modules,
+            layers_to_transform=layers_to_transform,
             bias="none",
         )
         inject_adapter_in_model(lora_config, self._base_model, adapter_name="default")
