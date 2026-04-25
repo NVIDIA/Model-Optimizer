@@ -38,6 +38,7 @@ from .config import (
     AWQLiteCalibConfig,
     CompressConfig,
     GPTQCalibConfig,
+    LAQConfig,
     LocalHessianCalibConfig,
     MaxCalibConfig,
     MseCalibConfig,
@@ -60,6 +61,7 @@ from .conversion import (
 from .model_calib import (
     awq,
     gptq,
+    laq,
     layerwise_calibrate,
     local_hessian_calibrate,
     max_calibrate,
@@ -524,3 +526,15 @@ class GPTQModeDescriptor(BaseCalibrateModeDescriptor):
         return GPTQCalibConfig
 
     _calib_func = gptq
+
+
+@CalibrateModeRegistry.register_mode
+class LAQModeDescriptor(BaseCalibrateModeDescriptor):
+    """Mode for LAQ (Learnt Amax Quantization) algorithm."""
+
+    @property
+    def config_class(self) -> type[QuantizeAlgorithmConfig]:
+        """Specifies the config class for the mode."""
+        return LAQConfig
+
+    _calib_func = laq

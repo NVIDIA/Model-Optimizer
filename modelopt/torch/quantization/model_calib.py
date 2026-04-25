@@ -15,6 +15,7 @@
 
 """Calibration utilities."""
 
+import inspect
 import math
 import time
 import warnings
@@ -32,13 +33,19 @@ from modelopt.torch.quantization.utils.layerwise_calib import (
     LayerActivationCollector,
     _CheckpointState,
 )
-from modelopt.torch.utils import print_rank_0
+from modelopt.torch.utils import print_rank_0, same_device_as
 from modelopt.torch.utils.distributed import DistributedProcessGroup, ParallelState
 from modelopt.torch.utils.network import bind_forward_method, unpatch_forward_method
 
 from .calib import MseCalibrator, NVFP4MSECalibrator
 from .conversion import create_and_replace_svdquant_linear_on_the_fly, set_quantizer_by_cfg_context
-from .nn import NVFP4StaticQuantizer, QuantModule, SequentialQuantizer, TensorQuantizer
+from .nn import (
+    NVFP4StaticQuantizer,
+    QuantModule,
+    SequentialQuantizer,
+    StaticBlockScaleQuantizer,
+    TensorQuantizer,
+)
 from .utils import (
     disable_calib,
     enable_fake_quant,
@@ -57,6 +64,7 @@ from .utils.calib_utils import _GPTQ_HELPER_REGISTRY, GPTQHelper
 
 __all__ = [
     "awq",
+    "laq",
     "layerwise_calibrate",
     "local_hessian_calibrate",
     "max_calibrate",
@@ -1732,3 +1740,167 @@ def gptq(
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
     print_rank_0(f"GPTQ time: {time.time() - total_start:.2f}s")
+
+
+def _is_quantized_block_scale(quantizer: StaticBlockScaleQuantizer) -> bool:
+    if quantizer._block_sizes is None:
+        return False
+    scale_bits = quantizer._block_sizes.get("scale_bits", None)
+    if scale_bits is None:
+        return False
+    return scale_bits == (4, 3)
+
+
+def _convert_to_static_block_quantizers(model: nn.Module):
+    """Convert eligible TensorQuantizers to StaticBlockScaleQuantizer."""
+    for name, module in model.named_modules():
+        if isinstance(module, TensorQuantizer) and not module._disabled:
+            if not hasattr(module, "_amax") or module._amax is None:
+                continue
+            is_static_block_scale = (
+                module.is_static_block_quant
+                and module._block_sizes is not None
+                and (
+                    (module._num_bits == (2, 1) and module._block_sizes.get("scale_bits") == (4, 3))
+                    or isinstance(module._num_bits, int)
+                )
+            )
+            if is_static_block_scale:
+                if _is_quantized_block_scale(module):
+                    global_amax = reduce_amax(module._amax.clone().detach(), axis=None)
+                else:
+                    global_amax = None
+                StaticBlockScaleQuantizer.from_tensor_quantizer(module, global_amax=global_amax)
+
+
+def _run_scale_calibration(model, forward_loop, scale_algorithm, caller_name):
+    """Run calibration and convert to StaticBlockScaleQuantizer if needed."""
+    if scale_algorithm is None:
+        scale_algorithm = {"method": "mse"}
+
+    method = scale_algorithm.get("method")
+    supported = ("mse", "local_hessian", "max")
+    assert method in supported, f"{caller_name}: method must be one of {supported}, got '{method}'"
+
+    algo_kwargs = {k: v for k, v in scale_algorithm.items() if k != "method"}
+    calib_funcs = {
+        "mse": mse_calibrate,
+        "local_hessian": local_hessian_calibrate,
+        "max": max_calibrate,
+    }
+    calib_func = calib_funcs[method]
+    accepted = {
+        name
+        for name, p in inspect.signature(calib_func).parameters.items()
+        if p.kind not in (inspect.Parameter.VAR_KEYWORD, inspect.Parameter.VAR_POSITIONAL)
+    }
+    ignored = sorted(k for k in algo_kwargs if k not in accepted)
+    if ignored:
+        warnings.warn(
+            f"{caller_name}: scale_algorithm kwargs {ignored} are not supported by "
+            f"'{method}' calibration and will be ignored.",
+            stacklevel=2,
+        )
+        algo_kwargs = {k: v for k, v in algo_kwargs.items() if k in accepted}
+    calib_func(model, forward_loop=forward_loop, **algo_kwargs)
+
+    if method == "max":
+        _convert_to_static_block_quantizers(model)
+
+
+def _compute_block_scales(quantizer):
+    """Compute per-block and per-tensor scales from a StaticBlockScaleQuantizer.
+
+    Returns (per_block_scale, per_tensor_scale, quantize_scales).
+    """
+    from .nn.modules.tensor_quantizer import _amax_to_scale
+    from .tensor_quant import scaled_e4m3
+
+    amax = quantizer._amax.float()
+    max_representable = quantizer._quant_max_bound
+    quantize_scales = _is_quantized_block_scale(quantizer)
+    per_tensor_scale = None
+
+    with same_device_as(amax):
+        if quantize_scales:
+            global_amax = quantizer._global_amax.float()
+            per_tensor_scale = _amax_to_scale(global_amax, max_representable)
+            per_block_scale = scaled_e4m3(
+                _amax_to_scale(
+                    amax,
+                    max_representable,
+                    min_value=0.002
+                    * per_tensor_scale.view(-1),  # 0.002 ≈ smallest positive FP8 E4M3 value
+                ),
+                per_tensor_scale,
+                None,
+                4,
+                3,
+            )
+        else:
+            per_block_scale = _amax_to_scale(amax, max_representable)
+
+    return per_block_scale, per_tensor_scale, quantize_scales
+
+
+def _iter_weight_quantizers(model):
+    """Yield (module, weight_name, quantizer) for each StaticBlockScaleQuantizer with amax."""
+    seen_modules = set()
+    for name, module in model.named_modules():
+        if module in seen_modules:
+            continue
+        for weight_name in weight_attr_names(module):
+            wq_name = quantizer_attr_names(weight_name).weight_quantizer
+            quantizer = getattr(module, wq_name, None)
+            if isinstance(quantizer, StaticBlockScaleQuantizer) and hasattr(quantizer, "_amax"):
+                seen_modules.add(module)
+                yield module, weight_name, quantizer
+                break
+
+
+def _compute_laq_params(quantizer):
+    """Compute amax and scale-quantization params for LAQ."""
+    per_block_scale, per_tensor_scale, quantize_scales = _compute_block_scales(quantizer)
+    amax = per_block_scale * quantizer._quant_max_bound
+    return amax, per_tensor_scale, quantize_scales
+
+
+@torch.no_grad()
+def laq(
+    model: nn.Module,
+    forward_loop: ForwardLoop | None = None,
+    scale_algorithm: dict | None = None,
+    learnable_amax: list | str = ("post",),
+    tied_amax: bool = False,
+    **kwargs,
+):
+    """Run scale calibration then convert to LAQ mode.
+
+    Uses separate pre (quant) and post (dequant) amax values.
+    Forward: ``w_q = Q_STE(w / s_pre) * s_post`` where ``s = amax / Q_max``.
+
+    Args:
+        model: Quantized model.
+        forward_loop: Calibration data forward loop.
+        scale_algorithm: Calibration algorithm config to run first.
+            Dict with 'method' key: 'mse', 'local_hessian', or 'max'.
+            Defaults to {'method': 'mse'} if None.
+        learnable_amax: Which amax params are learnable: 'pre', 'post',
+            ['pre', 'post'], or [].
+        tied_amax: If True, pre and post share a single tensor.
+    """
+    _run_scale_calibration(model, forward_loop, scale_algorithm, "laq")
+
+    for module, weight_name, quantizer in _iter_weight_quantizers(model):
+        amax, per_tensor_scale, quantize_scales = _compute_laq_params(quantizer)
+        weight_dtype = getattr(module, weight_name).dtype
+        amax = amax.to(weight_dtype)
+        if per_tensor_scale is not None:
+            per_tensor_scale = per_tensor_scale.to(weight_dtype)
+        quantizer.enable_laq(
+            amax,
+            per_tensor_scale,
+            quantize_scales,
+            learnable_amax=learnable_amax,
+            tied_amax=tied_amax,
+        )

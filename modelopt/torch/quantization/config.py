@@ -1551,6 +1551,70 @@ class GPTQCalibConfig(QuantizeAlgorithmConfig):
     )
 
 
+class LAQConfig(QuantizeAlgorithmConfig):
+    """Config for LAQ (Learnt Amax Quantization) algorithm.
+
+    LAQ uses separate learnable pre-quantization and post-dequantization amax
+    values.  Forward: ``w_q = Q_STE(w / s_pre) * s_post`` where ``s = amax / Q_max``.
+
+    ``learnable_amax`` controls which amax parameters are learnable vs frozen:
+        - ``["pre", "post"]``: both learnable
+        - ``"post"`` or ``["post"]``: only post learnable, pre frozen
+        - ``"pre"`` or ``["pre"]``: only pre learnable, post frozen
+        - ``[]``: both frozen (static scales)
+
+    ``tied_amax`` makes pre and post share a single tensor (requires both to
+    have the same learnable state, i.e. ``learnable_amax`` must be
+    ``["pre", "post"]`` or ``[]``).
+    """
+
+    method: Literal["laq"] = ModeloptField("laq")
+
+    learnable_amax: list[Literal["pre", "post"]] | Literal["pre", "post"] = ModeloptField(
+        default=["post"],
+        title="Which amax parameters are learnable.",
+        description=(
+            "Which amax params are learnable. "
+            "'pre', 'post', ['pre', 'post'], or []. "
+            "Defaults to ['post'] (post-only learnable)."
+        ),
+    )
+
+    tied_amax: bool = ModeloptField(
+        default=False,
+        title="Tie pre and post amax into a single tensor.",
+        description=(
+            "If True, pre and post share one underlying tensor. "
+            "Requires both to have the same learnable state."
+        ),
+    )
+
+    scale_algorithm: dict | None = ModeloptField(
+        default=None,
+        title="Scale calibration algorithm to run first.",
+        description=(
+            "Dict with 'method' key: 'mse', 'local_hessian', or 'max'. "
+            "Optional keys include 'fp8_scale_sweep' for FP4 formats. "
+            "Defaults to {'method': 'mse'} if None."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _validate_tied_amax(self):
+        """Validate tied_amax is compatible with learnable_amax."""
+        learn = self.learnable_amax
+        if isinstance(learn, str):
+            learn = [learn]
+        learn_set = set(learn)
+        if self.tied_amax:
+            if learn_set not in (set(), {"pre", "post"}):
+                raise ValueError(
+                    f"tied_amax=True requires learnable_amax to be [] or ['pre', 'post'], "
+                    f"got {self.learnable_amax}"
+                )
+        return self
+
+
 QuantizeQuantCfgType = list[QuantizerCfgEntry]
 
 _QuantizeAlgoCfgType = str | dict | QuantizeAlgorithmConfig | None

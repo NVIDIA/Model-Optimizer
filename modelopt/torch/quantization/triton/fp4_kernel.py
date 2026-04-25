@@ -24,7 +24,7 @@ import torch
 import triton
 import triton.language as tl
 
-__all__ = ["fp4_dequantize", "static_blockwise_fp4_fake_quant"]
+__all__ = ["fp4_dequantize", "static_blockwise_fp4_cast", "static_blockwise_fp4_fake_quant"]
 
 
 _TORCH_TO_TL_DTYPE = {
@@ -295,6 +295,92 @@ def static_blockwise_fp4_fake_quant(
             scale_flat,
             NUM_FP4_BLOCKS,
             BLOCK_SIZE,
+            OUT_DTYPE=tl_out_dtype,
+        )
+
+    return y_flat.view_as(x)
+
+
+@triton.jit
+def static_blockwise_fp4_cast_kernel(
+    x_ptr,  # [NUM_ELEMENTS] flattened pre-scaled input
+    y_ptr,  # [NUM_ELEMENTS] flattened output
+    NUM_ELEMENTS,
+    TILE_SIZE: tl.constexpr,
+    OUT_DTYPE: tl.constexpr,
+):
+    """Round pre-scaled values to nearest FP4 representable value (no scale)."""
+    pid = tl.program_id(axis=0)
+    offset = pid * TILE_SIZE + tl.arange(0, TILE_SIZE)
+    mask = offset < NUM_ELEMENTS
+
+    x = tl.load(x_ptr + offset, mask=mask).to(tl.float32)
+    x_abs = tl.abs(x)
+
+    # FP4 E2M1 representable values: 0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0
+    q_val = tl.where(
+        x_abs <= 0.25,
+        0.0,
+        tl.where(
+            x_abs < 0.75,
+            0.5,
+            tl.where(
+                x_abs <= 1.25,
+                1.0,
+                tl.where(
+                    x_abs < 1.75,
+                    1.5,
+                    tl.where(
+                        x_abs <= 2.5,
+                        2.0,
+                        tl.where(
+                            x_abs < 3.5,
+                            3.0,
+                            tl.where(x_abs <= 5.0, 4.0, 6.0),
+                        ),
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    y = tl.where(x >= 0, q_val, -q_val)
+    tl.store(y_ptr + offset, y.to(OUT_DTYPE), mask=mask)
+
+
+def static_blockwise_fp4_cast(
+    x: torch.Tensor,
+    out_dtype: torch.dtype | None = None,
+    rounding: str = "rne",
+) -> torch.Tensor:
+    """Round pre-scaled values to nearest FP4 E2M1 representable value.
+
+    Unlike ``static_blockwise_fp4_fake_quant``, this does **not** apply any
+    scale -- the caller is responsible for pre-dividing by scale_pre and
+    post-multiplying by scale_post (as in LAQ).
+
+    Args:
+        x: Input tensor (any shape) on CUDA.
+        out_dtype: Output dtype. Defaults to x.dtype.
+        rounding: Rounding mode (only ``"rne"`` supported currently).
+    """
+    if out_dtype is None:
+        out_dtype = x.dtype
+
+    x_flat = x.contiguous().view(-1)
+    y_flat = torch.empty_like(x_flat, dtype=out_dtype)
+    NUM_ELEMENTS = x_flat.numel()
+    TILE_SIZE = 1024
+
+    tl_out_dtype = _torch_dtype_to_tl(out_dtype)
+    grid = ((NUM_ELEMENTS + TILE_SIZE - 1) // TILE_SIZE,)
+
+    with torch.cuda.device(x.device):
+        static_blockwise_fp4_cast_kernel[grid](
+            x_flat,
+            y_flat,
+            NUM_ELEMENTS,
+            TILE_SIZE=TILE_SIZE,
             OUT_DTYPE=tl_out_dtype,
         )
 
