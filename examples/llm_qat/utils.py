@@ -13,10 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import gc
-import types
-from functools import partial
-
 import torch
 import transformers
 from peft import LoraConfig, TaskType
@@ -80,18 +76,6 @@ def get_lora_config():
         ],
         task_type=TaskType.CAUSAL_LM,
     )
-
-
-def monkey_patch_training_step_to_fix_memory_leak(trainer):
-    def new_func(original_f_name, trainer, *args, **kwargs):
-        gc.collect()
-        return getattr(trainer, original_f_name)(*args, **kwargs)
-
-    for f_name in ["training_step", "prediction_step", "_load_best_model"]:
-        setattr(trainer, "_original_" + f_name, getattr(trainer, f_name))
-        setattr(
-            trainer, f_name, types.MethodType(partial(new_func, "_original_" + f_name), trainer)
-        )
 
 
 def get_metrics_with_perplexity(metrics):

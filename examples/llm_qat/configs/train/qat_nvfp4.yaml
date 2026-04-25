@@ -3,6 +3,7 @@
 # Model
 model_name_or_path:  # e.g., Qwen/Qwen3-8B
 output_dir:  # e.g., qwen3-8b-qat-nvfp4
+attn_implementation: flash_attention_2
 
 # Quantization
 recipe: general/ptq/nvfp4_default-fp8_kv
@@ -18,10 +19,11 @@ learning_rate: 1e-5
 per_device_train_batch_size: 2
 per_device_eval_batch_size: 2
 gradient_accumulation_steps: 2
-model_max_length: 4096
+model_max_length: 8192
 warmup_ratio: 0.05
 lr_scheduler_type: cosine
-gradient_checkpointing: true
+use_liger_kernel: true
+manual_gc: true
 seed: 42
 do_train: true
 do_eval: true

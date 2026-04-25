@@ -27,6 +27,18 @@ BACKEND_CONFIGS = {
 # Backends that need gradient checkpointing
 GRADIENT_CHECKPOINTING_BACKENDS = {"ddp", "deepspeed"}
 
+# Fast training overrides (short runs with frequent eval)
+FAST_TRAIN_ARGS = [
+    "--model_max_length",
+    "128",
+    "--num_train_epochs",
+    "1.0",
+    "--save_steps",
+    "5",
+    "--eval_steps",
+    "5",
+]
+
 
 # fmt: off
 def _fast_data_args(cache_dir: str) -> list[str]:
@@ -40,10 +52,11 @@ def _fast_data_args(cache_dir: str) -> list[str]:
     ]
 
 
-def _run_quantize(extra_cmd_args: list[str], cache_dir: str = ""):
+def _run_quantize(config: str, extra_cmd_args: list[str], cache_dir: str = ""):
     run_example_command(
         [
             "python", "quantize.py",
+            "--config", config,
             *_fast_data_args(cache_dir),
             *extra_cmd_args,
         ],
@@ -51,7 +64,7 @@ def _run_quantize(extra_cmd_args: list[str], cache_dir: str = ""):
     )
 
 
-def _run_train(extra_cmd_args: list[str], backend: str = "fsdp2", cache_dir: str = ""):
+def _run_train(config: str, extra_cmd_args: list[str], backend: str = "fsdp2", cache_dir: str = ""):
     config_file = BACKEND_CONFIGS[backend]
     gradient_args = (
         ["--gradient_checkpointing", "True"]
@@ -63,13 +76,9 @@ def _run_train(extra_cmd_args: list[str], backend: str = "fsdp2", cache_dir: str
             "accelerate", "launch",
             "--config-file", config_file,
             "train.py",
+            "--config", config,
             *_fast_data_args(cache_dir),
-            "--num_train_epochs", "0.3",
-            "--learning_rate", "1e-5",
-            "--per_device_train_batch_size", "2",
-            "--per_device_eval_batch_size", "2",
-            "--save_steps", "5",
-            "--eval_steps", "5",
+            *FAST_TRAIN_ARGS,
             *gradient_args,
             *extra_cmd_args,
         ],
@@ -104,9 +113,9 @@ def test_qwen3_qat_nvfp4(tiny_qwen3_path, tmp_path, backend):
 
     # Step 1: Quantize
     _run_quantize(
+        "configs/train/qat_nvfp4.yaml",
         [
             "--model_name_or_path", tiny_qwen3_path,
-            "--recipe", "general/ptq/nvfp4_default-fp8_kv",
             "--calib_size", "64",
             "--quantize_output_dir", str(ptq_output_dir),
         ],
@@ -115,6 +124,7 @@ def test_qwen3_qat_nvfp4(tiny_qwen3_path, tmp_path, backend):
 
     # Step 2: QAT
     _run_train(
+        "configs/train/qat_nvfp4.yaml",
         [
             "--model_name_or_path", str(ptq_output_dir),
             "--do_train", "True",
@@ -130,9 +140,9 @@ def test_qwen3_lora_qat_nvfp4(tiny_qwen3_path, tmp_path):
 
     # Step 1: Quantize
     _run_quantize(
+        "configs/train/qat_nvfp4.yaml",
         [
             "--model_name_or_path", tiny_qwen3_path,
-            "--recipe", "general/ptq/nvfp4_default-fp8_kv",
             "--calib_size", "64",
             "--quantize_output_dir", str(ptq_output_dir),
         ],
@@ -141,6 +151,7 @@ def test_qwen3_lora_qat_nvfp4(tiny_qwen3_path, tmp_path):
 
     # Step 2: LoRA QAT
     _run_train(
+        "configs/train/qat_nvfp4.yaml",
         [
             "--model_name_or_path", str(ptq_output_dir),
             "--do_train", "True",
@@ -152,15 +163,50 @@ def test_qwen3_lora_qat_nvfp4(tiny_qwen3_path, tmp_path):
     )
 
 
+@pytest.mark.parametrize("backend", [
+    "fsdp2",
+    "deepspeed",
+])
+def test_qwen3_qad_nvfp4(tiny_qwen3_path, tmp_path, backend):
+    ptq_output_dir = tmp_path / "ptq"
+    qad_output_dir = tmp_path / "qad"
+    cache_dir = str(tmp_path / "dataset_cache")
+
+    # Step 1: Quantize student
+    _run_quantize(
+        "configs/train/qad_nvfp4.yaml",
+        [
+            "--model_name_or_path", tiny_qwen3_path,
+            "--calib_size", "64",
+            "--quantize_output_dir", str(ptq_output_dir),
+        ],
+        cache_dir=cache_dir,
+    )
+
+    # Step 2: QAD (quantization-aware distillation)
+    _run_train(
+        "configs/train/qad_nvfp4.yaml",
+        [
+            "--model_name_or_path", str(ptq_output_dir),
+            "--do_train", "True",
+            "--output_dir", str(qad_output_dir),
+            "--distill", "True",
+            "--teacher_model", tiny_qwen3_path,
+        ],
+        backend=backend,
+        cache_dir=cache_dir,
+    )
+
+
 def test_qwen3_qlora_nvfp4(tiny_qwen3_path, tmp_path):
     ptq_output_dir = tmp_path / "ptq"
     cache_dir = str(tmp_path / "dataset_cache")
 
     # Step 1: Quantize with compression for QLoRA
     _run_quantize(
+        "configs/train/qlora_nvfp4.yaml",
         [
             "--model_name_or_path", tiny_qwen3_path,
-            "--recipe", "general/ptq/nvfp4_default-fp8_kv",
             "--calib_size", "64",
             "--compress", "True",
             "--quantize_output_dir", str(ptq_output_dir),
@@ -170,6 +216,7 @@ def test_qwen3_qlora_nvfp4(tiny_qwen3_path, tmp_path):
 
     # Step 2: QLoRA training
     _run_train(
+        "configs/train/qlora_nvfp4.yaml",
         [
             "--model_name_or_path", str(ptq_output_dir),
             "--do_train", "True",

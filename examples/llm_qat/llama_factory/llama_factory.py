@@ -35,7 +35,6 @@ from transformers import AutoModelForCausalLM, PreTrainedModel, PreTrainedTokeni
 from wrapt import register_post_import_hook
 
 import modelopt.torch.opt as mto
-from modelopt.torch.distill.plugins.huggingface import LMLogitsLoss
 from modelopt.torch.quantization.plugins.transformers_trainer import QADTrainer, QATTrainer
 
 logger = logging.get_logger(__name__)
@@ -217,11 +216,7 @@ def create_patch_module(quant_args=None, distill_args=None):
                     teacher_model = transformers.AutoModelForCausalLM.from_pretrained(
                         distill_args.teacher_model,
                     )
-                    distill_config = {
-                        "teacher_model": teacher_model,
-                        "criterion": LMLogitsLoss(),
-                    }
-                    modelopt_trainer_args["distill_config"] = distill_config
+                    modelopt_trainer_args["distill_args"] = {"teacher_model": teacher_model}
                 super().__init__(*args, **modelopt_trainer_args, **kwargs)
 
         # Replace the trainer class in the module

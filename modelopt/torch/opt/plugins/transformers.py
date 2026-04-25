@@ -16,18 +16,24 @@
 """ModelOpt plugin for enabling automatic save/restore of ModelOpt state for HuggingFace models."""
 
 import dataclasses
+import fnmatch
+import gc
+import json
 import os
 import sys
 import types
-from contextlib import contextmanager
+import warnings
+from contextlib import contextmanager, suppress
 from pathlib import Path
+from typing import Any
 
 import torch
+import torch.nn as nn
 import transformers
 from transformers import HfArgumentParser, PreTrainedModel, Trainer, TrainerCallback
 from transformers import modeling_utils as tf_modeling_utils
 
-from modelopt.torch.utils import report_memory
+from modelopt.torch.utils import print_rank_0, report_memory
 
 from ..conversion import ModeloptStateManager, load_modelopt_state
 from .huggingface import (
@@ -38,7 +44,14 @@ from .huggingface import (
     register_for_patching,
 )
 
-__all__ = ["ModelOptArgParser", "ModelOptHFArguments", "ModelOptHFTrainer"]
+IGNORE_INDEX = nn.CrossEntropyLoss().ignore_index
+
+__all__ = [
+    "ModelOptArgParser",
+    "ModelOptHFArguments",
+    "ModelOptHFTrainer",
+    "ModelOptTrainerArguments",
+]
 
 
 @contextmanager
@@ -169,6 +182,71 @@ class ModelOptHFArguments:
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
         dataclasses.dataclass(cls)
+
+
+class ModelOptTrainerArguments(ModelOptHFArguments):
+    """Arguments for ModelOptHFTrainer controlling param freezing, LR config, and save dtype.
+
+    This class can be used with HuggingFace's ``HfArgumentParser`` for CLI parsing.
+    """
+
+    trainable_params: list[str] | None = dataclasses.field(
+        default=None,
+        metadata={
+            "nargs": "+",
+            "help": (
+                "Glob patterns (fnmatch) for parameters that should be trainable. "
+                "All other parameters will be frozen. Mutually exclusive with frozen_params."
+            ),
+        },
+    )
+    frozen_params: list[str] | None = dataclasses.field(
+        default=None,
+        metadata={
+            "nargs": "+",
+            "help": (
+                "Glob patterns (fnmatch) for parameters that should be frozen. "
+                "Mutually exclusive with trainable_params."
+            ),
+        },
+    )
+    lr_config: str | None = dataclasses.field(
+        default=None,
+        metadata={
+            "help": (
+                "Path to a YAML file mapping fnmatch patterns to optimizer kwargs "
+                "(e.g. lr, weight_decay). First matching pattern wins per parameter. "
+                "See examples/llm_qat/configs/train/lr_config_example.yaml."
+            ),
+        },
+    )
+    save_dtype: str | None = dataclasses.field(
+        default="bfloat16",
+        metadata={
+            "help": (
+                "Dtype string to write into the saved model's config.json "
+                "(e.g. 'bfloat16', 'float16'). Set to None to preserve the original dtype."
+            ),
+        },
+    )
+    manual_gc: bool = dataclasses.field(
+        default=False,
+        metadata={
+            "help": (
+                "Run `gc.collect()` before each training/prediction step to work around "
+                "GPU memory leaks during QAT/distillation."
+            ),
+        },
+    )
+    liger_ce_label_smoothing: float = dataclasses.field(
+        default=0.0,
+        metadata={
+            "help": (
+                "Label smoothing for Liger fused CE loss. "
+                "Only used when --use_liger_kernel is enabled."
+            ),
+        },
+    )
 
 
 class ModelOptArgParser(HfArgumentParser):
@@ -342,14 +420,352 @@ class _MemoryReportCallback(TrainerCallback):
             _report_memory("Memory usage at evaluation")
 
 
+def _forward_redirect(module, fn):
+    """Run ``fn`` inside ``module``'s forward to trigger distributed param gathering.
+
+    Works for both FSDP2 (unshards DTensor params) and DeepSpeed ZeRO-3
+    (gathers partitioned params via per-module forward hooks).
+    """
+    original_forward = module.forward
+
+    def wrapped_forward(*a, **kw):
+        module.forward = original_forward
+        return fn()
+
+    module.forward = wrapped_forward
+    try:
+        dummy = torch.empty(1, device=next(module.parameters()).device)
+        return module(dummy)
+    except Exception:
+        module.forward = original_forward
+        raise
+
+
 class ModelOptHFTrainer(Trainer):
     """A drop-in replacement of HuggingFace's Trainer for ModelOpt.
 
-    This class adds extra utilities for ModelOpt checkpointing and memory reporting.
+    This class adds extra utilities for ModelOpt checkpointing, memory reporting,
+    parameter freezing, per-layer learning rates, Liger fused loss, and save dtype.
+
+    **Liger kernel support:** When ``--use_liger_kernel`` is set, this trainer provides
+    model-agnostic fused loss computation that extends HuggingFace's built-in Liger
+    integration in three ways:
+
+    1. **Model-agnostic**: Works with any causal LM that has an ``lm_head``, unlike
+       HF's Liger which only supports `a fixed set of model architectures
+       <https://github.com/linkedin/Liger-Kernel/blob/main/src/liger_kernel/transformers/monkey_patch.py>`_.
+    2. **DeepSpeed ZeRO-3 support**: HF's Liger integration only works with FSDP.
+       ModelOpt adds distributed param gathering for DeepSpeed ZeRO-3 and DDP as well.
+    3. **KD loss support**: ``KDTrainer`` extends fused loss to knowledge distillation
+       via ``LigerFusedLinearJSD`` for fused lm_head + Jensen-Shannon divergence.
     """
 
-    def __init__(self, *args, **kwargs):
-        """Initialize."""
+    def __init__(
+        self,
+        *args,
+        trainer_args: ModelOptTrainerArguments | None = None,
+        lr_config: dict[str, dict[str, Any]] | None = None,
+        **kwargs,
+    ):
+        """Initialize.
+
+        Args:
+            trainer_args: Optional arguments for param freeze, lr config, and save dtype.
+            lr_config: Optional dict for per-pattern optimizer param groups
+                (overrides trainer_args.lr_config).
+        """
         enable_huggingface_checkpointing()
         super().__init__(*args, **kwargs)
+        if trainer_args is None and isinstance(self.args, ModelOptTrainerArguments):
+            trainer_args = self.args
+        self.trainer_args = trainer_args or ModelOptTrainerArguments()
+        self._lr_config = self._resolve_lr_config(lr_config, self.trainer_args)
+        self._apply_gradient_checkpointing_defaults()
         self.add_callback(_MemoryReportCallback())
+        self.use_liger_kernel = getattr(self.args, "use_liger_kernel", False)
+        if self.use_liger_kernel:
+            if self.is_fsdp_enabled and not self.accelerator.is_fsdp2:
+                raise ValueError("Liger fused loss is not supported with FSDP1. Use FSDP2 instead.")
+            self._setup_liger_fused_loss()
+        self._configure_trainable_params()
+
+    def _prepare_model(self, model):
+        """Prepare a model via accelerator (materializes meta-device params, applies sharding).
+
+        Uses a dummy optimizer because ``accelerator.prepare`` requires one for FSDP2.
+        Works generically for FSDP2, DDP, and DeepSpeed backends. For fully-frozen models
+        under DS ZeRO-3, falls back to inference-mode prep since ZeRO-3 asserts on empty
+        trainable_param_groups; in that case the caller is responsible for gathering
+        ``zero.Init``-partitioned params around forward passes.
+        """
+        if self.is_deepspeed_enabled and not any(p.requires_grad for p in model.parameters()):
+            return self.accelerator.prepare_model(model, evaluation_mode=True)
+        dummy_optimizer = torch.optim.SGD([next(model.parameters())], lr=0.0)
+        model, _ = self.accelerator.prepare(model, dummy_optimizer)
+        return model
+
+    def training_step(self, *args, **kwargs):
+        """Run gc.collect() before the training step if manual_gc is enabled."""
+        if self.trainer_args.manual_gc:
+            gc.collect()
+        return super().training_step(*args, **kwargs)
+
+    def prediction_step(self, *args, **kwargs):
+        """Run gc.collect() before the prediction step if manual_gc is enabled."""
+        if self.trainer_args.manual_gc:
+            gc.collect()
+        return super().prediction_step(*args, **kwargs)
+
+    def _load_best_model(self, *args, **kwargs):
+        """Run gc.collect() before loading the best model if manual_gc is enabled."""
+        if self.trainer_args.manual_gc:
+            gc.collect()
+        return super()._load_best_model(*args, **kwargs)
+
+    def _apply_gradient_checkpointing_defaults(self):
+        """Ensure non-reentrant gradient checkpointing when no explicit kwargs are set."""
+        args = self.args
+        if not getattr(args, "gradient_checkpointing", False):
+            return
+        if args.gradient_checkpointing_kwargs is None:
+            args.gradient_checkpointing_kwargs = {"use_reentrant": False}
+        else:
+            if args.gradient_checkpointing_kwargs.get("use_reentrant", False):
+                warnings.warn(
+                    "ModelOpt overriding `use_reentrant=True` to `use_reentrant=False` "
+                    "for gradient checkpointing compatibility.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+            args.gradient_checkpointing_kwargs["use_reentrant"] = False
+
+    def _configure_trainable_params(self):
+        """Freeze/unfreeze parameters based on trainer_args.trainable_params or frozen_params."""
+        trainable = self.trainer_args.trainable_params
+        frozen = self.trainer_args.frozen_params
+        if not trainable and not frozen:
+            return
+        if trainable and frozen:
+            raise ValueError("trainable_params and frozen_params are mutually exclusive.")
+
+        def _matches(name, patterns):
+            return any(fnmatch.fnmatch(name, p) for p in patterns)
+
+        model = self.model
+        if trainable:
+            for name, param in model.named_parameters():
+                param.requires_grad_(_matches(name, trainable))
+        else:
+            for name, param in model.named_parameters():
+                if _matches(name, frozen):
+                    param.requires_grad_(False)
+
+        trainable_count = sum(p.requires_grad for p in model.parameters())
+        total_count = sum(1 for _ in model.parameters())
+        print_rank_0(
+            f"Trainable params: {trainable_count}/{total_count} "
+            f"({100 * trainable_count / max(total_count, 1):.1f}%)"
+        )
+
+    @staticmethod
+    def _resolve_lr_config(
+        lr_config: dict[str, dict[str, Any]] | None,
+        trainer_args: ModelOptTrainerArguments,
+    ) -> dict[str, dict[str, Any]] | None:
+        if lr_config is not None:
+            return lr_config
+        path = getattr(trainer_args, "lr_config", None)
+        if path is not None:
+            return ModelOptHFTrainer.load_lr_config(path)
+        return None
+
+    @staticmethod
+    def load_lr_config(path: str) -> dict[str, dict[str, Any]]:
+        """Load an lr_config YAML file mapping fnmatch patterns to optimizer kwargs.
+
+        Example YAML::
+
+            "*lm_head*":
+              lr: 1e-5
+            "*mlp*":
+              lr: 5e-5
+
+        Returns:
+            Ordered dict of ``{pattern: {kwarg: value, ...}}``.
+        """
+        import yaml
+
+        with open(path) as f:
+            cfg = yaml.safe_load(f)
+        if not isinstance(cfg, dict):
+            raise ValueError(f"lr_config must be a YAML mapping, got {type(cfg).__name__}")
+        for pattern, kwargs in cfg.items():
+            if not isinstance(pattern, str) or not isinstance(kwargs, dict):
+                raise ValueError(
+                    f"lr_config entry must be str -> dict, got {pattern!r} -> {kwargs!r}"
+                )
+            for key, val in kwargs.items():
+                if isinstance(val, str):
+                    with suppress(ValueError):
+                        kwargs[key] = float(val)
+        return cfg
+
+    def _match_lr_config_pattern(self, name: str) -> str | None:
+        """Return the first lr_config pattern matching ``name``, or None."""
+        for pattern in self._lr_config:  # type: ignore[union-attr]
+            if fnmatch.fnmatch(name, pattern):
+                return pattern
+        return None
+
+    def create_optimizer(self):
+        """Build per-pattern param groups from lr_config, then delegate to HF Trainer."""
+        if self._lr_config is None:
+            return super().create_optimizer()
+
+        if self.optimizer is not None:
+            return self.optimizer
+
+        opt_model = self.model
+
+        if self.optimizer_cls_and_kwargs is not None:
+            optimizer_cls, optimizer_kwargs = self.optimizer_cls_and_kwargs
+        else:
+            optimizer_cls, optimizer_kwargs = self.get_optimizer_cls_and_kwargs(
+                self.args, opt_model
+            )
+
+        decay_parameters = self.get_decay_parameter_names(opt_model)
+        groups: dict[tuple[str | None, bool], list] = {}
+        for name, param in opt_model.named_parameters():
+            if not param.requires_grad:
+                continue
+            pattern = self._match_lr_config_pattern(name)
+            is_decay = name in decay_parameters
+            groups.setdefault((pattern, is_decay), []).append(param)
+
+        param_groups = []
+        for (pattern, is_decay), params in groups.items():
+            group: dict[str, Any] = {
+                "params": params,
+                "weight_decay": self.args.weight_decay if is_decay else 0.0,
+            }
+            if pattern is not None:
+                group.update(self._lr_config[pattern])
+            param_groups.append(group)
+
+        optimizer_kwargs["params"] = param_groups
+        self.optimizer_cls_and_kwargs = (optimizer_cls, optimizer_kwargs)
+
+        result = super().create_optimizer()
+
+        self._log_lr_config_summary()
+        return result
+
+    def _log_lr_config_summary(self):
+        if self.optimizer is None:
+            return
+        lines = ["lr_config optimizer param groups:"]
+        for i, group in enumerate(self.optimizer.param_groups):
+            lr = group.get("lr", "default")
+            wd = group.get("weight_decay", "default")
+            n_params = len(group["params"])
+            lines.append(f"  group {i}: {n_params} params, lr={lr}, weight_decay={wd}")
+        print_rank_0("\n".join(lines))
+
+    def _get_lm_head(self, model):
+        """Resolve lm_head from model at call time (no cached pointer to FSDP-managed params)."""
+        return model.lm_head
+
+    def _setup_liger_fused_loss(self):
+        """Set compute_loss_func for fused CE."""
+        model = self.accelerator.unwrap_model(self.model)
+        if not hasattr(model, "lm_head"):
+            self.use_liger_kernel = False
+            return
+        self.compute_loss_func = self._liger_loss_func
+
+    @contextmanager
+    def _liger_identity_lm_head(self):
+        """Temporarily patch lm_head to identity for fused loss computation."""
+        model = self.accelerator.unwrap_model(self.model)
+        lm_head = self._get_lm_head(model)
+        original_forward = lm_head.forward
+        lm_head.forward = lambda x: x
+        try:
+            yield
+        finally:
+            lm_head.forward = original_forward
+
+    def _sharded_liger_compute(self, fn):
+        """Route fn through sharded DP to ensure lm_head params are gathered. No-op for DDP."""
+        if self.is_fsdp_enabled:
+            return _forward_redirect(self.model, fn)
+        if self.is_deepspeed_enabled:
+            lm_head = self._get_lm_head(self.accelerator.unwrap_model(self.model))
+            return _forward_redirect(lm_head, fn)
+        return fn()
+
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+        """Compute loss, patching lm_head to identity when using liger fused loss."""
+        if self.use_liger_kernel:
+            with self._liger_identity_lm_head():
+                return super().compute_loss(model, inputs, return_outputs=return_outputs, **kwargs)
+        return super().compute_loss(model, inputs, return_outputs=return_outputs, **kwargs)
+
+    def _liger_loss_func(self, outputs, labels, num_items_in_batch=None, **kwargs):
+        """Fused lm_head + CE loss via liger kernel."""
+        from liger_kernel.transformers.model.loss_utils import LigerForCausalLMLoss
+
+        model = self.accelerator.unwrap_model(self.model)
+        lm_head = self._get_lm_head(model)
+        hidden_states = outputs.logits.to(lm_head.weight.dtype)  # RMSNorm may upcast to fp32
+
+        def _compute():
+            return LigerForCausalLMLoss(
+                hidden_states=hidden_states,
+                lm_head_weight=lm_head.weight,
+                labels=labels,
+                hidden_size=hidden_states.size(-1),
+                num_items_in_batch=num_items_in_batch,
+                ignore_index=IGNORE_INDEX,
+                label_smoothing=self.trainer_args.liger_ce_label_smoothing,
+            )
+
+        return self._sharded_liger_compute(_compute)
+
+    def save_model(self, *args, **kwargs):
+        """Save the model and rewrite config.json dtype to ``save_dtype``."""
+        outputs = super().save_model(*args, **kwargs)
+        if (not self.is_in_train) and self.args.should_save:
+            out_dir = args[0] if args else self.args.output_dir
+            save_dtype = getattr(self.trainer_args, "save_dtype", None)
+            self._update_config_json_dtype(out_dir, save_dtype)
+        return outputs
+
+    def _update_config_json_dtype(self, output_dir: str, dtype_str: str | None) -> None:
+        """Rewrite <output_dir>/config.json 'dtype' (preferred) or 'torch_dtype' to dtype_str."""
+        if dtype_str is None:
+            return
+        cfg_path = os.path.join(output_dir, "config.json")
+        if not os.path.isfile(cfg_path):
+            print_rank_0(f"[warn] config.json not found under {output_dir}; skip dtype rewrite.")
+            return
+        try:
+            with open(cfg_path, encoding="utf-8") as f:
+                data = json.load(f)
+            key_to_update = (
+                "dtype" if "dtype" in data else ("torch_dtype" if "torch_dtype" in data else None)
+            )
+            if key_to_update is None:
+                print_rank_0(
+                    "[warn] Neither 'dtype' nor 'torch_dtype' present in config.json; "
+                    "skip dtype rewrite."
+                )
+                return
+            if data.get(key_to_update) != dtype_str:
+                data[key_to_update] = dtype_str
+                with open(cfg_path, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                print_rank_0(f'Updated config.json: {key_to_update} -> "{dtype_str}"')
+        except Exception as e:
+            print_rank_0(f"[warn] Failed to update dtype in config.json: {e}")

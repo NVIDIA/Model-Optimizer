@@ -1,3 +1,4 @@
 flash-attn
+liger-kernel
 py7zr
 tensorboard

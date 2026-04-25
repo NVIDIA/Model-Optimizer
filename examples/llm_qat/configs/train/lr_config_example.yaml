@@ -1,0 +1,39 @@
+# Per-parameter optimizer config example
+#
+# Maps fnmatch glob patterns to optimizer kwargs (lr, weight_decay, betas,
+# eps, etc.).  First matching pattern wins per parameter.  Parameters not
+# matching any pattern use the global values from the train config.
+#
+# Any keyword accepted by the optimizer constructor can be specified here.
+# Common kwargs for AdamW:
+#   lr           - learning rate
+#   weight_decay - L2 penalty (overrides the global --weight_decay)
+#   betas        - Adam momentum coefficients [beta1, beta2]
+#   eps          - term added to denominator for numerical stability
+#
+# Usage:
+#   --lr_config configs/train/lr_config_example.yaml
+#
+# Tip: use `model.named_parameters()` to find the exact parameter names
+# for your model.
+
+# Output head — lower LR, no weight decay
+"*lm_head*":
+  lr: 1e-5
+  weight_decay: 0.0
+
+# Attention layers — custom LR + more aggressive momentum
+"*self_attn*":
+  lr: 5e-5
+  betas: [0.9, 0.95]
+
+# MLP layers — custom LR + higher weight decay
+"*mlp*":
+  lr: 5e-5
+  weight_decay: 0.05
+
+# Embedding layers (often kept at a lower LR or frozen)
+"*embed_tokens*":
+  lr: 1e-6
+  weight_decay: 0.0
+  eps: 1e-7

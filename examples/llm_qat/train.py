@@ -42,18 +42,11 @@ import os
 
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
-from warnings import warn
-
 import torch
 import transformers
 from arguments import DataArguments, ModelArguments, QuantizeArguments, TrainingArguments
 from transformers.trainer_utils import get_last_checkpoint
-from utils import (
-    get_lora_config,
-    get_metrics_with_perplexity,
-    make_supervised_data_module,
-    monkey_patch_training_step_to_fix_memory_leak,
-)
+from utils import get_lora_config, get_metrics_with_perplexity, make_supervised_data_module
 
 import modelopt.torch.opt as mto
 from modelopt.torch.distill.plugins.huggingface import DistillArguments
@@ -78,14 +71,6 @@ def train():
             "--recipe is ignored by train.py; use quantize.py for the quantization step before QAT/QAD training"
         )
 
-    if distill_args.distill and getattr(training_args, "fsdp_config", None):
-        fsdp_cfg = training_args.fsdp_config
-        if fsdp_cfg.get("fsdp_cpu_ram_efficient_loading", True):
-            warn(
-                "Distillation with FSDP2 may require --fsdp_cpu_ram_efficient_loading False. "
-                "Set this if you encounter issues loading the teacher model."
-            )
-
     print_rank_0(f"arguments: {model_args}, {training_args}, {data_args}, {distill_args}")
 
     # Detecting last checkpoint.
@@ -94,10 +79,14 @@ def train():
         last_checkpoint = get_last_checkpoint(training_args.output_dir)
         print_rank_0(f"Last checkpoint detected: {last_checkpoint}")
 
+    model_kwargs = {}
+    if model_args.attn_implementation:
+        model_kwargs["attn_implementation"] = model_args.attn_implementation
+
     model = transformers.AutoModelForCausalLM.from_pretrained(
         model_args.model_name_or_path,
-        cache_dir=training_args.cache_dir,
         dtype=torch.bfloat16,
+        **model_kwargs,
     )
     model.generation_config.do_sample = True
     tokenizer = transformers.AutoTokenizer.from_pretrained(
@@ -123,36 +112,33 @@ def train():
     if checkpoint is not None and training_args.lora:
         raise RuntimeError("Does not support LoRA resuming training yet!")
 
-    # Torch >= 2.4 throws an error if `use_reentrant` is not set explicitly
-    if training_args.gradient_checkpointing and training_args.gradient_checkpointing_kwargs is None:
-        training_args.gradient_checkpointing_kwargs = {"use_reentrant": True}
-
-    distill_kwargs = {}
-    if distill_args.distill:
-        if distill_args.teacher_model is None:
-            raise ValueError("--teacher_model is required when --distill is enabled.")
-
-        teacher_model = transformers.AutoModelForCausalLM.from_pretrained(
-            distill_args.teacher_model,
-            cache_dir=training_args.cache_dir,
-            dtype=torch.bfloat16,
-        )
-        distill_kwargs = distill_args.to_distill_kwargs(teacher_model)
     trainer_cls = QADTrainer if distill_args.distill else QATTrainer
 
     if training_args.lora:
         training_args.lora_config = get_lora_config()
 
+    distill_config = None
+    if distill_args.distill:
+        assert distill_args.teacher_model is not None, "Teacher model is required for distillation."
+        teacher = transformers.AutoModelForCausalLM.from_pretrained(
+            distill_args.teacher_model,
+            torch_dtype=torch.bfloat16,
+            **model_kwargs,
+        )
+        distill_config = {
+            "teacher_model": teacher,
+            "temperature": distill_args.temperature,
+            "criterion": distill_args.criterion,
+            "liger_jsd_beta": distill_args.liger_jsd_beta,
+        }
+
     trainer = trainer_cls(
         model=model,
         processing_class=tokenizer,
         args=training_args,
-        **distill_kwargs,
+        **({"distill_args": distill_config} if distill_config is not None else {}),  # type: ignore[arg-type]
         **data_module,
     )
-
-    # There could be GPU memory leak during QAT causing OOM. This is a workaround to fix it.
-    monkey_patch_training_step_to_fix_memory_leak(trainer)
 
     if training_args.do_train:
         trainer.train(resume_from_checkpoint=checkpoint)

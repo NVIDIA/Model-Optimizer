@@ -140,7 +140,8 @@ repos:
     hooks:
       - id: generate-arguments-md
         name: Regenerate examples/llm_qat/ARGUMENTS.md
-        entry: bash -c 'python examples/llm_qat/train.py --generate_docs examples/llm_qat/ARGUMENTS.md'
+        entry: bash -c 'python -c "import modelopt" 2>/dev/null && python examples/llm_qat/train.py --generate_docs examples/llm_qat/ARGUMENTS.md || echo
+          "Skipping ARGUMENTS.md generation (modelopt not installed)"'
         language: system
         files: >-
           (?x)^(
