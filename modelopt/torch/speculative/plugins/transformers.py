@@ -592,6 +592,7 @@ class HFEagleModel(EagleModel):
             lora_alpha=self.eagle_base_lora_alpha,
             target_modules=target_modules,
             layers_to_transform=layers_to_transform,
+            layers_pattern="layers",
             bias="none",
         )
         inject_adapter_in_model(lora_config, self._base_model, adapter_name="default")
