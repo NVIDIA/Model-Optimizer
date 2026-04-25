@@ -80,7 +80,24 @@ def dflash_offline_output_dir(tmp_path_factory):
 
 
 @pytest.fixture(scope="session")
-def offline_hidden_states_dir(qwen3_model_name, dflash_offline_output_dir):
+def tagged_synth_data_path(dflash_offline_output_dir):
+    """Tag each row of synthetic_conversations_1k.jsonl with a stable conversation_id.
+
+    compute_hidden_states_hf.py uses conversation_id as the dump filename and
+    resume/skip key, asserting it is non-null. The shared synthetic dataset
+    only ships a `messages` field, so we materialize a tagged copy here.
+    """
+    tagged_path = dflash_offline_output_dir / "tagged_synth.jsonl"
+    with open(SYNTH_DATA) as src, open(tagged_path, "w") as dst:
+        for i, line in enumerate(src):
+            entry = json.loads(line)
+            entry.setdefault("conversation_id", f"{i:04d}")
+            dst.write(json.dumps(entry) + "\n")
+    return tagged_path
+
+
+@pytest.fixture(scope="session")
+def offline_hidden_states_dir(qwen3_model_name, dflash_offline_output_dir, tagged_synth_data_path):
     """Dump base-model hidden states once for the whole test module."""
     dump_dir = dflash_offline_output_dir / "hidden_states"
     run_example_command(
@@ -90,7 +107,7 @@ def offline_hidden_states_dir(qwen3_model_name, dflash_offline_output_dir):
             "--model",
             qwen3_model_name,
             "--input-data",
-            SYNTH_DATA,
+            str(tagged_synth_data_path),
             "--output-dir",
             str(dump_dir),
             "--debug-max-num-conversations",
