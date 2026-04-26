@@ -49,7 +49,7 @@ from transformers.trainer_utils import get_last_checkpoint
 
 import modelopt.torch.opt as mto
 import modelopt.torch.speculative as mtsp
-from modelopt.torch.speculative.config import EagleConfig
+from modelopt.torch.speculative.config import DFlashConfig, EagleConfig
 from modelopt.torch.speculative.utils import load_vlm_or_llm, patch_transformers5_params_loading
 from modelopt.torch.utils import print_rank_0
 
@@ -318,18 +318,9 @@ def train():
                 model.eagle_module.d2t = torch.load(data_args.draft_vocab_cache, weights_only=True)
                 print_rank_0(f"Loaded draft vocab cache from {data_args.draft_vocab_cache}.")
         elif training_args.mode == "dflash":
-            # Auto-detect mask_token_id from tokenizer if not set
-            if not dflash_cfg.get("dflash_mask_token_id"):
-                if tokenizer.mask_token_id is not None:
-                    dflash_cfg["dflash_mask_token_id"] = tokenizer.mask_token_id
-                    print_rank_0(
-                        f"Auto-detected mask_token_id={tokenizer.mask_token_id} from tokenizer"
-                    )
-                else:
-                    raise ValueError(
-                        "mask_token_id not found in tokenizer and not set in config. "
-                        "Set dflash.dflash_mask_token_id in the training YAML."
-                    )
+            dflash_cfg = DFlashConfig.model_validate(
+                dflash_cfg, context={"tokenizer": tokenizer, "data_args": data_args}
+            ).model_dump()
             mtsp.convert(model, [("dflash", dflash_cfg)])
         else:
             raise Exception(f"{training_args.mode} is not supported!")
