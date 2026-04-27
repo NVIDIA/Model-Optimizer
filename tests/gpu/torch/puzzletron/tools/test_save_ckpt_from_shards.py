@@ -122,9 +122,7 @@ class TestSaveCheckpointFromShardsSingleProcess:
 
         expected_substrings = {"embeddings", "lm_head", "block_0_ffn", "block_0_attention"}
         for substr in expected_substrings:
-            assert any(
-                substr in f for f in filenames
-            ), f"no shard filename contains '{substr}'"
+            assert any(substr in f for f in filenames), f"no shard filename contains '{substr}'"
 
 
 def _distributed_save_worker(rank, world_size, checkpoint_dir):
@@ -146,9 +144,7 @@ def _distributed_save_worker(rank, world_size, checkpoint_dir):
     save_checkpoint_from_shards(model, checkpoint_dir, LlamaModelDescriptor)
 
 
-@pytest.mark.skipif(
-    torch.cuda.device_count() < 2, reason="need >=2 GPUs for multi-rank test"
-)
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="need >=2 GPUs for multi-rank test")
 class TestSaveCheckpointFromShardsMultiProcess:
     """Tests that exercise the distributed gather path (world_size > 1)."""
 
