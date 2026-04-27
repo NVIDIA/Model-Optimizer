@@ -170,6 +170,34 @@ class QuantizerCfgEntry(TypedDict, total=False):
     enable: bool | None  # toggles matched quantizers on/off; independent of cfg
 
 
+QuantizerCfg = list[QuantizerCfgEntry]
+
+
+def _set_quant_cfg_entry(
+    quant_cfg: QuantizerCfg, quantizer_name: str, entry_cfg: QuantizerCfgEntry
+) -> None:
+    """Set a QuantizerCfgEntry by quantizer_name in the QuantizerCfg."""
+    for entry in quant_cfg:
+        if entry.get("quantizer_name") == quantizer_name:
+            # mypy workaround for TypedDict: treat as a plain dict for the merge.
+            cast("dict[str, Any]", entry).update(entry_cfg)
+            return
+    quant_cfg.append(
+        cast(
+            "QuantizerCfgEntry",
+            {"quantizer_name": quantizer_name, **entry_cfg},
+        )
+    )
+
+
+def _get_quant_cfg_entry(quant_cfg: QuantizerCfg, quantizer_name: str) -> QuantizerCfgEntry | None:
+    """Get a QuantizerCfgEntry by quantizer_name in the QuantizerCfg."""
+    for entry in quant_cfg:
+        if entry.get("quantizer_name") == quantizer_name:
+            return entry
+    return None
+
+
 def find_quant_cfg_entry_by_path(
     quant_cfg_list: list[QuantizerCfgEntry], quantizer_name: str
 ) -> QuantizerCfgEntry:
