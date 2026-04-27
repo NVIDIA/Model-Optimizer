@@ -1,0 +1,108 @@
+# Example: Quantization Validation Suite
+#
+# A balanced set of benchmarks for validating quantized model quality.
+# Copy this file and customize for your needs.
+#
+# Includes:
+#   - MMLU-Pro (knowledge, completions)
+#   - GPQA Diamond (reasoning, chat, 5 repeats)
+#   - LiveCodeBench v6 (code, chat, 3 repeats)
+#   - IFBench (instruction following, chat, 8 repeats)
+#
+# Usage:
+#   nel run --config recipes/examples/example_eval.yaml \
+#     -o deployment.checkpoint_path=/path/to/quantized/checkpoint \
+#     -o deployment.served_model_name=my-model-nvfp4 \
+#     -o execution.hostname=<slurm_host> \
+#     -o execution.account=<slurm_account> \
+#     -o execution.output_dir=/path/to/output
+#
+# For quantized checkpoints, also add the quantization flag:
+#   -o 'deployment.extra_args=--max-model-len 32768 --trust-remote-code --quantization modelopt_fp4'
+#
+# Run a single task:
+#   nel run --config ... -t ns_gpqa
+#
+# Smoke test (2 samples):
+#   nel run --config ... -o ++evaluation.nemo_evaluator_config.config.params.limit_samples=2
+defaults:
+  - execution: slurm/default
+  - deployment: vllm
+  - _self_
+execution:
+  hostname: ???
+  username: ${oc.env:USER}
+  account: ???
+  output_dir: ???
+  walltime: "04:00:00"
+  mounts:
+    mount_home: false
+deployment:
+  env_vars:
+    HF_TOKEN: host:HF_TOKEN
+  checkpoint_path: ???
+  hf_model_handle:
+  served_model_name: ???
+  tensor_parallel_size: 1
+  data_parallel_size: 1
+  # For models with custom code, add: --trust-remote-code
+  extra_args: --max-model-len 32768
+evaluation:
+  env_vars:
+    HF_TOKEN: host:HF_TOKEN
+  nemo_evaluator_config:
+    config:
+      params:
+        request_timeout: 3600
+        max_retries: 10
+        parallelism: 16
+    target:
+      api_endpoint:
+        api_key_name: DUMMY_API_KEY
+  tasks:
+  # Knowledge (completions endpoint, short)
+    - name: adlr_mmlu_pro_5_shot_base
+
+  # Reasoning (chat endpoint, 5 repeats, short)
+    - name: ns_gpqa
+      nemo_evaluator_config:
+        config:
+          params:
+            extra:
+              args: ++prompt_config=eval/aai/mcq-4choices
+              num_repeats: 5
+        target:
+          api_endpoint:
+            adapter_config:
+              params_to_remove:
+                - max_new_tokens
+                - max_completion_tokens
+
+  # Code (chat endpoint, 3 repeats, medium)
+    - name: ns_livecodebench
+      nemo_evaluator_config:
+        config:
+          params:
+            extra:
+              dataset_split: test_v6_2408_2505
+              num_repeats: 3
+        target:
+          api_endpoint:
+            adapter_config:
+              params_to_remove:
+                - max_new_tokens
+                - max_completion_tokens
+
+  # Instruction following (chat endpoint, 8 repeats, super short)
+    - name: ns_ifbench
+      nemo_evaluator_config:
+        config:
+          params:
+            extra:
+              num_repeats: 8
+        target:
+          api_endpoint:
+            adapter_config:
+              params_to_remove:
+                - max_new_tokens
+                - max_completion_tokens
