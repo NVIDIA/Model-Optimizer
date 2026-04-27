@@ -32,7 +32,7 @@ from transformers import (
     PreTrainedModel,
 )
 
-# Candidate module paths searched in order — shared with HFEagleModel._find_base_model_parts
+# Candidate module paths searched in order — used by HFSpecDecMixin._find_base_model_parts
 _EMBED_TOKENS_PATHS = [
     "embed_tokens",
     "language_model.model.embed_tokens",

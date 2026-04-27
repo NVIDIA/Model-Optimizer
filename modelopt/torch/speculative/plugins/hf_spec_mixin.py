@@ -15,26 +15,42 @@
 
 """Shared mixin for HuggingFace speculative decoding model classes."""
 
-# mypy: disable-error-code="attr-defined,misc"
-
 import contextlib
+import logging
+from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING, Any, TypeAlias
 
 import torch
-from torch.nn import CrossEntropyLoss
 
 from .modeling_fakebase import _BASE_MODEL_PATHS, _EMBED_TOKENS_PATHS, _LM_HEAD_PATHS
+
+logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    # At type-check time, pretend the mixin is an nn.Module so attribute access
+    # like self.get_submodule(...) type-checks. At runtime it remains a plain
+    # mixin (object) and gets nn.Module via the sibling base class in the MRO.
+    _Host: TypeAlias = torch.nn.Module
+else:
+    _Host = object
 
 __all__ = ["HFSpecDecMixin"]
 
 
-class HFSpecDecMixin:
+class HFSpecDecMixin(_Host, ABC):
     """Mixin providing HuggingFace base-model discovery for speculative decoding plugins.
 
     Provides shared properties and methods for locating base-model submodules
-    (backbone, embeddings, lm_head) and running the base-model forward pass.
+    (backbone, embeddings, lm_head), plus NVTX profiling and torch.compile helpers.
 
     Must be used with multiple inheritance alongside an algorithm-specific base
     (EagleModel, DFlashModel, etc.) that inherits from DynamicModule.
+
+    Lifecycle:
+        Base-model paths are discovered automatically inside ``modify()`` via the
+        MRO hook below — subclasses only need to call ``super().modify(config)``
+        and the ``_base_model`` / ``_base_model_embeddings`` / ``_base_model_lm_head``
+        properties are ready to use in the rest of the subclass's ``modify()`` body.
 
     Example::
 
@@ -42,24 +58,36 @@ class HFSpecDecMixin:
         class HFEagleModel(HFSpecDecMixin, EagleModel): ...
     """
 
+    # -- Host-supplied attributes (declared for type checkers) --
+
+    # Provided by the host (e.g., PreTrainedModel.config).
+    config: Any
+    # Set by ``_find_base_model_parts()``.
+    base_model_path: str
+    base_model_embeddings_path: str
+    base_model_lm_head_path: str
+
     # -- Class attributes (subclasses may override) --
 
     # List of (method_name, compile_kwargs) for _activate_torch_compile().
     # Example: [("_eagle_forward", {"mode": "max-autotune"}), ("_eagle_loss", {"fullgraph": True})]
     _compile_targets: list[tuple[str, dict]] = []
 
+    # Set to True in subclass ``modify()`` to enable NVTX ranges.
+    _enable_nvtx: bool = False
+
     # -- Properties: base model access --
 
     @property
-    def _base_model(self):
+    def _base_model(self) -> torch.nn.Module:
         return self.get_submodule(self.base_model_path)
 
     @property
-    def _base_model_embeddings(self):
+    def _base_model_embeddings(self) -> torch.nn.Module:
         return self.get_submodule(self.base_model_embeddings_path)
 
     @property
-    def _base_model_lm_head(self):
+    def _base_model_lm_head(self) -> torch.nn.Module:
         return self.get_submodule(self.base_model_lm_head_path)
 
     @property
@@ -70,6 +98,17 @@ class HFSpecDecMixin:
             or getattr(self.config, "llm_config", None)
             or self.config
         )
+
+    # -- Lifecycle hook --
+
+    def modify(self, config):
+        """Run base-class ``modify``, then auto-discover base-model paths.
+
+        Subclasses only need to call ``super().modify(config)`` first; the base-model
+        properties are then ready to use in the rest of the subclass's ``modify()`` body.
+        """
+        super().modify(config)
+        self._find_base_model_parts()
 
     # -- Methods: model discovery --
 
@@ -89,47 +128,14 @@ class HFSpecDecMixin:
         }.items():
             for path in paths:
                 try:
-                    submodule = self.get_submodule(path)
-                    assert isinstance(submodule, torch.nn.Module)
+                    self.get_submodule(path)
                     setattr(self, name, path)
+                    logger.debug("Found %s at %s", name, path)
                     break
                 except Exception:
                     continue
             else:
                 raise ValueError(f"Part {name} not found in model")
-
-    # -- Methods: base model forward --
-
-    def _base_model_forward(self, input_ids, attention_mask, freeze=True, labels=None, **kwargs):
-        """Run the base model forward pass with optional freeze and base-model loss.
-
-        Args:
-            input_ids: Input token IDs.
-            attention_mask: Attention mask.
-            freeze: If True, run under torch.no_grad().
-            labels: Optional labels for computing base model CE loss.
-            **kwargs: Additional keyword arguments forwarded to the base model.
-
-        Returns:
-            (outputs, base_loss) tuple where outputs is the raw model output and
-            base_loss is the cross-entropy loss (None if freeze=True or labels=None).
-        """
-        ctx = torch.no_grad() if freeze else contextlib.nullcontext()
-        with ctx:
-            outputs = super().forward(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                output_hidden_states=True,
-                **kwargs,
-            )
-            base_loss = None
-            if not freeze and labels is not None:
-                loss_fct = CrossEntropyLoss()
-                base_loss = loss_fct(
-                    outputs.logits.view(-1, outputs.logits.shape[-1]),
-                    labels.view(-1),
-                )
-        return outputs, base_loss
 
     # -- Methods: profiling & compilation --
 
@@ -138,7 +144,7 @@ class HFSpecDecMixin:
 
         Enabled when the subclass sets ``self._enable_nvtx = True`` in ``modify()``.
         """
-        if not getattr(self, "_enable_nvtx", False):
+        if not self._enable_nvtx:
             return contextlib.nullcontext()
         try:
             import torch.cuda.nvtx as nvtx
@@ -164,12 +170,8 @@ class HFSpecDecMixin:
             except Exception:  # noqa: PERF203
                 print(f"Disabling torch.compile for {name} due to compilation error.")
 
-    # -- Methods: export interface (subclasses must override) --
+    # -- Required interface --
 
-    def get_dummy_inputs(self) -> dict:
-        """Construct dummy inputs for export forward pass. Subclasses must override."""
-        raise NotImplementedError
-
+    @abstractmethod
     def get_exporter(self):
-        """Return the exporter for the draft model. Subclasses must override."""
-        raise NotImplementedError
+        """Return the exporter for the draft model."""

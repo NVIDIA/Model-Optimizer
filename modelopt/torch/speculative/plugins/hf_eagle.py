@@ -244,8 +244,6 @@ class HFEagleModel(HFSpecDecMixin, EagleModel):
             decoder_cls,
         )
 
-        # find base model, lm head, and embeddings paths
-        self._find_base_model_parts()
         self.eagle_module.to(self._base_model.dtype).to(self._get_eagle_device())
 
         # EAGLE-3 auxiliary hidden_states

@@ -137,8 +137,6 @@ class HFDFlashModel(HFSpecDecMixin, DFlashModel):
             for param in self.parameters():
                 param.requires_grad = False
 
-        self._find_base_model_parts()
-
         self.dflash_module = DFlashModule(self.dflash_config)
         # Match base model dtype/device. Skip if base is on meta (during from_pretrained
         # restore — the model will be moved to the correct device after weight loading).
