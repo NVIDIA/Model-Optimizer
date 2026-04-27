@@ -17,9 +17,11 @@ from unittest.mock import Mock
 
 import pytest
 import torch
+from torch.utils.data import DataLoader
 
 from modelopt.torch.utils.dataset_utils import (
     _disable_use_cache,
+    _forward_loop,
     _process_batch,
     get_dataset_samples,
 )
@@ -187,6 +189,33 @@ def test_disable_use_cache_without_existing_attr():
         assert model.config.use_cache is False
 
     assert not hasattr(model.config, "use_cache")
+
+
+def test_forward_loop_runs_under_disabled_use_cache():
+    """`_forward_loop` runs forward on every batch and restores `use_cache` on exit."""
+    seen_use_cache: list[bool] = []
+
+    class _Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.config = _Config()
+            self.config.use_cache = True
+
+        def forward(self, **kwargs):
+            seen_use_cache.append(self.config.use_cache)
+
+    model = _Model()
+
+    def _collate(samples):
+        return {"input_ids": torch.stack([s["input_ids"] for s in samples])}
+
+    data = [{"input_ids": torch.zeros(8, dtype=torch.long)} for _ in range(3)]
+    loader = DataLoader(data, batch_size=1, collate_fn=_collate)
+
+    _forward_loop(model, loader)
+
+    assert seen_use_cache == [False, False, False]
+    assert model.config.use_cache is True
 
 
 def test_disable_use_cache_restores_on_exception():
