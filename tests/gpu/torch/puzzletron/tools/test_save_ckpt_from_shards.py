@@ -33,21 +33,9 @@ from modelopt.torch.puzzletron.tools.checkpoint_utils_hf import (
     save_checkpoint_from_shards,
 )
 
-TINY_LLAMA_CONFIG = {
-    "hidden_size": 32,
-    "intermediate_size": 64,
-    "num_hidden_layers": 2,
-    "num_attention_heads": 4,
-    "num_key_value_heads": 2,
-    "max_position_embeddings": 32,
-    "vocab_size": 32,
-    "tie_word_embeddings": False,
-}
-
-
-def _make_tiny_llama(**overrides) -> AutoModelForCausalLM:
-    cfg = {**TINY_LLAMA_CONFIG, **overrides}
-    return AutoModelForCausalLM.from_config(LlamaConfig(**cfg))
+from _test_utils.torch.transformers_models import get_tiny_llama
+...
+model = get_tiny_llama(num_hidden_layers=2)
 
 
 class TestSaveCheckpointFromShardsSingleProcess:
