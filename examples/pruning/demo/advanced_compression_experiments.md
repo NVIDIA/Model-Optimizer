@@ -6,7 +6,7 @@ This document extends the [main tutorial](README.md) with results and insights f
 
 ## 1. Extended Distillation: WikiText vs. Nemotron-v2 at 80% Memory
 
-The main tutorial uses a deliberately minimal distillation setup (100 iterations on WikiText-103, ~1.6M tokens). Here we investigate what happens when we scale up distillation significantly (using the higher-quality [Nemotron-Post-Training-Dataset-v2](https://huggingface.co/datasets/nvidia/Nemotron-Post-Training-Dataset-v2) with 1000x more tokens) on Qwen3-8B models compressed to ~80% of the original memory footprint.
+The main tutorial uses a deliberately minimal distillation setup (100 iterations on [WikiText-103](https://huggingface.co/datasets/Salesforce/wikitext/tree/main/wikitext-103-v1), ~1.6M tokens). Here we investigate what happens when we scale up distillation significantly (using the higher-quality [Nemotron-Post-Training-Dataset-v2](https://huggingface.co/datasets/nvidia/Nemotron-Post-Training-Dataset-v2) with 1000x more tokens) on Qwen3-8B models compressed to ~80% of the original memory footprint.
 
 ### 1.1 Results across all benchmarks
 

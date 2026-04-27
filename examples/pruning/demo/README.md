@@ -177,11 +177,11 @@ hf download Qwen/Qwen3-8B --local-dir /workspace/models/Qwen3-8B
 
 | Notebook | Description | Runtime (2x H200) |
 |---|---|---|
-| `00_prerequisites.ipynb` | Prepare the data + Baseline evaluation | ~15 min |
-| `scenario1_minitron.ipynb` | Scenario 1 — Minitron | ~1h45 |
-| `scenario1_puzzletron.ipynb` | Scenario 1 — Puzzletron | ~6h (on first Puzzletron run) |
-| `scenario2_minitron.ipynb` | Scenario 2 — Minitron | ~45 min |
-| `scenario2_puzzletron.ipynb` | Scenario 2 — Puzzletron | ~6h15 (on first Puzzletron run) |
+| [`00_prerequisites.ipynb`](00_prerequisites.ipynb) | Prepare the data + Baseline evaluation | ~15 min |
+| [`scenario1_minitron.ipynb`](scenario1_minitron.ipynb) | Scenario 1 — Minitron | ~1h45 |
+| [`scenario1_puzzletron.ipynb`](scenario1_puzzletron.ipynb) | Scenario 1 — Puzzletron | ~6h (on first Puzzletron run) |
+| [`scenario2_minitron.ipynb`](scenario2_minitron.ipynb) | Scenario 2 — Minitron | ~45 min |
+| [`scenario2_puzzletron.ipynb`](scenario2_puzzletron.ipynb) | Scenario 2 — Puzzletron | ~6h15 (on first Puzzletron run) |
 
 From within the container, copy the notebooks to your local workspace:
 
@@ -236,9 +236,9 @@ Both strategies can be combined. An optional automatic NAS search can be enabled
 
 ### 3.3 Walkthrough: Qwen3-8B → 7B parameters
 
-**▶ Data preparation:** Run notebook `00_prerequisites.ipynb` to prepare the data and evaluate the original model.
+**▶ Data preparation:** Run notebook [`00_prerequisites.ipynb`](00_prerequisites.ipynb) to prepare the data and evaluate the original model.
 
-**▶ Minitron pruning and distillation:** Run notebook `scenario1_minitron.ipynb` for the full end-to-end pipeline (prune → distill → evaluate).
+**▶ Minitron pruning and distillation:** Run notebook [`scenario1_minitron.ipynb`](scenario1_minitron.ipynb) for the full end-to-end pipeline (prune → distill → evaluate).
 
 #### Results
 
@@ -248,13 +248,13 @@ Both strategies can be combined. An optional automatic NAS search can be enabled
 | Minitron — pruned | 32 | 3840 | 12288 | 6.96B | 0.7038 | 93.9% |
 | Minitron — pruned + distilled | 32 | 3840 | 12288 | 6.96B | **0.7166** | **95.6%** |
 
-Distillation recovers **+1.28 percentage points** of MMLU accuracy with just 100 iterations on WikiText-103.
+Distillation recovers **+1.28 percentage points** of MMLU accuracy with just 100 iterations on [WikiText-103](https://huggingface.co/datasets/Salesforce/wikitext/tree/main/wikitext-103-v1).
 
 ### 3.4 Comparison with Puzzletron at the same parameter target
 
 To validate that Minitron is the right choice for this scenario, we also ran Puzzletron at the same ~7B parameter target. Puzzletron produces a 36-layer heterogeneous model with variable FFN widths per layer (some as low as 2560) and selective attention removal.
 
-▶ See notebook `scenario1_puzzletron.ipynb` to reproduce this run.
+▶ See notebook [`scenario1_puzzletron.ipynb`](scenario1_puzzletron.ipynb) to reproduce this run.
 
 | Model | Parameters | MMLU (pruned) | MMLU (distilled) | % of Teacher |
 |---|---|---|---|---|
@@ -302,9 +302,9 @@ Puzzletron compresses a model through an automated NAS pipeline:
 
 ### 4.3 Walkthrough: Qwen3-8B - 126,215 MiB → 78,000 MiB memory target
 
-**▶ Data preparation:** Run notebook `00_prerequisites.ipynb` to prepare the data and evaluate the original model (if not already done).
+**▶ Data preparation:** Run notebook [`00_prerequisites.ipynb`](00_prerequisites.ipynb) to prepare the data and evaluate the original model (if not already done).
 
-**▶ Puzzletron NAS and distillation:** Run notebook `scenario2_puzzletron.ipynb` for the full end-to-end pipeline (prune → NAS search → distill → evaluate).
+**▶ Puzzletron NAS and distillation:** Run notebook [`scenario2_puzzletron.ipynb`](scenario2_puzzletron.ipynb) for the full end-to-end pipeline (prune → NAS search → distill → evaluate).
 
 #### Results
 
@@ -361,7 +361,7 @@ block_35:  attention  kv_heads_8    ffn  intermediate_9984
 
 To validate that Puzzletron is the right choice for this scenario, we also ran Minitron at the same memory budget. To match ~78,000 MiB, Minitron drops 14 of 36 layers (keeping 22), producing a 5.49B parameter model.
 
-▶ See notebook `scenario2_minitron.ipynb` to reproduce this run.
+▶ See notebook [`scenario2_minitron.ipynb`](scenario2_minitron.ipynb) to reproduce this run.
 
 | Model | Memory Footprint | MMLU (pruned) | MMLU (distilled) | % of Teacher |
 |---|---|---|---|---|
