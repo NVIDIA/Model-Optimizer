@@ -206,6 +206,7 @@ def representative_weight_quantizer(module: nn.Module, weight_name: str = "weigh
     """Return the representative weight quantizer for ``weight_name`` on ``module``.
 
     Handles two layouts:
+
     - singular ``<name>_weight_quantizer`` — standard ``nn.Linear`` / ``_QuantLinear``.
     - plural ``<name>_weight_quantizers`` (``nn.ModuleList``) — fused-experts modules
       (``_QuantFusedExperts``) hold one ``TensorQuantizer`` per expert. Per-expert
@@ -232,6 +233,7 @@ def weight_attr_names(module: nn.Module) -> "Generator[str, None, None]":
     """Get the weight param attribute names in a converted module, non-recursive.
 
     Covers three layouts:
+
     - standard ``nn.Linear``: ``weight`` + ``weight_quantizer``.
     - custom per-weight quantizer (e.g. ``Llama4TextExperts`` with ``gate_up_proj`` +
       ``gate_up_proj_weight_quantizer``).

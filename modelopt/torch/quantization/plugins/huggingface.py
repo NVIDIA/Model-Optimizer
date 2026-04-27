@@ -900,6 +900,33 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
         self._down_proj_linear = False
         return super().forward(*args, **kwargs)
 
+    def fold_weight(self, keep_attrs: bool = False):
+        """Fold per-expert weight quantizers into the fused 3-D weights.
+
+        The base ``fold_weight`` only handles singular ``*_weight_quantizer``
+        attributes. Fused experts use ``nn.ModuleList`` of per-expert quantizers
+        (``gate_up_proj_weight_quantizers``, ``down_proj_weight_quantizers``),
+        which would otherwise be skipped, leaving ``_amax`` on every quantizer.
+        """
+        for weight_name, quantizers_name in (
+            ("gate_up_proj", "gate_up_proj_weight_quantizers"),
+            ("down_proj", "down_proj_weight_quantizers"),
+        ):
+            weight = getattr(self, weight_name, None)
+            quantizers = getattr(self, quantizers_name, None)
+            if weight is None or quantizers is None:
+                continue
+            for idx, q in enumerate(quantizers):
+                if not (isinstance(q, TensorQuantizer) and q.fake_quant):
+                    continue
+                slice_ = weight.data[idx]
+                slice_.copy_(q(slice_.float()).to(weight.dtype))
+                q.disable()
+                if not keep_attrs:
+                    for attr_name in ("_pre_quant_scale", "_amax"):
+                        if hasattr(q, attr_name):
+                            delattr(q, attr_name)
+
 
 class _QuantDbrxFFN(_QuantSparseSequentialMoe):
     @property
