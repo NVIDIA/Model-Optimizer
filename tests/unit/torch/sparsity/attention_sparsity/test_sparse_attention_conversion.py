@@ -270,7 +270,7 @@ class TestSetAttnImplementation:
             "*": {"method": "triton_skip_softmax", "backend": "triton"},
         }
         with patch(
-            "modelopt.torch.sparsity.attention_sparsity.kernels.register_triton_attention",
+            "modelopt.torch.kernels.sparsity.attention.register_triton_attention",
             MagicMock(return_value=True),
         ):
             _set_attn_implementation(model, config)
@@ -287,7 +287,7 @@ class TestSetAttnImplementation:
         config.sparse_cfg = {"*": {"method": "triton_skip_softmax", "backend": "triton"}}
         with (
             patch(
-                "modelopt.torch.sparsity.attention_sparsity.kernels.register_triton_attention",
+                "modelopt.torch.kernels.sparsity.attention.register_triton_attention",
                 MagicMock(return_value=False),
             ),
             pytest.raises(RuntimeError, match="Failed to register"),
@@ -305,7 +305,7 @@ class TestSetAttnImplementation:
         config.sparse_cfg = {"*": {"method": "triton_skip_softmax", "backend": "triton"}}
         with (
             patch(
-                "modelopt.torch.sparsity.attention_sparsity.kernels.register_triton_attention",
+                "modelopt.torch.kernels.sparsity.attention.register_triton_attention",
                 None,
             ),
             pytest.raises(ImportError, match="Triton backend requires"),

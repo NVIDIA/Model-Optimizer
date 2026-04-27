@@ -46,7 +46,7 @@ def filter_func_default(name: str) -> bool:
 
 def check_conv_and_mha(backbone, if_fp4, quantize_mha):
     for name, module in backbone.named_modules():
-        if isinstance(module, (torch.nn.Conv1d, torch.nn.Conv2d, torch.nn.Conv3d)) and if_fp4:
+        if isinstance(module, (torch.nn.Conv1d, torch.nn.Conv2d)) and if_fp4:
             module.weight_quantizer.disable()
             module.input_quantizer.disable()
 
@@ -85,6 +85,22 @@ def filter_func_flux_dev(name: str) -> bool:
         r"(proj_out.*|.*(time_text_embed|context_embedder|x_embedder|norm_out|time_guidance_embed|stream_modulation).*)"
     )
     return pattern.match(name) is not None
+
+
+def filter_func_ltx2_vae(name: str) -> bool:
+    """Filter for LTX-2 VAE: keeps only conv1/conv2 in up_blocks resnets."""
+    keep = re.compile(r".*up_blocks\.\d+\.resnets\.\d+\.conv[12](?:\.|$)")
+    return not keep.match(name)
+
+
+def filter_func_wan_vae(name: str) -> bool:
+    """Filter for Wan 2.2 VAE: keeps only conv1/conv2 in resnet blocks."""
+    keep = re.compile(
+        r".*(down_blocks\.\d+\.(?:resnets\.\d+\.)?conv[12]"
+        r"|mid_block\.resnets\.\d+\.conv[12]"
+        r"|up_blocks\.\d+\.resnets\.\d+\.conv[12])(?:\.|$)"
+    )
+    return not keep.match(name)
 
 
 def filter_func_wan_video(name: str) -> bool:
