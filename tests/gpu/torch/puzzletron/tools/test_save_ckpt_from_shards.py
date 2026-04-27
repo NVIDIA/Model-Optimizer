@@ -37,53 +37,36 @@ from modelopt.torch.puzzletron.tools.checkpoint_utils_hf import (
 class TestSaveCheckpointFromShardsSingleProcess:
     """Tests that run without torch.distributed (world_size=1 path)."""
 
-    def test_creates_index_and_subblocks(self, tmp_path):
+    def test_creates_config_index_and_subblocks(self, tmp_path):
         model = get_tiny_llama()
+        expected_keys = set(model.state_dict().keys())
         save_checkpoint_from_shards(model, tmp_path, LlamaModelDescriptor)
 
+        # test safetensors index file exists and contains weight map
         index_path = tmp_path / SAFE_WEIGHTS_INDEX_NAME
         assert index_path.exists(), "safetensors index file was not written"
         index = json.loads(index_path.read_text())
         assert "weight_map" in index
+        assert set(index["weight_map"].keys()) == expected_keys
 
+        # test subblocks directory exists and contains shard files
         subblocks_dir = tmp_path / SAFETENSORS_SUBBLOCKS_DIR_NAME
         assert subblocks_dir.is_dir(), "subblocks directory was not created"
+        assert len(list(subblocks_dir.glob("*.safetensors"))) > 0, (
+            "no safetensors shard files were saved"
+        )
 
-        shard_files = list(subblocks_dir.glob("*.safetensors"))
-        assert len(shard_files) > 0, "no safetensors shard files were saved"
-
-    def test_weight_map_covers_all_state_dict_keys(self, tmp_path):
-        model = get_tiny_llama()
-        expected_keys = set(model.state_dict().keys())
-
-        save_checkpoint_from_shards(model, tmp_path, LlamaModelDescriptor)
-
-        index = json.loads((tmp_path / SAFE_WEIGHTS_INDEX_NAME).read_text())
-        mapped_keys = set(index["weight_map"].keys())
-        assert mapped_keys == expected_keys
-
-    def test_saved_weights_match_original(self, tmp_path):
-        model = get_tiny_llama()
-        original_sd = {k: v.clone().cpu() for k, v in model.state_dict().items()}
-
-        save_checkpoint_from_shards(model, tmp_path, LlamaModelDescriptor)
-
-        reloaded_sd = {}
-        for shard in (tmp_path / SAFETENSORS_SUBBLOCKS_DIR_NAME).glob("*.safetensors"):
-            reloaded_sd.update(safe_load_file(str(shard)))
-
-        assert set(reloaded_sd.keys()) == set(original_sd.keys())
-        for key in original_sd:
-            torch.testing.assert_close(reloaded_sd[key], original_sd[key])
-
-    def test_config_json_saved(self, tmp_path):
-        model = get_tiny_llama()
-        save_checkpoint_from_shards(model, tmp_path, LlamaModelDescriptor)
-
+        # test config.json saved
         config_path = tmp_path / "config.json"
         assert config_path.exists(), "config.json was not saved"
         cfg = json.loads(config_path.read_text())
         assert cfg["num_hidden_layers"] == get_tiny_llama().config.num_hidden_layers
+
+        # test subblock filenames follow descriptor groups
+        filenames = set(index["weight_map"].values())
+        expected_substrings = {"embeddings", "lm_head", "block_0_ffn", "block_0_attention"}
+        for substr in expected_substrings:
+            assert any(substr in f for f in filenames), f"no shard filename contains '{substr}'"
 
     def test_tie_word_embeddings_excluded(self, tmp_path):
         model = get_tiny_llama(tie_word_embeddings=True)
@@ -97,16 +80,18 @@ class TestSaveCheckpointFromShardsSingleProcess:
             reloaded_sd.update(safe_load_file(str(shard)))
         assert "lm_head.weight" not in reloaded_sd
 
-    def test_subblock_filenames_follow_descriptor_groups(self, tmp_path):
+    def test_saved_weights_match_original(self, tmp_path):
         model = get_tiny_llama()
+        original_sd = {k: v.clone().cpu() for k, v in model.state_dict().items()}
         save_checkpoint_from_shards(model, tmp_path, LlamaModelDescriptor)
 
-        index = json.loads((tmp_path / SAFE_WEIGHTS_INDEX_NAME).read_text())
-        filenames = set(index["weight_map"].values())
+        reloaded_sd = {}
+        for shard in (tmp_path / SAFETENSORS_SUBBLOCKS_DIR_NAME).glob("*.safetensors"):
+            reloaded_sd.update(safe_load_file(str(shard)))
 
-        expected_substrings = {"embeddings", "lm_head", "block_0_ffn", "block_0_attention"}
-        for substr in expected_substrings:
-            assert any(substr in f for f in filenames), f"no shard filename contains '{substr}'"
+        assert set(reloaded_sd.keys()) == set(original_sd.keys())
+        for key in original_sd:
+            torch.testing.assert_close(reloaded_sd[key], original_sd[key])
 
 
 def _distributed_save_worker(rank, world_size, checkpoint_dir):
