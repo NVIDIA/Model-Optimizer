@@ -12,9 +12,11 @@ license: Apache-2.0
 
 You're an expert in NeMo Evaluator Launcher! Guide the user through creating production-ready YAML configurations, running evaluations, and monitoring progress via an interactive workflow specified below.
 
-### Workspace (multi-user / Slack bot)
+### Workspace and Pipeline Integration
 
 If `MODELOPT_WORKSPACE_ROOT` is set, read `skills/common/workspace-management.md`. Check for existing workspaces — especially if evaluating a model from a prior PTQ or deployment step. Reuse the existing workspace so you have access to the quantized checkpoint and any code modifications.
+
+This skill is often the final stage of the PTQ → Deploy → Eval pipeline. If the model required runtime patches during deployment (transformers upgrade, framework source fixes), carry those patches into the NEL config via `deployment.command`.
 
 ### Workflow
 
@@ -256,64 +258,24 @@ After the dry-run, check the output from `nel` for any problems with the config.
 
 **Monitoring Progress**
 
-After job submission, you can monitor progress using:
+After job submission, register the job per the **monitor skill** for durable cross-session tracking. For one-off queries (live status, debugging a failed run, analyzing results) use the **launching-evals skill**; for querying past runs in MLflow use **accessing-mlflow**.
 
-1. **Check job status:**
+**NEL-specific diagnostics** (for debugging failures):
 
-   ```bash
-   nel status <invocation_id>
-   nel info <invocation_id>
-   ```
+```bash
+# Quick status check
+nel status <invocation_id>
+nel info <invocation_id>
 
-2. **Stream logs** (Local execution only):
+# Get log paths
+nel info <invocation_id> --logs
 
-   ```bash
-   nel logs <invocation_id>
-   ```
-
-   Note: `nel logs` is not supported for SLURM execution.
-
-3. **Inspect logs via SSH** (SLURM workaround):
-
-   When `nel logs` is unavailable (SLURM), use SSH to inspect logs directly:
-
-   First, get log locations:
-
-   ```bash
-   nel info <invocation_id> --logs
-   ```
-
-   Then, use SSH to view logs:
-
-   **Check server deployment logs:**
-
-   ```bash
-   ssh <username>@<hostname> "tail -100 <log path from `nel info <invocation_id> --logs`>/server-<slurm_job_id>-*.log"
-   ```
-
-   Shows vLLM server startup, model loading, and deployment errors (e.g., missing wget/curl).
-
-   **Check evaluation client logs:**
-
-   ```bash
-   ssh <username>@<hostname> "tail -100 <log path from `nel info <invocation_id> --logs`>/client-<slurm_job_id>.log"
-   ```
-
-   Shows evaluation progress, task execution, and results.
-
-   **Check SLURM scheduler logs:**
-
-   ```bash
-   ssh <username>@<hostname> "tail -100 <log path from `nel info <invocation_id> --logs`>/slurm-<slurm_job_id>.log"
-   ```
-
-   Shows job scheduling, health checks, and overall execution flow.
-
-   **Search for errors:**
-
-   ```bash
-   ssh <username>@<hostname> "grep -i 'error\|warning\|failed' <log path from `nel info <invocation_id> --logs`>/*.log"
-   ```
+# Inspect logs via SSH
+ssh <user>@<host> "tail -100 <log_path>/server-<slurm_job_id>-*.log"   # deployment errors
+ssh <user>@<host> "tail -100 <log_path>/client-<slurm_job_id>.log"     # evaluation errors
+ssh <user>@<host> "tail -100 <log_path>/slurm-<slurm_job_id>.log"      # scheduling/walltime
+ssh <user>@<host> "grep -i 'error\|failed' <log_path>/*.log"           # search all logs
+```
 
 ---
 

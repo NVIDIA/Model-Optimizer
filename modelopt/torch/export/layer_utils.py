@@ -81,8 +81,16 @@ with import_plugin("megatron", verbose=False):
     has_mcore = True
 
 
-def get_experts_list(module: torch.nn.Module, model_type: str):
-    """Returns list of grouped experts by linear name for given module."""
+def get_experts_list(
+    module: torch.nn.Module,
+    model_type: str,
+):
+    """Returns list of grouped experts by linear name for given module.
+
+    Args:
+        module: MoE block (e.g. MixtralSparseMoeBlock, NemotronHMOE).
+        model_type: `type(root_model).__name__.lower()` (may change after ModelOpt quantize).
+    """
     experts_list = []
 
     # Define linear layer names for different model types
@@ -98,6 +106,8 @@ def get_experts_list(module: torch.nn.Module, model_type: str):
         ]
     ):
         linear_names = ["gate_proj", "down_proj", "up_proj"]
+    elif "nemotronhforcausallm" in model_type:
+        linear_names = ["up_proj", "down_proj"]
     else:
         raise NotImplementedError(f" {model_type} not supported")
 
@@ -305,7 +315,7 @@ def is_moe(module: nn.Module) -> bool:
     if name.endswith("sparsemoeblock") or "moelayer" in name:
         return True
     # Explicit matches for non-standard naming
-    return any(key in name for key in ["arcticmoe", "deepseekmoe", "dbrxffn"])
+    return any(key in name for key in ["arcticmoe", "deepseekmoe", "dbrxffn", "nemotronhmoe"])
 
 
 def is_quantlinear(module: nn.Module) -> bool:
@@ -994,6 +1004,9 @@ def get_expert_linear_names(module: nn.Module) -> list[str]:
         return ["w1_linear", "w2_linear", "v1_linear"]
     elif module_match_name_list(module, ["GptOssMoE"]):
         return ["gate_up_proj", "down_proj"]
+    elif module_match_name_list(module, ["NemotronHMOE"]):
+        # NemotronHMOE experts (NemotronHMLP) use up_proj and down_proj only (no gate).
+        return ["up_proj", "down_proj"]
     else:
         # assuming w1, w2, w3 by default
         return ["w1", "w2", "w3"]

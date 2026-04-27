@@ -164,7 +164,7 @@ def _save_component_state_dict_safetensors(
         json.dump(metadata, f, indent=4)
 
 
-def _collect_shared_input_modules(
+def collect_shared_input_modules(
     model: nn.Module,
     dummy_forward_fn: Callable[[], None],
     collect_layernorms: bool = False,
@@ -388,7 +388,7 @@ def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
         else:
             model(fake_input)
 
-    input_to_linear, output_to_layernorm = _collect_shared_input_modules(
+    input_to_linear, output_to_layernorm = collect_shared_input_modules(
         model, llm_dummy_forward, collect_layernorms=True
     )
 
@@ -863,7 +863,7 @@ def _fuse_qkv_linears_diffusion(
 
     # Collect modules sharing the same input
     try:
-        input_to_linear, _ = _collect_shared_input_modules(
+        input_to_linear, _ = collect_shared_input_modules(
             model, dummy_forward_fn, collect_layernorms=False
         )
     except Exception as e:

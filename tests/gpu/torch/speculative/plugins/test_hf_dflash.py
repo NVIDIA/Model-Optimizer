@@ -194,3 +194,73 @@ class TestDFlashTrainingForwardGPU:
         with torch.no_grad():
             output = model(input_ids=input_ids)
         assert output.logits.shape == (bsz, SEQ_LEN, model.config.vocab_size)
+
+
+class TestDFlashOfflineForwardGPU:
+    """Test DFlash training forward pass with dflash_offline=True on GPU."""
+
+    NUM_BASE_LAYERS = 4
+
+    @pytest.fixture
+    def offline_model(self):
+        """Create a tiny DFlash model with dflash_offline=True on GPU."""
+        model = get_tiny_llama(num_hidden_layers=self.NUM_BASE_LAYERS)
+        model.config.num_orig_hidden_layers = self.NUM_BASE_LAYERS
+        config = _get_dflash_config()
+        config["dflash_offline"] = True
+        mtsp.convert(model, [("dflash", config)])
+        model = model.cuda()
+        model.train()
+        return model
+
+    def _make_base_model_outputs(self, model, bsz):
+        """Build a base_model_outputs dict matching DFlashBaseModelOutput.from_offline_dict.
+
+        Production EagleOfflineDataCollator only emits ``aux_hidden_states`` and
+        ``base_model_hidden_states`` — ``base_model_logits`` is never in the batch,
+        so this fixture matches that shape exactly.
+        """
+        hidden_size = model.config.hidden_size
+        num_layers = len(model.target_layer_ids)
+        dtype = next(model.dflash_module.parameters()).dtype
+        return {
+            "aux_hidden_states": torch.randn(
+                bsz, SEQ_LEN, num_layers * hidden_size, device="cuda", dtype=dtype
+            ),
+            "base_model_hidden_states": torch.randn(
+                bsz, SEQ_LEN, hidden_size, device="cuda", dtype=dtype
+            ),
+        }
+
+    def test_offline_forward_returns_loss(self, offline_model):
+        """Offline forward consumes precomputed base_model_outputs and returns a finite loss."""
+        bsz = 2
+        input_ids = torch.randint(0, offline_model.config.vocab_size, (bsz, SEQ_LEN), device="cuda")
+        attention_mask = torch.ones(bsz, SEQ_LEN, dtype=torch.long, device="cuda")
+        base_model_outputs = self._make_base_model_outputs(offline_model, bsz)
+
+        output = offline_model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            base_model_outputs=base_model_outputs,
+        )
+        assert hasattr(output, "loss")
+        assert output.loss.requires_grad
+        assert torch.isfinite(output.loss).item()
+
+    def test_offline_forward_self_logit_distillation_recomputes_logits(self, offline_model):
+        """When base_model_logits is absent, self-distillation path computes them from hidden states."""
+        assert offline_model.dflash_self_logit_distillation
+        bsz = 2
+        input_ids = torch.randint(0, offline_model.config.vocab_size, (bsz, SEQ_LEN), device="cuda")
+        attention_mask = torch.ones(bsz, SEQ_LEN, dtype=torch.long, device="cuda")
+        base_model_outputs = self._make_base_model_outputs(offline_model, bsz)
+
+        output = offline_model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            base_model_outputs=base_model_outputs,
+        )
+        assert hasattr(output, "logits")
+        assert output.logits is not None
+        assert torch.isfinite(output.loss).item()
