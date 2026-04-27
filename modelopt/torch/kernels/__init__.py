@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,38 +13,4 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Shared Triton kernels for modelopt (attention, quantization, etc.)."""
-
-import torch
-
-from modelopt.torch.utils import import_plugin
-
-IS_AVAILABLE = False
-attention = None
-attention_calibrate = None
-register_triton_attention = None
-
-if torch.cuda.is_available():
-    with import_plugin(
-        "triton",
-        msg_if_missing=(
-            "Your device is potentially capable of using the triton attention "
-            "kernel. Try to install triton with `pip install triton`."
-        ),
-    ):
-        from .triton_fa import attention as _attention
-        from .triton_fa import attention_calibrate as _attention_calibrate
-
-        attention = _attention
-        attention_calibrate = _attention_calibrate
-        IS_AVAILABLE = True
-        from .hf_triton_attention import register_triton_attention as _register_triton_attention
-
-        register_triton_attention = _register_triton_attention
-
-__all__ = [
-    "IS_AVAILABLE",
-    "attention",
-    "attention_calibrate",
-    "register_triton_attention",
-]
+"""ModelOpt kernel library: common, quantization (conv, gemm), sparsity (attention, gemm)."""

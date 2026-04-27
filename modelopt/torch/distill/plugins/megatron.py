@@ -172,7 +172,7 @@ def _adjust_layer_index_for_pp(submodule_name, model_cfg):
     if new_layer_idx < 0:
         raise ValueError(f"Layer {submodule_name} does not fall on final PP rank.")
 
-    new_submodule_name = submodule_name.replace(match.group(0), str(new_layer_idx))
+    new_submodule_name = submodule_name.replace(f".{match.group(0)}", f".{new_layer_idx}")
     if parallel_state.get_tensor_and_context_parallel_rank() == 0:
         logger.info(
             f'Distillation: Renamed layer "{submodule_name}" on final PP rank to "{new_submodule_name}"'

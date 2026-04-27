@@ -23,6 +23,7 @@ import asyncio
 from pathlib import Path
 
 import torch
+from common import add_aux_layers_args, resolve_aux_layers
 from datasets import load_dataset
 from tensorrt_llm import LLM, SamplingParams
 from tensorrt_llm.llmapi import CudaGraphConfig, KvCacheConfig, SaveHiddenStatesDecodingConfig
@@ -122,6 +123,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="""moe_cluster_parallel_size for TRTLLM.""",
     )
+    add_aux_layers_args(parser)
 
     return parser.parse_args()
 
@@ -194,7 +196,7 @@ def main(args: argparse.Namespace) -> None:
         "output_directory": str(args.output_dir),
         "write_interval": 1,
         "file_prefix": f"dp_{args.dp_rank}",
-        "eagle3_layers_to_capture": {1, num_hidden_layers // 2 - 1, num_hidden_layers - 4},
+        "eagle3_layers_to_capture": set(resolve_aux_layers(args, num_hidden_layers)),
     }
     sampling_params = SamplingParams(max_tokens=32, temperature=0)
 

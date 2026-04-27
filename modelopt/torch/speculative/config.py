@@ -67,6 +67,14 @@ DFLASH_DEFAULT_CFG = {
 class DFlashConfig(ModeloptBaseConfig):
     """DFlash config for block-wise parallel speculative decoding."""
 
+    dflash_offline: bool = ModeloptField(
+        default=False,
+        description=(
+            "Whether to use detached DFlash (offline training from pre-computed hidden states). "
+            "Auto-derived from data_args.offline_data_path during validation — not user-configurable."
+        ),
+    )
+
     dflash_block_size: int = ModeloptField(
         default=8,
         description="Block size for parallel prediction. Draft predicts this many tokens per block.",
@@ -109,6 +117,43 @@ class DFlashConfig(ModeloptBaseConfig):
         default=True,
         description="Whether to use torch.compile on DFlash forward/loss methods.",
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _derive_dflash_offline(cls, data: Any, info: ValidationInfo) -> Any:
+        """Derive ``dflash_offline`` from ``data_args.offline_data_path``.
+
+        This field is auto-derived, not user-configurable: when context provides
+        ``data_args``, the derived value overrides any user-supplied value.
+        """
+        ctx = info.context if info.context else {}
+        data_args = ctx.get("data_args")
+        if data_args is not None and isinstance(data, dict):
+            data["dflash_offline"] = getattr(data_args, "offline_data_path", None) is not None
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def _resolve_mask_token_id(cls, data: Any, info: ValidationInfo) -> Any:
+        """Auto-detect ``dflash_mask_token_id`` from tokenizer when provided in context."""
+        if not isinstance(data, dict) or data.get("dflash_mask_token_id") is not None:
+            return data
+        ctx = info.context if info.context else {}
+        tokenizer = ctx.get("tokenizer")
+        if tokenizer is not None and getattr(tokenizer, "mask_token_id", None) is not None:
+            data["dflash_mask_token_id"] = tokenizer.mask_token_id
+        return data
+
+    @model_validator(mode="after")
+    def _check_mask_token_id(self) -> "DFlashConfig":
+        """Validate that mask_token_id is set after all resolution attempts."""
+        if self.dflash_mask_token_id is None:
+            raise ValueError(
+                "dflash_mask_token_id is required. Set it in the config YAML "
+                "(dflash.dflash_mask_token_id=TOKEN_ID) or ensure the tokenizer "
+                "has a mask_token_id attribute."
+            )
+        return self
 
 
 class MedusaConfig(ModeloptBaseConfig):
