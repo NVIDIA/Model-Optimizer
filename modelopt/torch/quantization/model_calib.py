@@ -1280,12 +1280,13 @@ def awq_lite(
                     " that can be used to forward data through the model many times."
                 )
 
-            if module.awq_lite.num_cache_steps == 0 or not module.awq_lite.is_enabled:
-                # Expert was either uncalibrated (no cache-pass tokens), had NaN
-                # in act/weight scales, or saw no search-pass tokens. Max-calibrate
-                # weights and apply a neutral (all-ones) pre_quant_scale so the
-                # exporter sees a consistent nvfp4_awq format across all expert
-                # linears in an MoE group.
+            if not module.awq_lite.is_enabled:
+                # Expert is disabled — uncalibrated (no cache-pass tokens, set
+                # at the pre-search pass above), had NaN in act/weight scales,
+                # or saw no search-pass tokens. Max-calibrate weights and apply
+                # a neutral (all-ones) pre_quant_scale so the exporter sees a
+                # consistent nvfp4_awq format across all expert linears in an
+                # MoE group.
                 # NOTE: ones-scale must be registered OUTSIDE enable_weight_access_and_writeback
                 # because HF accelerate post_forward drops newly-registered submodule buffers.
                 warnings.warn(
