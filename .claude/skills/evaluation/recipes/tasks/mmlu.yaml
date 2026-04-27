@@ -1,0 +1,53 @@
+# MMLU (ADLR, completions)
+#
+# Massive Multitask Language Understanding. Uses the completions endpoint.
+# Primary metric: exact_match
+# Run time: Short
+#
+# Usage:
+#   nel run --config recipes/tasks/mmlu.yaml \
+#     -o deployment.checkpoint_path=/path/to/checkpoint \
+#     -o execution.hostname=<slurm_host> \
+#     -o execution.account=<slurm_account> \
+#     -o execution.output_dir=/path/to/output \
+#     -o deployment.served_model_name=<model_name>
+defaults:
+  - execution: slurm/default
+  - deployment: vllm
+  - _self_
+execution:
+  hostname: ???
+  username: ${oc.env:USER}
+  account: ???
+  output_dir: ???
+  walltime: "02:00:00"
+  mounts:
+    mount_home: false
+deployment:
+  env_vars:
+    HF_TOKEN: host:HF_TOKEN
+  checkpoint_path: ???
+  hf_model_handle:
+  served_model_name: ???
+  tensor_parallel_size: 1
+  data_parallel_size: 1
+  # For models with custom code, add: --trust-remote-code
+  extra_args: --max-model-len 32768
+evaluation:
+  env_vars:
+    HF_TOKEN: host:HF_TOKEN
+  nemo_evaluator_config:
+    config:
+      params:
+        request_timeout: 3600
+        max_retries: 5
+        parallelism: 16
+  tasks:
+    - name: adlr_mmlu
+      nemo_evaluator_config:
+        config:
+          params:
+            max_new_tokens: 2
+        target:
+          api_endpoint:
+            type: completions

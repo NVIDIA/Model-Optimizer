@@ -40,6 +40,8 @@ Test that `nel` is installed with `nel --version`. If not, instruct the user to 
 
 If the user already has a config file (e.g., "run this config", "evaluate with my-config.yaml"), skip to Step 8. Optionally review it for common issues (missing `???` values, quantization flags) before running.
 
+**Shortcut: use a pre-built recipe.** If the user asks for a specific benchmark (e.g., "run MMLU-Pro", "evaluate with AIME"), check `recipes/tasks/` (relative to this skill's directory) for a matching recipe. Available: mmlu, mmlu_pro, gpqa, aime2025, livecodebench, ifbench, scicode. If found, skip Steps 2-5 — go directly to the recipe, fill in deployment overrides, and proceed to Step 7.5/8.
+
 **Step 2: Build the base config file**
 
 Prompt the user with "I'll ask you 5 questions to build the base config we'll adjust in the next steps". Guide the user through the 5 questions using AskUserQuestion:
