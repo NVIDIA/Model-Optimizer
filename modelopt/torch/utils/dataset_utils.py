@@ -463,6 +463,11 @@ def _disable_use_cache(model: torch.nn.Module) -> Iterator[None]:
     finally:
         if had_attr:
             config.use_cache = prev
+        else:
+            try:
+                delattr(config, "use_cache")
+            except AttributeError:
+                pass
 
 
 def get_max_batch_size(
