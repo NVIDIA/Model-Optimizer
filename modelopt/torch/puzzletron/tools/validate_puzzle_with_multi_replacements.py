@@ -41,7 +41,7 @@ from ..utils.parsing import get_nested_key
 from ..utils.validate_runtime_pipeline import perform_pipeline_stitches
 from . import validate_model
 from .checkpoint_utils import copy_tokenizer
-from .checkpoint_utils_hf import save_checkpoint, save_checkpoint_from_shards
+from .checkpoint_utils_hf import save_checkpoint_from_shards
 from .common import resolve_torch_dtype
 from .sharded_checkpoint_utils import load_and_shard_model
 from .validation_utils import (
