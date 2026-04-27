@@ -170,17 +170,6 @@ class QuantizerCfgEntry(TypedDict, total=False):
     enable: bool | None  # toggles matched quantizers on/off; independent of cfg
 
 
-QuantizerCfg = list[QuantizerCfgEntry]
-
-
-def _get_quant_cfg_entry(quant_cfg: QuantizerCfg, quantizer_name: str) -> QuantizerCfgEntry | None:
-    """Get a QuantizerCfgEntry by quantizer_name in the QuantizerCfg."""
-    for entry in reversed(quant_cfg):
-        if entry.get("quantizer_name") == quantizer_name:
-            return entry
-    return None
-
-
 def find_quant_cfg_entry_by_path(
     quant_cfg_list: list[QuantizerCfgEntry], quantizer_name: str
 ) -> QuantizerCfgEntry:
