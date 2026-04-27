@@ -160,6 +160,14 @@ class HFDFlashModel(HFSpecDecMixin, DFlashModel):
 
         return DFlashExporter(self)
 
+    def get_dummy_inputs(self) -> dict:
+        """Not yet implemented for DFlash."""
+        raise NotImplementedError(
+            "HFDFlashModel.get_dummy_inputs() is not yet implemented. "
+            "Required by unified HF quantization export (modelopt.torch.export.unified_export_hf). "
+            "Implement to enable quantization-export of DFlash speculative decoding models."
+        )
+
     def _sample_anchor_positions(self, seq_len, loss_mask, device):
         """Randomly sample anchor positions per sample.
 

@@ -175,3 +175,13 @@ class HFSpecDecMixin(_Host, ABC):
     @abstractmethod
     def get_exporter(self):
         """Return the exporter for the draft model."""
+
+    @abstractmethod
+    def get_dummy_inputs(self) -> dict:
+        """Construct dummy inputs for the export forward pass.
+
+        Used by unified HF quantization export to drive a fake forward when the
+        model's ``forward`` signature is non-standard (e.g. takes ``base_model_outputs``).
+        Subclasses that don't yet support this path should raise ``NotImplementedError``
+        with a clear message so callers fail loudly rather than silently.
+        """
