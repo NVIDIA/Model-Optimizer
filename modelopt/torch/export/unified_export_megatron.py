@@ -72,6 +72,7 @@ has_mcore = False
 with import_plugin("megatron"):
     from megatron.core.models.gpt import GPTModel
     from megatron.core.models.mamba import MambaModel
+
     try:
         from megatron.core.models.hybrid.hybrid_model import HybridModel
     except ImportError:
