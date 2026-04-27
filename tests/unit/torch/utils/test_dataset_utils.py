@@ -195,10 +195,9 @@ def test_disable_use_cache_restores_on_exception():
     model.config = _Config()
     model.config.use_cache = True
 
-    with pytest.raises(RuntimeError, match="boom"):
-        with _disable_use_cache(model):
-            assert model.config.use_cache is False
-            raise RuntimeError("boom")
+    with pytest.raises(RuntimeError, match="boom"), _disable_use_cache(model):
+        assert model.config.use_cache is False
+        raise RuntimeError("boom")
 
     assert model.config.use_cache is True
 

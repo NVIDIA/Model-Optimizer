@@ -19,7 +19,7 @@ import copy
 import json
 import os
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from warnings import warn
@@ -464,10 +464,8 @@ def _disable_use_cache(model: torch.nn.Module) -> Iterator[None]:
         if had_attr:
             config.use_cache = prev
         else:
-            try:
+            with suppress(AttributeError):
                 delattr(config, "use_cache")
-            except AttributeError:
-                pass
 
 
 def get_max_batch_size(
