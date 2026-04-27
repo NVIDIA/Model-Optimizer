@@ -554,14 +554,14 @@ def get_ttt_msk_func(seq_length, ttt_step):
 @contextlib.contextmanager
 def enable_cp_ttt_patch():
     """Context manager to enable CP TTT patch."""
-    import modelopt.torch.speculative.plugins.transformers
+    import modelopt.torch.speculative.plugins.hf_eagle
 
-    modelopt.torch.speculative.plugins.transformers.ENABLE_CP_TTT_PATCH = True
+    modelopt.torch.speculative.plugins.hf_eagle.ENABLE_CP_TTT_PATCH = True
     with sdpa_kernel([SDPBackend.CUDNN_ATTENTION, SDPBackend.MATH]):
         try:
             yield
         finally:
-            modelopt.torch.speculative.plugins.transformers.ENABLE_CP_TTT_PATCH = False
+            modelopt.torch.speculative.plugins.hf_eagle.ENABLE_CP_TTT_PATCH = False
 
 
 def load_vlm_or_llm(

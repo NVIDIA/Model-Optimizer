@@ -444,7 +444,7 @@ def get_vlm_dataset_dataloader(
             "return_tensors": "pt",
             "padding": True,
         }
-        if max_length is not None:
+        if max_length is not None and "images" not in kwargs:
             kwargs.update({"truncation": True, "max_length": max_length})
 
         enc = processor(**kwargs)
