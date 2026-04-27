@@ -61,7 +61,7 @@ git cherry-pick --continue
 Push the cherry-picks to a new branch and open a PR targeting `release/<VERSION>`. The PR title lists every cherry-picked PR number. The body uses `## Cherry-picked PRs` as the only heading with one `- #<NUM>` bullet per PR — no titles, no links, no extra text.
 
 ```bash
-git checkout -b cherry-picks/release-<VERSION>
+git checkout -B cherry-picks/release-<VERSION>
 git push -u origin cherry-picks/release-<VERSION>
 
 gh pr create \
