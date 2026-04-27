@@ -21,8 +21,8 @@ from functools import partial
 import pytest
 import torch
 from _test_utils.torch.distributed.utils import spawn_multiprocess_job
+from _test_utils.torch.transformers_models import get_tiny_llama
 from safetensors.torch import load_file as safe_load_file
-from transformers import AutoModelForCausalLM, LlamaConfig
 
 from modelopt.torch.puzzletron.anymodel.models.llama.llama_model_descriptor import (
     LlamaModelDescriptor,
@@ -33,16 +33,12 @@ from modelopt.torch.puzzletron.tools.checkpoint_utils_hf import (
     save_checkpoint_from_shards,
 )
 
-from _test_utils.torch.transformers_models import get_tiny_llama
-...
-model = get_tiny_llama(num_hidden_layers=2)
-
 
 class TestSaveCheckpointFromShardsSingleProcess:
     """Tests that run without torch.distributed (world_size=1 path)."""
 
     def test_creates_index_and_subblocks(self, tmp_path):
-        model = _make_tiny_llama()
+        model = get_tiny_llama()
         save_checkpoint_from_shards(model, tmp_path, LlamaModelDescriptor)
 
         index_path = tmp_path / SAFE_WEIGHTS_INDEX_NAME
@@ -57,7 +53,7 @@ class TestSaveCheckpointFromShardsSingleProcess:
         assert len(shard_files) > 0, "no safetensors shard files were saved"
 
     def test_weight_map_covers_all_state_dict_keys(self, tmp_path):
-        model = _make_tiny_llama()
+        model = get_tiny_llama()
         expected_keys = set(model.state_dict().keys())
 
         save_checkpoint_from_shards(model, tmp_path, LlamaModelDescriptor)
@@ -67,7 +63,7 @@ class TestSaveCheckpointFromShardsSingleProcess:
         assert mapped_keys == expected_keys
 
     def test_saved_weights_match_original(self, tmp_path):
-        model = _make_tiny_llama()
+        model = get_tiny_llama()
         original_sd = {k: v.clone().cpu() for k, v in model.state_dict().items()}
 
         save_checkpoint_from_shards(model, tmp_path, LlamaModelDescriptor)
@@ -81,16 +77,16 @@ class TestSaveCheckpointFromShardsSingleProcess:
             torch.testing.assert_close(reloaded_sd[key], original_sd[key])
 
     def test_config_json_saved(self, tmp_path):
-        model = _make_tiny_llama()
+        model = get_tiny_llama()
         save_checkpoint_from_shards(model, tmp_path, LlamaModelDescriptor)
 
         config_path = tmp_path / "config.json"
         assert config_path.exists(), "config.json was not saved"
         cfg = json.loads(config_path.read_text())
-        assert cfg["num_hidden_layers"] == TINY_LLAMA_CONFIG["num_hidden_layers"]
+        assert cfg["num_hidden_layers"] == get_tiny_llama().config.num_hidden_layers
 
     def test_tie_word_embeddings_excluded(self, tmp_path):
-        model = _make_tiny_llama(tie_word_embeddings=True)
+        model = get_tiny_llama(tie_word_embeddings=True)
         save_checkpoint_from_shards(model, tmp_path, LlamaModelDescriptor)
 
         index = json.loads((tmp_path / SAFE_WEIGHTS_INDEX_NAME).read_text())
@@ -102,7 +98,7 @@ class TestSaveCheckpointFromShardsSingleProcess:
         assert "lm_head.weight" not in reloaded_sd
 
     def test_subblock_filenames_follow_descriptor_groups(self, tmp_path):
-        model = _make_tiny_llama()
+        model = get_tiny_llama()
         save_checkpoint_from_shards(model, tmp_path, LlamaModelDescriptor)
 
         index = json.loads((tmp_path / SAFE_WEIGHTS_INDEX_NAME).read_text())
@@ -115,7 +111,7 @@ class TestSaveCheckpointFromShardsSingleProcess:
 
 def _distributed_save_worker(rank, world_size, checkpoint_dir):
     """Worker that shards a model's state dict across ranks and saves."""
-    model = _make_tiny_llama()
+    model = get_tiny_llama()
     full_sd = model.state_dict()
     keys = sorted(full_sd.keys())
     per_rank = len(keys) // world_size
@@ -143,7 +139,7 @@ class TestSaveCheckpointFromShardsMultiProcess:
         assert index_path.exists()
         index = json.loads(index_path.read_text())
 
-        model = _make_tiny_llama()
+        model = get_tiny_llama()
         expected_keys = set(model.state_dict().keys())
         assert set(index["weight_map"].keys()) == expected_keys
 
