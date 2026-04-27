@@ -4,7 +4,7 @@ This directory provides integration between [LLaMA-Factory](https://github.com/h
 
 ## Quick Start
 
-### Basic QAT/QAD Training with FSDP
+### Basic QAT/QAD Training
 
 ```bash
 ./launch_llamafactory.sh llama_config.yaml
@@ -12,24 +12,18 @@ This directory provides integration between [LLaMA-Factory](https://github.com/h
 
 > **_NOTE:_** The `launch_llamafactory.sh` script automatically installs LLaMA Factory if it's not already present in your environment.
 
-In order to train using FSDP2:
-
-```sh
-./launch_llamafactory.sh llama_config.yaml --use_fsdp2 true
-```
-
-By default, the script uses [fsdp1.yaml](../accelerate_config/fsdp1.yaml) and [fsdp2.yaml](../accelerate_config/fsdp2.yaml) for FSDP and FSDP2 training respectively.
+By default, the script uses [fsdp2.yaml](../configs/accelerate/fsdp2.yaml) for distributed training.
 
 **Use Custom FSDP Arguments**:
 
 Pass additional FSDP parameters using the `FSDP_ARGS` environment variable:
 
 ```bash
-FSDP_ARGS="--fsdp_transformer_layer_cls_to_wrap LlamaDecoderLayer" \
+FSDP_ARGS="--fsdp_transformer_layer_cls_to_wrap Qwen3DecoderLayer" \
 ./launch_llamafactory.sh llama_config.yaml
 ```
 
-> **_NOTE:_** The default `fsdp*.yml` files use `LlamaDecoderLayer` as the transformer layer class. If your model uses a different layer class, you can either pass `--fsdp_transformer_layer_cls_to_wrap <your_layer_class>` to the `launch_llamafactory.sh` script or provide a custom FSDP configuration file.
+> **_NOTE:_** The default `fsdp2.yaml` uses `Qwen3DecoderLayer` as the transformer layer class. If your model uses a different layer class (e.g., `LlamaDecoderLayer` for Llama models), pass `--fsdp_transformer_layer_cls_to_wrap <your_layer_class>` to the `launch_llamafactory.sh` script or provide a custom FSDP configuration file. See [Supported Backends](../README.md#supported-backends) for details.
 
 **Custom Config File**:
 
@@ -83,14 +77,14 @@ val_size: 0.1               # Validation split ratio
 
 ### ModelOpt Configuration
 modelopt:
-  quant_cfg: NVFP4_DEFAULT_CFG            # Quantization format
-  calib_size: 1024                        # Calibration dataset size
-  compress: false                         # Enable weight compression
-  distill: false                          # Modify distill to true for QAD
-  teacher_model: /path/to/teacher/model   # For QAD (optional)
+  recipe: general/ptq/nvfp4_default-fp8_kv  # Quantization recipe (built-in or custom path)
+  calib_size: 1024                          # Calibration dataset size
+  compress: false                           # Enable weight compression
+  distill: false                            # Modify distill to true for QAD
+  teacher_model: /path/to/teacher/model     # For QAD (optional)
 ```
 
-> **_NOTE:_** `compress: true` enables weight compression and will by default use [ddp.yaml](../accelerate_config/ddp.yaml).
+> **_NOTE:_** `compress: true` enables weight compression and will by default use [ddp.yaml](../configs/accelerate/ddp.yaml).
 > **_NOTE:_** When training without [cli](#training-using-cli), avoid using deepspeed option in the YAML configuration file.
 
 ## Deployment

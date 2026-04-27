@@ -45,7 +45,7 @@ eval_strategy: steps
 eval_steps: 16
 
 modelopt:
-  quant_cfg: NVFP4_DEFAULT_CFG
+  recipe: general/ptq/nvfp4_default-fp8_kv
   calib_size: 1024
   compress: false
   distill: false

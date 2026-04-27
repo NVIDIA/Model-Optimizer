@@ -1,0 +1,45 @@
+# Default SFT blend for QAT/QAD training.
+# Uses NVIDIA post-training datasets with chat template tokenization.
+# Ratios are relative weights (normalized automatically).
+
+blend_size: 20000
+splits:
+  train: 0.90
+  eval: 0.05
+  test: 0.05
+
+sources:
+  - hf_path: nvidia/Nemotron-SWE-v1
+    split: r2e_gym
+    ratio: 6000
+    category: code
+
+  - hf_path: nvidia/Nemotron-Math-v2
+    split: medium
+    ratio: 2500
+    category: math
+
+  - hf_path: nvidia/Nemotron-Science-v1
+    split: MCQ
+    ratio: 1500
+    category: science_qa
+
+  - hf_path: nvidia/Nemotron-Science-v1
+    split: RQA
+    ratio: 1500
+    category: science_qa
+
+  - hf_path: nvidia/Nemotron-Instruction-Following-Chat-v1
+    split: chat_if
+    ratio: 5000
+    category: chat
+
+  - hf_path: nvidia/Nemotron-Post-Training-Dataset-v2
+    split: chat
+    ratio: 1500
+    category: multilingual
+
+  - hf_path: nvidia/Nemotron-Competitive-Programming-v1
+    split: competitive_coding_python_part00
+    ratio: 1000
+    category: swe_mixed

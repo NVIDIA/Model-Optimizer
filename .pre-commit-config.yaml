@@ -108,7 +108,7 @@ repos:
               examples/llm_eval/lm_eval_hf.py|
               examples/llm_eval/mmlu.py|
               examples/llm_eval/modeling.py|
-              examples/llm_qat/main.py|
+              examples/llm_qat/train.py|
               examples/llm_sparsity/weight_sparsity/finetune.py|
               examples/specdec_bench/specdec_bench/models/specbench_medusa.py|
               examples/speculative_decoding/main.py|
@@ -135,6 +135,21 @@ repos:
       - id: bandit
         args: ["-c", "pyproject.toml", "-q"]
         additional_dependencies: ["bandit[toml]"]
+
+  - repo: local
+    hooks:
+      - id: generate-arguments-md
+        name: Regenerate examples/llm_qat/ARGUMENTS.md
+        entry: bash -c 'python examples/llm_qat/train.py --generate_docs examples/llm_qat/ARGUMENTS.md'
+        language: system
+        files: >-
+          (?x)^(
+            examples/llm_qat/arguments\.py|
+            examples/llm_qat/train\.py|
+            modelopt/torch/opt/plugins/transformers\.py|
+            modelopt/torch/quantization/plugins/transformers_trainer\.py
+          )$
+        pass_filenames: false
 
   - repo: https://github.com/DavidAnson/markdownlint-cli2
     rev: v0.18.1
