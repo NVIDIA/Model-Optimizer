@@ -224,7 +224,6 @@ def save_checkpoint_from_shards(
 
     local_sd = {k: v.cpu() for k, v in model.state_dict().items()}
     if dist_utils.size() > 1:
-    if dist_utils.size() > 1:
         save_err: str | None = None
         if dist_utils.is_master():
             gathered: list[dict] = [None] * dist_utils.size()
