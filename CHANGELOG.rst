@@ -19,6 +19,10 @@ Changelog
 
 - Add FP8 MHA quantization support for vision transformers. Adds an attention-aware ONNX post-processing pass (scale Mul / K-transpose move before Q, Q→DQ insertion on softmax output) in :class:`FP8QuantExporter <modelopt.onnx.export.fp8_exporter.FP8QuantExporter>`, per-instance nested-attention-wrapper skipping in the HF plugin, and ``nn.LayerNorm`` registration in ``QuantModuleRegistry`` so BMM input quantizers and LayerNorm output quantizers defined in FP8_DEFAULT_CFG are honored end-to-end. See `examples/torch_onnx/torch_quant_to_onnx.py <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx/torch_quant_to_onnx.py>`_ for the general timm-model quantize→ONNX workflow.
 
+**Bug Fixes**
+
+- Fix ``nvfp4_awq`` export ``AssertionError: Modules have different quantization formats`` for MoE models (e.g. Qwen3-30B-A3B) when some experts are not exercised by the calibration data. ``awq_lite`` now applies a neutral all-ones ``pre_quant_scale`` to any expert that ends up disabled (no cache-pass tokens, NaN scales, or no search-pass tokens) so its format remains ``nvfp4_awq``, consistent with the rest of the MoE block. A warning is emitted whenever this fallback fires.
+
 0.44 (2026-05-xx)
 ^^^^^^^^^^^^^^^^^
 
