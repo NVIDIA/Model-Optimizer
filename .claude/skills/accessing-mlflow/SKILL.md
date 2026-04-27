@@ -2,8 +2,8 @@
 name: accessing-mlflow
 description: Query and browse evaluation results stored in MLflow. Use when the user wants to look up runs by invocation ID, compare metrics across models, fetch artifacts (configs, logs, results), or set up the MLflow MCP server. ALWAYS triggers on mentions of MLflow, experiment results, run comparison, invocation IDs in the context of results, or MLflow MCP setup.
 license: Apache-2.0
-# Vendored verbatim from NVIDIA NeMo Evaluator (commit 01899f8)
-# https://github.com/NVIDIA-NeMo/Evaluator/tree/01899f89e8f31116efbca56e8f87fbd8513e24ac/packages/nemo-evaluator-launcher/.claude/skills/accessing-mlflow
+# Vendored verbatim from NVIDIA NeMo Evaluator (commit 8fa16b2)
+# https://github.com/NVIDIA-NeMo/Evaluator/tree/8fa16b237d11e213ea665d5bad6b44d393762317/packages/nemo-evaluator-launcher/.claude/skills/accessing-mlflow
 # To re-sync: .claude/scripts/sync-upstream-skills.sh
 # Note: this skill depends on the mlflow-mcp MCP server (https://github.com/kkruglik/mlflow-mcp)
 # configured in the user's Claude Code setup.

@@ -2,8 +2,8 @@
 name: launching-evals
 description: Run, monitor, analyze, and debug LLM evaluations via nemo-evaluator-launcher. Covers running evaluations, checking status and live progress, debugging failed runs, exporting artifacts and logs, and analyzing results. ALWAYS triggers on mentions of running evaluations, checking progress, debugging failed evals, analyzing or analysing runs or results, run directories or artifact paths on clusters, Slurm job issues, invocation IDs, or inspecting logs (client logs, server logs, SSH to cluster, tail logs, grep logs). Do NOT use for creating or modifying evaluation configs.
 license: Apache-2.0
-# Vendored verbatim from NVIDIA NeMo Evaluator (commit 01899f8)
-# https://github.com/NVIDIA-NeMo/Evaluator/tree/01899f89e8f31116efbca56e8f87fbd8513e24ac/packages/nemo-evaluator-launcher/.claude/skills/launching-evals
+# Vendored verbatim from NVIDIA NeMo Evaluator (commit 8fa16b2)
+# https://github.com/NVIDIA-NeMo/Evaluator/tree/8fa16b237d11e213ea665d5bad6b44d393762317/packages/nemo-evaluator-launcher/.claude/skills/launching-evals
 # To re-sync: .claude/scripts/sync-upstream-skills.sh
 ---
 
@@ -37,12 +37,15 @@ uv run nemo-evaluator-launcher info <invocation_id> --copy-logs ./evaluation-res
 # ssh <user>@<hostname> "ls <artifacts_path>/"
 # rsync -avzP <user>@<hostname>:<artifacts_path>/{results.yml,eval_factory_metrics.json,config.yml} ./evaluation-results/<invocation_id>.<job_index>/artifacts/
 
+# Resume a failed/interrupted run (re-sbatches existing run.sub in the original run directory)
+uv run nemo-evaluator-launcher resume <invocation_id>
+
 # List past runs
 uv run nemo-evaluator-launcher ls runs --since 1d   
 
 # List available evaluation tasks (by default, only shows tasks from the latest released containers)
 uv run nemo-evaluator-launcher ls tasks
-uv run nemo-evaluator-launcher ls tasks --from_container gitlab-master.nvidia.com/dl/joc/competitive_evaluation/nvidia-core-evals/ci-llm/long-context-eval:dev-2025-12-16T14-37-1693de28-amd64
+uv run nemo-evaluator-launcher ls tasks --from_container nvcr.io/nvidia/eval-factory/simple-evals:26.03
 ```
 
 ## Workflow
@@ -51,7 +54,7 @@ The complete evaluation workflow is divided into the following steps you should 
 
 1. Create or modify a config using the `nel-assistant` skill. If the user provides a past run, use its `config.yml` artifact as a starting point.
 2. Run the evaluation. See `references/run-evaluation.md` when executing this step.
-3. Check progress (while RUNNING). See `references/check-progress.md` when executing this step.
+3. **Monitor progress (MANDATORY after every `nel run`)**: poll status repeatedly until SUCCESS/FAILED. See `references/check-progress.md`.
 4. Post-run actions (when terminal state reached):
    1. When the evaluation status is `SUCCESS`, analyze the results. See `references/analyze-results.md` when executing this step.
    2. When the evaluation status is `FAILED`, debug the failed run. See `references/debug-failed-runs.md` when executing this step.
@@ -66,4 +69,3 @@ The complete evaluation workflow is divided into the following steps you should 
 - **`payload_modifier` interceptor**: The `params_to_remove` list (e.g. `[max_tokens, max_completion_tokens]`) strips those fields from the outgoing payload, intentionally lifting output length limits so reasoning models can think as long as they need.
 - **Auto-export git workaround**: The export container (`python:3.12-slim`) lacks `git`. When installing the launcher from a git URL, set `auto_export.launcher_install_cmd` to install git first (e.g., `apt-get update -qq && apt-get install -qq -y git && pip install "nemo-evaluator-launcher[all] @ git+...#subdirectory=packages/nemo-evaluator-launcher"`).
 - **Do NOT use `nemo-evaluator-launcher export --dest local`** — it only writes a summary JSON (`processed_results.json`), it does NOT copy actual logs or artifacts despite accepting `--copy_logs` and `--copy-artifacts` flags. `nel info --copy-artifacts` works but copies everything (very slow for large benchmarks). Preferred approach: use `nel info` to discover paths — if local, read directly; if remote, SSH to explore and rsync only what you need. Note that `nel info` prints standard artifacts but benchmarks produce additional artifacts in subdirs — explore to find them.
-

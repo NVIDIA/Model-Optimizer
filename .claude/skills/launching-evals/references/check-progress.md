@@ -8,7 +8,7 @@ Follow the three phases and track your progress in the output.
 
 ## 1. INPUT
 
-- **Invocation ID**: The evaluation to monitor.
+- **Invocation ID**: The evaluation to monitor. After a `nel run` submission, this is printed in the output as `Invocation ID: <id>`.
 
 ## 2. EXPLORE
 

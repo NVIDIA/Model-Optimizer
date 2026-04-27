@@ -34,7 +34,7 @@
 set -euo pipefail
 
 # Pinned upstream commit. Bump this (or pass UPSTREAM_SHA=...) when syncing.
-DEFAULT_SHA="01899f89e8f31116efbca56e8f87fbd8513e24ac"
+DEFAULT_SHA="8fa16b237d11e213ea665d5bad6b44d393762317"
 SHA="${UPSTREAM_SHA:-$DEFAULT_SHA}"
 SHORT_SHA="${SHA:0:7}"
 
