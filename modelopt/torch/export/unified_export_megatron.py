@@ -301,9 +301,7 @@ class GPTModelExporter:
                     trust_remote_code=self.trust_remote_code,
                 )
                 tokenizer.save_pretrained(save_directory)
-            except OSError:
-                pass
-            except TypeError:
+            except (OSError, TypeError, ValueError, ImportError):
                 pass
             try:
                 # Load and save preprocessor config from the original model
