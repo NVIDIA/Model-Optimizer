@@ -247,6 +247,12 @@ def test_llama(command):
             mini_sm=100,
         ),
         *ModelDeployerList(
+            model_id="nvidia/Qwen3-VL-235B-A22B-Instruct-NVFP4",
+            backend=("trtllm", "vllm", "sglang"),
+            tensor_parallel_size=8,
+            mini_sm=100,
+        ),
+        *ModelDeployerList(
             model_id="nvidia/Qwen3-30B-A3B-NVFP4",
             backend=("trtllm", "vllm", "sglang"),
             tensor_parallel_size=4,
@@ -555,6 +561,22 @@ def test_medusa(command):
             backend=("trtllm", "sglang"),
             tensor_parallel_size=8,
             mini_sm=89,
+        ),
+        *ModelDeployerList(
+            base_model="nvidia/Kimi-K2-Thinking-NVFP4",
+            model_id="nvidia/Kimi-K2-Thinking-Eagle3",
+            backend=("trtllm", "sglang"),
+            tensor_parallel_size=8,
+            mini_sm=100,
+            eagle3_one_model=False,
+        ),
+        *ModelDeployerList(
+            base_model="nvidia/Kimi-K2.5-NVFP4",
+            model_id="nvidia/Kimi-K2.5-Thinking-Eagle3",
+            backend=("trtllm", "sglang"),
+            tensor_parallel_size=8,
+            mini_sm=100,
+            eagle3_one_model=False,
         ),
         *ModelDeployerList(
             base_model="Qwen/Qwen3-235B-A22B",
