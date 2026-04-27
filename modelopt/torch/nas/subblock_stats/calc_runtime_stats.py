@@ -11,9 +11,9 @@ from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer, LlamaConfig, LlamaForCausalLM
 
 from modelopt.torch.puzzletron.anymodel.converter import Converter
-from modelopt.torch.puzzletron.anymodel.models.llama import LlamaConverter, LlamaModelDescriptor
+from modelopt.torch.puzzletron.anymodel.models.llama import LlamaModelDescriptor
 from modelopt.torch.puzzletron.anymodel.puzzformer import deci_x_patcher
-from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.block_config import (
+from modelopt.torch.puzzletron.block_config import (
     AttentionConfig,
     BlockConfig,
     FFNConfig,
@@ -58,7 +58,8 @@ def create_benchmark_model(
         },
     )
 
-    block_configs = LlamaConverter.create_block_configs_from_main_config(model_config)
+    for idx, block_config in enumerate(block_configs):
+        block_configs[idx] = block_config.to_dict()
     model_config.block_configs = block_configs
 
     with deci_x_patcher(LlamaModelDescriptor, block_configs):
@@ -148,14 +149,18 @@ def run_vllm_latency_benchmark(model_path: Path, runtime_config: RuntimeConfig):
         "1",
         "--distributed-executor-backend",
         "external_launcher",
+        "--tensor-parallel-size",
+        "1",
+        "--pipeline-parallel-size",
+        "1",
     ]
     os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
-    if os.environ["RANK"] == "0":
-        subprocess.run(cmd)
+    subprocess.run(cmd)
+
     with open(output_json_path) as f:
         vllm_results = json.load(f)
     print(vllm_results)
-    return vllm_results["avg_latency"]
+    return vllm_results["avg_latency"] * 1000  # convert to milliseconds
 
 
 def calc_subblock_runtime(
@@ -189,7 +194,6 @@ def calc_subblock_runtime(
             Path(model_tmpdir),
             num_hidden_layers=runtime_config.repeat_block_n_times + 1,
         )
-
         subblock_total_runtime_ms = run_vllm_latency_benchmark(Path(model_tmpdir), runtime_config)
 
     return subblock_total_runtime_ms
@@ -256,7 +260,9 @@ def calc_runtime_for_subblocks(
             total_runtime_ms = 0.0
         else:
             subblock_total_runtime_ms = calc_subblock_runtime(runtime_config, subblock_config)
-            total_runtime_ms = subblock_total_runtime_ms - baseline_runtime_ms
+            total_runtime_ms = (
+                subblock_total_runtime_ms - baseline_runtime_ms
+            ) / repeat_block_n_times
 
         runtime_by_subblock_dict[subblock_config] = total_runtime_ms
 

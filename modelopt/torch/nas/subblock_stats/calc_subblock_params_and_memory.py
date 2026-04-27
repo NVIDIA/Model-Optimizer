@@ -31,16 +31,16 @@ import numpy as np
 import torch
 from transformers import PretrainedConfig
 
-from ..anymodel.model_descriptor import ModelDescriptor
-from ..block_config import (
+from modelopt.torch.puzzletron.anymodel.model_descriptor import ModelDescriptor
+from modelopt.torch.puzzletron.block_config import (
     AttentionConfig,
     BlockConfig,
     FFNConfig,
     MambaConfig,
     maybe_cast_block_configs,
 )
-from ..tools.checkpoint_utils_hf import init_model_from_config
-from ..utils.misc import (
+from modelopt.torch.puzzletron.tools.checkpoint_utils_hf import init_model_from_config
+from modelopt.torch.puzzletron.utils.misc import (
     EmptyInitOnDevice,
     calculate_kv_dim,
     raise_unknown_subblock_config_error,

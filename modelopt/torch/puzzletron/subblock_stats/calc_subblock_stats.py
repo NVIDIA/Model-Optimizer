@@ -125,9 +125,6 @@ def calculate_subblock_stats(
         )
         runtime_stats_config = calc_subblock_stats_config.get("runtime_stats", {})
 
-        rt_prefill_seq_len = runtime_stats_config.get("prefill_seq_len", prefill_seq_len)
-        rt_generation_seq_len = runtime_stats_config.get("generation_seq_len", generation_seq_len)
-
         runtime_by_subblock_dict, non_block_runtime_ms = calc_runtime_for_subblocks(
             subblock_configs_nolayerindex,
             runtime_stats_config,
@@ -137,8 +134,8 @@ def calculate_subblock_stats(
             master_puzzle_dir,
             teacher_dir,
             synth_dataset_num_requests,
-            rt_prefill_seq_len,
-            rt_generation_seq_len,
+            prefill_seq_len,
+            generation_seq_len,
         )
 
     sorted_subblock_config = sorted(
