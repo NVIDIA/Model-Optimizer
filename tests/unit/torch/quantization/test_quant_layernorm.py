@@ -13,15 +13,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Modules with quantization support."""
+"""Tests for ``torch.nn.LayerNorm`` being registered in ``QuantModuleRegistry``."""
 
-from .modules.quant_activations import *
-from .modules.quant_batchnorm import *
-from .modules.quant_conv import *
-from .modules.quant_instancenorm import *
-from .modules.quant_layernorm import *
-from .modules.quant_linear import *
-from .modules.quant_module import *
-from .modules.quant_pooling import *
-from .modules.quant_rnn import *
-from .modules.tensor_quantizer import *
+import torch
+import torch.nn as nn
+
+from modelopt.torch.quantization.nn import QuantModuleRegistry
+
+
+def test_layernorm_quant_wrapper_is_identity_when_quantizers_disabled():
+    qln = QuantModuleRegistry.convert(nn.LayerNorm(8))
+    qln.input_quantizer.disable()
+    qln.output_quantizer.disable()
+
+    x = torch.randn(2, 8)
+    ref = nn.functional.layer_norm(x, (8,), qln.weight, qln.bias, eps=qln.eps)
+    assert torch.allclose(qln(x), ref, rtol=0, atol=0)

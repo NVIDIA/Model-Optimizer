@@ -13,15 +13,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Modules with quantization support."""
+"""Registers ``torch.nn.LayerNorm`` with ``QuantInputBase``.
 
-from .modules.quant_activations import *
-from .modules.quant_batchnorm import *
-from .modules.quant_conv import *
-from .modules.quant_instancenorm import *
-from .modules.quant_layernorm import *
-from .modules.quant_linear import *
-from .modules.quant_module import *
-from .modules.quant_pooling import *
-from .modules.quant_rnn import *
-from .modules.tensor_quantizer import *
+Enables LayerNorm output quantizers to be honored during quantization. Required for FP8
+attention fusion where a single LayerNorm output QDQ is shared across all downstream
+Q/K/V/FC consumers (instead of repeating it on each input), which enables TRT to fuse DQ
+into the attention MatMul kernels.
+"""
+
+import torch.nn as nn
+
+from .quant_module import QuantInputBase, QuantModuleRegistry
+
+QuantModuleRegistry.register({nn.LayerNorm: "nn.LayerNorm"})(QuantInputBase)
