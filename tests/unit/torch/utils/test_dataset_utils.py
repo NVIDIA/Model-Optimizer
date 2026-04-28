@@ -24,6 +24,7 @@ from modelopt.torch.utils.dataset_utils import (
     _forward_loop,
     _process_batch,
     get_dataset_samples,
+    get_max_batch_size,
 )
 
 
@@ -215,6 +216,44 @@ def test_forward_loop_runs_under_disabled_use_cache():
     _forward_loop(model, loader)
 
     assert seen_use_cache == [False, False, False]
+    assert model.config.use_cache is True
+
+
+def test_get_max_batch_size_disables_use_cache_during_probe(monkeypatch):
+    """Exercise `get_max_batch_size` on CPU by mocking CUDA memory probes.
+
+    Verifies that the probe forward pass runs with `config.use_cache = False`
+    and that the prior value is restored after the function returns.
+    """
+    seen_use_cache: list[bool] = []
+
+    class _Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.config = _Config()
+            self.config.use_cache = True
+            self.device = torch.device("cpu")
+
+        def forward(self, _input):
+            seen_use_cache.append(self.config.use_cache)
+
+    model = _Model()
+
+    total_mem = 100_000_000_000  # 100 GB
+    free_seq = iter([total_mem, total_mem - 1_000_000_000] * 8)  # before/after, with extras
+
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
+    monkeypatch.setattr(
+        torch.cuda, "get_device_properties", lambda _i: type("P", (), {"total_memory": total_mem})()
+    )
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 1)
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda _i: (next(free_seq), total_mem))
+    monkeypatch.setattr(torch.cuda, "max_memory_allocated", lambda _i: 0)
+
+    bsize = get_max_batch_size(model, max_sample_length=4)
+
+    assert isinstance(bsize, int) and bsize >= 1
+    assert seen_use_cache and all(v is False for v in seen_use_cache)
     assert model.config.use_cache is True
 
 
