@@ -480,6 +480,23 @@ def _augment_graph(
             augmented_outputs.add(act_tensor.name)
 
 
+def _remove_augmented_onnx(onnx_path: str, use_external_data_format: bool) -> None:
+    """Remove the augmented ONNX temp file and its external data companion (if any)."""
+    try:
+        os.remove(onnx_path)
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        logger.warning("Failed to remove augmented ONNX file: %s", e)
+    if use_external_data_format:
+        try:
+            os.remove(onnx_path + "_data")
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            logger.warning("Failed to remove augmented ONNX data file: %s", e)
+
+
 def _change_input_type(
     graph: onnx.GraphProto, input_name: str, gemm_io_type: onnx.TensorProto.DataType
 ):
@@ -533,6 +550,7 @@ def _quantize_awq_clip(
     augmented_onnx_file, augmented_onnx_path = tempfile.mkstemp(suffix=".onnx")
     os.close(augmented_onnx_file)
 
+    session = None
     try:
         save_onnx(augmented_model, augmented_onnx_path, use_external_data_format)
         logger.info(f"Saving the model took {time.time() - t} seconds")
@@ -577,7 +595,7 @@ def _quantize_awq_clip(
 
         logger.info(f"Clip search for all weights took {time.time() - t} seconds")
 
-        del session
+        session = None
 
         # Compute quantized weights and scales which are needed for DQ nodes
         t = time.time()
@@ -674,12 +692,10 @@ def _quantize_awq_clip(
         model.ir_version = 10
         logger.info(f"Exporting took {time.time() - t} seconds")
     finally:
-        try:
-            os.remove(augmented_onnx_path)
-            if use_external_data_format:
-                os.remove(augmented_onnx_path + "_data")
-        except OSError:
-            logger.warn("Augmented ONNX model or external data file was not found")
+        if session is not None:
+            session = None
+            gc.collect()
+        _remove_augmented_onnx(augmented_onnx_path, use_external_data_format)
 
     return model
 
@@ -1091,6 +1107,7 @@ def _quantize_awq_lite(
     augmented_onnx_file, augmented_onnx_path = tempfile.mkstemp(suffix=".onnx")
     os.close(augmented_onnx_file)
 
+    session = None
     try:
         save_onnx(augmented_model, augmented_onnx_path, use_external_data_format)
         logger.info(f"Saving the model took {time.time() - t} seconds")
@@ -1180,7 +1197,6 @@ def _quantize_awq_lite(
         logger.info("AWQ scale search" + msg.strip(".") + f" took {time.time() - t} seconds")
 
         if session is not None:
-            del session
             session = None
         if has_cupy:
             np.get_default_memory_pool().free_all_blocks()
@@ -1404,12 +1420,10 @@ def _quantize_awq_lite(
         model.ir_version = 10
         logger.info(f"Exporting took {time.time() - t} seconds")
     finally:
-        try:
-            os.remove(augmented_onnx_path)
-            if use_external_data_format:
-                os.remove(augmented_onnx_path + "_data")
-        except OSError:
-            logger.error("Augmented ONNX model or external data file was not found")
+        if session is not None:
+            session = None
+            gc.collect()
+        _remove_augmented_onnx(augmented_onnx_path, use_external_data_format)
 
     return model
 
