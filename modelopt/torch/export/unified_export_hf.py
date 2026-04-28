@@ -1187,9 +1187,22 @@ def export_hf_checkpoint(
         post_state_dict, hf_quant_config = _export_transformers_checkpoint(model, dtype)
 
         if hf_quant_config is not None:
+            # Remove quantized_layers before saving as it's not compatible with TensorRT-LLM's QuantConfig
+            hf_quant_config_to_save = {
+                k: v for k, v in hf_quant_config.items()
+                if k != "quantized_layers"
+            }
+            if "quantization" in hf_quant_config_to_save:
+                quantization = hf_quant_config_to_save["quantization"]
+                if isinstance(quantization, dict):
+                    hf_quant_config_to_save["quantization"] = {
+                        k: v for k, v in quantization.items()
+                        if k != "quantized_layers"
+                    }
+            
             # Save hf_quant_config.json for backward compatibility
             with open(f"{export_dir}/hf_quant_config.json", "w") as file:
-                json.dump(hf_quant_config, file, indent=4)
+                json.dump(hf_quant_config_to_save, file, indent=4)
 
             hf_quant_config = convert_hf_quant_config_format(hf_quant_config)
 
