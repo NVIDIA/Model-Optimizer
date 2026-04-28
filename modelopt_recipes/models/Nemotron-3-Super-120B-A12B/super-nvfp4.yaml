@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,15 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Mirrors the published nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4 hf_quant_config.json:
+# Approximately mirrors the published nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4 hf_quant_config.json:
 #   - MoE routed experts (mixer.experts.<N>.{up,down}_proj):       NVFP4 W4A4 weight MSE, group_size 16
 #   - MoE shared experts (mixer.shared_experts.{up,down}_proj):    FP8 per-tensor
 #   - Mamba mixer linears (mixer.{in,out}_proj):                   FP8 per-tensor
 #   - KV cache:                                                    FP8
 #   - Attention linears ({q,k,v}_proj):                            BF16 (not quantized)
-#   - MTP head, lm_head, output, mamba conv1d:  BF16 (not quantized)
-#   - Latent MOE (fc1_latent_proj, fc2_latent_proj):            BF16 (not quantized)
-#   - SSM cache:                                    FP32 (can be set to FP16 in VLLM)
+#   - MTP head, lm_head, output, mamba conv1d:                     BF16 (not quantized)
+#   - Latent MOE (fc1_latent_proj, fc2_latent_proj):               BF16 (not quantized)
+#   - SSM cache:                                                   FP32 (can be set to FP16 in VLLM)
 #
 # Calibration: weight MSE with FP8-scale sweep over the 128 e4m3 scale values
 # (NVFP4 weights use static block scales selected by MSE; FP8 per-tensor scales
@@ -35,6 +35,8 @@ quantize:
     method: mse
     fp8_scale_sweep: true
   quant_cfg:
+    # Disable all layers by default so that these layers stay in their original precision: BF16/FP32:
+    # lm_head, output projection, MoE routers/gates, MTP head, SSM state, mamba conv1d.
     - quantizer_name: '*'
       enable: false
 
@@ -97,5 +99,3 @@ quantize:
       cfg:
         num_bits: e4m3
 
-    # Stay BF16: lm_head, output projection, MoE routers/gates, MTP head.
-    # SSM state / mamba conv1d stay FP16.
