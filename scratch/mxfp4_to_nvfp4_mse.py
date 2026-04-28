@@ -18,22 +18,27 @@
 
 """MXFP4 -> NVFP4 conversion MSE experiment.
 
-Compares two algorithms for converting an MXFP4 tensor (block_size=32, E2M1 + E8M0
-power-of-2 scales) to NVFP4 (block_size=16, E2M1 + E4M3 scales + global FP32 scale):
+Compares three algorithms for converting an MXFP4 tensor (block_size=32, E2M1 +
+E8M0 power-of-2 scales) to NVFP4 (block_size=16, E2M1 + E4M3 scales + global FP32
+scale):
 
   Algo 1 (dequant-requant): dequantize MXFP4 to BF16, then quantize to NVFP4 the
-    standard way. This re-buckets nibbles and computes new scales from scratch.
+    standard way. Re-buckets nibbles and computes new scales from scratch.
 
-  Algo 2 (verbatim nibbles): keep the E2M1 nibbles unchanged. Each MXFP4 block of 32
+  Algo 2 (verbatim nibbles): keep E2M1 nibbles unchanged. Each MXFP4 block of 32
     splits into two NVFP4 blocks of 16, both inheriting the same exponent k_j.
     Pick a global scale S = 2^m (integer m) and store the per-block E4M3 scale as
-    2^(k_j - m). E4M3 exactly represents 2^k for k in [-9, 8], so as long as
-    max(k) - min(k) <= 17 there is a valid m and the conversion is exact (zero
-    MSE). For blocks outside that window, snap the per-block exponent to the
-    [-9, 8] boundary; nibbles stay verbatim, and that snap is provably MSE-optimal
-    given the constraint.
+    2^(k_j - m). E4M3 exactly represents 2^k for k in [-9, 8], so when
+    max(k) - min(k) <= 17 there is a valid m and the conversion is exact. For
+    blocks outside that window the per-block exponent snaps to [-9, 8].
 
-Reference for both algos: the MXFP4-dequantized tensor (i.e. what the source
+  Algo 3 (hybrid): apply Algo 2's verbatim path for in-range blocks (zero error)
+    and NVFP4-requant each 16-element half with fixed scale_2 = 2^m for OOR
+    blocks. The closed-form rule m = k_max - 8 is provably optimal: it keeps the
+    highest-magnitude blocks just inside E4M3's window (the side where snap
+    errors are catastrophic), and any in-range block is unaffected by m.
+
+Reference for all algos: the MXFP4-dequantized tensor (what the source
 representation faithfully encodes). MSE is computed against that reference in fp32.
 """
 
@@ -243,17 +248,21 @@ def _algo3_recon_for_m(
     return recon_blocks.view_as(deq_ref).float()
 
 
-def algo3_hybrid_requant(
+def algo3_hybrid(
     mxfp4_qt: MXFP4QTensor,
     e8m0_scale: torch.Tensor,
 ) -> tuple[torch.Tensor, int, int, int]:
     """Hybrid: verbatim for in-range blocks, NVFP4-requant for out-of-range blocks.
 
-    For OOR MXFP4 blocks, dequantize and re-quantize each 16-element half with
-    the fixed global scale 2^m. m is chosen to minimize the actual post-hybrid
-    MSE: brute-force over the same integer range Algo 2 considers, but evaluating
-    the real reconstruction error rather than a closed form (because NVFP4-requant's
-    E4M3 mantissa quantization isn't a clean function of m alone).
+    Closed-form rule: ``m = k_max - 8`` (top-aligned). For every block,
+    ``k_j - m = k_j - k_max + 8`` lands in ``[8 - spread, 8]``. When spread <=17
+    that's a subset of E4M3's exact-power-of-2 window [-9, 8], so all blocks take
+    the verbatim path and the conversion is lossless (MSE = 0). When spread >17
+    the highest-magnitude blocks sit just inside the top of the window — any
+    lower m would NaN them in E4M3 (per-block scale ``amax / (6·2^m)`` exceeds
+    448); any higher m only shrinks in-range coverage on the low side without
+    helping the high side. This rule was confirmed by exhaustive search to match
+    the post-hoc MSE-optimal m on every scenario tested.
     """
     k = e8m0_scale.to(torch.int32) - 127
     original_shape = mxfp4_qt.metadata["shape"]
@@ -265,27 +274,12 @@ def algo3_hybrid_requant(
     k_min = int(nonzero_k.min().item())
     k_max = int(nonzero_k.max().item())
 
+    m = k_max - E4M3_KMAX
     deq_ref = reference_from_mxfp4(mxfp4_qt, e8m0_scale)
-
-    # If everything fits in E4M3, midpoint m gives exact zero-error reconstruction.
     if (k_max - k_min) <= (E4M3_KMAX - E4M3_KMIN):
-        m = (k_max - E4M3_KMAX + k_min - E4M3_KMIN + 1) // 2
-        m = max(k_max - E4M3_KMAX, min(m, k_min - E4M3_KMIN))
         return deq_ref.float(), m, k_min, k_max
-
-    # Otherwise, brute-force search over candidate m and pick best MSE.
-    candidates = list(range(k_min - E4M3_KMAX - 1, k_max - E4M3_KMIN + 2))
-    best_m: int = candidates[0]
-    best_mse: float = float("inf")
-    best_recon: torch.Tensor = _algo3_recon_for_m(deq_ref, e8m0_scale, best_m)
-    for m_cand in candidates:
-        recon = _algo3_recon_for_m(deq_ref, e8m0_scale, m_cand)
-        mse_val = mse(deq_ref, recon)
-        if mse_val < best_mse:
-            best_mse = mse_val
-            best_m = m_cand
-            best_recon = recon
-    return best_recon, best_m, k_min, k_max
+    recon = _algo3_recon_for_m(deq_ref, e8m0_scale, m)
+    return recon, m, k_min, k_max
 
 
 # ---------- Reference and metrics --------------------------------------------
@@ -593,7 +587,7 @@ def run_one(name: str, x: torch.Tensor) -> dict:
     out2_best, m_best, _, _ = algo2_keep_nibbles(mx_qt, e8m0, m_strategy="search")
     mse2_best = mse(ref, out2_best)
 
-    out3, m3, _, _ = algo3_hybrid_requant(mx_qt, e8m0)
+    out3, m3, _, _ = algo3_hybrid(mx_qt, e8m0)
     mse3 = mse(ref, out3)
 
     k_int = (e8m0.to(torch.int32) - 127 - m_best).flatten()
@@ -644,20 +638,19 @@ def main():
     rows_hdr = (
         f"{'scenario':<34}"
         f"{'spread':>7}"
-        f"{'m2/m3':>8}"
-        f"{'oor':>9}"
-        f"{'algo1 MSE':>11}"
-        f"{'algo2_best':>11}"
-        f"{'algo3':>11}"
+        f"{'m3':>5}"
+        f"{'oor':>10}"
+        f"{'algo1 MSE':>12}"
+        f"{'algo2_best':>12}"
+        f"{'algo3':>12}"
         f"{'SNR1':>7}"
-        f"{'SNR2':>7}"
         f"{'SNR3':>7}"
     )
     print(rows_hdr)
     print("-" * len(rows_hdr))
 
-    win = {"algo1": 0, "algo2": 0, "algo3": 0, "tie": 0}
     n_algo3_exact = 0
+    win = {"algo1": 0, "algo2": 0, "algo3": 0, "tie": 0}
     n_total = 0
     all_results = []
     for name, gen in SCENARIOS:
@@ -665,6 +658,8 @@ def main():
         r = run_one(name, x)
         all_results.append(r)
         n_total += 1
+        if r["mse_algo3"] == 0.0:
+            n_algo3_exact += 1
 
         mses = {"algo1": r["mse_algo1"], "algo2": r["mse_algo2_best"], "algo3": r["mse_algo3"]}
         best_v = min(mses.values())
@@ -673,66 +668,64 @@ def main():
             win["tie"] += 1
         else:
             win[winners[0]] += 1
-        if r["mse_algo3"] == 0.0:
-            n_algo3_exact += 1
 
-        oor_str = f"{r['n_oor']:>4}/{r['n_blocks']:<4}"
-        m_str = f"{r['m_best']:>3}/{r['m_algo3']:<3}"
+        oor_str = f"{r['n_oor_algo3']:>4}/{r['n_blocks']:<5}"
         print(
             f"{r['name']:<34}"
             f"{r['spread']:>7}"
-            f"{m_str:>8}"
-            f"{oor_str:>9}"
-            f"{r['mse_algo1']:>11.2e}"
-            f"{r['mse_algo2_best']:>11.2e}"
-            f"{r['mse_algo3']:>11.2e}"
+            f"{r['m_algo3']:>5}"
+            f"{oor_str:>10}"
+            f"{r['mse_algo1']:>12.2e}"
+            f"{r['mse_algo2_best']:>12.2e}"
+            f"{r['mse_algo3']:>12.2e}"
             f"{_fmt_snr(r['snr1']):>7}"
-            f"{_fmt_snr(r['snr2_best']):>7}"
             f"{_fmt_snr(r['snr3']):>7}"
         )
 
     print()
     print(f"Summary across {n_total} scenarios:")
-    print(f"  Algo 3 wins outright: {win['algo3']}")
-    print(f"  Algo 2 wins outright: {win['algo2']}")
-    print(f"  Algo 1 wins outright: {win['algo1']}")
-    print(f"  Tied (≥ 2 algos at same MSE): {win['tie']}")
-    print(f"  Algo 3 is exact (MSE=0): {n_algo3_exact}/{n_total}")
+    print(f"  Algo 3 outright winner:        {win['algo3']}")
+    print(f"  Algo 2 outright winner:        {win['algo2']}")
+    print(f"  Algo 1 outright winner:        {win['algo1']}")
+    print(f"  Tied (>=2 algos at same MSE):  {win['tie']}")
+    print(f"  Algo 3 exact (MSE = 0):        {n_algo3_exact}/{n_total}")
     print()
 
-    # Losses: scenarios where algo3 is strictly worse than algo1 or algo2 (full precision)
-    losses_vs_1 = [r for r in all_results if r["mse_algo3"] > r["mse_algo1"]]
-    losses_vs_2 = [r for r in all_results if r["mse_algo3"] > r["mse_algo2_best"]]
+    # Loss tables — full precision so 0.x% gaps are visible.
+    def _print_losses(title: str, rows: list, lhs_key: str, rhs_key: str, ratio_label: str) -> None:
+        print(title)
+        if not rows:
+            print("  (none)")
+            return
+        print(f"  {'scenario':<34}{lhs_key:>16}{rhs_key:>16}{ratio_label:>14}")
+        for r in rows:
+            ratio = r[lhs_key] / max(r[rhs_key], 1e-300)
+            print(f"  {r['name']:<34}{r[lhs_key]:>16.6e}{r[rhs_key]:>16.6e}{ratio:>14.4f}")
 
-    print("Cases where Algo 3 loses to Algo 1 (mse_algo3 > mse_algo1):")
-    if not losses_vs_1:
-        print("  (none — Algo 3 ≤ Algo 1 in every scenario)")
-    else:
-        print(f"  {'scenario':<34}{'algo1 MSE':>16}{'algo3 MSE':>16}{'ratio (3/1)':>14}")
-        for r in losses_vs_1:
-            ratio = r["mse_algo3"] / max(r["mse_algo1"], 1e-300)
-            print(f"  {r['name']:<34}{r['mse_algo1']:>16.6e}{r['mse_algo3']:>16.6e}{ratio:>14.4f}")
+    losses_3_vs_1 = [r for r in all_results if r["mse_algo3"] > r["mse_algo1"]]
+    losses_3_vs_2 = [r for r in all_results if r["mse_algo3"] > r["mse_algo2_best"]]
+
+    _print_losses(
+        "Cases where Algo 3 loses to Algo 1:",
+        losses_3_vs_1,
+        "mse_algo3",
+        "mse_algo1",
+        "ratio 3/1",
+    )
     print()
-    print("Cases where Algo 3 loses to Algo 2 (mse_algo3 > mse_algo2_best):")
-    if not losses_vs_2:
-        print("  (none — Algo 3 ≤ Algo 2 in every scenario)")
-    else:
-        print(f"  {'scenario':<34}{'algo2 MSE':>16}{'algo3 MSE':>16}{'ratio (3/2)':>14}")
-        for r in losses_vs_2:
-            ratio = r["mse_algo3"] / max(r["mse_algo2_best"], 1e-300)
-            print(
-                f"  {r['name']:<34}"
-                f"{r['mse_algo2_best']:>16.6e}"
-                f"{r['mse_algo3']:>16.6e}"
-                f"{ratio:>14.4f}"
-            )
+    _print_losses(
+        "Cases where Algo 3 loses to Algo 2:",
+        losses_3_vs_2,
+        "mse_algo3",
+        "mse_algo2_best",
+        "ratio 3/2",
+    )
     print()
     print("Notes:")
     print(" - Reference: MXFP4 dequantized tensor.")
-    print(" - m2/m3:   global-scale exponent picked by algo2 / algo3 (may differ).")
-    print(" - oor:     MXFP4 blocks whose (k - m_best) is outside [-9, 8] for algo2.")
-    print(" - algo3:   verbatim where in-range, NVFP4-requant (with fixed scale_2=2^m3)")
-    print("            where out-of-range, with m3 chosen by direct-MSE 1D sweep.")
+    print(" - m3:      global-scale exponent picked by Algo 3 (closed-form: m = k_max - 8).")
+    print(" - oor:     blocks where (k_j - m3) is outside [-9, 8]; these go through")
+    print("            NVFP4 requant. In-range blocks use the verbatim path (zero error).")
 
 
 if __name__ == "__main__":
