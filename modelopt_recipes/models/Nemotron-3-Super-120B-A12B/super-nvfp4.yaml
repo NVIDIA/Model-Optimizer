@@ -91,29 +91,6 @@ quantize:
         num_bits: e4m3
         axis:
 
-    # latent MOE down/up projections) -> FP8 per-tensor.
-    # NOTE: only 3 layers quantized latent MOE to FP8, layers 1, 3, 5
-    - quantizer_name: '*mixer.fc1_latent_proj*weight_quantizer'
-      enable: true
-      cfg:
-        num_bits: e4m3
-        axis:
-    - quantizer_name: '*mixer.fc1_latent_proj*input_quantizer'
-      enable: true
-      cfg:
-        num_bits: e4m3
-        axis:
-    - quantizer_name: '*mixer.fc2_latent_proj*weight_quantizer'
-      enable: true
-      cfg:
-        num_bits: e4m3
-        axis:
-    - quantizer_name: '*mixer.fc2_latent_proj*input_quantizer'
-      enable: true
-      cfg:
-        num_bits: e4m3
-        axis:
-
     # KV cache -> FP8.
     - quantizer_name: '*[kv]_bmm_quantizer'
       enable: true
