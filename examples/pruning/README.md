@@ -20,7 +20,7 @@ This section focuses on applying Model Optimizer's state-of-the-art complementar
 | Support Matrix | View the support matrix to see available pruning algorithms and their compatibility with different models and frameworks | \[[Link](#support-matrix)\] | |
 | Examples | Examples of different pruning methods | \[[Link](#examples)\] | |
 | Pruning Guidelines | Guidelines for choosing how and how much to prune for best results | \[[Link](#pruning-guidelines)\] | |
-| Results | End-to-end distillation results after Minitron and Puzzletron pruning | \[[Link](#results)\] | |
+| Tutorials / Results | End-to-end tutorials for Minitron and Puzzletron pruning | \[[Link](#tutorials--results)\] | |
 | Resources | Extra links to relevant resources | \[[Link](#resources)\] | |
 
 </div>
@@ -300,11 +300,11 @@ After pruning, distillation is required to recover model accuracy. Below are rec
 > [!TIP]
 > If you know the maximum learning rate used during the original training, a good rule of thumb for knowledge distillation is to use **1/5th of that maximum LR** when compressing by ~50%.
 
-## Results
+## Tutorials / Results
 
 End-to-end distillation results with Megatron-Bridge after Minitron and Puzzletron pruning:
 
-- **[Minitron — Nemotron-Nano-9B-v2 → Pruned 7B](minitron/README.md)**: Structured pruning of Nemotron-Nano-9B-v2 to 7B followed by knowledge distillation up to 80B tokens. Achieves near-parity with the official 9B model across pretraining and reasoning benchmarks.
+- **[Minitron — Nemotron-Nano-9B-v2](minitron/README.md)**: End-to-end tutorial of structured pruning for Nemotron-Nano-9B-v2 to 7B followed by knowledge distillation up to 80B tokens, quantization, and vLLM deployment. Achieves near-parity with the official 9B model across popular pretraining and reasoning benchmarks.
 - **[Puzzletron — Qwen3-8B and Llama-3.1-8B-Instruct](puzzletron/README.md)**: MIP-based compression followed by short distillation runs on WikiText-103. Shows MMLU recovery and illustrates the importance of using larger datasets to avoid overfitting.
 
 ## Resources

@@ -127,7 +127,7 @@ When adding new datasets, reduce weights of lower-priority categories proportion
 
 ### 2. Pruning
 
-Run on **1 node × 8x H100** (~1 hour)
+Run on **1 node with 8x H100** (~1 hour)
 
 Non-default arguments: `--hparams_to_skip num_attention_heads` (default: none; attention heads pruning is harder to recover hence skipped), `--seq_length 8192` (default: 4096) since dataset has longer sequences. All other arguments use defaults i.e. we optimize for MMLU (10% subset, 0-shot) for the pruned model (without distillation).
 
@@ -171,6 +171,9 @@ Original hybrid_override_pattern: M-M-M-MM-M-M-M*-M-M-M*-M-M-M-M*-M-M-M-M*-M-MM-
 Pruned hybrid_override_pattern: M-M-M-MM-M-M-M*-M-M-M*-M-M-M-M*-M-M-M-M*-MMMM-M-
 ```
 
+> [!TIP]
+> Here we skip the Knowledge Distillation (KD) step for candidates for simplicity. If you want to find a better pruned model, you can take the top K candidates' `export_config` from the logs above and then export all models separately and perform KD for ~2B tokens on each of them before selecting the best subnet based on your desired metrics.
+
 ---
 
 ### 3. Distillation
@@ -208,7 +211,7 @@ torchrun --nproc_per_node 8 /opt/Model-Optimizer/examples/megatron_bridge/distil
 
 For multi-node Slurm runs, see the [Megatron-Bridge README](../../../megatron_bridge/README.md#slurm-usage) for details.
 
-Distillation saves checkpoints in Megatron distributed format under `<output_dir>/checkpoints/iter_XXXXXXX`. To evaluate, convert a checkpoint to HuggingFace format using the Megatron-Bridge conversion script (see [Megatron Bridge README](../../../megatron_bridge/README.md) for full details):
+Distillation saves checkpoints in Megatron distributed format under `<output_dir>/checkpoints/iter_XXXXXXX`. You can convert any intermediate checkpoint to HuggingFace format using the Megatron-Bridge conversion script (see [Megatron Bridge README](../../../megatron_bridge/README.md) for full details):
 
 ```bash
 python /opt/Megatron-Bridge/examples/conversion/convert_checkpoints.py export \
