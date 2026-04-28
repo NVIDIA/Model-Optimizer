@@ -107,7 +107,7 @@ def is_multimodal_model(model):
     config = model.config
 
     # Check for Nemotron-Parse encoder-decoder architecture
-    architectures = getattr(config, "architectures", [])
+    architectures = getattr(config, "architectures", []) or []
     is_nemotron_parse = any("nemotronparse" in arch.lower() for arch in architectures)
 
     return (

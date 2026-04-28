@@ -586,6 +586,12 @@ def _nvfp4_selective_quant_cfg(
         quant_cfg.append(
             {"quantizer_name": f"{pattern}weight_quantizer", "cfg": copy.deepcopy(quantizer)}
         )
+        # Also match plural ModuleList quantizers used by _QuantFusedExperts
+        # (e.g. gate_up_proj_weight_quantizers.N) for fused MoE architectures.
+        for suffix in ["gate_up_proj_weight_quantizers", "down_proj_weight_quantizers"]:
+            quant_cfg.append(
+                {"quantizer_name": f"{pattern}{suffix}*", "cfg": copy.deepcopy(quantizer)}
+            )
         if not weight_only:
             quant_cfg.append(
                 {"quantizer_name": f"{pattern}input_quantizer", "cfg": copy.deepcopy(quantizer)}
