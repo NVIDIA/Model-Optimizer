@@ -193,7 +193,7 @@ python -m modelopt.torch.utils.plugins.megatron_preprocess_data \
 Omit `--hf_name` to process all subsets, `--hf_split` for all splits, or `--hf_max_samples_per_split` for all samples.
 To quickly test, use [nvidia/Nemotron-Pretraining-Dataset-sample](https://huggingface.co/datasets/nvidia/Nemotron-Pretraining-Dataset-sample).
 
-For **very large datasets** (tens of millions of documents), add `--hf_streaming --hf_max_samples_per_split <num_samples>` to avoid downloading the full dataset — only the rows actually consumed are fetched.
+For very large datasets (tens of millions of documents), or datasets with complex nested message schemas (e.g. `tool_calls`, `function_call` fields) that cause Arrow type-cast errors in non-streaming mode, add `--hf_streaming` to avoid downloading the full dataset — only the rows actually consumed are fetched. Optionally pair with `--hf_max_samples_per_split <num_samples>` to cap the row count; without it streaming still works but re-downloads on every run with no disk cache.
 
 > **Performance note:** Non-streaming mode downloads all Parquet shards once and caches them as Arrow files on disk.
 > Re-runs read from cache and are much faster.

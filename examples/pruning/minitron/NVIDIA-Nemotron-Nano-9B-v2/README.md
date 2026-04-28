@@ -62,7 +62,7 @@ Distillation uses the **30% Pretraining (Code 5, General 20, MATH 5) + 70% Post-
 
 See [examples/dataset/MEGATRON_DATA_PREP.md](../../../dataset/MEGATRON_DATA_PREP.md) for tokenization commands for all datasets used in this blend.
 
-For this experiment: `TOKENIZER=nvidia/NVIDIA-Nemotron-Nano-9B-v2`, `OUTPUT_DIR=tokenized_nano_v2`.
+For this experiment: `TOKENIZER=nvidia/NVIDIA-Nemotron-Nano-9B-v2`, `OUTPUT_DIR=tokenized_nemotron_v2`.
 
 #### Data Blend
 
@@ -70,19 +70,18 @@ For this experiment: `TOKENIZER=nvidia/NVIDIA-Nemotron-Nano-9B-v2`, `OUTPUT_DIR=
 
 ```bash
 DATA_BLEND=" \
-5  tokenized_nano_v2/nvidia--Nemotron-Pretraining-SFT-v1_Nemotron-SFT-Code_train_text_max10000000 \
-20 tokenized_nano_v2/nvidia--Nemotron-Pretraining-SFT-v1_Nemotron-SFT-General_train_text_max10000000 \
-5  tokenized_nano_v2/nvidia--Nemotron-Pretraining-SFT-v1_Nemotron-SFT-MATH_train_text_max10000000 \
-15 tokenized_nano_v2/nvidia--Nemotron-Math-v2_default_high_part00_messages \
-10 tokenized_nano_v2/nvidia--Nemotron-Math-v2_default_high_part01_messages \
-5  tokenized_nano_v2/nvidia--Nemotron-SFT-Math-v3_default_train_messages \
-15 tokenized_nano_v2/competitive_programming_python_00_messages \
-5  tokenized_nano_v2/competitive_programming_cpp_00_messages \
-10 tokenized_nano_v2/nvidia--Nemotron-Post-Training-Dataset-v1_default_stem_messages_max5000000 \
-3  tokenized_nano_v2/MCQ_messages \
-2  tokenized_nano_v2/RQA_messages \
-3  tokenized_nano_v2/reasoning_on_messages \
-2  tokenized_nano_v2/reasoning_off_messages \
+5  tokenized_nemotron_v2/nvidia--Nemotron-Pretraining-SFT-v1_Nemotron-SFT-Code_train_text_max10000000 \
+20 tokenized_nemotron_v2/nvidia--Nemotron-Pretraining-SFT-v1_Nemotron-SFT-General_train_text_max10000000 \
+5  tokenized_nemotron_v2/nvidia--Nemotron-Pretraining-SFT-v1_Nemotron-SFT-MATH_train_text_max10000000 \
+15 tokenized_nemotron_v2/nvidia--Nemotron-Math-v2_default_high_part00_messages \
+15 tokenized_nemotron_v2/nvidia--Nemotron-Math-v2_default_high_part01_messages \
+15 tokenized_nemotron_v2/competitive_programming_python_00_messages \
+5  tokenized_nemotron_v2/competitive_programming_cpp_00_messages \
+10 tokenized_nemotron_v2/nvidia--Nemotron-Post-Training-Dataset-v1_default_stem_messages_max5000000 \
+3  tokenized_nemotron_v2/MCQ_messages \
+2  tokenized_nemotron_v2/RQA_messages \
+3  tokenized_nemotron_v2/reasoning_on_messages \
+2  tokenized_nemotron_v2/reasoning_off_messages \
 "
 ```
 
@@ -92,8 +91,7 @@ DATA_BLEND=" \
 | Nemotron-Pretraining-SFT-v1 / General (10M samples) | 16B | 20 | Upweighted to better close MMLU gap |
 | Nemotron-Pretraining-SFT-v1 / MATH (10M samples) | 12B | 5 | Pretraining math |
 | Nemotron-Math-v2 / high_part00 | 9B | 15 | Hard math reasoning |
-| Nemotron-Math-v2 / high_part01 | 11B | 10 | Hard math reasoning |
-| Nemotron-SFT-Math-v3 | 2B | 5 | Tool-Integrated Reasoning (TIR) traces |
+| Nemotron-Math-v2 / high_part01 | 11B | 15 | Hard math reasoning |
 | Nemotron-SFT-Competitive-Programming-v2 / python_00 | 7B | 15 | Python reasoning traces |
 | Nemotron-SFT-Competitive-Programming-v2 / cpp_00 | 7B | 5 | C++ reasoning traces |
 | Nemotron-Post-Training-Dataset-v1 / stem (5M samples) | 20B | 10 | Broad STEM |

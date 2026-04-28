@@ -5,8 +5,8 @@ Tokenization commands for the Nemotron Pre-Training and Post-Training dataset co
 Two parameters vary by model — set them before running the commands below:
 
 ```bash
-TOKENIZER=nvidia/NVIDIA-Nemotron-Nano-9B-v2   # HuggingFace tokenizer (or local path)
-OUTPUT_DIR=tokenized_nano_v2                   # Output directory for tokenized files
+TOKENIZER=nvidia/NVIDIA-Nemotron-Nano-9B-v2        # HuggingFace tokenizer (or local path)
+OUTPUT_DIR=tokenized_nemotron_v2                   # Output directory for tokenized files
 ```
 
 Output files are written in Megatron binary format (`.bin` / `.idx`). See [examples/dataset/README.md](../dataset/README.md) for full tokenization documentation.
@@ -14,7 +14,10 @@ Output files are written in Megatron binary format (`.bin` / `.idx`). See [examp
 > [!TIP]
 > Token count for a `.bin` file = file size in bytes ÷ 4. This is also printed by the tokenization script on completion.
 
-> Tokenizing each of the datasets below will take anywhere between 10 minutes to 1 hour. You can tokenize all in parallel to speed up the process.
+> [!NOTE]
+> Tokenizing each of the datasets below will take anywhere between 10 minutes to few hours. You can tokenize all in parallel to speed up the process.
+>
+> You may tokenize more datasets or skip some datasets depending on your needs.
 
 ---
 
@@ -77,21 +80,6 @@ for SPLIT in high_part00 high_part01; do
     --max_sequence_length 256_000 \
     --reasoning_content inline
 done
-```
-
-**[nvidia/Nemotron-SFT-Math-v3](https://huggingface.co/datasets/nvidia/Nemotron-SFT-Math-v3)**:
-
-```bash
-python -m modelopt.torch.utils.plugins.megatron_preprocess_data \
-    --hf_dataset nvidia/Nemotron-SFT-Math-v3 \
-    --hf_name default \
-    --hf_split train \
-    --json_keys messages \
-    --tokenizer ${TOKENIZER} \
-    --output_dir ${OUTPUT_DIR} \
-    --workers 96 \
-    --max_sequence_length 256_000 \
-    --reasoning_content inline
 ```
 
 **[nvidia/Nemotron-SFT-Competitive-Programming-v2](https://huggingface.co/datasets/nvidia/Nemotron-SFT-Competitive-Programming-v2)** — stored as raw JSONL on HuggingFace, download before tokenizing:
@@ -157,7 +145,6 @@ nvidia--Nemotron-Pretraining-SFT-v1_Nemotron-SFT-MATH_train_text_max10000000.{bi
 nvidia--Nemotron-Post-Training-Dataset-v1_default_stem_messages_max5000000.{bin,idx}
 nvidia--Nemotron-Math-v2_default_high_part00_messages.{bin,idx}
 nvidia--Nemotron-Math-v2_default_high_part01_messages.{bin,idx}
-nvidia--Nemotron-SFT-Math-v3_default_train_messages.{bin,idx}
 competitive_programming_python_00_messages.{bin,idx}
 competitive_programming_cpp_00_messages.{bin,idx}
 MCQ_messages.{bin,idx}
