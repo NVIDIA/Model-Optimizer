@@ -1,3 +1,21 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# mypy: ignore-errors
+
+"""Runtime statistics calculation for NAS subblock benchmarking via vLLM."""
+
 import json
 import os
 import subprocess
@@ -38,7 +56,7 @@ def create_benchmark_model(
     block_config: BlockConfig | None,
     repeat_block_n_times: int = 10,
 ) -> LlamaForCausalLM:
-
+    """Build a small Llama model with repeated subblocks for latency benchmarking."""
     block_configs = [_make_standard_block_config(hidden_size, num_attention_heads)]
 
     if block_config:
@@ -58,8 +76,8 @@ def create_benchmark_model(
         },
     )
 
-    for idx, block_config in enumerate(block_configs):
-        block_configs[idx] = block_config.to_dict()
+    for idx, bc in enumerate(block_configs):
+        block_configs[idx] = bc.to_dict()
     model_config.block_configs = block_configs
 
     with deci_x_patcher(LlamaModelDescriptor, block_configs):
@@ -72,7 +90,7 @@ def create_benchmark_model(
 
 
 def save_model_as_anymodel(model, output_dir: Path, descriptor, num_hidden_layers: int):
-
+    """Save a model checkpoint in AnyModel subblock-safetensors format."""
     # Save standard model checkpoint (as safetensors, HF format)
     model.save_pretrained(output_dir, safe_serialization=True)
 
@@ -97,7 +115,7 @@ def save_model_as_anymodel(model, output_dir: Path, descriptor, num_hidden_layer
 def save_model(
     model: LlamaForCausalLM, tokenizer_path: Path, output_path: Path, num_hidden_layers: int
 ) -> None:
-
+    """Save model weights as AnyModel and copy the tokenizer to ``output_path``."""
     model.to(dtype=torch.bfloat16).save_pretrained(output_path)
     save_model_as_anymodel(model, output_path, LlamaModelDescriptor, num_hidden_layers)
 
@@ -107,6 +125,8 @@ def save_model(
 
 @dataclass(frozen=True)
 class RuntimeConfig:
+    """Configuration for a vLLM latency benchmark run."""
+
     vocab_size: int
     hidden_size: int
     num_attention_heads: int
@@ -122,7 +142,7 @@ class RuntimeConfig:
 
 
 def run_vllm_latency_benchmark(model_path: Path, runtime_config: RuntimeConfig):
-
+    """Run ``vllm bench latency`` and return the average latency in milliseconds."""
     output_json_path = model_path / "vllm_latency_benchmark.json"
 
     cmd = [
@@ -167,7 +187,7 @@ def calc_subblock_runtime(
     runtime_config: RuntimeConfig,
     subblock_config: SubblockConfig,
 ) -> float:
-
+    """Measure total runtime of a repeated subblock via vLLM latency benchmark."""
     block_config: BlockConfig | None = None
 
     if subblock_config is not None:
@@ -200,7 +220,7 @@ def calc_subblock_runtime(
 
 
 def calc_no_block_runtime(runtime_config: RuntimeConfig) -> float:
-
+    """Estimate the overhead runtime (embedding + LM head) with no decoder blocks."""
     runtime_config1 = replace(runtime_config, repeat_block_n_times=0)
     runtime_config10 = replace(runtime_config, repeat_block_n_times=9)
 
@@ -228,7 +248,7 @@ def calc_runtime_for_subblocks(
     prefill_seq_len: int,
     generation_seq_len: int,
 ) -> tuple[dict[SubblockConfig, float], float]:
-
+    """Benchmark each unique subblock and return per-subblock runtimes and no-block overhead."""
     repeat_block_n_times = 10
     runtime_config = RuntimeConfig(
         vocab_size,
