@@ -25,6 +25,7 @@ from modelopt.torch.quantization.config import (
     INT4_AWQ_CFG,
     NVFP4_DEFAULT_CFG,
     W4A8_AWQ_BETA_CFG,
+    MaxCalibConfig,
     QuantizeConfig,
     find_quant_cfg_entry_by_path,
     need_calibration,
@@ -525,3 +526,35 @@ class TestQuantizeConfigValidators:
             algorithm="max",
         )
         assert len(cfg.quant_cfg) == 2
+
+
+class TestLayerwiseUseSequentialAlias:
+    """`layerwise` accepts the legacy `use_sequential` name via validation_alias.
+
+    Old PTQ checkpoints serialized the field as `use_sequential` before #1251 renamed
+    it to `layerwise`. AliasChoices lets those checkpoints load without a migration
+    validator while still serializing under the current name.
+    """
+
+    def test_use_sequential_true_sets_layerwise(self):
+        cfg = MaxCalibConfig(use_sequential=True)
+        assert cfg.layerwise is True
+
+    def test_use_sequential_false_sets_layerwise(self):
+        cfg = MaxCalibConfig(use_sequential=False)
+        assert cfg.layerwise is False
+
+    def test_layerwise_name_still_accepted(self):
+        cfg = MaxCalibConfig(layerwise=True)
+        assert cfg.layerwise is True
+
+    def test_serializes_under_current_name(self):
+        """Dump must use `layerwise`, not the legacy alias."""
+        dumped = MaxCalibConfig(use_sequential=True).model_dump()
+        assert dumped["layerwise"] is True
+        assert "use_sequential" not in dumped
+
+    def test_unknown_field_still_rejected(self):
+        """extra='forbid' must still reject unrelated unknown fields."""
+        with pytest.raises(ValidationError):
+            MaxCalibConfig(not_a_real_field=True)
