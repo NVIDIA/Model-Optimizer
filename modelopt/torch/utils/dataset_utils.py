@@ -511,7 +511,7 @@ def get_max_batch_size(
             )
             * sample_memory_usage_ratio
         )
-        if mem_diff_per_data_batch <= 0:
+        if mem_diff_per_data_batch <= 0:  # pragma: no cover - GPU memory probe edge case
             print(
                 "Warning: No measurable memory usage found for a single batch. "
                 "Falling back to batch_size=1."
@@ -533,7 +533,7 @@ def get_max_batch_size(
                 try:
                     infer_method(target_input)
                     break
-                except torch.cuda.OutOfMemoryError:
+                except torch.cuda.OutOfMemoryError:  # pragma: no cover - GPU OOM retry path
                     target_data_batch = target_data_batch // 2
 
     # Regulate the data batch target to be 1, 2, 4, 8, 12, ..., capped at 64
