@@ -24,7 +24,7 @@ import warnings
 from functools import partial
 from itertools import product
 from pathlib import Path
-from typing import Iterable, Optional, Type, TypeVar
+from typing import Iterable, Type, TypeVar
 
 import pandas as pd
 import torch
@@ -41,7 +41,7 @@ from ..replacement_library.replacement_utils import parse_layer_replacement
 from ..tools.checkpoint_utils import load_model_config
 from ..tools.logger import mprint
 from ..utils.parsing import format_global_config
-from .calc_subblock_params_and_memory import (
+from modelopt.torch.nas.subblock_stats.calc_subblock_params_and_memory import (
     calc_subblock_active_params,
     calculate_non_block_memory,
     calculate_non_block_params,
@@ -52,7 +52,6 @@ from .calc_subblock_params_and_memory import (
 __all__ = [
     "calculate_subblock_stats",
     "launch_calc_subblock_stats",
-    "add_int8_runtime_estimates",
 ]
 
 # Type variable for dataclasses
@@ -60,10 +59,10 @@ T_DataClass = TypeVar("T_DataClass")
 
 """
 Usage:
-python -m modelopt.torch.puzzletron.subblock_stats.calc_subblock_stats PUZZLE_DIR [ --benchmark_iterations 1000 ]
+python -m modelopt.torch.puzzletron.subblock_stats.calc_subblock_stats PUZZLE_DIR [ --runtime_stats ]
 
---benchmark_iterations=None (the default) means that the code won't use infery to benchmark runtime,
-  only memory stats will be calculated. If you want to benchmark runtime, run inside an infery-llm docker.
+--runtime_stats_enabled=False (the default) means that the code won't benchmark runtime,
+  only memory stats will be calculated. If you want to benchmark runtime, run inside an trtllm docker.
 
 """
 
@@ -82,7 +81,7 @@ def calculate_subblock_stats(
     n_embd: int,
     n_head: int,
     vocab_size: int,
-    benchmark_iterations: Optional[int],
+    runtime_stats_enabled: bool,
     use_cuda_graph: bool,
     weights_dtype: torch.dtype,
     activations_dtype: torch.dtype,
@@ -90,14 +89,12 @@ def calculate_subblock_stats(
     allocate_prefill_query: bool,
     moe_stats_file: str | Path | None = None,
 ) -> dict:
-    is_calc_runtime = benchmark_iterations is not None
-    if is_calc_runtime:
-        raise NotImplementedError("Runtime stats calculation is not implemented yet")
+    if runtime_stats_enabled:
+        from modelopt.torch.nas.subblock_stats.calc_runtime_stats import calc_runtime_for_subblocks
 
     gpu = None if not torch.cuda.is_available() else torch.cuda.get_device_name()
     subblock_stats = {
         "args": dict(
-            is_calc_runtime=is_calc_runtime,
             gpu=gpu,
             batch_size=batch_size,
             prefill_seq_len=prefill_seq_len,
@@ -106,7 +103,7 @@ def calculate_subblock_stats(
             n_embd=n_embd,
             n_head=n_head,
             vocab_size=vocab_size,
-            benchmark_iterations=benchmark_iterations,
+            runtime_stats=runtime_stats_enabled,
             use_cuda_graph=use_cuda_graph,
             weights_dtype=str(weights_dtype),
             activations_dtype=str(activations_dtype),
@@ -116,8 +113,7 @@ def calculate_subblock_stats(
         "subblocks": list(),
     }
     # Compute runtime stats for unique subblocks only
-    if is_calc_runtime:
-        raise NotImplementedError("Runtime stats calculation is not implemented yet")
+    if runtime_stats_enabled:
         subblock_configs_nolayerindex = set(
             [subblock_config["subblock_config"] for subblock_config in subblock_configs]
         )
@@ -127,16 +123,19 @@ def calculate_subblock_stats(
         synth_dataset_num_requests = calc_subblock_stats_config.get("runtime_stats", {}).get(
             "synth_dataset_num_requests", 200
         )
-        backend = calc_subblock_stats_config.get("runtime_stats", {}).get("backend", "trt_torch")
-        runtime_by_subblock_dict, non_block_runtime_ms = calc_runtime_ms_for_subblocks(
+        runtime_stats_config = calc_subblock_stats_config.get("runtime_stats", {})
+
+        runtime_by_subblock_dict, non_block_runtime_ms = calc_runtime_for_subblocks(
             subblock_configs_nolayerindex,
+            runtime_stats_config,
             vocab_size,
             n_embd,
             n_head,
             master_puzzle_dir,
             teacher_dir,
             synth_dataset_num_requests,
-            backend,
+            prefill_seq_len,
+            generation_seq_len,
         )
 
     sorted_subblock_config = sorted(
@@ -144,7 +143,7 @@ def calculate_subblock_stats(
     )
     it = (
         tqdm(sorted_subblock_config, desc="Measuring subblock runtimes")
-        if is_calc_runtime
+        if runtime_stats_enabled
         else sorted_subblock_config
     )
     for subblock_config_indexed in it:
@@ -156,7 +155,7 @@ def calculate_subblock_stats(
             descriptor.get_language_model_config(layer_model_config), parent_layer_indices[0]
         )
 
-        if is_calc_runtime:
+        if runtime_stats_enabled:
             total_runtime_ms = runtime_by_subblock_dict[subblock_config]
             prefill_runtime_ms = None
             decode_runtime_ms = None
@@ -207,25 +206,13 @@ def calculate_subblock_stats(
             }
         )
 
-    if is_calc_runtime:
-        # TODO: fix
-        # from puzzle_tools.calc_subblock_runtime import measure_non_block_runtime_ms
-        # non_block_runtime_ms, embedding_runtime_ms, lm_head_runtime_ms = \
-        #     measure_non_block_runtime_ms(batch_size, prefill_seq_len, generation_seq_len, n_embd, vocab_size,
-        #                                  benchmark_iterations, use_cuda_graph)
-        embedding_runtime_ms, lm_head_runtime_ms = None, None
-    else:
-        non_block_runtime_ms, embedding_runtime_ms, lm_head_runtime_ms = None, None, None
+    if not runtime_stats_enabled:
+        non_block_runtime_ms = None
     non_block_memory = calculate_non_block_memory(n_embd, vocab_size, weights_dtype)
     non_block_params = calculate_non_block_params(n_embd, vocab_size)
 
-    # TODO
-    # the semantics here is wrong why do we refer, prefill_runtime_ms as embedding_runtime_ms and lm_head_runtime_ms as decode_runtime_ms ?
-    # Prefill is the first the user prompt inference, and Decode refer to the next generation process. both processes use all the model layers.
     subblock_stats["non_block"] = {
         "runtime_ms": non_block_runtime_ms,
-        "prefill_runtime_ms": embedding_runtime_ms,
-        "decode_runtime_ms": lm_head_runtime_ms,
         "memory_mib": non_block_memory,
         "num_params": non_block_params,
     }
@@ -256,7 +243,9 @@ def launch_calc_subblock_stats(cfg: DictConfig) -> None:
         num_active_tokens_override=cfg.calc_subblock_stats.get("num_active_tokens_override", None),
         prefill_queue_size=cfg.calc_subblock_stats.prefill_queue_size,
         allocate_prefill_query=cfg.calc_subblock_stats.get("allocate_prefill_query", False),
-        benchmark_iterations=cfg.calc_subblock_stats.get("benchmark_iterations", None),
+        runtime_stats_enabled=cfg.calc_subblock_stats.get("runtime_stats", {}).get(
+            "enabled", False
+        ),
         merge_with_existing_stats=cfg.calc_subblock_stats.merge_with_existing_stats,
         subblock_stats_filename=cfg.calc_subblock_stats.subblock_stats_filename,
         moe_stats_filename=cfg.calc_subblock_stats.moe_stats_filename,
@@ -276,9 +265,7 @@ def calculate_subblock_stats_for_puzzle_dir(
     num_active_tokens_override: int | None = None,
     prefill_queue_size: int = 0,  # it's an infery-llm thing
     allocate_prefill_query: bool = False,
-    benchmark_iterations: (
-        int | None
-    ) = None,  # If set then compute runtime performance statistics. TODO: recommend default value, is 1000 good?
+    runtime_stats_enabled: bool = False,  # Compute runtime statistics.
     merge_with_existing_stats: bool = False,
     subblock_stats_filename: str = "subblock_stats.json",
     moe_stats_filename: str = "moe_stats.json",
@@ -344,8 +331,8 @@ def calculate_subblock_stats_for_puzzle_dir(
         if num_active_tokens_override is not None:
             prefill_seq_len = generation_seq_len = int(num_active_tokens_override / batch_size / 2)
 
-        curr_benchmark_iterations = (
-            benchmark_iterations if weights_dtype == torch.bfloat16 else None
+        curr_runtime_stats_enabled = (
+            runtime_stats_enabled if weights_dtype == torch.bfloat16 else False
         )
 
         curr_subblock_stats = calculate_subblock_stats(
@@ -362,7 +349,7 @@ def calculate_subblock_stats_for_puzzle_dir(
             n_embd=model_hidden_size,
             n_head=lm_config.num_attention_heads,
             vocab_size=lm_config.vocab_size,
-            benchmark_iterations=curr_benchmark_iterations,
+            runtime_stats_enabled=curr_runtime_stats_enabled,
             use_cuda_graph=True,
             weights_dtype=weights_dtype,
             activations_dtype=activations_dtype,
@@ -377,8 +364,6 @@ def calculate_subblock_stats_for_puzzle_dir(
             )
 
         subblock_stats.append(curr_subblock_stats)
-
-    # TODO fix: add_int8_runtime_estimates(subblock_stats)
 
     json_dump(subblock_stats, subblock_stats_file)
 
@@ -503,65 +488,3 @@ def _dataclass_from_dict(
     raise ValueError(f"_dataclass_from_dict: unrecognized {type(d)=} {d=}")
 
 
-def add_int8_runtime_estimates(subblock_stats: list[dict]) -> None:
-    for curr_subblock_stats in subblock_stats:
-        args = curr_subblock_stats["args"]
-        if args["weights_dtype"] == "torch.int8":
-            assert args["activations_dtype"] == "torch.int8"
-            ffn_factor = 0.5
-            attention_factor = 0.5 if args["kv_cache_dtype"] == "torch.int8" else 0.8
-
-            bf16_stats = _find_corresponding_bf16_stats(args, subblock_stats)
-            if bf16_stats is not None:
-                curr_subblocks = curr_subblock_stats["subblocks"] + [
-                    curr_subblock_stats["non_block"]
-                ]
-                bf16_subblocks = bf16_stats["subblocks"] + [bf16_stats["non_block"]]
-                for curr_subblock, bf16_subblock in zip(curr_subblocks, bf16_subblocks):
-                    assert curr_subblock.get("subblock_config", None) == bf16_subblock.get(
-                        "subblock_config", None
-                    )
-                    is_attention = False
-                    if (subblock_config := curr_subblock.get("subblock_config")) is not None:
-                        if hasattr(subblock_config, "__dataclass_fields__"):
-                            subblock_config = dataclasses.asdict(subblock_config)
-                        is_attention = subblock_config.get("num_key_value_heads", None) is not None
-                    runtime_factor = attention_factor if is_attention else ffn_factor
-                    for stat_name, stat_value in bf16_subblock.items():
-                        if "runtime" in stat_name:
-                            curr_subblock[stat_name] = stat_value * runtime_factor
-
-
-def _find_corresponding_bf16_stats(args: dict, subblock_stats: list[dict]) -> dict | None:
-    scenario_keys = [
-        "batch_size",
-        "prefill_seq_len",
-        "generation_seq_len",
-        "prefill_queue_size",
-        "gpu",
-        "n_embd",
-        "n_head",
-        "vocab_size",
-    ]
-    corresponding_bf16_args = {
-        **{k: v for k, v in args.items() if k in scenario_keys},
-        "is_calc_runtime": True,
-        "weights_dtype": "torch.bfloat16",
-        "activations_dtype": "torch.bfloat16",
-        "kv_cache_dtype": "torch.bfloat16",
-    }
-    matching_bf16_stats = [
-        stats
-        for stats in subblock_stats
-        if all(
-            [
-                stats["args"][key] == corresponding_bf16_args[key]
-                for key in corresponding_bf16_args.keys()
-            ]
-        )
-    ]
-    if len(matching_bf16_stats) == 0:
-        return None
-    if len(matching_bf16_stats) == 1:
-        return matching_bf16_stats[0]
-    raise ValueError(f"Found more than 1 matching bf16 stats for {args=}")
