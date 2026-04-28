@@ -72,6 +72,11 @@ has_mcore = False
 with import_plugin("megatron"):
     from megatron.core.models.gpt import GPTModel
     from megatron.core.models.mamba import MambaModel
+
+    try:
+        from megatron.core.models.hybrid.hybrid_model import HybridModel
+    except ImportError:
+        HybridModel = MambaModel
     from megatron.core.models.multimodal.llava_model import LLaVAModel
     from megatron.core.parallel_state import (
         get_pipeline_model_parallel_rank,
@@ -121,7 +126,7 @@ class GPTModelExporter:
         moe_router_dtype: str | None = None,
     ):
         """Create a GPTModel exporter instance."""
-        if not isinstance(model, (GPTModel, MambaModel, LLaVAModel)):
+        if not isinstance(model, (GPTModel, MambaModel, HybridModel, LLaVAModel)):
             raise ValueError("Input to GPTModelExport must be a megatron.core.models.GPTModel!")
 
         self._state_dict = OrderedDict()
