@@ -520,8 +520,15 @@ class GPTModelExporter:
                         layer.mlp.shared_experts.linear_fc2, layer_id
                     )
                 if hasattr(layer.mlp.experts, "local_experts"):
+                    # With expert parallelism, local_experts are indexed 0..N-1 per rank,
+                    # but the global expert ID needs the EP rank offset.
+                    from megatron.core.parallel_state import get_expert_model_parallel_rank, get_expert_model_parallel_world_size
+                    ep_rank = get_expert_model_parallel_rank()
+                    ep_size = get_expert_model_parallel_world_size()
+                    num_local = len(layer.mlp.experts.local_experts)
                     if not self.rules.get("use_packed_local_experts", False):
-                        for expert_id, expert in enumerate(layer.mlp.experts.local_experts):
+                        for local_id, expert in enumerate(layer.mlp.experts.local_experts):
+                            expert_id = ep_rank * num_local + local_id
                             self.rules["local_experts.linear_fc1"](
                                 expert.linear_fc1, layer_id, expert_id
                             )
