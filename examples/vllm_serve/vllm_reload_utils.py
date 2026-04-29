@@ -20,7 +20,6 @@ from collections.abc import Callable
 from typing import Any
 
 import torch
-from vllm.distributed.parallel_state import get_tp_group
 
 from modelopt.torch.export.plugins.vllm_fakequant_hf import (
     infer_quantizer_prefix_remap,
@@ -38,6 +37,7 @@ from modelopt.torch.quantization.conversion import (
 )
 from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
 from modelopt.torch.quantization.utils import is_quantized
+from vllm.distributed.parallel_state import get_tp_group
 
 
 def _union_quantizer_keys_across_ranks(local_quantizer_keys: list[str]) -> set[str]:

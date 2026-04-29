@@ -20,11 +20,11 @@ from typing import Any
 import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from vllm.sampling_params import SamplingParams
-from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, SchedulerOutput
 
 import modelopt.torch.quantization as mtq
 from modelopt.recipe import ModelOptPTQRecipe, load_recipe
+from vllm.sampling_params import SamplingParams
+from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, SchedulerOutput
 
 
 def _create_new_data_cls(data_cls, **kwargs):
