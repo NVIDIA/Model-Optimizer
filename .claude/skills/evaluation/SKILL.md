@@ -40,7 +40,13 @@ Test that `nel` is installed with `nel --version`. If not, instruct the user to 
 
 If the user already has a config file (e.g., "run this config", "evaluate with my-config.yaml"), skip to Step 8. Optionally review it for common issues (missing `???` values, quantization flags) before running.
 
-**Shortcut: use a pre-built recipe.** If the user asks for a specific benchmark (e.g., "run MMLU-Pro", "evaluate with AIME"), check `recipes/tasks/` (relative to this skill's directory) for a matching recipe. Available: mmlu, mmlu_pro, gpqa, aime2025, livecodebench, ifbench, scicode. If found, skip Steps 2 and 5 (config generation and task confirmation), but still do Step 3 (auto-detect model settings from checkpoint) and Step 4 (fill in required `???` values from user input), then proceed to Step 7.5/8.
+**Shortcut: use pre-built task snippets.** If the user asks for a specific benchmark (e.g., "run MMLU-Pro", "evaluate with AIME"), check `recipes/tasks/` (relative to this skill's directory) for a matching task snippet. Available: mmlu_pro, gpqa, aime2025, livecodebench, ifbench, scicode. Task snippets contain only the task-specific config (name, params, repeats) — not the full NEL config. To use them:
+
+1. Read the task snippet(s) the user wants
+2. Use `recipes/examples/example_eval.yaml` as the base config template
+3. Replace the `tasks:` section with the selected snippet(s)
+4. Do Step 3 (auto-detect model settings from checkpoint) and Step 4 (fill in `???` values)
+5. Proceed to Step 7.5/8
 
 **Step 2: Build the base config file**
 
