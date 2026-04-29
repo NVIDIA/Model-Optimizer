@@ -243,7 +243,13 @@ ssh <host> "grep -E '^\s*machine\s+' ~/.config/enroot/.credentials 2>/dev/null"
 
 Print the following commands to the user. Propose to execute them in order to confirm the config works as expected before the full run.
 
-**Important**: Export required environment variables based on your config. If any tokens or keys are missing (e.g. `HF_TOKEN`, `NGC_API_KEY`, `api_key_name` from the config), ask the user to put them in a `.env` file in the project root so you can run `set -a && source .env && set +a` (or equivalent) before executing `nel run` commands.
+**Important**: Export required environment variables based on your config. If any tokens or keys are missing, point the user to `recipes/env.example` — it lists all possible keys with notes on which tasks need them. Ask the user to copy it, fill in their keys, and source it:
+
+```bash
+cp recipes/env.example .env
+# Edit .env with your keys
+set -a && source .env && set +a
+```
 
 ```bash
 # If using pre_cmd or post_cmd (review pre_cmd content before enabling — it runs arbitrary commands):
