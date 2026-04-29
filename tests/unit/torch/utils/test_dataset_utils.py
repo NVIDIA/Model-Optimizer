@@ -392,6 +392,26 @@ class TestLocalJsonlLoading:
         with pytest.raises(ValueError, match="Cannot auto-detect format"):
             get_dataset_samples(path, num_samples=1)
 
+    def test_sparse_recognized_column_falls_through_to_text(self, tmp_path):
+        """Sparse ``prompt`` column (None on most rows) must not shadow ``text``.
+
+        HF's schema unification fills missing values with None across heterogeneous
+        rows, so a row with only ``text`` ends up exposing ``prompt=None`` in the
+        unified schema.  Auto-detect must skip null-valued recognized columns
+        rather than crash on ``"\\n".join([None])``.
+        """
+        pytest.importorskip("datasets")
+        rows = [
+            {"text": "row a"},
+            {"text": "row b", "prompt": "ignored", "completion": "stuff"},
+            {"text": "row c"},
+        ]
+        path = _write_jsonl(tmp_path / "sparse.jsonl", rows)
+        samples = get_dataset_samples(path, num_samples=3)
+        # text-only rows fall through to ``text``; the prompt-bearing row uses
+        # the prompt+completion path.
+        assert samples == ["row a", "ignored\nstuff", "row c"]
+
     def test_legacy_text_fallback_on_hf_builder_failure(self, tmp_path):
         """If the HF json builder raises, fall back to the legacy text-field reader."""
         pytest.importorskip("datasets")
