@@ -1080,18 +1080,6 @@ def quantize_main(
                 quant_cfg["quant_cfg"].append({"quantizer_name": pattern, "enable": False})
                 print(f"Excluding MTP layer from quantization: {pattern}")
 
-        # Apply user-requested per-module exclusions (--exclude_modules).
-        if args.exclude_modules:
-            quant_cfg = copy.deepcopy(quant_cfg)
-            for mod in args.exclude_modules:
-                quant_cfg["quant_cfg"].append(
-                    {"quantizer_name": f"*{mod}*.weight_quantizer", "enable": False}
-                )
-                quant_cfg["quant_cfg"].append(
-                    {"quantizer_name": f"*{mod}*.input_quantizer", "enable": False}
-                )
-                print(f"Excluding module from quantization: {mod}")
-
         # Use constant amax for KV quantizers when a cast format is selected.
         # Recipes are authoritative for KV cache config (including use_constant_amax),
         # so skip this post-hoc override when --recipe is used; rely on the YAML instead
