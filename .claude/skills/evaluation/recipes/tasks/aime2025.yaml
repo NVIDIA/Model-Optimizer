@@ -5,6 +5,10 @@
 # Run time: Long (reasoning models generate lengthy thinking traces)
 # Repeats: 16
 #
+# Note: The AA variant (simple_evals.AIME_2025) requires JUDGE_API_KEY
+# for LLM-based scoring. This NeMo Skills variant uses symbolic scoring
+# and does not require external API keys.
+#
 # Usage:
 #   nel run --config recipes/tasks/aime2025.yaml \
 #     -o deployment.checkpoint_path=/path/to/checkpoint \
