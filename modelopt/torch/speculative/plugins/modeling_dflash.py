@@ -20,6 +20,8 @@ Draft model components use Qwen3 (MLP, RMSNorm, RotaryEmbedding) from
 The draft architecture is independent of the target model.
 """
 
+from dataclasses import dataclass
+
 import torch
 from torch import nn
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
@@ -30,7 +32,27 @@ from transformers.models.qwen3.modeling_qwen3 import (
 )
 from transformers.models.qwen3.modeling_qwen3 import rotate_half as _rotate_half
 
-__all__ = ["DFlashModule", "build_target_layer_ids"]
+__all__ = ["DFlashBaseModelOutput", "DFlashModule", "build_target_layer_ids"]
+
+
+@dataclass
+class DFlashBaseModelOutput:
+    """Output container for base model forward pass in DFlash training."""
+
+    target_hidden: torch.Tensor  # concatenated hidden states from target layers [B, seq, N*H]
+    logits: torch.Tensor | None = None  # base model logits [B, seq, vocab]
+
+    @classmethod
+    def from_offline_dict(cls, d: dict):
+        """Construct from a dict of pre-computed base model outputs (offline training).
+
+        ``aux_hidden_states`` is required — missing it raises KeyError at the entry point
+        rather than producing a cryptic failure deeper in the forward.
+        """
+        return cls(
+            target_hidden=d["aux_hidden_states"],
+            logits=d.get("base_model_logits"),
+        )
 
 
 def build_target_layer_ids(num_target_layers, num_draft_layers):

@@ -39,6 +39,7 @@ with import_plugin("transformers", verbose=False):
 has_mcore = False
 with import_plugin("megatron"):
     from megatron.core.parallel_state import (
+        get_expert_model_parallel_rank,
         get_expert_tensor_parallel_world_size,
         get_tensor_model_parallel_world_size,
     )
@@ -294,9 +295,13 @@ class GPTModelImporter:
         assert module.num_gemms == num_local_experts, (
             "num_gemms must be equal to num_local_experts in TEGroupedMLP"
         )
-        for expert_id in range(init_expert_id, init_expert_id + num_local_experts):
-            tensor = self._get_safetensor(prefix.format(expert_id) + ".weight")
-            state_dict[f"weight{expert_id}"] = tensor
+        # init_expert_id is the global index of this rank's first local expert.
+        # TEGroupedMLP stores weights as weight0..weight{num_local-1} locally, so we
+        # map global expert_id -> local slot (expert_id - init_expert_id).
+        for local_id in range(num_local_experts):
+            global_expert_id = init_expert_id + local_id
+            tensor = self._get_safetensor(prefix.format(global_expert_id) + ".weight")
+            state_dict[f"weight{local_id}"] = tensor
             # TODO handle weight_scale
 
         module.load_state_dict(state_dict)
@@ -653,10 +658,13 @@ class GPTModelImporter:
                         layer_pbar.set_description("Importing MoE grouped local experts")
                         num_local_experts = experts.num_local_experts
                         num_global_experts = experts.config.num_moe_experts
-                        assert num_local_experts == num_global_experts, (
-                            "num_local_experts must be equal to num_global_experts during MoE import"
+                        assert num_global_experts % num_local_experts == 0, (
+                            "num_global_experts must be divisible by num_local_experts "
+                            "during MoE import"
                         )
-                        init_index = 0
+                        # Each EP rank owns a contiguous slice of global experts:
+                        # [ep_rank * num_local_experts, (ep_rank + 1) * num_local_experts).
+                        init_index = get_expert_model_parallel_rank() * num_local_experts
 
                         self.rules["experts.linear_fc1"](
                             experts.linear_fc1,

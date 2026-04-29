@@ -1270,11 +1270,30 @@ def awq_lite(
 
     for name, module in model.named_modules():
         if hasattr(module, "awq_lite"):
-            if module.awq_lite.num_cache_steps == 0:
-                # Uncalibrated expert: max calibrate weights and apply neutral
-                # (all-ones) pre_quant_scale for export consistency.
-                # NOTE: ones_scale must be registered OUTSIDE enable_weight_access_and_writeback
+            # Flag modules whose search pass missed them despite cache hits, so
+            # they fall through to the neutral-scale path below.
+            if module.awq_lite.num_cache_steps > 0 and module.awq_lite.num_search_steps == 0:
+                module.awq_lite.is_enabled = False
+                warnings.warn(
+                    "awq_lite: Calling `forward_loop(model)` the second time did not forward"
+                    f" data through the {name}. Please provide a valid `forward_loop` function"
+                    " that can be used to forward data through the model many times."
+                )
+
+            if not module.awq_lite.is_enabled:
+                # Expert is disabled — uncalibrated (no cache-pass tokens, set
+                # at the pre-search pass above), had NaN in act/weight scales,
+                # or saw no search-pass tokens. Max-calibrate weights and apply
+                # a neutral (all-ones) pre_quant_scale so the exporter sees a
+                # consistent nvfp4_awq format across all expert linears in an
+                # MoE group.
+                # NOTE: ones-scale must be registered OUTSIDE enable_weight_access_and_writeback
                 # because HF accelerate post_forward drops newly-registered submodule buffers.
+                warnings.warn(
+                    f"awq_lite: Forcing pre_quant_scale=1 for {name} because the expert "
+                    "was not properly exercised during calibration. This may degrade accuracy; "
+                    "consider increasing calibration size or using a more diverse dataset."
+                )
                 with enable_weight_access_and_writeback(module, model, name_to_module):
                     max_calibrate(module, lambda module: module.weight_quantizer(module.weight))
                     w_shape, w_dtype, w_device = (
@@ -1289,13 +1308,6 @@ def awq_lite(
                     device=w_device,
                 )
             else:
-                if module.awq_lite.num_search_steps == 0:
-                    module.awq_lite.is_enabled = False
-                    warnings.warn(
-                        "awq_lite: Calling `forward_loop(model)` the second time did not forward"
-                        f" data through the {name}. Please provide a valid `forward_loop` function"
-                        " that can be used to forward data through the model many times."
-                    )
                 with enable_weight_access_and_writeback(module, model, name_to_module):
                     postprocess(module, name)
 
