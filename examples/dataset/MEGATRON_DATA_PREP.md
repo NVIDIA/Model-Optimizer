@@ -9,7 +9,7 @@ TOKENIZER=nvidia/NVIDIA-Nemotron-Nano-9B-v2        # HuggingFace tokenizer (or l
 OUTPUT_DIR=tokenized_nemotron_v2                   # Output directory for tokenized files
 ```
 
-Output files are written in Megatron binary format (`.bin` / `.idx`). See [examples/dataset/README.md](../dataset/README.md) for full tokenization documentation.
+Output files are written in Megatron binary format (`.bin` / `.idx`). See [examples/dataset/README.md](./README.md#tokenizing-for-megatron-frameworks) for full tokenization documentation.
 
 > [!TIP]
 > Token count for a `.bin` file = file size in bytes ÷ 4. This is also printed by the tokenization script on completion.

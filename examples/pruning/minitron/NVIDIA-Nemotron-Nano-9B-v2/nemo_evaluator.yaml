@@ -7,7 +7,7 @@
 #   export HF_TOKEN=<your_huggingface_token>
 #   export API_KEY=<your_api_key>
 #   export INFERENCE_API_KEY=<your_inference_api_key>
-#   export JUDGE_API_KEY=${INFERENCE_API_KEY}   # used for MATH500 judge
+#   export JUDGE_API_KEY=<your_judge_api_key>
 #   export OPENAI_CLIENT_ID=<your_openai_client_id>
 #   export OPENAI_CLIENT_SECRET=<your_openai_client_secret>
 #   export SLURM_JOB_DIR=<path_to_slurm_job_output_dir>
@@ -100,7 +100,7 @@ evaluation:
   env_vars:
     API_KEY: API_KEY
     HF_TOKEN: HF_TOKEN
-    JUDGE_API_KEY: INFERENCE_API_KEY
+    JUDGE_API_KEY: JUDGE_API_KEY
     INFERENCE_API_KEY: INFERENCE_API_KEY
     OPENAI_CLIENT_ID: OPENAI_CLIENT_ID
     OPENAI_CLIENT_SECRET: OPENAI_CLIENT_SECRET

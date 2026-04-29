@@ -212,10 +212,11 @@ the final answer). Use `--reasoning_content` to control how it is handled:
 
 ```bash
 python -m modelopt.torch.utils.plugins.megatron_preprocess_data \
-    --hf_dataset nvidia/Nemotron-Post-Training-Dataset-v3 \
+    --hf_dataset nvidia/Nemotron-Math-v2 \
+    --hf_split high_part00 \
     --json_keys messages \
-    --tokenizer Qwen/Qwen3-0.6B \
-    --output_dir tokenized_qwen3 \
+    --tokenizer nvidia/NVIDIA-Nemotron-Nano-9B-v2 \
+    --output_dir tokenized_nemotron_v2 \
     --workers 32 \
     --reasoning_content inline
 ```

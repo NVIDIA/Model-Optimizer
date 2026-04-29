@@ -8,7 +8,7 @@ All experiments prune Nemotron-Nano-9B-v2 → 7B and distill with teacher = Nemo
 
 Pure Nemotron-Pretraining-SFT-v1 data only (no post-training reasoning traces).
 
-| Tokens | MMLU | MMLU Pro | GPQA | LCB v6 | AIME 2025 | Math 500 | IFEval | SciCode |
+| Tokens | MMLU | MMLU Pro | GPQA Diamond | LCB v6 | AIME 2025 | Math 500 | IFEval | SciCode |
 |---|---|---|---|---|---|---|---|---|
 | 19B | 72.7 | 70.5 | 53.9 | 58.8 | 63.4 | 94.4 | 57.9 | 19.2 |
 | 56B | 73.3 | 71.9 | 54.3 | 62.0 | 63.8 | 95.0 | 58.7 | 17.9 |
@@ -21,7 +21,7 @@ Pure Nemotron-Pretraining-SFT-v1 data only (no post-training reasoning traces).
 
 70% post-training only (no pretraining data), Nemotron-v1/v2 blend.
 
-| Tokens | MMLU | MMLU Pro | GPQA | LCB v6 | AIME 2025 | Math 500 | IFEval | SciCode |
+| Tokens | MMLU | MMLU Pro | GPQA Diamond | LCB v6 | AIME 2025 | Math 500 | IFEval | SciCode |
 |---|---|---|---|---|---|---|---|---|
 | 2.5B | 71.0 | 69.3 | 52.6 | 54.8 | 58.2 | 94.1 | 51.7 | 14.4 |
 | 5B | 70.8 | 70.7 | 53.6 | 57.2 | 63.8 | 94.1 | 50.5 | 14.2 |
@@ -36,7 +36,7 @@ Pure Nemotron-Pretraining-SFT-v1 data only (no post-training reasoning traces).
 
 30% Nemotron-Pretraining-SFT-v1 + 70% Nemotron-v1/v2 post-training data.
 
-| Tokens | MMLU | MMLU Pro | GPQA | LCB v6 | AIME 2025 | Math 500 | IFEval | SciCode |
+| Tokens | MMLU | MMLU Pro | GPQA Diamond | LCB v6 | AIME 2025 | Math 500 | IFEval | SciCode |
 |---|---|---|---|---|---|---|---|---|
 | 2.5B | 71.9 | 68.9 | 49.8 | 56.4 | 55.3 | 93.3 | 58.2 | 14.6 |
 | 5B | — | — | — | — | — | — | — | — |
@@ -54,7 +54,7 @@ Pure Nemotron-Pretraining-SFT-v1 data only (no post-training reasoning traces).
 
 Refined v3 blend: dropped exercism/text2sql, added Nemotron-Math-v2 part01, boosted Math to 30% total.
 
-| Tokens | MMLU | MMLU Pro | GPQA | LCB v6 | AIME 2025 | Math 500 | IFEval | SciCode |
+| Tokens | MMLU | MMLU Pro | GPQA Diamond | LCB v6 | AIME 2025 | Math 500 | IFEval | SciCode |
 |---|---|---|---|---|---|---|---|---|
 | 2.5B | 70.5 | 69.0 | 51.2 | 59.1 | 62.9 | 94.3 | 62.2 | 11.6 |
 | 5B | 71.0 | 69.8 | 53.0 | 59.4 | 65.0 | 94.4 | 66.8 | 20.3 |

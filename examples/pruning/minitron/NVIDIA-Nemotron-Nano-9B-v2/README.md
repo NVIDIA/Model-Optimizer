@@ -5,7 +5,7 @@ End-to-end optimization of [Nemotron-Nano-9B-v2](https://huggingface.co/nvidia/N
 1. **[Data Preparation](#1-data-preparation)** — tokenizing the training blend for distillation
 2. **[Pruning](#2-pruning)** — Minitron structured pruning from 9B to 7B
 3. **[Distillation](#3-distillation)** — recovering accuracy via Megatron-Bridge knowledge distillation (up to 80B tokens)
-4. **[Evaluation](#4-evaluation)** — benchmarking with NeMo Evaluator across MMLU Pro, GPQA, AIME, and more
+4. **[Evaluation](#4-evaluation)** — benchmarking with NeMo Evaluator across MMLU Pro, GPQA Diamond, AIME, and more
 5. **[Quantization](#5-quantization)** — FP8 PTQ on the distilled checkpoint using ModelOpt's `examples/llm_ptq/hf_ptq.py` script
 6. **[vLLM Inference Benchmarking](#6-vllm-inference-benchmarking)** — throughput comparison of BF16 vs FP8 on a single H100
 
@@ -15,7 +15,7 @@ End-to-end optimization of [Nemotron-Nano-9B-v2](https://huggingface.co/nvidia/N
 
 ![Benchmark Recovery During Knowledge Distillation](figures/learning_curves.png)
 
-| Model | MMLU | MMLU Pro | GPQA | LiveCodeBench v6 | AIME 2025 | Math 500 | IFEval | SciCode (Subtask) | Average |
+| Model | MMLU | MMLU Pro | GPQA Diamond | LiveCodeBench v6 | AIME 2025 | Math 500 | IFEval | SciCode (Subtask) | Average |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | Pruned 7B (no distillation) | 67.8 | 11.9 | 17.7 | 1.4 | 0.3 | 6.0 | 41.8 | 0.1 | 18.4 |
 | Pruned 7B + distill 2.5B tokens (400 iters) | 70.7 | 68.4 | 52.7 | 57.0 | 63.0 | 93.7 | 63.2 | 11.6 | 60.0 |
@@ -38,7 +38,7 @@ End-to-end optimization of [Nemotron-Nano-9B-v2](https://huggingface.co/nvidia/N
 | --- | --- | --- |
 | MMLU | −2.5 | −3.8 |
 | MMLU Pro | −1.9 | −3.0 |
-| GPQA | **+0.8** | −2.1 |
+| GPQA Diamond | **+0.8** | −2.1 |
 | LiveCodeBench v6 | −1.8 | −2.2 |
 | AIME 2025 | −1.2 | −2.9 |
 | Math 500 | −0.1 | −1.0 |
@@ -243,7 +243,7 @@ pip install "nemo-evaluator-launcher[all]==0.1.90"
 export HF_TOKEN=<your_huggingface_token>
 export API_KEY=<your_api_key>
 export INFERENCE_API_KEY=<your_inference_api_key>
-export JUDGE_API_KEY=${INFERENCE_API_KEY}
+export JUDGE_API_KEY=<your_judge_api_key>
 export OPENAI_CLIENT_ID=<your_openai_client_id>
 export OPENAI_CLIENT_SECRET=<your_openai_client_secret>
 export SLURM_JOB_DIR=<path_to_slurm_job_output_dir>
@@ -259,7 +259,7 @@ nemo-evaluator-launcher run --config nemo_evaluator.yaml
 | --- | --- | --- |
 | MMLU | [lm-evaluation-harness](https://github.com/EleutherAI/lm-evaluation-harness) (5-shot) | `mmlu` |
 | MMLU Pro | NeMo Evaluator | `mmlu-pro_pass_at_1_symbolic_correct` |
-| GPQA | NeMo Evaluator | `gpqa_pass_at_1_symbolic_correct` |
+| GPQA Diamond | NeMo Evaluator | `gpqa_pass_at_1_symbolic_correct` |
 | LiveCodeBench v6 | NeMo Evaluator | `livecodebench_pass_at_1_accuracy` |
 | AIME 2025 | NeMo Evaluator | `aime25_pass_at_1_symbolic_correct` |
 | Math 500 | NeMo Evaluator | `AA_math_test_500_score_micro_avg_of_5` |
