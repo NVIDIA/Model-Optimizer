@@ -68,6 +68,9 @@ qwen3_causal_lm_export: dict[str, CustomModuleMapping] = {
     "router": NameRemapping("model.layers.{}.mlp.gate."),
     "local_experts.linear_fc1": GatedMLPSlicing("model.layers.{}.mlp.experts.{}."),
     "local_experts.linear_fc2": NameRemapping("model.layers.{}.mlp.experts.{}.down_proj."),
+    # GatedDeltaNet (linear attention) — no QKV slicing, direct name remap
+    "gated_delta_net_in_proj": NameRemapping("model.layers.{}.linear_attn.in_proj."),
+    "gated_delta_net_out_norm": NameRemapping("model.layers.{}.linear_attn.out_norm."),
 }
 
 qwen25_causal_lm_import: dict[str, CustomModuleMapping] = {

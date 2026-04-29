@@ -465,10 +465,9 @@ class GPTModelExporter:
             elif "GatedDeltaNet" in str(type(layer.self_attention)):
                 # GatedDeltaNet (linear attention) has in_proj, out_norm, out_proj
                 # instead of linear_qkv, q_layernorm, etc.
+                # Use dedicated GDN rules if available (no QKV slicing), else skip.
                 if "gated_delta_net_in_proj" in self.rules:
                     self.rules["gated_delta_net_in_proj"](layer.self_attention.in_proj, layer_id)
-                else:
-                    self.rules["linear_qkv"](layer.self_attention.in_proj, layer_id)
                 if hasattr(layer.self_attention, "out_norm") and not isinstance(
                     layer.self_attention.out_norm, IdentityOp
                 ):
