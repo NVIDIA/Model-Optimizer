@@ -234,9 +234,12 @@ def get_dataset_samples(
             For ``.jsonl`` paths, the file is first loaded via HuggingFace's ``json``
             builder and routed through the same auto-preprocess path as unregistered HF
             datasets so chat / prompt / text columns are handled consistently with live
-            HF datasets.  If that path fails (e.g. PyArrow schema unification across
-            heterogeneous rows), it falls back to a line-by-line reader that extracts
-            the legacy ``text`` field for backward compatibility.
+            HF datasets.  If that path fails on JSON parsing or PyArrow schema
+            unification, it falls back to a line-by-line reader that extracts the
+            legacy ``text`` field for backward compatibility.  The fallback is also
+            used when the optional ``datasets`` package isn't installed, preserving
+            legacy plain-``.jsonl`` workflows in base installations.  Local JSONL
+            files only expose the ``train`` split; passing any other ``split`` raises.
         num_samples: Number of samples to load from the dataset.
         apply_chat_template: Whether to apply the chat template to the samples
             (if supported by the dataset).  For unregistered datasets with a
@@ -251,13 +254,33 @@ def get_dataset_samples(
     Returns:
         Samples: The list of samples.
     """
-    from datasets import load_dataset
-
     # Local JSONL: load via HF's ``json`` builder and route through the same
     # auto-preprocess path as unregistered HF datasets so chat / prompt / text
     # columns are handled consistently with a downloaded HF dataset.  Never
     # matches ``SUPPORTED_DATASET_CONFIG``.
     is_jsonl = dataset_name.endswith(".jsonl") and os.path.isfile(dataset_name)
+
+    # HF's file-based builders only expose ``train`` for the ``data_files`` form
+    # we use, so any other split is a caller error.  Surface it up front rather
+    # than letting ``load_dataset`` fail and silently dropping into the
+    # text-field fallback (which would ignore the requested split).
+    if is_jsonl and split is not None:
+        invalid = [s for s in _normalize_splits(split) if s != "train"]
+        if invalid:
+            raise ValueError(
+                f"Local JSONL files only expose the 'train' split, got {invalid}. "
+                "Either omit ``split`` or pass ``split='train'``."
+            )
+
+    # Lazy ``datasets`` import: legacy ``.jsonl`` workflows historically didn't
+    # require the optional ``datasets`` extra, so keep them working with just
+    # the stdlib reader when the package isn't installed.
+    try:
+        from datasets import load_dataset
+    except ImportError:
+        if is_jsonl:
+            return get_jsonl_text_samples(dataset_name, num_samples, key="text")
+        raise
 
     local_dataset_path = None
     if os.path.exists(dataset_name):  # Local path
@@ -316,6 +339,25 @@ def get_dataset_samples(
         def _preprocess(sample: dict) -> str:
             return _auto_preprocess_sample(sample, dataset_name, tokenizer)
 
+    # Narrow the legacy fallback to JSON-parsing / Arrow schema failures.  Any
+    # other error (split-not-found, IO, OOM, ...) should surface to the caller
+    # rather than be hidden by the text-field reader.  Imported lazily because
+    # the exact module paths vary across versions; an empty tuple is a valid
+    # ``except`` target that catches nothing if neither is importable.
+    fallback_types: tuple[type[BaseException], ...] = ()
+    try:
+        from datasets.exceptions import DatasetGenerationError
+
+        fallback_types += (DatasetGenerationError,)
+    except ImportError:
+        pass
+    try:
+        from pyarrow.lib import ArrowInvalid
+
+        fallback_types += (ArrowInvalid,)
+    except ImportError:
+        pass
+
     # load_dataset does not support a list of splits while streaming, so load each separately.
     print(f"Loading dataset with {config=} and {splits=}")
     try:
@@ -334,26 +376,23 @@ def get_dataset_samples(
                     samples.append(text)
 
         return samples
-    except Exception as e:
+    except fallback_types as e:
         # Backward-compat fallback: legacy callers passed JSONL files whose only usable
-        # field is ``text``.  If the HF ``json`` builder or auto-detect can't handle the
-        # file (schema inference error, unrecognized columns, etc.), fall back to a
-        # line-by-line reader that pulls the ``text`` field directly.
-        if is_jsonl:
-            assert local_dataset_path is not None  # is_jsonl implies the path exists
-            try:
-                fallback_samples = get_jsonl_text_samples(
-                    local_dataset_path, num_samples, key="text"
-                )
-            except Exception:
-                # Fallback can't help either — surface the original HF error.
-                raise e from None
-            warn(
-                f"Failed to load {local_dataset_path} via the HF 'json' builder "
-                f"({type(e).__name__}: {e}); fell back to legacy text-field reader."
-            )
-            return fallback_samples
-        raise
+        # field is ``text``.  If the HF ``json`` builder fails on schema inference or
+        # JSON parsing, fall back to a line-by-line reader that pulls ``text`` directly.
+        if not is_jsonl:
+            raise
+        assert local_dataset_path is not None  # is_jsonl implies the path exists
+        try:
+            fallback_samples = get_jsonl_text_samples(local_dataset_path, num_samples, key="text")
+        except Exception:
+            # Fallback can't help either — surface the original HF error.
+            raise e from None
+        warn(
+            f"Failed to load {local_dataset_path} via the HF 'json' builder "
+            f"({type(e).__name__}: {e}); fell back to legacy text-field reader."
+        )
+        return fallback_samples
 
 
 class _CustomDataset(torch.utils.data.Dataset):
