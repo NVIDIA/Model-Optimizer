@@ -286,6 +286,14 @@ class NVFP4QTensor(BaseQuantizedTensor):
                 input, block_size, weights_scaling_factor_2
             )
 
+        # Handle empty tensors (e.g. from TP/EP sharding where this rank has no slice)
+        if input.numel() == 0:
+            return (
+                cls(input_shape, input_dtype, input),
+                torch.zeros(*input.shape[:-1], device=input.device, dtype=torch.float8_e4m3fn),
+                torch.zeros(1, device=input.device, dtype=torch.float32),
+            )
+
         # Reshape the weight and scale factors
         original_shape = input.shape
         input = input.view((*tuple(input.shape[:-1]), -1, block_size))
