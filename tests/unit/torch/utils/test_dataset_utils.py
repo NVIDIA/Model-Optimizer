@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 import torch
@@ -24,6 +24,7 @@ from modelopt.torch.utils.dataset_utils import (
     _forward_loop,
     _process_batch,
     get_dataset_samples,
+    get_max_batch_size,
 )
 
 
@@ -229,6 +230,54 @@ def test_disable_use_cache_restores_on_exception():
         raise RuntimeError("boom")
 
     assert model.config.use_cache is True
+
+
+def test_get_max_batch_size_oom_retry_shrinks_input():
+    """On OOM, target_input must be re-expanded to the halved batch size.
+
+    Regression test: previously target_input was built once and never shrunk,
+    so OOM retries kept feeding the same too-large tensor to infer_method.
+    """
+    seq_len = 8
+    sample_input = torch.ones((1, seq_len), dtype=torch.int32)
+
+    seen_batch_sizes: list[int] = []
+
+    def fake_forward(x):
+        seen_batch_sizes.append(x.shape[0])
+        # First call is the single-batch probe — succeeds.
+        # Second call is the target-batch attempt — OOMs.
+        # Third call (after halving) — succeeds.
+        if len(seen_batch_sizes) == 2:
+            raise torch.cuda.OutOfMemoryError
+
+    model = Mock(spec=torch.nn.Module)
+    model.forward = fake_forward
+    model.__class__.__name__ = "DummyModel"  # not enc/dec
+
+    free_before = 1000
+    free_after = 900  # 100 bytes per batch -> target = 1000/100 = 10
+
+    device_props = Mock()
+    device_props.total_memory = 10**12
+
+    with (
+        patch("torch.cuda.empty_cache"),
+        patch("torch.cuda.get_device_properties", return_value=device_props),
+        patch("torch.cuda.device_count", return_value=1),
+        patch("torch.cuda.mem_get_info", side_effect=[(free_before, 0), (free_after, 0)]),
+        patch("torch.cuda.max_memory_allocated", side_effect=[0, 0]),
+    ):
+        result = get_max_batch_size(
+            model,
+            max_sample_length=seq_len,
+            sample_input_single_batch=sample_input,
+        )
+
+    # Forward calls: probe(1), retry-at-target(10), retry-after-halve(5)
+    assert seen_batch_sizes == [1, 10, 5]
+    # Final batch is 5 -> regulated to 4 (5 // 4 * 4 = 4).
+    assert result == 4
 
 
 @pytest.mark.parametrize("test_local_path", [True, False])
