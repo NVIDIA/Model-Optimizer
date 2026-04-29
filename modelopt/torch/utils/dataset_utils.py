@@ -178,12 +178,11 @@ def _auto_preprocess_sample(
         ValueError: If the tokenizer is missing/incompatible for chat-format datasets,
             or if no recognized column is found.
     """
-    # Truthy ``sample.get`` checks instead of ``key in sample``: HF's schema
-    # unification fills missing values with ``None`` across heterogeneous JSONL
-    # rows, so a row that only has ``text`` would still expose ``prompt=None``
-    # in the unified schema.  Falling through on null/empty lets such rows
-    # match the next column (e.g. ``text``) instead of crashing on
-    # ``"\n".join([None])``.
+    # ``is not None`` (rather than ``key in sample`` or truthy ``.get(...)``)
+    # so we skip HF's schema-unification ``None`` padding while still treating
+    # legitimate empty strings as valid values (the caller filters falsy
+    # samples downstream).  Chat keys still use truthy checks because an empty
+    # ``messages``/``conversations`` list isn't meaningful to template.
     chat_key = next((k for k in ("messages", "conversations") if sample.get(k)), None)
     if chat_key is not None:
         if tokenizer is None or not hasattr(tokenizer, "apply_chat_template"):
@@ -197,17 +196,19 @@ def _auto_preprocess_sample(
             kwargs["tools"] = tools
         return tokenizer.apply_chat_template(sample[chat_key], tokenize=False, **kwargs)
 
-    if sample.get("prompt"):
+    if sample.get("prompt") is not None:
         parts = [sample["prompt"]]
-        parts.extend(sample[k] for k in ("completion", "response", "output") if sample.get(k))
+        parts.extend(
+            sample[k] for k in ("completion", "response", "output") if sample.get(k) is not None
+        )
         return "\n".join(parts)
 
-    if sample.get("text"):
+    if sample.get("text") is not None:
         return sample["text"]
 
-    if sample.get("input"):
+    if sample.get("input") is not None:
         parts = [sample["input"]]
-        if sample.get("output"):
+        if sample.get("output") is not None:
             parts.append(sample["output"])
         return "\n".join(parts)
 

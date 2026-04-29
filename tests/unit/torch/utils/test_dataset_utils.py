@@ -412,6 +412,26 @@ class TestLocalJsonlLoading:
         # the prompt+completion path.
         assert samples == ["row a", "ignored\nstuff", "row c"]
 
+    def test_empty_string_columns_treated_as_present(self, tmp_path):
+        """Empty strings are valid values, not absent columns.
+
+        ``prompt=""`` should still take the prompt path (caller filters empty
+        results downstream), and ``text=""`` rows must not crash the load —
+        only ``None`` should fall through to the next column.
+        """
+        pytest.importorskip("datasets")
+        rows = [
+            {"text": ""},  # blank but valid; caller drops empty samples
+            {"prompt": "", "completion": "from-completion"},
+            {"text": "kept"},
+        ]
+        path = _write_jsonl(tmp_path / "blank.jsonl", rows)
+        samples = get_dataset_samples(path, num_samples=3)
+        # ``{"text": ""}`` produces "" and is filtered by the caller.
+        # ``{"prompt": "", "completion": "from-completion"}`` joins to
+        # "\nfrom-completion".  ``{"text": "kept"}`` is kept verbatim.
+        assert samples == ["\nfrom-completion", "kept"]
+
     def test_legacy_text_fallback_on_hf_builder_failure(self, tmp_path):
         """If the HF json builder raises, fall back to the legacy text-field reader."""
         pytest.importorskip("datasets")
