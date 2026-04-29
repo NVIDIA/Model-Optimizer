@@ -73,7 +73,7 @@ with import_plugin("megatron"):
     from megatron.core.models.gpt import GPTModel
     from megatron.core.models.mamba import MambaModel
     from megatron.core.models.multimodal.llava_model import LLaVAModel
-    from megatron.core.models.gpt.hybrid_model import HybridModel
+    from megatron.core.models.hybrid.hybrid_model import HybridModel
     from megatron.bridge.models.qwen_vl import Qwen3VLModel
     from megatron.core.parallel_state import (
         get_pipeline_model_parallel_rank,
