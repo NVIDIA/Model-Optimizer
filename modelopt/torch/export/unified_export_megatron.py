@@ -395,6 +395,8 @@ class GPTModelExporter:
 
     def _get_state_dict(self):
         model = self.model
+        import time as _time
+        _start = _time.time()
 
         # Embedding
         if hasattr(model, "embedding"):
