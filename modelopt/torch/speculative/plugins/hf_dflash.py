@@ -166,8 +166,10 @@ class HFDFlashModel(DFlashModel):
             else base_config.num_hidden_layers
         )
         num_draft_layers = self.dflash_config.num_hidden_layers
-        self.target_layer_ids = build_target_layer_ids(num_target_layers, num_draft_layers)
+        # self.target_layer_ids = build_target_layer_ids(num_target_layers, num_draft_layers)
+        self.target_layer_ids = [1,12,24,35,47,58]
         self.dflash_config.target_layer_ids = self.target_layer_ids
+
 
         # mask_token_id: validated by DFlashConfig, auto-detected from tokenizer context
         self.mask_token_id = config.dflash_mask_token_id
