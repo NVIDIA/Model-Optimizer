@@ -442,6 +442,19 @@ class GPTModelExporter:
         return getattr(module, "layer_norm_weight", None)
 
     def _get_transformer_layer_state_dict(self, layer, layer_id):
+        if layer_id == 0:
+            print(f"[diag] layer.mlp type: {type(layer.mlp).__name__}", flush=True)
+            print(f"[diag] mlp attrs: {[a for a in dir(layer.mlp) if not a.startswith('_')][:25]}", flush=True)
+            print(f"[diag] hasattr mlp.experts: {hasattr(layer.mlp, 'experts')}", flush=True)
+            if hasattr(layer.mlp, 'experts'):
+                print(f"[diag] experts type: {type(layer.mlp.experts).__name__}", flush=True)
+                print(f"[diag] hasattr local_experts: {hasattr(layer.mlp.experts, 'local_experts')}", flush=True)
+                if hasattr(layer.mlp.experts, 'local_experts'):
+                    print(f"[diag] num local_experts: {len(layer.mlp.experts.local_experts)}", flush=True)
+            print(f"[diag] hasattr shared_experts: {hasattr(layer.mlp, 'shared_experts')}", flush=True)
+            if hasattr(layer.mlp, 'config'):
+                print(f"[diag] mlp.config.num_experts: {getattr(layer.mlp.config, 'num_experts', 'N/A')}", flush=True)
+
         if not isinstance(layer.input_layernorm, IdentityOp):
             self.rules["input_layernorm"](layer.input_layernorm, layer_id)
         elif (
