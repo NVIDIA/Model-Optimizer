@@ -1020,9 +1020,12 @@ class GPTModelExporter:
         gate_proj_prefix = prefix + gate_proj_name + "."
         up_proj_prefix = prefix + up_proj_name + "."
 
-        ffn_hidden_size = module.config.ffn_hidden_size
-        gate_proj_weight = weight[:ffn_hidden_size, :]
-        up_proj_weight = weight[ffn_hidden_size:, :]
+        # Derive split point from actual weight shape instead of config.ffn_hidden_size.
+        # For MoE models, ffn_hidden_size may not match the per-expert intermediate size.
+        gated_split = weight.shape[0] // 2
+        print(f"[PATCH] GatedMLPSlicing: actual_rows={weight.shape[0]}, gated_split={gated_split}, config.ffn_hidden_size={module.config.ffn_hidden_size}")
+        gate_proj_weight = weight[:gated_split, :]
+        up_proj_weight = weight[gated_split:, :]
 
         if weight_scale is None:
             self._state_dict[gate_proj_prefix + "weight"] = gate_proj_weight
@@ -1032,8 +1035,8 @@ class GPTModelExporter:
                 gate_proj_weight_scale = weight_scale.detach().clone()
                 up_proj_weight_scale = weight_scale.detach().clone()
             else:
-                gate_proj_weight_scale = weight_scale[:ffn_hidden_size]
-                up_proj_weight_scale = weight_scale[ffn_hidden_size:]
+                gate_proj_weight_scale = weight_scale[:gated_split]
+                up_proj_weight_scale = weight_scale[gated_split:]
             self._state_dict[gate_proj_prefix + "weight"] = to_quantized_weight(
                 gate_proj_weight,
                 gate_proj_weight_scale,
@@ -1157,10 +1160,13 @@ class GPTModelExporter:
                 delattr(module, "weight")
 
         state_dict = module.state_dict()
-        ffn_hidden_size = module.config.ffn_hidden_size
-        # For gated linear unit, ffn_hidden_size is already doubled (2 * moe_intermediate_size).
-        # We need the un-doubled per-projection size for the gate/up split.
-        gated_split = ffn_hidden_size // 2
+        # Derive gated_split from actual weight shape instead of config.ffn_hidden_size.
+        # For MoE models, ffn_hidden_size may not reflect the per-expert intermediate size.
+        # The fused gate_up weight is [2 * intermediate_size, hidden_size], so split at midpoint.
+        first_weight_key = f"weight0"
+        actual_rows = state_dict[first_weight_key].shape[0]
+        gated_split = actual_rows // 2
+        print(f"[PATCH] GroupedGatedMLPSlicing: actual_rows={actual_rows}, gated_split={gated_split}, config.ffn_hidden_size={module.config.ffn_hidden_size}")
 
         for local_expert_id in range(num_experts):
             expert_id = expert_offset + local_expert_id
