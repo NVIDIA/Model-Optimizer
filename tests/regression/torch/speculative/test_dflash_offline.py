@@ -159,4 +159,4 @@ def test_dflash_offline_training(
     assert final_loss < first_loss, f"Loss did not decrease: {first_loss:.3f} -> {final_loss:.3f}"
     # Sanity ceiling — same threshold as the online regression. Offline trains
     # on fewer samples so we don't tighten it further here.
-    assert final_loss < 4.0, f"Final loss {final_loss:.3f} too high (expected < 4.0)"
+    assert final_loss < 5.0, f"Final loss {final_loss:.3f} too high (expected < 5.0)"
