@@ -529,6 +529,7 @@ def get_model(
     trust_remote_code=False,
     use_seq_device_map=False,
     attn_implementation=None,
+    experts_implementation=None,
 ):
     print(f"Initializing model from {ckpt_path}")
 
@@ -561,6 +562,8 @@ def get_model(
         raise RuntimeError(f"Failed to load model configuration from {ckpt_path}") from e
     if attn_implementation is not None:
         config_kwargs["attn_implementation"] = attn_implementation
+    if experts_implementation is not None:
+        config_kwargs["experts_implementation"] = experts_implementation
 
     # Note: Forcibly converting the model precision between bf16 and fp16 may introduce accuracy drop
     model_kwargs = config_kwargs.copy()
@@ -581,6 +584,15 @@ def get_model(
             # If we use sequential, set max_memory limit to ensure that the model does not occupy the full GPU
             max_memory = get_max_memory()
             max_memory = {key: value * gpu_mem_percentage for key, value in max_memory.items()}
+            # Include CPU RAM so that layers exceeding the GPU budget offload to CPU instead
+            # of crashing. This also installs accelerate offload hooks, enabling
+            # persistent_materialization() during layerwise calibration.
+            try:
+                import psutil
+
+                max_memory["cpu"] = psutil.virtual_memory().available
+            except ImportError:
+                pass  # psutil unavailable; CPU offload disabled, model must fit on GPU
             model_kwargs["max_memory"] = max_memory
 
         if hf_config.model_type == "bart":

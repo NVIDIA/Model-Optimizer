@@ -88,10 +88,12 @@ def _export_fused_experts(module: nn.Module, dtype: torch.dtype) -> None:
             ):
                 amax = w_quantizer._amax
                 amax_dim0 = amax.shape[0]
-                if fused_total % amax_dim0 == 0:
+                if amax_dim0 % fused_total == 0:
                     slice_start = fused_start * amax_dim0 // fused_total
                     slice_end = (fused_start + weight_slice.shape[0]) * amax_dim0 // fused_total
-                    w_quantizer.amax = amax[slice_start:slice_end].contiguous()
+                    # Bypass amax.setter (which forbids shape changes); w_quantizer is a
+                    # deepcopy for gate/up so mutating it is safe.
+                    w_quantizer._amax = amax[slice_start:slice_end].contiguous()
                 else:
                     warnings.warn(
                         f"Expert {idx} {proj_name}: fused amax dim0 ({amax_dim0}) does not "

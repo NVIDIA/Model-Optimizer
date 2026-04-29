@@ -409,6 +409,7 @@ def load_model(args: argparse.Namespace):
             trust_remote_code=args.trust_remote_code,
             use_seq_device_map=args.use_seq_device_map,
             attn_implementation=args.attn_implementation,
+            experts_implementation=getattr(args, "experts_implementation", None),
         )
     else:
         assert args.qformat in QUANT_CFG_CHOICES, (
@@ -1291,6 +1292,15 @@ def parse_args() -> argparse.Namespace:
         "--attn_implementation",
         help=(
             "Specify the attention implementation to use. "
+            "This arg will be passed to the HF model loading if specified."
+        ),
+        default=None,
+        type=str,
+    )
+    parser.add_argument(
+        "--experts_implementation",
+        help=(
+            "Specify the MoE experts kernel implementation (e.g., 'eager' to bypass optimized CUTLASS kernels). "
             "This arg will be passed to the HF model loading if specified."
         ),
         default=None,

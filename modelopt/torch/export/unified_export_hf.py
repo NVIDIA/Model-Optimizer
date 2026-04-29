@@ -684,6 +684,14 @@ def _process_quantized_modules(
 
                 with fsdp2_aware_weight_update(model, sub_module, reshard=False):
                     _export_fused_experts(sub_module, dtype)
+        elif hasattr(sub_module, "gate_up_proj_weight_quantizers"):
+            # _QuantFusedExperts wrapping raw nn.Parameter expert tensors (e.g. GlmMoeDsaNaiveMoe).
+            # get_quantization_format returns QUANTIZATION_NONE for these since they lack standard
+            # weight_quantizer attributes, so we handle them here with a separate top-level check.
+            from modelopt.torch.export.moe_utils import _export_fused_experts
+
+            with fsdp2_aware_weight_update(model, sub_module, reshard=False):
+                _export_fused_experts(sub_module, dtype)
 
 
 def _export_transformers_checkpoint(
@@ -1203,6 +1211,18 @@ def export_hf_checkpoint(
         # We must patch both the source module and the importing module since
         # modeling_utils does `from core_model_loading import revert_weight_conversion`.
         _patches = _patch_revert_weight_conversion()
+
+        # Sanitize generation_config before saving: transformers >=5 raises ValueError if
+        # sampling flags like top_p are set without do_sample=True (strict validation).
+        if hasattr(model, "generation_config") and model.generation_config is not None:
+            gc = model.generation_config
+            sampling_flags = ("top_p", "top_k", "temperature", "typical_p", "epsilon_cutoff",
+                              "eta_cutoff", "diversity_penalty", "repetition_penalty")
+            if not getattr(gc, "do_sample", False):
+                for flag in sampling_flags:
+                    if getattr(gc, flag, None) not in (None, 1.0, 0.0):
+                        gc.do_sample = True
+                        break
 
         try:
             model.save_pretrained(

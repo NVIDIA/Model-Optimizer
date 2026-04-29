@@ -670,6 +670,23 @@ def get_quantization_format(module) -> str | None:
         if quantization != QUANTIZATION_NONE:
             return quantization
 
+    # Handle _QuantFusedExperts: per-expert ModuleList quantizers on raw nn.Parameter 3D tensors
+    # (e.g. GlmMoeDsaNaiveMoe). These don't have standard weight_quantizer attributes.
+    if hasattr(module, "gate_up_proj_weight_quantizers"):
+        wq_list = module.gate_up_proj_weight_quantizers
+        if len(wq_list) > 0 and wq_list[0].is_enabled:
+            # Build a temporary namespace with standard quantizer attribute names so
+            # _get_quantization_from_layer can inspect the quantizer configuration.
+            import types as _types
+            wrapper = _types.SimpleNamespace()
+            wrapper.weight_quantizer = wq_list[0]
+            wrapper.input_quantizer = getattr(module, "gate_up_proj_input_quantizer", None)
+            quantization = _get_quantization_from_layer(
+                wrapper, quantizer_attr_names("weight")
+            )
+            if quantization != QUANTIZATION_NONE:
+                return quantization
+
     for _, layer in module.named_children():
         format = get_quantization_format(layer)
         if format != QUANTIZATION_NONE:
@@ -1468,6 +1485,18 @@ def get_quant_config(
             or hasattr(module, quantizer_attr_names(weight_name).input_quantizer)
             for weight_name in weight_names
         )
+        # Also detect _QuantFusedExperts (raw nn.Parameter 3D expert tensors, e.g. GlmMoeDsaNaiveMoe)
+        # which use per-expert ModuleLists instead of standard weight_quantizer attribute.
+        is_fused_experts = (
+            not has_quantizers
+            and hasattr(module, "gate_up_proj_weight_quantizers")
+            and hasattr(module, "down_proj_weight_quantizers")
+        )
+        if is_fused_experts:
+            # Report this as NVFP4 experts quantization by inspecting the first expert's quantizer
+            wq_list = module.gate_up_proj_weight_quantizers
+            if len(wq_list) > 0 and wq_list[0].is_enabled:
+                has_quantizers = True
 
         # Skip LORA module and adapters.
         # ModelOpt does not currently quantize these layers in QLoRA path.

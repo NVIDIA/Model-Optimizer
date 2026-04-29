@@ -1,0 +1,235 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+metadata:
+  recipe_type: ptq
+  description: >
+    NVFP4 W4A4 for MoE routed experts, shared experts, and attention projections
+    (q_a_proj, kv_a_proj, q_b_proj, o_proj). No KV cache quantization.
+    Max calibration, layerwise with per-layer checkpointing for long/interruptible runs.
+    Designed for GLM-5.1 and compatible large MoE architectures.
+quantize:
+  algorithm:
+    method: max
+    # Calibrate one transformer layer at a time:
+    #   - keeps only one layer's weights materialized on GPU (via persistent_materialization)
+    #   - enables per-layer checkpointing so interrupted runs resume from the last saved layer
+    layerwise: true
+    # Auto-resolved to <base_dir>/<model_name>_<config_hash>/ by hf_ptq.py.
+    # Remove or set to null to disable checkpointing (faster for short runs).
+    layerwise_checkpoint_dir: /raid/fridah/models/GLM-5.1-ptq-layerwise-ckpts/
+  quant_cfg:
+    # ── Disable everything first ─────────────────────────────────────────────
+    - quantizer_name: '*'
+      enable: false
+
+    # ── Routed MoE experts: standard pattern (e.g. nn.Linear-based experts) ──
+    - quantizer_name: '*mlp.experts*weight_quantizer'
+      enable: true
+      cfg:
+        block_sizes:
+          -1: 16
+          type: dynamic
+          scale_bits: e4m3
+        num_bits: e2m1
+    - quantizer_name: '*mlp.experts*input_quantizer'
+      enable: true
+      cfg:
+        block_sizes:
+          -1: 16
+          type: dynamic
+          scale_bits: e4m3
+        num_bits: e2m1
+
+    # ── Routed MoE experts: Mixtral / block_sparse_moe-style ─────────────────
+    - quantizer_name: '*block_sparse_moe*weight_quantizer'
+      enable: true
+      cfg:
+        block_sizes:
+          -1: 16
+          type: dynamic
+          scale_bits: e4m3
+        num_bits: e2m1
+    - quantizer_name: '*block_sparse_moe*input_quantizer'
+      enable: true
+      cfg:
+        block_sizes:
+          -1: 16
+          type: dynamic
+          scale_bits: e4m3
+        num_bits: e2m1
+
+    # ── Routed MoE experts: HF transformers 5.0+ _QuantFusedExperts ──────────
+    # GlmMoeDsaNaiveMoe stores weights as 3D nn.Parameters (not nn.Linear).
+    # _QuantFusedExperts intercepts F.linear and registers quantizers as
+    # ModuleLists named gate_up_proj_weight_quantizers / down_proj_weight_quantizers.
+    - quantizer_name: '*gate_up_proj_weight_quantizers*'
+      enable: true
+      cfg:
+        block_sizes:
+          -1: 16
+          type: dynamic
+          scale_bits: e4m3
+        num_bits: e2m1
+    - quantizer_name: '*gate_up_proj_input_quantizer*'
+      enable: true
+      cfg:
+        block_sizes:
+          -1: 16
+          type: dynamic
+          scale_bits: e4m3
+        num_bits: e2m1
+    - quantizer_name: '*down_proj_weight_quantizers*'
+      enable: true
+      cfg:
+        block_sizes:
+          -1: 16
+          type: dynamic
+          scale_bits: e4m3
+        num_bits: e2m1
+    - quantizer_name: '*down_proj_input_quantizer*'
+      enable: true
+      cfg:
+        block_sizes:
+          -1: 16
+          type: dynamic
+          scale_bits: e4m3
+        num_bits: e2m1
+
+    # ── Shared experts (standard nn.Linear) ──────────────────────────────────
+    - quantizer_name: '*mlp.shared_experts*weight_quantizer'
+      enable: true
+      cfg:
+        block_sizes:
+          -1: 16
+          type: dynamic
+          scale_bits: e4m3
+        num_bits: e2m1
+    - quantizer_name: '*mlp.shared_experts*input_quantizer'
+      enable: true
+      cfg:
+        block_sizes:
+          -1: 16
+          type: dynamic
+          scale_bits: e4m3
+        num_bits: e2m1
+
+    # ── Attention projections ─────────────────────────────────────────────────
+    # q_a_proj: first Q projection (compresses to q_lora_rank latent)
+    - quantizer_name: '*q_a_proj*weight_quantizer'
+      enable: true
+      cfg:
+        block_sizes:
+          -1: 16
+          type: dynamic
+          scale_bits: e4m3
+        num_bits: e2m1
+    - quantizer_name: '*q_a_proj*input_quantizer'
+      enable: true
+      cfg:
+        block_sizes:
+          -1: 16
+          type: dynamic
+          scale_bits: e4m3
+        num_bits: e2m1
+
+    # kv_a_proj: KV compression projection (named kv_a_proj_with_mqa in GLM-5.1)
+    - quantizer_name: '*kv_a_proj*weight_quantizer'
+      enable: true
+      cfg:
+        block_sizes:
+          -1: 16
+          type: dynamic
+          scale_bits: e4m3
+        num_bits: e2m1
+    - quantizer_name: '*kv_a_proj*input_quantizer'
+      enable: true
+      cfg:
+        block_sizes:
+          -1: 16
+          type: dynamic
+          scale_bits: e4m3
+        num_bits: e2m1
+
+    # q_b_proj: second Q projection (from q_lora_rank latent to attention heads)
+    - quantizer_name: '*q_b_proj*weight_quantizer'
+      enable: true
+      cfg:
+        block_sizes:
+          -1: 16
+          type: dynamic
+          scale_bits: e4m3
+        num_bits: e2m1
+    - quantizer_name: '*q_b_proj*input_quantizer'
+      enable: true
+      cfg:
+        block_sizes:
+          -1: 16
+          type: dynamic
+          scale_bits: e4m3
+        num_bits: e2m1
+
+    # o_proj: attention output projection
+    - quantizer_name: '*o_proj*weight_quantizer'
+      enable: true
+      cfg:
+        block_sizes:
+          -1: 16
+          type: dynamic
+          scale_bits: e4m3
+        num_bits: e2m1
+    - quantizer_name: '*o_proj*input_quantizer'
+      enable: true
+      cfg:
+        block_sizes:
+          -1: 16
+          type: dynamic
+          scale_bits: e4m3
+        num_bits: e2m1
+
+    # ── Explicit exclusions ───────────────────────────────────────────────────
+    # KV cache quantization intentionally omitted
+    - quantizer_name: '*block_sparse_moe.gate*'
+      enable: false
+    - quantizer_name: '*linear_attn.conv1d*'
+      enable: false
+    - quantizer_name: '*lm_head*'
+      enable: false
+    - quantizer_name: '*mixer.conv1d*'
+      enable: false
+    - quantizer_name: '*mlp.gate.*'
+      enable: false
+    - quantizer_name: '*mlp.shared_expert_gate.*'
+      enable: false
+    - quantizer_name: '*output_layer*'
+      enable: false
+    - quantizer_name: '*proj_out.*'
+      enable: false
+    - quantizer_name: '*router*'
+      enable: false
+    - quantizer_name: 'output.*'
+      enable: false
+    - parent_class: 'nn.BatchNorm1d'
+      quantizer_name: '*'
+      enable: false
+    - parent_class: 'nn.BatchNorm2d'
+      quantizer_name: '*'
+      enable: false
+    - parent_class: 'nn.BatchNorm3d'
+      quantizer_name: '*'
+      enable: false
+    - parent_class: 'nn.LeakyReLU'
+      quantizer_name: '*'
+      enable: false
