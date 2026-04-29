@@ -1,3 +1,4 @@
+import re
 # SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -367,13 +368,62 @@ class GPTModelExporter:
             with open(config_json_file, "w") as f:
                 json.dump(config_dict, f, indent=4)
 
-        # save_safetensors(state_dict, save_directory)
+        # Each EP rank writes to its own subdirectory to avoid OOM from gathering
+        if torch.distributed.is_initialized():
+            world_size = torch.distributed.get_world_size()
+            rank = torch.distributed.get_rank()
+        else:
+            world_size = 1
+            rank = 0
+
+        rank_save_dir = save_directory + "_rank" + str(rank)
+        os.makedirs(rank_save_dir, exist_ok=True)
+
+        # Each rank writes its own layer shards
         save_safetensors_by_layer_index(
             layer_state_dicts=layer_state_dicts,
             total_layers=self.model.config.num_layers,
-            save_directory=save_directory,
+            save_directory=rank_save_dir,
             name_template="model-{:05d}-of-{:05d}",
         )
+
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
+
+        # Rank 0 merges per-shard safetensors from all rank dirs
+        if rank == 0 and world_size > 1:
+            print("[export] Merging shard files from all ranks...", flush=True)
+            from safetensors import safe_open as _safe_open
+            from safetensors.torch import save_file as _save_file
+            for layer_idx in range(self.model.config.num_layers):
+                shard_name = "model-{:05d}-of-{:05d}".format(layer_idx + 1, self.model.config.num_layers)
+                ckpt_name = shard_name + ".safetensors"
+                meta_name = shard_name + ".json"
+                merged_dict = {}
+                for r in range(world_size):
+                    rdir = save_directory + "_rank" + str(r)
+                    fpath = os.path.join(rdir, ckpt_name)
+                    if os.path.exists(fpath):
+                        with _safe_open(fpath, framework="pt") as f:
+                            for k in f.keys():
+                                merged_dict[k] = f.get_tensor(k)
+                # Write merged shard
+                os.makedirs(save_directory, exist_ok=True)
+                _save_file(merged_dict, os.path.join(save_directory, ckpt_name), metadata={"format": "pt"})
+                # Build metadata
+                weight_map = {}
+                total_size = 0
+                for k, v in merged_dict.items():
+                    weight_map[k] = ckpt_name
+                    total_size += v.numel() * v.element_size()
+                with open(os.path.join(save_directory, meta_name), "w") as f:
+                    json.dump({"metadata": {"total_size": total_size}, "weight_map": weight_map}, f, indent=4)
+            print(f"[export] Merged {len(merged_dict)} keys per layer across {world_size} ranks", flush=True)
+        elif rank == 0:
+            # Single rank, just rename dir
+            import shutil
+            if os.path.exists(save_directory + "_rank0"):
+                shutil.move(save_directory + "_rank0", save_directory)
 
     @property
     def state_dict(self):
@@ -572,11 +622,20 @@ class GPTModelExporter:
                     raw_mappings = all_mcore_hf_export_mapping[self.arch]
                     fc1_prefix = raw_mappings["experts.linear_fc1"].target_name_or_prefix
                     fc2_prefix = raw_mappings["experts.linear_fc2"].target_name_or_prefix
+                    # Fill only the first {} (layer_id), leave second {} for expert_id in _grouped_mlp_slicing
+                    fc1_prefix_partial = re.sub(r'\{\}', str(layer_id), fc1_prefix, count=1)
+                    fc2_prefix_partial = re.sub(r'\{\}', str(layer_id), fc2_prefix, count=1)
+                    # With EP>1, each rank only has a subset of experts. Offset the expert IDs
+                    # by ep_rank * num_local_experts so all ranks write to non-overlapping keys.
+                    from megatron.core.parallel_state import get_expert_model_parallel_rank
+                    ep_rank = get_expert_model_parallel_rank()
+                    expert_offset = ep_rank * layer.mlp.experts.linear_fc1.num_gemms
+                    print(f"[export] layer {layer_id}: TEGroupedMLP, ep_rank={ep_rank}, expert_offset={expert_offset}", flush=True)
                     self._grouped_mlp_slicing(
-                        layer.mlp.experts.linear_fc1, fc1_prefix.format(layer_id)
+                        layer.mlp.experts.linear_fc1, fc1_prefix_partial, expert_offset=expert_offset
                     )
                     self._grouped_mlp_slicing(
-                        layer.mlp.experts.linear_fc2, fc2_prefix.format(layer_id)
+                        layer.mlp.experts.linear_fc2, fc2_prefix_partial, expert_offset=expert_offset
                     )
             else:
                 self.rules["linear_fc1"](layer.mlp.linear_fc1, layer_id)
@@ -1003,7 +1062,7 @@ class GPTModelExporter:
                 self._state_dict[gate_proj_key] = val.detach().clone()
                 self._state_dict[up_proj_key] = val.detach().clone()
 
-    def _grouped_mlp_slicing(self, module, prefix, parallel_config=None):
+    def _grouped_mlp_slicing(self, module, prefix, parallel_config=None, expert_offset=0):
         """Export TEGroupedMLP weights by splitting per-expert weights into individual HF weights.
 
         TEGroupedMLP (via TEGroupedLinear) stores weights as weight0, weight1, ..., weight{N-1}
@@ -1033,9 +1092,10 @@ class GPTModelExporter:
 
         state_dict = module.state_dict()
 
-        for expert_id in range(num_experts):
+        for local_expert_id in range(num_experts):
+            expert_id = expert_offset + local_expert_id
             expert_prefix = prefix.format(expert_id) + "."
-            weight_key = f"weight{expert_id}"
+            weight_key = f"weight{local_expert_id}"
 
             if weight_key not in state_dict:
                 raise ValueError(f"Missing expected TEGroupedMLP expert weight: {weight_key}")
@@ -1060,7 +1120,8 @@ class GPTModelExporter:
         for key, val in name_to_value.items():
             if key == "output_scale":
                 continue
-            for expert_id in range(num_experts):
+            for local_expert_id in range(num_experts):
+                expert_id = expert_offset + local_expert_id
                 expert_prefix = prefix.format(expert_id) + "."
                 self._state_dict[expert_prefix + key] = val.detach().clone()
 
