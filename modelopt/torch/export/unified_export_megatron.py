@@ -567,10 +567,17 @@ class GPTModelExporter:
                 elif "experts.linear_fc1" in self.rules:
                     # TEGroupedMLP: experts use fused grouped GEMM with a single
                     # linear_fc1/linear_fc2 for all experts (no local_experts attribute).
-                    # Uses "experts.linear_fc1" rule (GroupedMLPMerging) instead of
-                    # "local_experts.linear_fc1" which expects per-expert iteration.
-                    self.rules["experts.linear_fc1"](layer.mlp.experts.linear_fc1, layer_id)
-                    self.rules["experts.linear_fc2"](layer.mlp.experts.linear_fc2, layer_id)
+                    # Call _grouped_mlp_slicing directly because the lambda-based dispatch
+                    # cannot handle two-placeholder prefixes (layer_id + expert_id).
+                    raw_mappings = all_mcore_hf_export_mapping[self.arch]
+                    fc1_prefix = raw_mappings["experts.linear_fc1"].target_name_or_prefix
+                    fc2_prefix = raw_mappings["experts.linear_fc2"].target_name_or_prefix
+                    self._grouped_mlp_slicing(
+                        layer.mlp.experts.linear_fc1, fc1_prefix.format(layer_id)
+                    )
+                    self._grouped_mlp_slicing(
+                        layer.mlp.experts.linear_fc2, fc2_prefix.format(layer_id)
+                    )
             else:
                 self.rules["linear_fc1"](layer.mlp.linear_fc1, layer_id)
                 self.rules["linear_fc2"](layer.mlp.linear_fc2, layer_id)
