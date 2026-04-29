@@ -1262,17 +1262,6 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
     )
     parser.add_argument(
-        "--exclude_modules",
-        nargs="+",
-        default=[],
-        metavar="MODULE",
-        help=(
-            "Module name patterns to exclude from quantization "
-            "(e.g. lm_head backbone.layers.0.mixer). "
-            "Appends a disable rule for each pattern's weight and input quantizers."
-        ),
-    )
-    parser.add_argument(
         "--gpu_max_mem_percentage",
         help=(
             "Specify the percentage of available GPU memory to use for loading the model when "
