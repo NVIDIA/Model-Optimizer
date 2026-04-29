@@ -271,7 +271,9 @@ class GPTModelExporter:
         is_last_stage_main_rank = pp_rank == pp_size - 1 and tp_rank == 0
 
         # Main export process
+        print("[export] About to build layer_state_dicts...", flush=True)
         layer_state_dicts = self.layer_state_dicts
+        print(f"[export] Built {len(layer_state_dicts)} layer state dicts", flush=True)
 
         quantization_format = self._get_quantization_format(self.model)
         quantization = None
@@ -394,6 +396,7 @@ class GPTModelExporter:
         return self._state_dict
 
     def _get_state_dict(self):
+        print("[export] _get_state_dict called", flush=True)
         model = self.model
         import time as _time
         _start = _time.time()
@@ -403,6 +406,7 @@ class GPTModelExporter:
             self.rules["word_embeddings"](model.embedding.word_embeddings)
 
         # Decoder layers
+        print(f"[export] Iterating {len(model.decoder.layers)} decoder layers", flush=True)
         for layer in model.decoder.layers:
             layer_id = layer.layer_number - 1
             if isinstance(layer, MambaLayer):
