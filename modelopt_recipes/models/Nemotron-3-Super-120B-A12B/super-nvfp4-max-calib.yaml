@@ -14,7 +14,8 @@
 # limitations under the License.
 
 # Mirrors the published nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4 hf_quant_config.json:
-#   - MoE routed experts:     NVFP4 W4A4 weight MSE, group_size 16
+# but with ONE major difference: use max calibration instead of MSE
+#   - MoE routed experts:     NVFP4 W4A4 weight, group_size 16
 #     HF names:               mixer.experts.<N>.{up,down}_proj
 #     Megatron-Core names:    mlp.experts.local_experts.<N>.linear_fc{1,2}
 #   - MoE shared experts:     FP8 per-tensor
