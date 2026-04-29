@@ -160,16 +160,17 @@ evaluation:
             extra:
               num_repeats: 64
 
-    # 5. MATH500
-    - name: AA_math_test_500
-      env_vars:
-        HF_TOKEN: HF_TOKEN
-      nemo_evaluator_config:
-        config:
-          params:
-            # limit_samples: 8
-            extra:
-              n_samples: 5
+    # 5. MATH500 (Requires JUDGE_API_KEY)
+    # - name: AA_math_test_500
+    #   env_vars:
+    #     HF_TOKEN: HF_TOKEN
+    #     JUDGE_API_KEY: JUDGE_API_KEY
+    #   nemo_evaluator_config:
+    #     config:
+    #       params:
+    #         # limit_samples: 8
+    #         extra:
+    #           n_samples: 5
 
     # 6. IFEval
     - name: ns_ifeval
