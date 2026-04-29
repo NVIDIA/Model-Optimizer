@@ -105,9 +105,11 @@ evaluation:
           # Update tokenizer path to match checkpoint_path above
           tokenizer: <hf_model_name_or_path>
   env_vars:
-    API_KEY: API_KEY
     HF_TOKEN: HF_TOKEN
     JUDGE_API_KEY: JUDGE_API_KEY
+    HF_HOME: HF_HOME
+    VLLM_CACHE_ROOT: VLLM_CACHE_ROOT
+    API_KEY: API_KEY
     INFERENCE_API_KEY: INFERENCE_API_KEY
     OPENAI_CLIENT_ID: OPENAI_CLIENT_ID
     OPENAI_CLIENT_SECRET: OPENAI_CLIENT_SECRET
