@@ -52,6 +52,7 @@ all_mcore_hf_export_mapping: dict[str, Any] = {
     "LlamaForCausalLMEagle3Deep": eagle3_deep_llama_causal_lm_export,
     "Qwen3ForCausalLM": qwen3_causal_lm_export,
     "Qwen3MoeForCausalLM": qwen3_causal_lm_export,
+    "Qwen3_5MoeForConditionalGeneration": qwen3_causal_lm_export,
     "Qwen2ForCausalLM": qwen25_causal_lm_export,
     "GptOssForCausalLM": gptoss_causal_lm_export,
 }
@@ -64,6 +65,7 @@ all_mcore_hf_import_mapping: dict[str, Any] = {
     "NemotronHForCausalLM": nemotron_h_causal_lm_import,
     "Qwen3ForCausalLM": qwen3_causal_lm_import,
     "Qwen3MoeForCausalLM": qwen3_causal_lm_import,
+    "Qwen3_5MoeForConditionalGeneration": qwen3_causal_lm_import,
     "Qwen2ForCausalLM": qwen25_causal_lm_import,
     "GptOssForCausalLM": gptoss_causal_lm_import,
 }

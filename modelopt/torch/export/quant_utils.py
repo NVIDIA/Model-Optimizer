@@ -668,23 +668,32 @@ def get_quantization_format(module) -> str | None:
     # Handle _QuantFusedExperts modules (e.g. Qwen3.x MoE) which use plural
     # ModuleList quantizers (gate_up_proj_weight_quantizers, down_proj_weight_quantizers)
     # instead of singular weight_quantizer attributes.
+    # The quantization format is determined at module setup time, not per-expert.
+    # Check any quantizer in the list (even disabled ones) to determine the format,
+    # since calibration may not have activated all experts.
     for quantizer_list_name in ["gate_up_proj_weight_quantizers", "down_proj_weight_quantizers"]:
         quantizer_list = getattr(module, quantizer_list_name, None)
         if quantizer_list is not None and len(quantizer_list) > 0:
-            # Find the first enabled quantizer — expert 0 may be disabled if
-            # uncalibrated, so we iterate rather than checking index 0 only.
-            for q in quantizer_list:
-                if hasattr(q, "is_enabled") and q.is_enabled:
-                    num_bits = getattr(q, "num_bits", None)
-                    block_sizes = getattr(q, "block_sizes", None)
-                    scale_bits = (
-                        block_sizes.get("scale_bits", (8, 0))
-                        if isinstance(block_sizes, dict) and "scale_bits" in block_sizes
-                        else (8, 0)
-                    )
-                    if num_bits == (2, 1) and scale_bits == (4, 3):
-                        return QUANTIZATION_NVFP4
+            # Check any quantizer — enabled or not — for format config.
+            # Prefer enabled ones first, but fall back to any if none are enabled.
+            q = None
+            for candidate in quantizer_list:
+                if hasattr(candidate, "is_enabled") and candidate.is_enabled:
+                    q = candidate
                     break
+            if q is None:
+                q = quantizer_list[0]
+
+            num_bits = getattr(q, "num_bits", None)
+            block_sizes = getattr(q, "block_sizes", None)
+            scale_bits = (
+                block_sizes.get("scale_bits", (8, 0))
+                if isinstance(block_sizes, dict) and "scale_bits" in block_sizes
+                else (8, 0)
+            )
+            if num_bits == (2, 1) and scale_bits == (4, 3):
+                return QUANTIZATION_NVFP4
+            # Add other expert quantization format checks here as needed
 
     for weight_name in weight_attr_names(module):
         quantization = _get_quantization_from_layer(module, quantizer_attr_names(weight_name))

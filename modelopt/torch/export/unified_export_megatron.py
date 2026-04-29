@@ -73,6 +73,8 @@ with import_plugin("megatron"):
     from megatron.core.models.gpt import GPTModel
     from megatron.core.models.mamba import MambaModel
     from megatron.core.models.multimodal.llava_model import LLaVAModel
+    from megatron.core.models.gpt.hybrid_model import HybridModel
+    from megatron.bridge.models.qwen_vl import Qwen3VLModel
     from megatron.core.parallel_state import (
         get_pipeline_model_parallel_rank,
         get_pipeline_model_parallel_world_size,
@@ -121,7 +123,7 @@ class GPTModelExporter:
         moe_router_dtype: str | None = None,
     ):
         """Create a GPTModel exporter instance."""
-        if not isinstance(model, (GPTModel, MambaModel, LLaVAModel)):
+        if not isinstance(model, (GPTModel, MambaModel, HybridModel, LLaVAModel, Qwen3VLModel)):
             raise ValueError("Input to GPTModelExport must be a megatron.core.models.GPTModel!")
 
         self._state_dict = OrderedDict()
@@ -460,8 +462,21 @@ class GPTModelExporter:
                 self.rules["linear_kv_layernorm"](layer.self_attention.kv_layernorm, layer_id)
                 self.rules["linear_kv_up_proj"](layer.self_attention.linear_kv_up_proj, layer_id)
                 self.rules["linear_proj"](layer.self_attention.linear_proj, layer_id)
+            elif "GatedDeltaNet" in str(type(layer.self_attention)):
+                # GatedDeltaNet (linear attention) has in_proj, out_norm, out_proj
+                # instead of linear_qkv, q_layernorm, etc.
+                if "gated_delta_net_in_proj" in self.rules:
+                    self.rules["gated_delta_net_in_proj"](layer.self_attention.in_proj, layer_id)
+                else:
+                    self.rules["linear_qkv"](layer.self_attention.in_proj, layer_id)
+                if hasattr(layer.self_attention, "out_norm") and not isinstance(
+                    layer.self_attention.out_norm, IdentityOp
+                ):
+                    if "gated_delta_net_out_norm" in self.rules:
+                        self.rules["gated_delta_net_out_norm"](layer.self_attention.out_norm, layer_id)
+                self.rules["linear_proj"](layer.self_attention.out_proj, layer_id)
             else:
-                if layer.self_attention.q_layernorm is not None and not isinstance(
+                if hasattr(layer.self_attention, "q_layernorm") and layer.self_attention.q_layernorm is not None and not isinstance(
                     layer.self_attention.q_layernorm, (IdentityOp, L2Norm)
                 ):
                     self.rules["q_layernorm"](layer.self_attention.q_layernorm, layer_id)
@@ -473,7 +488,7 @@ class GPTModelExporter:
                 ):  # KV cache quant export
                     self.rules["core_attention"](layer.self_attention.core_attention, layer_id)
                 self.rules["linear_proj"](layer.self_attention.linear_proj, layer_id)
-                if getattr(layer.self_attention.core_attention, "softmax_offset", None) is not None:
+                if hasattr(layer.self_attention, "core_attention") and getattr(layer.self_attention.core_attention, "softmax_offset", None) is not None:
                     self.rules["softmax_offset"](
                         layer.self_attention.core_attention.softmax_offset, layer_id
                     )
