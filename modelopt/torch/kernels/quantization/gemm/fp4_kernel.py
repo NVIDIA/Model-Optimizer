@@ -251,14 +251,26 @@ def static_blockwise_fp4_fake_quant(
     """Static blockwise FP4 fake quantization using Triton kernel.
 
     Args:
-        x: [NUM_FP4_BLOCKS, BLOCK_SIZE] on CUDA.
-        amax: [NUM_FP4_BLOCKS] or [NUM_FP4_BLOCKS, 1] per-block amax values.
+        x: Input tensor on CUDA. The last dim must be the block dim (each consecutive
+            ``BLOCK_SIZE`` elements form one FP4 block). Any number of leading dims
+            is supported — they're flattened internally and the shape is restored
+            on output (so MoE expert weights ``(E, F, K)`` work the same as plain
+            linear weights ``(N, K)``).
+        amax: Per-block amax values. ``amax.numel()`` must equal
+            ``x.numel() // BLOCK_SIZE``. Shape is otherwise free; the kernel
+            consumes it as a flat 1-D buffer of length ``NUM_FP4_BLOCKS``.
         global_amax: FP32 scalar global amax. If provided, used to compute scale_fp8_quant_amax.
         quantize_block_scales: If True, quantize block scales to FP8.
         out_dtype: Output dtype. Defaults to x.dtype if None.
     """
-    assert x.ndim == 2
-    NUM_FP4_BLOCKS, BLOCK_SIZE = x.shape
+    original_shape = x.shape
+    NUM_FP4_BLOCKS = amax.numel()
+    if x.numel() % NUM_FP4_BLOCKS != 0:
+        raise ValueError(
+            f"x.numel() ({x.numel()}) is not divisible by amax.numel() ({NUM_FP4_BLOCKS}); "
+            "they must satisfy x.numel() == NUM_FP4_BLOCKS * BLOCK_SIZE."
+        )
+    BLOCK_SIZE = x.numel() // NUM_FP4_BLOCKS
 
     if out_dtype is None:
         out_dtype = x.dtype
@@ -267,7 +279,7 @@ def static_blockwise_fp4_fake_quant(
 
     x_flat = x.contiguous().view(-1)
     y_flat = torch.empty_like(x_flat, dtype=out_dtype)
-    scale_flat = scale.view(NUM_FP4_BLOCKS).contiguous()
+    scale_flat = scale.contiguous().view(NUM_FP4_BLOCKS)
 
     tl_out_dtype = _torch_dtype_to_tl(out_dtype)
 
@@ -283,4 +295,4 @@ def static_blockwise_fp4_fake_quant(
             OUT_DTYPE=tl_out_dtype,
         )
 
-    return y_flat.view_as(x)
+    return y_flat.view(original_shape)

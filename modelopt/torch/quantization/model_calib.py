@@ -280,6 +280,13 @@ def max_calibrate(
                         module.parallel_state.tensor_parallel_group
                     )
 
+    # Promote eligible static-block NVFP4 weight quantizers to NVFP4StaticQuantizer
+    # so the static blockwise fake-quant path is used in forward and the export
+    # picks up the two-level (per-block + global) scaling. ``promote_nvfp4_static_quantizers``
+    # only promotes when ``is_static_block_quant`` is True and the per-block ``_amax``
+    # buffer is populated, so it's a no-op for dynamic-block / non-NVFP4 configs.
+    promote_nvfp4_static_quantizers(model)
+
 
 def _mse_quant_func(x, amax, quantizer):
     """Quantization function for MSE calibration."""
