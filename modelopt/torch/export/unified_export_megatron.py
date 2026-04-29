@@ -528,9 +528,11 @@ class GPTModelExporter:
                     ep_rank = get_expert_model_parallel_rank()
                     ep_size = get_expert_model_parallel_world_size()
                     num_local = len(layer.mlp.experts.local_experts)
+                    print(f"[export] layer {layer_id}: {num_local} local_experts, ep_rank={ep_rank}, ep_size={ep_size}", flush=True)
                     if not self.rules.get("use_packed_local_experts", False):
                         for local_id, expert in enumerate(layer.mlp.experts.local_experts):
                             expert_id = ep_rank * num_local + local_id
+                            print(f"[export]   expert {local_id} -> global {expert_id}, linear_fc1={type(expert.linear_fc1).__name__}", flush=True)
                             self.rules["local_experts.linear_fc1"](
                                 expert.linear_fc1, layer_id, expert_id
                             )
