@@ -31,7 +31,7 @@
 # values. This keeps the FP8 static-scale path but uses a coarser candidate set.
 metadata:
   recipe_type: ptq
-  description: Super NVFP4 mixed precision — sparse MoE experts NVFP4 (W4A4, group_size 16); shared experts, mamba in/out_proj, and attention o_proj/fc1_latent_proj/fc2_latent_proj
+  description: Super NVFP4 mixed precision — sparse MoE experts NVFP4 (W4A4, group_size 16); shared experts, mamba in/out_proj, and Latent MOE fc1_latent_proj/fc2_latent_proj
     FP8 per-tensor; FP8 KV cache; lm_head/MTP/SSM stay BF16/FP16. Weight-MSE calibration with stride-4 FP8 scale sweep.
 quantize:
   algorithm:

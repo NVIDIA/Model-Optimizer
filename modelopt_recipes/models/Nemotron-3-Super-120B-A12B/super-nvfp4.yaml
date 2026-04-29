@@ -13,11 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-<<<<<<< Updated upstream
-# Approximately mirrors the published nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4 hf_quant_config.json:
-#   - MoE routed experts (mixer.experts.<N>.{up,down}_proj):       NVFP4 W4A4 weight MSE, group_size 16
-#   - MoE shared experts (mixer.shared_experts.{up,down}_proj):    FP8 per-tensor
-=======
 # Mirrors the published nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4 hf_quant_config.json:
 #   - MoE routed experts:     NVFP4 W4A4 weight MSE, group_size 16
 #     HF names:               mixer.experts.<N>.{up,down}_proj
@@ -25,7 +20,6 @@
 #   - MoE shared experts:     FP8 per-tensor
 #     HF names:               mixer.shared_experts.{up,down}_proj
 #     Megatron-Core names:    mlp.shared_experts.linear_fc{1,2}
->>>>>>> Stashed changes
 #   - Mamba mixer linears (mixer.{in,out}_proj):                   FP8 per-tensor
 #   - KV cache:                                                    FP8
 #   - Attention linears ({q,k,v}_proj):                            BF16 (not quantized)
@@ -38,7 +32,7 @@
 # are also chosen via MSE search instead of plain amax).
 metadata:
   recipe_type: ptq
-  description: Super NVFP4 mixed precision — sparse MoE experts NVFP4 (W4A4, group_size 16); shared experts, mamba in/out_proj, and attention o_proj/fc1_latent_proj/fc2_latent_proj
+  description: Super NVFP4 mixed precision — sparse MoE experts NVFP4 (W4A4, group_size 16); shared experts, mamba in/out_proj, and Latent MOE fc1_latent_proj/fc2_latent_proj
     FP8 per-tensor; FP8 KV cache; lm_head/MTP/SSM stay BF16/FP16. Weight-MSE calibration with FP8 scale sweep.
 quantize:
   algorithm:
@@ -138,4 +132,3 @@ quantize:
       enable: true
       cfg:
         num_bits: e4m3
-
