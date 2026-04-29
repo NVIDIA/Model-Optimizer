@@ -74,6 +74,7 @@ qwen3_causal_lm_export: dict[str, CustomModuleMapping] = {
     # GatedDeltaNet (linear attention) — no QKV slicing, direct name remap
     "gated_delta_net_in_proj": NameRemapping("model.layers.{}.linear_attn.in_proj."),
     "gated_delta_net_out_norm": NameRemapping("model.layers.{}.linear_attn.out_norm."),
+    "gated_delta_net_out_proj": NameRemapping("model.layers.{}.linear_attn.out_proj."),
 }
 
 qwen25_causal_lm_import: dict[str, CustomModuleMapping] = {

@@ -473,7 +473,10 @@ class GPTModelExporter:
                 ):
                     if "gated_delta_net_out_norm" in self.rules:
                         self.rules["gated_delta_net_out_norm"](layer.self_attention.out_norm, layer_id)
-                self.rules["linear_proj"](layer.self_attention.out_proj, layer_id)
+                if "gated_delta_net_out_proj" in self.rules:
+                    self.rules["gated_delta_net_out_proj"](layer.self_attention.out_proj, layer_id)
+                else:
+                    self.rules["linear_proj"](layer.self_attention.out_proj, layer_id)
             else:
                 if hasattr(layer.self_attention, "q_layernorm") and layer.self_attention.q_layernorm is not None and not isinstance(
                     layer.self_attention.q_layernorm, (IdentityOp, L2Norm)
