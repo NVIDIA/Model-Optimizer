@@ -631,7 +631,11 @@ class GPTModelExporter:
                     ep_rank = get_expert_model_parallel_rank()
                     expert_offset = ep_rank * layer.mlp.experts.linear_fc1.num_gemms
                     print(f"[export] layer {layer_id}: TEGroupedMLP, ep_rank={ep_rank}, expert_offset={expert_offset}", flush=True)
-                    self._grouped_mlp_slicing(
+                    # Dispatch based on the mapping func_name — grouped_gated_mlp_slicing
+                    # splits fused gate_up into gate_proj + up_proj per expert.
+                    fc1_func_name = raw_mappings["experts.linear_fc1"].func_name
+                    fc1_method = getattr(self, f"_{fc1_func_name}")
+                    fc1_method(
                         layer.mlp.experts.linear_fc1, fc1_prefix_partial, expert_offset=expert_offset
                     )
                     self._grouped_mlp_slicing(
@@ -835,6 +839,7 @@ class GPTModelExporter:
                 "self_attention_scaling": self._self_attention_scaling,
                 "gated_mlp_slicing": self._gated_mlp_slicing,
                 "grouped_mlp_slicing": self._grouped_mlp_slicing,
+                "grouped_gated_mlp_slicing": self._grouped_gated_mlp_slicing,
                 "pack_name_remapping": self._pack_name_remapping,
                 "pack_name_remapping_gpt_oss": self._pack_name_remapping_gpt_oss,
             }
@@ -1124,6 +1129,86 @@ class GPTModelExporter:
                 expert_id = expert_offset + local_expert_id
                 expert_prefix = prefix.format(expert_id) + "."
                 self._state_dict[expert_prefix + key] = val.detach().clone()
+
+
+    def _grouped_gated_mlp_slicing(self, module, prefix, parallel_config=None, expert_offset=0):
+        """Export TEGroupedMLP fused gate_up weights, splitting into per-expert gate_proj + up_proj.
+
+        Like _grouped_mlp_slicing but handles the fused gate_up (linear_fc1) case:
+        each expert weight is [2*ffn_hidden_size, hidden_size], split into
+        gate_proj [ffn_hidden_size, hidden_size] and up_proj [ffn_hidden_size, hidden_size].
+
+        Produces per-expert gate_proj and up_proj that vLLM expects for MoE models
+        with packed_modules_mapping = {"gate_up_proj": ["gate_proj", "up_proj"]}.
+        """
+        num_experts = module.num_gemms
+
+        has_weight = hasattr(module, "weight")
+        if not has_weight:
+            module.weight = module.weight0
+        try:
+            name_to_value, qformat, block_size = self._get_quantized_state(
+                module, self.dtype, prefix=prefix
+            )
+            weight_scale, weight_scale_2 = self._get_weight_scales(name_to_value, qformat)
+            name_to_value.pop("weight", None)
+        finally:
+            if not has_weight and hasattr(module, "weight"):
+                delattr(module, "weight")
+
+        state_dict = module.state_dict()
+        ffn_hidden_size = module.config.ffn_hidden_size
+        # For gated linear unit, ffn_hidden_size is already doubled (2 * moe_intermediate_size).
+        # We need the un-doubled per-projection size for the gate/up split.
+        gated_split = ffn_hidden_size // 2
+
+        for local_expert_id in range(num_experts):
+            expert_id = expert_offset + local_expert_id
+            expert_prefix = prefix.format(expert_id) + "."
+            weight_key = f"weight{local_expert_id}"
+
+            if weight_key not in state_dict:
+                raise ValueError(f"Missing expected TEGroupedMLP expert weight: {weight_key}")
+
+            weight = state_dict[weight_key].to(self.dtype).cpu()
+            gate_weight = weight[:gated_split, :]
+            up_weight = weight[gated_split:, :]
+
+            gate_prefix = expert_prefix + "gate_proj."
+            up_prefix = expert_prefix + "up_proj."
+
+            if weight_scale is None:
+                self._state_dict[gate_prefix + "weight"] = gate_weight
+                self._state_dict[up_prefix + "weight"] = up_weight
+            else:
+                if len(weight_scale.shape) == 0:
+                    gate_weight_scale = weight_scale.detach().clone()
+                    up_weight_scale = weight_scale.detach().clone()
+                else:
+                    gate_weight_scale = weight_scale[:gated_split]
+                    up_weight_scale = weight_scale[gated_split:]
+
+                self._state_dict[gate_prefix + "weight"] = to_quantized_weight(
+                    gate_weight, gate_weight_scale, qformat, weight_scale_2, block_size,
+                )
+                self._state_dict[up_prefix + "weight"] = to_quantized_weight(
+                    up_weight, up_weight_scale, qformat, weight_scale_2, block_size,
+                )
+                self._state_dict[gate_prefix + "weight_scale"] = gate_weight_scale
+                self._state_dict[up_prefix + "weight_scale"] = up_weight_scale
+
+            if weight_scale_2 is not None:
+                self._state_dict[gate_prefix + "weight_scale_2"] = weight_scale_2.detach().clone()
+                self._state_dict[up_prefix + "weight_scale_2"] = weight_scale_2.detach().clone()
+
+        for key, val in name_to_value.items():
+            if key == "output_scale":
+                continue
+            for local_expert_id in range(num_experts):
+                expert_id = expert_offset + local_expert_id
+                expert_prefix = prefix.format(expert_id) + "."
+                self._state_dict[expert_prefix + "gate_proj." + key] = val.detach().clone()
+                self._state_dict[expert_prefix + "up_proj." + key] = val.detach().clone()
 
     def _qkv_slicing(
         self,

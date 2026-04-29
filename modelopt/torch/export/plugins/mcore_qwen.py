@@ -25,6 +25,7 @@ from .mcore_custom import (
     GatedMLPMerging,
     GatedMLPSlicing,
     GroupedMLPSlicing,
+    GroupedGatedMLPSlicing,
     NameRemapping,
     QKVMerging,
     QKVSlicing,
@@ -70,7 +71,7 @@ qwen3_causal_lm_export: dict[str, CustomModuleMapping] = {
     "local_experts.linear_fc1": GatedMLPSlicing("model.layers.{}.mlp.experts.{}."),
     "local_experts.linear_fc2": NameRemapping("model.layers.{}.mlp.experts.{}.down_proj."),
     # Grouped experts (TEGroupedMLP: fused per-expert weights via grouped GEMM)
-    "experts.linear_fc1": GroupedMLPSlicing("model.layers.{}.mlp.experts.{}.up_proj"),
+    "experts.linear_fc1": GroupedGatedMLPSlicing("model.layers.{}.mlp.experts.{}"),
     "experts.linear_fc2": GroupedMLPSlicing("model.layers.{}.mlp.experts.{}.down_proj"),
     # Shared experts (Qwen3.6 MoE)
     "shared_experts.linear_fc1": GatedMLPSlicing("model.layers.{}.mlp.shared_experts."),

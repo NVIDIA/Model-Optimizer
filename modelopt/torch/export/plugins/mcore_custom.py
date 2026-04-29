@@ -175,6 +175,17 @@ class GatedMLPSlicing(CustomModuleMapping):
         )
 
 
+class GroupedGatedMLPSlicing(CustomModuleMapping):
+    """A custom module mapping for TEGroupedMLP that splits fused gate_up into gate_proj + up_proj per expert."""
+
+    def __init__(self, target_name_or_prefix: str = "", func_kwargs: dict[str, Any] = {}):
+        """Create a custom module mapping for grouped gated MLP slicing."""
+        super().__init__(
+            func_name="grouped_gated_mlp_slicing",
+            target_name_or_prefix=target_name_or_prefix,
+            func_kwargs=func_kwargs,
+        )
+
 class PackNameRemapping(CustomModuleMapping):
     """A custom module mapping that packs module after name remapping."""
 
@@ -318,6 +329,15 @@ def save_safetensors_by_layer_index(
                 f,
                 indent=4,
             )
+        # Clone tensors that share storage (NVFP4 weight_scale broadcast causes this)
+        seen_storages = {}
+        for _key, _val in layer_state_dict.items():
+            _sid = id(_val.storage())
+            if _sid in seen_storages:
+                layer_state_dict[_key] = _val.clone()
+            else:
+                seen_storages[_sid] = _key
+
         save_file(layer_state_dict, save_directory + "/" + ckpt_filename, metadata={"format": "pt"})
 
     # [TODO]: this global barrier needs to be replaced with something safer
