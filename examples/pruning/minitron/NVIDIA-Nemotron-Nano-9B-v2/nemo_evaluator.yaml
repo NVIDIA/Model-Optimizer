@@ -1,20 +1,27 @@
-# NeMo Evaluator Launcher config for Nemotron-Nano-9B-v2 Pruned 7B evaluation
+# NeMo Evaluator Launcher config for Nemotron-Nano-9B-v2 and Pruned variants
+# --------------------------------------------------------------------------
+# Before running, update the following fields in the yaml:
+# - `execution.hostname` — your Slurm login node hostname
+# - `execution.account` — your Slurm account
+# - `deployment.checkpoint_path` — path to your converted `hf_iter_XXXXXX` checkpoint
+# - `evaluation.nemo_evaluator_config.config.params.extra.tokenizer` — same path as `checkpoint_path`
 #
 # Usage:
 #   pip install "nemo-evaluator-launcher[all]==0.1.90"
 #
 #   # Set required environment variables:
 #   export HF_TOKEN=<your_huggingface_token>
-#   export API_KEY=<your_api_key>
-#   export INFERENCE_API_KEY=<your_inference_api_key>
 #   export JUDGE_API_KEY=<your_judge_api_key>
-#   export OPENAI_CLIENT_ID=<your_openai_client_id>
-#   export OPENAI_CLIENT_SECRET=<your_openai_client_secret>
 #   export SLURM_JOB_DIR=<path_to_slurm_job_output_dir>
 #   export HF_HOME=<path_to_huggingface_cache>
 #   export VLLM_CACHE_ROOT=<path_to_vllm_cache>
 #
-#   # Update checkpoint_path below, then run:
+#   # Set additional unused but required environment variables:
+#   export API_KEY=xxxxxx
+#   export INFERENCE_API_KEY=xxxxxx
+#   export OPENAI_CLIENT_ID=xxxxxx
+#   export OPENAI_CLIENT_SECRET=xxxxxx
+#
 #   nemo-evaluator-launcher run --config nemo_evaluator.yaml
 #
 
@@ -49,9 +56,9 @@ execution:
 
 # Note: Only tp=1 works for Nano (Mamba-based architecture)
 deployment:
-  # Update this to your distilled checkpoint path
-  checkpoint_path: /path/to/distilled/checkpoint/hf_iter_XXXXXX
-  served_model_name: nemotron-nano-9b-v2-pruned-7b
+  # Update this to your Hugging Face checkpoint path (original, pruned or quantized)
+  checkpoint_path: <hf_model_name_or_path>
+  served_model_name: Nemotron-Nano-9B-v2
   port: 8000
   tensor_parallel_size: 1
   pipeline_parallel_size: 1
@@ -96,7 +103,7 @@ evaluation:
         extra:
           tokenizer_backend: huggingface
           # Update tokenizer path to match checkpoint_path above
-          tokenizer: /path/to/distilled/checkpoint/hf_iter_XXXXXX
+          tokenizer: <hf_model_name_or_path>
   env_vars:
     API_KEY: API_KEY
     HF_TOKEN: HF_TOKEN
@@ -169,6 +176,10 @@ evaluation:
     - name: ns_ifeval
       env_vars:
         HF_TOKEN: HF_TOKEN
+      # nemo_evaluator_config:
+      #   config:
+      #     params:
+      #       limit_samples: 8
 
     # 7. SciCode
     - name: ns_scicode

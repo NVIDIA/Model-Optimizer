@@ -231,24 +231,24 @@ Before running, update the following fields in the yaml:
 - `deployment.checkpoint_path` — path to your converted `hf_iter_XXXXXX` checkpoint
 - `evaluation.nemo_evaluator_config.config.params.extra.tokenizer` — same path as `checkpoint_path`
 
-Set the required environment variables and run:
-
 > [!TIP]
 > Uncomment `limit_samples` under any task to run a small subset and verify the end-to-end eval pipeline before launching full evals.
 
 ```bash
 pip install "nemo-evaluator-launcher[all]==0.1.90"
 
-# Required environment variables
+# Set required environment variables:
 export HF_TOKEN=<your_huggingface_token>
-export API_KEY=<your_api_key>
-export INFERENCE_API_KEY=<your_inference_api_key>
 export JUDGE_API_KEY=<your_judge_api_key>
-export OPENAI_CLIENT_ID=<your_openai_client_id>
-export OPENAI_CLIENT_SECRET=<your_openai_client_secret>
 export SLURM_JOB_DIR=<path_to_slurm_job_output_dir>
 export HF_HOME=<path_to_huggingface_cache>
 export VLLM_CACHE_ROOT=<path_to_vllm_cache>
+
+# Set additional unused but required environment variables:
+export API_KEY=xxxxxx
+export INFERENCE_API_KEY=xxxxxx
+export OPENAI_CLIENT_ID=xxxxxx
+export OPENAI_CLIENT_SECRET=xxxxxx
 
 nemo-evaluator-launcher run --config nemo_evaluator.yaml
 ```
