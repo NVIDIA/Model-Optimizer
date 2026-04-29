@@ -22,11 +22,13 @@ import torch.nn.functional as F
 
 pytest.importorskip("transformers")
 
+from modelopt.torch.quantization.conversion import _normalize_fused_experts_quantizer_name
 from modelopt.torch.quantization.nn import QuantModuleRegistry
 from modelopt.torch.quantization.plugins.huggingface import (
     _is_fused_experts_module,
     _is_sparse_sequaential_moe_block,
     _QuantFusedExperts,
+    force_eager_experts_impl_on_the_fly,
     register_fused_experts_on_the_fly,
     register_sparse_moe_on_the_fly,
 )
@@ -297,3 +299,316 @@ class TestExportFusedExperts:
 
         if QuantModuleRegistry.get(expert_type) is not None:
             QuantModuleRegistry.unregister(expert_type)
+
+
+# ---------------------------------------------------------------------------
+# Tests for force_eager_experts_impl_on_the_fly
+# ---------------------------------------------------------------------------
+class _StubConfig:
+    """Minimal stand-in for HF PretrainedConfig with optional nested sub-configs."""
+
+    def __init__(self, impl=None, **nested):
+        if impl is not None:
+            self._experts_implementation = impl
+        for key, value in nested.items():
+            setattr(self, key, value)
+
+
+class _TinyMoEModelWithConfig(_TinyMoEModel):
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+
+
+class _NonMoEModelWithConfig(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.linear = nn.Linear(HIDDEN_DIM, HIDDEN_DIM)
+        self.config = config
+
+
+class TestForceEagerExpertsImpl:
+    def test_sets_eager_on_moe_model(self):
+        """Non-eager backend on an MoE model gets flipped to eager."""
+        cfg = _StubConfig(impl="kernels")
+        model = _TinyMoEModelWithConfig(cfg)
+        force_eager_experts_impl_on_the_fly(model)
+        assert cfg._experts_implementation == "eager"
+
+    def test_recurses_into_nested_configs(self):
+        """VLM-style nested text_config / vision_config are also flipped."""
+        text_cfg = _StubConfig(impl="grouped_mm")
+        vision_cfg = _StubConfig(impl="bmm")
+        root_cfg = _StubConfig(text_config=text_cfg, vision_config=vision_cfg)
+        model = _TinyMoEModelWithConfig(root_cfg)
+        force_eager_experts_impl_on_the_fly(model)
+        assert text_cfg._experts_implementation == "eager"
+        assert vision_cfg._experts_implementation == "eager"
+
+    def test_skips_model_without_fused_experts(self):
+        """Non-MoE models must not have their config silently mutated."""
+        cfg = _StubConfig(impl="kernels")
+        model = _NonMoEModelWithConfig(cfg)
+        force_eager_experts_impl_on_the_fly(model)
+        assert cfg._experts_implementation == "kernels"
+
+    def test_no_crash_when_config_missing(self):
+        """Model without a ``config`` attribute must not raise."""
+        force_eager_experts_impl_on_the_fly(_TinyMoEModel())  # no-op, no error
+
+    def test_no_crash_when_impl_attr_missing(self):
+        """Config without ``_experts_implementation`` must not raise."""
+        cfg = _StubConfig()  # no impl attr
+        model = _TinyMoEModelWithConfig(cfg)
+        force_eager_experts_impl_on_the_fly(model)
+        assert not hasattr(cfg, "_experts_implementation")
+
+    def test_leaves_eager_value_unchanged(self):
+        cfg = _StubConfig(impl="eager")
+        model = _TinyMoEModelWithConfig(cfg)
+        force_eager_experts_impl_on_the_fly(model)
+        assert cfg._experts_implementation == "eager"
+
+
+# ---------------------------------------------------------------------------
+# End-to-end PTQ calibration test — guards the full fused-experts path:
+#   register_fused_experts_on_the_fly → _QuantFusedExperts.{_setup, forward} →
+#   plural ModuleList name normalization in conversion._match_quantizer →
+#   TensorQuantizer amax collection via the F.linear hook.
+# If any link breaks, quantizer `amax` stays None and this test fails.
+# ---------------------------------------------------------------------------
+class TestFusedExpertsCalibration:
+    @staticmethod
+    def _cleanup_registry(mod_type):
+        if QuantModuleRegistry.get(mod_type) is not None:
+            QuantModuleRegistry.unregister(mod_type)
+
+    def test_calibration_populates_all_expert_quantizers(self):
+        """After PTQ, every input/weight quantizer on the fused-experts module has amax set."""
+        import modelopt.torch.quantization as mtq
+
+        model = _TinyMoEModel()
+        expert_type = type(model.moe.experts)
+        self._cleanup_registry(expert_type)
+
+        quant_cfg = {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {
+                    "quantizer_name": "*gate_up_proj_input_quantizer",
+                    "cfg": {"num_bits": 8, "axis": None},
+                },
+                {
+                    "quantizer_name": "*down_proj_input_quantizer",
+                    "cfg": {"num_bits": 8, "axis": None},
+                },
+                {
+                    "quantizer_name": "*gate_up_proj_weight_quantizer",
+                    "cfg": {"num_bits": 8, "axis": 0},
+                },
+                {
+                    "quantizer_name": "*down_proj_weight_quantizer",
+                    "cfg": {"num_bits": 8, "axis": 0},
+                },
+            ],
+            "algorithm": "max",
+        }
+
+        def forward_loop(m):
+            torch.manual_seed(0)
+            for _ in range(2):
+                x = torch.randn(1, 4, HIDDEN_DIM)
+                m(x)
+
+        mtq.quantize(model, quant_cfg, forward_loop=forward_loop)
+
+        experts = model.moe.experts
+        assert experts.gate_up_proj_input_quantizer.amax is not None, (
+            "Shared gate_up_proj input quantizer was not calibrated — "
+            "F.linear hook likely bypassed by non-eager experts_implementation."
+        )
+        assert experts.down_proj_input_quantizer.amax is not None, (
+            "Shared down_proj input quantizer was not calibrated."
+        )
+        for idx in range(NUM_EXPERTS):
+            assert experts.gate_up_proj_weight_quantizers[idx].amax is not None, (
+                f"gate_up_proj_weight_quantizers[{idx}].amax is None — "
+                "plural ModuleList name normalization in _match_quantizer likely broken."
+            )
+            assert experts.down_proj_weight_quantizers[idx].amax is not None, (
+                f"down_proj_weight_quantizers[{idx}].amax is None."
+            )
+
+        self._cleanup_registry(expert_type)
+
+
+# ---------------------------------------------------------------------------
+# Tests for export enumeration — guards the bug where fused-experts were
+# silently skipped by get_quant_config because their weight quantizers live
+# on a plural nn.ModuleList instead of the singular *_weight_quantizer attr.
+# Missed enumeration → experts don't appear in quantized_layers →
+# quantization_formats has only 1 entry from the non-expert modules →
+# quant_algo lands on that format instead of "MIXED_PRECISION".
+# ---------------------------------------------------------------------------
+class _MixedPrecisionModel(nn.Module):
+    """A model with both a fused-experts block AND a standard Linear, so a
+    mixed-precision recipe should produce two distinct format groups."""
+
+    def __init__(self):
+        super().__init__()
+        self.moe = _SyntheticSparseMoeBlock()
+        self.dense = nn.Linear(HIDDEN_DIM, HIDDEN_DIM)
+
+    def forward(self, x):
+        return self.dense(self.moe(x))
+
+
+class TestMixedPrecisionExport:
+    @staticmethod
+    def _cleanup_registry(mod_type):
+        if QuantModuleRegistry.get(mod_type) is not None:
+            QuantModuleRegistry.unregister(mod_type)
+
+    def test_weight_attr_names_yields_fused_expert_params(self):
+        """weight_attr_names must yield gate_up_proj / down_proj on fused experts
+        even though their quantizers are a plural ModuleList, not singular."""
+        from modelopt.torch.quantization.utils.core_utils import weight_attr_names
+
+        model = _TinyMoEModel()
+        expert_type = type(model.moe.experts)
+        self._cleanup_registry(expert_type)
+
+        register_fused_experts_on_the_fly(model)
+        converted = QuantModuleRegistry.convert(model.moe.experts)
+
+        yielded = list(weight_attr_names(converted))
+        assert set(yielded) == {"gate_up_proj", "down_proj"}, (
+            f"Expected both fused weight attrs, got {yielded}. "
+            "Likely regression in representative_weight_quantizer plural fallback."
+        )
+
+        self._cleanup_registry(expert_type)
+
+    def test_mixed_precision_config_export(self):
+        """Mixed-precision recipe (experts FP8 + dense Linear FP8 per-channel) should
+        show both modules in quantized_layers. Using two distinct formats would
+        trigger MIXED_PRECISION; using same-format still exercises enumeration."""
+        import modelopt.torch.quantization as mtq
+        from modelopt.torch.export.quant_utils import get_quant_config
+
+        model = _MixedPrecisionModel()
+        expert_type = type(model.moe.experts)
+        self._cleanup_registry(expert_type)
+
+        # FP8 per-tensor for experts; FP8 per-channel for dense — two distinct
+        # format strings in quantization_formats, so quant_algo must become
+        # MIXED_PRECISION.
+        quant_cfg = {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {
+                    "quantizer_name": "*gate_up_proj_input_quantizer",
+                    "cfg": {"num_bits": (4, 3), "axis": None},
+                },
+                {
+                    "quantizer_name": "*down_proj_input_quantizer",
+                    "cfg": {"num_bits": (4, 3), "axis": None},
+                },
+                {
+                    "quantizer_name": "*gate_up_proj_weight_quantizer",
+                    "cfg": {"num_bits": (4, 3), "axis": None},
+                },
+                {
+                    "quantizer_name": "*down_proj_weight_quantizer",
+                    "cfg": {"num_bits": (4, 3), "axis": None},
+                },
+                {
+                    "quantizer_name": "*dense.input_quantizer",
+                    "cfg": {"num_bits": (4, 3), "axis": None},
+                },
+                {
+                    "quantizer_name": "*dense.weight_quantizer",
+                    "cfg": {"num_bits": (4, 3), "axis": 0},  # per-channel → FP8_PC_PT
+                },
+            ],
+            "algorithm": "max",
+        }
+
+        def forward_loop(m):
+            torch.manual_seed(0)
+            for _ in range(2):
+                x = torch.randn(1, 4, HIDDEN_DIM)
+                m(x)
+
+        mtq.quantize(model, quant_cfg, forward_loop=forward_loop)
+
+        cfg = get_quant_config(model)
+        q = cfg["quantization"]
+
+        # The fused-experts module MUST appear in quantized_layers. This is the
+        # central guard: regressions of weight_attr_names plural fallback would
+        # make experts disappear here.
+        layer_names = set(q.get("quantized_layers", {}).keys())
+        assert any("moe.experts" in n for n in layer_names), (
+            f"Fused-experts module missing from quantized_layers: {layer_names}. "
+            "weight_attr_names likely not yielding plural-ModuleList weight attrs."
+        )
+        assert any(n.endswith("dense") for n in layer_names), (
+            f"Dense Linear missing from quantized_layers: {layer_names}."
+        )
+
+        # Two distinct formats → MIXED_PRECISION at top level.
+        assert q["quant_algo"] == "MIXED_PRECISION", (
+            f"Expected MIXED_PRECISION (fused-experts FP8 per-tensor + dense "
+            f"FP8 per-channel), got quant_algo={q['quant_algo']}. "
+            f"quantized_layers={q.get('quantized_layers')}"
+        )
+
+        self._cleanup_registry(expert_type)
+
+
+# ---------------------------------------------------------------------------
+# Tests for the fused-experts quantizer-name normalizer used by
+# conversion._match_quantizer. Covers both plural (actual _QuantFusedExperts
+# layout) and singular (defensive: future variants may name the ModuleList
+# without the trailing `s`) forms.
+# ---------------------------------------------------------------------------
+class TestNormalizeFusedExpertsQuantizerName:
+    def test_plural_weight_quantizers_stripped(self):
+        assert (
+            _normalize_fused_experts_quantizer_name("moe.experts.gate_up_proj_weight_quantizers.7")
+            == "moe.experts.gate_up_proj_weight_quantizer"
+        )
+
+    def test_plural_input_quantizers_stripped(self):
+        assert (
+            _normalize_fused_experts_quantizer_name("moe.experts.down_proj_input_quantizers.3")
+            == "moe.experts.down_proj_input_quantizer"
+        )
+
+    def test_singular_weight_quantizer_with_index_stripped(self):
+        """Defensive: handle variants that name the ModuleList singular."""
+        assert (
+            _normalize_fused_experts_quantizer_name("moe.experts.gate_up_proj_weight_quantizer.2")
+            == "moe.experts.gate_up_proj_weight_quantizer"
+        )
+
+    def test_singular_input_quantizer_with_index_stripped(self):
+        assert (
+            _normalize_fused_experts_quantizer_name("moe.experts.down_proj_input_quantizer.0")
+            == "moe.experts.down_proj_input_quantizer"
+        )
+
+    def test_non_indexed_name_unchanged(self):
+        """Plain singular names (no index) must be passed through untouched."""
+        assert (
+            _normalize_fused_experts_quantizer_name("moe.experts.gate_up_proj_weight_quantizer")
+            == "moe.experts.gate_up_proj_weight_quantizer"
+        )
+
+    def test_unrelated_dotted_number_unchanged(self):
+        """Dotted numbers that aren't inside a quantizer-list context are left alone."""
+        assert (
+            _normalize_fused_experts_quantizer_name("moe.layers.3.gate.weight")
+            == "moe.layers.3.gate.weight"
+        )
