@@ -20,6 +20,14 @@ import asyncio
 from pathlib import Path
 
 import torch
+from common import (
+    add_answer_only_loss_args,
+    add_aux_layers_args,
+    load_chat_template,
+    resolve_aux_layers,
+    tokenize_with_loss_mask,
+    verify_generation_tags,
+)
 from datasets import load_dataset
 from tqdm import tqdm as tqdm
 from transformers import AutoModel, AutoTokenizer
@@ -90,6 +98,8 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Set trust_remote_code for Huggingface models and tokenizers",
     )
+    add_aux_layers_args(parser)
+    add_answer_only_loss_args(parser)
 
     return parser.parse_args()
 
@@ -138,12 +148,20 @@ def main(args: argparse.Namespace) -> None:
         args.model, dtype="auto", device_map="auto", trust_remote_code=args.trust_remote_code
     )
     num_hidden_layers = getattr(model.config, "num_hidden_layers", None)
+    if num_hidden_layers is None:
+        raise ValueError(f"model.config has no 'num_hidden_layers' attribute: {model.config}")
+    selected_layer_ids = resolve_aux_layers(args, num_hidden_layers)
 
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=args.trust_remote_code)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+    override_template = load_chat_template(args.chat_template)
+    if override_template is not None:
+        tokenizer.chat_template = override_template
     if tokenizer.chat_template is not None:
         tokenizer.chat_template = tokenizer.chat_template.replace(REMOVE_THINK_CHAT_TEMPLATE, "")
+    if args.answer_only_loss:
+        verify_generation_tags(tokenizer.chat_template)
 
     output_dir = args.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -152,29 +170,21 @@ def main(args: argparse.Namespace) -> None:
     num_success = 0
     pbar = tqdm(total=len(dataset), desc=f"DP#{args.dp_rank} Processing conversations")
 
-    async def dump_hidden_states(idx: int, conversation_id: int, input_ids: torch.Tensor):
+    async def dump_hidden_states(
+        idx: int,
+        conversation_id: int,
+        input_ids: torch.Tensor,
+        loss_mask: torch.Tensor,
+    ):
         nonlocal num_success
-        nonlocal num_hidden_layers
 
         # Get hidden states
         with torch.inference_mode():
             outputs = model(input_ids=input_ids.to(model.device), output_hidden_states=True)
-            if num_hidden_layers is None:
-                num_hidden_layers = len(outputs.hidden_states) - 1
-            else:
-                assert num_hidden_layers + 1 == len(outputs.hidden_states), (
-                    f"Expected {num_hidden_layers}+1 layers of hidden states, but got {len(outputs.hidden_states)}."
-                )
-            # Extract hidden states from layers with index (2, N/2, N-3), and the output hidden states
+            # outputs.hidden_states[0] is the embedding output; layer k output is at index k+1.
             hidden_states = outputs.hidden_states
-            selected_layer_indices = [
-                2,
-                max(0, num_hidden_layers // 2),
-                max(1, num_hidden_layers - 3),
-            ]
-            selected_layer_indices = sorted(set(selected_layer_indices))
             aux_hidden_states = torch.cat(
-                [hidden_states[i].squeeze(0).cpu() for i in selected_layer_indices], dim=-1
+                [hidden_states[lid + 1].squeeze(0).cpu() for lid in selected_layer_ids], dim=-1
             )
             output_hidden_states = hidden_states[-1].squeeze(0).cpu()
         output_file = output_dir / f"{conversation_id}.pt"
@@ -185,6 +195,7 @@ def main(args: argparse.Namespace) -> None:
                     "input_ids": input_ids.squeeze(0).cpu(),
                     "hidden_states": output_hidden_states,
                     "aux_hidden_states": aux_hidden_states,
+                    "loss_mask": loss_mask,
                     "conversation_id": conversation_id,
                 },
                 f,
@@ -206,19 +217,17 @@ def main(args: argparse.Namespace) -> None:
                 num_invalid += 1
                 continue
 
-            # Tokenize and check length
-            # return_dict=True ensures BatchEncoding is returned on all transformers
-            # versions: in <5.0 the default is False (returns raw tensor), in 5.0+
-            # the default changed to True (returns BatchEncoding).
-            input_ids = tokenizer.apply_chat_template(
-                conversations, return_tensors="pt", return_dict=True, add_generation_template=False
-            )["input_ids"]
+            # Single apply_chat_template call produces both input_ids and loss_mask,
+            # guaranteeing they come from the same tokenization.
+            input_ids, loss_mask = tokenize_with_loss_mask(
+                tokenizer, conversations, args.answer_only_loss
+            )
             num_input_tokens = input_ids.shape[1]
             if num_input_tokens <= 10 or num_input_tokens > args.max_seq_len:
                 num_skipped_too_long += 1
                 continue
 
-            tasks.append(dump_hidden_states(idx, conversation_id, input_ids))
+            tasks.append(dump_hidden_states(idx, conversation_id, input_ids, loss_mask))
             # Increment only for valid conversations to match dump file index
             idx += 1
         await asyncio.gather(*tasks)

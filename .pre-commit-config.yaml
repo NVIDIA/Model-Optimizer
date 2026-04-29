@@ -99,7 +99,7 @@ repos:
               modelopt/torch/quantization/plugins/attention.py|
               modelopt/torch/sparsity/attention_sparsity/methods/vsa_utils.py|
               modelopt/torch/speculative/eagle/utils.py|
-              modelopt/torch/speculative/plugins/transformers.py|
+              modelopt/torch/speculative/plugins/hf_medusa.py|
               modelopt/torch/utils/plugins/megatron_mmlu.py|
               examples/chained_optimizations/bert_prune_distill_quantize.py|
               examples/deepseek/quantize_to_nvfp4.py|

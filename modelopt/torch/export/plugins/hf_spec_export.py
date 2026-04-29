@@ -171,8 +171,8 @@ class EagleExporter(SpeculativeDecodingExporter):
         template_config = deepcopy(template_config)
 
         def _get_config_from_draft_or_base(key: str, model: nn.Module):
-            if getattr(model._draft_model_config, key, None) is not None:
-                return getattr(model._draft_model_config, key)
+            if getattr(model.eagle_config, key, None) is not None:
+                return getattr(model.eagle_config, key)
             elif getattr(model.config, key, None) is not None:
                 return getattr(model.config, key)
             else:

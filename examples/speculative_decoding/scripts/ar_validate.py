@@ -27,7 +27,7 @@ from tqdm import tqdm
 from transformers import AutoTokenizer
 
 import modelopt.torch.opt as mto
-from modelopt.torch.speculative.plugins.transformers import HFARValidation
+from modelopt.torch.speculative.plugins.hf_eagle import HFARValidation
 from modelopt.torch.speculative.utils import load_vlm_or_llm
 
 mto.enable_huggingface_checkpointing()

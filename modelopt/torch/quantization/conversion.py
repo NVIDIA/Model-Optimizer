@@ -16,6 +16,7 @@
 """Quantization conversion/restore utilities."""
 
 import fnmatch
+import re
 import warnings
 from collections.abc import Callable
 from contextlib import contextmanager
@@ -286,6 +287,33 @@ def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: QuantizeQuantCfgType
             set_quantizer_attributes_full(quant_model, quantizer_name, attributes, parent_class)
 
 
+_FUSED_EXPERTS_QUANTIZER_LIST_RE = re.compile(
+    r"(weight_quantizers?|input_quantizers?)\.\d+(?=$|\.)"
+)
+
+
+def _normalize_fused_experts_quantizer_name(name: str) -> str:
+    """Strip the per-expert index from per-expert quantizer ModuleList names.
+
+    Fused-experts modules register per-expert weight/input quantizers in a
+    ``nn.ModuleList``; its children surface as dotted names like
+    ``...gate_up_proj_weight_quantizers.0`` (plural) or — if a variant uses
+    singular naming — ``...gate_up_proj_weight_quantizer.0``. Neither matches
+    the singular-suffix wildcards (``*weight_quantizer``) used in the stock
+    configs, so the experts stay at their defaults.
+
+    Return a normalized name where either ``weight_quantizer[s]?.N`` or
+    ``input_quantizer[s]?.N`` collapses to the singular form without the index
+    so the standard wildcards match.
+    """
+
+    def _repl(m: re.Match) -> str:
+        base = m.group(1)
+        return base.removesuffix("s")
+
+    return _FUSED_EXPERTS_QUANTIZER_LIST_RE.sub(_repl, name)
+
+
 def _match_quantizer(
     wildcard_or_filter_func: str | Callable,
     name: str,
@@ -296,7 +324,11 @@ def _match_quantizer(
     if not isinstance(module, (TensorQuantizer, SequentialQuantizer)):
         return False
     if isinstance(wildcard_or_filter_func, str):
-        if not fnmatch.fnmatch(name, wildcard_or_filter_func):
+        normalized = _normalize_fused_experts_quantizer_name(name)
+        if not (
+            fnmatch.fnmatch(name, wildcard_or_filter_func)
+            or (normalized != name and fnmatch.fnmatch(normalized, wildcard_or_filter_func))
+        ):
             return False
     elif callable(wildcard_or_filter_func):
         if not wildcard_or_filter_func(name):
