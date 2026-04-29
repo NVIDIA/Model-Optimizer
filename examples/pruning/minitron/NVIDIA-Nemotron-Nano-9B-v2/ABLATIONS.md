@@ -19,7 +19,7 @@ Pure Nemotron-Pretraining-SFT-v1 data only (no post-training reasoning traces).
 
 ## Baseline: Pure Post-Training Data (pt-v1v2)
 
-70% post-training only (no pretraining data), Nemotron-v1/v2 blend.
+100% post-training data (no pretraining data), Nemotron-v1/v2 blend.
 
 | Tokens | MMLU | MMLU Pro | GPQA Diamond | LCB v6 | AIME 2025 | Math 500 | IFEval | SciCode |
 |---|---|---|---|---|---|---|---|---|

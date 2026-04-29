@@ -176,9 +176,12 @@ Pruned hybrid_override_pattern: M-M-M-MM-M-M-M*-M-M-M*-M-M-M-M*-M-M-M-M*-MMMM-M-
 
 ### 3. Distillation
 
+Non-default arguments: `--seq_length 8192` (default: 4096), `--mbs 4` (default: 1), `--train_iters 16000` (train upto ~100B tokens — can stop earlier and take intermediate checkpoints for smaller runs), `--lr_warmup_iters 100` (default: 50), `--eval_interval 400` (default: 100). All other arguments use defaults.
+
 Run on **96 nodes × 8x H100 (768 GPUs total)**. ~600 H100 GPU-hours per 1k steps (~6.3B tokens), i.e. ~45 min wall-clock per 1k steps. Full 80B token run (~13k steps) takes ~9k H100 GPU-hours (~10 hours wall-clock).
 
-Non-default arguments: `--seq_length 8192` (default: 4096), `--mbs 4` (default: 1), `--train_iters 16000` (train upto ~100B tokens — can stop earlier and take intermediate checkpoints for smaller runs), `--lr_warmup_iters 100` (default: 50), `--eval_interval 400` (default: 100). All other arguments use defaults.
+>[!TIP]
+> While we use 96 nodes here for faster training, you can also run with 1 node. If you dont want to do full distillation run, you can stop earlier and take intermediate checkpoints as well.
 
 ```bash
 torchrun --nproc_per_node 8 /opt/Model-Optimizer/examples/megatron_bridge/distill_minitron.py \
@@ -228,7 +231,7 @@ Before running, update the following fields in the yaml:
 
 - `execution.hostname` — your Slurm login node hostname
 - `execution.account` — your Slurm account
-- `deployment.checkpoint_path` — path to your converted `hf_iter_XXXXXX` checkpoint
+- `deployment.checkpoint_path` — Hugging Face checkpoint path (original, pruned or quantized)
 - `evaluation.nemo_evaluator_config.config.params.extra.tokenizer` — same path as `checkpoint_path`
 
 > [!TIP]
@@ -239,7 +242,6 @@ pip install "nemo-evaluator-launcher[all]==0.1.90"
 
 # Set required environment variables:
 export HF_TOKEN=<your_huggingface_token>
-export JUDGE_API_KEY=<your_judge_api_key>
 export SLURM_JOB_DIR=<path_to_slurm_job_output_dir>
 export HF_HOME=<path_to_huggingface_cache>
 export VLLM_CACHE_ROOT=<path_to_vllm_cache>

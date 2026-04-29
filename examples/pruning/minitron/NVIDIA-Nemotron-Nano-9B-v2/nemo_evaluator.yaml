@@ -3,7 +3,7 @@
 # Before running, update the following fields in the yaml:
 # - `execution.hostname` — your Slurm login node hostname
 # - `execution.account` — your Slurm account
-# - `deployment.checkpoint_path` — path to your converted `hf_iter_XXXXXX` checkpoint
+# - `deployment.checkpoint_path` — Hugging Face checkpoint path (original, pruned or quantized)
 # - `evaluation.nemo_evaluator_config.config.params.extra.tokenizer` — same path as `checkpoint_path`
 #
 # Usage:
@@ -11,7 +11,6 @@
 #
 #   # Set required environment variables:
 #   export HF_TOKEN=<your_huggingface_token>
-#   export JUDGE_API_KEY=<your_judge_api_key>
 #   export SLURM_JOB_DIR=<path_to_slurm_job_output_dir>
 #   export HF_HOME=<path_to_huggingface_cache>
 #   export VLLM_CACHE_ROOT=<path_to_vllm_cache>
@@ -106,7 +105,6 @@ evaluation:
           tokenizer: <hf_model_name_or_path>
   env_vars:
     HF_TOKEN: HF_TOKEN
-    JUDGE_API_KEY: JUDGE_API_KEY
     HF_HOME: HF_HOME
     VLLM_CACHE_ROOT: VLLM_CACHE_ROOT
     API_KEY: API_KEY
@@ -165,7 +163,6 @@ evaluation:
     # 5. MATH500
     - name: AA_math_test_500
       env_vars:
-        JUDGE_API_KEY: JUDGE_API_KEY
         HF_TOKEN: HF_TOKEN
       nemo_evaluator_config:
         config:

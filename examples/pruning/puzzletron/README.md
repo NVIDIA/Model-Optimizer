@@ -1,6 +1,12 @@
 # Puzzletron Pruning — Distillation Results
 
-Distillation results for models compressed with [Puzzletron](../../puzzletron/README.md) MIP-based heterogeneous pruning, followed by Megatron-Bridge knowledge distillation. Each file covers a specific source model.
+Distillation results for models compressed with [Puzzletron](../../puzzletron/README.md) MIP-based heterogeneous pruning, followed by Megatron-Bridge knowledge distillation.
+
+## Results
+
+| Model | File |
+| --- | --- |
+| Llama-3.1-8B-Instruct and Qwen3-8B | [Llama-3.1-8B-Instruct.md](Llama-3.1-8B-Instruct.md) |
 
 ## Related
 
