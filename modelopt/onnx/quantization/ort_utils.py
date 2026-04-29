@@ -171,7 +171,7 @@ def _load_extra_cudnn_dlls():
     if not dll_files:
         return
 
-    get_module_handle_w = ctypes.windll.kernel32.GetModuleHandleW
+    get_module_handle_w = ctypes.windll.kernel32.GetModuleHandleW  # type: ignore[attr-defined]
     get_module_handle_w.argtypes = [ctypes.wintypes.LPCWSTR]
     get_module_handle_w.restype = ctypes.wintypes.HMODULE
 
