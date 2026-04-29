@@ -2,6 +2,8 @@
 #
 # A balanced set of benchmarks for validating quantized model quality.
 # Copy this file and customize for your needs.
+# Task snippets in recipes/tasks/ define per-task configs — the agent
+# composes them into a runnable config like this one.
 #
 # Includes:
 #   - MMLU-Pro (knowledge, completions)
@@ -60,8 +62,20 @@ evaluation:
       api_endpoint:
         api_key_name: DUMMY_API_KEY
   tasks:
-  # Knowledge (completions endpoint, short)
-    - name: adlr_mmlu_pro_5_shot_base
+  # Knowledge (chat endpoint, short)
+    - name: ns_mmlu_pro
+      nemo_evaluator_config:
+        config:
+          params:
+            extra:
+              num_repeats: 1
+              args: ++prompt_config=eval/aai/mcq-10choices-boxed ++inference.tokens_to_generate=null
+        target:
+          api_endpoint:
+            adapter_config:
+              params_to_remove:
+                - max_new_tokens
+                - max_completion_tokens
 
   # Reasoning (chat endpoint, 5 repeats, short)
     - name: ns_gpqa
