@@ -331,9 +331,9 @@ def auto_quantize(
         for qformat in qformat_list
     ), "One or more quantization formats provided are not supported for unified checkpoint export"
 
-    # For VLMs like Gemma4, the extracted language_model is a base text model without
-    # lm_head, so it cannot produce logits or loss directly. In that case, use the
-    # full_model's lm_head to compute logits/loss from the language model's hidden states.
+    # Gemma4-specific: its language_model is a base text model (Gemma4TextModel) without
+    # lm_head, unlike other VLMs (LLaVA, Qwen2.5-VL, PaliGemma) whose language_model
+    # includes lm_head. Use full_model's lm_head to compute logits/loss from hidden states.
     is_base_model = (
         full_model is not None
         and language_model is not full_model
@@ -344,6 +344,9 @@ def auto_quantize(
     if is_base_model:
         assert full_model is not None
         lm_head = full_model.lm_head
+
+        def _model_inputs(batch):
+            return {k: v for k, v in batch.items() if k != "labels"}
 
         def loss_func(output, data):
             logits = lm_head(output.last_hidden_state)
@@ -357,12 +360,12 @@ def auto_quantize(
         if auto_quantize_method == "gradient":
 
             def forward_step(model, batch):
-                return model(**batch)
+                return model(**_model_inputs(batch))
 
         elif auto_quantize_method == "kl_div":
 
             def forward_step(model, batch):
-                hidden_states = model(**batch).last_hidden_state
+                hidden_states = model(**_model_inputs(batch)).last_hidden_state
                 return lm_head(hidden_states)
 
         else:
@@ -1067,6 +1070,9 @@ def quantize_main(
             args,
             language_model,
             calib_dataloader,
+            auto_quantize_method=args.auto_quantize_method,
+            auto_quantize_score_size=args.auto_quantize_score_size,
+            auto_quantize_checkpoint=args.auto_quantize_checkpoint,
             full_model=full_model,
         )
 
