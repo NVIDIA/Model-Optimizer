@@ -256,6 +256,8 @@ class TrtExecBenchmark(Benchmark):
             self.remote_password = parsed.password
             self.remote_ip = parsed.hostname
             self.remote_port = parsed.port
+            if self.remote_port is None:
+                self.remote_port = 22
             # Parse query options into a dict
             self.remote_options = {
                 k: v[0] if len(v) == 1 else v for k, v in parse_qs(parsed.query).items()
