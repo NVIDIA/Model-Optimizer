@@ -49,7 +49,6 @@ import modelopt.torch.opt as mto
 import modelopt.torch.speculative as mtsp
 from modelopt.recipe import load_recipe
 from modelopt.recipe.config import ModelOptDFlashRecipe, ModelOptEagleRecipe, ModelOptMedusaRecipe
-from modelopt.torch.speculative.config import DFlashConfig
 from modelopt.torch.speculative.utils import load_vlm_or_llm, patch_transformers5_params_loading
 from modelopt.torch.utils import print_rank_0
 from modelopt.torch.utils.distributed import is_master
@@ -159,10 +158,15 @@ def train():
             # Load draft vocab cache
             mtsp.plugins.HFEagleModel.load_draft_vocab_cache(model, recipe.data.draft_vocab_cache)
         elif isinstance(recipe, ModelOptDFlashRecipe):
-            # Re-validate with tokenizer to resolve dflash_mask_token_id and enforce its presence.
-            dflash_cfg: dict = DFlashConfig.model_validate(
-                recipe.dflash.model_dump(), context={"tokenizer": tokenizer}
-            ).model_dump()
+            # Fall back to tokenizer.mask_token_id when not set in the recipe; require one of the two.
+            if recipe.dflash.dflash_mask_token_id is None:
+                recipe.dflash.dflash_mask_token_id = getattr(tokenizer, "mask_token_id", None)
+            if recipe.dflash.dflash_mask_token_id is None:
+                raise ValueError(
+                    "dflash.dflash_mask_token_id is required: set it in the recipe YAML "
+                    "or use a tokenizer that defines mask_token_id."
+                )
+            dflash_cfg: dict = recipe.dflash.model_dump()
             mtsp.convert(model, [("dflash", dflash_cfg)])
         else:
             raise ValueError(f"Unsupported speculative recipe type: {type(recipe).__name__}")

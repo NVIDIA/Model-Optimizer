@@ -16,9 +16,8 @@
 """Configurations for speculative decoding modes."""
 
 from copy import deepcopy
-from typing import Any
 
-from pydantic import ValidationInfo, model_validator
+from pydantic import model_validator
 
 from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
 
@@ -102,10 +101,12 @@ class DFlashConfig(ModeloptBaseConfig):
         default=True, description="Whether to report eval accuracy."
     )
 
-    dflash_mask_token_id: int = ModeloptField(
+    dflash_mask_token_id: int | None = ModeloptField(
         default=None,
-        description="Token ID used for masked (unknown) positions. "
-        "Set explicitly or auto-detected from tokenizer.mask_token_id in main.py.",
+        description=(
+            "Token ID used for masked (unknown) positions. Set explicitly in the recipe YAML, "
+            "or left unset to fall back to ``tokenizer.mask_token_id`` at training time."
+        ),
     )
 
     dflash_architecture_config: dict = ModeloptField(
@@ -116,37 +117,6 @@ class DFlashConfig(ModeloptBaseConfig):
         default=True,
         description="Whether to use torch.compile on DFlash forward/loss methods.",
     )
-
-    @model_validator(mode="before")
-    @classmethod
-    def _resolve_mask_token_id(cls, data: Any, info: ValidationInfo) -> Any:
-        """Auto-detect ``dflash_mask_token_id`` from tokenizer when provided in context."""
-        if not isinstance(data, dict) or data.get("dflash_mask_token_id") is not None:
-            return data
-        ctx = info.context if info.context else {}
-        tokenizer = ctx.get("tokenizer")
-        if tokenizer is not None and getattr(tokenizer, "mask_token_id", None) is not None:
-            data["dflash_mask_token_id"] = tokenizer.mask_token_id
-        return data
-
-    @model_validator(mode="after")
-    def _check_mask_token_id(self, info: ValidationInfo) -> "DFlashConfig":
-        """Require ``dflash_mask_token_id`` once a tokenizer is available.
-
-        Skipped when no tokenizer is in context (e.g., recipe-load time before the tokenizer
-        is constructed). The caller is expected to re-validate with ``context={"tokenizer": ...}``
-        once the tokenizer is loaded; that pass enforces the requirement.
-        """
-        ctx = info.context if info.context else {}
-        if ctx.get("tokenizer") is None:
-            return self
-        if self.dflash_mask_token_id is None:
-            raise ValueError(
-                "dflash_mask_token_id is required. Set it in the config YAML "
-                "(dflash.dflash_mask_token_id=TOKEN_ID) or ensure the tokenizer "
-                "has a mask_token_id attribute."
-            )
-        return self
 
 
 class MedusaConfig(ModeloptBaseConfig):
