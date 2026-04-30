@@ -280,3 +280,118 @@ def test_e2m1_magnitude_table_cached_per_device():
     t2 = cast._e2m1_magnitude_table(torch.device("cpu"))
     assert t1 is t2  # cached: same object
     assert t1.tolist() == cast._E2M1_MAGNITUDE
+
+
+# ---------- apply_to_model end-to-end (mock model) ---------------------------
+
+
+class _FakeStaticQuantizer(torch.nn.Module):
+    """Stand-in for NVFP4StaticQuantizer.
+
+    Carries a per-block ``_amax`` buffer and a ``global_amax`` property whose
+    setter writes ``_global_amax`` — matches the contract apply_to_model relies
+    on. Subclasses ``cast.NVFP4StaticQuantizer`` so the isinstance check passes.
+    """
+
+    def __init__(self, num_blocks: int):
+        super().__init__()
+        self.register_buffer("_amax", torch.zeros(num_blocks, dtype=torch.float32))
+        self.register_buffer("_global_amax", torch.zeros((), dtype=torch.float32))
+
+    @property
+    def global_amax(self) -> torch.Tensor:
+        return self._global_amax
+
+    @global_amax.setter
+    def global_amax(self, value: torch.Tensor) -> None:
+        self._global_amax = value
+
+
+# Inherit at runtime so isinstance(NVFP4StaticQuantizer) is True.
+_FakeStaticQuantizer.__bases__ = (cast.NVFP4StaticQuantizer,)
+
+
+class _FakeExperts(torch.nn.Module):
+    """Mimics a HF GptOssExperts module: a ``*_weight_quantizer`` child."""
+
+    def __init__(self, num_blocks: int):
+        super().__init__()
+        # Quantizer attribute name must match the source key after stripping
+        # ``_blocks`` and appending ``_weight_quantizer``.
+        self.gate_up_proj_weight_quantizer = _FakeStaticQuantizer(num_blocks)
+
+
+class _FakeModel(torch.nn.Module):
+    """Single MLP-like submodule path: ``model.layers.0.mlp.experts.gate_up_proj_*``."""
+
+    def __init__(self, num_blocks: int):
+        super().__init__()
+        self.experts = _FakeExperts(num_blocks)
+
+
+def test_apply_to_model_writes_global_and_per_block_amax(tmp_path):
+    """Happy path: cast overrides _amax + global_amax on the matching quantizer."""
+    # Build a synthetic MXFP4 source: 4 in-range MXFP4 blocks => 8 NVFP4 blocks.
+    name = "experts.gate_up_proj"
+    e8m0 = torch.tensor([130, 128, 125, 132], dtype=torch.uint8)  # ks: 3, 1, -2, 5
+    blocks = torch.zeros((4, 16), dtype=torch.uint8)
+    ckpt_dir = _write_synthetic_mxfp4_checkpoint(
+        tmp_path,
+        [name],
+        e8m0_per_layer={name: e8m0},
+        blocks_per_layer={name: blocks},
+    )
+
+    # 8 NVFP4 blocks (each MXFP4 block of 32 splits into two NVFP4 blocks of 16).
+    model = _FakeModel(num_blocks=8)
+    cast.apply_to_model(model, ckpt_dir)
+
+    quantizer = model.experts.gate_up_proj_weight_quantizer
+    # k_max = 5 -> m = -3 -> global_amax = 6 * 448 * 2^-3 = 336.
+    assert float(quantizer.global_amax.item()) == pytest.approx(6.0 * 448.0 * 2.0**-3)
+    # All in-range -> per-block _amax = 6 * 2^k_j, repeat-interleaved by 2.
+    expected_per_mxfp4 = 6.0 * torch.exp2(torch.tensor([3.0, 1.0, -2.0, 5.0]))
+    expected_per_nvfp4 = expected_per_mxfp4.repeat_interleave(2)
+    assert torch.allclose(quantizer._amax.float(), expected_per_nvfp4)
+
+
+def test_apply_to_model_raises_on_missing_blocks_pair(tmp_path):
+    """If a *_scales tensor has no paired *_blocks tensor, raise ValueError."""
+    ckpt_dir = tmp_path / "missing_blocks"
+    ckpt_dir.mkdir()
+    # Write only the _scales tensor.
+    save_file(
+        {"experts.gate_up_proj_scales": torch.zeros(2, dtype=torch.uint8)},
+        str(ckpt_dir / "model-00001-of-00001.safetensors"),
+    )
+    (ckpt_dir / "model.safetensors.index.json").write_text(
+        json.dumps(
+            {
+                "metadata": {},
+                "weight_map": {"experts.gate_up_proj_scales": "model-00001-of-00001.safetensors"},
+            }
+        )
+    )
+    model = _FakeModel(num_blocks=4)
+    with pytest.raises(AssertionError, match="no paired '.*_blocks' tensor"):
+        cast.apply_to_model(model, ckpt_dir)
+
+
+def test_apply_to_model_raises_on_wrong_quantizer_type(tmp_path):
+    """If the matching attribute isn't an NVFP4StaticQuantizer, raise RuntimeError."""
+    name = "experts.gate_up_proj"
+    e8m0 = torch.tensor([130, 128], dtype=torch.uint8)
+    blocks = torch.zeros((2, 16), dtype=torch.uint8)
+    ckpt_dir = _write_synthetic_mxfp4_checkpoint(tmp_path, [name], {name: e8m0}, {name: blocks})
+
+    class _NotAQuantizer(torch.nn.Module):
+        pass
+
+    class _Wrong(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.experts = torch.nn.Module()
+            self.experts.gate_up_proj_weight_quantizer = _NotAQuantizer()
+
+    with pytest.raises(AssertionError, match="expected NVFP4StaticQuantizer"):
+        cast.apply_to_model(_Wrong(), ckpt_dir)

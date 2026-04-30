@@ -1451,4 +1451,17 @@ if __name__ == "__main__":
             "--specdec_offline_dataset expects a single --calib value, not a comma-separated list."
         )
 
+    if args.cast_mxfp4_to_nvfp4:
+        qformats = [q.strip() for q in args.qformat.split(",")]
+        if not all("nvfp4" in q for q in qformats):
+            raise ValueError(
+                "--cast_mxfp4_to_nvfp4 requires NVFP4-family --qformat values "
+                f"(got {args.qformat!r}). Use e.g. --qformat nvfp4 or nvfp4_mlp_only."
+            )
+        if args.auto_quantize_bits is not None:
+            raise ValueError(
+                "--cast_mxfp4_to_nvfp4 is not supported with --auto_quantize_bits "
+                "(multi-format auto-quantize)."
+            )
+
     main(args)

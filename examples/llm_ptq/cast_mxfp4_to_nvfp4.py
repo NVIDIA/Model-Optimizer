@@ -34,12 +34,33 @@ out-of-range blocks; runs in seconds.
 """
 
 import json
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
 import torch
 from safetensors import safe_open
 
 from modelopt.torch.quantization.nn.modules.tensor_quantizer import NVFP4StaticQuantizer
+
+
+@contextmanager
+def _shard_reader():
+    """Yield a ``read(key, shard) -> tensor`` closure with cached safetensors handles.
+
+    Each unique shard is opened lazily on first read and closed deterministically
+    when the context exits, so callers don't need to manage the handle cache or
+    the surrounding ``ExitStack`` themselves.
+    """
+    with ExitStack() as stack:
+        handles: dict[Path, safe_open] = {}
+
+        def read(key: str, shard: Path) -> torch.Tensor:
+            if shard not in handles:
+                handles[shard] = stack.enter_context(safe_open(shard, framework="pt", device="cpu"))
+            return handles[shard].get_tensor(key)
+
+        yield read
+
 
 E8M0_BIAS = 127  # E8M0 stores k_j as uint8 with bias 127
 E2M1_MAX = 6.0
@@ -141,9 +162,10 @@ def compute_per_block_amax_for_mxfp4(
     Returns:
         float32 tensor of shape ``(..., 2 * num_mxfp4_blocks)``.
     """
-    if blocks.shape[:-1] != e8m0_scales.shape:
+    if blocks.shape[-1] != 16 or blocks.shape[:-1] != e8m0_scales.shape:
         raise ValueError(
-            f"shape mismatch: blocks {tuple(blocks.shape)} (expect last dim 16) "
+            f"shape mismatch: blocks {tuple(blocks.shape)} "
+            "(expected (..., num_mxfp4_blocks, 16)) "
             f"vs scales {tuple(e8m0_scales.shape)}"
         )
 
@@ -255,18 +277,16 @@ def build_amax_map(checkpoint_dir: str | Path) -> dict[str, dict]:
             "This requires an MXFP4 HF checkpoint with the OpenAI layout."
         )
 
-    handles: dict[Path, safe_open] = {}
     amax_map: dict[str, dict] = {}
-    for tensor_key, shard in sorted(scales_keys.items()):
-        if shard not in handles:
-            handles[shard] = safe_open(shard, framework="pt", device="cpu")
-        scales = handles[shard].get_tensor(tensor_key)
+    with _shard_reader() as read:
+        for tensor_key, shard in sorted(scales_keys.items()):
+            scales = read(tensor_key, shard)
 
-        global_amax, info = compute_global_amax_for_scales(scales)
+            global_amax, info = compute_global_amax_for_scales(scales)
 
-        blocks_key = tensor_key[: -len("_scales")] + "_blocks"
-        qname = quantizer_name_from_blocks_key(blocks_key)
-        amax_map[qname] = {"global_amax": global_amax, **info}
+            blocks_key = tensor_key[: -len("_scales")] + "_blocks"
+            qname = quantizer_name_from_blocks_key(blocks_key)
+            amax_map[qname] = {"global_amax": global_amax, **info}
 
     return amax_map
 
@@ -307,7 +327,6 @@ def apply_to_model(
 
     blocks_keys = _collect_keys_with_suffix(ckpt_dir, "_blocks")
 
-    handles: dict[Path, safe_open] = {}
     name_to_module = dict(model.named_modules())
     matched = 0
     missed: list[str] = []
@@ -317,79 +336,87 @@ def apply_to_model(
     grand_total_blocks = 0
     grand_lossless_blocks = 0
 
-    def _read(key: str, shard: Path) -> torch.Tensor:
-        if shard not in handles:
-            handles[shard] = safe_open(shard, framework="pt", device="cpu")
-        return handles[shard].get_tensor(key)
+    with _shard_reader() as read:
+        for tensor_key, shard in sorted(scales_keys.items()):
+            scales = read(tensor_key, shard)
 
-    for tensor_key, shard in sorted(scales_keys.items()):
-        scales = _read(tensor_key, shard)
+            global_amax_value, info = compute_global_amax_for_scales(scales)
+            n_total_layers += 1
+            if info["pct_lossless"] >= 100.0:
+                n_lossless_layers += 1
+            grand_total_blocks += info["n_total_blocks"]
+            grand_lossless_blocks += info["n_lossless_blocks"]
 
-        global_amax_value, info = compute_global_amax_for_scales(scales)
-        n_total_layers += 1
-        if info["pct_lossless"] >= 100.0:
-            n_lossless_layers += 1
-        grand_total_blocks += info["n_total_blocks"]
-        grand_lossless_blocks += info["n_lossless_blocks"]
+            blocks_key = tensor_key[: -len("_scales")] + "_blocks"
+            qname = quantizer_name_from_blocks_key(blocks_key)
+            blocks_shard = blocks_keys.get(blocks_key)
+            assert blocks_shard is not None, (
+                f"{tensor_key}: no paired '{blocks_key}' tensor found in source checkpoint."
+            )
 
-        blocks_key = tensor_key[: -len("_scales")] + "_blocks"
-        qname = quantizer_name_from_blocks_key(blocks_key)
-        blocks_shard = blocks_keys.get(blocks_key)
-        assert blocks_shard is not None, (
-            f"{tensor_key}: no paired '{blocks_key}' tensor found in source checkpoint."
-        )
+            weight_quantizer = name_to_module.get(qname)
+            if weight_quantizer is None:
+                missed.append(qname)
+                continue
 
-        weight_quantizer = name_to_module.get(qname)
-        if weight_quantizer is None:
-            missed.append(qname)
-            continue
+            # The cast assumes ``max_calibrate`` already promoted this quantizer
+            # to NVFP4StaticQuantizer (with ``_amax`` populated per-block by
+            # static-block max-cal and ``_global_amax`` set by the auto-promote).
+            # Anything else means the qformat or quant_cfg disabled this module's
+            # weight quantization — surface that loudly so we don't silently no-op.
+            assert isinstance(weight_quantizer, NVFP4StaticQuantizer), (
+                f"{qname}: expected NVFP4StaticQuantizer (set by max_calibrate's "
+                f"auto-promote), got {type(weight_quantizer).__name__}. The cast "
+                "requires the matching quantizer to be enabled with static-block "
+                "NVFP4 (num_bits=(2,1), scale_bits=(4,3))."
+            )
+            existing = getattr(weight_quantizer, "_amax", None)
+            assert isinstance(existing, torch.Tensor) and existing.numel() > 1, (
+                f"{qname}: NVFP4StaticQuantizer must have a per-block ``_amax`` "
+                f"buffer populated by max_calibrate. Got: {existing!r}."
+            )
 
-        # The cast assumes ``max_calibrate`` already promoted this quantizer
-        # to NVFP4StaticQuantizer (with ``_amax`` populated per-block by
-        # static-block max-cal and ``_global_amax`` set by the auto-promote).
-        # Anything else means the qformat or quant_cfg disabled this module's
-        # weight quantization — surface that loudly so we don't silently no-op.
-        assert isinstance(weight_quantizer, NVFP4StaticQuantizer), (
-            f"{qname}: expected NVFP4StaticQuantizer (set by max_calibrate's "
-            f"auto-promote), got {type(weight_quantizer).__name__}. The cast "
-            "requires the matching quantizer to be enabled with static-block "
-            "NVFP4 (num_bits=(2,1), scale_bits=(4,3))."
-        )
-        existing = getattr(weight_quantizer, "_amax", None)
-        assert isinstance(existing, torch.Tensor) and existing.numel() > 1, (
-            f"{qname}: NVFP4StaticQuantizer must have a per-block ``_amax`` "
-            f"buffer populated by max_calibrate. Got: {existing!r}."
-        )
+            # Pick the device from the existing per-block ``_amax`` buffer.
+            device = existing.device
 
-        # Pick the device from the existing per-block ``_amax`` buffer.
-        device = existing.device
+            global_amax = torch.tensor(float(global_amax_value), dtype=torch.float32, device=device)
+            # Fully-lossless layers don't need the packed ``*_blocks`` tensor —
+            # the per-block amax is just ``6 * 2^k_j`` from ``scales`` alone, and
+            # avoiding the (16x larger) block read is the main I/O win the
+            # closed-form path is designed for.
+            if info["pct_lossless"] >= 100.0:
+                k = scales.to(torch.int32) - E8M0_BIAS
+                per_block_amax = (
+                    (E2M1_MAX * torch.exp2(k.float()))
+                    .repeat_interleave(2, dim=-1)
+                    .to(dtype=torch.float32, device=device)
+                )
+            else:
+                blocks = read(blocks_key, blocks_shard)
+                per_block_amax = compute_per_block_amax_for_mxfp4(blocks, scales).to(
+                    dtype=torch.float32, device=device
+                )
+            # Numel must match — calibration may store ``_amax`` flat (e.g. (N, 1))
+            # while we compute it in natural (E, F, num_blocks) layout. The static
+            # export path reshapes via ``.view(expected_shape)``, so we just need
+            # element count to agree, then reshape for the in-place copy.
+            assert existing.numel() == per_block_amax.numel(), (
+                f"{qname}: ``_amax`` element count {existing.numel()} does not "
+                f"match the cast-computed count {per_block_amax.numel()}. The "
+                "block layout from calibration disagrees with the source MXFP4 "
+                "scales — check that the qformat block_size is 16 and the source "
+                "checkpoint is the same MXFP4 model."
+            )
 
-        global_amax = torch.tensor(float(global_amax_value), dtype=torch.float32, device=device)
-        blocks = _read(blocks_key, blocks_shard)
-        per_block_amax = compute_per_block_amax_for_mxfp4(blocks, scales).to(
-            dtype=torch.float32, device=device
-        )
-        # Numel must match — calibration may store ``_amax`` flat (e.g. (N, 1))
-        # while we compute it in natural (E, F, num_blocks) layout. The static
-        # export path reshapes via ``.view(expected_shape)``, so we just need
-        # element count to agree, then reshape for the in-place copy.
-        assert existing.numel() == per_block_amax.numel(), (
-            f"{qname}: ``_amax`` element count {existing.numel()} does not "
-            f"match the cast-computed count {per_block_amax.numel()}. The "
-            "block layout from calibration disagrees with the source MXFP4 "
-            "scales — check that the qformat block_size is 16 and the source "
-            "checkpoint is the same MXFP4 model."
-        )
+            # global_amax via the NVFP4StaticQuantizer property setter (writes to
+            # the canonical ``_global_amax`` buffer).
+            weight_quantizer.global_amax = global_amax
+            # _amax: in-place buffer copy, reshaping our value to the calibrator's
+            # storage layout (numel verified above).
+            with torch.no_grad():
+                existing.data.copy_(per_block_amax.view_as(existing))
 
-        # global_amax via the NVFP4StaticQuantizer property setter (writes to
-        # the canonical ``_global_amax`` buffer).
-        weight_quantizer.global_amax = global_amax
-        # _amax: in-place buffer copy, reshaping our value to the calibrator's
-        # storage layout (numel verified above).
-        with torch.no_grad():
-            existing.data.copy_(per_block_amax.view_as(existing))
-
-        matched += 1
+            matched += 1
 
     print(
         f"[cast_mxfp4_to_nvfp4] overrode {matched}/{n_total_layers} weight quantizers from {source_checkpoint_path}"

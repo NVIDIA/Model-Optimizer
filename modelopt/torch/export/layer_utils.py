@@ -1092,6 +1092,9 @@ def set_expert_quantizer_amax(
         if existing_amax is not None:
             # Convert to tensor and add to collection
             if isinstance(existing_amax, torch.Tensor):
+                # Meta tensors have no storage; .amax() / .to() would fail.
+                if existing_amax.is_meta:
+                    continue
                 valid_amax_values.append(existing_amax.amax().to(target_device))
             else:
                 valid_amax_values.append(
