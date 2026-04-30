@@ -150,7 +150,7 @@ def _load_extra_cudnn_dlls():
     hardcoded list of cuDNN sub-libraries which may be incomplete for newer cuDNN
     versions (e.g. cuDNN 9.21 added cudnn_engines_tensor_ir64_9.dll, cuDNN 9.20
     added cudnn_cnn64_9.dll). Once ort.preload_dlls() is fixed upstream to
-    dynamically discover all cuDNN DLLs, this function and its caller
+    dynamically discover all cuDNN DLLs, this function and its helper
     (_find_cudnn_bin_dir) should be removed.
 
     This scans the nvidia-cudnn bin directory and loads any cudnn*.dll not already
@@ -168,6 +168,7 @@ def _load_extra_cudnn_dlls():
 
     dll_files = sorted(glob.glob(os.path.join(cudnn_bin_dir, "cudnn*.dll")))
     if not dll_files:
+        logger.debug("No cudnn*.dll files found in %s", cudnn_bin_dir)
         return
 
     get_module_handle_w = ctypes.windll.kernel32.GetModuleHandleW  # type: ignore[attr-defined]
