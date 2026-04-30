@@ -17,9 +17,10 @@
 
 from __future__ import annotations
 
+import warnings
 from enum import Enum
 
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 
 from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
 from modelopt.torch.quantization.config import QuantizeConfig
@@ -126,6 +127,19 @@ class ModelOptEagleRecipe(ModelOptSpeculativeRecipeBase):
         validate_default=True,
     )
 
+    @model_validator(mode="after")
+    def _resolve_eagle_cross_section(self) -> ModelOptEagleRecipe:
+        """Fill cross-section fields and warn on inconsistencies once all sections are loaded."""
+        self.eagle.eagle_offline = self.data.offline_data_path is not None
+        orig_max_pos = self.eagle.eagle_export_rope_scaling.get("original_max_position_embeddings")
+        if orig_max_pos is not None and orig_max_pos != self.training.training_seq_len:
+            warnings.warn(
+                f"eagle.eagle_export_rope_scaling.original_max_position_embeddings ({orig_max_pos}) "
+                f"differs from training.training_seq_len ({self.training.training_seq_len}). "
+                f"This may affect long-context inference quality."
+            )
+        return self
+
 
 class ModelOptDFlashRecipe(ModelOptSpeculativeRecipeBase):
     """Our config class for DFlash speculative decoding recipes."""
@@ -138,6 +152,11 @@ class ModelOptDFlashRecipe(ModelOptSpeculativeRecipeBase):
         description="DFlash speculative decoding configuration.",
         validate_default=True,
     )
+
+    @model_validator(mode="after")
+    def _resolve_dflash_cross_section(self) -> ModelOptDFlashRecipe:
+        self.dflash.dflash_offline = self.data.offline_data_path is not None
+        return self
 
 
 class ModelOptMedusaRecipe(ModelOptSpeculativeRecipeBase):

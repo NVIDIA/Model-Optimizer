@@ -49,7 +49,7 @@ import modelopt.torch.opt as mto
 import modelopt.torch.speculative as mtsp
 from modelopt.recipe import load_recipe
 from modelopt.recipe.config import ModelOptDFlashRecipe, ModelOptEagleRecipe, ModelOptMedusaRecipe
-from modelopt.torch.speculative.config import DFlashConfig, EagleConfig
+from modelopt.torch.speculative.config import DFlashConfig
 from modelopt.torch.speculative.utils import load_vlm_or_llm, patch_transformers5_params_loading
 from modelopt.torch.utils import print_rank_0
 from modelopt.torch.utils.distributed import is_master
@@ -153,11 +153,7 @@ def train():
         if isinstance(recipe, ModelOptMedusaRecipe):
             mtsp.convert(model, [("medusa", recipe.medusa.model_dump())])
         elif isinstance(recipe, ModelOptEagleRecipe):
-            # Validate and rewrite eagle config fields
-            eagle_cfg = EagleConfig.model_validate(
-                recipe.eagle.model_dump(),
-                context={"training_args": training_args, "data_args": recipe.data},
-            ).model_dump()
+            eagle_cfg = recipe.eagle.model_dump()
             mtsp.convert(model, [("eagle", eagle_cfg)])
 
             # Load draft vocab cache if the draft model uses a compressed vocabulary
@@ -168,8 +164,9 @@ def train():
                 model.eagle_module.d2t = torch.load(d2t, weights_only=True)
                 print_rank_0(f"Loaded draft vocab cache from {d2t}.")
         elif isinstance(recipe, ModelOptDFlashRecipe):
+            # Re-validate with tokenizer to resolve dflash_mask_token_id and enforce its presence.
             dflash_cfg = DFlashConfig.model_validate(
-                recipe.dflash.model_dump(), context={"tokenizer": tokenizer, "data_args": recipe.data}
+                recipe.dflash.model_dump(), context={"tokenizer": tokenizer}
             ).model_dump()
             mtsp.convert(model, [("dflash", dflash_cfg)])
         else:
