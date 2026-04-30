@@ -1,17 +1,19 @@
 # vLLM DFlash smoke test for deepseek-ai/DeepSeek-V4-Flash — CW-DFW H100 variant.
 #
-# Launches a vLLM server with DeepSeek-V4-Flash as the target model and a
-# small randomly-initialized DFlash draft model (4-layer Qwen3-based scaffold,
-# created from z-lab's DFlash architecture reference) to verify the inference
-# pipeline starts and generates tokens end-to-end.
+# 2-task pipeline:
+#   task_0  — creates a randomly-initialized DFlash draft checkpoint at /scratchspace/dflash_draft
+#             from the bundled config.json + dflash.py (4-layer Qwen3 scaffold based on z-lab's
+#             DFlash architecture reference). Requires only 1 GPU.
+#   task_1  — launches a vLLM server with DeepSeek-V4-Flash as the target model and the draft
+#             checkpoint created by task_0. Verifies the inference pipeline starts and generates
+#             tokens end-to-end ("The capital of France is" → " Paris.").
 #
-# NOTE: the draft model uses random weights — this smoke test validates the
-# DFlash inference stack (patching, KV cache allocation, speculative decoding
-# loop), NOT acceptance rate or generation quality. Replace draft_model with
-# a properly trained checkpoint for production use.
+# NOTE: the draft model uses random weights — this smoke test validates the DFlash inference
+# stack (patching, KV cache allocation, speculative decoding loop), NOT acceptance rate or
+# generation quality. Replace draft_model with a properly trained checkpoint for production use.
 #
-# This container (deepseekv4-cu130) does not yet natively support deepseek_v4 as a
-# DFlash target. patch_vllm_dflash.py bridges the gap by patching vLLM at startup.
+# This container (deepseekv4-cu130) does not yet natively support deepseek_v4 as a DFlash
+# target. patch_vllm_dflash.py bridges the gap by patching vLLM at startup.
 #
 # Key config choices:
 #   block_size=256   — required: SWA layers use window_size=256 so the page constraint
@@ -33,9 +35,20 @@ job_name: DeepSeek-V4-Flash_DFlash_smoke_cw_dfw
 pipeline:
   global_vars:
     hf_model: /hf-local/deepseek-ai/DeepSeek-V4-Flash
-    draft_model: /hf-local/z-lab/DeepSeek-V4-Flash-DFlash
+    draft_model: /scratchspace/dflash_draft
 
   task_0:
+    script: examples/deepseek-ai/DeepSeek-V4-Flash/create_dflash_draft.sh
+    environment:
+      - OUT: "/scratchspace/dflash_draft"
+    slurm_config:
+      _factory_: "cw_dfw_slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 1
+      container: "vllm/vllm-openai:deepseekv4-cu130"
+
+  task_1:
     script: common/specdec/vllm_smoke_test.sh
     environment:
       - HF_MODEL_CKPT: <<global_vars.hf_model>>
