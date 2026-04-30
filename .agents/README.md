@@ -49,7 +49,7 @@ git add .codex/skills
 - Vendored-verbatim skills (`launching-evals`, `accessing-mlflow`) are managed
   by `.agents/scripts/sync-upstream-skills.sh` — do not modify by hand.
 - New skills go in `.agents/skills/<skill-name>/SKILL.md` following the
-  conventions documented in [`.cursor/skills-cursor/create-skill/SKILL.md`](https://docs.anthropic.com/) (or your agent's equivalent).
+  conventions of existing skills (e.g. `.agents/skills/monitor/SKILL.md`).
 
 ## Project-level cluster config
 
