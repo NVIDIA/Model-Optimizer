@@ -97,8 +97,8 @@ Tokenization commands for all Nemotron Pre-Training and Post-Training datasets u
 Two parameters vary by model — set them before running the commands below:
 
 ```bash
-TOKENIZER=nvidia/NVIDIA-Nemotron-Nano-9B-v2        # HuggingFace tokenizer (or local path)
-OUTPUT_DIR=tokenized_nemotron_v2                   # Output directory for tokenized files
+TOKENIZER=nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 # HuggingFace tokenizer (or local path)
+OUTPUT_DIR=tokenized_nemotron_3                      # Output directory for tokenized files
 ```
 
 > [!TIP]
@@ -154,13 +154,14 @@ python -m modelopt.torch.utils.plugins.megatron_preprocess_data \
 
 Datasets below are from the [Nemotron Post-Training v3 collection](https://huggingface.co/collections/nvidia/nemotron-post-training-v3). All use `--reasoning_content inline` to preserve `<think>…</think>` traces. The collection contains many more datasets — if you care about benchmarks not covered here (e.g. multilingual, agentic/tool use, SWE, safety), pick the relevant datasets from the collection and tokenize them the same way.
 
-**[nvidia/Nemotron-Math-v2](https://huggingface.co/datasets/nvidia/Nemotron-Math-v2)** — tokenize `high_part00` and `high_part01` separately:
+**[nvidia/Nemotron-Math-v2](https://huggingface.co/datasets/nvidia/Nemotron-Math-v2)** — tokenize `high_part00` and `high_part01` separately. `--hf_streaming` is required because the messages contain extra fields (e.g. `tool_calls`) that cause Arrow type-cast errors in non-streaming mode when using tokenizers with complex chat templates (such as Nemotron v3):
 
 ```bash
 for SPLIT in high_part00 high_part01; do
   python -m modelopt.torch.utils.plugins.megatron_preprocess_data \
     --hf_dataset nvidia/Nemotron-Math-v2 \
     --hf_split ${SPLIT} \
+    --hf_streaming \
     --json_keys messages \
     --tokenizer ${TOKENIZER} \
     --output_dir ${OUTPUT_DIR} \
@@ -168,6 +169,26 @@ for SPLIT in high_part00 high_part01; do
     --max_sequence_length 256_000 \
     --reasoning_content inline
 done
+```
+
+**[nvidia/Nemotron-SFT-Math-v3](https://huggingface.co/datasets/nvidia/Nemotron-SFT-Math-v3)** — stored as raw JSONL on HuggingFace, download before tokenizing (more reliable than streaming for this dataset due to complex nested `tool_calls` fields):
+
+```bash
+hf download nvidia/Nemotron-SFT-Math-v3 \
+    --repo-type dataset \
+    --local-dir datasets/Nemotron-SFT-Math-v3/
+python -m modelopt.torch.utils.plugins.megatron_preprocess_data \
+    --jsonl_paths datasets/Nemotron-SFT-Math-v3/data/train.jsonl \
+    --json_keys messages \
+    --tokenizer ${TOKENIZER} \
+    --output_dir ${OUTPUT_DIR} \
+    --workers 96 \
+    --max_sequence_length 256_000 \
+    --reasoning_content inline
+
+# Rename to avoid generic file name
+mv ${OUTPUT_DIR}/train_messages.bin ${OUTPUT_DIR}/nvidia--Nemotron-SFT-Math-v3_default_train_messages.bin
+mv ${OUTPUT_DIR}/train_messages.idx ${OUTPUT_DIR}/nvidia--Nemotron-SFT-Math-v3_default_train_messages.idx
 ```
 
 **[nvidia/Nemotron-SFT-Competitive-Programming-v2](https://huggingface.co/datasets/nvidia/Nemotron-SFT-Competitive-Programming-v2)** — stored as raw JSONL on HuggingFace, download before tokenizing:
@@ -233,6 +254,7 @@ nvidia--Nemotron-Pretraining-SFT-v1_Nemotron-SFT-MATH_train_text_max10000000.{bi
 nvidia--Nemotron-Post-Training-Dataset-v1_default_stem_messages_max5000000.{bin,idx}
 nvidia--Nemotron-Math-v2_default_high_part00_messages.{bin,idx}
 nvidia--Nemotron-Math-v2_default_high_part01_messages.{bin,idx}
+nvidia--Nemotron-SFT-Math-v3_default_train_messages.{bin,idx}
 competitive_programming_python_00_messages.{bin,idx}
 competitive_programming_cpp_00_messages.{bin,idx}
 MCQ_messages.{bin,idx}

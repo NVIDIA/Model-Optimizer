@@ -1,0 +1,214 @@
+# NeMo Evaluator Launcher config for Nemotron-3-Nano-30B-A3B and pruned variants
+# ------------------------------------------------------------------------------
+# Before running, update the following fields in the yaml:
+# - `execution.hostname` — your Slurm login node hostname
+# - `execution.account` — your Slurm account
+# - `deployment.checkpoint_path` — Hugging Face checkpoint path (original, pruned or quantized)
+# - `evaluation.nemo_evaluator_config.config.params.extra.tokenizer` — same path as `checkpoint_path`
+#
+# Usage:
+#   pip install "nemo-evaluator-launcher[all]==0.1.90"
+#
+#   # Set required environment variables:
+#   export HF_TOKEN=<your_huggingface_token>
+#   export SLURM_JOB_DIR=<path_to_slurm_job_output_dir>
+#   export HF_HOME=<path_to_huggingface_cache>
+#   export VLLM_CACHE_ROOT=<path_to_vllm_cache>
+#
+#   # Set additional unused but required environment variables:
+#   export API_KEY=xxxxxx
+#   export INFERENCE_API_KEY=xxxxxx
+#   export OPENAI_CLIENT_ID=xxxxxx
+#   export OPENAI_CLIENT_SECRET=xxxxxx
+#
+#   nemo-evaluator-launcher run --config nemo_evaluator.yaml
+#
+
+defaults:
+  - execution: slurm/default
+  - deployment: vllm
+  - _self_
+
+execution:
+  type: slurm
+  hostname: <your_slurm_hostname>
+  username: ${oc.env:USER}
+  account: <your_slurm_account>
+  partition: batch
+  num_nodes: 1
+  ntasks_per_node: 1
+  gpus_per_node: 8
+  gres: "gpu:8"
+  walltime: 04:00:00
+  sbatch_comment: "{\"OccupiedIdleGPUsJobReaper\":{\"exemptIdleTimeMins\":\"1920\",\"reason\":\"benchmarking\",\"description\":\"Some evals need idle time\
+    \ else gets cancelled\"}}"
+  subproject: nel
+  output_dir: ${oc.env:SLURM_JOB_DIR}
+  mode: sequential
+
+  mounts:
+    mount_home: false
+  deployment:
+    n_tasks: 1
+  batch_comment: "{\"OccupiedIdleGPUsJobReaper\":{\"exemptIdleTimeMins\":\"1920\",\"reason\":\"benchmarking\",\"description\":\"Required data validation\
+    \ and evaluation\"}}"
+
+# Note: Only tp=1 works for Nano (Mamba-based hybrid architecture)
+deployment:
+  # Update this to your Hugging Face checkpoint path (original, pruned or quantized)
+  checkpoint_path: <hf_model_name_or_path>
+  served_model_name: Nemotron-3-Nano-30B-A3B
+  port: 8000
+  tensor_parallel_size: 1
+  pipeline_parallel_size: 1
+  data_parallel_size: 8
+  gpu_memory_utilization: 0.90
+  extra_args: "--max-model-len 262144 --enable-log-requests --no-enable-prefix-caching --trust-remote-code --mamba_ssm_cache_dtype float32 --enable-auto-tool-choice\
+    \ --tool-call-parser qwen3_coder --reasoning-parser-plugin /checkpoint/nano_v3_reasoning_parser.py --reasoning-parser nano_v3"
+  env_vars:
+    VLLM_FLASHINFER_MOE_BACKEND: throughput
+  endpoints:
+    chat: /v1/chat/completions
+    completions: /v1/completions
+    health: /health
+  multiple_instances: true
+
+evaluation:
+  nemo_evaluator_config:
+    target:
+      api_endpoint:
+        adapter_config:
+          use_system_prompt: true
+          use_reasoning: false
+          params_to_add:
+            chat_template_kwargs:
+              enable_thinking: true
+            skip_special_tokens: false
+          use_caching: true
+          tracking_requests_stats: true
+          log_failed_requests: true
+          use_request_logging: true
+          max_logged_requests: 10
+          use_response_logging: true
+          max_logged_responses: 10
+    config:
+      params:
+        parallelism: 64
+        max_new_tokens: 131072
+        temperature: 0.99999
+        top_p: 0.99999
+        request_timeout: 3600
+        max_retries: 10
+        extra:
+          tokenizer_backend: huggingface
+          # Update tokenizer path to match checkpoint_path above
+          tokenizer: <hf_model_name_or_path>
+  env_vars:
+    HF_TOKEN: HF_TOKEN
+    HF_HOME: HF_HOME
+    VLLM_CACHE_ROOT: VLLM_CACHE_ROOT
+    API_KEY: API_KEY
+    INFERENCE_API_KEY: INFERENCE_API_KEY
+    OPENAI_CLIENT_ID: OPENAI_CLIENT_ID
+    OPENAI_CLIENT_SECRET: OPENAI_CLIENT_SECRET
+
+  tasks:
+    # 1. MMLU Pro
+    - name: ns_mmlu_pro
+      env_vars:
+        HF_TOKEN: HF_TOKEN
+      nemo_evaluator_config:
+        config:
+          params:
+            # limit_samples: 8
+            extra:
+              num_repeats: 1
+              args: "++prompt_config=eval/aai/mcq-10choices-boxed"
+
+    # 2. GPQA Diamond
+    - name: ns_gpqa
+      env_vars:
+        HF_TOKEN: HF_TOKEN
+      nemo_evaluator_config:
+        config:
+          params:
+            # limit_samples: 8
+            extra:
+              num_repeats: 8
+              args: "++prompt_config=eval/aai/mcq-4choices"
+
+    # 3. LiveCodeBench
+    - name: ns_livecodebench
+      env_vars:
+        HF_TOKEN: HF_TOKEN
+      nemo_evaluator_config:
+        config:
+          params:
+            # limit_samples: 8
+            extra:
+              num_repeats: 8
+              dataset_split: test_v6_2408_2505
+
+    # 4. AIME 2025
+    - name: ns_aime2025
+      env_vars:
+        HF_TOKEN: HF_TOKEN
+      nemo_evaluator_config:
+        config:
+          params:
+            # limit_samples: 8
+            extra:
+              num_repeats: 64
+
+    # 5. IFBench
+    - name: ns_ifbench
+      env_vars:
+        HF_TOKEN: HF_TOKEN
+      nemo_evaluator_config:
+        config:
+          params:
+            # limit_samples: 8
+            extra:
+              num_repeats: 8
+
+    # 6. SciCode
+    - name: ns_scicode
+      env_vars:
+        HF_TOKEN: HF_TOKEN
+      nemo_evaluator_config:
+        config:
+          params:
+            # limit_samples: 8
+            extra:
+              num_repeats: 8
+
+    # 7. BFCL v3 — tool calling benchmark (requires --enable-auto-tool-choice in deployment)
+    - name: ns_bfcl_v3
+      env_vars:
+        HF_TOKEN: HF_TOKEN
+      nemo_evaluator_config:
+        config:
+          params:
+            temperature: 0.6
+            top_p: 0.95
+            parallelism: 32
+            # limit_samples: 8
+            extra:
+              num_repeats: 1
+              args: ++use_client_parsing=False
+
+    # 8. BFCL v4 — tool calling benchmark (requires --enable-auto-tool-choice in deployment)
+    - name: ns_bfcl_v4
+      env_vars:
+        HF_TOKEN: HF_TOKEN
+      nemo_evaluator_config:
+        config:
+          params:
+            max_new_tokens: 8192
+            temperature: 0.6
+            top_p: 0.95
+            parallelism: 128
+            # limit_samples: 8
+            extra:
+              num_repeats: 1
+              args: ++use_client_parsing=False
