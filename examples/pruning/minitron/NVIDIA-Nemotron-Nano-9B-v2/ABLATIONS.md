@@ -1,10 +1,13 @@
-# Distillation Blend Ablations
+# Ablations: Nemotron-Nano-9B-v2
+
+## Distillation
 
 All experiments prune Nemotron-Nano-9B-v2 → 7B and distill with teacher = Nemotron-Nano-9B-v2 (official). The final chosen blend (**30pre_70post_v1v3**) is in [README.md](README.md).
 
 ---
 
-## Baseline: Pre-SFT-v1 Only (no post-training data)
+<details>
+<summary>Baseline: Pre-SFT-v1 Only (no post-training data) (click to expand)</summary>
 
 Pure Nemotron-Pretraining-SFT-v1 data only (no post-training reasoning traces).
 
@@ -15,9 +18,12 @@ Pure Nemotron-Pretraining-SFT-v1 data only (no post-training reasoning traces).
 
 **Notes:** Highest MMLU of any blend, but AIME stagnates and LCB lags. Pretraining data alone insufficient for reasoning benchmarks.
 
+</details>
+
 ---
 
-## Baseline: Pure Post-Training Data (pt-v1v2)
+<details>
+<summary>Baseline: Pure Post-Training Data (pt-v1v2) (click to expand)</summary>
 
 100% post-training data (no pretraining data), Nemotron-v1/v2 blend.
 
@@ -30,9 +36,12 @@ Pure Nemotron-Pretraining-SFT-v1 data only (no post-training reasoning traces).
 
 **Notes:** IFEval degrades badly at longer training (41.9 at 20B). LCB lags behind other blends.
 
+</details>
+
 ---
 
-## 30% Pretraining / 70% Post-Training: v1v2 Blend
+<details>
+<summary>30% Pretraining / 70% Post-Training: v1v2 Blend (click to expand)</summary>
 
 30% Nemotron-Pretraining-SFT-v1 + 70% Nemotron-v1/v2 post-training data.
 
@@ -48,9 +57,12 @@ Pure Nemotron-Pretraining-SFT-v1 data only (no post-training reasoning traces).
 
 **Notes:** Best MMLU of the 30/70 blends (~1% above v3 blends). IFEval ~56–59 (lower than v3 blends). GPQA shows instability at longer runs.
 
+</details>
+
 ---
 
-## 30% Pretraining / 70% Post-Training: v3 Blend
+<details>
+<summary>30% Pretraining / 70% Post-Training: v3 Blend (click to expand)</summary>
 
 Refined v3 blend: dropped exercism/text2sql, added Nemotron-Math-v2 part01, boosted Math to 30% total.
 
@@ -65,9 +77,11 @@ Refined v3 blend: dropped exercism/text2sql, added Nemotron-Math-v2 part01, boos
 
 **Notes:** Better AIME and LCB than blend 1 at 40B+. GPQA still unstable (53.9 at 80B). MMLU ~1% below v1v2 blend.
 
+</details>
+
 ---
 
-## Blend Design Notes
+### Blend Design Notes
 
 **Why MMLU is ~1% lower with v3 blends:** The heavy reasoning-trace format (chain-of-thought, TIR) in v3 data suppresses general knowledge recall measured by MMLU. This is structural — v1v2 post-training data has a more knowledge-dense format. Upweighting Pretraining-SFT-v1 General (to 20%) partially mitigates this. Given that MMLU Pro is better with v3 blends, lower MMLU is acceptable.
 
