@@ -214,7 +214,7 @@ class TrtExecBenchmark(Benchmark):
         self.has_remote_config = any("--remoteAutoTuningConfig" in arg for arg in trtexec_args)
         self.remote_ip: str | None = None
         self.remote_port: int = 22
-        self.remote_user: str | None = None
+        self.remote_user: str = "root"
         self.remote_password: str | None = None
         self.remote_engine_path: str | None = "trtexec_benchmark_model.trt"
         self.remote_bin_path: str = "trtexec"
@@ -356,6 +356,11 @@ class TrtExecBenchmark(Benchmark):
                 return float("inf")
             latency_pattern = std_pattern
             if self.has_remote_config and self.is_safe:
+                ssh_pass = []
+                if self.remote_password:
+                    ssh_pass.append("sshpass")
+                    ssh_pass.append("-p")
+                    ssh_pass.append(self.remote_password)
                 # need to push the model to the device and use trtexec_safe to run
                 scp_cmd = [
                     "scp",
@@ -363,6 +368,7 @@ class TrtExecBenchmark(Benchmark):
                     self.engine_path,
                     f"{self.remote_user}@{self.remote_ip}:{self.remote_engine_path}",
                 ]
+                scp_cmd = ssh_pass + scp_cmd
                 result = subprocess.run(scp_cmd)  # nosec B603
                 if result.returncode != 0:
                     self.logger.error("Failed to push engine to remote device")
@@ -378,6 +384,7 @@ class TrtExecBenchmark(Benchmark):
                     f"{self.remote_user}@{self.remote_ip}",
                     f"{ld_path} {trt_path} --loadEngine={self.remote_engine_path}",
                 ]
+                trtexec_safe_cmd = ssh_pass + trtexec_safe_cmd
                 result = subprocess.run(trtexec_safe_cmd, capture_output=True, text=True)  # nosec B603
                 latency_pattern = safe_pattern
                 if result.returncode != 0:
@@ -387,9 +394,11 @@ class TrtExecBenchmark(Benchmark):
                         "ssh",
                         "-p",
                         f"{self.remote_port}",
-                        f"{self.remote_user}:{self.remote_password}@{self.remote_ip}",
+                        f"{self.remote_user}@{self.remote_ip}",
                         f"{ld_path} {trt_path} --safe --loadEngine={self.remote_engine_path}",
                     ]
+                    trtexec_safe_cmd = ssh_pass + trtexec_safe_cmd
+
                     result = subprocess.run(trtexec_safe_cmd, capture_output=True, text=True)  # nosec B603
                     latency_pattern = std_pattern
             if result.returncode != 0:
