@@ -292,7 +292,7 @@ class TrtExecBenchmark(Benchmark):
         self.is_safe = "--safe" in trtexec_args
         self._base_cmd.extend(trtexec_args)
 
-        self.logger.info(f"Base command template: {' '.join(self._base_cmd)}")
+        self.logger.debug(f"Base command template: {' '.join(self._base_cmd)}")
 
     def __del__(self):
         """Cleanup temporary directory."""
