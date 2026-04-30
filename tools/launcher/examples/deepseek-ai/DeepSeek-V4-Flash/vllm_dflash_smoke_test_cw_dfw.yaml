@@ -1,8 +1,14 @@
 # vLLM DFlash smoke test for deepseek-ai/DeepSeek-V4-Flash — CW-DFW H100 variant.
 #
-# Launches a vLLM server with DeepSeek-V4-Flash as the target model and
-# DeepSeek-V4-Flash-DFlash as the draft model, using DFlash block-diffusion
-# speculative decoding (15 speculative tokens per step).
+# Launches a vLLM server with DeepSeek-V4-Flash as the target model and a
+# small randomly-initialized DFlash draft model (4-layer Qwen3-based scaffold,
+# created from z-lab's DFlash architecture reference) to verify the inference
+# pipeline starts and generates tokens end-to-end.
+#
+# NOTE: the draft model uses random weights — this smoke test validates the
+# DFlash inference stack (patching, KV cache allocation, speculative decoding
+# loop), NOT acceptance rate or generation quality. Replace draft_model with
+# a properly trained checkpoint for production use.
 #
 # This container (deepseekv4-cu130) does not yet natively support deepseek_v4 as a
 # DFlash target. patch_vllm_dflash.py bridges the gap by patching vLLM at startup.
