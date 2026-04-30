@@ -23,12 +23,21 @@ from pydantic import field_validator
 
 from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
 from modelopt.torch.quantization.config import QuantizeConfig
+from modelopt.torch.speculative.config import DFlashConfig, EagleConfig, MedusaConfig
+from modelopt.torch.speculative.plugins.hf_training_args import DataArguments as SpecDataArgs
+from modelopt.torch.speculative.plugins.hf_training_args import ModelArguments as SpecModelArgs
+from modelopt.torch.speculative.plugins.hf_training_args import (
+    TrainingArguments as SpecTrainingArgs,
+)
 
 
 class RecipeType(str, Enum):
     """List of recipe types."""
 
     PTQ = "ptq"
+    SPECULATIVE_EAGLE = "speculative_eagle"
+    SPECULATIVE_DFLASH = "speculative_dflash"
+    SPECULATIVE_MEDUSA = "speculative_medusa"
     # QAT = "qat" # Not implemented yet, will be added in the future.
 
 
@@ -70,5 +79,75 @@ class ModelOptPTQRecipe(ModelOptRecipeBase):
         default=QuantizeConfig(),
         title="PTQ config",
         description="PTQ config containing quant_cfg and algorithm.",
+        validate_default=True,
+    )
+
+
+class ModelOptSpeculativeRecipeBase(ModelOptRecipeBase):
+    """Base class for speculative-decoding recipes.
+
+    Unlike PTQ, speculative-decoding is a training-time optimization: the draft head is trained
+    with HF Trainer. We therefore bundle ``model`` / ``data`` / ``training`` sections into the
+    recipe so a single YAML is the full experiment spec. Each section is a typed Pydantic model
+    (see :mod:`modelopt.torch.speculative.plugins.hf_training_args`) so field typos and bad
+    values are caught at recipe-load time; HF trainer fields pass through
+    ``TrainingArguments`` via ``extra='allow'``.
+    """
+
+    model: SpecModelArgs = ModeloptField(
+        default=SpecModelArgs(),
+        title="HF model args",
+        description="ModelArguments for the base HF model to train a draft head against.",
+        validate_default=True,
+    )
+    data: SpecDataArgs = ModeloptField(
+        default=SpecDataArgs(),
+        title="HF data args",
+        description="DataArguments for the training/offline dataset.",
+        validate_default=True,
+    )
+    training: SpecTrainingArgs = ModeloptField(
+        default=SpecTrainingArgs(),
+        title="HF training args",
+        description="Speculative-decoding extensions; HF trainer fields flow through as extras.",
+        validate_default=True,
+    )
+
+
+class ModelOptEagleRecipe(ModelOptSpeculativeRecipeBase):
+    """Our config class for EAGLE speculative decoding recipes."""
+
+    recipe_type: RecipeType = RecipeType.SPECULATIVE_EAGLE
+
+    eagle: EagleConfig = ModeloptField(
+        default=EagleConfig(),
+        title="EAGLE config",
+        description="EAGLE speculative decoding configuration.",
+        validate_default=True,
+    )
+
+
+class ModelOptDFlashRecipe(ModelOptSpeculativeRecipeBase):
+    """Our config class for DFlash speculative decoding recipes."""
+
+    recipe_type: RecipeType = RecipeType.SPECULATIVE_DFLASH
+
+    dflash: DFlashConfig = ModeloptField(
+        default=DFlashConfig(),
+        title="DFlash config",
+        description="DFlash speculative decoding configuration.",
+        validate_default=True,
+    )
+
+
+class ModelOptMedusaRecipe(ModelOptSpeculativeRecipeBase):
+    """Our config class for Medusa speculative decoding recipes."""
+
+    recipe_type: RecipeType = RecipeType.SPECULATIVE_MEDUSA
+
+    medusa: MedusaConfig = ModeloptField(
+        default=MedusaConfig(),
+        title="Medusa config",
+        description="Medusa speculative decoding configuration.",
         validate_default=True,
     )
