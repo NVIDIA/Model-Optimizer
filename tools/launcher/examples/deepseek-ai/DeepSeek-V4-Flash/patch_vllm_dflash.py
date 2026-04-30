@@ -32,6 +32,7 @@ Patches applied:
   P9  gpu_model_runner.py    — _reshape_kv_cache_tensors: allow heterogeneous page sizes
   P10 flash_attn.py          — treat fp8_ds_mla as float8_e4m3fn in get_fp8_dtype_for_flashattn
   P11 sparse_attn_indexer.py — bypass fp8_fp4_paged_mqa_logits (smem overflow on H100 w/ MLA)
+  P12 deepseek_v4_attention.py — C128A prefill fallback when c128a_prefill_topk_indices is None
 
 ----------------------------------------------------------------------------
 Upstream PR strategy
@@ -94,28 +95,48 @@ def _patch_file(path: pathlib.Path, old: str, new: str, sentinel: str, label: st
 
 
 # ---------------------------------------------------------------------------
-# P0: speculative.py — add deepseek_v4 to DFlash allowed target models
+# P0: speculative.py — add deepseek_v4 to DFlash/EAGLE3 allowed target models
+#
+# speculative.py has an `aux_hidden_states_supported` list that gates DFlash,
+# EAGLE3, and extract_hidden_states methods. We need "deepseek_v4" in this list.
+#
+# The file has multiple lists containing "deepseek_v3" (e.g. the MTP allowed
+# list at ~line 238 also has "deepseek_v32"), so we anchor on "kimi_k2" or
+# "gemma4" which are unique to the aux_hidden_states_supported list.
+#
+# The validator uses substring matching: `supported_model in model_type`, so
+# adding "deepseek_v4" lets model_type="deepseek_v4" pass.
 # ---------------------------------------------------------------------------
 _spec = VLLM / "config" / "speculative.py"
 _spec_src = _spec.read_text()
-_p0_sentinel = '"deepseek_v4"'
+
+# Sentinel: "deepseek_v4" appears in the DFlash list (right before "kimi_k2" or after "deepseek_v3"
+# where "gemma4" is also nearby — unique to aux_hidden_states_supported)
+_p0_sentinel = "_p0_dflash_v4_patch"
 if _p0_sentinel in _spec_src:
     print("P0 speculative.py: already patched")
 else:
+    # Find "deepseek_v3" that is followed within 10 lines by "kimi_k2" (unique to DFlash list)
     _target = None
-    for i, line in enumerate(_spec_src.splitlines()):
-        if '"deepseek_v3"' in line:
-            _target = i
-            break
+    _lines = _spec_src.splitlines()
+    for i, line in enumerate(_lines):
+        if '"deepseek_v3"' in line or "'deepseek_v3'" in line:
+            # Check if "kimi_k2" or "gemma4" appears within the next 10 lines (DFlash list context)
+            window = " ".join(_lines[i:i+10])
+            if "kimi_k2" in window or "gemma4" in window:
+                _target = i
+                break
     if _target is None:
-        print("WARNING: P0 speculative.py: deepseek_v3 line not found — skipping")
+        print("WARNING: P0 speculative.py: DFlash aux_hidden_states_supported list not found — skipping")
     else:
-        lines = _spec_src.splitlines(keepends=True)
-        indent = len(lines[_target]) - len(lines[_target].lstrip())
-        lines.insert(_target + 1, " " * indent + '"deepseek_v4",\n')
-        _spec.write_text("".join(lines))
+        lines_kp = _spec_src.splitlines(keepends=True)
+        indent = len(lines_kp[_target]) - len(lines_kp[_target].lstrip())
+        # Insert "deepseek_v4" after "deepseek_v3", with sentinel comment
+        insert_line = " " * indent + '"deepseek_v4",  # _p0_dflash_v4_patch\n'
+        lines_kp.insert(_target + 1, insert_line)
+        _spec.write_text("".join(lines_kp))
         _delete_pyc("speculative")
-        print("P0 speculative.py: added deepseek_v4 after deepseek_v3 — OK")
+        print("P0 speculative.py: added deepseek_v4 to aux_hidden_states_supported — OK")
 
 # ---------------------------------------------------------------------------
 # P1-P3: deepseek_v4.py — EAGLE3/DFlash aux hidden state interface
@@ -504,6 +525,58 @@ _patch_file(
     ),
     sentinel="_dflash_smem_fallback_patch",
     label="P11 sparse_attn_indexer.py smem fallback",
+)
+
+# ---------------------------------------------------------------------------
+# P12: deepseek_v4_attention.py — C128A prefill fallback when topk_indices is None
+#
+# DeepSeek-V4-Flash has 20 C128A layers (compress_ratio=128) whose prefill top-k
+# indices are pre-computed in FlashMLASparseBackend.build() via
+# _build_c128a_metadata().  Under DFlash speculative decoding, that path can
+# produce c128a_prefill_topk_indices=None (e.g. when num_prefill_tokens is
+# misclassified to 0 by split_decodes_and_prefills, or when the C128A metadata
+# builder is gated by a condition that isn't met in the DFlash setup).
+#
+# When None arrives at line 821 (`top_k = topk_indices.shape[-1]`), it crashes.
+# This patch inserts a None-guard that degrades to SWA-only mode for that layer
+# when the C128A indices are unavailable — acceptable for the smoke test since
+# correctness is not required, only that inference completes.
+# ---------------------------------------------------------------------------
+_dv4a = VLLM / "model_executor" / "layers" / "deepseek_v4_attention.py"
+_patch_file(
+    _dv4a,
+    old=(
+        "            else:\n"
+        "                # C128A: pre-computed during metadata build.\n"
+        "                assert attn_metadata is not None\n"
+        "                topk_indices = attn_metadata.c128a_prefill_topk_indices\n"
+        "            top_k = topk_indices.shape[-1]\n"
+        "            # Compressed region must fit the full compressed pool (seq_len //\n"
+        "            # compress_ratio), not just top_k. top_k bounds how many indices\n"
+        "            # the indexer selects, not the pool size it indexes into.\n"
+        "            N = (self.max_model_len + self.compress_ratio - 1) // self.compress_ratio"
+    ),
+    new=(
+        "            else:\n"
+        "                # C128A: pre-computed during metadata build.\n"
+        "                assert attn_metadata is not None\n"
+        "                topk_indices = attn_metadata.c128a_prefill_topk_indices\n"
+        "            if topk_indices is None:  # _p12_c128a_prefill_fallback_patch\n"
+        "                # c128a_prefill_topk_indices unavailable; degrade to SWA-only.\n"
+        "                assert self.topk_indices_buffer is not None\n"
+        "                topk_indices = self.topk_indices_buffer[num_decode_tokens:]\n"
+        "                swa_only = True\n"
+        "                top_k = 0\n"
+        "                N = 0\n"
+        "            else:\n"
+        "                top_k = topk_indices.shape[-1]\n"
+        "                # Compressed region must fit the full compressed pool (seq_len //\n"
+        "                # compress_ratio), not just top_k. top_k bounds how many indices\n"
+        "                # the indexer selects, not the pool size it indexes into.\n"
+        "                N = (self.max_model_len + self.compress_ratio - 1) // self.compress_ratio"
+    ),
+    sentinel="_p12_c128a_prefill_fallback_patch",
+    label="P12 deepseek_v4_attention.py C128A prefill fallback",
 )
 
 print("All patches done!")

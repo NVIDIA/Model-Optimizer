@@ -20,7 +20,12 @@
 #                      max(sm_page_sizes) ≤ max(all_page_sizes) forces block_size ≥ 256
 #   gpu_memory_utilization=0.85 — leaves ~4 GB headroom per GPU for Triton JIT compilation
 #                                  of the DeepSeek compressor kernel on first inference
-#   max_num_batched_tokens=4096 — reduces profiling-phase memory pressure
+#   enforce_eager              — disables CUDA graph capture; avoids NoneType tensor errors
+#                                in deepseek_v4_attention CUDA graph execution with DFlash patches
+#   max_num_batched_tokens=32768 — vLLM's default; required so spec-decoding token budget
+#                                   (max_num_batched_tokens minus per-request draft overhead)
+#                                   stays positive. Setting this too low (e.g. 4096) causes
+#                                   "max_num_scheduled_tokens is set to negative value" error.
 #
 # Reference: "DFlash: Block Diffusion for Flash Speculative Decoding" (arXiv:2502.06036)
 #
@@ -61,8 +66,9 @@ pipeline:
       - TRUST_REMOTE_CODE: "1"
       - VLLM_USE_DEEP_GEMM: "1"
       - FORCE_AF_V2: "1"
-      - GPU_MEM_UTIL: "0.85"
-      - MAX_BATCHED_TOKENS: "4096"
+      - VLLM_EXTRA_ARGS: "--enforce-eager"
+      - GPU_MEM_UTIL: "0.80"
+      - MAX_BATCHED_TOKENS: "16384"
       - COPY_MODEL_TO_TMPFS: "1"
       - VLLM_PATCH_SCRIPT: "examples/deepseek-ai/DeepSeek-V4-Flash/patch_vllm_dflash.py"
     slurm_config:
