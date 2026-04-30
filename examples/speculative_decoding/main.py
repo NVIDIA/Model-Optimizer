@@ -151,21 +151,16 @@ def train():
             trust_remote_code=recipe.model.trust_remote_code,
         )
         if isinstance(recipe, ModelOptMedusaRecipe):
-            mtsp.convert(model, [("medusa", recipe.medusa.model_dump())])
+            medusa_cfg: dict = recipe.medusa.model_dump()
+            mtsp.convert(model, [("medusa", medusa_cfg)])
         elif isinstance(recipe, ModelOptEagleRecipe):
-            eagle_cfg = recipe.eagle.model_dump()
+            eagle_cfg: dict = recipe.eagle.model_dump()
             mtsp.convert(model, [("eagle", eagle_cfg)])
-
-            # Load draft vocab cache if the draft model uses a compressed vocabulary
-            if model.eagle_config.draft_vocab_size < model.eagle_config.vocab_size:
-                d2t = recipe.data.draft_vocab_cache
-                if d2t is None or not os.path.isfile(d2t):
-                    raise FileNotFoundError(f"Draft vocab cache provided but not found: {d2t}")
-                model.eagle_module.d2t = torch.load(d2t, weights_only=True)
-                print_rank_0(f"Loaded draft vocab cache from {d2t}.")
+            # Load draft vocab cache
+            mtsp.plugins.HFEagleModel.load_draft_vocab_cache(model, recipe.data.draft_vocab_cache)
         elif isinstance(recipe, ModelOptDFlashRecipe):
             # Re-validate with tokenizer to resolve dflash_mask_token_id and enforce its presence.
-            dflash_cfg = DFlashConfig.model_validate(
+            dflash_cfg: dict = DFlashConfig.model_validate(
                 recipe.dflash.model_dump(), context={"tokenizer": tokenizer}
             ).model_dump()
             mtsp.convert(model, [("dflash", dflash_cfg)])
