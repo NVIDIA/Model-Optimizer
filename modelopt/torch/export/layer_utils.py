@@ -108,6 +108,8 @@ def get_experts_list(
         linear_names = ["gate_proj", "down_proj", "up_proj"]
     elif "nemotronhforcausallm" in model_type:
         linear_names = ["up_proj", "down_proj"]
+    elif "gemma4" in model_type:
+        linear_names = ["gate_proj", "down_proj", "up_proj"]
     else:
         raise NotImplementedError(f" {model_type} not supported")
 
