@@ -150,7 +150,7 @@ safe_pattern = (
     r"\[\d{2}/\d{2}/\d{4}-\d{2}:\d{2}:\d{2}\]\s+\[I\]\s+"
     r"Average over \d+ runs - GPU latency:\s*([\d.]+)\s*ms"
 )
-std_pattern = r"\[I\]\s+Latency:.*?median\s*=\s*([\d.]+)\s*ms"
+std_pattern = r"\[I\]\s+GPU Compute Time:.*?median\s*=\s*([\d.]+)\s*ms"
 
 
 class TrtExecBenchmark(Benchmark):
@@ -213,7 +213,7 @@ class TrtExecBenchmark(Benchmark):
         trtexec_args = self.trtexec_args or []
         self.has_remote_config = any("--remoteAutoTuningConfig" in arg for arg in trtexec_args)
         self.remote_ip: str | None = None
-        self.remote_port: int | None = None
+        self.remote_port: int = 22
         self.remote_user: str | None = None
         self.remote_password: str | None = None
         self.remote_engine_path: str | None = "trtexec_benchmark_model.trt"
@@ -260,6 +260,12 @@ class TrtExecBenchmark(Benchmark):
             self.remote_options = {
                 k: v[0] if len(v) == 1 else v for k, v in parse_qs(parsed.query).items()
             }
+            required_params = ["remote_exec_path", "remote_lib_path"]
+            missing = [p for p in required_params if p not in self.remote_options]
+            if missing:
+                raise ValueError(
+                    f"Missing required query parameters in --remoteAutoTuningConfig: {missing}"
+                )
             self.remote_bin_path = os.path.dirname(str(self.remote_options["remote_exec_path"]))
             try:
                 _check_for_trtexec(min_version="10.15")
@@ -284,10 +290,6 @@ class TrtExecBenchmark(Benchmark):
                     arg for arg in trtexec_args if "--remoteAutoTuningConfig" not in arg
                 ]
         self.is_safe = "--safe" in trtexec_args
-        if self.is_safe:
-            self.latency_pattern = safe_pattern
-        else:
-            self.latency_pattern = std_pattern
         self._base_cmd.extend(trtexec_args)
 
         self.logger.info(f"Base command template: {' '.join(self._base_cmd)}")
@@ -352,6 +354,7 @@ class TrtExecBenchmark(Benchmark):
                 self.logger.error(f"trtexec failed with return code {result.returncode}")
                 self.logger.error(f"stderr: {result.stderr}")
                 return float("inf")
+            latency_pattern = std_pattern
             if self.has_remote_config and self.is_safe:
                 # need to push the model to the device and use trtexec_safe to run
                 scp_cmd = [
@@ -372,12 +375,29 @@ class TrtExecBenchmark(Benchmark):
                     "ssh",
                     "-p",
                     f"{self.remote_port}",
-                    f"{self.remote_user}:{self.remote_password}@{self.remote_ip}",
+                    f"{self.remote_user}@{self.remote_ip}",
                     f"{ld_path} {trt_path} --loadEngine={self.remote_engine_path}",
                 ]
                 result = subprocess.run(trtexec_safe_cmd, capture_output=True, text=True)  # nosec B603
-
-            if not (match := re.search(self.latency_pattern, result.stdout, re.IGNORECASE)):
+                latency_pattern = safe_pattern
+                if result.returncode != 0:
+                    # fallback and try trtexec with "--safe"
+                    trt_path = f"{os.path.join(self.remote_bin_path, 'trtexec')}"
+                    trtexec_safe_cmd = [
+                        "ssh",
+                        "-p",
+                        f"{self.remote_port}",
+                        f"{self.remote_user}:{self.remote_password}@{self.remote_ip}",
+                        f"{ld_path} {trt_path} --safe --loadEngine={self.remote_engine_path}",
+                    ]
+                    result = subprocess.run(trtexec_safe_cmd, capture_output=True, text=True)  # nosec B603
+                    latency_pattern = std_pattern
+            if result.returncode != 0:
+                self.logger.error(
+                    f"Failed to run trtexec_safe or trtexec with '--safe'\n {result.stdout}"
+                )
+                return float("inf")
+            if not (match := re.search(latency_pattern, result.stdout, re.IGNORECASE)):
                 self.logger.warning(f"trtexec stdout:\n{result.stdout}")
                 self.logger.error("Could not parse median latency from trtexec output")
                 return float("inf")
