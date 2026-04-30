@@ -18,11 +18,11 @@ End-to-end optimization of [Nemotron-Nano-9B-v2](https://huggingface.co/nvidia/N
 | Model | MMLU | MMLU Pro | GPQA Diamond | LiveCodeBench v6 | AIME 2025 | Math 500 | IFEval | SciCode (Subtask) | Average |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | Pruned 7B (no distillation) | 67.8 | 11.9 | 17.7 | 1.4 | 0.3 | 6.0 | 41.8 | 0.1 | 18.4 |
-| Pruned 7B + distill 2.5B tokens (400 iters) | 70.7 | 68.4 | 52.7 | 57.0 | 63.0 | 93.7 | 63.2 | 11.6 | 60.0 |
-| Pruned 7B + distill 20B tokens (3200 iters) | 71.3 | 71.7 | 54.8 | 62.0 | 69.1 | 95.2 | 63.8 | 20.9 | 63.6 |
-| Pruned 7B + distill 40B tokens (6400 iters) | 71.1 | 71.6 | 53.7 | 60.9 | 70.4 | 95.6 | 68.0 | 21.1 | 64.1 |
-| Pruned 7B + distill 60B tokens (9600 iters) | 72.1 | 72.1 | 54.9 | 61.6 | 70.3 | 95.4 | 64.7 | 24.1 | 64.4 |
-| Pruned 7B + distill 80B tokens (12800 iters) | 72.2 | 73.0 | 56.9 | 62.6 | 72.0 | 95.8 | 66.2 | 22.2 | 65.1 |
+| Distill @ 2.5B tokens (400 iters) | 70.7 | 68.4 | 52.7 | 57.0 | 63.0 | 93.7 | 63.2 | 11.6 | 60.0 |
+| Distill @  20B tokens (3200 iters) | 71.3 | 71.7 | 54.8 | 62.0 | 69.1 | 95.2 | 63.8 | 20.9 | 63.6 |
+| Distill @  40B tokens (6400 iters) | 71.1 | 71.6 | 53.7 | 60.9 | 70.4 | 95.6 | 68.0 | 21.1 | 64.1 |
+| Distill @  60B tokens (9600 iters) | 72.1 | 72.1 | 54.9 | 61.6 | 70.3 | 95.4 | 64.7 | 24.1 | 64.4 |
+| Distill @  80B tokens (12800 iters) | 72.2 | 73.0 | 56.9 | 62.6 | 72.0 | 95.8 | 66.2 | 22.2 | 65.1 |
 | Nemotron-Nano-9B-v2 (official, pruned from 12B) | 74.7 | 74.9 | 56.1 | 64.4 | 73.2 | 95.9 | 65.8 | 21.9 | 65.9 |
 | Nemotron-Nano-12B-v2 (official) | 78.5 | 77.9 | 58.2 | 66.6 | 76.1 | 96.9 | 67.9 | 28.4 | 68.8 |
 
@@ -49,7 +49,7 @@ End-to-end optimization of [Nemotron-Nano-9B-v2](https://huggingface.co/nvidia/N
 Distillation uses the **30% Pretraining (Code 5, General 20, MATH 5) + 70% Post-training v1/v3 (Math 30, Coding 20, Science 15, IF 5)** blend (see [Data Blend](#data-blend) below). Blend ablations are in [ABLATIONS.md](ABLATIONS.md).
 
 > [!NOTE]
-> Exact numbers may vary depending on deployment and evaluation setup. All models above — including the official 9B and 12B — were evaluated with the same [nemo_evaluator.yaml](nemo_evaluator.yaml) for fair comparison. These numbers may differ from those reported on the official [Nemotron-Nano-9B-v2](https://huggingface.co/nvidia/NVIDIA-Nemotron-Nano-9B-v2) and [Nemotron-Nano-12B-v2](https://huggingface.co/nvidia/NVIDIA-Nemotron-Nano-12B-v2) HuggingFace model cards.
+> Exact numbers may vary depending on deployment and evaluation setup. All models above — including the official 9B and 12B — were evaluated once with the same [evaluation setup](#4-evaluation) for fair comparison. These numbers may differ from those reported on the official [Nemotron-Nano-9B-v2](https://huggingface.co/nvidia/NVIDIA-Nemotron-Nano-9B-v2) and [Nemotron-Nano-12B-v2](https://huggingface.co/nvidia/NVIDIA-Nemotron-Nano-12B-v2) HuggingFace model cards.
 
 > [!NOTE]
 > The official Nemotron-Nano-9B-v2 model was itself produced by pruning Nemotron-Nano-12B-v2 using Minitron. See [arxiv:2508.14444](https://arxiv.org/abs/2508.14444) for details on the exact steps used there.
@@ -68,6 +68,24 @@ For this experiment: `TOKENIZER=nvidia/NVIDIA-Nemotron-Nano-9B-v2`, `OUTPUT_DIR=
 
 **30% Pretraining (Code 5, General 20, MATH 5) + 70% Post-training v1/v3 (Math 30, Coding 20, Science 15, IF 5)**
 
+| Dataset | Tokens | Weight | Notes |
+| --- | --- | --- | --- |
+| Nemotron-Pretraining-SFT-v1 / Code (10M samples) | 7B | 5 | Pretraining code |
+| Nemotron-Pretraining-SFT-v1 / General (10M samples) | 16B | 20 | Upweighted to better close MMLU gap |
+| Nemotron-Pretraining-SFT-v1 / MATH (10M samples) | 12B | 5 | Pretraining math |
+| Nemotron-Math-v2 / high_part00 | 9B | 15 | Hard math reasoning |
+| Nemotron-Math-v2 / high_part01 | 11B | 15 | Hard math reasoning |
+| Nemotron-SFT-Competitive-Programming-v2 / python_00 | 7B | 15 | Python reasoning traces |
+| Nemotron-SFT-Competitive-Programming-v2 / cpp_00 | 7B | 5 | C++ reasoning traces |
+| Nemotron-Post-Training-Dataset-v1 / stem (5M samples) | 20B | 10 | Broad STEM |
+| Nemotron-Science-v1 / MCQ | 0.5B | 3 | GPQA MCQ format alignment |
+| Nemotron-Science-v1 / RQA | 0.3B | 2 | GPQA format diversity |
+| Nemotron-SFT-IF-Chat-v2 / reasoning_on | 2B | 3 | Instruction following (thinking on) |
+| Nemotron-SFT-IF-Chat-v2 / reasoning_off | 1B | 2 | Instruction following (thinking off) |
+
+<details>
+<summary>Data blend for distillation (click to expand)</summary>
+
 ```bash
 DATA_BLEND=" \
 5  tokenized_nemotron_v2/nvidia--Nemotron-Pretraining-SFT-v1_Nemotron-SFT-Code_train_text_max10000000 \
@@ -85,20 +103,7 @@ DATA_BLEND=" \
 "
 ```
 
-| Dataset | Tokens | Weight | Notes |
-| --- | --- | --- | --- |
-| Nemotron-Pretraining-SFT-v1 / Code (10M samples) | 7B | 5 | Pretraining code |
-| Nemotron-Pretraining-SFT-v1 / General (10M samples) | 16B | 20 | Upweighted to better close MMLU gap |
-| Nemotron-Pretraining-SFT-v1 / MATH (10M samples) | 12B | 5 | Pretraining math |
-| Nemotron-Math-v2 / high_part00 | 9B | 15 | Hard math reasoning |
-| Nemotron-Math-v2 / high_part01 | 11B | 15 | Hard math reasoning |
-| Nemotron-SFT-Competitive-Programming-v2 / python_00 | 7B | 15 | Python reasoning traces |
-| Nemotron-SFT-Competitive-Programming-v2 / cpp_00 | 7B | 5 | C++ reasoning traces |
-| Nemotron-Post-Training-Dataset-v1 / stem (5M samples) | 20B | 10 | Broad STEM |
-| Nemotron-Science-v1 / MCQ | 0.5B | 3 | GPQA MCQ format alignment |
-| Nemotron-Science-v1 / RQA | 0.3B | 2 | GPQA format diversity |
-| Nemotron-SFT-IF-Chat-v2 / reasoning_on | 2B | 3 | Instruction following (thinking on) |
-| Nemotron-SFT-IF-Chat-v2 / reasoning_off | 1B | 2 | Instruction following (thinking off) |
+</details>
 
 #### General Guidelines
 
@@ -115,7 +120,7 @@ This blend intentionally omits capabilities not targeted in this experiment (e.g
 | --- | --- |
 | Multilingual | `Nemotron-SFT-Multilingual-v1` |
 | Agentic / tool use | `Nemotron-SFT-Tool-Call-v1`, `Nemotron-SFT-Tool-Call-v2` |
-| Software engineering (SWE) | `Nemotron-SFT-SWE-v1` |
+| Software engineering (SWE) | `Nemotron-SFT-SWE-v2` |
 | Safety / alignment | `Nemotron-SFT-Safety-v1` |
 | Long context | `Nemotron-SFT-Long-Context-v1` |
 
@@ -125,9 +130,12 @@ When adding new datasets, reduce weights of lower-priority categories proportion
 
 ### 2. Pruning
 
+Here we prune the model from 9B to 7B parameters.
+
 Run on **1 node with 8x H100** (~1 hour)
 
-Non-default arguments: `--hparams_to_skip num_attention_heads` (default: none; attention heads pruning is harder to recover hence skipped), `--seq_length 8192` (default: 4096) since dataset has longer sequences. All other arguments use defaults i.e. we optimize for MMLU (10% subset, 0-shot) for the pruned model (without distillation).
+<details>
+<summary>Pruning command (click to expand)</summary>
 
 ```bash
 torchrun --nproc_per_node 8 /opt/Model-Optimizer/examples/megatron_bridge/prune_minitron.py \
@@ -140,7 +148,15 @@ torchrun --nproc_per_node 8 /opt/Model-Optimizer/examples/megatron_bridge/prune_
   --output_hf_path /path/to/Nemotron-Nano-9B-v2-Pruned-7B
 ```
 
-Important pruning logs:
+Non-default arguments:
+
+- `--hparams_to_skip num_attention_heads` (default: none) — attention heads pruning is harder to recover, hence skipped
+- `--seq_length 8192` (default: 4096) — dataset has longer sequences
+
+</details>
+
+<details>
+<summary>Pruning logs (top 10 candidates, best subnet, layer patterns) (click to expand)</summary>
 
 ```text
 Only considering atmost 40% for width and 20% for depth pruning hparams
@@ -169,19 +185,22 @@ Original hybrid_override_pattern: M-M-M-MM-M-M-M*-M-M-M*-M-M-M-M*-M-M-M-M*-M-MM-
 Pruned hybrid_override_pattern: M-M-M-MM-M-M-M*-M-M-M*-M-M-M-M*-M-M-M-M*-MMMM-M-
 ```
 
+</details>
+
 > [!TIP]
-> Here we skip the Knowledge Distillation (KD) step for candidates for simplicity. If you want to find a better pruned model, you can take the top K candidates' `export_config` from the logs above and then export all models separately and perform KD for ~2B tokens on each of them before selecting the best subnet based on your desired metrics.
+> Here we skip the Knowledge Distillation (KD) step for candidates for simplicity. If you want to find a better pruned model, you can take few top candidates' `export_config` from the logs above (where score is in similar range as the best subnet) and then export all models separately and perform KD for ~2B tokens on each of them before selecting the best subnet based on your desired metrics.
 
 ---
 
 ### 3. Distillation
 
-Non-default arguments: `--seq_length 8192` (default: 4096), `--mbs 4` (default: 1), `--train_iters 16000` (train upto ~100B tokens — can stop earlier and take intermediate checkpoints for smaller runs), `--lr_warmup_iters 100` (default: 50), `--eval_interval 400` (default: 100). All other arguments use defaults.
-
 Run on **96 nodes × 8x H100 (768 GPUs total)**. ~600 H100 GPU-hours per 1k steps (~6.3B tokens), i.e. ~45 min wall-clock per 1k steps. Full 80B token run (~13k steps) takes ~9k H100 GPU-hours (~10 hours wall-clock).
 
 >[!TIP]
-> While we use 96 nodes here for faster training, you can also run with 1 node. If you dont want to do full distillation run, you can stop earlier and take intermediate checkpoints as well.
+> While we use 96 nodes here for faster training, you can also run with 1 node. If you dont want to do full distillation run, you can stop earlier and take intermediate checkpoints as well. See results for intermediate checkpoints at the top of this README.
+
+<details>
+<summary>Distillation command (click to expand)</summary>
 
 ```bash
 torchrun --nproc_per_node 8 /opt/Model-Optimizer/examples/megatron_bridge/distill_minitron.py \
@@ -210,6 +229,17 @@ torchrun --nproc_per_node 8 /opt/Model-Optimizer/examples/megatron_bridge/distil
 #     --wandb_exp_name <wandb_exp_name>
 ```
 
+Non-default arguments:
+
+- `--seq_length 8192` (default: 4096)
+- `--mbs 4` (default: 1) - use as large as possible to maximize throughput
+- `--train_iters 16000` (train upto ~100B tokens — can stop earlier and take intermediate checkpoints for smaller runs)
+- `--lr_warmup_iters 100` (default: 50)
+- `--eval_interval 400` (default: 100) — less frequent eval to save compute
+- All other arguments use defaults.
+
+</details>
+
 For multi-node Slurm runs, see the [Megatron-Bridge README](../../../megatron_bridge/README.md#slurm-usage) for details.
 
 Distillation saves checkpoints in Megatron distributed format under `<output_dir>/checkpoints/iter_XXXXXXX`. You can convert any intermediate checkpoint to HuggingFace format using the Megatron-Bridge conversion script (see [Megatron Bridge README](../../../megatron_bridge/README.md) for full details):
@@ -221,13 +251,16 @@ python /opt/Megatron-Bridge/examples/conversion/convert_checkpoints.py export \
     --hf-path <output_dir>/checkpoints/hf_iter_<iter_number>
 ```
 
+> [!NOTE]
+> This is pure SFT-style distillation — no RL or online reward signal is used. Adding an RL-based post-training step after distillation is a natural next step that could further improve some of these benchmarks.
+
 ---
 
 ### 4. Evaluation
 
-The eval config xin [nemo_evaluator.yaml](nemo_evaluator.yaml) is for Slurm-based evaluation — it submits a vLLM serving job and runs evals against it. For local model execution and evaluation, refer to the [NeMo Evaluator documentation](https://docs.nvidia.com/nemo/evaluator/latest/) or this [blog](https://huggingface.co/blog/nvidia/nemotron-3-nano-evaluation-recipe).
+The eval config in [nemo_evaluator.yaml](nemo_evaluator.yaml) is for Slurm-based evaluation — it submits a vLLM serving job and runs evals against it. For local model execution and evaluation, refer to the [NeMo Evaluator documentation](https://docs.nvidia.com/nemo/evaluator/latest/) or this [blog](https://huggingface.co/blog/nvidia/nemotron-3-nano-evaluation-recipe).
 
-Before running, update the following fields in the yaml:
+Before running, update the following fields in the yaml or overwrite them in the command line with `-o <option>=<value>`:
 
 - `execution.hostname` — your Slurm login node hostname
 - `execution.account` — your Slurm account
@@ -255,9 +288,12 @@ export OPENAI_CLIENT_SECRET=xxxxxx
 nemo-evaluator-launcher run --config nemo_evaluator.yaml
 ```
 
+> [!TIP]
+> Run same evals multiple times to get a more stable result.
+
 **Tasks and exact metric names reported in the results table:**
 
-| Benchmark | Tool | Metric name |
+| Benchmark | Library | Metric name |
 | --- | --- | --- |
 | MMLU | [lm-evaluation-harness](https://github.com/EleutherAI/lm-evaluation-harness) (5-shot) | `mmlu` |
 | MMLU Pro | NeMo Evaluator | `mmlu-pro_pass_at_1_symbolic_correct` |

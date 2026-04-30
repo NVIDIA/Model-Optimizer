@@ -161,15 +161,49 @@ class _Encoder:
         """
         if self.reasoning_content == "native":
             return messages
+
+        def _fix_arguments(args):
+            """Ensure tool_call.arguments is a dict for Jinja2 |items compatibility."""
+            if isinstance(args, dict):
+                return args
+            if isinstance(args, str):
+                try:
+                    parsed = json.loads(args)
+                    return parsed if isinstance(parsed, dict) else {}
+                except (json.JSONDecodeError, TypeError):
+                    return {}
+            return {}
+
         processed = []
         for msg in messages:
-            if "reasoning_content" not in msg:
+            has_tool_calls = "tool_calls" in msg and isinstance(msg.get("tool_calls"), list)
+            needs_copy = "reasoning_content" in msg or has_tool_calls
+            if not needs_copy:
                 processed.append(msg)
                 continue
             msg = dict(msg)  # shallow copy — don't mutate the original
-            rc = msg.pop("reasoning_content")
+            rc = msg.pop("reasoning_content", None)
             if self.reasoning_content == "inline" and rc:
                 msg["content"] = f"<think>\n{rc}\n</think>\n{msg.get('content', '')}"
+            # Always normalize tool_call.arguments to dict so Jinja2 |items doesn't crash.
+            # The Nemotron v3 chat template reassigns tool_call = tool_call.function when
+            # the nested OpenAI format is used, so we fix both the direct and nested levels.
+            if has_tool_calls:
+                fixed_tool_calls = []
+                for tc in msg["tool_calls"]:
+                    if not isinstance(tc, dict):
+                        fixed_tool_calls.append(tc)
+                        continue
+                    tc = dict(tc)
+                    if "arguments" in tc and not isinstance(tc["arguments"], dict):
+                        tc["arguments"] = _fix_arguments(tc["arguments"])
+                    if isinstance(tc.get("function"), dict):
+                        fn = dict(tc["function"])
+                        if "arguments" in fn and not isinstance(fn["arguments"], dict):
+                            fn["arguments"] = _fix_arguments(fn["arguments"])
+                        tc["function"] = fn
+                    fixed_tool_calls.append(tc)
+                msg["tool_calls"] = fixed_tool_calls
             processed.append(msg)
         return processed
 
