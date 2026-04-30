@@ -219,6 +219,7 @@ class TrtExecBenchmark(Benchmark):
         self.remote_password: str = ""
         self.remote_engine_path: str = "trtexec_benchmark_model.trt"
         self.remote_bin_path: str = "trtexec"
+        self.remote_timeout_sec = 300
 
         if self.has_remote_config:
             remote_config = [arg for arg in trtexec_args if "--remoteAutoTuningConfig" in arg]
@@ -335,7 +336,9 @@ class TrtExecBenchmark(Benchmark):
 
             cmd = [*self._base_cmd, f"--onnx={model_path}"]
             self.logger.debug(f"Running: {' '.join(cmd)}")
-            result = subprocess.run(cmd, capture_output=True, text=True)  # nosec B603
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=self.remote_timeout_sec
+            )  # nosec B603
             self._write_log_file(
                 log_file,
                 "\n".join(
@@ -373,7 +376,9 @@ class TrtExecBenchmark(Benchmark):
                     f"{self.remote_user}@{self.remote_ip}:{shlex.quote(self.remote_engine_path)}",
                 ]
                 scp_cmd = ssh_pass + scp_cmd
-                result = subprocess.run(scp_cmd, capture_output=True, text=True)  # nosec B603
+                result = subprocess.run(
+                    scp_cmd, capture_output=True, text=True, timeout=self.remote_timeout_sec
+                )  # nosec B603
                 if result.returncode != 0:
                     self.logger.error(f"Failed to push engine to remote device: {result.stderr}")
                     return float("inf")
@@ -387,7 +392,12 @@ class TrtExecBenchmark(Benchmark):
                     f"{ld_path} {shlex.quote(trt_path)} --loadEngine={shlex.quote(self.remote_engine_path)}",
                 ]
                 trtexec_safe_cmd = ssh_pass + trtexec_safe_cmd
-                result = subprocess.run(trtexec_safe_cmd, capture_output=True, text=True)  # nosec B603
+                result = subprocess.run(
+                    trtexec_safe_cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=self.remote_timeout_sec,
+                )  # nosec B603
                 latency_pattern = safe_pattern
                 if result.returncode != 0:
                     # fallback and try trtexec with "--safe"
@@ -401,7 +411,12 @@ class TrtExecBenchmark(Benchmark):
                     ]
                     trtexec_safe_cmd = ssh_pass + trtexec_safe_cmd
 
-                    result = subprocess.run(trtexec_safe_cmd, capture_output=True, text=True)  # nosec B603
+                    result = subprocess.run(
+                        trtexec_safe_cmd,
+                        capture_output=True,
+                        text=True,
+                        timeout=self.remote_timeout_sec,
+                    )  # nosec B603
                     latency_pattern = std_pattern
             if result.returncode != 0:
                 self.logger.error(
