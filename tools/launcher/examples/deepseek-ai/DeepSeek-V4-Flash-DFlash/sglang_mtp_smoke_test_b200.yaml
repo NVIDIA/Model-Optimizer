@@ -1,0 +1,30 @@
+# SGLang MTP smoke test for deepseek-ai/DeepSeek-V4-Flash-DFlash — B200 (umbriel) variant.
+#
+# Usage:
+#   uv run slurm.py --yaml modules/Model-Optimizer/tools/launcher/examples/deepseek-ai/DeepSeek-V4-Flash-DFlash/sglang_mtp_smoke_test_b200.yaml job_dir=/home/omniml_data_3/cicd --yes
+
+job_name: DeepSeek-V4-Flash-DFlash_sglang_mtp_smoke_b200
+
+pipeline:
+  global_vars:
+    hf_model: /hf-local/deepseek-ai/DeepSeek-V4-Flash
+
+  task_0:
+    script: common/specdec/sglang_smoke_test.sh
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+      - NUM_SPEC_TOKENS: "0"
+      - DATA_PARALLEL_SIZE: "1"
+      - TP_SIZE: "8"
+      - TRUST_REMOTE_CODE: "1"
+      - COPY_MODEL_TO_TMPFS: "1"
+      - EXPERT_PARALLEL_SIZE: "1"
+      - ATTENTION_BACKEND: "trtllm_mha"
+      - MOE_BACKEND: "flashinfer_trtllm"
+      - SGLANG_APPLY_CONFIG_BACKUP: "none"
+    slurm_config:
+      _factory_: "computelab_umbriel_slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 8
+      container: "lmsysorg/sglang:deepseek-v4-blackwell"

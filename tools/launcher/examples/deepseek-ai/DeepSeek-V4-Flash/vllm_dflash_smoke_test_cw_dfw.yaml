@@ -1,0 +1,54 @@
+# vLLM DFlash smoke test for deepseek-ai/DeepSeek-V4-Flash — CW-DFW H100 variant.
+#
+# Launches a vLLM server with DeepSeek-V4-Flash as the target model and
+# DeepSeek-V4-Flash-DFlash as the draft model, using DFlash block-diffusion
+# speculative decoding (15 speculative tokens per step).
+#
+# This container (deepseekv4-cu130) does not yet natively support deepseek_v4 as a
+# DFlash target. patch_vllm_dflash.py bridges the gap by patching vLLM at startup.
+#
+# Key config choices:
+#   block_size=256   — required: SWA layers use window_size=256 so the page constraint
+#                      max(sm_page_sizes) ≤ max(all_page_sizes) forces block_size ≥ 256
+#   gpu_memory_utilization=0.85 — leaves ~4 GB headroom per GPU for Triton JIT compilation
+#                                  of the DeepSeek compressor kernel on first inference
+#   max_num_batched_tokens=4096 — reduces profiling-phase memory pressure
+#
+# Reference: "DFlash: Block Diffusion for Flash Speculative Decoding" (arXiv:2502.06036)
+#
+# Usage (nmm-sandbox):
+#   uv run slurm.py --yaml modules/Model-Optimizer/tools/launcher/examples/deepseek-ai/DeepSeek-V4-Flash/vllm_dflash_smoke_test_cw_dfw.yaml --yes
+#
+# Usage (ModelOpt launcher):
+#   uv run launch.py --yaml examples/deepseek-ai/DeepSeek-V4-Flash/vllm_dflash_smoke_test_cw_dfw.yaml --yes
+
+job_name: DeepSeek-V4-Flash_DFlash_smoke_cw_dfw
+
+pipeline:
+  global_vars:
+    hf_model: /hf-local/deepseek-ai/DeepSeek-V4-Flash
+    draft_model: /hf-local/z-lab/DeepSeek-V4-Flash-DFlash
+
+  task_0:
+    script: common/specdec/vllm_smoke_test.sh
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+      - DRAFT_MODEL: <<global_vars.draft_model>>
+      - SPEC_METHOD: "dflash"
+      - NUM_SPEC_TOKENS: "15"
+      - TP_SIZE: "8"
+      - KV_CACHE_DTYPE: "fp8"
+      - BLOCK_SIZE: "256"
+      - TRUST_REMOTE_CODE: "1"
+      - VLLM_USE_DEEP_GEMM: "1"
+      - FORCE_AF_V2: "1"
+      - GPU_MEM_UTIL: "0.85"
+      - MAX_BATCHED_TOKENS: "4096"
+      - COPY_MODEL_TO_TMPFS: "1"
+      - VLLM_PATCH_SCRIPT: "examples/deepseek-ai/DeepSeek-V4-Flash/patch_vllm_dflash.py"
+    slurm_config:
+      _factory_: "cw_dfw_slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 8
+      container: "vllm/vllm-openai:deepseekv4-cu130"

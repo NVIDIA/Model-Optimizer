@@ -1,0 +1,50 @@
+# EAGLE3 offline pipeline for deepseek-ai/DeepSeek-V4-Flash-DFlash — B200 (umbriel) variant.
+#
+# Step 1: Synthetic data generation — serve the target model with vLLM and run query.py
+#         to generate prompt+response pairs, saved to /scratchspace/data.
+#
+# B200-specific notes:
+#   - DATA_PARALLEL_SIZE=4: 8 GPUs split as 4 DP workers × 2 GPUs (EP=4 within DP)
+#   - DEEPGEMM_TMPDIR: deepgemm JIT compiles FP8 E8M0 kernels via NVCC on B200.
+#     /tmp (tmpfs) is too small; /dev/shm is noexec. /cicd (NFS) is writable+executable.
+#     Uses DEEPGEMM_TMPDIR (not TMPDIR) so enroot doesn't read it at container startup.
+#   - VLLM_ENGINE_READY_TIMEOUT_S=1800: engine init takes ~566s on B200 (model copy +
+#     deepgemm warmup + CUDA graph capture), which exceeds the default 600s timeout.
+#   - VLLM_STARTUP_TIMEOUT=1800: query.sh's server-ready poll timeout, also needs extension.
+#
+# Usage:
+#   uv run slurm.py --yaml modules/Model-Optimizer/tools/launcher/examples/deepseek-ai/DeepSeek-V4-Flash-DFlash/hf_offline_eagle3.yaml job_dir=/home/omniml_data_3/cicd --yes
+
+job_name: DeepSeek-V4-Flash-DFlash_EAGLE3_offline_data
+
+pipeline:
+  global_vars:
+    hf_model: /hf-local/deepseek-ai/DeepSeek-V4-Flash
+
+  # Step 1: Synthetic data generation via vLLM
+  # Args before "--" go to vllm serve; args after "--" go to common/query.py.
+  task_0:
+    script: common/vllm/query.sh
+    args:
+      - --model <<global_vars.hf_model>>
+      - --data-parallel-size 4
+      - --kv-cache-dtype fp8
+      - --block-size 256
+      - --enable-expert-parallel
+      - --tokenizer-mode deepseek_v4
+      - --trust-remote-code
+      - --max-num-batched-tokens 32768
+      - --
+      - --data /hf-local/modelopt/Speculative-Decoding-Prompt-Samples
+      - --save /scratchspace/data
+    environment:
+      - COPY_MODEL_TO_TMPFS: "1"
+      - DEEPGEMM_TMPDIR: "/cicd/deepgemm_tmp"
+      - VLLM_ENGINE_READY_TIMEOUT_S: "1800"
+      - VLLM_STARTUP_TIMEOUT: "1800"
+    slurm_config:
+      _factory_: "computelab_umbriel_slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 8
+      container: "vllm/vllm-openai:deepseekv4-cu130"
