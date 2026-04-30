@@ -26,6 +26,7 @@ import subprocess  # nosec B404
 import sys
 from collections.abc import Sequence
 from contextlib import redirect_stderr, redirect_stdout
+from importlib.metadata import PackageNotFoundError, distribution
 
 import onnxruntime as ort
 from onnxruntime.quantization.operators.qdq_base_operator import QDQOperatorBase
@@ -129,9 +130,7 @@ def _check_for_tensorrt(min_version: str = "10.0"):
 
 def _find_cudnn_bin_dir():
     """Locate the nvidia cudnn bin directory inside site-packages."""
-    from importlib.metadata import PackageNotFoundError, distribution
-
-    for pkg_name in ("nvidia-cudnn-cu12", "nvidia-cudnn-cu11", "nvidia-cudnn-cu13"):
+    for pkg_name in ("nvidia-cudnn-cu12", "nvidia-cudnn-cu13"):
         try:
             dist = distribution(pkg_name)
         except PackageNotFoundError:
