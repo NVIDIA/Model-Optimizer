@@ -128,9 +128,12 @@ class ModelOptEagleRecipe(ModelOptSpeculativeRecipeBase):
     )
 
     @model_validator(mode="after")
-    def _resolve_eagle_cross_section(self) -> ModelOptEagleRecipe:
-        """Fill cross-section fields and warn on inconsistencies once all sections are loaded."""
+    def _derive_eagle_offline(self) -> ModelOptEagleRecipe:
         self.eagle.eagle_offline = self.data.offline_data_path is not None
+        return self
+
+    @model_validator(mode="after")
+    def _warn_rope_vs_training_seq_len(self) -> ModelOptEagleRecipe:
         orig_max_pos = self.eagle.eagle_export_rope_scaling.get("original_max_position_embeddings")
         if orig_max_pos is not None and orig_max_pos != self.training.training_seq_len:
             warnings.warn(
@@ -154,7 +157,7 @@ class ModelOptDFlashRecipe(ModelOptSpeculativeRecipeBase):
     )
 
     @model_validator(mode="after")
-    def _resolve_dflash_cross_section(self) -> ModelOptDFlashRecipe:
+    def _derive_dflash_offline(self) -> ModelOptDFlashRecipe:
         self.dflash.dflash_offline = self.data.offline_data_path is not None
         return self
 
