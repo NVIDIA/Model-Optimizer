@@ -373,9 +373,9 @@ class TrtExecBenchmark(Benchmark):
                     f"{self.remote_user}@{self.remote_ip}:{shlex.quote(self.remote_engine_path)}",
                 ]
                 scp_cmd = ssh_pass + scp_cmd
-                result = subprocess.run(scp_cmd)  # nosec B603
+                result = subprocess.run(scp_cmd, capture_output=True, text=True)  # nosec B603
                 if result.returncode != 0:
-                    self.logger.error("Failed to push engine to remote device")
+                    self.logger.error(f"Failed to push engine to remote device: {result.stderr}")
                     return float("inf")
                 ld_path = f"LD_LIBRARY_PATH={shlex.quote(self.remote_lib_path)}:$LD_LIBRARY_PATH"
                 trt_path = f"{os.path.join(self.remote_bin_path, 'trtexec_safe')}"
