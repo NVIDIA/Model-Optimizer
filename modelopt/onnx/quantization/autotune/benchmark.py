@@ -37,6 +37,7 @@ import time
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 import numpy as np
 import torch
@@ -145,6 +146,13 @@ class Benchmark(ABC):
             self.logger.warning(f"Failed to save logs to {file}: {e}")
 
 
+safe_pattern = (
+    r"\[\d{2}/\d{2}/\d{4}-\d{2}:\d{2}:\d{2}\]\s+\[I\]\s+"
+    r"Average over \d+ runs - GPU latency:\s*([\d.]+)\s*ms"
+)
+std_pattern = r"\[I\]\s+Latency:.*?median\s*=\s*([\d.]+)\s*ms"
+
+
 class TrtExecBenchmark(Benchmark):
     """TensorRT benchmark using trtexec command-line tool.
 
@@ -183,7 +191,6 @@ class TrtExecBenchmark(Benchmark):
         self.temp_model_path = os.path.join(self.temp_dir, "temp_model.onnx")
         self.logger.debug(f"Created temporary engine directory: {self.temp_dir}")
         self.logger.debug(f"Temporary model path: {self.temp_model_path}")
-        self.latency_pattern = r"\[I\]\s+Latency:.*?median\s*=\s*([\d.]+)\s*ms"
 
         self._base_cmd = [
             self.trtexec_path,
@@ -204,9 +211,56 @@ class TrtExecBenchmark(Benchmark):
             self.logger.debug(f"Added plugin library: {plugin_path}")
 
         trtexec_args = self.trtexec_args or []
-        has_remote_config = any("--remoteAutoTuningConfig" in arg for arg in trtexec_args)
+        self.has_remote_config = any("--remoteAutoTuningConfig" in arg for arg in trtexec_args)
+        self.remote_ip: str | None = None
+        self.remote_port: int | None = None
+        self.remote_user: str | None = None
+        self.remote_password: str | None = None
+        self.remote_engine_path: str | None = "trtexec_benchmark_model.trt"
+        self.remote_bin_path: str = "trtexec"
 
-        if has_remote_config:
+        if self.has_remote_config:
+            remote_config = [arg for arg in trtexec_args if "--remoteAutoTuningConfig" in arg]
+            if len(remote_config) != 1:
+                raise ValueError("Exactly one --remoteAutoTuningConfig argument is required")
+            # Parse --remoteAutoTuningConfig argument, which may be given as:
+            #  ('--remoteAutoTuningConfig=ssh://user:pass@host:port?...') or
+            #  ('--remoteAutoTuningConfig', 'ssh://user:pass@host:port?...')
+            #
+            # The logic: find the arg starting with '--remoteAutoTuningConfig'
+            # If formatted as '--remoteAutoTuningConfig=...', split off the '='
+            # Otherwise, grab the next argument.
+            config_arg_value: str | None = None
+            for i, arg in enumerate(trtexec_args):
+                if arg.startswith("--remoteAutoTuningConfig"):
+                    if arg == "--remoteAutoTuningConfig":
+                        # Value should be the next argument
+                        if i + 1 < len(trtexec_args):
+                            config_arg_value = trtexec_args[i + 1]
+                        else:
+                            raise ValueError("Missing value for --remoteAutoTuningConfig")
+                    elif arg.startswith("--remoteAutoTuningConfig="):
+                        config_arg_value = arg.split("=", 1)[1]
+                    else:
+                        raise ValueError(f"Malformed --remoteAutoTuningConfig argument: {arg}")
+                    break
+            if not config_arg_value:
+                raise ValueError("Could not parse --remoteAutoTuningConfig argument")
+            remote_config_str: str = config_arg_value
+
+            if not remote_config_str.startswith("ssh://"):
+                raise ValueError("Only 'ssh://' remote autotuning config URLs are supported")
+            parsed = urlparse(remote_config_str)
+            # parsed.username, parsed.password, parsed.hostname, parsed.port, parsed.query
+            self.remote_user = parsed.username
+            self.remote_password = parsed.password
+            self.remote_ip = parsed.hostname
+            self.remote_port = parsed.port
+            # Parse query options into a dict
+            self.remote_options = {
+                k: v[0] if len(v) == 1 else v for k, v in parse_qs(parsed.query).items()
+            }
+            self.remote_bin_path = os.path.dirname(str(self.remote_options["remote_exec_path"]))
             try:
                 _check_for_trtexec(min_version="10.15")
                 self.logger.debug("TensorRT Python API version >= 10.15 detected")
@@ -215,6 +269,7 @@ class TrtExecBenchmark(Benchmark):
                         "Remote autotuning requires '--safe' to be set. Adding it to trtexec arguments."
                     )
                     self.trtexec_args.append("--safe")
+                    self.is_safe = True
                 if "--skipInference" not in trtexec_args:
                     self.logger.warning(
                         "Remote autotuning requires '--skipInference' to be set. Adding it to trtexec arguments."
@@ -228,9 +283,14 @@ class TrtExecBenchmark(Benchmark):
                 trtexec_args = [
                     arg for arg in trtexec_args if "--remoteAutoTuningConfig" not in arg
                 ]
+        self.is_safe = "--safe" in trtexec_args
+        if self.is_safe:
+            self.latency_pattern = safe_pattern
+        else:
+            self.latency_pattern = std_pattern
         self._base_cmd.extend(trtexec_args)
 
-        self.logger.debug(f"Base command template: {' '.join(self._base_cmd)}")
+        self.logger.info(f"Base command template: {' '.join(self._base_cmd)}")
 
     def __del__(self):
         """Cleanup temporary directory."""
@@ -292,10 +352,34 @@ class TrtExecBenchmark(Benchmark):
                 self.logger.error(f"trtexec failed with return code {result.returncode}")
                 self.logger.error(f"stderr: {result.stderr}")
                 return float("inf")
+            if self.has_remote_config and self.is_safe:
+                # need to push the model to the device and use trtexec_safe to run
+                scp_cmd = [
+                    "scp",
+                    f"-P{self.remote_port}",
+                    self.engine_path,
+                    f"{self.remote_user}@{self.remote_ip}:{self.remote_engine_path}",
+                ]
+                result = subprocess.run(scp_cmd)  # nosec B603
+                if result.returncode != 0:
+                    self.logger.error("Failed to push engine to remote device")
+                    return float("inf")
+                ld_path = (
+                    f"LD_LIBRARY_PATH={self.remote_options['remote_lib_path']}:$LD_LIBRARY_PATH"
+                )
+                trt_path = f"{os.path.join(self.remote_bin_path, 'trtexec_safe')}"
+                trtexec_safe_cmd = [
+                    "ssh",
+                    "-p",
+                    f"{self.remote_port}",
+                    f"{self.remote_user}:{self.remote_password}@{self.remote_ip}",
+                    f"{ld_path} {trt_path} --loadEngine={self.remote_engine_path}",
+                ]
+                result = subprocess.run(trtexec_safe_cmd, capture_output=True, text=True)  # nosec B603
 
             if not (match := re.search(self.latency_pattern, result.stdout, re.IGNORECASE)):
-                self.logger.warning("Could not parse median latency from trtexec output")
-                self.logger.debug(f"trtexec stdout:\n{result.stdout}")
+                self.logger.warning(f"trtexec stdout:\n{result.stdout}")
+                self.logger.error("Could not parse median latency from trtexec output")
                 return float("inf")
             latency = float(match.group(1))
             self.logger.info(f"TrtExec benchmark (median): {latency:.2f} ms")
