@@ -18,6 +18,7 @@ from pathlib import Path
 
 from _test_utils.examples.run_command import extend_cmd_parts, run_example_command
 from _test_utils.torch.transformers_models import create_tiny_qwen3_dir
+from transformers import AutoModelForCausalLM
 
 
 def test_prune_minitron(tmp_path: Path, num_gpus):
@@ -25,6 +26,7 @@ def test_prune_minitron(tmp_path: Path, num_gpus):
         tmp_path, with_tokenizer=True, return_model=True, num_hidden_layers=num_gpus
     )
     teacher_params = sum(p.numel() for p in teacher_model.parameters())
+    prune_target_params = int(teacher_params * 0.8)
 
     pruned_model_path = tmp_path / "pruned"
     prune_command_parts = extend_cmd_parts(
@@ -35,7 +37,7 @@ def test_prune_minitron(tmp_path: Path, num_gpus):
         calib_dataset_name="cnn_dailymail",
         calib_num_samples=16,
         seq_length=32,
-        prune_target_params=teacher_params * 0.8,
+        prune_target_params=prune_target_params,
         prune_score_func="mmlu_1pct",
         ss_channel_divisor=4,
         hparams_to_skip="num_attention_heads",
@@ -43,3 +45,7 @@ def test_prune_minitron(tmp_path: Path, num_gpus):
     )
     run_example_command(prune_command_parts, example_path="megatron_bridge")
     assert (pruned_model_path / "config.json").exists()
+
+    pruned_model = AutoModelForCausalLM.from_pretrained(pruned_model_path)
+    pruned_params = sum(p.numel() for p in pruned_model.parameters())
+    assert pruned_params <= prune_target_params

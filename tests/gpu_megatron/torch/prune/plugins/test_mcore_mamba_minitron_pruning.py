@@ -15,7 +15,7 @@
 
 import contextlib
 import io
-from functools import partial
+import re
 
 import pytest
 import torch
@@ -34,11 +34,14 @@ from megatron.core.ssm.mamba_layer import MambaLayer
 from megatron.core.transformer.identity_op import IdentityOp
 
 import modelopt.torch.nas as mtn
+from modelopt.torch.nas.plugins.megatron_model_stats import (
+    mcore_memory_footprint_mb,
+    mcore_param_count,
+)
 from modelopt.torch.prune.plugins.mcore_minitron import (
     ImportanceEstimatorRegistry,
     _convert_model_to_dynamic_space,
     get_mcore_minitron_config,
-    get_mcore_param_count,
 )
 
 SEED = 1234
@@ -120,7 +123,7 @@ def test_mcore_mamba_parameter_sorting(dist_workers):
     dist_workers.run(_test_mcore_mamba_parameter_sorting)
 
 
-def _test_mcore_mamba_hybrid_pruning(ckpt_dir, rank, size):
+def _test_mcore_mamba_hybrid_pruning(rank, size, ckpt_dir):
     channel_divisor = 4
 
     num_layers = min(size * 2, 8)
@@ -228,140 +231,249 @@ def _test_mcore_mamba_hybrid_pruning(ckpt_dir, rank, size):
 
 
 def test_mcore_mamba_hybrid_pruning(dist_workers, tmp_path):
-    dist_workers.run(partial(_test_mcore_mamba_hybrid_pruning, tmp_path / "minitron_scores"))
+    dist_workers.run(_test_mcore_mamba_hybrid_pruning, tmp_path / "minitron_scores")
 
 
-def _test_mcore_mamba_hybrid_pruning_nas(ckpt_dir, rank, size):
-    set_seed(SEED)
-    channel_divisor = 4
+# Shared parameters for the "ME*-" hybrid NAS tests
+_NAS_CHANNEL_DIVISOR = 4
+_NAS_BATCH_SIZE = 2
+_NAS_MODEL_KWARGS = {
+    "num_layers": 4,
+    "hybrid_override_pattern": "ME*-",
+    "hidden_size": 16,
+    "ffn_hidden_size": 32,
+    "num_attention_heads": 16,
+    "num_query_groups": 4,
+    "mamba_state_dim": 4,
+    "mamba_num_heads": 8,
+    "mamba_head_dim": 16,
+    "mamba_num_groups": 2,
+    "moe_ffn_hidden_size": 16,
+    "moe_shared_expert_intermediate_size": 16,
+    "num_moe_experts": 8,
+    "vocab_size": 32,
+}
 
-    num_layers = 4  # Atleast one of "M, *, -, E" blocks
-    hybrid_pattern = "ME*-"
-    hidden_size = 16
-    ffn_hidden_size = 32
-    num_attention_heads = 16
-    num_query_groups = 4
-    mamba_state_dim = 4
-    mamba_num_heads = 8
-    mamba_head_dim = 16
-    mamba_num_groups = 2
-    num_moe_experts = 8
-    moe_ffn_hidden_size = 16
-    moe_shared_expert_intermediate_size = 16
-    vocab_size = 32
-    batch_size = 2
 
-    model = get_mcore_mamba_hybrid_model(
+def _make_nas_hybrid_model(size):
+    return get_mcore_mamba_hybrid_model(
         tensor_model_parallel_size=1,
         pipeline_model_parallel_size=size,
         initialize_megatron=True,
-        num_layers=num_layers,
-        hybrid_override_pattern=hybrid_pattern,
-        hidden_size=hidden_size,
-        num_attention_heads=num_attention_heads,
-        num_query_groups=num_query_groups,
-        ffn_hidden_size=ffn_hidden_size,
-        mamba_state_dim=mamba_state_dim,
-        mamba_num_heads=mamba_num_heads,
-        mamba_head_dim=mamba_head_dim,
-        mamba_num_groups=mamba_num_groups,
-        moe_ffn_hidden_size=moe_ffn_hidden_size,
-        moe_shared_expert_intermediate_size=moe_shared_expert_intermediate_size,
-        num_moe_experts=num_moe_experts,
-        vocab_size=vocab_size,
         transformer_impl="transformer_engine",
         bf16=False,
+        **_NAS_MODEL_KWARGS,
     ).cuda()
 
-    param_count = get_mcore_param_count(model)
-    assert param_count == 14984.0, param_count
 
-    def forward_loop(m):
-        for _ in range(2):
-            run_mcore_inference_with_dummy_input(m, batch_size, hidden_size)
+def _nas_forward_loop(m):
+    for _ in range(2):
+        run_mcore_inference_with_dummy_input(m, _NAS_BATCH_SIZE, _NAS_MODEL_KWARGS["hidden_size"])
 
-    def score_func(m):
-        c = m.config
-        return (
-            c.num_layers
-            + c.hidden_size
-            + c.ffn_hidden_size
-            + c.mamba_num_heads
-            + c.mamba_head_dim
-            + c.num_attention_heads
-            + c.num_moe_experts
-            + c.moe_ffn_hidden_size
-            + c.moe_shared_expert_intermediate_size
-        )
 
-    constraints = {"params": int(param_count * 0.7)}
-    config = {
-        "forward_loop": forward_loop,
+def _nas_score_func(m):
+    c = m.config
+    return (
+        c.num_layers
+        + c.hidden_size
+        + c.ffn_hidden_size
+        + c.mamba_num_heads
+        + c.mamba_head_dim
+        + c.num_attention_heads
+        + c.num_moe_experts
+        + c.moe_ffn_hidden_size
+        + c.moe_shared_expert_intermediate_size
+    )
+
+
+def _base_nas_config(ckpt_dir):
+    return {
+        "forward_loop": _nas_forward_loop,
         "checkpoint": ckpt_dir,
-        "score_func": score_func,
+        "score_func": _nas_score_func,
         "max_width_pruning": 0.5,
         "max_depth_pruning": 0.5,
         "hparams_to_skip": ["num_attention_heads", "moe_shared_expert_intermediate_size"],
         "top_k": 10,
     }
 
-    # Capture stdout to assert search space output
-    stdout_capture = io.StringIO()
-    with contextlib.redirect_stdout(stdout_capture):
-        model, searcher_state = prune_minitron(model, constraints, config, channel_divisor)
 
-    # Assert expected search space output is present
-    captured_output = stdout_capture.getvalue()
-    print(captured_output)
-    if rank == 0:
-        assert "Search space for num_layers: [3, 4]" in captured_output
-        assert "Search space for hidden_size: [12, 16]" in captured_output
-        assert "Search space for mamba_num_heads: [6, 8]" in captured_output
-        assert "Search space for mamba_head_dim: [12, 16]" in captured_output
-        assert "Search space for num_moe_experts: [5, 6, 7, 8]" in captured_output
-        assert "Search space for moe_ffn_hidden_size: [12, 16]" in captured_output
-        assert "Total search space in consideration: 512" in captured_output
+def _get_hybrid_layer_pattern(model):
+    key = (
+        "hybrid_override_pattern"
+        if hasattr(model, "hybrid_override_pattern")
+        else "hybrid_layer_pattern"
+    )
+    return getattr(model, key)
 
-    # NOTE: Slight variation in layer ordering for MoE / Attention / MLP depending on PP configuration
-    # This affects param counts when num_layers is pruned
-    sorted_layers = [
+
+def _get_sorted_layers(searcher_state):
+    return [
         layer
         for layer, _ in sorted(
             searcher_state["layer_scores"].items(), key=lambda x: x[1], reverse=True
         )
     ]
+
+
+def _assert_top_k_candidates(searcher_state, constraint_key, expected_top_k, k=10):
+    top_k = searcher_state["all_candidates_per_constraint"][constraint_key][:k]
+    assert len(top_k) == k
+    for actual, (ss_config, metrics, score) in zip(top_k, expected_top_k):
+        assert actual.ss_config == ss_config, (actual.ss_config, ss_config)
+        assert actual.metrics == metrics, (actual.metrics, metrics)
+        assert actual.score == score, (actual.score, score)
+
+
+def _test_mcore_mamba_hybrid_pruning_nas_params(rank, size, ckpt_dir):
+    set_seed(SEED)
+    model = _make_nas_hybrid_model(size)
+
+    baseline_params, baseline_active = mcore_param_count(
+        model.config,
+        model.vocab_size,
+        model.share_embeddings_and_output_weights,
+        hybrid_layer_pattern=_get_hybrid_layer_pattern(model),
+    )
+    assert baseline_params == 14984, baseline_params
+    constraints = {
+        "params": int(baseline_params * 0.5),
+        "active_params": int(baseline_active * 0.7),
+    }
+
+    # Capture stdout to assert search space output
+    stdout_capture = io.StringIO()
+    with contextlib.redirect_stdout(stdout_capture):
+        model, searcher_state = prune_minitron(
+            model, constraints, _base_nas_config(ckpt_dir), _NAS_CHANNEL_DIVISOR
+        )
+
+    # Assert expected search space output is present (rich table format, strip ANSI codes first)
+    captured_output = stdout_capture.getvalue()
+    print(captured_output)
+    clean_output = re.sub(r"\x1b\[[0-9;]*[mGKH]", "", captured_output)
+    if rank == 0:
+        lines = clean_output.splitlines()
+
+        def assert_row(key: str, value: str) -> None:
+            assert any(key in line and value in line for line in lines), (
+                f"Expected row with {key!r} and {value!r} not found in search space table"
+            )
+
+        assert_row("num_layers", "[3, 4]")
+        assert_row("hidden_size", "[12, 16]")
+        assert_row("mamba_num_heads", "[6, 8]")
+        assert_row("num_moe_experts", "[5, 6, 7, 8]")
+        assert_row("moe_ffn_hidden_size", "[12, 16]")
+        assert_row("Search space size", "512")
+
+    pruned_params, pruned_active_params = mcore_param_count(
+        model.config,
+        model.vocab_size,
+        model.share_embeddings_and_output_weights,
+        hybrid_layer_pattern=_get_hybrid_layer_pattern(model),
+    )
+    assert pruned_params == 7154, pruned_params
+    assert pruned_active_params == 7154, pruned_active_params
+
+    # NOTE: Slight variation in layer ordering for MoE / Attention / MLP depending on PP configuration
+    # This affects param counts when num_layers is pruned
+    sorted_layers = _get_sorted_layers(searcher_state)
     # fmt: off
     if sorted_layers == [1, 4, 3, 2]:  # PP 1/2
+        # Winner is 3-layer: keeps layers [1,4,3] from "ME*-" → drops 'E' (layer 2) → "M*-"
+        assert _get_hybrid_layer_pattern(model) == "M*-", _get_hybrid_layer_pattern(model)
         expected_top_k = [
-            [{"num_layers": 4, "hidden_size": 16, "mamba_num_heads": 6, "mamba_head_dim": 12, "num_moe_experts": 6, "moe_ffn_hidden_size": 16, "ffn_hidden_size": 20}, 10482.0, 112.0],  # noqa: E501
-            [{"num_layers": 4, "hidden_size": 12, "mamba_num_heads": 8, "mamba_head_dim": 16, "num_moe_experts": 6, "moe_ffn_hidden_size": 16, "ffn_hidden_size": 24}, 10472.0, 118.0],  # noqa: E501
-            [{"num_layers": 4, "hidden_size": 12, "mamba_num_heads": 8, "mamba_head_dim": 16, "num_moe_experts": 8, "moe_ffn_hidden_size": 12, "ffn_hidden_size": 20}, 10400.0, 112.0],  # noqa: E501
-            [{"num_layers": 4, "hidden_size": 12, "mamba_num_heads": 8, "mamba_head_dim": 16, "num_moe_experts": 7, "moe_ffn_hidden_size": 12, "ffn_hidden_size": 32}, 10388.0, 123.0],  # noqa: E501
-            [{"num_layers": 4, "hidden_size": 12, "mamba_num_heads": 8, "mamba_head_dim": 16, "num_moe_experts": 6, "moe_ffn_hidden_size": 16, "ffn_hidden_size": 20}, 10376.0, 114.0],  # noqa: E501
-            [{"num_layers": 4, "hidden_size": 16, "mamba_num_heads": 6, "mamba_head_dim": 12, "num_moe_experts": 7, "moe_ffn_hidden_size": 12, "ffn_hidden_size": 28}, 10370.0, 117.0],  # noqa: E501
-            [{"num_layers": 4, "hidden_size": 16, "mamba_num_heads": 6, "mamba_head_dim": 12, "num_moe_experts": 5, "moe_ffn_hidden_size": 16, "ffn_hidden_size": 32}, 10338.0, 123.0],  # noqa: E501
-            [{"num_layers": 4, "hidden_size": 12, "mamba_num_heads": 8, "mamba_head_dim": 16, "num_moe_experts": 7, "moe_ffn_hidden_size": 12, "ffn_hidden_size": 28}, 10292.0, 119.0],  # noqa: E501
-            [{"num_layers": 4, "hidden_size": 12, "mamba_num_heads": 8, "mamba_head_dim": 16, "num_moe_experts": 5, "moe_ffn_hidden_size": 16, "ffn_hidden_size": 32}, 10268.0, 125.0],  # noqa: E501
-            [{"num_layers": 4, "hidden_size": 16, "mamba_num_heads": 6, "mamba_head_dim": 12, "num_moe_experts": 7, "moe_ffn_hidden_size": 12, "ffn_hidden_size": 24}, 10242.0, 113.0],  # noqa: E501
+            # 4 four-layer models qualifying under params_thresh=7492
+            [{"num_layers": 4, "hidden_size": 12, "mamba_num_heads": 6, "mamba_head_dim": 12, "num_moe_experts": 6, "moe_ffn_hidden_size": 12, "ffn_hidden_size": 20}, {"params": 7418, "active_params": 6266}, 104],  # noqa: E501
+            [{"num_layers": 4, "hidden_size": 12, "mamba_num_heads": 6, "mamba_head_dim": 12, "num_moe_experts": 5, "moe_ffn_hidden_size": 12, "ffn_hidden_size": 32}, {"params": 7406, "active_params": 6542}, 115],  # noqa: E501
+            [{"num_layers": 4, "hidden_size": 12, "mamba_num_heads": 6, "mamba_head_dim": 12, "num_moe_experts": 5, "moe_ffn_hidden_size": 12, "ffn_hidden_size": 28}, {"params": 7310, "active_params": 6446}, 111],  # noqa: E501
+            [{"num_layers": 4, "hidden_size": 12, "mamba_num_heads": 6, "mamba_head_dim": 12, "num_moe_experts": 5, "moe_ffn_hidden_size": 12, "ffn_hidden_size": 24}, {"params": 7214, "active_params": 6350}, 107],  # noqa: E501
+            # 6 depth-pruned (num_layers=3) models; params==active_params since MoE layer is dropped
+            [{"num_layers": 3, "hidden_size": 16, "mamba_num_heads": 6, "mamba_head_dim": 12, "num_moe_experts": 5, "moe_ffn_hidden_size": 12, "ffn_hidden_size": 32}, {"params": 7154, "active_params": 7154}, 118],  # noqa: E501
+            [{"num_layers": 3, "hidden_size": 16, "mamba_num_heads": 6, "mamba_head_dim": 12, "num_moe_experts": 5, "moe_ffn_hidden_size": 16, "ffn_hidden_size": 32}, {"params": 7154, "active_params": 7154}, 122],  # noqa: E501
+            [{"num_layers": 3, "hidden_size": 16, "mamba_num_heads": 6, "mamba_head_dim": 12, "num_moe_experts": 6, "moe_ffn_hidden_size": 12, "ffn_hidden_size": 32}, {"params": 7154, "active_params": 7154}, 119],  # noqa: E501
+            [{"num_layers": 3, "hidden_size": 16, "mamba_num_heads": 6, "mamba_head_dim": 12, "num_moe_experts": 6, "moe_ffn_hidden_size": 16, "ffn_hidden_size": 32}, {"params": 7154, "active_params": 7154}, 123],  # noqa: E501
+            [{"num_layers": 3, "hidden_size": 16, "mamba_num_heads": 6, "mamba_head_dim": 12, "num_moe_experts": 7, "moe_ffn_hidden_size": 12, "ffn_hidden_size": 32}, {"params": 7154, "active_params": 7154}, 120],  # noqa: E501
+            [{"num_layers": 3, "hidden_size": 16, "mamba_num_heads": 6, "mamba_head_dim": 12, "num_moe_experts": 7, "moe_ffn_hidden_size": 16, "ffn_hidden_size": 32}, {"params": 7154, "active_params": 7154}, 124],  # noqa: E501
         ]
     else:
         raise RuntimeError(f"FIXME: Non deterministic test, assertions may fail: {sorted_layers=}")
     # fmt: on
 
-    assert get_mcore_param_count(model) == 10268.0
-
-    top_k = searcher_state["all_candidates_per_constraint"][constraints["params"]][:10]
-    assert len(top_k) == 10
-    for actual, (ss_config, params, score) in zip(top_k, expected_top_k):
-        assert actual.ss_config == ss_config, (actual.ss_config, ss_config)
-        assert actual.params == params, (actual.params, params)
-        assert actual.score == score, (actual.score, score)
+    _assert_top_k_candidates(
+        searcher_state,
+        (("params", constraints["params"]), ("active_params", constraints["active_params"])),
+        expected_top_k,
+    )
+    run_mcore_inference_with_dummy_input(model, _NAS_BATCH_SIZE, model.config.hidden_size)
 
 
 @pytest.mark.skipif(
     torch.cuda.device_count() > 2, reason="Assertions not configured for more than 2 GPUs"
 )
-def test_mcore_mamba_hybrid_pruning_nas(dist_workers, tmp_path):
-    dist_workers.run(
-        partial(_test_mcore_mamba_hybrid_pruning_nas, tmp_path / "minitron_scores"),
+def test_mcore_mamba_hybrid_pruning_nas_params(dist_workers, tmp_path):
+    dist_workers.run(_test_mcore_mamba_hybrid_pruning_nas_params, tmp_path / "minitron_scores")
+
+
+def _test_mcore_mamba_hybrid_pruning_nas_memory_mb(rank, size, ckpt_dir):
+    set_seed(SEED)
+    dtype_bytes = 2
+    sequence_length = 128
+    model = _make_nas_hybrid_model(size)
+
+    _, _, _, baseline_memory_mb = mcore_memory_footprint_mb(
+        model.config,
+        model.vocab_size,
+        model.share_embeddings_and_output_weights,
+        hybrid_layer_pattern=_get_hybrid_layer_pattern(model),
+        dtype_bytes=dtype_bytes,
+        sequence_length=sequence_length,
+        batch_size=1,
     )
+    memory_threshold = baseline_memory_mb * 0.7
+
+    constraints = {"memory_mb": memory_threshold}
+    config = {
+        **_base_nas_config(ckpt_dir),
+        "seq_length": sequence_length,
+        "batch_size": 1,
+    }
+    model, searcher_state = prune_minitron(model, constraints, config, _NAS_CHANNEL_DIVISOR)
+
+    pruned_params, _ = mcore_param_count(
+        model.config,
+        model.vocab_size,
+        model.share_embeddings_and_output_weights,
+        hybrid_layer_pattern=_get_hybrid_layer_pattern(model),
+    )
+    assert pruned_params == 10082, pruned_params
+
+    sorted_layers = _get_sorted_layers(searcher_state)
+    # fmt: off
+    if sorted_layers == [1, 4, 3, 2]:
+        expected_top_k = [
+            [{"num_layers": 4, "hidden_size": 12, "mamba_num_heads": 8, "mamba_head_dim": 16, "num_moe_experts": 6, "moe_ffn_hidden_size": 12, "ffn_hidden_size": 24}, {"memory_mb": 0.0226287841796875},    114],  # noqa: E501
+            [{"num_layers": 4, "hidden_size": 12, "mamba_num_heads": 8, "mamba_head_dim": 12, "num_moe_experts": 8, "moe_ffn_hidden_size": 16, "ffn_hidden_size": 32}, {"memory_mb": 0.022613525390625},     124],  # noqa: E501
+            [{"num_layers": 4, "hidden_size": 12, "mamba_num_heads": 6, "mamba_head_dim": 16, "num_moe_experts": 8, "moe_ffn_hidden_size": 16, "ffn_hidden_size": 32}, {"memory_mb": 0.022556304931640625},  126],  # noqa: E501
+            [{"num_layers": 4, "hidden_size": 16, "mamba_num_heads": 6, "mamba_head_dim": 12, "num_moe_experts": 7, "moe_ffn_hidden_size": 12, "ffn_hidden_size": 24}, {"memory_mb": 0.022541046142578125},  113],  # noqa: E501
+            [{"num_layers": 3, "hidden_size": 16, "mamba_num_heads": 8, "mamba_head_dim": 16, "num_moe_experts": 5, "moe_ffn_hidden_size": 12, "ffn_hidden_size": 20}, {"memory_mb": 0.0225067138671875},    112],  # noqa: E501
+            [{"num_layers": 3, "hidden_size": 16, "mamba_num_heads": 8, "mamba_head_dim": 16, "num_moe_experts": 5, "moe_ffn_hidden_size": 16, "ffn_hidden_size": 20}, {"memory_mb": 0.0225067138671875},    116],  # noqa: E501
+            [{"num_layers": 3, "hidden_size": 16, "mamba_num_heads": 8, "mamba_head_dim": 16, "num_moe_experts": 6, "moe_ffn_hidden_size": 12, "ffn_hidden_size": 20}, {"memory_mb": 0.0225067138671875},    113],  # noqa: E501
+            [{"num_layers": 3, "hidden_size": 16, "mamba_num_heads": 8, "mamba_head_dim": 16, "num_moe_experts": 6, "moe_ffn_hidden_size": 16, "ffn_hidden_size": 20}, {"memory_mb": 0.0225067138671875},    117],  # noqa: E501
+            [{"num_layers": 3, "hidden_size": 16, "mamba_num_heads": 8, "mamba_head_dim": 16, "num_moe_experts": 7, "moe_ffn_hidden_size": 12, "ffn_hidden_size": 20}, {"memory_mb": 0.0225067138671875},    114],  # noqa: E501
+            [{"num_layers": 3, "hidden_size": 16, "mamba_num_heads": 8, "mamba_head_dim": 16, "num_moe_experts": 7, "moe_ffn_hidden_size": 16, "ffn_hidden_size": 20}, {"memory_mb": 0.0225067138671875},    118],  # noqa: E501
+        ]
+    else:
+        raise RuntimeError(f"FIXME: Non deterministic test, assertions may fail: {sorted_layers=}")
+    # fmt: on
+
+    _assert_top_k_candidates(searcher_state, (("memory_mb", memory_threshold),), expected_top_k)
+    run_mcore_inference_with_dummy_input(model, _NAS_BATCH_SIZE, model.config.hidden_size)
+
+
+@pytest.mark.skipif(
+    torch.cuda.device_count() > 2, reason="Assertions not configured for more than 2 GPUs"
+)
+def test_mcore_mamba_hybrid_pruning_nas_memory_mb(dist_workers, tmp_path):
+    dist_workers.run(_test_mcore_mamba_hybrid_pruning_nas_memory_mb, tmp_path / "minitron_scores")

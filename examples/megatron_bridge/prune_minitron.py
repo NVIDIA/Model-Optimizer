@@ -14,6 +14,11 @@
 # limitations under the License.
 """Example script for pruning a GPT / Mamba model using Minitron algorithm on a Megatron-Bridge model (load from HF).
 
+Supports three NAS-based pruning targets (can be combined):
+  --prune_target_params       Total parameter count (e.g. 6e9 for 6B total params)
+  --prune_target_active_params Active parameter count for MoE models (e.g. 3e9 for 3B active params)
+  --prune_target_memory_mb    Memory footprint in MB (uses --seq_length for KV-cache estimate, assumes BF16)
+
 Example usage to prune Qwen3-8B to 6B on 2-GPUs (Pipeline Parallelism = 2)
 while skipping pruning of num_attention_heads using following defaults:
     1024 samples from nemotron-post-training-dataset-v2 for calibration,
@@ -47,7 +52,7 @@ from transformers import AutoConfig, AutoModelForCausalLM
 import modelopt.torch.opt as mto
 import modelopt.torch.prune as mtp
 import modelopt.torch.utils.distributed as dist
-from modelopt.torch.utils import get_supported_datasets, num2hrb, print_rank_0, warn_rank_0
+from modelopt.torch.utils import get_supported_datasets, print_rank_0, warn_rank_0
 from modelopt.torch.utils.plugins.mbridge import (
     get_hf_mbridge_calibration_loop,
     load_mbridge_model_from_hf,
@@ -105,7 +110,6 @@ def get_args() -> argparse.Namespace:
     )
     parser.add_argument("--calib_gbs", type=int, default=1, help="Calibration global batch size")
     parser.add_argument("--seq_length", type=int, default=4096)
-
     # Pruning parameters
     parser.add_argument(
         "--prune_intermediate_ckpt",
@@ -117,23 +121,40 @@ def get_args() -> argparse.Namespace:
         ),
     )
 
-    target_group = parser.add_mutually_exclusive_group(required=True)
-    target_group.add_argument(
+    parser.add_argument(
         "--prune_export_config",
         type=str,
         help=(
             'Target pruned config as JSON e.g., \'{"hidden_size": 512, "ffn_hidden_size": 2048}\'. '
             f"Supported hyperparameters: {mtp.mcore_minitron.SUPPORTED_HPARAMS}. "
-            "Cannot be used with --prune_target_params."
+            "Cannot be combined with NAS-based targets."
         ),
     )
-    target_group.add_argument(
+    parser.add_argument(
         "--prune_target_params",
         type=float,
         help=(
-            "Target parameter count for pruning e.g., 6e9 for pruning to 6B params (total params, not active params). "
-            "Uses Neural Architecture Search (NAS) to find the best pruned model that maximizes the --prune_score_func."
-            "Cannot be used with --prune_export_config."
+            "Target total parameter count e.g., 6e9 for 6B params. "
+            "Uses NAS to find the best pruned model that maximizes --prune_score_func. "
+            "Can be combined with --prune_target_active_params and/or --prune_target_memory_mb."
+        ),
+    )
+    parser.add_argument(
+        "--prune_target_active_params",
+        type=float,
+        help=(
+            "Target active parameter count e.g., 3e9 for 3B active params (useful for MoE models). "
+            "Uses NAS to find the best pruned model that maximizes --prune_score_func. "
+            "Can be combined with --prune_target_params and/or --prune_target_memory_mb."
+        ),
+    )
+    parser.add_argument(
+        "--prune_target_memory_mb",
+        type=float,
+        help=(
+            "Target memory footprint in MB (weights + KV-cache estimated via seq_length and calib_mbs; assumes BF16). "
+            "Uses NAS to find the best pruned model that maximizes --prune_score_func. "
+            "Can be combined with --prune_target_params and/or --prune_target_active_params."
         ),
     )
 
@@ -142,7 +163,7 @@ def get_args() -> argparse.Namespace:
         type=str,
         default="mmlu_10pct",
         help=(
-            "Score function to use for NAS-based pruning (--prune_target_params). Only supports MMLU at the moment. "
+            "Score function to use for NAS-based pruning. Only supports MMLU at the moment. "
             "Format: mmlu_<N>pct where <N> is the percentage of MMLU data to sample per subject "
             "(e.g. mmlu_10pct for 10%, mmlu_100pct for full eval)."
         ),
@@ -152,7 +173,7 @@ def get_args() -> argparse.Namespace:
         type=int,
         default=None,
         help=(
-            "hidden_size / ffn_hidden_size divisor for NAS-based pruning (--prune_target_params). "
+            "hidden_size / ffn_hidden_size divisor for NAS-based pruning. "
             "Leave as None to use default divisors."
         ),
     )
@@ -162,14 +183,14 @@ def get_args() -> argparse.Namespace:
         default=0.4,
         help=(
             f"Maximum width pruning percentage ({mtp.mcore_minitron.SUPPORTED_HPARAMS - {'num_layers'}}) "
-            "for NAS-based pruning (--prune_target_params)"
+            "for NAS-based pruning"
         ),
     )
     parser.add_argument(
         "--max_depth_pruning",
         type=float,
         default=0.2,
-        help="Maximum depth pruning percentage ('num_layers') for NAS-based pruning (--prune_target_params)",
+        help="Maximum depth pruning percentage ('num_layers') for NAS-based pruning",
     )
     parser.add_argument(
         "--hparams_to_skip",
@@ -178,7 +199,7 @@ def get_args() -> argparse.Namespace:
         default=[],
         choices=mtp.mcore_minitron.SUPPORTED_HPARAMS,
         help=(
-            "Space-separated list of hparams to skip for NAS-based pruning (--prune_target_params) "
+            "Space-separated list of hparams to skip for NAS-based pruning "
             "e.g. dont prune 'num_attention_heads'"
         ),
     )
@@ -187,12 +208,26 @@ def get_args() -> argparse.Namespace:
         type=int,
         default=10,
         help=(
-            "Number of top candidates to consider for NAS-based pruning (--prune_target_params). "
+            "Number of top candidates to consider for NAS-based pruning. "
             "Higher values will take longer to prune but may find a better model."
         ),
     )
 
     args = parser.parse_args()
+
+    # Validate pruning target arguments
+    _nas_targets = [
+        args.prune_target_params,
+        args.prune_target_active_params,
+        args.prune_target_memory_mb,
+    ]
+    if args.prune_export_config and any(t is not None for t in _nas_targets):
+        parser.error("--prune_export_config cannot be combined with NAS-based targets.")
+    if not args.prune_export_config and not any(t is not None for t in _nas_targets):
+        parser.error(
+            "At least one of --prune_export_config, --prune_target_params,"
+            " --prune_target_active_params, or --prune_target_memory_mb is required."
+        )
 
     # Post-process arguments
     if args.prune_intermediate_ckpt is None:
@@ -250,11 +285,6 @@ def main(args: argparse.Namespace):
         init_model_parallel=True,
         moe_grouped_gemm=False,
     )
-    print_rank_0(f"\nPruning model (showing PP rank0): {unwrapped_model}")
-    print_rank_0(
-        f"Original model params: {num2hrb(mtp.mcore_minitron.get_mcore_param_count(unwrapped_model))}"
-    )
-
     forward_loop = get_hf_mbridge_calibration_loop(
         model=model,
         provider=provider,
@@ -271,10 +301,20 @@ def main(args: argparse.Namespace):
         "forward_loop": forward_loop,
         "checkpoint": args.prune_intermediate_ckpt,
     }
-    if args.prune_target_params is not None:
-        # Restrict search space to a smaller set of candidates
-        # Allow more choices for MoE FFN as they are generally smaller
-        # NOTE: You can reduce the divisors and increase config['top_k'] to potentially find a better model.
+    if args.prune_export_config is not None:
+        # Less restrictive search space for manual pruning
+        ss_config = mtp.mcore_minitron.get_mcore_minitron_config(
+            hidden_size_divisor=64,
+            ffn_hidden_size_divisor=64,
+            mamba_head_dim_divisor=8,
+            num_moe_experts_divisor=8,
+            num_layers_divisor=1,
+        )
+        pruning_constraints = {"export_config": args.prune_export_config}
+    else:
+        # NAS-based pruning: restrict search space to a smaller set of candidates.
+        # Allow more choices for MoE FFN as they are generally smaller.
+        # NOTE: Reduce divisors and increase config['top_k'] to potentially find a better model.
         hidden_size_divisor = args.ss_channel_divisor if args.ss_channel_divisor else 256
         ffn_hidden_size_divisor = (
             args.ss_channel_divisor
@@ -290,7 +330,14 @@ def main(args: argparse.Namespace):
         )
         print_rank_0(f"Using search space config: {ss_config}")
 
-        pruning_constraints = {"params": args.prune_target_params}
+        pruning_constraints = {}
+        if args.prune_target_params is not None:
+            pruning_constraints["params"] = args.prune_target_params
+        if args.prune_target_active_params is not None:
+            pruning_constraints["active_params"] = args.prune_target_active_params
+        if args.prune_target_memory_mb is not None:
+            pruning_constraints["memory_mb"] = args.prune_target_memory_mb
+
         print_rank_0(
             f"Using NAS-based automatic pruning with score function: {args.prune_score_func}. "
             "You can change this to be any other metric you want to maximize (e.g. negative validation loss)."
@@ -313,17 +360,9 @@ def main(args: argparse.Namespace):
         pruning_config["max_depth_pruning"] = args.max_depth_pruning
         pruning_config["hparams_to_skip"] = args.hparams_to_skip
         pruning_config["top_k"] = args.top_k
-    elif args.prune_export_config is not None:
-        # Less restrictive search space for manual pruning
-        ss_config = mtp.mcore_minitron.get_mcore_minitron_config(
-            hidden_size_divisor=64,
-            ffn_hidden_size_divisor=64,
-            mamba_head_dim_divisor=8,
-            num_moe_experts_divisor=8,
-            num_layers_divisor=1,
-        )
-
-        pruning_constraints = {"export_config": args.prune_export_config}
+        # memory_mb constraint requires batch_size and seq_length
+        pruning_config["batch_size"] = args.calib_mbs
+        pruning_config["seq_length"] = args.seq_length
     print_rank_0(f"Pruning constraints: {pruning_constraints}")
 
     unwrapped_model, pruning_scores = mtp.prune(  # in-place pruning
@@ -343,10 +382,6 @@ def main(args: argparse.Namespace):
             else "hybrid_layer_pattern"
         )
         setattr(provider, hybrid_key, getattr(unwrapped_model, hybrid_key))
-    print_rank_0(f"\nPruned model (showing PP rank0): {unwrapped_model}")
-    print_rank_0(
-        f"Pruned model params: {num2hrb(mtp.mcore_minitron.get_mcore_param_count(unwrapped_model))}"
-    )
 
     if args.output_megatron_path is not None:
         print_rank_0(

@@ -21,9 +21,14 @@ skip_if_no_mamba()
 
 from _test_utils.torch.megatron.models import get_mcore_mamba_hybrid_model
 from _test_utils.torch.megatron.utils import run_mcore_inference
-from megatron.core.parallel_state import is_pipeline_first_stage, is_pipeline_last_stage
+from megatron.core.parallel_state import (
+    get_pipeline_model_parallel_group,
+    is_pipeline_first_stage,
+    is_pipeline_last_stage,
+)
 
 import modelopt.torch.nas as mtn
+import modelopt.torch.utils.distributed as dist
 from modelopt.torch.nas.modules.conv import _DynamicConvNd
 from modelopt.torch.nas.plugins.megatron import (
     MambaDInnerHp,
@@ -38,9 +43,13 @@ from modelopt.torch.nas.plugins.megatron import (
     _DynamicTENorm,
     _DynamicTERowParallelLinear,
 )
+from modelopt.torch.nas.plugins.megatron_model_stats import mcore_param_count
 from modelopt.torch.nas.traced_hp import TracedHp
-from modelopt.torch.opt.utils import named_dynamic_modules, search_space_size
-from modelopt.torch.prune.plugins.mcore_minitron import get_mcore_minitron_config
+from modelopt.torch.opt.utils import named_dynamic_modules, named_hparams, search_space_size
+from modelopt.torch.prune.plugins.mcore_minitron import (
+    _param_num_dynamic,
+    get_mcore_minitron_config,
+)
 from modelopt.torch.utils.random import centroid
 
 SEED = 1234
@@ -135,6 +144,115 @@ def _test_mamba_search_space(rank, size):
 
 def test_mamba_search_space(dist_workers):
     dist_workers.run(_test_mamba_search_space)
+
+
+def _test_param_num_dynamic_matches_formula(rank, size):
+    """Sample min-width subnet and assert _param_num_dynamic matches the analytical formula.
+
+    Uses "ME*-" to exercise all four block types (Mamba, MoE, Attention, dense MLP).
+    Depth pruning is excluded from the formula override because _param_num_dynamic counts all
+    physical layers on each PP rank (actual depth pruning requires drop_mcore_language_model_layers).
+    """
+    assert size <= 4, "test_param_num_dynamic_matches_formula only configured for upto 4 GPUs"
+    channel_divisor = 4
+    mamba_head_dim_divisor = 4
+
+    # 4-layer hybrid covering all block types
+    num_layers = 4
+    hybrid_override_pattern = "ME*-"
+    hidden_size = 16
+    ffn_hidden_size = 32
+    num_attention_heads = 16
+    num_query_groups = 4
+    mamba_state_dim = 4
+    mamba_num_heads = 8
+    mamba_head_dim = 16
+    mamba_num_groups = 2
+    num_moe_experts = 8
+    moe_ffn_hidden_size = 16
+    moe_shared_expert_intermediate_size = 16
+    vocab_size = 32
+
+    model = get_mcore_mamba_hybrid_model(
+        tensor_model_parallel_size=1,
+        pipeline_model_parallel_size=size,
+        initialize_megatron=True,
+        num_layers=num_layers,
+        hybrid_override_pattern=hybrid_override_pattern,
+        hidden_size=hidden_size,
+        num_attention_heads=num_attention_heads,
+        num_query_groups=num_query_groups,
+        ffn_hidden_size=ffn_hidden_size,
+        mamba_state_dim=mamba_state_dim,
+        mamba_num_heads=mamba_num_heads,
+        mamba_head_dim=mamba_head_dim,
+        mamba_num_groups=mamba_num_groups,
+        moe_ffn_hidden_size=moe_ffn_hidden_size,
+        moe_shared_expert_intermediate_size=moe_shared_expert_intermediate_size,
+        num_moe_experts=num_moe_experts,
+        vocab_size=vocab_size,
+        transformer_impl="transformer_engine",
+        bf16=False,
+    ).cuda()
+
+    mtn.convert(
+        model,
+        [
+            (
+                "mcore_minitron",
+                get_mcore_minitron_config(
+                    hidden_size_divisor=channel_divisor,
+                    ffn_hidden_size_divisor=channel_divisor,
+                    mamba_head_dim_divisor=mamba_head_dim_divisor,
+                    num_moe_experts_divisor=1,
+                    num_layers_divisor=1,
+                ),
+            )
+        ],
+    )
+
+    mtn.sample(model, min)
+
+    hybrid_key = (
+        "hybrid_override_pattern"
+        if hasattr(model, "hybrid_override_pattern")
+        else "hybrid_layer_pattern"
+    )
+    hybrid_layer_pattern = getattr(model, hybrid_key)
+
+    # Build a flat {hparam_name: active_value} dict (same convention as the searcher's ss_config).
+    # get_subnet_config() returns full-path keys, which mcore_param_count does not understand.
+    # With PP > 1 each rank only holds a subset of layer types, so gather across the PP group
+    # to get the complete set of hparam overrides for the global formula.
+    # Exclude num_layers: _param_num_dynamic counts all physical layers regardless of the depth
+    # hparam; actual depth pruning (drop_mcore_language_model_layers) is not called here.
+    local_config = {
+        n.split(".")[-1]: hp.active
+        for n, hp in named_hparams(model, configurable=True)
+        if n.split(".")[-1] != "num_layers"
+    }
+    width_ss_config = dist.DistributedProcessGroup.get_dist_syncd_obj(
+        local_config,
+        dist.DistributedProcessGroup(get_pipeline_model_parallel_group()),
+        op=lambda all_rank_configs: {k: v for d in all_rank_configs for k, v in d.items()},
+    )
+    formula_total, _ = mcore_param_count(
+        model.config,
+        model.vocab_size,
+        model.share_embeddings_and_output_weights,
+        hybrid_layer_pattern=hybrid_layer_pattern,
+        **width_ss_config,
+    )
+    dynamic_count = int(_param_num_dynamic(model))
+
+    assert formula_total == dynamic_count, (
+        f"Formula ({formula_total:,}) != _param_num_dynamic ({dynamic_count:,}) "
+        f"for min-width subnet {width_ss_config} (PP={size})"
+    )
+
+
+def test_param_num_dynamic_matches_formula(dist_workers):
+    dist_workers.run(_test_param_num_dynamic_matches_formula)
 
 
 def test_mamba_num_heads_hp():
