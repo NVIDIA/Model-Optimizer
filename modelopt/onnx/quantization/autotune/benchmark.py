@@ -286,14 +286,13 @@ class TrtExecBenchmark(Benchmark):
                         "Remote autotuning requires '--skipInference' to be set. Adding it to trtexec arguments."
                     )
                     self.trtexec_args.append("--skipInference")
-            except ImportError:
+            except ImportError as e:
                 self.logger.warning(
                     "Remote autotuning is not supported with TensorRT version < 10.15. "
                     "Removing --remoteAutoTuningConfig from trtexec arguments"
                 )
-                trtexec_args = [
-                    arg for arg in trtexec_args if "--remoteAutoTuningConfig" not in arg
-                ]
+                raise e
+
         self.is_safe = "--safe" in trtexec_args
         self._base_cmd.extend(trtexec_args)
 
