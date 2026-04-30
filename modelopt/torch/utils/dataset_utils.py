@@ -519,12 +519,16 @@ def get_max_batch_size(
             target_data_batch = 1  # pragma: no cover
         else:
             target_data_batch = max(int(free_mem_before / mem_diff_per_data_batch), 1)
-        target_input = sample_input_single_batch.expand(
-            [
-                target_data_batch if index == 0 else dim
-                for index, dim in enumerate(sample_input_single_batch.shape)
-            ]
-        )
+
+        def _expand_to(batch: int) -> torch.Tensor:
+            return sample_input_single_batch.expand(
+                [
+                    batch if index == 0 else dim
+                    for index, dim in enumerate(sample_input_single_batch.shape)
+                ]
+            )
+
+        target_input = _expand_to(target_data_batch)
 
         # For some models on multi GPU, we observe the memory per batch is not a constant.
         # So we just test the target batch size and make sure we do not go OOM.
@@ -535,6 +539,8 @@ def get_max_batch_size(
                     break
                 except torch.cuda.OutOfMemoryError:  # pragma: no cover - GPU OOM retry path
                     target_data_batch = target_data_batch // 2  # pragma: no cover
+                    target_input = _expand_to(target_data_batch)  # pragma: no cover
+                    torch.cuda.empty_cache()  # pragma: no cover
 
     # Regulate the data batch target to be 1, 2, 4, 8, 12, ..., capped at 64
     if target_data_batch < 2:
