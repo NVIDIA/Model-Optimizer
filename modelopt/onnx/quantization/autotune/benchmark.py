@@ -30,6 +30,7 @@ import ctypes
 import importlib.util
 import os
 import re
+import shlex
 import shutil
 import subprocess  # nosec B404
 import tempfile
@@ -215,8 +216,8 @@ class TrtExecBenchmark(Benchmark):
         self.remote_ip: str | None = None
         self.remote_port: int = 22
         self.remote_user: str = "root"
-        self.remote_password: str | None = None
-        self.remote_engine_path: str | None = "trtexec_benchmark_model.trt"
+        self.remote_password: str = ""
+        self.remote_engine_path: str = "trtexec_benchmark_model.trt"
         self.remote_bin_path: str = "trtexec"
 
         if self.has_remote_config:
@@ -269,6 +270,7 @@ class TrtExecBenchmark(Benchmark):
                     f"Missing required query parameters in --remoteAutoTuningConfig: {missing}"
                 )
             self.remote_bin_path = os.path.dirname(str(self.remote_options["remote_exec_path"]))
+            self.remote_lib_path = str(self.remote_options["remote_lib_path"])
             try:
                 _check_for_trtexec(min_version="10.15")
                 self.logger.debug("TensorRT Python API version >= 10.15 detected")
@@ -368,23 +370,21 @@ class TrtExecBenchmark(Benchmark):
                     "scp",
                     f"-P{self.remote_port}",
                     self.engine_path,
-                    f"{self.remote_user}@{self.remote_ip}:{self.remote_engine_path}",
+                    f"{self.remote_user}@{self.remote_ip}:{shlex.quote(self.remote_engine_path)}",
                 ]
                 scp_cmd = ssh_pass + scp_cmd
                 result = subprocess.run(scp_cmd)  # nosec B603
                 if result.returncode != 0:
                     self.logger.error("Failed to push engine to remote device")
                     return float("inf")
-                ld_path = (
-                    f"LD_LIBRARY_PATH={self.remote_options['remote_lib_path']}:$LD_LIBRARY_PATH"
-                )
+                ld_path = f"LD_LIBRARY_PATH={shlex.quote(self.remote_lib_path)}:$LD_LIBRARY_PATH"
                 trt_path = f"{os.path.join(self.remote_bin_path, 'trtexec_safe')}"
                 trtexec_safe_cmd = [
                     "ssh",
                     "-p",
                     f"{self.remote_port}",
                     f"{self.remote_user}@{self.remote_ip}",
-                    f"{ld_path} {trt_path} --loadEngine={self.remote_engine_path}",
+                    f"{ld_path} {shlex.quote(trt_path)} --loadEngine={shlex.quote(self.remote_engine_path)}",
                 ]
                 trtexec_safe_cmd = ssh_pass + trtexec_safe_cmd
                 result = subprocess.run(trtexec_safe_cmd, capture_output=True, text=True)  # nosec B603
@@ -397,7 +397,7 @@ class TrtExecBenchmark(Benchmark):
                         "-p",
                         f"{self.remote_port}",
                         f"{self.remote_user}@{self.remote_ip}",
-                        f"{ld_path} {trt_path} --safe --loadEngine={self.remote_engine_path}",
+                        f"{ld_path} {shlex.quote(trt_path)} --safe --loadEngine={shlex.quote(self.remote_engine_path)}",
                     ]
                     trtexec_safe_cmd = ssh_pass + trtexec_safe_cmd
 
