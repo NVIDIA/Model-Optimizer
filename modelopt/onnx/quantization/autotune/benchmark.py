@@ -253,11 +253,14 @@ class TrtExecBenchmark(Benchmark):
             if not remote_config_str.startswith("ssh://"):
                 raise ValueError("Only 'ssh://' remote autotuning config URLs are supported")
             parsed = urlparse(remote_config_str)
-            # parsed.username, parsed.password, parsed.hostname, parsed.port, parsed.query
             self.remote_user = parsed.username
             self.remote_password = parsed.password
             self.remote_ip = parsed.hostname
             self.remote_port = parsed.port
+            if self.remote_user is None:
+                raise ValueError("Unable to parse remote user from --remoteAutoTuningConfig")
+            if self.remote_ip is None:
+                raise ValueError("Unable to parse remote IP from --remoteAutoTuningConfig")
             if self.remote_port is None:
                 self.remote_port = 22
             # Parse query options into a dict
