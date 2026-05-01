@@ -42,14 +42,14 @@ quantize:
       enable: false
 
     # MoE routed experts -> NVFP4 W4A4, block_size 16, e4m3 scale.
-    # Weight uses static block scales (chosen by MSE); activations stay dynamic.
+    # Max/amax calibration uses dynamic block scales for both weight and activation.
     # HF/export names: backbone.layers.*.mixer.experts.*.{up,down}_proj.
     - quantizer_name: '*mixer.experts.*weight_quantizer'
       enable: true
       cfg:
         block_sizes:
           -1: 16
-          type: static
+          type: dynamic
           scale_bits: e4m3
         num_bits: e2m1
     - quantizer_name: '*mixer.experts.*input_quantizer'
@@ -66,7 +66,7 @@ quantize:
       cfg:
         block_sizes:
           -1: 16
-          type: static
+          type: dynamic
           scale_bits: e4m3
         num_bits: e2m1
     - quantizer_name: '*mlp.experts*input_quantizer'
