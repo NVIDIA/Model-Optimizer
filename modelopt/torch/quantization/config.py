@@ -236,10 +236,18 @@ _default_disabled_quantizer_cfg: list[QuantizerCfgEntry] = [
 _mamba_moe_disabled_quantizer_cfg: list[QuantizerCfgEntry] = [
     {"quantizer_name": "*fc1_latent_proj*", "enable": False},  # Skip Latent MOE
     {"quantizer_name": "*fc2_latent_proj*", "enable": False},  # Skip Latent MOE
-    {"quantizer_name": "*q_proj*", "enable": False},  # Skip QKV Linear
-    {"quantizer_name": "*k_proj*", "enable": False},  # Skip QKV Linear
-    {"quantizer_name": "*v_proj*", "enable": False},  # Skip QKV Linear
-    {"quantizer_name": "*o_proj*", "enable": False},  # Skip QKV Output Projection
+    {"quantizer_name": "*q_proj*", "enable": False},  # Skip QKV Linear (HF naming)
+    {"quantizer_name": "*k_proj*", "enable": False},  # Skip QKV Linear (HF naming)
+    {"quantizer_name": "*v_proj*", "enable": False},  # Skip QKV Linear (HF naming)
+    {"quantizer_name": "*o_proj*", "enable": False},  # Skip QKV Output Projection (HF naming)
+    {
+        "quantizer_name": "*self_attention.linear_qkv*",
+        "enable": False,
+    },  # Skip QKV Linear (Mcore naming)
+    {
+        "quantizer_name": "*self_attention.linear_proj*",
+        "enable": False,
+    },  # Skip QKV Output Projection (Mcore naming)
 ]
 
 INT8_DEFAULT_CFG = {
@@ -1217,15 +1225,35 @@ class QuantizeAlgorithmConfig(ModeloptBaseConfig):
         ),
     )
 
-    use_sequential: bool = ModeloptField(
+    layerwise: bool = ModeloptField(
         default=False,
-        title="Enable sequential layer-by-layer calibration.",
+        title="Enable layerwise (layer-by-layer) calibration.",
         description=(
-            "If True, the calibration algorithm is applied sequentially to each decoder block. "
-            "Each layer's inputs are captured via a single forward pass that reflects the "
+            "If True, the calibration algorithm is applied layer by layer. "
+            "Each layer's inputs are captured via a forward pass that reflects the "
             "quantization of all preceding layers, incurring O(N) forward passes for N layers."
         ),
     )
+
+    layerwise_checkpoint_dir: str | None = ModeloptField(
+        default=None,
+        title="Checkpoint directory for layerwise calibration.",
+        description=(
+            "If set together with layerwise=True, per-layer checkpoints are saved to this "
+            "directory during calibration. On restart, calibration resumes from the last "
+            "completed layer."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def validate_layerwise_checkpoint_dir(self):
+        """Raise if layerwise_checkpoint_dir is set but layerwise is False."""
+        if self.layerwise_checkpoint_dir is not None and not self.layerwise:
+            raise ValueError(
+                "layerwise_checkpoint_dir requires layerwise=True. "
+                "Set layerwise=True or remove layerwise_checkpoint_dir."
+            )
+        return self
 
 
 class MaxCalibConfig(QuantizeAlgorithmConfig):
@@ -1528,6 +1556,12 @@ class GPTQCalibConfig(QuantizeAlgorithmConfig):
         title="Block size for GPTQ weight update.",
         description="""The block size for GPTQ weight update, which must be a multiple of the
         group_size used in the quantization.""",
+    )
+    fused: bool = ModeloptField(
+        default=False,
+        title="Use fused Triton kernel for GPTQ.",
+        description="""When True, use a fused Triton kernel that combines quantization and
+        per-column error propagation into one launch per GPTQ block.""",
     )
 
 

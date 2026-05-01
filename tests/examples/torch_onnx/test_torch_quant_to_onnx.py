@@ -14,9 +14,6 @@
 # limitations under the License.
 
 
-import os
-import subprocess
-
 import pytest
 from _test_utils.examples.run_command import extend_cmd_parts, run_example_command
 
@@ -28,33 +25,8 @@ _MODELS = {
     "vit_tiny": ("vit_tiny_patch16_224", '{"depth": 1}'),
     "swin_tiny": ("swin_tiny_patch4_window7_224", '{"depths": [1, 1, 1, 1]}'),
     "swinv2_tiny": ("swinv2_tiny_window8_256", '{"depths": [1, 1, 1, 1]}'),
+    "resnet50": ("resnet50", None),
 }
-
-# Builder optimization level: 4 for low-bit modes, 3 otherwise
-_LOW_BIT_MODES = {"fp8", "int8", "nvfp4"}
-
-
-def _verify_trt_engine_build(onnx_save_path, quantize_mode):
-    """Verify the exported ONNX model can be compiled into a TensorRT engine."""
-    example_dir = os.path.join(
-        os.path.dirname(__file__), "..", "..", "..", "examples", "torch_onnx"
-    )
-    onnx_path = os.path.join(example_dir, onnx_save_path)
-    assert os.path.exists(onnx_path), f"ONNX file not found: {onnx_path}"
-
-    opt_level = "4" if quantize_mode in _LOW_BIT_MODES else "3"
-    cmd = [
-        "trtexec",
-        f"--onnx={onnx_path}",
-        "--stronglyTyped",
-        f"--builderOptimizationLevel={opt_level}",
-    ]
-
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-    assert result.returncode == 0, (
-        f"TensorRT engine build failed for {onnx_save_path} "
-        f"(mode={quantize_mode}):\n{result.stdout}\n{result.stderr}"
-    )
 
 
 @pytest.mark.parametrize("quantize_mode", _QUANT_MODES)
@@ -63,7 +35,6 @@ def test_torch_onnx(model_key, quantize_mode):
     timm_model_name, model_kwargs = _MODELS[model_key]
     onnx_save_path = f"{model_key}.{quantize_mode}.onnx"
 
-    # Step 1: Quantize and export to ONNX
     cmd_parts = extend_cmd_parts(
         ["python", "torch_quant_to_onnx.py"],
         timm_model_name=timm_model_name,
@@ -73,8 +44,5 @@ def test_torch_onnx(model_key, quantize_mode):
         calibration_data_size="1",
         num_score_steps="1",
     )
-    cmd_parts.append("--no_pretrained")
+    cmd_parts.extend(["--no_pretrained", "--trt_build"])
     run_example_command(cmd_parts, "torch_onnx")
-
-    # Step 2: Verify the exported ONNX model builds a TensorRT engine
-    _verify_trt_engine_build(onnx_save_path, quantize_mode)

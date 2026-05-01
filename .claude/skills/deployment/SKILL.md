@@ -195,7 +195,7 @@ If a cluster config exists (`~/.config/modelopt/clusters.yaml` or `.claude/clust
 
 3. **Deploy based on remote environment:**
 
-   - **SLURM** — see `skills/common/slurm-setup.md` for job script templates (container setup, account/partition discovery). The server command inside the container is the same as Step 4 (e.g., `python -m vllm.entrypoints.openai.api_server --model <path> --quantization modelopt`). Use `remote_submit_job` and `remote_poll_job` to manage the job. Get the node hostname from `squeue -j $JOBID -o %N`.
+   - **SLURM** — see `skills/common/slurm-setup.md` for job script templates (container setup, account/partition discovery). The server command inside the container is the same as Step 4 (e.g., `python -m vllm.entrypoints.openai.api_server --model <path> --quantization modelopt`). After submitting, register the job and set up monitoring per the **monitor skill**. Get the node hostname from `squeue -j $JOBID -o %N`.
 
    - **Bare metal / Docker** — use `remote_run` to start the server directly:
 

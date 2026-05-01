@@ -16,8 +16,8 @@
 # ruff: noqa: F405
 """Quantization utilities."""
 
-from .activation_collector import LayerActivationCollector
 from .core_utils import *
+from .layerwise_calib import LayerActivationCollector
 
 __all__ = [
     "EXPORT_MODE",
@@ -30,6 +30,7 @@ __all__ = [
     "reduce_amax",
     "reduce_sum",
     "replace_function",
+    "representative_weight_quantizer",
     "update_quant_cfg_with_kv_cache_quant",
     "weight_attr_names",
 ]

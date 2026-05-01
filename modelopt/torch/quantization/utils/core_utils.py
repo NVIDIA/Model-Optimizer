@@ -202,27 +202,57 @@ def reduce_sum(input, axis=None, keepdims=True):
     return output
 
 
-def weight_attr_names(module: nn.Module) -> "Generator[str, None, None]":
-    """Get the weight param attribute names in a converted module, non-recursive.
+def representative_weight_quantizer(module: nn.Module, weight_name: str = "weight"):
+    """Return the representative weight quantizer for ``weight_name`` on ``module``.
 
-    We consider the following two cases for each weight param attribute:
-    - The standard weight attribute (e.g. nn.Linear).
-    - The custom `weight_attr_name`. (e.g. Llama4TextExperts has weight attributes `gate_up_proj` and `down_proj`)
+    Handles two layouts:
+
+    - singular ``<name>_weight_quantizer`` — standard ``nn.Linear`` / ``_QuantLinear``.
+    - plural ``<name>_weight_quantizers`` (``nn.ModuleList``) — fused-experts modules
+      (``_QuantFusedExperts``) hold one ``TensorQuantizer`` per expert. Per-expert
+      formats are identical, so the first element is representative.
+
+    Returns ``None`` if no matching quantizer is found.
     """
     from ..nn import SequentialQuantizer, TensorQuantizer
 
-    # the standard weight and quantizer case
-    weight = getattr(module, "weight", None)
-    weight_quantizer = getattr(module, "weight_quantizer", None)
-    if weight is not None and isinstance(weight_quantizer, (TensorQuantizer, SequentialQuantizer)):
-        yield "weight"
+    singular = quantizer_attr_names(weight_name).weight_quantizer
+    q = getattr(module, singular, None)
+    if isinstance(q, (TensorQuantizer, SequentialQuantizer)):
+        return q
 
-    # other weight and quantizer case
+    plural = getattr(module, singular + "s", None)
+    if isinstance(plural, nn.ModuleList) and len(plural) > 0:
+        first = plural[0]
+        if isinstance(first, (TensorQuantizer, SequentialQuantizer)):
+            return first
+    return None
+
+
+def weight_attr_names(module: nn.Module) -> "Generator[str, None, None]":
+    """Get the weight param attribute names in a converted module, non-recursive.
+
+    Covers three layouts:
+
+    - standard ``nn.Linear``: ``weight`` + ``weight_quantizer``.
+    - custom per-weight quantizer (e.g. ``Llama4TextExperts`` with ``gate_up_proj`` +
+      ``gate_up_proj_weight_quantizer``).
+    - fused-experts ``nn.ModuleList`` quantizers (``_QuantFusedExperts`` with
+      ``gate_up_proj`` + ``gate_up_proj_weight_quantizers`` plural list).
+    """
+    # standard: "weight" + "weight_quantizer" (singular) or "weight_quantizers" (plural)
+    if getattr(module, "weight", None) is not None:
+        if representative_weight_quantizer(module, "weight") is not None:
+            yield "weight"
+
+    # per-parameter custom attr names
     for name, _ in module.named_parameters(recurse=False):
+        if name == "weight":
+            continue
         weight = getattr(module, name, None)
-        weight_quantizer = getattr(module, f"{name}_weight_quantizer", None)
-        if isinstance(weight, nn.Parameter) and isinstance(
-            weight_quantizer, (TensorQuantizer, SequentialQuantizer)
+        if (
+            isinstance(weight, nn.Parameter)
+            and representative_weight_quantizer(module, name) is not None
         ):
             yield name
 
@@ -423,47 +453,70 @@ def _get_enclosing_fsdp_module(
         return root_model
 
 
+def _set_parameter(module: nn.Module, name: str, value: nn.Parameter):
+    """Set a parameter on a module by dotted name (e.g. ``self_attn.q_proj.weight``)."""
+    parts = name.rsplit(".", 1)
+    if len(parts) == 2:
+        parent = module.get_submodule(parts[0])
+        attr = parts[1]
+    else:
+        parent = module
+        attr = name
+    parent._parameters[attr] = value
+
+
 @contextmanager
 def fsdp2_weight_access_and_writeback_context(module: nn.Module, root_model: nn.Module):
     """Context manager for FSDP2 weight access and writeback.
 
-    Note this context will gather the weight across FSDP/HSDP shards. If TP is implemented with DTensor,
-    the weight will be a local tensor of the TP DTensor under this context.
+    Gathers sharded DTensor parameters across FSDP/HSDP shards so they can be
+    read or modified. Works for both leaf modules (single ``weight``) and
+    composite modules like decoder layers (all ``named_parameters``).
+
+    If TP is implemented with DTensor, the weight will be a local tensor of the
+    TP DTensor under this context.
     """
     assert isinstance(root_model, torch.distributed.fsdp.FSDPModule), "We only support FSDP2"
 
     assert not hasattr(module, "_hf_hook"), "We dont support FSDP2 with HF accelerate hooks"
-    assert isinstance(module.weight, torch.distributed.tensor.DTensor)
     fsdp_module = _get_enclosing_fsdp_module(module, root_model)
     assert fsdp_module is not None, "Module is not wrapped by FSDP"
     fsdp_device_mesh = _get_fsdp2_mesh(fsdp_module)
     fsdp_dim = fsdp_device_mesh.ndim
 
-    original_placements = module.weight.placements
-    original_device_mesh = module.weight.device_mesh
-    original_weight = module.weight
-    # Assuming the first fsdp_dim dimensions are for FSDP/HSDP, we only collect the tensor over FSDP/HSDP dimension,
-    # the TP will be handled by the TP reduction.
-    if fsdp_dim != original_device_mesh.ndim:
-        assert fsdp_device_mesh.mesh_dim_names == original_device_mesh.mesh_dim_names[:fsdp_dim], (
-            "FSDP2 mesh should be a slice of DTesnor's device mesh."
+    # Collect all DTensor parameters, replacing them with local replicated copies.
+    originals: dict[str, tuple] = {}
+    for name, param in module.named_parameters():
+        if not isinstance(param, torch.distributed.tensor.DTensor):
+            continue
+        original_placements = param.placements
+        original_device_mesh = param.device_mesh
+        if fsdp_dim != original_device_mesh.ndim:
+            assert (
+                fsdp_device_mesh.mesh_dim_names == original_device_mesh.mesh_dim_names[:fsdp_dim]
+            ), "FSDP2 mesh should be a slice of DTensor's device mesh."
+        collected = param.redistribute(
+            placements=[Replicate()] * fsdp_dim + list(original_placements[fsdp_dim:]),
+            device_mesh=original_device_mesh,
         )
-
-    weight_collected = original_weight.redistribute(
-        placements=[Replicate()] * fsdp_dim + list(original_placements[fsdp_dim:]),
-        device_mesh=original_device_mesh,
-    )
-    new_weight = nn.Parameter(weight_collected.to_local())
-    module._parameters["weight"] = new_weight
+        originals[name] = (param, collected, original_placements, original_device_mesh)
+        _set_parameter(module, name, nn.Parameter(collected.to_local()))
 
     yield
 
-    original_weight.to_local().data.copy_(
-        weight_collected.redistribute(
-            placements=original_placements, device_mesh=original_device_mesh
-        ).to_local()
-    )
-    module._parameters["weight"] = original_weight
+    # Write back and restore original DTensor parameters.
+    for name, (
+        original_param,
+        collected,
+        original_placements,
+        original_device_mesh,
+    ) in originals.items():
+        original_param.to_local().data.copy_(
+            collected.redistribute(
+                placements=original_placements, device_mesh=original_device_mesh
+            ).to_local()
+        )
+        _set_parameter(module, name, original_param)
 
 
 @contextmanager
@@ -471,7 +524,7 @@ def enable_weight_access_and_writeback(module, root_model, name_to_module: dict 
     """Enable weight access and writeback for a module.
 
     Useful for modules with weight not intact such as Linear layer in FSDP wrapped model or
-    HF accelerate CPU off-loaded models.
+    HF accelerate offloaded models (CPU or disk).
 
     Args:
         module: The module to access weights for.
@@ -495,6 +548,22 @@ def enable_weight_access_and_writeback(module, root_model, name_to_module: dict 
         context = nullcontext()
 
     with context:
+        yield
+
+
+@contextmanager
+def persistent_materialization(layer):
+    """Keep all layer weights materialized on GPU for the duration.
+
+    Suppresses per-forward weight transfers so that N calibration batches
+    pay the cost of one load/unload instead of N.
+
+    - **FSDP2**: patches ``FSDPParamGroup.unshard/reshard`` to no-ops, then
+      gathers weights once via ``enable_weight_access_and_writeback``.
+    - **Accelerate**: materializes weights and sets ``hook.offload = False``
+      so per-forward hooks skip materialization/offloading.
+    """
+    with _disable_fsdp_unshard_reshard(layer), enable_weight_access_and_writeback(layer, layer):
         yield
 
 
@@ -605,6 +674,24 @@ def patch_fsdp_mp_dtypes():
         torch.distributed.fsdp._fully_shard._fsdp_param_group.FSDPParamGroup._init_mp_dtypes = (
             original_init_mp_dtypes
         )
+
+
+@contextmanager
+def _disable_fsdp_unshard_reshard(layer):
+    """Disable FSDP2 unshard/reshard if *layer* is FSDP-wrapped."""
+    if isinstance(layer, FSDPModule):
+        _pg_cls = torch.distributed.fsdp._fully_shard._fsdp_param_group.FSDPParamGroup
+        orig_unshard = _pg_cls.unshard
+        orig_reshard = _pg_cls.reshard
+        _pg_cls.unshard = lambda self, async_op=False: None
+        _pg_cls.reshard = lambda self: None
+        try:
+            yield
+        finally:
+            _pg_cls.unshard = orig_unshard
+            _pg_cls.reshard = orig_reshard
+    else:
+        yield
 
 
 def get_prefixed_param_names(parent_model, target_module):

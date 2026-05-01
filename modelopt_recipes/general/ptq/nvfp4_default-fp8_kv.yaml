@@ -15,7 +15,7 @@
 
 metadata:
   recipe_type: ptq
-  description: NVFP4 MLP/MoE weight only (W4A16), FP8 KV cache, max calibration.
+  description: NVFP4 W4A4, FP8 KV cache, max calibration.
 quantize:
   algorithm: max
   quant_cfg:

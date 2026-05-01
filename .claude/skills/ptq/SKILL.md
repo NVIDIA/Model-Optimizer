@@ -118,9 +118,7 @@ For SLURM, see `skills/common/slurm-setup.md` and `references/slurm-setup-ptq.md
 
 ### Monitoring
 
-- **Launcher**: blocks and tails logs automatically
-- **SLURM (manual)**: poll with `squeue -u $USER` + `sleep` (not cron or background tasks)
-- **Local**: watch stdout
+After job submission, register the job and set up monitoring per the **monitor skill**.
 
 ## Step 5 — Verify output
 
@@ -134,6 +132,8 @@ Report the path and size to the user.
 ### Post-quantization validation
 
 Validate the exported checkpoint's quantization pattern matches the recipe. Quantization config patterns can silently miss layers if the model uses non-standard naming (e.g., Gemma4 `experts.*` missed by `*mlp*` patterns) — this only surfaces later as deployment failures. Read `references/checkpoint-validation.md` for the validation script, expected patterns per recipe, and common pattern gaps.
+
+**Next steps**: If the user wants to deploy or evaluate the quantized checkpoint, use the **deployment** or **evaluation** skill. The checkpoint workspace carries over. If the model required patches during PTQ (e.g., transformers upgrade), the same fixes will likely be needed at deployment and evaluation time.
 
 ## Key API Rules
 

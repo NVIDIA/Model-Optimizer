@@ -346,7 +346,7 @@ class NVFP4QTensor(BaseQuantizedTensor):
                 ) from e
 
         if fast:
-            from ..triton.fp4_kernel import fp4_dequantize
+            from modelopt.torch.kernels.quantization.gemm.fp4_kernel import fp4_dequantize
 
             return fp4_dequantize(
                 self._quantized_data,
