@@ -46,6 +46,77 @@ from .nn import QuantLinearConvBase, QuantModule, SequentialQuantizer, TensorQua
 from .utils import is_quantized_linear
 
 
+def _is_fused_experts_module(module: nn.Module) -> bool:
+    """Return True if ``module`` is a quantized fused-MoE-experts container.
+
+    These modules expose plural ``*_input_quantizer`` and ``*_weight_quantizers``
+    (an ``nn.ModuleList`` of per-expert quantizers) instead of the singular
+    ``input_quantizer`` / ``weight_quantizer`` attrs found on standard
+    ``nn.Linear``-derived QuantModules. AutoQuantize hparam discovery and cost
+    accounting need to recognize this layout to enumerate fused experts as
+    search dimensions.
+    """
+    # Late import to avoid a circular import at module load time.
+    try:
+        from .plugins.huggingface import _QuantFusedExperts
+    except ImportError:
+        return False
+    return isinstance(module, _QuantFusedExperts)
+
+
+# Quantizer attribute names that participate in AutoQuantize snapshot/restore.
+_STD_QUANTIZER_ATTRS = ("input_quantizer", "weight_quantizer", "output_quantizer")
+_FUSED_EXPERTS_QUANTIZER_ATTRS = (
+    "gate_up_proj_input_quantizer",
+    "gate_up_proj_weight_quantizers",
+    "down_proj_input_quantizer",
+    "down_proj_weight_quantizers",
+)
+
+
+def _get_quantizer_attrs(module: nn.Module) -> tuple[str, ...]:
+    """Return the quantizer attribute names that AutoQuantize must snapshot/restore.
+
+    For fused MoE experts, this returns the four plural quantizer attrs (two
+    shared input quantizers + two ``ModuleList`` of per-expert weight quantizers).
+    For standard Linear-derived QuantModules, returns the canonical trio.
+    """
+    if _is_fused_experts_module(module):
+        return _FUSED_EXPERTS_QUANTIZER_ATTRS
+    return _STD_QUANTIZER_ATTRS
+
+
+def _make_fresh_quantizer_for_attr(module: nn.Module, attr_name: str) -> nn.Module:
+    """Return a fresh, default quantizer object suitable to overwrite ``module.<attr_name>``.
+
+    For ModuleList attrs (per-expert quantizers on fused-experts modules), the
+    returned ModuleList preserves the original list length so per-expert
+    enumeration stays consistent across recipes.
+    """
+    current = getattr(module, attr_name, None)
+    if isinstance(current, nn.ModuleList):
+        return nn.ModuleList(TensorQuantizer() for _ in range(len(current)))
+    return TensorQuantizer()
+
+
+def _get_module_weight_numel(module: nn.Module) -> int:
+    """Return the total parameter count of a module's quantizable weights.
+
+    Standard QuantLinear modules have a single ``weight`` parameter. Fused
+    experts modules have two 3-D fused parameters (``gate_up_proj`` and
+    ``down_proj``) instead — both contribute to the cost accounting.
+    """
+    if _is_fused_experts_module(module):
+        total = 0
+        for attr in ("gate_up_proj", "down_proj"):
+            param = getattr(module, attr, None)
+            if param is not None:
+                total += param.numel()
+        return total
+    weight = getattr(module, "weight", None)
+    return weight.numel() if weight is not None else 0
+
+
 def estimate_quant_compression(quant_cfg: QuantizeConfig) -> float:
     """Estimate the compression ratio of a quantization configuration.
 
@@ -218,26 +289,26 @@ class QuantRecipeHparam(Hparam):
         # This is a hack; We dont want to make the input_quantizer, weight_quantizer, output_quantizer
         # a dynamic attribute for backward compatibility with the model_calib.py
         # TODO: Make input_quantizer, weight_quantizer, output_quantizer a dynamic attribute and get rid of this hack
+        # NOTE: For fused-experts modules, the relevant attrs are plural
+        # (``*_input_quantizer`` + ``*_weight_quantizers`` ModuleList) — see
+        # ``_get_quantizer_attrs``. Both layouts share the same snapshot dict
+        # shape so ``active.setter`` swaps the right child modules.
         self._all_quantizer_choices = {quant_recipe: {} for quant_recipe in self.choices}
 
         quant_recipe: QuantRecipe
         for quant_recipe in self.choices:
             for quant_module in self.quant_modules:
-                for quantizer_attr_name in [
-                    "input_quantizer",
-                    "weight_quantizer",
-                    "output_quantizer",
-                ]:
-                    setattr(quant_module, quantizer_attr_name, TensorQuantizer())
+                attr_names = _get_quantizer_attrs(quant_module)
+                for attr_name in attr_names:
+                    setattr(
+                        quant_module,
+                        attr_name,
+                        _make_fresh_quantizer_for_attr(quant_module, attr_name),
+                    )
 
                 set_quantizer_by_cfg(quant_module, quant_recipe.config.quant_cfg)
                 self._all_quantizer_choices[quant_recipe][quant_module] = {
-                    quantizer_attr_name: getattr(quant_module, quantizer_attr_name)
-                    for quantizer_attr_name in [
-                        "input_quantizer",
-                        "weight_quantizer",
-                        "output_quantizer",
-                    ]
+                    attr_name: getattr(quant_module, attr_name) for attr_name in attr_names
                 }
 
         self.active = self.original
@@ -344,6 +415,20 @@ class QuantRecipeHparam(Hparam):
         return ["name", *super().attrs]
 
 
+_LINEAR_ATTN_QKVZ_RE = re.compile(r"^(.*?\.linear_attn)\.(?:in_proj_qkv|in_proj_z)$")
+_LINEAR_ATTN_BA_RE = re.compile(r"^(.*?\.linear_attn)\.(?:in_proj_a|in_proj_b)$")
+
+
+def _linear_attn_qkvz_group_key(_model, name: str) -> str | None:
+    m = _LINEAR_ATTN_QKVZ_RE.match(name)
+    return f"{m.group(1)}/qkvz" if m else None
+
+
+def _linear_attn_ba_group_key(_model, name: str) -> str | None:
+    m = _LINEAR_ATTN_BA_RE.match(name)
+    return f"{m.group(1)}/ba" if m else None
+
+
 class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
     """Base searcher for AutoQuantize algorithm."""
 
@@ -365,6 +450,13 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         r"^(.*?)\.(gate_proj|up_proj)$",  # gate_proj, up_proj for llama like models
         r"^(.*?)\.(\d+\.(w1|w2|w3))$",  # mixtral experts
         r"^(.*?)\.((w1_linear|w2_linear|w3_linear)\.\d+)$",  # dbrx experts
+        # Qwen3.5/3.6 hybrid linear_attn: vLLM fuses (in_proj_qkv, in_proj_z)
+        # into ``in_proj_qkvz`` and (in_proj_a, in_proj_b) into ``in_proj_ba`` and
+        # requires fused shards to share quant_algo. Two callables (not one
+        # regex) so qkv+z and a+b produce DIFFERENT group keys; each pair
+        # stays with its own fusion partner.
+        _linear_attn_qkvz_group_key,
+        _linear_attn_ba_group_key,
     ]
 
     score_module_rules = []
@@ -410,9 +502,15 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
 
     @staticmethod
     def _is_auto_quantize_module(module):
-        return (
-            is_quantized_linear(module) or isinstance(module, QuantLinearConvBase)
-        ) and isinstance(module, QuantModule)
+        if (is_quantized_linear(module) or isinstance(module, QuantLinearConvBase)) and isinstance(
+            module, QuantModule
+        ):
+            return True
+        # Fused MoE experts: a single ``QuantModule`` that owns N per-expert
+        # weight quantizers in an ``nn.ModuleList`` plus shared input quantizers.
+        # All N experts in a layer share one search dimension (one recipe per
+        # fused module).
+        return _is_fused_experts_module(module) and isinstance(module, QuantModule)
 
     @staticmethod
     def _get_search_recipes(quantization_formats):
@@ -712,11 +810,9 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
     @staticmethod
     def _get_total_weight_size(modules):
         return sum(
-            (
-                module.weight.numel()
-                if _AutoQuantizeBaseSearcher._is_auto_quantize_module(module)
-                else 0
-            )
+            _get_module_weight_numel(module)
+            if _AutoQuantizeBaseSearcher._is_auto_quantize_module(module)
+            else 0
             for module in modules
         )
 
