@@ -13,6 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
+from fnmatch import fnmatch
+
 import pytest
 import torch
 from _test_utils.torch.export.utils import (
@@ -29,6 +32,7 @@ from _test_utils.torch.export.utils import (
     partial_nvfp4_config,
     partial_w4a8_config,
 )
+from _test_utils.torch.transformers_models import get_tiny_qwen3_moe
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.model_config import (
@@ -53,6 +57,7 @@ from modelopt.torch.export.quant_utils import (
     postprocess_state_dict,
     process_layer_quant_config,
 )
+from modelopt.torch.export.unified_export_hf import export_hf_checkpoint
 from modelopt.torch.quantization.config import (
     FP8_DEFAULT_CFG,
     INT4_AWQ_CFG,
@@ -60,6 +65,7 @@ from modelopt.torch.quantization.config import (
     INT8_WEIGHT_ONLY_CFG,
     NVFP4_AWQ_LITE_CFG,
     NVFP4_DEFAULT_CFG,
+    NVFP4_EXPERTS_ONLY_CFG,
     W4A8_AWQ_BETA_CFG,
 )
 from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
@@ -466,3 +472,51 @@ def test_get_quant_config(config, expected):
     mtq.quantize(model, config, lambda x: x(torch.randn(1, 4, 10, device="cuda")))
     quant_config = get_quant_config(model)
     assert quant_config["quantization"] == expected
+
+
+def test_qwen3_moe_nvfp4_experts_only_export_exclude_modules(tmp_path):
+    """Test that NVFP4_EXPERTS_ONLY_CFG correctly excludes non-expert modules in HF export.
+
+    For a Qwen3 MoE model, only routed expert layers (mlp.experts.*) should be quantized.
+    Attention layers and lm_head should appear in the exported hf_quant_config.json
+    exclude_modules.
+
+    Reference: https://huggingface.co/nvidia/Qwen3.5-397B-A17B-NVFP4/blob/main/hf_quant_config.json
+    """
+    model = get_tiny_qwen3_moe().to("cuda")
+    # from_config doesn't set architectures; export code requires it
+    model.config.architectures = ["Qwen3MoeForCausalLM"]
+
+    # Quantize with NVFP4_EXPERTS_ONLY_CFG (targets only *mlp.experts* patterns)
+    dummy_inputs = {k: v.to("cuda") for k, v in model.dummy_inputs.items()}
+    mtq.quantize(model, NVFP4_EXPERTS_ONLY_CFG, lambda m: m(**dummy_inputs))
+
+    # Export
+    export_dir = tmp_path / "qwen3_moe_nvfp4_experts_only"
+    export_hf_checkpoint(model, export_dir=export_dir)
+
+    # Load the generated hf_quant_config.json
+    hf_quant_config_path = export_dir / "hf_quant_config.json"
+    assert hf_quant_config_path.exists(), "hf_quant_config.json should be generated"
+    with open(hf_quant_config_path) as f:
+        hf_quant_config = json.load(f)
+
+    quant_section = hf_quant_config["quantization"]
+    assert quant_section["quant_algo"] == "NVFP4"
+    exclude_modules = quant_section["exclude_modules"]
+
+    def is_excluded(module_name: str) -> bool:
+        return any(fnmatch(module_name, pattern) for pattern in exclude_modules)
+
+    # Attention layers must be excluded
+    assert is_excluded("model.layers.0.self_attn.q_proj"), (
+        f"self_attn should be excluded, got patterns: {exclude_modules}"
+    )
+
+    # lm_head must be excluded
+    assert is_excluded("lm_head"), f"lm_head should be excluded, got patterns: {exclude_modules}"
+
+    # Routed experts should NOT be excluded
+    assert not is_excluded("model.layers.0.mlp.experts.0.down_proj"), (
+        f"Routed experts should not be excluded, got patterns: {exclude_modules}"
+    )
