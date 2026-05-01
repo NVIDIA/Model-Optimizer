@@ -55,7 +55,16 @@ class NVFP4QTensor(BaseQuantizedTensor):
     @classmethod
     def _is_static_quantizer(cls, weight_quantizer) -> bool:
         """Check if the weight quantizer is a static NVFP4 quantizer with pre-computed amax."""
-        return hasattr(weight_quantizer, "global_amax") and weight_quantizer.global_amax is not None
+        global_amax = cls._get_static_global_amax(weight_quantizer)
+        return global_amax is not None
+
+    @classmethod
+    def _get_static_global_amax(cls, weight_quantizer):
+        """Return global amax from live or restored static NVFP4 quantizers."""
+        global_amax = getattr(weight_quantizer, "global_amax", None)
+        if global_amax is None:
+            global_amax = getattr(weight_quantizer, "_global_amax", None)
+        return global_amax
 
     @classmethod
     def get_weights_scaling_factor_2_from_quantizer(cls, weight_quantizer):
@@ -70,8 +79,9 @@ class NVFP4QTensor(BaseQuantizedTensor):
         Returns:
             The global scaling factor as a float tensor.
         """
-        if cls._is_static_quantizer(weight_quantizer):
-            return weight_quantizer.global_amax.float() / (6.0 * 448.0)
+        global_amax = cls._get_static_global_amax(weight_quantizer)
+        if global_amax is not None:
+            return global_amax.float() / (6.0 * 448.0)
         else:
             assert hasattr(weight_quantizer, "_amax"), (
                 "Weight quantizer does not have attribute amax"
@@ -109,7 +119,7 @@ class NVFP4QTensor(BaseQuantizedTensor):
 
         if cls._is_static_quantizer(weight_quantizer):
             # Static path: use pre-computed per-block amax values from quantizer
-            global_amax = weight_quantizer.global_amax.float()
+            global_amax = cls._get_static_global_amax(weight_quantizer).float()
             per_block_amax = weight_quantizer._amax.float()
 
             # Compute scales in float

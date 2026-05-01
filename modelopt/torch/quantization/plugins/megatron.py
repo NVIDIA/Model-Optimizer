@@ -399,7 +399,9 @@ class _MegatronColumnParallelLinear(_MegatronParallelLinear):
         """
         shard_axis_dict = {}
         for k in state_dict:
-            if "weight_quantizer." in k:
+            # Static NVFP4 _global_amax is a scalar shared by all TP ranks; only shard
+            # per-block/per-channel weight quantizer state.
+            if "weight_quantizer." in k and not k.endswith("._global_amax"):
                 weight_quantizer_axis = self.get_submodule(k.rsplit(".", 1)[0]).axis
                 if weight_quantizer_axis is not None:
                     shard_axis_dict[k] = 0
@@ -427,7 +429,9 @@ class _MegatronRowParallelLinear(_MegatronParallelLinear):
         """
         shard_axis_dict = {}
         for k in state_dict:
-            if "weight_quantizer." in k:
+            # Static NVFP4 _global_amax is a scalar shared by all TP ranks; only shard
+            # per-block/per-channel weight quantizer state.
+            if "weight_quantizer." in k and not k.endswith("._global_amax"):
                 weight_quantizer_axis = None
                 if isinstance(self.weight_quantizer, TensorQuantizer):
                     weight_quantizer_axis = self.weight_quantizer.axis
