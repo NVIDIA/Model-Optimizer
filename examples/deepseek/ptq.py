@@ -290,7 +290,9 @@ def fixup_moe_expert_amax(transformer):
                     continue
                 # DeepSeek stores experts as FP8 with a per-block .scale; dequantize
                 # to bf16 first so we measure the real weight distribution, not bytes.
-                deq = weight_dequant(w, w.scale, torch.bfloat16) if w.element_size() == 1 else w
+                deq = (
+                    weight_dequant(w, w.scale, dtype=torch.bfloat16) if w.element_size() == 1 else w
+                )
                 axis = getattr(wq, "_axis", None)
                 if axis is None:
                     reduce_axis = None
