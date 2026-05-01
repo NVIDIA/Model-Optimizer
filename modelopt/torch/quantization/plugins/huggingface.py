@@ -900,6 +900,33 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
         self._down_proj_linear = False
         return super().forward(*args, **kwargs)
 
+    def fold_weight(self, keep_attrs: bool = False):
+        """Fold per-expert weight quantizers into the fused 3-D weights.
+
+        The base ``fold_weight`` only handles singular ``*_weight_quantizer``
+        attributes. Fused experts use ``nn.ModuleList`` of per-expert quantizers
+        (``gate_up_proj_weight_quantizers``, ``down_proj_weight_quantizers``),
+        which would otherwise be skipped, leaving ``_amax`` on every quantizer.
+        """
+        for weight_name, quantizers_name in (
+            ("gate_up_proj", "gate_up_proj_weight_quantizers"),
+            ("down_proj", "down_proj_weight_quantizers"),
+        ):
+            weight = getattr(self, weight_name, None)
+            quantizers = getattr(self, quantizers_name, None)
+            if weight is None or quantizers is None:
+                continue
+            for idx, q in enumerate(quantizers):
+                if not (isinstance(q, TensorQuantizer) and q.fake_quant):
+                    continue
+                slice_ = weight.data[idx]
+                slice_.copy_(q(slice_.float()).to(weight.dtype))
+                q.disable()
+                if not keep_attrs:
+                    for attr_name in ("_pre_quant_scale", "_amax"):
+                        if hasattr(q, attr_name):
+                            delattr(q, attr_name)
+
 
 class _QuantDbrxFFN(_QuantSparseSequentialMoe):
     @property
@@ -1438,6 +1465,38 @@ def register_fused_experts_on_the_fly(model):
             QuantModuleRegistry.register({mod_type: f"hf.{mod_type.__name__}"})(_QuantFusedExperts)
 
 
+def force_eager_experts_impl_on_the_fly(model):
+    """Force HF fused-experts modules onto the eager ``F.linear``-based forward.
+
+    HF transformers 5.0+ decorates fused-experts forwards with
+    ``@use_experts_implementation``, which may dispatch to ``torch._grouped_mm``
+    or ``torch.bmm`` backends. Those backends bypass ``F.linear`` and so bypass
+    ``_QuantFusedExperts``'s input/weight quantizer hooks — calibration silently
+    does nothing, no ``input_scale`` / ``amax`` is collected, and the exported
+    checkpoint produces garbage at inference.
+
+    Sets ``config._experts_implementation = "eager"`` on the model config (and
+    recursively on ``text_config`` / ``vision_config`` / ``audio_config`` /
+    ``speech_config``) whenever a fused-experts module is present.
+    """
+    if not any(_is_fused_experts_module(m) for m in model.modules()):
+        return
+
+    nested_cfg_attrs = ("text_config", "vision_config", "audio_config", "speech_config")
+
+    def _force(cfg):
+        if cfg is None:
+            return
+        if hasattr(cfg, "_experts_implementation"):
+            cfg._experts_implementation = "eager"
+        for sub in nested_cfg_attrs:
+            if hasattr(cfg, sub):
+                _force(getattr(cfg, sub))
+
+    if hasattr(model, "config"):
+        _force(model.config)
+
+
 def _is_supported_hf_model(model):
     """Check if the model a valid model for transformers quantization specific support."""
     supported_models = [transformers.PreTrainedModel]
@@ -1665,6 +1724,7 @@ CUSTOM_MODEL_PLUGINS.update(
         register_dbrx_moe_on_the_fly,
         register_step3p5_moe_on_the_fly,
         register_fused_experts_on_the_fly,
+        force_eager_experts_impl_on_the_fly,
         register_sparse_moe_on_the_fly,
         register_hf_attentions_on_the_fly,
         convert_hf_parallel_linears_on_the_fly,

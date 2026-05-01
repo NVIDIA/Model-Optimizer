@@ -143,6 +143,10 @@ if [ -n "$MOE_CALIB_EXPERTS_RATIO" ]; then
     PTQ_ARGS+=" --moe_calib_experts_ratio=$MOE_CALIB_EXPERTS_RATIO "
 fi
 
+if $CAST_MXFP4_TO_NVFP4; then
+    PTQ_ARGS+=" --cast_mxfp4_to_nvfp4 "
+fi
+
 if ! $VERBOSE; then
     PTQ_ARGS+=" --no-verbose "
 fi
