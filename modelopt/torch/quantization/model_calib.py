@@ -163,6 +163,15 @@ def max_calibrate(
         if hasattr(module, "layer_sync_moe_local_experts_amax"):
             module.layer_sync_moe_local_experts_amax(sync_weight_amax=sync_expert_weight_amax)
 
+    # Promote eligible static-block NVFP4 weight quantizers to NVFP4StaticQuantizer
+    # so the static blockwise fake-quant path is used in forward and the export
+    # picks up the two-level (per-block + global) scaling. Run before the
+    # ``distributed_sync`` early return so single-process callers also get the
+    # promotion. ``promote_nvfp4_static_quantizers`` only promotes when
+    # ``is_static_block_quant`` is True and the per-block ``_amax`` buffer is
+    # populated, so it's a no-op for dynamic-block / non-NVFP4 configs.
+    promote_nvfp4_static_quantizers(model)
+
     if not distributed_sync:
         return
 

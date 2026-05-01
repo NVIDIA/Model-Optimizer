@@ -1079,14 +1079,23 @@ def set_expert_quantizer_amax(
 
     target_amax = None
 
-    # Collect ANY existing amax values from current batch (most direct source)
+    # Collect ANY existing amax values from current batch (most direct source).
+    # Reduce per-quantizer amax to a scalar before stacking — quantizers in
+    # static-mode (e.g. NVFP4 with pre-computed per-block _amax) carry tensors
+    # whose shapes differ across attrs (gate_up_proj vs down_proj have different
+    # output dims), and torch.stack would otherwise fail. The result here is
+    # only used as a *fallback* scalar `target_amax` for quantizers missing
+    # amax, so a max-of-max is exactly what we want.
     valid_amax_values = []
     for _, attr_name, quantizer in all_quantizers:
         existing_amax = getattr(quantizer, "amax", None)
         if existing_amax is not None:
             # Convert to tensor and add to collection
             if isinstance(existing_amax, torch.Tensor):
-                valid_amax_values.append(existing_amax.to(target_device))
+                # Meta tensors have no storage; .amax() / .to() would fail.
+                if existing_amax.is_meta:
+                    continue
+                valid_amax_values.append(existing_amax.amax().to(target_device))
             else:
                 valid_amax_values.append(
                     torch.tensor(existing_amax, dtype=torch.float32, device=target_device)

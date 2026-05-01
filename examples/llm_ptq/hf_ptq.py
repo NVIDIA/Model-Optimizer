@@ -24,6 +24,8 @@ from typing import Any
 import numpy as np
 import torch
 from accelerate.hooks import remove_hook_from_module
+from cast_mxfp4_to_nvfp4 import apply_to_model as apply_cast_mxfp4_to_nvfp4
+from cast_mxfp4_to_nvfp4 import force_weight_quantizers_static
 from example_utils import (
     build_quant_cfg,
     copy_custom_model_files,
@@ -1087,6 +1089,10 @@ def quantize_main(
                 f"Auto-resolved layerwise_checkpoint_dir: {quant_cfg['algorithm']['layerwise_checkpoint_dir']}"
             )
 
+        if args.cast_mxfp4_to_nvfp4:
+            quant_cfg = copy.deepcopy(quant_cfg)
+            force_weight_quantizers_static(quant_cfg["quant_cfg"])
+
         if args.qformat in QUANT_CFG_CHOICES:
             mono_quantize(
                 args,
@@ -1101,6 +1107,14 @@ def quantize_main(
         else:
             assert model_type != "dbrx", f"Does not support export {model_type} without quantizaton"
             print(f"qformat: {args.qformat}. No quantization applied, export {device} model")
+
+    # If asked, run the closed-form MXFP4 -> NVFP4 cast: read the source MXFP4
+    # *_scales tensors and pin each NVFP4 weight quantizer's scale_2 to 2^m.
+    # Runs after calibration (max_calibrate has already promoted weight quantizers
+    # to NVFP4StaticQuantizer with a data-derived ``_global_amax``); we just
+    # override that scalar with the closed-form value before export.
+    if args.cast_mxfp4_to_nvfp4:
+        apply_cast_mxfp4_to_nvfp4(language_model, args.pyt_ckpt_path)
 
     post_quantize(
         args,
@@ -1343,6 +1357,18 @@ def parse_args() -> argparse.Namespace:
         help="Export as vLLM fake-quant checkpoint (produces vllm_fq_modelopt_state.pth "
         "for use with vllm_serve_fakequant.py).",
     )
+    parser.add_argument(
+        "--cast_mxfp4_to_nvfp4",
+        action="store_true",
+        default=False,
+        help=(
+            "After calibration, override NVFP4 weight quantizers' global_amax with "
+            "the closed-form value derived from the source MXFP4 *_scales. "
+            "Per-block _amax is computed from the loaded BF16 weights (data-derived). "
+            "Use when --pyt_ckpt_path points at an MXFP4 HF checkpoint (e.g. "
+            "openai/gpt-oss-20b) and the target qformat is NVFP4-family."
+        ),
+    )
 
     args = parser.parse_args()
     if args.moe_calib_experts_ratio is not None and not (0.0 < args.moe_calib_experts_ratio <= 1.0):
@@ -1414,5 +1440,18 @@ if __name__ == "__main__":
         raise ValueError(
             "--specdec_offline_dataset expects a single --calib value, not a comma-separated list."
         )
+
+    if args.cast_mxfp4_to_nvfp4:
+        qformats = [q.strip() for q in args.qformat.split(",")]
+        if not all("nvfp4" in q for q in qformats):
+            raise ValueError(
+                "--cast_mxfp4_to_nvfp4 requires NVFP4-family --qformat values "
+                f"(got {args.qformat!r}). Use e.g. --qformat nvfp4 or nvfp4_mlp_only."
+            )
+        if args.auto_quantize_bits is not None:
+            raise ValueError(
+                "--cast_mxfp4_to_nvfp4 is not supported with --auto_quantize_bits "
+                "(multi-format auto-quantize)."
+            )
 
     main(args)
