@@ -1128,18 +1128,6 @@ def quantize_main(
                 quant_cfg["quant_cfg"].append({"quantizer_name": pattern, "enable": False})
                 print(f"Excluding MTP layer from quantization: {pattern}")
 
-        # Apply user-requested per-module exclusions (--exclude_modules).
-        if args.exclude_modules:
-            quant_cfg = copy.deepcopy(quant_cfg)
-            for mod in args.exclude_modules:
-                quant_cfg["quant_cfg"].append(
-                    {"quantizer_name": f"*{mod}*.weight_quantizer", "enable": False}
-                )
-                quant_cfg["quant_cfg"].append(
-                    {"quantizer_name": f"*{mod}*.input_quantizer", "enable": False}
-                )
-                print(f"Excluding module from quantization: {mod}")
-
         # Use constant amax for KV quantizers when a cast format is selected.
         if args.kv_cache_qformat in _KV_CAST_FORMATS:
             quant_cfg = copy.deepcopy(quant_cfg)
@@ -1337,17 +1325,6 @@ def parse_args() -> argparse.Namespace:
         ),
         default=False,
         action="store_true",
-    )
-    parser.add_argument(
-        "--exclude_modules",
-        nargs="+",
-        default=[],
-        metavar="MODULE",
-        help=(
-            "Module name patterns to exclude from quantization "
-            "(e.g. lm_head backbone.layers.0.mixer). "
-            "Appends a disable rule for each pattern's weight and input quantizers."
-        ),
     )
     parser.add_argument(
         "--low_memory_mode",

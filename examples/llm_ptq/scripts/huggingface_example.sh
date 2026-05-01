@@ -127,18 +127,6 @@ if $TRUST_REMOTE_CODE; then
     PTQ_ARGS+=" --trust_remote_code "
 fi
 
-# --exclude_modules is kept out of the PTQ_ARGS string and passed via a bash array so
-# wildcard patterns like '*embed_tokens*' reach hf_ptq.py verbatim. Word-splitting into
-# per-pattern elements happens with glob expansion disabled (set -f) so the shell does
-# not expand '*' against the filesystem.
-EXCLUDE_MODULES_ARGS=()
-if [ -n "${EXCLUDE_MODULES:-}" ]; then
-    set -f
-    # shellcheck disable=SC2206  # intentional word-splitting without glob expansion
-    EXCLUDE_MODULES_ARGS=(--exclude_modules $EXCLUDE_MODULES)
-    set +f
-fi
-
 if $USE_SEQ_DEVICE_MAP; then
     PTQ_ARGS+=" --use_seq_device_map "
 fi
@@ -195,7 +183,6 @@ if [[ $TASKS =~ "quant" ]] || [[ ! -d "$SAVE_PATH" ]] || [[ ! $(ls -A $SAVE_PATH
             --inference_tensor_parallel=$TP \
             --inference_pipeline_parallel=$PP \
             $PTQ_ARGS \
-            "${EXCLUDE_MODULES_ARGS[@]}" \
             $AWQ_ARGS
     else
         echo "Quantized model config $MODEL_CONFIG exists, skipping the quantization stage"
