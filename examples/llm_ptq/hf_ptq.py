@@ -331,9 +331,8 @@ def auto_quantize(
         for qformat in qformat_list
     ), "One or more quantization formats provided are not supported for unified checkpoint export"
 
-    # Gemma4-specific: its language_model is a base text model (Gemma4TextModel) without
-    # lm_head, unlike other VLMs (LLaVA, Qwen2.5-VL, PaliGemma) whose language_model
-    # includes lm_head. Use full_model's lm_head to compute logits/loss from hidden states.
+    # When language_model is a base text model without lm_head (e.g. Gemma4TextModel),
+    # use full_model's lm_head to compute logits/loss from hidden states.
     is_base_model = (
         full_model is not None
         and language_model is not full_model
@@ -345,9 +344,6 @@ def auto_quantize(
         assert full_model is not None
         lm_head = full_model.lm_head
 
-        def _model_inputs(batch):
-            return {k: v for k, v in batch.items() if k != "labels"}
-
         def loss_func(output, data):
             logits = lm_head(output.last_hidden_state)
             labels = data["labels"]
@@ -357,44 +353,31 @@ def auto_quantize(
                 shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1)
             )
 
-        if auto_quantize_method == "gradient":
-
-            def forward_step(model, batch):
-                return model(**_model_inputs(batch))
-
-        elif auto_quantize_method == "kl_div":
-
-            def forward_step(model, batch):
-                hidden_states = model(**_model_inputs(batch)).last_hidden_state
-                return lm_head(hidden_states)
-
-        else:
-            raise ValueError(
-                f"Invalid auto_quantize_method: {auto_quantize_method}. Must be 'gradient' or 'kl_div'"
-            )
     else:
 
         def loss_func(output, data):
-            # For transformers AutoModelForCausalLM models, the outputs are wrapped in `CausalLMOutputWithPast`
-            # which contains the loss attribute.
             return output.loss
 
-        if auto_quantize_method == "gradient":
-            # For gradient-based method, return full output with loss
+    if auto_quantize_method == "gradient":
 
-            def forward_step(model, batch):
-                return model(**batch)
+        def forward_step(model, batch):
+            inputs = {k: v for k, v in batch.items() if k != "labels"} if is_base_model else batch
+            return model(**inputs)
 
-        elif auto_quantize_method == "kl_div":
-            # For KL divergence method, return only logits
+    elif auto_quantize_method == "kl_div":
 
-            def forward_step(model, batch):
-                return model(**batch).logits
+        def forward_step(model, batch):
+            inputs = {k: v for k, v in batch.items() if k != "labels"} if is_base_model else batch
+            output = model(**inputs)
+            if is_base_model:
+                assert full_model is not None
+                return full_model.lm_head(output.last_hidden_state)
+            return output.logits
 
-        else:
-            raise ValueError(
-                f"Invalid auto_quantize_method: {auto_quantize_method}. Must be 'gradient' or 'kl_div'"
-            )
+    else:
+        raise ValueError(
+            f"Invalid auto_quantize_method: {auto_quantize_method}. Must be 'gradient' or 'kl_div'"
+        )
 
     language_model, _ = mtq.auto_quantize(
         language_model,
