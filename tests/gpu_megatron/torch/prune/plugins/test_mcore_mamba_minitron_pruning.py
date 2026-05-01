@@ -321,7 +321,12 @@ def _assert_top_k_candidates(searcher_state, constraint_key, expected_top_k, k=1
     assert len(top_k) == k
     for actual, (ss_config, metrics, score) in zip(top_k, expected_top_k):
         assert actual.ss_config == ss_config, (actual.ss_config, ss_config)
-        assert actual.metrics == metrics, (actual.metrics, metrics)
+        for metric_name, expected_value in metrics.items():
+            actual_value = actual.metrics[metric_name]
+            if isinstance(expected_value, float):
+                assert actual_value == pytest.approx(expected_value), (actual.metrics, metrics)
+            else:
+                assert actual_value == expected_value, (actual.metrics, metrics)
         assert actual.score == score, (actual.score, score)
 
 
@@ -338,7 +343,7 @@ def _test_mcore_mamba_hybrid_pruning_nas_params(rank, size, ckpt_dir):
     assert baseline_params == 14984, baseline_params
     constraints = {
         "params": int(baseline_params * 0.5),
-        "active_params": int(baseline_active * 0.7),
+        "active_params": int(baseline_active * 0.55),
     }
 
     # Capture stdout to assert search space output
@@ -373,8 +378,8 @@ def _test_mcore_mamba_hybrid_pruning_nas_params(rank, size, ckpt_dir):
         model.share_embeddings_and_output_weights,
         hybrid_layer_pattern=_get_hybrid_layer_pattern(model),
     )
-    assert pruned_params == 7154, pruned_params
-    assert pruned_active_params == 7154, pruned_active_params
+    assert pruned_params == 6536, pruned_params
+    assert pruned_active_params == 6536, pruned_active_params
 
     # NOTE: Slight variation in layer ordering for MoE / Attention / MLP depending on PP configuration
     # This affects param counts when num_layers is pruned
@@ -384,18 +389,20 @@ def _test_mcore_mamba_hybrid_pruning_nas_params(rank, size, ckpt_dir):
         # Winner is 3-layer: keeps layers [1,4,3] from "ME*-" → drops 'E' (layer 2) → "M*-"
         assert _get_hybrid_layer_pattern(model) == "M*-", _get_hybrid_layer_pattern(model)
         expected_top_k = [
-            # 4 four-layer models qualifying under params_thresh=7492
-            [{"num_layers": 4, "hidden_size": 12, "mamba_num_heads": 6, "mamba_head_dim": 12, "num_moe_experts": 6, "moe_ffn_hidden_size": 12, "ffn_hidden_size": 20}, {"params": 7418, "active_params": 6266}, 104],  # noqa: E501
+            # position 1: the one qualifying 4-layer model (active=6542 > 3-layer H=12 active),
+            # demonstrating that active_params-first ranking can elevate 4-layer above 3-layer models
             [{"num_layers": 4, "hidden_size": 12, "mamba_num_heads": 6, "mamba_head_dim": 12, "num_moe_experts": 5, "moe_ffn_hidden_size": 12, "ffn_hidden_size": 32}, {"params": 7406, "active_params": 6542}, 115],  # noqa: E501
-            [{"num_layers": 4, "hidden_size": 12, "mamba_num_heads": 6, "mamba_head_dim": 12, "num_moe_experts": 5, "moe_ffn_hidden_size": 12, "ffn_hidden_size": 28}, {"params": 7310, "active_params": 6446}, 111],  # noqa: E501
-            [{"num_layers": 4, "hidden_size": 12, "mamba_num_heads": 6, "mamba_head_dim": 12, "num_moe_experts": 5, "moe_ffn_hidden_size": 12, "ffn_hidden_size": 24}, {"params": 7214, "active_params": 6350}, 107],  # noqa: E501
-            # 6 depth-pruned (num_layers=3) models; params==active_params since MoE layer is dropped
-            [{"num_layers": 3, "hidden_size": 16, "mamba_num_heads": 6, "mamba_head_dim": 12, "num_moe_experts": 5, "moe_ffn_hidden_size": 12, "ffn_hidden_size": 32}, {"params": 7154, "active_params": 7154}, 118],  # noqa: E501
-            [{"num_layers": 3, "hidden_size": 16, "mamba_num_heads": 6, "mamba_head_dim": 12, "num_moe_experts": 5, "moe_ffn_hidden_size": 16, "ffn_hidden_size": 32}, {"params": 7154, "active_params": 7154}, 122],  # noqa: E501
-            [{"num_layers": 3, "hidden_size": 16, "mamba_num_heads": 6, "mamba_head_dim": 12, "num_moe_experts": 6, "moe_ffn_hidden_size": 12, "ffn_hidden_size": 32}, {"params": 7154, "active_params": 7154}, 119],  # noqa: E501
-            [{"num_layers": 3, "hidden_size": 16, "mamba_num_heads": 6, "mamba_head_dim": 12, "num_moe_experts": 6, "moe_ffn_hidden_size": 16, "ffn_hidden_size": 32}, {"params": 7154, "active_params": 7154}, 123],  # noqa: E501
-            [{"num_layers": 3, "hidden_size": 16, "mamba_num_heads": 6, "mamba_head_dim": 12, "num_moe_experts": 7, "moe_ffn_hidden_size": 12, "ffn_hidden_size": 32}, {"params": 7154, "active_params": 7154}, 120],  # noqa: E501
-            [{"num_layers": 3, "hidden_size": 16, "mamba_num_heads": 6, "mamba_head_dim": 12, "num_moe_experts": 7, "moe_ffn_hidden_size": 16, "ffn_hidden_size": 32}, {"params": 7154, "active_params": 7154}, 124],  # noqa: E501
+            # positions 2-9: 3-layer H=12 MNH=8 MHD=12 ffn=32 (active==params=6536, no MoE layer)
+            [{"num_layers": 3, "hidden_size": 12, "mamba_num_heads": 8, "mamba_head_dim": 12, "num_moe_experts": 5, "moe_ffn_hidden_size": 12, "ffn_hidden_size": 32}, {"params": 6536, "active_params": 6536}, 116],  # noqa: E501
+            [{"num_layers": 3, "hidden_size": 12, "mamba_num_heads": 8, "mamba_head_dim": 12, "num_moe_experts": 5, "moe_ffn_hidden_size": 16, "ffn_hidden_size": 32}, {"params": 6536, "active_params": 6536}, 120],  # noqa: E501
+            [{"num_layers": 3, "hidden_size": 12, "mamba_num_heads": 8, "mamba_head_dim": 12, "num_moe_experts": 6, "moe_ffn_hidden_size": 12, "ffn_hidden_size": 32}, {"params": 6536, "active_params": 6536}, 117],  # noqa: E501
+            [{"num_layers": 3, "hidden_size": 12, "mamba_num_heads": 8, "mamba_head_dim": 12, "num_moe_experts": 6, "moe_ffn_hidden_size": 16, "ffn_hidden_size": 32}, {"params": 6536, "active_params": 6536}, 121],  # noqa: E501
+            [{"num_layers": 3, "hidden_size": 12, "mamba_num_heads": 8, "mamba_head_dim": 12, "num_moe_experts": 7, "moe_ffn_hidden_size": 12, "ffn_hidden_size": 32}, {"params": 6536, "active_params": 6536}, 118],  # noqa: E501
+            [{"num_layers": 3, "hidden_size": 12, "mamba_num_heads": 8, "mamba_head_dim": 12, "num_moe_experts": 7, "moe_ffn_hidden_size": 16, "ffn_hidden_size": 32}, {"params": 6536, "active_params": 6536}, 122],  # noqa: E501
+            [{"num_layers": 3, "hidden_size": 12, "mamba_num_heads": 8, "mamba_head_dim": 12, "num_moe_experts": 8, "moe_ffn_hidden_size": 12, "ffn_hidden_size": 32}, {"params": 6536, "active_params": 6536}, 119],  # noqa: E501
+            [{"num_layers": 3, "hidden_size": 12, "mamba_num_heads": 8, "mamba_head_dim": 12, "num_moe_experts": 8, "moe_ffn_hidden_size": 16, "ffn_hidden_size": 32}, {"params": 6536, "active_params": 6536}, 123],  # noqa: E501
+            # position 10: first 3-layer H=12 MNH=6 MHD=16 ffn=32 candidate (active=6506)
+            [{"num_layers": 3, "hidden_size": 12, "mamba_num_heads": 6, "mamba_head_dim": 16, "num_moe_experts": 5, "moe_ffn_hidden_size": 12, "ffn_hidden_size": 32}, {"params": 6506, "active_params": 6506}, 118],  # noqa: E501
         ]
     else:
         raise RuntimeError(f"FIXME: Non deterministic test, assertions may fail: {sorted_layers=}")
@@ -403,7 +410,7 @@ def _test_mcore_mamba_hybrid_pruning_nas_params(rank, size, ckpt_dir):
 
     _assert_top_k_candidates(
         searcher_state,
-        (("params", constraints["params"]), ("active_params", constraints["active_params"])),
+        (("active_params", constraints["active_params"]), ("params", constraints["params"])),
         expected_top_k,
     )
     run_mcore_inference_with_dummy_input(model, _NAS_BATCH_SIZE, model.config.hidden_size)

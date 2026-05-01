@@ -1,0 +1,2 @@
+# Saving some pruned models (e.g. Nemotron-3-Nano-30B-A3B-BF16) have issues with transformers>=5.0
+transformers<5.0

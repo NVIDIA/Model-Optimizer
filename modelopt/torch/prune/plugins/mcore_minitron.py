@@ -190,7 +190,7 @@ def _rprint(*renderables: Any) -> None:
 
 # Constraint keys that trigger the grid-search path in MCoreMinitronSearcher.
 # Order defines priority: first active key is used as the primary display/sort metric.
-_METRIC_CONSTRAINT_PRIORITY = ("params", "active_params", "memory_mb")
+_METRIC_CONSTRAINT_PRIORITY = ("active_params", "params", "memory_mb")
 _METRIC_CONSTRAINTS = frozenset(_METRIC_CONSTRAINT_PRIORITY)
 
 
@@ -524,15 +524,15 @@ class MCoreMinitronSearcher(BaseSearcher):
         _rprint(table)
 
         # 3. Optional Knowledge Distillation (KD) step for all top-k candidates
-        print_rank_0(
-            "\nSkipping optional Knowledge Distillation (KD) step for candidates as it is a manual step. "
+        _rprint(
+            f"[yellow]\nSkipping optional Knowledge Distillation (KD) step for candidates as it is a manual step. "
             "As per the original paper (https://arxiv.org/pdf/2407.14679), ideally we need to perform a short "
             f"Knowledge Distillation on ~2B tokens for all top {top_k} candidates before evaluating the "
             "`score_func`, which will take a lot longer to prune, require splitting the pruning process into multiple "
             "stages and a lot more compute for pruning but can lead to better pruned model selection. If you are "
             f"interested to do this, you can take the top {top_k} candidates' `export_config` from the logs above and "
             "then export all models separately and perform Knowledge Distillation on each of them before evaluating "
-            "the `score_func`.\n"
+            f"the `score_func`.\n[/yellow]"
         )
 
         # 4. Validate top-k candidates using the score_func and return the best subnet
@@ -683,9 +683,6 @@ class MCoreMinitronSearcher(BaseSearcher):
     def _compute_candidate_metrics(self, ss_config: dict, max_num_layers: int) -> dict[str, float]:
         """Compute all active metric constraint values for a candidate config analytically.
 
-        Calls ``mcore_param_count`` at most once (covers both ``params`` and ``active_params``)
-        and ``mcore_memory_footprint_mb`` at most once (for ``memory_mb``).
-        Replaces the slow ``_prune → _param_num_dynamic → sample(max)`` loop used during search.
         Handles depth pruning by filtering the hybrid layer pattern to the kept (best) layers.
         """
         model = self.model

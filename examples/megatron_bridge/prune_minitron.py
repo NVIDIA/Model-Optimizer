@@ -161,11 +161,11 @@ def get_args() -> argparse.Namespace:
     parser.add_argument(
         "--prune_score_func",
         type=str,
-        default="mmlu_10pct",
+        default="mmlu_10pct_bs1",
         help=(
             "Score function to use for NAS-based pruning. Only supports MMLU at the moment. "
-            "Format: mmlu_<N>pct where <N> is the percentage of MMLU data to sample per subject "
-            "(e.g. mmlu_10pct for 10%, mmlu_100pct for full eval)."
+            "Format: mmlu_<N>pct_<bs> where <N> is the percentage of MMLU data to sample per subject and <bs> is "
+            "batch size for fast evaluation (default is mmlu_10pct_bs1)."
         ),
     )
     parser.add_argument(
@@ -343,16 +343,17 @@ def main(args: argparse.Namespace):
             "You can change this to be any other metric you want to maximize (e.g. negative validation loss)."
         )
 
-        match = re.fullmatch(r"mmlu_(\d+)pct", args.prune_score_func)
+        match = re.fullmatch(r"mmlu_(\d+)pct_bs(\d+)", args.prune_score_func)
         if not match:
             raise ValueError(
-                f"Invalid score function: {args.prune_score_func}. Expected format: mmlu_<N>pct (e.g. mmlu_10pct)"
+                f"Invalid score function: {args.prune_score_func}. Expected format: mmlu_<N>pct_bs<bs>"
             )
         mmlu_frac = float(match.group(1)) / 100.0
+        batch_size = int(match.group(2))
 
         def score_func(m):
             return megatron_mmlu(
-                m, tokenizer, few_shots=0, fraction=mmlu_frac, batch_size=args.calib_mbs
+                m, tokenizer, few_shots=0, fraction=mmlu_frac, batch_size=batch_size
             )
 
         pruning_config["score_func"] = score_func

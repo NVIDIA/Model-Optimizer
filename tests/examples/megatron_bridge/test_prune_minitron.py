@@ -38,7 +38,7 @@ def test_prune_minitron(tmp_path: Path, num_gpus):
         calib_num_samples=16,
         seq_length=32,
         prune_target_params=prune_target_params,
-        prune_score_func="mmlu_1pct",
+        prune_score_func="mmlu_1pct_bs32",
         ss_channel_divisor=4,
         hparams_to_skip="num_attention_heads",
         top_k=1,
