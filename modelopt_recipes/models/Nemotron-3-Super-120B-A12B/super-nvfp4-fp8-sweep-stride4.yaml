@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Mirrors the published nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4 hf_quant_config.json:
+# Mirrors the published nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4 hf_quant_config.json BUT adds a stride=4 for FP8 scale sweep, which is useful for large models to improve PTQ efficiency.
 #   - MoE routed experts:     NVFP4 W4A4 weight MSE, group_size 16
 #     HF names:               mixer.experts.<N>.{up,down}_proj
 #     Megatron-Core names:    mlp.experts.local_experts.<N>.linear_fc{1,2}
