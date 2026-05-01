@@ -28,21 +28,21 @@
 #   - Latent MOE (fc1_latent_proj, fc2_latent_proj):            BF16 (not quantized)
 #   - SSM cache:                                    FP32 (can be set to FP16 in VLLM)
 #
-# Calibration: amax/max calibration comparison variant. This skips MSE weight
-# scale search and uses max calibration for enabled quantizers.
+# Calibration: amax/max calibration comparison variant
 metadata:
   recipe_type: ptq
-  description: Super NVFP4 mixed precision — sparse MoE experts NVFP4 (W4A4, group_size 16); shared experts, mamba in/out_proj, and Latent MOE fc1_latent_proj/fc2_latent_proj
-    FP8 per-tensor; FP8 KV cache; lm_head/MTP/SSM stay BF16/FP16. Amax calibration comparison variant.
+  description: Super NVFP4 mixed precision — sparse MoE experts NVFP4 (W4A4, group_size 16); shared experts, mamba in/out_proj
+    FP8 per-tensor; FP8 KV cache; everything else(lm_head/MTP/Latent MOE) stay BF16. Amax calibration comparison variant.
 quantize:
   algorithm:
     method: max
   quant_cfg:
+    # Disable all layers by default so that these layers stay in original BF16 precision:
+    # lm_head, output projection, MoE routers/gates, Latent MOE, MTP head, mamba conv1d.
     - quantizer_name: '*'
       enable: false
 
     # MoE routed experts -> NVFP4 W4A4, block_size 16, e4m3 scale.
-    # Max/amax calibration uses dynamic block scales for both weight and activation.
     # HF/export names: backbone.layers.*.mixer.experts.*.{up,down}_proj.
     - quantizer_name: '*mixer.experts.*weight_quantizer'
       enable: true
@@ -129,6 +129,3 @@ quantize:
       enable: true
       cfg:
         num_bits: e4m3
-
-    # Stay BF16: lm_head, output projection, MoE routers/gates, MTP head.
-    # SSM state / mamba conv1d stay FP16.
