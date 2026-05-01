@@ -1,4 +1,9 @@
-# Base config for EAGLE3 training. Override fields via OmegaConf dotlist on the CLI.
+# Base config for EAGLE3 training. A full modelopt recipe; override fields via
+# OmegaConf dotlist on the CLI (e.g. `model.model_name_or_path=...`).
+
+metadata:
+  recipe_type: speculative_eagle
+  description: EAGLE3 training recipe (model/data/training/eagle bundled).
 
 # maps to ModelArguments (main.py)
 model:
@@ -17,7 +22,6 @@ data:
 # maps to TrainingArguments (main.py)
 training:
   # --- commonly modified ---
-  mode: eagle3
   output_dir:
   num_train_epochs: 1
   per_device_train_batch_size: 1

@@ -15,11 +15,9 @@
 
 """Configurations for speculative decoding modes."""
 
-import warnings
 from copy import deepcopy
-from typing import Any
 
-from pydantic import ValidationInfo, model_validator
+from pydantic import model_validator
 
 from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
 
@@ -71,7 +69,7 @@ class DFlashConfig(ModeloptBaseConfig):
         default=False,
         description=(
             "Whether to use detached DFlash (offline training from pre-computed hidden states). "
-            "Auto-derived from data_args.offline_data_path during validation — not user-configurable."
+            "Derived by ModelOptDFlashRecipe from data.offline_data_path; not user-configurable."
         ),
     )
 
@@ -103,10 +101,12 @@ class DFlashConfig(ModeloptBaseConfig):
         default=True, description="Whether to report eval accuracy."
     )
 
-    dflash_mask_token_id: int = ModeloptField(
+    dflash_mask_token_id: int | None = ModeloptField(
         default=None,
-        description="Token ID used for masked (unknown) positions. "
-        "Set explicitly or auto-detected from tokenizer.mask_token_id in main.py.",
+        description=(
+            "Token ID used for masked (unknown) positions. Set explicitly in the recipe YAML, "
+            "or left unset to fall back to ``tokenizer.mask_token_id`` at training time."
+        ),
     )
 
     dflash_architecture_config: dict = ModeloptField(
@@ -117,43 +117,6 @@ class DFlashConfig(ModeloptBaseConfig):
         default=True,
         description="Whether to use torch.compile on DFlash forward/loss methods.",
     )
-
-    @model_validator(mode="before")
-    @classmethod
-    def _derive_dflash_offline(cls, data: Any, info: ValidationInfo) -> Any:
-        """Derive ``dflash_offline`` from ``data_args.offline_data_path``.
-
-        This field is auto-derived, not user-configurable: when context provides
-        ``data_args``, the derived value overrides any user-supplied value.
-        """
-        ctx = info.context if info.context else {}
-        data_args = ctx.get("data_args")
-        if data_args is not None and isinstance(data, dict):
-            data["dflash_offline"] = getattr(data_args, "offline_data_path", None) is not None
-        return data
-
-    @model_validator(mode="before")
-    @classmethod
-    def _resolve_mask_token_id(cls, data: Any, info: ValidationInfo) -> Any:
-        """Auto-detect ``dflash_mask_token_id`` from tokenizer when provided in context."""
-        if not isinstance(data, dict) or data.get("dflash_mask_token_id") is not None:
-            return data
-        ctx = info.context if info.context else {}
-        tokenizer = ctx.get("tokenizer")
-        if tokenizer is not None and getattr(tokenizer, "mask_token_id", None) is not None:
-            data["dflash_mask_token_id"] = tokenizer.mask_token_id
-        return data
-
-    @model_validator(mode="after")
-    def _check_mask_token_id(self) -> "DFlashConfig":
-        """Validate that mask_token_id is set after all resolution attempts."""
-        if self.dflash_mask_token_id is None:
-            raise ValueError(
-                "dflash_mask_token_id is required. Set it in the config YAML "
-                "(dflash.dflash_mask_token_id=TOKEN_ID) or ensure the tokenizer "
-                "has a mask_token_id attribute."
-            )
-        return self
 
 
 class MedusaConfig(ModeloptBaseConfig):
@@ -174,7 +137,11 @@ class EagleConfig(ModeloptBaseConfig):
     """Eagle config."""
 
     eagle_offline: bool = ModeloptField(
-        default=False, description=("Whether to use detached Eagle.")
+        default=False,
+        description=(
+            "Whether to use detached Eagle. Derived by ModelOptEagleRecipe from "
+            "data.offline_data_path; not user-configurable."
+        ),
     )
 
     eagle_hidden_state_distillation: bool = ModeloptField(
@@ -292,16 +259,6 @@ class EagleConfig(ModeloptBaseConfig):
         ),
     )
 
-    @model_validator(mode="before")
-    @classmethod
-    def _derive_eagle_offline(cls, data: Any, info: ValidationInfo) -> Any:
-        """Derive ``eagle_offline`` from ``data_args.offline_data_path`` when provided in context."""
-        ctx = info.context if info.context else {}
-        data_args = ctx.get("data_args")
-        if data_args is not None and isinstance(data, dict):
-            data["eagle_offline"] = data_args.offline_data_path is not None
-        return data
-
     @model_validator(mode="after")
     def _check_rope_scaling_consistency(self) -> "EagleConfig":
         if not self.eagle_export_rope_scaling:
@@ -313,20 +270,5 @@ class EagleConfig(ModeloptBaseConfig):
                 f"eagle_export_rope_scaling is set but eagle_architecture_config has "
                 f"rope_type='{rope_type}'. Export rope overwrite is only valid when the "
                 f"training rope_type is 'default' (no scaling)."
-            )
-        return self
-
-    @model_validator(mode="after")
-    def _warn_rope_vs_training_seq_len(self, info: ValidationInfo) -> "EagleConfig":
-        ctx = info.context if info.context else {}
-        training_args = ctx.get("training_args")
-        if training_args is None:
-            return self
-        orig_max_pos = self.eagle_export_rope_scaling.get("original_max_position_embeddings")
-        if orig_max_pos is not None and orig_max_pos != training_args.training_seq_len:
-            warnings.warn(
-                f"eagle_export_rope_scaling.original_max_position_embeddings ({orig_max_pos}) "
-                f"differs from training_seq_len ({training_args.training_seq_len}). "
-                f"This may affect long-context inference quality."
             )
         return self

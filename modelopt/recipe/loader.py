@@ -21,8 +21,17 @@ except ImportError:  # Python < 3.11
     from importlib.abc import Traversable
 from pathlib import Path
 
+from omegaconf import OmegaConf
+
 from ._config_loader import BUILTIN_RECIPES_LIB, load_config
-from .config import ModelOptPTQRecipe, ModelOptRecipeBase, RecipeType
+from .config import (
+    ModelOptDFlashRecipe,
+    ModelOptEagleRecipe,
+    ModelOptMedusaRecipe,
+    ModelOptPTQRecipe,
+    ModelOptRecipeBase,
+    RecipeType,
+)
 
 __all__ = ["load_config", "load_recipe"]
 
@@ -49,17 +58,29 @@ def _resolve_recipe_path(recipe_path: str | Path | Traversable) -> Path | Traver
     return recipe_path
 
 
-def load_recipe(recipe_path: str | Path | Traversable) -> ModelOptRecipeBase:
-    """Load a recipe from a YAML file or directory.
+def load_recipe(
+    recipe_path: str | Path | Traversable,
+    overrides: list[str] | None = None,
+) -> ModelOptRecipeBase:
+    """Load a recipe from a YAML file or directory, with optional CLI-style overrides.
 
     ``recipe_path`` can be:
 
-    * A ``.yml`` / ``.yaml`` file with ``metadata`` and ``quantize`` sections.
-      The suffix may be omitted and will be probed automatically.
-    * A directory containing ``recipe.yml`` (metadata) and ``quantize.yml``.
+    * A ``.yml`` / ``.yaml`` file with ``metadata`` and one of ``quantize`` (PTQ),
+      ``eagle`` (EAGLE speculative decoding), ``dflash`` (DFlash speculative
+      decoding) or ``medusa`` (Medusa speculative decoding) sections. The suffix
+      may be omitted and will be probed automatically.
+    * A directory containing ``recipe.yml`` (metadata) plus ``quantize.yml`` —
+      **PTQ recipes only**. Speculative-decoding recipes are always single YAML files.
 
     The path may be relative to the built-in recipes library or an absolute /
     relative filesystem path.
+
+    ``overrides`` is an optional list of ``key.path=value`` dotlist entries applied
+    on top of the YAML before Pydantic validation. Values are parsed with
+    ``yaml.safe_load`` so they get proper types (``foo.bar=true`` → bool, ``foo=1``
+    → int, ``foo=[1,2]`` → list, etc.). Only supported when *recipe_path* is a
+    single YAML file.
     """
     resolved = _resolve_recipe_path(recipe_path)
 
@@ -72,21 +93,43 @@ def load_recipe(recipe_path: str | Path | Traversable) -> ModelOptRecipeBase:
     print(f"[load_recipe] loading: {_display}")
 
     if resolved.is_file():
-        return _load_recipe_from_file(resolved)
+        return _load_recipe_from_file(resolved, overrides=overrides)
 
     if resolved.is_dir():
+        if overrides:
+            raise ValueError(
+                "overrides are not supported for directory-format recipes; "
+                "use the single-YAML-file form instead."
+            )
         return _load_recipe_from_dir(resolved)
 
     raise ValueError(f"Recipe path {recipe_path!r} is not a valid YAML file or directory.")
 
 
-def _load_recipe_from_file(recipe_file: Path | Traversable) -> ModelOptRecipeBase:
-    """Load a recipe from a YAML file.
+def _apply_dotlist(data: dict, overrides: list[str]) -> dict:
+    """Merge ``a.b.c=value`` command line overrides on top of ``data`` via OmegaConf."""
+    for entry in overrides:
+        if "=" not in entry:
+            raise ValueError(f"Invalid override (missing '='): {entry!r}")
+    merged = OmegaConf.merge(
+        OmegaConf.create(data),
+        OmegaConf.from_dotlist(list(overrides)),
+    )
+    return OmegaConf.to_container(merged, resolve=True)
+
+
+def _load_recipe_from_file(
+    recipe_file: Path | Traversable,
+    overrides: list[str] | None = None,
+) -> ModelOptRecipeBase:
+    """Load a recipe from a YAML file, optionally applying dotlist overrides.
 
     The file must contain a ``metadata`` section with at least ``recipe_type``,
-    plus a ``quant_cfg`` mapping and an optional ``algorithm`` for PTQ recipes.
+    plus the algorithm-specific section (``quantize`` / ``eagle`` / ``dflash`` / ``medusa``).
     """
     data = load_config(recipe_file)
+    if overrides:
+        data = _apply_dotlist(data, overrides)
 
     metadata = data.get("metadata", {})
     recipe_type = metadata.get("recipe_type")
@@ -100,6 +143,36 @@ def _load_recipe_from_file(recipe_file: Path | Traversable) -> ModelOptRecipeBas
             recipe_type=RecipeType.PTQ,
             description=metadata.get("description", "PTQ recipe."),
             quantize=data["quantize"],
+        )
+    if recipe_type == RecipeType.SPECULATIVE_EAGLE:
+        if "eagle" not in data:
+            raise ValueError(f"EAGLE recipe file {recipe_file} must contain 'eagle'.")
+        return ModelOptEagleRecipe(
+            description=metadata.get("description", "EAGLE speculative decoding recipe."),
+            model=data.get("model") or {},
+            data=data.get("data") or {},
+            training=data.get("training") or {},
+            eagle=data["eagle"],
+        )
+    if recipe_type == RecipeType.SPECULATIVE_DFLASH:
+        if "dflash" not in data:
+            raise ValueError(f"DFlash recipe file {recipe_file} must contain 'dflash'.")
+        return ModelOptDFlashRecipe(
+            description=metadata.get("description", "DFlash speculative decoding recipe."),
+            model=data.get("model") or {},
+            data=data.get("data") or {},
+            training=data.get("training") or {},
+            dflash=data["dflash"],
+        )
+    if recipe_type == RecipeType.SPECULATIVE_MEDUSA:
+        if "medusa" not in data:
+            raise ValueError(f"Medusa recipe file {recipe_file} must contain 'medusa'.")
+        return ModelOptMedusaRecipe(
+            description=metadata.get("description", "Medusa speculative decoding recipe."),
+            model=data.get("model") or {},
+            data=data.get("data") or {},
+            training=data.get("training") or {},
+            medusa=data["medusa"],
         )
     raise ValueError(f"Unsupported recipe type: {recipe_type!r}")
 

@@ -19,8 +19,13 @@ import re
 
 import pytest
 
-from modelopt.recipe.config import ModelOptPTQRecipe, RecipeType
-from modelopt.recipe.loader import load_config, load_recipe
+from modelopt.recipe.config import (
+    ModelOptDFlashRecipe,
+    ModelOptEagleRecipe,
+    ModelOptPTQRecipe,
+    RecipeType,
+)
+from modelopt.recipe.loader import _apply_dotlist, load_config, load_recipe
 
 # ---------------------------------------------------------------------------
 # Static YAML fixtures
@@ -189,6 +194,223 @@ def test_load_recipe_dir_missing_quantize_raises(tmp_path):
     (tmp_path / "recipe.yml").write_text("metadata:\n  recipe_type: ptq\n")
     with pytest.raises(ValueError, match="quantize"):
         load_recipe(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# load_recipe — EAGLE speculative decoding
+# ---------------------------------------------------------------------------
+
+
+def test_load_recipe_eagle_builtin():
+    """load_recipe loads the built-in EAGLE recipe and returns a ModelOptEagleRecipe."""
+    recipe = load_recipe("general/speculative_decoding/eagle3")
+    assert recipe.recipe_type == RecipeType.SPECULATIVE_EAGLE
+    assert isinstance(recipe, ModelOptEagleRecipe)
+    assert recipe.eagle.eagle_decoder_type == "llama"
+    assert recipe.eagle.eagle_ttt_steps == 3
+    # Full-pipeline recipe also carries typed HF trainer sections.
+    assert recipe.training.training_seq_len == 2048
+
+
+def test_load_recipe_eagle_missing_section_raises(tmp_path):
+    """load_recipe raises ValueError when 'eagle' is absent for a SPECULATIVE_EAGLE recipe."""
+    bad = tmp_path / "bad.yml"
+    bad.write_text("metadata:\n  recipe_type: speculative_eagle\n")
+    with pytest.raises(ValueError, match="eagle"):
+        load_recipe(bad)
+
+
+def test_load_recipe_eagle_field_validation_raises(tmp_path):
+    """Invalid EAGLE field values must fail Pydantic validation at load time."""
+    bad = tmp_path / "bad.yml"
+    bad.write_text(
+        "metadata:\n  recipe_type: speculative_eagle\neagle:\n  eagle_ttt_steps: not_an_int\n"
+    )
+    with pytest.raises(Exception):  # pydantic.ValidationError
+        load_recipe(bad)
+
+
+# ---------------------------------------------------------------------------
+# load_recipe — DFlash speculative decoding
+# ---------------------------------------------------------------------------
+
+
+def test_load_recipe_dflash_builtin():
+    """load_recipe loads the built-in DFlash recipe and returns a ModelOptDFlashRecipe."""
+    recipe = load_recipe("general/speculative_decoding/dflash")
+    assert recipe.recipe_type == RecipeType.SPECULATIVE_DFLASH
+    assert isinstance(recipe, ModelOptDFlashRecipe)
+    assert recipe.dflash.dflash_block_size == 8
+    assert recipe.dflash.dflash_num_anchors == 512
+    # Full-pipeline recipe also carries typed HF trainer sections.
+    assert recipe.training.training_seq_len == 4096
+
+
+def test_load_recipe_dflash_missing_section_raises(tmp_path):
+    """load_recipe raises ValueError when 'dflash' is absent for a SPECULATIVE_DFLASH recipe."""
+    bad = tmp_path / "bad.yml"
+    bad.write_text("metadata:\n  recipe_type: speculative_dflash\n")
+    with pytest.raises(ValueError, match="dflash"):
+        load_recipe(bad)
+
+
+def test_load_recipe_eagle_with_training_sections(tmp_path):
+    """load_recipe populates typed HF trainer sections from all four YAML segments."""
+    recipe_path = tmp_path / "eagle.yml"
+    recipe_path.write_text(
+        "metadata:\n  recipe_type: speculative_eagle\n"
+        "model:\n  model_name_or_path: TinyLlama/TinyLlama-1.1B-Chat-v1.0\n"
+        "data:\n  data_path: train.jsonl\n"
+        "training:\n  output_dir: ckpts/test\n"
+        "eagle:\n  eagle_decoder_type: llama\n  eagle_ttt_steps: 2\n"
+    )
+    recipe = load_recipe(recipe_path)
+    assert isinstance(recipe, ModelOptEagleRecipe)
+    assert recipe.model.model_name_or_path == "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+    assert recipe.data.data_path == "train.jsonl"
+    # output_dir is an HF-trainer extra; flows through extras.
+    assert recipe.training.model_dump()["output_dir"] == "ckpts/test"
+    assert recipe.eagle.eagle_ttt_steps == 2
+
+
+def test_typed_model_section_rejects_unknown_field(tmp_path):
+    """model section has extra='forbid'; unknown keys raise ValidationError at load time."""
+    recipe_path = tmp_path / "bad.yml"
+    recipe_path.write_text(
+        "metadata:\n  recipe_type: speculative_eagle\n"
+        "model:\n  typo_name: oops\n"
+        "eagle:\n  eagle_decoder_type: llama\n"
+    )
+    with pytest.raises(Exception):  # pydantic.ValidationError
+        load_recipe(recipe_path)
+
+
+def test_typed_training_section_accepts_hf_extras(tmp_path):
+    """training section has extra='allow'; HF trainer fields flow through without validation."""
+    recipe_path = tmp_path / "eagle.yml"
+    recipe_path.write_text(
+        "metadata:\n  recipe_type: speculative_eagle\n"
+        "training:\n"
+        "  num_train_epochs: 3\n"  # HF field — accepted as extra
+        "  learning_rate: 1.0e-4\n"  # HF field — accepted as extra
+        "  training_seq_len: 4096\n"  # our extension field — validated
+        "eagle:\n  eagle_decoder_type: llama\n"
+    )
+    recipe = load_recipe(recipe_path)
+    assert isinstance(recipe, ModelOptEagleRecipe)
+    assert recipe.training.training_seq_len == 4096
+    dumped = recipe.training.model_dump()
+    assert dumped["num_train_epochs"] == 3
+    assert dumped["learning_rate"] == 1e-4
+
+
+# ---------------------------------------------------------------------------
+# CLI-style dotlist overrides
+# ---------------------------------------------------------------------------
+
+
+def test_apply_dotlist_flat():
+    """_apply_dotlist sets a top-level key and parses the value with yaml.safe_load."""
+    result = _apply_dotlist({"a": 1}, ["b=2"])
+    assert result == {"a": 1, "b": 2}
+
+
+def test_apply_dotlist_nested_overwrite():
+    """_apply_dotlist overwrites a nested key without mutating input."""
+    original = {"model": {"trust_remote_code": False}}
+    result = _apply_dotlist(original, ["model.trust_remote_code=true"])
+    assert result["model"]["trust_remote_code"] is True
+    assert original["model"]["trust_remote_code"] is False  # input untouched
+
+
+def test_apply_dotlist_creates_missing_path():
+    """_apply_dotlist creates intermediate dicts when the path doesn't exist."""
+    result = _apply_dotlist({}, ["a.b.c=42"])
+    assert result == {"a": {"b": {"c": 42}}}
+
+
+def test_apply_dotlist_parses_typed_values():
+    """_apply_dotlist preserves yaml.safe_load's type inference."""
+    result = _apply_dotlist(
+        {},
+        [
+            "int_v=7",
+            "float_v=1.5",
+            "bool_v=true",
+            "null_v=null",
+            "list_v=[1, 2, 3]",
+            "str_v=hello",
+        ],
+    )
+    assert result == {
+        "int_v": 7,
+        "float_v": 1.5,
+        "bool_v": True,
+        "null_v": None,
+        "list_v": [1, 2, 3],
+        "str_v": "hello",
+    }
+
+
+def test_apply_dotlist_scientific_notation():
+    """OmegaConf parses ``1e-4`` as float natively (unlike yaml.safe_load in YAML 1.1 mode)."""
+    result = _apply_dotlist({}, ["lr=5e-5", "decay=1e-10", "still_str=hello"])
+    assert result["lr"] == 5e-5 and isinstance(result["lr"], float)
+    assert result["decay"] == 1e-10 and isinstance(result["decay"], float)
+    assert result["still_str"] == "hello"  # non-numeric strings stay as strings
+
+
+def test_apply_dotlist_malformed_raises():
+    """_apply_dotlist rejects entries missing the '=' separator."""
+    with pytest.raises(ValueError, match="missing '='"):
+        _apply_dotlist({}, ["foo_no_equals"])
+
+
+def test_load_recipe_with_overrides(tmp_path):
+    """load_recipe(path, overrides=...) merges dotlist entries before Pydantic validation."""
+    recipe_path = tmp_path / "recipe.yml"
+    recipe_path.write_text(
+        "metadata:\n  recipe_type: speculative_eagle\n"
+        "model:\n  trust_remote_code: false\n"
+        "eagle:\n  eagle_ttt_steps: 3\n"
+    )
+    recipe = load_recipe(
+        recipe_path,
+        overrides=["model.trust_remote_code=true", "eagle.eagle_ttt_steps=7"],
+    )
+    assert isinstance(recipe, ModelOptEagleRecipe)
+    assert recipe.model.trust_remote_code is True
+    assert recipe.eagle.eagle_ttt_steps == 7
+
+
+def test_load_recipe_overrides_rejected_for_dir(tmp_path):
+    """Overrides are not allowed for directory-format recipes."""
+    (tmp_path / "recipe.yml").write_text("metadata:\n  recipe_type: ptq\n")
+    (tmp_path / "quantize.yml").write_text("algorithm: max\nquant_cfg: []\n")
+    with pytest.raises(ValueError, match="directory-format"):
+        load_recipe(tmp_path, overrides=["quantize.algorithm=gptq"])
+
+
+def test_typed_data_sample_size_validator(tmp_path):
+    """DataArguments rejects sample_size=0 via field_validator."""
+    recipe_path = tmp_path / "bad.yml"
+    recipe_path.write_text(
+        "metadata:\n  recipe_type: speculative_eagle\n"
+        "data:\n  sample_size: 0\n"
+        "eagle:\n  eagle_decoder_type: llama\n"
+    )
+    with pytest.raises(Exception, match="sample_size"):  # pydantic.ValidationError
+        load_recipe(recipe_path)
+
+
+def test_load_recipe_dflash_field_validation_raises(tmp_path):
+    """Invalid DFlash field values must fail Pydantic validation at load time."""
+    bad = tmp_path / "bad.yml"
+    bad.write_text(
+        "metadata:\n  recipe_type: speculative_dflash\ndflash:\n  dflash_block_size: not_an_int\n"
+    )
+    with pytest.raises(Exception):  # pydantic.ValidationError
+        load_recipe(bad)
 
 
 # ---------------------------------------------------------------------------
