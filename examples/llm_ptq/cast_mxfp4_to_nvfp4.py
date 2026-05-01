@@ -291,6 +291,23 @@ def build_amax_map(checkpoint_dir: str | Path) -> dict[str, dict]:
     return amax_map
 
 
+def force_weight_quantizers_static(quant_cfg: list) -> None:
+    """Force every weight-quantizer entry's ``block_sizes`` to ``type='static'``.
+
+    The MXFP4 -> NVFP4 cast needs the per-block weight ``_amax`` to be recorded
+    by max-cal (so it can be paired with the pinned global_amax later). Setting
+    ``block_sizes['type'] = 'static'`` makes ``is_static_block_quant`` True so
+    ``promote_nvfp4_static_quantizers`` picks the entry up automatically at the
+    end of max_calibrate.
+    """
+    for i, entry in enumerate(quant_cfg):
+        qname = entry.get("quantizer_name", "")
+        cfg = entry.get("cfg") or {}
+        bs = cfg.get("block_sizes")
+        if "weight_quantizer" in qname and isinstance(bs, dict):
+            quant_cfg[i] = {**entry, "cfg": {**cfg, "block_sizes": {**bs, "type": "static"}}}
+
+
 def apply_to_model(
     model: "torch.nn.Module",
     source_checkpoint_path: str | Path,

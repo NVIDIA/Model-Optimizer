@@ -25,6 +25,7 @@ import numpy as np
 import torch
 from accelerate.hooks import remove_hook_from_module
 from cast_mxfp4_to_nvfp4 import apply_to_model as apply_cast_mxfp4_to_nvfp4
+from cast_mxfp4_to_nvfp4 import force_weight_quantizers_static
 from example_utils import (
     build_quant_cfg,
     copy_custom_model_files,
@@ -1088,20 +1089,9 @@ def quantize_main(
                 f"Auto-resolved layerwise_checkpoint_dir: {quant_cfg['algorithm']['layerwise_checkpoint_dir']}"
             )
 
-        # MXFP4 -> NVFP4 cast needs the per-block weight ``_amax`` to be recorded
-        # by max-cal (so it can be paired with the pinned global_amax later).
-        # Force every weight-quantizer entry to ``block_sizes['type'] = 'static'``
-        # so ``is_static_block_quant`` is True and ``promote_nvfp4_static_quantizers``
-        # picks them up automatically at the end of max_calibrate.
         if args.cast_mxfp4_to_nvfp4:
             quant_cfg = copy.deepcopy(quant_cfg)
-            for entry in quant_cfg.get("quant_cfg", []):
-                qname = entry.get("quantizer_name", "")
-                cfg = entry.get("cfg") or {}
-                bs = cfg.get("block_sizes")
-                if "weight_quantizer" in qname and isinstance(bs, dict):
-                    bs = {**bs, "type": "static"}
-                    entry["cfg"] = {**cfg, "block_sizes": bs}
+            force_weight_quantizers_static(quant_cfg["quant_cfg"])
 
         if args.qformat in QUANT_CFG_CHOICES:
             mono_quantize(
