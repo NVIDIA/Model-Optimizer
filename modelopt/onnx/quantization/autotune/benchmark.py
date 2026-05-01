@@ -219,7 +219,6 @@ class TrtExecBenchmark(Benchmark):
         self.remote_password: str = ""
         self.remote_engine_path: str = "trtexec_benchmark_model.trt"
         self.remote_bin_path: str = "trtexec"
-        self.remote_timeout_sec = 300
 
         if self.has_remote_config:
             remote_config = [arg for arg in trtexec_args if "--remoteAutoTuningConfig" in arg]
@@ -291,8 +290,7 @@ class TrtExecBenchmark(Benchmark):
                     self.trtexec_args.append("--skipInference")
             except ImportError as e:
                 self.logger.warning(
-                    "Remote autotuning is not supported with TensorRT version < 10.15. "
-                    "Removing --remoteAutoTuningConfig from trtexec arguments"
+                    "Remote autotuning is not supported with TensorRT version < 10.15."
                 )
                 raise e
 
@@ -338,9 +336,7 @@ class TrtExecBenchmark(Benchmark):
 
             cmd = [*self._base_cmd, f"--onnx={model_path}"]
             self.logger.debug(f"Running: {' '.join(cmd)}")
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=self.remote_timeout_sec
-            )  # nosec B603
+            result = subprocess.run(cmd, capture_output=True, text=True)  # nosec B603
             self._write_log_file(
                 log_file,
                 "\n".join(
@@ -378,9 +374,7 @@ class TrtExecBenchmark(Benchmark):
                     f"{self.remote_user}@{self.remote_ip}:{shlex.quote(self.remote_engine_path)}",
                 ]
                 scp_cmd = ssh_pass + scp_cmd
-                result = subprocess.run(
-                    scp_cmd, capture_output=True, text=True, timeout=self.remote_timeout_sec
-                )  # nosec B603
+                result = subprocess.run(scp_cmd, capture_output=True, text=True)  # nosec B603
                 if result.returncode != 0:
                     self.logger.error(f"Failed to push engine to remote device: {result.stderr}")
                     return float("inf")
@@ -391,34 +385,26 @@ class TrtExecBenchmark(Benchmark):
                     "-p",
                     f"{self.remote_port}",
                     f"{self.remote_user}@{self.remote_ip}",
-                    f"{ld_path} {shlex.quote(trt_path)} --loadEngine={shlex.quote(self.remote_engine_path)}",
+                    f"{ld_path} {shlex.quote(trt_path)} --useCudaGraphs "
+                    f"--loadEngine={shlex.quote(self.remote_engine_path)}",
                 ]
                 trtexec_safe_cmd = ssh_pass + trtexec_safe_cmd
-                result = subprocess.run(
-                    trtexec_safe_cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=self.remote_timeout_sec,
-                )  # nosec B603
+                result = subprocess.run(trtexec_safe_cmd, capture_output=True, text=True)  # nosec B603
                 latency_pattern = safe_pattern
                 if result.returncode != 0:
-                    # fallback and try trtexec with "--safe"
+                    # fallback and try trtexec with "--safe" in case this is a safety proxy target
                     trt_path = f"{os.path.join(self.remote_bin_path, 'trtexec')}"
                     trtexec_safe_cmd = [
                         "ssh",
                         "-p",
                         f"{self.remote_port}",
                         f"{self.remote_user}@{self.remote_ip}",
-                        f"{ld_path} {shlex.quote(trt_path)} --safe --loadEngine={shlex.quote(self.remote_engine_path)}",
+                        f"{ld_path} {shlex.quote(trt_path)} --safe --useCudaGraphs "
+                        f"--loadEngine={shlex.quote(self.remote_engine_path)}",
                     ]
                     trtexec_safe_cmd = ssh_pass + trtexec_safe_cmd
 
-                    result = subprocess.run(
-                        trtexec_safe_cmd,
-                        capture_output=True,
-                        text=True,
-                        timeout=self.remote_timeout_sec,
-                    )  # nosec B603
+                    result = subprocess.run(trtexec_safe_cmd, capture_output=True, text=True)  # nosec B603
                     latency_pattern = std_pattern
             if result.returncode != 0:
                 self.logger.error(
@@ -426,6 +412,8 @@ class TrtExecBenchmark(Benchmark):
                 )
                 return float("inf")
             if not (match := re.search(latency_pattern, result.stdout, re.IGNORECASE)):
+                # this could be due to creating a degenerate onnx file that can't be engine built.
+                # thus not a hard failure
                 self.logger.warning(f"trtexec stdout:\n{result.stdout}")
                 self.logger.error("Could not parse median latency from trtexec output")
                 return float("inf")
