@@ -61,6 +61,7 @@ from .quant_utils import (
     get_weight_block_size,
     get_weight_scaling_factor,
     get_weight_scaling_factor_2,
+    process_layer_quant_config,
     to_quantized_weight,
 )
 
@@ -169,6 +170,7 @@ class GPTModelExporter:
         self.all_rules = self._populate_rule_book()
         self.rules = self.all_rules[self.arch]
         self.exclude_modules = []
+        self.layer_config_dict = {}
 
         if not hasattr(model, "_modelopt_state"):
             return
@@ -324,22 +326,32 @@ class GPTModelExporter:
                 print(f"Successfully loaded {len(mtp_state_dict)} MTP tensors")
 
         combined_exclude_modules = self._gather_exclude_modules()
+        combined_layer_config_dict = self._gather_layer_config_dict()
 
         if is_last_stage_main_rank and quantization is not None:
-            self._hf_quant_config = {
+            if combined_layer_config_dict:
+                quantization_config = process_layer_quant_config(combined_layer_config_dict)
+                quantization_config["exclude_modules"] = combined_exclude_modules
+            else:
+                quantization_config = {
+                    "quant_algo": quantization,
+                    "exclude_modules": combined_exclude_modules,
+                }
+                if quantization == "NVFP4":  # update block size
+                    quantization_config["group_size"] = 16
+
+            if hasattr(self, "kv_cache_dtype"):
+                quantization_config["kv_cache_quant_algo"] = self.kv_cache_dtype
+
+            raw_hf_quant_config = {
                 "producer": {
                     "name": "modelopt",
                     "version": __version__,
                 },
-                "quantization": {
-                    "quant_algo": quantization,
-                    "exclude_modules": combined_exclude_modules,
-                },
+                "quantization": quantization_config,
             }
-            if quantization == "NVFP4":  # update block size
-                self._hf_quant_config["quantization"]["group_size"] = 16
-            if hasattr(self, "kv_cache_dtype"):
-                self._hf_quant_config["quantization"]["kv_cache_quant_algo"] = self.kv_cache_dtype
+            # Use one serving-facing config for both hf_quant_config.json and config.json.
+            self._hf_quant_config = convert_hf_quant_config_format(raw_hf_quant_config)
             with open(save_directory + "/hf_quant_config.json", "w") as f:
                 json.dump(self._hf_quant_config, f, indent=4)
 
@@ -359,10 +371,9 @@ class GPTModelExporter:
         # Newer versions of VLLM expect config.json with hf_quant_config
         config_json_file = save_directory + "/config.json"
         if self._hf_quant_config and os.path.exists(config_json_file):
-            converted_quant_config = convert_hf_quant_config_format(self._hf_quant_config)
             with open(config_json_file) as f:
                 config_dict = json.load(f)
-            config_dict["quantization_config"] = converted_quant_config
+            config_dict["quantization_config"] = self._hf_quant_config
             with open(config_json_file, "w") as f:
                 json.dump(config_dict, f, indent=4)
 
@@ -803,9 +814,7 @@ class GPTModelExporter:
         name_to_value = {}
         qformat: str = self._get_quantization_format(module)
         if qformat is None and "norm" not in prefix:
-            # Add exclude layers for hf_quant_config. Note that if the prefix is not an empty
-            # string then it usually ends with "." which needs to be removed.
-            self.exclude_modules.append(prefix.removesuffix("."))
+            self._record_excluded_module(prefix)
         block_size = get_weight_block_size(module)
 
         name_to_value = self._get_weight_bias(module, dtype, name_to_value)
@@ -850,6 +859,27 @@ class GPTModelExporter:
 
         return weight_scale, weight_scale_2
 
+    def _record_layer_quant_config(self, prefix: str, qformat: str | None, block_size: int):
+        """Record per-HF-layer quantization metadata for mixed precision exports."""
+        if qformat in (None, QUANTIZATION_NONE):
+            return
+
+        layer_name = prefix.removesuffix(".")
+        if "{" in layer_name or not layer_name:
+            return
+
+        self.layer_config_dict[layer_name + ".quantization"] = qformat
+        self.layer_config_dict[layer_name + ".awq_block_size"] = block_size
+
+    def _record_excluded_module(self, prefix: str):
+        """Record an unquantized HF module prefix for hf_quant_config."""
+        layer_name = prefix.removesuffix(".")
+        if "{" in layer_name or not layer_name:
+            return
+
+        if layer_name not in self.exclude_modules:
+            self.exclude_modules.append(layer_name)
+
     def _name_remapping(
         self,
         module: torch.nn.Module | torch.Tensor,
@@ -866,6 +896,7 @@ class GPTModelExporter:
             return
 
         name_to_value, qformat, block_size = self._get_quantized_state(module, dtype, prefix=prefix)
+        self._record_layer_quant_config(prefix, qformat, block_size)
 
         weight = name_to_value.pop("weight")
         weight_scale, weight_scale_2 = self._get_weight_scales(name_to_value, qformat)
@@ -906,6 +937,8 @@ class GPTModelExporter:
 
         gate_proj_prefix = prefix + gate_proj_name + "."
         up_proj_prefix = prefix + up_proj_name + "."
+        self._record_layer_quant_config(gate_proj_prefix, qformat, block_size)
+        self._record_layer_quant_config(up_proj_prefix, qformat, block_size)
 
         ffn_hidden_size = module.config.ffn_hidden_size
         gate_proj_weight = weight[:ffn_hidden_size, :]
@@ -986,6 +1019,7 @@ class GPTModelExporter:
 
         for expert_id in range(num_experts):
             expert_prefix = prefix.format(expert_id) + "."
+            self._record_layer_quant_config(expert_prefix, qformat, block_size)
             weight_key = f"weight{expert_id}"
 
             if weight_key not in state_dict:
@@ -1030,6 +1064,18 @@ class GPTModelExporter:
         q_proj_prefix = prefix + q_proj_name + "."
         k_proj_prefix = prefix + k_proj_name + "."
         v_proj_prefix = prefix + v_proj_name + "."
+        self._record_layer_quant_config(q_proj_prefix, qformat, block_size)
+        self._record_layer_quant_config(k_proj_prefix, qformat, block_size)
+        self._record_layer_quant_config(v_proj_prefix, qformat, block_size)
+        if qformat in (None, QUANTIZATION_NONE):
+            # MCore stores Q/K/V as one fused linear_qkv module, but HF exports them
+            # as separate q_proj/k_proj/v_proj modules. Record the HF names so
+            # runtime quant configs do not miss excluded fused-QKV projections.
+            fused_prefix = prefix.removesuffix(".")
+            self.exclude_modules = [m for m in self.exclude_modules if m != fused_prefix]
+            self._record_excluded_module(q_proj_prefix)
+            self._record_excluded_module(k_proj_prefix)
+            self._record_excluded_module(v_proj_prefix)
 
         config = module.config
         hidden_size = config.hidden_size
@@ -1179,6 +1225,7 @@ class GPTModelExporter:
             weight_scale_list.append(weight_scale)
             weight_scale_2_list.append(weight_scale_2)
             input_scale_list.append(input_scale)
+            self._record_layer_quant_config(prefix, qformat, block_size)
 
         merged_weight = torch.stack(weight_list, dim=0)
 
@@ -1247,6 +1294,7 @@ class GPTModelExporter:
             weight_scale_2_list.append(weight_scale_2)
             input_scale_list.append(input_scale)
             bias_list.append(bias)
+            self._record_layer_quant_config(prefix, qformat, block_size)
 
         merged_weight = torch.stack(weight_list, dim=0)
 
@@ -1348,6 +1396,19 @@ class GPTModelExporter:
             if modules:
                 combined_exclude_modules.update(modules)
         return sorted(combined_exclude_modules)
+
+    def _gather_layer_config_dict(self):
+        """Get per-layer quantization metadata from all ranks for hf_quant_config."""
+        if not torch.distributed.is_initialized():
+            return dict(sorted(self.layer_config_dict.items()))
+
+        all_layer_config_dicts = [None] * torch.distributed.get_world_size()
+        torch.distributed.all_gather_object(all_layer_config_dicts, self.layer_config_dict)
+        combined_layer_config_dict = {}
+        for layer_config_dict in all_layer_config_dicts:
+            if layer_config_dict:
+                combined_layer_config_dict.update(layer_config_dict)
+        return dict(sorted(combined_layer_config_dict.items()))
 
 
 def export_mcore_gpt_to_hf(
