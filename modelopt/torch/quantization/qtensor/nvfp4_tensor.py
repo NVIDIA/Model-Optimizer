@@ -128,9 +128,10 @@ class NVFP4QTensor(BaseQuantizedTensor):
             # explodes to ``1.0 * 448 / (global_amax/6)``. fp8_e4m3fn has no Inf, so any
             # value >= 480 casts to NaN — clamp first to keep the stored byte finite.
             if not keep_high_precision:
+                _FP8_E4M3FN_MIN = 2**-9  # 0.001953125 — smallest positive subnormal
                 per_block_scale = (
                     (per_block_scale * 448.0 / per_block_scale_max)
-                    .clamp_(max=448.0)
+                    .clamp(min=_FP8_E4M3FN_MIN, max=448.0)
                     .to(torch.float8_e4m3fn)
                 )
             return per_block_scale, weights_scaling_factor_2
@@ -173,6 +174,12 @@ class NVFP4QTensor(BaseQuantizedTensor):
         per_block_scale[per_block_scale == 0] = 1.0
         # Convert to torch.float8_e4m3fn
         if not keep_high_precision:
+            # Clamp to the minimum positive FP8 E4M3FN subnormal (~0.00195 = 2^-9) before
+            # casting.  Without this, blocks whose scale falls below the FP8 representable
+            # range silently underflow to 0, causing those blocks to produce zero output at
+            # inference even when the weights are non-trivial.
+            _FP8_E4M3FN_MIN = 2**-9  # 0.001953125 — smallest positive subnormal
+            per_block_scale = per_block_scale.clamp(min=_FP8_E4M3FN_MIN)
             per_block_scale = per_block_scale.to(torch.float8_e4m3fn)
         return per_block_scale, weights_scaling_factor_2
 
