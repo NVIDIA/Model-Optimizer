@@ -124,9 +124,10 @@ class NVFP4QTensor(BaseQuantizedTensor):
 
             # Quantize scales to FP8
             if not keep_high_precision:
-                per_block_scale = (per_block_scale * 448.0 / per_block_scale_max).to(
-                    torch.float8_e4m3fn
-                )
+                _FP8_E4M3FN_MIN = 2**-9  # 0.001953125 — smallest positive subnormal
+                per_block_scale = (per_block_scale * 448.0 / per_block_scale_max).clamp(
+                    min=_FP8_E4M3FN_MIN
+                ).to(torch.float8_e4m3fn)
             return per_block_scale, weights_scaling_factor_2
         else:
             # Dynamic path: compute from weight tensor
@@ -167,6 +168,12 @@ class NVFP4QTensor(BaseQuantizedTensor):
         per_block_scale[per_block_scale == 0] = 1.0
         # Convert to torch.float8_e4m3fn
         if not keep_high_precision:
+            # Clamp to the minimum positive FP8 E4M3FN subnormal (~0.00195 = 2^-9) before
+            # casting.  Without this, blocks whose scale falls below the FP8 representable
+            # range silently underflow to 0, causing those blocks to produce zero output at
+            # inference even when the weights are non-trivial.
+            _FP8_E4M3FN_MIN = 2**-9  # 0.001953125 — smallest positive subnormal
+            per_block_scale = per_block_scale.clamp(min=_FP8_E4M3FN_MIN)
             per_block_scale = per_block_scale.to(torch.float8_e4m3fn)
         return per_block_scale, weights_scaling_factor_2
 
