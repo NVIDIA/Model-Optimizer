@@ -535,6 +535,7 @@ After the TensorRT-LLM checkpoint export, you can use the `trtllm-build` build c
 
 ## Resources
 
+- [Custom MoE Quantization Guide](./moe.md) — How to add quantization support for custom MoE architectures
 - 📅 [Roadmap](https://github.com/NVIDIA/Model-Optimizer/issues/146)
 - 📖 [Documentation](https://nvidia.github.io/Model-Optimizer)
 - 🎯 [Benchmarks](../benchmark.md)
