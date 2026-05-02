@@ -53,6 +53,20 @@ hf auth login --token <your token>
 
 This section shows how to prune a HuggingFace model using Minitron algorithm in Megatron-Bridge framework. Checkout other available pruning algorithms, supported frameworks and models, and general pruning getting-started in the [pruning README](../pruning/README.md).
 
+To estimate the importance of each layer of a model oen can use a `rank_layer_importance.py` script. This script compares the final hidden state representation with and without particular layer. The intuition behind is the less a layer affects the final hidden state the less important it is i.e. the safer is to drop it completly from the model.
+Example usage of the script to estiamte importance of NVIDIA-Nemotron-Nano-12B-v2 layers. Usually the first and the last layers are the most important ones - resulting scoring should be similar to the one in the Fig.
+
+![Importance scres](nemotron-nano-12b-v2.png)
+
+```bash
+torchrun --nproc_per_node=8 examples/megatron_bridge/rank_layer_importance.py \
+    --hf_model_name_or_path /path/to/hf-checkpoint/nvidia/NVIDIA-Nemotron-Nano-12B-v2 \
+    --trust_remote_code \
+    --calib_dataset_name wikitext  \
+    --num_layers 62 \
+    --save_scores_path /path/to/scores.pt
+```
+
 Example usage to prune Qwen3-8B to 6B on 2-GPUs (Pipeline Parallelism = 2) while skipping pruning of `num_attention_heads` using following defaults:
     1024 samples from [`nemotron-post-training-dataset-v2`](https://huggingface.co/datasets/nvidia/Nemotron-Post-Training-Dataset-v2) for calibration,
     at-most 20% depth (`num_layers`) and 40% width is pruned per prunable hparam (`hidden_size`, `ffn_hidden_size`, ...),
