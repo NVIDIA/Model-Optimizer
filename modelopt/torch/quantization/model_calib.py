@@ -412,6 +412,18 @@ def mse_calibrate(
             if isinstance(weight_quantizer, TensorQuantizer) and weight_quantizer.is_enabled:
                 if getattr(weight_quantizer, "_calibrator", None) is not None:
                     weight_quantizers.append((parent_module, weight_name, weight_quantizer))
+        # _QuantFusedExperts stores per-expert weight quantizers as nn.ModuleList named
+        # {param_name}_weight_quantizers (plural). Detect this pattern and enqueue each 
+        # per-expert quantizer individually.
+        for param_name, _ in parent_module.named_parameters(recurse=False):
+            qlist = getattr(parent_module, f"{param_name}_weight_quantizers", None)
+            if not isinstance(qlist, nn.ModuleList):
+                continue
+            for expert_idx, wq in enumerate(qlist):
+                if isinstance(wq, TensorQuantizer) and wq.is_enabled:
+                    if getattr(wq, "_calibrator", None) is not None:
+                        weight_quantizers.append((parent_module, (param_name, expert_idx), wq))
+
         seen_modules.add(parent_module)
 
     # Step 3: Calibrate weight quantizers ONE AT A TIME with immediate amax computation
@@ -423,7 +435,11 @@ def mse_calibrate(
         weight_quantizer.disable_quant()
         weight_quantizer.enable_calib()
         with enable_weight_access_and_writeback(parent_module, model, name_to_module):
-            weight = getattr(parent_module, weight_name)
+            if isinstance(weight_name, tuple):
+                param_name, expert_idx = weight_name
+                weight = getattr(parent_module, param_name)[expert_idx]
+            else:
+                weight = getattr(parent_module, weight_name)
             weight_quantizer(weight)
 
         # IMMEDIATELY compute amax and reset calibrator to free memory

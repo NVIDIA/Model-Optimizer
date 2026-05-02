@@ -695,6 +695,7 @@ def print_quant_summary(model: nn.Module, output_dir: str | None = None):
     lines.append(f"{len(lines)} TensorQuantizers found in model")
 
     if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
         path = os.path.join(output_dir, ".quant_summary.txt")
         with open(path, "w", encoding="utf-8") as f:
             f.write("\n".join(lines) + "\n")
