@@ -1,0 +1,18 @@
+# KV cache merge sets algorithm to 'max' when not specified
+_test:
+  description: "KV cache sets default algorithm to max"
+
+  validate:
+    expect_success: true
+
+  resolve:
+    check_algorithm: max
+
+version: "1.0"
+quantization:
+  weights:
+    format: int8
+  activations:
+    format: int8
+  kv_cache:
+    format: fp8

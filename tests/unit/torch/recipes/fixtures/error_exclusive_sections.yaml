@@ -1,0 +1,14 @@
+# Schema validation error: quantization + auto_quantize mutually exclusive
+_test:
+  description: "Schema error: quantization and auto_quantize are mutually exclusive"
+
+  validate:
+    expect_error: "mutually exclusive"
+
+version: "1.0"
+quantization:
+  preset: fp8
+auto_quantize:
+  effective_bits: 4.5
+  formats:
+    - preset: fp8

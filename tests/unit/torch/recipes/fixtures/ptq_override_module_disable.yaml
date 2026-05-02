@@ -1,0 +1,21 @@
+# Module-class override with enable=false (no weights/activations)
+_test:
+  description: "Module-class disable override uses wildcard pattern"
+
+  validate:
+    expect_success: true
+
+  resolve:
+    check_config:
+      quantize_config:
+        quant_cfg:
+          "nn.Embedding":
+            "*":
+              enable: false
+
+version: "1.0"
+quantization:
+  preset: fp8
+  overrides:
+    - module_class: "nn.Embedding"
+      enable: false

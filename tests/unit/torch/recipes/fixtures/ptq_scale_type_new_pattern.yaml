@@ -1,0 +1,21 @@
+# scale_type on a new pattern creates fresh entry
+_test:
+  description: "scale_type on new pattern creates entry with block_sizes.type"
+
+  validate:
+    expect_success: true
+
+  resolve:
+    check_config:
+      quantize_config:
+        quant_cfg:
+          "*self_attn*weight_quantizer":
+            block_sizes:
+              type: dynamic
+
+version: "1.0"
+quantization:
+  preset: nvfp4_local_hessian
+  overrides:
+    - pattern: "*self_attn*weight_quantizer"
+      scale_type: dynamic

@@ -1,0 +1,22 @@
+# Block sizes with integer string keys and type passthrough
+_test:
+  description: "Block sizes integer string keys and type field pass through"
+
+  validate:
+    expect_success: true
+
+  resolve:
+    check_block_sizes:
+      path: quantize_config.quant_cfg.*weight_quantizer.block_sizes
+      expected:
+        type: dynamic
+        0: 128
+
+version: "1.0"
+quantization:
+  weights:
+    block_sizes:
+      type: dynamic
+      "0": 128
+  activations:
+    enable: false

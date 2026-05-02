@@ -1,0 +1,17 @@
+# Verify INT4 format resolves (core format registry coverage)
+_test:
+  description: "INT4 format resolves with weight quantizer"
+
+  validate:
+    expect_success: true
+
+  resolve:
+    check_has_key: quantize_config
+    check_quant_cfg_has_keys: ["*weight_quantizer"]
+
+version: "1.0"
+quantization:
+  weights:
+    format: int4
+  activations:
+    enable: false
