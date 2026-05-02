@@ -47,7 +47,7 @@ hf auth login --token <your token>
 ```
 
 > [!WARNING]
-> Use `python -m pip` instead of `pip` to avoid conflicts with the system-wide installed packages in the NeMo containers.
+> Use `python -m pip` instead of `pip` to avoid conflicts with the system-wide installed packages in the NeMo containers. You may also refer to this [doc](https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/main/docker/common/README.md#installing-packages-inside-the-container) on how to correctly install packages in the NeMo containers without breaking existing torch installation.
 
 ## Pruning
 
@@ -189,7 +189,7 @@ For more details, see the [Megatron-Bridge conversion README](https://github.com
 
 ### Distillation Results
 
-See [results/puzzletron.md](results/puzzletron.md) for MMLU results demonstrating knowledge distillation on Puzzletron-compressed student models.
+See [examples/pruning/](../pruning/README.md#tutorials--results) for distillation experiment results covering Minitron and Puzzletron pruning algorithms.
 
 ## Post-Training Quantization
 

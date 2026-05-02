@@ -33,7 +33,7 @@ _MODEL_TYPE_TO_DESCRIPTOR = {
     "qwen3": "qwen3",
     "nemotron_h": "nemotron_h",
     "nemotron_h_v2": "nemotron_h_v2",
-    "gpt_oss_20b": "gpt_oss_20b",
+    "gpt_oss": "gpt_oss",
 }
 
 

@@ -26,7 +26,9 @@ quantize:
   algorithm:
     method: max
     # Max calibration is fast and does not typically need checkpointing.
-    layerwise: true
+    # layerwise=false required for VLMs where the decoder layers are nested under
+    # `model.language_model.layers` (layerwise_calibrate can't find them otherwise).
+    layerwise: false
   quant_cfg:
     - $import: base_disable_all
     - quantizer_name: '*mlp.experts*weight_quantizer'
