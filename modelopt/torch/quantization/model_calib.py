@@ -16,6 +16,7 @@
 """Calibration utilities."""
 
 import math
+import os
 import time
 import warnings
 from collections.abc import Callable
@@ -37,7 +38,7 @@ from modelopt.torch.utils import print_rank_0
 from modelopt.torch.utils.distributed import DistributedProcessGroup, ParallelState
 from modelopt.torch.utils.network import bind_forward_method, unpatch_forward_method
 
-from .calib import MseCalibrator, NVFP4MSECalibrator, _Calibrator
+from .calib import MseCalibrator, NVFP4MSECalibrator, TritonNVFP4MSECalibrator, _Calibrator
 from .conversion import create_and_replace_svdquant_linear_on_the_fly, set_quantizer_by_cfg_context
 from .nn import NVFP4StaticQuantizer, QuantModule, SequentialQuantizer, TensorQuantizer
 from .utils import (
@@ -391,8 +392,13 @@ def mse_calibrate(
                         continue
 
                 if fp8_scale_sweep and is_nvfp4_static:
-                    # Replace calibrator with NVFP4MSECalibrator
-                    module._calibrator = NVFP4MSECalibrator(
+                    # Replace calibrator with the fused Triton sweep kernel by default
+                    # (single-shot collect, ~7-20x faster for the weight-MSE phase).
+                    # Set MODELOPT_NVFP4_TRITON_SWEEP=0 to fall back to the reference
+                    # NVFP4MSECalibrator for debugging or numerics comparison.
+                    use_triton = os.environ.get("MODELOPT_NVFP4_TRITON_SWEEP", "1") != "0"
+                    cls = TritonNVFP4MSECalibrator if use_triton else NVFP4MSECalibrator
+                    module._calibrator = cls(
                         amax=initial_amax,
                         axis=module._calibrator._axis,
                         global_amax=module.global_amax,
