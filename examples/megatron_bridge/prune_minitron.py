@@ -152,9 +152,20 @@ def get_args() -> argparse.Namespace:
         "--prune_target_memory_mb",
         type=float,
         help=(
-            "Target memory footprint in MB (weights + KV-cache estimated via seq_length and calib_mbs; assumes BF16). "
+            "Target memory footprint in MB (weights + KV-cache estimated via seq_length and "
+            "--inference_batch_size; assumes BF16). "
             "Uses NAS to find the best pruned model that maximizes --prune_score_func. "
             "Can be combined with --prune_target_params and/or --prune_target_active_params."
+        ),
+    )
+    parser.add_argument(
+        "--inference_batch_size",
+        type=int,
+        default=None,
+        help=(
+            "Batch size used only for KV-cache sizing in --prune_target_memory_mb. "
+            "Defaults to --calib_mbs when not set. "
+            "Use this to target an inference batch size that differs from the calibration micro-batch size."
         ),
     )
 
@@ -344,12 +355,23 @@ def main(args: argparse.Namespace):
         )
 
         match = re.fullmatch(r"mmlu_(\d+)pct_bs(\d+)", args.prune_score_func)
-        if not match:
-            raise ValueError(
-                f"Invalid score function: {args.prune_score_func}. Expected format: mmlu_<N>pct_bs<bs>"
+        legacy_match = re.fullmatch(r"mmlu_(\d+)pct", args.prune_score_func)
+        if match:
+            mmlu_frac = float(match.group(1)) / 100.0
+            batch_size = int(match.group(2))
+        elif legacy_match:
+            warn_rank_0(
+                f"Score function '{args.prune_score_func}' uses the deprecated format "
+                "'mmlu_<N>pct'. Use 'mmlu_<N>pct_bs<bs>' to specify the evaluation batch size. "
+                "Falling back to batch_size=1."
             )
-        mmlu_frac = float(match.group(1)) / 100.0
-        batch_size = int(match.group(2))
+            mmlu_frac = float(legacy_match.group(1)) / 100.0
+            batch_size = 1
+        else:
+            raise ValueError(
+                f"Invalid score function: {args.prune_score_func}. "
+                "Expected format: mmlu_<N>pct_bs<bs> (e.g. mmlu_10pct_bs1)"
+            )
 
         def score_func(m):
             return megatron_mmlu(
@@ -362,7 +384,9 @@ def main(args: argparse.Namespace):
         pruning_config["hparams_to_skip"] = args.hparams_to_skip
         pruning_config["top_k"] = args.top_k
         # memory_mb constraint requires batch_size and seq_length
-        pruning_config["batch_size"] = args.calib_mbs
+        pruning_config["batch_size"] = (
+            args.inference_batch_size if args.inference_batch_size is not None else args.calib_mbs
+        )
         pruning_config["seq_length"] = args.seq_length
     print_rank_0(f"Pruning constraints: {pruning_constraints}")
 

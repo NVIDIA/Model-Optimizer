@@ -18,7 +18,7 @@
 Two test groups:
   - TestMcoreParamCountFormulas: pure arithmetic / no GPU needed.
   - Live model tests (_test_formula_matches_*): build a real MCore model on GPU,
-    compare the analytical formula result against get_mcore_param_count().
+    compare the analytical formula result against mcore_param_count_live().
 """
 
 from types import SimpleNamespace
@@ -33,8 +33,8 @@ from _test_utils.torch.megatron.models import (
 from modelopt.torch.nas.plugins.megatron_model_stats import (
     mcore_memory_footprint_mb,
     mcore_param_count,
+    mcore_param_count_live,
 )
-from modelopt.torch.prune.plugins.mcore_minitron import get_mcore_param_count
 
 # ---------------------------------------------------------------------------
 # Small reference dimensions - easy to verify by hand
@@ -313,7 +313,7 @@ class TestMcoreMemoryFootprint:
 
 
 # ---------------------------------------------------------------------------
-# Live model tests: formula must match get_mcore_param_count() exactly
+# Live model tests: formula must match mcore_param_count_live() exactly
 # ---------------------------------------------------------------------------
 
 
@@ -338,7 +338,7 @@ def _test_formula_matches_gpt_model(rank, size, parallelism):
         model.vocab_size,
         model.share_embeddings_and_output_weights,
     )
-    actual = get_mcore_param_count(model)
+    actual = mcore_param_count_live(model)
 
     assert expected_total == expected_active, "Non-MoE GPT: total must equal active"
     assert expected_total == actual, (
@@ -380,7 +380,7 @@ def _test_formula_matches_gpt_moe_model(rank, size, parallelism):
         model.vocab_size,
         model.share_embeddings_and_output_weights,
     )
-    actual = get_mcore_param_count(model)
+    actual = mcore_param_count_live(model)
 
     assert expected_active < expected_total, "MoE model: active must be less than total"
     assert expected_total == actual, (
@@ -428,7 +428,7 @@ def _test_formula_matches_mamba_model(rank, size, parallelism):
         model.share_embeddings_and_output_weights,
         hybrid_layer_pattern=hybrid_layer_pattern,
     )
-    actual = get_mcore_param_count(model)
+    actual = mcore_param_count_live(model)
 
     assert expected_total == actual, (
         f"Formula ({expected_total:,}) != live model ({actual:,}) for {parallelism}"

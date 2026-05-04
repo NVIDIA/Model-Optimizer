@@ -37,22 +37,29 @@ Hybrid pattern characters (from ``megatron.core.ssm.mamba_hybrid_layer_allocatio
 
 import io
 import sys
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
+import torch
+from megatron.core.models.gpt.gpt_model import GPTModel
 from megatron.core.models.mamba.mamba_model import MambaModel
+from megatron.core.parallel_state import (
+    get_expert_tensor_and_model_parallel_group,
+    get_expert_tensor_parallel_rank,
+    get_pipeline_model_parallel_group,
+    get_tensor_model_parallel_group,
+    get_tensor_model_parallel_rank,
+)
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+from modelopt.torch.opt.dynamic import DynamicModule
 from modelopt.torch.utils import num2hrb, print_rank_0
-
-if TYPE_CHECKING:
-    from megatron.core.models.gpt.gpt_model import GPTModel
-
 
 __all__ = [
     "mcore_memory_footprint_mb",
     "mcore_param_count",
+    "mcore_param_count_live",
     "parse_main_layer_chars",
     "print_mcore_model_stats",
 ]
@@ -219,14 +226,24 @@ def _mamba_layer_params(
 # ---------------------------------------------------------------------------
 
 
+_ALLOWED_HYBRID_CHARS = {_HYBRID_MAMBA, _HYBRID_ATTN, _HYBRID_MLP, _HYBRID_MOE}
+
+
 def parse_main_layer_chars(hybrid_layer_pattern: str, num_layers: int | None = None) -> list[str]:
     """Extract per-layer characters from the main (non-MTP) part of a hybrid pattern.
 
     Strips the MTP suffix (``/...``) and PP boundaries (``|``), returning one char per layer.
     When ``num_layers`` is provided the result length must equal it exactly.
+    Raises ``ValueError`` for any character not in the supported set ``{M, *, -, E}``.
     """
     main = hybrid_layer_pattern.split("/")[0]
     chars = [c for c in main if c != "|"]
+    unknown = {c for c in chars if c not in _ALLOWED_HYBRID_CHARS}
+    if unknown:
+        raise ValueError(
+            f"Unsupported hybrid layer chars {unknown} in pattern '{hybrid_layer_pattern}'. "
+            f"Supported: {_ALLOWED_HYBRID_CHARS}"
+        )
     if num_layers is not None and len(chars) != num_layers:
         raise ValueError(
             f"Hybrid pattern '{hybrid_layer_pattern}' has {len(chars)} layers "
@@ -418,6 +435,54 @@ def mcore_param_count(
     return total, active
 
 
+def mcore_param_count_live(model: GPTModel | MambaModel) -> int:
+    """Count parameters in a live MCore GPTModel or MambaModel (reduced across TP, EP, ETP, and PP ranks)."""
+    if isinstance(model, DynamicModule):
+        raise RuntimeError(
+            "mcore_param_count_live does not support DynamicModule. "
+            "Use mcore_param_count() with the active hyperparameter values instead."
+        )
+
+    tp_rank = get_tensor_model_parallel_rank()
+    # get_expert_tensor_parallel_rank() falls back to tp_rank when ETP is not configured.
+    etp_rank = get_expert_tensor_parallel_rank()
+
+    regular_params = 0  # allreduce=True (or unset): replicated / TP-sharded
+    expert_params = 0  # allreduce=False: EP-sharded (and possibly ETP-sharded)
+
+    for name, p in model.named_parameters():
+        if model.share_embeddings_and_output_weights and "output_layer.weight" in name:
+            continue
+        is_expert_parallel = not getattr(p, "allreduce", True)
+        is_tp_sharded = getattr(p, "tensor_model_parallel", False)
+        if is_expert_parallel:
+            # EP/ETP-sharded: ETP-sharded params are summed across all ETP ranks; non-ETP params
+            # are counted only on ETP rank 0 to avoid multiplying by ETP size in the EPxETP reduce.
+            if not is_tp_sharded and etp_rank != 0:
+                continue
+            expert_params += p.numel()
+        else:
+            # Non-expert: TP-sharded params are summed; replicated params counted on TP rank 0.
+            if not is_tp_sharded and tp_rank != 0:
+                continue
+            regular_params += p.numel()
+
+    device = next(model.parameters()).device
+
+    regular_tensor = torch.tensor([regular_params], device=device)
+    torch.distributed.all_reduce(regular_tensor, group=get_pipeline_model_parallel_group())
+    torch.distributed.all_reduce(regular_tensor, group=get_tensor_model_parallel_group())
+
+    ep_etp_group = get_expert_tensor_and_model_parallel_group(check_initialized=False)
+    if ep_etp_group is not None:
+        expert_tensor = torch.tensor([expert_params], device=device)
+        torch.distributed.all_reduce(expert_tensor, group=get_pipeline_model_parallel_group())
+        torch.distributed.all_reduce(expert_tensor, group=ep_etp_group)
+        return int((regular_tensor + expert_tensor).item())
+
+    return int(regular_tensor.item())
+
+
 def mcore_memory_footprint_mb(
     config: Any,
     vocab_size: int,
@@ -434,7 +499,9 @@ def mcore_memory_footprint_mb(
     Covers three components:
 
     * **params**: model weights at ``dtype_bytes`` precision.
-    * **kv_cache**: KV cache for all attention layers (2 tensors per layer at ``kv_cache_dtype_bytes`` precision).
+    * **kv_cache**: KV cache for all attention layers (2 tensors per layer at ``kv_cache_dtype_bytes``
+      precision). This assumes full global attention; configs with sliding-window or local attention
+      (e.g. some Nemotron variants) will have a smaller real KV cache — treat this as an upper bound.
     * **mamba_state**: recurrent SSM sliding-window state stored for all Mamba layers during
       generation (one buffer of size ``(d_inner + 2*ngroups*d_state) * d_conv`` per layer).
 

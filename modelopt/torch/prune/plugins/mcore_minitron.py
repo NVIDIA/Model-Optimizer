@@ -37,16 +37,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from megatron.core.extensions.transformer_engine import TELayerNormColumnParallelLinear
-from megatron.core.models.gpt.gpt_model import GPTModel
 from megatron.core.models.mamba.mamba_model import MambaModel
 from megatron.core.parallel_state import (
-    get_expert_tensor_and_model_parallel_group,
-    get_expert_tensor_parallel_rank,
     get_pipeline_model_parallel_group,
     get_pipeline_model_parallel_rank,
     get_pipeline_model_parallel_world_size,
-    get_tensor_model_parallel_group,
-    get_tensor_model_parallel_rank,
 )
 from megatron.core.tensor_parallel import (
     gather_from_tensor_model_parallel_region,
@@ -346,7 +341,7 @@ class MCoreMinitronSearcher(BaseSearcher):
         if self.config["skip_sorting"]:
             print_rank_0("Skipping sorting parameters...")
         else:
-            sort_parameters(self.model, self.hps_to_sort, verbose=True)
+            sort_parameters(self.model, self.hps_to_sort, verbose=False)
         registry.cleanup()
 
         if self.layer_scores:
@@ -735,103 +730,6 @@ class MCoreMinitronSearcher(BaseSearcher):
             )
 
         return metrics
-
-
-def get_mcore_param_count(model: GPTModel | MambaModel) -> int:
-    """Get the number of parameters in the MCore GPTModel or MambaModel (reduced across TP, EP, ETP, and PP ranks)."""
-    assert isinstance(model, (GPTModel, MambaModel)), "Model must be a GPTModel or MambaModel"
-    if isinstance(model, DynamicModule):
-        return int(_param_num_dynamic(model))
-    else:
-        return int(_param_num(model))
-
-
-def _param_num(model: GPTModel | MambaModel) -> float:
-    """Get the number of parameters in the model (reduced across TP, EP, ETP, and PP ranks).
-
-    Expert params (``allreduce=False``) are EP/ETP-sharded and require a separate reduction over
-    the joint EPxETP group rather than the regular TP group.  Non-expert params are reduced over
-    PP and TP as before.  When EP is not configured the expert path is a no-op.
-    """
-    tp_rank = get_tensor_model_parallel_rank()
-    # get_expert_tensor_parallel_rank() falls back to tp_rank when ETP is not configured.
-    etp_rank = get_expert_tensor_parallel_rank()
-
-    regular_params = 0  # allreduce=True (or unset): replicated / TP-sharded
-    expert_params = 0  # allreduce=False: EP-sharded (and possibly ETP-sharded)
-
-    for name, p in model.named_parameters():
-        if model.share_embeddings_and_output_weights and "output_layer.weight" in name:
-            continue
-        is_expert_parallel = not getattr(p, "allreduce", True)
-        is_tp_sharded = getattr(p, "tensor_model_parallel", False)
-        if is_expert_parallel:
-            # EP/ETP-sharded: ETP-sharded params are summed across all ETP ranks; non-ETP params
-            # are counted only on ETP rank 0 to avoid multiplying by ETP size in the EPxETP reduce.
-            if not is_tp_sharded and etp_rank != 0:
-                continue
-            expert_params += p.numel()
-        else:
-            # Non-expert: TP-sharded params are summed; replicated params counted on TP rank 0.
-            if not is_tp_sharded and tp_rank != 0:
-                continue
-            regular_params += p.numel()
-
-    device = next(model.parameters()).device
-
-    regular_tensor = torch.tensor([regular_params], device=device)
-    torch.distributed.all_reduce(regular_tensor, group=get_pipeline_model_parallel_group())
-    torch.distributed.all_reduce(regular_tensor, group=get_tensor_model_parallel_group())
-
-    ep_etp_group = get_expert_tensor_and_model_parallel_group(check_initialized=False)
-    if ep_etp_group is not None:
-        expert_tensor = torch.tensor([expert_params], device=device)
-        torch.distributed.all_reduce(expert_tensor, group=get_pipeline_model_parallel_group())
-        torch.distributed.all_reduce(expert_tensor, group=ep_etp_group)
-        return (regular_tensor + expert_tensor).item()
-
-    return regular_tensor.item()
-
-
-def _param_num_dynamic(
-    model: _DynamicMCoreLanguageModel, *, layer_numbers_to_count: list[int] | None = None
-) -> float:
-    """Get the number of parameters in the Dynamic Module (reduced across TP and PP ranks).
-
-    Args:
-        model: GPTModel or MambaModel converted to a DynamicModule.
-        layer_numbers_to_count: If specified, only count the parameters of the given layer numbers (1-indexed).
-            Only needed when input is a DynamicModule to correctly count the parameters of the active layers.
-    """
-
-    # NOTE: model.parameters() doesnt consider active_slice so we dont get sorted or trimmed parameters!
-    def get_param_count(mod, name) -> int:
-        """Use getattr to access parameters correctly."""
-        module_path, _, param_name = name.rpartition(".")
-        submodule = mod.get_submodule(module_path) if module_path else mod
-        return getattr(submodule, param_name).numel()
-
-    assert model.config.tensor_model_parallel_size == 1, (
-        "_param_num_dynamic does not support tensor parallelism (TP > 1)"
-    )
-
-    # Account for depth pruning with uneven PP and hybrid models!
-    # Dont double count output_layer parameters if model.share_embeddings_and_output_weights is True
-    params = sum(
-        get_param_count(model, name)
-        for name, _ in model.named_parameters()
-        if ("decoder.layers." not in name or layer_numbers_to_count is None)
-        and not (model.share_embeddings_and_output_weights and "output_layer.weight" in name)
-    )
-    if layer_numbers_to_count is not None:
-        for layer in model.decoder.layers:
-            if layer.layer_number in layer_numbers_to_count:
-                params += sum(get_param_count(layer, name) for name, _ in layer.named_parameters())
-
-    reduced_params = torch.Tensor([params]).to(device=next(model.parameters()).device)
-    torch.distributed.all_reduce(reduced_params, group=get_pipeline_model_parallel_group())
-    torch.distributed.all_reduce(reduced_params, group=get_tensor_model_parallel_group())
-    return reduced_params.item()
 
 
 MCoreMinitronConfig: type[ModeloptBaseConfig] = create_model(
