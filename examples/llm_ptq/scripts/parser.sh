@@ -20,6 +20,7 @@ parse_options() {
   # Default values
     MODEL_PATH=""
     QFORMAT=""
+    RECIPE=""
     KV_CACHE_QUANT=""
     TP=1
     PP=1
@@ -37,13 +38,14 @@ parse_options() {
     CAST_MXFP4_TO_NVFP4=false
 
   # Parse command-line options
-  ARGS=$(getopt -o "" -l "model:,quant:,kv_cache_quant:,tp:,pp:,sparsity:,awq_block_size:,calib:,calib_batch_size:,auto_quantize_bits:,output:,batch:,tasks:,lm_eval_tasks:,lm_eval_limit:,simple_eval_tasks:,trust_remote_code,use_seq_device_map,gpu_max_mem_percentage:,kv_cache_free_gpu_memory_fraction:,low_memory_mode,no-verbose,calib_dataset:,calib_seq:,auto_quantize_method:,auto_quantize_score_size:,auto_quantize_checkpoint:,moe_calib_experts_ratio:,cast_mxfp4_to_nvfp4" -n "$0" -- "$@")
+  ARGS=$(getopt -o "" -l "model:,quant:,recipe:,kv_cache_quant:,tp:,pp:,sparsity:,awq_block_size:,calib:,calib_batch_size:,auto_quantize_bits:,output:,batch:,tasks:,lm_eval_tasks:,lm_eval_limit:,simple_eval_tasks:,trust_remote_code,use_seq_device_map,gpu_max_mem_percentage:,kv_cache_free_gpu_memory_fraction:,low_memory_mode,no-verbose,calib_dataset:,calib_seq:,auto_quantize_method:,auto_quantize_score_size:,auto_quantize_checkpoint:,moe_calib_experts_ratio:,cast_mxfp4_to_nvfp4" -n "$0" -- "$@")
 
   eval set -- "$ARGS"
   while true; do
     case "$1" in
       --model ) MODEL_PATH="$2"; shift 2;;
       --quant ) QFORMAT="$2"; shift 2;;
+      --recipe ) RECIPE="$2"; shift 2;;
       --kv_cache_quant ) KV_CACHE_QUANT="$2"; shift 2;;
       --tp ) TP="$2"; shift 2;;
       --pp ) PP="$2"; shift 2;;
@@ -99,9 +101,16 @@ parse_options() {
   fi
 
   # Verify required options are provided
-  if [ -z "$MODEL_PATH" ] || [ -z "$QFORMAT" ] || [ -z "$TASKS" ]; then
-    echo "Usage: $0 --model=<MODEL_PATH> --quant=<QFORMAT> --tasks=<TASK,...>"
+  if [ -z "$MODEL_PATH" ] || [ -z "$TASKS" ] || ([ -z "$QFORMAT" ] && [ -z "$RECIPE" ]); then
+    echo "Usage: $0 --model=<MODEL_PATH> (--quant=<QFORMAT> | --recipe=<RECIPE>) --tasks=<TASK,...>"
     echo "Optional args: --sparsity=<SPARSITY_FMT> --awq_block_size=<AWQ_BLOCK_SIZE> --calib=<CALIB_SIZE>"
+    exit 1
+  fi
+
+  # --quant and --recipe are mutually exclusive: --recipe is a full PTQ spec, while
+  # --quant selects a built-in qformat preset. Pick exactly one.
+  if [ -n "$QFORMAT" ] && [ -n "$RECIPE" ]; then
+    echo "Cannot specify both --quant and --recipe; pick one." >&2
     exit 1
   fi
 
@@ -135,6 +144,7 @@ parse_options() {
   echo "================="
   echo "model: $MODEL_PATH"
   echo "quant: $QFORMAT"
+  echo "recipe: $RECIPE"
   echo "tp (TensorRT-LLM Checkpoint only): $TP"
   echo "pp (TensorRT-LLM Checkpoint only): $PP"
   echo "sparsity: $SPARSITY_FMT"
