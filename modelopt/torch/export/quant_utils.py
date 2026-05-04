@@ -42,6 +42,7 @@ from modelopt.torch.quantization.utils import (
     QuantizerAttrNames,
     quantizer_attr_names,
     reduce_block_amax,
+    representative_weight_quantizer,
     weight_attr_names,
 )
 from modelopt.torch.utils import clear_cuda_cache
@@ -546,7 +547,7 @@ def _compute_kv_cache_dtype(
 
 def get_weight_block_size(module: nn.Module, weight_name: str = "weight") -> int:
     """Returns the weight block size."""
-    weight_quantizer = getattr(module, quantizer_attr_names(weight_name).weight_quantizer, None)
+    weight_quantizer = representative_weight_quantizer(module, weight_name)
 
     if weight_quantizer is None:
         return 0
@@ -572,7 +573,11 @@ def get_quantization_format(module) -> str | None:
     """
 
     def _get_quantization_from_layer(layer, quantizer_attr_names: QuantizerAttrNames):
-        weight_quantizer = getattr(layer, quantizer_attr_names.weight_quantizer, None)
+        # Singular form first, plural ModuleList fallback (fused-experts).
+        # Strip the "_weight_quantizer" suffix to recover the weight attr name.
+        weight_attr = quantizer_attr_names.weight_quantizer
+        weight_name = weight_attr[: -len("_weight_quantizer")].rstrip("_") or "weight"
+        weight_quantizer = representative_weight_quantizer(layer, weight_name)
         input_quantizer = getattr(layer, quantizer_attr_names.input_quantizer, None)
 
         if weight_quantizer is None or not weight_quantizer.is_enabled:

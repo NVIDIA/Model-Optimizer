@@ -24,7 +24,7 @@ pipeline:
   task_0:
     script: common/eagle3/make_dataset.sh
     args:
-      - -f modules/Model-Optimizer/examples/speculative_decoding/prepare_input_conversations/example_data_config.yaml
+      - -f modules/Model-Optimizer/examples/dataset/example_data_config.yaml
       - --full-conversations
     slurm_config:
       _factory_: "slurm_factory"
@@ -44,9 +44,6 @@ pipeline:
       - training.disable_tqdm=true
       - training.ar_validate_steps=500000
       - training.num_train_epochs=1
-    environment:
-      - HOME: /tmp
-      - TORCHINDUCTOR_CACHE_DIR: /tmp/torch_cache
     slurm_config:
       _factory_: "slurm_factory"
       nodes: 1
@@ -68,8 +65,6 @@ pipeline:
       - --concurrency 1
     environment:
       - HF_MODEL_CKPT: <<global_vars.hf_model>>
-      - HOME: /tmp
-      - TORCHINDUCTOR_CACHE_DIR: /tmp/torch_cache
     slurm_config:
       _factory_: "slurm_factory"
       nodes: 1

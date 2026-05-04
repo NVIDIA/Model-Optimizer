@@ -114,6 +114,7 @@ Please reference our [framework scripts](#framework-scripts) and our [docs](http
 | GLM-4.7<sup>8</sup> | ✅ | - | - | - | ✅ |
 | Kimi K2 | - | - | - | - | ✅ |
 | MiniMax M2.1 | - | - | - | - | ✅ |
+| GPT-OSS<sup>10</sup> | - | - | - | - | ✅ |
 | T5 | ✅ | ✅ | ✅ | ✅ | - |
 | Whisper<sup>9</sup> | ✅ | ❌ | ❌ | ❌ | - |
 | Nemotron-3 | ✅ | ❌ | ❌ | ❌ | ✅ |
@@ -128,7 +129,8 @@ Please reference our [framework scripts](#framework-scripts) and our [docs](http
 > *<sup>6.</sup>Some models currently support export to HF format only.* \
 > *<sup>7.</sup>[PTQ for DeepSeek](../deepseek/README.md)* \
 > *<sup>8.</sup>GLM-4.7 has MTP (Multi-Token Prediction) layers that are automatically loaded and excluded from quantization.* \
-> *<sup>9.</sup>Running Whisper model with transformers>=5.0 requires [torchcodec](https://github.com/meta-pytorch/torchcodec?tab=readme-ov-file#installing-cuda-enabled-torchcodec) and other system packages (e.g. ffmpeg).*
+> *<sup>9.</sup>Running Whisper model with transformers>=5.0 requires [torchcodec](https://github.com/meta-pytorch/torchcodec?tab=readme-ov-file#installing-cuda-enabled-torchcodec) and other system packages (e.g. ffmpeg).* \
+> *<sup>10.</sup>GPT-OSS ships with native MXFP4 weights; NVFP4 export is produced via the closed-form `--cast_mxfp4_to_nvfp4` cast (see [MXFP4 → NVFP4 cast](#mxfp4--nvfp4-cast-for-gpt-oss)).*
 
 > *The accuracy loss after PTQ may vary depending on the actual model and the quantization method. Different models may have different accuracy loss and usually the accuracy loss is more significant when the base model is small. If the accuracy after PTQ is not meeting the requirement, please try either modifying [hf_ptq.py](./hf_ptq.py) and disabling the KV cache quantization or using the [QAT](./../llm_qat/README.md) instead. For NVFP4 quantization specifically, we recommend `nvfp4_mlp_only`, `nvfp4_experts_only`, or `nvfp4_omlp_only` to achieve higher accuracy by restricting quantization to the MLP/expert layers (and optionally the `o_proj` layer) while keeping the attention QKV projections unquantized.*
 
@@ -220,6 +222,22 @@ Available KV cache formats:
 | `none` | Disable KV cache quantization |
 
 > *Formats ending in `_cast` (fp8_cast, nvfp4_cast) are fast — they set the amax to the format's full range without data-driven calibration. Other formats use data-driven calibration for potentially better accuracy.*
+
+#### MXFP4 → NVFP4 cast (for GPT-OSS)
+
+GPT-OSS checkpoints (`openai/gpt-oss-20b`, `openai/gpt-oss-120b`) ship with native MXFP4 weights (`*_blocks` + `*_scales` in the checkpoint, `quantization_config.quant_method == "mxfp4"`). Passing `--cast_mxfp4_to_nvfp4` tells `hf_ptq.py` to read the source MXFP4 scales and produce a closed-form, bit-exact NVFP4 weight export — no GEMM-level recalibration of the weights needed.
+
+```bash
+python hf_ptq.py \
+  --pyt_ckpt_path openai/gpt-oss-20b \
+  --qformat nvfp4_mlp_only \
+  --cast_mxfp4_to_nvfp4 \
+  --export_path <quantized_ckpt_path>
+```
+
+The cast pins each NVFP4 block's `scale_2 = 2^(k_max - 8)` and `_amax = 6 * 2^k_j`, both derived from the source MXFP4 E8M0 scales. For blocks whose `k_j` lands in E4M3's representable window (`k_max - k_j ≤ 17`), NVFP4 dequant matches MXFP4 dequant bit-for-bit; out-of-range blocks fall back to a data-derived per-block amax.
+
+> *`--cast_mxfp4_to_nvfp4` requires an NVFP4-family `--qformat` (e.g. `nvfp4_mlp_only`, `nvfp4_experts_only`, `nvfp4`) and is incompatible with `--auto_quantize_bits`.*
 
 #### Deepseek R1
 

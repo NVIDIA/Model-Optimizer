@@ -51,6 +51,10 @@ srun \
     "
 ```
 
+### Container registry credentials (pyxis)
+
+If `srun --container-image` uses an image from a private registry (e.g., `nvcr.io/nvidia/...`), pyxis/enroot needs registry credentials on the cluster in `~/.config/enroot/.credentials`. See `skills/common/credentials.md` for the NGC / Docker / HF token setup. Without this, `srun` fails with `401 Unauthorized` when the compute node pulls.
+
 Submit and capture the job ID:
 
 ```bash
