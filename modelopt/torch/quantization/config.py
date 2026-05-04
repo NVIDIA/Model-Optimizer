@@ -228,6 +228,8 @@ _default_disabled_quantizer_cfg: list[QuantizerCfgEntry] = [
         "enable": False,
     },  # Skip the MOE router
     {"quantizer_name": "*linear_attn.conv1d*", "enable": False},
+    {"quantizer_name": "*linear_attn.in_proj_a*", "enable": False},
+    {"quantizer_name": "*linear_attn.in_proj_b*", "enable": False},
     {"quantizer_name": "*mixer.conv1d*", "enable": False},  # Skip mamba conv1d
     {"quantizer_name": "*output_layer*", "enable": False},
     {"quantizer_name": "output.*", "enable": False},
