@@ -104,6 +104,8 @@ def _make_wan22_video_shape_hook(transformer: nn.Module):
         logger.debug("Wan 2.2 transformer has no config.patch_size; hook inert")
 
         def _noop(module, args, kwargs):
+            # Returning None from a pre-hook (with_kwargs=True) means "don't
+            # modify args/kwargs" — the original call proceeds unchanged.
             return None
 
         return _noop

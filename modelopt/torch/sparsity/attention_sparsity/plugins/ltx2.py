@@ -326,17 +326,15 @@ class _LTX2SparseAttention(SparseAttentionModule):
     def _call_original_forward(self, *args, **kwargs):
         """Invoke the original module's forward, bypassing VSA.
 
-        ``SparseAttentionModule.forward`` passes through to the original
-        module when ``is_enabled`` is False — exploit that to avoid
-        reimplementing the fallback path.
+        Skips ``SparseAttentionModule`` in the MRO via
+        ``super(SparseAttentionModule, self)``.  Since ``DynamicModule``
+        defines no ``forward``, this resolves to the wrapped nn.Module's
+        ``forward`` (e.g. ``LTXSelfAttention.forward``) — the same target
+        ``SparseAttentionModule.forward`` falls through to when
+        ``is_enabled`` is False, but reached without depending on the
+        internals of that check.
         """
-        was_enabled = getattr(self, "_enabled", True)
-        self._enabled = False
-        try:
-            result = SparseAttentionModule.forward(self, *args, **kwargs)
-        finally:
-            self._enabled = was_enabled
-        return result
+        return super(SparseAttentionModule, self).forward(*args, **kwargs)
 
     def get_gate_compress_parameters(self):
         """Return trainable ``gate_compress`` parameters for later fine-tuning."""

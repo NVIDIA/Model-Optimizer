@@ -32,9 +32,13 @@ def register_custom_model_plugins_on_the_fly(model):
 # Built-in plugins
 from . import huggingface  # noqa: E402
 
-# Model-specific plugins for VSA.  Guarded by ``import_plugin`` so the
-# module-level imports stay soft — a missing dependency in one plugin must
-# not break the core sparse-attention API.
+# Model-specific plugins for VSA.  Guarded by ``import_plugin`` defensively:
+# today, neither ltx2.py nor wan22.py imports any optional third-party
+# package at module level (``ltx_core`` is imported lazily inside
+# ``_compute_qkv``), so these guards are inert — they catch nothing at
+# present.  They exist so that if a future plugin grows a module-level
+# dependency on an optional package (e.g. a diffusers/lightricks helper),
+# a missing install in one plugin won't break the core sparse-attention API.
 with import_plugin("ltx2"):
     from . import ltx2
 
