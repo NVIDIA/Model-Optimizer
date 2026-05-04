@@ -385,7 +385,7 @@ class TrtExecBenchmark(Benchmark):
                     "-p",
                     f"{self.remote_port}",
                     f"{self.remote_user}@{self.remote_ip}",
-                    f"{ld_path} {shlex.quote(trt_path)} --useCudaGraphs "
+                    f"{ld_path} {shlex.quote(trt_path)} --useCudaGraph "
                     f"--loadEngine={shlex.quote(self.remote_engine_path)}",
                 ]
                 trtexec_safe_cmd = ssh_pass + trtexec_safe_cmd
@@ -399,7 +399,7 @@ class TrtExecBenchmark(Benchmark):
                         "-p",
                         f"{self.remote_port}",
                         f"{self.remote_user}@{self.remote_ip}",
-                        f"{ld_path} {shlex.quote(trt_path)} --safe --useCudaGraphs "
+                        f"{ld_path} {shlex.quote(trt_path)} --safe --useCudaGraph "
                         f"--loadEngine={shlex.quote(self.remote_engine_path)}",
                     ]
                     trtexec_safe_cmd = ssh_pass + trtexec_safe_cmd
