@@ -798,10 +798,10 @@ def pre_quantize(
         "input_features" if model_type == "whisper" else "input_ids"
     ][0:1]
     # Strip leading padding tokens so the preview input shows real content
-    if model_type not in ("whisper",) and tokenizer is not None and tokenizer.pad_token_id is not None:
+    if model_type != "whisper" and tokenizer is not None and tokenizer.pad_token_id is not None:
         first_non_pad = (preview_input_ids[0] != tokenizer.pad_token_id).nonzero(as_tuple=True)[0]
         if first_non_pad.numel() > 0:
-            preview_input_ids = preview_input_ids[:, first_non_pad[0]:]
+            preview_input_ids = preview_input_ids[:, first_non_pad[0] :]
 
     # Generate preview before quantization
     if args.skip_generate:
