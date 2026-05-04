@@ -14,7 +14,6 @@
 # limitations under the License.
 
 # mypy: disable-error-code="index"
-import math
 import random
 import re
 from enum import Enum
@@ -746,35 +745,31 @@ her fear and anger)."""
     def _stratified_select(dataset: "Dataset", n: int) -> "Dataset":
         """Select ``n`` samples uniformly across the ``category`` column.
 
-        When ``category`` is present, each category contributes
-        ``ceil(n / num_categories)`` rows (capped by category size); the
-        result is truncated to exactly ``n`` rows by interleaving the
-        per-category samples round-robin so any further prefix slice
-        remains balanced. Falls back to ``range(n)`` when ``category`` is
-        absent. Indices come from ``range(category_size)`` (not random)
-        so behavior is deterministic.
+        Round-robin across categories until ``n`` rows are collected. The
+        resulting prefix is balanced; once a smaller category is exhausted
+        the remaining categories continue contributing, so exactly ``n``
+        rows are returned whenever ``n`` does not exceed the dataset size.
+        Falls back to ``range(n)`` when ``category`` is absent or there is
+        only one category. Indices come from ``range(category_size)`` (not
+        random) so behavior is deterministic.
         """
         if "category" not in dataset.column_names:
             return dataset.select(range(n))
         cat_to_rows: dict[str, list[int]] = {}
         for i, c in enumerate(dataset["category"]):
             cat_to_rows.setdefault(c, []).append(i)
-        num_cats = len(cat_to_rows)
-        if num_cats <= 1:
+        if len(cat_to_rows) <= 1:
             return dataset.select(range(n))
-        per_cat = math.ceil(n / num_cats)
-        # Take the first ``per_cat`` rows from each category (parquet order
-        # within a category is treated as the canonical sample order).
-        cat_samples = [
-            rows[: min(per_cat, len(rows))] for rows in cat_to_rows.values()
-        ]
-        # Round-robin interleave so the first N rows are balanced.
+        cat_lists = list(cat_to_rows.values())
         interleaved: list[int] = []
-        for i in range(per_cat):
-            for samples in cat_samples:
-                if i < len(samples):
-                    interleaved.append(samples[i])
-        return dataset.select(interleaved[:n])
+        max_len = max(len(c) for c in cat_lists)
+        for i in range(max_len):
+            for c in cat_lists:
+                if i < len(c):
+                    interleaved.append(c[i])
+                    if len(interleaved) == n:
+                        return dataset.select(interleaved)
+        return dataset.select(interleaved)
 
     def _resolve_external_data(
         self, dataset: "Dataset", speed_config: config_type | str
