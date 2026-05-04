@@ -185,7 +185,6 @@ class TrtExecBenchmark(Benchmark):
         self.latency_pattern = r"\[I\]\s+Latency:.*?median\s*=\s*([\d.]+)\s*ms"
 
         self._base_cmd = [
-            self.trtexec_path,
             f"--avgRuns={self.timing_runs}",
             f"--iterations={self.timing_runs}",
             f"--warmUp={self.warmup_runs}",
