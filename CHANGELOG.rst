@@ -21,7 +21,7 @@ Changelog
 - Add ``--cast_mxfp4_to_nvfp4`` flag to ``examples/llm_ptq/hf_ptq.py`` for closed-form, bit-exact MXFP4 → NVFP4 weight conversion. Supports the GPT-OSS family (``openai/gpt-oss-20b``, ``openai/gpt-oss-120b``). See `examples/llm_ptq/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq#mxfp4--nvfp4-cast-for-gpt-oss>`__ for usage.
 - DeepSeek PTQ (``examples/deepseek/ptq.py``) now defaults to native top-k calibration with post-hoc per-layer peer-max sync of expert ``input_quantizer.amax``; the all-experts path is preserved behind ``--calib_all_experts``.
 
-0.44 (2026-05-xx)
+0.44 (2026-05-18)
 ^^^^^^^^^^^^^^^^^
 
 **New Features**
@@ -60,6 +60,7 @@ Changelog
 - Bump minimum required PyTorch version to 2.8.
 - [Experimental] Add support for transformers>=5.0, including generic PTQ and unified HF checkpoint export for fused MoE expert modules (Mixtral, Qwen2-MoE, Qwen3-MoE, Qwen3.5-MoE, DeepSeek-V3, Jamba, OLMoE, etc.).
 - Improve ``megatron_preprocess_data``: add ``--reasoning_content`` support for Nemotron v3 datasets, eliminate intermediate JSONL for HuggingFace datasets, return output file prefixes from the Python API, add gzip input support (``.jsonl.gz``), add ``--strip_newlines`` flag for plain-text pretraining data, add ``--hf_streaming`` for very large datasets (only consumed rows downloaded), and auto-shuffle when ``--hf_max_samples_per_split`` is set to avoid biased sampling.
+- Add installation support for Python 3.14. Only basic unit tests are verified for now. Production usage is still default to Python 3.12. Python 3.10 support will be dropped in the next release.
 
 0.43 (2026-04-16)
 ^^^^^^^^^^^^^^^^^
