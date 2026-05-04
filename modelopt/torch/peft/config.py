@@ -92,6 +92,10 @@ class PEFTAttributeConfig(ModeloptBaseConfig):
     @classmethod
     def _parse_init_callable(cls, v):
         if isinstance(v, str):
+            if not v.startswith("torch.nn.init."):
+                raise ValueError(
+                    f"Initializer must be from 'torch.nn.init', got '{v}'"
+                )
             try:
                 module_path, func_name = v.rsplit(".", 1)
                 mod = importlib.import_module(module_path)
