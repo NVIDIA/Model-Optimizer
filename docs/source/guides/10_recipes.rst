@@ -238,7 +238,7 @@ a list splice are not supported.
    quantize:
      algorithm: max
      quant_cfg:
-       - $import: base_disable_all          # spliced from a single-element list snippet
+       - $import: base_disable_all          # appended from a single-entry snippet
        - quantizer_name: '*weight_quantizer'
          cfg:
            $import: fp8                     # cfg value replaced with imported dict
@@ -247,7 +247,8 @@ a list splice are not supported.
 In this example:
 
 - ``$import: base_disable_all`` and ``$import: default_disabled`` are **list elements**
-  — their snippets (YAML lists) are spliced into ``quant_cfg``.
+  — ``base_disable_all`` is appended as one entry, while ``default_disabled`` is
+  a YAML list spliced into ``quant_cfg``.
 - ``$import: fp8`` under ``cfg`` is a **dict value** — the snippet (a YAML dict of
   quantizer attributes) replaces the ``cfg`` field.
 

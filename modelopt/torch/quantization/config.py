@@ -1156,7 +1156,9 @@ class _QuantizeExportConfig(ModeloptBaseConfig):
     """An empty config."""
 
 
-_base_disable_all: list[QuantizerCfgEntry] = load_config("configs/ptq/units/base_disable_all")
+_base_disable_all: list[QuantizerCfgEntry] = [
+    cast("QuantizerCfgEntry", load_config("configs/ptq/units/base_disable_all"))
+]
 
 _default_disabled_quantizer_cfg: list[QuantizerCfgEntry] = load_config(
     "configs/ptq/units/default_disabled_quantizers"
