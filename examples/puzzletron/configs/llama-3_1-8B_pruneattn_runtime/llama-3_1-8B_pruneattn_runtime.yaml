@@ -1,0 +1,29 @@
+defaults:
+  - Llama-3_1-8B
+  - override pruning: attn_pruning
+  - _self_
+
+# Input Hugging Face model to compress
+input_hf_model_path: /lustre/fs1/portfolios/coreai/projects/coreai_dlalgo_llm/users/gkarch/puzzletron/checkpoints/meta-llama/Llama-3.1-8B-Instruct
+
+# Dataset path for pruning and NAS scoring
+dataset_path: /lustre/fs1/portfolios/coreai/projects/coreai_dlalgo_llm/users/gkarch/modelopt/datasets/nvidia/Nemotron-Post-Training-Dataset-v2
+
+# Working directory for puzzletron outputs
+puzzle_dir: /lustre/fs1/portfolios/coreai/projects/coreai_dlalgo_llm/users/gkarch/modelopt/Model-Optimizer/artifacts
+
+dist_timeout_minutes: 60
+
+calc_subblock_stats:
+  runtime_stats:
+    enabled: true
+    synth_dataset_num_requests: 32
+    backend: vllm
+    num_warmup_iters: 2
+    num_iters: 10
+    batch_size: 1
+
+# MIP memory constraint (in MiB)
+mip:
+  human_constraints:
+    target_latency: 21
