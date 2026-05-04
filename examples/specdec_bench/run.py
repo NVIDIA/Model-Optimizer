@@ -155,6 +155,7 @@ def run_simple(args):
         draft_model_dir=args.draft_model_dir,
         speculative_num_steps=args.draft_length,
         tensor_parallel_size=args.tp_size,
+        data_parallel_size=args.data_parallel_size,
         moe_expert_parallel_size=args.ep_size,
         trust_remote_code=args.trust_remote_code,
         tokenizer_path=args.tokenizer,

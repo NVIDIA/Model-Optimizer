@@ -75,6 +75,7 @@ class VLLMModel(Model):
             tokenizer=kwargs.get("tokenizer_path"),
             trust_remote_code=kwargs.get("trust_remote_code", False),
             tensor_parallel_size=kwargs.get("tensor_parallel_size", 1),
+            data_parallel_size=kwargs.get("data_parallel_size", 1),
             enable_expert_parallel=kwargs.get("moe_expert_parallel_size", 1) > 1,
             enable_prefix_caching=kwargs.get("prefix_cache", False),
             speculative_config=specdec,
