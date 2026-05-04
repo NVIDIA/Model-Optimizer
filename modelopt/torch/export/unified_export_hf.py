@@ -1189,12 +1189,25 @@ def export_hf_checkpoint(
     try:
         post_state_dict, hf_quant_config = _export_transformers_checkpoint(model, dtype)
 
-        if hf_quant_config is not None:
+        # Only treat the export as quantized when at least one quant_algo field is set.
+        # get_quant_config always returns a dict (even for sparsity-only or unmodified models),
+        # so emitting hf_quant_config.json unconditionally produces a file with
+        # "quant_algo": null that downstream loaders (e.g. TensorRT-LLM) reject as a
+        # malformed pre-quantized checkpoint.
+        quantization_details = (hf_quant_config or {}).get("quantization", {})
+        is_quantized_export = (
+            quantization_details.get("quant_algo") is not None
+            or quantization_details.get("kv_cache_quant_algo") is not None
+        )
+
+        if is_quantized_export:
             # Save hf_quant_config.json for backward compatibility
             with open(f"{export_dir}/hf_quant_config.json", "w") as file:
                 json.dump(hf_quant_config, file, indent=4)
 
             hf_quant_config = convert_hf_quant_config_format(hf_quant_config)
+        else:
+            hf_quant_config = None
 
         # Remove hf_quantizer from model so post_state_dict can be exported.
         if getattr(model, "hf_quantizer", None) is not None:
