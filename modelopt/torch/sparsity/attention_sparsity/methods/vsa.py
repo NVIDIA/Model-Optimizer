@@ -258,7 +258,12 @@ class VSA(SparseAttentionMethod):
             key: Key tensor [batch, heads, seq_len, dim].
             value: Value tensor [batch, heads, seq_len, dim].
             gate_compress: Learned gating weights [batch, heads, seq_len, dim].
-                          If None, uses equal weighting (0.5) for both branches.
+                          If None, the compression branch is disabled
+                          (equivalent to gate=0) so output reduces to the
+                          sparse branch alone — i.e. ``out = out_s``.  This
+                          matches an untrained LTX-2 whose ``to_gate_compress``
+                          is zero-initialised, and makes VSA at
+                          ``top_k_ratio=1.0`` reduce to dense attention.
             video_shape: Video dimensions (T, H, W). If None, uses self.video_shape.
             **kwargs: Additional arguments (ignored).
 

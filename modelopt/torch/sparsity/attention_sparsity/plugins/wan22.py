@@ -129,7 +129,13 @@ def _make_wan22_video_shape_hook(transformer: nn.Module):
         # Also expose on the transformer for debugging / external inspection.
         module._vsa_video_shape = video_shape
 
-        # Propagate to every VSA method instance in this transformer.
+        # Propagate to every VSA method instance in this transformer.  Only
+        # update slots this hook owns: if the user supplied an explicit
+        # ``video_shape`` via the sparsify config (or called
+        # ``set_video_shape`` directly), ``method.video_shape`` will already
+        # be non-None *without* our marker, and we leave it alone.  Slots we
+        # populated previously carry ``_wan22_auto_video_shape`` so they
+        # continue to refresh as inputs change across calls.
         for sub in module.modules():
             if not isinstance(sub, SparseAttentionModule):
                 continue
@@ -138,7 +144,12 @@ def _make_wan22_video_shape_hook(transformer: nn.Module):
                 continue
             if getattr(method, "name", None) != "vsa":
                 continue
+            if method.video_shape is not None and not getattr(
+                method, "_wan22_auto_video_shape", False
+            ):
+                continue
             method.set_video_shape(video_shape)
+            method._wan22_auto_video_shape = True
 
     return _hook
 
