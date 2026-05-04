@@ -262,13 +262,14 @@ class TrtExecBenchmark(Benchmark):
                 self.logger.debug(f"Wrote model bytes to temporary file: {model_path}")
 
             cmd = [*self._base_cmd, f"--onnx={model_path}"]
-            self.logger.debug(f"Running: {' '.join(cmd)}")
+            full_cmd = ["trtexec", *cmd]
+            self.logger.debug(f"Running: {' '.join(full_cmd)}")
             result = _run_trtexec(cmd)
             self._write_log_file(
                 log_file,
                 "\n".join(
                     [
-                        f"Command: {' '.join(cmd)}",
+                        f"Command: {' '.join(full_cmd)}",
                         f"Return code: {result.returncode}",
                         "=" * 80,
                         "STDOUT:",
