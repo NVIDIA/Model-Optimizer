@@ -140,18 +140,44 @@ def test_reset_allows_recollect():
     cal.collect(x)
     first = cal.compute_amax().clone()
 
-    with pytest.raises(RuntimeError, match="single collect"):
+    # collect() is one-shot per cycle until reset() is called.
+    with pytest.raises(RuntimeError, match="one-shot"):
         cal.collect(x)
 
     cal.reset()
-    # After reset the calibrator's _initial_amax has been freed; reconstruct.
-    cal2 = TritonNVFP4MSECalibrator(
-        amax=per_block_amax,
-        axis=0,
-        global_amax=global_amax,
-    )
-    cal2.collect(x)
-    assert torch.equal(first, cal2.compute_amax())
+    # After reset, the same calibrator instance can be re-used.
+    cal.collect(x)
+    assert torch.equal(first, cal.compute_amax())
+
+
+@requires_triton
+def test_input_validation():
+    """``nvfp4_fp8_scale_sweep`` should reject malformed inputs cleanly."""
+    from modelopt.torch.kernels.quantization.gemm import fp8_scale_candidates, nvfp4_fp8_scale_sweep
+
+    device = "cuda"
+    x = torch.randn(64, BLOCK_SIZE, device=device)
+    g = x.abs().amax()
+
+    # CPU tensor → ValueError (not bare AssertionError).
+    with pytest.raises(ValueError, match="CUDA"):
+        nvfp4_fp8_scale_sweep(x.cpu(), g.cpu())
+
+    # block_size <= 0.
+    with pytest.raises(ValueError, match="block_size"):
+        nvfp4_fp8_scale_sweep(x, g, block_size=0)
+    with pytest.raises(ValueError, match="block_size"):
+        nvfp4_fp8_scale_sweep(x, g, block_size=-1)
+
+    # Non-divisible numel.
+    with pytest.raises(ValueError, match="not divisible"):
+        nvfp4_fp8_scale_sweep(x, g, block_size=15)
+
+    # Empty / wrong-rank candidates.
+    with pytest.raises(ValueError, match="non-empty 1-D"):
+        nvfp4_fp8_scale_sweep(x, g, candidates=torch.empty(0, device=device))
+    with pytest.raises(ValueError, match="non-empty 1-D"):
+        nvfp4_fp8_scale_sweep(x, g, candidates=fp8_scale_candidates(device).reshape(2, -1))
 
 
 def _bench(fn, warmup=2, iters=5):

@@ -355,6 +355,11 @@ def mse_calibrate(
     weight_quantizers = []
     seen_modules = set()
 
+    # Triton-fused FP8 sweep is on by default for NVFP4 static quant; set
+    # MODELOPT_NVFP4_TRITON_SWEEP=0 to fall back to the reference for debugging.
+    use_triton_fp8_sweep = os.environ.get("MODELOPT_NVFP4_TRITON_SWEEP", "1") != "0"
+    nvfp4_calibrator_cls = TritonNVFP4MSECalibrator if use_triton_fp8_sweep else NVFP4MSECalibrator
+
     for name, module in list(model.named_modules()):
         if isinstance(module, TensorQuantizer) and not module._disabled:
             if module._calibrator is not None and not module._dynamic and hasattr(module, "_amax"):
@@ -392,13 +397,7 @@ def mse_calibrate(
                         continue
 
                 if fp8_scale_sweep and is_nvfp4_static:
-                    # Replace calibrator with the fused Triton sweep kernel by default
-                    # (single-shot collect, ~7-20x faster for the weight-MSE phase).
-                    # Set MODELOPT_NVFP4_TRITON_SWEEP=0 to fall back to the reference
-                    # NVFP4MSECalibrator for debugging or numerics comparison.
-                    use_triton = os.environ.get("MODELOPT_NVFP4_TRITON_SWEEP", "1") != "0"
-                    cls = TritonNVFP4MSECalibrator if use_triton else NVFP4MSECalibrator
-                    module._calibrator = cls(
+                    module._calibrator = nvfp4_calibrator_cls(
                         amax=initial_amax,
                         axis=module._calibrator._axis,
                         global_amax=module.global_amax,
