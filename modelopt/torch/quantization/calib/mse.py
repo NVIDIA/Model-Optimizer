@@ -24,7 +24,7 @@ import torch.nn.functional as F
 from .. import utils as quant_utils
 from .calibrator import _Calibrator
 
-__all__ = ["MseCalibrator", "NVFP4MSECalibrator"]
+__all__ = ["MseCalibrator", "NVFP4MSECalibrator", "TritonNVFP4MSECalibrator"]
 
 
 class MseCalibrator(_Calibrator):
@@ -198,3 +198,82 @@ class NVFP4MSECalibrator(MseCalibrator):
         valid_mask = torch.isfinite(fp8_values) & (fp8_values > 0)
         fp8_values = fp8_values[valid_mask]
         return fp8_values / 448.0
+
+
+class TritonNVFP4MSECalibrator(NVFP4MSECalibrator):
+    """Triton-fused FP8 scale sweep calibrator for NVFP4 weight MSE.
+
+    Numerically equivalent to :class:`NVFP4MSECalibrator` but evaluates all 126
+    candidates in a single fused Triton kernel — one weight read instead of 126.
+
+    Limitation: a single ``collect()`` call is supported per ``compute_amax`` cycle.
+    This matches the static weight-MSE flow (``mse_calibrate``'s weight loop), where
+    the calibrator is collected once per weight and immediately consumed. For
+    activation calibration (multiple ``collect`` calls), use :class:`NVFP4MSECalibrator`.
+    """
+
+    def __init__(
+        self,
+        amax: torch.Tensor,
+        global_amax: torch.Tensor,
+        axis: int | tuple | list | None = None,
+        quant_func: Callable | None = None,
+        error_func: Callable | None = None,
+        blocks_per_program: int = 4,
+    ):
+        """Initialize the Triton-fused NVFP4 MSE calibrator.
+
+        See :class:`NVFP4MSECalibrator`. ``quant_func``/``error_func`` are unused by
+        the kernel path but accepted for API parity.
+        """
+        super().__init__(
+            amax=amax,
+            global_amax=global_amax,
+            axis=axis,
+            quant_func=quant_func,
+            error_func=error_func,
+        )
+        self._blocks_per_program = blocks_per_program
+        self._best_amax: torch.Tensor | None = None
+
+    @torch.no_grad()
+    def collect(self, x: torch.Tensor):
+        """Run the fused FP8 sweep kernel and store the resulting per-block amax."""
+        from modelopt.torch.kernels.quantization.gemm import nvfp4_fp8_scale_sweep
+
+        if self._best_amax is not None:
+            raise RuntimeError(
+                "TritonNVFP4MSECalibrator only supports a single collect() per cycle; "
+                "call reset() before collecting again."
+            )
+
+        x = x.detach()
+        block_size = x.shape[-1]
+        n_blocks = x.numel() // block_size
+        if self._initial_amax.numel() != n_blocks:
+            raise ValueError(
+                f"initial_amax.numel() ({self._initial_amax.numel()}) does not match "
+                f"the number of NVFP4 blocks ({n_blocks})."
+            )
+
+        best_amax_flat = nvfp4_fp8_scale_sweep(
+            x,
+            self._global_amax,
+            block_size=block_size,
+            blocks_per_program=self._blocks_per_program,
+        )
+        # Match the original shape/dtype of _initial_amax so downstream load_calib_amax
+        # behaves identically to the reference path.
+        self._best_amax = best_amax_flat.reshape(self._initial_amax.shape).to(
+            self._initial_amax.dtype
+        )
+
+    @torch.no_grad()
+    def compute_amax(self, verbose: bool = False):
+        """Return the per-block amax computed during ``collect``."""
+        return self._best_amax
+
+    def reset(self):
+        """Reset the stored best amax."""
+        self._best_amax = None
+        super().reset()
