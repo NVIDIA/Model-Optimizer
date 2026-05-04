@@ -256,27 +256,51 @@ class TestQuantFusedExperts:
 # Tests for export
 # ---------------------------------------------------------------------------
 class TestExportFusedExperts:
+    @staticmethod
+    def _cleanup_registry(mod_type):
+        if QuantModuleRegistry.get(mod_type) is not None:
+            QuantModuleRegistry.unregister(mod_type)
+
     def test_export_creates_per_expert_submodules(self):
         """_export_fused_experts should create per-expert submodules with standard naming."""
+        import modelopt.torch.quantization as mtq
         from modelopt.torch.export.moe_utils import _export_fused_experts
 
-        experts = _SyntheticFusedExperts()
-        expert_type = type(experts)
+        model = _TinyMoEModel()
+        expert_type = type(model.moe.experts)
+        self._cleanup_registry(expert_type)
 
-        # Manually register and convert
-        if QuantModuleRegistry.get(expert_type) is None:
-            QuantModuleRegistry.register({expert_type: "test.SyntheticFusedExperts"})(
-                _QuantFusedExperts
-            )
-        converted = QuantModuleRegistry.convert(experts)
+        quant_cfg = {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {
+                    "quantizer_name": "*gate_up_proj_input_quantizer",
+                    "cfg": {"num_bits": 8, "axis": None},
+                },
+                {
+                    "quantizer_name": "*down_proj_input_quantizer",
+                    "cfg": {"num_bits": 8, "axis": None},
+                },
+                {
+                    "quantizer_name": "*gate_up_proj_weight_quantizer",
+                    "cfg": {"num_bits": 8, "axis": 0},
+                },
+                {
+                    "quantizer_name": "*down_proj_weight_quantizer",
+                    "cfg": {"num_bits": 8, "axis": 0},
+                },
+            ],
+            "algorithm": "max",
+        }
 
-        # Run a forward pass to calibrate (set amaxes)
-        seq_len = 16
-        hidden_states = torch.randn(seq_len, HIDDEN_DIM)
-        top_k_index = torch.randint(0, NUM_EXPERTS, (seq_len, TOP_K))
-        top_k_weights = torch.softmax(torch.randn(seq_len, TOP_K), dim=-1)
-        with torch.no_grad():
-            converted(hidden_states, top_k_index, top_k_weights)
+        def forward_loop(m):
+            torch.manual_seed(0)
+            for _ in range(2):
+                x = torch.randn(1, 4, HIDDEN_DIM)
+                m(x)
+
+        mtq.quantize(model, quant_cfg, forward_loop=forward_loop)
+        converted = model.moe.experts
 
         _export_fused_experts(converted, torch.float16)
 
@@ -297,8 +321,7 @@ class TestExportFusedExperts:
         assert not hasattr(converted, "down_proj")
         assert not hasattr(converted, "gate_up_proj_weight_quantizers")
 
-        if QuantModuleRegistry.get(expert_type) is not None:
-            QuantModuleRegistry.unregister(expert_type)
+        self._cleanup_registry(expert_type)
 
     def test_uncalibrated_expert_gate_up_share_amax(self, monkeypatch):
         """gate_proj and up_proj must share weight_scale_2 even when an expert
@@ -899,3 +922,48 @@ class TestNormalizeFusedExpertsQuantizerName:
             _normalize_fused_experts_quantizer_name("moe.layers.3.gate.weight")
             == "moe.layers.3.gate.weight"
         )
+
+
+# Verifies that MSE calibration discovers and calibrates every per-expert weight quantizer
+# inside a fused-expert ModuleList (both gate_up_proj and down_proj, for all experts).
+class TestFusedExpertsMSECalibration:
+    @staticmethod
+    def _cleanup_registry(mod_type):
+        if QuantModuleRegistry.get(mod_type) is not None:
+            QuantModuleRegistry.unregister(mod_type)
+
+    def test_mse_calibration_populates_all_expert_quantizers(self):
+        import modelopt.torch.quantization as mtq
+
+        model = _TinyMoEModel()
+        expert_type = type(model.moe.experts)
+        self._cleanup_registry(expert_type)
+
+        mtq.quantize(
+            model,
+            {
+                "quant_cfg": [
+                    {"quantizer_name": "*", "enable": False},
+                    {
+                        "quantizer_name": "*gate_up_proj_weight_quantizer",
+                        "cfg": {"num_bits": 8, "axis": None},
+                    },
+                    {
+                        "quantizer_name": "*down_proj_weight_quantizer",
+                        "cfg": {"num_bits": 8, "axis": None},
+                    },
+                ],
+                "algorithm": "mse",
+            },
+            forward_loop=lambda m: [m(torch.randn(1, 4, HIDDEN_DIM)) for _ in range(2)],
+        )
+
+        experts = model.moe.experts
+        for idx in range(NUM_EXPERTS):
+            assert experts.gate_up_proj_weight_quantizers[idx].amax is not None, (
+                f"gate_up_proj_weight_quantizers[{idx}] not calibrated — Bug 1 regression"
+            )
+            assert experts.down_proj_weight_quantizers[idx].amax is not None, (
+                f"down_proj_weight_quantizers[{idx}] not calibrated"
+            )
+        self._cleanup_registry(expert_type)
