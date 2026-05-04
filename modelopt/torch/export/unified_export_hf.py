@@ -69,6 +69,7 @@ from .layer_utils import (
     is_moe,
     is_quantlinear,
     set_expert_quantizer_amax,
+    sync_linear_attn_fused_projection_amax,
     sync_moe_gate_up_amax,
 )
 from .model_config import (
@@ -812,6 +813,15 @@ def _export_transformers_checkpoint(
             f"weight_scale_2 after requantize_resmooth_fused_llm_layers. "
             f"This typically means the dummy forward did not activate these experts. "
             f"Taking element-wise max of amaxes for serving-engine fusion."
+        )
+
+    # Safety net for Qwen3.5/Qwen3-Next GDN projections. These remain separate
+    # HF tensors, but vLLM fuses qkv+z and b+a at load time.
+    synced = sync_linear_attn_fused_projection_amax(model)
+    if synced:
+        warnings.warn(
+            f"Synced quantizer amax/global_amax for {synced} linear-attention "
+            f"projection pair(s) that are fused by serving engines."
         )
 
     # Process all quantized modules and export weights

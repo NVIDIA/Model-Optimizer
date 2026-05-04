@@ -1354,9 +1354,23 @@ def preprocess_linear_fusion(modules: list[torch.nn.Module], resmooth_only=False
     """Preprocess the quantized linears that we plan to fuse.
 
     Use resmooth_only for MOE experts as each individual expert is not fused.
+
+    When the modules carry mismatched quantization formats — most often after
+    AutoQuantize picks different formats for layers that share input but were
+    not coalesced into a single search group — we cannot coalesce them into a
+    fused linear. In that case, fall back to skipping the fusion so each linear
+    exports independently with its own format, instead of asserting.
     """
     quantization_format_list = [get_quantization_format(module) for module in modules]
-    assert all_items_same(quantization_format_list), "Modules have different quantization formats"
+    if not all_items_same(quantization_format_list):
+        warn(
+            "preprocess_linear_fusion: modules in this fusion group have mixed "
+            f"quantization formats {quantization_format_list}. Skipping fusion; "
+            "each linear will export with its own format. Common cause: "
+            "AutoQuantize assigned different formats to fusion-mate linears.",
+            stacklevel=2,
+        )
+        return
 
     # Activation
     if hasattr(modules[0], "input_quantizer"):

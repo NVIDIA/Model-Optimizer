@@ -15,6 +15,7 @@
 
 import argparse
 import copy
+import os
 import random
 import time
 import warnings
@@ -105,6 +106,7 @@ QUANT_CFG_CHOICES: dict[str, dict[str, Any]] = {
     "int8_sq": mtq.INT8_SMOOTHQUANT_CFG,
     "int8_wo": mtq.INT8_WEIGHT_ONLY_CFG,
     "fp8": mtq.FP8_DEFAULT_CFG,
+    "fp8_w8a8": mtq.FP8_DEFAULT_CFG,
     "int4_awq": mtq.INT4_AWQ_CFG,
     "w4a8_awq": mtq.W4A8_AWQ_BETA_CFG,
     "nvfp4": mtq.NVFP4_DEFAULT_CFG,
@@ -137,6 +139,43 @@ KV_QUANT_CFG_CHOICES = {
 _KV_CAST_FORMATS = {"fp8_cast", "nvfp4_cast"}
 
 mto.enable_huggingface_checkpointing()
+
+
+NVFP4_W4A16_CFG = {
+    "quant_cfg": [
+        {"quantizer_name": "*", "enable": False},
+        {
+            "quantizer_name": "*weight_quantizer",
+            "cfg": {
+                "num_bits": (2, 1),
+                "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+            },
+        },
+        {"quantizer_name": "*input_quantizer", "enable": False},
+        *_default_disabled_quantizer_cfg,
+    ],
+    "algorithm": "max",
+}
+
+FP8_W8A16_CFG = {
+    "quant_cfg": [
+        {"quantizer_name": "*", "enable": False},
+        {
+            "quantizer_name": "*weight_quantizer",
+            "cfg": {"num_bits": (4, 3), "axis": None},
+        },
+        {"quantizer_name": "*input_quantizer", "enable": False},
+        *_default_disabled_quantizer_cfg,
+    ],
+    "algorithm": "max",
+}
+
+QUANT_CFG_CHOICES.update(
+    {
+        "nvfp4_w4a16": NVFP4_W4A16_CFG,
+        "fp8_w8a16": FP8_W8A16_CFG,
+    }
+)
 
 
 def extract_and_prepare_language_model_from_vl(full_model):
@@ -314,6 +353,7 @@ def auto_quantize(
         qformat
         in [
             "fp8",
+            "fp8_w8a8",
             "int8_sq",
             "int8_wo",
             "int4_awq",
@@ -328,6 +368,8 @@ def auto_quantize(
             "nvfp4_omlp_only",
             "nvfp4_local_hessian",
             "mxfp8",
+            "nvfp4_w4a16",
+            "fp8_w8a16",
         ]
         for qformat in qformat_list
     ), "One or more quantization formats provided are not supported for unified checkpoint export"
@@ -350,6 +392,44 @@ def auto_quantize(
             f"Invalid auto_quantize_method: {auto_quantize_method}. Must be 'gradient' or 'kl_div'"
         )
 
+    # Let AutoQuantize search lm_head, but keep modules out that vLLM either
+    # constructs as BF16-only paths today or has known unsafe fused dispatch for.
+    disabled_layers = [
+        entry["quantizer_name"]
+        for entry in _default_disabled_quantizer_cfg
+        if "parent_class" not in entry and entry["quantizer_name"] != "*lm_head*"
+    ]
+    enable_linear_attn_big3 = os.environ.get("MODELOPT_AUTOQ_ENABLE_LINEAR_ATTN_BIG3") == "1"
+    enable_linear_attn_all = os.environ.get("MODELOPT_AUTOQ_ENABLE_LINEAR_ATTN_ALL") == "1"
+    enable_shared_expert = os.environ.get("MODELOPT_AUTOQ_ENABLE_SHARED_EXPERT") == "1"
+    if enable_linear_attn_all:
+        enable_linear_attn_big3 = True
+    autoq_extra_disabled = [
+        "*shared_expert_gate*",
+        # Keep the GDN a/b projections in BF16 even for "all linear_attn"
+        # searches. Prior healthy NVFP4 controls excluded these small
+        # projections, while low-end full-search checkpoints quantized them.
+        "*linear_attn.in_proj_a*",
+        "*linear_attn.in_proj_b*",
+    ]
+    if not enable_shared_expert:
+        autoq_extra_disabled.append("*mlp.shared_expert*")
+    if not enable_linear_attn_big3:
+        autoq_extra_disabled.extend(
+            [
+                "*linear_attn.in_proj_qkv*",
+                "*linear_attn.in_proj_z*",
+                "*linear_attn.out_proj*",
+            ]
+        )
+    for pat in autoq_extra_disabled:
+        if pat not in disabled_layers:
+            disabled_layers.append(pat)
+    if is_multimodal_model(language_model):
+        for pat in ("*visual*", "*mtp*", "*vision_tower*"):
+            if pat not in disabled_layers:
+                disabled_layers.append(pat)
+
     language_model, _ = mtq.auto_quantize(
         language_model,
         constraints={"effective_bits": args.auto_quantize_bits},
@@ -364,14 +444,13 @@ def auto_quantize(
             len(calib_dataloader), max(auto_quantize_score_size // args.batch_size, 1)
         ),
         verbose=True,
-        # Disable all default disabled layers such as lm_head, mlp.gate, router etc.
-        disabled_layers=[
-            entry["quantizer_name"]
-            for entry in _default_disabled_quantizer_cfg
-            if "parent_class" not in entry
-        ],
+        disabled_layers=disabled_layers,
         method=auto_quantize_method,
         checkpoint=auto_quantize_checkpoint,
+        cost_model=args.auto_quantize_cost_model,
+        active_moe_expert_ratio=args.auto_quantize_active_moe_expert_ratio,
+        cost_lower_bound=args.auto_quantize_cost_lower_bound,
+        cost_objective=args.auto_quantize_cost_objective,
     )
 
     calibrate_loop = create_forward_loop(dataloader=calib_dataloader)
@@ -509,12 +588,26 @@ def load_model(args: argparse.Namespace):
             ]
 
             # We only quantize the language model for VLMs other than the type supported above.
-            extracted_lm, extracted_model_type = extract_and_prepare_language_model_from_vl(
-                full_model
-            )
-            if extracted_lm is not None:
-                language_model = extracted_lm
-                model_type = extracted_model_type
+            # For AutoQuantize, skip the eager visual-disable side-effect: it
+            # registers ``modelopt`` state on each visual sibling, which
+            # ``mtq.auto_quantize → apply_mode → is_converted`` then trips on
+            # ("Model has multiple modelopt states!"). AutoQuantize handles
+            # visual/mtp via ``disabled_layers`` patterns instead, so the
+            # extraction is unnecessary for that path.
+            #
+            # For ``--recipe`` mode on a VLM, lm_head sits on the OUTER
+            # CausalLM. Recipe rules can't see it via the inner language
+            # backbone, so we keep ``language_model = full_model`` here and
+            # let ``quantize_main`` strip visual/mtp siblings around
+            # ``mtq.quantize`` (so registration/calibration stays fast and
+            # batch_size auto-detect doesn't collapse to 1).
+            if args.auto_quantize_bits is None and args.recipe is None:
+                extracted_lm, extracted_model_type = extract_and_prepare_language_model_from_vl(
+                    full_model
+                )
+                if extracted_lm is not None:
+                    language_model = extracted_lm
+                    model_type = extracted_model_type
 
         tokenizer = get_tokenizer(args.pyt_ckpt_path, trust_remote_code=args.trust_remote_code)
 
@@ -630,12 +723,51 @@ def mono_quantize(
                     else None,
                 )
 
+        # When ``--recipe`` is given on a VLM we keep ``language_model =
+        # full_model`` (so recipe rules can match lm_head) but ``mtq.quantize``
+        # would otherwise walk and register quantizers on every Linear in the
+        # visual encoder + MTP head.
+        stripped_vlm_modules: dict[str, torch.nn.Module] = {}
+        if args.recipe is not None and language_model is full_model:
+            for path in ("model.visual", "mtp"):
+                parts = path.split(".")
+                parent = full_model
+                ok = True
+                for p in parts[:-1]:
+                    if not hasattr(parent, p):
+                        ok = False
+                        break
+                    parent = getattr(parent, p)
+                if ok and hasattr(parent, parts[-1]):
+                    mod = getattr(parent, parts[-1])
+                    if mod is not None and isinstance(mod, torch.nn.Module):
+                        stripped_vlm_modules[path] = mod
+                        setattr(parent, parts[-1], None)
+            if stripped_vlm_modules:
+                print(
+                    "[recipe] stripped VLM siblings before mtq.quantize: "
+                    + ", ".join(stripped_vlm_modules.keys())
+                )
+
         if calibration_only:
             language_model = mtq.calibrate(
                 language_model, quant_cfg["algorithm"], forward_loop=calibrate_loop
             )
         else:
             language_model = mtq.quantize(language_model, quant_cfg, forward_loop=calibrate_loop)
+
+        # Restore stripped VLM siblings so export sees the full model.
+        for path, mod in stripped_vlm_modules.items():
+            parts = path.split(".")
+            parent = full_model
+            for p in parts[:-1]:
+                parent = getattr(parent, p)
+            setattr(parent, parts[-1], mod)
+        if stripped_vlm_modules:
+            print(
+                "[recipe] restored VLM siblings after mtq.quantize: "
+                + ", ".join(stripped_vlm_modules.keys())
+            )
 
         # For VL models, update full_model to use the quantized language model
         if is_nemotron_vl_model:
@@ -1020,10 +1152,18 @@ def quantize_main(
             "Auto quantization needs multiple quantization format."
         )
 
+        # For VL models, autoquant must walk submodules of the OUTER CausalLM
+        # (which carries lm_head and the LM-head forward path) — otherwise
+        # lm_head and any sibling-of-language_model modules are silently
+        # invisible to the search. ``forward_step`` also needs the outer model
+        # to produce ``CausalLMOutputWithPast`` (for ``.loss`` / ``.logits``).
+        # Visual tower and MTP siblings are auto-excluded inside
+        # ``auto_quantize()`` via *visual* / *mtp* / *vision_tower* patterns.
         auto_quantize(
             args,
-            language_model,
+            full_model,
             calib_dataloader,
+            auto_quantize_method=args.auto_quantize_method,
         )
 
     else:
@@ -1341,6 +1481,48 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--auto_quantize_cost_model",
+        type=str,
+        default="weight",
+        choices=["weight", "active_moe"],
+        help=(
+            "Cost model for auto_quantize effective-bits accounting. 'weight' counts all "
+            "quantizable weights equally. 'active_moe' scales routed MoE expert weights by "
+            "--auto_quantize_active_moe_expert_ratio, or infers top_k/num_experts from model config."
+        ),
+    )
+    parser.add_argument(
+        "--auto_quantize_active_moe_expert_ratio",
+        type=float,
+        default=None,
+        help=(
+            "Routed MoE expert active ratio for --auto_quantize_cost_model active_moe. "
+            "For top-k MoE this is top_k / num_experts. If omitted, common model config "
+            "fields such as num_experts_per_tok and num_experts are used when available."
+        ),
+    )
+    parser.add_argument(
+        "--auto_quantize_cost_lower_bound",
+        type=float,
+        default=None,
+        help=(
+            "Optional lower bound, as a fraction of the requested effective-bits budget, "
+            "for the auto_quantize LP. Active-MoE cost mode uses a best-effort lower bound "
+            "by default when this is omitted."
+        ),
+    )
+    parser.add_argument(
+        "--auto_quantize_cost_objective",
+        type=str,
+        default="sensitivity",
+        choices=["sensitivity", "active_moe"],
+        help=(
+            "Objective for auto_quantize LP. 'sensitivity' minimizes quantization sensitivity. "
+            "'active_moe' minimizes active routed-MoE cost while the cost model constraint "
+            "still controls the requested budget."
+        ),
+    )
+    parser.add_argument(
         "--moe_calib_experts_ratio",
         type=float,
         default=None,
@@ -1373,6 +1555,23 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if args.moe_calib_experts_ratio is not None and not (0.0 < args.moe_calib_experts_ratio <= 1.0):
         parser.error("--moe_calib_experts_ratio must be in the range (0.0, 1.0].")
+    if args.auto_quantize_active_moe_expert_ratio is not None and not (
+        0.0 < args.auto_quantize_active_moe_expert_ratio <= 1.0
+    ):
+        parser.error("--auto_quantize_active_moe_expert_ratio must be in the range (0.0, 1.0].")
+    if (
+        args.auto_quantize_cost_model == "weight"
+        and args.auto_quantize_cost_objective != "active_moe"
+        and args.auto_quantize_active_moe_expert_ratio is not None
+    ):
+        parser.error(
+            "--auto_quantize_active_moe_expert_ratio requires "
+            "--auto_quantize_cost_model active_moe or --auto_quantize_cost_objective active_moe."
+        )
+    if args.auto_quantize_cost_lower_bound is not None and not (
+        0.0 < args.auto_quantize_cost_lower_bound <= 1.0
+    ):
+        parser.error("--auto_quantize_cost_lower_bound must be in the range (0.0, 1.0].")
 
     if args.specdec_offline_dataset is not None and args.sparsity_fmt != "dense":
         parser.error("--specdec_offline_dataset is only supported with --sparsity_fmt dense (PTQ).")

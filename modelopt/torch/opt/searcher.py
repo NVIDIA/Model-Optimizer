@@ -57,6 +57,16 @@ SearchStateDict = dict[str, Any]  # state dict for searcher
 __all__ = ["BaseSearcher"]
 
 
+def _get_optional_env_float(name: str) -> float | None:
+    value = os.environ.get(name)
+    if not value:
+        return None
+    parsed_value = float(value)
+    if parsed_value <= 0.0:
+        raise ValueError(f"{name} must be positive, got {parsed_value}.")
+    return parsed_value
+
+
 class BaseSearcher(ABC):
     """A basic search interface that can be used to search/optimize a model.
 
@@ -336,7 +346,14 @@ class LPS:
         self.constraints_to_candidate_costs = constraints_to_candidate_costs
         self.candidate_scores = candidate_scores
         self.objective_type = pulp.LpMinimize if objective_type == "minimize" else pulp.LpMaximize
-        self.solver = pulp.PULP_CBC_CMD(msg=verbose)
+        solver_kwargs = {}
+        cbc_time_limit = _get_optional_env_float("MODELOPT_LPS_CBC_TIME_LIMIT")
+        cbc_gap_rel = _get_optional_env_float("MODELOPT_LPS_CBC_GAP_REL")
+        if cbc_time_limit is not None:
+            solver_kwargs["timeLimit"] = cbc_time_limit
+        if cbc_gap_rel is not None:
+            solver_kwargs["gapRel"] = cbc_gap_rel
+        self.solver = pulp.PULP_CBC_CMD(msg=verbose, **solver_kwargs)
 
         self.num_layers = len(self.candidate_scores)
         self.num_candidates_per_layer = list(map(len, self.candidate_scores))
