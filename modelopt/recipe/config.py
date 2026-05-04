@@ -18,10 +18,9 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any
 
 from pydantic import field_validator
-from typing_extensions import TypedDict
+from typing_extensions import NotRequired, TypedDict
 
 from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
 from modelopt.torch.quantization.config import QuantizeConfig
@@ -34,19 +33,14 @@ class RecipeType(str, Enum):
     # QAT = "qat" # Not implemented yet, will be added in the future.
 
 
-class RecipeMetadataConfig(TypedDict, total=False):
-    """YAML shape of the recipe metadata section before Pydantic model construction."""
+class RecipeMetadataConfig(TypedDict):
+    """YAML shape of the recipe metadata section."""
 
     recipe_type: RecipeType
-    description: str
+    description: NotRequired[str]
 
 
-class ModelOptPTQRecipeYamlConfig(TypedDict, total=False):
-    """YAML shape of a PTQ recipe file before metadata is flattened into the model."""
-
-    imports: dict[str, Any]
-    metadata: RecipeMetadataConfig
-    quantize: QuantizeConfig
+_DEFAULT_RECIPE_DESCRIPTION = "Model optimization recipe."
 
 
 class ModelOptRecipeBase(ModeloptBaseConfig):
@@ -55,29 +49,33 @@ class ModelOptRecipeBase(ModeloptBaseConfig):
     If a layer name matches ``"*output_layer*"``, the attributes will be replaced with ``{"enable": False}``.
     """
 
-    recipe_type: RecipeType = ModeloptField(
-        default=RecipeType.PTQ,
-        title="type of the recipe",
-        description="The type of the recipe.",
+    metadata: RecipeMetadataConfig = ModeloptField(
+        default={"recipe_type": RecipeType.PTQ, "description": _DEFAULT_RECIPE_DESCRIPTION},
+        title="Metadata",
+        description="Recipe metadata containing the recipe type and description.",
         validate_default=True,
     )
 
-    description: str = ModeloptField(
-        default="Model optimization recipe.",
-        title="Description",
-        description="A brief description of the model optimization recipe.",
-        validate_default=False,
-    )
-
-    @field_validator("recipe_type")
+    @field_validator("metadata")
     @classmethod
-    def validate_recipe_type(cls, v):
-        """Validate recipe type."""
-        if v not in RecipeType:
+    def validate_metadata(cls, metadata: RecipeMetadataConfig) -> RecipeMetadataConfig:
+        """Validate recipe metadata and fill defaults for optional fields."""
+        if metadata["recipe_type"] not in RecipeType:
             raise ValueError(
-                f"Unsupported recipe type: {v}. Only {list(RecipeType)} are currently supported."
+                f"Unsupported recipe type: {metadata['recipe_type']}. "
+                f"Only {list(RecipeType)} are currently supported."
             )
-        return v
+        return {"description": _DEFAULT_RECIPE_DESCRIPTION, **metadata}
+
+    @property
+    def recipe_type(self) -> RecipeType:
+        """Return the recipe type from metadata."""
+        return self.metadata["recipe_type"]
+
+    @property
+    def description(self) -> str:
+        """Return the recipe description from metadata."""
+        return self.metadata.get("description", _DEFAULT_RECIPE_DESCRIPTION)
 
 
 class ModelOptPTQRecipe(ModelOptRecipeBase):
