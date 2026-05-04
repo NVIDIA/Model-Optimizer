@@ -99,6 +99,7 @@ jobs:
           - {nox_session: "unit-3.10(torch_211, tf_latest)", python_version: "3.10"}
           - {nox_session: "unit-3.11(torch_211, tf_latest)", python_version: "3.11"}
           - {nox_session: "unit-3.13(torch_211, tf_latest)", python_version: "3.13"}
+          - {nox_session: "unit-3.14(torch_211, tf_latest)", python_version: "3.14"}
           - {nox_session: "unit-3.12(torch_28, tf_latest)", python_version: "3.12"}
           - {nox_session: "unit-3.12(torch_29, tf_latest)", python_version: "3.12"}
           - {nox_session: "unit-3.12(torch_210, tf_latest)", python_version: "3.12"}
