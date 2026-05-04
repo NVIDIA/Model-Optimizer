@@ -68,7 +68,20 @@ def run_full_puzzletron(hydra_config_path: str):
         config_path: Path to the YAML configuration file
     """
     mtpz.tools.mprint("Puzzletron Progress 1/8: starting puzzletron pipeline")
-    dist.setup(timeout=timedelta(minutes=10))
+    # Read the Hydra config to determine runtime_stats:enabled, and set the timeout accordingly
+    from omegaconf import OmegaConf
+
+    # Resolve absolute path for Hydra config
+    hydra_config_path = Path(hydra_config_path).resolve()
+    hydra_config = OmegaConf.load(str(hydra_config_path))
+
+    # Default timeout: 10 minutes, or extended to dist_timeout_minutes if set in config
+    if hasattr(hydra_config, "dist_timeout_minutes"):
+        timeout_minutes = timedelta(minutes=hydra_config.dist_timeout_minutes)
+    else:
+        timeout_minutes = timedelta(minutes=10)
+    mtpz.tools.mprint(f"Puzzletron Progress 1/8: Timeout minutes: {timeout_minutes}")
+    dist.setup(timeout=timeout_minutes)
 
     # Register Hydra custom resolvers (needed for config resolution)
     mtpz.tools.register_hydra_resolvers()
