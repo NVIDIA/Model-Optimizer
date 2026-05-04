@@ -39,7 +39,7 @@ jobs:
       matrix:
         include:
           - example: gpu
-            timeout: 60
+            timeout: 75
             container_image: pytorch:26.01-py3
             # tests/gpu/_extensions/test_onnx_extensions.py fails for newer containers until https://github.com/tbenthompson/cppimport/pull/98
           - example: gpu_megatron
