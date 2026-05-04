@@ -1173,6 +1173,97 @@ def set_expert_quantizer_amax(
 _GATE_UP_PAIRS = [("gate_proj", "up_proj"), ("w1", "w3")]
 
 
+_LINEAR_ATTN_FUSED_PAIRS = [
+    ("in_proj_qkv", "in_proj_z"),
+    ("in_proj_b", "in_proj_a"),
+]
+
+
+def _tensor_values_equal(left: torch.Tensor | None, right: torch.Tensor | None) -> bool:
+    if left is None or right is None:
+        return left is right
+    if left.is_meta or right.is_meta:
+        return False
+    return torch.equal(left, right)
+
+
+def _safe_quantizer_amax(quantizer) -> torch.Tensor | None:
+    try:
+        return getattr(quantizer, "amax", None)
+    except AssertionError:
+        return None
+
+
+def _linear_fusion_scales_match(left: nn.Module, right: nn.Module) -> bool:
+    left_iq = getattr(left, "input_quantizer", None)
+    right_iq = getattr(right, "input_quantizer", None)
+    if (
+        left_iq is not None
+        and right_iq is not None
+        and getattr(left_iq, "is_enabled", False)
+        and getattr(right_iq, "is_enabled", False)
+        and not _tensor_values_equal(_safe_quantizer_amax(left_iq), _safe_quantizer_amax(right_iq))
+    ):
+        return False
+
+    left_wq = getattr(left, "weight_quantizer", None)
+    right_wq = getattr(right, "weight_quantizer", None)
+    if left_wq is None or right_wq is None:
+        return True
+
+    if isinstance(left_wq, SequentialQuantizer) and isinstance(right_wq, SequentialQuantizer):
+        if (
+            len(left_wq) > 0
+            and len(right_wq) > 0
+            and getattr(left_wq[-1], "is_enabled", False)
+            and getattr(right_wq[-1], "is_enabled", False)
+        ):
+            return _tensor_values_equal(
+                _safe_quantizer_amax(left_wq[-1]), _safe_quantizer_amax(right_wq[-1])
+            )
+        return True
+
+    if hasattr(left_wq, "global_amax") and hasattr(right_wq, "global_amax"):
+        return _tensor_values_equal(left_wq.global_amax, right_wq.global_amax)
+
+    if getattr(left_wq, "is_enabled", False) and getattr(right_wq, "is_enabled", False):
+        return _tensor_values_equal(_safe_quantizer_amax(left_wq), _safe_quantizer_amax(right_wq))
+
+    return True
+
+
+def sync_linear_attn_fused_projection_amax(model: nn.Module) -> int:
+    """Sync quantizer amaxes for GDN projections that serving engines fuse.
+
+    Qwen3.5/Qwen3-Next GDN exports keep ``in_proj_qkv`` and ``in_proj_z`` as
+    separate HF tensors, but vLLM fuses them into ``in_proj_qkvz`` at load time.
+    Likewise ``in_proj_b`` and ``in_proj_a`` may be fused as ``in_proj_ba``.
+    Sharing the quantizer scale domains before export avoids serving-time fused
+    loaders having to reconcile different scalar/global scales.
+
+    Returns:
+        Number of projection pairs whose scale state changed.
+    """
+    changed = 0
+    for _, sub_module in model.named_modules():
+        for left_name, right_name in _LINEAR_ATTN_FUSED_PAIRS:
+            left = getattr(sub_module, left_name, None)
+            right = getattr(sub_module, right_name, None)
+            if left is None or right is None:
+                continue
+            left_format = get_quantization_format(left)
+            right_format = get_quantization_format(right)
+            if left_format != right_format or left_format is None:
+                continue
+            if left_format == QUANTIZATION_NONE:
+                continue
+            matched_before = _linear_fusion_scales_match(left, right)
+            preprocess_linear_fusion([left, right])
+            if not matched_before:
+                changed += 1
+    return changed
+
+
 def sync_moe_gate_up_amax(model: nn.Module) -> int:
     """Take element-wise max of gate and up weight quantizer amaxes per expert.
 

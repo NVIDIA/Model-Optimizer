@@ -15,6 +15,7 @@
 
 import copy
 import io
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -23,7 +24,9 @@ from _test_utils.torch.quantization.models import SimpleConv, SimpleConvLinear, 
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
+from modelopt.torch.opt.searcher import LPS
 from modelopt.torch.quantization.algorithms import (
+    AutoQuantizeGradientSearcher,
     QuantRecipe,
     QuantRecipeHparam,
     estimate_quant_compression,
@@ -57,6 +60,31 @@ class TransformerBlock(torch.nn.Module):
         x = self.attn(x)
         x = self.mlp(x)
         return x
+
+    def get_input(self):
+        return torch.randn(1, 4, 32)
+
+
+class _AutoQuantMoeModel(torch.nn.Module):
+    def __init__(self, num_experts_attr="num_experts"):
+        super().__init__()
+        self.config = SimpleNamespace(text_config=SimpleNamespace(num_experts_per_tok=2))
+        setattr(self.config.text_config, num_experts_attr, 8)
+        self.mlp = torch.nn.Module()
+        self.mlp.experts = torch.nn.ModuleList()
+        for _ in range(2):
+            expert = torch.nn.Module()
+            expert.gate_proj = torch.nn.Linear(32, 32)
+            expert.up_proj = torch.nn.Linear(32, 32)
+            expert.down_proj = torch.nn.Linear(32, 32)
+            self.mlp.experts.append(expert)
+        self.mlp.shared_expert = torch.nn.Linear(32, 32)
+
+    def forward(self, x):
+        y = self.mlp.shared_expert(x)
+        for expert in self.mlp.experts:
+            y = y + expert.down_proj(expert.gate_proj(x) + expert.up_proj(x))
+        return y
 
     def get_input(self):
         return torch.randn(1, 4, 32)
@@ -107,6 +135,113 @@ def test_quant_recipe_hparam():
     output_ref = model_ref(inputs)
 
     assert torch.allclose(output_test, output_ref)
+
+
+def test_quant_recipe_hparam_cost_weight():
+    model_test = mtq.quantize(torch.nn.Linear(4, 16), mtq.INT8_DEFAULT_CFG)
+    search_recipes = [QuantRecipe(mtq.INT8_DEFAULT_CFG)]
+    hparam = QuantRecipeHparam(
+        search_recipes,
+        quant_modules=[model_test],
+        quant_module_names=["layers.0.mlp.experts.0.down_proj"],
+        cost_weight=0.25,
+    )
+
+    dense_cost = hparam.get_cost(QuantRecipe(quant_cfg=None))
+    int8_cost = hparam.get_cost(QuantRecipe(mtq.INT8_DEFAULT_CFG))
+
+    assert dense_cost == pytest.approx(model_test.weight.numel() * 0.25)
+    assert int8_cost == pytest.approx(model_test.weight.numel() * 0.25 * 0.5)
+
+
+@pytest.mark.parametrize("num_experts_attr", ["num_experts", "num_local_experts"])
+def test_auto_quantize_active_moe_cost_model(num_experts_attr):
+    model = _AutoQuantMoeModel(num_experts_attr)
+
+    _, search_history = mtq.auto_quantize(
+        model,
+        constraints={"effective_bits": 6.0},
+        quantization_formats=[mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG, mtq.INT8_DEFAULT_CFG],
+        data_loader=[model.get_input() for _ in range(2)],
+        forward_step=lambda model, batch: model(batch),
+        loss_func=lambda output, data: output.sum(),
+        num_calib_steps=2,
+        num_score_steps=2,
+        cost_model="active_moe",
+    )
+
+    assert search_history["cost_model"] == "active_moe"
+    assert search_history["active_moe_expert_ratio"] == pytest.approx(0.25)
+    weighted_no_quant_cost = sum(
+        stats["costs"][-1] for stats in search_history["candidate_stats"].values()
+    )
+    assert search_history["cost_denominator"] == pytest.approx(weighted_no_quant_cost)
+    routed_stats = [
+        stats
+        for stats in search_history["candidate_stats"].values()
+        if any("mlp.experts" in name for name in stats["module_names"])
+    ]
+    shared_stats = [
+        stats
+        for stats in search_history["candidate_stats"].values()
+        if any("mlp.shared_expert" in name for name in stats["module_names"])
+    ]
+    assert routed_stats
+    assert shared_stats
+    assert all(stats["cost_weight"] == pytest.approx(0.25) for stats in routed_stats)
+    assert all(stats["cost_weight"] == pytest.approx(1.0) for stats in shared_stats)
+    assert all("active_costs" in stats for stats in search_history["candidate_stats"].values())
+
+
+def test_lps_cbc_env_controls(monkeypatch):
+    monkeypatch.setenv("MODELOPT_LPS_CBC_GAP_REL", "0.001")
+    monkeypatch.setenv("MODELOPT_LPS_CBC_TIME_LIMIT", "12")
+
+    lps = LPS(
+        name="test_env_cbc_controls",
+        constraints={"cost": 1.0},
+        constraints_to_candidate_costs={"cost": [[0.0, 1.0]]},
+        candidate_scores=[[0.0, 1.0]],
+    )
+
+    assert lps.solver.optionsDict["gapRel"] == pytest.approx(0.001)
+    assert lps.solver.timeLimit == pytest.approx(12.0)
+
+
+def test_active_moe_search_prefers_budget_lower_bound():
+    searcher = AutoQuantizeGradientSearcher()
+    searcher.config = {"cost_model": "active_moe", "cost_lower_bound": None}
+    searcher.cost_model = "active_moe"
+    searcher.candidate_stats = {
+        "layers.0.mlp.quant_recipe": {
+            "formats": ["under_budget", "near_budget"],
+            "costs": [1.0, 4.95],
+            "scores": [0.0, 10.0],
+        }
+    }
+
+    best_recipes, is_satisfied = searcher.run_search_with_stats(5.0)
+
+    assert is_satisfied
+    assert best_recipes["layers.0.mlp.quant_recipe"]["format"] == "near_budget"
+
+
+def test_active_moe_cost_objective_minimizes_active_cost():
+    searcher = AutoQuantizeGradientSearcher()
+    searcher.config = {"cost_model": "weight", "cost_objective": "active_moe"}
+    searcher.candidate_stats = {
+        "layers.0.mlp.quant_recipe": {
+            "formats": ["low_sensitivity", "low_active_cost"],
+            "costs": [4.0, 4.0],
+            "active_costs": [10.0, 1.0],
+            "scores": [0.0, 100.0],
+        }
+    }
+
+    best_recipes, is_satisfied = searcher.run_search_with_stats(5.0)
+
+    assert is_satisfied
+    assert best_recipes["layers.0.mlp.quant_recipe"]["format"] == "low_active_cost"
 
 
 # use this config to test custom quantization config

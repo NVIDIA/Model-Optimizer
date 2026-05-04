@@ -265,6 +265,54 @@ _AUTO_QUANTIZE_SUPPORTED_ALGORITHMS = {
     "awq_clip",
 }
 
+_ACTIVE_MOE_TOP_K_ATTRS = (
+    "num_experts_per_tok",
+    "num_experts_per_token",
+    "moe_top_k",
+    "top_k",
+    "num_selected_experts",
+)
+_ACTIVE_MOE_NUM_EXPERTS_ATTRS = (
+    "num_experts",
+    "num_local_experts",
+    "n_routed_experts",
+    "moe_num_experts",
+    "num_routed_experts",
+)
+
+
+def _iter_model_configs(model: nn.Module):
+    seen = set()
+    for obj in (model, getattr(model, "model", None), getattr(model, "language_model", None)):
+        config = getattr(obj, "config", None)
+        if config is None or id(config) in seen:
+            continue
+        seen.add(id(config))
+        yield config
+        for nested_attr in ("text_config", "language_config"):
+            nested_config = getattr(config, nested_attr, None)
+            if nested_config is None or id(nested_config) in seen:
+                continue
+            seen.add(id(nested_config))
+            yield nested_config
+
+
+def _get_first_numeric_config_attr(model: nn.Module, attr_names: tuple[str, ...]) -> float | None:
+    for config in _iter_model_configs(model):
+        for attr_name in attr_names:
+            value = getattr(config, attr_name, None)
+            if isinstance(value, (int, float)):
+                return float(value)
+    return None
+
+
+def _infer_active_moe_expert_ratio(model: nn.Module) -> float | None:
+    num_active_experts = _get_first_numeric_config_attr(model, _ACTIVE_MOE_TOP_K_ATTRS)
+    num_experts = _get_first_numeric_config_attr(model, _ACTIVE_MOE_NUM_EXPERTS_ATTRS)
+    if num_active_experts is None or num_experts is None or num_experts <= 0:
+        return None
+    return min(num_active_experts / num_experts, 1.0)
+
 
 def auto_quantize(
     model: nn.Module,
@@ -283,6 +331,10 @@ def auto_quantize(
     verbose: bool = False,
     method: str = "gradient",
     checkpoint: str | None = None,
+    cost_model: str = "weight",
+    active_moe_expert_ratio: float | None = None,
+    cost_lower_bound: float | None = None,
+    cost_objective: str = "sensitivity",
 ):
     r"""Perform optimal per-layer quantization by searching for the best quantization formats per-layer.
 
@@ -433,6 +485,18 @@ def auto_quantize(
         checkpoint: (Optional) Path to checkpoint file for saving/restoring auto_quantize search state.
             If the checkpoint file exists, the search state will be restored from it, skipping the
             expensive score estimation step.
+        cost_model: Cost metric used for the effective-bits constraint. ``"weight"`` (default) counts
+            all quantizable weights equally. ``"active_moe"`` scales routed MoE expert weights by
+            ``active_moe_expert_ratio`` so the budget approximates active decode weight traffic.
+        active_moe_expert_ratio: Ratio of routed MoE experts active per token, normally
+            ``num_experts_per_tok / num_experts``. If omitted with ``cost_model="active_moe"``, the
+            ratio is inferred from common model config fields when available.
+        cost_lower_bound: Optional lower bound, as a fraction of the requested cost budget, for
+            the AutoQuantize LP. If omitted, ``cost_model="active_moe"`` uses a best-effort lower
+            bound so solutions consume the requested active-weight budget instead of undershooting it.
+        cost_objective: Objective for the AutoQuantize LP. ``"sensitivity"`` (default) minimizes
+            quantization sensitivity. ``"active_moe"`` minimizes active routed-MoE cost while the
+            normal ``cost_model`` constraint still controls the requested budget.
 
     Returns: A tuple (model, state_dict) where ``model`` is the searched and quantized model and
         ``state_dict`` contains the history and detailed stats of the search procedure.
@@ -514,6 +578,38 @@ def auto_quantize(
     else:
         raise ValueError(f"Invalid method: {method}. Valid options are 'gradient' or 'kl_div'.")
 
+    if cost_model not in ("weight", "active_moe"):
+        raise ValueError(
+            f"Invalid cost_model: {cost_model}. Valid options are 'weight' and 'active_moe'."
+        )
+    if cost_objective not in ("sensitivity", "active_moe"):
+        raise ValueError(
+            f"Invalid cost_objective: {cost_objective}. "
+            "Valid options are 'sensitivity' and 'active_moe'."
+        )
+    if active_moe_expert_ratio is not None and not (0.0 < active_moe_expert_ratio <= 1.0):
+        raise ValueError("active_moe_expert_ratio must be in the range (0.0, 1.0].")
+    if (
+        cost_model == "weight"
+        and cost_objective != "active_moe"
+        and active_moe_expert_ratio is not None
+    ):
+        raise ValueError(
+            "active_moe_expert_ratio requires cost_model='active_moe' "
+            "or cost_objective='active_moe'."
+        )
+    if cost_lower_bound is not None and not (0.0 < cost_lower_bound <= 1.0):
+        raise ValueError("cost_lower_bound must be in the range (0.0, 1.0].")
+    if (
+        cost_model == "active_moe" or cost_objective == "active_moe"
+    ) and active_moe_expert_ratio is None:
+        active_moe_expert_ratio = _infer_active_moe_expert_ratio(model)
+        if active_moe_expert_ratio is None:
+            raise ValueError(
+                "Could not infer active_moe_expert_ratio from model.config. "
+                "Pass active_moe_expert_ratio explicitly."
+            )
+
     model = apply_mode(
         model,
         mode="auto_quantize",
@@ -530,6 +626,10 @@ def auto_quantize(
         "disabled_layers": disabled_layers,
         "verbose": verbose,
         "checkpoint": checkpoint,
+        "cost_model": cost_model,
+        "active_moe_expert_ratio": active_moe_expert_ratio,
+        "cost_lower_bound": cost_lower_bound,
+        "cost_objective": cost_objective,
     }
     # Disable all quantizers; AutoQuantize will enable the needed ones
     set_quantizer_by_cfg(model, [{"quantizer_name": "*", "enable": False}])

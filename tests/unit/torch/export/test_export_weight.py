@@ -19,7 +19,13 @@ import torch
 from _test_utils.torch.export.utils import ToyModel, partial_fp8_config, partial_w4a8_config
 
 import modelopt.torch.quantization as mtq
+from modelopt.torch.export.layer_utils import sync_linear_attn_fused_projection_amax
 from modelopt.torch.export.unified_export_hf import _export_quantized_weight
+from modelopt.torch.quantization.config import QuantizerAttributeConfig
+from modelopt.torch.quantization.nn.modules.tensor_quantizer import (
+    NVFP4StaticQuantizer,
+    TensorQuantizer,
+)
 from modelopt.torch.quantization.utils import quantizer_attr_names
 
 
@@ -96,3 +102,74 @@ def test_export_per_block_quantized_weight():
     assert hasattr(model.linears[2], quantizer_attrs.output_quantizer)
     assert not getattr(model.linears[2], quantizer_attrs.output_quantizer).is_enabled
     assert not hasattr(model.linears[2], quantizer_attrs.output_scale)
+
+
+class _GatedDeltaNetProjectionToy(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.linear_attn = torch.nn.Module()
+        self.linear_attn.in_proj_qkv = torch.nn.Linear(16, 48, bias=False)
+        self.linear_attn.in_proj_z = torch.nn.Linear(16, 16, bias=False)
+
+
+def _attach_quantizers(module, weight_cfg, input_cfg):
+    module.weight_quantizer = TensorQuantizer(weight_cfg)
+    module.input_quantizer = TensorQuantizer(input_cfg)
+
+
+def test_sync_linear_attn_fused_projection_fp8_amax():
+    model = _GatedDeltaNetProjectionToy()
+    quant_cfg = QuantizerAttributeConfig(num_bits=(4, 3), axis=None)
+    _attach_quantizers(model.linear_attn.in_proj_qkv, quant_cfg, quant_cfg)
+    _attach_quantizers(model.linear_attn.in_proj_z, quant_cfg, quant_cfg)
+
+    model.linear_attn.in_proj_qkv.weight_quantizer.amax = torch.tensor(3.0)
+    model.linear_attn.in_proj_z.weight_quantizer.amax = torch.tensor(5.0)
+    model.linear_attn.in_proj_qkv.input_quantizer.amax = torch.tensor(7.0)
+    model.linear_attn.in_proj_z.input_quantizer.amax = torch.tensor(11.0)
+
+    synced = sync_linear_attn_fused_projection_amax(model)
+
+    assert synced == 1
+    assert torch.equal(model.linear_attn.in_proj_qkv.weight_quantizer.amax, torch.tensor(5.0))
+    assert torch.equal(model.linear_attn.in_proj_z.weight_quantizer.amax, torch.tensor(5.0))
+    assert torch.equal(model.linear_attn.in_proj_qkv.input_quantizer.amax, torch.tensor(11.0))
+    assert torch.equal(model.linear_attn.in_proj_z.input_quantizer.amax, torch.tensor(11.0))
+    assert hasattr(model.linear_attn, "in_proj_qkv")
+    assert hasattr(model.linear_attn, "in_proj_z")
+
+
+def test_sync_linear_attn_fused_projection_nvfp4_global_amax():
+    model = _GatedDeltaNetProjectionToy()
+    weight_cfg = QuantizerAttributeConfig(
+        num_bits=(2, 1),
+        block_sizes={-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+        axis=None,
+    )
+    input_cfg = QuantizerAttributeConfig(
+        num_bits=(2, 1),
+        block_sizes={-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+        axis=None,
+    )
+    _attach_quantizers(model.linear_attn.in_proj_qkv, weight_cfg, input_cfg)
+    _attach_quantizers(model.linear_attn.in_proj_z, weight_cfg, input_cfg)
+    NVFP4StaticQuantizer.from_tensor_quantizer(
+        model.linear_attn.in_proj_qkv.weight_quantizer, global_amax=torch.tensor(13.0)
+    )
+    NVFP4StaticQuantizer.from_tensor_quantizer(
+        model.linear_attn.in_proj_z.weight_quantizer, global_amax=torch.tensor(17.0)
+    )
+    model.linear_attn.in_proj_qkv.input_quantizer.amax = torch.tensor(19.0)
+    model.linear_attn.in_proj_z.input_quantizer.amax = torch.tensor(23.0)
+
+    synced = sync_linear_attn_fused_projection_amax(model)
+
+    assert synced == 1
+    assert torch.equal(
+        model.linear_attn.in_proj_qkv.weight_quantizer.global_amax, torch.tensor(17.0)
+    )
+    assert torch.equal(model.linear_attn.in_proj_z.weight_quantizer.global_amax, torch.tensor(17.0))
+    assert torch.equal(model.linear_attn.in_proj_qkv.input_quantizer.amax, torch.tensor(23.0))
+    assert torch.equal(model.linear_attn.in_proj_z.input_quantizer.amax, torch.tensor(23.0))
+    assert hasattr(model.linear_attn, "in_proj_qkv")
+    assert hasattr(model.linear_attn, "in_proj_z")
