@@ -20,7 +20,7 @@ import time
 import warnings
 from collections.abc import Callable
 from functools import partial
-from typing import TypeAlias
+from typing import Any, TypeAlias
 
 import torch
 import torch.distributed as dist
@@ -351,7 +351,7 @@ def mse_calibrate(
 
     # Step 2: Replace calibrators with MseCalibrator for enabled quantizers
     # and identify weight quantizers
-    weight_quantizers = []
+    weight_quantizers: list[tuple[Any, Any, TensorQuantizer]] = []
     seen_modules = set()
 
     for name, module in list(model.named_modules()):
@@ -422,8 +422,10 @@ def mse_calibrate(
                 if getattr(weight_quantizer, "_calibrator", None) is not None:
                     weight_quantizers.append((parent_module, weight_name, weight_quantizer))
         # _QuantFusedExperts stores per-expert weight quantizers as nn.ModuleList named
-        # {param_name}_weight_quantizers (plural). Detect this pattern and enqueue each 
-        # per-expert quantizer individually.
+        # {param_name}_weight_quantizers (plural). Detect this pattern and enqueue each
+        # per-expert quantizer individually. The isinstance(qlist, nn.ModuleList) +
+        # isinstance(wq, TensorQuantizer) check below guards against false positives on
+        # unrelated modules that happen to have similarly-named attributes.
         for param_name, _ in parent_module.named_parameters(recurse=False):
             qlist = getattr(parent_module, f"{param_name}_weight_quantizers", None)
             if not isinstance(qlist, nn.ModuleList):
