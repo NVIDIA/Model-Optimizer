@@ -787,7 +787,7 @@ def finish_stats_collection(model: nn.Module, method: str | None = None, **kwarg
 
         cal = getattr(module, "_calibrator", None)
         if cal and not getattr(module, "_dynamic", False):
-            if method in {"entropy"}:
+            if method == "entropy":
                 if cal.compute_amax(method) is not None:
                     module.load_calib_amax("entropy", **kwargs)
             elif cal.compute_amax(**kwargs) is not None:
