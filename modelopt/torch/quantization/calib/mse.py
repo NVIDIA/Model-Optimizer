@@ -219,12 +219,12 @@ class TritonNVFP4MSECalibrator(NVFP4MSECalibrator):
         axis: int | tuple | list | None = None,
         quant_func: Callable | None = None,
         error_func: Callable | None = None,
-        blocks_per_program: int = 4,
     ):
         """Initialize the Triton-fused NVFP4 MSE calibrator.
 
         See :class:`NVFP4MSECalibrator`. ``quant_func``/``error_func`` are unused by
-        the kernel path but accepted for API parity.
+        the kernel path but accepted for API parity. Tile shape and ``num_warps`` are
+        autotuned by the kernel per ``N_BLOCKS``.
         """
         super().__init__(
             amax=amax,
@@ -233,7 +233,6 @@ class TritonNVFP4MSECalibrator(NVFP4MSECalibrator):
             quant_func=quant_func,
             error_func=error_func,
         )
-        self._blocks_per_program = blocks_per_program
         self._best_amax: torch.Tensor | None = None
 
     @torch.no_grad()
@@ -260,7 +259,6 @@ class TritonNVFP4MSECalibrator(NVFP4MSECalibrator):
             x,
             self._global_amax,
             block_size=block_size,
-            blocks_per_program=self._blocks_per_program,
         )
         # Match the original shape/dtype of _initial_amax so downstream load_calib_amax
         # behaves identically to the reference path.

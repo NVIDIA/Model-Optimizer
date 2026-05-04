@@ -24,13 +24,15 @@ The 126 candidates are constructed as ``valid_fp8_e4m3_value / 448`` (see
 the per-block scale is the identity, so the kernel can use
 ``scale = candidate * global_amax / 6.0`` without an explicit FP8 cast — making it
 runnable on any CUDA GPU with Triton (no ``tl.float8e4nv`` requirement).
+
+Tile shape (``BLOCKS_PER_PROGRAM``) and ``num_warps`` are autotuned per ``N_BLOCKS``.
 """
 
 import torch
 import triton
 import triton.language as tl
 
-from .nvfp4_quant import nvfp4_scalar_quant
+from .nvfp4_quant import fp4_round_magnitude
 
 __all__ = ["fp8_scale_candidates", "nvfp4_fp8_scale_sweep"]
 
@@ -43,6 +45,18 @@ def fp8_scale_candidates(device: torch.device | str = "cpu") -> torch.Tensor:
     return fp8_values[valid_mask] / 448.0
 
 
+# Selected from a (BLOCKS_PER_PROGRAM, num_warps) sweep on B300:
+#   BPP=16,nw=2: 6.06 ms   BPP=32,nw=4: 6.06 ms   BPP=64,nw=8: 5.08 ms
+# The smaller-tile entries cover cases where N_BLOCKS is small enough that BPP=64
+# would underfill the SMs.
+_FP8_SWEEP_AUTOTUNE_CONFIGS = [
+    triton.Config({"BLOCKS_PER_PROGRAM": 16}, num_warps=2),
+    triton.Config({"BLOCKS_PER_PROGRAM": 32}, num_warps=4),
+    triton.Config({"BLOCKS_PER_PROGRAM": 64}, num_warps=8),
+]
+
+
+@triton.autotune(configs=_FP8_SWEEP_AUTOTUNE_CONFIGS, key=["N_BLOCKS"])
 @triton.jit
 def _fp8_scale_sweep_kernel(
     x_ptr,  # [N_BLOCKS * BLOCK_SIZE], any float dtype (loaded as fp32)
@@ -59,10 +73,13 @@ def _fp8_scale_sweep_kernel(
     block_idx = block_start + tl.arange(0, BLOCKS_PER_PROGRAM)
     block_mask = block_idx < N_BLOCKS
 
-    # Load weights for this tile: [BLOCKS_PER_PROGRAM, BLOCK_SIZE]
+    # Load weights for this tile and pre-compute their absolute values once.
+    # The squared error is sign-invariant since FP4 quant preserves sign:
+    #   (w - w_q)^2 = (|w| - |w_q|)^2 = (|w| - q_mag * scale)^2
+    # so we never need ``w`` itself again, dropping a tl.where + negation per element.
     elem_offs = block_idx[:, None] * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)[None, :]
     elem_mask = block_mask[:, None]
-    w = tl.load(x_ptr + elem_offs, mask=elem_mask, other=0.0).to(tl.float32)
+    w_abs = tl.abs(tl.load(x_ptr + elem_offs, mask=elem_mask, other=0.0).to(tl.float32))
 
     global_amax = tl.load(global_amax_ptr).to(tl.float32)
 
@@ -70,13 +87,17 @@ def _fp8_scale_sweep_kernel(
     best_idx = tl.zeros([BLOCKS_PER_PROGRAM], dtype=tl.int32)
 
     # Loop over the 126 FP8 candidates (compile-time unrolled).
+    # Scales are guaranteed positive and finite (constructed from a positive candidate
+    # times nonneg global_amax), so the degenerate-scale guard from nvfp4_scalar_quant is
+    # unnecessary apart from the global_amax == 0 case handled below.
     for k in tl.static_range(NUM_CANDIDATES):
         c = tl.load(candidates_ptr + k).to(tl.float32)
-        # block_amax = global_amax * c by construction; the FP8 round on the resulting
-        # scale is the identity for our candidate set, so we can skip the FP8 cast.
         scale = c * global_amax / 6.0
-        w_q = nvfp4_scalar_quant(w, scale, BLOCK_SIZE)
-        diff = w - w_q
+        # Avoid divide-by-zero when global_amax == 0; the resulting err == w_abs² is
+        # the same for every candidate, so any best_idx is fine.
+        scale_safe = tl.where(scale == 0.0, 1.0, scale)
+        q_mag = fp4_round_magnitude(w_abs / scale_safe)
+        diff = w_abs - q_mag * scale
         loss = tl.sum(diff * diff, axis=1)  # [BLOCKS_PER_PROGRAM]
         is_better = loss < best_loss
         best_loss = tl.where(is_better, loss, best_loss)
@@ -93,7 +114,6 @@ def nvfp4_fp8_scale_sweep(
     global_amax: torch.Tensor,
     block_size: int = 16,
     candidates: torch.Tensor | None = None,
-    blocks_per_program: int = 4,
 ) -> torch.Tensor:
     """Find the per-block FP8 scale that minimizes NVFP4 quantization MSE.
 
@@ -108,8 +128,6 @@ def nvfp4_fp8_scale_sweep(
         block_size: NVFP4 block size (typically 16).
         candidates: Optional precomputed candidate tensor of shape ``[126]`` (must
             be the FP8 E4M3 valid values divided by 448). Built lazily if omitted.
-        blocks_per_program: Number of blocks each Triton program handles. Trades
-            launch overhead for register pressure; 4 is a reasonable default.
 
     Returns:
         ``best_amax`` of shape ``[N_BLOCKS]``, fp32, on the same device as ``x``.
@@ -127,7 +145,7 @@ def nvfp4_fp8_scale_sweep(
     global_amax_f32 = global_amax.detach().to(device=x.device, dtype=torch.float32).reshape(1)
     best_amax = torch.empty(n_blocks, dtype=torch.float32, device=x.device)
 
-    grid = (triton.cdiv(n_blocks, blocks_per_program),)
+    grid = lambda meta: (triton.cdiv(n_blocks, meta["BLOCKS_PER_PROGRAM"]),)
     with torch.cuda.device(x.device):
         _fp8_scale_sweep_kernel[grid](
             x_flat,
@@ -137,6 +155,5 @@ def nvfp4_fp8_scale_sweep(
             n_blocks,
             BLOCK_SIZE=block_size,
             NUM_CANDIDATES=int(candidates.numel()),
-            BLOCKS_PER_PROGRAM=blocks_per_program,
         )
     return best_amax
