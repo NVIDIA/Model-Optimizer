@@ -15,6 +15,8 @@
 
 # FP8 per-tensor weight and activation (W8A8), max calibration.
 # Equivalent to the hardcoded FP8_DEFAULT_CFG in config.py.
+
+# modelopt-schema: modelopt.torch.quantization.config.QuantizeConfig
 imports:
   base_disable_all: configs/ptq/units/base_disable_all
   w8a8_fp8_fp8: configs/ptq/units/w8a8_fp8_fp8

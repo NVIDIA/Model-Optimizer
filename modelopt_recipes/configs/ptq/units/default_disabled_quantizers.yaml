@@ -15,6 +15,7 @@
 
 # Standard quantizer exclusions: layers that should not be quantized.
 
+# modelopt-schema: modelopt.torch.quantization.config.QuantizerCfgListConfig
   - quantizer_name: '*block_sparse_moe.gate*'
     enable: false
   - quantizer_name: '*linear_attn.conv1d*'

@@ -22,6 +22,7 @@ imports.
 """
 
 from dataclasses import dataclass, field
+from importlib import import_module
 from importlib.resources import files
 
 try:
@@ -29,10 +30,12 @@ try:
 except ImportError:  # Python < 3.11
     from importlib.abc import Traversable
 import re
+import sys
 from pathlib import Path
 from typing import Any
 
 import yaml
+from pydantic import TypeAdapter
 
 
 @dataclass
@@ -51,11 +54,21 @@ class _ListSnippet:
     content: list[Any] = field(default_factory=list)
 
 
+@dataclass
+class _RawConfig:
+    """Raw YAML content plus optional ModelOpt schema metadata."""
+
+    data: dict[str, Any] | list[Any] | _ListSnippet
+    schema: str | None = None
+    path: Path | Traversable | None = None
+
+
 # Root to all built-in configs and recipes.
 BUILTIN_CONFIG_ROOT = files("modelopt_recipes")
 
 _EXMY_RE = re.compile(r"^[Ee](\d+)[Mm](\d+)$")
 _EXMY_KEYS = frozenset({"num_bits", "scale_bits"})
+_MODELOPT_SCHEMA_RE = re.compile(r"^\s*#\s*modelopt-schema:\s*(\S+)\s*$")
 
 
 def _parse_exmy_num_bits(obj: Any) -> Any:
@@ -141,25 +154,33 @@ def _canonical_key(path: Path | Traversable) -> str:
     return str(path)
 
 
-def _load_raw_config(
-    config_file: str | Path | Traversable,
-) -> dict[str, Any] | list[Any] | _ListSnippet:
-    """Load a config YAML without resolving ``$import`` references.
+def _parse_modelopt_schema(text: str, config_path: Path | Traversable) -> str | None:
+    """Parse a ``# modelopt-schema: ...`` preamble comment, if present."""
+    schema: str | None = None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if not stripped.startswith("#"):
+            break
+        match = _MODELOPT_SCHEMA_RE.match(line)
+        if not match:
+            continue
+        if schema is not None:
+            raise ValueError(f"Config file {config_path}: multiple modelopt-schema comments found.")
+        schema = match.group(1)
+    return schema
 
-    config_file: Path to a config yaml file. The path suffix can be omitted.
 
-    Return type:
-        * ``dict`` — single-document or two-document-dict YAML.
-        * ``list`` — single-document list YAML.
-        * :class:`_ListSnippet` — two-document YAML with a list body;
-          carries the header's ``imports`` alongside the list content.
-    """
+def _load_raw_config_with_schema(config_file: str | Path | Traversable) -> _RawConfig:
+    """Load a config YAML without resolving ``$import`` references."""
     config_path = _resolve_config_path(config_file)
     text = config_path.read_text(encoding="utf-8")
+    schema = _parse_modelopt_schema(text, config_path)
     docs = list(yaml.safe_load_all(text))
 
     if len(docs) == 0 or docs[0] is None:
-        return {}
+        return _RawConfig({}, schema=schema, path=config_path)
     if len(docs) == 1:
         _raw = docs[0]
     elif len(docs) == 2:
@@ -180,9 +201,13 @@ def _load_raw_config(
             # Only ``imports`` from the header is carried forward; any other
             # header keys are meaningless alongside a list body.
             imports = header.get("imports", {}) or {}
-            return _ListSnippet(
-                imports=imports,
-                content=_parse_exmy_num_bits(content),
+            return _RawConfig(
+                _ListSnippet(
+                    imports=imports,
+                    content=_parse_exmy_num_bits(content),
+                ),
+                schema=schema,
+                path=config_path,
             )
         else:
             raise ValueError(
@@ -196,9 +221,21 @@ def _load_raw_config(
 
     if not isinstance(_raw, (dict, list)):
         raise ValueError(
-            f"Config file {config_path} must contain a YAML mapping or list, got {type(_raw).__name__}"
+            f"Config file {config_path} must contain a YAML mapping or list, "
+            f"got {type(_raw).__name__}"
         )
-    return _parse_exmy_num_bits(_raw)
+    return _RawConfig(
+        _parse_exmy_num_bits(_raw),
+        schema=schema,
+        path=config_path,
+    )
+
+
+def _load_raw_config(
+    config_file: str | Path | Traversable,
+) -> dict[str, Any] | list[Any] | _ListSnippet:
+    """Load a config YAML without resolving ``$import`` references."""
+    return _load_raw_config_with_schema(config_file).data
 
 
 # ---------------------------------------------------------------------------
@@ -206,6 +243,59 @@ def _load_raw_config(
 # ---------------------------------------------------------------------------
 
 _IMPORT_KEY = "$import"
+
+
+def _schema_type(schema_path: str) -> Any:
+    """Resolve a schema path to a Python type.
+
+    ``modelopt-schema`` comments are intentionally limited to import paths under
+    ``modelopt.*`` so config files cannot trigger arbitrary third-party imports.
+    The resolved object is expected to be a Pydantic-validatable type annotation,
+    such as a BaseModel class, TypedDict, list[TypedDict], or union/type alias.
+
+    If the target module is still being initialized and the requested schema has
+    not been defined yet, raise an error that points to the likely circular import.
+    """
+    if not schema_path.startswith("modelopt."):
+        raise ValueError(
+            f"Unsupported modelopt-schema {schema_path!r}; schemas must live under 'modelopt.'."
+        )
+
+    module_name, _, attr_name = schema_path.rpartition(".")
+    if not module_name or not attr_name:
+        raise ValueError(f"Invalid modelopt-schema path: {schema_path!r}.")
+
+    module = sys.modules.get(module_name) or import_module(module_name)
+    try:
+        schema_type: Any = module
+        for part in attr_name.split("."):
+            schema_type = getattr(schema_type, part)
+        return schema_type
+    except AttributeError as exc:
+        is_initializing = getattr(getattr(module, "__spec__", None), "_initializing", False)
+        if is_initializing:
+            raise ValueError(
+                f"Cannot resolve modelopt-schema {schema_path!r}: module {module_name!r} is "
+                "still being initialized. This likely indicates a circular import or a schema "
+                "defined after config loading."
+            ) from exc
+        raise ValueError(f"Cannot resolve modelopt-schema {schema_path!r}.") from exc
+
+
+def _validate_modelopt_schema(schema_path: str | None, data: Any, config_path: Any) -> None:
+    """Validate resolved config content against the requested schema without mutating it."""
+    if not schema_path:
+        return
+    schema_type = _schema_type(schema_path)
+    try:
+        # TypeAdapter validates the schema types we allow here: BaseModel classes
+        # plus regular typing constructs such as TypedDict, list[TypedDict], unions,
+        # and aliases. Schema comments are not treated as arbitrary validators.
+        TypeAdapter(schema_type).validate_python(data)
+    except Exception as exc:
+        raise ValueError(
+            f"Config file {config_path} does not match modelopt-schema {schema_path!r}: {exc}"
+        ) from exc
 
 
 def _resolve_imports(
@@ -256,11 +346,13 @@ def _resolve_imports(
                 f"{cycle_key!r}) is already being loaded. "
                 f"Import chain: {sorted(_loading)}"
             )
-        snippet = _load_raw_config(config_path)
+        raw_snippet = _load_raw_config_with_schema(config_path)
+        snippet = raw_snippet.data
         if isinstance(snippet, _ListSnippet) or (
             isinstance(snippet, dict) and "imports" in snippet
         ):
             snippet = _resolve_imports(snippet, _loading | {cycle_key})
+        _validate_modelopt_schema(raw_snippet.schema, snippet, raw_snippet.path)
         import_map[name] = snippet
 
     def _lookup(ref_name: str, context: str) -> Any:
@@ -330,7 +422,9 @@ def load_config(config_path: str | Path | Traversable) -> dict[str, Any] | list[
     resolves any ``imports`` / ``$import`` directives, and returns the final
     config dict or list.
     """
-    data = _load_raw_config(config_path)
+    raw = _load_raw_config_with_schema(config_path)
+    data = raw.data
     if isinstance(data, _ListSnippet) or (isinstance(data, dict) and "imports" in data):
         data = _resolve_imports(data)
+    _validate_modelopt_schema(raw.schema, data, raw.path)
     return data

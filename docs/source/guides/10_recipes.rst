@@ -289,6 +289,26 @@ dict snippets can reference other dict snippets, and recipes can reference
 any of them.  All import resolution happens at load time with the same
 precedence rules.
 
+Schema modelines
+^^^^^^^^^^^^^^^^^
+
+Reusable snippets can declare the Pydantic schema they are expected to satisfy
+using a comment preamble.  The comment is ignored by YAML itself, but
+ModelOpt's loader reads it before parsing and validates the resolved snippet
+payload after any imports have been expanded:
+
+.. code-block:: yaml
+
+   # modelopt-schema: modelopt.torch.quantization.config.QuantizerAttributeConfig
+   num_bits: e2m1
+   block_sizes:
+     -1: 16
+     type: dynamic
+     scale_bits: e4m3
+
+The schema comment is metadata only; it is not returned as part of the loaded
+config, and validation does not expand Pydantic defaults into the snippet.
+
 Built-in config snippets
 ^^^^^^^^^^^^^^^^^^^^^^^^
 

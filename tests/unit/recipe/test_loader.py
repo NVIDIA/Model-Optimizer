@@ -970,6 +970,91 @@ def test_import_cross_file_same_name_no_conflict(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# modelopt-schema comments
+# ---------------------------------------------------------------------------
+
+
+_BUILTIN_CONFIG_SNIPPETS = [
+    "configs/numerics/fp8",
+    "configs/numerics/nvfp4",
+    "configs/numerics/nvfp4_static",
+    "configs/ptq/units/base_disable_all",
+    "configs/ptq/units/default_disabled_quantizers",
+    "configs/ptq/units/fp8_kv",
+    "configs/ptq/units/w4a4_nvfp4_nvfp4",
+    "configs/ptq/units/w8a8_fp8_fp8",
+    "configs/ptq/presets/kv/fp8",
+    "configs/ptq/presets/model/fp8",
+]
+
+
+@pytest.mark.parametrize("config_path", _BUILTIN_CONFIG_SNIPPETS)
+def test_builtin_config_snippets_with_modelopt_schema(config_path):
+    """Every built-in config snippet carrying modelopt-schema validates and loads."""
+    data = load_config(config_path)
+    assert data
+
+
+def test_modelopt_schema_comment_validates_without_changing_payload(tmp_path):
+    """modelopt-schema validates the resolved payload but load_config still returns a plain dict."""
+    config_file = tmp_path / "fp8.yaml"
+    config_file.write_text(
+        "# modelopt-schema: modelopt.torch.quantization.config.QuantizerAttributeConfig\n"
+        "num_bits: e4m3\n"
+        "axis:\n"
+    )
+    data = load_config(config_file)
+    assert data == {"num_bits": (4, 3), "axis": None}
+
+
+def test_modelopt_schema_comment_validation_error(tmp_path):
+    """Invalid payloads raise with schema context when a modelopt-schema comment is present."""
+    config_file = tmp_path / "bad.yaml"
+    config_file.write_text(
+        "# modelopt-schema: modelopt.torch.quantization.config.QuantizerAttributeConfig\n"
+        "unknown_field: true\n"
+    )
+    with pytest.raises(ValueError, match="does not match modelopt-schema"):
+        load_config(config_file)
+
+
+def test_modelopt_schema_reports_circular_resolution(monkeypatch):
+    """A schema missing from an initializing module reports the likely circular import."""
+    import sys
+    import types
+
+    from modelopt.torch.opt.config_loader import _schema_type
+
+    module_name = "modelopt._schema_cycle_test"
+    module = types.ModuleType(module_name)
+    module.__spec__ = types.SimpleNamespace(_initializing=True)
+    monkeypatch.setitem(sys.modules, module_name, module)
+
+    with pytest.raises(ValueError, match="still being initialized.*circular import"):
+        _schema_type(f"{module_name}.MissingSchema")
+
+
+def test_modelopt_schema_comment_validates_after_import_resolution(tmp_path):
+    """Schema validation runs after nested imports have been resolved."""
+    (tmp_path / "fp8.yaml").write_text(
+        "# modelopt-schema: modelopt.torch.quantization.config.QuantizerAttributeConfig\n"
+        "num_bits: e4m3\n"
+    )
+    config_file = tmp_path / "entry.yaml"
+    config_file.write_text(
+        f"# modelopt-schema: modelopt.torch.quantization.config.QuantizerCfgListConfig\n"
+        f"imports:\n"
+        f"  fp8: {tmp_path / 'fp8.yaml'}\n"
+        f"---\n"
+        f"- quantizer_name: '*weight_quantizer'\n"
+        f"  cfg:\n"
+        f"    $import: fp8\n"
+    )
+    data = load_config(config_file)
+    assert data == [{"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": (4, 3)}}]
+
+
+# ---------------------------------------------------------------------------
 # Coverage: _load_raw_config edge cases
 # ---------------------------------------------------------------------------
 

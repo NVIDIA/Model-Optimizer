@@ -14,6 +14,8 @@
 # limitations under the License.
 
 # W8A8 FP8: FP8 E4M3 weight and activation quantizers.
+
+# modelopt-schema: modelopt.torch.quantization.config.QuantizerCfgListConfig
 imports:
   fp8: configs/numerics/fp8
 ---

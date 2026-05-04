@@ -20,6 +20,8 @@
 # allows one root node per document, so a file cannot be both a mapping
 # (for imports) and a list (for entries).  The first document holds the
 # imports, the second holds the list content that references them.
+
+# modelopt-schema: modelopt.torch.quantization.config.QuantizerCfgListConfig
 imports:
   fp8: configs/numerics/fp8
 ---

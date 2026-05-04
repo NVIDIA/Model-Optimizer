@@ -14,6 +14,8 @@
 # limitations under the License.
 
 # NVFP4 E2M1 blockwise quantizer attributes with FP8 E4M3 scales (static calibration).
+
+# modelopt-schema: modelopt.torch.quantization.config.QuantizerAttributeConfig
 num_bits: e2m1
 block_sizes:
   -1: 16

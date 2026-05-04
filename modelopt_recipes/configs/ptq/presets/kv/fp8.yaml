@@ -17,6 +17,8 @@
 # Equivalent to the hardcoded FP8_KV_CFG in config.py.
 # This is a partial config (no algorithm, no base_disable_all) — designed
 # to be merged with a primary model quantization config.
+
+# modelopt-schema: modelopt.torch.quantization.config.QuantizeConfig
 imports:
   fp8_kv: configs/ptq/units/fp8_kv
 
