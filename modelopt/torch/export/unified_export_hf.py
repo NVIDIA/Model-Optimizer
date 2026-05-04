@@ -52,11 +52,7 @@ except ImportError:
 from torch.distributed.fsdp import FSDPModule
 
 from modelopt.torch.quantization import set_quantizer_by_cfg_context
-from modelopt.torch.quantization.nn import (
-    NVFP4StaticQuantizer,
-    SequentialQuantizer,
-    TensorQuantizer,
-)
+from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
 from modelopt.torch.quantization.qtensor import MXFP8QTensor, NVFP4QTensor
 from modelopt.torch.quantization.utils import fsdp2_aware_weight_update, quantizer_attr_names
 
@@ -88,6 +84,7 @@ from .model_config import (
     QUANTIZATION_W4A8_NVFP4_FP8,
 )
 from .model_utils import get_language_model_from_vl, is_multimodal_model
+from .moe_utils import _export_fused_experts
 from .plugins import SpeculativeDecodingExporter, has_spec_opt
 from .quant_utils import (
     fuse_prequant_layernorm,
@@ -538,11 +535,12 @@ def _export_quantized_weight(
         expert_type in type(sub_module).__name__
         for expert_type in ["Llama4TextExperts", "GptOssExperts"]
     )
-    if is_bmm_expert_weight and isinstance(weight_quantizer, NVFP4StaticQuantizer):
-        raise ValueError(
-            "NVFP4StaticQuantizer with BMM-style expert weights (e.g. Llama4TextExperts, "
-            "GptOssExperts) is not yet supported."
-        )
+    # NVFP4StaticQuantizer + BMM-style experts: route through the static-aware
+    # ``_from_quantizer`` helper so the pinned per-block ``_amax`` (e.g. set by
+    # the MXFP4->NVFP4 cast to ``6 * 2^k_j``) is used to derive the FP8
+    # per-block scale. The plain ``get_weights_scaling_factor`` would ignore
+    # ``_amax`` and recompute per-block max from the BF16 weight, which
+    # rebuckets nibbles and loses bit-exactness when ``max_nibble < 6``.
 
     if quantization_format in [
         QUANTIZATION_NVFP4,
@@ -555,11 +553,18 @@ def _export_quantized_weight(
             weight, is_bmm_expert_weight=is_bmm_expert_weight
         )
 
-        weight_scale = NVFP4QTensor.get_weights_scaling_factor(
-            weight,
-            block_size=block_size,
-            weights_scaling_factor_2=weight_scale_2,
-        )[0]
+        if NVFP4QTensor._is_static_quantizer(weight_quantizer):
+            weight_scale = NVFP4QTensor.get_weights_scaling_factor_from_quantizer(
+                weight_quantizer,
+                weight,
+                weight_scale_2,
+            )[0]
+        else:
+            weight_scale = NVFP4QTensor.get_weights_scaling_factor(
+                weight,
+                block_size=block_size,
+                weights_scaling_factor_2=weight_scale_2,
+            )[0]
 
         quantized_weight = to_quantized_weight(
             weight.to(dtype),
@@ -642,11 +647,20 @@ def _process_quantized_modules(
         if is_modelopt_qlora and (hasattr(sub_module, "base_layer")):
             continue
 
+        # Preprocessing: restore unpacked weight so the export path can read
+        # the live quantizer state. Falls through to the export branches below.
         if hasattr(sub_module, "weight_packed") or (
             "QuantFP8Linear" in type(sub_module).__name__ and sub_module.weight.element_size() <= 1
         ):
             sub_module.unpack_weight()
-        if get_quantization_format(sub_module) != QUANTIZATION_NONE:
+
+        if hasattr(sub_module, "gate_up_proj_weight_quantizers"):
+            # _QuantFusedExperts uses plural `gate_up_proj_weight_quantizers` (ModuleList),
+            # which get_quantization_format's singular-weight_quantizer check misses. Handle
+            # it explicitly before the format gate so fused-experts get split + quantized.
+            with fsdp2_aware_weight_update(model, sub_module, reshard=False):
+                _export_fused_experts(sub_module, dtype)
+        elif get_quantization_format(sub_module) != QUANTIZATION_NONE:
             # Skip QuantMoELinear - it's handled separately in _reconstruct_fused_moe_linear
             if type(sub_module).__name__ == "QuantMoELinear":
                 continue
@@ -677,13 +691,6 @@ def _process_quantized_modules(
                 with fsdp2_aware_weight_update(model, sub_module, reshard=False):
                     for weight_name in ["gate_up_proj", "down_proj"]:
                         _export_quantized_weight(sub_module, dtype, weight_name)
-            elif hasattr(sub_module, "gate_up_proj_weight_quantizers"):
-                # Generic fused MoE experts (_QuantFusedExperts) with per-expert
-                # quantizer ModuleLists. Split into per-expert modules and export.
-                from modelopt.torch.export.moe_utils import _export_fused_experts
-
-                with fsdp2_aware_weight_update(model, sub_module, reshard=False):
-                    _export_fused_experts(sub_module, dtype)
 
 
 def _export_transformers_checkpoint(
