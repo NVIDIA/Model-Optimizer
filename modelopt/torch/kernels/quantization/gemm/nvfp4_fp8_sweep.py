@@ -132,13 +132,20 @@ def nvfp4_fp8_scale_sweep(
     Returns:
         ``best_amax`` of shape ``[N_BLOCKS]``, fp32, on the same device as ``x``.
     """
-    assert x.is_cuda, "nvfp4_fp8_scale_sweep requires a CUDA tensor"
+    if not x.is_cuda:
+        raise ValueError("nvfp4_fp8_scale_sweep requires a CUDA tensor.")
+    if not isinstance(block_size, int) or block_size <= 0:
+        raise ValueError(f"block_size must be a positive int, got {block_size!r}.")
     if x.numel() % block_size != 0:
         raise ValueError(f"x.numel() ({x.numel()}) is not divisible by block_size ({block_size}).")
 
     if candidates is None:
         candidates = fp8_scale_candidates(x.device)
     candidates = candidates.contiguous().to(device=x.device, dtype=torch.float32)
+    if candidates.ndim != 1 or candidates.numel() == 0:
+        raise ValueError(
+            f"candidates must be a non-empty 1-D tensor; got shape {tuple(candidates.shape)}."
+        )
 
     n_blocks = x.numel() // block_size
     x_flat = x.contiguous().view(-1)
