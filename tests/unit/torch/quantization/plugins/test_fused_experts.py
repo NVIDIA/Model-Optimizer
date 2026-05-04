@@ -713,7 +713,7 @@ class TestExportFusedExpertsUncalibratedFallback:
 
     @pytest.mark.parametrize("zero_amax", [False, True])
     def test_fallback_warning_emitted(self, zero_amax):
-        """Fallback warning must fire for uncalibrated (_amax=None) and zero-amax experts."""
+        """Fallback warning must fire and produce valid per-block _amax + global_amax."""
         import warnings
         from unittest.mock import patch
 
@@ -725,8 +725,16 @@ class TestExportFusedExpertsUncalibratedFallback:
             converted.gate_up_proj_weight_quantizers[idx]._amax = bad_amax
             converted.down_proj_weight_quantizers[idx]._amax = bad_amax
 
+        captured_wrappers = []
+
+        def _capture(wrapper, dtype):
+            captured_wrappers.append(wrapper)
+
         with (
-            patch("modelopt.torch.export.unified_export_hf._export_quantized_weight"),
+            patch(
+                "modelopt.torch.export.unified_export_hf._export_quantized_weight",
+                side_effect=_capture,
+            ),
             warnings.catch_warnings(record=True) as caught,
         ):
             warnings.simplefilter("always")
@@ -735,4 +743,17 @@ class TestExportFusedExpertsUncalibratedFallback:
         assert any("weight-derived per-block amax" in str(w.message) for w in caught), (
             f"No fallback warning emitted for {'zero' if zero_amax else 'None'} amax — Bug 3 regression"
         )
+
+        # Every per-block weight quantizer must have a repaired per-block _amax and global_amax.
+        for wrapper in captured_wrappers:
+            wq = wrapper.weight_quantizer
+            if not (getattr(wq, "block_sizes", None) or {}).get(-1):
+                continue
+            assert wq._amax is not None and wq._amax.numel() > 1, (
+                "Fallback did not produce per-block _amax"
+            )
+            assert hasattr(wq, "global_amax") and wq.global_amax > 0, (
+                "global_amax missing or zero after fallback"
+            )
+
         self._cleanup_registry(expert_type)

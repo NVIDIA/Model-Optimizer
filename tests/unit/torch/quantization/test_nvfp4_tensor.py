@@ -29,7 +29,8 @@ class TestNVFP4ScaleClamping:
         """Tiny per-block amax (<<FP8 min) must not underflow to zero after FP8 cast."""
         block_size = 16
         tiny_weight = torch.full((4, block_size), 1e-10)
-        wsf2 = torch.tensor(1e-10 / (6.0 * 448.0))
+        # wsf2=1.0 → per_block_scale = amax/(6*wsf2) ≈ 1.7e-11 << 2^-9, exercises FP8-min clamp
+        wsf2 = torch.tensor(1.0)
 
         per_block_scale, _ = NVFP4QTensor.get_weights_scaling_factor(tiny_weight, block_size, wsf2)
         per_block_scale_f32 = per_block_scale.float()

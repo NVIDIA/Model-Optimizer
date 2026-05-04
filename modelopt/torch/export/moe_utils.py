@@ -90,13 +90,11 @@ def _export_fused_experts(module: nn.Module, dtype: torch.dtype) -> None:
                 and w_quantizer._amax is not None
                 and w_quantizer._amax.dim() >= 1
             ):
-                amax = w_quantizer._amax  # CPU float32
+                amax = w_quantizer._amax
                 amax_dim0 = amax.shape[0]
-                if amax_dim0 % fused_total == 0:
+                if fused_total % amax_dim0 == 0:
                     slice_start = fused_start * amax_dim0 // fused_total
                     slice_end = (fused_start + weight_slice.shape[0]) * amax_dim0 // fused_total
-                    # Bypass amax.setter (which forbids shape changes); w_quantizer is a
-                    # deepcopy for gate/up so mutating it is safe.
                     w_quantizer._amax = amax[slice_start:slice_end].contiguous()
                 else:
                     warnings.warn(
@@ -114,6 +112,7 @@ def _export_fused_experts(module: nn.Module, dtype: torch.dtype) -> None:
                 hasattr(w_quantizer, "_amax")
                 and w_quantizer._amax is not None
                 and w_quantizer._amax.numel() > 1
+                and (getattr(w_quantizer, "block_sizes", None) or {}).get(-1) is not None
             ):
                 amax_cpu = w_quantizer._amax
                 invalid_mask = ~(
