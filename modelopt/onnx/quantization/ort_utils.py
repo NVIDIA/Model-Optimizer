@@ -57,9 +57,17 @@ def _run_trtexec(
 
     Returns:
         The completed subprocess result.
+
+    Raises:
+        FileNotFoundError: If the 'trtexec' binary is not found in PATH.
     """
     cmd = ["trtexec", *(args or [])]
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)  # nosec B603
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)  # nosec B603
+    except FileNotFoundError as e:
+        raise FileNotFoundError(
+            "'trtexec' binary not found. Please ensure TensorRT is installed and 'trtexec' is in PATH."
+        ) from e
 
 
 def _check_for_trtexec(min_version: str = "10.0") -> str:
