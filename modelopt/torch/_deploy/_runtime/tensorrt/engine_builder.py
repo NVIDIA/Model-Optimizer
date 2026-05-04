@@ -15,7 +15,6 @@
 
 import logging
 import shutil
-import subprocess  # nosec
 import sys
 from pathlib import Path
 from tempfile import NamedTemporaryFile, TemporaryDirectory, gettempdir
@@ -57,6 +56,8 @@ def _run_trtexec_streamed(args: list[str], cwd: Path | None = None) -> tuple[int
     Returns:
         A tuple of (returncode, output) where output is the combined stdout/stderr bytes.
     """
+    import subprocess  # nosec
+
     cmd = ["trtexec", *args]
     logging.info(" ".join(cmd))
     with NamedTemporaryFile("w+b") as log:
