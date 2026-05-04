@@ -179,7 +179,7 @@ python hf_ptq.py \
 # Using a custom recipe YAML file path
 python hf_ptq.py \
   --pyt_ckpt_path <huggingface_model_card> \
-  --recipe /path/to/my_recipe.yaml \
+  --recipe /path/to/my_ptq.yaml \
   --export_path <quantized_ckpt_path>
 ```
 

@@ -20,10 +20,17 @@ try:
 except ImportError:  # Python < 3.11
     from importlib.abc import Traversable
 from pathlib import Path
-from typing import Any
 
-from ._config_loader import BUILTIN_RECIPES_LIB, _load_raw_config, _resolve_imports, load_config
-from .config import ModelOptPTQRecipe, ModelOptRecipeBase, RecipeType
+from modelopt.torch.quantization.config import QuantizeConfig
+
+from ._config_loader import BUILTIN_RECIPES_LIB, load_config
+from .config import (
+    ModelOptPTQRecipe,
+    ModelOptPTQRecipeYamlConfig,
+    ModelOptRecipeBase,
+    RecipeMetadataConfig,
+    RecipeType,
+)
 
 __all__ = ["load_config", "load_recipe"]
 
@@ -57,7 +64,7 @@ def load_recipe(recipe_path: str | Path | Traversable) -> ModelOptRecipeBase:
 
     * A ``.yml`` / ``.yaml`` file with ``metadata`` and ``quantize`` sections.
       The suffix may be omitted and will be probed automatically.
-    * A directory containing ``recipe.yml`` (metadata) and ``quantize.yml``.
+    * A directory containing ``metadata.yml`` and ``quantize.yml``.
 
     The path may be relative to the built-in recipes library or an absolute /
     relative filesystem path.
@@ -87,15 +94,11 @@ def _load_recipe_from_file(recipe_file: Path | Traversable) -> ModelOptRecipeBas
     The file must contain a ``metadata`` section with at least ``recipe_type``,
     plus a ``quant_cfg`` mapping and an optional ``algorithm`` for PTQ recipes.
     """
-    raw = _load_raw_config(recipe_file)
-    if not isinstance(raw, dict):
+    data = load_config(recipe_file, schema_type=ModelOptPTQRecipeYamlConfig)
+    if not isinstance(data, dict):
         raise ValueError(
-            f"Recipe file {recipe_file} must be a YAML mapping, got {type(raw).__name__}."
+            f"Recipe file {recipe_file} must be a YAML mapping, got {type(data).__name__}."
         )
-    data = _resolve_imports(raw)
-    assert isinstance(data, dict), (
-        f"Recipe file {recipe_file} resolved to {type(data).__name__}; expected dict."
-    )
 
     metadata = data.get("metadata", {})
     recipe_type = metadata.get("recipe_type")
@@ -113,83 +116,48 @@ def _load_recipe_from_file(recipe_file: Path | Traversable) -> ModelOptRecipeBas
     raise ValueError(f"Unsupported recipe type: {recipe_type!r}")
 
 
-def _load_recipe_from_dir(recipe_dir: Path | Traversable) -> ModelOptRecipeBase:
-    """Load a recipe from a directory containing ``recipe.yml`` and ``quantize.yml``.
-
-    Import resolution is deliberately two-pass:
-
-    1. ``quantize.yaml`` is resolved first against its own ``imports:`` section
-       (if any). After this pass, every ``$import`` that references a
-       ``quantize.yaml``-declared name is already expanded.
-    2. The resolved ``quantize`` dict is then wrapped under a ``quantize:`` key
-       and merged with ``recipe.yaml``'s ``imports:``, and ``_resolve_imports``
-       is called again. This second pass only fires ``$import`` markers that
-       name imports declared in ``recipe.yaml`` — which, by step 1, cannot
-       alias a ``quantize.yaml`` import name.
-
-    Practical consequence: each file's ``imports:`` section defines names
-    scoped to that file; there is no cross-file import sharing. If
-    ``recipe.yaml`` and ``quantize.yaml`` both declare an import with the
-    same name but different paths, each file sees only its own.
-    """
-    recipe_file = None
-    for name in ("recipe.yml", "recipe.yaml"):
-        candidate = recipe_dir.joinpath(name)
+def _find_recipe_section_file(
+    recipe_dir: Path | Traversable, section_name: str
+) -> Path | Traversable:
+    """Find ``<section_name>.yml`` or ``<section_name>.yaml`` in a recipe directory."""
+    for suffix in (".yml", ".yaml"):
+        candidate = recipe_dir.joinpath(section_name + suffix)
         if candidate.is_file():
-            recipe_file = candidate
-            break
-    if recipe_file is None:
-        raise ValueError(
-            f"Cannot find a recipe descriptor in {recipe_dir}. Looked for: recipe.yml, recipe.yaml"
-        )
+            return candidate
+    raise ValueError(
+        f"Cannot find {section_name} in {recipe_dir}. "
+        f"Looked for: {section_name}.yml, {section_name}.yaml"
+    )
 
-    recipe_data = _load_raw_config(recipe_file)
-    if not isinstance(recipe_data, dict):
+
+def _load_recipe_from_dir(recipe_dir: Path | Traversable) -> ModelOptRecipeBase:
+    """Load a recipe from a directory containing ``metadata.yml`` and ``quantize.yml``.
+
+    Each file is loaded independently. The file name provides the recipe
+    section key: ``metadata.yml`` becomes metadata, and ``quantize.yml`` becomes
+    quantize.
+    """
+    metadata_file = _find_recipe_section_file(recipe_dir, "metadata")
+
+    metadata = load_config(metadata_file, schema_type=RecipeMetadataConfig)
+    if not isinstance(metadata, dict):
         raise ValueError(
-            f"Recipe file {recipe_file} must be a YAML mapping, got {type(recipe_data).__name__}."
+            f"Metadata file {metadata_file} must be a YAML mapping, got {type(metadata).__name__}."
         )
-    metadata = recipe_data.get("metadata", {})
     recipe_type = metadata.get("recipe_type")
     if recipe_type is None:
-        raise ValueError(f"Recipe file {recipe_file} must contain a 'metadata.recipe_type' field.")
+        raise ValueError(f"Metadata file {metadata_file} must contain a 'recipe_type' field.")
 
     if recipe_type == RecipeType.PTQ:
-        quantize_file = None
-        for name in ("quantize.yml", "quantize.yaml"):
-            candidate = recipe_dir.joinpath(name)
-            if candidate.is_file():
-                quantize_file = candidate
-                break
-        if quantize_file is None:
-            raise ValueError(
-                f"Cannot find quantize in {recipe_dir}. Looked for: quantize.yml, quantize.yaml"
-            )
-        # Resolve imports from both recipe.yaml and quantize.yaml
-        quantize_data = _load_raw_config(quantize_file)
+        quantize_file = _find_recipe_section_file(recipe_dir, "quantize")
+        quantize_data = load_config(quantize_file, schema_type=QuantizeConfig)
         if not isinstance(quantize_data, dict):
             raise ValueError(
                 f"{quantize_file} must be a YAML mapping, got {type(quantize_data).__name__}."
             )
-        # Resolve quantize.yaml's own imports first (if any)
-        if "imports" in quantize_data:
-            resolved = _resolve_imports(quantize_data)
-            assert isinstance(resolved, dict), (
-                f"{quantize_file} resolved to {type(resolved).__name__}; expected dict."
-            )
-            quantize_data = resolved
-        # Then resolve recipe.yaml's imports applied to the quantize data
-        combined: dict[str, Any] = {"quantize": quantize_data}
-        imports = recipe_data.get("imports")
-        if imports:
-            combined["imports"] = imports
-            resolved = _resolve_imports(combined)
-            assert isinstance(resolved, dict), (
-                f"Recipe {recipe_dir} resolved to {type(resolved).__name__}; expected dict."
-            )
-            combined = resolved
         return ModelOptPTQRecipe(
             recipe_type=RecipeType.PTQ,
             description=metadata.get("description", "PTQ recipe."),
-            quantize=combined["quantize"],
+            quantize=quantize_data,
         )
     raise ValueError(f"Unsupported recipe type: {recipe_type!r}")

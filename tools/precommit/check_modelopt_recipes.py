@@ -117,7 +117,7 @@ def _check_single_file_recipe(path: Path) -> list[str]:
 
 
 def _check_dir_recipe(dir_path: Path) -> list[str]:
-    """Check a directory-format recipe (recipe.yml + quantize.yml)."""
+    """Check a directory-format recipe (metadata.yml + quantize.yml)."""
     errors: list[str] = []
 
     for name in ("quantize.yml", "quantize.yaml"):
@@ -149,7 +149,7 @@ def _try_load_recipe(path: str) -> list[str]:
 
 def _is_dir_recipe(dir_path: Path) -> bool:
     """Return True if *dir_path* is a directory-format recipe."""
-    return any((dir_path / n).is_file() for n in ("recipe.yml", "recipe.yaml"))
+    return any((dir_path / n).is_file() for n in ("metadata.yml", "metadata.yaml"))
 
 
 def _is_recipe_file(path: Path) -> bool:
@@ -170,6 +170,14 @@ def _is_recipe_file(path: Path) -> bool:
     return metadata["recipe_type"] == "ptq"
 
 
+def _is_metadata_file(path: Path) -> bool:
+    """Return True if *path* looks like a directory recipe metadata file."""
+    data = _load_yaml(path)
+    if data is None:
+        return True  # let load_recipe report the parse error
+    return data.get("recipe_type") == "ptq"
+
+
 def _resolve_recipes(changed_files: list[str]) -> dict[Path, str]:
     """Resolve changed files to recipes. Returns {recipe_path: kind} mapping.
 
@@ -182,10 +190,10 @@ def _resolve_recipes(changed_files: list[str]) -> dict[Path, str]:
 
         # Check if this file is inside a directory-format recipe.
         if _is_dir_recipe(path.parent):
-            # Directory recipes have a recipe.yml with metadata; check it.
-            for name in ("recipe.yml", "recipe.yaml"):
+            # Directory recipes have a metadata.yml with top-level metadata fields.
+            for name in ("metadata.yml", "metadata.yaml"):
                 candidate = path.parent / name
-                if candidate.is_file() and _is_recipe_file(candidate):
+                if candidate.is_file() and _is_metadata_file(candidate):
                     recipes.setdefault(path.parent, "dir")
                     break
         elif path.is_file() and path.suffix in (".yml", ".yaml"):

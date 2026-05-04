@@ -15,19 +15,12 @@
 
 """Re-export config loading utilities from ``modelopt.torch.opt.config_loader``."""
 
-from modelopt.torch.opt.config_loader import (
-    BUILTIN_CONFIG_ROOT,
-    _load_raw_config,
-    _resolve_imports,
-    load_config,
-)
+from modelopt.torch.opt.config_loader import BUILTIN_CONFIG_ROOT, load_config
 
 BUILTIN_RECIPES_LIB = BUILTIN_CONFIG_ROOT
 
 __all__ = [
     "BUILTIN_CONFIG_ROOT",
     "BUILTIN_RECIPES_LIB",
-    "_load_raw_config",
-    "_resolve_imports",
     "load_config",
 ]

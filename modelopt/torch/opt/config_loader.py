@@ -24,6 +24,7 @@ imports.
 from dataclasses import dataclass, field
 from importlib import import_module
 from importlib.resources import files
+from types import NoneType, UnionType
 
 try:
     from importlib.resources.abc import Traversable
@@ -32,10 +33,11 @@ except ImportError:  # Python < 3.11
 import re
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Union, get_args, get_origin, get_type_hints
 
 import yaml
 from pydantic import TypeAdapter
+from typing_extensions import NotRequired, Required, is_typeddict
 
 
 @dataclass
@@ -61,6 +63,16 @@ class _RawConfig:
     data: dict[str, Any] | list[Any] | _ListSnippet
     schema: str | None = None
     path: Path | Traversable | None = None
+
+
+@dataclass
+class _ResolvedImport:
+    """Resolved imported payload plus the schema declared by that payload."""
+
+    data: Any
+    schema: str | None
+    schema_type: Any | None
+    path: Path | Traversable | None
 
 
 # Root to all built-in configs and recipes.
@@ -282,11 +294,96 @@ def _schema_type(schema_path: str) -> Any:
         raise ValueError(f"Cannot resolve modelopt-schema {schema_path!r}.") from exc
 
 
-def _validate_modelopt_schema(schema_path: str | None, data: Any, config_path: Any) -> None:
+def _schema_label(schema_type: Any | None, schema_path: str | None = None) -> str:
+    """Return a compact human-readable schema name for diagnostics."""
+    if schema_path:
+        return schema_path
+    if schema_type is None:
+        return "<untyped>"
+    return getattr(schema_type, "__qualname__", repr(schema_type))
+
+
+def _unwrap_schema_type(schema_type: Any | None) -> Any | None:
+    """Unwrap typing wrappers that do not change the value shape."""
+    if schema_type is None:
+        return None
+    origin = get_origin(schema_type)
+    if origin in (Required, NotRequired):
+        return _unwrap_schema_type(get_args(schema_type)[0])
+    if origin in (UnionType, Union):
+        args = tuple(arg for arg in get_args(schema_type) if arg is not NoneType)
+        if len(args) == 1:
+            return _unwrap_schema_type(args[0])
+    return schema_type
+
+
+def _schema_equal(left: Any | None, right: Any | None) -> bool:
+    """Compare schema annotations structurally enough for import splice decisions."""
+    left = _unwrap_schema_type(left)
+    right = _unwrap_schema_type(right)
+    if left == right:
+        return True
+
+    left_origin, right_origin = get_origin(left), get_origin(right)
+    if left_origin is None or right_origin is None or left_origin != right_origin:
+        return False
+
+    left_args = get_args(left)
+    right_args = get_args(right)
+    return len(left_args) == len(right_args) and all(
+        _schema_equal(l_arg, r_arg) for l_arg, r_arg in zip(left_args, right_args)
+    )
+
+
+def _list_element_schema(schema_type: Any | None) -> Any | None:
+    """Return the element schema for a typed ``list[T]`` annotation."""
+    schema_type = _unwrap_schema_type(schema_type)
+    if get_origin(schema_type) is not list:
+        return None
+    args = get_args(schema_type)
+    if len(args) != 1 or args[0] is Any:
+        return None
+    return _unwrap_schema_type(args[0])
+
+
+def _child_schema(schema_type: Any | None, key: Any) -> Any | None:
+    """Return the schema for ``key`` under a Pydantic model, TypedDict, or dict annotation."""
+    schema_type = _unwrap_schema_type(schema_type)
+    if schema_type is None:
+        return None
+
+    model_fields = getattr(schema_type, "model_fields", None)
+    if isinstance(key, str) and model_fields and key in model_fields:
+        return _unwrap_schema_type(model_fields[key].annotation)
+
+    if isinstance(key, str) and is_typeddict(schema_type):
+        try:
+            annotations = get_type_hints(schema_type, include_extras=True)
+        except Exception:
+            annotations = getattr(schema_type, "__annotations__", {})
+        return _unwrap_schema_type(annotations.get(key))
+
+    origin = get_origin(schema_type)
+    if origin is dict:
+        args = get_args(schema_type)
+        if len(args) == 2:
+            return _unwrap_schema_type(args[1])
+
+    return None
+
+
+def _validate_modelopt_schema(
+    schema_path: str | None,
+    data: Any,
+    config_path: Any,
+    schema_type: Any | None = None,
+) -> None:
     """Validate resolved config content against the requested schema without mutating it."""
-    if not schema_path:
+    if schema_type is None and not schema_path:
         return
-    schema_type = _schema_type(schema_path)
+    if schema_type is None:
+        assert schema_path is not None
+        schema_type = _schema_type(schema_path)
     try:
         # TypeAdapter validates the schema types we allow here: BaseModel classes
         # plus regular typing constructs such as TypedDict, list[TypedDict], unions,
@@ -294,19 +391,23 @@ def _validate_modelopt_schema(schema_path: str | None, data: Any, config_path: A
         TypeAdapter(schema_type).validate_python(data)
     except Exception as exc:
         raise ValueError(
-            f"Config file {config_path} does not match modelopt-schema {schema_path!r}: {exc}"
+            f"Config file {config_path} does not match modelopt-schema "
+            f"{_schema_label(schema_type, schema_path)!r}: {exc}"
         ) from exc
 
 
 def _resolve_imports(
-    data: dict[str, Any] | _ListSnippet, _loading: frozenset[str] | None = None
+    data: dict[str, Any] | _ListSnippet,
+    _loading: frozenset[str] | None = None,
+    schema_type: Any | None = None,
 ) -> dict[str, Any] | list[Any]:
     """Resolve the ``imports`` section and ``$import`` references.
 
     Accepts either a raw dict (with optional top-level ``imports:``) or a
     :class:`_ListSnippet` (a list body carrying its own ``imports``). Returns
     a dict for the former and a list for the latter — the imports section is
-    consumed.
+    consumed.  Bare ``$import`` entries inside lists require ``schema_type`` so
+    the resolver can distinguish list splicing from element appending.
 
     See ``modelopt.recipe.loader`` module docstring for the full specification.
     This function lives in ``_config_loader`` (not ``loader``) so that it can be
@@ -320,6 +421,12 @@ def _resolve_imports(
         body = {k: v for k, v in data.items() if k != "imports"}
 
     if not imports_dict:
+        unresolved = _find_import_marker(body)
+        if unresolved is not None:
+            ref_name, context = unresolved
+            raise ValueError(
+                f"Unknown $import reference {ref_name!r} in {context}. No imports are declared."
+            )
         return body
 
     if not isinstance(imports_dict, dict):
@@ -334,7 +441,7 @@ def _resolve_imports(
     # Cycle detection uses the *resolved* file path as the key so that aliases
     # such as ``foo/bar``, ``./foo/bar``, and its absolute form all map to the
     # same cycle entry.
-    import_map: dict[str, Any] = {}
+    import_map: dict[str, _ResolvedImport] = {}
     for name, config_path in imports_dict.items():
         if not config_path:
             raise ValueError(f"Import {name!r} has an empty config path.")
@@ -348,14 +455,24 @@ def _resolve_imports(
             )
         raw_snippet = _load_raw_config_with_schema(config_path)
         snippet = raw_snippet.data
+        snippet_schema_type = _schema_type(raw_snippet.schema) if raw_snippet.schema else None
         if isinstance(snippet, _ListSnippet) or (
             isinstance(snippet, dict) and "imports" in snippet
         ):
-            snippet = _resolve_imports(snippet, _loading | {cycle_key})
-        _validate_modelopt_schema(raw_snippet.schema, snippet, raw_snippet.path)
-        import_map[name] = snippet
+            snippet = _resolve_imports(
+                snippet, _loading | {cycle_key}, schema_type=snippet_schema_type
+            )
+        _validate_modelopt_schema(
+            raw_snippet.schema, snippet, raw_snippet.path, schema_type=snippet_schema_type
+        )
+        import_map[name] = _ResolvedImport(
+            data=snippet,
+            schema=raw_snippet.schema,
+            schema_type=snippet_schema_type,
+            path=raw_snippet.path,
+        )
 
-    def _lookup(ref_name: str, context: str) -> Any:
+    def _lookup(ref_name: str, context: str) -> _ResolvedImport:
         if ref_name not in import_map:
             raise ValueError(
                 f"Unknown $import reference {ref_name!r} in {context}. "
@@ -363,12 +480,47 @@ def _resolve_imports(
             )
         return import_map[ref_name]
 
-    def _resolve_value(obj: Any) -> Any:
+    def _resolve_list_import(
+        imported: _ResolvedImport, list_schema: Any | None, ref_name: str, context: str
+    ) -> list[Any]:
+        """Resolve a bare list-entry import using the containing list's schema."""
+        element_schema = _list_element_schema(list_schema)
+        if element_schema is None:
+            raise ValueError(
+                f"$import {ref_name!r} in list at {context} requires a typed list schema "
+                "(expected list[ElementType])."
+            )
+        if imported.schema_type is None:
+            raise ValueError(
+                f"$import {ref_name!r} in list at {context} must reference a snippet with "
+                "a modelopt-schema comment."
+            )
+
+        if _schema_equal(imported.schema_type, list_schema):
+            if not isinstance(imported.data, list):
+                raise ValueError(
+                    f"$import {ref_name!r} in list at {context} declared schema "
+                    f"{_schema_label(imported.schema_type, imported.schema)!r} but resolved to "
+                    f"{type(imported.data).__name__}, expected list."
+                )
+            return list(imported.data)
+
+        if _schema_equal(imported.schema_type, element_schema):
+            return [imported.data]
+
+        raise ValueError(
+            f"$import {ref_name!r} in list at {context} has schema "
+            f"{_schema_label(imported.schema_type, imported.schema)!r}; expected either "
+            f"the list schema {_schema_label(list_schema)!r} for splicing or the element "
+            f"schema {_schema_label(element_schema)!r} for appending."
+        )
+
+    def _resolve_value(obj: Any, value_schema: Any | None = None, context: str = "root") -> Any:
         """Recursively resolve ``$import`` markers anywhere in the config tree.
 
-        - Dict with ``$import`` as only key and list value → splice (in list context)
+        - Dict with ``$import`` as only key in list context → splice or append by schema
         - Dict with ``$import`` key → replace/merge (import + override with inline keys)
-        - List → resolve each element (with list-splice for ``$import`` entries)
+        - List → resolve each element with the list element schema
         - Other → return as-is
         """
         if isinstance(obj, dict):
@@ -383,7 +535,8 @@ def _resolve_imports(
 
                 merged: dict[str, Any] = {}
                 for rname in ref_names:
-                    snippet = _lookup(rname, "dict value")
+                    imported = _lookup(rname, f"dict value at {context}")
+                    snippet = imported.data
                     if not isinstance(snippet, dict):
                         raise ValueError(
                             f"$import {rname!r} in dict must resolve to a dict, "
@@ -392,39 +545,75 @@ def _resolve_imports(
                     merged.update(snippet)
 
                 merged.update(inline_keys)
-                return _resolve_value(merged)  # resolve any nested $import in result
+                return _resolve_value(
+                    merged, value_schema, context
+                )  # resolve any nested $import in result
             else:
-                return {k: _resolve_value(v) for k, v in obj.items()}
+                return {
+                    k: _resolve_value(v, _child_schema(value_schema, k), f"{context}.{k}")
+                    for k, v in obj.items()
+                }
         elif isinstance(obj, list):
             resolved: list[Any] = []
-            for entry in obj:
+            element_schema = _list_element_schema(value_schema)
+            for index, entry in enumerate(obj):
+                entry_context = f"{context}[{index}]"
                 if isinstance(entry, dict) and _IMPORT_KEY in entry and len(entry) == 1:
-                    # {$import: name} as sole key in list → splice
-                    imported = _lookup(entry[_IMPORT_KEY], "list entry")
-                    if not isinstance(imported, list):
-                        raise ValueError(
-                            f"$import {entry[_IMPORT_KEY]!r} in list must resolve to a "
-                            f"list, got {type(imported).__name__}."
+                    # {$import: name} as sole key in a typed list splices list[T] snippets
+                    # and appends T snippets. Untyped list imports are intentionally rejected.
+                    imported = _lookup(entry[_IMPORT_KEY], f"list entry at {entry_context}")
+                    resolved.extend(
+                        _resolve_list_import(
+                            imported, value_schema, entry[_IMPORT_KEY], entry_context
                         )
-                    resolved.extend(_resolve_value(imported))
+                    )
                 else:
-                    resolved.append(_resolve_value(entry))
+                    resolved.append(_resolve_value(entry, element_schema, entry_context))
             return resolved
         return obj
 
-    return _resolve_value(body)
+    return _resolve_value(body, schema_type)
 
 
-def load_config(config_path: str | Path | Traversable) -> dict[str, Any] | list[Any]:
+def _find_import_marker(obj: Any, context: str = "root") -> tuple[Any, str] | None:
+    """Return the first unresolved ``$import`` marker in ``obj``, if any."""
+    if isinstance(obj, dict):
+        if _IMPORT_KEY in obj:
+            return obj[_IMPORT_KEY], context
+        for key, value in obj.items():
+            found = _find_import_marker(value, f"{context}.{key}")
+            if found is not None:
+                return found
+    elif isinstance(obj, list):
+        for index, entry in enumerate(obj):
+            found = _find_import_marker(entry, f"{context}[{index}]")
+            if found is not None:
+                return found
+    return None
+
+
+def load_config(
+    config_path: str | Path | Traversable,
+    *,
+    schema_type: Any | None = None,
+) -> dict[str, Any] | list[Any]:
     """Load a YAML config and resolve all ``$import`` references.
 
     This is the primary config loading entry point.  It loads the YAML file,
     resolves any ``imports`` / ``$import`` directives, and returns the final
     config dict or list.
+
+    ``schema_type`` supplies a typing context for import resolution when the
+    file itself has no ``modelopt-schema`` comment. It is intentionally not a
+    request to validate the top-level file; only files that declare
+    ``modelopt-schema`` are schema-validated.
     """
     raw = _load_raw_config_with_schema(config_path)
     data = raw.data
-    if isinstance(data, _ListSnippet) or (isinstance(data, dict) and "imports" in data):
-        data = _resolve_imports(data)
-    _validate_modelopt_schema(raw.schema, data, raw.path)
+    declared_schema_type = _schema_type(raw.schema) if raw.schema else None
+    resolver_schema_type = declared_schema_type or schema_type
+
+    if isinstance(data, (_ListSnippet, dict)):
+        data = _resolve_imports(data, schema_type=resolver_schema_type)
+    _validate_modelopt_schema(raw.schema, data, raw.path, schema_type=declared_schema_type)
     return data

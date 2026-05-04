@@ -131,16 +131,15 @@ example:
 .. code-block:: text
 
    my_recipe/
-     recipe.yaml      # metadata section (+ optional imports)
+     metadata.yaml    # metadata section body
      quantize.yaml    # quantize section (+ optional imports)
 
-``recipe.yaml``:
+``metadata.yaml``:
 
 .. code-block:: yaml
 
-   metadata:
-     recipe_type: ptq
-     description: My custom NVFP4 recipe.
+   recipe_type: ptq
+   description: My custom NVFP4 recipe.
 
 ``quantize.yaml``:
 
@@ -159,9 +158,9 @@ example:
          num_bits: e4m3
          axis:
 
-Both inline and import styles work with the directory format.  Any YAML file
-in the directory can have its own ``imports`` section — ``recipe.yaml``,
-``quantize.yaml``, or any other config file.
+Both inline and import styles work with the directory format.  Imports are
+scoped to the file that declares them; for PTQ quantization snippets, declare
+the relevant ``imports`` section in ``quantize.yaml``.
 
 .. _composable-imports:
 
@@ -277,6 +276,7 @@ and returns the resolved list:
 .. code-block:: yaml
 
    # configs/ptq/units/fp8_kv.yaml — list snippet that imports a dict snippet
+   # modelopt-schema: modelopt.torch.quantization.config.QuantizerCfgListConfig
    imports:
      fp8: configs/numerics/fp8
    ---
@@ -308,6 +308,18 @@ payload after any imports have been expanded:
 
 The schema comment is metadata only; it is not returned as part of the loaded
 config, and validation does not expand Pydantic defaults into the snippet.
+
+List imports are schema-driven.  When a typed list field such as
+``quant_cfg: list[QuantizerCfgEntry]`` contains a bare import entry, the
+imported snippet must declare its own ``modelopt-schema``:
+
+* If the snippet schema is the same list type, e.g. ``QuantizerCfgListConfig``,
+  the imported entries are spliced into the containing list.
+* If the snippet schema is the element type, e.g. ``QuantizerCfgEntry``, the
+  imported entry is appended as a single list item.
+* If the containing list or imported snippet has no schema, or the snippet
+  schema is neither the list type nor the element type, loading raises
+  ``ValueError``.
 
 Built-in config snippets
 ^^^^^^^^^^^^^^^^^^^^^^^^
@@ -496,7 +508,7 @@ type depends on the ``recipe_type`` in the metadata:
 .. code-block:: python
 
    # Load a custom recipe from the filesystem (file or directory)
-   recipe = load_recipe("/path/to/my_custom_recipe.yaml")
+   recipe = load_recipe("/path/to/my_custom_ptq.yaml")
    # or: recipe = load_recipe("/path/to/my_recipe_dir/")
 
 Command-line usage
@@ -568,7 +580,7 @@ Example -- creating a custom PTQ recipe using imports:
 
 .. code-block:: yaml
 
-   # my_int8_recipe.yaml
+   # my_int8_ptq.yaml
    imports:
      base_disable_all: configs/ptq/units/base_disable_all
      default_disabled: configs/ptq/units/default_disabled_quantizers

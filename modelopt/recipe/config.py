@@ -18,8 +18,10 @@
 from __future__ import annotations
 
 from enum import Enum
+from typing import Any
 
 from pydantic import field_validator
+from typing_extensions import TypedDict
 
 from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
 from modelopt.torch.quantization.config import QuantizeConfig
@@ -30,6 +32,21 @@ class RecipeType(str, Enum):
 
     PTQ = "ptq"
     # QAT = "qat" # Not implemented yet, will be added in the future.
+
+
+class RecipeMetadataConfig(TypedDict, total=False):
+    """YAML shape of the recipe metadata section before Pydantic model construction."""
+
+    recipe_type: RecipeType
+    description: str
+
+
+class ModelOptPTQRecipeYamlConfig(TypedDict, total=False):
+    """YAML shape of a PTQ recipe file before metadata is flattened into the model."""
+
+    imports: dict[str, Any]
+    metadata: RecipeMetadataConfig
+    quantize: QuantizeConfig
 
 
 class ModelOptRecipeBase(ModeloptBaseConfig):
