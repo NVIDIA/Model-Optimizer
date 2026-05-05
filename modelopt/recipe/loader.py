@@ -21,9 +21,10 @@ except ImportError:  # Python < 3.11
     from importlib.abc import Traversable
 from pathlib import Path
 
+from modelopt.torch.opt.config_loader import BUILTIN_CONFIG_ROOT as BUILTIN_RECIPES_LIB
+from modelopt.torch.opt.config_loader import load_config
 from modelopt.torch.quantization.config import QuantizeConfig
 
-from ._config_loader import BUILTIN_RECIPES_LIB, load_config
 from .config import ModelOptPTQRecipe, ModelOptRecipeBase, RecipeMetadataConfig, RecipeType
 
 __all__ = ["load_config", "load_recipe"]

@@ -410,7 +410,7 @@ def _resolve_imports(
     the resolver can distinguish list splicing from element appending.
 
     See ``modelopt.recipe.loader`` module docstring for the full specification.
-    This function lives in ``_config_loader`` (not ``loader``) so that it can be
+    This function lives at the lower ``modelopt.torch.opt`` layer so it can be
     used from ``modelopt.torch.quantization.config`` without circular imports.
     """
     if isinstance(data, _ListSnippet):
