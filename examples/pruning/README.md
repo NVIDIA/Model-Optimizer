@@ -27,7 +27,7 @@ This section focuses on applying Model Optimizer's state-of-the-art complementar
 
 ## Pre-Requisites
 
-For Minitron pruning for Megatron-Bridge / Megatron-LM models, use the NeMo container (e.g., `nvcr.io/nvidia/nemo:26.02`) which has all the dependencies installed.
+For Minitron pruning for Megatron-Bridge / Megatron-LM models, use the NeMo container (e.g., `nvcr.io/nvidia/nemo:26.04`) which has all the dependencies installed.
 
 For FastNAS pruning for PyTorch Computer Vision models, no additional dependencies are required.
 
@@ -179,7 +179,7 @@ If your model parameters are already sorted and you just want to prune the weigh
 
 | **Algorithm** | **Model** | **Pruning Constraints** |
 | :---: | :---: | :---: |
-| Minitron | Megatron-core (M-LM, M-Bridge) based GPT / Mamba / MoE / Hybrid LLM Models<sup>1</sup> | **Manual:** `export_config` with width (`hidden_size`, `ffn_hidden_size`, `num_attention_heads`, `mamba_num_heads`, `mamba_head_dim`, `num_moe_experts`, `moe_ffn_hidden_size`, `moe_shared_expert_intermediate_size`) and/or depth (`num_layers`) pruned values<br>**Auto:** `params` (requires `score_func` in config) |
+| Minitron | Megatron-core (M-LM, M-Bridge) based GPT / Mamba / MoE / Hybrid LLM Models<sup>1</sup> | **Manual:** `export_config` with width (`hidden_size`, `ffn_hidden_size`, `num_attention_heads`, `mamba_num_heads`, `mamba_head_dim`, `num_moe_experts`, `moe_ffn_hidden_size`, `moe_shared_expert_intermediate_size`) and/or depth (`num_layers`) pruned values<br>**Auto:** one or more of `params`, `active_params`, `memory_mb` (requires `score_func` in config) |
 | FastNAS | Computer Vision models | `flops`, `params` |
 | GradNAS | HuggingFace BERT, GPT-J | `flops`, `params` |
 

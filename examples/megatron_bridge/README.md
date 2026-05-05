@@ -16,7 +16,7 @@ This directory contains examples of using Model Optimizer with [NeMo Megatron-Br
 
 ## Pre-Requisites
 
-Running these examples requires many additional dependencies to be installed (e.g., Megatron-Bridge, Megatron-core, etc.), hence we strongly recommend directly using the NeMo container (e.g., `nvcr.io/nvidia/nemo:26.02`) which has all the dependencies installed.
+Running these examples requires many additional dependencies to be installed (e.g., Megatron-Bridge, Megatron-core, etc.), hence we strongly recommend directly using the NeMo container (e.g., `nvcr.io/nvidia/nemo:26.04`) which has all the dependencies installed.
 
 To get the ModelOpt examples scripts, mount your Model-Optimizer repo to the container as follows:
 
@@ -26,7 +26,7 @@ if [ ! -d "${MODELOPT_DIR}" ]; then
   git clone https://github.com/NVIDIA/Model-Optimizer.git ${MODELOPT_DIR}
 fi
 
-export DOCKER_IMAGE=nvcr.io/nvidia/nemo:26.02
+export DOCKER_IMAGE=nvcr.io/nvidia/nemo:26.04
 docker run \
   --gpus all \
   --shm-size=16GB \
@@ -49,11 +49,28 @@ hf auth login --token <your token>
 > [!WARNING]
 > Use `python -m pip` instead of `pip` to avoid conflicts with the system-wide installed packages in the NeMo containers. You may also refer to this [doc](https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/main/docker/common/README.md#installing-packages-inside-the-container) on how to correctly install packages in the NeMo containers without breaking existing torch installation.
 
+Also install additional dependencies from the [requirements.txt](./requirements.txt) file.
+
+```bash
+python -m pip install -r requirements.txt
+```
+
 ## Pruning
 
 This section shows how to prune a HuggingFace model using Minitron algorithm in Megatron-Bridge framework. Checkout other available pruning algorithms, supported frameworks and models, and general pruning getting-started in the [pruning README](../pruning/README.md).
 
-Example usage to prune Qwen3-8B to 6B on 2-GPUs (Pipeline Parallelism = 2) while skipping pruning of `num_attention_heads` using following defaults:
+The script supports three NAS-based pruning targets and one manual export mode:
+
+| Mode | Flag | Description |
+| :---: | :---: | :--- |
+| NAS | `--prune_target_params` | Prune to a target total parameter count |
+| NAS | `--prune_target_active_params` | Prune to a target active parameter count (useful for MoE models). For non-MoE models, this is equivalent to `--prune_target_params`. |
+| NAS | `--prune_target_memory_mb` | Prune to a target memory footprint in MB (weights + KV-cache) for a given batch size and sequence length assuming BF16 precision |
+| Manual | `--prune_export_config` | Prune directly to a specified architecture config (no NAS). Useful if you want to take top K candidates and do a short knowledge distillation before selecting the best model. |
+
+Multiple NAS targets can be combined — e.g. `--prune_target_params 6e9 --prune_target_memory_mb 12288` finds the best model with under 6B params and under 12GB memory footprint at (default) batch size 1 and sequence length 4096 assuming BF16 precision.
+
+**Prune by total parameter count** — prune Qwen3-8B to 6B on 2-GPUs (Pipeline Parallelism = 2) while skipping pruning of `num_attention_heads` using following defaults:
     1024 samples from [`nemotron-post-training-dataset-v2`](https://huggingface.co/datasets/nvidia/Nemotron-Post-Training-Dataset-v2) for calibration,
     at-most 20% depth (`num_layers`) and 40% width is pruned per prunable hparam (`hidden_size`, `ffn_hidden_size`, ...),
     top-10 candidates are evaluated for MMLU score (5% sampled data) to select the best model.
@@ -67,8 +84,29 @@ torchrun --nproc_per_node 2 prune_minitron.py \
     --output_hf_path /tmp/Qwen3-8B-Pruned-6B
 ```
 
-Example usage for manually pruning to a specific architecture using following defaults:
-    1024 samples from [`nemotron-post-training-dataset-v2`](https://huggingface.co/datasets/nvidia/Nemotron-Post-Training-Dataset-v2) for calibration.
+**Prune by active parameter count** — useful for MoE models where most experts are inactive per token (e.g. prune Nemotron-3-Nano-30B-A3B-BF16 (3.6B active params) to 3B active params):
+
+```bash
+torchrun --nproc_per_node 2 prune_minitron.py \
+    --pp_size 2 \
+    --hf_model_name_or_path nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 \
+    --prune_target_active_params 3e9 \
+    --output_hf_path /tmp/Nemotron-3-Nano-30B-A3B-BF16-Pruned-3B-Active
+```
+
+**Prune by memory footprint** — prune to fit a target GPU memory budget (weights + KV-cache at the given sequence length and batch size, assuming BF16):
+
+```bash
+torchrun --nproc_per_node 2 prune_minitron.py \
+    --pp_size 2 \
+    --hf_model_name_or_path Qwen/Qwen3-8B \
+    --prune_target_memory_mb 12288 \
+    --seq_length 4096 \
+    --calib_mbs 1 \
+    --output_hf_path /tmp/Qwen3-8B-Pruned-12GB
+```
+
+**Manual pruning** — prune directly to a specified architecture (no NAS, no score evaluation):
 
 ```bash
 torchrun --nproc_per_node 2 prune_minitron.py \

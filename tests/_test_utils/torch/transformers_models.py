@@ -110,7 +110,7 @@ def get_tiny_qwen3_moe(**config_kwargs) -> PreTrainedModel:
 
 def create_tiny_qwen3_moe_dir(
     tmp_path: Path | str, with_tokenizer: bool = False, **config_kwargs
-) -> Path:
+) -> Path | tuple[Path, PreTrainedModel]:
     qwen3_moe_dir = Path(tmp_path) / "tiny_qwen3_moe"
     if with_tokenizer:
         tokenizer = tokenizer = get_tiny_tokenizer()
