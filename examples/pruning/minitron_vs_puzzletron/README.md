@@ -2,7 +2,7 @@
 
 ## Table of Contents
 
-1.[Introduction](#1-introduction)
+1\. [Introduction](#1-introduction)
 
 [Part I — Setup & Experiments](#part-i--setup--experiments)
 
@@ -18,7 +18,7 @@
 8. [Limitations & Practical Tips](#8-limitations--practical-tips)
 9. [Open Questions](#9-open-questions)
 
-10.[References](#10-references)
+10\. [References](#10-references)
 
 ---
 
@@ -37,12 +37,12 @@ Throughout this guide, we use [**Qwen3-8B**](https://huggingface.co/Qwen/Qwen3-8
 |---|---|---|
 | **Goal** | Make my general-purpose model smaller and faster, quickly and reliably | Fit a strict hardware memory budget |
 | **Usecases** | Create a smaller version of the same model architecture to form a consistent family | Create a single, highly optimized deployment model that fits specific hardware budget |
-| **Compression** | Light/Moderate (10–15% parameter reduction) | Aggressive (>30% memory reduction) |
+| **Compression** | Light/Moderate (10–20% parameter reduction) | Aggressive (>30% memory reduction) |
 | **Method** | Homogeneous Pruning ([Minitron](https://arxiv.org/abs/2408.11796)) | Heterogeneous NAS-based Pruning ([Puzzletron](https://arxiv.org/html/2411.19146v3)) |
 | **Complexity** | Low — Importance-based ranking, uniform pruning | High — Fine-grained NAS search + MIP optimization |
 | **Output** | Homogeneous (all Transformer blocks have the same structure) | Heterogeneous architecture (variable layer widths) |
 
-Both paths are followed by **knowledge distillation**, which recovers accuracy lost during pruning. In our Qwen3-8B experiments, we show that significant recovery is possible with as few as 100 training iterations on a small dataset, though actual recovery will vary by model and compression level.
+Both paths are followed by **knowledge distillation**, which recovers accuracy lost during pruning. In our Qwen3-8B experiments, we show that significant recovery (in MMLU) is possible with as few as 100 training iterations on a small dataset, though actual recovery will vary by model and compression level.
 
 The overall pipeline is the same for both scenarios — only the compression step differs:
 
@@ -75,7 +75,7 @@ flowchart LR
 
 - **Quantization**: reducing numerical precision (e.g. FP16 → INT8).
 - **Sparsity**: zeroing out weights while keeping the architecture.
-- **MoE and hybrid architectures**: this guide focuses on dense Transformer models. Compression of Mixture-of-Experts (MoE) and hybrid architectures will be covered in a future guide.
+- **MoE and hybrid architectures**: this guide focuses on dense Transformer models. For an end-to-end Minitron pruning + distillation + FP8 PTQ + vLLM deployment example on a Mamba-Transformer hybrid, see the [Nemotron-Nano-9B-v2 tutorial](../minitron/NVIDIA-Nemotron-Nano-9B-v2/README.md). Compression of Mixture-of-Experts (MoE) architectures will be covered in a future guide.
 
 > **Note:** Pruning and quantization are complementary. After following this guide, you can further compress your pruned model with quantization for additional deployment gains.
 
@@ -83,7 +83,7 @@ flowchart LR
 
 **Minitron is a special case of Puzzletron**: any architecture Minitron can produce, Puzzletron can also find. Both follow the same pipeline (find a smaller architecture, then recover accuracy via distillation); they score the components of each Transformer layer (neurons, attention heads, FFN widths) and remove the ones that contribute least to the model's output. What distinguishes them is how fine-grained that search is.
 
-- **Minitron** applies *homogeneous pruning*: the same pruning decision is applied across all layers simultaneously. The compression target is a **parameter count** (e.g. "reduce to 7B"). The result is a standard, smaller model with the same architecture type as the original. Fast and simple.
+- **Minitron** applies *homogeneous pruning*: the same pruning decision is applied across all layers simultaneously. The compression target is a **parameter count** (e.g. "reduce to 7B"). Direct memory-budget targeting is also now supported as a recently added Minitron feature. The result is a standard, smaller model with the same architecture type as the original. Fast and simple.
 
 - **Puzzletron** applies *heterogeneous pruning* via Neural Architecture Search (NAS): it evaluates multiple candidate configurations for each layer independently (different FFN widths, optional attention removal), then uses Mixed-Integer Programming (MIP) to find the optimal per-layer combination under a given resource constraint (e.g. a **memory budget**). The result is a model where each layer can have a different structure, tailored to a specific hardware budget. More powerful, but slower.
 
@@ -97,7 +97,7 @@ Puzzletron's per-layer search space is much broader than Minitron's. The trade-o
 
 **Guide organization:** This guide is split into two parts. **Part I — Setup & Experiments** (Sections 2–4) covers the technicalities needed to reproduce the experiments: environment setup and step-by-step walkthroughs for each scenario. **Part II — Results, Analysis & Insights** (Sections 5–9) focuses on what those experiments reveal: a head-to-head comparison, a deep dive into distillation, inference benchmarks, practical tips and limitations, and open questions for future work.
 
-> **Note on reproducibility:** The pruning frameworks and scoring mechanisms used by Minitron and Puzzletron are under active development. As ModelOpt evolves, exact evaluation numbers may differ from one release to another. The trends and comparative insights presented in this guide (which method wins in which regime, how distillation behaves, and the accuracy-compression trade-offs) are expected to remain consistent.
+> **Note on reproducibility:** All experiments in this guide were run on the [NeMo container 26.02](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/nemo?version=26.02.00) with `nvidia-modelopt` 0.43.0. The pruning frameworks and scoring mechanisms used by Minitron and Puzzletron are under active development. As ModelOpt evolves, exact evaluation numbers may differ from one release to another. The trends and comparative insights presented in this guide (which method wins in which regime, how distillation behaves, and the accuracy-compression trade-offs) are expected to remain consistent.
 
 ---
 
@@ -115,14 +115,28 @@ All experiments in this guide were run on **2x H200 GPUs**. This can be adapted 
 
 > **Architecture requirement:** The NeMo container and ModelOpt scripts used in this guide require an **x86-64 (AMD64)** host.
 
+### Clone ModelOpt
+
+Clone the ModelOpt repository on your host machine. It will be mounted into the container in the next step, so any changes you make to the source persist across sessions:
+
+```bash
+export MODELOPT_DIR=${PWD}/Model-Optimizer
+git clone https://github.com/NVIDIA/Model-Optimizer.git ${MODELOPT_DIR}
+chmod -R 777 ${MODELOPT_DIR}
+```
+
+> **Permissions:** The `chmod -R 777` ensures the container (running as root) can write to the mounted directory.
+
 ### Container
 
 > **Setup source of truth:** ModelOpt evolves quickly. The instructions below reflect the setup used at the time this guide was written and are provided as a working example. For the most up-to-date container version and installation steps, refer to:
-> [puzzletron/mbridge_distillation/README.md](https://github.com/NVIDIA/Model-Optimizer/blob/feature/puzzletron/examples/puzzletron/mbridge_distillation/README.md)
+> [megatron_bridge/README.md](https://github.com/NVIDIA/Model-Optimizer/blob/main/examples/megatron_bridge/README.md)
 
-We use the [NVIDIA NeMo Framework Docker container (26.02)](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/nemo?version=26.02.00), which includes all the libraries needed pre-installed (including [Megatron-Bridge](https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/megatron_bridge/README.md) — NVIDIA's library that bridges HuggingFace models with the Megatron-LM training framework, enabling efficient multi-GPU distillation).
+We use the [NVIDIA NeMo Framework Docker container (26.02)](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/nemo?version=26.02.00), which includes all the libraries needed pre-installed (including [Megatron-Bridge](https://github.com/NVIDIA-Nemo/Megatron-Bridge) — NVIDIA's library that bridges HuggingFace models with the Megatron-core framework, enabling efficient multi-GPU distillation).
 
 You need [Docker](https://docs.docker.com/get-docker/) and the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) to enable GPU access inside containers.
+
+Launch the container with the cloned repo mounted at `/opt/Model-Optimizer`:
 
 ```bash
 docker run \
@@ -131,26 +145,20 @@ docker run \
     --net=host \
     --ulimit memlock=-1 \
     --rm -it \
+    -v ${MODELOPT_DIR}:/opt/Model-Optimizer \
     -w /workspace \
-    nvcr.io/nvidia/nemo:26.02 bash
+    nvcr.io/nvidia/nemo:26.02 bash -c "umask 000 && exec bash"
 ```
 
-### Clone ModelOpt
+### Install dependencies
 
-Clone the ModelOpt repository to access examples and scripts:
-
-```bash
-git clone https://github.com/NVIDIA/Model-Optimizer.git /workspace/Model-Optimizer
-cd /workspace/Model-Optimizer
-```
-
-### Evaluation setup
-
-Inside the container, install `lm-eval` for benchmark evaluation:
+Once inside the container, uninstall the pre-existing `nvidia-modelopt`, `lm_eval`, and `nvidia_lm_eval` so they don't cause version conflicts. Then install ModelOpt from the cloned repo as an editable package with the `hf` and `puzzletron` extras, and add the extra Puzzletron-example dependencies (which include `lm-eval` for benchmark evaluation). Together these steps cover the dependencies for all scenarios in this guide:
 
 ```bash
-rm -rf /opt/venv/lib/python3.12/site-packages/lm_eval
-pip install lm-eval==0.4.8
+/usr/bin/python3 -m pip uninstall -y nvidia-modelopt
+python -m pip uninstall -y lm_eval nvidia_lm_eval
+cd /opt/Model-Optimizer && python -m pip install -e ".[hf,puzzletron]"
+python -m pip install -r /opt/Model-Optimizer/examples/puzzletron/requirements.txt
 ```
 
 ### Base model
@@ -183,18 +191,10 @@ hf download Qwen/Qwen3-8B --local-dir /workspace/models/Qwen3-8B
 | [`scenario2_minitron.ipynb`](scenario2_minitron.ipynb) | Scenario 2 — Minitron | ~45 min |
 | [`scenario2_puzzletron.ipynb`](scenario2_puzzletron.ipynb) | Scenario 2 — Puzzletron | ~6h15 (on first Puzzletron run) |
 
-From within the container, copy the notebooks to your local workspace:
+From within the container, run the notebooks directly from the mounted ModelOpt repo so any edits you make persist on your host machine. Start Jupyter Lab in the notebook directory:
 
 ```bash
-cp -r /workspace/Model-Optimizer/examples/pruning/demo/* /workspace
-```
-
-If this doesn't work, upload the notebooks manually in Jupyter after launching it.
-
-Finally, start Jupyter Lab:
-
-```bash
-cd /workspace
+cd /opt/Model-Optimizer/examples/pruning/minitron_vs_puzzletron
 pip install --upgrade ipywidgets notebook
 jupyter lab --ip 0.0.0.0 --port=8888 --allow-root
 ```
@@ -205,13 +205,13 @@ jupyter lab --ip 0.0.0.0 --port=8888 --allow-root
 
 > *"I need a smaller and faster general-purpose model — quickly and reliably."*
 
-You have a working LLM and want to reduce its size by 10–15% (in number of parameters) for general-purpose tasks. You need a straightforward pipeline with predictable results and a standard, homogeneous model as output. You don't want to invest time experimenting and familiarizing with a complex pipeline or dealing with heterogeneous model formats.
+You have a working LLM and want to reduce its size by up to 20% (in number of parameters) for general-purpose tasks. You need a straightforward pipeline with predictable results and a standard, homogeneous model as output. You don't want to invest time experimenting and familiarizing with a complex pipeline or dealing with heterogeneous model formats.
 
 **Minitron** is the right tool for this job.
 
 ### 3.1 When to choose this path
 
-- Your compression target is **moderate** (10–15% reduction in number of parameters).
+- Your compression target is **moderate** (10–20% reduction in number of parameters).
 - You want a **simple, fast pipeline**: prune → distill → deploy.
 - You need a **standard/homogeneous model** as output (same architecture type, just smaller).
 - You value **predictability**: Minitron's importance-based ranking produces consistent results.
@@ -405,7 +405,7 @@ In theory, Minitron is a subset of Puzzletron: any architecture Minitron can fin
 
 On MMLU, Minitron outperforms Puzzletron at this level (+3.43pp post-distill). Its uniform pruning directly targets a parameter count, produces a clean architecture in a single step, and avoids the complexity of a full NAS pipeline. At the same time, this advantage is benchmark-dependent: on other benchmarks, Puzzletron could retain more of the teacher's accuracy than Minitron (see [Section 5.4](#54-benchmark-specific-behavior)). This means there is no single-bullet approach: different compression methods have their winning territories even at moderate compression. That said, when factoring in pipeline complexity and the standard model format Minitron produces, it remains the practical default for most general-purpose compression needs at this level.
 
-Moreover, Minitron can be applied **iteratively**: for example, prune 10%, distill, then prune another 10% and distill again. This staged schedule typically preserves more quality than a single, more aggressive pruning step at the same overall parameter reduction.
+Moreover, Minitron can be applied **iteratively**: for example, prune 20%, distill, then prune another 20% and distill again. This staged schedule typically preserves more quality than a single, more aggressive pruning step at the same overall parameter reduction.
 
 **Scenario 2 (aggressive memory compression):**
 
@@ -413,7 +413,7 @@ Puzzletron becomes essential. When the target is a hard memory budget, Puzzletro
 
 ### 5.3 Accuracy vs. compression
 
-![Pruning + Distillation Results on Qwen3-8B](summary_chart.png)
+![Pruning + Distillation Results on Qwen3-8B](figures/summary_chart.png)
 
 ### 5.4 Benchmark-specific behavior
 
@@ -447,7 +447,7 @@ Several observations stand out:
 
 The two scenarios in this guide represent two specific points on a continuous compression curve. Complementary experiments using Puzzletron's MIP sweep mode (which re-runs the MIP solver across multiple memory targets without repeating the full NAS pipeline) allowed us to sample additional points and compare both methods side-by-side across the full spectrum.
 
-![Puzzletron vs. Minitron Memory Sweep on Qwen3-8B](memory_sweep_combined.png)
+![Puzzletron vs. Minitron Memory Sweep on Qwen3-8B](figures/memory_sweep_combined.png)
 
 Several observations stand out:
 
@@ -461,12 +461,11 @@ Several observations stand out:
 
 | If... | Then use... |
 |---|---|
-| Compression is <15% and general-purpose | **Minitron** |
+| Compression is <20% and general-purpose | **Minitron** |
 | You need a standard/homogeneous model | **Minitron** |
 | Compression is >20% | **Puzzletron** |
 | You have a hard memory budget | **Puzzletron** |
 | You want minimal pipeline complexity | **Minitron** |
-| You need to preserve specific capabilities (e.g. reasoning) | **Puzzletron** |
 | You want maximum accuracy at any cost | **Puzzletron** |
 
 ---
@@ -497,7 +496,7 @@ The results were remarkable: +1.28pp to +28.61pp of MMLU recovery depending on t
 
 The plot below shows the training and validation distillation loss (KL divergence) for both methods at the 7B parameter target:
 
-![Distillation loss curves — Scenario 1](distillation_curves.png)
+![Distillation loss curves — Scenario 1](figures/distillation_curves.png)
 
 Both curves converge smoothly, with Puzzletron maintaining a consistently lower loss throughout: its heterogeneous architecture preserves more of the original model's behavior, even though it ultimately scores lower on MMLU (0.6823 vs. 0.7166). This confirms that **distillation loss alone does not predict downstream task accuracy**.
 
@@ -529,7 +528,7 @@ Sections 5 and 6 focused on accuracy. But for deployment, throughput and latency
 
 ### 7.2 Results
 
-![Throughput vs Latency — all models](all_curves_throughput_vs_latency.png)
+![Throughput vs Latency — all models](figures/all_curves_throughput_vs_latency.png)
 
 Results shown in the table at concurrency 64 (near-saturated throughput). Full curves across all concurrency levels are in the chart above.
 
@@ -567,7 +566,7 @@ The key insight is the accuracy-performance trade-off: Puzzletron 78k retains 74
 
 - **Single base model:** All experiments use Qwen3-8B. Results (especially distillation convergence speed and the crossover point between Minitron and Puzzletron) may differ on other models and model families.
 - **Limited benchmarks:** The notebooks reproduce MMLU end-to-end. Supplementary evaluations on HellaSwag and GSM8K (see [Section 5.4](#54-benchmark-specific-behavior)) confirm that the best method is benchmark-dependent, but three benchmarks on one model are not enough to build general per-task guidelines.
-- **Minimal distillation:** 100 iterations on WikiText-103 is a lower bound. Production deployments should use more iterations, larger datasets, and domain-specific data.
+- **Minimal distillation:** 100 iterations on WikiText-103 is a lower bound. Production deployments should use more iterations, larger datasets, and a curated data blend (e.g. Nemotron pretraining + post-training mix). See the [Nemotron-Nano-9B-v2 Data Preparation guide](../minitron/NVIDIA-Nemotron-Nano-9B-v2/README.md#1-data-preparation) for a worked example, and [`MEGATRON_DATA_PREP.md`](../../dataset/MEGATRON_DATA_PREP.md) for tokenization commands.
 - **Fixed search space for Puzzletron:** The NAS search space (FFN candidate sizes, attention removal options) was kept small for tractability. A broader search space could yield better architectures at the cost of longer search time.
 - **Single-step Minitron:** We use a one-shot Minitron configuration rather than a multi-step iterative scheme, which simplifies the pipeline but typically achieves less compression and leaves some potential quality–compression gains on the table.
 
@@ -596,6 +595,7 @@ All our results come from a single model (Qwen3-8B). Do other architectures or m
 
 **Distillation recipe: how to choose the dataset, duration, and scale?**
 Our experiments used 100 iterations on WikiText-103, a deliberately minimal setup that happened to work well for Qwen3-8B. But how should one choose the distillation dataset (generic vs. domain-specific?), the number of iterations, and the token budget for a new model? Is there a principled way to estimate the required distillation effort given a model and compression level, or does it always require empirical tuning?
+> For a concrete recipe and detailed ablations on data blend, token budget, and convergence (on Nemotron-Nano-9B-v2), see the [Nano-9B-v2 tutorial](../minitron/NVIDIA-Nemotron-Nano-9B-v2/README.md) and its [blend ablations](../minitron/NVIDIA-Nemotron-Nano-9B-v2/ABLATIONS.md).
 
 **Serving heterogeneous architectures: how to balance Tensor Parallelism and Pipeline Parallelism?**
 Puzzletron produces models where layers have different widths and some lack attention entirely. Standard TP/PP strategies assume uniform layers. How should parallelism be partitioned when layer costs vary significantly? Finding efficient serving configurations for heterogeneous architectures is an open problem that directly impacts their practical deployment.
@@ -613,8 +613,8 @@ As shown in [Section 5.4](#54-benchmark-specific-behavior), the relative ranking
 - **More Minitron Results:** Sreenivas et al., [*LLM Pruning and Distillation in Practice: The Minitron Approach*](https://arxiv.org/pdf/2408.11796), 2024.
 - **Puzzletron:** Bercovich et al., [*Puzzle: Distillation-Based NAS for Inference-Optimized LLMs*](https://arxiv.org/abs/2411.19146), 2024.
 - **NVIDIA ModelOpt:** [GitHub Repository](https://github.com/NVIDIA/Model-Optimizer)
-- **Llama Puzzletron Tutorial:** [Puzzletron Example on ModelOpt](https://github.com/NVIDIA/Model-Optimizer/blob/feature/puzzletron/examples/puzzletron/README.md)
-- **Model Compression with Megatron-Bridge:** [Megatron-Bridge Examples](https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/megatron_bridge/README.md)
+- **Llama Puzzletron Tutorial:** [Puzzletron Example on ModelOpt](https://github.com/NVIDIA/Model-Optimizer/blob/main/examples/puzzletron/README.md)
+- **Model Compression and distillation with Megatron-Bridge:** [Megatron-Bridge Examples](https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/megatron_bridge/README.md)
 - **Qwen3-8B:** [HuggingFace Model Card](https://huggingface.co/Qwen/Qwen3-8B)
 
 ---
@@ -623,7 +623,7 @@ As shown in [Section 5.4](#54-benchmark-specific-behavior), the relative ranking
 
 ## Appendix: Serving a Puzzletron Model with vLLM
 
-Puzzletron's heterogeneous models require a few extra steps to serve with vLLM. Below is the procedure for the Scenario 1 Puzzletron model (`distilled_Qwen3-8B-Puzzle-7B`); the same steps apply to any Puzzletron checkpoint.
+Puzzletron's heterogeneous models require a few extra steps to serve with vLLM. Below is the procedure for the Scenario 1 Puzzletron model (`distilled_Qwen3-8B-Puzzle-7B`); the same steps apply to any Puzzletron checkpoint. The walkthrough below is kept self-contained to reproduce the exact throughput-vs-latency curves in [Section 7](#7-inference-performance) end-to-end. For the canonical, kept-up-to-date deployment instructions, see also [Deploy compressed model in vLLM](https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/puzzletron#deploy-compressed-model-in-vllm) in the Puzzletron example.
 
 **Step 1 — Install vLLM with AnyModel support:**
 
