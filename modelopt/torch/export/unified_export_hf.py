@@ -52,11 +52,7 @@ except ImportError:
 from torch.distributed.fsdp import FSDPModule
 
 from modelopt.torch.quantization import set_quantizer_by_cfg_context
-from modelopt.torch.quantization.nn import (
-    NVFP4StaticQuantizer,
-    SequentialQuantizer,
-    TensorQuantizer,
-)
+from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
 from modelopt.torch.quantization.qtensor import MXFP8QTensor, NVFP4QTensor
 from modelopt.torch.quantization.utils import fsdp2_aware_weight_update, quantizer_attr_names
 
@@ -539,11 +535,12 @@ def _export_quantized_weight(
         expert_type in type(sub_module).__name__
         for expert_type in ["Llama4TextExperts", "GptOssExperts"]
     )
-    if is_bmm_expert_weight and isinstance(weight_quantizer, NVFP4StaticQuantizer):
-        raise ValueError(
-            "NVFP4StaticQuantizer with BMM-style expert weights (e.g. Llama4TextExperts, "
-            "GptOssExperts) is not yet supported."
-        )
+    # NVFP4StaticQuantizer + BMM-style experts: route through the static-aware
+    # ``_from_quantizer`` helper so the pinned per-block ``_amax`` (e.g. set by
+    # the MXFP4->NVFP4 cast to ``6 * 2^k_j``) is used to derive the FP8
+    # per-block scale. The plain ``get_weights_scaling_factor`` would ignore
+    # ``_amax`` and recompute per-block max from the BF16 weight, which
+    # rebuckets nibbles and loses bit-exactness when ``max_nibble < 6``.
 
     if quantization_format in [
         QUANTIZATION_NVFP4,
@@ -556,11 +553,18 @@ def _export_quantized_weight(
             weight, is_bmm_expert_weight=is_bmm_expert_weight
         )
 
-        weight_scale = NVFP4QTensor.get_weights_scaling_factor(
-            weight,
-            block_size=block_size,
-            weights_scaling_factor_2=weight_scale_2,
-        )[0]
+        if NVFP4QTensor._is_static_quantizer(weight_quantizer):
+            weight_scale = NVFP4QTensor.get_weights_scaling_factor_from_quantizer(
+                weight_quantizer,
+                weight,
+                weight_scale_2,
+            )[0]
+        else:
+            weight_scale = NVFP4QTensor.get_weights_scaling_factor(
+                weight,
+                block_size=block_size,
+                weights_scaling_factor_2=weight_scale_2,
+            )[0]
 
         quantized_weight = to_quantized_weight(
             weight.to(dtype),
@@ -1189,12 +1193,25 @@ def export_hf_checkpoint(
     try:
         post_state_dict, hf_quant_config = _export_transformers_checkpoint(model, dtype)
 
-        if hf_quant_config is not None:
+        # Only treat the export as quantized when at least one quant_algo field is set.
+        # get_quant_config always returns a dict (even for sparsity-only or unmodified models),
+        # so emitting hf_quant_config.json unconditionally produces a file with
+        # "quant_algo": null that downstream loaders (e.g. TensorRT-LLM) reject as a
+        # malformed pre-quantized checkpoint.
+        quantization_details = (hf_quant_config or {}).get("quantization", {})
+        is_quantized_export = (
+            quantization_details.get("quant_algo") is not None
+            or quantization_details.get("kv_cache_quant_algo") is not None
+        )
+
+        if is_quantized_export:
             # Save hf_quant_config.json for backward compatibility
             with open(f"{export_dir}/hf_quant_config.json", "w") as file:
                 json.dump(hf_quant_config, file, indent=4)
 
             hf_quant_config = convert_hf_quant_config_format(hf_quant_config)
+        else:
+            hf_quant_config = None
 
         # Remove hf_quantizer from model so post_state_dict can be exported.
         if getattr(model, "hf_quantizer", None) is not None:
