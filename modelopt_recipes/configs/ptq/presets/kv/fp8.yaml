@@ -20,7 +20,7 @@
 
 # modelopt-schema: modelopt.torch.quantization.config.QuantizeConfig
 imports:
-  fp8_kv: configs/ptq/units/fp8_kv
+  kv_fp8: configs/ptq/units/kv_fp8
 
 quant_cfg:
-  - $import: fp8_kv
+  - $import: kv_fp8

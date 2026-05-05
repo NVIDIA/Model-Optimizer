@@ -18,6 +18,6 @@ recipes (under `general/` or `models/`) or presets (under `presets/`).
 |------|-------------|
 | `base_disable_all.yaml` | Deny-all entry: disables all quantizers as the first step |
 | `default_disabled_quantizers.yaml` | Standard exclusions (LM head, routers, BatchNorm, etc.) |
-| `fp8_kv.yaml` | FP8 E4M3 KV cache quantizer entry |
+| `kv_fp8.yaml` | FP8 E4M3 KV cache quantizer entry |
 | `w8a8_fp8_fp8.yaml` | FP8 weight + activation quantizer entries (W8A8) |
 | `w4a4_nvfp4_nvfp4.yaml` | NVFP4 weight + activation quantizer entries (W4A4) |

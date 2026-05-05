@@ -109,7 +109,7 @@ def test_load_config_missing_file_raises(tmp_path):
 
 def test_load_recipe_builtin_with_suffix():
     """load_recipe loads a built-in PTQ recipe given the full YAML path."""
-    recipe = load_recipe("general/ptq/fp8_default-fp8_kv.yaml")
+    recipe = load_recipe("general/ptq/fp8_default-kv_fp8.yaml")
     assert recipe.recipe_type == RecipeType.PTQ
     assert isinstance(recipe, ModelOptPTQRecipe)
     assert recipe.quantize
@@ -117,27 +117,27 @@ def test_load_recipe_builtin_with_suffix():
 
 def test_load_recipe_builtin_without_suffix():
     """load_recipe resolves the .yaml suffix automatically."""
-    recipe = load_recipe("general/ptq/fp8_default-fp8_kv")
+    recipe = load_recipe("general/ptq/fp8_default-kv_fp8")
     assert recipe.recipe_type == RecipeType.PTQ
 
 
 def test_load_recipe_builtin_description():
     """The description field is loaded from the YAML metadata."""
-    recipe = load_recipe("general/ptq/fp8_default-fp8_kv.yaml")
+    recipe = load_recipe("general/ptq/fp8_default-kv_fp8.yaml")
     assert isinstance(recipe.description, str)
     assert len(recipe.description) > 0
 
 
 _BUILTIN_PTQ_RECIPES = [
-    "general/ptq/fp8_default-fp8_kv",
+    "general/ptq/fp8_default-kv_fp8",
     "general/ptq/fp8_default-fp8_cast_kv",
-    "general/ptq/nvfp4_default-fp8_kv",
+    "general/ptq/nvfp4_default-kv_fp8",
     "general/ptq/nvfp4_default-fp8_cast_kv",
     "general/ptq/nvfp4_default-nvfp4_cast_kv",
     "general/ptq/nvfp4_default-none_kv_gptq",
-    "general/ptq/nvfp4_experts_only-fp8_kv",
-    "general/ptq/nvfp4_mlp_only-fp8_kv",
-    "general/ptq/nvfp4_omlp_only-fp8_kv",
+    "general/ptq/nvfp4_experts_only-kv_fp8",
+    "general/ptq/nvfp4_mlp_only-kv_fp8",
+    "general/ptq/nvfp4_omlp_only-kv_fp8",
 ]
 
 
@@ -223,10 +223,10 @@ def test_load_recipe_dir_missing_quantize_raises(tmp_path):
 @pytest.mark.parametrize(
     ("yaml_path", "model_cfg_name", "kv_cfg_name"),
     [
-        ("general/ptq/fp8_default-fp8_kv.yaml", "FP8_DEFAULT_CFG", "FP8_KV_CFG"),
-        ("general/ptq/nvfp4_default-fp8_kv.yaml", "NVFP4_DEFAULT_CFG", "FP8_KV_CFG"),
-        ("general/ptq/nvfp4_mlp_only-fp8_kv.yaml", "NVFP4_MLP_ONLY_CFG", "FP8_KV_CFG"),
-        ("general/ptq/nvfp4_omlp_only-fp8_kv.yaml", "NVFP4_OMLP_ONLY_CFG", "FP8_KV_CFG"),
+        ("general/ptq/fp8_default-kv_fp8.yaml", "FP8_DEFAULT_CFG", "FP8_KV_CFG"),
+        ("general/ptq/nvfp4_default-kv_fp8.yaml", "NVFP4_DEFAULT_CFG", "FP8_KV_CFG"),
+        ("general/ptq/nvfp4_mlp_only-kv_fp8.yaml", "NVFP4_MLP_ONLY_CFG", "FP8_KV_CFG"),
+        ("general/ptq/nvfp4_omlp_only-kv_fp8.yaml", "NVFP4_OMLP_ONLY_CFG", "FP8_KV_CFG"),
     ],
 )
 def test_general_ptq_yaml_matches_config_dicts(yaml_path, model_cfg_name, kv_cfg_name):
@@ -467,7 +467,7 @@ def test_import_no_imports_section(tmp_path):
 
 def test_import_builtin_recipe_with_imports():
     """Built-in recipes using $import load and resolve correctly."""
-    recipe = load_recipe("general/ptq/fp8_default-fp8_kv")
+    recipe = load_recipe("general/ptq/fp8_default-kv_fp8")
     assert recipe.quantize
     # Verify $import was resolved — cfg should be a dict, not a {$import: ...} marker
     for entry in recipe.quantize["quant_cfg"]:
@@ -806,9 +806,9 @@ def test_import_multi_document_list_snippet(tmp_path):
     assert recipe.quantize["quant_cfg"][0]["cfg"] == {"num_bits": (4, 3)}
 
 
-def test_import_builtin_fp8_kv_snippet():
-    """Built-in fp8_kv snippet uses multi-document format and resolves correctly."""
-    recipe = load_recipe("general/ptq/fp8_default-fp8_kv")
+def test_import_builtin_kv_fp8_snippet():
+    """Built-in kv_fp8 snippet uses multi-document format and resolves correctly."""
+    recipe = load_recipe("general/ptq/fp8_default-kv_fp8")
     kv_entries = [
         e for e in recipe.quantize["quant_cfg"] if e.get("quantizer_name") == "*[kv]_bmm_quantizer"
     ]
@@ -1071,7 +1071,7 @@ _BUILTIN_CONFIG_SNIPPETS = [
     "configs/numerics/nvfp4_static",
     "configs/ptq/units/base_disable_all",
     "configs/ptq/units/default_disabled_quantizers",
-    "configs/ptq/units/fp8_kv",
+    "configs/ptq/units/kv_fp8",
     "configs/ptq/units/w4a4_nvfp4_nvfp4",
     "configs/ptq/units/w8a8_fp8_fp8",
     "configs/ptq/presets/kv/fp8",

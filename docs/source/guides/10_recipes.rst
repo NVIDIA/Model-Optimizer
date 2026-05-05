@@ -284,7 +284,7 @@ and returns the resolved list:
 
 .. code-block:: yaml
 
-   # configs/ptq/units/fp8_kv.yaml — list snippet that imports a dict snippet
+   # configs/ptq/units/kv_fp8.yaml — list snippet that imports a dict snippet
    # modelopt-schema: modelopt.torch.quantization.config.QuantizerCfgListConfig
    imports:
      fp8: configs/numerics/fp8
@@ -363,7 +363,7 @@ Reusable snippets are stored under ``modelopt_recipes/configs/``:
      - Disable all quantizers (deny-all-then-configure pattern)
    * - ``configs/ptq/units/default_disabled_quantizers``
      - Standard exclusions (LM head, routers, BatchNorm, etc.)
-   * - ``configs/ptq/units/fp8_kv``
+   * - ``configs/ptq/units/kv_fp8``
      - FP8 E4M3 KV cache quantization (multi-document, imports ``fp8``)
 
 
@@ -477,15 +477,15 @@ General PTQ recipes are model-agnostic and apply to any supported architecture:
 
    * - Recipe path
      - Description
-   * - ``general/ptq/fp8_default-fp8_kv``
+   * - ``general/ptq/fp8_default-kv_fp8``
      - FP8 per-tensor W8A8, FP8 KV cache, max calibration
-   * - ``general/ptq/nvfp4_default-fp8_kv``
+   * - ``general/ptq/nvfp4_default-kv_fp8``
      - NVFP4 W4A4 with FP8 KV cache, max calibration
-   * - ``general/ptq/nvfp4_mlp_only-fp8_kv``
+   * - ``general/ptq/nvfp4_mlp_only-kv_fp8``
      - NVFP4 for MLP layers only, FP8 KV cache
-   * - ``general/ptq/nvfp4_experts_only-fp8_kv``
+   * - ``general/ptq/nvfp4_experts_only-kv_fp8``
      - NVFP4 for MoE expert layers only, FP8 KV cache
-   * - ``general/ptq/nvfp4_omlp_only-fp8_kv``
+   * - ``general/ptq/nvfp4_omlp_only-kv_fp8``
      - NVFP4 for output projection + MLP layers, FP8 KV cache
 
 Model-specific recipes
@@ -519,7 +519,7 @@ type depends on the ``recipe_type`` in the metadata:
    from modelopt.recipe import load_recipe
 
    # Load a built-in recipe by relative path (suffix optional)
-   recipe = load_recipe("general/ptq/fp8_default-fp8_kv")
+   recipe = load_recipe("general/ptq/fp8_default-kv_fp8")
 
    # For PTQ recipes, the quantize dict can be passed directly to mtq.quantize()
    import modelopt.torch.quantization as mtq
@@ -541,7 +541,7 @@ Some example scripts accept a ``--recipe`` flag.  For instance, the PTQ example:
 
    python examples/llm_ptq/hf_ptq.py \
        --model Qwen/Qwen3-8B \
-       --recipe general/ptq/fp8_default-fp8_kv \
+       --recipe general/ptq/fp8_default-kv_fp8 \
        --export_path build/fp8 \
        --calib_size 512 \
        --export_fmt hf
@@ -582,8 +582,8 @@ This means built-in recipes can be referenced without any prefix:
 .. code-block:: python
 
    # These are all equivalent:
-   load_recipe("general/ptq/fp8_default-fp8_kv")
-   load_recipe("general/ptq/fp8_default-fp8_kv.yaml")
+   load_recipe("general/ptq/fp8_default-kv_fp8")
+   load_recipe("general/ptq/fp8_default-kv_fp8.yaml")
 
 
 Writing a custom recipe
@@ -640,11 +640,11 @@ The ``modelopt_recipes/`` package is organized as follows:
    +-- __init__.py
    +-- general/                    # Model-agnostic recipes
    |   +-- ptq/
-   |       +-- fp8_default-fp8_kv.yaml
-   |       +-- nvfp4_default-fp8_kv.yaml
-   |       +-- nvfp4_mlp_only-fp8_kv.yaml
-   |       +-- nvfp4_experts_only-fp8_kv.yaml
-   |       +-- nvfp4_omlp_only-fp8_kv.yaml
+   |       +-- fp8_default-kv_fp8.yaml
+   |       +-- nvfp4_default-kv_fp8.yaml
+   |       +-- nvfp4_mlp_only-kv_fp8.yaml
+   |       +-- nvfp4_experts_only-kv_fp8.yaml
+   |       +-- nvfp4_omlp_only-kv_fp8.yaml
    +-- models/                     # Model-specific recipes
    |   +-- Step3.5-Flash/
    |       +-- nvfp4-mlp-only.yaml
@@ -657,7 +657,7 @@ The ``modelopt_recipes/`` package is organized as follows:
            +-- units/                # Reusable quant_cfg building blocks
            |   +-- base_disable_all.yaml
            |   +-- default_disabled_quantizers.yaml
-           |   +-- fp8_kv.yaml
+           |   +-- kv_fp8.yaml
            |   +-- w8a8_fp8_fp8.yaml
            |   +-- w4a4_nvfp4_nvfp4.yaml
            +-- presets/              # Complete configs (backward compat with *_CFG dicts)

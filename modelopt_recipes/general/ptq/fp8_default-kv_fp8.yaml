@@ -16,32 +16,16 @@
 imports:
   base_disable_all: configs/ptq/units/base_disable_all
   default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
-  nvfp4: configs/numerics/nvfp4
-  fp8_kv: configs/ptq/units/fp8_kv
+  w8a8_fp8_fp8: configs/ptq/units/w8a8_fp8_fp8
+  kv_fp8: configs/ptq/units/kv_fp8
 
 metadata:
   recipe_type: ptq
-  description: NVFP4 static weight and dynamic activation for expert layers only (W4A4), FP8 KV cache, max layerwise calibration.
+  description: FP8 per-tensor weight and activation (W8A8), FP8 KV cache, max calibration.
 quantize:
-  algorithm:
-    method: max
-    # Max calibration is fast and does not typically need checkpointing.
-    # layerwise=false required for VLMs where the decoder layers are nested under
-    # `model.language_model.layers` (layerwise_calibrate can't find them otherwise).
-    layerwise: false
+  algorithm: max
   quant_cfg:
     - $import: base_disable_all
-    - quantizer_name: '*mlp.experts*weight_quantizer'
-      cfg:
-        $import: nvfp4
-    - quantizer_name: '*mlp.experts*input_quantizer'
-      cfg:
-        $import: nvfp4
-    - quantizer_name: '*block_sparse_moe*weight_quantizer'
-      cfg:
-        $import: nvfp4
-    - quantizer_name: '*block_sparse_moe*input_quantizer'
-      cfg:
-        $import: nvfp4
-    - $import: fp8_kv
+    - $import: w8a8_fp8_fp8
+    - $import: kv_fp8
     - $import: default_disabled_quantizers

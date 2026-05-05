@@ -16,16 +16,27 @@
 imports:
   base_disable_all: configs/ptq/units/base_disable_all
   default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
-  w4a4_nvfp4_nvfp4: configs/ptq/units/w4a4_nvfp4_nvfp4
-  fp8_kv: configs/ptq/units/fp8_kv
+  nvfp4: configs/numerics/nvfp4
+  kv_fp8: configs/ptq/units/kv_fp8
 
 metadata:
   recipe_type: ptq
-  description: NVFP4 W4A4, FP8 KV cache, max calibration.
+  description: NVFP4 static weight and dynamic activation for all linear layers (W4A4), FP8 KV cache, max calibration.
 quantize:
   algorithm: max
   quant_cfg:
     - $import: base_disable_all
-    - $import: w4a4_nvfp4_nvfp4
-    - $import: fp8_kv
+    - quantizer_name: '*mlp*weight_quantizer'
+      cfg:
+        $import: nvfp4
+    - quantizer_name: '*mlp*input_quantizer'
+      cfg:
+        $import: nvfp4
+    - quantizer_name: '*block_sparse_moe*weight_quantizer'
+      cfg:
+        $import: nvfp4
+    - quantizer_name: '*block_sparse_moe*input_quantizer'
+      cfg:
+        $import: nvfp4
+    - $import: kv_fp8
     - $import: default_disabled_quantizers

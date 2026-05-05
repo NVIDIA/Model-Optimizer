@@ -17,7 +17,7 @@ imports:
   base_disable_all: configs/ptq/units/base_disable_all
   default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
   nvfp4: configs/numerics/nvfp4
-  fp8_kv: configs/ptq/units/fp8_kv
+  kv_fp8: configs/ptq/units/kv_fp8
 
 metadata:
   recipe_type: ptq
@@ -44,5 +44,5 @@ quantize:
     - quantizer_name: '*o_proj*input_quantizer'
       cfg:
         $import: nvfp4
-    - $import: fp8_kv
+    - $import: kv_fp8
     - $import: default_disabled_quantizers
