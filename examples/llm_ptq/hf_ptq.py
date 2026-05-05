@@ -37,6 +37,7 @@ from example_utils import (
     is_nemotron_vl,
     load_mtp_weights,
     needs_checkpoint_path_update,
+    normalized_generation_config_for_export,
     resolve_checkpoint_dir,
     run_nemotron_vl_preview,
 )
@@ -108,6 +109,7 @@ QUANT_CFG_CHOICES: dict[str, dict[str, Any]] = {
     "int4_awq": mtq.INT4_AWQ_CFG,
     "w4a8_awq": mtq.W4A8_AWQ_BETA_CFG,
     "nvfp4": mtq.NVFP4_DEFAULT_CFG,
+    "nvfp4_w4a16": mtq.NVFP4_W4A16_CFG,
     "nvfp4_awq": mtq.NVFP4_AWQ_LITE_CFG,
     "nvfp4_mse": mtq.NVFP4_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG,
     "fp8_pb_wo": mtq.FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG,
@@ -320,6 +322,7 @@ def auto_quantize(
             "nvfp4",
             "nvfp4_awq",
             "nvfp4_mse",
+            "nvfp4_w4a16",
             "w4a8_awq",
             "fp8_pb_wo",
             "w4a8_mxfp4_fp8",
@@ -609,6 +612,12 @@ def mono_quantize(
         )  # Nemotron-Parse specific
         print("Quantization will only be applied to the decoder (text generation) component")
 
+    # Model-specific quantization extensions (e.g. quantizing lm_head + input embedding for
+    # Nemotron-H, where those tables are a large fraction of parameters and leaving them at
+    # bf16 wastes most of the memory savings) are now expressed as recipes under
+    # ``modelopt_recipes/models/<ModelName>/``. Pass ``--recipe models/<ModelName>/<flavor>``
+    # (e.g. ``--recipe models/Nemotron-H/nvfp4_w4a16``) to opt in.
+
     if not model_is_already_quantized or calibration_only:
         # quantize the model
 
@@ -657,7 +666,14 @@ def export_quantized(
     default_padding_side,
     default_pad_token,
 ):
-    with torch.inference_mode():
+    # ``normalized_generation_config_for_export`` swaps ``model.generation_config`` with
+    # a deep-copied ``do_sample=True`` variant for the duration of the export so
+    # ``save_pretrained`` passes transformers 5.x's strict validation without affecting
+    # any ``.generate()`` callers outside the export window.
+    with (
+        torch.inference_mode(),
+        normalized_generation_config_for_export(full_model),
+    ):
         if model_type is None:
             print(f"Unknown model type {type(language_model).__name__}. Continue exporting...")
             model_type = f"unknown:{type(language_model).__name__}"
@@ -753,6 +769,12 @@ def export_quantized(
                     export_dir=export_path,
                     extra_state_dict=mtp_state_dict,
                 )
+
+                if args.qformat == "nvfp4_w4a16":
+                    warnings.warn(
+                        "TensorRT-LLM and SGLang do not support this format. "
+                        "To serve on vLLM, convert the NVFP4 W4A16 checkpoint to compressed-tensors format."
+                    )
 
         # Restore default padding and export the tokenizer as well.
         if tokenizer is not None:

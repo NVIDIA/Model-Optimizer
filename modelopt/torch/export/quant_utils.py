@@ -66,6 +66,7 @@ from .model_config import (
     QUANTIZATION_NVFP4,
     QUANTIZATION_NVFP4_AWQ,
     QUANTIZATION_NVFP4_SVDQUANT,
+    QUANTIZATION_NVFP4_W4A16,
     QUANTIZATION_W4A8_AWQ,
     QUANTIZATION_W4A8_MXFP4_FP8,
     QUANTIZATION_W4A8_NVFP4_FP8,
@@ -359,6 +360,7 @@ def get_weight_scaling_factor(module: nn.Module, weight_name: str = "weight") ->
         QUANTIZATION_NVFP4,
         QUANTIZATION_NVFP4_AWQ,
         QUANTIZATION_NVFP4_SVDQUANT,
+        QUANTIZATION_NVFP4_W4A16,
         QUANTIZATION_W4A8_NVFP4_FP8,
     ]:
         # Calibrate weight quantizer if amax is not set
@@ -403,6 +405,7 @@ def get_weight_scaling_factor_2(module: nn.Module, weight_name: str = "weight") 
         QUANTIZATION_NVFP4,
         QUANTIZATION_NVFP4_AWQ,
         QUANTIZATION_NVFP4_SVDQUANT,
+        QUANTIZATION_NVFP4_W4A16,
         QUANTIZATION_W4A8_NVFP4_FP8,
     ]:
         # Calibrate weight quantizer if amax is not set
@@ -641,6 +644,10 @@ def get_quantization_format(module) -> str | None:
                 return QUANTIZATION_NVFP4_AWQ
             if getattr(layer, "fused_with_prequant", False):
                 return QUANTIZATION_NVFP4_AWQ
+            # W4A16 weight-only: input_quantizer absent or disabled
+            if input_quantizer is None or not input_quantizer.is_enabled:
+                if scale_bits == (4, 3):
+                    return QUANTIZATION_NVFP4_W4A16
             assert input_quantizer is not None, (
                 f"input_quantizer is None for {quantizer_attr_names}"
             )
@@ -806,6 +813,11 @@ def process_layer_quant_config(layer_config_dict):
         elif v in ["nvfp4", "nvfp4_static"]:
             layer_config = {
                 "quant_algo": "NVFP4",
+                "group_size": block_size_value,
+            }
+        elif v == "nvfp4_w4a16":
+            layer_config = {
+                "quant_algo": "NVFP4_W4A16",
                 "group_size": block_size_value,
             }
         elif v == "nvfp4_awq":
@@ -985,6 +997,7 @@ def to_quantized_weight(
     if quantization in [
         QUANTIZATION_NVFP4,
         QUANTIZATION_NVFP4_AWQ,
+        QUANTIZATION_NVFP4_W4A16,
         QUANTIZATION_W4A8_NVFP4_FP8,
         QUANTIZATION_NVFP4_SVDQUANT,
     ]:

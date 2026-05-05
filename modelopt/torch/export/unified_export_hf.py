@@ -65,6 +65,7 @@ from .convert_hf_config import convert_hf_quant_config_format
 from .layer_utils import (
     get_expert_linear_names,
     get_experts_list,
+    is_embedding,
     is_layernorm,
     is_moe,
     is_quantlinear,
@@ -80,6 +81,7 @@ from .model_config import (
     QUANTIZATION_NVFP4,
     QUANTIZATION_NVFP4_AWQ,
     QUANTIZATION_NVFP4_SVDQUANT,
+    QUANTIZATION_NVFP4_W4A16,
     QUANTIZATION_W4A8_AWQ,
     QUANTIZATION_W4A8_NVFP4_FP8,
 )
@@ -517,6 +519,7 @@ def _export_quantized_weight(
         QUANTIZATION_NVFP4_AWQ,
         QUANTIZATION_NVFP4_SVDQUANT,
         QUANTIZATION_NVFP4,
+        QUANTIZATION_NVFP4_W4A16,
         QUANTIZATION_W4A8_AWQ,
         QUANTIZATION_W4A8_NVFP4_FP8,
     ]:
@@ -546,6 +549,7 @@ def _export_quantized_weight(
         QUANTIZATION_NVFP4,
         QUANTIZATION_NVFP4_AWQ,
         QUANTIZATION_NVFP4_SVDQUANT,
+        QUANTIZATION_NVFP4_W4A16,
     ]:
         # Transpose weight from (num_experts, input_dim, output_dim) to (num_experts, output_dim, input_dim)
         # for NVFP4 quantization functions that expect input_dim as the last dimension for block quantization
@@ -664,7 +668,7 @@ def _process_quantized_modules(
             # Skip QuantMoELinear - it's handled separately in _reconstruct_fused_moe_linear
             if type(sub_module).__name__ == "QuantMoELinear":
                 continue
-            if is_quantlinear(sub_module):
+            if is_quantlinear(sub_module) or is_embedding(sub_module):
                 try:
                     with fsdp2_aware_weight_update(model, sub_module, reshard=False):
                         _export_quantized_weight(sub_module, dtype)
