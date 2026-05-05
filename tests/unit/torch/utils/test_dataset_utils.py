@@ -472,28 +472,40 @@ class TestLocalJsonlLoading:
         rows = [
             {"text": ""},  # blank but valid; caller drops empty samples
             {"prompt": "", "completion": "from-completion"},
+            {"input": "", "output": "from-output"},
             {"text": "kept"},
         ]
         path = _write_jsonl(tmp_path / "blank.jsonl", rows)
-        samples = get_dataset_samples(path, num_samples=3)
+        samples = get_dataset_samples(path, num_samples=4)
         # ``{"text": ""}`` produces "" and is filtered by the caller.
         # ``{"prompt": "", "completion": "from-completion"}`` joins to
-        # "\nfrom-completion".  ``{"text": "kept"}`` is kept verbatim.
-        assert samples == ["\nfrom-completion", "kept"]
+        # "\nfrom-completion". ``{"input": "", "output": "from-output"}``
+        # joins to "\nfrom-output".  ``{"text": "kept"}`` is kept verbatim.
+        assert samples == ["\nfrom-completion", "\nfrom-output", "kept"]
 
-    def test_legacy_text_fallback_on_hf_builder_failure(self, tmp_path):
+    def test_empty_split_list_raises(self, tmp_path):
+        path = _write_jsonl(tmp_path / "plain.jsonl", [{"text": "row"}])
+        with pytest.raises(ValueError, match="at least one split name"):
+            get_dataset_samples(path, num_samples=1, split=[])
+
+    def test_legacy_text_fallback_on_hf_builder_failure(self, tmp_path, monkeypatch):
         """If the HF json builder raises, fall back to the legacy text-field reader."""
-        pytest.importorskip("datasets")
-        # Mixed-type ``meta`` field across rows — int vs string — trips PyArrow
-        # schema unification in the HF json builder. The rows still carry a
-        # ``text`` field, so the legacy reader can recover the samples.
+        datasets = pytest.importorskip("datasets")
+        from datasets.exceptions import DatasetGenerationError
+
         rows = [
             {"text": "row a", "meta": 1},
             {"text": "row b", "meta": "two"},
             {"text": "row c", "meta": 3},
         ]
         path = _write_jsonl(tmp_path / "mixed.jsonl", rows)
-        samples = get_dataset_samples(path, num_samples=3)
+        load_dataset_mock = Mock(side_effect=DatasetGenerationError("schema boom"))
+        monkeypatch.setattr(datasets, "load_dataset", load_dataset_mock)
+
+        with pytest.warns(UserWarning, match="fell back to legacy text-field reader"):
+            samples = get_dataset_samples(path, num_samples=3)
+
+        load_dataset_mock.assert_called_once()
         assert samples == ["row a", "row b", "row c"]
 
 
@@ -614,6 +626,8 @@ def _hf_dump_to_jsonl(name: str, split: str, path) -> str:
     return str(path)
 
 
+@pytest.mark.integration
+@pytest.mark.network
 class TestHfTinyDataset:
     """End-to-end coverage with a real (tiny) HF dataset."""
 

@@ -178,12 +178,11 @@ def _auto_preprocess_sample(
         ValueError: If the tokenizer is missing/incompatible for chat-format datasets,
             or if no recognized column is found.
     """
-    # ``is not None`` (rather than ``key in sample`` or truthy ``.get(...)``)
-    # so we skip HF's schema-unification ``None`` padding while still treating
-    # legitimate empty strings as valid values (the caller filters falsy
-    # samples downstream).  Chat keys still use truthy checks because an empty
-    # ``messages``/``conversations`` list isn't meaningful to template.
-    chat_key = next((k for k in ("messages", "conversations") if sample.get(k)), None)
+
+    def _has_non_null_value(key: str) -> bool:
+        return sample.get(key) is not None
+
+    chat_key = next((k for k in ("messages", "conversations") if _has_non_null_value(k)), None)
     if chat_key is not None:
         if tokenizer is None or not hasattr(tokenizer, "apply_chat_template"):
             raise ValueError(
@@ -192,23 +191,23 @@ def _auto_preprocess_sample(
             )
         kwargs: dict[str, Any] = {}
         tools = sample.get("tools")
-        if tools:
+        if tools is not None:
             kwargs["tools"] = tools
         return tokenizer.apply_chat_template(sample[chat_key], tokenize=False, **kwargs)
 
-    if sample.get("prompt") is not None:
+    if _has_non_null_value("prompt"):
         parts = [sample["prompt"]]
         parts.extend(
-            sample[k] for k in ("completion", "response", "output") if sample.get(k) is not None
+            sample[k] for k in ("completion", "response", "output") if _has_non_null_value(k)
         )
         return "\n".join(parts)
 
-    if sample.get("text") is not None:
+    if _has_non_null_value("text"):
         return sample["text"]
 
-    if sample.get("input") is not None:
+    if _has_non_null_value("input"):
         parts = [sample["input"]]
-        if sample.get("output") is not None:
+        if _has_non_null_value("output"):
             parts.append(sample["output"])
         return "\n".join(parts)
 
@@ -266,13 +265,16 @@ def get_dataset_samples(
     # columns are handled consistently with a downloaded HF dataset.  Never
     # matches ``SUPPORTED_DATASET_CONFIG``.
     is_jsonl = dataset_name.endswith(".jsonl") and os.path.isfile(dataset_name)
+    requested_splits = _normalize_splits(split) if split is not None else None
+    if requested_splits is not None and not requested_splits:
+        raise ValueError("``split`` must contain at least one split name.")
 
     # HF's file-based builders only expose ``train`` for the ``data_files`` form
     # we use, so any other split is a caller error.  Surface it up front rather
     # than letting ``load_dataset`` fail and silently dropping into the
     # text-field fallback (which would ignore the requested split).
-    if is_jsonl and split is not None:
-        invalid = [s for s in _normalize_splits(split) if s != "train"]
+    if is_jsonl and requested_splits is not None:
+        invalid = [s for s in requested_splits if s != "train"]
         if invalid:
             raise ValueError(
                 f"Local JSONL files only expose the 'train' split, got {invalid}. "
@@ -304,7 +306,7 @@ def get_dataset_samples(
         config = dataset_config["config"].copy()
         if local_dataset_path:
             config["path"] = local_dataset_path
-        splits = _normalize_splits(split) if split is not None else config.pop("split", [None])
+        splits = requested_splits if requested_splits is not None else config.pop("split", [None])
         if split is not None:
             config.pop("split", None)
 
@@ -341,10 +343,13 @@ def get_dataset_samples(
         # as the ``train`` split unconditionally — the filename on disk is ignored.
         # Named splits require a dict ``data_files={"train": ..., "test": ...}``,
         # which we don't expose here.
-        splits = _normalize_splits(split) if split is not None else ["train"]
+        splits = requested_splits if requested_splits is not None else ["train"]
 
         def _preprocess(sample: dict) -> str:
             return _auto_preprocess_sample(sample, dataset_name, tokenizer)
+
+    if not splits:
+        raise ValueError("``split`` must contain at least one split name.")
 
     # Narrow the legacy fallback to JSON-parsing / Arrow schema failures.  Any
     # other error (split-not-found, IO, OOM, ...) should surface to the caller
@@ -395,9 +400,10 @@ def get_dataset_samples(
         except Exception:
             # Fallback can't help either — surface the original HF error.
             raise e from None
+        safe_name = Path(local_dataset_path).name
         warn(
-            f"Failed to load {local_dataset_path} via the HF 'json' builder "
-            f"({type(e).__name__}: {e}); fell back to legacy text-field reader."
+            f"Failed to load JSONL file '{safe_name}' via the HF 'json' builder "
+            f"({type(e).__name__}); fell back to legacy text-field reader."
         )
         return fallback_samples
 
