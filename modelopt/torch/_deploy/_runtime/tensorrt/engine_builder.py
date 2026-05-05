@@ -17,7 +17,7 @@ import logging
 import shutil
 import sys
 from pathlib import Path
-from tempfile import NamedTemporaryFile, TemporaryDirectory, gettempdir
+from tempfile import TemporaryDirectory, gettempdir
 
 from ..._runtime.common import read_bytes, timeit, write_bytes, write_string
 from ..._runtime.tensorrt.layerwise_profiling import process_layerwise_result
@@ -39,14 +39,14 @@ logging.basicConfig(
 )
 
 
-def _run_trtexec_streamed(args: list[str], cwd: Path | None = None) -> tuple[int, bytes]:
-    """Run a 'trtexec' command via subprocess, streaming stdout/stderr to a temp file.
+def _run_trtexec_with_logging(args: list[str], cwd: Path | None = None) -> tuple[int, bytes]:
+    """Run a 'trtexec' command via subprocess, logging the cmd and any failure output.
 
     The 'trtexec' binary is hardcoded as the executable; only its arguments may be supplied
     by the caller. This restricts the function to trtexec invocations.
 
-    Output handling: stdout and stderr are captured to a temp file and returned as bytes.
-    On failure (non-zero returncode), the captured output is also logged at ERROR level;
+    Output handling: stdout and stderr are merged and captured in memory.
+    On failure (non-zero returncode) or timeout, the captured output is logged at ERROR level;
     on success, this function emits nothing to the console.
 
     Args:
@@ -55,21 +55,34 @@ def _run_trtexec_streamed(args: list[str], cwd: Path | None = None) -> tuple[int
 
     Returns:
         A tuple of (returncode, output) where output is the combined stdout/stderr bytes.
+
+    Raises:
+        FileNotFoundError: If the 'trtexec' binary is not found in PATH.
+        subprocess.TimeoutExpired: If trtexec does not finish within 60 minutes.
+            The captured output is logged before re-raising.
     """
     import subprocess  # nosec
 
     cmd = ["trtexec", *args]
     logging.info(" ".join(cmd))
-    with NamedTemporaryFile("w+b") as log:
-        p = subprocess.Popen(  # nosec B603 - cmd[0] is hardcoded "trtexec"
-            cmd, stdout=log, stderr=log, cwd=str(cwd) if cwd else None
+    try:
+        result = subprocess.run(  # nosec B603 - cmd[0] is hardcoded "trtexec"
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            cwd=str(cwd) if cwd else None,
+            timeout=3600,
         )
-        p.wait()
-        log.seek(0)
-        output = log.read()
-        if p.returncode != 0:
-            logging.error(output.decode(errors="ignore"))
-        return p.returncode, output
+    except FileNotFoundError as e:
+        raise FileNotFoundError(
+            "'trtexec' binary not found. Please ensure TensorRT is installed and 'trtexec' is in PATH."
+        ) from e
+    except subprocess.TimeoutExpired as e:
+        logging.error((e.stdout or b"").decode(errors="ignore"))
+        raise
+    if result.returncode != 0:
+        logging.error(result.stdout.decode(errors="ignore"))
+    return result.returncode, result.stdout
 
 
 def _get_profiling_params(profiling_runs: int) -> list[str]:
@@ -239,7 +252,7 @@ def build_engine(
         cmd = _build_command(onnx_path, engine_path, calib_cache_path, timing_cache_path)
 
         try:
-            ret_code, out = _run_trtexec_streamed(cmd)
+            ret_code, out = _run_trtexec_with_logging(cmd)
             if ret_code != 0:
                 return None, out
 
@@ -324,7 +337,7 @@ def profile_engine(
         cmd = _build_command(engine_path, profile_path, layer_info_path)
 
         try:
-            ret_code, out = _run_trtexec_streamed(cmd)
+            ret_code, out = _run_trtexec_with_logging(cmd)
             if ret_code != 0:
                 return None, out
 
