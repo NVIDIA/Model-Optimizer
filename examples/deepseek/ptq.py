@@ -61,6 +61,7 @@ from modelopt.torch.quantization.utils import (
     is_quantized_column_parallel_linear,
     is_quantized_parallel_linear,
     is_quantized_row_parallel_linear,
+    reduce_amax,
 )
 from modelopt.torch.utils.dataset_utils import get_dataset_dataloader
 from modelopt.torch.utils.distributed import ParallelState
@@ -81,7 +82,7 @@ import model as deekseep_model  # noqa: E402
 from kernel import act_quant, fp8_gemm  # noqa: E402
 
 
-def monkey_patch_deepseek_model():
+def monkey_patch_deepseek_model(calib_all_experts: bool = False):
     gemm_impl: Literal["bf16", "fp8"] = "bf16"
     block_size = 128
 
@@ -199,6 +200,10 @@ def monkey_patch_deepseek_model():
             self.pe_bmm_quantizer = TensorQuantizer()
 
     class CalibMoe(deekseep_model.MoE):
+        """MoE override that forces every token through every expert during
+        calibration. Slower (~2x forwards) but every expert sees the full token
+        distribution, so per-expert input amaxes are calibrated directly."""
+
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
             self._setup()
@@ -208,14 +213,11 @@ def monkey_patch_deepseek_model():
             self._original_topk_groups = self.gate.topk_groups
 
         def forward(self, x: torch.Tensor) -> torch.Tensor:
-            # Forward all tokens to all experts for calibration
             self.gate.topk = self.n_routed_experts
             self.gate.topk_groups = self.gate.n_groups
             super().forward(x)
-            # Restore the original topk and topk_groups
             self.gate.topk = self._original_topk
             self.gate.topk_groups = self._original_topk_groups
-
             return super().forward(x)
 
     mtq.register(
@@ -228,10 +230,88 @@ def monkey_patch_deepseek_model():
     )
     mtq.register(original_cls=deekseep_model.Linear, quantized_cls=QuantLinear)
     mtq.register(original_cls=deekseep_model.MLA, quantized_cls=QuantMLA)
-    mtq.register(original_cls=deekseep_model.MoE, quantized_cls=CalibMoe)
+    if calib_all_experts:
+        mtq.register(original_cls=deekseep_model.MoE, quantized_cls=CalibMoe)
 
 
-def load_deepseek_model(model_config: str, model_path: str, batch_size: int):
+def _expert_linear_names() -> list[str]:
+    return ["w1", "w2", "w3"]
+
+
+def fixup_moe_expert_amax(transformer):
+    """Post-calibration amax sweep for MoE experts.
+
+    * ``input_quantizer`` (w1/w2/w3): every expert in a layer takes the per-layer
+      peer max, all-reduced across ranks so the max is global across all experts.
+    * ``weight_quantizer``: kept per-expert. Calibrated values are preserved;
+      missing values are filled by computing amax over the dequantized FP8 weight.
+    """
+    world_size = dist.get_world_size() if dist.is_initialized() else 1
+    synced_input = fixed_weight = 0
+
+    def _missing(amax):
+        return amax is None or torch.all(amax == 0)
+
+    for module in transformer.modules():
+        if not isinstance(module, deekseep_model.MoE):
+            continue
+        local_experts = [
+            module.experts[i]
+            for i in range(module.experts_start_idx, module.experts_end_idx)
+            if module.experts[i] is not None
+        ]
+
+        for linear_name in _expert_linear_names():
+            linears = [getattr(e, linear_name) for e in local_experts]
+
+            qs = [
+                lin.input_quantizer
+                for lin in linears
+                if lin.input_quantizer.is_enabled
+                and not getattr(lin.input_quantizer, "_dynamic", False)
+            ]
+            valid = [q.amax.float() for q in qs if not _missing(q.amax)]
+            if valid:
+                m = torch.stack(valid).amax(dim=0)
+                if world_size > 1:
+                    dist.all_reduce(m, op=dist.ReduceOp.MAX)
+                for q in qs:
+                    q.amax = m.clone()
+                    synced_input += 1
+
+            for lin in linears:
+                wq = lin.weight_quantizer
+                if not wq.is_enabled or getattr(wq, "_dynamic", False):
+                    continue
+                if not _missing(wq.amax):
+                    continue
+                w = lin.weight
+                if w.is_meta:
+                    continue
+                # DeepSeek stores experts as FP8 with a per-block .scale; dequantize
+                # to bf16 first so we measure the real weight distribution, not bytes.
+                deq = (
+                    weight_dequant(w, w.scale, dtype=torch.bfloat16) if w.element_size() == 1 else w
+                )
+                axis = getattr(wq, "_axis", None)
+                if axis is None:
+                    reduce_axis = None
+                else:
+                    axis = (axis,) if isinstance(axis, int) else axis
+                    keep = {a % deq.dim() for a in axis}
+                    reduce_axis = tuple(d for d in range(deq.dim()) if d not in keep)
+                wq.amax = reduce_amax(deq.detach(), axis=reduce_axis).to(torch.float32)
+                fixed_weight += 1
+
+    return synced_input, fixed_weight
+
+
+def load_deepseek_model(
+    model_config: str,
+    model_path: str,
+    batch_size: int,
+    calib_all_experts: bool = False,
+):
     """Loads the deepseek model to memory."""
     # get distributed info
     world_size = int(os.getenv("WORLD_SIZE", "1"))
@@ -252,7 +332,7 @@ def load_deepseek_model(model_config: str, model_path: str, batch_size: int):
         model = deekseep_model.Transformer(model_args)
 
     # monkey path the model definition for quantization
-    monkey_patch_deepseek_model()
+    monkey_patch_deepseek_model(calib_all_experts=calib_all_experts)
 
     # load model
     checkpoint_path = os.path.join(model_path, f"model{rank}-mp{world_size}.safetensors")
@@ -280,6 +360,8 @@ def ptq(
     batch_size: int,
     calib_size: int,
     mla_quant: str | None = None,
+    calib_all_experts: bool = False,
+    output_path: str | None = None,
 ):
     """Runs Deepseek model PTQ and returns the quantized model."""
 
@@ -384,8 +466,18 @@ def ptq(
     ## ptq
     transformer = mtq.quantize(transformer, mtq_cfg, calibrate_loop)
 
+    if not calib_all_experts:
+        synced_input, fixed_weight = fixup_moe_expert_amax(transformer)
+        if int(os.environ["LOCAL_RANK"]) == 0:
+            print(
+                f"Synced peer-max for {synced_input} expert input_quantizer(s) "
+                f"and computed {fixed_weight} weight_quantizer amax(es) on rank 0."
+            )
+
     if int(os.environ["LOCAL_RANK"]) == 0:
-        mtq.print_quant_summary(transformer)
+        if output_path:
+            os.makedirs(output_path, exist_ok=True)
+        mtq.print_quant_summary(transformer, output_path)
 
     return model
 
@@ -472,11 +564,31 @@ if __name__ == "__main__":
         default=None,
         help="MLA quantization type: None (disable), per_tensor_fp8, nvfp4",
     )
+    parser.add_argument(
+        "--calib_all_experts",
+        action="store_true",
+        help=(
+            "Force every token through every MoE expert during calibration "
+            "(slower, ~2x forwards). Default: use native top-k routing and "
+            "post-calibration peer-max sync of expert input amaxes."
+        ),
+    )
 
     args = parser.parse_args()
-    model = load_deepseek_model(args.config, args.model_path, args.batch_size)
+    model = load_deepseek_model(
+        args.config, args.model_path, args.batch_size, calib_all_experts=args.calib_all_experts
+    )
     tokenizer = AutoTokenizer.from_pretrained(
         args.model_path, trust_remote_code=args.trust_remote_code
     )
-    model = ptq(model, tokenizer, args.quant_cfg, args.batch_size, args.calib_size, args.mla_quant)
+    model = ptq(
+        model,
+        tokenizer,
+        args.quant_cfg,
+        args.batch_size,
+        args.calib_size,
+        args.mla_quant,
+        calib_all_experts=args.calib_all_experts,
+        output_path=args.output_path,
+    )
     save_amax_and_quant_config(model, args.output_path, not args.disable_fp8_kvcache)

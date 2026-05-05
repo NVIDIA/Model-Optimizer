@@ -108,6 +108,8 @@ def get_experts_list(
         linear_names = ["gate_proj", "down_proj", "up_proj"]
     elif "nemotronhforcausallm" in model_type:
         linear_names = ["up_proj", "down_proj"]
+    elif "gemma4" in model_type:
+        linear_names = ["gate_proj", "down_proj", "up_proj"]
     else:
         raise NotImplementedError(f" {model_type} not supported")
 
@@ -315,7 +317,14 @@ def is_moe(module: nn.Module) -> bool:
     if name.endswith("sparsemoeblock") or "moelayer" in name:
         return True
     # Explicit matches for non-standard naming
-    return any(key in name for key in ["arcticmoe", "deepseekmoe", "dbrxffn", "nemotronhmoe"])
+    if any(key in name for key in ["arcticmoe", "deepseekmoe", "dbrxffn", "nemotronhmoe"]):
+        return True
+    # Structural detection: modules with router + experts (e.g. Gemma4TextDecoderLayer)
+    return (
+        hasattr(module, "router")
+        and hasattr(module, "experts")
+        and isinstance(module.experts, nn.Module)
+    )
 
 
 def is_quantlinear(module: nn.Module) -> bool:
@@ -1007,6 +1016,9 @@ def get_expert_linear_names(module: nn.Module) -> list[str]:
     elif module_match_name_list(module, ["NemotronHMOE"]):
         # NemotronHMOE experts (NemotronHMLP) use up_proj and down_proj only (no gate).
         return ["up_proj", "down_proj"]
+    elif module_match_name_list(module, ["Gemma4TextDecoderLayer"]):
+        # Gemma4 MoE experts are unfused into per-expert nn.Linear layers
+        return ["gate_proj", "down_proj", "up_proj"]
     else:
         # assuming w1, w2, w3 by default
         return ["w1", "w2", "w3"]
@@ -1079,14 +1091,23 @@ def set_expert_quantizer_amax(
 
     target_amax = None
 
-    # Collect ANY existing amax values from current batch (most direct source)
+    # Collect ANY existing amax values from current batch (most direct source).
+    # Reduce per-quantizer amax to a scalar before stacking — quantizers in
+    # static-mode (e.g. NVFP4 with pre-computed per-block _amax) carry tensors
+    # whose shapes differ across attrs (gate_up_proj vs down_proj have different
+    # output dims), and torch.stack would otherwise fail. The result here is
+    # only used as a *fallback* scalar `target_amax` for quantizers missing
+    # amax, so a max-of-max is exactly what we want.
     valid_amax_values = []
     for _, attr_name, quantizer in all_quantizers:
         existing_amax = getattr(quantizer, "amax", None)
         if existing_amax is not None:
             # Convert to tensor and add to collection
             if isinstance(existing_amax, torch.Tensor):
-                valid_amax_values.append(existing_amax.to(target_device))
+                # Meta tensors have no storage; .amax() / .to() would fail.
+                if existing_amax.is_meta:
+                    continue
+                valid_amax_values.append(existing_amax.amax().to(target_device))
             else:
                 valid_amax_values.append(
                     torch.tensor(existing_amax, dtype=torch.float32, device=target_device)

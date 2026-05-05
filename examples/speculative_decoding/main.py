@@ -341,7 +341,7 @@ def train():
 
     print_rank_0("Loading dataset...")
     is_dflash = training_args.mode == "dflash"
-    if training_args.mode in ("eagle3", "dflash"):
+    if training_args.mode in ("eagle3", "medusa", "dflash"):
         data_module = make_speculative_data_module(
             tokenizer,
             data_args,
