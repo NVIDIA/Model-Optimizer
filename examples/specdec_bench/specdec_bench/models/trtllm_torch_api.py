@@ -13,8 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import itertools
 import time
+
+import torch
 
 try:
     import tensorrt_llm.bindings.executor as trtllm
@@ -22,7 +23,6 @@ try:
     from tensorrt_llm.llmapi import (
         CudaGraphConfig,
         DraftTargetDecodingConfig,
-        EagleDecodingConfig,
         KvCacheConfig,
         MoeConfig,
         MTPDecodingConfig,
@@ -33,121 +33,117 @@ except ImportError:
     trtllm = None
 
 
-from .base import Model
+from .base import CumulativeTokenCollector, Model, build_model_output
 
 
 class TRTLLMPYTModel(Model):
-    def __init__(
-        self,
-        model_path,
-        max_concurrent_requests,
-        sampling_kwargs,
-        use_draft_logits=False,
-        **kwargs,
-    ):
-        self.model = create_executor(model_path, max_concurrent_requests, kwargs)
+    def __init__(self, model_path, max_concurrent_requests, sampling_kwargs, **kwargs):
+        self.model = create_executor(model_path, max_concurrent_requests, sampling_kwargs, kwargs)
         self.sampling_kwargs = sampling_kwargs
 
-    async def run(self, prompt_ids, max_length, end_id, request_id, turn_id):
-        output_dict = {}
+    async def run(self, prompt_ids, max_length, end_id, request_id=None, turn_id=None):
         sampling_config = check_sampling_config(self.sampling_kwargs, max_length, end_id)
-        outputs = []
-        timing = [time.perf_counter()]
-        beam_lens = [[] for _ in range(self.sampling_kwargs.get("beam_width", 1))]
+        collector = CumulativeTokenCollector()
         async for output in self.model.generate_async(
             prompt_ids,
             streaming=not sampling_config.use_beam_search,
             sampling_params=sampling_config,
         ):
+            chunk_time = time.perf_counter()
             for beam in output.outputs:
-                beam_lens[beam.index].append(len(beam.token_ids))
-            outputs.append(output.outputs)
-            timing.append(time.perf_counter())
-        reformatted_output_ids = [[] for _ in range(self.sampling_kwargs.get("beam_width", 1))]
-        for beam_idx, beam_len in enumerate(beam_lens):
-            response = outputs[-1][beam_idx]
-            if beam_len[0] != 0:
-                reformatted_output_ids[beam_idx].append(response.token_ids[: beam_len[0]])
-            for s, e in itertools.pairwise(beam_len):
-                reformatted_output_ids[beam_idx].append(response.token_ids[s:e])
-            if len(response.token_ids) > beam_len[-1]:
-                reformatted_output_ids[beam_idx].append(response.token_ids[beam_len[-1] :])
-        output_dict["output_ids"] = reformatted_output_ids
-        output_dict["output_logits"] = None
-        output_dict["token_times"] = timing
-        return output_dict
+                collector.add_update(beam.index, beam.token_ids, chunk_time)
+        return build_model_output(
+            collector.output_ids(), collector.token_times, collector.chunk_lengths()
+        )
 
 
-def create_executor(model_path: str, max_concurrent_requests, kwargs):
-    disable_overlap_schedule = kwargs.get("disable_overlap_schedule", False)
-    if kwargs.get("speculative_algorithm", None) == "DRAFT_TARGET":
+def create_executor(model_path: str, max_concurrent_requests, sampling_kwargs, kwargs):
+    kwargs.pop("parallel_drafting", None)
+    trust_remote_code = kwargs.pop("trust_remote_code", False)
+    disable_overlap_schedule = kwargs.pop("disable_overlap_schedule", False)
+    speculative_algorithm = kwargs.pop("speculative_algorithm", None)
+    num_speculative_tokens = kwargs.pop("speculative_num_steps", 3)
+    draft_model_dir = kwargs.pop("draft_model_dir", None)
+    if speculative_algorithm == "DRAFT_TARGET":
         specdec = DraftTargetDecodingConfig(
-            max_draft_len=kwargs.get("speculative_num_steps", 3),
-            speculative_model_dir=kwargs.get("draft_model_dir", None),
+            max_draft_len=num_speculative_tokens,
+            speculative_model_dir=draft_model_dir,
         )
 
-    elif kwargs.get("speculative_algorithm", None) == "EAGLE3":
-        extra_params = {}
-        if "allow_advanced_sampling" in EagleDecodingConfig.model_fields:
-            extra_params["allow_advanced_sampling"] = kwargs.get("allow_advanced_sampling", False)
-        elif "allow_advanced_sampling" in kwargs:
-            print(
-                f"WARNING: allow_advanced_sampling unsupported in tensorrt_llm version: {trtllm.__version__}"
-            )
-        specdec = EagleDecodingConfig(
-            max_draft_len=kwargs.get("speculative_num_steps", 3),
-            speculative_model_dir=kwargs.get("draft_model_dir", None),
-            eagle3_one_model=kwargs.get("use_one_model", True),
-            eagle3_layers_to_capture=kwargs.get("eagle3_layers_to_capture", None),
-            num_eagle_layers=kwargs.get("num_eagle_layers", 1),
-            **extra_params,
+    elif speculative_algorithm == "EAGLE3":
+        from tensorrt_llm.llmapi import Eagle3DecodingConfig
+
+        specdec = Eagle3DecodingConfig(
+            max_draft_len=num_speculative_tokens,
+            speculative_model_dir=draft_model_dir,
+            eagle3_layers_to_capture=kwargs.pop("eagle3_layers_to_capture", None),
+            num_eagle_layers=kwargs.pop("num_eagle_layers", 1),
+            allow_advanced_sampling=kwargs.pop("allow_advanced_sampling", True),
+            use_sa_spec=kwargs.pop("use_sa_spec", False),
+            sa_spec_threshold=kwargs.pop("sa_spec_threshold", 4),
         )
 
-    elif kwargs.get("speculative_algorithm", None) == "MTP":
+    elif speculative_algorithm == "MTP":
         specdec = MTPDecodingConfig(
-            num_nextn_predict_layers=kwargs.get("speculative_num_steps", 3),
-            use_relaxed_acceptance_for_thinking=kwargs.get("relaxed_acceptance", False),
-            relaxed_topk=kwargs.get("relaxed_topk", 10),
-            relaxed_delta=kwargs.get("relaxed_delta", 0.6),
+            num_nextn_predict_layers=num_speculative_tokens,
+            use_relaxed_acceptance_for_thinking=kwargs.pop("relaxed_acceptance", False),
+            relaxed_topk=kwargs.pop("relaxed_topk", 10),
+            relaxed_delta=kwargs.pop("relaxed_delta", 0.6),
+            allow_advanced_sampling=kwargs.pop("allow_advanced_sampling", True),
+            use_sa_spec=kwargs.pop("use_sa_spec", False),
+            sa_spec_threshold=kwargs.pop("sa_spec_threshold", 4),
         )
-    elif kwargs.get("speculative_algorithm", None) == "NGRAM":
+    elif speculative_algorithm == "NGRAM":
         specdec = NGramDecodingConfig(
-            max_draft_len=kwargs.get("speculative_num_steps", 5),
-            max_matching_ngram_size=kwargs.get("max_matching_ngram_size", 3),
+            max_draft_len=num_speculative_tokens,
+            max_matching_ngram_size=kwargs.pop("max_matching_ngram_size", 3),
             is_keep_all=True,
             is_use_oldest=True,
             is_public_pool=True,
         )
-    elif kwargs.get("speculative_algorithm", None) == "NONE":
+    elif speculative_algorithm == "PARD":
+        from tensorrt_llm.llmapi import PARDDecodingConfig
+
+        specdec = PARDDecodingConfig(
+            max_draft_len=num_speculative_tokens,
+            speculative_model_dir=draft_model_dir,
+        )
+    elif speculative_algorithm == "NONE":
         specdec = None
     else:
+        print(f"Unknown speculative algorithm: {speculative_algorithm} for TRTLLM PyTorch API")
         specdec = None
 
     kv_cache_config = KvCacheConfig(
-        enable_block_reuse=kwargs.get("prefix_cache", False),
+        enable_block_reuse=kwargs.pop("prefix_cache", False),
         free_gpu_memory_fraction=0.75,
+        mamba_ssm_cache_dtype=kwargs.pop("mamba_ssm_cache_dtype", "auto"),
+        mamba_ssm_stochastic_rounding=kwargs.pop("mamba_ssm_stochastic_rounding", False),
+        mamba_ssm_philox_rounds=kwargs.pop("mamba_ssm_philox_rounds", 10),
     )
 
     cuda_graph_config = CudaGraphConfig(
-        batch_sizes=[max_concurrent_requests],
+        max_batch_size=max_concurrent_requests,
         enable_padding=True,
     )
 
     model = LLM(
         model=model_path,
-        tensor_parallel_size=kwargs.get("tensor_parallel_size", 4),
-        moe_expert_parallel_size=kwargs.get("moe_expert_parallel_size", 2),
+        trust_remote_code=trust_remote_code,
+        tensor_parallel_size=kwargs.pop("tensor_parallel_size", 4),
+        gpus_per_node=kwargs.pop("gpus_per_node", torch.cuda.device_count()),
+        moe_expert_parallel_size=kwargs.pop("moe_expert_parallel_size", 2),
         disable_overlap_scheduler=disable_overlap_schedule,
         cuda_graph_config=cuda_graph_config,
-        enable_chunked_prefill=kwargs.get("enable_chunked_prefill", True),
+        enable_chunked_prefill=kwargs.pop("enable_chunked_prefill", True),
         kv_cache_config=kv_cache_config,
         speculative_config=specdec,
-        enable_attention_dp=kwargs.get("enable_attention_dp", False),
+        enable_attention_dp=kwargs.pop("enable_attention_dp", False),
         max_batch_size=max_concurrent_requests,
-        moe_config=MoeConfig(backend=kwargs.get("moe_backend", "TRTLLM")),
-        sampler_type="TorchSampler",
-        max_seq_len=kwargs.get("max_seq_len", None),
-        max_num_tokens=kwargs.get("max_num_tokens", 8192),
+        moe_config=MoeConfig(backend=kwargs.pop("moe_backend", "TRTLLM")),
+        max_seq_len=kwargs.pop("max_seq_len", None),
+        max_num_tokens=kwargs.pop("max_num_tokens", 8192),
+        **kwargs,
     )
     return model
 
@@ -155,8 +151,8 @@ def create_executor(model_path: str, max_concurrent_requests, kwargs):
 def check_sampling_config(sampling_config, max_length, end_id):
     return SamplingParams(
         use_beam_search=sampling_config.get("beam_width", 1) > 1,
-        n=sampling_config.get("beam_width", 1),  # beam_width=1 for inflight batching
-        top_k=sampling_config.get("top_k", None),  # SizeType topK
+        n=sampling_config.get("beam_width", 1),
+        top_k=sampling_config.get("top_k", None),
         top_p=sampling_config.get("top_p", None),
         seed=sampling_config.get("seed", None),
         temperature=sampling_config.get("temperature", 1),

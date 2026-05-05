@@ -14,15 +14,21 @@
 # limitations under the License.
 
 import json
+import os
+import sys
 
 from transformers import AutoTokenizer
+
+_SENSITIVE_SUBSTRINGS = ("token", "key", "secret", "password")
 
 
 def get_tokenizer(path, trust_remote_code=False):
     return AutoTokenizer.from_pretrained(path, trust_remote_code=trust_remote_code)
 
 
-def encode_chat(tokenizer, messages, chat_template_args={}, completions=False):
+def encode_chat(tokenizer, messages, chat_template_args=None, completions=False):
+    if chat_template_args is None:
+        chat_template_args = {}
     if completions:
         return tokenizer.encode(messages[-1]["content"], add_special_tokens=False)
     return tokenizer.encode(
@@ -47,6 +53,67 @@ def read_json(path):
 
 def postprocess_base(text):
     return text
+
+
+def _get_engine_version(engine):
+    """Try to import the engine package and return its __version__, or None on failure."""
+    try:
+        if engine in ("TRTLLM", "AUTO_DEPLOY"):
+            import tensorrt_llm
+
+            return tensorrt_llm.__version__
+        elif engine == "VLLM":
+            import vllm
+
+            return vllm.__version__
+        elif engine == "SGLANG":
+            import sglang
+
+            return sglang.__version__
+        elif engine == "ATOM":
+            import atom
+
+            return atom.__version__
+    except Exception:
+        pass
+    return None
+
+
+def _get_gpu_name():
+    """Return the name of GPU 0 if CUDA is available, else None."""
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            return torch.cuda.get_device_name(0)
+    except Exception:
+        pass
+    return None
+
+
+def _redact_config(config):
+    return {
+        key: (
+            "***REDACTED***"
+            if any(part in key.lower() for part in _SENSITIVE_SUBSTRINGS)
+            else value
+        )
+        for key, value in config.items()
+    }
+
+
+def dump_env(args, save_dir, overrides=None):
+    """Write a configuration.json to save_dir capturing the run args and engine version."""
+    config = _redact_config(vars(args).copy())
+    if overrides:
+        config.update(_redact_config(overrides))
+    config["engine_version"] = _get_engine_version(config.get("engine"))
+    config["gpu"] = _get_gpu_name()
+    config["python_version"] = sys.version
+    config["argv"] = sys.argv[:]
+    os.makedirs(save_dir, exist_ok=True)
+    with open(os.path.join(save_dir, "configuration.json"), "w") as f:
+        json.dump(config, f, indent=4)
 
 
 def postprocess_gptoss(text):

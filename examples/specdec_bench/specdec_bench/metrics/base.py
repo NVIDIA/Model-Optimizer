@@ -24,14 +24,75 @@ class Metric:
         self.out = {}
         self.name = "metric"
 
-    def process_step(self, step_outputs, request_id, turn_id):
-        raise NotImplementedError
-
-    def process_final(self, text_outputs):
+    def process_final(self, text_outputs, request_records):
         raise NotImplementedError
 
     def clear(self):
-        raise NotImplementedError
+        self.out = {}
+
+    @staticmethod
+    def chunk_lengths(record):
+        chunk_lengths = record.get("chunk_lengths")
+        if chunk_lengths is not None:
+            return chunk_lengths
+
+        output_ids = record.get("output_ids", [])
+        if output_ids and output_ids[0] and isinstance(output_ids[0][0], list):
+            return [[len(chunk) for chunk in beam_output] for beam_output in output_ids]
+        return [[] for _ in output_ids]
+
+    @classmethod
+    def output_chunks(cls, record):
+        output_ids = record.get("output_ids", [])
+        if output_ids and output_ids[0] and isinstance(output_ids[0][0], list):
+            return output_ids
+
+        chunks = []
+        chunk_lengths = cls.chunk_lengths(record)
+        for beam_idx, beam_lengths in enumerate(chunk_lengths):
+            beam_tokens = output_ids[beam_idx] if beam_idx < len(output_ids) else []
+            beam_chunks = []
+            cursor = 0
+            for chunk_length in beam_lengths:
+                beam_chunks.append(beam_tokens[cursor : cursor + chunk_length])
+                cursor += chunk_length
+            chunks.append(beam_chunks)
+        return chunks
+
+    @staticmethod
+    def trim_beam_lengths(beam_lengths):
+        if not beam_lengths:
+            return [1]
+        start_idx = 1 if beam_lengths[0] == 1 else 0
+        end_idx = len(beam_lengths) - 1
+        if end_idx <= start_idx:
+            return [1]
+        return beam_lengths[start_idx:end_idx]
+
+    @staticmethod
+    def trim_beam_chunks(beam_chunks):
+        if not beam_chunks:
+            return []
+        start_idx = 1 if len(beam_chunks[0]) == 1 else 0
+        end_idx = len(beam_chunks) - 1
+        if end_idx <= start_idx:
+            return []
+        return beam_chunks[start_idx:end_idx]
+
+    @classmethod
+    def trimmed_chunk_lengths(cls, record):
+        return [cls.trim_beam_lengths(beam_lengths) for beam_lengths in cls.chunk_lengths(record)]
+
+    @classmethod
+    def trimmed_output_chunks(cls, record):
+        return [cls.trim_beam_chunks(beam_chunks) for beam_chunks in cls.output_chunks(record)]
+
+    @staticmethod
+    def flat_output_tokens(record):
+        output_ids = record.get("output_ids", [])
+        if output_ids and output_ids[0] and isinstance(output_ids[0][0], list):
+            return [token for beam_output in output_ids for chunk in beam_output for token in chunk]
+        return [token for beam_output in output_ids for token in beam_output]
 
     def write(self):
         os.makedirs(self.directory, exist_ok=True)

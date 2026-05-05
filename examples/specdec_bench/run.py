@@ -15,17 +15,27 @@
 
 import argparse
 import asyncio
+import os
 
 import yaml
 from specdec_bench import datasets, metrics, models, runners
+from specdec_bench.run_utils import (
+    build_dataset,
+    build_metrics,
+    expand_sweep_run_specs,
+    gather_limited,
+    resolve_run_save_dir,
+    resolve_single_run_spec,
+    resolve_sweep_output_root,
+)
 from specdec_bench.utils import (
     decode_chat,
+    dump_env,
     encode_chat,
     get_tokenizer,
     postprocess_base,
     postprocess_gptoss,
 )
-from tqdm.asyncio import tqdm
 
 engines_available = {
     "TRTLLM": models.TRTLLMPYTModel,
@@ -35,24 +45,12 @@ engines_available = {
     "SPECBENCH_MEDUSA": models.SpecBenchMedusaModel,
 }
 datasets_available = {
+    "humaneval": datasets.HumanEval,
     "mtbench": datasets.MTBench,
     "random": datasets.RandomToken,
     "specbench": datasets.SpecBench,
     "speed": datasets.SPEEDBench,
 }
-
-
-async def tqdm_gather(*fs, return_exceptions=False, **kwargs):
-    if not return_exceptions:
-        return await tqdm.gather(*fs, **kwargs)
-
-    async def wrap(f):
-        try:
-            return await f
-        except Exception as e:
-            return e
-
-    return await tqdm.gather(*map(wrap, fs), **kwargs)
 
 
 async def run_loop(
@@ -65,58 +63,81 @@ async def run_loop(
     end_id=-1,
     show_progress=False,
     completions=False,
-    chat_template_args={},
+    chat_template_args=None,
 ):
-    """
-    Async version of run_loop with concurrency control using a semaphore.
-
-    Args:
-        runner: The model runner instance
-        dataset: The dataset containing requests
-        tokenizer: The tokenizer instance
-        output_length: Maximum output length
-        concurrency: Maximum number of concurrent requests (default: 10)
-    """
-    semaphore = asyncio.Semaphore(concurrency)
+    """Run requests with bounded concurrency and preserve input order."""
     max_length = output_length
+    if chat_template_args is None:
+        chat_template_args = {}
 
     async def process_single_request(request, i):
         """Process a single request with all its conversation turns."""
-        async with semaphore:
-            messages = []
-            if request.system_prompt is not None:
-                messages.append({"role": "system", "content": request.system_prompt})
-
-            for turn_id, question in enumerate(request.turns):
-                messages.append({"role": "user", "content": question})
-                entry_encoded = encode_chat(
-                    tokenizer,
-                    messages,
-                    chat_template_args=chat_template_args,
-                    completions=completions,
-                )
-
-                # Run the async runner.run directly
-                output_tokens = await runner.run(
-                    entry_encoded, max_length, end_id, request_id=i, turn_id=turn_id
-                )
-                output_text = decode_chat(tokenizer, output_tokens["output_ids"][0])
-                output_text = postprocess(output_text)
-                messages.append({"role": "assistant", "content": output_text})
-
+        # Pre-built messages (e.g. from a trace JSON): single forward pass
+        if request.messages is not None:
+            entry_encoded = encode_chat(
+                tokenizer,
+                request.messages,
+                chat_template_args=chat_template_args,
+                completions=completions,
+            )
+            output_tokens = await runner.run(
+                entry_encoded, max_length, end_id, request_id=i, turn_id=0
+            )
+            raw_output = decode_chat(tokenizer, output_tokens["output_ids"][0])
+            output_text = postprocess(raw_output)
+            messages = [
+                *request.messages,
+                {
+                    "role": "assistant",
+                    "content": output_text,
+                    "raw_content": raw_output,
+                    "output_token_ids": output_tokens["output_ids"][0],
+                    "generated": True,
+                },
+            ]
             return messages
 
-    tasks = [process_single_request(request, i) for i, request in enumerate(dataset.data)]
-    if show_progress:
-        text_outputs = await tqdm_gather(
-            *tasks,
-            return_exceptions=True,
-            desc=f"Running requests (concurrency={concurrency})",
-        )
-    else:
-        text_outputs = await asyncio.gather(*tasks, return_exceptions=True)
+        messages = []
+        raw_outputs = []
+        if request.system_prompt is not None:
+            messages.append({"role": "system", "content": request.system_prompt})
 
-    # Check for any exceptions and handle them
+        for turn_id, question in enumerate(request.turns):
+            messages.append({"role": "user", "content": question})
+            entry_encoded = encode_chat(
+                tokenizer, messages, chat_template_args=chat_template_args, completions=completions
+            )
+            output_tokens = await runner.run(
+                entry_encoded, max_length, end_id, request_id=i, turn_id=turn_id
+            )
+            output_text = decode_chat(tokenizer, output_tokens["output_ids"][0])
+            raw_outputs.append(output_text)
+            output_text = postprocess(output_text)
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": output_text,
+                    "output_token_ids": output_tokens["output_ids"][0],
+                    "generated": True,
+                }
+            )
+
+        assistant_idx = 0
+        for msg in messages:
+            if msg["role"] == "assistant":
+                msg["raw_content"] = raw_outputs[assistant_idx]
+                assistant_idx += 1
+
+        return messages
+
+    text_outputs = await gather_limited(
+        dataset.data,
+        process_single_request,
+        concurrency=concurrency,
+        show_progress=show_progress,
+        progress_desc=f"Running requests (concurrency={concurrency})",
+    )
+
     for i, result in enumerate(text_outputs):
         if isinstance(result, Exception):
             print(f"Error processing request {i}/{dataset.data[i].question_id}: {result}")
@@ -129,53 +150,39 @@ async def run_loop(
 def run_simple(args):
     tokenizer = get_tokenizer(args.tokenizer, trust_remote_code=args.trust_remote_code)
     chat_template_args = args.runtime_params.get("chat_template_args", {})
-    dataset_kwargs = args.runtime_params.get("dataset_kwargs", {})
+    dataset_kwargs = dict(args.runtime_params.get("dataset_kwargs", {}))
     if args.num_requests is not None:
         dataset_kwargs["num_samples"] = args.num_requests
-    if args.dataset is not None:
-        if args.dataset == "random":
-            assert args.random_isl is not None, "Random input length must be provided"
-            dataset = datasets.RandomToken(tokenizer, args.random_isl, **dataset_kwargs)
-        else:
-            dataset = datasets_available[args.dataset](args.dataset_path, **dataset_kwargs)
-    elif args.mtbench is not None:
-        dataset = datasets.MTBench(args.mtbench, **dataset_kwargs)
-    elif args.random_isl is not None:
-        dataset = datasets.RandomToken(tokenizer, args.random_isl, **dataset_kwargs)
-    elif args.specbench is not None:
-        dataset = datasets.SpecBench(args.specbench, **dataset_kwargs)
+    if args.category is not None:
+        dataset_kwargs["category"] = args.category
+
+    if args.sweep_config is None:
+        run_specs = resolve_single_run_spec(args)
+        is_sweep = False
+        sweep_output_root = None
+    else:
+        run_specs = expand_sweep_run_specs(args, datasets_available)
+        is_sweep = True
+        sweep_output_root = resolve_sweep_output_root(args)
+        print(f"Sweep output root: {sweep_output_root}")
+
+    max_engine_concurrency = max(run_spec["concurrency"] for run_spec in run_specs)
     engine_args = args.runtime_params.get("engine_args", {})
-    sampling_kwargs = args.runtime_params.get("sampling_kwargs", {"temperature": 0})
+    sampling_kwargs = args.runtime_params.get("sampling_kwargs", {"temperature": args.temperature})
     model_class = engines_available[args.engine]
     model = model_class(
         args.model_dir,
-        max_concurrent_requests=args.concurrency,
+        max_concurrent_requests=max_engine_concurrency,
         sampling_kwargs=sampling_kwargs,
         speculative_algorithm=args.speculative_algorithm,
         draft_model_dir=args.draft_model_dir,
         speculative_num_steps=args.draft_length,
         tensor_parallel_size=args.tp_size,
         moe_expert_parallel_size=args.ep_size,
+        parallel_drafting=args.parallel_drafting,
         trust_remote_code=args.trust_remote_code,
-        tokenizer_path=args.tokenizer,
         **engine_args,
     )
-
-    metrics_list = [metrics.Timing(args.tp_size)]
-    if args.aa_timing:
-        metrics_list.append(metrics.AATiming(tokenizer))
-    if args.mtbench is not None:
-        metrics_list.insert(0, metrics.MTBench())
-    elif args.specbench is not None or args.dataset == "speed":
-        metrics_list.insert(0, metrics.SpecBench(requests=dataset.data))
-    else:
-        metrics_list.insert(0, metrics.AcceptanceRate())
-
-    if args.save_dir is not None:
-        for metric in metrics_list:
-            metric.update_directory(args.save_dir)
-
-    runner = runners.SimpleRunner(model, metrics=metrics_list)
 
     if args.postprocess == "base":
         postprocess = postprocess_base
@@ -186,22 +193,72 @@ def run_simple(args):
 
     end_id = tokenizer.eos_token_id if not args.ignore_eos else -1
 
-    asyncio.run(
-        run_loop(
-            runner,
-            dataset,
-            tokenizer,
-            args.output_length,
-            postprocess,
-            args.concurrency,
-            end_id,
-            args.show_progress,
-            args.completions,
-            chat_template_args,
-        )
-    )
+    async def run_all():
+        for run_index, run_spec in enumerate(run_specs):
+            run_dataset_kwargs = dict(dataset_kwargs)
+            run_num_requests = run_spec.get("num_requests")
+            if run_num_requests is not None:
+                run_dataset_kwargs["num_samples"] = run_num_requests
+            run_category = run_spec.get("category")
+            if run_category is not None:
+                run_dataset_kwargs["category"] = run_category
+            dataset = build_dataset(
+                run_spec, tokenizer, run_dataset_kwargs, datasets_available, datasets
+            )
+            metrics_list = build_metrics(args, tokenizer, run_spec["dataset"], dataset, metrics)
+            output_length = run_spec.get("output_length") or args.output_length
+            run_temperature = run_spec.get("temperature")
+            if run_temperature is None:
+                run_temperature = args.temperature
+            model.sampling_kwargs["temperature"] = run_temperature
+            run_save_dir = resolve_run_save_dir(
+                args, run_spec, run_index, is_sweep, sweep_output_root
+            )
+            if run_save_dir is not None:
+                if is_sweep:
+                    dump_env(
+                        args,
+                        run_save_dir,
+                        overrides={
+                            "dataset": run_spec["dataset"],
+                            "dataset_path": run_spec.get("dataset_path"),
+                            "random_isl": run_spec.get("random_isl"),
+                            "category": run_spec.get("category") or args.category,
+                            "concurrency": run_spec["concurrency"],
+                            "num_requests": run_spec.get("num_requests") or args.num_requests,
+                            "output_length": output_length,
+                            "temperature": run_temperature,
+                        },
+                    )
+                for metric in metrics_list:
+                    metric.update_directory(run_save_dir)
 
-    runner.clear_metrics()
+            print(
+                f"Run {run_index + 1}/{len(run_specs)} | "
+                f"dataset={run_spec['dataset']} | concurrency={run_spec['concurrency']} | "
+                f"temperature={run_temperature} | requests={len(dataset.data)} | "
+                f"save_dir={run_save_dir if run_save_dir is not None else './'}"
+            )
+
+            runner = runners.SimpleRunner(model, metrics=metrics_list)
+            await run_loop(
+                runner,
+                dataset,
+                tokenizer,
+                output_length,
+                postprocess,
+                run_spec["concurrency"],
+                end_id,
+                args.show_progress,
+                args.completions,
+                chat_template_args,
+            )
+            runner.clear_metrics()
+
+    try:
+        asyncio.run(run_all())
+    finally:
+        model.stop()
 
 
 if __name__ == "__main__":
@@ -210,18 +267,10 @@ if __name__ == "__main__":
         "--tokenizer", type=str, required=True, help="Path to the tokenizer directory"
     )
     parser.add_argument(
-        "--mtbench",
-        type=str,
-        required=False,
-        default=None,
-        help="Path to the mtbench dataset",
+        "--mtbench", type=str, required=False, default=None, help="Path to the mtbench dataset"
     )
     parser.add_argument(
-        "--specbench",
-        type=str,
-        required=False,
-        default=None,
-        help="Path to the specbench dataset",
+        "--specbench", type=str, required=False, default=None, help="Path to the specbench dataset"
     )
     parser.add_argument(
         "--random_isl",
@@ -253,11 +302,18 @@ if __name__ == "__main__":
         help="Number of requests to run. If not provided, all requests from the dataset will be run.",
     )
     parser.add_argument(
+        "--category",
+        type=str,
+        required=False,
+        default=None,
+        help="For datasets that provide the category field, only run requests in this category",
+    )
+    parser.add_argument(
         "--engine",
         type=str,
         required=False,
         default="TRTLLM",
-        choices=list(engines_available.keys()),
+        choices=sorted(engines_available.keys()),
         help="Engine to use",
     )
     parser.add_argument(
@@ -265,7 +321,7 @@ if __name__ == "__main__":
         type=str,
         required=False,
         default="EAGLE3",
-        choices=["EAGLE3", "EAGLE", "DRAFT_TARGET", "NGRAM", "MTP", "NONE"],
+        choices=["EAGLE3", "EAGLE", "DRAFT_TARGET", "NGRAM", "MTP", "PARD", "NONE"],
         help="Speculative algorithm to use",
     )
     parser.add_argument("--model_dir", type=str, required=True, help="Path to the model directory")
@@ -284,9 +340,26 @@ if __name__ == "__main__":
         help="Path to the runtime params yaml file",
     )
     parser.add_argument(
+        "--sweep_config",
+        type=str,
+        required=False,
+        default=None,
+        help="Path to YAML defining dataset/concurrency sweep runs",
+    )
+    parser.add_argument(
+        "--sweep_output_root",
+        type=str,
+        required=False,
+        default=None,
+        help="Root directory for sweep outputs (defaults to save_dir or ./sweep_outputs/<timestamp>)",
+    )
+    parser.add_argument(
         "--output_length", type=int, required=False, default=4096, help="Output length"
     )
     parser.add_argument("--draft_length", type=int, required=False, default=3, help="Draft length")
+    parser.add_argument(
+        "--parallel_drafting", action="store_true", help="Enable parallel drafting (for vLLM)"
+    )
     parser.add_argument(
         "--tp_size", type=int, required=False, default=4, help="Tensor parallel size"
     )
@@ -300,11 +373,22 @@ if __name__ == "__main__":
         default=1,
         help="Maximum number of concurrent requests",
     )
-    parser.add_argument(
-        "--trust_remote_code", action="store_true", help="Trust remote code for tokenizer and model"
-    )
     parser.add_argument("--aa_timing", action="store_true", help="Enable AA timing metric")
+    parser.add_argument(
+        "--stop_think_id",
+        type=int,
+        nargs="+",
+        required=False,
+        default=None,
+        help="Token IDs that mark the stop-think boundary (can specify multiple sequential tokens)",
+    )
     parser.add_argument("--ignore_eos", action="store_true", help="Ignore EOS token")
+    parser.add_argument(
+        "--trust_remote_code",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Trust remote code when loading tokenizer and model (default: False)",
+    )
     parser.add_argument("--show_progress", action="store_true", help="Show progress bar")
     parser.add_argument(
         "--completions",
@@ -320,29 +404,33 @@ if __name__ == "__main__":
         help="Postprocess to use",
     )
     parser.add_argument(
-        "--save_dir",
-        type=str,
-        required=False,
-        default=None,
-        help="Directory to save the results",
+        "--temperature", type=float, required=False, default=0.0, help="Temperature to use"
+    )
+    parser.add_argument(
+        "--save_dir", type=str, required=False, default=None, help="Directory to save the results"
     )
     args = parser.parse_args()
 
     if args.runtime_params is not None:
         with open(args.runtime_params) as f:
-            args.runtime_params = yaml.safe_load(f)
+            args.runtime_params = yaml.safe_load(f) or {}
     else:
         args.runtime_params = {}
-    if args.dataset is None:
-        assert (
-            args.mtbench is not None or args.random_isl is not None or args.specbench is not None
-        ), "Either mtbench or random_isl or specbench must be provided"
-    else:
-        assert args.dataset_path is not None, "Dataset path must be provided"
-        if args.dataset == "specbench":
-            args.specbench = args.dataset_path
-        elif args.dataset == "mtbench":
-            args.mtbench = args.dataset_path
+
+    if args.sweep_config is None:
+        if args.dataset is None:
+            assert (
+                args.mtbench is not None
+                or args.random_isl is not None
+                or args.specbench is not None
+            ), "Either mtbench or random_isl or specbench must be provided"
+        elif args.dataset != "random":
+            assert args.dataset_path is not None, "Dataset path must be provided"
+
+    if args.save_dir is not None:
+        if os.path.exists(args.save_dir) and os.listdir(args.save_dir):
+            raise ValueError(f"Save directory {args.save_dir} already exists and is not empty")
+        dump_env(args, args.save_dir)
 
     if args.ignore_eos:
         print(

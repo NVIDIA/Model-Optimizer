@@ -13,6 +13,5 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from .base import BaseRunner
 from .simple import SimpleRunner
-
-__all__ = ["SimpleRunner"]

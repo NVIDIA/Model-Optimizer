@@ -21,27 +21,25 @@ from .base import Metric
 class Timing(Metric):
     def __init__(self, tp_size):
         super().__init__()
-        self.timing = []
         self.name = "timing"
-        self.total_tokens = []
         self.tp_size = tp_size
 
-    def process_step(self, step_outputs, request_id, turn_id):
-        self.timing.append(step_outputs["token_times"])
-        self.total_tokens.append(
-            sum([sum([len(j) for j in i]) for i in step_outputs["output_ids"]])
-        )
-
-    def process_final(self, text_outputs):
+    def process_final(self, text_outputs, request_records):
+        self.out = {}
+        timing = [record["token_times"] for record in request_records]
+        total_tokens = [
+            sum(sum(beam_lengths) for beam_lengths in self.chunk_lengths(record))
+            for record in request_records
+        ]
         e2e_time = []
         ttft_time = []
         tpot_time = []
         gen_tp_time = []
-        start_time = min([t[0] for t in self.timing])
-        end_time = max([t[-1] for t in self.timing])
-        self.out["Output TPS"] = sum(self.total_tokens) / (end_time - start_time)
+        start_time = min(t[0] for t in timing)
+        end_time = max(t[-1] for t in timing)
+        self.out["Output TPS"] = sum(total_tokens) / (end_time - start_time)
         self.out["Output TPS/gpu"] = self.out["Output TPS"] / self.tp_size
-        for tokens, times in zip(self.total_tokens, self.timing):
+        for tokens, times in zip(total_tokens, timing):
             if len(times) > 1:
                 e2e_time.append(times[-1] - times[0])
                 ttft_time.append(times[1] - times[0])
@@ -53,29 +51,22 @@ class Timing(Metric):
         if tpot_time:
             self.out["Request Generation Step Time"] = compute_statistics(tpot_time)
             self.out["Request Generation Tokens Per Second"] = compute_statistics(gen_tp_time)
-        self.out["Number of Output Tokens"] = compute_statistics(self.total_tokens)
+        self.out["Number of Output Tokens"] = compute_statistics(total_tokens)
         for k, v in self.out.items():
             print(k, v)
         self.write()
 
     def clear(self):
-        self.timing = []
+        self.out = {}
 
 
 def compute_statistics(data, quantiles=[0.25, 0.5, 0.75]):
-    # Convert the data to a numpy array for easier calculations
     data = np.array(data)
-
-    # Compute the statistics
     min_val = np.min(data)
     max_val = np.max(data)
     mean_val = np.mean(data)
     std_val = np.std(data)
-
-    # Compute quantiles (default: 25th, 50th, and 75th percentiles)
     quantile_vals = np.percentile(data, [q * 100 for q in quantiles])
-
-    # Return the results as a dictionary
     stats = {
         "min": f"{min_val:.4f}",
         "max": f"{max_val:.4f}",
@@ -83,5 +74,4 @@ def compute_statistics(data, quantiles=[0.25, 0.5, 0.75]):
         "std": f"{std_val:.4f}",
         "quantiles": {f"{q}": f"{v:.4f}" for q, v in zip(quantiles, quantile_vals)},
     }
-
     return stats

@@ -24,7 +24,6 @@ from .timing import compute_statistics
 class AATiming(Metric):
     def __init__(self, base_tokenizer):
         super().__init__()
-        self.timing = []
         self.name = "aa_timing"
         if tiktoken is None:
             raise ImportError(
@@ -32,23 +31,21 @@ class AATiming(Metric):
             )
         self.enc = tiktoken.get_encoding("o200k_base")
         self.base_tokenizer = base_tokenizer
-        self.total_tokens = []
 
-    def process_step(self, step_outputs, request_id, turn_id):
-        self.timing.append(step_outputs["token_times"])
-        target_tokens = [
-            t for tok_list in step_outputs["output_ids"] for tok in tok_list for t in tok
-        ]
-        target_text = self.base_tokenizer.decode(target_tokens)
-        target_tokens = self.enc.encode(target_text, disallowed_special=())
-        self.total_tokens.append(len(target_tokens))
-
-    def process_final(self, text_outputs):
+    def process_final(self, text_outputs, request_records):
+        self.out = {}
+        timing = [record["token_times"] for record in request_records]
+        total_tokens = []
+        for record in request_records:
+            target_tokens = self.flat_output_tokens(record)
+            target_text = self.base_tokenizer.decode(target_tokens)
+            aa_tokens = self.enc.encode(target_text, disallowed_special=())
+            total_tokens.append(len(aa_tokens))
         gen_tp_time = []
-        start_time = min([t[0] for t in self.timing])
-        end_time = max([t[-1] for t in self.timing])
-        self.out["AA Output TPS"] = sum(self.total_tokens) / (end_time - start_time)
-        for tokens, times in zip(self.total_tokens, self.timing):
+        start_time = min(t[0] for t in timing)
+        end_time = max(t[-1] for t in timing)
+        self.out["AA Output TPS"] = sum(total_tokens) / (end_time - start_time)
+        for tokens, times in zip(total_tokens, timing):
             if len(times) > 2:
                 gen_tp_time.append((tokens - 1) / (times[-1] - times[1]))
         if gen_tp_time:
@@ -58,4 +55,4 @@ class AATiming(Metric):
         self.write()
 
     def clear(self):
-        self.timing = []
+        self.out = {}
