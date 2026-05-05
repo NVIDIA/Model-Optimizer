@@ -23,6 +23,56 @@ import torch
 import torch.nn as nn
 
 
+def _slice_fused_expert_amax(
+    amax: torch.Tensor,
+    weight_slice: torch.Tensor,
+    fused_start: int,
+    fused_total: int,
+    block_size: int | None,
+) -> torch.Tensor:
+    """Return ``amax`` reshaped/sliced to match one exported expert projection.
+
+    MSE-calibrated NVFP4 fused experts may store per-block amax for the fused
+    gate+up tensor in flattened form, for example ``[1024 * 128, 1]`` for a
+    ``[1024, 2048]`` fused weight. Serving/export splits that into two
+    ``[512, 2048]`` projections, so the amax must be reshaped to the fused
+    block grid first and then row-sliced.
+    """
+    if amax.numel() <= 1:
+        return amax
+
+    if block_size is not None and weight_slice.shape[-1] % block_size == 0:
+        num_blocks_per_row = weight_slice.shape[-1] // block_size
+        expected_shape = (*weight_slice.shape[:-1], num_blocks_per_row)
+        expected_numel = torch.tensor(expected_shape).prod().item()
+        fused_numel = fused_total * num_blocks_per_row
+
+        if amax.numel() == fused_numel:
+            return (
+                amax.reshape(fused_total, num_blocks_per_row)[
+                    fused_start : fused_start + weight_slice.shape[0]
+                ]
+                .contiguous()
+                .reshape(expected_shape)
+            )
+        if amax.numel() == expected_numel:
+            return amax.reshape(expected_shape).contiguous()
+
+    amax_dim0 = amax.shape[0]
+    if amax_dim0 == fused_total:
+        return amax[fused_start : fused_start + weight_slice.shape[0]].contiguous()
+    if amax_dim0 > fused_total and amax_dim0 % fused_total == 0:
+        row_factor = amax_dim0 // fused_total
+        slice_start = fused_start * row_factor
+        slice_end = (fused_start + weight_slice.shape[0]) * row_factor
+        return amax[slice_start:slice_end].contiguous()
+    if fused_total % amax_dim0 == 0:
+        slice_start = fused_start * amax_dim0 // fused_total
+        slice_end = (fused_start + weight_slice.shape[0]) * amax_dim0 // fused_total
+        return amax[slice_start:slice_end].contiguous()
+    return amax
+
+
 def _export_fused_experts(module: nn.Module, dtype: torch.dtype) -> None:
     """Split fused MoE expert weights and export per-expert quantization scales.
 
@@ -91,15 +141,15 @@ def _export_fused_experts(module: nn.Module, dtype: torch.dtype) -> None:
                 and w_quantizer._amax.dim() >= 1
             ):
                 amax = w_quantizer._amax
-                amax_dim0 = amax.shape[0]
-                if fused_total % amax_dim0 == 0:
-                    slice_start = fused_start * amax_dim0 // fused_total
-                    slice_end = (fused_start + weight_slice.shape[0]) * amax_dim0 // fused_total
-                    w_quantizer._amax = amax[slice_start:slice_end].contiguous()
-                else:
+                block_size = (getattr(w_quantizer, "block_sizes", None) or {}).get(-1)
+                w_quantizer._amax = _slice_fused_expert_amax(
+                    amax, weight_slice, fused_start, fused_total, block_size
+                )
+                if w_quantizer._amax is amax:
                     warnings.warn(
-                        f"Expert {idx} {proj_name}: fused amax dim0 ({amax_dim0}) does not "
-                        f"evenly divide fused_total ({fused_total}). Skipping amax slicing, "
+                        f"Expert {idx} {proj_name}: fused amax shape ({tuple(amax.shape)}) "
+                        f"cannot be mapped to projection shape ({tuple(weight_slice.shape)}). "
+                        f"Skipping amax slicing, "
                         f"which may produce incorrect quantization scales.",
                         stacklevel=2,
                     )
