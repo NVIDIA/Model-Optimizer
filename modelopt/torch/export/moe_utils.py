@@ -164,7 +164,7 @@ def _export_fused_experts(module: nn.Module, dtype: torch.dtype) -> None:
                 and w_quantizer._amax.numel() > 1
                 and (getattr(w_quantizer, "block_sizes", None) or {}).get(-1) is not None
             ):
-                amax_cpu = w_quantizer._amax
+                amax_cpu = w_quantizer._amax.detach().cpu().float()
                 invalid_mask = ~(
                     torch.isfinite(amax_cpu)
                     & (amax_cpu >= min_valid_amax)

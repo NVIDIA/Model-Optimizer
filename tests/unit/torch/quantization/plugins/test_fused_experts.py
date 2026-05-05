@@ -772,6 +772,52 @@ class TestExportFusedExpertsUncalibratedFallback:
 
         self._cleanup_registry(expert_type)
 
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+    def test_cuda_flattened_amax_invalid_entries_are_repaired_on_cpu(self):
+        """GPU-resident MSE amax must not trip CPU fallback repair during export."""
+        from unittest.mock import patch
+
+        from modelopt.torch.export.moe_utils import _export_fused_experts
+
+        converted, expert_type = self._quantize_with_block_sizes()
+        block_size = converted.gate_up_proj_weight_quantizers[0].block_sizes[-1]
+        num_blocks_per_row = HIDDEN_DIM // block_size
+        fused_rows = 2 * INTERMEDIATE_DIM
+        fused_numel = fused_rows * num_blocks_per_row
+
+        for idx in range(NUM_EXPERTS):
+            gate_up_amax = torch.arange(
+                1, fused_numel + 1, dtype=torch.float32, device="cuda"
+            ).reshape(fused_numel, 1)
+            gate_up_amax[0] = 0
+            converted.gate_up_proj_weight_quantizers[idx]._amax = gate_up_amax
+            converted.down_proj_weight_quantizers[idx]._amax = torch.arange(
+                1,
+                HIDDEN_DIM * (INTERMEDIATE_DIM // block_size) + 1,
+                dtype=torch.float32,
+                device="cuda",
+            ).reshape(-1, 1)
+
+        captured_wrappers = []
+
+        def _capture(wrapper, dtype):
+            captured_wrappers.append(wrapper)
+
+        with patch(
+            "modelopt.torch.export.unified_export_hf._export_quantized_weight",
+            side_effect=_capture,
+        ):
+            _export_fused_experts(converted, torch.float16)
+
+        first_gate = captured_wrappers[0]
+        assert first_gate.weight_quantizer._amax.shape == (
+            INTERMEDIATE_DIM,
+            num_blocks_per_row,
+        )
+        assert torch.all(first_gate.weight_quantizer._amax > 0)
+
+        self._cleanup_registry(expert_type)
+
     @pytest.mark.parametrize("zero_amax", [False, True])
     def test_fallback_warning_emitted(self, zero_amax):
         """Fallback warning must fire and produce valid per-block _amax + global_amax."""
