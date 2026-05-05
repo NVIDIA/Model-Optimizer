@@ -705,13 +705,14 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         for group_key, module_info_list in search_map.items():
             quant_modules = [module for module, _, _, _ in module_info_list]
             disabled = any(disabled for _, _, disabled, _ in module_info_list)
+            if disabled:
+                continue
             score_modules = [score_module for _, _, _, score_module in module_info_list]
             quant_module_names = [name for _, name, _, _ in module_info_list]
             cost_weight = _get_active_moe_cost_weight(quant_module_names, active_moe_expert_ratio)
 
-            _quant_recipes = None if disabled else quant_recipes
             hparam = QuantRecipeHparam(
-                _quant_recipes,
+                quant_recipes,
                 quant_modules=quant_modules,
                 score_modules=score_modules,
                 name=str(group_key),
@@ -920,6 +921,17 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             )
         return total_weight_size
 
+    @staticmethod
+    def _get_cost_denominator_from_candidate_stats(candidate_stats):
+        total_weight_size = sum(
+            candidate_stat["costs"][-1] for candidate_stat in candidate_stats.values()
+        )
+        if total_weight_size <= 0:
+            raise ValueError(
+                "AutoQuantize found no non-disabled quantizable modules for the cost constraint."
+            )
+        return total_weight_size
+
     def _get_constraints_for_search(self, max_weight_size, lower_bound=None):
         constraints = {
             "weight_size_after_compression": (
@@ -954,12 +966,7 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         )
 
         compression = self._get_formatted_weight_compression_constraint()
-        if self.config["cost_model"] == "active_moe":
-            total_weight_size = self._get_total_weight_size_from_named_modules(
-                self.model.named_modules(), self.config["active_moe_expert_ratio"]
-            )
-        else:
-            total_weight_size = self._get_total_weight_size(self.model.modules())
+        total_weight_size = self._get_cost_denominator_from_candidate_stats(self.candidate_stats)
         self.cost_denominator = total_weight_size
         max_weight_size = total_weight_size * compression
         if verbose:

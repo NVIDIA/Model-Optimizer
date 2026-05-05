@@ -193,6 +193,32 @@ def test_auto_quantize_active_moe_cost_model(num_experts_attr):
     assert all("active_costs" in stats for stats in search_history["candidate_stats"].values())
 
 
+def test_auto_quantize_cost_denominator_excludes_disabled_layers():
+    model = _AutoQuantMoeModel()
+
+    _, search_history = mtq.auto_quantize(
+        model,
+        constraints={"effective_bits": 6.0},
+        quantization_formats=[mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG, mtq.INT8_DEFAULT_CFG],
+        data_loader=[model.get_input() for _ in range(2)],
+        forward_step=lambda model, batch: model(batch),
+        loss_func=lambda output, data: output.sum(),
+        disabled_layers=["*shared_expert*"],
+        num_calib_steps=2,
+        num_score_steps=2,
+        cost_model="active_moe",
+    )
+
+    assert all(
+        not any("shared_expert" in name for name in stats["module_names"])
+        for stats in search_history["candidate_stats"].values()
+    )
+    weighted_no_quant_cost = sum(
+        stats["costs"][-1] for stats in search_history["candidate_stats"].values()
+    )
+    assert search_history["cost_denominator"] == pytest.approx(weighted_no_quant_cost)
+
+
 def test_lps_cbc_env_controls(monkeypatch):
     monkeypatch.setenv("MODELOPT_LPS_CBC_GAP_REL", "0.001")
     monkeypatch.setenv("MODELOPT_LPS_CBC_TIME_LIMIT", "12")
@@ -349,7 +375,7 @@ def test_auto_quantize_disabled_layers_no_poison():
     """disabled_layers must only affect the matched layers, not all subsequent layer groups."""
     model = TransformerBlock()
 
-    best_model, _ = mtq.auto_quantize(
+    best_model, search_history = mtq.auto_quantize(
         model,
         constraints={"effective_bits": 5.0},
         quantization_formats=[mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG, mtq.INT8_DEFAULT_CFG],
@@ -364,6 +390,10 @@ def test_auto_quantize_disabled_layers_no_poison():
     assert not best_model.mlp.input_quantizer.is_enabled
     hparam = best_model.attn.q_proj.get_hparam("quant_recipe")
     assert QuantRecipe(mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG) in hparam.choices
+    assert all(
+        not any("mlp" in name for name in stats["module_names"])
+        for stats in search_history["candidate_stats"].values()
+    )
 
 
 INT4INT8_AWQ_CFG = {
