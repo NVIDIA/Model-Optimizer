@@ -15,10 +15,9 @@
 
 import logging
 import shutil
-import subprocess  # nosec
 import sys
 from pathlib import Path
-from tempfile import NamedTemporaryFile, TemporaryDirectory, gettempdir
+from tempfile import TemporaryDirectory, gettempdir
 
 from ..._runtime.common import read_bytes, timeit, write_bytes, write_string
 from ..._runtime.tensorrt.layerwise_profiling import process_layerwise_result
@@ -28,7 +27,6 @@ from .constants import (
     DEFAULT_NUM_INFERENCE_PER_RUN,
     SHA_256_HASH_LENGTH,
     TRT_MODE_FLAGS,
-    TRTEXEC_PATH,
     WARMUP_TIME_MS,
     TRTMode,
 )
@@ -41,31 +39,50 @@ logging.basicConfig(
 )
 
 
-# TODO: Get rid of this function or get approval for `# nosec` usage if we want to include this
-#   as a non-compiled python file in the release.
-def _run_command(cmd: list[str], cwd: Path | None = None) -> tuple[int, bytes]:
-    """Util function to execute a command.
+def _run_trtexec_with_logging(args: list[str], cwd: Path | None = None) -> tuple[int, bytes]:
+    """Run a 'trtexec' command via subprocess, logging the cmd and any failure output.
 
-    This util will not direct stdout and stderr to console if the cmd succeeds.
+    The 'trtexec' binary is hardcoded as the executable; only its arguments may be supplied
+    by the caller. This restricts the function to trtexec invocations.
+
+    Output handling: stdout and stderr are merged and captured in memory.
+    On failure (non-zero returncode) or timeout, the captured output is logged at ERROR level;
+    on success, this function emits nothing to the console.
 
     Args:
-        cmd: the command line list
-        cwd: current working directory
+        args: Arguments to pass to trtexec (without the 'trtexec' command itself).
+        cwd: Optional working directory for the subprocess.
 
     Returns:
-        return code: 0 means successful, otherwise means failed
-        log_string: the stdout and stderr output as a string
+        A tuple of (returncode, output) where output is the combined stdout/stderr bytes.
 
+    Raises:
+        FileNotFoundError: If the 'trtexec' binary is not found in PATH.
+        subprocess.TimeoutExpired: If trtexec does not finish within 60 minutes.
+            The captured output is logged before re-raising.
     """
+    import subprocess  # nosec
+
+    cmd = ["trtexec", *args]
     logging.info(" ".join(cmd))
-    with NamedTemporaryFile("w+b") as log:
-        p = subprocess.Popen(cmd, stdout=log, stderr=log, cwd=str(cwd) if cwd else None)  # nosec
-        p.wait()
-        log.seek(0)
-        output = log.read()
-        if p.returncode != 0:
-            logging.error(output.decode(errors="ignore"))
-        return p.returncode, output
+    try:
+        result = subprocess.run(  # nosec B603 - cmd[0] is hardcoded "trtexec"
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            cwd=str(cwd) if cwd else None,
+            timeout=3600,
+        )
+    except FileNotFoundError as e:
+        raise FileNotFoundError(
+            "'trtexec' binary not found. Please ensure TensorRT is installed and 'trtexec' is in PATH."
+        ) from e
+    except subprocess.TimeoutExpired as e:
+        logging.error((e.stdout or b"").decode(errors="ignore"))
+        raise
+    if result.returncode != 0:
+        logging.error(result.stdout.decode(errors="ignore"))
+    return result.returncode, result.stdout
 
 
 def _get_profiling_params(profiling_runs: int) -> list[str]:
@@ -181,7 +198,7 @@ def build_engine(
         calib_cache_path: Path | None = None,
         timing_cache_path: Path | None = None,
     ) -> list[str]:
-        cmd = [TRTEXEC_PATH, f"--onnx={onnx_path}"]
+        cmd = [f"--onnx={onnx_path}"]
         cmd.extend(TRT_MODE_FLAGS[trt_mode])
 
         if trt_mode == TRTMode.INT8 and calib_cache and calib_cache_path:
@@ -235,7 +252,7 @@ def build_engine(
         cmd = _build_command(onnx_path, engine_path, calib_cache_path, timing_cache_path)
 
         try:
-            ret_code, out = _run_command(cmd)
+            ret_code, out = _run_trtexec_with_logging(cmd)
             if ret_code != 0:
                 return None, out
 
@@ -284,7 +301,7 @@ def profile_engine(
     """
 
     def _build_command(engine_path: Path, profile_path: Path, layer_info_path: Path) -> list[str]:
-        cmd = [TRTEXEC_PATH, f"--loadEngine={engine_path}"]
+        cmd = [f"--loadEngine={engine_path}"]
         cmd += _get_profiling_params(profiling_runs)
 
         if enable_layerwise_profiling:
@@ -320,7 +337,7 @@ def profile_engine(
         cmd = _build_command(engine_path, profile_path, layer_info_path)
 
         try:
-            ret_code, out = _run_command(cmd)
+            ret_code, out = _run_trtexec_with_logging(cmd)
             if ret_code != 0:
                 return None, out
 
