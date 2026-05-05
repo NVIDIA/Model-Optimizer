@@ -55,7 +55,7 @@ def setup_mocks():
 
     with (
         mock.patch(
-            "modelopt.torch._deploy._runtime.tensorrt.engine_builder._run_command"
+            "modelopt.torch._deploy._runtime.tensorrt.engine_builder._run_trtexec_with_logging"
         ) as mock_run,
         mock.patch(
             "modelopt.torch._deploy._runtime.tensorrt.engine_builder.TemporaryDirectory"
