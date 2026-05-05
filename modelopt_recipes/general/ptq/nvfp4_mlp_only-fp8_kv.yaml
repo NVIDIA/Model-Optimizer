@@ -53,6 +53,22 @@ quantize:
           type: dynamic
           scale_bits: e4m3
         num_bits: e2m1
+    - quantizer_name: '*.experts.*weight_quantizer'
+      enable: true
+      cfg:
+        block_sizes:
+          -1: 16
+          type: dynamic
+          scale_bits: e4m3
+        num_bits: e2m1
+    - quantizer_name: '*.experts.*input_quantizer'
+      enable: true
+      cfg:
+        block_sizes:
+          -1: 16
+          type: dynamic
+          scale_bits: e4m3
+        num_bits: e2m1
     - quantizer_name: '*[kv]_bmm_quantizer'
       enable: true
       cfg:
