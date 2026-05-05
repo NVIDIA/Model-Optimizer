@@ -173,7 +173,7 @@ Instead of specifying `--qformat` and `--kv_cache_qformat` separately, you can u
 # Using a built-in recipe name (without .yaml suffix)
 python hf_ptq.py \
   --pyt_ckpt_path <huggingface_model_card> \
-  --recipe general/ptq/nvfp4_default-fp8_cast_kv \
+  --recipe general/ptq/nvfp4_default-kv_fp8_cast \
   --export_path <quantized_ckpt_path>
 
 # Using a custom recipe YAML file path
