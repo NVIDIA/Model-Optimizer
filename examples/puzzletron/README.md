@@ -6,12 +6,13 @@ The supported modifications are:
 
 - `ffn_intermediate_size`: different FFN intermediate sizes
 - `attention op/noop`: complete removal of attention layers
+- `kv_heads`: different KV head counts (GQA/KV-head pruning)
 
 To use the Puzzle algorithm effectively, we need to specify the target number of parameters and/or the memory. The final stage is based on Mixed-Integer Programming (MIP) algorithm to find the most optimal combination of layer modifications that satisfy the target requirements.
 
 In this example, we compress the [Llama-3.1-8B-Instruct](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct) model reducing GPU memory usage from 113 GiB to 96 GiB (15% reduction) with less than 1% regression in the token_accuracy_top_10 metric. Other supported models should be compressed in a similar way. For GptOss there is one [additional step to be performed](GPTOSS.md).
 
-> **Note:** Other models are also supported. See the [configs](./configs/) directory for additional model configurations (e.g., Llama-3.2-3B-Instruct on 1x H100, Qwen2.5-7B-Instruct on 1x H100, Qwen3-8B on 1x H100, Nemotron-Nano-12B-v2 on 1x H100, Mistral-Small-24B-Instruct-2501 on 4x H100). For information on adding support for new models, see the [AnyModel Guide](../../modelopt/torch/puzzletron/anymodel/README.md).
+> **Note:** Other models are also supported. See the [configs](./configs/) directory for additional model configurations (e.g., Llama-3.2-3B-Instruct on 1x H100, Qwen2.5-7B-Instruct on 1x H100, Qwen3-8B on 1x H100, Nemotron-Nano-12B-v2 on 1x H100, Mistral-Small-24B-Instruct-2501 on 4x H100). For KV-head pruning see [`llama-3_1-8B_pruneattn_runtime`](./configs/llama-3_1-8B_pruneattn_runtime/) and the [Attention Pruning](#attention-pruning-kv-head-reduction) and [Runtime-Based Latency Optimization](#runtime-based-latency-optimization) sections below. For information on adding support for new models, see the [AnyModel Guide](../../modelopt/torch/puzzletron/anymodel/README.md).
 
 ## Environment
 
@@ -342,6 +343,61 @@ To recover degradation in the quality of the compressed model, we can use knowle
 See [Megatron-Bridge distillation](../megatron_bridge/README.md#distillation) for instructions on using Megatron-Bridge for knowledge distillation. The distillation script supports both standard HuggingFace and Puzzletron AnyModel checkpoints.
 
 For distillation results on Puzzletron-compressed models, see [examples/pruning/puzzletron/](../pruning/puzzletron/README.md).
+
+## Attention Pruning (KV-Head Reduction)
+
+Beyond FFN intermediate-size pruning, Puzzletron supports pruning **KV heads** (GQA reduction). This mode scores and removes KV-head groups per layer, reducing the attention memory footprint and inference latency.
+
+The [`llama-3_1-8B_pruneattn_runtime`](./configs/llama-3_1-8B_pruneattn_runtime/) config demonstrates KV-head pruning for Llama-3.1-8B-Instruct. Selecting attention pruning requires one override in the config defaults:
+
+```yaml
+defaults:
+  - override pruning: attn_pruning
+```
+
+The candidate KV-head counts are specified via `n_heads_in_group_list` in the pruning config (e.g., `[8, 16, 32]` yields num_kv_heads candidates of 4, 2, and 1 for Llama-3.1-8B). The MIP stage then selects the optimal per-layer KV-head count subject to the specified constraint (`target_memory` or `target_latency` under `mip.human_constraints`).
+
+To run:
+
+1. Set `puzzle_dir`, `input_hf_model_path`, and `dataset_path` in
+   [`llama-3_1-8B_pruneattn_runtime.yaml`](./configs/llama-3_1-8B_pruneattn_runtime/llama-3_1-8B_pruneattn_runtime.yaml).
+
+2. Set the MIP constraint under `mip.human_constraints` — e.g., `target_memory` (MiB) or `target_latency` (ms).
+
+3. Run:
+
+   ```bash
+   torchrun --nproc_per_node 2 examples/puzzletron/main.py \
+      --config examples/puzzletron/configs/llama-3_1-8B_pruneattn_runtime/llama-3_1-8B_pruneattn_runtime.yaml \
+      2>&1 | tee ./log.txt | grep "Puzzletron Progress"
+   ```
+
+## Runtime-Based Latency Optimization
+
+By default, subblock statistics use the `trt_torch` backend with theoretical memory proxies. You can instead enable **runtime stats** to measure actual inference latency via vLLM, which unlocks latency-based MIP constraints:
+
+```yaml
+calc_subblock_stats:
+  runtime_stats:
+    enabled: true
+    synth_dataset_num_requests: 32
+    backend: vllm
+    num_warmup_iters: 2
+    num_iters: 10
+    batch_size: 1
+
+mip:
+  human_constraints:
+    target_latency: 20  # ms
+```
+
+Because vLLM startup adds substantial overhead during stats collection, extend the distributed process group timeout accordingly:
+
+```yaml
+dist_timeout_minutes: 60  # default is 10 if omitted
+```
+
+This field is supported in any Puzzletron YAML config and overrides the default 10-minute distributed timeout.
 
 ## Advanced Usage
 
