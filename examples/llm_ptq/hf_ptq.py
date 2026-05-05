@@ -113,6 +113,7 @@ QUANT_CFG_CHOICES: dict[str, dict[str, Any]] = {
     "fp8_pb_wo": mtq.FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG,
     "fp8_pc_pt": mtq.FP8_PER_CHANNEL_PER_TOKEN_CFG,
     "w4a8_nvfp4_fp8": mtq.W4A8_NVFP4_FP8_CFG,
+    "w4a16_nvfp4": mtq.W4A16_NVFP4_CFG,
     "w4a8_mxfp4_fp8": mtq.W4A8_MXFP4_FP8_CFG,
     "nvfp4_mlp_only": mtq.NVFP4_MLP_ONLY_CFG,
     "nvfp4_experts_only": mtq.NVFP4_EXPERTS_ONLY_CFG,
@@ -120,7 +121,6 @@ QUANT_CFG_CHOICES: dict[str, dict[str, Any]] = {
     "nvfp4_svdquant": mtq.NVFP4_SVDQUANT_DEFAULT_CFG,
     "mxfp8": mtq.MXFP8_DEFAULT_CFG,
     "nvfp4_local_hessian": mtq.NVFP4_W4A4_WEIGHT_LOCAL_HESSIAN_CFG,
-    "nvfp4_w4a16": mtq.NVFP4_W4A16_CFG,
 }
 
 KV_QUANT_CFG_CHOICES = {
@@ -786,7 +786,7 @@ def export_quantized(
                     extra_state_dict=mtp_state_dict,
                 )
 
-                if args.qformat == "nvfp4_w4a16":
+                if args.qformat == "w4a16_nvfp4":
                     warnings.warn(
                         "TensorRT-LLM and SGLang do not support this format. "
                         "To serve on vLLM, convert the NVFP4 W4A16 checkpoint to compressed-tensors format."
