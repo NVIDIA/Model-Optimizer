@@ -227,7 +227,7 @@ _default_disabled_quantizer_cfg: list[QuantizerCfgEntry] = [
         "quantizer_name": "*mlp.shared_expert_gate.*",
         "enable": False,
     },  # Skip the MOE router
-    {"quantizer_name": "*linear_attn.conv1d*", "enable": False},
+    {"quantizer_name": "*linear_attn*", "enable": False},  # TRT-LLM linear-attn packing limit
     {"quantizer_name": "*mixer.conv1d*", "enable": False},  # Skip mamba conv1d
     {"quantizer_name": "*output_layer*", "enable": False},
     {"quantizer_name": "output.*", "enable": False},

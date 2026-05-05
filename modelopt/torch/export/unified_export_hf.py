@@ -357,9 +357,10 @@ def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
                 [1, model.config.num_mel_bins, feature_extractor.nb_max_frames], dtype=model.dtype
             ).to(model.device)
 
-        if is_vl_model and "nemotron" in model_type:
-            # For Nemotron VL models, run optimization on just the language model/decoder.
-            # This avoids needing pixel_values for the vision encoder.
+        if is_vl_model and any(tag in model_type for tag in ("nemotron", "qwen3_5")):
+            # For VL models whose vision encoder requires pixel_values (Nemotron, Qwen3.5),
+            # run optimization on just the language model / decoder to avoid needing
+            # pixel_values for the vision encoder.
             language_model_lineage = get_language_model_from_vl(model)
 
             if language_model_lineage is not None:
@@ -367,11 +368,10 @@ def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
                 print(
                     f"Running optimization on language model with fake_input shape: {fake_input.shape}"
                 )
-                # Pass use_cache=False to avoid KV cache issues in encoder-decoder models
                 language_model(fake_input, use_cache=False)
             else:
                 raise ValueError(
-                    f"Cannot extract language_model from Nemotron VL model (type: {model_type}). "
+                    f"Cannot extract language_model from VL model (type: {model_type}). "
                     "This is required for requantization/resmoothing optimization. "
                     "Please ensure the model architecture is supported or file an issue."
                 )
@@ -465,7 +465,7 @@ def _export_quantized_weight(
             weight_scaling_factor,
         )
 
-        if hasattr(input_quantizer, "_amax"):
+        if hasattr(input_quantizer, "_amax") and input_quantizer.is_enabled:
             assert input_quantizer is not None
             input_quantizer._amax = input_quantizer._amax.to(torch.float32)
 
@@ -816,6 +816,25 @@ def _export_transformers_checkpoint(
 
     # Process all quantized modules and export weights
     _process_quantized_modules(model, dtype, is_modelopt_qlora)
+
+    # Clean up _QuantFusedExperts modules whose quantizers are all disabled.
+    # When expert quantization is intentionally disabled (e.g. Qwen3.5-MoE to avoid
+    # TRT-LLM intermediate_size mismatch), the _QuantFusedExperts wrapper still exists
+    # but _process_quantized_modules skips it (QUANTIZATION_NONE).  Remove the
+    # leftover quantizer attributes so save_pretrained produces clean 3D fused weights.
+    _fused_experts_attrs = (
+        "gate_up_proj_weight_quantizers",
+        "down_proj_weight_quantizers",
+        "gate_up_proj_input_quantizer",
+        "down_proj_input_quantizer",
+    )
+    for _name, _mod in model.named_modules():
+        if not hasattr(_mod, "gate_up_proj_weight_quantizers"):
+            continue
+        if all(not q.is_enabled for q in _mod.gate_up_proj_weight_quantizers):
+            for _attr in _fused_experts_attrs:
+                if hasattr(_mod, _attr):
+                    delattr(_mod, _attr)
 
     # Reconstruct fused MoELinear: per-expert _QuantLinear weights → original 3D format
     from modelopt.torch.quantization.plugins.huggingface import _reconstruct_fused_moe_linear

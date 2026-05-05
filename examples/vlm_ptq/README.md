@@ -38,6 +38,7 @@ Please refer to the [llm_ptq/README.md](../llm_ptq/README.md#getting-started) fo
 | VILA | ✅ | ✅ | ✅ | ✅ | - |
 | Phi-3-vision, Phi-4-multimodal | ✅ | ✅ | ✅ | ✅ | ✅  |
 | Qwen2, 2.5-VL | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Qwen3.5-VL (Dense & MoE) | ✅ | - | - | - | - |
 | Gemma3 | ✅ | - | - | - | - |
 
 > *<sup>1.</sup>Only TensorRT-LLM checkpoint export is supported. Not compatible with the TensorRT-LLM torch backend* \
@@ -45,6 +46,8 @@ Please refer to the [llm_ptq/README.md](../llm_ptq/README.md#getting-started) fo
 > *<sup>3.</sup>A selective set of the popular models are internally tested. The actual model support list may be longer. NVFP4 inference requires Blackwell GPUs and TensorRT-LLM v0.17 or later.*
 
 > *For detailed TensorRT-LLM torch backend multimodal support, please refer to [this doc](https://github.com/NVIDIA/TensorRT-LLM/blob/main/docs/source/models/supported-models.md#multimodal-feature-support-matrix-pytorch-backend)*
+
+> **Qwen3.5 VLM Note:** When quantizing Qwen3.5 VLM models, linear attention (`linear_attn`) layers are not quantized (TRT-LLM compatibility), and MoE expert layers are also excluded from quantization for the MoE variant. The exported checkpoint preserves the original VLM format (`Qwen3_5ForConditionalGeneration` architecture, `model.language_model.*` key prefix) and can be deployed directly on TRT-LLM, vLLM, and SGLang.
 
 > *The accuracy loss after PTQ may vary depending on the actual model and the quantization method. Different models may have different accuracy loss and usually the accuracy loss is more significant when the base model is small. If the accuracy after PTQ is not meeting the requirement, please try either modifying [hf_ptq.py](../llm_ptq/hf_ptq.py) and disabling the KV cache quantization or using the [QAT](./../llm_qat/README.md) instead.*
 

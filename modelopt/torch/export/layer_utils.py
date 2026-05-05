@@ -103,6 +103,7 @@ def get_experts_list(
             "qwen2moeforcausallm",
             "qwen3moeforcausallm",
             "qwen3nextforcausallm",
+            "qwen3_5moeforconditionalgeneration",
         ]
     ):
         linear_names = ["gate_proj", "down_proj", "up_proj"]

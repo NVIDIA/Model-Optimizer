@@ -46,6 +46,111 @@ def get_tiny_tokenizer() -> "transformers.PreTrainedTokenizerBase":
     return AutoTokenizer.from_pretrained(TINY_TOKENIZER_PATH)
 
 
+try:
+    from transformers import Qwen3_5TextConfig
+except ImportError:
+    Qwen3_5TextConfig = None
+
+try:
+    from transformers import Qwen3_5MoeTextConfig
+except ImportError:
+    Qwen3_5MoeTextConfig = None
+
+
+##### Qwen3.5 Dense #####
+def get_tiny_qwen3_5(**config_kwargs) -> PreTrainedModel:
+    """Create a tiny Qwen3.5 Dense model (hybrid GatedDeltaNet + Softmax attention).
+
+    Requires ``transformers`` with ``Qwen3_5TextConfig`` support.
+    """
+    if Qwen3_5TextConfig is None:
+        pytest.skip("transformers does not have Qwen3_5TextConfig")
+
+    set_seed(SEED)
+    kwargs = {
+        "hidden_size": 32,
+        "intermediate_size": 32,
+        "num_hidden_layers": 4,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "max_position_embeddings": 64,
+        "vocab_size": 32,
+        "head_dim": 8,
+        "short_chunk_size": 32,
+        "attn_type": [0, 0, 0, 1],
+    }
+    kwargs.update(**config_kwargs)
+    config = Qwen3_5TextConfig(**kwargs)
+    tiny_model = AutoModelForCausalLM.from_config(config, torch_dtype=torch.bfloat16)
+    return tiny_model
+
+
+def create_tiny_qwen3_5_dir(
+    tmp_path: Path | str, with_tokenizer: bool = False, return_model: bool = False, **config_kwargs
+) -> Path | tuple[Path, PreTrainedModel]:
+    """Save a tiny Qwen3.5 Dense model to disk for testing."""
+    model_dir = Path(tmp_path) / "tiny_qwen3_5"
+    if with_tokenizer:
+        tokenizer = AutoTokenizer.from_pretrained(
+            "hf-internal-testing/tiny-random-LlamaForCausalLM"
+        )
+        tokenizer.save_pretrained(model_dir)
+        config_kwargs["vocab_size"] = tokenizer.vocab_size
+    tiny_model = get_tiny_qwen3_5(**config_kwargs)
+    tiny_model.save_pretrained(model_dir)
+
+    if return_model:
+        return model_dir, tiny_model
+    return model_dir
+
+
+##### Qwen3.5 MoE #####
+def get_tiny_qwen3_5_moe(**config_kwargs) -> PreTrainedModel:
+    """Create a tiny Qwen3.5 MoE model (hybrid attention + mixture-of-experts).
+
+    Requires ``transformers`` with ``Qwen3_5MoeTextConfig`` support.
+    """
+    if Qwen3_5MoeTextConfig is None:
+        pytest.skip("transformers does not have Qwen3_5MoeTextConfig")
+
+    set_seed(SEED)
+    kwargs = {
+        "hidden_size": 32,
+        "intermediate_size": 32,
+        "moe_intermediate_size": 32,
+        "num_hidden_layers": 4,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "max_position_embeddings": 64,
+        "vocab_size": 32,
+        "head_dim": 8,
+        "short_chunk_size": 32,
+        "attn_type": [0, 0, 0, 1],
+        "num_experts": 4,
+        "num_experts_per_tok": 2,
+        "decoder_sparse_step": 1,
+    }
+    kwargs.update(**config_kwargs)
+    config = Qwen3_5MoeTextConfig(**kwargs)
+    tiny_model = AutoModelForCausalLM.from_config(config, torch_dtype=torch.bfloat16)
+    return tiny_model
+
+
+def create_tiny_qwen3_5_moe_dir(
+    tmp_path: Path | str, with_tokenizer: bool = False, **config_kwargs
+) -> Path:
+    """Save a tiny Qwen3.5 MoE model to disk for testing."""
+    model_dir = Path(tmp_path) / "tiny_qwen3_5_moe"
+    if with_tokenizer:
+        tokenizer = AutoTokenizer.from_pretrained(
+            "hf-internal-testing/tiny-random-LlamaForCausalLM"
+        )
+        tokenizer.save_pretrained(model_dir)
+        config_kwargs["vocab_size"] = tokenizer.vocab_size
+    get_tiny_qwen3_5_moe(**config_kwargs).save_pretrained(model_dir)
+    return model_dir
+
+
 ##### Qwen3 #####
 def get_tiny_qwen3(**config_kwargs) -> PreTrainedModel:
     set_seed(SEED)

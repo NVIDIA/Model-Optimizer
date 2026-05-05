@@ -24,6 +24,8 @@ from _test_utils.torch.transformers_models import (
     create_tiny_llama_dir,
     get_tiny_gpt_oss,
     get_tiny_llama,
+    get_tiny_qwen3_5,
+    get_tiny_qwen3_5_moe,
     get_tiny_qwen3_moe,
     tf_modelopt_state_and_output_tester,
 )
@@ -243,3 +245,48 @@ def test_hf_decoder_discoverer_registration_path():
     assert LayerActivationCollector.get_decoder_layers(model) is get_homogeneous_hf_decoder_layers(
         model
     )
+
+
+def test_qwen3_5_hybrid_attention_quantize():
+    """Verify FP8 quantization disables all linear_attn quantizers while self_attn is quantized."""
+    model = get_tiny_qwen3_5()
+    mtq.quantize(model, mtq.FP8_DEFAULT_CFG, lambda m: m(**m.dummy_inputs))
+
+    for name, module in model.named_modules():
+        if not hasattr(module, "weight_quantizer"):
+            continue
+        if "linear_attn" in name:
+            assert not module.weight_quantizer.is_enabled, (
+                f"linear_attn module {name} should have weight_quantizer disabled"
+            )
+            assert not module.input_quantizer.is_enabled, (
+                f"linear_attn module {name} should have input_quantizer disabled"
+            )
+        elif "self_attn" in name and "layernorm" not in name:
+            assert module.weight_quantizer.is_enabled, (
+                f"self_attn module {name} should have weight_quantizer enabled"
+            )
+
+
+@pytest.mark.skipif(
+    Version(torch.__version__) < Version("2.9"),
+    reason="torch 2.8 grouped_mm is CUDA-only",
+)
+def test_qwen3_5_moe_experts_not_quantized():
+    """Verify MoE expert quantizers are disabled when build_quant_cfg rules are applied."""
+    model = get_tiny_qwen3_5_moe()
+
+    import copy
+
+    quant_cfg = copy.deepcopy(mtq.FP8_DEFAULT_CFG)
+    quant_cfg["quant_cfg"].append({"quantizer_name": "*experts*", "enable": False})
+
+    mtq.quantize(model, quant_cfg, lambda m: m(**m.dummy_inputs))
+
+    for name, module in model.named_modules():
+        if not hasattr(module, "weight_quantizer"):
+            continue
+        if "experts" in name:
+            assert not module.weight_quantizer.is_enabled, (
+                f"expert module {name} should have weight_quantizer disabled"
+            )
