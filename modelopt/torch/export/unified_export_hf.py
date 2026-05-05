@@ -1211,6 +1211,15 @@ def export_hf_checkpoint(
         # modeling_utils does `from core_model_loading import revert_weight_conversion`.
         _patches = _patch_revert_weight_conversion()
 
+        # Some models (e.g. GLM-5.1) have generation_config with top_p set but
+        # do_sample=False, which transformers >= 5.x rejects in save_pretrained.
+        # Silently fix it so export doesn't fail on a non-essential file.
+        if hasattr(model, "generation_config") and model.generation_config is not None:
+            try:
+                model.generation_config.validate()
+            except (ValueError, Exception):
+                model.generation_config.do_sample = True
+
         try:
             model.save_pretrained(
                 export_dir,

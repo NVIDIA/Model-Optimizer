@@ -1711,6 +1711,18 @@ def layerwise_calibrate(
     ckpt = _CheckpointState.from_folder(checkpoint_dir, num_layers)
     start_layer = ckpt.start_layer if ckpt else 0
 
+    # max_calibrate and mse_calibrate only compute amax values; they never touch weight
+    # tensors.  Skipping the weights.pt reload in full_restore saves 30-40 min of disk
+    # I/O for large MoE models where expert weights dominate the checkpoint size.
+    _weight_preserving = {max_calibrate, mse_calibrate}
+    restore_weights = calib_func not in _weight_preserving
+
+    if ckpt and start_layer >= num_layers:
+        print_rank_0(f"Checkpoint: all {num_layers} layers already calibrated, loading saved state")
+        ckpt.full_restore(transformer_layers, model, restore_weights=restore_weights)
+        print_rank_0("Layerwise calibration completed")
+        return
+
     input_getter = LayerActivationCollector(model)
     input_getter._patch_all_layers(decoder_layers=transformer_layers)
 
@@ -1765,7 +1777,7 @@ def layerwise_calibrate(
         input_getter._unpatch_all_layers()
 
     if ckpt:
-        ckpt.full_restore(transformer_layers, model)
+        ckpt.full_restore(transformer_layers, model, restore_weights=restore_weights)
 
     print_rank_0("Layerwise calibration completed")
 

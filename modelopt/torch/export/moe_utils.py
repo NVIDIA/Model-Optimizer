@@ -59,8 +59,29 @@ def _export_fused_experts(module: nn.Module, dtype: torch.dtype) -> None:
     # 2-3. Split + export each per-expert projection.
     fused_dim0 = gate_up.shape[1]  # 2 * expert_dim
 
+    def _safe_cpu_amax(quantizer_src: nn.Module) -> torch.Tensor | None:
+        """Extract _amax to CPU float32, surfacing and clearing any pending CUDA error first."""
+        amax = getattr(quantizer_src, "_amax", None)
+        if amax is None or not isinstance(amax, torch.Tensor):
+            return None
+        try:
+            if amax.is_cuda:
+                torch.cuda.synchronize(amax.device)
+            return amax.detach().cpu().float()
+        except Exception:
+            return None
+
     for idx in range(n):
         expert = nn.Module()
+
+        # Pre-extract both quantizer amaxes to CPU *before* deepcopy.
+        # deepcopy calls .clone() on CUDA tensors — if the stored _amax has corrupt
+        # bfloat16 storage (common for under-calibrated experts), that clone triggers an
+        # async CUDA illegal-memory-access error.  By extracting first (with an explicit
+        # synchronize to surface+clear the error) and then nulling _amax on the source
+        # before deepcopy, we guarantee no CUDA kernel ever touches the corrupt tensor.
+        gu_amax_cpu = _safe_cpu_amax(module.gate_up_proj_weight_quantizers[idx])
+        down_amax_cpu = _safe_cpu_amax(module.down_proj_weight_quantizers[idx])
 
         projections = [
             ("gate_proj", gate_up[idx, :expert_dim, :], 0, fused_dim0, True),
@@ -76,12 +97,19 @@ def _export_fused_experts(module: nn.Module, dtype: torch.dtype) -> None:
             )
             i_quantizer = gate_up_input_q if is_gate_up else down_input_q
 
-            # gate/up share a quantizer — deepcopy so gate_proj and up_proj get
-            # independent quantizers that can hold different amax slices.
+            # gate/up share a weight quantizer — clone so each gets independent amax.
+            # Null _amax on source before deepcopy so the corrupt CUDA tensor is never
+            # cloned; restore afterwards for the sibling projection (up_proj reuses src).
             if is_gate_up:
+                _saved_amax = getattr(w_quantizer_src, "_amax", None)
+                w_quantizer_src._amax = None
                 w_quantizer = copy.deepcopy(w_quantizer_src)
+                w_quantizer_src._amax = _saved_amax
+                # Inject the pre-extracted CPU amax (already float32, no CUDA ops).
+                w_quantizer._amax = gu_amax_cpu
             else:
                 w_quantizer = w_quantizer_src
+                w_quantizer._amax = down_amax_cpu
 
             # For per-channel amax (dim >= 1), proportionally slice dim-0
             # to match the split weight.
@@ -90,11 +118,13 @@ def _export_fused_experts(module: nn.Module, dtype: torch.dtype) -> None:
                 and w_quantizer._amax is not None
                 and w_quantizer._amax.dim() >= 1
             ):
-                amax = w_quantizer._amax
+                amax = w_quantizer._amax  # CPU float32
                 amax_dim0 = amax.shape[0]
-                if fused_total % amax_dim0 == 0:
+                if amax_dim0 % fused_total == 0:
                     slice_start = fused_start * amax_dim0 // fused_total
                     slice_end = (fused_start + weight_slice.shape[0]) * amax_dim0 // fused_total
+                    # Bypass amax.setter (which forbids shape changes); w_quantizer is a
+                    # deepcopy for gate/up so mutating it is safe.
                     w_quantizer._amax = amax[slice_start:slice_end].contiguous()
                 else:
                     warnings.warn(
@@ -104,45 +134,44 @@ def _export_fused_experts(module: nn.Module, dtype: torch.dtype) -> None:
                         stacklevel=2,
                     )
 
-            # Patch invalid per-block amax entries (NaN/inf/negative/zero/too-small/too-large)
-            # with weight-derived fallback values.
-            min_valid_amax = 2e-3  # floor matches FP8 E4M3FN minimum subnormal (2^-9 ≈ 0.00195)
-            max_valid_amax = 1e6
+            # Patch invalid blocks in the (possibly per-block) amax.
+            # A block is invalid if it is: NaN, inf, negative, zero, subnormal (too small),
+            # or a garbage-huge value from uninitialized memory.  All ops here are on CPU.
+            _min_valid_amax = 2e-3  # ≈ FP8 E4M3FN minimum subnormal (2^-9); matches fallback clamp
+            _max_valid_amax = 1e6  # reject clearly-corrupt huge values (uninitialized memory, etc.)
             if (
                 hasattr(w_quantizer, "_amax")
                 and w_quantizer._amax is not None
                 and w_quantizer._amax.numel() > 1
-                and (getattr(w_quantizer, "block_sizes", None) or {}).get(-1) is not None
             ):
-                amax_cpu = w_quantizer._amax
+                amax_cpu = w_quantizer._amax  # CPU float32, per-block shape e.g. (H, W)
                 invalid_mask = ~(
                     torch.isfinite(amax_cpu)
-                    & (amax_cpu >= min_valid_amax)
-                    & (amax_cpu <= max_valid_amax)
+                    & (amax_cpu >= _min_valid_amax)
+                    & (amax_cpu <= _max_valid_amax)
                 )
                 if invalid_mask.any():
-                    _block_size = (getattr(w_quantizer, "block_sizes", None) or {}).get(-1, 16)
+                    block_size = 16
                     per_block_fallback = (
                         weight_slice.detach()
-                        .reshape(-1, _block_size)
-                        .abs()
-                        .amax(dim=1, keepdim=True)
                         .cpu()
                         .float()
+                        .reshape(-1, block_size)
+                        .abs()
+                        .amax(dim=1, keepdim=True)
                         .clamp(min=2e-3)
                         .reshape(amax_cpu.shape)
                     )
                     amax_cpu[invalid_mask] = per_block_fallback[invalid_mask]
                     w_quantizer._amax = amax_cpu
 
-            # For uncalibrated experts (amax missing or invalid scalar), fall back to
-            # per-block amax from weights so the static export path can reshape it correctly.
-            # Only applies to per-block (NVFP4) quantizers — non-block quantizers have
-            # no block_sizes and should not be routed to the static NVFP4 export path.
+            # If the weight quantizer was never calibrated (scalar amax missing or invalid),
+            # compute per-block amax from weights entirely on CPU.
+            # Use per-block (not scalar) so the static NVFP4 export path can reshape _amax
+            # via .view(H, num_blocks_per_row) without a shape mismatch.
             if (
                 hasattr(w_quantizer, "is_enabled")
                 and w_quantizer.is_enabled
-                and (getattr(w_quantizer, "block_sizes", None) or {}).get(-1) is not None
                 and (
                     not hasattr(w_quantizer, "_amax")
                     or w_quantizer._amax is None
@@ -150,20 +179,20 @@ def _export_fused_experts(module: nn.Module, dtype: torch.dtype) -> None:
                         w_quantizer._amax.numel() == 1
                         and not (
                             torch.isfinite(w_quantizer._amax)
-                            and w_quantizer._amax >= min_valid_amax
-                            and w_quantizer._amax <= max_valid_amax
+                            and w_quantizer._amax >= _min_valid_amax
+                            and w_quantizer._amax <= _max_valid_amax
                         )
                     )
                 )
             ):
-                _block_size = (getattr(w_quantizer, "block_sizes", None) or {}).get(-1, 16)
+                _block_size = 16
                 fallback_per_block = (
                     weight_slice.detach()
+                    .cpu()
+                    .float()
                     .reshape(-1, _block_size)
                     .abs()
                     .amax(dim=1, keepdim=True)
-                    .cpu()
-                    .float()
                     .clamp(min=2e-3)
                     .reshape(*weight_slice.shape[:-1], weight_slice.shape[-1] // _block_size)
                 )
@@ -180,17 +209,16 @@ def _export_fused_experts(module: nn.Module, dtype: torch.dtype) -> None:
             wrapper.weight_quantizer = w_quantizer
             wrapper.input_quantizer = i_quantizer
 
-            # Set global_amax to route to the static NVFP4 export path (reads per-block _amax).
-            # Always recompute from the current (possibly patched) _amax — a stale zero
-            # global_amax causes division-by-zero in the per-block scale formula.
-            # Guard: only per-block (NVFP4) quantizers have block_sizes; skip for others.
+            # For NVFP4 MSE-calibrated experts, _amax is per-block (shape [H, W]).
+            # Setting global_amax routes to the static export path which correctly reshapes
+            # _amax via .view(expected_shape) rather than treating it as a per-tensor scale.
+            # Move _amax to the weight's device here (it was kept on CPU until now).
+            # IMPORTANT: always recompute global_amax from the current (possibly patched)
+            # per-block _amax — do not skip when global_amax is already set, because a
+            # stale zero value from an uncalibrated expert causes division-by-zero in the
+            # FP8 per-block scale formula (per_block_scale * 448 / (global_amax/6)).
             wq = wrapper.weight_quantizer
-            if (
-                hasattr(wq, "_amax")
-                and wq._amax is not None
-                and wq._amax.numel() > 1
-                and (getattr(wq, "block_sizes", None) or {}).get(-1) is not None
-            ):
+            if hasattr(wq, "_amax") and wq._amax is not None and wq._amax.numel() > 1:
                 wq._amax = wq._amax.to(weight_slice.device)
                 wq.global_amax = wq._amax.float().amax().clamp(min=2e-3)
 
