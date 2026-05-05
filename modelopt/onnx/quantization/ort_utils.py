@@ -18,6 +18,7 @@
 import glob
 import io
 import os
+import pathlib
 import platform
 import re
 import shutil
@@ -25,6 +26,7 @@ import subprocess  # nosec B404
 import sys
 from collections.abc import Sequence
 from contextlib import redirect_stderr, redirect_stdout
+from importlib.metadata import PackageNotFoundError, distribution
 
 import onnxruntime as ort
 from onnxruntime.quantization.operators.qdq_base_operator import QDQOperatorBase
@@ -126,6 +128,78 @@ def _check_for_tensorrt(min_version: str = "10.0"):
         )
 
 
+def _find_cudnn_bin_dir():
+    """Locate the nvidia cudnn bin directory inside site-packages."""
+    for pkg_name in ("nvidia-cudnn-cu12", "nvidia-cudnn-cu13"):
+        try:
+            dist = distribution(pkg_name)
+        except PackageNotFoundError:
+            continue
+        for f in dist.files or []:
+            if f.name.startswith("cudnn64_") and f.name.endswith(".dll"):
+                bin_dir = str(pathlib.Path(f.locate()).parent)
+                if os.path.isdir(bin_dir):
+                    return bin_dir
+    return None
+
+
+def _load_extra_cudnn_dlls():
+    """Load any cuDNN DLLs from site-packages that ORT's preload_dlls() missed.
+
+    TEMPORARY WORKAROUND: This function exists because ort.preload_dlls() has a
+    hardcoded list of cuDNN sub-libraries which may be incomplete for newer cuDNN
+    versions (e.g. cuDNN 9.21 added cudnn_engines_tensor_ir64_9.dll, cuDNN 9.20
+    added cudnn_cnn64_9.dll). Once ort.preload_dlls() is fixed upstream to
+    dynamically discover all cuDNN DLLs, this function and its helper
+    (_find_cudnn_bin_dir) should be removed.
+
+    This scans the nvidia-cudnn bin directory and loads any cudnn*.dll not already
+    loaded in the process.
+    """
+    import ctypes
+    import ctypes.wintypes
+
+    cudnn_bin_dir = _find_cudnn_bin_dir()
+    if not cudnn_bin_dir:
+        logger.debug(
+            "nvidia-cudnn bin directory not found in site-packages, skipping extra DLL load"
+        )
+        return
+
+    dll_files = sorted(glob.glob(os.path.join(cudnn_bin_dir, "cudnn*.dll")))
+    if not dll_files:
+        logger.debug("No cudnn*.dll files found in %s", cudnn_bin_dir)
+        return
+
+    get_module_handle_w = ctypes.windll.kernel32.GetModuleHandleW  # type: ignore[attr-defined]
+    get_module_handle_w.argtypes = [ctypes.wintypes.LPCWSTR]
+    get_module_handle_w.restype = ctypes.wintypes.HMODULE
+
+    loaded = []
+    skipped = []
+    failed = []
+    for dll_path in dll_files:
+        dll_name = os.path.basename(dll_path)
+        if get_module_handle_w(dll_name):
+            skipped.append(dll_name)
+            continue
+        try:
+            ctypes.CDLL(dll_path)
+            loaded.append(dll_name)
+        except OSError as e:
+            failed.append(dll_name)
+            logger.warning(f"Failed to load {dll_name} from site-packages: {e}")
+
+    if skipped:
+        logger.debug(f"Already loaded (skipped): {skipped}")
+    if loaded:
+        logger.info(
+            f"Loaded {len(loaded)} extra cuDNN DLLs that ort.preload_dlls() missed: {loaded}"
+        )
+    if failed:
+        logger.warning(f"Failed to load {len(failed)} cuDNN DLLs: {failed}")
+
+
 def _check_for_libcudnn():
     # TODO: handle multiple calls to this function
     logger.info("Checking for cuDNN library")
@@ -150,10 +224,6 @@ def _check_for_libcudnn():
                 f"cuDNN not found in {env_variable}. "
                 "Attempting onnxruntime.preload_dlls() to load from site-packages..."
             )
-            # preload_dlls() does not raise on failure — it silently prints
-            # "Failed to load ..." messages.  Capture its output and check
-            # whether the key cuDNN DLL actually loaded.
-            cudnn_dll = "cudnn" if platform.system() == "Windows" else "libcudnn_adv"
             captured = io.StringIO()
             try:
                 with redirect_stdout(captured), redirect_stderr(captured):
@@ -163,14 +233,17 @@ def _check_for_libcudnn():
 
             preload_output = captured.getvalue()
             if preload_output:
-                logger.debug(f"preload_dlls() output:\n{preload_output}")
+                logger.warning(f"preload_dlls() output:\n{preload_output}")
 
-            if f"Failed to load {cudnn_dll}" in preload_output:
+            core_cudnn_dll = "cudnn64_9" if platform.system() == "Windows" else "libcudnn_adv"
+            if f"Failed to load {core_cudnn_dll}" in preload_output:
                 logger.error(
-                    f"onnxruntime.preload_dlls() was called but {cudnn_dll} failed to load. "
+                    f"onnxruntime.preload_dlls() was called but {core_cudnn_dll} failed to load. "
                     "cuDNN DLLs were NOT successfully loaded from site-packages."
                 )
             else:
+                if platform.system() == "Windows":
+                    _load_extra_cudnn_dlls()
                 logger.info(
                     "onnxruntime.preload_dlls() succeeded — CUDA/cuDNN DLLs loaded"
                     " from site-packages. Verify version compatibility at"
