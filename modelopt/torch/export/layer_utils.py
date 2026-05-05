@@ -988,6 +988,7 @@ def get_expert_linear_names(module: nn.Module) -> list[str]:
             "Qwen3MoeSparseMoeBlock",
             "Qwen3NextSparseMoeBlock",
             "Qwen3_5MoeSparseMoeBlock",
+            "Qwen3VLMoeTextSparseMoeBlock",
             "DeepseekMoE",
         ],
     ):
