@@ -1,4 +1,4 @@
-# How to Reduce Your LLM Size and Efficiency with NVIDIA Model-Optimizer: A Pruning & Distillation Guide
+# How to Reduce Your LLM Size and Improve Efficiency with NVIDIA Model-Optimizer: A Pruning & Distillation Guide
 
 ## Table of Contents
 
@@ -83,7 +83,7 @@ flowchart LR
 
 **Minitron is a special case of Puzzletron**: any architecture Minitron can produce, Puzzletron can also find. Both follow the same pipeline (find a smaller architecture, then recover accuracy via distillation); they score the components of each Transformer layer (neurons, attention heads, FFN widths) and remove the ones that contribute least to the model's output. What distinguishes them is how fine-grained that search is.
 
-- **Minitron** applies *homogeneous pruning*: the same pruning decision is applied across all layers simultaneously. The compression target is a **parameter count** (e.g. "reduce to 7B"). Direct memory-budget targeting is also now supported as a recently added Minitron feature. The result is a standard, smaller model with the same architecture type as the original. Fast and simple.
+- **Minitron** applies *homogeneous pruning*: the same pruning decision is applied across all layers simultaneously. The compression target is a **parameter count** (e.g. "reduce to 7B"; direct memory-budget targeting is on the Minitron roadmap). The result is a standard, smaller model with the same architecture type as the original. Fast and simple.
 
 - **Puzzletron** applies *heterogeneous pruning* via Neural Architecture Search (NAS): it evaluates multiple candidate configurations for each layer independently (different FFN widths, optional attention removal), then uses Mixed-Integer Programming (MIP) to find the optimal per-layer combination under a given resource constraint (e.g. a **memory budget**). The result is a model where each layer can have a different structure, tailored to a specific hardware budget. More powerful, but slower.
 
