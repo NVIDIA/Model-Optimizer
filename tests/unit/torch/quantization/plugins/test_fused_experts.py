@@ -27,7 +27,6 @@ from modelopt.torch.quantization.nn import QuantModuleRegistry
 from modelopt.torch.quantization.plugins.huggingface import (
     _is_fused_experts_module,
     _is_sparse_sequaential_moe_block,
-    _QuantFusedExperts,
     force_eager_experts_impl_on_the_fly,
     register_fused_experts_on_the_fly,
     register_sparse_moe_on_the_fly,
@@ -256,27 +255,51 @@ class TestQuantFusedExperts:
 # Tests for export
 # ---------------------------------------------------------------------------
 class TestExportFusedExperts:
+    @staticmethod
+    def _cleanup_registry(mod_type):
+        if QuantModuleRegistry.get(mod_type) is not None:
+            QuantModuleRegistry.unregister(mod_type)
+
     def test_export_creates_per_expert_submodules(self):
         """_export_fused_experts should create per-expert submodules with standard naming."""
+        import modelopt.torch.quantization as mtq
         from modelopt.torch.export.moe_utils import _export_fused_experts
 
-        experts = _SyntheticFusedExperts()
-        expert_type = type(experts)
+        model = _TinyMoEModel()
+        expert_type = type(model.moe.experts)
+        self._cleanup_registry(expert_type)
 
-        # Manually register and convert
-        if QuantModuleRegistry.get(expert_type) is None:
-            QuantModuleRegistry.register({expert_type: "test.SyntheticFusedExperts"})(
-                _QuantFusedExperts
-            )
-        converted = QuantModuleRegistry.convert(experts)
+        quant_cfg = {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {
+                    "quantizer_name": "*gate_up_proj_input_quantizer",
+                    "cfg": {"num_bits": 8, "axis": None},
+                },
+                {
+                    "quantizer_name": "*down_proj_input_quantizer",
+                    "cfg": {"num_bits": 8, "axis": None},
+                },
+                {
+                    "quantizer_name": "*gate_up_proj_weight_quantizer",
+                    "cfg": {"num_bits": 8, "axis": 0},
+                },
+                {
+                    "quantizer_name": "*down_proj_weight_quantizer",
+                    "cfg": {"num_bits": 8, "axis": 0},
+                },
+            ],
+            "algorithm": "max",
+        }
 
-        # Run a forward pass to calibrate (set amaxes)
-        seq_len = 16
-        hidden_states = torch.randn(seq_len, HIDDEN_DIM)
-        top_k_index = torch.randint(0, NUM_EXPERTS, (seq_len, TOP_K))
-        top_k_weights = torch.softmax(torch.randn(seq_len, TOP_K), dim=-1)
-        with torch.no_grad():
-            converted(hidden_states, top_k_index, top_k_weights)
+        def forward_loop(m):
+            torch.manual_seed(0)
+            for _ in range(2):
+                x = torch.randn(1, 4, HIDDEN_DIM)
+                m(x)
+
+        mtq.quantize(model, quant_cfg, forward_loop=forward_loop)
+        converted = model.moe.experts
 
         _export_fused_experts(converted, torch.float16)
 
@@ -297,8 +320,7 @@ class TestExportFusedExperts:
         assert not hasattr(converted, "down_proj")
         assert not hasattr(converted, "gate_up_proj_weight_quantizers")
 
-        if QuantModuleRegistry.get(expert_type) is not None:
-            QuantModuleRegistry.unregister(expert_type)
+        self._cleanup_registry(expert_type)
 
 
 # ---------------------------------------------------------------------------
@@ -612,3 +634,126 @@ class TestNormalizeFusedExpertsQuantizerName:
             _normalize_fused_experts_quantizer_name("moe.layers.3.gate.weight")
             == "moe.layers.3.gate.weight"
         )
+
+
+# Verifies that MSE calibration discovers and calibrates every per-expert weight quantizer
+# inside a fused-expert ModuleList (both gate_up_proj and down_proj, for all experts).
+class TestFusedExpertsMSECalibration:
+    @staticmethod
+    def _cleanup_registry(mod_type):
+        if QuantModuleRegistry.get(mod_type) is not None:
+            QuantModuleRegistry.unregister(mod_type)
+
+    def test_mse_calibration_populates_all_expert_quantizers(self):
+        import modelopt.torch.quantization as mtq
+
+        model = _TinyMoEModel()
+        expert_type = type(model.moe.experts)
+        self._cleanup_registry(expert_type)
+
+        mtq.quantize(
+            model,
+            {
+                "quant_cfg": [
+                    {"quantizer_name": "*", "enable": False},
+                    {
+                        "quantizer_name": "*gate_up_proj_weight_quantizer",
+                        "cfg": {"num_bits": 8, "axis": None},
+                    },
+                    {
+                        "quantizer_name": "*down_proj_weight_quantizer",
+                        "cfg": {"num_bits": 8, "axis": None},
+                    },
+                ],
+                "algorithm": "mse",
+            },
+            forward_loop=lambda m: [m(torch.randn(1, 4, HIDDEN_DIM)) for _ in range(2)],
+        )
+
+        experts = model.moe.experts
+        for idx in range(NUM_EXPERTS):
+            assert experts.gate_up_proj_weight_quantizers[idx].amax is not None, (
+                f"gate_up_proj_weight_quantizers[{idx}] not calibrated — Bug 1 regression"
+            )
+            assert experts.down_proj_weight_quantizers[idx].amax is not None, (
+                f"down_proj_weight_quantizers[{idx}] not calibrated"
+            )
+        self._cleanup_registry(expert_type)
+
+
+# Verifies that _export_fused_experts emits a fallback warning and computes weight-derived
+# per-block amax when an expert's _amax is None or zero. Only applies to per-block (NVFP4)
+# quantizers. _export_quantized_weight is mocked to isolate from FP8/GPU requirements.
+class TestExportFusedExpertsUncalibratedFallback:
+    @staticmethod
+    def _cleanup_registry(mod_type):
+        if QuantModuleRegistry.get(mod_type) is not None:
+            QuantModuleRegistry.unregister(mod_type)
+
+    def _quantize_with_block_sizes(self):
+        import modelopt.torch.quantization as mtq
+
+        model = _TinyMoEModel()
+        expert_type = type(model.moe.experts)
+        self._cleanup_registry(expert_type)
+        block_cfg = {"num_bits": 8, "axis": None, "block_sizes": {-1: 16}}
+        mtq.quantize(
+            model,
+            {
+                "quant_cfg": [
+                    {"quantizer_name": "*", "enable": False},
+                    {"quantizer_name": "*gate_up_proj_weight_quantizer", "cfg": block_cfg},
+                    {"quantizer_name": "*down_proj_weight_quantizer", "cfg": block_cfg},
+                ],
+                "algorithm": "max",
+            },
+            forward_loop=lambda m: [m(torch.randn(1, 4, HIDDEN_DIM)) for _ in range(2)],
+        )
+        return model.moe.experts, expert_type
+
+    @pytest.mark.parametrize("zero_amax", [False, True])
+    def test_fallback_warning_emitted(self, zero_amax):
+        """Fallback warning must fire and produce valid per-block _amax + global_amax."""
+        import warnings
+        from unittest.mock import patch
+
+        from modelopt.torch.export.moe_utils import _export_fused_experts
+
+        converted, expert_type = self._quantize_with_block_sizes()
+        bad_amax = torch.tensor(0.0) if zero_amax else None
+        for idx in range(NUM_EXPERTS):
+            converted.gate_up_proj_weight_quantizers[idx]._amax = bad_amax
+            converted.down_proj_weight_quantizers[idx]._amax = bad_amax
+
+        captured_wrappers = []
+
+        def _capture(wrapper, dtype):
+            captured_wrappers.append(wrapper)
+
+        with (
+            patch(
+                "modelopt.torch.export.unified_export_hf._export_quantized_weight",
+                side_effect=_capture,
+            ),
+            warnings.catch_warnings(record=True) as caught,
+        ):
+            warnings.simplefilter("always")
+            _export_fused_experts(converted, torch.float16)
+
+        assert any("weight-derived per-block amax" in str(w.message) for w in caught), (
+            f"No fallback warning emitted for {'zero' if zero_amax else 'None'} amax — Bug 3 regression"
+        )
+
+        # Every per-block weight quantizer must have a repaired per-block _amax and global_amax.
+        for wrapper in captured_wrappers:
+            wq = wrapper.weight_quantizer
+            if not (getattr(wq, "block_sizes", None) or {}).get(-1):
+                continue
+            assert wq._amax is not None and wq._amax.numel() > 1, (
+                "Fallback did not produce per-block _amax"
+            )
+            assert hasattr(wq, "global_amax") and wq.global_amax > 0, (
+                "global_amax missing or zero after fallback"
+            )
+
+        self._cleanup_registry(expert_type)

@@ -20,7 +20,7 @@ import time
 import warnings
 from collections.abc import Callable
 from functools import partial
-from typing import TypeAlias
+from typing import Any, TypeAlias
 
 import torch
 import torch.distributed as dist
@@ -351,7 +351,7 @@ def mse_calibrate(
 
     # Step 2: Replace calibrators with MseCalibrator for enabled quantizers
     # and identify weight quantizers
-    weight_quantizers = []
+    weight_quantizers: list[tuple[Any, Any, TensorQuantizer]] = []
     seen_modules = set()
 
     for name, module in list(model.named_modules()):
@@ -410,7 +410,12 @@ def mse_calibrate(
                     quant_func=partial(_mse_quant_func, quantizer=module),
                 )
 
-    # Identify weight quantizers by checking if they have corresponding weight parameters
+    # Collect weight quantizers (standard + fused-experts per-expert lists).
+    try:
+        from modelopt.torch.quantization.plugins.huggingface import _QuantFusedExperts as _qfe_cls
+    except ImportError:
+        _qfe_cls = None  # type: ignore[misc]
+
     name_to_module = dict(model.named_modules())
     for parent_module in name_to_module.values():
         if parent_module in seen_modules:
@@ -421,7 +426,55 @@ def mse_calibrate(
             if isinstance(weight_quantizer, TensorQuantizer) and weight_quantizer.is_enabled:
                 if getattr(weight_quantizer, "_calibrator", None) is not None:
                     weight_quantizers.append((parent_module, weight_name, weight_quantizer))
+        # Enqueue per-expert quantizers from {param}_weight_quantizers ModuleLists.
+        if _qfe_cls is not None and isinstance(parent_module, _qfe_cls):
+            for param_name, param in parent_module.named_parameters(recurse=False):
+                qlist = getattr(parent_module, f"{param_name}_weight_quantizers", None)
+                if not isinstance(qlist, nn.ModuleList):
+                    continue
+                if len(qlist) != param.shape[0]:
+                    warnings.warn(
+                        f"Skipping {param_name}_weight_quantizers: list length {len(qlist)} "
+                        f"does not match parameter leading dimension {param.shape[0]}. "
+                        "This may indicate a misconfigured fused-experts module.",
+                        stacklevel=2,
+                    )
+                    continue
+                for expert_idx, wq in enumerate(qlist):
+                    if isinstance(wq, TensorQuantizer) and wq.is_enabled:
+                        if getattr(wq, "_calibrator", None) is not None:
+                            weight_quantizers.append((parent_module, (param_name, expert_idx), wq))
+
         seen_modules.add(parent_module)
+
+    # Warn about enabled weight quantizers that weren't scheduled for MSE calibration.
+    picked_ids = {id(wq) for _, _, wq in weight_quantizers}
+
+    def _is_active_unpicked(q: Any) -> bool:
+        return (
+            isinstance(q, TensorQuantizer)
+            and q.is_enabled
+            and getattr(q, "_calibrator", None) is not None
+            and id(q) not in picked_ids
+        )
+
+    missed: list[str] = []
+    for mod_name, module in name_to_module.items():
+        for attr_name, attr in module._modules.items():
+            if isinstance(attr, TensorQuantizer) and attr_name.endswith("weight_quantizer"):
+                if _is_active_unpicked(attr):
+                    missed.append(f"{mod_name}.{attr_name}")
+            elif isinstance(attr, nn.ModuleList) and attr_name.endswith("_weight_quantizers"):
+                for i, wq in enumerate(attr):
+                    if _is_active_unpicked(wq):
+                        missed.append(f"{mod_name}.{attr_name}[{i}]")
+    if missed:
+        warnings.warn(
+            f"MSE weight calibration: {len(missed)} weight quantizer(s) are enabled but were "
+            f"not scheduled for calibration and will retain max-calibration amax values. "
+            f"First {min(5, len(missed))}: {missed[:5]}",
+            stacklevel=2,
+        )
 
     # Step 3: Calibrate weight quantizers ONE AT A TIME with immediate amax computation
     # This prevents massive memory accumulation seen in large models
@@ -432,7 +485,11 @@ def mse_calibrate(
         weight_quantizer.disable_quant()
         weight_quantizer.enable_calib()
         with enable_weight_access_and_writeback(parent_module, model, name_to_module):
-            weight = getattr(parent_module, weight_name)
+            if isinstance(weight_name, tuple):
+                param_name, expert_idx = weight_name
+                weight = getattr(parent_module, param_name)[expert_idx]
+            else:
+                weight = getattr(parent_module, weight_name)
             weight_quantizer(weight)
 
         # IMMEDIATELY compute amax and reset calibrator to free memory
@@ -778,7 +835,7 @@ def finish_stats_collection(model: nn.Module, method: str | None = None, **kwarg
 
         cal = getattr(module, "_calibrator", None)
         if cal and not getattr(module, "_dynamic", False):
-            if method in {"entropy"}:
+            if method == "entropy":
                 if cal.compute_amax(method) is not None:
                     module.load_calib_amax("entropy", **kwargs)
             elif cal.compute_amax(**kwargs) is not None:
