@@ -1709,8 +1709,10 @@ MXFP4_MLP_WEIGHT_ONLY_CFG = {
 NVFP4_MLP_WEIGHT_ONLY_CFG = _nvfp4_selective_quant_cfg(
     ["*mlp*", "*block_sparse_moe*"], quantizer=_nvfp4_cfg_bs32, weight_only=True
 )
-NVFP4_EXPERTS_ONLY_CFG = _nvfp4_selective_quant_cfg(["*mlp.experts*", "*block_sparse_moe*"])
-NVFP4_MLP_ONLY_CFG = _nvfp4_selective_quant_cfg(["*mlp*", "*block_sparse_moe*"])
+NVFP4_EXPERTS_ONLY_CFG = _nvfp4_selective_quant_cfg(
+    ["*mlp.experts*", "*block_sparse_moe*", "*.experts.*"]
+)
+NVFP4_MLP_ONLY_CFG = _nvfp4_selective_quant_cfg(["*mlp*", "*block_sparse_moe*", "*.experts.*"])
 NVFP4_OMLP_ONLY_CFG = _nvfp4_selective_quant_cfg(["*o_proj*", "*mlp*", "*block_sparse_moe*"])
 
 # DO NOT ADD NEW CONFIGS HERE. If you want to add a new general recipe, add it to

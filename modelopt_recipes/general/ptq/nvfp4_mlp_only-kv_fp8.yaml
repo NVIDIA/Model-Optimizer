@@ -38,5 +38,11 @@ quantize:
     - quantizer_name: '*block_sparse_moe*input_quantizer'
       cfg:
         $import: nvfp4
+    - quantizer_name: '*.experts.*weight_quantizer'
+      cfg:
+        $import: nvfp4
+    - quantizer_name: '*.experts.*input_quantizer'
+      cfg:
+        $import: nvfp4
     - $import: kv_fp8
     - $import: default_disabled_quantizers
