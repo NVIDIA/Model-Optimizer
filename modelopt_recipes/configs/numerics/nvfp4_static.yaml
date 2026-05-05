@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# NVFP4 E2M1 blockwise quantizer attributes with FP8 E4M3 scales (static calibration).
+# NVFP4 E2M1 blockwise quantizer attributes with FP8 E4M3 scales (used for NVFP4 weights since weight scales can be static).
 
 # modelopt-schema: modelopt.torch.quantization.config.QuantizerAttributeConfig
 num_bits: e2m1

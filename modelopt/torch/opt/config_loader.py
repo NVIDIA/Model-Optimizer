@@ -250,10 +250,6 @@ def _load_raw_config(
     return _load_raw_config_with_schema(config_file).data
 
 
-# ---------------------------------------------------------------------------
-# $import resolution
-# ---------------------------------------------------------------------------
-
 _IMPORT_KEY = "$import"
 
 
