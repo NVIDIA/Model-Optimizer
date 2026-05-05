@@ -4,6 +4,12 @@ Reusable building blocks for composing PTQ quantization configurations.
 Each file defines one or more `quant_cfg` entries that can be imported
 into recipes or presets via `$import`.
 
+Every reusable snippet imported via an `imports` section must declare a
+`# modelopt-schema: ...` preamble. Unit snippets use either
+`QuantizerCfgEntry` for one entry or `QuantizerCfgListConfig` for a list
+of entries; the loader uses that schema to validate the snippet and to
+choose append vs splice semantics for list imports.
+
 Units are **not** standalone configs — they don't have `algorithm` or
 `metadata`. They are meant to be composed into complete configs by
 recipes (under `general/` or `models/`) or presets (under `presets/`).

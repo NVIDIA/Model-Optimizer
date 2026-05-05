@@ -67,11 +67,11 @@ class _RawConfig:
 
 @dataclass
 class _ResolvedImport:
-    """Resolved imported payload plus the schema declared by that payload."""
+    """Resolved imported payload plus the required schema declared by that payload."""
 
     data: Any
-    schema: str | None
-    schema_type: Any | None
+    schema: str
+    schema_type: Any
     path: Path | Traversable | None
 
 
@@ -454,8 +454,17 @@ def _resolve_imports(
                 f"Import chain: {sorted(_loading)}"
             )
         raw_snippet = _load_raw_config_with_schema(config_path)
+        # Every path listed under ``imports`` is a reusable snippet dependency.
+        # Require an explicit schema before exposing it to either dict-valued
+        # imports or typed list append/splice decisions.
+        if raw_snippet.schema is None:
+            raise ValueError(
+                f"Import {name!r} ({raw_snippet.path}) must reference a snippet with "
+                "a modelopt-schema comment."
+            )
+        snippet_schema = raw_snippet.schema
         snippet = raw_snippet.data
-        snippet_schema_type = _schema_type(raw_snippet.schema) if raw_snippet.schema else None
+        snippet_schema_type = _schema_type(snippet_schema)
         if isinstance(snippet, _ListSnippet) or (
             isinstance(snippet, dict) and "imports" in snippet
         ):
@@ -463,11 +472,11 @@ def _resolve_imports(
                 snippet, _loading | {cycle_key}, schema_type=snippet_schema_type
             )
         _validate_modelopt_schema(
-            raw_snippet.schema, snippet, raw_snippet.path, schema_type=snippet_schema_type
+            snippet_schema, snippet, raw_snippet.path, schema_type=snippet_schema_type
         )
         import_map[name] = _ResolvedImport(
             data=snippet,
-            schema=raw_snippet.schema,
+            schema=snippet_schema,
             schema_type=snippet_schema_type,
             path=raw_snippet.path,
         )
@@ -489,11 +498,6 @@ def _resolve_imports(
             raise ValueError(
                 f"$import {ref_name!r} in list at {context} requires a typed list schema "
                 "(expected list[ElementType])."
-            )
-        if imported.schema_type is None:
-            raise ValueError(
-                f"$import {ref_name!r} in list at {context} must reference a snippet with "
-                "a modelopt-schema comment."
             )
 
         if _schema_equal(imported.schema_type, list_schema):
@@ -605,8 +609,9 @@ def load_config(
 
     ``schema_type`` supplies a typing context for import resolution when the
     file itself has no ``modelopt-schema`` comment. It is intentionally not a
-    request to validate the top-level file; only files that declare
-    ``modelopt-schema`` are schema-validated.
+    request to validate the top-level file. Top-level files are validated only
+    when they declare ``modelopt-schema``; imported snippets are stricter and
+    must always declare ``modelopt-schema``.
     """
     raw = _load_raw_config_with_schema(config_path)
     data = raw.data

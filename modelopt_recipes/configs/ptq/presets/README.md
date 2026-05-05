@@ -9,6 +9,11 @@ Presets compose from the reusable snippets in `configs/numerics/` and
 `configs/ptq/units/` via the `$import` system, and are split into two
 kinds:
 
+Preset files are also reusable snippets when imported by recipes or other
+configs, so each preset must declare a `# modelopt-schema: ...` preamble.
+Current preset files use `QuantizeConfig` so they are validated after their
+own imports have been resolved.
+
 - **`model/`** — *full* quantization presets. Each file is a complete,
   self-contained config (it sets `algorithm` and a full `quant_cfg` with
   a base-disable-all prefix + standard exclusions) and can be passed

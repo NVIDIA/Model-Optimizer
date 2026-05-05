@@ -51,6 +51,30 @@ metadata:
   recipe_type: unknown_type
 """
 
+QUANTIZER_ATTRIBUTE_SCHEMA = (
+    "# modelopt-schema: modelopt.torch.quantization.config.QuantizerAttributeConfig\n"
+)
+QUANTIZER_CFG_ENTRY_SCHEMA = (
+    "# modelopt-schema: modelopt.torch.quantization.config.QuantizerCfgEntry\n"
+)
+QUANTIZER_CFG_LIST_SCHEMA = (
+    "# modelopt-schema: modelopt.torch.quantization.config.QuantizerCfgListConfig\n"
+)
+QUANTIZE_CONFIG_SCHEMA = "# modelopt-schema: modelopt.torch.quantization.config.QuantizeConfig\n"
+
+
+def _write_quantizer_attribute(path, body: str):
+    path.write_text(QUANTIZER_ATTRIBUTE_SCHEMA + body)
+
+
+def _write_quantizer_cfg_entry(path, body: str):
+    path.write_text(QUANTIZER_CFG_ENTRY_SCHEMA + body)
+
+
+def _write_quantizer_cfg_list(path, body: str):
+    path.write_text(QUANTIZER_CFG_LIST_SCHEMA + body)
+
+
 # ---------------------------------------------------------------------------
 # Directory-format YAML fixtures
 # ---------------------------------------------------------------------------
@@ -262,7 +286,7 @@ def test_general_ptq_yaml_matches_config_dicts(yaml_path, model_cfg_name, kv_cfg
 
 def test_import_resolves_cfg_reference(tmp_path):
     """$import in cfg is replaced with the imported config dict."""
-    (tmp_path / "fp8.yml").write_text("num_bits: e4m3\naxis:\n")
+    _write_quantizer_attribute(tmp_path / "fp8.yml", "num_bits: e4m3\naxis:\n")
     recipe_file = tmp_path / "ptq.yml"
     recipe_file.write_text(
         f"imports:\n"
@@ -283,7 +307,7 @@ def test_import_resolves_cfg_reference(tmp_path):
 
 def test_import_same_name_used_twice(tmp_path):
     """The same import can be referenced in multiple quant_cfg entries."""
-    (tmp_path / "fp8.yml").write_text("num_bits: e4m3\naxis:\n")
+    _write_quantizer_attribute(tmp_path / "fp8.yml", "num_bits: e4m3\naxis:\n")
     recipe_file = tmp_path / "ptq.yml"
     recipe_file.write_text(
         f"imports:\n"
@@ -306,8 +330,8 @@ def test_import_same_name_used_twice(tmp_path):
 
 def test_import_multiple_snippets(tmp_path):
     """Multiple imports with different names resolve independently."""
-    (tmp_path / "fp8.yml").write_text("num_bits: e4m3\naxis:\n")
-    (tmp_path / "nvfp4.yml").write_text("num_bits: e2m1\nblock_sizes:\n  -1: 16\n")
+    _write_quantizer_attribute(tmp_path / "fp8.yml", "num_bits: e4m3\naxis:\n")
+    _write_quantizer_attribute(tmp_path / "nvfp4.yml", "num_bits: e2m1\nblock_sizes:\n  -1: 16\n")
     recipe_file = tmp_path / "ptq.yml"
     recipe_file.write_text(
         f"imports:\n"
@@ -332,7 +356,7 @@ def test_import_multiple_snippets(tmp_path):
 
 def test_import_inline_cfg_not_affected(tmp_path):
     """Inline dict cfg entries without $import are not touched."""
-    (tmp_path / "fp8.yml").write_text("num_bits: e4m3\naxis:\n")
+    _write_quantizer_attribute(tmp_path / "fp8.yml", "num_bits: e4m3\naxis:\n")
     recipe_file = tmp_path / "ptq.yml"
     recipe_file.write_text(
         f"imports:\n"
@@ -389,6 +413,26 @@ def test_import_empty_path_raises(tmp_path):
         load_recipe(recipe_file)
 
 
+def test_import_snippet_without_schema_raises(tmp_path):
+    """Every imported snippet must declare modelopt-schema, including dict snippets."""
+    (tmp_path / "fp8.yml").write_text("num_bits: e4m3\n")
+    recipe_file = tmp_path / "ptq.yml"
+    recipe_file.write_text(
+        f"imports:\n"
+        f"  fp8: {tmp_path / 'fp8.yml'}\n"
+        f"metadata:\n"
+        f"  recipe_type: ptq\n"
+        f"quantize:\n"
+        f"  algorithm: max\n"
+        f"  quant_cfg:\n"
+        f"    - quantizer_name: '*weight_quantizer'\n"
+        f"      cfg:\n"
+        f"        $import: fp8\n"
+    )
+    with pytest.raises(ValueError, match="modelopt-schema"):
+        load_recipe(recipe_file)
+
+
 def test_import_not_a_dict_raises(tmp_path):
     """Import section that is not a dict raises ValueError."""
     recipe_file = tmp_path / "ptq.yml"
@@ -433,11 +477,7 @@ def test_import_builtin_recipe_with_imports():
 
 def test_import_entry_single_element_list(tmp_path):
     """$import splices a single-element list snippet into quant_cfg."""
-    (tmp_path / "disable.yml").write_text(
-        "# modelopt-schema: modelopt.torch.quantization.config.QuantizerCfgListConfig\n"
-        "- quantizer_name: '*'\n"
-        "  enable: false\n"
-    )
+    _write_quantizer_cfg_list(tmp_path / "disable.yml", "- quantizer_name: '*'\n  enable: false\n")
     recipe_file = tmp_path / "ptq.yml"
     recipe_file.write_text(
         f"imports:\n"
@@ -458,11 +498,7 @@ def test_import_entry_single_element_list(tmp_path):
 
 def test_import_entry_element_schema_appends(tmp_path):
     """$import in quant_cfg list position appends a QuantizerCfgEntry snippet."""
-    (tmp_path / "disable.yml").write_text(
-        "# modelopt-schema: modelopt.torch.quantization.config.QuantizerCfgEntry\n"
-        "quantizer_name: '*'\n"
-        "enable: false\n"
-    )
+    _write_quantizer_cfg_entry(tmp_path / "disable.yml", "quantizer_name: '*'\nenable: false\n")
     recipe_file = tmp_path / "ptq.yml"
     recipe_file.write_text(
         f"imports:\n"
@@ -480,10 +516,7 @@ def test_import_entry_element_schema_appends(tmp_path):
 
 def test_import_entry_wrong_schema_raises(tmp_path):
     """$import in quant_cfg list position rejects snippets with unrelated schema."""
-    (tmp_path / "fp8.yml").write_text(
-        "# modelopt-schema: modelopt.torch.quantization.config.QuantizerAttributeConfig\n"
-        "num_bits: e4m3\n"
-    )
+    _write_quantizer_attribute(tmp_path / "fp8.yml", "num_bits: e4m3\n")
     recipe_file = tmp_path / "ptq.yml"
     recipe_file.write_text(
         f"imports:\n"
@@ -501,10 +534,10 @@ def test_import_entry_wrong_schema_raises(tmp_path):
 
 def test_import_entry_list_splice(tmp_path):
     """$import as a quant_cfg list entry splices a list-valued snippet."""
-    (tmp_path / "disables.yml").write_text(
-        "# modelopt-schema: modelopt.torch.quantization.config.QuantizerCfgListConfig\n"
+    _write_quantizer_cfg_list(
+        tmp_path / "disables.yml",
         "- quantizer_name: '*lm_head*'\n  enable: false\n"
-        "- quantizer_name: '*router*'\n  enable: false\n"
+        "- quantizer_name: '*router*'\n  enable: false\n",
     )
     recipe_file = tmp_path / "ptq.yml"
     recipe_file.write_text(
@@ -527,7 +560,7 @@ def test_import_entry_list_splice(tmp_path):
 
 def test_import_entry_sibling_keys_with_list_snippet_raises(tmp_path):
     """$import with sibling keys raises when the import resolves to a list (not a dict)."""
-    (tmp_path / "disable.yml").write_text("- quantizer_name: '*'\n  enable: false\n")
+    _write_quantizer_cfg_list(tmp_path / "disable.yml", "- quantizer_name: '*'\n  enable: false\n")
     recipe_file = tmp_path / "ptq.yml"
     recipe_file.write_text(
         f"imports:\n"
@@ -546,7 +579,7 @@ def test_import_entry_sibling_keys_with_list_snippet_raises(tmp_path):
 
 def test_import_cfg_extend(tmp_path):
     """$import in cfg with extra non-conflicting keys extends the snippet."""
-    (tmp_path / "fp8.yml").write_text("num_bits: e4m3\n")
+    _write_quantizer_attribute(tmp_path / "fp8.yml", "num_bits: e4m3\n")
     recipe_file = tmp_path / "ptq.yml"
     recipe_file.write_text(
         f"imports:\n"
@@ -568,7 +601,7 @@ def test_import_cfg_extend(tmp_path):
 
 def test_import_cfg_inline_overrides_import(tmp_path):
     """Inline keys override imported values (highest precedence)."""
-    (tmp_path / "fp8.yml").write_text("num_bits: e4m3\naxis:\n")
+    _write_quantizer_attribute(tmp_path / "fp8.yml", "num_bits: e4m3\naxis:\n")
     recipe_file = tmp_path / "ptq.yml"
     recipe_file.write_text(
         f"imports:\n"
@@ -593,7 +626,7 @@ def test_import_cfg_inline_overrides_import(tmp_path):
 
 def test_import_in_non_cfg_dict_value(tmp_path):
     """$import resolves in any dict value, not just cfg (tested via load_config to skip validation)."""
-    (tmp_path / "extra.yml").write_text("foo: bar\nbaz: 42\n")
+    _write_quantizer_attribute(tmp_path / "extra.yml", "num_bits: e4m3\naxis: 0\n")
     config_file = tmp_path / "config.yml"
     config_file.write_text(
         f"imports:\n"
@@ -605,13 +638,13 @@ def test_import_in_non_cfg_dict_value(tmp_path):
     )
     data = load_config(config_file)
     entry = data["quant_cfg"][0]
-    assert entry["my_field"] == {"foo": "bar", "baz": 42}
+    assert entry["my_field"] == {"num_bits": (4, 3), "axis": 0}
 
 
 def test_import_in_multiple_dict_values(tmp_path):
     """$import resolves independently in multiple dict values of the same entry."""
-    (tmp_path / "fp8.yml").write_text("num_bits: e4m3\n")
-    (tmp_path / "extra.yml").write_text("foo: bar\n")
+    _write_quantizer_attribute(tmp_path / "fp8.yml", "num_bits: e4m3\n")
+    _write_quantizer_attribute(tmp_path / "extra.yml", "fake_quant: false\n")
     config_file = tmp_path / "config.yml"
     config_file.write_text(
         f"imports:\n"
@@ -627,13 +660,13 @@ def test_import_in_multiple_dict_values(tmp_path):
     data = load_config(config_file)
     entry = data["quant_cfg"][0]
     assert entry["cfg"] == {"num_bits": (4, 3)}
-    assert entry["my_field"] == {"foo": "bar"}
+    assert entry["my_field"] == {"fake_quant": False}
 
 
 def test_import_cfg_multi_import(tmp_path):
     """$import with a list of names merges non-overlapping snippets."""
-    (tmp_path / "bits.yml").write_text("num_bits: e4m3\n")
-    (tmp_path / "axis.yml").write_text("axis: 0\n")
+    _write_quantizer_attribute(tmp_path / "bits.yml", "num_bits: e4m3\n")
+    _write_quantizer_attribute(tmp_path / "axis.yml", "axis: 0\n")
     recipe_file = tmp_path / "ptq.yml"
     recipe_file.write_text(
         f"imports:\n"
@@ -655,8 +688,8 @@ def test_import_cfg_multi_import(tmp_path):
 
 def test_import_cfg_multi_import_later_overrides_earlier(tmp_path):
     """In $import list, later snippets override earlier ones on key conflicts."""
-    (tmp_path / "a.yml").write_text("num_bits: e4m3\naxis: 0\n")
-    (tmp_path / "b.yml").write_text("num_bits: 8\n")
+    _write_quantizer_attribute(tmp_path / "a.yml", "num_bits: e4m3\naxis: 0\n")
+    _write_quantizer_attribute(tmp_path / "b.yml", "num_bits: 8\n")
     recipe_file = tmp_path / "ptq.yml"
     recipe_file.write_text(
         f"imports:\n"
@@ -680,8 +713,8 @@ def test_import_cfg_multi_import_later_overrides_earlier(tmp_path):
 
 def test_import_cfg_multi_import_with_extend(tmp_path):
     """$import list + inline keys all merge without conflicts."""
-    (tmp_path / "bits.yml").write_text("num_bits: e4m3\n")
-    (tmp_path / "extra.yml").write_text("fake_quant: false\n")
+    _write_quantizer_attribute(tmp_path / "bits.yml", "num_bits: e4m3\n")
+    _write_quantizer_attribute(tmp_path / "extra.yml", "fake_quant: false\n")
     recipe_file = tmp_path / "ptq.yml"
     recipe_file.write_text(
         f"imports:\n"
@@ -704,7 +737,7 @@ def test_import_cfg_multi_import_with_extend(tmp_path):
 
 def test_import_dir_format(tmp_path):
     """Imports in quantize.yml work with the directory recipe format."""
-    (tmp_path / "fp8.yml").write_text("num_bits: e4m3\naxis:\n")
+    _write_quantizer_attribute(tmp_path / "fp8.yml", "num_bits: e4m3\naxis:\n")
     (tmp_path / "metadata.yml").write_text("recipe_type: ptq\ndescription: Dir with imports.\n")
     (tmp_path / "quantize.yml").write_text(
         f"imports:\n"
@@ -721,7 +754,7 @@ def test_import_dir_format(tmp_path):
 
 def test_import_dir_format_metadata_imports_do_not_apply_to_quantize(tmp_path):
     """metadata.yml imports are scoped to metadata.yml, not quantize.yml."""
-    (tmp_path / "fp8.yml").write_text("num_bits: e4m3\n")
+    _write_quantizer_attribute(tmp_path / "fp8.yml", "num_bits: e4m3\n")
     (tmp_path / "metadata.yml").write_text(
         f"imports:\n  fmt: {tmp_path / 'fp8.yml'}\nrecipe_type: ptq\n"
     )
@@ -790,18 +823,18 @@ def test_import_builtin_fp8_kv_snippet():
 
 def test_import_in_top_level_dict_value(tmp_path):
     """$import resolves in a top-level dict value (not inside any list)."""
-    (tmp_path / "algo.yml").write_text("method: gptq\nuse_layerwise: true\n")
+    _write_quantizer_attribute(tmp_path / "algo.yml", "num_bits: 8\naxis: 0\n")
     config_file = tmp_path / "config.yml"
     config_file.write_text(
         f"imports:\n  algo: {tmp_path / 'algo.yml'}\nalgorithm:\n  $import: algo\nquant_cfg: []\n"
     )
     data = load_config(config_file)
-    assert data["algorithm"] == {"method": "gptq", "use_layerwise": True}
+    assert data["algorithm"] == {"num_bits": 8, "axis": 0}
 
 
 def test_import_in_nested_dict(tmp_path):
     """$import resolves in deeply nested dicts."""
-    (tmp_path / "settings.yml").write_text("lr: 0.001\nepochs: 10\n")
+    _write_quantizer_attribute(tmp_path / "settings.yml", "num_bits: e4m3\n")
     config_file = tmp_path / "config.yml"
     config_file.write_text(
         f"imports:\n"
@@ -812,12 +845,15 @@ def test_import_in_nested_dict(tmp_path):
         f"      $import: settings\n"
     )
     data = load_config(config_file)
-    assert data["training"]["optimizer"]["params"] == {"lr": 0.001, "epochs": 10}
+    assert data["training"]["optimizer"]["params"] == {"num_bits": (4, 3)}
 
 
 def test_import_list_splice_outside_typed_list_raises(tmp_path):
     """A bare $import in an untyped list is rejected."""
-    (tmp_path / "extra_tasks.yml").write_text("- name: task_b\n- name: task_c\n")
+    _write_quantizer_cfg_list(
+        tmp_path / "extra_tasks.yml",
+        "- quantizer_name: '*weight_quantizer'\n- quantizer_name: '*input_quantizer'\n",
+    )
     config_file = tmp_path / "config.yml"
     config_file.write_text(
         f"imports:\n"
@@ -833,7 +869,7 @@ def test_import_list_splice_outside_typed_list_raises(tmp_path):
 
 def test_import_in_nested_list_of_dicts(tmp_path):
     """$import in dict values within a nested list resolves correctly."""
-    (tmp_path / "defaults.yml").write_text("timeout: 30\nretries: 3\n")
+    _write_quantizer_attribute(tmp_path / "defaults.yml", "num_bits: 8\n")
     config_file = tmp_path / "config.yml"
     config_file.write_text(
         f"imports:\n"
@@ -848,8 +884,8 @@ def test_import_in_nested_list_of_dicts(tmp_path):
         f"      $import: defaults\n"
     )
     data = load_config(config_file)
-    assert data["stages"][0]["config"] == {"timeout": 30, "retries": 3, "verbose": True}
-    assert data["stages"][1]["config"] == {"timeout": 30, "retries": 3}
+    assert data["stages"][0]["config"] == {"num_bits": 8, "verbose": True}
+    assert data["stages"][1]["config"] == {"num_bits": 8}
 
 
 def test_import_mixed_tree(tmp_path):
@@ -924,8 +960,12 @@ def test_import_recursive(tmp_path):
 
 def test_import_circular_raises(tmp_path):
     """Circular imports are detected and raise ValueError."""
-    (tmp_path / "a.yml").write_text(f"imports:\n  b: {tmp_path / 'b.yml'}\nnum_bits: 8\n")
-    (tmp_path / "b.yml").write_text(f"imports:\n  a: {tmp_path / 'a.yml'}\nnum_bits: 4\n")
+    _write_quantizer_attribute(
+        tmp_path / "a.yml", f"imports:\n  b: {tmp_path / 'b.yml'}\nnum_bits: 8\n"
+    )
+    _write_quantizer_attribute(
+        tmp_path / "b.yml", f"imports:\n  a: {tmp_path / 'a.yml'}\nnum_bits: 4\n"
+    )
     recipe_file = tmp_path / "ptq.yml"
     recipe_file.write_text(
         f"imports:\n"
@@ -947,10 +987,12 @@ def test_import_circular_via_path_aliases_raises(tmp_path):
     ``b.yml`` imports back using the relative path without suffix. Without path
     canonicalization these are distinct strings, and the cycle goes undetected.
     """
-    (tmp_path / "a.yml").write_text(f"imports:\n  b: {tmp_path / 'b.yml'}\nnum_bits: 8\n")
+    _write_quantizer_attribute(
+        tmp_path / "a.yml", f"imports:\n  b: {tmp_path / 'b.yml'}\nnum_bits: 8\n"
+    )
     # b imports a via a sibling-relative path + no suffix, so the import key
     # differs textually from the absolute path a was loaded under.
-    (tmp_path / "b.yml").write_text("imports:\n  a: ./a\nnum_bits: 4\n")
+    _write_quantizer_attribute(tmp_path / "b.yml", "imports:\n  a: ./a\nnum_bits: 4\n")
     recipe_file = tmp_path / "ptq.yml"
     recipe_file.write_text(
         f"imports:\n"
@@ -985,13 +1027,14 @@ def test_import_cross_file_same_name_no_conflict(tmp_path):
     Both values must survive together in the final recipe — if the names were
     accidentally shared across files, one would clobber the other.
     """
-    (tmp_path / "fp8.yml").write_text("num_bits: e4m3\n")
-    (tmp_path / "nvfp4.yml").write_text("num_bits: e2m1\n")
+    _write_quantizer_attribute(tmp_path / "fp8.yml", "num_bits: e4m3\n")
+    _write_quantizer_attribute(tmp_path / "nvfp4.yml", "num_bits: e2m1\n")
     # child.yml uses its own "fmt" (→ nvfp4) via an inline $import.  When the
     # parent imports `child`, the snippet it sees has inner.$import already
     # resolved in child's scope.
-    (tmp_path / "child.yml").write_text(
-        f"imports:\n  fmt: {tmp_path / 'nvfp4.yml'}\ninner:\n  $import: fmt\n"
+    _write_quantizer_attribute(
+        tmp_path / "child.yml",
+        f"imports:\n  fmt: {tmp_path / 'nvfp4.yml'}\n$import: fmt\naxis: 0\n",
     )
     recipe_file = tmp_path / "ptq.yml"
     recipe_file.write_text(
@@ -1014,7 +1057,7 @@ def test_import_cross_file_same_name_no_conflict(tmp_path):
     # Parent's "fmt" resolves to fp8 (e4m3), not child's nvfp4.
     assert recipe.quantize["quant_cfg"][0]["cfg"] == {"num_bits": (4, 3)}
     # Child's "fmt" resolves to nvfp4 (e2m1), not parent's fp8.
-    assert recipe.quantize["quant_cfg"][1]["cfg"] == {"inner": {"num_bits": (2, 1)}}
+    assert recipe.quantize["quant_cfg"][1]["cfg"] == {"num_bits": (2, 1), "axis": 0}
 
 
 # ---------------------------------------------------------------------------
@@ -1214,7 +1257,10 @@ def test_load_config_list_valued_yaml(tmp_path):
 
 def test_import_dict_value_resolves_to_list_raises(tmp_path):
     """$import in dict value position raises when snippet is a list."""
-    (tmp_path / "entries.yml").write_text("- a: 1\n- b: 2\n")
+    _write_quantizer_cfg_list(
+        tmp_path / "entries.yml",
+        "- quantizer_name: '*weight_quantizer'\n- quantizer_name: '*input_quantizer'\n",
+    )
     config_file = tmp_path / "config.yml"
     config_file.write_text(
         f"imports:\n  entries: {tmp_path / 'entries.yml'}\nmy_field:\n  $import: entries\n"

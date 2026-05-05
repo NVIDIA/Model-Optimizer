@@ -184,9 +184,11 @@ confused with literal values.
 
 The ``$import`` marker can appear anywhere in the recipe:
 
-- As a **dict value** — the marker is replaced with the snippet content.
-- As a **list element** — the snippet (which must itself be a list) is spliced
-  into the surrounding list.
+- As a **dict value** — the marker is replaced with the snippet content, or
+  merged with inline overrides when sibling keys are present.
+- As a **list element** — the surrounding list's schema and the imported
+  snippet's ``modelopt-schema`` determine whether the imported snippet is
+  appended as one element or spliced as multiple elements.
 
 As a **dict value**, ``$import`` supports composition with clear override
 precedence (lowest to highest):
@@ -222,7 +224,13 @@ list order), then inline keys last.
      axis: 0            # highest precedence
 
 As a **list element**, ``$import`` must be the only key — extra keys alongside
-a list splice are not supported.
+a list import are not supported.  List imports require a typed containing list
+and a schema-declared snippet:
+
+* If the snippet schema is the same list type as the containing list, its
+  entries are spliced into the surrounding list.
+* If the snippet schema is the list element type, it is appended as one list
+  item.
 
 .. code-block:: yaml
 
@@ -293,10 +301,11 @@ precedence rules.
 Schema modelines
 ^^^^^^^^^^^^^^^^^
 
-Reusable snippets can declare the Pydantic schema they are expected to satisfy
-using a comment preamble.  The comment is ignored by YAML itself, but
-ModelOpt's loader reads it before parsing and validates the resolved snippet
-payload after any imports have been expanded:
+Reusable snippets referenced from an ``imports`` section must declare the
+Pydantic-compatible schema they are expected to satisfy using a
+``modelopt-schema`` comment preamble.  The comment is ignored by YAML itself,
+but ModelOpt's loader reads it before parsing and validates the resolved
+snippet payload after any imports have been expanded:
 
 .. code-block:: yaml
 
@@ -309,6 +318,17 @@ payload after any imports have been expanded:
 
 The schema comment is metadata only; it is not returned as part of the loaded
 config, and validation does not expand Pydantic defaults into the snippet.
+
+Top-level recipe files are validated by :func:`~modelopt.recipe.load_recipe`;
+they do not need ``modelopt-schema`` comments.  The comments are the contract
+for reusable snippets, especially snippets under ``modelopt_recipes/configs/``:
+every file referenced from an ``imports`` section must declare
+``modelopt-schema``, whether it is imported into a dict value or a list.
+Schemas should be concrete ModelOpt config types, Pydantic models,
+``TypedDict`` classes, or explicitly typed container aliases such as
+``list[QuantizerCfgEntry]``.  Untyped list schemas are not supported for list
+imports because the loader must know the element type.  For safety,
+``modelopt-schema`` paths must resolve under the ``modelopt.`` package.
 
 List imports are schema-driven.  When a typed list field such as
 ``quant_cfg: list[QuantizerCfgEntry]`` contains a bare import entry, the
@@ -653,7 +673,9 @@ Recipe data model
 Recipes are validated at load time using Pydantic models:
 
 :class:`~modelopt.recipe.config.ModelOptRecipeBase`
-   Base class for all recipe types.  Contains ``recipe_type`` and ``description``.
+   Base class for all recipe types.  Contains ``metadata`` as a
+   :class:`~modelopt.recipe.config.RecipeMetadataConfig` mapping, with
+   ``recipe_type`` and ``description`` convenience properties.
 
 :class:`~modelopt.recipe.config.ModelOptPTQRecipe`
    PTQ-specific recipe.  Adds the ``quantize`` field (a dict with ``quant_cfg`` and
