@@ -41,7 +41,7 @@ TORCH_VERSIONS = {
 }
 
 TRANSFORMERS_VERSIONS = {
-    "tf_latest": None,
+    "tf_latest": "transformers~=5.7.0",
     "tf_min": "transformers~=4.56.0",
 }
 
