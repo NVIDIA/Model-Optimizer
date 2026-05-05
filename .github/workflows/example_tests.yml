@@ -60,7 +60,7 @@ jobs:
     uses: ./.github/workflows/_example_tests_runner.yml
     secrets: inherit
     with:
-      docker_image: "nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc10"
+      docker_image: "nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc12"
       example: ${{ matrix.example }}
       pip_install_extras: "[hf,dev-test]"
       runner: linux-amd64-gpu-rtxpro6000-latest-1
@@ -74,7 +74,7 @@ jobs:
     uses: ./.github/workflows/_example_tests_runner.yml
     secrets: inherit
     with:
-      docker_image: "nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc10"
+      docker_image: "nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc12"
       example: ${{ matrix.example }}
       pip_install_extras: "[hf,dev-test]"
       runner: linux-amd64-gpu-rtxpro6000-latest-2

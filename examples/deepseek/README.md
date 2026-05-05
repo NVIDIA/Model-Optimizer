@@ -63,6 +63,26 @@ DeepSeek V3.2
 torchrun --nproc-per-node 8 --master_port=12346 ptq.py --model_path $DS_CKPT --config DeepSeek-V3.2-Exp/inference/config_671B_v3.2.json --quant_cfg NVFP4_DEFAULT_CFG --output_path $FP4_QUANT_PATH
 ```
 
+#### MoE expert calibration
+
+By default, calibration uses the model's native top-k routing and then runs a
+post-calibration sync that sets every expert's `input_quantizer.amax` (w1/w2/w3)
+to the per-layer global peer max (all-reduced across EP ranks).
+`weight_quantizer.amax` stays per-expert; any uncalibrated expert falls back to
+a compute path over the dequantized FP8 weight. This mirrors the
+`layer_sync_moe_local_experts_amax` flow that mtq runs automatically for
+QuantSequentialMLP-derived MoEs.
+
+To restore the original behavior — force every token through every expert
+during calibration (slower, ~2x forwards, no post-calibration sync) — pass
+`--calib_all_experts`:
+
+```bash
+torchrun --nproc-per-node 8 --master_port=12346 ptq.py --model_path $DS_CKPT --config DeepSeek-V3.2-Exp/inference/config_671B_v3.2.json --quant_cfg NVFP4_DEFAULT_CFG --output_path $FP4_QUANT_PATH --calib_all_experts
+```
+
+A summary of every TensorQuantizer is written to `$FP4_QUANT_PATH/.quant_summary.txt`.
+
 ### Quantize the FP8 hf checkpoint to FP4
 
 We provide a one-step-script which will:

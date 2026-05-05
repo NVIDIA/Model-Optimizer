@@ -153,8 +153,12 @@ def create_decode_calibration_forward_loop(
 ) -> Callable:
     """Create forward loop for decode phase calibration.
 
-    Uses flash attention for fast prefill, then switches to eager attention
-    for decode token generation with softmax hook measurement.
+    Uses SDPA for fast prefill, then switches to eager attention for decode
+    token generation with softmax hook measurement. (Previously used
+    ``flash_attention_2`` for prefill, but transformers>=5.0's FA2 path
+    unconditionally calls ``s_aux.to(query.dtype)`` on the attention-sinks
+    tensor and crashes for models without sinks. SDPA is just as fast for
+    prefill, has no softmax hook, and is version-stable.)
 
     Args:
         calibration_data: List of samples with 'input' and 'length' fields
@@ -180,8 +184,8 @@ def create_decode_calibration_forward_loop(
 
             with torch.no_grad():
                 try:
-                    # Step 1: Fast prefill with flash attention (no measurement)
-                    model.config._attn_implementation = "flash_attention_2"
+                    # Step 1: Fast prefill with SDPA (no measurement)
+                    model.config._attn_implementation = "sdpa"
                     outputs = model(input_ids, use_cache=True)
                     past_key_values = outputs.past_key_values
                     next_token = outputs.logits[:, -1:, :].argmax(dim=-1)

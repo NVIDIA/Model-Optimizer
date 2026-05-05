@@ -72,6 +72,11 @@ has_mcore = False
 with import_plugin("megatron"):
     from megatron.core.models.gpt import GPTModel
     from megatron.core.models.mamba import MambaModel
+
+    try:
+        from megatron.core.models.hybrid.hybrid_model import HybridModel
+    except ImportError:
+        HybridModel = MambaModel
     from megatron.core.models.multimodal.llava_model import LLaVAModel
     from megatron.core.parallel_state import (
         get_pipeline_model_parallel_rank,
@@ -121,7 +126,7 @@ class GPTModelExporter:
         moe_router_dtype: str | None = None,
     ):
         """Create a GPTModel exporter instance."""
-        if not isinstance(model, (GPTModel, MambaModel, LLaVAModel)):
+        if not isinstance(model, (GPTModel, MambaModel, HybridModel, LLaVAModel)):
             raise ValueError("Input to GPTModelExport must be a megatron.core.models.GPTModel!")
 
         self._state_dict = OrderedDict()
@@ -301,9 +306,7 @@ class GPTModelExporter:
                     trust_remote_code=self.trust_remote_code,
                 )
                 tokenizer.save_pretrained(save_directory)
-            except OSError:
-                pass
-            except TypeError:
+            except (OSError, TypeError, ValueError, ImportError):
                 pass
             try:
                 # Load and save preprocessor config from the original model
@@ -743,6 +746,44 @@ class GPTModelExporter:
 
         return all_rules
 
+    def _get_weight_bias(
+        self,
+        module: torch.nn.Module,
+        dtype: torch.dtype = torch.float16,
+        name_to_value: dict[str, torch.Tensor] | None = None,
+    ) -> dict[str, torch.Tensor]:
+        """Get the weight and bias of the module.
+
+        Args:
+            module: The target module to get the weight and bias.
+            dtype: The data type of the weight and bias.
+            name_to_value: The dictionary to store the weight and bias. A new dict is created
+                if not provided.
+
+        Returns:
+            The dictionary containing the weight and bias.
+        """
+        if name_to_value is None:
+            name_to_value = {}
+        # numel() > 0 intentionally excludes zero-element weight tensors (e.g. MoE routing
+        # layers whose weight is a placeholder) so callers can use "weight" in name_to_value
+        # as a reliable guard without re-inspecting module.weight.
+        if hasattr(module, "weight") and module.weight is not None and module.weight.numel() > 0:
+            weight = module.weight.to(dtype).cpu()
+            name_to_value["weight"] = weight
+
+        if hasattr(module, "bias") and module.bias is not None and module.bias.numel() > 0:
+            name_to_value["bias"] = module.bias.to(dtype).cpu()
+
+        if (
+            hasattr(module, "expert_bias")
+            and module.expert_bias is not None
+            and module.expert_bias.numel() > 0
+        ):
+            name_to_value["expert_bias"] = module.expert_bias.to(dtype).cpu()
+
+        return name_to_value
+
     def _get_quantized_state(
         self,
         module: torch.nn.Module,
@@ -767,21 +808,10 @@ class GPTModelExporter:
             self.exclude_modules.append(prefix.removesuffix("."))
         block_size = get_weight_block_size(module)
 
-        if hasattr(module, "weight") and module.weight is not None and module.weight.numel() > 0:
-            weight = module.weight.to(dtype).cpu()
-            name_to_value["weight"] = weight
-        else:
+        name_to_value = self._get_weight_bias(module, dtype, name_to_value)
+
+        if "weight" not in name_to_value:
             return name_to_value, qformat, block_size
-
-        if hasattr(module, "bias") and module.bias is not None and module.bias.numel() > 0:
-            name_to_value["bias"] = module.bias.to(dtype).cpu()
-
-        if (
-            hasattr(module, "expert_bias")
-            and module.expert_bias is not None
-            and module.expert_bias.numel() > 0
-        ):
-            name_to_value["expert_bias"] = module.expert_bias.to(dtype).cpu()
 
         if qformat == QUANTIZATION_NONE:
             return name_to_value, qformat, block_size

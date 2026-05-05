@@ -163,6 +163,15 @@ def max_calibrate(
         if hasattr(module, "layer_sync_moe_local_experts_amax"):
             module.layer_sync_moe_local_experts_amax(sync_weight_amax=sync_expert_weight_amax)
 
+    # Promote eligible static-block NVFP4 weight quantizers to NVFP4StaticQuantizer
+    # so the static blockwise fake-quant path is used in forward and the export
+    # picks up the two-level (per-block + global) scaling. Run before the
+    # ``distributed_sync`` early return so single-process callers also get the
+    # promotion. ``promote_nvfp4_static_quantizers`` only promotes when
+    # ``is_static_block_quant`` is True and the per-block ``_amax`` buffer is
+    # populated, so it's a no-op for dynamic-block / non-NVFP4 configs.
+    promote_nvfp4_static_quantizers(model)
+
     if not distributed_sync:
         return
 
@@ -1270,11 +1279,30 @@ def awq_lite(
 
     for name, module in model.named_modules():
         if hasattr(module, "awq_lite"):
-            if module.awq_lite.num_cache_steps == 0:
-                # Uncalibrated expert: max calibrate weights and apply neutral
-                # (all-ones) pre_quant_scale for export consistency.
-                # NOTE: ones_scale must be registered OUTSIDE enable_weight_access_and_writeback
+            # Flag modules whose search pass missed them despite cache hits, so
+            # they fall through to the neutral-scale path below.
+            if module.awq_lite.num_cache_steps > 0 and module.awq_lite.num_search_steps == 0:
+                module.awq_lite.is_enabled = False
+                warnings.warn(
+                    "awq_lite: Calling `forward_loop(model)` the second time did not forward"
+                    f" data through the {name}. Please provide a valid `forward_loop` function"
+                    " that can be used to forward data through the model many times."
+                )
+
+            if not module.awq_lite.is_enabled:
+                # Expert is disabled — uncalibrated (no cache-pass tokens, set
+                # at the pre-search pass above), had NaN in act/weight scales,
+                # or saw no search-pass tokens. Max-calibrate weights and apply
+                # a neutral (all-ones) pre_quant_scale so the exporter sees a
+                # consistent nvfp4_awq format across all expert linears in an
+                # MoE group.
+                # NOTE: ones-scale must be registered OUTSIDE enable_weight_access_and_writeback
                 # because HF accelerate post_forward drops newly-registered submodule buffers.
+                warnings.warn(
+                    f"awq_lite: Forcing pre_quant_scale=1 for {name} because the expert "
+                    "was not properly exercised during calibration. This may degrade accuracy; "
+                    "consider increasing calibration size or using a more diverse dataset."
+                )
                 with enable_weight_access_and_writeback(module, model, name_to_module):
                     max_calibrate(module, lambda module: module.weight_quantizer(module.weight))
                     w_shape, w_dtype, w_device = (
@@ -1289,13 +1317,6 @@ def awq_lite(
                     device=w_device,
                 )
             else:
-                if module.awq_lite.num_search_steps == 0:
-                    module.awq_lite.is_enabled = False
-                    warnings.warn(
-                        "awq_lite: Calling `forward_loop(model)` the second time did not forward"
-                        f" data through the {name}. Please provide a valid `forward_loop` function"
-                        " that can be used to forward data through the model many times."
-                    )
                 with enable_weight_access_and_writeback(module, model, name_to_module):
                     postprocess(module, name)
 
@@ -1698,6 +1719,7 @@ def gptq(
     forward_loop: ForwardLoop,
     perc_damp: float = 0.01,
     block_size: int = 128,
+    fused: bool = False,
 ):
     """GPTQ quantization.
 
@@ -1723,6 +1745,7 @@ def gptq(
         forward_loop: Callable that replays calibration inputs through *model*.
         perc_damp: Percentage of avg Hessian diagonal for damping (default: 0.01).
         block_size: Block size for GPTQ weight update.
+        fused: If True, use fused Triton kernel for NVFP4 static quantization.
     """
     total_start = time.time()
 
@@ -1745,7 +1768,7 @@ def gptq(
             cls = GPTQHelper
         else:
             cls = _GPTQ_HELPER_REGISTRY.get(backend, GPTQHelper)
-        return cls(m, name, offload_to_cpu=True)
+        return cls(m, name, offload_to_cpu=True, fused=fused)
 
     gptq_handles = {name: _make_gptq_handle(name, m) for name, m in quantized_layers}
     for handle in gptq_handles.values():
