@@ -1,16 +1,15 @@
 defaults:
   - Llama-3_1-8B
-  - override pruning: attn_pruning
   - _self_
 
 # Input Hugging Face model to compress
-input_hf_model_path: /lustre/fs1/portfolios/coreai/projects/coreai_dlalgo_llm/users/gkarch/puzzletron/checkpoints/meta-llama/Llama-3.1-8B-Instruct
+input_hf_model_path: /workspace/hf_models/meta-llama/Llama-3.1-8B-Instruct
 
 # Dataset path for pruning and NAS scoring
-dataset_path: /lustre/fs1/portfolios/coreai/projects/coreai_dlalgo_llm/users/gkarch/modelopt/datasets/nvidia/Nemotron-Post-Training-Dataset-v2
+dataset_path: /workspace/datasets/Nemotron-Post-Training-Dataset-v2
 
 # Working directory for puzzletron outputs
-puzzle_dir: /lustre/fs1/portfolios/coreai/projects/coreai_dlalgo_llm/users/gkarch/modelopt/Model-Optimizer/artifacts
+puzzle_dir: /workspace/puzzle_dir
 
 dist_timeout_minutes: 60
 
@@ -27,3 +26,7 @@ calc_subblock_stats:
 mip:
   human_constraints:
     target_latency: 21
+
+# FFN intermediate sizes to search over (heterogeneous architecture)
+pruning:
+  intermediate_size_list: [3072, 5888, 8704, 11520] # teacher_intermediate_size is 14336

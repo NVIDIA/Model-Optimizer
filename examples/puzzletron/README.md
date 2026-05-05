@@ -11,7 +11,7 @@ To use the Puzzle algorithm effectively, we need to specify the target number of
 
 In this example, we compress the [Llama-3.1-8B-Instruct](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct) model reducing GPU memory usage from 113 GiB to 96 GiB (15% reduction) with less than 1% regression in the token_accuracy_top_10 metric. Other supported models should be compressed in a similar way. For GptOss there is one [additional step to be performed](GPTOSS.md).
 
-> **Note:** Other models are also supported. See the [configs](./configs/) directory for additional model configurations (e.g., Llama-3.2-3B-Instruct on 1x H100, Qwen2.5-7B-Instruct on 1x H100, Qwen3-8B on 1x H100, Nemotron-Nano-12B-v2 on 1x H100, Mistral-Small-24B-Instruct-2501 on 4x H100). For information on adding support for new models, see the [AnyModel Guide](../../modelopt/torch/puzzletron/anymodel/README.md).
+> **Note:** Other models are also supported. See the [configs](./configs/) directory for additional model configurations (e.g., Llama-3.2-3B-Instruct on 1x H100, Qwen2.5-7B-Instruct on 1x H100, Qwen3-8B on 1x H100, Nemotron-Nano-12B-v2 on 1x H100, Mistral-Small-24B-Instruct-2501 on 4x H100). For KV-head pruning see [`llama-3_1-8B_pruneattn_runtime`](./configs/llama-3_1-8B_pruneattn_runtime/) and the [Attention Pruning](#attention-pruning-kv-head-reduction) and [Runtime-Based Latency Optimization](#runtime-based-latency-optimization) sections below. For information on adding support for new models, see the [AnyModel Guide](../../modelopt/torch/puzzletron/anymodel/README.md).
 
 ## Environment
 
@@ -342,6 +342,33 @@ To recover degradation in the quality of the compressed model, we can use knowle
 See [Megatron-Bridge distillation](../megatron_bridge/README.md#distillation) for instructions on using Megatron-Bridge for knowledge distillation. The distillation script supports both standard HuggingFace and Puzzletron AnyModel checkpoints.
 
 For distillation results on Puzzletron-compressed models, see [examples/pruning/puzzletron/](../pruning/puzzletron/README.md).
+
+## Runtime-Based Latency Optimization
+
+By default, subblock statistics use the `trt_torch` backend with theoretical memory proxies. You can instead enable **runtime stats** to measure actual inference latency via vLLM, which unlocks latency-based MIP constraints:
+
+```yaml
+calc_subblock_stats:
+  runtime_stats:
+    enabled: true
+    synth_dataset_num_requests: 32
+    backend: vllm
+    num_warmup_iters: 2
+    num_iters: 10
+    batch_size: 1
+
+mip:
+  human_constraints:
+    target_latency: 20  # ms
+```
+
+Because vLLM startup adds substantial overhead during stats collection, extend the distributed process group timeout accordingly:
+
+```yaml
+dist_timeout_minutes: 60  # default is 10 if omitted
+```
+
+This field is supported in any Puzzletron YAML config and overrides the default 10-minute distributed timeout.
 
 ## Advanced Usage
 
