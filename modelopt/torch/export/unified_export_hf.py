@@ -88,6 +88,7 @@ from .model_config import (
     QUANTIZATION_W4A8_NVFP4_FP8,
 )
 from .model_utils import get_language_model_from_vl, is_multimodal_model
+from .moe_utils import _export_fused_experts
 from .plugins import SpeculativeDecodingExporter, has_spec_opt
 from .quant_utils import (
     fuse_prequant_layernorm,
@@ -642,11 +643,20 @@ def _process_quantized_modules(
         if is_modelopt_qlora and (hasattr(sub_module, "base_layer")):
             continue
 
+        # Preprocessing: restore unpacked weight so the export path can read
+        # the live quantizer state. Falls through to the export branches below.
         if hasattr(sub_module, "weight_packed") or (
             "QuantFP8Linear" in type(sub_module).__name__ and sub_module.weight.element_size() <= 1
         ):
             sub_module.unpack_weight()
-        if get_quantization_format(sub_module) != QUANTIZATION_NONE:
+
+        if hasattr(sub_module, "gate_up_proj_weight_quantizers"):
+            # _QuantFusedExperts uses plural `gate_up_proj_weight_quantizers` (ModuleList),
+            # which get_quantization_format's singular-weight_quantizer check misses. Handle
+            # it explicitly before the format gate so fused-experts get split + quantized.
+            with fsdp2_aware_weight_update(model, sub_module, reshard=False):
+                _export_fused_experts(sub_module, dtype)
+        elif get_quantization_format(sub_module) != QUANTIZATION_NONE:
             # Skip QuantMoELinear - it's handled separately in _reconstruct_fused_moe_linear
             if type(sub_module).__name__ == "QuantMoELinear":
                 continue
@@ -677,13 +687,6 @@ def _process_quantized_modules(
                 with fsdp2_aware_weight_update(model, sub_module, reshard=False):
                     for weight_name in ["gate_up_proj", "down_proj"]:
                         _export_quantized_weight(sub_module, dtype, weight_name)
-            elif hasattr(sub_module, "gate_up_proj_weight_quantizers"):
-                # Generic fused MoE experts (_QuantFusedExperts) with per-expert
-                # quantizer ModuleLists. Split into per-expert modules and export.
-                from modelopt.torch.export.moe_utils import _export_fused_experts
-
-                with fsdp2_aware_weight_update(model, sub_module, reshard=False):
-                    _export_fused_experts(sub_module, dtype)
 
 
 def _export_transformers_checkpoint(
@@ -1186,12 +1189,25 @@ def export_hf_checkpoint(
     try:
         post_state_dict, hf_quant_config = _export_transformers_checkpoint(model, dtype)
 
-        if hf_quant_config is not None:
+        # Only treat the export as quantized when at least one quant_algo field is set.
+        # get_quant_config always returns a dict (even for sparsity-only or unmodified models),
+        # so emitting hf_quant_config.json unconditionally produces a file with
+        # "quant_algo": null that downstream loaders (e.g. TensorRT-LLM) reject as a
+        # malformed pre-quantized checkpoint.
+        quantization_details = (hf_quant_config or {}).get("quantization", {})
+        is_quantized_export = (
+            quantization_details.get("quant_algo") is not None
+            or quantization_details.get("kv_cache_quant_algo") is not None
+        )
+
+        if is_quantized_export:
             # Save hf_quant_config.json for backward compatibility
             with open(f"{export_dir}/hf_quant_config.json", "w") as file:
                 json.dump(hf_quant_config, file, indent=4)
 
             hf_quant_config = convert_hf_quant_config_format(hf_quant_config)
+        else:
+            hf_quant_config = None
 
         # Remove hf_quantizer from model so post_state_dict can be exported.
         if getattr(model, "hf_quantizer", None) is not None:

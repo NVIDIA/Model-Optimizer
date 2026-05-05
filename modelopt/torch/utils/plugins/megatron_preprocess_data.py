@@ -78,8 +78,9 @@ python -m modelopt.torch.utils.plugins.megatron_preprocess_data \
     --strip_newlines
 ```
 
-Note: ``--hf_streaming`` without ``--hf_max_samples_per_split`` falls back to non-streaming,
-since streaming the full dataset is slower than the cached non-streaming path.
+Note: streaming does not cache to disk, so re-runs re-download. For full-dataset streaming
+without a sample cap this is slower than non-streaming mode, but it avoids Arrow schema
+compatibility issues with complex nested message types.
 """
 
 import argparse
@@ -191,7 +192,14 @@ class _Encoder:
                 if tools:
                     kwargs["tools"] = tools
                 value = self._process_messages(value)
-                text = _Encoder.tokenizer.apply_chat_template(value, tokenize=False, **kwargs)
+                try:
+                    text = _Encoder.tokenizer.apply_chat_template(value, tokenize=False, **kwargs)
+                except Exception as e:
+                    print(
+                        f"apply_chat_template failed: {e}\nData:\n{json.dumps(data, indent=2, default=str)}",
+                        flush=True,
+                    )
+                    raise
                 # chat template already embeds all special tokens; don't add BOS again
                 add_special_tokens = False
             else:
@@ -452,8 +460,9 @@ def megatron_preprocess_data(
         hf_split: Hugging Face Hub dataset split. Defaults to None (all splits).
         hf_max_samples_per_split: Maximum number of rows to consume per split.
         hf_streaming: Load HuggingFace datasets in streaming mode. Only consumed rows are
-            downloaded — useful for very large pretraining datasets. Note: streaming does not
-            cache to disk, so re-runs re-download. Defaults to False.
+            downloaded — useful for very large pretraining datasets or datasets with complex
+            nested message schemas that cause Arrow type-cast errors in non-streaming mode.
+            Note: streaming does not cache to disk, so re-runs re-download. Defaults to False.
         output_dir: Path to directory to save binary output files.
         tokenizer_name_or_path: Name or path of the Hugging Face tokenizer to use.
         json_keys: Key or list of keys to extract from json. Defaults to ["text"].
@@ -485,10 +494,9 @@ def megatron_preprocess_data(
         warnings.warn(
             "--hf_streaming is set but --hf_max_samples_per_split is not. "
             "Streaming without a sample cap re-downloads the full dataset on every run with no "
-            "disk cache, which is slower than non-streaming mode. Falling back to streaming=False.",
+            "disk cache, which is slower than the cached non-streaming path.",
             stacklevel=2,
         )
-        hf_streaming = False
 
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     vocab_size = AutoTokenizer.from_pretrained(tokenizer_name_or_path).vocab_size
