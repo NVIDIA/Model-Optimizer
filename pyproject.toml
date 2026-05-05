@@ -82,7 +82,7 @@ hf = [
     "peft>=0.17.0",
     "sentencepiece>=0.2.1",                                                           # Also implicitly used in test_unified_export_megatron, test_vllm_fakequant_megatron_export
     "tiktoken",
-    "transformers>=4.56",                                                             # Should match modelopt/torch/__init__.py and noxfile.py
+    "transformers>=4.56,<5.8",                                                        # Should match modelopt/torch/__init__.py and noxfile.py
     "wonderwords",
 ]
 
