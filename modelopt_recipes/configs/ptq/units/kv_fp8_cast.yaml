@@ -13,21 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-imports:
-  base_disable_all: configs/ptq/units/base_disable_all
-  default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
-  w4a4_nvfp4_nvfp4: configs/ptq/units/w4a4_nvfp4_nvfp4
-  kv_fp8_cast: configs/ptq/units/kv_fp8_cast
+# FP8 E4M3 KV cache quantization with constant amax.
 
-metadata:
-  recipe_type: ptq
-  description: >-
-    NVFP4 W4A4, FP8 KV cache with constant amax (skips KV calibration; amax
-    hardcoded to FP8 E4M3 max 448.0), max calibration.
-quantize:
-  algorithm: max
-  quant_cfg:
-    - $import: base_disable_all
-    - $import: w4a4_nvfp4_nvfp4
-    - $import: kv_fp8_cast
-    - $import: default_disabled_quantizers
+# modelopt-schema: modelopt.torch.quantization.config.QuantizerCfgListConfig
+imports:
+  fp8: configs/numerics/fp8
+---
+  - quantizer_name: '*[kv]_bmm_quantizer'
+    cfg:
+      $import: fp8
+      use_constant_amax: true

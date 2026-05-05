@@ -1072,6 +1072,8 @@ _BUILTIN_CONFIG_SNIPPETS = [
     "configs/ptq/units/base_disable_all",
     "configs/ptq/units/default_disabled_quantizers",
     "configs/ptq/units/kv_fp8",
+    "configs/ptq/units/kv_fp8_cast",
+    "configs/ptq/units/kv_nvfp4_cast",
     "configs/ptq/units/w4a4_nvfp4_nvfp4",
     "configs/ptq/units/w8a8_fp8_fp8",
     "configs/ptq/presets/kv/fp8",
