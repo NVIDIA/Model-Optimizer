@@ -99,8 +99,8 @@ parse_options() {
   fi
 
   # Verify required options are provided
-  if [ -z "$MODEL_PATH" ] || [ -z "$QFORMAT" ] || [ -z "$TASKS" ]; then
-    echo "Usage: $0 --model=<MODEL_PATH> --quant=<QFORMAT> --tasks=<TASK,...>"
+  if [ -z "$MODEL_PATH" ] || [ -z "$TASKS" ] || { [ -z "$QFORMAT" ] && [ -z "$RECIPE" ]; }; then
+    echo "Usage: $0 --model=<MODEL_PATH> (--quant=<QFORMAT> | RECIPE=<recipe>) --tasks=<TASK,...>"
     echo "Optional args: --sparsity=<SPARSITY_FMT> --awq_block_size=<AWQ_BLOCK_SIZE> --calib=<CALIB_SIZE>"
     exit 1
   fi

@@ -62,6 +62,11 @@ for qformat in $QFORMAT; do
 done
 IFS=" "
 
+if [ -n "$RECIPE" ] && [ -n "$QFORMAT" ]; then
+    echo "Error: --recipe and --quant are mutually exclusive." >&2
+    exit 1
+fi
+
 script_dir="$(dirname "$(readlink -f "$0")")"
 
 pushd $script_dir/..
@@ -72,7 +77,12 @@ fi
 
 QFORMAT_MODIFIED="${QFORMAT//,/_}"
 
-MODEL_NAME=$(basename $MODEL_PATH | sed 's/[^0-9a-zA-Z\-]/_/g')_${QFORMAT_MODIFIED}${KV_CACHE_QUANT:+_kv_${KV_CACHE_QUANT}}
+if [ -n "$RECIPE" ]; then
+    RECIPE_LABEL=$(basename "$RECIPE" .yaml | sed 's/[^0-9a-zA-Z\-]/_/g')
+    MODEL_NAME=$(basename $MODEL_PATH | sed 's/[^0-9a-zA-Z\-]/_/g')_${RECIPE_LABEL}
+else
+    MODEL_NAME=$(basename $MODEL_PATH | sed 's/[^0-9a-zA-Z\-]/_/g')_${QFORMAT_MODIFIED}${KV_CACHE_QUANT:+_kv_${KV_CACHE_QUANT}}
+fi
 
 SAVE_PATH=${ROOT_SAVE_PATH}/saved_models_${MODEL_NAME}
 
@@ -181,11 +191,16 @@ if [[ $TASKS =~ "quant" ]] || [[ ! -d "$SAVE_PATH" ]] || [[ ! $(ls -A $SAVE_PATH
 
     if [[ "$MODEL_CONFIG_EXIST" == false ]]; then
         echo "Quantizing original model..."
+        if [ -n "$RECIPE" ]; then
+            QUANT_ARG="--recipe=$RECIPE"
+        else
+            QUANT_ARG="--qformat=${QFORMAT// /,}"
+        fi
         python hf_ptq.py \
             --pyt_ckpt_path=$MODEL_PATH \
             --export_path=$SAVE_PATH \
             --sparsity_fmt=$SPARSITY_FMT \
-            --qformat="${QFORMAT// /,}" \
+            $QUANT_ARG \
             --calib_size=$CALIB_SIZE \
             --batch_size=$CALIB_BATCH_SIZE \
             --inference_tensor_parallel=$TP \
