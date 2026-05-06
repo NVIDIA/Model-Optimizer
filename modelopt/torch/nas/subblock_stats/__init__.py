@@ -12,7 +12,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Subblock runtime statistics API for ModelOpt NAS.
 
-"""Subblock statistics collection for Puzzletron."""
+This module provides utilities for measuring and calculating runtime statistics
+of subblocks (e.g., Attention, FFN) within transformer architectures.
 
-from .calc_subblock_stats import *
+Primary API:
+    - calc_runtime_for_subblocks: Empirically measures runtime for candidate subblock configurations
+"""
+from .calc_runtime_stats import calc_runtime_for_subblocks
