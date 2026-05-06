@@ -336,7 +336,21 @@ def _schema_equal(left: Any | None, right: Any | None) -> bool:
 def _list_element_schema(schema_type: Any | None) -> Any | None:
     """Return the element schema for a typed ``list[T]`` annotation."""
     schema_type = _unwrap_schema_type(schema_type)
-    if get_origin(schema_type) is not list:
+    origin = get_origin(schema_type)
+    if origin in (UnionType, Union):
+        element_schemas = [
+            element_schema
+            for arg in get_args(schema_type)
+            if (element_schema := _list_element_schema(arg)) is not None
+        ]
+        if len(element_schemas) == 1:
+            return element_schemas[0]
+        if element_schemas and all(
+            _schema_equal(element_schemas[0], item) for item in element_schemas[1:]
+        ):
+            return element_schemas[0]
+        return None
+    if origin is not list:
         return None
     args = get_args(schema_type)
     if len(args) != 1 or args[0] is Any:

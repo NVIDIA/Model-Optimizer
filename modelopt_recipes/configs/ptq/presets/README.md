@@ -1,7 +1,7 @@
 # PTQ Preset Configs
 
 This directory holds preset quantization configurations that serve as the
-YAML source of truth for the hardcoded `*_CFG` dicts in
+YAML source of truth for the `*_CFG` dicts exposed from
 `modelopt.torch.quantization.config` (e.g., `FP8_DEFAULT_CFG`,
 `FP8_KV_CFG`).
 

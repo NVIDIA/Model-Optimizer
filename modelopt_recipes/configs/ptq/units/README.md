@@ -21,5 +21,6 @@ recipes (under `general/` or `models/`) or presets (under `presets/`).
 | `kv_fp8.yaml` | FP8 E4M3 KV cache quantizer entry; supported on Hopper+ GPUs |
 | `kv_fp8_cast.yaml` | FP8 E4M3 KV cache with constant amax (skips KV calibration); supported on Hopper+ GPUs |
 | `kv_nvfp4_cast.yaml` | NVFP4 KV cache with constant amax (skips KV calibration); supported on Blackwell+ GPUs |
+| `mamba_moe_disabled_quantizers.yaml` | Shared Mamba-MoE quantizer exclusions |
 | `w8a8_fp8_fp8.yaml` | FP8 weight + activation quantizer entries (W8A8); supported on Hopper+ GPUs |
 | `w4a4_nvfp4_nvfp4.yaml` | NVFP4 weight + activation quantizer entries (W4A4); supported on Blackwell+ GPUs |

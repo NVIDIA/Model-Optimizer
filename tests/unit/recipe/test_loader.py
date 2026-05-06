@@ -16,6 +16,7 @@
 """Unit tests for modelopt.recipe.loader and modelopt.recipe.loader.load_config."""
 
 import re
+from importlib.resources import files
 
 import pytest
 
@@ -1336,20 +1337,20 @@ def test_import_cross_file_same_name_no_conflict(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-_BUILTIN_CONFIG_SNIPPETS = [
-    "configs/numerics/fp8",
-    "configs/numerics/nvfp4",
-    "configs/numerics/nvfp4_static",
-    "configs/ptq/units/base_disable_all",
-    "configs/ptq/units/default_disabled_quantizers",
-    "configs/ptq/units/kv_fp8",
-    "configs/ptq/units/kv_fp8_cast",
-    "configs/ptq/units/kv_nvfp4_cast",
-    "configs/ptq/units/w4a4_nvfp4_nvfp4",
-    "configs/ptq/units/w8a8_fp8_fp8",
-    "configs/ptq/presets/kv/fp8",
-    "configs/ptq/presets/model/fp8",
-]
+def _iter_builtin_config_snippets(root):
+    """Yield built-in config YAML files that declare a modelopt schema."""
+    for child in sorted(root.iterdir(), key=lambda path: path.name):
+        if child.is_dir():
+            yield from _iter_builtin_config_snippets(child)
+        elif child.name.endswith((".yaml", ".yml")) and "modelopt-schema:" in child.read_text(
+            encoding="utf-8"
+        ):
+            yield child
+
+
+_BUILTIN_CONFIG_SNIPPETS = list(
+    _iter_builtin_config_snippets(files("modelopt_recipes").joinpath("configs"))
+)
 
 
 @pytest.mark.parametrize("config_path", _BUILTIN_CONFIG_SNIPPETS)
@@ -1426,6 +1427,41 @@ def test_modelopt_schema_comment_validates_after_import_resolution(tmp_path):
         "quantizer_name": "*weight_quantizer",
         "cfg": {"num_bits": (4, 3)},
     }
+
+
+def test_import_dict_snippet_in_union_typed_list_field(tmp_path):
+    """A bare import can append into QuantizerCfgEntry.cfg's list branch."""
+    (tmp_path / "int4.yaml").write_text(
+        "# modelopt-schema: modelopt.torch.quantization.config.QuantizerAttributeConfig\n"
+        "num_bits: 4\n"
+        "block_sizes:\n"
+        "  -1: 128\n"
+        "  type: static\n"
+    )
+    (tmp_path / "fp8.yaml").write_text(
+        "# modelopt-schema: modelopt.torch.quantization.config.QuantizerAttributeConfig\n"
+        "num_bits: e4m3\n"
+    )
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        f"# modelopt-schema: modelopt.torch.quantization.config.QuantizeConfig\n"
+        f"imports:\n"
+        f"  int4: {tmp_path / 'int4.yaml'}\n"
+        f"  fp8: {tmp_path / 'fp8.yaml'}\n"
+        f"algorithm: awq_lite\n"
+        f"quant_cfg:\n"
+        f"  - quantizer_name: '*weight_quantizer'\n"
+        f"    cfg:\n"
+        f"      - $import: int4\n"
+        f"      - $import: fp8\n"
+    )
+
+    data = load_config(config_file)
+
+    assert _cfg_to_dict(data["quant_cfg"][0]["cfg"]) == [
+        {"num_bits": 4, "block_sizes": {-1: 128, "type": "static"}},
+        {"num_bits": (4, 3)},
+    ]
 
 
 # ---------------------------------------------------------------------------
