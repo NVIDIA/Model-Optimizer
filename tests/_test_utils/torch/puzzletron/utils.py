@@ -16,6 +16,7 @@
 import os
 from pathlib import Path
 
+import pytest
 import torch
 from _test_utils.torch.transformers_models import get_tiny_tokenizer
 from datasets import Dataset, DatasetDict
@@ -24,6 +25,40 @@ from transformers import AutoConfig, AutoModelForCausalLM, PreTrainedTokenizerBa
 import modelopt.torch.puzzletron as mtpz
 import modelopt.torch.utils.distributed as dist
 from modelopt.torch.export import copy_hf_ckpt_remote_code
+
+# Shared parametrize tuple for puzzletron GPU integration tests.
+# Fields: (hf_model_name, converter, hybrid_override_pattern, has_moe_layers).
+# To add a new model family, append a single pytest.param row here — every test
+# that imports PUZZLETRON_FAMILIES picks it up automatically.
+PUZZLETRON_FAMILIES = [
+    pytest.param("meta-llama/Llama-3.1-8B-Instruct", "llama", None, False, id="llama-3.1-8B"),
+    pytest.param("meta-llama/Llama-3.2-3B-Instruct", "llama", None, False, id="llama-3.2-3B"),
+    pytest.param(
+        "mistralai/Mistral-Small-24B-Instruct-2501",
+        "mistral_small",
+        None,
+        False,
+        id="mistral-small-24B",
+    ),
+    pytest.param(
+        "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16",
+        "nemotron_h",
+        "*E",
+        True,
+        id="nemotron-3-30B-A3B",
+    ),
+    pytest.param(
+        "nvidia/NVIDIA-Nemotron-Nano-12B-v2",
+        "nemotron_h_v2",
+        "*-",
+        False,
+        id="nemotron-nano-12B-v2",
+    ),
+    pytest.param("openai/gpt-oss-20b", "gpt_oss", None, True, id="gpt-oss-20b"),
+    pytest.param("Qwen/Qwen2.5-7B-Instruct", "qwen2", None, False, id="qwen2.5-7B"),
+    pytest.param("Qwen/Qwen3-8B", "qwen3", None, False, id="qwen3-8B"),
+    pytest.param("Qwen/Qwen3-VL-30B-A3B-Instruct", "qwen3_vl", None, True, id="qwen3-VL-30B-A3B"),
+]
 
 
 def setup_test_model_and_data(

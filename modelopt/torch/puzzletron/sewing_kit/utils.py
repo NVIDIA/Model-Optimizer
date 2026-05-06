@@ -35,6 +35,7 @@ import torch._C
 import torch._dynamo
 import torch.distributed
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.utils._pytree as pytree
 from torch import Tensor
 from torch._subclasses import FakeTensor, FakeTensorMode
@@ -451,3 +452,45 @@ def _get_group_kwarg_if_necessary() -> dict:
         torch.distributed.distributed_c10d._object_to_tensor
     ).parameters.keys()
     return dict(group=None) if "group" in arg_names else dict()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Loss functions for bypass distillation (blockwise local knowledge distillation)
+# ──────────────────────────────────────────────────────────────────────────────
+
+# `normalized_mse_loss` already lives in tools.kd_model — re-export it here so
+# bypass-distillation imports stay co-located with the per-vector / per-batch
+# variants below, without duplicating the implementation. The `as
+# normalized_mse_loss` form is PEP 484's explicit re-export (mypy treats
+# `from X import Y` as a private import otherwise).
+from modelopt.torch.puzzletron.tools.kd_model import (  # noqa: E402
+    normalized_mse_loss as normalized_mse_loss,
+)
+
+
+def vectorwise_normalized_mse_loss(
+    input: torch.Tensor,
+    target: torch.Tensor,
+    epsilon: float = 1e-6,
+) -> torch.Tensor:
+    """Like normalized_mse_loss, but normalization is done per-vector (last dim), then averaged."""
+    return batched_normalized_mse_loss(input, target, epsilon, batch_dims=range(input.ndim - 1))
+
+
+def batched_normalized_mse_loss(
+    input: torch.Tensor,
+    target: torch.Tensor,
+    epsilon: float = 1e-6,
+    batch_dims: Sequence[int] = (0,),
+) -> torch.Tensor:
+    """Like normalized_mse_loss, but normalization is done on non-batch dims, then averaged.
+
+    Useful when activations within a batch item should be normalized independently
+    rather than normalizing across the full batch.
+    """
+    norm_dims = list(set(range(input.ndim)) - set(batch_dims))
+    norm_of_target_vectors = F.mse_loss(
+        target, torch.zeros_like(target) + epsilon, reduction="none"
+    ).mean(norm_dims)
+    loss = F.mse_loss(input, target, reduction="none").mean(norm_dims) / norm_of_target_vectors
+    return loss.mean()

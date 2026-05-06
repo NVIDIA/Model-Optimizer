@@ -211,7 +211,21 @@ def _build_subblocks_df(
     checkpoint_dirs = _get_last_checkpoint_from_each_experiment(
         master_puzzle_dir, trust_remote_code=trust_remote_code
     )
-    checkpoint_dirs = [teacher_checkpoint_dir] + list(checkpoint_dirs - {teacher_checkpoint_dir})
+
+    # Order the non-teacher checkpoints so that downstream `drop_duplicates(keep="first")`
+    # deterministically prefers bypass-trained subblocks over Truncate-init pruned ones
+    # when both produce a row with the same architectural identifier. Without this,
+    # `set` iteration order makes the choice random (hash-of-path) and we'd sometimes
+    # discard the BLD-trained weights we just paid 30+ min to compute.
+    #
+    # Priority (lowest sort key wins): 0 = bypass-trained, 1 = everything else.
+    # Bypass checkpoints land under `<puzzle_dir>/bypass/bypass_runs/<exp_id>/<latest>`.
+    def _checkpoint_priority(p: Path) -> tuple[int, str]:
+        is_bypass = "bypass" in p.parts and "bypass_runs" in p.parts
+        return (0 if is_bypass else 1, str(p))
+
+    non_teacher_dirs = sorted(checkpoint_dirs - {teacher_checkpoint_dir}, key=_checkpoint_priority)
+    checkpoint_dirs = [teacher_checkpoint_dir] + non_teacher_dirs
     checkpoints_to_split = [teacher_checkpoint_dir]
 
     subblock_rows = []

@@ -24,6 +24,7 @@ This module provides utilities for:
 # mypy: ignore-errors
 
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -337,6 +338,20 @@ def format_stitched_losses(
     """
     if not losses_dict:
         return "❌ No losses found"
+
+    # Filter out nan entries — these are no-op blocks (e.g. Mamba) with no trainable
+    # parameters. The training loop sets their stitched_module_loss to NaN intentionally
+    # (see training_loop.py); filtering them here keeps the table focused on the
+    # actually-trained blocks while still surfacing real NaNs (which would only appear
+    # on a block that does have an optimizer and has diverged).
+    losses_dict = {k: v for k, v in losses_dict.items() if not math.isnan(v)}
+    if best_steps_dict:
+        best_steps_dict = {k: v for k, v in best_steps_dict.items() if k in losses_dict}
+    if best_values_dict:
+        best_values_dict = {k: v for k, v in best_values_dict.items() if k in losses_dict}
+
+    if not losses_dict:
+        return "❌ No trainable blocks found"
 
     lines = []
 

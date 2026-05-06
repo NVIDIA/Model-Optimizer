@@ -67,7 +67,6 @@ def run_full_puzzletron(hydra_config_path: str):
     Args:
         config_path: Path to the YAML configuration file
     """
-    mtpz.tools.mprint("Puzzletron Progress 1/8: starting puzzletron pipeline")
     dist.setup(timeout=timedelta(minutes=10))
 
     # Register Hydra custom resolvers (needed for config resolution)
@@ -77,11 +76,16 @@ def run_full_puzzletron(hydra_config_path: str):
     hydra_config_dir = str(hydra_config_path.parent)
     hydra_config_name = hydra_config_path.stem
 
-    # Load hydra config
+    # Load hydra config to determine total step count (bypass adds one step)
     hydra_cfg = mtpz.tools.initialize_hydra_config_for_dir(
         config_dir=hydra_config_dir,
         config_name=hydra_config_name,
         overrides=[],
+    )
+    start_step, total_steps = mtpz.puzzletron_nas_plugin._progress_step(hydra_cfg, "start")
+
+    mtpz.tools.mprint(
+        f"Puzzletron Progress {start_step}/{total_steps}: starting puzzletron pipeline"
     )
 
     # Convert model (convert from HF to DeciLM, score pruning activations,
@@ -113,7 +117,10 @@ def run_full_puzzletron(hydra_config_path: str):
     )
 
     dist.cleanup()
-    mtpz.tools.mprint("Puzzletron Progress 8/8: puzzletron pipeline completed (multi-gpu)")
+    complete_step, _ = mtpz.puzzletron_nas_plugin._progress_step(hydra_cfg, "complete")
+    mtpz.tools.mprint(
+        f"Puzzletron Progress {complete_step}/{total_steps}: puzzletron pipeline completed (multi-gpu)"
+    )
 
 
 def run_mip_only(hydra_config_path: str):
@@ -140,21 +147,28 @@ def run_mip_only(hydra_config_path: str):
         config_name=hydra_config_name,
         overrides=[],
     )
+    mip_step, total_steps = mtpz.puzzletron_nas_plugin._progress_step(hydra_cfg, "mip")
 
     # Check if sweep mode is enabled
     if hasattr(hydra_cfg.mip, "sweep") and hydra_cfg.mip.sweep.get("enabled", False):
         mtpz.tools.mprint(
-            "Puzzletron Progress 7/8: running MIP sweep for multiple compression rates (multi-gpu)"
+            f"Puzzletron Progress {mip_step}/{total_steps}:"
+            " running MIP sweep for multiple compression rates (multi-gpu)"
         )
         mtpz.mip.run_mip_sweep(hydra_cfg)
     else:
         # mip_and_realize_models (distributed processing)
         # TODO: How to make it part of mnt.search() api, similarly to run_full_puzzletron() API
-        mtpz.tools.mprint("Puzzletron Progress 7/8: running MIP and realizing models (multi-gpu)")
+        mtpz.tools.mprint(
+            f"Puzzletron Progress {mip_step}/{total_steps}: running MIP and realizing models (multi-gpu)"
+        )
         mtpz.mip.launch_mip_and_realize_model(hydra_cfg)
 
     dist.cleanup()
-    mtpz.tools.mprint("Puzzletron Progress 8/8: puzzletron pipeline completed (multi-gpu)")
+    complete_step, _ = mtpz.puzzletron_nas_plugin._progress_step(hydra_cfg, "complete")
+    mtpz.tools.mprint(
+        f"Puzzletron Progress {complete_step}/{total_steps}: puzzletron pipeline completed (multi-gpu)"
+    )
 
 
 def main():

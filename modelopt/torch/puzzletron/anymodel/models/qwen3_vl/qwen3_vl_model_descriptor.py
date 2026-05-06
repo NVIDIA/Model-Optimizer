@@ -26,9 +26,13 @@ from transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe import (
 )
 
 from ....block_config import BlockConfig
-from ....pruning.expert_removal_pruning_mixin import ExpertRemovalLayerDescriptor
+from ....pruning.expert_removal_pruning_mixin import (
+    ExpertRemovalLayerDescriptor,
+    ExpertRemovalPruningMixIn,
+)
 from ....pruning.ffn_intermediate_pruning_mixin import FFNIntermediateLayerDescriptor
-from ....pruning.kv_heads_pruning_mixin import KVHeadsLayerDescriptor
+from ....pruning.kv_heads_pruning_mixin import KVHeadsLayerDescriptor, KVHeadsPruningMixIn
+from ....pruning.pruning_mixin import PruningMixIn
 from ...model_descriptor import ModelDescriptor, ModelDescriptorFactory
 from ...puzzformer.no_op import MatchingZeros, Same, return_tuple_of_size
 
@@ -55,6 +59,13 @@ class Qwen3VLModelDescriptor(ModelDescriptor):
     def get_language_model_config(config):
         """Qwen3-VL has nested text_config for language model parameters."""
         return config.text_config if hasattr(config, "text_config") else config
+
+    @staticmethod
+    def pruning_mixins() -> Dict[str, PruningMixIn]:
+        return {
+            "experts_removal": ExpertRemovalPruningMixIn(Qwen3VLExpertRemovalLayerDescriptor()),
+            "kv_heads": KVHeadsPruningMixIn(Qwen3VLKVHeadsLayerDescriptor()),
+        }
 
     @staticmethod
     def decoder_layer_cls():

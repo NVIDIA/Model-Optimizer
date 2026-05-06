@@ -21,7 +21,10 @@ Utilities for loading and saving Hugging Face-format checkpoints (``AutoConfig``
 import concurrent.futures
 import dataclasses
 import fcntl
+import inspect
 import os
+import re
+import shutil
 import time
 from collections import defaultdict
 from collections.abc import Callable, Mapping
@@ -135,16 +138,23 @@ def load_model_config(
     return config
 
 
+_FALLBACK_WARNED_CLASSES: set[str] = set()
+
+
 def _get_model_class_from_config(config: PretrainedConfig) -> type:
     """Resolve HuggingFace model class from ``config.architectures`` (see puzzletron checkpoint_utils_hf)."""
     if hasattr(config, "architectures") and config.architectures:
         model_class_name = config.architectures[0]
         if hasattr(transformers, model_class_name):
             return getattr(transformers, model_class_name)
-        mprint(
-            f"Warning: {model_class_name} not found in transformers, "
-            "falling back to AutoModelForCausalLM"
-        )
+        # Warn at most once per missing class per process — the fallback path
+        # may be hit thousands of times during scoring/realize loops.
+        if model_class_name not in _FALLBACK_WARNED_CLASSES:
+            _FALLBACK_WARNED_CLASSES.add(model_class_name)
+            mprint(
+                f"Warning: {model_class_name} not found in transformers, "
+                "falling back to AutoModelForCausalLM"
+            )
     return AutoModelForCausalLM
 
 
@@ -490,6 +500,44 @@ def _build_safetensors_weight_map(
     return weight_map
 
 
+def _copy_auto_map_code_files(model_config: PretrainedConfig, checkpoint_dir: Path) -> None:
+    """Copy custom modeling Python files referenced in ``auto_map`` to the checkpoint dir.
+
+    ``PretrainedConfig.save_pretrained()`` only copies the config class's own source file
+    (e.g. ``configuration_nemotron_h.py``). Trust-remote-code models also need ``modeling_*.py``
+    (and any other auto_map-referenced ``.py``) present alongside ``config.json``, otherwise
+    later ``AutoConfig.from_pretrained(..., trust_remote_code=True)`` calls fail with
+    "does not appear to have a file named modeling_*.py".
+
+    We discover the source directory from the config class itself (via ``inspect.getfile``)
+    and copy every distinct ``.py`` referenced by the auto_map values.
+    """
+    if not hasattr(model_config, "auto_map") or not isinstance(model_config.auto_map, dict):
+        return
+
+    try:
+        source_dir = Path(inspect.getfile(type(model_config))).parent
+    except (TypeError, OSError):
+        # Built-in / non-file-backed config class — nothing to copy.
+        return
+
+    # Module names must look like Python identifiers — refuse anything with separators
+    # or relative-path components so a malformed/hostile auto_map can't drive shutil.copy
+    # outside source_dir / checkpoint_dir.
+    _module_name_re = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+    module_names = {class_ref.split(".")[0] for class_ref in model_config.auto_map.values()}
+
+    for module_name in module_names:
+        if not _module_name_re.match(module_name):
+            mprint(f"Warning: skipping non-identifier auto_map module name: {module_name!r}")
+            continue
+        filename = f"{module_name}.py"
+        src = source_dir / filename
+        dst = Path(checkpoint_dir) / filename
+        if src.exists() and not dst.exists():
+            shutil.copy(src, dst)
+
+
 def save_model_config(model_config: PretrainedConfig, checkpoint_dir: Path | str) -> None:
     if hasattr(model_config, "block_configs"):
         model_config.block_configs = [
@@ -497,3 +545,4 @@ def save_model_config(model_config: PretrainedConfig, checkpoint_dir: Path | str
             for conf in model_config.block_configs
         ]
     model_config.save_pretrained(checkpoint_dir)
+    _copy_auto_map_code_files(model_config, Path(checkpoint_dir))

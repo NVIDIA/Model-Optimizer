@@ -22,7 +22,7 @@ import torch
 import transformers
 from _test_utils.torch.distributed.utils import spawn_multiprocess_job
 from _test_utils.torch.misc import set_seed
-from _test_utils.torch.puzzletron.utils import setup_test_model_and_data
+from _test_utils.torch.puzzletron.utils import PUZZLETRON_FAMILIES, setup_test_model_and_data
 from packaging.version import Version
 
 import modelopt.torch.puzzletron as mtpz
@@ -39,17 +39,7 @@ SEED = 1234
 
 @pytest.mark.parametrize(
     ("hf_model_name", "converter", "hybrid_override_pattern", "has_moe_layers"),
-    [
-        ("meta-llama/Llama-3.1-8B-Instruct", "llama", None, False),
-        ("meta-llama/Llama-3.2-3B-Instruct", "llama", None, False),
-        ("mistralai/Mistral-Small-24B-Instruct-2501", "mistral_small", None, False),
-        ("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16", "nemotron_h", "*E", True),
-        ("nvidia/NVIDIA-Nemotron-Nano-12B-v2", "nemotron_h_v2", "*-", False),
-        ("openai/gpt-oss-20b", "gpt_oss", None, True),
-        ("Qwen/Qwen2.5-7B-Instruct", "qwen2", None, False),
-        ("Qwen/Qwen3-8B", "qwen3", None, False),
-        ("Qwen/Qwen3-VL-30B-A3B-Instruct", "qwen3_vl", None, True),
-    ],
+    PUZZLETRON_FAMILIES,
 )
 def test_puzzletron(
     project_root_path: Path,

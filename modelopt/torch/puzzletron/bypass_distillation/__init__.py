@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,22 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# NOTE: Some modules also trigger factory registration as side effect
-from . import (
-    activation_scoring,
-    anymodel,
-    block_config,
-    build_library_and_stats,
-    bypass_distillation,
-    dataset,
-    entrypoint,
-    mip,
-    plugins,
-    pruning,
-    puzzletron_nas_plugin,
-    replacement_library,
-    scoring,
-    subblock_stats,
-    tools,
-    utils,
-)
+"""Bypass distillation (blockwise local distillation) for the PUZZLE framework.
+
+This module implements Stage 1 of the PUZZLE pipeline: training alternative transformer
+block configurations using per-block knowledge distillation from a teacher model.
+"""
+
+from .training_loop import launch_bypass_distillation
+
+__all__ = ["launch_bypass_distillation"]

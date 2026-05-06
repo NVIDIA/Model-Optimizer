@@ -1,0 +1,30 @@
+defaults:
+  - NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16
+  - _self_
+
+# Input Hugging Face model to compress.
+# Auto-downloads from HuggingFace if the path is not a local directory.
+input_hf_model_path: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16
+
+# Dataset path for pruning and NAS scoring
+dataset_path: /workspace/datasets/Nemotron-Post-Training-Dataset-v2
+
+# Working directory for puzzletron outputs
+puzzle_dir: /workspace/puzzle_dir
+
+# Toy KV-heads-only constraint.
+# Teacher has 6 attention layers × num_key_value_heads=2 = 12 KV heads total.
+# Target 9 leaves 75% of teacher KV heads — the MIP solver picks per-layer from
+# {teacher 2-head, 1-head, no_op} so some layers stay full, some collapse to 1
+# head, and some become no_op.
+mip:
+  human_constraints:
+    target_num_kv_heads: 9
+
+# KV-heads-only toy pruning task.
+#   teacher num_attention_heads = 32, num_key_value_heads = 2  (n_heads_in_group = 16)
+# Bypass-trains a single 1-KV-head variant per attention layer
+# (n_heads_in_group = 32). Combined with `add_attention_no_ops: true` in the base
+# config, MIP picks per-layer from {teacher 2-head, 1-head, no_op}.
+pruning:
+  n_heads_in_group_list: [32]    # 32 / 32 = 1 KV head per attention layer
