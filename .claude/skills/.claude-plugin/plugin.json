@@ -1,0 +1,12 @@
+{
+  "name": "modelopt-agent",
+  "version": "0.1.0",
+  "description": "AI agent skills for NVIDIA ModelOpt: quantization (PTQ), deployment (vLLM/SGLang/TRT-LLM), evaluation (NEL), and end-to-end orchestration.",
+  "author": {
+    "name": "NVIDIA Model-Optimizer"
+  },
+  "homepage": "https://nvidia.github.io/Model-Optimizer/",
+  "repository": "https://github.com/NVIDIA/Model-Optimizer",
+  "license": "Apache-2.0",
+  "keywords": ["modelopt", "quantization", "ptq", "sparsity", "speculative-decoding", "distillation", "deployment", "evaluation", "vllm", "sglang", "trt-llm", "slurm", "nvidia"]
+}
