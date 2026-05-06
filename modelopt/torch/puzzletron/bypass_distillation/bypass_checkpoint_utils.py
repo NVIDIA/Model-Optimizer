@@ -87,6 +87,7 @@ def load_local_state(
     for stitched_module_name, stitched_module_descriptor in stitched_module_descriptors.items():
         stitched_module = stitched_module_descriptor.stitched_module
         optimizer = stitched_module_descriptor.optimizer
+        grad_scaler = stitched_module_descriptor.grad_scaler
 
         state_dict_path = load_dir / "stitched" / f"{stitched_module_name}.state_dict.pth"
         mprint(f"Loading state dict for module {stitched_module_name} from {state_dict_path}")
@@ -108,6 +109,25 @@ def load_local_state(
             )
             optimizer.load_state_dict(loaded_optimizer_state)
             del loaded_optimizer_state
+
+        # Restore GradScaler state (only relevant when use_grad_scaling=True; for the
+        # default bf16 / use_grad_scaling=False path the scaler is disabled and its
+        # state is a no-op, but we still load it if present for forward-compatibility).
+        # Older checkpoints predating this save path won't have the file — skip silently.
+        if grad_scaler is not None:
+            grad_scaler_state_path = (
+                load_dir / "stitched" / f"{stitched_module_name}.grad_scaler.pth"
+            )
+            if grad_scaler_state_path.exists():
+                mprint(
+                    f"Loading grad_scaler state for module {stitched_module_name} "
+                    f"from {grad_scaler_state_path}"
+                )
+                loaded_scaler_state = torch.load(
+                    grad_scaler_state_path, map_location=device, weights_only=True
+                )
+                grad_scaler.load_state_dict(loaded_scaler_state)
+                del loaded_scaler_state
 
 
 def _save_local_file(obj, save_path: Path | str, overwrite=True):
@@ -136,6 +156,7 @@ def _save_local_state(
         stitched_module_descriptors.items()
     ):
         optimizer = stitched_module_descriptor.optimizer
+        grad_scaler = stitched_module_descriptor.grad_scaler
 
         state_dict_path = save_dir / f"{stitched_module_name}.state_dict.pth"
         aprint(f"Saving state dict for module {stitched_module_name} to {state_dict_path}")
@@ -151,6 +172,19 @@ def _save_local_state(
                 f"Saving optimizer state for module {stitched_module_name} to {optimizer_state_path}"
             )
             _save_local_file(optimizer.state_dict(), optimizer_state_path, overwrite=overwrite)
+
+        # Persist GradScaler state. Required for correct resume when
+        # use_grad_scaling=True (state dict carries running scale + growth tracker).
+        # For the default bf16 / use_grad_scaling=False path the state dict is trivial
+        # but cheap, so save unconditionally whenever a scaler exists — keeps the
+        # save/load paths symmetric with the optimizer.
+        if grad_scaler is not None:
+            grad_scaler_state_path = save_dir / f"{stitched_module_name}.grad_scaler.pth"
+            mprint(
+                f"Saving grad_scaler state for module {stitched_module_name} "
+                f"to {grad_scaler_state_path}"
+            )
+            _save_local_file(grad_scaler.state_dict(), grad_scaler_state_path, overwrite=overwrite)
 
     dist.barrier()
 

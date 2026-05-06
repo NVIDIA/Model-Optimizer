@@ -390,6 +390,19 @@ def bypass_factory_fn(
     torch.cuda.empty_cache()
     dist.barrier()
 
+    # Every rank derives ownership from the same `model_blocks_process_ownership`
+    # list, so this guard fires identically on every rank when world_size exceeds
+    # num_hidden_layers — no NCCL hang from a single rank diverging.
+    ranks_with_blocks = set(model_blocks_process_ownership)
+    empty_ranks = [r for r in range(dist.size()) if r not in ranks_with_blocks]
+    if empty_ranks:
+        raise RuntimeError(
+            f"world_size ({dist.size()}) exceeds num_hidden_layers "
+            f"({len(all_block_indices)}); ranks {empty_ranks} would own 0 blocks. "
+            f"Pipeline-parallel bypass distillation does not support idle ranks — "
+            f"reduce nproc_per_node to at most num_hidden_layers."
+        )
+
     min_owned_index = min(owned_block_indexes)
     max_owned_index = max(owned_block_indexes)
     prev_rank: Optional[int] = (

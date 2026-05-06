@@ -15,15 +15,9 @@
 
 import os
 
+import datasets
 import fire
 import numpy as np
-
-# Import via submodules: HF `datasets` uses lazy `__getattr__` at the package level
-# (PEP 562), so mypy can't see top-level names — `from datasets import DatasetDict`
-# fails with `attr-defined`. Submodule paths bypass the lazy loader.
-from datasets.combine import concatenate_datasets
-from datasets.dataset_dict import DatasetDict
-from datasets.load import load_dataset
 
 from ..tools.logger import mprint
 
@@ -46,8 +40,8 @@ def process_and_save_dataset(
             )
             return
 
-    ds = load_dataset(dataset_name, split=split)
-    ds = concatenate_datasets(ds)
+    ds = datasets.load_dataset(dataset_name, split=split)
+    ds = datasets.concatenate_datasets(ds)
     # Filter out samples with reasoning = on
     ds = ds.filter(lambda x: x["reasoning"] == "off")
     # Hardcoded for dynamically create a deterministic train-val split
@@ -55,7 +49,7 @@ def process_and_save_dataset(
     generator = np.random.RandomState(seed=seed)
     ds_split = ds.train_test_split(test_size=0.05, shuffle=True, generator=generator)
     # Rename dataset names to follow previous conventions
-    ds_dict = DatasetDict(
+    ds_dict = datasets.DatasetDict(
         {
             "train": ds_split["train"],
             "valid": ds_split["test"],

@@ -19,11 +19,11 @@ from pathlib import Path
 import pytest
 import torch
 from _test_utils.torch.transformers_models import get_tiny_tokenizer
+from datasets import Dataset, DatasetDict
 from transformers import AutoConfig, AutoModelForCausalLM, PreTrainedTokenizerBase
 
 import modelopt.torch.puzzletron as mtpz
 import modelopt.torch.utils.distributed as dist
-from datasets import Dataset, DatasetDict
 from modelopt.torch.export import copy_hf_ckpt_remote_code
 
 # Shared parametrize tuple for puzzletron GPU integration tests.

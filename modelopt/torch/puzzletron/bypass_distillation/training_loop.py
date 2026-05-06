@@ -33,6 +33,7 @@ from pathlib import Path
 from statistics import mean
 from typing import Optional
 
+import datasets
 import torch
 import torch.distributed
 import transformers
@@ -40,8 +41,6 @@ from omegaconf import DictConfig
 from torch.utils.data.dataloader import DataLoader
 from transformers import AutoTokenizer, PretrainedConfig, PreTrainedTokenizerBase
 
-import datasets
-import datasets.utils.logging
 import modelopt.torch.puzzletron.bypass_distillation.stitched_model_factory as stitched_model_factory_module
 import modelopt.torch.utils.distributed as dist
 from modelopt.torch.puzzletron.anymodel.model_descriptor import (
@@ -204,6 +203,15 @@ def train(
 
     train_iterator = iter(train_dataloader)
 
+    # Advance past the first `skip_first_batches` batches before the training loop
+    # starts. Used either to skip a known-bad batch range during debugging, or to
+    # roll the data iterator forward when resuming a run (model + optimizer state
+    # are restored from the checkpoint, but the dataloader itself starts fresh).
+    if skip_first_batches > 0:
+        mprint(f"Skipping first {skip_first_batches} batches before training")
+        for _ in range(skip_first_batches):
+            next(train_iterator)
+
     mprint("Waiting for everyone before training starts")
     dist.barrier()
 
@@ -221,8 +229,10 @@ def train(
     # Train loop start
     while True:
         time_now = time.time()
-        # Check if we've reached the maximum number of steps
-        if cfg.bypass.step_num >= cfg.bypass.training.max_steps:
+        # Check if we've reached the maximum number of steps. `step_num` is 1-based
+        # and incremented at the END of each iteration, so we must use `>` (not `>=`)
+        # to ensure step `max_steps` itself runs before exiting.
+        if cfg.bypass.step_num > cfg.bypass.training.max_steps:
             if (
                 cfg.bypass.model.model_overrides.save_checkpoint_when_done
                 and not cfg.bypass.disable_checkpoint_save
@@ -522,7 +532,7 @@ def train(
             or step_to_save == cfg.bypass.step_num
             or (
                 cfg.bypass.model.model_overrides.save_checkpoint_when_done
-                and cfg.bypass.step_num >= cfg.bypass.training.max_steps
+                and cfg.bypass.step_num > cfg.bypass.training.max_steps
             )
         ):
             if not cfg.bypass.disable_checkpoint_save:
@@ -532,7 +542,7 @@ def train(
                     mprint("Saving time-based checkpoint")
                 elif (
                     cfg.bypass.model.model_overrides.save_checkpoint_when_done
-                    and cfg.bypass.step_num >= cfg.bypass.training.max_steps
+                    and cfg.bypass.step_num > cfg.bypass.training.max_steps
                 ):
                     mprint("Saving final checkpoint")
 
@@ -735,7 +745,9 @@ def run_bypassed_training(cfg: DictConfig):
             micro_batch_size=cfg.bypass.training.micro_batch_size,
             load_dataset_fn=load_dataset_fn,
             keep_in_memory=cfg.bypass.data.keep_in_memory,
-            source_datasets_to_discard=cfg.bypass.get("source_datasets_to_discard", tuple()),
+            source_datasets_to_discard=cfg.bypass.data.get(
+                "source_datasets_to_discard", tuple()
+            ),
             bos_rate=cfg.bypass.data.bos_rate,
             shuffle_seed=cfg.bypass.data.shuffle_train_data_seed,
         )
@@ -756,7 +768,9 @@ def run_bypassed_training(cfg: DictConfig):
                 load_dataset_fn=load_dataset_fn,
                 dataset_name=cfg.bypass.data.val_dataset_name,
                 keep_in_memory=cfg.bypass.data.keep_in_memory,
-                source_datasets_to_discard=cfg.bypass.get("source_datasets_to_discard", tuple()),
+                source_datasets_to_discard=cfg.bypass.data.get(
+                "source_datasets_to_discard", tuple()
+            ),
                 bos_rate=cfg.bypass.data.bos_rate,
             )
 

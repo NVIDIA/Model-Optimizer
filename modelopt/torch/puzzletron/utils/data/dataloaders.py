@@ -19,6 +19,7 @@ from collections.abc import Callable, Mapping, Sequence
 from functools import partial
 from typing import Protocol, TypeVar
 
+import datasets
 import torch
 import torch.distributed
 from accelerate import Accelerator
@@ -26,14 +27,6 @@ from torch.utils.data import DataLoader, Dataset, IterableDataset
 from torch.utils.data._utils.collate import collate, default_collate_fn_map
 from tqdm import tqdm
 from transformers import PreTrainedTokenizerBase
-
-# Import via submodules: HF `datasets` uses lazy `__getattr__` at the package level
-# (PEP 562), so mypy can't see top-level names — `from datasets import DatasetDict`
-# fails with `attr-defined`. Submodule paths bypass the lazy loader.
-from datasets.arrow_dataset import Dataset as HFDataset
-from datasets.dataset_dict import DatasetDict
-from datasets.features import Features, Value
-from datasets.load import load_dataset, load_from_disk
 
 from ...tools.logger import mprint
 from .dataset import ConstantLengthDataset
@@ -60,18 +53,18 @@ class LoadDatasetFn(Protocol):
 def load_from_disk_fn(
     dataset_path: str, content_field: str, keep_in_memory: bool = False
 ) -> Mapping[str, Dataset]:
-    return load_from_disk(dataset_path, keep_in_memory=keep_in_memory)
+    return datasets.load_from_disk(dataset_path, keep_in_memory=keep_in_memory)
 
 
 def load_streaming_fn(
     dataset_path: str, content_field: str, keep_in_memory: bool = False
 ) -> Mapping[str, Dataset]:
-    dataset = load_dataset(
+    dataset = datasets.load_dataset(
         dataset_path,
         streaming=True,
-        features=Features(
+        features=datasets.Features(
             {
-                content_field: Value(dtype="string"),
+                content_field: datasets.Value(dtype="string"),
             }
         ),
         keep_in_memory=keep_in_memory,
@@ -98,6 +91,19 @@ def create_train_dataloader(
     num_workers: int = 0,
 ) -> DataLoader:
     """Create an infinite training DataLoader over ConstantLengthDataset."""
+    # ConstantLengthDataset.__iter__ does not consult torch.utils.data.get_worker_info()
+    # to shard work across DataLoader workers, so num_workers > 0 would have every
+    # worker iterate the full dataset and emit duplicate samples. Reject explicitly
+    # until ConstantLengthDataset gains worker-aware iteration; the guard can then
+    # be removed.
+    if num_workers > 0:
+        raise ValueError(
+            f"create_train_dataloader: num_workers={num_workers} is not supported "
+            f"because ConstantLengthDataset.__iter__ does not shard via "
+            f"torch.utils.data.get_worker_info(). Use num_workers=0 (the default) "
+            f"or add worker-aware sharding to ConstantLengthDataset.__iter__."
+        )
+
     if isinstance(dataset_path, str):
         dataset = load_dataset_fn(dataset_path, content_field, keep_in_memory)
     else:
@@ -105,7 +111,14 @@ def create_train_dataloader(
 
     train_data = dataset[dataset_name]
     if shuffle_seed is not None:
-        train_data = train_data.shuffle(seed=shuffle_seed, keep_in_memory=True)
+        # `keep_in_memory` is only valid on map-style HF Datasets; streaming
+        # `IterableDataset.shuffle()` only accepts `seed` (and an optional
+        # `buffer_size`). Branch on the dataset type so streaming users
+        # (`load_from_disk: false`) don't crash on this call.
+        if isinstance(train_data, datasets.IterableDataset):
+            train_data = train_data.shuffle(seed=shuffle_seed)
+        else:
+            train_data = train_data.shuffle(seed=shuffle_seed, keep_in_memory=True)
 
     train_dataset = ConstantLengthDataset(
         tokenizer,
@@ -154,13 +167,13 @@ def create_validation_dataloader(
         if isinstance(dataset, str):
             dataset = load_dataset_fn(dataset, content_field, keep_in_memory)
 
-        if isinstance(dataset, HFDataset | torch.utils.data.Dataset):
+        if isinstance(dataset, datasets.Dataset | torch.utils.data.Dataset):
             valid_data = dataset
             mprint(
                 "#### Path to specific dataset was given (not DatasetDict), taking it as-is ####"
             )
         else:
-            assert isinstance(dataset, DatasetDict)
+            assert isinstance(dataset, datasets.DatasetDict)
             if dataset_name == "__auto__":
                 val_split_options = []
                 for val_key_prefix in ("val", "test"):
