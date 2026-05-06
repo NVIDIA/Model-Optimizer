@@ -7,6 +7,7 @@ Pruning can involve removal (prune) of Linear and Conv layers; and Transformer a
 This section focuses on applying Model Optimizer's state-of-the-art complementary pruning modes to enable you to search for the best subnet architecture from your provided base model:
 
 1. [Minitron](https://arxiv.org/pdf/2408.11796): A pruning method developed by NVIDIA Research for pruning GPT (and later extended to Mamba, MoE, and Hybrid Transformer Mamba) models in NVIDIA Megatron-LM (M-LM) or Megatron-Bridge (M-Bridge) framework. It uses the activation magnitudes to prune the embedding hidden size; mlp ffn hidden size; transformer attention heads; mamba heads and head dimension; MoE number of experts, ffn hidden size, and shared expert intermediate size; and number of layers of the model.
+1. [Puzzletron](../puzzletron/README.md): An advanced pruning method by NVIDIA using Mixed Integer Programming (MIP) based NAS search algorithm.
 1. FastNAS: A pruning method recommended for Computer Vision models. Given a pretrained model, FastNAS finds the subnet which maximizes the score function while meeting the given constraints.
 1. GradNAS: A light-weight pruning method recommended for language models like Hugging Face BERT, GPT-J. It uses the gradient information to prune the model's linear layers and attention heads to meet the given constraints.
 
@@ -19,13 +20,14 @@ This section focuses on applying Model Optimizer's state-of-the-art complementar
 | Support Matrix | View the support matrix to see available pruning algorithms and their compatibility with different models and frameworks | \[[Link](#support-matrix)\] | |
 | Examples | Examples of different pruning methods | \[[Link](#examples)\] | |
 | Pruning Guidelines | Guidelines for choosing how and how much to prune for best results | \[[Link](#pruning-guidelines)\] | |
+| Tutorials / Results | End-to-end tutorials for Minitron and Puzzletron pruning | \[[Link](#tutorials--results)\] | |
 | Resources | Extra links to relevant resources | \[[Link](#resources)\] | |
 
 </div>
 
 ## Pre-Requisites
 
-For Minitron pruning for Megatron-Bridge / Megatron-LM models, use the NeMo container (e.g., `nvcr.io/nvidia/nemo:26.02`) which has all the dependencies installed.
+For Minitron pruning for Megatron-Bridge / Megatron-LM models, use the NeMo container (e.g., `nvcr.io/nvidia/nemo:26.04`) which has all the dependencies installed.
 
 For FastNAS pruning for PyTorch Computer Vision models, no additional dependencies are required.
 
@@ -123,7 +125,7 @@ This mode can be useful when you don't know the exact dimensions you want to pru
 from modelopt.torch.utils.plugins.megatron_mmlu import megatron_mmlu
 
 def score_func(m):
-    return megatron_mmlu(m, tokenizer, percentage=0.05)  # 5% sampled data for faster eval
+    return megatron_mmlu(m, tokenizer, fraction=0.1, batch_size=4)  # 10% sampled data for faster eval
 
 # Specify target parameter count and configure the auto pruning algorithm
 # Save minitron scores at checkpoint so we can resume pruning without running the forward loop again
@@ -146,7 +148,7 @@ mtp.prune(...)
 
 1. **Importance Scoring**: Same as manual pruning - computes activation magnitudes for all parameters (takes ~5 minutes for an 8B model)
 2. **Search Space Construction**: Generates a search space of possible architectures based search space config and other configs (`max_width_pruning`, `max_depth_pruning`, `hparams_to_skip`)
-3. **Architecture Search**: Find candidate architectures that meet the parameter constraint and evaluate `top_k` (based on number of parameters) of them using `score_func` e.g. MMLU, negative validation loss, etc. (takes ~10 mins per candidate for an 8B model pruning)
+3. **Architecture Search**: Find candidate architectures that meet the parameter constraint and evaluate `top_k` (based on number of parameters) of them using `score_func` e.g. MMLU, negative validation loss, etc. (takes ~5 min per candidate for an 8B model MMLU score with 10% sampled data)
 4. **Best Architecture Selection**: Returns the architecture (best `export_config`) with the highest actual score from the top-K evaluated architectures
 5. **Weight Slicing**: Slices the model weights according to the best pruned architecture found
 
@@ -177,7 +179,7 @@ If your model parameters are already sorted and you just want to prune the weigh
 
 | **Algorithm** | **Model** | **Pruning Constraints** |
 | :---: | :---: | :---: |
-| Minitron | Megatron-core (M-LM, M-Bridge) based GPT / Mamba / MoE / Hybrid LLM Models<sup>1</sup> | **Manual:** `export_config` with width (`hidden_size`, `ffn_hidden_size`, `num_attention_heads`, `mamba_num_heads`, `mamba_head_dim`, `num_moe_experts`, `moe_ffn_hidden_size`, `moe_shared_expert_intermediate_size`) and/or depth (`num_layers`) pruned values<br>**Auto:** `params` (requires `score_func` in config) |
+| Minitron | Megatron-core (M-LM, M-Bridge) based GPT / Mamba / MoE / Hybrid LLM Models<sup>1</sup> | **Manual:** `export_config` with width (`hidden_size`, `ffn_hidden_size`, `num_attention_heads`, `mamba_num_heads`, `mamba_head_dim`, `num_moe_experts`, `moe_ffn_hidden_size`, `moe_shared_expert_intermediate_size`) and/or depth (`num_layers`) pruned values<br>**Auto:** one or more of `params`, `active_params`, `memory_mb` (requires `score_func` in config) |
 | FastNAS | Computer Vision models | `flops`, `params` |
 | GradNAS | HuggingFace BERT, GPT-J | `flops`, `params` |
 
@@ -185,15 +187,27 @@ If your model parameters are already sorted and you just want to prune the weigh
 
 ## Examples
 
-### Minitron Pruning for Megatron-Bridge/ Megatron-LM Framework LLMs (e.g. Qwen 3, Nemotron Nano)
+### Minitron Pruning for Megatron-Bridge/ Megatron-LM Framework LLMs (e.g. Qwen3, Nemotron 3 Nano)
 
 Checkout the Minitron pruning example for [Megatron-Bridge Framework](../megatron_bridge/README.md#pruning) or [Megatron-LM Framework](https://github.com/NVIDIA/Megatron-LM/tree/main/examples/post_training/modelopt#-pruning) which showcases the usage of the powerful Minitron pruning algorithm developed by NVIDIA Research for pruning LLMs like Llama-3.1-8B, Qwen3-8B, Nemotron-Nano-9B-v2, Nemotron-3-Nano-30B-A3B, etc.
 Both frameworks support importing from a Hugging Face pretrained checkpoint.
 
-Some of the models pruned using Minitron method followed by distillation and post-training are:
+Some of the official models pruned using Minitron method followed by distillation and post-training are:
 
 - [Minitron Collection on Hugging Face](https://huggingface.co/collections/nvidia/minitron)
 - [NVIDIA-Nemotron-Nano-9B-v2](https://huggingface.co/nvidia/NVIDIA-Nemotron-Nano-9B-v2)
+
+See [minitron/](minitron/README.md) for end-to-end tutorials and results.
+
+### Puzzletron Pruning for LLMs (e.g. Llama, Qwen, Nemotron)
+
+Checkout the [Puzzletron README](../puzzletron/README.md) which showcases MIP-based NAS pruning that produces heterogeneous model architectures — varying FFN intermediate sizes per layer and selectively removing attention layers — to meet a target parameter count or memory budget.
+
+Supported models include Llama-3.1-8B-Instruct, Qwen3-8B, Qwen2.5-7B-Instruct, Nemotron-Nano-12B-v2, Mistral-Small-24B-Instruct-2501, and others via the [configs](../puzzletron/configs/) directory. See the [Puzzletron README](../puzzletron/README.md) for more details.
+
+After compression, use [Megatron-Bridge distillation](../megatron_bridge/README.md#distillation) to recover accuracy.
+
+See [puzzletron/](puzzletron/README.md) for distillation results on Puzzletron-compressed models.
 
 ### FastNAS Pruning for PyTorch Computer Vision Models
 
@@ -278,15 +292,22 @@ After pruning, distillation is required to recover model accuracy. Below are rec
 | **Hyperparameter** | **Recommendation** |
 | :---: | :---: |
 | **Sequence Length** | 8192 (or 4096 if dataset has smaller sequences) |
-| **Global Batch Size (GBS)** | 768 |
+| **Global Batch Size (GBS)** | same as the original training or 768 if unsure |
 | **Micro Batch Size (MBS)** | As large as your GPU memory can accommodate |
 | **Learning Rate (LR)** | 1e-4 → 1e-5 (linear decay) for 30-50% pruning<br>• More compression → higher LR<br>• Less compression → lower LR<br>• As model gets larger → reduce LR to avoid divergence |
 | **Warmup Steps** | 100 |
-| **Training Max Steps** | Num training tokens / (Seq len × GBS)<br>• Recommended: 80-100B tokens |
+| **Training Max Steps** | Num training tokens / (Seq len × GBS)<br>• Recommended: 80-100B tokens for best results. |
 | **Data Composition** | • Standard models: 100% pre-training data<br>• Reasoning models: 70% reasoning data + 30% pre-training data |
 
 > [!TIP]
 > If you know the maximum learning rate used during the original training, a good rule of thumb for knowledge distillation is to use **1/5th of that maximum LR** when compressing by ~50%.
+
+## Tutorials / Results
+
+End-to-end distillation results with Megatron-Bridge after Minitron and Puzzletron pruning:
+
+- **[Minitron — Nemotron-Nano-9B-v2](minitron/NVIDIA-Nemotron-Nano-9B-v2/README.md)**: End-to-end tutorial of structured pruning for Nemotron-Nano-9B-v2 to 7B followed by knowledge distillation up to 80B tokens, quantization, and vLLM deployment. Achieves near-parity with the official 9B model across popular pretraining and reasoning benchmarks.
+- **[Puzzletron — Qwen3-8B and Llama-3.1-8B-Instruct](puzzletron/Llama-3.1-8B-Instruct.md)**: MIP-based compression followed by short distillation runs on WikiText-103. Shows MMLU recovery and illustrates the importance of using larger datasets to avoid overfitting.
 
 ## Resources
 

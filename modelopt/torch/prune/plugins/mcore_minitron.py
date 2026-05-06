@@ -24,6 +24,8 @@ Supports both GPT (attention-based) and Mamba (state-space) models, as well as h
 Actual dynamic module implementations are at :mod:`modelopt.torch.nas.plugins.megatron`.
 """
 
+import io
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import partial
@@ -35,19 +37,21 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from megatron.core.extensions.transformer_engine import TELayerNormColumnParallelLinear
-from megatron.core.models.gpt.gpt_model import GPTModel
 from megatron.core.models.mamba.mamba_model import MambaModel
 from megatron.core.parallel_state import (
     get_pipeline_model_parallel_group,
     get_pipeline_model_parallel_rank,
     get_pipeline_model_parallel_world_size,
-    get_tensor_model_parallel_group,
 )
 from megatron.core.tensor_parallel import (
     gather_from_tensor_model_parallel_region,
     reduce_from_tensor_model_parallel_region,
 )
 from pydantic import create_model
+from rich.console import Console
+from rich.markup import escape as rich_escape
+from rich.panel import Panel
+from rich.table import Table
 from tqdm import tqdm
 
 from modelopt.torch.nas.conversion import NASModeRegistry
@@ -62,6 +66,12 @@ from modelopt.torch.nas.plugins.megatron import (
     _DynamicSelfAttention,
     _DynamicSequentialMLP,
     _DynamicTransformerLayer,
+)
+from modelopt.torch.nas.plugins.megatron_model_stats import (
+    mcore_memory_footprint_mb,
+    mcore_param_count,
+    parse_main_layer_chars,
+    print_mcore_model_stats,
 )
 from modelopt.torch.nas.registry import DMRegistry
 from modelopt.torch.nas.utils import get_subnet_config, sample, sort_parameters
@@ -106,7 +116,6 @@ __all__ = [
     "MCoreMinitronSearcher",
     "drop_mcore_language_model_layers",
     "get_mcore_minitron_config",
-    "get_mcore_param_count",
 ]
 
 
@@ -164,30 +173,55 @@ def drop_mcore_language_model_layers(model: nn.Module, *, layers_to_drop: list[i
     model.config.num_layers = new_num_layers
 
 
+def _rprint(*renderables: Any) -> None:
+    """Render rich renderables and print on rank 0 only."""
+    buf = io.StringIO()
+    Console(file=buf, highlight=False, force_terminal=sys.stdout.isatty(), width=160).print(
+        *renderables
+    )
+    print_rank_0()
+    print_rank_0(buf.getvalue())
+
+
+# Constraint keys that trigger the grid-search path in MCoreMinitronSearcher.
+# Order defines priority: first active key is used as the primary display/sort metric.
+_METRIC_CONSTRAINT_PRIORITY = ("active_params", "params", "memory_mb")
+_METRIC_CONSTRAINTS = frozenset(_METRIC_CONSTRAINT_PRIORITY)
+
+
 @dataclass
 class CandidateSubnet:
     ss_config: dict
-    params: float
+    metrics: dict[str, float]
     score: float | None
+
+
+torch.serialization.add_safe_globals([CandidateSubnet])
 
 
 class MCoreMinitronSearcher(BaseSearcher):
     """Searcher for Minitron pruning algorithm.
 
-    Available additional config options (used when `params` constraint is provided):
+    Supported constraint keys: ``export_config``, ``params``, ``active_params``, ``memory_mb``.
+
+    Available additional config options (used when a metric constraint is provided):
     - `max_width_pruning`: Maximum fraction per width hyperparameter to prune (default: 0.40).
         Only top (1 - max_width_pruning) choices will be considered.
     - `max_depth_pruning`: Maximum fraction per depth hyperparameter to prune (default: 0.20).
         Only top (1 - max_depth_pruning) choices will be considered.
     - `hparams_to_skip`: List of hparams to skip during the search (default: None).
     - `top_k`: Number of candidates to consider for score_func validation (default: 10).
+    - `seq_length`: Sequence length for KV-cache memory estimate (default: 4096).
+        Only used with the ``memory_mb`` constraint.
+    - `batch_size`: Batch size for KV-cache and Mamba-state memory estimate (default: 1).
+        Only used with the ``memory_mb`` constraint.
     """
 
     local_activations: dict[str, torch.Tensor]
     layer_scores: dict[int, torch.Tensor]
     sorted_layers: list[int] | None  # 1-indexed sorted list of layer numbers
     # Dict from params constraint to list of all CandidateSubnets fitting that constraint
-    all_candidates_per_constraint: dict[float, list[CandidateSubnet]]
+    all_candidates_per_constraint: dict[tuple, list[CandidateSubnet]]
 
     @property
     def default_search_config(self) -> SearchConfig:
@@ -197,11 +231,14 @@ class MCoreMinitronSearcher(BaseSearcher):
             "max_iter_data_loader": 1024,
             "skip_sorting": False,
             "scores_path": None,
-            # Additional search config for parameter-based pruning
+            # Additional search config for metric-based pruning
             "max_width_pruning": 0.40,
             "max_depth_pruning": 0.20,
             "hparams_to_skip": None,
             "top_k": 10,
+            # Memory footprint config (only used with memory_mb constraint)
+            "seq_length": 4096,
+            "batch_size": 1,
         }
 
     @property
@@ -226,11 +263,16 @@ class MCoreMinitronSearcher(BaseSearcher):
         """Optional pre-processing steps before the search."""
         super().before_search()
 
-        # Check that the constraint is valid
-        assert len(self.constraints) == 1 and next(iter(self.constraints.keys())) in {
-            "export_config",
-            "params",
-        }, "Only `export_config` or `params` constraint is supported!"
+        # Check that the constraint is valid.
+        # export_config must be the sole key; metric constraints can be combined freely.
+        active_metric_keys = self.constraints.keys() & _METRIC_CONSTRAINTS
+        assert self.constraints.keys() <= {"export_config"} | _METRIC_CONSTRAINTS, (
+            f"Only {sorted({'export_config'} | _METRIC_CONSTRAINTS)} constraints are supported!"
+        )
+        assert not ("export_config" in self.constraints and active_metric_keys), (
+            "export_config cannot be combined with metric constraints!"
+        )
+        assert self.constraints, "At least one constraint must be provided!"
 
         if "export_config" in self.constraints:
             export_config = self.constraints["export_config"]
@@ -250,10 +292,11 @@ class MCoreMinitronSearcher(BaseSearcher):
             # If a user only prunes depth, we should not sort width parameters
             self.hps_to_sort = set(export_config.keys())
         else:
-            assert isinstance(self.constraints["params"], (int, float)), "params must be a float!"
-            assert self.has_score, "score_func (e.g. MMLU) is required for parameter-based pruning!"
+            for k in active_metric_keys:
+                assert isinstance(self.constraints[k], (int, float)), f"{k} must be a float!"
+            assert self.has_score, "score_func (e.g. MMLU) is required for metric-based pruning!"
             export_config = None
-            # Sort all parameters for parameter-based pruning
+            # Sort all parameters for metric-based pruning
             self.hps_to_sort = SUPPORTED_HPARAMS
 
         for n, hp in named_hparams(self.model, unique=True):
@@ -273,6 +316,9 @@ class MCoreMinitronSearcher(BaseSearcher):
 
     def run_search(self) -> None:
         """Run forward loop to collect activations, sort parameters, and prune the model."""
+        print_mcore_model_stats(
+            self.model, "Original Model", self.config["seq_length"], self.config["batch_size"]
+        )
         registry = ImportanceEstimatorRegistry(self.model)
         if self.local_activations and self.layer_scores:  # Available from per-rank checkpoint
             registry.set_local_activations_and_layer_scores(
@@ -295,7 +341,7 @@ class MCoreMinitronSearcher(BaseSearcher):
         if self.config["skip_sorting"]:
             print_rank_0("Skipping sorting parameters...")
         else:
-            sort_parameters(self.model, self.hps_to_sort, verbose=True)
+            sort_parameters(self.model, self.hps_to_sort, verbose=False)
         registry.cleanup()
 
         if self.layer_scores:
@@ -312,8 +358,8 @@ class MCoreMinitronSearcher(BaseSearcher):
             ), "Cannot prune `num_layers` without collecting layer scores!"
             self.sorted_layers = None
 
-        if "params" in self.constraints:
-            export_config = self.search_best_arch_by_params()
+        if self.constraints.keys() & _METRIC_CONSTRAINTS:
+            export_config = self.search_best_arch_by_metrics()
         else:
             export_config = self.constraints["export_config"]
 
@@ -342,6 +388,10 @@ class MCoreMinitronSearcher(BaseSearcher):
                 ),
             )
             print_rank_0(f"Pruned {hybrid_key}: {getattr(self.model, hybrid_key)}")
+
+        print_mcore_model_stats(
+            self.model, "Pruned Model", self.config["seq_length"], self.config["batch_size"]
+        )
 
     def _prune(self, export_config: dict, prune_depth: bool = True) -> None:
         """Prune the model homogeneously based on the export_config by setting active choices for configurable hparams.
@@ -388,25 +438,27 @@ class MCoreMinitronSearcher(BaseSearcher):
             if isinstance(m, _DynamicMoELayer):
                 m._export_reinit_token_dispatcher()
 
-    def search_best_arch_by_params(self) -> dict:
-        """Search for the best architecture based on the given parameters constraints.
+    def search_best_arch_by_metrics(self) -> dict:
+        """Search for the best architecture based on the given metric constraint.
 
-        We perform a grid-search over the search space to find subnets (homogeneous) fitting the constraints.
-        Top-k candidates (sorted by param count) are then validated using the score_func (e.g. MMLU)
-            and the best subnet is returned.
+        Supports ``params``, ``active_params``, and ``memory_mb`` constraints.
+        Performs a grid-search over the search space to find subnets fitting the constraint,
+        then validates the top-k candidates using ``score_func`` (e.g. MMLU).
 
         Returns:
             export_config: Dictionary mapping hyperparameter names to their pruned values.
         """
         assert self.sorted_layers is not None
-        max_params = float(self.constraints["params"])  # type: ignore[arg-type]
+        # Ordered list of active metric keys; primary (first) is used for sorting/display.
+        active_metric_keys = [k for k in _METRIC_CONSTRAINT_PRIORITY if k in self.constraints]
+        primary_key = active_metric_keys[0]
+        max_metrics: dict[str, float] = {k: float(self.constraints[k]) for k in active_metric_keys}  # type: ignore[arg-type]
         max_width_pruning = self.config["max_width_pruning"]
         max_depth_pruning = self.config["max_depth_pruning"]
         hparams_to_skip = self.config["hparams_to_skip"]
         top_k = self.config["top_k"]
-        print_rank_0(
-            f"\nSearching for the best pruned architecture under {num2hrb(max_params)} params constraints..."
-        )
+        constraints_str = ", ".join(f"{self._fmt_metric(v, k)} {k}" for k, v in max_metrics.items())
+        print_rank_0(f"\nSearching for the best pruned architecture under {constraints_str}...")
 
         # 1. Find available search space choices (across all PP ranks)
         hp_choices = {}
@@ -422,8 +474,9 @@ class MCoreMinitronSearcher(BaseSearcher):
             },
         )
 
-        # 2. Perform grid-search over the search space to find subnets fitting the constraints
-        if max_params not in self.all_candidates_per_constraint:
+        # 2. Perform grid-search over the search space to find subnets fitting all constraints
+        constraints_cache_key = tuple((k, max_metrics[k]) for k in active_metric_keys)
+        if constraints_cache_key not in self.all_candidates_per_constraint:
             max_num_layers = self.model.get_hparam("num_layers").max
             search_space_configs = MCoreMinitronSearcher._generate_search_space_combos(
                 hp_choices,
@@ -431,46 +484,50 @@ class MCoreMinitronSearcher(BaseSearcher):
                 max_depth_pruning,
                 hparams_to_skip,
             )
-            sample(self.model, sample_func=max)  # reset to max subnet (for sanity)
             selected = []
             for ss_config in tqdm(
                 search_space_configs,
                 desc="Finding all candidates fitting the constraints...",
                 disable=not dist.is_master(),
             ):
-                self._prune(ss_config, prune_depth=False)
-                layer_ids = None
-                if "num_layers" in ss_config and ss_config["num_layers"] < max_num_layers:
-                    layer_ids = self.sorted_layers[: ss_config["num_layers"]]
-                candidate_params = _param_num_dynamic(self.model, layer_numbers_to_count=layer_ids)
-                if candidate_params <= max_params:
-                    selected.append(CandidateSubnet(ss_config, candidate_params, None))
-                sample(self.model, sample_func=max)  # reset to max subnet
+                candidate_metrics = self._compute_candidate_metrics(ss_config, max_num_layers)
+                if all(candidate_metrics[k] <= max_metrics[k] for k in active_metric_keys):
+                    selected.append(
+                        CandidateSubnet(
+                            ss_config, {k: candidate_metrics[k] for k in active_metric_keys}, None
+                        )
+                    )
             assert len(selected) > 0, "No subnets found fitting the constraints!"
             print_rank_0(f"Found {len(selected)} candidates fitting the constraints!")
-            self.all_candidates_per_constraint[max_params] = sorted(
-                selected, key=lambda x: x.params, reverse=True
+            self.all_candidates_per_constraint[constraints_cache_key] = sorted(
+                selected, key=lambda x: x.metrics[primary_key], reverse=True
             )
             self.save_search_checkpoint(verbose=True)
         else:
             print_rank_0(f"\nUsing top {top_k} candidates from checkpoint")
-        top_k_candidates = self.all_candidates_per_constraint[max_params][:top_k]
+        top_k_candidates = self.all_candidates_per_constraint[constraints_cache_key][:top_k]
 
-        print_rank_0(f"\n====================\nTop {top_k} candidates:")
-        for candidate in top_k_candidates:
-            print_rank_0(f"\t{candidate.ss_config} -> {num2hrb(candidate.params)} params")
-        print_rank_0("====================\n")
+        table = Table(title=f"Top {top_k} Candidates", show_header=True, header_style="bold")
+        table.add_column("#", justify="right", style="dim", no_wrap=True)
+        table.add_column("export_config", overflow="fold")
+        for k in active_metric_keys:
+            table.add_column(k, justify="right")
+        for i, candidate in enumerate(top_k_candidates, 1):
+            row = [str(i), rich_escape(str(candidate.ss_config))]
+            row += [self._fmt_metric(candidate.metrics[k], k) for k in active_metric_keys]
+            table.add_row(*row)
+        _rprint(table)
 
         # 3. Optional Knowledge Distillation (KD) step for all top-k candidates
-        print_rank_0(
-            "\nSkipping optional Knowledge Distillation (KD) step for candidates as it is a manual step. "
+        _rprint(
+            f"[yellow]\nSkipping optional Knowledge Distillation (KD) step for candidates as it is a manual step. "
             "As per the original paper (https://arxiv.org/pdf/2407.14679), ideally we need to perform a short "
             f"Knowledge Distillation on ~2B tokens for all top {top_k} candidates before evaluating the "
             "`score_func`, which will take a lot longer to prune, require splitting the pruning process into multiple "
             "stages and a lot more compute for pruning but can lead to better pruned model selection. If you are "
             f"interested to do this, you can take the top {top_k} candidates' `export_config` from the logs above and "
             "then export all models separately and perform Knowledge Distillation on each of them before evaluating "
-            "the `score_func`.\n"
+            f"the `score_func`.\n[/yellow]"
         )
 
         # 4. Validate top-k candidates using the score_func and return the best subnet
@@ -505,26 +562,46 @@ class MCoreMinitronSearcher(BaseSearcher):
                     layer.layer_number = start_layer_number
                     start_layer_number += 1
                 self.model.decoder.layers = all_layers
-            print_rank_0(
-                f"\t{candidate.ss_config} -> {num2hrb(candidate.params)} params, {candidate.score:.4f} score\n"
+            metrics_str = ", ".join(
+                f"{self._fmt_metric(v, k)} {k}" for k, v in candidate.metrics.items()
             )
+            print_rank_0(f"\t{candidate.ss_config} -> {metrics_str}, {candidate.score:.4f} score\n")
 
         for m in _routers_with_expert_bias:
             m.enable_expert_bias = True
 
-        print_rank_0(f"\n====================\nTop {top_k} candidates with scores:")
-        for candidate in top_k_candidates:
-            print_rank_0(
-                f"\t{candidate.ss_config} -> {num2hrb(candidate.params)} params, {candidate.score:.4f} score"
-            )
-        print_rank_0("====================\n")
+        scored_table = Table(
+            title=f"Top {top_k} Candidates with Scores", show_header=True, header_style="bold"
+        )
+        scored_table.add_column("#", justify="right", style="dim", no_wrap=True)
+        scored_table.add_column("export_config")
+        for k in active_metric_keys:
+            scored_table.add_column(k, justify="right")
+        scored_table.add_column("score", justify="right")
+        for i, candidate in enumerate(top_k_candidates, 1):
+            row = [str(i), rich_escape(str(candidate.ss_config))]
+            row += [self._fmt_metric(candidate.metrics[k], k) for k in active_metric_keys]
+            row.append(f"{candidate.score:.4f}")
+            scored_table.add_row(*row)
+        _rprint(scored_table)
 
         dist.barrier()
         best = max(top_k_candidates, key=lambda x: x.score)  # type: ignore[arg-type, return-value]
-        print_rank_0(
-            f"\n[BEST SUBNET] {best.ss_config} -> {num2hrb(best.params)} params, {best.score:.4f} score\n"
+        best_grid = Table.grid(padding=(0, 2))
+        best_grid.add_column(style="bold green", no_wrap=True)
+        best_grid.add_column()
+        best_grid.add_row("export_config", rich_escape(str(best.ss_config)))
+        for k, v in best.metrics.items():
+            best_grid.add_row(k, self._fmt_metric(v, k))
+        best_grid.add_row("score", f"{best.score:.4f}")
+        _rprint(
+            Panel(best_grid, title="[bold green]Best Subnet[/bold green]", border_style="green")
         )
         return best.ss_config
+
+    def _fmt_metric(self, value: float, constraint_key: str) -> str:
+        """Format a metric value for display."""
+        return f"{value:.3f} MB" if constraint_key == "memory_mb" else num2hrb(value)
 
     @staticmethod
     def _generate_search_space_combos(
@@ -554,11 +631,6 @@ class MCoreMinitronSearcher(BaseSearcher):
                 {"hidden_size": 4096, "num_layers": 32},
             ]
         """
-        print_rank_0(
-            f"\nOnly considering atmost {(max_width_pruning * 100):.0f}% for width and "
-            f"{max_depth_pruning * 100:.0f}% for depth pruning hparams"
-        )
-
         if hparams_to_skip:
             search_space = dict(search_space)  # Avoid modifying the original search space
             print_rank_0(f"Skipping {hparams_to_skip=} during search space generation...")
@@ -579,10 +651,19 @@ class MCoreMinitronSearcher(BaseSearcher):
         }
 
         ss_size = 1
+        table = Table(
+            title=f"Search Space \n(≤{max_width_pruning * 100:.0f}% width / ≤{max_depth_pruning * 100:.0f}% depth pruning)",  # noqa: E501
+            show_header=True,
+            header_style="bold",
+        )
+        table.add_column("Hyperparameter")
+        table.add_column("Choices", overflow="fold")
         for k, v in filtered_ss.items():
-            print_rank_0(f"\tSearch space for {k}: {v}")
+            table.add_row(k, rich_escape(str(v)))
             ss_size *= len(v)
-        print_rank_0(f"\tTotal search space in consideration: {ss_size}\n")
+        table.add_section()
+        table.add_row("Search space size", f"{ss_size}")
+        _rprint(table)
 
         hparam_names = list(filtered_ss.keys())
         hparam_choices_lists = [filtered_ss[name] for name in hparam_names]
@@ -594,66 +675,61 @@ class MCoreMinitronSearcher(BaseSearcher):
 
         return search_space_combos
 
+    def _compute_candidate_metrics(self, ss_config: dict, max_num_layers: int) -> dict[str, float]:
+        """Compute all active metric constraint values for a candidate config analytically.
 
-def get_mcore_param_count(model: GPTModel | MambaModel) -> float:
-    """Get the number of parameters in the MCore GPTModel or MambaModel (reduced across TP and PP ranks)."""
-    assert isinstance(model, (GPTModel, MambaModel)), "Model must be a GPTModel or MambaModel"
-    if isinstance(model, DynamicModule):
-        return _param_num_dynamic(model)
-    else:
-        return _param_num(model)
+        Handles depth pruning by filtering the hybrid layer pattern to the kept (best) layers.
+        """
+        model = self.model
+        active_metric_keys = self.constraints.keys() & _METRIC_CONSTRAINTS
 
+        # Get hybrid layer pattern for MambaModel (None for pure GPT)
+        hybrid_layer_pattern: str | None = None
+        if isinstance(model, MambaModel):
+            hybrid_key = (
+                "hybrid_override_pattern"
+                if hasattr(self.model, "hybrid_override_pattern")
+                else "hybrid_layer_pattern"
+            )
+            hybrid_layer_pattern = getattr(model, hybrid_key)
 
-def _param_num(model: GPTModel | MambaModel) -> float:
-    """Get the number of parameters in the model (reduced across TP and PP ranks)."""
-    # Dont double count output_layer parameters if model.share_embeddings_and_output_weights is True
-    params = sum(
-        p.numel()
-        for name, p in model.named_parameters()
-        if not model.share_embeddings_and_output_weights or "output_layer.weight" not in name
-    )
+        # If depth pruning on a hybrid model, filter the pattern to only the kept layers.
+        # sorted_layers gives layer numbers (1-indexed) ordered best-first; we keep the top N.
+        num_layers_target: int = ss_config.get("num_layers", max_num_layers)
+        if hybrid_layer_pattern is not None and num_layers_target < max_num_layers:
+            assert self.sorted_layers is not None
+            kept = set(self.sorted_layers[:num_layers_target])
+            layer_chars = parse_main_layer_chars(hybrid_layer_pattern)
+            hybrid_layer_pattern = "".join(c for i, c in enumerate(layer_chars) if (i + 1) in kept)
 
-    reduced_params = torch.Tensor([params]).to(device=next(model.parameters()).device)
-    torch.distributed.all_reduce(reduced_params, group=get_pipeline_model_parallel_group())
-    torch.distributed.all_reduce(reduced_params, group=get_tensor_model_parallel_group())
-    return reduced_params.item()
+        metrics: dict[str, float] = {}
 
+        if active_metric_keys & {"params", "active_params"}:
+            total, active = mcore_param_count(
+                model.config,
+                model.vocab_size,
+                model.share_embeddings_and_output_weights,
+                hybrid_layer_pattern=hybrid_layer_pattern,
+                **ss_config,
+            )
+            if "params" in active_metric_keys:
+                metrics["params"] = total
+            if "active_params" in active_metric_keys:
+                metrics["active_params"] = active
 
-def _param_num_dynamic(
-    model: _DynamicMCoreLanguageModel, *, layer_numbers_to_count: list[int] | None = None
-) -> float:
-    """Get the number of parameters in the Dynamic Module (reduced across TP and PP ranks).
+        if "memory_mb" in active_metric_keys:
+            _, _, _, metrics["memory_mb"] = mcore_memory_footprint_mb(
+                model.config,
+                model.vocab_size,
+                model.share_embeddings_and_output_weights,
+                hybrid_layer_pattern=hybrid_layer_pattern,
+                dtype_bytes=2,  # assume BF16 input
+                sequence_length=self.config["seq_length"],
+                batch_size=self.config["batch_size"],
+                **ss_config,
+            )
 
-    Args:
-        model: GPTModel or MambaModel converted to a DynamicModule.
-        layer_numbers_to_count: If specified, only count the parameters of the given layer numbers (1-indexed).
-            Only needed when input is a DynamicModule to correctly count the parameters of the active layers.
-    """
-
-    # NOTE: model.parameters() doesnt consider active_slice so we dont get sorted or trimmed parameters!
-    def get_param_count(mod, name) -> int:
-        """Use getattr to access parameters correctly."""
-        module_path, _, param_name = name.rpartition(".")
-        submodule = mod.get_submodule(module_path) if module_path else mod
-        return getattr(submodule, param_name).numel()
-
-    # Account for depth pruning with uneven PP and hybrid models!
-    # Dont double count output_layer parameters if model.share_embeddings_and_output_weights is True
-    params = sum(
-        get_param_count(model, name)
-        for name, _ in model.named_parameters()
-        if ("decoder.layers." not in name or layer_numbers_to_count is None)
-        and not (model.share_embeddings_and_output_weights and "output_layer.weight" in name)
-    )
-    if layer_numbers_to_count is not None:
-        for layer in model.decoder.layers:
-            if layer.layer_number in layer_numbers_to_count:
-                params += sum(get_param_count(layer, name) for name, _ in layer.named_parameters())
-
-    reduced_params = torch.Tensor([params]).to(device=next(model.parameters()).device)
-    torch.distributed.all_reduce(reduced_params, group=get_pipeline_model_parallel_group())
-    torch.distributed.all_reduce(reduced_params, group=get_tensor_model_parallel_group())
-    return reduced_params.item()
+        return metrics
 
 
 MCoreMinitronConfig: type[ModeloptBaseConfig] = create_model(

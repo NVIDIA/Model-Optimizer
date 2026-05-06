@@ -174,6 +174,8 @@ All checks must pass before reporting success to the user.
 
 If a cluster config exists (`~/.config/modelopt/clusters.yaml` or `.claude/clusters.yaml`), or the user mentions running on a remote machine:
 
+0. **Check container registry auth** — before submitting any SLURM job with a container image, verify credentials exist on the cluster per `skills/common/slurm-setup.md` section 6. If credentials are missing for the image's registry, ask the user to fix auth or switch to an image on an authenticated registry (e.g., NGC). **Do not submit until auth is confirmed.**
+
 1. **Source remote utilities:**
 
    ```bash
@@ -193,7 +195,7 @@ If a cluster config exists (`~/.config/modelopt/clusters.yaml` or `.claude/clust
 
 3. **Deploy based on remote environment:**
 
-   - **SLURM** — see `skills/common/slurm-setup.md` for job script templates (container setup, account/partition discovery). The server command inside the container is the same as Step 4 (e.g., `python -m vllm.entrypoints.openai.api_server --model <path> --quantization modelopt`). Use `remote_submit_job` and `remote_poll_job` to manage the job. Get the node hostname from `squeue -j $JOBID -o %N`.
+   - **SLURM** — see `skills/common/slurm-setup.md` for job script templates (container setup, account/partition discovery). The server command inside the container is the same as Step 4 (e.g., `python -m vllm.entrypoints.openai.api_server --model <path> --quantization modelopt`). After submitting, register the job and set up monitoring per the **monitor skill**. Get the node hostname from `squeue -j $JOBID -o %N`.
 
    - **Bare metal / Docker** — use `remote_run` to start the server directly:
 
@@ -221,6 +223,10 @@ For NEL-managed deployment (evaluation with self-deployment), use the evaluation
 | `hf_quant_config.json not found` | Not a ModelOpt-exported checkpoint | Re-export with `export_hf_checkpoint()`, or remove `--quantization` flag |
 | `Connection refused` on health check | Server still starting | Wait 30-60s for large models; check logs for errors |
 | `modelopt_fp4 not supported` | Framework doesn't support FP4 for this model | Check support matrix in `references/support-matrix.md` |
+
+## Unsupported Models
+
+If the model is not in the validated support matrix (`references/support-matrix.md`), deployment may fail due to weight key mismatches, missing architecture mappings, or quantized/unquantized layer confusion. Read `references/unsupported-models.md` for the iterative debug loop: **run → read error → diagnose → patch framework source → re-run**. For kernel-level issues, escalate to the framework team rather than attempting fixes.
 
 ## Success Criteria
 

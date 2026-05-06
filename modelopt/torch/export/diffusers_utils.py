@@ -46,6 +46,17 @@ TI2VidTwoStagesPipeline: type[Any] | None
 try:  # optional for LTX-2 export paths
     from ltx_pipelines.ti2vid_two_stages import TI2VidTwoStagesPipeline as _TI2VidTwoStagesPipeline
 
+    warnings.warn(
+        "LTX-2 packages (ltx-core, ltx-pipelines, ltx-trainer) are provided by Lightricks "
+        "and are NOT covered by the Apache 2.0 license governing NVIDIA Model Optimizer. "
+        "You MUST comply with the LTX Community License Agreement when installing and using "
+        "LTX-2 with NVIDIA Model Optimizer. Any derivative models or fine-tuned weights from "
+        "LTX-2 (including quantized or distilled checkpoints) remain subject to the LTX "
+        "Community License Agreement, not Apache 2.0. "
+        "See: https://github.com/Lightricks/LTX-2/blob/main/LICENSE",
+        UserWarning,
+        stacklevel=2,
+    )
     TI2VidTwoStagesPipeline = _TI2VidTwoStagesPipeline
 except Exception:  # pragma: no cover
     TI2VidTwoStagesPipeline = None
@@ -381,6 +392,17 @@ def generate_diffusion_dummy_forward_fn(model: nn.Module) -> Callable[[], None]:
     if velocity_model is not None:
 
         def _ltx2_dummy_forward() -> None:
+            warnings.warn(
+                "LTX-2 packages (ltx-core, ltx-pipelines, ltx-trainer) are provided by Lightricks "
+                "and are NOT covered by the Apache 2.0 license governing NVIDIA Model Optimizer. "
+                "You MUST comply with the LTX Community License Agreement when installing and using "
+                "LTX-2 with NVIDIA Model Optimizer. Any derivative models or fine-tuned weights from "
+                "LTX-2 (including quantized or distilled checkpoints) remain subject to the LTX "
+                "Community License Agreement, not Apache 2.0. "
+                "See: https://github.com/Lightricks/LTX-2/blob/main/LICENSE",
+                UserWarning,
+                stacklevel=2,
+            )
             try:
                 from ltx_core.guidance.perturbations import BatchedPerturbationConfig
                 from ltx_core.model.transformer.modality import Modality

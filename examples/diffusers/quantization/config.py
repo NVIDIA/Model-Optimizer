@@ -17,82 +17,79 @@ import torch.nn as nn
 from calib.plugin_calib import PercentileCalibrator
 
 FP8_DEFAULT_CONFIG = {
-    "quant_cfg": {
-        "*weight_quantizer": {"num_bits": (4, 3), "axis": None},
-        "*input_quantizer": {"num_bits": (4, 3), "axis": None},
-        "*output_quantizer": {"enable": False},
-        "*softmax_quantizer": {
-            "num_bits": (4, 3),
-            "axis": None,
-        },
-        "default": {"enable": False},
-    },
+    "quant_cfg": [
+        {"quantizer_name": "*", "enable": False},
+        {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
+        {"quantizer_name": "*input_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
+        {"quantizer_name": "*output_quantizer", "enable": False},
+        {"quantizer_name": "*softmax_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
+    ],
     "algorithm": "max",
 }
 
 INT8_DEFAULT_CONFIG = {
-    "quant_cfg": {
-        "*weight_quantizer": {"num_bits": 8, "axis": 0},
-        "*input_quantizer": {"num_bits": 8, "axis": None},
-        "*output_quantizer": {"enable": False},
-        "default": {"enable": False},
-    },
+    "quant_cfg": [
+        {"quantizer_name": "*", "enable": False},
+        {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+        {"quantizer_name": "*input_quantizer", "cfg": {"num_bits": 8, "axis": None}},
+        {"quantizer_name": "*output_quantizer", "enable": False},
+    ],
     "algorithm": "max",
 }
 
 NVFP4_DEFAULT_CONFIG = {
-    "quant_cfg": {
-        "*weight_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
-            "axis": None,
+    "quant_cfg": [
+        {"quantizer_name": "*", "enable": False},
+        {
+            "quantizer_name": "*weight_quantizer",
+            "cfg": {
+                "num_bits": (2, 1),
+                "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+                "axis": None,
+            },
             "enable": True,
         },
-        "*input_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
-            "axis": None,
+        {
+            "quantizer_name": "*input_quantizer",
+            "cfg": {
+                "num_bits": (2, 1),
+                "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+                "axis": None,
+            },
             "enable": True,
         },
-        "*output_quantizer": {"enable": False},
-        "*softmax_quantizer": {
-            "num_bits": (4, 3),
-            "axis": None,
-        },
-        "default": {"enable": False},
-    },
+        {"quantizer_name": "*output_quantizer", "enable": False},
+        {"quantizer_name": "*softmax_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
+    ],
     "algorithm": "max",
 }
 
 NVFP4_FP8_MHA_CONFIG = {
-    "quant_cfg": {
-        "**weight_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
-            "axis": None,
+    "quant_cfg": [
+        {"quantizer_name": "*", "enable": False},
+        {
+            "quantizer_name": "**weight_quantizer",
+            "cfg": {
+                "num_bits": (2, 1),
+                "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+                "axis": None,
+            },
             "enable": True,
         },
-        "**input_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
-            "axis": None,
+        {
+            "quantizer_name": "**input_quantizer",
+            "cfg": {
+                "num_bits": (2, 1),
+                "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+                "axis": None,
+            },
             "enable": True,
         },
-        "*output_quantizer": {"enable": False},
-        "*[qkv]_bmm_quantizer": {
-            "num_bits": (4, 3),
-            "axis": None,
-        },
-        "*softmax_quantizer": {
-            "num_bits": (4, 3),
-            "axis": None,
-        },
-        "*bmm2_output_quantizer": {
-            "num_bits": (4, 3),
-            "axis": None,
-        },
-        "default": {"enable": False},
-    },
+        {"quantizer_name": "*output_quantizer", "enable": False},
+        {"quantizer_name": "*[qkv]_bmm_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
+        {"quantizer_name": "*softmax_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
+        {"quantizer_name": "*bmm2_output_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
+    ],
     "algorithm": {"method": "svdquant", "lowrank": 32},
 }
 
@@ -106,8 +103,9 @@ def set_quant_config_attr(quant_config, trt_high_precision_dtype, quant_algo, **
         algo_cfg["lowrank"] = kwargs["lowrank"]
     quant_config["algorithm"] = algo_cfg
 
-    for p in quant_config["quant_cfg"].values():
-        if "num_bits" in p and "trt_high_precision_dtype" not in p:
+    for entry in quant_config["quant_cfg"]:
+        p = entry.get("cfg", {})
+        if isinstance(p, dict) and "num_bits" in p and "trt_high_precision_dtype" not in p:
             p["trt_high_precision_dtype"] = trt_high_precision_dtype
 
 
@@ -127,18 +125,23 @@ def reset_set_int8_config(quant_config, percentile, n_steps, collect_method, bac
     for name, module in backbone.named_modules():
         if isinstance(module, nn.Conv2d):
             aq_name = f"*{name}*input_quantizer*"
-            quant_config["quant_cfg"][aq_name] = {
-                "num_bits": 8,
-                "axis": None,
-                "calibrator": (
-                    PercentileCalibrator,
-                    (),
-                    {
+            quant_config["quant_cfg"].append(
+                {
+                    "quantizer_name": aq_name,
+                    "cfg": {
                         "num_bits": 8,
                         "axis": None,
-                        "percentile": percentile,
-                        "total_step": n_steps,
-                        "collect_method": collect_method,
+                        "calibrator": (
+                            PercentileCalibrator,
+                            (),
+                            {
+                                "num_bits": 8,
+                                "axis": None,
+                                "percentile": percentile,
+                                "total_step": n_steps,
+                                "collect_method": collect_method,
+                            },
+                        ),
                     },
-                ),
-            }
+                }
+            )

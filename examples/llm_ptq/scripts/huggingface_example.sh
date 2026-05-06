@@ -53,9 +53,9 @@ esac
 IFS=","
 for qformat in $QFORMAT; do
     case $qformat in
-    fp8 | fp8_pc_pt | fp8_pb_wo | int8_wo | int8_sq | int4_awq | w4a8_awq | fp16 | bf16 | nvfp4 | nvfp4_awq | w4a8_nvfp4_fp8 | w4a8_mxfp4_fp8 | nvfp4_mlp_only | nvfp4_experts_only | nvfp4_omlp_only | nvfp4_svdquant | mxfp8) ;;
+    fp8 | fp8_pc_pt | fp8_pb_wo | int8_wo | int8_sq | int4_awq | w4a8_awq | fp16 | bf16 | nvfp4 | nvfp4_awq | nvfp4_mse | w4a8_nvfp4_fp8 | w4a8_mxfp4_fp8 | nvfp4_experts_only | nvfp4_mlp_only | nvfp4_omlp_only | nvfp4_svdquant | mxfp8 | nvfp4_local_hessian) ;;
     *)
-        echo "Unknown quant argument: Expected one of: [fp8, fp8_pc_pt, fp8_pb_wo, int8_wo, int8_sq, int4_awq, w4a8_awq, fp16, bf16, nvfp4, nvfp4_awq, w4a8_nvfp4_fp8, w4a8_mxfp4_fp8, nvfp4_mlp_only, nvfp4_experts_only, nvfp4_omlp_only, nvfp4_svdquant, mxfp8]" >&2
+        echo "Unknown quant argument: Expected one of: [fp8, fp8_pc_pt, fp8_pb_wo, int8_wo, int8_sq, int4_awq, w4a8_awq, fp16, bf16, nvfp4, nvfp4_awq, nvfp4_mse, w4a8_nvfp4_fp8, w4a8_mxfp4_fp8, nvfp4_experts_only, nvfp4_mlp_only, nvfp4_omlp_only, nvfp4_svdquant, mxfp8, nvfp4_local_hessian]" >&2
         exit 1
         ;;
     esac
@@ -141,6 +141,10 @@ fi
 
 if [ -n "$MOE_CALIB_EXPERTS_RATIO" ]; then
     PTQ_ARGS+=" --moe_calib_experts_ratio=$MOE_CALIB_EXPERTS_RATIO "
+fi
+
+if $CAST_MXFP4_TO_NVFP4; then
+    PTQ_ARGS+=" --cast_mxfp4_to_nvfp4 "
 fi
 
 if ! $VERBOSE; then

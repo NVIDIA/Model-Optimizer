@@ -28,6 +28,8 @@ from typing import Any
 import torch
 import torch.distributed
 from huggingface_hub import hf_hub_download
+from huggingface_hub.errors import EntryNotFoundError
+from safetensors import safe_open
 from safetensors.torch import save_file
 
 from modelopt import __version__
@@ -43,7 +45,7 @@ from .model_config import (
     QUANTIZATION_NONE,
     QUANTIZATION_NVFP4,
 )
-from .plugins.hf_checkpoint_utils import copy_remote_code, load_multimodal_components
+from .plugins.hf_checkpoint_utils import copy_hf_ckpt_remote_code, load_multimodal_components
 from .plugins.mcore_common import all_mcore_hf_export_mapping
 from .plugins.mcore_custom import (
     CustomModuleMapping,
@@ -70,10 +72,16 @@ has_mcore = False
 with import_plugin("megatron"):
     from megatron.core.models.gpt import GPTModel
     from megatron.core.models.mamba import MambaModel
+
+    try:
+        from megatron.core.models.hybrid.hybrid_model import HybridModel
+    except ImportError:
+        HybridModel = MambaModel
     from megatron.core.models.multimodal.llava_model import LLaVAModel
     from megatron.core.parallel_state import (
         get_pipeline_model_parallel_rank,
         get_pipeline_model_parallel_world_size,
+        get_tensor_model_parallel_rank,
     )
     from megatron.core.ssm.mamba_layer import MambaLayer
     from megatron.core.transformer.identity_op import IdentityOp
@@ -118,7 +126,7 @@ class GPTModelExporter:
         moe_router_dtype: str | None = None,
     ):
         """Create a GPTModel exporter instance."""
-        if not isinstance(model, (GPTModel, MambaModel, LLaVAModel)):
+        if not isinstance(model, (GPTModel, MambaModel, HybridModel, LLaVAModel)):
             raise ValueError("Input to GPTModelExport must be a megatron.core.models.GPTModel!")
 
         self._state_dict = OrderedDict()
@@ -256,13 +264,14 @@ class GPTModelExporter:
         """
         pp_rank = get_pipeline_model_parallel_rank()
         pp_size = get_pipeline_model_parallel_world_size()
+        tp_rank = get_tensor_model_parallel_rank()
 
         # We use the 1st PP rank to handle VLM because vision_models
         # and vision_proj only exist in the first stage.
-        is_first_stage_main_rank = pp_rank == 0
+        is_first_stage_main_rank = pp_rank == 0 and tp_rank == 0
         # We use the last PP rank to write the config because
         # medusa_heads and eagle_module only exist in the last stage.
-        is_last_stage_main_rank = pp_rank == pp_size - 1
+        is_last_stage_main_rank = pp_rank == pp_size - 1 and tp_rank == 0
 
         # Main export process
         layer_state_dicts = self.layer_state_dicts
@@ -297,9 +306,7 @@ class GPTModelExporter:
                     trust_remote_code=self.trust_remote_code,
                 )
                 tokenizer.save_pretrained(save_directory)
-            except OSError:
-                pass
-            except TypeError:
+            except (OSError, TypeError, ValueError, ImportError):
                 pass
             try:
                 # Load and save preprocessor config from the original model
@@ -347,7 +354,7 @@ class GPTModelExporter:
         torch.distributed.barrier()
 
         if is_last_stage_main_rank and self._hf_config is not None:
-            copy_remote_code(pretrained_model_name_or_path, save_directory)
+            copy_hf_ckpt_remote_code(pretrained_model_name_or_path, save_directory)
 
         # Newer versions of VLLM expect config.json with hf_quant_config
         config_json_file = save_directory + "/config.json"
@@ -534,29 +541,57 @@ class GPTModelExporter:
         # TODO Implement MTP export for quantized MTP
         # Hacky version for now: copy MTP weights from pretrained model
         mtp_state_dict = {}
-        if self._hf_pretrained_model_name:
-            if os.path.isdir(self._hf_pretrained_model_name):
-                safetensors_index_file = (
-                    Path(self._hf_pretrained_model_name) / "model.safetensors.index.json"
-                )
-            else:
-                safetensors_index_file = hf_hub_download(
-                    repo_id=self._hf_pretrained_model_name, filename="model.safetensors.index.json"
-                )
+        if not self._hf_pretrained_model_name:
+            return mtp_state_dict
 
+        mtp_exists = False
+
+        if os.path.isdir(self._hf_pretrained_model_name):
+            safetensors_index_file = (
+                Path(self._hf_pretrained_model_name) / "model.safetensors.index.json"
+            )
+            single_safetensors_file = Path(self._hf_pretrained_model_name) / "model.safetensors"
+        else:
+            try:
+                safetensors_index_file = Path(
+                    hf_hub_download(
+                        repo_id=self._hf_pretrained_model_name,
+                        filename="model.safetensors.index.json",
+                    )
+                )
+                single_safetensors_file = None
+            except EntryNotFoundError:
+                # Model uses a single unsharded safetensors file — check it for MTP weights.
+                safetensors_index_file = None
+                try:
+                    single_safetensors_file = Path(
+                        hf_hub_download(
+                            repo_id=self._hf_pretrained_model_name,
+                            filename="model.safetensors",
+                        )
+                    )
+                except EntryNotFoundError:
+                    return mtp_state_dict
+
+        if safetensors_index_file is not None and safetensors_index_file.exists():
             print(f"Exporting MTP: using safetensors_index_file: {safetensors_index_file}")
-            mtp_exists = False
-            if safetensors_index_file and os.path.exists(safetensors_index_file):
-                with open(safetensors_index_file) as f:
-                    safetensors_index = json.load(f)
-                model_dir = Path(safetensors_index_file).parent
-                for key in safetensors_index["weight_map"]:
+            with open(safetensors_index_file) as f:
+                safetensors_index = json.load(f)
+            model_dir = safetensors_index_file.parent
+            for key in safetensors_index["weight_map"]:
+                if key.startswith("mtp.") and key not in self._state_dict:
+                    mtp_state_dict[key] = get_safetensor(model_dir, key)
+                    mtp_exists = True
+        elif single_safetensors_file is not None and single_safetensors_file.exists():
+            print(f"Exporting MTP: using single safetensors file: {single_safetensors_file}")
+            with safe_open(str(single_safetensors_file), framework="pt", device="cpu") as f:
+                for key in f.keys():  # noqa: SIM118
                     if key.startswith("mtp.") and key not in self._state_dict:
-                        mtp_state_dict[key] = get_safetensor(model_dir, key)
+                        mtp_state_dict[key] = f.get_tensor(key)
                         mtp_exists = True
 
-            if mtp_exists:
-                self.exclude_modules.append("mtp*")
+        if mtp_exists:
+            self.exclude_modules.append("mtp*")
         return mtp_state_dict
 
     def _get_mamba_layer_state_dict(self, layer, layer_id):
@@ -711,6 +746,44 @@ class GPTModelExporter:
 
         return all_rules
 
+    def _get_weight_bias(
+        self,
+        module: torch.nn.Module,
+        dtype: torch.dtype = torch.float16,
+        name_to_value: dict[str, torch.Tensor] | None = None,
+    ) -> dict[str, torch.Tensor]:
+        """Get the weight and bias of the module.
+
+        Args:
+            module: The target module to get the weight and bias.
+            dtype: The data type of the weight and bias.
+            name_to_value: The dictionary to store the weight and bias. A new dict is created
+                if not provided.
+
+        Returns:
+            The dictionary containing the weight and bias.
+        """
+        if name_to_value is None:
+            name_to_value = {}
+        # numel() > 0 intentionally excludes zero-element weight tensors (e.g. MoE routing
+        # layers whose weight is a placeholder) so callers can use "weight" in name_to_value
+        # as a reliable guard without re-inspecting module.weight.
+        if hasattr(module, "weight") and module.weight is not None and module.weight.numel() > 0:
+            weight = module.weight.to(dtype).cpu()
+            name_to_value["weight"] = weight
+
+        if hasattr(module, "bias") and module.bias is not None and module.bias.numel() > 0:
+            name_to_value["bias"] = module.bias.to(dtype).cpu()
+
+        if (
+            hasattr(module, "expert_bias")
+            and module.expert_bias is not None
+            and module.expert_bias.numel() > 0
+        ):
+            name_to_value["expert_bias"] = module.expert_bias.to(dtype).cpu()
+
+        return name_to_value
+
     def _get_quantized_state(
         self,
         module: torch.nn.Module,
@@ -735,21 +808,10 @@ class GPTModelExporter:
             self.exclude_modules.append(prefix.removesuffix("."))
         block_size = get_weight_block_size(module)
 
-        if hasattr(module, "weight") and module.weight is not None and module.weight.numel() > 0:
-            weight = module.weight.to(dtype).cpu()
-            name_to_value["weight"] = weight
-        else:
+        name_to_value = self._get_weight_bias(module, dtype, name_to_value)
+
+        if "weight" not in name_to_value:
             return name_to_value, qformat, block_size
-
-        if hasattr(module, "bias") and module.bias is not None and module.bias.numel() > 0:
-            name_to_value["bias"] = module.bias.to(dtype).cpu()
-
-        if (
-            hasattr(module, "expert_bias")
-            and module.expert_bias is not None
-            and module.expert_bias.numel() > 0
-        ):
-            name_to_value["expert_bias"] = module.expert_bias.to(dtype).cpu()
 
         if qformat == QUANTIZATION_NONE:
             return name_to_value, qformat, block_size
@@ -987,17 +1049,22 @@ class GPTModelExporter:
             )
             hidden_size = 2 * hidden_size
 
-        weight = weight.reshape([qkv_total_dim, head_size, hidden_size])
+        # When TP > 1 the weight tensor is already sharded: shape[0] = per_rank_qkv_dim, not
+        # qkv_total_dim.  Derive the per-rank dimensions from the actual tensor shape so that
+        # all subsequent reshape/slice operations are correct regardless of TP degree.
+        per_rank_qkv_dim = weight.shape[0] // head_size
+        num_query_groups_local = num_query_groups * per_rank_qkv_dim // qkv_total_dim
+        weight = weight.reshape([per_rank_qkv_dim, head_size, hidden_size])
         weight_scale, weight_scale_2 = self._get_weight_scales(name_to_value, qformat)
 
         q_slice = torch.cat(
             [
                 torch.arange((heads_per_group + 2) * i, (heads_per_group + 2) * i + heads_per_group)
-                for i in range(num_query_groups)
+                for i in range(num_query_groups_local)
             ]
         )
-        k_slice = torch.arange(heads_per_group, qkv_total_dim, (heads_per_group + 2))
-        v_slice = torch.arange(heads_per_group + 1, qkv_total_dim, (heads_per_group + 2))
+        k_slice = torch.arange(heads_per_group, per_rank_qkv_dim, (heads_per_group + 2))
+        v_slice = torch.arange(heads_per_group + 1, per_rank_qkv_dim, (heads_per_group + 2))
         ## Example of slices
         ## 7b: num_query_groups = head_num = 32,
         ## q_slice = [0, 3, 6, 9 , ... 90, 93]
@@ -1022,7 +1089,7 @@ class GPTModelExporter:
                 weight_scale_dtype = weight_scale.dtype
                 weight_scale_hidden_size = weight_scale.shape[-1]
                 weight_scale = weight_scale.to(dtype=float).reshape(
-                    [qkv_total_dim, head_size, weight_scale_hidden_size]
+                    [per_rank_qkv_dim, head_size, weight_scale_hidden_size]
                 )
                 proj_weight_scales = [
                     weight_scale[s]
@@ -1063,7 +1130,7 @@ class GPTModelExporter:
             if key == "bias":
                 # Slice bias similar to weight
                 bias = val.detach().clone()
-                bias = bias.reshape([qkv_total_dim, head_size])
+                bias = bias.reshape([per_rank_qkv_dim, head_size])
                 proj_biases = [bias[s].reshape(-1) for s in slices]
                 proj_bias_keys = [q_proj_prefix + key, k_proj_prefix + key, v_proj_prefix + key]
                 for bias_tensor, bias_key in zip(proj_biases, proj_bias_keys):

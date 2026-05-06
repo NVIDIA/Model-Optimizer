@@ -716,10 +716,60 @@ her fear and anger)."""
                 }
             else:
                 data_files = {"test": [str(config_name_or_dataset_path_path)]}
-            dataset = load_dataset("parquet", data_files=data_files, split="test")
-        if self.num_samples is not None:
-            dataset = dataset.select(range(self.num_samples))
+            try:
+                dataset = load_dataset("parquet", data_files=data_files, split="test")
+            except (TypeError, ValueError):
+                # Fallback: parquet metadata may be incompatible with the installed
+                # ``datasets`` version.  Read via PyArrow and convert directly.
+                import pyarrow
+                import pyarrow.parquet as pq
+                from datasets import Dataset as HFDataset
+
+                tables = [pq.read_table(f) for f in data_files["test"]]
+                table = pyarrow.concat_tables(tables) if len(tables) > 1 else tables[0]
+                # Strip HF metadata from the schema to avoid Feature parsing errors
+                schema = table.schema
+                if schema.metadata and b"huggingface" in schema.metadata:
+                    new_meta = {
+                        k: v
+                        for k, v in schema.metadata.items()
+                        if k != b"huggingface"
+                    }
+                    table = table.replace_schema_metadata(new_meta or None)
+                dataset = HFDataset(table)
+        if self.num_samples is not None and self.num_samples < len(dataset):
+            dataset = self._stratified_select(dataset, self.num_samples)
         return dataset
+
+    @staticmethod
+    def _stratified_select(dataset: "Dataset", n: int) -> "Dataset":
+        """Select ``n`` samples uniformly across the ``category`` column.
+
+        Round-robin across categories until ``n`` rows are collected. The
+        resulting prefix is balanced; once a smaller category is exhausted
+        the remaining categories continue contributing, so exactly ``n``
+        rows are returned whenever ``n`` does not exceed the dataset size.
+        Falls back to ``range(n)`` when ``category`` is absent or there is
+        only one category. Indices come from ``range(category_size)`` (not
+        random) so behavior is deterministic.
+        """
+        if "category" not in dataset.column_names:
+            return dataset.select(range(n))
+        cat_to_rows: dict[str, list[int]] = {}
+        for i, c in enumerate(dataset["category"]):
+            cat_to_rows.setdefault(c, []).append(i)
+        if len(cat_to_rows) <= 1:
+            return dataset.select(range(n))
+        cat_lists = list(cat_to_rows.values())
+        interleaved: list[int] = []
+        max_len = max(len(c) for c in cat_lists)
+        for i in range(max_len):
+            for c in cat_lists:
+                if i < len(c):
+                    interleaved.append(c[i])
+                    if len(interleaved) == n:
+                        return dataset.select(interleaved)
+        return dataset.select(interleaved)
 
     def _resolve_external_data(
         self, dataset: "Dataset", speed_config: config_type | str

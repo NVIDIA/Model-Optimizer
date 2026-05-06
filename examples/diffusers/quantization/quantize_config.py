@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import math
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -78,6 +79,7 @@ class QuantizationConfig:
     lowrank: int = 32  # SVDQuant lowrank
     quantize_mha: bool = False
     compress: bool = False
+    block_size: int = 16  # NVFP4 block size
 
     def validate(self) -> None:
         """Validate configuration consistency."""
@@ -110,7 +112,7 @@ class CalibrationConfig:
     @property
     def num_batches(self) -> int:
         """Calculate number of calibration batches."""
-        return self.calib_size // self.batch_size
+        return math.ceil(self.calib_size / self.batch_size)
 
 
 @dataclass
@@ -119,7 +121,7 @@ class ModelConfig:
 
     model_type: ModelType = ModelType.FLUX_DEV
     model_dtype: dict[str, torch.dtype] = field(default_factory=lambda: {"default": torch.float16})
-    backbone: str = ""
+    backbone: list[str] = field(default_factory=list)
     trt_high_precision_dtype: DataType = DataType.HALF
     override_model_path: Path | None = None
     cpu_offloading: bool = False

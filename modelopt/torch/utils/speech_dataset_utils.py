@@ -48,9 +48,7 @@ def _get_speech_dataset(dataset_name: str, num_samples: int):
 
         # Use streaming can reduce the downloading time for large datasets
         dataset = load_dataset(
-            **SUPPORTED_SPEECH_DATASET_CONFIG[dataset_name]["config"],
-            trust_remote_code=True,
-            streaming=True,
+            **SUPPORTED_SPEECH_DATASET_CONFIG[dataset_name]["config"], streaming=True
         )
     else:
         raise NotImplementedError(

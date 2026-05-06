@@ -151,6 +151,119 @@ def test_diffusers_quantization(
     model.inference(tmp_path)
 
 
+class Wan22Model(NamedTuple):
+    model: str
+    backbone: str | None
+    format_type: str
+    quant_algo: str
+    collect_method: str
+
+    def _ckpt_path(self, tmp_path: Path) -> str:
+        stem = self.model.replace("wan2.2-t2v-", "")
+        parts = [stem, *([self.backbone] if self.backbone else []), self.format_type]
+        return str(tmp_path / f"wan22_{'_'.join(parts)}.pt")
+
+    def _common_args(self, tiny_wan22_path: str) -> list[str]:
+        cmd_args = [
+            "python",
+            "quantize.py",
+            "--model",
+            self.model,
+            "--override-model-path",
+            tiny_wan22_path,
+            "--format",
+            self.format_type,
+            "--quant-algo",
+            self.quant_algo,
+            "--collect-method",
+            self.collect_method,
+            "--model-dtype",
+            "BFloat16",
+            "--trt-high-precision-dtype",
+            "BFloat16",
+            "--calib-size",
+            "2",
+            "--batch-size",
+            "1",
+            "--n-steps",
+            "2",
+            # Tiny video dims — override MODEL_DEFAULTS for fast CI.
+            "--extra-param",
+            "height=16",
+            "--extra-param",
+            "width=16",
+            "--extra-param",
+            "num_frames=5",
+        ]
+        if self.backbone is not None:
+            cmd_args.extend(["--backbone", self.backbone])
+        return cmd_args
+
+    def quantize(self, tiny_wan22_path: str, tmp_path: Path) -> None:
+        run_example_command(
+            [
+                *self._common_args(tiny_wan22_path),
+                "--quantized-torch-ckpt-save-path",
+                self._ckpt_path(tmp_path),
+            ],
+            "diffusers/quantization",
+        )
+
+    def restore(self, tiny_wan22_path: str, tmp_path: Path) -> None:
+        run_example_command(
+            [*self._common_args(tiny_wan22_path), "--restore-from", self._ckpt_path(tmp_path)],
+            "diffusers/quantization",
+        )
+
+
+# The VAE (``AutoencoderKLWan``) is shared between Wan 2.2 14B and 5B, so the
+# Conv3D NVFP4 implicit-GEMM dispatch exercises the same kernel either way; we
+# parametrize both ``--model`` values to also cover the ``quantize.py`` dispatch
+# for each.
+@pytest.mark.parametrize(
+    "wan_model",
+    [
+        Wan22Model("wan2.2-t2v-14b", None, "int8", "smoothquant", "min-mean"),
+        pytest.param(
+            Wan22Model("wan2.2-t2v-14b", None, "fp8", "max", "default"),
+            marks=minimum_sm(89),
+        ),
+        pytest.param(
+            Wan22Model("wan2.2-t2v-14b", None, "fp4", "max", "default"),
+            marks=minimum_sm(89),
+        ),
+        pytest.param(
+            Wan22Model("wan2.2-t2v-14b", "vae", "fp8", "max", "default"),
+            marks=minimum_sm(89),
+        ),
+        pytest.param(
+            Wan22Model("wan2.2-t2v-14b", "vae", "fp4", "max", "default"),
+            marks=minimum_sm(89),
+        ),
+        pytest.param(
+            Wan22Model("wan2.2-t2v-5b", "vae", "fp8", "max", "default"),
+            marks=minimum_sm(89),
+        ),
+        pytest.param(
+            Wan22Model("wan2.2-t2v-5b", "vae", "fp4", "max", "default"),
+            marks=minimum_sm(89),
+        ),
+    ],
+    ids=[
+        "wan22_14b_transformer_int8_smoothquant",
+        "wan22_14b_transformer_fp8_max",
+        "wan22_14b_transformer_fp4_max",
+        "wan22_14b_vae_fp8_max",
+        "wan22_14b_vae_fp4_max",
+        "wan22_5b_vae_fp8_max",
+        "wan22_5b_vae_fp4_max",
+    ],
+)
+def test_wan22_quantization(wan_model: Wan22Model, tiny_wan22_path: str, tmp_path: Path) -> None:
+    wan_model.quantize(tiny_wan22_path, tmp_path)
+    wan_model.restore(tiny_wan22_path, tmp_path)
+
+
 @pytest.mark.parametrize(
     ("model_name", "model_path", "torch_compile"),
     [

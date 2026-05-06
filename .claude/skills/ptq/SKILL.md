@@ -24,6 +24,24 @@ Check the support table in `examples/llm_ptq/README.md` for verified HF models.
 - **Listed** → supported, use `hf_ptq.py` (step 4A/4B)
 - **Not listed** → read `references/unsupported-models.md` to determine if `hf_ptq.py` can still work or if a custom script is needed (step 4C)
 
+## Step 2.5 — Check for model-specific dependencies
+
+If the model uses `trust_remote_code` (check `config.json` for `auto_map`), inspect its custom Python files for imports not present in the container:
+
+```bash
+grep -h "^from \|^import " <model_path>/modeling_*.py | sort -u
+```
+
+**Known dependency patterns:**
+
+| Import found | Packages to install |
+| --- | --- |
+| `from mamba_ssm` / `from causal_conv1d` | `mamba-ssm causal-conv1d` (Mamba/hybrid models: NemotronH, Jamba) |
+
+If extra deps are needed:
+- **Launcher (4B)**: set `EXTRA_PIP_DEPS` in the task's `environment` section — `ptq.sh` installs them automatically
+- **Manual (4A)**: `unset PIP_CONSTRAINT && pip install <deps>` before running `hf_ptq.py`
+
 ## Step 3 — Choose quantization format
 
 **First**, check for a model-specific recipe:
@@ -100,9 +118,7 @@ For SLURM, see `skills/common/slurm-setup.md` and `references/slurm-setup-ptq.md
 
 ### Monitoring
 
-- **Launcher**: blocks and tails logs automatically
-- **SLURM (manual)**: poll with `squeue -u $USER` + `sleep` (not cron or background tasks)
-- **Local**: watch stdout
+After job submission, register the job and set up monitoring per the **monitor skill**.
 
 ## Step 5 — Verify output
 
@@ -113,14 +129,27 @@ ls -lh <output_path>/
 
 Report the path and size to the user.
 
+### Post-quantization validation
+
+Validate the exported checkpoint's quantization pattern matches the recipe. Quantization config patterns can silently miss layers if the model uses non-standard naming (e.g., Gemma4 `experts.*` missed by `*mlp*` patterns) — this only surfaces later as deployment failures. Read `references/checkpoint-validation.md` for the validation script, expected patterns per recipe, and common pattern gaps.
+
+**Next steps**: If the user wants to deploy or evaluate the quantized checkpoint, use the **deployment** or **evaluation** skill. The checkpoint workspace carries over. If the model required patches during PTQ (e.g., transformers upgrade), the same fixes will likely be needed at deployment and evaluation time.
+
 ## Key API Rules
 
 - `mtq.register()` classes **must** define `_setup()` and call it from `__init__`
 - Call `mto.enable_huggingface_checkpointing()` **before** quantization
 - Wildcard `*gate*` matches too broadly — use `*mlp.gate*` or `*router*`
-- VLMs need `AutoModel`, not `AutoModelForCausalLM`
-- FP8 loading: `FineGrainedFP8Config(dequantize=True)`, not a dict
+- VLMs: `hf_ptq.py` auto-extracts the language model via `extract_and_prepare_language_model_from_vl()` — no manual VLM handling needed in most cases
+- FP8 checkpoints: prefer `_QuantFP8Linear` (lazy dequant) over `FineGrainedFP8Config(dequantize=True)` which wastes ~2x memory. See `references/unsupported-models.md` for details
 - Custom quantizer names must end with `_input_quantizer` or `_weight_quantizer`
+
+## Common Pitfalls
+
+- **Model-specific dependencies**: Models with `trust_remote_code` may import packages not in the container (e.g., `mamba-ssm` for hybrid Mamba models). See Step 2.5. Use `EXTRA_PIP_DEPS` env var with the launcher, or install manually before running `hf_ptq.py`
+- **Transformers version**: New models may need a newer version of transformers than what's installed. Check `config.json` for `transformers_version`. In containers, beware of `PIP_CONSTRAINT` blocking upgrades — see `references/slurm-setup-ptq.md` for workarounds
+- **Gated datasets**: Some calibration datasets require HF authentication. Ensure `HF_TOKEN` is set in the job environment, or use `--dataset cnn_dailymail` as a non-gated alternative
+- **NFS root_squash + Docker**: See `skills/common/slurm-setup.md` section 5
 
 ## References
 
@@ -131,9 +160,10 @@ Report the path and size to the user.
 | `references/launcher-guide.md` | Step 4B only (launcher path) |
 | `tools/launcher/CLAUDE.md` | Step 4B only, if you need more launcher detail |
 | `references/unsupported-models.md` | Step 4C only (unlisted model) |
+| `references/checkpoint-validation.md` | Step 5: validate quantization pattern matches recipe |
 | `skills/common/remote-execution.md` | Step 4A/4C only, if target is remote |
 | `skills/common/slurm-setup.md` | Step 4A/4C only, if using SLURM manually (not launcher) |
-| `references/slurm-setup-ptq.md` | Step 4A/4C only, PTQ-specific SLURM (container, FSDP2) |
+| `references/slurm-setup-ptq.md` | Step 4A/4C only, PTQ-specific SLURM (container, GPU sizing, FSDP2) |
 | `examples/llm_ptq/README.md` | Step 3: support matrix, CLI flags, accuracy |
 | `modelopt/torch/quantization/config.py` | Step 3: format definitions |
 | `modelopt/torch/export/model_utils.py` | Step 4C: TRT-LLM export type mapping |

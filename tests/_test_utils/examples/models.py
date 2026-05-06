@@ -64,8 +64,8 @@ LLAVA_PATH = _select_path(
 )
 
 QWEN_VL_PATH = _select_path(
-    remote_id="Qwen/Qwen2-VL-2B-Instruct",
-    local_id="Qwen2-VL-2B-Instruct",
+    remote_id="Qwen/Qwen3-VL-2B-Instruct",
+    local_id="Qwen3-VL-2B-Instruct",
 )
 
 # Diffusers

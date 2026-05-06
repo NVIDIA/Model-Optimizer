@@ -25,6 +25,7 @@ from typing import Any
 import torch
 
 from modelopt.torch.utils import distributed as dist
+from modelopt.torch.utils import safe_load
 
 from .model_config_utils import (
     model_config_from_dict,
@@ -41,7 +42,7 @@ class NFSWorkspace:
           communication nor barrier. It is users' responsibility to synchronize
           all ranks (local and remove processes).
 
-    This implementation uses `torch.save` and `torch.load` for serialization.
+    This implementation uses `torch.save` and `safe_load` (`torch.load(weights_only=True)`) for serialization.
 
     Args:
         workspace_path: the path to the NFS directory for postprocess cross rank communication.
@@ -91,8 +92,7 @@ class NFSWorkspace:
             raise ValueError("NFSWorkspace is not initialized!")
         state_path = self._get_state_path(target_rank)
         if state_path.exists():
-            # Security NOTE: weights_only=False is used here on ModelOpt-generated ckpt, not on untrusted user input
-            state = torch.load(state_path, map_location="cpu", weights_only=False)
+            state = safe_load(state_path, map_location="cpu")
             return state["config"], state["weight"]
         else:
             return None, None

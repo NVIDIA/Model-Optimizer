@@ -13,13 +13,11 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/ubuntu-setup
-      - name: Install dependencies
-        run: pip install tox
       - name: Run basic unit tests
-        run: tox -e py312-torch29-tf_latest-unit
+        run: pip install nox uv && nox -s "unit-3.12(torch_211, tf_latest)"
       - name: Build Wheel
         run: |
-          tox -e build-wheel
+          nox -s build_wheel
           echo "WHEEL_PATH=$(find dist -name "*.whl" | head -n 1)" >> $GITHUB_ENV
       - name: Upload GitHub Release Artifact
         env:

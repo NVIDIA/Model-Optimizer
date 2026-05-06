@@ -21,7 +21,8 @@ import pytest
 import torch
 import torch.nn as nn
 
-from modelopt.torch.quantization import set_quantizer_attribute, tensor_quant
+from modelopt.torch.quantization import tensor_quant
+from modelopt.torch.quantization.conversion import set_quantizer_attributes_partial
 from modelopt.torch.quantization.nn import QuantModuleRegistry
 from modelopt.torch.quantization.nn.modules.quant_rnn import VFRNNForward
 
@@ -52,7 +53,7 @@ class TestQuantRNN:
         quant_rnn_object = QuantModuleRegistry.convert(rnn_object)
         rnn_object.eval()
         rnn_object_original.eval()
-        set_quantizer_attribute(quant_rnn_object, lambda name: True, {"enable": False})
+        set_quantizer_attributes_partial(quant_rnn_object, lambda name: True, {"enable": False})
 
         assert torch.allclose(
             quant_rnn_object.weight_ih_l0, rnn_object_original.weight_ih_l0, atol=1e-6
@@ -86,7 +87,7 @@ class TestQuantRNN:
         quant_rnn_object = QuantModuleRegistry.convert(rnn_object)
         rnn_object.eval()
         rnn_object_original.eval()
-        set_quantizer_attribute(quant_rnn_object, lambda name: True, {"enable": False})
+        set_quantizer_attributes_partial(quant_rnn_object, lambda name: True, {"enable": False})
 
         assert torch.allclose(
             quant_rnn_object.weight_ih_l0, rnn_object_original.weight_ih_l0, atol=1e-6
@@ -124,7 +125,7 @@ class TestQuantRNN:
         rnn_object_original = copy.deepcopy(rnn_object)
         quant_rnn_object = QuantModuleRegistry.convert(rnn_object)
 
-        set_quantizer_attribute(quant_rnn_object, lambda name: True, {"enable": False})
+        set_quantizer_attributes_partial(quant_rnn_object, lambda name: True, {"enable": False})
 
         test_input = torch.randn(INPUT_SHAPE)
 
@@ -150,7 +151,7 @@ class TestQuantRNN:
         rnn_object_original = copy.deepcopy(rnn_object)
         quant_rnn_object = QuantModuleRegistry.convert(rnn_object)
 
-        set_quantizer_attribute(quant_rnn_object, lambda name: True, {"enable": False})
+        set_quantizer_attributes_partial(quant_rnn_object, lambda name: True, {"enable": False})
 
         test_input = torch.randn([INPUT_SHAPE[1], INPUT_SHAPE[0], INPUT_SHAPE[2]])
 
@@ -176,7 +177,7 @@ class TestQuantRNN:
         )
         rnn_object_original = copy.deepcopy(rnn_object)
         quant_rnn_object = QuantModuleRegistry.convert(rnn_object)
-        set_quantizer_attribute(quant_rnn_object, lambda name: True, {"axis": None})
+        set_quantizer_attributes_partial(quant_rnn_object, lambda name: True, {"axis": None})
         quant_rnn_object._disable_input_quantizers()
 
         for name, weight in rnn_object_original.named_parameters():
@@ -205,7 +206,7 @@ class TestQuantRNN:
         rnn_object = original_cls(HIDDEN_SIZE, HIDDEN_SIZE, NUM_LAYERS, bidirectional=bidirectional)
         rnn_object_original = copy.deepcopy(rnn_object)
         quant_rnn_object = QuantModuleRegistry.convert(rnn_object)
-        set_quantizer_attribute(quant_rnn_object, lambda name: True, {"axis": (0)})
+        set_quantizer_attributes_partial(quant_rnn_object, lambda name: True, {"axis": (0)})
         quant_rnn_object._disable_input_quantizers()
 
         for name, weight in rnn_object_original.named_parameters():
@@ -234,7 +235,7 @@ class TestQuantRNN:
             HIDDEN_SIZE, HIDDEN_SIZE, NUM_LAYERS, bidirectional=bidirectional, bias=True
         )
         quant_rnn_object = QuantModuleRegistry.convert(rnn_object)
-        set_quantizer_attribute(quant_rnn_object, lambda name: True, {"axis": None})
+        set_quantizer_attributes_partial(quant_rnn_object, lambda name: True, {"axis": None})
         quant_rnn_object._disable_weight_quantizers()
 
         num_directions = 2 if bidirectional else 1

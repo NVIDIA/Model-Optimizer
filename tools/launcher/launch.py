@@ -64,9 +64,10 @@ packager = run.PatternPackager(
         "modules/Model-Optimizer/modelopt/*",
         "modules/Model-Optimizer/modelopt_recipes/*",
         "modules/Model-Optimizer/examples/*",
+        "examples/*",
         "common/*",
     ],
-    relative_path=[LAUNCHER_DIR] * 7,
+    relative_path=[LAUNCHER_DIR] * 8,
 )
 
 MODELOPT_SRC_PATH = os.path.join(LAUNCHER_DIR, "modules/Model-Optimizer/modelopt")

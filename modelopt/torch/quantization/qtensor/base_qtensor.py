@@ -16,6 +16,7 @@
 """Base Class for Real Quantized Tensor."""
 
 import enum
+from typing import Any
 
 import torch
 from torch.distributed.fsdp._fully_shard._fsdp_param import FSDPParam
@@ -62,6 +63,14 @@ class BaseQuantizedTensor:
             "dtype": original_dtype,
         }
         self._quantized_data = quantized_data
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        """Register the quantized tensor class as a safe global for torch serialization.
+
+        It can be used to load the quantized tensor with torch.load(weights_only=True) in safe_load().
+        """
+        super().__init_subclass__(**kwargs)
+        torch.serialization.add_safe_globals([cls])
 
     @classmethod
     def quantize(cls, input: torch.Tensor, block_size: int):
@@ -227,3 +236,7 @@ def pack_real_quantize_weight(module, force_quantize: bool = False):
             if name != "":
                 with fsdp2_aware_weight_update(module, m):
                     _compress_and_update_module_weight(m)
+
+
+# Register QTensorWrapper as safe global
+torch.serialization.add_safe_globals([QTensorWrapper])

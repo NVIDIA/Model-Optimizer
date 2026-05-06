@@ -17,6 +17,7 @@ import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pytest
+import torch
 from _test_utils.torch.opt.utils import apply_mode_with_sampling
 from _test_utils.torch.transformers_models import (
     create_tiny_llama_dir,
@@ -27,7 +28,7 @@ from transformers import AutoConfig, AutoModelForCausalLM, LlamaForCausalLM
 
 @pytest.mark.parametrize("model_cls", [LlamaForCausalLM, AutoModelForCausalLM])
 def test_causal_lm_save_restore(tmp_path, model_cls):
-    tiny_llama_dir = create_tiny_llama_dir(tmp_path, hidden_size=128)
+    tiny_llama_dir = create_tiny_llama_dir(tmp_path, hidden_size=128, dtype=torch.float32)
     model_ref = model_cls.from_pretrained(tiny_llama_dir)
     # TODO: Add calibrate, compress mode to the test
     model_ref = apply_mode_with_sampling(
@@ -41,7 +42,7 @@ def test_causal_lm_save_restore(tmp_path, model_cls):
 
 def test_causal_lm_from_config(tmp_path):
     """Test loading a model using from_config after applying optimizations"""
-    tiny_llama_dir = create_tiny_llama_dir(tmp_path, hidden_size=128)
+    tiny_llama_dir = create_tiny_llama_dir(tmp_path, hidden_size=128, dtype=torch.float32)
 
     model_ref = AutoModelForCausalLM.from_pretrained(tiny_llama_dir)
     model_ref = apply_mode_with_sampling(

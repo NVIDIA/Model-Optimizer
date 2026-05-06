@@ -111,7 +111,7 @@ def generate_sample_output(model, tokenizer, args):
         padding=False,
     )
     if torch.cuda.is_available():
-        inputs = {k: v.cuda() for k, v in inputs.items()}
+        inputs = {k: v.to(model.device) for k, v in inputs.items()}
 
         # Generate
         with torch.no_grad():
@@ -143,10 +143,7 @@ def main(args):
     # No need to specify attn_implementation here — mtsa.sparsify() sets it
     # automatically ("eager" for pytorch backend, "modelopt_triton" for triton).
     model = AutoModelForCausalLM.from_pretrained(
-        args.pyt_ckpt_path,
-        attn_implementation="eager",
-        torch_dtype="auto",
-        device_map="auto",
+        args.pyt_ckpt_path, attn_implementation="eager", dtype="auto", device_map="auto"
     )
     tokenizer = AutoTokenizer.from_pretrained(args.pyt_ckpt_path)
 

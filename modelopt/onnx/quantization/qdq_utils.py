@@ -1011,14 +1011,37 @@ def replace_zero_scale_with_smallest_nonzero(onnx_model: onnx.ModelProto) -> onn
     """Replace zero scale values with smallest nonzero fp16 value in the ONNX model."""
     graph = onnx_model.graph
     fp16_smallest_nonzero = np.float16(6e-08)
-    scale_nodes = [node.input[1] for node in graph.node if node.op_type == "QuantizeLinear"]
+    qdq_op_types = {
+        "QuantizeLinear",
+        "DequantizeLinear",
+        "TRT_INT4QuantizeLinear",
+        "TRT_INT4DequantizeLinear",
+    }
+    scale_tensor_names = {
+        node.input[1]
+        for node in graph.node
+        if node.op_type in qdq_op_types and len(node.input) >= 2
+    }
+    # Scales stored as graph initializers (e.g. INT4_AWQ / TRT_INT4DequantizeLinear exports).
+    for init in graph.initializer:
+        if init.name in scale_tensor_names:
+            tensor = numpy_helper.to_array(init)
+            if tensor.dtype.kind == "f":
+                new_tensor = np.where(tensor == 0, fp16_smallest_nonzero, tensor).astype(
+                    tensor.dtype
+                )
+                init.CopyFrom(numpy_helper.from_array(new_tensor, init.name))
+    # Scales emitted by Constant nodes (legacy QDQ export path).
     for node in graph.node:
-        if node.op_type == "Constant" and node.output[0] in scale_nodes:
+        if node.op_type == "Constant" and node.output[0] in scale_tensor_names:
             for attr in node.attribute:
                 if attr.name == "value":
                     tensor = numpy_helper.to_array(attr.t)
-                    new_tensor = np.where(tensor == 0, fp16_smallest_nonzero, tensor)
-                    attr.t.CopyFrom(numpy_helper.from_array(new_tensor, attr.t.name))
+                    if tensor.dtype.kind == "f":
+                        new_tensor = np.where(tensor == 0, fp16_smallest_nonzero, tensor).astype(
+                            tensor.dtype
+                        )
+                        attr.t.CopyFrom(numpy_helper.from_array(new_tensor, attr.t.name))
     return onnx_model
 
 
@@ -1162,9 +1185,12 @@ def cast_initializer_to_dtype(
     node: onnx.NodeProto, dtype: str, initializer_map: dict[str, onnx.TensorProto]
 ):
     """Casts the initializer to the given dtype."""
+    input_id = None
     for id, input_name in enumerate(node.input):
         if input_name in initializer_map:
             input_id = id
+    if input_id is None:
+        return
     input_name = node.input[input_id]
     input = numpy_helper.to_array(initializer_map[input_name])
     input = input.astype(np_dtype_map[dtype])

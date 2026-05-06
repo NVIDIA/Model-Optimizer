@@ -18,6 +18,7 @@
 import os
 import sys
 
+# TODO: cppimport is not actively maintained, consider a better alternative library
 import cppimport
 
 from modelopt.onnx.logging_config import logger
@@ -30,6 +31,6 @@ try:
     sys.path.remove(path)
 except Exception as e:
     logger.warning(
-        f"{e}\nUnable to load `modelopt_round_and_pack_ext', falling back to python based optimized version"
+        f"{e}\nUnable to load `modelopt_round_and_pack_ext', falling back to python based optimized version. "
     )
     round_and_pack_ext = None

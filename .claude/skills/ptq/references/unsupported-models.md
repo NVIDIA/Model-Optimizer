@@ -15,7 +15,11 @@ After download, inspect the model files on the target machine (use `remote_run` 
 
 Write custom scripts locally (in `./workspaces/<model>/scripts/`), then sync to remote before running.
 
-**Then check `config.json`** (on the target machine):
+**Check transformers compatibility** (on the target machine):
+
+First, if README or `config.json` specifies a required transformers version, check if installed version satisfies it. If not, upgrade: `pip install -U "transformers>=<required_version>"`.
+
+Then try loading:
 
 ```bash
 python -c "
@@ -40,23 +44,23 @@ print(type(cfg).__name__)
 
   Read the modeling file and proceed to Step B.
 
-- **Raises `ValueError` / `OSError` (unknown architecture)** → not in the installed transformers. Determine why:
-
-  1. **Check the transformers `main` branch** (not yet released):
+- **Raises `ValueError` / `OSError` (unknown architecture)** → not in the installed transformers. Try `pip install -U transformers` first. If still not found, check the `main` branch:
 
      ```bash
      git clone --depth 1 https://github.com/huggingface/transformers.git /tmp/transformers-main --quiet
      grep -r "class <ArchName>" /tmp/transformers-main/src/transformers/models/
      ```
 
-     - **Found** → install from that clone: `pip install /tmp/transformers-main --quiet`, then re-run `AutoConfig.from_pretrained()`.
+     - **Found** → `pip install /tmp/transformers-main`, then re-run `AutoConfig`.
      - **Not found** → ask the user: *"The checkpoint uses `<ArchName>` which isn't in released or main-branch transformers. Do you have a private fork or custom modeling code?"*
 
 - **No `config.json`** → not a standard HF checkpoint. List the directory for README or `.py` files. If nothing useful, ask the user for the modeling code.
 
 ## Step B — Is the checkpoint already FP8-quantized?
 
-Check `config.json` for `"quantization_config"` or scan weight files for `*_scale_inv*` tensors. If found, the model must be dequantized before re-quantizing. HuggingFace's `WeightConverter` only handles standard `weight` / `weight_scale_inv` names and will silently miss non-standard parameter names (e.g., 3D expert tensors in MoE layers). See **Pattern 5** below.
+Check `config.json` for `"quantization_config"` with `"quant_method": "fp8"`, or scan weight files for `*_scale_inv*` tensors. If the model uses standard `FP8Linear` modules (2D weights with `weight` + `weight_scale_inv`), ModelOpt's `_QuantFP8Linear` plugin handles them automatically — no manual dequantization needed. The plugin keeps weights in FP8 and dequantizes lazily during calibration, which is memory-efficient.
+
+Manual dequantization is only needed for **non-standard parameter names** (e.g., 3D expert tensors in MoE layers) that the plugin doesn't cover. See **Pattern 5** below.
 
 ## Step C — Determine what custom patches are needed
 
@@ -69,7 +73,7 @@ Custom patches are required when:
 - **Fused/batched expert weights** — experts stored as a single parameter (e.g., 3D `[num_experts, in, out]`) rather than separate `nn.Linear` modules → Pattern 1 + 3
 - **Self-defined weight parameters** (`nn.Parameter` used directly instead of `nn.Linear`) — common in non-HF or research models → Pattern 1 + 3
 - **VLM structure** (vision encoder that should be excluded) → Pattern 4
-- **FP8 checkpoint** that needs dequantization before re-quantizing → Pattern 5
+- **FP8 checkpoint with non-standard parameter names** (standard `FP8Linear` is handled automatically by the `_QuantFP8Linear` plugin) → Pattern 5
 
 ## Step D — Check weight names against ModelOpt's config patterns
 
@@ -129,13 +133,15 @@ class QuantCustomModule(OriginalModule):
 
 ## Pattern 2: MoE Models
 
-**Standard MoE** (per-expert `nn.Linear` in a `ModuleList` with `gate` + `experts`): Auto-detected by `register_sparse_moe_on_the_fly`. No custom code needed — amax sync and calibration coverage are handled automatically.
+**Most MoE models are auto-detected** — ModelOpt handles two common patterns automatically:
 
-**Custom MoE** requires patching. Read the model source to understand how expert weights are stored and computed, then find the closest pattern in the plugin (`modelopt/torch/quantization/plugins/huggingface.py`):
+- **transformers >= 5.0**: Unified fused experts (`gate_up_proj` + `down_proj` 3D tensors) → auto-detected by `register_fused_experts_on_the_fly`, handled by `_QuantFusedExperts`. Covers Mixtral, Qwen, DeepSeek, Jamba, OlMoE, etc.
+- **transformers < 5.0**: Sequential per-expert `nn.Linear` with `gate` + `experts` → auto-detected by `register_sparse_moe_on_the_fly`.
+
+**Custom MoE** (non-standard layout not matching auto-detection) requires patching. Find the closest pattern in the plugin (`modelopt/torch/quantization/plugins/huggingface.py`):
 
 | MoE design | Strategy | Plugin example |
 | --- | --- | --- |
-| Fused weights + per-expert dispatch loop | Expand to per-expert `nn.Linear` | `_QuantQwen35MoeExperts` |
 | Fused weights + `torch.bmm` | Add `TensorQuantizer` around bmm | `_QuantLlama4TextExperts` |
 | Fused weights + functional interception | Intercept matmul ops | `_QuantGptOssExperts` |
 | Fused 2D weights (experts stacked in rows) | Two-level expansion | `_QuantDbrxExpertGLU` |
@@ -187,7 +193,9 @@ Both methods replace all instances of `original_cls` with `quantized_cls` during
 
 ## Pattern 4: VLM Language Model Extraction
 
-For multimodal models, only quantize the language model backbone:
+**Note**: `hf_ptq.py` already handles VLMs automatically via `extract_and_prepare_language_model_from_vl()`. It detects multimodal models, extracts the language backbone, and disables quantization for vision/projector modules. This works for most VLMs (tested with Mistral3/Devstral, Nemotron VL, Llama VL, etc.) — try `hf_ptq.py` first before writing custom VLM handling.
+
+For custom scripts or when `hf_ptq.py` doesn't handle the VLM correctly, only quantize the language model backbone:
 
 ```python
 from modelopt.torch.export.model_utils import get_language_model_from_vl, is_multimodal_model
@@ -218,30 +226,32 @@ quant_cfg["quant_cfg"]["*multi_modal_projector*"] = {"enable": False}
 
 **Known VLM export issue**: The export step (`requantize_resmooth_fused_llm_layers` in `unified_export_hf.py`) may try to run a dummy forward pass on the full VLM instead of the language model backbone. This currently only handles Nemotron VLMs. If hit, patch the export to use `is_multimodal_model()` for the VLM check instead of model-specific string matching.
 
-## Pattern 5: FP8 Checkpoint Dequantization
+## Pattern 5: FP8 Checkpoint Handling
 
-### Standard nn.Linear weights
+### Standard FP8Linear modules (preferred — no action needed)
 
-HuggingFace handles these automatically with `dequantize=True`:
+ModelOpt's `_QuantFP8Linear` plugin (`modelopt/torch/quantization/plugins/huggingface.py`) automatically handles HuggingFace `FP8Linear` modules. It:
+
+1. Keeps weights **compact in FP8** in GPU memory during calibration
+2. **Dequantizes lazily** on-the-fly during calibration forward passes via `weight_dequant()`
+3. Has `unpack_weight()` for full dequantization at export time
+
+This is registered automatically for `transformers.integrations.finegrained_fp8.FP8Linear`. It requires **Triton** to be installed (used internally for FP8 dequantization kernels). Just load the model normally — no `FineGrainedFP8Config(dequantize=True)` needed:
 
 ```python
-from transformers.utils.quantization_config import FineGrainedFP8Config
-
-model = AutoModel.from_pretrained(
-    model_path,
-    torch_dtype=torch.bfloat16,
-    device_map="auto",
-    quantization_config=FineGrainedFP8Config(dequantize=True),
-)
+model = AutoModel.from_pretrained(model_path, device_map="auto", torch_dtype="auto")
+# FP8Linear modules stay in FP8 → _QuantFP8Linear handles dequant during calibration
 ```
+
+**Do NOT use `FineGrainedFP8Config(dequantize=True)`** — it expands the entire model to BF16 upfront, wasting ~2x GPU memory. The plugin approach is both more memory-efficient and simpler.
 
 ### Non-standard parameter names (e.g., 3D expert weights)
 
-HF's `WeightConverter` uses source patterns `["weight$", "weight_scale_inv", "activation_scale"]`. Parameters with names like `gate_up_proj`, `down_proj`, `w1`, `w2`, `w3` won't match these patterns and will remain in FP8 after loading. Dequantize them manually:
+The `_QuantFP8Linear` plugin only handles standard 2D `FP8Linear` modules with `weight` + `weight_scale_inv`. Parameters with non-standard names (e.g., `gate_up_proj`, `down_proj`, `w1`/`w2`/`w3` in fused MoE experts) won't be covered. For these, dequantize manually after loading:
 
 ```python
 def dequantize_fp8_params(model, param_names=("gate_up_proj", "down_proj")):
-    """Dequantize remaining FP8 parameters that HF's WeightConverter missed."""
+    """Dequantize remaining FP8 parameters that the plugin doesn't cover."""
     count = 0
     for name, module in model.named_modules():
         for param_name in param_names:
@@ -252,10 +262,8 @@ def dequantize_fp8_params(model, param_names=("gate_up_proj", "down_proj")):
             if scale is None:
                 param.data = param.data.to(torch.bfloat16)
             elif scale.dim() == 1:
-                # Per-tensor scale
                 param.data = param.data.to(torch.bfloat16) * scale.data[:, None, None].to(torch.bfloat16)
             elif scale.dim() == 3:
-                # Per-block scale: reshape, broadcast, multiply
                 w = param.data
                 s = scale.data
                 assert w.shape[-2] % s.shape[-2] == 0 and w.shape[-1] % s.shape[-1] == 0, (
@@ -339,3 +347,5 @@ tokenizer.save_pretrained(output_path)
 - **Check quantizer summary**: `mtq.print_quant_summary(model)` shows which quantizers are enabled/disabled
 - **Inspect dtypes**: After loading, iterate `model.named_parameters()` and check for unexpected FP8 tensors
 - **Watch for silent disabling**: A misconfigured wildcard pattern can silently disable quantizers — always verify the summary
+- **Validate quantization pattern after export**: Run the validation script from SKILL.md Step 5 on the exported checkpoint. It checks every linear layer is either quantized (has scale params) or explicitly excluded. Layers that are neither were silently skipped — common for models with non-standard naming (e.g., Gemma4 `experts.*` missed by `*mlp*` patterns). This causes deployment failures when the framework tries to load BF16 weights as quantized
+- **Read pip errors carefully**: `ResolutionImpossible` means dependency conflict (try `--no-deps`), NOT network failure. Check for `Connection refused`/`Name resolution failed` before concluding network is down

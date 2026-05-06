@@ -18,7 +18,7 @@
 Please check out the source code of this module for examples of how plugins work and how you can
 write your own one. Currently, we support plugins for
 
-- :meth:`transformers<modelopt.torch.speculative.plugins.transformers>`
+- :meth:`hf_eagle<modelopt.torch.speculative.plugins.hf_eagle>`
 """
 
 from modelopt.torch.utils import import_plugin
@@ -30,4 +30,6 @@ with import_plugin("megatron_medusa"):
     from .megatron_medusa import *
 
 with import_plugin("transformers"):
-    from .transformers import *
+    from .hf_dflash import *
+    from .hf_eagle import *
+    from .hf_medusa import *

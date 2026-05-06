@@ -1,5 +1,3 @@
-kernels>=0.9.0
-torch>2.7.1
-trackio
-transformers>=4.55.0
+kernels>=0.9.0,<0.13
+trackio<0.21
 trl>=0.21.0

@@ -92,6 +92,19 @@ rsync -a --quiet \
     "$MODELOPT_REPO_DIR/" "$MODELOPT_WORKSPACE_ROOT/<name>/"
 ```
 
+## Cross-Skill Workspace Flow
+
+Workspaces carry over across the PTQ → Deploy → Eval pipeline. Each stage adds to the same directory:
+
+```text
+workspaces/model-name-format/
+  output/              ← PTQ: quantized checkpoint
+  eval_results/        ← Evaluation: NEL artifacts (results.yml per task)
+  eval_config.yaml     ← Evaluation: NEL config
+  scripts/             ← Deployment/PTQ: custom run scripts
+  logs/                ← All: SLURM job logs
+```
+
 ## Example Flow
 
 ```text
@@ -103,6 +116,10 @@ Agent: ls workspaces/ → no "qwen3-0.6b-nvfp4"
 User: "deploy the model I just quantized"
 Agent: ls workspaces/ → sees "qwen3-0.6b-nvfp4"
        → reuse, find checkpoint at workspaces/qwen3-0.6b-nvfp4/output/
+
+User: "evaluate the quantized model on MMLU and GSM8K"
+Agent: ls workspaces/ → sees "qwen3-0.6b-nvfp4"
+       → reuse, write eval_config.yaml, results to workspaces/qwen3-0.6b-nvfp4/eval_results/
 
 User: "now quantize Llama-3.1-8B with fp8"
 Agent: ls workspaces/ → no llama

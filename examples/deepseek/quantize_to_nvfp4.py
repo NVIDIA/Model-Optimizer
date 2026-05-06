@@ -22,7 +22,7 @@
 # SOFTWARE.
 
 # SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: Apache-2.0 AND MIT
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -47,8 +47,8 @@ import torch
 from safetensors.torch import load_file, save_file
 from tqdm import tqdm
 
+from modelopt.torch.kernels.quantization.gemm import weight_dequant
 from modelopt.torch.quantization.qtensor import NVFP4QTensor
-from modelopt.torch.quantization.triton import weight_dequant
 
 
 def _remap_key(key_dict: dict[str, Any]):

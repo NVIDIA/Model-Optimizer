@@ -18,15 +18,20 @@
 import glob
 import io
 import os
+import pathlib
 import platform
+import re
+import shutil
+import subprocess  # nosec B404
 import sys
 from collections.abc import Sequence
 from contextlib import redirect_stderr, redirect_stdout
+from importlib.metadata import PackageNotFoundError, distribution
 
 import onnxruntime as ort
 from onnxruntime.quantization.operators.qdq_base_operator import QDQOperatorBase
 from onnxruntime.quantization.registry import QDQRegistry, QLinearOpsRegistry
-from packaging.version import Version
+from packaging.version import InvalidVersion, Version
 
 from modelopt.onnx.logging_config import logger
 from modelopt.onnx.quantization.operators import QDQConvTranspose, QDQCustomOp, QDQNormalization
@@ -39,6 +44,94 @@ def _check_lib_in_ld_library_path(ld_library_path, lib_pattern):
         if matches:
             return True, matches[0]
     return False, None
+
+
+def _run_trtexec(
+    args: list[str] | None = None, timeout: float | None = None
+) -> subprocess.CompletedProcess:
+    """Run a 'trtexec' command via subprocess.
+
+    Args:
+        args: Arguments to pass to trtexec (without the 'trtexec' command itself).
+        timeout: Optional subprocess timeout in seconds.
+
+    Returns:
+        The completed subprocess result.
+
+    Raises:
+        FileNotFoundError: If the 'trtexec' binary is not found in PATH.
+    """
+    cmd = ["trtexec", *(args or [])]
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)  # nosec B603
+    except FileNotFoundError as e:
+        raise FileNotFoundError(
+            "'trtexec' binary not found. Please ensure TensorRT is installed and 'trtexec' is in PATH."
+        ) from e
+
+
+def _check_for_trtexec(min_version: str = "10.0") -> str:
+    """Check if the `trtexec` CLI tool is available in PATH and is >= min_version.
+
+    Args:
+        min_version (str): Minimum required version (e.g., "10.0")
+
+    Returns:
+        str: The resolved path to the `trtexec` binary.
+
+    Raises:
+        ImportError: If `trtexec` is not found or the version is too low.
+    """
+
+    def _parse_version_from_string(version_str: str) -> str | None:
+        # Try canonical TensorRT x.x.x.x strings first
+        match = re.search(
+            r"TensorRT(?:\s+version)?\s*[:=]\s*(\d+(?:\.\d+)+)",
+            version_str,
+            flags=re.IGNORECASE,
+        )
+        if match:
+            return match.group(1)
+
+        # Fallback: look for "[TensorRT v101502]" pattern and convert to "10.15"
+        match = re.search(r"\[TensorRT v(\d{6,8})\]", version_str)
+        if match:
+            vnum = match.group(1)
+            # Use only major and minor, e.g., v101502 -> 10.15
+            if len(vnum) >= 4:
+                major = int(vnum[0:2])
+                minor = int(vnum[2:4])
+                return f"{major}.{minor}"
+            return None
+        return None
+
+    trtexec_path = shutil.which("trtexec")
+    if trtexec_path is None:
+        logger.error("trtexec executable not found in PATH.")
+        raise ImportError(
+            "Could not find the `trtexec` executable. Please install TensorRT and ensure `trtexec` is in your PATH."
+        )
+
+    try:
+        result = _run_trtexec(timeout=5)
+        banner_output = result.stdout + result.stderr
+        parsed_version = _parse_version_from_string(banner_output)
+
+        if not parsed_version:
+            raise ValueError("Could not parse version from trtexec output.")
+
+        if Version(parsed_version) < Version(min_version):
+            logger.error(
+                f"trtexec version found ({parsed_version}) is lower than required ({min_version})"
+            )
+            raise ImportError(f"`trtexec` version must be >= {min_version}, found {parsed_version}")
+        logger.info(f"trtexec found at {trtexec_path} (version {parsed_version})")
+        return trtexec_path
+    except (subprocess.SubprocessError, FileNotFoundError, ValueError, InvalidVersion) as err:
+        logger.error(f"Failed to check trtexec version: {err}")
+        raise ImportError(
+            "Could not determine the version of `trtexec`. Please ensure the CLI is installed and available."
+        )
 
 
 def _check_for_tensorrt(min_version: str = "10.0"):
@@ -57,6 +150,78 @@ def _check_for_tensorrt(min_version: str = "10.0"):
             " to use ORT's TensorRT Execution Provider. For more information on version compatibility,"
             " please check https://onnxruntime.ai/docs/execution-providers/TensorRT-ExecutionProvider.html#requirements."
         )
+
+
+def _find_cudnn_bin_dir():
+    """Locate the nvidia cudnn bin directory inside site-packages."""
+    for pkg_name in ("nvidia-cudnn-cu12", "nvidia-cudnn-cu13"):
+        try:
+            dist = distribution(pkg_name)
+        except PackageNotFoundError:
+            continue
+        for f in dist.files or []:
+            if f.name.startswith("cudnn64_") and f.name.endswith(".dll"):
+                bin_dir = str(pathlib.Path(f.locate()).parent)
+                if os.path.isdir(bin_dir):
+                    return bin_dir
+    return None
+
+
+def _load_extra_cudnn_dlls():
+    """Load any cuDNN DLLs from site-packages that ORT's preload_dlls() missed.
+
+    TEMPORARY WORKAROUND: This function exists because ort.preload_dlls() has a
+    hardcoded list of cuDNN sub-libraries which may be incomplete for newer cuDNN
+    versions (e.g. cuDNN 9.21 added cudnn_engines_tensor_ir64_9.dll, cuDNN 9.20
+    added cudnn_cnn64_9.dll). Once ort.preload_dlls() is fixed upstream to
+    dynamically discover all cuDNN DLLs, this function and its helper
+    (_find_cudnn_bin_dir) should be removed.
+
+    This scans the nvidia-cudnn bin directory and loads any cudnn*.dll not already
+    loaded in the process.
+    """
+    import ctypes
+    import ctypes.wintypes
+
+    cudnn_bin_dir = _find_cudnn_bin_dir()
+    if not cudnn_bin_dir:
+        logger.debug(
+            "nvidia-cudnn bin directory not found in site-packages, skipping extra DLL load"
+        )
+        return
+
+    dll_files = sorted(glob.glob(os.path.join(cudnn_bin_dir, "cudnn*.dll")))
+    if not dll_files:
+        logger.debug("No cudnn*.dll files found in %s", cudnn_bin_dir)
+        return
+
+    get_module_handle_w = ctypes.windll.kernel32.GetModuleHandleW  # type: ignore[attr-defined]
+    get_module_handle_w.argtypes = [ctypes.wintypes.LPCWSTR]
+    get_module_handle_w.restype = ctypes.wintypes.HMODULE
+
+    loaded = []
+    skipped = []
+    failed = []
+    for dll_path in dll_files:
+        dll_name = os.path.basename(dll_path)
+        if get_module_handle_w(dll_name):
+            skipped.append(dll_name)
+            continue
+        try:
+            ctypes.CDLL(dll_path)
+            loaded.append(dll_name)
+        except OSError as e:
+            failed.append(dll_name)
+            logger.warning(f"Failed to load {dll_name} from site-packages: {e}")
+
+    if skipped:
+        logger.debug(f"Already loaded (skipped): {skipped}")
+    if loaded:
+        logger.info(
+            f"Loaded {len(loaded)} extra cuDNN DLLs that ort.preload_dlls() missed: {loaded}"
+        )
+    if failed:
+        logger.warning(f"Failed to load {len(failed)} cuDNN DLLs: {failed}")
 
 
 def _check_for_libcudnn():
@@ -83,10 +248,6 @@ def _check_for_libcudnn():
                 f"cuDNN not found in {env_variable}. "
                 "Attempting onnxruntime.preload_dlls() to load from site-packages..."
             )
-            # preload_dlls() does not raise on failure — it silently prints
-            # "Failed to load ..." messages.  Capture its output and check
-            # whether the key cuDNN DLL actually loaded.
-            cudnn_dll = "cudnn" if platform.system() == "Windows" else "libcudnn_adv"
             captured = io.StringIO()
             try:
                 with redirect_stdout(captured), redirect_stderr(captured):
@@ -96,14 +257,17 @@ def _check_for_libcudnn():
 
             preload_output = captured.getvalue()
             if preload_output:
-                logger.debug(f"preload_dlls() output:\n{preload_output}")
+                logger.warning(f"preload_dlls() output:\n{preload_output}")
 
-            if f"Failed to load {cudnn_dll}" in preload_output:
+            core_cudnn_dll = "cudnn64_9" if platform.system() == "Windows" else "libcudnn_adv"
+            if f"Failed to load {core_cudnn_dll}" in preload_output:
                 logger.error(
-                    f"onnxruntime.preload_dlls() was called but {cudnn_dll} failed to load. "
+                    f"onnxruntime.preload_dlls() was called but {core_cudnn_dll} failed to load. "
                     "cuDNN DLLs were NOT successfully loaded from site-packages."
                 )
             else:
+                if platform.system() == "Windows":
+                    _load_extra_cudnn_dlls()
                 logger.info(
                     "onnxruntime.preload_dlls() succeeded — CUDA/cuDNN DLLs loaded"
                     " from site-packages. Verify version compatibility at"

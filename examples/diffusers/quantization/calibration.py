@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import logging
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -107,11 +108,12 @@ class Calibrator:
     def _run_wan_video_calibration(
         self, prompt_batch: list[str], extra_args: dict[str, Any]
     ) -> None:
+        extra_params = self.pipeline_manager.config.extra_params
         kwargs = {}
         kwargs["negative_prompt"] = extra_args["negative_prompt"]
-        kwargs["height"] = extra_args["height"]
-        kwargs["width"] = extra_args["width"]
-        kwargs["num_frames"] = extra_args["num_frames"]
+        kwargs["height"] = extra_params.get("height", extra_args["height"])
+        kwargs["width"] = extra_params.get("width", extra_args["width"])
+        kwargs["num_frames"] = extra_params.get("num_frames", extra_args["num_frames"])
         kwargs["guidance_scale"] = extra_args["guidance_scale"]
         if "guidance_scale_2" in extra_args:
             kwargs["guidance_scale_2"] = extra_args["guidance_scale_2"]
@@ -120,6 +122,16 @@ class Calibrator:
         self.pipe(prompt=prompt_batch, **kwargs).frames
 
     def _run_ltx2_calibration(self, prompt_batch: list[str], extra_args: dict[str, Any]) -> None:
+        warnings.warn(
+            "LTX-2 packages (ltx-core, ltx-pipelines, ltx-trainer) are provided by Lightricks and are NOT "
+            "covered by the Apache 2.0 license governing NVIDIA Model Optimizer. You MUST comply "
+            "with the LTX Community License Agreement when installing and using LTX-2 with NVIDIA "
+            "Model Optimizer. Any derivative models or fine-tuned weights from LTX-2 remain "
+            "subject to the LTX Community License Agreement, not Apache 2.0. "
+            "See: https://github.com/Lightricks/LTX-2/blob/main/LICENSE",
+            UserWarning,
+            stacklevel=2,
+        )
         from ltx_core.model.video_vae import TilingConfig
         from ltx_pipelines.utils.constants import (
             DEFAULT_AUDIO_GUIDER_PARAMS,
@@ -143,7 +155,11 @@ class Calibrator:
             "images": extra_params.get("images", []),
             "tiling_config": extra_params.get("tiling_config", TilingConfig.default()),
         }
-        self.pipe(prompt=prompt, **kwargs)
+        decoded_video, decoded_audio = self.pipe(prompt=prompt, **kwargs)
+        # vae_decode_video returns a lazy generator — consume it so the
+        # video decoder's forward() actually runs during calibration.
+        for _ in decoded_video:
+            pass
 
     def _run_ltx_video_calibration(
         self, prompt_batch: list[str], extra_args: dict[str, Any]

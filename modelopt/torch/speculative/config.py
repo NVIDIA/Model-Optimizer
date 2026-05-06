@@ -15,7 +15,11 @@
 
 """Configurations for speculative decoding modes."""
 
+import warnings
 from copy import deepcopy
+from typing import Any
+
+from pydantic import ValidationInfo, model_validator
 
 from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
 
@@ -44,6 +48,112 @@ EAGLE_MTP_DEFAULT_CFG = {
         "eagle_architecture_config": eagle_mtp_default_config,
     },
 }
+
+
+def _get_dflash_default_config():
+    from .dflash.default_config import default_dflash_config
+
+    return default_dflash_config
+
+
+DFLASH_DEFAULT_CFG = {
+    "algorithm": "dflash",
+    "config": {
+        "dflash_architecture_config": {},  # merged with default at convert time
+    },
+}
+
+
+class DFlashConfig(ModeloptBaseConfig):
+    """DFlash config for block-wise parallel speculative decoding."""
+
+    dflash_offline: bool = ModeloptField(
+        default=False,
+        description=(
+            "Whether to use detached DFlash (offline training from pre-computed hidden states). "
+            "Auto-derived from data_args.offline_data_path during validation — not user-configurable."
+        ),
+    )
+
+    dflash_block_size: int = ModeloptField(
+        default=8,
+        description="Block size for parallel prediction. Draft predicts this many tokens per block.",
+    )
+
+    dflash_freeze_base_model: bool = ModeloptField(
+        default=True, description="Whether to freeze base model during DFlash module training."
+    )
+
+    dflash_self_logit_distillation: bool = ModeloptField(
+        default=True, description="Whether to use logit distillation from base model."
+    )
+
+    dflash_loss_decay_factor: float = ModeloptField(
+        default=0.0,
+        description="Gamma for exponential loss decay weighting (paper Eq.4). "
+        "Suggested: 7 for block_size=16, 5 for 10, 4 for 8. 0 disables.",
+    )
+
+    dflash_num_anchors: int = ModeloptField(
+        default=512,
+        description="Number of random anchor positions sampled per sequence during training.",
+    )
+
+    dflash_report_acc: bool = ModeloptField(
+        default=True, description="Whether to report eval accuracy."
+    )
+
+    dflash_mask_token_id: int = ModeloptField(
+        default=None,
+        description="Token ID used for masked (unknown) positions. "
+        "Set explicitly or auto-detected from tokenizer.mask_token_id in main.py.",
+    )
+
+    dflash_architecture_config: dict = ModeloptField(
+        default={}, description="Config for the DFlash draft module architecture."
+    )
+
+    dflash_use_torch_compile: bool = ModeloptField(
+        default=True,
+        description="Whether to use torch.compile on DFlash forward/loss methods.",
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _derive_dflash_offline(cls, data: Any, info: ValidationInfo) -> Any:
+        """Derive ``dflash_offline`` from ``data_args.offline_data_path``.
+
+        This field is auto-derived, not user-configurable: when context provides
+        ``data_args``, the derived value overrides any user-supplied value.
+        """
+        ctx = info.context if info.context else {}
+        data_args = ctx.get("data_args")
+        if data_args is not None and isinstance(data, dict):
+            data["dflash_offline"] = getattr(data_args, "offline_data_path", None) is not None
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def _resolve_mask_token_id(cls, data: Any, info: ValidationInfo) -> Any:
+        """Auto-detect ``dflash_mask_token_id`` from tokenizer when provided in context."""
+        if not isinstance(data, dict) or data.get("dflash_mask_token_id") is not None:
+            return data
+        ctx = info.context if info.context else {}
+        tokenizer = ctx.get("tokenizer")
+        if tokenizer is not None and getattr(tokenizer, "mask_token_id", None) is not None:
+            data["dflash_mask_token_id"] = tokenizer.mask_token_id
+        return data
+
+    @model_validator(mode="after")
+    def _check_mask_token_id(self) -> "DFlashConfig":
+        """Validate that mask_token_id is set after all resolution attempts."""
+        if self.dflash_mask_token_id is None:
+            raise ValueError(
+                "dflash_mask_token_id is required. Set it in the config YAML "
+                "(dflash.dflash_mask_token_id=TOKEN_ID) or ensure the tokenizer "
+                "has a mask_token_id attribute."
+            )
+        return self
 
 
 class MedusaConfig(ModeloptBaseConfig):
@@ -120,3 +230,103 @@ class EagleConfig(ModeloptBaseConfig):
         default=False,
         description="Whether to enable NVTX ranges for profiling eagle forward/loss methods.",
     )
+
+    eagle_export_rope_scaling: dict = ModeloptField(
+        default={"rope_type": "yarn", "factor": 32.0, "original_max_position_embeddings": 2048},
+        description=(
+            "The rope_scaling config to inject into the exported HuggingFace model config. "
+            "Applied when the training rope_type is 'default' (no scaling). "
+            "Set to empty dict {} to disable rope scaling injection at export."
+        ),
+    )
+
+    eagle_base_lora: bool = ModeloptField(
+        default=False,
+        description=(
+            "Whether to add LoRA adapters to the base model for co-training with the EAGLE module. "
+            "Requires the `peft` library. Incompatible with eagle_offline=True."
+        ),
+    )
+
+    eagle_base_lora_rank: int = ModeloptField(
+        default=64,
+        description="LoRA rank for the base model adapters.",
+    )
+
+    eagle_base_lora_alpha: float = ModeloptField(
+        default=16.0,
+        description="LoRA alpha (scaling) for the base model adapters.",
+    )
+
+    eagle_base_lora_target_modules: list | None = ModeloptField(
+        default=None,
+        description=(
+            "List of module name patterns to apply LoRA to in the base model "
+            "(e.g. ['q_proj', 'v_proj']). None uses peft defaults."
+        ),
+    )
+
+    eagle_base_lora_preservation_loss_weight: float = ModeloptField(
+        default=0.1,
+        description=(
+            "Weight for the preservation loss that minimizes the KL divergence between "
+            "the LoRA-adapted base model output and the original base model output."
+        ),
+    )
+
+    eagle_base_lora_warmup_steps: int = ModeloptField(
+        default=0,
+        description=(
+            "Number of warmup steps where LoRA is frozen and only the EAGLE draft head trains. "
+            "After warmup, LoRA is enabled for co-training."
+        ),
+    )
+
+    eagle_base_lora_logits_detach_prob: float = ModeloptField(
+        default=0.5,
+        description=(
+            "After warmup, probability of detaching base_output_softmax_logits each step. "
+            "Acts as dropout regularization on the eagle-loss-to-LoRA gradient path through "
+            "logits, preventing LoRA from degenerating to maximize EAGLE accuracy at the cost "
+            "of base model quality. 1.0 = always detach (no logits gradient), 0.0 = never detach."
+        ),
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _derive_eagle_offline(cls, data: Any, info: ValidationInfo) -> Any:
+        """Derive ``eagle_offline`` from ``data_args.offline_data_path`` when provided in context."""
+        ctx = info.context if info.context else {}
+        data_args = ctx.get("data_args")
+        if data_args is not None and isinstance(data, dict):
+            data["eagle_offline"] = data_args.offline_data_path is not None
+        return data
+
+    @model_validator(mode="after")
+    def _check_rope_scaling_consistency(self) -> "EagleConfig":
+        if not self.eagle_export_rope_scaling:
+            return self
+        rope_cfg = self.eagle_architecture_config.get("rope_scaling", {}) or {}
+        rope_type = rope_cfg.get("rope_type") or rope_cfg.get("type")
+        if rope_type is not None and rope_type != "default":
+            raise ValueError(
+                f"eagle_export_rope_scaling is set but eagle_architecture_config has "
+                f"rope_type='{rope_type}'. Export rope overwrite is only valid when the "
+                f"training rope_type is 'default' (no scaling)."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _warn_rope_vs_training_seq_len(self, info: ValidationInfo) -> "EagleConfig":
+        ctx = info.context if info.context else {}
+        training_args = ctx.get("training_args")
+        if training_args is None:
+            return self
+        orig_max_pos = self.eagle_export_rope_scaling.get("original_max_position_embeddings")
+        if orig_max_pos is not None and orig_max_pos != training_args.training_seq_len:
+            warnings.warn(
+                f"eagle_export_rope_scaling.original_max_position_embeddings ({orig_max_pos}) "
+                f"differs from training_seq_len ({training_args.training_seq_len}). "
+                f"This may affect long-context inference quality."
+            )
+        return self
