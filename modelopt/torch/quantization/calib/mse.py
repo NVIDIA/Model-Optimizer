@@ -259,10 +259,16 @@ class TritonNVFP4MSECalibrator(NVFP4MSECalibrator):
 
         x = x.detach()
         # The weight quantizer reshapes its input to [n_blocks, block_size] before
-        # calling collect (see TensorQuantizer._process_for_blockquant).
-        assert x.ndim == 2, f"Expected x to be [n_blocks, block_size]; got shape {tuple(x.shape)}."
+        # calling collect (see TensorQuantizer._process_for_blockquant). Validate
+        # via ValueError so the contract still holds under ``python -O``.
+        if x.ndim != 2:
+            raise ValueError(
+                f"Expected x to be [n_blocks, block_size]; got shape {tuple(x.shape)}."
+            )
         block_size = x.shape[-1]
-        n_blocks = x.numel() // block_size
+        if block_size <= 0:
+            raise ValueError(f"x.shape[-1] must be positive; got {block_size}.")
+        n_blocks = x.shape[0]
         if n_blocks != self._n_blocks:
             raise ValueError(
                 f"initial amax.numel() ({self._n_blocks}) does not match the number "
