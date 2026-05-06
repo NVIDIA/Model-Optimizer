@@ -1,0 +1,102 @@
+quantization
+============
+
+.. List the submodules
+
+
+
+.. rubric:: Modules
+
+.. autosummary::
+   :toctree:
+   :recursive:
+
+
+
+   modelopt.onnx.quantization.autotune
+
+
+
+   modelopt.onnx.quantization.calib_utils
+
+
+
+   modelopt.onnx.quantization.extensions
+
+
+
+   modelopt.onnx.quantization.fp8
+
+
+
+   modelopt.onnx.quantization.graph_utils
+
+
+
+   modelopt.onnx.quantization.gs_patching
+
+
+
+   modelopt.onnx.quantization.int4
+
+
+
+   modelopt.onnx.quantization.int8
+
+
+
+   modelopt.onnx.quantization.operators
+
+
+
+   modelopt.onnx.quantization.ort_patching
+
+
+
+   modelopt.onnx.quantization.ort_utils
+
+
+
+   modelopt.onnx.quantization.partitioning
+
+
+
+   modelopt.onnx.quantization.qdq_utils
+
+
+
+   modelopt.onnx.quantization.quant_utils
+
+
+
+   modelopt.onnx.quantization.quantize
+
+
+
+
+.. Autodoc anything defined in the module itself
+
+   TODO: WE DON'T USE THIS OPTION RIGHT NOW BUT WE CAN REACTIVATE IF WANTED
+   We use :ignore-module-all: so sphinx does not document the same module twice, even if it is reimported
+   For reimports that should be documented somewhere other than where they are defined, the re-imports
+   __module__ should be manually overridden -- i.e. in the ``__init__.py`` which contains ``from xxx import YYY``,
+   add in ``YYY.__module__ = __name__``.
+
+.. automodule:: modelopt.onnx.quantization
+   :members:
+   :undoc-members:
+
+   .. Also show members without docstrings. Only members from __all__ are considered as per conf.py
+   .. Ideally we should add docstrings for these members.
+
+
+   .. Overview table of available classes in the module
+   
+   
+   
+
+
+   .. Overview table of available functions in the module
+   
+   
+   

@@ -1,0 +1,271 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>FAQs &mdash; Model Optimizer 0.0.1.dev1+g3c48886be</title>
+      <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
+      <link rel="stylesheet" type="text/css" href="../_static/tabs.css?v=4c969af8" />
+      <link rel="stylesheet" type="text/css" href="../_static/togglebutton.css?v=9c3e77be" />
+      <link rel="stylesheet" type="text/css" href="../_static/autodoc_pydantic.css" />
+      <link rel="stylesheet" type="text/css" href="../_static/custom.css?v=7a224f4b" />
+
+  
+      <script src="../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../_static/documentation_options.js?v=5929fcd5"></script>
+      <script src="../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
+      <script src="../_static/copybutton.js?v=20d3d275"></script>
+      <script src="../_static/tabs.js?v=3ee01567"></script>
+      <script>let toggleHintShow = 'Click to show';</script>
+      <script>let toggleHintHide = 'Click to hide';</script>
+      <script>let toggleOpenOnPrint = 'true';</script>
+      <script src="../_static/togglebutton.js?v=b8b12719"></script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+    <script src="../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+    <link rel="prev" title="Contact us" href="1_contact.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../index.html" class="icon icon-home">
+            Model Optimizer
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../getting_started/1_overview.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../getting_started/2_installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch to ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - Windows</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_qat" rel="noopener noreferrer" target="_blank">Quick Start: QAT</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning" rel="noopener noreferrer" target="_blank">Quick Start: Pruning</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_distill" rel="noopener noreferrer" target="_blank">Quick Start: Distillation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/speculative_decoding" rel="noopener noreferrer" target="_blank">Quick Start: Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_sparsity" rel="noopener noreferrer" target="_blank">Quick Start: Sparsity</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Guides</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../guides/0_support_matrix.html">Support Matrix</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/1_quantization.html">Quantization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/2_save_load.html">Saving &amp; Restoring</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/3_pruning.html">Pruning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/4_distillation.html">Distillation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/5_speculative_decoding.html">Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/6_sparsity.html">Sparsity</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/7_nas.html">NAS</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/8_autocast.html">AutoCast (ONNX)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/9_autotune.html">Autotune (ONNX)</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Deployment</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../deployment/1_tensorrt_llm.html">TensorRT-LLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../deployment/2_onnxruntime.html">Onnxruntime</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../deployment/3_unified_hf.html">Unified HuggingFace Checkpoint</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Examples</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../examples/0_all_examples.html">All GitHub Examples</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Reference</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../reference/0_changelog.html">NVIDIA Model Optimizer Changelog</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../reference/1_modelopt_api.html">modelopt API</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Support</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="1_contact.html">Contact us</a></li>
+<li class="toctree-l1 current"><a class="current reference internal" href="#">FAQs</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#modelopt-windows">ModelOpt-Windows</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#why-is-awq-scale-search-taking-too-long-or-stuck-at-0-during-onnx-int4-quantization">1. Why is awq-scale search taking too long or stuck at 0% during ONNX INT4 quantization?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#why-is-cuda-ep-not-found-error-showing-during-onnx-quantization">2. Why is “CUDA EP not found” error showing during ONNX quantization?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#why-does-ort-session-creation-fail-for-cuda-ep-despite-having-cuda-toolkit-and-cudnn">3. Why does ORT-session creation fail for CUDA-EP despite having CUDA toolkit and cuDNN?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#why-quantized-model-s-size-increases-on-re-runs">4. Why quantized model’s size increases on re-runs?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#running-int4-quantized-onnx-model-on-directml-backend-gives-following-error-what-can-be-the-issue">5. Running INT4 quantized ONNX model on DirectML backend gives following error. What can be the issue?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#running-int4-quantized-onnx-model-on-directml-backend-gives-following-kind-of-error-what-can-be-the-issue">6. Running INT4 quantized ONNX model on DirectML backend gives following kind of error. What can be the issue?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#running-8-bit-quantized-onnx-model-with-ort-dml-gives-onnxruntime-error-about-using-8-bit-data-type-e-g-int8-fp8-what-can-be-the-issue">7. Running 8-bit quantized ONNX model with ORT-DML gives onnxruntime error about using 8-bit data-type (e.g. INT8/FP8). What can be the issue?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#how-to-resolve-onnxruntime-error-about-invalid-use-of-fp8-type-in-quantizelinear-dequantizelinear-node">8. How to resolve onnxruntime error about invalid use of FP8 type in QuantizeLinear / DequantizeLinear node?</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#nas-pruning">NAS/Pruning</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#parallel-search">Parallel search</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#monkey-patched-functions">Monkey-patched functions</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#known-issues">Known Issues</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#potential-memory-leak-for-fsdp-with-use-orig-params-true">1. Potential memory leak for <code class="docutils literal notranslate"><span class="pre">FSDP</span></code> with <code class="docutils literal notranslate"><span class="pre">use_orig_params=True</span></code></a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../index.html">Model Optimizer</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content style-external-links">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">FAQs</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../_sources/support/2_faqs.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="faqs">
+<h1>FAQs<a class="headerlink" href="#faqs" title="Link to this heading"></a></h1>
+<section id="modelopt-windows">
+<span id="faq-modelopt-windows"></span><h2>ModelOpt-Windows<a class="headerlink" href="#modelopt-windows" title="Link to this heading"></a></h2>
+<p><strong>ONNX PTQ</strong></p>
+<section id="why-is-awq-scale-search-taking-too-long-or-stuck-at-0-during-onnx-int4-quantization">
+<h3>1. Why is awq-scale search taking too long or stuck at 0% during ONNX INT4 quantization?<a class="headerlink" href="#why-is-awq-scale-search-taking-too-long-or-stuck-at-0-during-onnx-int4-quantization" title="Link to this heading"></a></h3>
+<p>Awq-scale search should complete in minutes with NVIDIA GPU acceleration. If stalled:</p>
+<ul class="simple">
+<li><p><strong>GPU acceleration may be disabled.</strong> If CUDA 12.x is not available, quantization will fall back to slower <code class="docutils literal notranslate"><span class="pre">numpy</span></code> implementation instead of <code class="docutils literal notranslate"><span class="pre">cupy-cuda12x</span></code>. Make sure that <code class="docutils literal notranslate"><span class="pre">cupy</span></code> package is compatible with installed CUDA toolkit.</p></li>
+<li><p><strong>Low GPU memory.</strong> Quantization needs 20-24GB VRAM; low memory forces slower shared memory usage.</p></li>
+<li><p><strong>Using CPU for quantization.</strong> Install ORT-GPU (supports CUDA EP) or ORT-DML (supports DML EP) for better speed.</p></li>
+</ul>
+</section>
+<section id="why-is-cuda-ep-not-found-error-showing-during-onnx-quantization">
+<h3>2. Why is “CUDA EP not found” error showing during ONNX quantization?<a class="headerlink" href="#why-is-cuda-ep-not-found-error-showing-during-onnx-quantization" title="Link to this heading"></a></h3>
+<p>ORT used in GenAI may conflict with ModelOpt-Windows ORT:</p>
+<ul class="simple">
+<li><p>Uninstall ORT, run <code class="docutils literal notranslate"><span class="pre">pip</span> <span class="pre">cache</span> <span class="pre">purge</span></code>, and reinstall <em>nvidia-modelopt[onnx]</em>.</p></li>
+<li><p>Use separate virtual environments for GenAI and quantization (e.g., with <em>venv</em> or <em>conda</em>).</p></li>
+</ul>
+</section>
+<section id="why-does-ort-session-creation-fail-for-cuda-ep-despite-having-cuda-toolkit-and-cudnn">
+<h3>3. Why does ORT-session creation fail for CUDA-EP despite having CUDA toolkit and cuDNN?<a class="headerlink" href="#why-does-ort-session-creation-fail-for-cuda-ep-despite-having-cuda-toolkit-and-cudnn" title="Link to this heading"></a></h3>
+<p>This usually results from mismatched CUDA and cuDNN versions or missing paths. Ensure:</p>
+<ul class="simple">
+<li><p>Compatible CUDA toolkit and cuDNN versions (check <a class="reference external" href="https://onnxruntime.ai/docs/execution-providers/CUDA-ExecutionProvider.html#requirements/" rel="noopener noreferrer" target="_blank">CUDA EP requirements</a>).</p></li>
+<li><p>Add cuDNN’s <em>bin</em> and <em>lib</em> paths to <em>PATH</em> and restart the command prompt.</p></li>
+</ul>
+</section>
+<section id="why-quantized-model-s-size-increases-on-re-runs">
+<h3>4. Why quantized model’s size increases on re-runs?<a class="headerlink" href="#why-quantized-model-s-size-increases-on-re-runs" title="Link to this heading"></a></h3>
+<p>Make sure that the output directory is clean before each quantization run otherwise, existing quantized model file may get appended in each run leading to increase in model’s size and possibly corrupting it.</p>
+</section>
+<section id="running-int4-quantized-onnx-model-on-directml-backend-gives-following-error-what-can-be-the-issue">
+<h3>5. Running INT4 quantized ONNX model on DirectML backend gives following error. What can be the issue?<a class="headerlink" href="#running-int4-quantized-onnx-model-on-directml-backend-gives-following-error-what-can-be-the-issue" title="Link to this heading"></a></h3>
+<blockquote>
+<div><p><cite>Error Unrecognized attribute: block_size for operator DequantizeLinear</cite></p>
+</div></blockquote>
+<p>ModelOpt-Windows uses ONNX’s <a class="reference external" href="https://onnx.ai/onnx/operators/onnx__DequantizeLinear.html" rel="noopener noreferrer" target="_blank">DequantizeLinear</a> (DQ) nodes. The int4 data-type support in DeQuantizeLinear node came in opset-21. And, <em>block_size</em> attribute was added in DequantizeLinear node in Opset-21. Make sure that quantized model’s opset version is 21 or higher. Refer <a class="reference internal" href="../guides/windows_guides/_ONNX_PTQ_guide.html#apply-onnx-ptq"><span class="std std-ref">Apply Post Training Quantization (PTQ)</span></a> for details.</p>
+</section>
+<section id="running-int4-quantized-onnx-model-on-directml-backend-gives-following-kind-of-error-what-can-be-the-issue">
+<h3>6. Running INT4 quantized ONNX model on DirectML backend gives following kind of error. What can be the issue?<a class="headerlink" href="#running-int4-quantized-onnx-model-on-directml-backend-gives-following-kind-of-error-what-can-be-the-issue" title="Link to this heading"></a></h3>
+<blockquote>
+<div><p><cite>Error: Type ‘tensor(int4)’ of input parameter (onnx::MatMul_6508_i4) of operator (DequantizeLinear) in node (onnx::MatMul_6508_DequantizeLinear) is invalid.</cite></p>
+</div></blockquote>
+<p>One possible reason for above error is that INT4 quantized ONNX model’s opset version (default or onnx domain) is less than 21. Ensure the INT4 quantized model’s opset version is 21 or higher since INT4 data-type support in DequantizeLinear ONNX node came in opset-21.</p>
+</section>
+<section id="running-8-bit-quantized-onnx-model-with-ort-dml-gives-onnxruntime-error-about-using-8-bit-data-type-e-g-int8-fp8-what-can-be-the-issue">
+<h3>7. Running 8-bit quantized ONNX model with ORT-DML gives onnxruntime error about using 8-bit data-type (e.g. INT8/FP8). What can be the issue?<a class="headerlink" href="#running-8-bit-quantized-onnx-model-with-ort-dml-gives-onnxruntime-error-about-using-8-bit-data-type-e-g-int8-fp8-what-can-be-the-issue" title="Link to this heading"></a></h3>
+<p>Currently, DirectML backend (ORT-DML) doesn’t support 8-bit precision. So, it expectedly complains about 8-bit data-type. Try using ORT-CUDA or other 8-bit compatible backend.</p>
+</section>
+<section id="how-to-resolve-onnxruntime-error-about-invalid-use-of-fp8-type-in-quantizelinear-dequantizelinear-node">
+<h3>8. How to resolve onnxruntime error about invalid use of FP8 type in QuantizeLinear / DequantizeLinear node?<a class="headerlink" href="#how-to-resolve-onnxruntime-error-about-invalid-use-of-fp8-type-in-quantizelinear-dequantizelinear-node" title="Link to this heading"></a></h3>
+<p>The FP8 type support in QuantizeLinear / DeQuantizeLinear node came with Opset-19. So, ensure that opset of ONNX model is 19+.</p>
+</section>
+</section>
+<section id="nas-pruning">
+<span id="nas-faqs"></span><h2>NAS/Pruning<a class="headerlink" href="#nas-pruning" title="Link to this heading"></a></h2>
+<section id="parallel-search">
+<h3>Parallel search<a class="headerlink" href="#parallel-search" title="Link to this heading"></a></h3>
+<p>If your <code class="docutils literal notranslate"><span class="pre">score_func</span></code> in <a class="reference internal" href="../reference/generated/modelopt.torch.nas.algorithms.html#modelopt.torch.nas.algorithms.search" title="modelopt.torch.nas.algorithms.search"><code class="xref py py-meth docutils literal notranslate"><span class="pre">mtn.search()</span></code></a>
+supports parallel evaluation, you can make use of it by passing in <code class="docutils literal notranslate"><span class="pre">DistributedDataParallel</span></code>
+module to search.</p>
+</section>
+<section id="monkey-patched-functions">
+<h3>Monkey-patched functions<a class="headerlink" href="#monkey-patched-functions" title="Link to this heading"></a></h3>
+<p>During the conversion process (<a class="reference internal" href="../reference/generated/modelopt.torch.nas.conversion.html#modelopt.torch.nas.conversion.convert" title="modelopt.torch.nas.conversion.convert"><code class="xref py py-meth docutils literal notranslate"><span class="pre">mtn.convert()</span></code></a>), we
+use a <a class="reference external" href="https://en.wikipedia.org/wiki/Monkey_patch" rel="noopener noreferrer" target="_blank">monkey patch</a> to augment the <code class="docutils literal notranslate"><span class="pre">forward()</span></code>,
+<code class="docutils literal notranslate"><span class="pre">eval()</span></code>, and <code class="docutils literal notranslate"><span class="pre">train()</span></code> methods of <code class="docutils literal notranslate"><span class="pre">nn.Module</span></code>. This renders the ModelOpt conversion process
+incompatible with other monkey patches to those methods.</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="c1"># Internally in mtn.convert, we do:</span>
+<span class="n">model</span><span class="o">.</span><span class="n">forward</span> <span class="o">=</span> <span class="n">types</span><span class="o">.</span><span class="n">MethodType</span><span class="p">(</span><span class="n">nas_forward_func</span><span class="p">,</span> <span class="n">model</span><span class="p">)</span>
+<span class="n">model</span><span class="o">.</span><span class="n">train</span> <span class="o">=</span> <span class="n">types</span><span class="o">.</span><span class="n">MethodType</span><span class="p">(</span><span class="n">nas_train_func</span><span class="p">,</span> <span class="n">model</span><span class="p">)</span>
+</pre></div>
+</div>
+</section>
+</section>
+<section id="known-issues">
+<h2>Known Issues<a class="headerlink" href="#known-issues" title="Link to this heading"></a></h2>
+<section id="potential-memory-leak-for-fsdp-with-use-orig-params-true">
+<h3>1. Potential memory leak for <code class="docutils literal notranslate"><span class="pre">FSDP</span></code> with <code class="docutils literal notranslate"><span class="pre">use_orig_params=True</span></code><a class="headerlink" href="#potential-memory-leak-for-fsdp-with-use-orig-params-true" title="Link to this heading"></a></h3>
+<p>When using <code class="docutils literal notranslate"><span class="pre">FSDP</span></code> with <code class="docutils literal notranslate"><span class="pre">use_orig_params=True</span></code>, there is a potential memory leak during training
+when using <code class="docutils literal notranslate"><span class="pre">FSDP</span></code> in conjunction with modelopt-converted models. Please use
+<code class="docutils literal notranslate"><span class="pre">use_orig_params=False</span></code> to avoid this issue.</p>
+</section>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="1_contact.html" class="btn btn-neutral float-left" title="Contact us" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2023-2025, NVIDIA Corporation.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

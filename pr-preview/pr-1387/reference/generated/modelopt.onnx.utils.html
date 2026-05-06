@@ -1,0 +1,1282 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>utils &mdash; Model Optimizer 0.0.1.dev1+g374249c40</title>
+      <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="../../_static/copybutton.css?v=76b2166b" />
+      <link rel="stylesheet" type="text/css" href="../../_static/tabs.css?v=4c969af8" />
+      <link rel="stylesheet" type="text/css" href="../../_static/togglebutton.css?v=9c3e77be" />
+      <link rel="stylesheet" type="text/css" href="../../_static/autodoc_pydantic.css" />
+      <link rel="stylesheet" type="text/css" href="../../_static/custom.css?v=7a224f4b" />
+
+  
+      <script src="../../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../../_static/documentation_options.js?v=5929fcd5"></script>
+      <script src="../../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="../../_static/clipboard.min.js?v=a7894cd8"></script>
+      <script src="../../_static/copybutton.js?v=20d3d275"></script>
+      <script src="../../_static/tabs.js?v=3ee01567"></script>
+      <script>let toggleHintShow = 'Click to show';</script>
+      <script>let toggleHintHide = 'Click to hide';</script>
+      <script>let toggleOpenOnPrint = 'true';</script>
+      <script src="../../_static/togglebutton.js?v=b8b12719"></script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+    <script src="../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" />
+    <link rel="next" title="torch" href="modelopt.torch.html" />
+    <link rel="prev" title="trt_utils" href="modelopt.onnx.trt_utils.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../../index.html" class="icon icon-home">
+            Model Optimizer
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../getting_started/1_overview.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../getting_started/2_installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch to ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - Windows</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_qat" rel="noopener noreferrer" target="_blank">Quick Start: QAT</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning" rel="noopener noreferrer" target="_blank">Quick Start: Pruning</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_distill" rel="noopener noreferrer" target="_blank">Quick Start: Distillation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/speculative_decoding" rel="noopener noreferrer" target="_blank">Quick Start: Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_sparsity" rel="noopener noreferrer" target="_blank">Quick Start: Sparsity</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Guides</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/0_support_matrix.html">Support Matrix</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/10_recipes.html">Recipes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/1_quantization.html">Quantization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/2_save_load.html">Saving &amp; Restoring</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/3_pruning.html">Pruning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/4_distillation.html">Distillation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/5_speculative_decoding.html">Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/6_sparsity.html">Sparsity</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/7_nas.html">NAS</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/8_autocast.html">AutoCast (ONNX)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/9_autotune.html">Autotune (ONNX)</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Deployment</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/1_tensorrt_llm.html">TensorRT-LLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/2_onnxruntime.html">Onnxruntime</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/3_unified_hf.html">Unified HuggingFace Checkpoint</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Examples</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../examples/0_all_examples.html">All GitHub Examples</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Reference</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="../0_changelog.html">Changelog</a></li>
+<li class="toctree-l1 current"><a class="reference internal" href="../1_modelopt_api.html">modelopt API</a><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="modelopt.deploy.html">deploy</a></li>
+<li class="toctree-l2 current"><a class="reference internal" href="modelopt.onnx.html">onnx</a><ul class="current">
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.autocast.html">autocast</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.export.html">export</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.graph_surgery.html">graph_surgery</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.llm_export_utils.html">llm_export_utils</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.logging_config.html">logging_config</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.op_types.html">op_types</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.quantization.html">quantization</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.trt_utils.html">trt_utils</a></li>
+<li class="toctree-l3 current"><a class="current reference internal" href="#">utils</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.utils.bfloat16_to_float32"><code class="docutils literal notranslate"><span class="pre">bfloat16_to_float32()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.utils.change_casts_to_fp16"><code class="docutils literal notranslate"><span class="pre">change_casts_to_fp16()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.utils.check_model"><code class="docutils literal notranslate"><span class="pre">check_model()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.utils.check_model_uses_external_data"><code class="docutils literal notranslate"><span class="pre">check_model_uses_external_data()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.utils.duplicate_shared_constants"><code class="docutils literal notranslate"><span class="pre">duplicate_shared_constants()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.utils.find_lowest_common_ancestor"><code class="docutils literal notranslate"><span class="pre">find_lowest_common_ancestor()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.utils.fold_dq_fp32_to_fp16_casts"><code class="docutils literal notranslate"><span class="pre">fold_dq_fp32_to_fp16_casts()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.utils.fold_q_fp16_to_fp32_casts"><code class="docutils literal notranslate"><span class="pre">fold_q_fp16_to_fp32_casts()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.utils.fold_qdq_scale_fp16_to_fp32_casts"><code class="docutils literal notranslate"><span class="pre">fold_qdq_scale_fp16_to_fp32_casts()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.utils.gen_random_inputs"><code class="docutils literal notranslate"><span class="pre">gen_random_inputs()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.utils.get_all_input_names"><code class="docutils literal notranslate"><span class="pre">get_all_input_names()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.utils.get_attribute"><code class="docutils literal notranslate"><span class="pre">get_attribute()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.utils.get_batch_size"><code class="docutils literal notranslate"><span class="pre">get_batch_size()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.utils.get_batch_size_from_bytes"><code class="docutils literal notranslate"><span class="pre">get_batch_size_from_bytes()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.utils.get_cast_to_type"><code class="docutils literal notranslate"><span class="pre">get_cast_to_type()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.utils.get_child_nodes"><code class="docutils literal notranslate"><span class="pre">get_child_nodes()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.utils.get_consumer_nodes"><code class="docutils literal notranslate"><span class="pre">get_consumer_nodes()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.utils.get_dynamic_graph_inputs"><code class="docutils literal notranslate"><span class="pre">get_dynamic_graph_inputs()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.utils.get_input_names"><code class="docutils literal notranslate"><span class="pre">get_input_names()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.utils.get_input_names_from_bytes"><code class="docutils literal notranslate"><span class="pre">get_input_names_from_bytes()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.utils.get_input_shapes"><code class="docutils literal notranslate"><span class="pre">get_input_shapes()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.utils.get_input_shapes_from_bytes"><code class="docutils literal notranslate"><span class="pre">get_input_shapes_from_bytes()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.utils.get_min_opset_for_precisions"><code class="docutils literal notranslate"><span class="pre">get_min_opset_for_precisions()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.utils.get_node_names"><code class="docutils literal notranslate"><span class="pre">get_node_names()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.utils.get_node_names_from_bytes"><code class="docutils literal notranslate"><span class="pre">get_node_names_from_bytes()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.utils.get_opset_version"><code class="docutils literal notranslate"><span class="pre">get_opset_version()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.utils.get_output_names"><code class="docutils literal notranslate"><span class="pre">get_output_names()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.utils.get_output_names_from_bytes"><code class="docutils literal notranslate"><span class="pre">get_output_names_from_bytes()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.utils.get_output_shapes"><code class="docutils literal notranslate"><span class="pre">get_output_shapes()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.utils.get_parent_nodes"><code class="docutils literal notranslate"><span class="pre">get_parent_nodes()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.utils.get_producer_nodes"><code class="docutils literal notranslate"><span class="pre">get_producer_nodes()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.utils.get_qdq_precisions"><code class="docutils literal notranslate"><span class="pre">get_qdq_precisions()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.utils.get_tensor_by_name"><code class="docutils literal notranslate"><span class="pre">get_tensor_by_name()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.utils.get_variable_inputs"><code class="docutils literal notranslate"><span class="pre">get_variable_inputs()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.utils.has_attribute"><code class="docutils literal notranslate"><span class="pre">has_attribute()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.utils.infer_shapes"><code class="docutils literal notranslate"><span class="pre">infer_shapes()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.utils.infer_types"><code class="docutils literal notranslate"><span class="pre">infer_types()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.utils.infer_types_verification"><code class="docutils literal notranslate"><span class="pre">infer_types_verification()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.utils.name_onnx_nodes"><code class="docutils literal notranslate"><span class="pre">name_onnx_nodes()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.utils.onnx_type_str_to_enum"><code class="docutils literal notranslate"><span class="pre">onnx_type_str_to_enum()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.utils.parse_shapes_spec"><code class="docutils literal notranslate"><span class="pre">parse_shapes_spec()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.utils.randomize_weights"><code class="docutils literal notranslate"><span class="pre">randomize_weights()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.utils.randomize_weights_onnx_bytes"><code class="docutils literal notranslate"><span class="pre">randomize_weights_onnx_bytes()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.utils.read_f16_tensor_as_fp32"><code class="docutils literal notranslate"><span class="pre">read_f16_tensor_as_fp32()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.utils.remove_node_training_mode"><code class="docutils literal notranslate"><span class="pre">remove_node_training_mode()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.utils.remove_redundant_casts"><code class="docutils literal notranslate"><span class="pre">remove_redundant_casts()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.utils.remove_weights_data"><code class="docutils literal notranslate"><span class="pre">remove_weights_data()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.utils.save_onnx"><code class="docutils literal notranslate"><span class="pre">save_onnx()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.utils.save_onnx_bytes_to_dir"><code class="docutils literal notranslate"><span class="pre">save_onnx_bytes_to_dir()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.utils.update_domain"><code class="docutils literal notranslate"><span class="pre">update_domain()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.utils.validate_batch_size"><code class="docutils literal notranslate"><span class="pre">validate_batch_size()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.utils.validate_onnx"><code class="docutils literal notranslate"><span class="pre">validate_onnx()</span></code></a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="modelopt.torch.html">torch</a></li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Support</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../support/1_contact.html">Contact us</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../support/2_faqs.html">FAQs</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../index.html">Model Optimizer</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content style-external-links">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="../1_modelopt_api.html">modelopt API</a></li>
+          <li class="breadcrumb-item"><a href="modelopt.onnx.html">onnx</a></li>
+      <li class="breadcrumb-item active">utils</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../../_sources/reference/generated/modelopt.onnx.utils.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="utils">
+<h1>utils<a class="headerlink" href="#utils" title="Link to this heading"></a></h1>
+<p id="module-modelopt.onnx.utils">Utility functions related to onnx.</p>
+<p class="rubric">Functions</p>
+<table class="autosummary longtable docutils align-default">
+<tbody>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.utils.bfloat16_to_float32" title="modelopt.onnx.utils.bfloat16_to_float32"><code class="xref py py-obj docutils literal notranslate"><span class="pre">bfloat16_to_float32</span></code></a></p></td>
+<td><p>Converts a bfloat16 array (as raw data) to a float32 array.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.utils.change_casts_to_fp16" title="modelopt.onnx.utils.change_casts_to_fp16"><code class="xref py py-obj docutils literal notranslate"><span class="pre">change_casts_to_fp16</span></code></a></p></td>
+<td><p>Change FP16-to-FP32 Cast nodes whose entire fanout feeds target ops to cast to FP16 instead.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.utils.check_model" title="modelopt.onnx.utils.check_model"><code class="xref py py-obj docutils literal notranslate"><span class="pre">check_model</span></code></a></p></td>
+<td><p>Checks if the given model is valid.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.utils.check_model_uses_external_data" title="modelopt.onnx.utils.check_model_uses_external_data"><code class="xref py py-obj docutils literal notranslate"><span class="pre">check_model_uses_external_data</span></code></a></p></td>
+<td><p>Checks if the model uses external data.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.utils.duplicate_shared_constants" title="modelopt.onnx.utils.duplicate_shared_constants"><code class="xref py py-obj docutils literal notranslate"><span class="pre">duplicate_shared_constants</span></code></a></p></td>
+<td><p>Duplicate constant tensors if they are shared.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.utils.find_lowest_common_ancestor" title="modelopt.onnx.utils.find_lowest_common_ancestor"><code class="xref py py-obj docutils literal notranslate"><span class="pre">find_lowest_common_ancestor</span></code></a></p></td>
+<td><p>Function to find the lowest common ancestor of two nodes.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.utils.fold_dq_fp32_to_fp16_casts" title="modelopt.onnx.utils.fold_dq_fp32_to_fp16_casts"><code class="xref py py-obj docutils literal notranslate"><span class="pre">fold_dq_fp32_to_fp16_casts</span></code></a></p></td>
+<td><p>Remove Cast(FP32-&gt;FP16) nodes after DequantizeLinear by setting DQ output to FP16.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.utils.fold_q_fp16_to_fp32_casts" title="modelopt.onnx.utils.fold_q_fp16_to_fp32_casts"><code class="xref py py-obj docutils literal notranslate"><span class="pre">fold_q_fp16_to_fp32_casts</span></code></a></p></td>
+<td><p>Remove <code class="docutils literal notranslate"><span class="pre">Cast(FP16→FP32)</span> <span class="pre">→</span> <span class="pre">Q</span></code> patterns inserted by <code class="docutils literal notranslate"><span class="pre">convert_float_to_float16</span></code>.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.utils.fold_qdq_scale_fp16_to_fp32_casts" title="modelopt.onnx.utils.fold_qdq_scale_fp16_to_fp32_casts"><code class="xref py py-obj docutils literal notranslate"><span class="pre">fold_qdq_scale_fp16_to_fp32_casts</span></code></a></p></td>
+<td><p>Remove Cast(FP16-&gt;FP32) nodes feeding into Q/DQ scale inputs.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.utils.gen_random_inputs" title="modelopt.onnx.utils.gen_random_inputs"><code class="xref py py-obj docutils literal notranslate"><span class="pre">gen_random_inputs</span></code></a></p></td>
+<td><p>This function generates random inputs for an onnx model.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.utils.get_all_input_names" title="modelopt.onnx.utils.get_all_input_names"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_all_input_names</span></code></a></p></td>
+<td><p>This function returns the inputs names of the given onnx model.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.utils.get_attribute" title="modelopt.onnx.utils.get_attribute"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_attribute</span></code></a></p></td>
+<td><p>Returns the value of the specified attribute.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.utils.get_batch_size" title="modelopt.onnx.utils.get_batch_size"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_batch_size</span></code></a></p></td>
+<td><p>Returns the batch size of the given onnx model.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.utils.get_batch_size_from_bytes" title="modelopt.onnx.utils.get_batch_size_from_bytes"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_batch_size_from_bytes</span></code></a></p></td>
+<td><p>Returns the batch size of the given onnx model.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.utils.get_cast_to_type" title="modelopt.onnx.utils.get_cast_to_type"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_cast_to_type</span></code></a></p></td>
+<td><p>Get the target type from a Cast node.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.utils.get_child_nodes" title="modelopt.onnx.utils.get_child_nodes"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_child_nodes</span></code></a></p></td>
+<td><p>Returns list of output consumer nodes for the given node.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.utils.get_consumer_nodes" title="modelopt.onnx.utils.get_consumer_nodes"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_consumer_nodes</span></code></a></p></td>
+<td><p>Get all consumer nodes for a given tensor name.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.utils.get_dynamic_graph_inputs" title="modelopt.onnx.utils.get_dynamic_graph_inputs"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_dynamic_graph_inputs</span></code></a></p></td>
+<td><p>This function returns the dynamic inputs of an ONNX model.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.utils.get_input_names" title="modelopt.onnx.utils.get_input_names"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_input_names</span></code></a></p></td>
+<td><p>This function returns the external inputs names of the given onnx model.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.utils.get_input_names_from_bytes" title="modelopt.onnx.utils.get_input_names_from_bytes"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_input_names_from_bytes</span></code></a></p></td>
+<td><p>This function returns the inputs names of the given onnx model in bytes.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.utils.get_input_shapes" title="modelopt.onnx.utils.get_input_shapes"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_input_shapes</span></code></a></p></td>
+<td><p>This function returns the inputs shapes for the given onnx model.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.utils.get_input_shapes_from_bytes" title="modelopt.onnx.utils.get_input_shapes_from_bytes"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_input_shapes_from_bytes</span></code></a></p></td>
+<td><p>This function returns the input shapes of the given onnx model in bytes.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.utils.get_min_opset_for_precisions" title="modelopt.onnx.utils.get_min_opset_for_precisions"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_min_opset_for_precisions</span></code></a></p></td>
+<td><p>Gets the minimum required opset version for a set of Q/DQ precision types.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.utils.get_node_names" title="modelopt.onnx.utils.get_node_names"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_node_names</span></code></a></p></td>
+<td><p>This function returns all node names from the given onnx model.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.utils.get_node_names_from_bytes" title="modelopt.onnx.utils.get_node_names_from_bytes"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_node_names_from_bytes</span></code></a></p></td>
+<td><p>This function returns all node names from the given onnx model in bytes.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.utils.get_opset_version" title="modelopt.onnx.utils.get_opset_version"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_opset_version</span></code></a></p></td>
+<td><p>Returns the opset version of the given model.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.utils.get_output_names" title="modelopt.onnx.utils.get_output_names"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_output_names</span></code></a></p></td>
+<td><p>This function returns the output names of the given onnx model.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.utils.get_output_names_from_bytes" title="modelopt.onnx.utils.get_output_names_from_bytes"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_output_names_from_bytes</span></code></a></p></td>
+<td><p>This function returns the output names of the given onnx model in bytes.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.utils.get_output_shapes" title="modelopt.onnx.utils.get_output_shapes"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_output_shapes</span></code></a></p></td>
+<td><p>This function returns the output shapes for the given onnx model.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.utils.get_parent_nodes" title="modelopt.onnx.utils.get_parent_nodes"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_parent_nodes</span></code></a></p></td>
+<td><p>Returns list of input producer nodes for the given node.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.utils.get_producer_nodes" title="modelopt.onnx.utils.get_producer_nodes"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_producer_nodes</span></code></a></p></td>
+<td><p>Get all producer nodes for a given tensor name.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.utils.get_qdq_precisions" title="modelopt.onnx.utils.get_qdq_precisions"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_qdq_precisions</span></code></a></p></td>
+<td><p>Gets the Q/DQ precision types present in the model.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.utils.get_tensor_by_name" title="modelopt.onnx.utils.get_tensor_by_name"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_tensor_by_name</span></code></a></p></td>
+<td><p>This function returns a tensor from its name.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.utils.get_variable_inputs" title="modelopt.onnx.utils.get_variable_inputs"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_variable_inputs</span></code></a></p></td>
+<td><p>Returns the variable inputs of the given Node.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.utils.has_attribute" title="modelopt.onnx.utils.has_attribute"><code class="xref py py-obj docutils literal notranslate"><span class="pre">has_attribute</span></code></a></p></td>
+<td><p>Checks if the given node has the specified attribute.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.utils.infer_shapes" title="modelopt.onnx.utils.infer_shapes"><code class="xref py py-obj docutils literal notranslate"><span class="pre">infer_shapes</span></code></a></p></td>
+<td><p>Infers shapes of the onnx graph, handles large models.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.utils.infer_types" title="modelopt.onnx.utils.infer_types"><code class="xref py py-obj docutils literal notranslate"><span class="pre">infer_types</span></code></a></p></td>
+<td><p>Infers types (and optionally shapes) based on the use_standalone_type_inference flag.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.utils.infer_types_verification" title="modelopt.onnx.utils.infer_types_verification"><code class="xref py py-obj docutils literal notranslate"><span class="pre">infer_types_verification</span></code></a></p></td>
+<td><p>Verify that all reachable tensors have a defined type.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.utils.name_onnx_nodes" title="modelopt.onnx.utils.name_onnx_nodes"><code class="xref py py-obj docutils literal notranslate"><span class="pre">name_onnx_nodes</span></code></a></p></td>
+<td><p>Assigns name to the onnx nodes if not present and return the modified status.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.utils.onnx_type_str_to_enum" title="modelopt.onnx.utils.onnx_type_str_to_enum"><code class="xref py py-obj docutils literal notranslate"><span class="pre">onnx_type_str_to_enum</span></code></a></p></td>
+<td><p>Converts ONNX type in string format to onnx.TensorProto format.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.utils.parse_shapes_spec" title="modelopt.onnx.utils.parse_shapes_spec"><code class="xref py py-obj docutils literal notranslate"><span class="pre">parse_shapes_spec</span></code></a></p></td>
+<td><p>Parse shapes spec and returns them in a dictionary.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.utils.randomize_weights" title="modelopt.onnx.utils.randomize_weights"><code class="xref py py-obj docutils literal notranslate"><span class="pre">randomize_weights</span></code></a></p></td>
+<td><p>Assigns random values to the onnx model weights.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.utils.randomize_weights_onnx_bytes" title="modelopt.onnx.utils.randomize_weights_onnx_bytes"><code class="xref py py-obj docutils literal notranslate"><span class="pre">randomize_weights_onnx_bytes</span></code></a></p></td>
+<td><p>Assigns random values to the onnx model weights.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.utils.read_f16_tensor_as_fp32" title="modelopt.onnx.utils.read_f16_tensor_as_fp32"><code class="xref py py-obj docutils literal notranslate"><span class="pre">read_f16_tensor_as_fp32</span></code></a></p></td>
+<td><p>Reads a float16 or bfloat16 tensor as a float32 numpy ndarray.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.utils.remove_node_training_mode" title="modelopt.onnx.utils.remove_node_training_mode"><code class="xref py py-obj docutils literal notranslate"><span class="pre">remove_node_training_mode</span></code></a></p></td>
+<td><p>Remove <cite>training_mode</cite> attribute and extra training outputs from nodes of a given op type.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.utils.remove_redundant_casts" title="modelopt.onnx.utils.remove_redundant_casts"><code class="xref py py-obj docutils literal notranslate"><span class="pre">remove_redundant_casts</span></code></a></p></td>
+<td><p>Removes both sequential casts and casts that don't change precision.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.utils.remove_weights_data" title="modelopt.onnx.utils.remove_weights_data"><code class="xref py py-obj docutils literal notranslate"><span class="pre">remove_weights_data</span></code></a></p></td>
+<td><p>Removes raw weight data from the onnx model.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.utils.save_onnx" title="modelopt.onnx.utils.save_onnx"><code class="xref py py-obj docutils literal notranslate"><span class="pre">save_onnx</span></code></a></p></td>
+<td><p>Save an ONNX model to given path.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.utils.save_onnx_bytes_to_dir" title="modelopt.onnx.utils.save_onnx_bytes_to_dir"><code class="xref py py-obj docutils literal notranslate"><span class="pre">save_onnx_bytes_to_dir</span></code></a></p></td>
+<td><p>Saves the onnx bytes to a directory with specified file name.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.utils.update_domain" title="modelopt.onnx.utils.update_domain"><code class="xref py py-obj docutils literal notranslate"><span class="pre">update_domain</span></code></a></p></td>
+<td><p>Updates the domain of all the nodes of the specified op_type to the specified domain.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.utils.validate_batch_size" title="modelopt.onnx.utils.validate_batch_size"><code class="xref py py-obj docutils literal notranslate"><span class="pre">validate_batch_size</span></code></a></p></td>
+<td><p>Returns True if all the model inputs has batch dimension equal to batch_size.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.utils.validate_onnx" title="modelopt.onnx.utils.validate_onnx"><code class="xref py py-obj docutils literal notranslate"><span class="pre">validate_onnx</span></code></a></p></td>
+<td><p>Returns True if the onnx_bytes is valid, else False.</p></td>
+</tr>
+</tbody>
+</table>
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.utils.bfloat16_to_float32">
+<span class="sig-name descname"><span class="pre">bfloat16_to_float32</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">bf16_array</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.utils.bfloat16_to_float32" title="Link to this definition"></a></dt>
+<dd><p>Converts a bfloat16 array (as raw data) to a float32 array.</p>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.utils.change_casts_to_fp16">
+<span class="sig-name descname"><span class="pre">change_casts_to_fp16</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">target_op_types</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.utils.change_casts_to_fp16" title="Link to this definition"></a></dt>
+<dd><p>Change FP16-to-FP32 Cast nodes whose entire fanout feeds target ops to cast to FP16 instead.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>model</strong> (<em>ModelProto</em>) – The ONNX model to modify.</p></li>
+<li><p><strong>target_op_types</strong> (<em>list</em><em>[</em><em>str</em><em>]</em>) – List of op types to check for. Cast nodes feeding exclusively into
+these will be changed from FP32 to FP16.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>The modified ONNX model with Cast nodes updated.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>ModelProto</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.utils.check_model">
+<span class="sig-name descname"><span class="pre">check_model</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.utils.check_model" title="Link to this definition"></a></dt>
+<dd><p>Checks if the given model is valid.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>model</strong> (<em>ModelProto</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.utils.check_model_uses_external_data">
+<span class="sig-name descname"><span class="pre">check_model_uses_external_data</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.utils.check_model_uses_external_data" title="Link to this definition"></a></dt>
+<dd><p>Checks if the model uses external data. True if any initializer tensor has data_location set to EXTERNAL.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>model</strong> (<em>ModelProto</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>bool</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.utils.duplicate_shared_constants">
+<span class="sig-name descname"><span class="pre">duplicate_shared_constants</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.utils.duplicate_shared_constants" title="Link to this definition"></a></dt>
+<dd><p>Duplicate constant tensors if they are shared.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>onnx_model</strong> (<em>ModelProto</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>tuple</em>[<em>ModelProto</em>, <em>bool</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.utils.find_lowest_common_ancestor">
+<span class="sig-name descname"><span class="pre">find_lowest_common_ancestor</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">node1</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">node2</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.utils.find_lowest_common_ancestor" title="Link to this definition"></a></dt>
+<dd><p>Function to find the lowest common ancestor of two nodes.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>node1</strong> (<em>Node</em>) – First node name.</p></li>
+<li><p><strong>node2</strong> (<em>Node</em>) – Second node name.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>LCA node.
+Distance from first node.
+Distance from second node.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>tuple</em>[<em>str</em> | <em>None</em>, <em>int</em>, <em>int</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.utils.fold_dq_fp32_to_fp16_casts">
+<span class="sig-name descname"><span class="pre">fold_dq_fp32_to_fp16_casts</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.utils.fold_dq_fp32_to_fp16_casts" title="Link to this definition"></a></dt>
+<dd><p>Remove Cast(FP32-&gt;FP16) nodes after DequantizeLinear by setting DQ output to FP16.</p>
+<p>When convert_float_to_float16 blocks DequantizeLinear, it inserts Cast nodes to bridge
+the FP32 DQ output to the FP16 graph. This function removes those Cast nodes by:
+1. Converting the DQ scale initializer from FP32 to FP16
+2. Updating the DQ output type to FP16 in value_info
+3. Bypassing and removing the Cast node</p>
+<p>NVFP4 uses a nested DQ chain (scale is itself a DQ output). When the outer DQ’s scale
+is produced by another DQ, recursively retype the inner DQ’s chain so the whole
+chain produces FP16 tensors under strongly-typed TRT parsing.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>onnx_model</strong> (<em>ModelProto</em>) – The ONNX model with DQ -&gt; Cast(FP32-&gt;FP16) patterns.</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>The ONNX model with Cast nodes removed and DQ outputs set to FP16.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>ModelProto</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.utils.fold_q_fp16_to_fp32_casts">
+<span class="sig-name descname"><span class="pre">fold_q_fp16_to_fp32_casts</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.utils.fold_q_fp16_to_fp32_casts" title="Link to this definition"></a></dt>
+<dd><p>Remove <code class="docutils literal notranslate"><span class="pre">Cast(FP16→FP32)</span> <span class="pre">→</span> <span class="pre">Q</span></code> patterns inserted by <code class="docutils literal notranslate"><span class="pre">convert_float_to_float16</span></code>.</p>
+<p>The Q scale is rewritten to FP16 so Q consumes the FP16 graph directly. Skipped for
+opsets below <code class="docutils literal notranslate"><span class="pre">BASE_MIN_OPSET</span></code> since FP16 Q scales require opset &gt;= 19.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>onnx_model</strong> (<em>ModelProto</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>ModelProto</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.utils.fold_qdq_scale_fp16_to_fp32_casts">
+<span class="sig-name descname"><span class="pre">fold_qdq_scale_fp16_to_fp32_casts</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.utils.fold_qdq_scale_fp16_to_fp32_casts" title="Link to this definition"></a></dt>
+<dd><p>Remove Cast(FP16-&gt;FP32) nodes feeding into Q/DQ scale inputs.</p>
+<p>When convert_float_to_float16 blocks QuantizeLinear/DequantizeLinear, it inserts
+Cast(FP16-&gt;FP32) nodes before every scale input. In opset &gt;=20 Q/DQ natively accept
+FP16 scales, and leaving the cast in place forces DQ outputs to FP32, breaking
+downstream FP16 matmul/add operations under strongly-typed TRT parsing.</p>
+<p>This function bypasses each such Cast and, when the upstream Constant is FP16,
+wires the DQ output to FP16 in value_info so shape inference stays consistent.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>onnx_model</strong> (<em>ModelProto</em>) – The ONNX model with Cast(FP16-&gt;FP32) -&gt; Q/DQ.scale patterns.</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>The ONNX model with redundant scale-path casts removed.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>ModelProto</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.utils.gen_random_inputs">
+<span class="sig-name descname"><span class="pre">gen_random_inputs</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">shapes_spec</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.utils.gen_random_inputs" title="Link to this definition"></a></dt>
+<dd><p>This function generates random inputs for an onnx model.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>model</strong> (<em>ModelProto</em>) – Loaded in-memory onnx ModelProto.</p></li>
+<li><p><strong>shapes_spec</strong> (<em>str</em><em> | </em><em>None</em>) – A string representing the shape of each input tensors. The format is</p></li>
+<li><p><strong>&quot;&lt;tensor1&gt;</strong> – &lt;d1&gt;x&lt;d2&gt;,&lt;tensor2&gt;:&lt;d1&gt;,…”. If the shape is not provided for an input tensor, the shape is</p></li>
+<li><p><strong>directly</strong> (<em>inferred from the onnx model</em>)</p></li>
+<li><p><strong>1.</strong> (<em>with all the unknown dims filled with</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>Dictionary of numpy tensors.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>dict</em>[<em>str</em>, <em>ndarray</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.utils.get_all_input_names">
+<span class="sig-name descname"><span class="pre">get_all_input_names</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.utils.get_all_input_names" title="Link to this definition"></a></dt>
+<dd><p>This function returns the inputs names of the given onnx model.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>model</strong> (<em>ModelProto</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>list</em>[<em>str</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.utils.get_attribute">
+<span class="sig-name descname"><span class="pre">get_attribute</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">node</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">attr_name</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.utils.get_attribute" title="Link to this definition"></a></dt>
+<dd><p>Returns the value of the specified attribute.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>node</strong> (<em>NodeProto</em>)</p></li>
+<li><p><strong>attr_name</strong> (<em>str</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>Any</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.utils.get_batch_size">
+<span class="sig-name descname"><span class="pre">get_batch_size</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.utils.get_batch_size" title="Link to this definition"></a></dt>
+<dd><p>Returns the batch size of the given onnx model.</p>
+<p>Assertion will fail if batch size is not same over all the inputs.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>model</strong> (<em>ModelProto</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>int</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.utils.get_batch_size_from_bytes">
+<span class="sig-name descname"><span class="pre">get_batch_size_from_bytes</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_bytes</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.utils.get_batch_size_from_bytes" title="Link to this definition"></a></dt>
+<dd><p>Returns the batch size of the given onnx model.</p>
+<p>Assertion will fail if batch size is not same over all the inputs.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>onnx_bytes</strong> (<em>bytes</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>int</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.utils.get_cast_to_type">
+<span class="sig-name descname"><span class="pre">get_cast_to_type</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">cast_node</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.utils.get_cast_to_type" title="Link to this definition"></a></dt>
+<dd><p>Get the target type from a Cast node.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>cast_node</strong> (<em>NodeProto</em>) – The Cast node to extract type from.</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>The target type value from the Cast node’s ‘to’ attribute.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>int</em></p>
+</dd>
+<dt class="field-even">Raises<span class="colon">:</span></dt>
+<dd class="field-even"><p><strong>ValueError</strong> – If the Cast node does not have a ‘to’ attribute.</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.utils.get_child_nodes">
+<span class="sig-name descname"><span class="pre">get_child_nodes</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">node</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.utils.get_child_nodes" title="Link to this definition"></a></dt>
+<dd><p>Returns list of output consumer nodes for the given node.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>node</strong> (<em>Node</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>list</em>[<em>Node</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.utils.get_consumer_nodes">
+<span class="sig-name descname"><span class="pre">get_consumer_nodes</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">tensor_name</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.utils.get_consumer_nodes" title="Link to this definition"></a></dt>
+<dd><p>Get all consumer nodes for a given tensor name.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>model</strong> (<em>ModelProto</em>) – The ONNX model to search.</p></li>
+<li><p><strong>tensor_name</strong> (<em>str</em>) – Name of the tensor to find consumers for.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>List of nodes that consume the tensor.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>list</em>[onnx.NodeProto]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.utils.get_dynamic_graph_inputs">
+<span class="sig-name descname"><span class="pre">get_dynamic_graph_inputs</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.utils.get_dynamic_graph_inputs" title="Link to this definition"></a></dt>
+<dd><p>This function returns the dynamic inputs of an ONNX model.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>onnx_model</strong> (<em>ModelProto</em>) – ONNX model to obtain dynamic inputs from.</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>List of dynamic inputs.</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.utils.get_input_names">
+<span class="sig-name descname"><span class="pre">get_input_names</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">external_inputs_only</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.utils.get_input_names" title="Link to this definition"></a></dt>
+<dd><p>This function returns the external inputs names of the given onnx model.</p>
+<p>Note: external_input_names = input_names - initializer_names</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>model</strong> (<em>ModelProto</em>) – Loaded in-memory onnx ModelProto.</p></li>
+<li><p><strong>external_inputs_only</strong> (<em>bool</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>List of external input names of the model.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>list</em>[<em>str</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.utils.get_input_names_from_bytes">
+<span class="sig-name descname"><span class="pre">get_input_names_from_bytes</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model_bytes</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">external_inputs_only</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.utils.get_input_names_from_bytes" title="Link to this definition"></a></dt>
+<dd><p>This function returns the inputs names of the given onnx model in bytes.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>model_bytes</strong> (<em>bytes</em>) – Onnx model in bytes.</p></li>
+<li><p><strong>external_inputs_only</strong> (<em>bool</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>List of input names of the model.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>list</em>[<em>str</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.utils.get_input_shapes">
+<span class="sig-name descname"><span class="pre">get_input_shapes</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">external_inputs_only</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.utils.get_input_shapes" title="Link to this definition"></a></dt>
+<dd><p>This function returns the inputs shapes for the given onnx model.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>model</strong> (<em>ModelProto</em>)</p></li>
+<li><p><strong>external_inputs_only</strong> (<em>bool</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>dict</em>[<em>str</em>, <em>list</em>[<em>int</em>]]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.utils.get_input_shapes_from_bytes">
+<span class="sig-name descname"><span class="pre">get_input_shapes_from_bytes</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model_bytes</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.utils.get_input_shapes_from_bytes" title="Link to this definition"></a></dt>
+<dd><p>This function returns the input shapes of the given onnx model in bytes.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>model_bytes</strong> (<em>bytes</em>) – Onnx model in bytes.</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>Dictionary of inputs names and shapes.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>dict</em>[<em>str</em>, <em>list</em>[<em>int</em>]]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.utils.get_min_opset_for_precisions">
+<span class="sig-name descname"><span class="pre">get_min_opset_for_precisions</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">precisions</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.utils.get_min_opset_for_precisions" title="Link to this definition"></a></dt>
+<dd><p>Gets the minimum required opset version for a set of Q/DQ precision types.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>precisions</strong> (<em>set</em>) – Set of precision type strings (e.g., ‘float8_e4m3fn’, ‘int4’).</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>Minimum required opset version for the given precisions.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>int</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.utils.get_node_names">
+<span class="sig-name descname"><span class="pre">get_node_names</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.utils.get_node_names" title="Link to this definition"></a></dt>
+<dd><p>This function returns all node names from the given onnx model.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>model</strong> (<em>ModelProto</em>) – Loaded in-memory onnx ModelProto.</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>List of node names of the model.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>list</em>[<em>str</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.utils.get_node_names_from_bytes">
+<span class="sig-name descname"><span class="pre">get_node_names_from_bytes</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model_bytes</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.utils.get_node_names_from_bytes" title="Link to this definition"></a></dt>
+<dd><p>This function returns all node names from the given onnx model in bytes.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>model</strong> – onnx model in bytes.</p></li>
+<li><p><strong>model_bytes</strong> (<em>bytes</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>List of node names of the model.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>list</em>[<em>str</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.utils.get_opset_version">
+<span class="sig-name descname"><span class="pre">get_opset_version</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.utils.get_opset_version" title="Link to this definition"></a></dt>
+<dd><p>Returns the opset version of the given model.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>model</strong> (<em>ModelProto</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>int</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.utils.get_output_names">
+<span class="sig-name descname"><span class="pre">get_output_names</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.utils.get_output_names" title="Link to this definition"></a></dt>
+<dd><p>This function returns the output names of the given onnx model.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>model</strong> (<em>ModelProto</em>) – Loaded in-memory onnx ModelProto.</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>List of output names of the model.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>list</em>[<em>str</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.utils.get_output_names_from_bytes">
+<span class="sig-name descname"><span class="pre">get_output_names_from_bytes</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model_bytes</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.utils.get_output_names_from_bytes" title="Link to this definition"></a></dt>
+<dd><p>This function returns the output names of the given onnx model in bytes.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>model_bytes</strong> (<em>bytes</em>) – Onnx model in bytes.</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>List of output names of the model.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>list</em>[<em>str</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.utils.get_output_shapes">
+<span class="sig-name descname"><span class="pre">get_output_shapes</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.utils.get_output_shapes" title="Link to this definition"></a></dt>
+<dd><p>This function returns the output shapes for the given onnx model.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>model</strong> (<em>ModelProto</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>dict</em>[<em>str</em>, <em>list</em>[<em>int</em>]]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.utils.get_parent_nodes">
+<span class="sig-name descname"><span class="pre">get_parent_nodes</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">node</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.utils.get_parent_nodes" title="Link to this definition"></a></dt>
+<dd><p>Returns list of input producer nodes for the given node.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>node</strong> (<em>Node</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>list</em>[<em>Node</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.utils.get_producer_nodes">
+<span class="sig-name descname"><span class="pre">get_producer_nodes</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">tensor_name</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.utils.get_producer_nodes" title="Link to this definition"></a></dt>
+<dd><p>Get all producer nodes for a given tensor name.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>model</strong> (<em>ModelProto</em>) – The ONNX model to search.</p></li>
+<li><p><strong>tensor_name</strong> (<em>str</em>) – Name of the tensor to find producers for.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>List of nodes that produce the tensor.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>list</em>[onnx.NodeProto]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.utils.get_qdq_precisions">
+<span class="sig-name descname"><span class="pre">get_qdq_precisions</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.utils.get_qdq_precisions" title="Link to this definition"></a></dt>
+<dd><p>Gets the Q/DQ precision types present in the model.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>model</strong> (<em>ModelProto</em>) – Loaded in-memory onnx ModelProto.</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p><dl class="simple">
+<dt>Set of Q/DQ precision types present in the model (e.g., ‘float8_e4m3fn’, ‘int8’,</dt><dd><p>’int4’, ‘float4_e2m1fn’).</p>
+</dd>
+</dl>
+</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>set</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.utils.get_tensor_by_name">
+<span class="sig-name descname"><span class="pre">get_tensor_by_name</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_model</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">tensor_name</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.utils.get_tensor_by_name" title="Link to this definition"></a></dt>
+<dd><p>This function returns a tensor from its name.</p>
+<p>This function searches for a tensor in the model’s:
+1. Value info (shape/type info, no data)
+2. Initializers (TensorProto, contains actual data)
+3. Inputs and outputs</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>onnx_model</strong> (<em>ModelProto</em>) – ONNX model.</p></li>
+<li><p><strong>tensor_name</strong> (<em>str</em>) – tensor name.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>tensor</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>ValueInfoProto</em> | <em>TensorProto</em> | <em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.utils.get_variable_inputs">
+<span class="sig-name descname"><span class="pre">get_variable_inputs</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">node</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.utils.get_variable_inputs" title="Link to this definition"></a></dt>
+<dd><p>Returns the variable inputs of the given Node.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>node</strong> (<em>Node</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>list</em>[<em>Variable</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.utils.has_attribute">
+<span class="sig-name descname"><span class="pre">has_attribute</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">node</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">attr_name</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.utils.has_attribute" title="Link to this definition"></a></dt>
+<dd><p>Checks if the given node has the specified attribute.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>node</strong> (<em>NodeProto</em>)</p></li>
+<li><p><strong>attr_name</strong> (<em>str</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>bool</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.utils.infer_shapes">
+<span class="sig-name descname"><span class="pre">infer_shapes</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">**</span></span><span class="n"><span class="pre">kwargs</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.utils.infer_shapes" title="Link to this definition"></a></dt>
+<dd><p>Infers shapes of the onnx graph, handles large models.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>model</strong> (<em>ModelProto</em>)</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.utils.infer_types">
+<span class="sig-name descname"><span class="pre">infer_types</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">use_standalone_type_inference</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">**</span></span><span class="n"><span class="pre">kwargs</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.utils.infer_types" title="Link to this definition"></a></dt>
+<dd><p>Infers types (and optionally shapes) based on the use_standalone_type_inference flag.</p>
+<p>When use_standalone_type_inference is True, uses a standalone type inference implementation
+that only infers types. Otherwise, uses ONNX’s infer_shapes which infers both types and shapes.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>model</strong> (<em>ModelProto</em>) – ONNX model to infer types/shapes for.</p></li>
+<li><p><strong>use_standalone_type_inference</strong> (<em>bool</em>) – If True, use standalone type inference (_infer_types_only).
+If False, use ONNX’s shape inference (infer_shapes).</p></li>
+<li><p><strong>**kwargs</strong> – Additional arguments passed to infer_shapes when not using standalone type inference.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>Model with inferred types (and shapes if not using standalone type inference).</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>onnx.ModelProto</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.utils.infer_types_verification">
+<span class="sig-name descname"><span class="pre">infer_types_verification</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.utils.infer_types_verification" title="Link to this definition"></a></dt>
+<dd><p>Verify that all reachable tensors have a defined type.</p>
+<p>This is necessary because some nodes may be removed during the inference process,
+leaving unreachable value_info entries.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>model</strong> (<em>ModelProto</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>ModelProto</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.utils.name_onnx_nodes">
+<span class="sig-name descname"><span class="pre">name_onnx_nodes</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">graph</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.utils.name_onnx_nodes" title="Link to this definition"></a></dt>
+<dd><p>Assigns name to the onnx nodes if not present and return the modified status.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>graph</strong> (<em>GraphProto</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>bool</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.utils.onnx_type_str_to_enum">
+<span class="sig-name descname"><span class="pre">onnx_type_str_to_enum</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">dtype</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.utils.onnx_type_str_to_enum" title="Link to this definition"></a></dt>
+<dd><p>Converts ONNX type in string format to onnx.TensorProto format.</p>
+<p>Example: ‘tensor(float16)’ becomes onnx.TensorProto.FLOAT16</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>dtype</strong> (<em>str</em>) – ONNX type in string format.</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>ONNX type in enum format.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>int</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.utils.parse_shapes_spec">
+<span class="sig-name descname"><span class="pre">parse_shapes_spec</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">shapes_spec</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.utils.parse_shapes_spec" title="Link to this definition"></a></dt>
+<dd><p>Parse shapes spec and returns them in a dictionary.</p>
+<p>Example shapes spec: input0:1x3x256x256,input1:1x3x128x128</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>shapes_spec</strong> (<em>str</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>dict</em>[<em>str</em>, <em>list</em>[<em>int</em>]]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.utils.randomize_weights">
+<span class="sig-name descname"><span class="pre">randomize_weights</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_path</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.utils.randomize_weights" title="Link to this definition"></a></dt>
+<dd><p>Assigns random values to the onnx model weights.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>onnx_path</strong> (<em>str</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.utils.randomize_weights_onnx_bytes">
+<span class="sig-name descname"><span class="pre">randomize_weights_onnx_bytes</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_bytes</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">seed</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.utils.randomize_weights_onnx_bytes" title="Link to this definition"></a></dt>
+<dd><p>Assigns random values to the onnx model weights.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>onnx_bytes</strong> (<em>bytes</em>)</p></li>
+<li><p><strong>seed</strong> (<em>int</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>bytes</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.utils.read_f16_tensor_as_fp32">
+<span class="sig-name descname"><span class="pre">read_f16_tensor_as_fp32</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">tensor</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.utils.read_f16_tensor_as_fp32" title="Link to this definition"></a></dt>
+<dd><p>Reads a float16 or bfloat16 tensor as a float32 numpy ndarray.</p>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.utils.remove_node_training_mode">
+<span class="sig-name descname"><span class="pre">remove_node_training_mode</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_model</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">node_op_type</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.utils.remove_node_training_mode" title="Link to this definition"></a></dt>
+<dd><p>Remove <cite>training_mode</cite> attribute and extra training outputs from nodes of a given op type.</p>
+<p>This also removes the unused outputs from the training_mode nodes.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>onnx_model</strong> (<em>ModelProto</em>) – The onnx model.</p></li>
+<li><p><strong>node_op_type</strong> (<em>str</em>) – The node type to remove training_mode attribute from.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>The onnx model with the training_mode attribute removed.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>ModelProto</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.utils.remove_redundant_casts">
+<span class="sig-name descname"><span class="pre">remove_redundant_casts</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.utils.remove_redundant_casts" title="Link to this definition"></a></dt>
+<dd><p>Removes both sequential casts and casts that don’t change precision.</p>
+<p>This method optimizes the graph by removing unnecessary cast operations that either:
+1. Don’t actually change the data type
+2. Could be replaced by a single cast operation
+3. Can be folded into a preceding Constant node</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>onnx_model</strong> (<em>ModelProto</em>) – The ONNX model to optimize.</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>Model with redundant casts removed.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>onnx.ModelProto</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.utils.remove_weights_data">
+<span class="sig-name descname"><span class="pre">remove_weights_data</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_bytes</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.utils.remove_weights_data" title="Link to this definition"></a></dt>
+<dd><p>Removes raw weight data from the onnx model.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>onnx_bytes</strong> (<em>bytes</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>bytes</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.utils.save_onnx">
+<span class="sig-name descname"><span class="pre">save_onnx</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">onnx_path</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">save_as_external_data</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.utils.save_onnx" title="Link to this definition"></a></dt>
+<dd><p>Save an ONNX model to given path. If a model is larger than 2GB, will save with external data.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>model</strong> (<em>ModelProto</em>)</p></li>
+<li><p><strong>onnx_path</strong> (<em>str</em>)</p></li>
+<li><p><strong>save_as_external_data</strong> (<em>bool</em>)</p></li>
+</ul>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.utils.save_onnx_bytes_to_dir">
+<span class="sig-name descname"><span class="pre">save_onnx_bytes_to_dir</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_bytes</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">onnx_dir</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">onnx_name</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.utils.save_onnx_bytes_to_dir" title="Link to this definition"></a></dt>
+<dd><p>Saves the onnx bytes to a directory with specified file name.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>onnx_bytes</strong> (<em>bytes</em>)</p></li>
+<li><p><strong>onnx_dir</strong> (<em>str</em>)</p></li>
+<li><p><strong>onnx_name</strong> (<em>str</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.utils.update_domain">
+<span class="sig-name descname"><span class="pre">update_domain</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_model</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">op_type</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">domain</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.utils.update_domain" title="Link to this definition"></a></dt>
+<dd><p>Updates the domain of all the nodes of the specified op_type to the specified domain.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>onnx_model</strong> (<em>ModelProto</em>)</p></li>
+<li><p><strong>op_type</strong> (<em>str</em>)</p></li>
+<li><p><strong>domain</strong> (<em>str</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>ModelProto</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.utils.validate_batch_size">
+<span class="sig-name descname"><span class="pre">validate_batch_size</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_bytes</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">batch_size</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.utils.validate_batch_size" title="Link to this definition"></a></dt>
+<dd><p>Returns True if all the model inputs has batch dimension equal to batch_size.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>onnx_bytes</strong> (<em>bytes</em>)</p></li>
+<li><p><strong>batch_size</strong> (<em>int</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>bool</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.utils.validate_onnx">
+<span class="sig-name descname"><span class="pre">validate_onnx</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_bytes</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.utils.validate_onnx" title="Link to this definition"></a></dt>
+<dd><p>Returns True if the onnx_bytes is valid, else False.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>onnx_bytes</strong> (<em>bytes</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>bool</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="modelopt.onnx.trt_utils.html" class="btn btn-neutral float-left" title="trt_utils" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="modelopt.torch.html" class="btn btn-neutral float-right" title="torch" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2023-2025, NVIDIA Corporation.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

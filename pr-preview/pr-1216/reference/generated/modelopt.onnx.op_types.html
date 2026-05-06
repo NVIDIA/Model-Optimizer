@@ -1,0 +1,634 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>op_types &mdash; Model Optimizer 0.0.1.dev1+ga89e90c91</title>
+      <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="../../_static/copybutton.css?v=76b2166b" />
+      <link rel="stylesheet" type="text/css" href="../../_static/tabs.css?v=4c969af8" />
+      <link rel="stylesheet" type="text/css" href="../../_static/togglebutton.css?v=9c3e77be" />
+      <link rel="stylesheet" type="text/css" href="../../_static/autodoc_pydantic.css" />
+      <link rel="stylesheet" type="text/css" href="../../_static/custom.css?v=7a224f4b" />
+
+  
+      <script src="../../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../../_static/documentation_options.js?v=5929fcd5"></script>
+      <script src="../../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="../../_static/clipboard.min.js?v=a7894cd8"></script>
+      <script src="../../_static/copybutton.js?v=20d3d275"></script>
+      <script src="../../_static/tabs.js?v=3ee01567"></script>
+      <script>let toggleHintShow = 'Click to show';</script>
+      <script>let toggleHintHide = 'Click to hide';</script>
+      <script>let toggleOpenOnPrint = 'true';</script>
+      <script src="../../_static/togglebutton.js?v=b8b12719"></script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+    <script src="../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" />
+    <link rel="next" title="quantization" href="modelopt.onnx.quantization.html" />
+    <link rel="prev" title="logging_config" href="modelopt.onnx.logging_config.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../../index.html" class="icon icon-home">
+            Model Optimizer
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../getting_started/1_overview.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../getting_started/2_installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch to ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - Windows</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_qat" rel="noopener noreferrer" target="_blank">Quick Start: QAT</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning" rel="noopener noreferrer" target="_blank">Quick Start: Pruning</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_distill" rel="noopener noreferrer" target="_blank">Quick Start: Distillation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/speculative_decoding" rel="noopener noreferrer" target="_blank">Quick Start: Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_sparsity" rel="noopener noreferrer" target="_blank">Quick Start: Sparsity</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Guides</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/0_support_matrix.html">Support Matrix</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/1_quantization.html">Quantization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/2_save_load.html">Saving &amp; Restoring</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/3_pruning.html">Pruning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/4_distillation.html">Distillation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/5_speculative_decoding.html">Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/6_sparsity.html">Sparsity</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/7_nas.html">NAS</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/8_autocast.html">AutoCast (ONNX)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/9_autotune.html">Autotune (ONNX)</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Deployment</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/1_tensorrt_llm.html">TensorRT-LLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/2_onnxruntime.html">Onnxruntime</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/3_unified_hf.html">Unified HuggingFace Checkpoint</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Examples</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../examples/0_all_examples.html">All GitHub Examples</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Reference</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="../0_changelog.html">NVIDIA Model Optimizer Changelog</a></li>
+<li class="toctree-l1 current"><a class="reference internal" href="../1_modelopt_api.html">modelopt API</a><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="modelopt.deploy.html">deploy</a></li>
+<li class="toctree-l2 current"><a class="reference internal" href="modelopt.onnx.html">onnx</a><ul class="current">
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.autocast.html">autocast</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.export.html">export</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.graph_surgery.html">graph_surgery</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.llm_export_utils.html">llm_export_utils</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.logging_config.html">logging_config</a></li>
+<li class="toctree-l3 current"><a class="current reference internal" href="#">op_types</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.op_types.get_activation_ops"><code class="docutils literal notranslate"><span class="pre">get_activation_ops()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.op_types.get_aggregation_ops"><code class="docutils literal notranslate"><span class="pre">get_aggregation_ops()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.op_types.get_bitwise_ops"><code class="docutils literal notranslate"><span class="pre">get_bitwise_ops()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.op_types.get_bool_ops"><code class="docutils literal notranslate"><span class="pre">get_bool_ops()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.op_types.get_comparison_ops"><code class="docutils literal notranslate"><span class="pre">get_comparison_ops()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.op_types.get_conditional_ops"><code class="docutils literal notranslate"><span class="pre">get_conditional_ops()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.op_types.get_copy_ops"><code class="docutils literal notranslate"><span class="pre">get_copy_ops()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.op_types.get_set_ops"><code class="docutils literal notranslate"><span class="pre">get_set_ops()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.op_types.get_symmetric_ops"><code class="docutils literal notranslate"><span class="pre">get_symmetric_ops()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.op_types.get_value_check_ops"><code class="docutils literal notranslate"><span class="pre">get_value_check_ops()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.op_types.is_binary_op"><code class="docutils literal notranslate"><span class="pre">is_binary_op()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.op_types.is_control_flow_op"><code class="docutils literal notranslate"><span class="pre">is_control_flow_op()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.op_types.is_conversion_op"><code class="docutils literal notranslate"><span class="pre">is_conversion_op()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.op_types.is_copy_op"><code class="docutils literal notranslate"><span class="pre">is_copy_op()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.op_types.is_data_dependent_shape_op"><code class="docutils literal notranslate"><span class="pre">is_data_dependent_shape_op()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.op_types.is_default_quantizable_op_by_ort"><code class="docutils literal notranslate"><span class="pre">is_default_quantizable_op_by_ort()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.op_types.is_fusible_reduction_op"><code class="docutils literal notranslate"><span class="pre">is_fusible_reduction_op()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.op_types.is_fusible_scaling_op"><code class="docutils literal notranslate"><span class="pre">is_fusible_scaling_op()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.op_types.is_generator_op"><code class="docutils literal notranslate"><span class="pre">is_generator_op()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.op_types.is_irregular_mem_access_op"><code class="docutils literal notranslate"><span class="pre">is_irregular_mem_access_op()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.op_types.is_linear_op"><code class="docutils literal notranslate"><span class="pre">is_linear_op()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.op_types.is_modifier_op"><code class="docutils literal notranslate"><span class="pre">is_modifier_op()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.op_types.is_multiclass_op"><code class="docutils literal notranslate"><span class="pre">is_multiclass_op()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.op_types.is_non_reshape_copy_op"><code class="docutils literal notranslate"><span class="pre">is_non_reshape_copy_op()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.op_types.is_normalization_op"><code class="docutils literal notranslate"><span class="pre">is_normalization_op()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.op_types.is_pointwise_or_elementwise_op"><code class="docutils literal notranslate"><span class="pre">is_pointwise_or_elementwise_op()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.op_types.is_pooling_or_window_op"><code class="docutils literal notranslate"><span class="pre">is_pooling_or_window_op()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.op_types.is_recurrent_op"><code class="docutils literal notranslate"><span class="pre">is_recurrent_op()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.op_types.is_selection_op"><code class="docutils literal notranslate"><span class="pre">is_selection_op()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.op_types.is_sequence_op"><code class="docutils literal notranslate"><span class="pre">is_sequence_op()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.op_types.is_shape_op"><code class="docutils literal notranslate"><span class="pre">is_shape_op()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.op_types.is_unary_op"><code class="docutils literal notranslate"><span class="pre">is_unary_op()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.quantization.html">quantization</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.trt_utils.html">trt_utils</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="modelopt.torch.html">torch</a></li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Support</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../support/1_contact.html">Contact us</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../support/2_faqs.html">FAQs</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../index.html">Model Optimizer</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content style-external-links">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="../1_modelopt_api.html">modelopt API</a></li>
+          <li class="breadcrumb-item"><a href="modelopt.onnx.html">onnx</a></li>
+      <li class="breadcrumb-item active">op_types</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../../_sources/reference/generated/modelopt.onnx.op_types.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="op-types">
+<h1>op_types<a class="headerlink" href="#op-types" title="Link to this heading"></a></h1>
+<p id="module-modelopt.onnx.op_types">Utility functions to categorize onnx ops.</p>
+<p class="rubric">Functions</p>
+<table class="autosummary longtable docutils align-default">
+<tbody>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.op_types.get_activation_ops" title="modelopt.onnx.op_types.get_activation_ops"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_activation_ops</span></code></a></p></td>
+<td><p>Returns set of activation operations.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.op_types.get_aggregation_ops" title="modelopt.onnx.op_types.get_aggregation_ops"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_aggregation_ops</span></code></a></p></td>
+<td><p>Returns set of aggregation operations.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.op_types.get_bitwise_ops" title="modelopt.onnx.op_types.get_bitwise_ops"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_bitwise_ops</span></code></a></p></td>
+<td><p>Returns set of bitwise operations.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.op_types.get_bool_ops" title="modelopt.onnx.op_types.get_bool_ops"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_bool_ops</span></code></a></p></td>
+<td><p>Returns set of bool operations.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.op_types.get_comparison_ops" title="modelopt.onnx.op_types.get_comparison_ops"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_comparison_ops</span></code></a></p></td>
+<td><p>Returns set of comparison operations.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.op_types.get_conditional_ops" title="modelopt.onnx.op_types.get_conditional_ops"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_conditional_ops</span></code></a></p></td>
+<td><p>Returns set of conditional operations.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.op_types.get_copy_ops" title="modelopt.onnx.op_types.get_copy_ops"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_copy_ops</span></code></a></p></td>
+<td><p>Returns list of copy operators.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.op_types.get_set_ops" title="modelopt.onnx.op_types.get_set_ops"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_set_ops</span></code></a></p></td>
+<td><p>Returns set of set/search operations.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.op_types.get_symmetric_ops" title="modelopt.onnx.op_types.get_symmetric_ops"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_symmetric_ops</span></code></a></p></td>
+<td><p>Returns set of commutative/symmetric operations where operand order doesn't matter.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.op_types.get_value_check_ops" title="modelopt.onnx.op_types.get_value_check_ops"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_value_check_ops</span></code></a></p></td>
+<td><p>Returns set of value checking operations.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.op_types.is_binary_op" title="modelopt.onnx.op_types.is_binary_op"><code class="xref py py-obj docutils literal notranslate"><span class="pre">is_binary_op</span></code></a></p></td>
+<td><p>Returns whether the given op is a binary operator or not.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.op_types.is_control_flow_op" title="modelopt.onnx.op_types.is_control_flow_op"><code class="xref py py-obj docutils literal notranslate"><span class="pre">is_control_flow_op</span></code></a></p></td>
+<td><p>Returns whether the given op type is of Control Flow category or not.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.op_types.is_conversion_op" title="modelopt.onnx.op_types.is_conversion_op"><code class="xref py py-obj docutils literal notranslate"><span class="pre">is_conversion_op</span></code></a></p></td>
+<td><p>Returns whether the given op type is of Conversion category or not.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.op_types.is_copy_op" title="modelopt.onnx.op_types.is_copy_op"><code class="xref py py-obj docutils literal notranslate"><span class="pre">is_copy_op</span></code></a></p></td>
+<td><p>Returns whether the given op is a copy operator or not.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.op_types.is_data_dependent_shape_op" title="modelopt.onnx.op_types.is_data_dependent_shape_op"><code class="xref py py-obj docutils literal notranslate"><span class="pre">is_data_dependent_shape_op</span></code></a></p></td>
+<td><p>Returns whether the op type has data-dependent shapes (DDS).</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.op_types.is_default_quantizable_op_by_ort" title="modelopt.onnx.op_types.is_default_quantizable_op_by_ort"><code class="xref py py-obj docutils literal notranslate"><span class="pre">is_default_quantizable_op_by_ort</span></code></a></p></td>
+<td><p>Returns if ORT quantizes the op type by default.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.op_types.is_fusible_reduction_op" title="modelopt.onnx.op_types.is_fusible_reduction_op"><code class="xref py py-obj docutils literal notranslate"><span class="pre">is_fusible_reduction_op</span></code></a></p></td>
+<td><p>Returns whether the given op type is of reduction category and fusible by the compiler.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.op_types.is_fusible_scaling_op" title="modelopt.onnx.op_types.is_fusible_scaling_op"><code class="xref py py-obj docutils literal notranslate"><span class="pre">is_fusible_scaling_op</span></code></a></p></td>
+<td><p>Returns whether the given op type is of scaling category and fusible with input.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.op_types.is_generator_op" title="modelopt.onnx.op_types.is_generator_op"><code class="xref py py-obj docutils literal notranslate"><span class="pre">is_generator_op</span></code></a></p></td>
+<td><p>Returns whether the given op type is of Generator category or not.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.op_types.is_irregular_mem_access_op" title="modelopt.onnx.op_types.is_irregular_mem_access_op"><code class="xref py py-obj docutils literal notranslate"><span class="pre">is_irregular_mem_access_op</span></code></a></p></td>
+<td><p>Returns whether the given op type is of Irreggular mem access category or not.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.op_types.is_linear_op" title="modelopt.onnx.op_types.is_linear_op"><code class="xref py py-obj docutils literal notranslate"><span class="pre">is_linear_op</span></code></a></p></td>
+<td><p>Returns whether the given op type is of Linear category or not.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.op_types.is_modifier_op" title="modelopt.onnx.op_types.is_modifier_op"><code class="xref py py-obj docutils literal notranslate"><span class="pre">is_modifier_op</span></code></a></p></td>
+<td><p>Returns whether the given op type is of Modifier category or not.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.op_types.is_multiclass_op" title="modelopt.onnx.op_types.is_multiclass_op"><code class="xref py py-obj docutils literal notranslate"><span class="pre">is_multiclass_op</span></code></a></p></td>
+<td><p>Returns whether the given op type is of Multiclass category or not.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.op_types.is_non_reshape_copy_op" title="modelopt.onnx.op_types.is_non_reshape_copy_op"><code class="xref py py-obj docutils literal notranslate"><span class="pre">is_non_reshape_copy_op</span></code></a></p></td>
+<td><p>Returns whether the given op is a non-reshape copy op or not.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.op_types.is_normalization_op" title="modelopt.onnx.op_types.is_normalization_op"><code class="xref py py-obj docutils literal notranslate"><span class="pre">is_normalization_op</span></code></a></p></td>
+<td><p>Returns whether the given op type is of Normalization category or not.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.op_types.is_pointwise_or_elementwise_op" title="modelopt.onnx.op_types.is_pointwise_or_elementwise_op"><code class="xref py py-obj docutils literal notranslate"><span class="pre">is_pointwise_or_elementwise_op</span></code></a></p></td>
+<td><p>Returns whether the given op type is of Pointwise or Elementwise category or not.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.op_types.is_pooling_or_window_op" title="modelopt.onnx.op_types.is_pooling_or_window_op"><code class="xref py py-obj docutils literal notranslate"><span class="pre">is_pooling_or_window_op</span></code></a></p></td>
+<td><p>Returns whether the given op type is of Pooling/Window category or not.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.op_types.is_recurrent_op" title="modelopt.onnx.op_types.is_recurrent_op"><code class="xref py py-obj docutils literal notranslate"><span class="pre">is_recurrent_op</span></code></a></p></td>
+<td><p>Returns whether the given op type is of Recurrent category or not.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.op_types.is_selection_op" title="modelopt.onnx.op_types.is_selection_op"><code class="xref py py-obj docutils literal notranslate"><span class="pre">is_selection_op</span></code></a></p></td>
+<td><p>Returns whether the given op type is of Selection category or not.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.op_types.is_sequence_op" title="modelopt.onnx.op_types.is_sequence_op"><code class="xref py py-obj docutils literal notranslate"><span class="pre">is_sequence_op</span></code></a></p></td>
+<td><p>Returns whether the given op type is of Sequence category or not.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.op_types.is_shape_op" title="modelopt.onnx.op_types.is_shape_op"><code class="xref py py-obj docutils literal notranslate"><span class="pre">is_shape_op</span></code></a></p></td>
+<td><p>Returns whether the given op type is of Shape category or not.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.op_types.is_unary_op" title="modelopt.onnx.op_types.is_unary_op"><code class="xref py py-obj docutils literal notranslate"><span class="pre">is_unary_op</span></code></a></p></td>
+<td><p>Returns whether the given op is a unary operator or not.</p></td>
+</tr>
+</tbody>
+</table>
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.op_types.get_activation_ops">
+<span class="sig-name descname"><span class="pre">get_activation_ops</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.op_types.get_activation_ops" title="Link to this definition"></a></dt>
+<dd><p>Returns set of activation operations.</p>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.op_types.get_aggregation_ops">
+<span class="sig-name descname"><span class="pre">get_aggregation_ops</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.op_types.get_aggregation_ops" title="Link to this definition"></a></dt>
+<dd><p>Returns set of aggregation operations.</p>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.op_types.get_bitwise_ops">
+<span class="sig-name descname"><span class="pre">get_bitwise_ops</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.op_types.get_bitwise_ops" title="Link to this definition"></a></dt>
+<dd><p>Returns set of bitwise operations.</p>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.op_types.get_bool_ops">
+<span class="sig-name descname"><span class="pre">get_bool_ops</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.op_types.get_bool_ops" title="Link to this definition"></a></dt>
+<dd><p>Returns set of bool operations.</p>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.op_types.get_comparison_ops">
+<span class="sig-name descname"><span class="pre">get_comparison_ops</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.op_types.get_comparison_ops" title="Link to this definition"></a></dt>
+<dd><p>Returns set of comparison operations.</p>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.op_types.get_conditional_ops">
+<span class="sig-name descname"><span class="pre">get_conditional_ops</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.op_types.get_conditional_ops" title="Link to this definition"></a></dt>
+<dd><p>Returns set of conditional operations.</p>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.op_types.get_copy_ops">
+<span class="sig-name descname"><span class="pre">get_copy_ops</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.op_types.get_copy_ops" title="Link to this definition"></a></dt>
+<dd><p>Returns list of copy operators.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>list</em>[<em>str</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.op_types.get_set_ops">
+<span class="sig-name descname"><span class="pre">get_set_ops</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.op_types.get_set_ops" title="Link to this definition"></a></dt>
+<dd><p>Returns set of set/search operations.</p>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.op_types.get_symmetric_ops">
+<span class="sig-name descname"><span class="pre">get_symmetric_ops</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.op_types.get_symmetric_ops" title="Link to this definition"></a></dt>
+<dd><p>Returns set of commutative/symmetric operations where operand order doesn’t matter.</p>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.op_types.get_value_check_ops">
+<span class="sig-name descname"><span class="pre">get_value_check_ops</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.op_types.get_value_check_ops" title="Link to this definition"></a></dt>
+<dd><p>Returns set of value checking operations.</p>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.op_types.is_binary_op">
+<span class="sig-name descname"><span class="pre">is_binary_op</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">op_type</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.op_types.is_binary_op" title="Link to this definition"></a></dt>
+<dd><p>Returns whether the given op is a binary operator or not.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>op_type</strong> (<em>str</em>)</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.op_types.is_control_flow_op">
+<span class="sig-name descname"><span class="pre">is_control_flow_op</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">op_type</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.op_types.is_control_flow_op" title="Link to this definition"></a></dt>
+<dd><p>Returns whether the given op type is of Control Flow category or not.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>op_type</strong> (<em>str</em>)</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.op_types.is_conversion_op">
+<span class="sig-name descname"><span class="pre">is_conversion_op</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">op_type</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.op_types.is_conversion_op" title="Link to this definition"></a></dt>
+<dd><p>Returns whether the given op type is of Conversion category or not.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>op_type</strong> (<em>str</em>)</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.op_types.is_copy_op">
+<span class="sig-name descname"><span class="pre">is_copy_op</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">op_type</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.op_types.is_copy_op" title="Link to this definition"></a></dt>
+<dd><p>Returns whether the given op is a copy operator or not.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>op_type</strong> (<em>str</em>)</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.op_types.is_data_dependent_shape_op">
+<span class="sig-name descname"><span class="pre">is_data_dependent_shape_op</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">op_type</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.op_types.is_data_dependent_shape_op" title="Link to this definition"></a></dt>
+<dd><p>Returns whether the op type has data-dependent shapes (DDS).</p>
+<p>DDS ops have output shapes that are only determined at runtime based on its input data.
+Source: <a class="reference external" href="https://onnxruntime.ai/docs/execution-providers/TensorRT-ExecutionProvider.html#data-dependant-shape-dds-ops" rel="noopener noreferrer" target="_blank">https://onnxruntime.ai/docs/execution-providers/TensorRT-ExecutionProvider.html#data-dependant-shape-dds-ops</a></p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>op_type</strong> (<em>str</em>)</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.op_types.is_default_quantizable_op_by_ort">
+<span class="sig-name descname"><span class="pre">is_default_quantizable_op_by_ort</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">op_type</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.op_types.is_default_quantizable_op_by_ort" title="Link to this definition"></a></dt>
+<dd><p>Returns if ORT quantizes the op type by default.</p>
+<p>Note. Subject to change with different ORT versions.
+Note. Users can use nodes_to_quantize and/or op_types_to_quantize arguments to quantize
+non-default operations.
+Reference: <a class="reference external" href="https://github.com/microsoft/onnxruntime/blob/main/onnxruntime/python/tools/quantization/registry.py" rel="noopener noreferrer" target="_blank">https://github.com/microsoft/onnxruntime/blob/main/onnxruntime/python/tools/quantization/registry.py</a></p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>op_type</strong> (<em>str</em>)</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.op_types.is_fusible_reduction_op">
+<span class="sig-name descname"><span class="pre">is_fusible_reduction_op</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">op_type</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.op_types.is_fusible_reduction_op" title="Link to this definition"></a></dt>
+<dd><p>Returns whether the given op type is of reduction category and fusible by the compiler.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>op_type</strong> (<em>str</em>)</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.op_types.is_fusible_scaling_op">
+<span class="sig-name descname"><span class="pre">is_fusible_scaling_op</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">op_type</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.op_types.is_fusible_scaling_op" title="Link to this definition"></a></dt>
+<dd><p>Returns whether the given op type is of scaling category and fusible with input.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>op_type</strong> (<em>str</em>)</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.op_types.is_generator_op">
+<span class="sig-name descname"><span class="pre">is_generator_op</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">op_type</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.op_types.is_generator_op" title="Link to this definition"></a></dt>
+<dd><p>Returns whether the given op type is of Generator category or not.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>op_type</strong> (<em>str</em>)</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.op_types.is_irregular_mem_access_op">
+<span class="sig-name descname"><span class="pre">is_irregular_mem_access_op</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">op_type</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.op_types.is_irregular_mem_access_op" title="Link to this definition"></a></dt>
+<dd><p>Returns whether the given op type is of Irreggular mem access category or not.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>op_type</strong> (<em>str</em>)</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.op_types.is_linear_op">
+<span class="sig-name descname"><span class="pre">is_linear_op</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">op_type</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.op_types.is_linear_op" title="Link to this definition"></a></dt>
+<dd><p>Returns whether the given op type is of Linear category or not.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>op_type</strong> (<em>str</em>)</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.op_types.is_modifier_op">
+<span class="sig-name descname"><span class="pre">is_modifier_op</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">op_type</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.op_types.is_modifier_op" title="Link to this definition"></a></dt>
+<dd><p>Returns whether the given op type is of Modifier category or not.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>op_type</strong> (<em>str</em>)</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.op_types.is_multiclass_op">
+<span class="sig-name descname"><span class="pre">is_multiclass_op</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">op_type</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.op_types.is_multiclass_op" title="Link to this definition"></a></dt>
+<dd><p>Returns whether the given op type is of Multiclass category or not.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>op_type</strong> (<em>str</em>)</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.op_types.is_non_reshape_copy_op">
+<span class="sig-name descname"><span class="pre">is_non_reshape_copy_op</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">op_type</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.op_types.is_non_reshape_copy_op" title="Link to this definition"></a></dt>
+<dd><p>Returns whether the given op is a non-reshape copy op or not.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>op_type</strong> (<em>str</em>)</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.op_types.is_normalization_op">
+<span class="sig-name descname"><span class="pre">is_normalization_op</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">op_type</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.op_types.is_normalization_op" title="Link to this definition"></a></dt>
+<dd><p>Returns whether the given op type is of Normalization category or not.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>op_type</strong> (<em>str</em>)</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.op_types.is_pointwise_or_elementwise_op">
+<span class="sig-name descname"><span class="pre">is_pointwise_or_elementwise_op</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">op_type</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.op_types.is_pointwise_or_elementwise_op" title="Link to this definition"></a></dt>
+<dd><p>Returns whether the given op type is of Pointwise or Elementwise category or not.</p>
+<p>This considers only the fusible types.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>op_type</strong> (<em>str</em>)</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.op_types.is_pooling_or_window_op">
+<span class="sig-name descname"><span class="pre">is_pooling_or_window_op</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">op_type</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.op_types.is_pooling_or_window_op" title="Link to this definition"></a></dt>
+<dd><p>Returns whether the given op type is of Pooling/Window category or not.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>op_type</strong> (<em>str</em>)</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.op_types.is_recurrent_op">
+<span class="sig-name descname"><span class="pre">is_recurrent_op</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">op_type</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.op_types.is_recurrent_op" title="Link to this definition"></a></dt>
+<dd><p>Returns whether the given op type is of Recurrent category or not.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>op_type</strong> (<em>str</em>)</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.op_types.is_selection_op">
+<span class="sig-name descname"><span class="pre">is_selection_op</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">op_type</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.op_types.is_selection_op" title="Link to this definition"></a></dt>
+<dd><p>Returns whether the given op type is of Selection category or not.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>op_type</strong> (<em>str</em>)</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.op_types.is_sequence_op">
+<span class="sig-name descname"><span class="pre">is_sequence_op</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">op_type</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.op_types.is_sequence_op" title="Link to this definition"></a></dt>
+<dd><p>Returns whether the given op type is of Sequence category or not.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>op_type</strong> (<em>str</em>)</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.op_types.is_shape_op">
+<span class="sig-name descname"><span class="pre">is_shape_op</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">op_type</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.op_types.is_shape_op" title="Link to this definition"></a></dt>
+<dd><p>Returns whether the given op type is of Shape category or not.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>op_type</strong> (<em>str</em>)</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.op_types.is_unary_op">
+<span class="sig-name descname"><span class="pre">is_unary_op</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">op_type</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.op_types.is_unary_op" title="Link to this definition"></a></dt>
+<dd><p>Returns whether the given op is a unary operator or not.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>op_type</strong> (<em>str</em>)</p>
+</dd>
+</dl>
+</dd></dl>
+
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="modelopt.onnx.logging_config.html" class="btn btn-neutral float-left" title="logging_config" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="modelopt.onnx.quantization.html" class="btn btn-neutral float-right" title="quantization" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2023-2025, NVIDIA Corporation.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

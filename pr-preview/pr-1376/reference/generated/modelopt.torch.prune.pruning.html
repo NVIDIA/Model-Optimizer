@@ -1,0 +1,383 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>pruning &mdash; Model Optimizer 0.0.1.dev1+g96326285b</title>
+      <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="../../_static/copybutton.css?v=76b2166b" />
+      <link rel="stylesheet" type="text/css" href="../../_static/tabs.css?v=4c969af8" />
+      <link rel="stylesheet" type="text/css" href="../../_static/togglebutton.css?v=9c3e77be" />
+      <link rel="stylesheet" type="text/css" href="../../_static/autodoc_pydantic.css" />
+      <link rel="stylesheet" type="text/css" href="../../_static/custom.css?v=7a224f4b" />
+
+  
+      <script src="../../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../../_static/documentation_options.js?v=5929fcd5"></script>
+      <script src="../../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="../../_static/clipboard.min.js?v=a7894cd8"></script>
+      <script src="../../_static/copybutton.js?v=20d3d275"></script>
+      <script src="../../_static/tabs.js?v=3ee01567"></script>
+      <script>let toggleHintShow = 'Click to show';</script>
+      <script>let toggleHintHide = 'Click to hide';</script>
+      <script>let toggleOpenOnPrint = 'true';</script>
+      <script src="../../_static/togglebutton.js?v=b8b12719"></script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+    <script src="../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" />
+    <link rel="next" title="puzzletron" href="modelopt.torch.puzzletron.html" />
+    <link rel="prev" title="plugins" href="modelopt.torch.prune.plugins.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../../index.html" class="icon icon-home">
+            Model Optimizer
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../getting_started/1_overview.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../getting_started/2_installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch to ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - Windows</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_qat" rel="noopener noreferrer" target="_blank">Quick Start: QAT</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning" rel="noopener noreferrer" target="_blank">Quick Start: Pruning</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_distill" rel="noopener noreferrer" target="_blank">Quick Start: Distillation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/speculative_decoding" rel="noopener noreferrer" target="_blank">Quick Start: Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_sparsity" rel="noopener noreferrer" target="_blank">Quick Start: Sparsity</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Guides</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/0_support_matrix.html">Support Matrix</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/10_recipes.html">Recipes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/1_quantization.html">Quantization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/2_save_load.html">Saving &amp; Restoring</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/3_pruning.html">Pruning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/4_distillation.html">Distillation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/5_speculative_decoding.html">Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/6_sparsity.html">Sparsity</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/7_nas.html">NAS</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/8_autocast.html">AutoCast (ONNX)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/9_autotune.html">Autotune (ONNX)</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Deployment</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/1_tensorrt_llm.html">TensorRT-LLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/2_onnxruntime.html">Onnxruntime</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/3_unified_hf.html">Unified HuggingFace Checkpoint</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Examples</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../examples/0_all_examples.html">All GitHub Examples</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Reference</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="../0_changelog.html">Changelog</a></li>
+<li class="toctree-l1 current"><a class="reference internal" href="../1_modelopt_api.html">modelopt API</a><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="modelopt.deploy.html">deploy</a></li>
+<li class="toctree-l2"><a class="reference internal" href="modelopt.onnx.html">onnx</a></li>
+<li class="toctree-l2 current"><a class="reference internal" href="modelopt.torch.html">torch</a><ul class="current">
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.distill.html">distill</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.export.html">export</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.kernels.html">kernels</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.nas.html">nas</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.opt.html">opt</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.peft.html">peft</a></li>
+<li class="toctree-l3 current"><a class="reference internal" href="modelopt.torch.prune.html">prune</a><ul class="current">
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.prune.fastnas.html">fastnas</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.prune.gradnas.html">gradnas</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.prune.importance_hooks.html">importance_hooks</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.prune.plugins.html">plugins</a></li>
+<li class="toctree-l4 current"><a class="current reference internal" href="#">pruning</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.puzzletron.html">puzzletron</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.quantization.html">quantization</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.sparsity.html">sparsity</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.speculative.html">speculative</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.trace.html">trace</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.utils.html">utils</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Support</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../support/1_contact.html">Contact us</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../support/2_faqs.html">FAQs</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../index.html">Model Optimizer</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content style-external-links">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="../1_modelopt_api.html">modelopt API</a></li>
+          <li class="breadcrumb-item"><a href="modelopt.torch.html">torch</a></li>
+          <li class="breadcrumb-item"><a href="modelopt.torch.prune.html">prune</a></li>
+      <li class="breadcrumb-item active">pruning</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../../_sources/reference/generated/modelopt.torch.prune.pruning.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="pruning">
+<h1>pruning<a class="headerlink" href="#pruning" title="Link to this heading"></a></h1>
+<p id="module-modelopt.torch.prune.pruning">High-level API to automatically prune and optimize your model with various algorithms.</p>
+<p class="rubric">Functions</p>
+<table class="autosummary longtable docutils align-default">
+<tbody>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.prune.pruning.prune" title="modelopt.torch.prune.pruning.prune"><code class="xref py py-obj docutils literal notranslate"><span class="pre">prune</span></code></a></p></td>
+<td><p>Prune a given model by searching for the best architecture within the design space.</p></td>
+</tr>
+</tbody>
+</table>
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.prune.pruning.prune">
+<span class="sig-name descname"><span class="pre">prune</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">mode</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">constraints</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">dummy_input</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">config</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.prune.pruning.prune" title="Link to this definition"></a></dt>
+<dd><p>Prune a given model by searching for the best architecture within the design space.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>model</strong> (<em>Module</em>) – A standard model that contains standard building blocks to be pruned in-place.</p></li>
+<li><p><strong>mode</strong> (<a class="reference internal" href="modelopt.torch.opt.mode.html#modelopt.torch.opt.mode.ModeDescriptor" title="modelopt.torch.opt.mode.ModeDescriptor"><em>ModeDescriptor</em></a><em> | </em><em>str</em><em> | </em><em>list</em><em>[</em><a class="reference internal" href="modelopt.torch.opt.mode.html#modelopt.torch.opt.mode.ModeDescriptor" title="modelopt.torch.opt.mode.ModeDescriptor"><em>ModeDescriptor</em></a><em> | </em><em>str</em><em>] </em><em>| </em><em>list</em><em>[</em><em>tuple</em><em>[</em><em>str</em><em>, </em><em>dict</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>]</em><em>]</em><em>]</em>) – <p>A (list of) string(s) or Mode(s) or a list of tuples containing the mode and its
+config indicating the desired mode(s) (and configurations) for the convert
+process. Modes set up the model for different algorithms for model optimization. The
+following modes are available:</p>
+<ul>
+<li><p><a class="reference internal" href="modelopt.torch.prune.fastnas.html#modelopt.torch.prune.fastnas.FastNASModeDescriptor" title="modelopt.torch.prune.fastnas.FastNASModeDescriptor"><code class="xref py py-class docutils literal notranslate"><span class="pre">&quot;fastnas&quot;</span></code></a>: The <code class="docutils literal notranslate"><span class="pre">model</span></code> will
+be converted into a search space and set up to automatically perform operations
+required for FastNAS pruning &amp; search. The mode’s config
+is described in <code class="xref py py-class docutils literal notranslate"><span class="pre">FastNASConfig</span></code>.
+This mode is recommended to prune Computer Vision models.</p></li>
+<li><p><a class="reference internal" href="modelopt.torch.prune.gradnas.html#modelopt.torch.prune.gradnas.GradNASModeDescriptor" title="modelopt.torch.prune.gradnas.GradNASModeDescriptor"><code class="xref py py-class docutils literal notranslate"><span class="pre">&quot;gradnas&quot;</span></code></a>: The <code class="docutils literal notranslate"><span class="pre">model</span></code> will
+be converted into a search space and set up to automatically perform operations
+required for gradient-based pruning &amp; search. The mode’s config
+is described in <code class="xref py py-class docutils literal notranslate"><span class="pre">GradNASConfig</span></code>.
+This mode is recommended to prune Hugging Face language models like BERT and GPT-J.</p></li>
+<li><p><code class="xref py py-class docutils literal notranslate"><span class="pre">&quot;mcore_minitron&quot;</span></code>: The <code class="docutils literal notranslate"><span class="pre">model</span></code>
+will be converted into a search space and set up to automatically perform operations
+required for Minitron-style pruning &amp; search. The mode’s config
+is described in <code class="xref py py-class docutils literal notranslate"><span class="pre">MCoreMinitronConfig</span></code>.
+This mode is required to prune NVIDIA Megatron-Core GPT or Mamba models.</p></li>
+</ul>
+<p>If the mode argument is specified as a dictionary, the keys should indicate the mode and
+the values specify the per-mode configuration. If not provided, then default
+configuration would be used.</p>
+</p></li>
+<li><p><strong>constraints</strong> (<em>dict</em><em>[</em><em>str</em><em>, </em><em>str</em><em> | </em><em>float</em><em> | </em><em>dict</em><em> | </em><em>None</em><em>]</em>) – <p>A dictionary mapping constraint names to their respective values that the pruned model must
+satisfy. Currently, the supported constraints are <code class="docutils literal notranslate"><span class="pre">flops</span></code>, <code class="docutils literal notranslate"><span class="pre">params</span></code>, and <code class="docutils literal notranslate"><span class="pre">export_config</span></code>. If the key
+is <code class="docutils literal notranslate"><span class="pre">flops</span></code> or <code class="docutils literal notranslate"><span class="pre">params</span></code>, the value should be an upper bound number or percentage of original. For
+<code class="docutils literal notranslate"><span class="pre">export_config</span></code>, the value is a dictionary mapping hyperparameter names to their pruned values. For e.g.,:</p>
+<blockquote>
+<div><div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="c1"># Specify a flops upper bound as 4.5 GFLOPs</span>
+<span class="n">constraints</span> <span class="o">=</span> <span class="p">{</span><span class="s2">&quot;flops&quot;</span><span class="p">:</span> <span class="mf">4.5e6</span><span class="p">}</span>
+
+<span class="c1"># Specify a percentage-based constraint</span>
+<span class="c1"># (e.g., search for a model with &lt;= 60% of the original model params)</span>
+<span class="n">constraints</span> <span class="o">=</span> <span class="p">{</span><span class="s2">&quot;params&quot;</span><span class="p">:</span> <span class="s2">&quot;60%&quot;</span><span class="p">}</span>
+
+<span class="c1"># Specify export_config with pruned hyperparameters</span>
+<span class="c1"># This is supported only if the model is converted via ``mcore_minitron`` mode.</span>
+<span class="n">constraints</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="s2">&quot;export_config&quot;</span><span class="p">:</span> <span class="p">{</span>
+        <span class="s2">&quot;ffn_hidden_size&quot;</span><span class="p">:</span> <span class="mi">128</span><span class="p">,</span>
+        <span class="s2">&quot;num_attention_heads&quot;</span><span class="p">:</span> <span class="mi">16</span><span class="p">,</span>
+        <span class="s2">&quot;num_query_groups&quot;</span><span class="p">:</span> <span class="mi">4</span><span class="p">,</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+</div></blockquote>
+</p></li>
+<li><p><strong>dummy_input</strong> (<em>Any</em><em> | </em><em>tuple</em>) – <p>Arguments of <code class="docutils literal notranslate"><span class="pre">model.forward()</span></code>. This is used for exporting and calculating
+inference-based metrics, such as FLOPs. The format of <code class="docutils literal notranslate"><span class="pre">dummy_inputs</span></code> follows the
+convention of the <code class="docutils literal notranslate"><span class="pre">args</span></code> argument in
+<a class="reference external" href="https://pytorch.org/docs/stable/onnx.html#torch.onnx.export" rel="noopener noreferrer" target="_blank">torch.onnx.export</a>.
+Specifically, <code class="docutils literal notranslate"><span class="pre">dummy_input</span></code> can be:</p>
+<ol class="arabic">
+<li><p>a single argument (<code class="docutils literal notranslate"><span class="pre">type(dummy_input)</span> <span class="pre">!=</span> <span class="pre">tuple</span></code>) corresponding to</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">model</span><span class="o">.</span><span class="n">forward</span><span class="p">(</span><span class="n">dummy_input</span><span class="p">)</span>
+</pre></div>
+</div>
+</li>
+<li><p>a tuple of arguments corresponding to</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">model</span><span class="o">.</span><span class="n">forward</span><span class="p">(</span><span class="o">*</span><span class="n">dummy_input</span><span class="p">)</span>
+</pre></div>
+</div>
+</li>
+<li><p>a tuple of arguments such that <code class="docutils literal notranslate"><span class="pre">type(dummy_input[-1])</span> <span class="pre">==</span> <span class="pre">dict</span></code> corresponding to</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">model</span><span class="o">.</span><span class="n">forward</span><span class="p">(</span><span class="o">*</span><span class="n">dummy_input</span><span class="p">[:</span><span class="o">-</span><span class="mi">1</span><span class="p">],</span> <span class="o">**</span><span class="n">dummy_input</span><span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">])</span>
+</pre></div>
+</div>
+<div class="admonition warning">
+<p class="admonition-title">Warning</p>
+<p>In this case the model’s <code class="docutils literal notranslate"><span class="pre">forward()</span></code> method <strong>cannot</strong> contain keyword-only
+arguments (e.g. <code class="docutils literal notranslate"><span class="pre">forward(...,</span> <span class="pre">*,</span> <span class="pre">kw_only_args)</span></code>) or variable keyword arguments
+(e.g. <code class="docutils literal notranslate"><span class="pre">forward(...,</span> <span class="pre">**kwargs)</span></code>) since these cannot be sorted into positional
+arguments.</p>
+</div>
+</li>
+</ol>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>In order to pass a dict as last non-keyword argument, you need to use a tuple as
+<code class="docutils literal notranslate"><span class="pre">dummy_input</span></code> and add an <em>empty</em> dict as the last element, e.g.,</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">dummy_input</span> <span class="o">=</span> <span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="p">{</span><span class="s2">&quot;y&quot;</span><span class="p">:</span> <span class="n">y</span><span class="p">,</span> <span class="s2">&quot;z&quot;</span><span class="p">:</span> <span class="n">z</span><span class="p">},</span> <span class="p">{})</span>
+</pre></div>
+</div>
+<p>The empty dict at the end will then be interpreted as the keyword args.</p>
+</div>
+<p>See <a class="reference external" href="https://pytorch.org/docs/stable/onnx.html#torch.onnx.export" rel="noopener noreferrer" target="_blank">torch.onnx.export</a>
+for more info.</p>
+<p>Note that if you provide a <code class="docutils literal notranslate"><span class="pre">{arg_name}</span></code> with batch size <code class="docutils literal notranslate"><span class="pre">b</span></code>, the results will be
+computed based on batch size <code class="docutils literal notranslate"><span class="pre">b</span></code>.</p>
+</p></li>
+<li><p><strong>config</strong> (<em>dict</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>] </em><em>| </em><em>None</em>) – <p>Additional optional arguments to configure the search. Currently, we support:</p>
+<ul>
+<li><p><code class="docutils literal notranslate"><span class="pre">checkpoint</span></code>: Path to save/restore checkpoint with dictionary containing intermediate
+search state. If provided, the intermediate search state will be automatically
+restored before search (if exists) and stored/saved during search.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">verbose</span></code>: Whether to print detailed search space profiling and search stats during search.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">forward_loop</span></code>: A <code class="docutils literal notranslate"><span class="pre">Callable</span></code> that takes a model as input and runs a forward loop
+on it. It is recommended to choose the data loader used inside the forward loop
+carefully to reduce the runtime. Cannot be provided at the same time as
+<code class="docutils literal notranslate"><span class="pre">data_loader</span></code> and <code class="docutils literal notranslate"><span class="pre">collect_func</span></code>.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">data_loader</span></code>: An iterator yielding batches of data for calibrating the
+normalization layers in the model or compute gradient scores. It is recommended to use
+the same data loader as for training but with significantly fewer iterations. Cannot
+be provided at the same time as <code class="docutils literal notranslate"><span class="pre">forward_loop</span></code>.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">collect_func</span></code>: A <code class="docutils literal notranslate"><span class="pre">Callable</span></code> that takes a batch of data from the data loader as
+input and returns the input to <code class="docutils literal notranslate"><span class="pre">model.forward()</span></code> as described in
+<a class="reference internal" href="modelopt.torch.utils.network.html#modelopt.torch.utils.network.run_forward_loop" title="modelopt.torch.utils.network.run_forward_loop"><code class="xref py py-meth docutils literal notranslate"><span class="pre">run_forward_loop</span></code></a>. Cannot
+be provided at the same time as <code class="docutils literal notranslate"><span class="pre">forward_loop</span></code>.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">max_iter_data_loader</span></code>: Maximum number of iterations to run the data loader.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">score_func</span></code>: A callable taking the model as input and returning a single accuracy/score
+metric (float). This metric will be maximized during search.</p>
+<blockquote>
+<div><div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>The <code class="docutils literal notranslate"><span class="pre">score_func</span></code> is required only for <code class="docutils literal notranslate"><span class="pre">fastnas</span></code> mode. It will be
+evaluated on models in eval mode (<code class="docutils literal notranslate"><span class="pre">model.eval()</span></code>).</p>
+</div>
+</div></blockquote>
+</li>
+<li><p><code class="docutils literal notranslate"><span class="pre">loss_func</span></code>: A <code class="docutils literal notranslate"><span class="pre">Callable</span></code> which takes the model output (i.e output of <code class="docutils literal notranslate"><span class="pre">model.forward()</span></code>)
+and the batch of data as its inputs and returns a scalar loss.
+This is a required argument if the model is converted via <code class="docutils literal notranslate"><span class="pre">gradnas</span></code> mode.</p>
+<p>It should be possible to run a backward pass on the loss value returned by this method.</p>
+<p><code class="docutils literal notranslate"><span class="pre">collect_func</span></code> will be used to gather the inputs to <code class="docutils literal notranslate"><span class="pre">model.forward()</span></code>
+from a batch of data yielded by``data_loader``.</p>
+<p><code class="docutils literal notranslate"><span class="pre">loss_func</span></code> should support the following usage:</p>
+<blockquote>
+<div><div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="k">for</span> <span class="n">i</span><span class="p">,</span> <span class="n">batch</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">data_loader</span><span class="p">):</span>
+    <span class="k">if</span> <span class="n">i</span> <span class="o">&gt;=</span> <span class="n">max_iter_data_loader</span><span class="p">:</span>
+        <span class="k">break</span>
+
+    <span class="c1"># Assuming collect_func returns a tuple of arguments</span>
+    <span class="n">output</span> <span class="o">=</span> <span class="n">model</span><span class="p">(</span><span class="o">*</span><span class="n">collect_func</span><span class="p">(</span><span class="n">batch</span><span class="p">))</span>
+
+    <span class="n">loss</span> <span class="o">=</span> <span class="n">loss_func</span><span class="p">(</span><span class="n">output</span><span class="p">,</span> <span class="n">batch</span><span class="p">)</span>
+    <span class="n">loss</span><span class="o">.</span><span class="n">backward</span><span class="p">()</span>
+</pre></div>
+</div>
+</div></blockquote>
+</li>
+</ul>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>Additional configuration options may be added by individual algorithms. Please
+refer to the documentation of the individual algorithms for more information.</p>
+</div>
+</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>tuple</em>[<em>Module</em>, <em>dict</em>[<em>str</em>, <em>Any</em>]]</p>
+</dd>
+</dl>
+<dl class="simple">
+<dt>Returns: A tuple (subnet, state_dict) where</dt><dd><p>subnet is the searched subnet (nn.Module), which can be used for subsequent tasks like
+fine-tuning, state_dict contains the history and detailed stats of the search procedure.</p>
+</dd>
+</dl>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>The given model is modified (exported) in-place to match the best subnet found by the
+search algorithm. The returned subnet is thus a reference to the same model instance as the
+input model.</p>
+</div>
+</dd></dl>
+
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="modelopt.torch.prune.plugins.html" class="btn btn-neutral float-left" title="plugins" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="modelopt.torch.puzzletron.html" class="btn btn-neutral float-right" title="puzzletron" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2023-2025, NVIDIA Corporation.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

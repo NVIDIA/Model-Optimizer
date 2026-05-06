@@ -1,0 +1,562 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Quantization Configuration (quant_cfg) &mdash; Model Optimizer 0.0.1.dev1+ga89e90c91</title>
+      <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
+      <link rel="stylesheet" type="text/css" href="../_static/tabs.css?v=4c969af8" />
+      <link rel="stylesheet" type="text/css" href="../_static/togglebutton.css?v=9c3e77be" />
+      <link rel="stylesheet" type="text/css" href="../_static/autodoc_pydantic.css" />
+      <link rel="stylesheet" type="text/css" href="../_static/custom.css?v=7a224f4b" />
+
+  
+      <script src="../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../_static/documentation_options.js?v=5929fcd5"></script>
+      <script src="../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
+      <script src="../_static/copybutton.js?v=20d3d275"></script>
+      <script src="../_static/tabs.js?v=3ee01567"></script>
+      <script>let toggleHintShow = 'Click to show';</script>
+      <script>let toggleHintHide = 'Click to hide';</script>
+      <script>let toggleOpenOnPrint = 'true';</script>
+      <script src="../_static/togglebutton.js?v=b8b12719"></script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+    <script src="../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+    <link rel="next" title="Guides to quantize a customized model from Hugging Face for TensorRT-LLM deployment" href="_customized_model_quantization.html" />
+    <link rel="prev" title="PyTorch Quantization" href="_pytorch_quantization.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../index.html" class="icon icon-home">
+            Model Optimizer
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../getting_started/1_overview.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../getting_started/2_installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch to ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - Windows</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_qat" rel="noopener noreferrer" target="_blank">Quick Start: QAT</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning" rel="noopener noreferrer" target="_blank">Quick Start: Pruning</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_distill" rel="noopener noreferrer" target="_blank">Quick Start: Distillation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/speculative_decoding" rel="noopener noreferrer" target="_blank">Quick Start: Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_sparsity" rel="noopener noreferrer" target="_blank">Quick Start: Sparsity</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Guides</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="0_support_matrix.html">Support Matrix</a></li>
+<li class="toctree-l1 current"><a class="reference internal" href="1_quantization.html">Quantization</a><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="_basic_quantization.html">Basic Concepts</a></li>
+<li class="toctree-l2"><a class="reference internal" href="_choosing_quant_methods.html">Best practices to choose the right quantization methods</a></li>
+<li class="toctree-l2"><a class="reference internal" href="_pytorch_quantization.html">PyTorch Quantization</a></li>
+<li class="toctree-l2 current"><a class="current reference internal" href="#">Quantization Configuration (quant_cfg)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#overview">Overview</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#entry-format">Entry Format</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#default-quantizer-configuration">Default Quantizer Configuration</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#ordering-and-precedence">Ordering and Precedence</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#entry-atomicity">Entry Atomicity</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#common-patterns">Common Patterns</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#skipping-specific-layers">Skipping Specific Layers</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#skipping-layers-by-module-class">Skipping Layers by Module Class</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#overriding-quantizer-precision-for-specific-layers">Overriding Quantizer Precision for Specific Layers</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#building-a-config-from-scratch">Building a Config from Scratch</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="#sequential-quantization">Sequential Quantization</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#migrating-from-dict-format">Migrating from Dict Format</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#reference">Reference</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="_customized_model_quantization.html">Guides to quantize a customized model from Hugging Face for TensorRT-LLM deployment</a></li>
+<li class="toctree-l2"><a class="reference internal" href="_compress_quantized_models.html">Compress quantized models</a></li>
+<li class="toctree-l2"><a class="reference internal" href="_onnx_quantization.html">ONNX Quantization - Linux (Beta)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="windows_guides/_ONNX_PTQ_guide.html">ONNX Quantization - Windows</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="2_save_load.html">Saving &amp; Restoring</a></li>
+<li class="toctree-l1"><a class="reference internal" href="3_pruning.html">Pruning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="4_distillation.html">Distillation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="5_speculative_decoding.html">Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference internal" href="6_sparsity.html">Sparsity</a></li>
+<li class="toctree-l1"><a class="reference internal" href="7_nas.html">NAS</a></li>
+<li class="toctree-l1"><a class="reference internal" href="8_autocast.html">AutoCast (ONNX)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="9_autotune.html">Autotune (ONNX)</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Deployment</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../deployment/1_tensorrt_llm.html">TensorRT-LLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../deployment/2_onnxruntime.html">Onnxruntime</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../deployment/3_unified_hf.html">Unified HuggingFace Checkpoint</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Examples</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../examples/0_all_examples.html">All GitHub Examples</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Reference</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../reference/0_changelog.html">NVIDIA Model Optimizer Changelog</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../reference/1_modelopt_api.html">modelopt API</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Support</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../support/1_contact.html">Contact us</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../support/2_faqs.html">FAQs</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../index.html">Model Optimizer</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content style-external-links">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="1_quantization.html">Quantization</a></li>
+      <li class="breadcrumb-item active">Quantization Configuration (quant_cfg)</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../_sources/guides/_quant_cfg.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="quantization-configuration-quant-cfg">
+<span id="quant-cfg"></span><h1>Quantization Configuration (quant_cfg)<a class="headerlink" href="#quantization-configuration-quant-cfg" title="Link to this heading"></a></h1>
+<p>The <code class="docutils literal notranslate"><span class="pre">quant_cfg</span></code> field is the primary mechanism for controlling which quantizers are active in a
+model and how they are configured. This guide explains the format, ordering semantics, and common
+patterns for composing quantization configurations.</p>
+<div class="admonition tip">
+<p class="admonition-title">Tip</p>
+<p>For the list of built-in configs and supported formats, see <a class="reference internal" href="../reference/generated/modelopt.torch.quantization.config.html#quantization-formats"><span class="std std-ref">Quantization Formats</span></a>.
+For how to apply a config to a model, see <a class="reference internal" href="_pytorch_quantization.html"><span class="doc">PyTorch Quantization</span></a>.</p>
+</div>
+<hr class="docutils" />
+<section id="overview">
+<h2>Overview<a class="headerlink" href="#overview" title="Link to this heading"></a></h2>
+<p>A quantization config is a Python dictionary with two top-level keys:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">config</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="s2">&quot;quant_cfg&quot;</span><span class="p">:</span> <span class="p">[</span><span class="o">...</span><span class="p">],</span>   <span class="c1"># ordered list of QuantizerCfgEntry dicts</span>
+    <span class="s2">&quot;algorithm&quot;</span><span class="p">:</span> <span class="s2">&quot;max&quot;</span><span class="p">,</span>   <span class="c1"># calibration algorithm</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+<p>The <code class="docutils literal notranslate"><span class="pre">quant_cfg</span></code> value is an <strong>ordered list</strong> of <a class="reference internal" href="../reference/generated/modelopt.torch.quantization.config.html#modelopt.torch.quantization.config.QuantizerCfgEntry" title="modelopt.torch.quantization.config.QuantizerCfgEntry"><code class="xref py py-class docutils literal notranslate"><span class="pre">QuantizerCfgEntry</span></code></a> dicts. Each entry targets a set of
+quantizer modules in the model and specifies their configuration.</p>
+</section>
+<hr class="docutils" />
+<section id="entry-format">
+<h2>Entry Format<a class="headerlink" href="#entry-format" title="Link to this heading"></a></h2>
+<p>Each entry in the list is a dictionary with the following fields:</p>
+<table class="docutils align-default">
+<colgroup>
+<col style="width: 20.0%" />
+<col style="width: 15.0%" />
+<col style="width: 65.0%" />
+</colgroup>
+<thead>
+<tr class="row-odd"><th class="head"><p>Field</p></th>
+<th class="head"><p>Required</p></th>
+<th class="head"><p>Description</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">quantizer_name</span></code></p></td>
+<td><p>Yes</p></td>
+<td><p>Wildcard string matched against quantizer module names (e.g. <code class="docutils literal notranslate"><span class="pre">&quot;*weight_quantizer&quot;</span></code>).
+Uses <code class="xref py py-func docutils literal notranslate"><span class="pre">fnmatch()</span></code> rules.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">parent_class</span></code></p></td>
+<td><p>No</p></td>
+<td><p>Restricts matching to quantizers whose immediate parent module is of this PyTorch class
+(e.g. <code class="docutils literal notranslate"><span class="pre">&quot;nn.Linear&quot;</span></code>). If omitted, all modules are targeted regardless of class.</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">cfg</span></code></p></td>
+<td><p>No</p></td>
+<td><p>A dict of quantizer attributes as defined by <a class="reference internal" href="../reference/generated/modelopt.torch.quantization.config.html#modelopt.torch.quantization.config.QuantizerAttributeConfig" title="modelopt.torch.quantization.config.QuantizerAttributeConfig"><code class="xref py py-class docutils literal notranslate"><span class="pre">QuantizerAttributeConfig</span></code></a>, or a list of such dicts
+for sequential quantization (see <a class="reference internal" href="#sequential-quantizers"><span class="std std-ref">Sequential Quantization</span></a>).</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">enable</span></code></p></td>
+<td><p>No</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">True</span></code> or <code class="docutils literal notranslate"><span class="pre">False</span></code>. Toggles matched quantizers on or off, independently of <code class="docutils literal notranslate"><span class="pre">cfg</span></code>.
+When <code class="docutils literal notranslate"><span class="pre">cfg</span></code> is absent, <strong>only</strong> the enabled/disabled state is changed — all other
+attributes remain untouched. When <code class="docutils literal notranslate"><span class="pre">cfg</span></code> is present, <code class="docutils literal notranslate"><span class="pre">enable</span></code> sets the enabled state
+of the newly-configured quantizer. When <code class="docutils literal notranslate"><span class="pre">cfg</span></code> is present and <code class="docutils literal notranslate"><span class="pre">enable</span></code> is omitted,
+the quantizer is implicitly enabled (<code class="docutils literal notranslate"><span class="pre">True</span></code>).</p></td>
+</tr>
+</tbody>
+</table>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>Every entry must specify at least one of <code class="docutils literal notranslate"><span class="pre">cfg</span></code> or <code class="docutils literal notranslate"><span class="pre">enable</span></code> in addition to
+<code class="docutils literal notranslate"><span class="pre">quantizer_name</span></code>.  An entry with only <code class="docutils literal notranslate"><span class="pre">quantizer_name</span></code> and no other keys is <strong>invalid</strong>
+and will raise a <code class="docutils literal notranslate"><span class="pre">ValueError</span></code> at config-processing time.  This prevents subtle bugs where
+a bare <code class="docutils literal notranslate"><span class="pre">{&quot;quantizer_name&quot;:</span> <span class="pre">&quot;*&quot;}</span></code> would silently behave as <code class="docutils literal notranslate"><span class="pre">enable=True</span></code> for all
+quantizers.</p>
+</div>
+</section>
+<hr class="docutils" />
+<section id="default-quantizer-configuration">
+<h2>Default Quantizer Configuration<a class="headerlink" href="#default-quantizer-configuration" title="Link to this heading"></a></h2>
+<p>When a quantizer is enabled but has never been touched by a <code class="docutils literal notranslate"><span class="pre">cfg</span></code> entry — either because no
+entry in the list matched it, or because it was only reached by enable-only entries — it operates
+with the default attributes of
+<a class="reference internal" href="../reference/generated/modelopt.torch.quantization.config.html#modelopt.torch.quantization.config.QuantizerAttributeConfig" title="modelopt.torch.quantization.config.QuantizerAttributeConfig"><code class="xref py py-class docutils literal notranslate"><span class="pre">QuantizerAttributeConfig</span></code></a>:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="p">{</span>
+    <span class="s2">&quot;num_bits&quot;</span><span class="p">:</span>                 <span class="mi">8</span><span class="p">,</span>       <span class="c1"># 8-bit integer quantization</span>
+    <span class="s2">&quot;axis&quot;</span><span class="p">:</span>                     <span class="kc">None</span><span class="p">,</span>    <span class="c1"># per-tensor scale (no per-channel axis)</span>
+    <span class="s2">&quot;fake_quant&quot;</span><span class="p">:</span>               <span class="kc">True</span><span class="p">,</span>    <span class="c1"># simulate quantization in forward pass (PTQ / QAT)</span>
+    <span class="s2">&quot;unsigned&quot;</span><span class="p">:</span>                 <span class="kc">False</span><span class="p">,</span>   <span class="c1"># signed integer range, e.g. [-128, 127] for INT8</span>
+    <span class="s2">&quot;narrow_range&quot;</span><span class="p">:</span>             <span class="kc">False</span><span class="p">,</span>   <span class="c1"># full range; True would restrict to [-127, 127] for INT8</span>
+    <span class="s2">&quot;type&quot;</span><span class="p">:</span>                     <span class="s2">&quot;static&quot;</span><span class="p">,</span>  <span class="c1"># static calibration (not dynamic per-inference)</span>
+    <span class="s2">&quot;block_sizes&quot;</span><span class="p">:</span>              <span class="kc">None</span><span class="p">,</span>    <span class="c1"># no block quantization; set for NF4 / MXFP formats</span>
+    <span class="s2">&quot;bias&quot;</span><span class="p">:</span>                     <span class="kc">None</span><span class="p">,</span>    <span class="c1"># no affine bias correction</span>
+    <span class="s2">&quot;calibrator&quot;</span><span class="p">:</span>               <span class="s2">&quot;max&quot;</span><span class="p">,</span>   <span class="c1"># use max-abs calibration to determine amax</span>
+    <span class="s2">&quot;rotate&quot;</span><span class="p">:</span>                   <span class="kc">False</span><span class="p">,</span>   <span class="c1"># no Hadamard rotation (QuaRot / SpinQuant)</span>
+    <span class="s2">&quot;pass_through_bwd&quot;</span><span class="p">:</span>         <span class="kc">True</span><span class="p">,</span>    <span class="c1"># straight-through estimator for QAT gradients</span>
+    <span class="s2">&quot;trt_high_precision_dtype&quot;</span><span class="p">:</span> <span class="s2">&quot;Float&quot;</span><span class="p">,</span> <span class="c1"># cast QDQ nodes to fp32 for TRT StronglyType export</span>
+    <span class="s2">&quot;backend&quot;</span><span class="p">:</span>                  <span class="kc">None</span><span class="p">,</span>    <span class="c1"># use the built-in quantization backend</span>
+    <span class="s2">&quot;backend_extra_args&quot;</span><span class="p">:</span>       <span class="kc">None</span><span class="p">,</span>    <span class="c1"># no extra args for custom backends</span>
+    <span class="s2">&quot;use_constant_amax&quot;</span><span class="p">:</span>        <span class="kc">False</span><span class="p">,</span>   <span class="c1"># calibrate amax; True hard-codes FP8 E4M3 max (448.0)</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+<p>In practice this means an un-configured but enabled quantizer performs <strong>INT8 per-tensor static
+fake-quantization</strong> with a max-calibrated scale. This is rarely the intended behavior — every
+quantizer you want active should be explicitly configured with a <code class="docutils literal notranslate"><span class="pre">cfg</span></code> entry.</p>
+</section>
+<hr class="docutils" />
+<section id="ordering-and-precedence">
+<h2>Ordering and Precedence<a class="headerlink" href="#ordering-and-precedence" title="Link to this heading"></a></h2>
+<p>Entries are applied <strong>in list order</strong>. Later entries override earlier ones for any quantizer they
+match. This gives a clear, composable precedence model:</p>
+<ul class="simple">
+<li><p>Put broad rules (e.g. deny-all) <strong>first</strong>.</p></li>
+<li><p>Put format-specific enable rules <strong>after</strong>.</p></li>
+<li><p>Put fine-grained exclusions (specific layers, classes) <strong>last</strong>.</p></li>
+</ul>
+<p>The recommended pattern used by all built-in configs is:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="s2">&quot;quant_cfg&quot;</span><span class="p">:</span> <span class="p">[</span>
+    <span class="c1"># 1. Deny all quantizers by default</span>
+    <span class="p">{</span><span class="s2">&quot;quantizer_name&quot;</span><span class="p">:</span> <span class="s2">&quot;*&quot;</span><span class="p">,</span> <span class="s2">&quot;enable&quot;</span><span class="p">:</span> <span class="kc">False</span><span class="p">},</span>
+
+    <span class="c1"># 2. Enable and configure the target quantizers</span>
+    <span class="p">{</span><span class="s2">&quot;quantizer_name&quot;</span><span class="p">:</span> <span class="s2">&quot;*weight_quantizer&quot;</span><span class="p">,</span> <span class="s2">&quot;cfg&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;num_bits&quot;</span><span class="p">:</span> <span class="mi">8</span><span class="p">,</span> <span class="s2">&quot;axis&quot;</span><span class="p">:</span> <span class="mi">0</span><span class="p">}},</span>
+    <span class="p">{</span><span class="s2">&quot;quantizer_name&quot;</span><span class="p">:</span> <span class="s2">&quot;*input_quantizer&quot;</span><span class="p">,</span> <span class="s2">&quot;cfg&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;num_bits&quot;</span><span class="p">:</span> <span class="mi">8</span><span class="p">,</span> <span class="s2">&quot;axis&quot;</span><span class="p">:</span> <span class="kc">None</span><span class="p">}},</span>
+
+    <span class="c1"># 3. Apply standard exclusions last (BatchNorm, LM head, MoE routers, etc.)</span>
+    <span class="o">*</span><span class="n">mtq</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">_default_disabled_quantizer_cfg</span><span class="p">,</span>
+<span class="p">]</span>
+</pre></div>
+</div>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>The deny-all entry <code class="docutils literal notranslate"><span class="pre">{&quot;quantizer_name&quot;:</span> <span class="pre">&quot;*&quot;,</span> <span class="pre">&quot;enable&quot;:</span> <span class="pre">False}</span></code> is available as
+<code class="xref py py-data docutils literal notranslate"><span class="pre">modelopt.torch.quantization.config._base_disable_all</span></code> and is prepended to every
+built-in config. This ensures quantizers not explicitly targeted remain disabled.</p>
+</div>
+</section>
+<hr class="docutils" />
+<section id="entry-atomicity">
+<h2>Entry Atomicity<a class="headerlink" href="#entry-atomicity" title="Link to this heading"></a></h2>
+<p>Each <code class="docutils literal notranslate"><span class="pre">cfg</span></code>-bearing entry in <code class="docutils literal notranslate"><span class="pre">quant_cfg</span></code> is a <strong>complete, self-contained configuration unit</strong>.
+When an entry with <code class="docutils literal notranslate"><span class="pre">cfg</span></code> matches a quantizer, it <strong>completely replaces</strong> that quantizer’s
+configuration — it does not merge with or incrementally update settings left by earlier entries.</p>
+<p>Concretely, if an entry specifies only a subset of quantizer attributes (e.g. only <code class="docutils literal notranslate"><span class="pre">num_bits</span></code>),
+all unspecified attributes are filled in with their default values from
+<a class="reference internal" href="../reference/generated/modelopt.torch.quantization.config.html#modelopt.torch.quantization.config.QuantizerAttributeConfig" title="modelopt.torch.quantization.config.QuantizerAttributeConfig"><code class="xref py py-class docutils literal notranslate"><span class="pre">QuantizerAttributeConfig</span></code></a>.
+The resulting <em>complete</em> config is then written to the quantizer, discarding whatever any prior
+matching entry had set.</p>
+<p>This means:</p>
+<ul class="simple">
+<li><p><strong>Last cfg-entry wins, fully.</strong> If two entries both match <code class="docutils literal notranslate"><span class="pre">*weight_quantizer</span></code> and both carry
+a <code class="docutils literal notranslate"><span class="pre">cfg</span></code>, the second entry does not inherit the first entry’s settings — it replaces them entirely.</p></li>
+<li><p><strong>No hidden state accumulation.</strong> The final configuration of a quantizer depends only on the
+<em>last</em> <code class="docutils literal notranslate"><span class="pre">cfg</span></code>-bearing entry in the list that matched it, making behavior easy to reason about.</p></li>
+<li><p><strong>Changing one field requires a full spec.</strong> Because each <code class="docutils literal notranslate"><span class="pre">cfg</span></code> entry is a complete replacement,
+to change only one attribute of a quantizer that was already configured, you must reproduce the
+full desired config in the new entry. Any attribute omitted from the entry will revert to its
+default, not to the value set by an earlier entry.</p></li>
+</ul>
+<p><strong>Enable-only entries are the exception.</strong> An entry with no <code class="docutils literal notranslate"><span class="pre">cfg</span></code> (only <code class="docutils literal notranslate"><span class="pre">enable</span></code>) is <em>not</em> a
+full replacement — it solely flips the on/off state of matched quantizers, leaving all other
+attributes unchanged:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">{&quot;quantizer_name&quot;:</span> <span class="pre">&quot;*&quot;,</span> <span class="pre">&quot;enable&quot;:</span> <span class="pre">False}</span></code> disables all quantizers without touching their
+configured attributes. Use this as the first step in a deny-all-then-configure pattern.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">{&quot;quantizer_name&quot;:</span> <span class="pre">&quot;*weight_quantizer&quot;,</span> <span class="pre">&quot;enable&quot;:</span> <span class="pre">True}</span></code> (no <code class="docutils literal notranslate"><span class="pre">cfg</span></code>) re-enables weight
+quantizers using whatever attributes they currently carry (or their defaults if they were never
+configured by a <code class="docutils literal notranslate"><span class="pre">cfg</span></code> entry).</p></li>
+</ul>
+<p>For example, given the following two entries both matching <code class="docutils literal notranslate"><span class="pre">*weight_quantizer</span></code>:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="c1"># Entry 1 — sets FP8 per-channel</span>
+<span class="p">{</span><span class="s2">&quot;quantizer_name&quot;</span><span class="p">:</span> <span class="s2">&quot;*weight_quantizer&quot;</span><span class="p">,</span> <span class="s2">&quot;cfg&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;num_bits&quot;</span><span class="p">:</span> <span class="p">(</span><span class="mi">4</span><span class="p">,</span> <span class="mi">3</span><span class="p">),</span> <span class="s2">&quot;axis&quot;</span><span class="p">:</span> <span class="mi">0</span><span class="p">}},</span>
+
+<span class="c1"># Entry 2 — sets INT4 blockwise (axis is NOT inherited from Entry 1)</span>
+<span class="p">{</span><span class="s2">&quot;quantizer_name&quot;</span><span class="p">:</span> <span class="s2">&quot;*weight_quantizer&quot;</span><span class="p">,</span> <span class="s2">&quot;cfg&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;num_bits&quot;</span><span class="p">:</span> <span class="mi">4</span><span class="p">,</span> <span class="s2">&quot;block_sizes&quot;</span><span class="p">:</span> <span class="p">{</span><span class="o">-</span><span class="mi">1</span><span class="p">:</span> <span class="mi">128</span><span class="p">}}},</span>
+</pre></div>
+</div>
+<p>After Entry 2 is applied, the quantizer has <code class="docutils literal notranslate"><span class="pre">num_bits=4</span></code>, <code class="docutils literal notranslate"><span class="pre">block_sizes={-1:</span> <span class="pre">128}</span></code>, and
+<code class="docutils literal notranslate"><span class="pre">axis=None</span></code> (the default). The <code class="docutils literal notranslate"><span class="pre">axis=0</span></code> set by Entry 1 is gone.</p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>The deny-all-then-configure pattern is safe and predictable precisely because
+<code class="docutils literal notranslate"><span class="pre">{&quot;quantizer_name&quot;:</span> <span class="pre">&quot;*&quot;,</span> <span class="pre">&quot;enable&quot;:</span> <span class="pre">False}</span></code> <strong>only</strong> disables quantizers without resetting
+their attributes. Subsequent <code class="docutils literal notranslate"><span class="pre">cfg</span></code> entries then configure targets from a known default state.</p>
+</div>
+</section>
+<hr class="docutils" />
+<section id="common-patterns">
+<h2>Common Patterns<a class="headerlink" href="#common-patterns" title="Link to this heading"></a></h2>
+<section id="skipping-specific-layers">
+<h3>Skipping Specific Layers<a class="headerlink" href="#skipping-specific-layers" title="Link to this heading"></a></h3>
+<p>Append a disable entry after the existing config to exclude layers matched by a path pattern.
+Because it is appended last, it takes precedence over all earlier entries:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">copy</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">modelopt.torch.quantization</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">mtq</span>
+
+<span class="n">config</span> <span class="o">=</span> <span class="n">copy</span><span class="o">.</span><span class="n">deepcopy</span><span class="p">(</span><span class="n">mtq</span><span class="o">.</span><span class="n">FP8_DEFAULT_CFG</span><span class="p">)</span>
+
+<span class="c1"># Skip the final projection layer</span>
+<span class="n">config</span><span class="p">[</span><span class="s2">&quot;quant_cfg&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">append</span><span class="p">({</span><span class="s2">&quot;quantizer_name&quot;</span><span class="p">:</span> <span class="s2">&quot;*lm_head*&quot;</span><span class="p">,</span> <span class="s2">&quot;enable&quot;</span><span class="p">:</span> <span class="kc">False</span><span class="p">})</span>
+
+<span class="n">model</span> <span class="o">=</span> <span class="n">mtq</span><span class="o">.</span><span class="n">quantize</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="n">config</span><span class="p">,</span> <span class="n">forward_loop</span><span class="p">)</span>
+</pre></div>
+</div>
+</section>
+<section id="skipping-layers-by-module-class">
+<h3>Skipping Layers by Module Class<a class="headerlink" href="#skipping-layers-by-module-class" title="Link to this heading"></a></h3>
+<p>Use <code class="docutils literal notranslate"><span class="pre">parent_class</span></code> to target quantizers only within a specific type of layer, leaving the
+same quantizer path in other layer types unaffected:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">config</span><span class="p">[</span><span class="s2">&quot;quant_cfg&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">append</span><span class="p">({</span>
+    <span class="s2">&quot;quantizer_name&quot;</span><span class="p">:</span> <span class="s2">&quot;*input_quantizer&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;parent_class&quot;</span><span class="p">:</span> <span class="s2">&quot;nn.LayerNorm&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;enable&quot;</span><span class="p">:</span> <span class="kc">False</span><span class="p">,</span>
+<span class="p">})</span>
+</pre></div>
+</div>
+</section>
+<section id="overriding-quantizer-precision-for-specific-layers">
+<h3>Overriding Quantizer Precision for Specific Layers<a class="headerlink" href="#overriding-quantizer-precision-for-specific-layers" title="Link to this heading"></a></h3>
+<p>A later entry with a matching <code class="docutils literal notranslate"><span class="pre">quantizer_name</span></code> replaces the configuration set by an earlier
+entry. This allows per-layer precision overrides without restructuring the entire config:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">config</span> <span class="o">=</span> <span class="n">copy</span><span class="o">.</span><span class="n">deepcopy</span><span class="p">(</span><span class="n">mtq</span><span class="o">.</span><span class="n">FP8_DEFAULT_CFG</span><span class="p">)</span>
+
+<span class="c1"># Quantize attention output projections in higher-precision INT8 instead of FP8</span>
+<span class="n">config</span><span class="p">[</span><span class="s2">&quot;quant_cfg&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">append</span><span class="p">({</span>
+    <span class="s2">&quot;quantizer_name&quot;</span><span class="p">:</span> <span class="s2">&quot;*o_proj*weight_quantizer&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;cfg&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;num_bits&quot;</span><span class="p">:</span> <span class="mi">8</span><span class="p">,</span> <span class="s2">&quot;axis&quot;</span><span class="p">:</span> <span class="mi">0</span><span class="p">},</span>
+<span class="p">})</span>
+</pre></div>
+</div>
+</section>
+<section id="building-a-config-from-scratch">
+<h3>Building a Config from Scratch<a class="headerlink" href="#building-a-config-from-scratch" title="Link to this heading"></a></h3>
+<p>For entirely custom recipes, compose the list directly:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">modelopt.torch.quantization.config</span><span class="w"> </span><span class="kn">import</span> <span class="n">_base_disable_all</span><span class="p">,</span> <span class="n">_default_disabled_quantizer_cfg</span>
+
+<span class="n">MY_CUSTOM_CFG</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="s2">&quot;quant_cfg&quot;</span><span class="p">:</span> <span class="p">[</span>
+        <span class="o">*</span><span class="n">_base_disable_all</span><span class="p">,</span>
+        <span class="p">{</span><span class="s2">&quot;quantizer_name&quot;</span><span class="p">:</span> <span class="s2">&quot;*weight_quantizer&quot;</span><span class="p">,</span> <span class="s2">&quot;cfg&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;num_bits&quot;</span><span class="p">:</span> <span class="mi">4</span><span class="p">,</span> <span class="s2">&quot;block_sizes&quot;</span><span class="p">:</span> <span class="p">{</span><span class="o">-</span><span class="mi">1</span><span class="p">:</span> <span class="mi">128</span><span class="p">}}},</span>
+        <span class="p">{</span><span class="s2">&quot;quantizer_name&quot;</span><span class="p">:</span> <span class="s2">&quot;*input_quantizer&quot;</span><span class="p">,</span> <span class="s2">&quot;cfg&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;num_bits&quot;</span><span class="p">:</span> <span class="mi">8</span><span class="p">,</span> <span class="s2">&quot;axis&quot;</span><span class="p">:</span> <span class="kc">None</span><span class="p">}},</span>
+        <span class="o">*</span><span class="n">_default_disabled_quantizer_cfg</span><span class="p">,</span>
+    <span class="p">],</span>
+    <span class="s2">&quot;algorithm&quot;</span><span class="p">:</span> <span class="s2">&quot;max&quot;</span><span class="p">,</span>
+<span class="p">}</span>
+
+<span class="n">model</span> <span class="o">=</span> <span class="n">mtq</span><span class="o">.</span><span class="n">quantize</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="n">MY_CUSTOM_CFG</span><span class="p">,</span> <span class="n">forward_loop</span><span class="p">)</span>
+</pre></div>
+</div>
+<hr class="docutils" />
+</section>
+</section>
+<section id="sequential-quantization">
+<span id="sequential-quantizers"></span><h2>Sequential Quantization<a class="headerlink" href="#sequential-quantization" title="Link to this heading"></a></h2>
+<p>When <code class="docutils literal notranslate"><span class="pre">cfg</span></code> is a <strong>list</strong> of attribute dicts, the matched
+<a class="reference internal" href="../reference/generated/modelopt.torch.quantization.nn.modules.tensor_quantizer.html#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer" title="modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer"><code class="xref py py-class docutils literal notranslate"><span class="pre">TensorQuantizer</span></code></a>
+is replaced with a
+<a class="reference internal" href="../reference/generated/modelopt.torch.quantization.nn.modules.tensor_quantizer.html#modelopt.torch.quantization.nn.modules.tensor_quantizer.SequentialQuantizer" title="modelopt.torch.quantization.nn.modules.tensor_quantizer.SequentialQuantizer"><code class="xref py py-class docutils literal notranslate"><span class="pre">SequentialQuantizer</span></code></a>
+that applies each format in sequence. This is used, for example, in W4A8 quantization where weights
+are quantized first in INT4 and then in FP8:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="p">{</span>
+    <span class="s2">&quot;quantizer_name&quot;</span><span class="p">:</span> <span class="s2">&quot;*weight_quantizer&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;cfg&quot;</span><span class="p">:</span> <span class="p">[</span>
+        <span class="p">{</span><span class="s2">&quot;num_bits&quot;</span><span class="p">:</span> <span class="mi">4</span><span class="p">,</span> <span class="s2">&quot;block_sizes&quot;</span><span class="p">:</span> <span class="p">{</span><span class="o">-</span><span class="mi">1</span><span class="p">:</span> <span class="mi">128</span><span class="p">,</span> <span class="s2">&quot;type&quot;</span><span class="p">:</span> <span class="s2">&quot;static&quot;</span><span class="p">}},</span>
+        <span class="p">{</span><span class="s2">&quot;num_bits&quot;</span><span class="p">:</span> <span class="p">(</span><span class="mi">4</span><span class="p">,</span> <span class="mi">3</span><span class="p">)},</span>  <span class="c1"># FP8</span>
+    <span class="p">],</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+<hr class="docutils" />
+</section>
+<section id="migrating-from-dict-format">
+<span id="id1"></span><h2>Migrating from Dict Format<a class="headerlink" href="#migrating-from-dict-format" title="Link to this heading"></a></h2>
+<p>Earlier versions of ModelOpt used a flat dictionary for <code class="docutils literal notranslate"><span class="pre">quant_cfg</span></code>. The new list format is
+preferred because it provides explicit ordering and unambiguous precedence. Existing dict-based
+configs continue to work — the normalization layer converts them automatically — but new code
+should use the list format.</p>
+<p>The table below shows common patterns and their list equivalents:</p>
+<table class="docutils align-default">
+<colgroup>
+<col style="width: 50.0%" />
+<col style="width: 50.0%" />
+</colgroup>
+<thead>
+<tr class="row-odd"><th class="head"><p>Legacy dict format</p></th>
+<th class="head"><p>New list format</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="s2">&quot;quant_cfg&quot;</span><span class="p">:</span> <span class="p">{</span>
+    <span class="s2">&quot;*weight_quantizer&quot;</span><span class="p">:</span> <span class="p">{</span>
+        <span class="s2">&quot;num_bits&quot;</span><span class="p">:</span> <span class="mi">8</span><span class="p">,</span>
+        <span class="s2">&quot;axis&quot;</span><span class="p">:</span> <span class="mi">0</span><span class="p">,</span>
+    <span class="p">},</span>
+    <span class="s2">&quot;*input_quantizer&quot;</span><span class="p">:</span> <span class="p">{</span>
+        <span class="s2">&quot;num_bits&quot;</span><span class="p">:</span> <span class="mi">8</span><span class="p">,</span>
+        <span class="s2">&quot;axis&quot;</span><span class="p">:</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="p">},</span>
+    <span class="s2">&quot;default&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;enable&quot;</span><span class="p">:</span> <span class="kc">False</span><span class="p">},</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+</td>
+<td><div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="s2">&quot;quant_cfg&quot;</span><span class="p">:</span> <span class="p">[</span>
+    <span class="p">{</span><span class="s2">&quot;quantizer_name&quot;</span><span class="p">:</span> <span class="s2">&quot;*&quot;</span><span class="p">,</span>
+     <span class="s2">&quot;enable&quot;</span><span class="p">:</span> <span class="kc">False</span><span class="p">},</span>
+    <span class="p">{</span><span class="s2">&quot;quantizer_name&quot;</span><span class="p">:</span> <span class="s2">&quot;*weight_quantizer&quot;</span><span class="p">,</span>
+     <span class="s2">&quot;cfg&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;num_bits&quot;</span><span class="p">:</span> <span class="mi">8</span><span class="p">,</span> <span class="s2">&quot;axis&quot;</span><span class="p">:</span> <span class="mi">0</span><span class="p">}},</span>
+    <span class="p">{</span><span class="s2">&quot;quantizer_name&quot;</span><span class="p">:</span> <span class="s2">&quot;*input_quantizer&quot;</span><span class="p">,</span>
+     <span class="s2">&quot;cfg&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;num_bits&quot;</span><span class="p">:</span> <span class="mi">8</span><span class="p">,</span> <span class="s2">&quot;axis&quot;</span><span class="p">:</span> <span class="kc">None</span><span class="p">}},</span>
+<span class="p">]</span>
+</pre></div>
+</div>
+</td>
+</tr>
+<tr class="row-odd"><td><div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="c1"># Disable by key assignment</span>
+<span class="n">config</span><span class="p">[</span><span class="s2">&quot;quant_cfg&quot;</span><span class="p">][</span><span class="s2">&quot;*lm_head*&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="s2">&quot;enable&quot;</span><span class="p">:</span> <span class="kc">False</span><span class="p">,</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+</td>
+<td><div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="c1"># Append to the end (last entry wins)</span>
+<span class="n">config</span><span class="p">[</span><span class="s2">&quot;quant_cfg&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">append</span><span class="p">(</span>
+    <span class="p">{</span><span class="s2">&quot;quantizer_name&quot;</span><span class="p">:</span> <span class="s2">&quot;*lm_head*&quot;</span><span class="p">,</span>
+     <span class="s2">&quot;enable&quot;</span><span class="p">:</span> <span class="kc">False</span><span class="p">}</span>
+<span class="p">)</span>
+</pre></div>
+</div>
+</td>
+</tr>
+<tr class="row-even"><td><div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="c1"># Class-scoped entry</span>
+<span class="s2">&quot;quant_cfg&quot;</span><span class="p">:</span> <span class="p">{</span>
+    <span class="s2">&quot;nn.Linear&quot;</span><span class="p">:</span> <span class="p">{</span>
+        <span class="s2">&quot;*input_quantizer&quot;</span><span class="p">:</span> <span class="p">{</span>
+            <span class="s2">&quot;enable&quot;</span><span class="p">:</span> <span class="kc">False</span><span class="p">,</span>
+        <span class="p">},</span>
+    <span class="p">},</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+</td>
+<td><div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="s2">&quot;quant_cfg&quot;</span><span class="p">:</span> <span class="p">[</span>
+    <span class="p">{</span><span class="s2">&quot;quantizer_name&quot;</span><span class="p">:</span> <span class="s2">&quot;*input_quantizer&quot;</span><span class="p">,</span>
+     <span class="s2">&quot;parent_class&quot;</span><span class="p">:</span> <span class="s2">&quot;nn.Linear&quot;</span><span class="p">,</span>
+     <span class="s2">&quot;enable&quot;</span><span class="p">:</span> <span class="kc">False</span><span class="p">},</span>
+<span class="p">]</span>
+</pre></div>
+</div>
+</td>
+</tr>
+</tbody>
+</table>
+<p>Key differences to keep in mind:</p>
+<ul class="simple">
+<li><p>The <code class="docutils literal notranslate"><span class="pre">&quot;default&quot;</span></code> key becomes <code class="docutils literal notranslate"><span class="pre">{&quot;quantizer_name&quot;:</span> <span class="pre">&quot;*&quot;,</span> <span class="pre">&quot;enable&quot;:</span> <span class="pre">False}</span></code> placed at the
+<strong>start</strong> of the list (deny-all-then-configure pattern).</p></li>
+<li><p>Dict key assignment (<code class="docutils literal notranslate"><span class="pre">config[&quot;quant_cfg&quot;][&quot;*lm_head*&quot;]</span> <span class="pre">=</span> <span class="pre">...</span></code>) becomes <code class="docutils literal notranslate"><span class="pre">list.append()</span></code>.
+Because later entries override earlier ones, appending achieves the same override effect.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">nn.*</span></code>-scoped dict keys become entries with a <code class="docutils literal notranslate"><span class="pre">parent_class</span></code> field.</p></li>
+</ul>
+</section>
+<hr class="docutils" />
+<section id="reference">
+<h2>Reference<a class="headerlink" href="#reference" title="Link to this heading"></a></h2>
+<ul class="simple">
+<li><p><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.config.html#modelopt.torch.quantization.config.QuantizerCfgEntry" title="modelopt.torch.quantization.config.QuantizerCfgEntry"><code class="xref py py-class docutils literal notranslate"><span class="pre">QuantizerCfgEntry</span></code></a></p></li>
+<li><p><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.config.html#modelopt.torch.quantization.config.QuantizerAttributeConfig" title="modelopt.torch.quantization.config.QuantizerAttributeConfig"><code class="xref py py-class docutils literal notranslate"><span class="pre">QuantizerAttributeConfig</span></code></a></p></li>
+<li><p><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.config.html#modelopt.torch.quantization.config.QuantizeConfig" title="modelopt.torch.quantization.config.QuantizeConfig"><code class="xref py py-class docutils literal notranslate"><span class="pre">QuantizeConfig</span></code></a></p></li>
+<li><p><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.conversion.html#modelopt.torch.quantization.conversion.set_quantizer_by_cfg" title="modelopt.torch.quantization.conversion.set_quantizer_by_cfg"><code class="xref py py-func docutils literal notranslate"><span class="pre">set_quantizer_by_cfg</span></code></a></p></li>
+</ul>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="_pytorch_quantization.html" class="btn btn-neutral float-left" title="PyTorch Quantization" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="_customized_model_quantization.html" class="btn btn-neutral float-right" title="Guides to quantize a customized model from Hugging Face for TensorRT-LLM deployment" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2023-2025, NVIDIA Corporation.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

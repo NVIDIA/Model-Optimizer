@@ -1,0 +1,644 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>conversion &mdash; Model Optimizer 0.0.1.dev1+ga89e90c91</title>
+      <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="../../_static/copybutton.css?v=76b2166b" />
+      <link rel="stylesheet" type="text/css" href="../../_static/tabs.css?v=4c969af8" />
+      <link rel="stylesheet" type="text/css" href="../../_static/togglebutton.css?v=9c3e77be" />
+      <link rel="stylesheet" type="text/css" href="../../_static/autodoc_pydantic.css" />
+      <link rel="stylesheet" type="text/css" href="../../_static/custom.css?v=7a224f4b" />
+
+  
+      <script src="../../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../../_static/documentation_options.js?v=5929fcd5"></script>
+      <script src="../../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="../../_static/clipboard.min.js?v=a7894cd8"></script>
+      <script src="../../_static/copybutton.js?v=20d3d275"></script>
+      <script src="../../_static/tabs.js?v=3ee01567"></script>
+      <script>let toggleHintShow = 'Click to show';</script>
+      <script>let toggleHintHide = 'Click to hide';</script>
+      <script>let toggleOpenOnPrint = 'true';</script>
+      <script src="../../_static/togglebutton.js?v=b8b12719"></script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+    <script src="../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" />
+    <link rel="next" title="dynamic" href="modelopt.torch.opt.dynamic.html" />
+    <link rel="prev" title="config" href="modelopt.torch.opt.config.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../../index.html" class="icon icon-home">
+            Model Optimizer
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../getting_started/1_overview.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../getting_started/2_installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch to ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - Windows</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_qat" rel="noopener noreferrer" target="_blank">Quick Start: QAT</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning" rel="noopener noreferrer" target="_blank">Quick Start: Pruning</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_distill" rel="noopener noreferrer" target="_blank">Quick Start: Distillation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/speculative_decoding" rel="noopener noreferrer" target="_blank">Quick Start: Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_sparsity" rel="noopener noreferrer" target="_blank">Quick Start: Sparsity</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Guides</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/0_support_matrix.html">Support Matrix</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/1_quantization.html">Quantization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/2_save_load.html">Saving &amp; Restoring</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/3_pruning.html">Pruning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/4_distillation.html">Distillation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/5_speculative_decoding.html">Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/6_sparsity.html">Sparsity</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/7_nas.html">NAS</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/8_autocast.html">AutoCast (ONNX)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/9_autotune.html">Autotune (ONNX)</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Deployment</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/1_tensorrt_llm.html">TensorRT-LLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/2_onnxruntime.html">Onnxruntime</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/3_unified_hf.html">Unified HuggingFace Checkpoint</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Examples</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../examples/0_all_examples.html">All GitHub Examples</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Reference</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="../0_changelog.html">NVIDIA Model Optimizer Changelog</a></li>
+<li class="toctree-l1 current"><a class="reference internal" href="../1_modelopt_api.html">modelopt API</a><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="modelopt.deploy.html">deploy</a></li>
+<li class="toctree-l2"><a class="reference internal" href="modelopt.onnx.html">onnx</a></li>
+<li class="toctree-l2 current"><a class="reference internal" href="modelopt.torch.html">torch</a><ul class="current">
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.distill.html">distill</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.export.html">export</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.kernels.html">kernels</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.nas.html">nas</a></li>
+<li class="toctree-l3 current"><a class="reference internal" href="modelopt.torch.opt.html">opt</a><ul class="current">
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.opt.config.html">config</a></li>
+<li class="toctree-l4 current"><a class="current reference internal" href="#">conversion</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.opt.dynamic.html">dynamic</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.opt.hparam.html">hparam</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.opt.mode.html">mode</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.opt.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.opt.searcher.html">searcher</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.opt.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.peft.html">peft</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.prune.html">prune</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.quantization.html">quantization</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.sparsity.html">sparsity</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.speculative.html">speculative</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.trace.html">trace</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.utils.html">utils</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Support</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../support/1_contact.html">Contact us</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../support/2_faqs.html">FAQs</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../index.html">Model Optimizer</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content style-external-links">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="../1_modelopt_api.html">modelopt API</a></li>
+          <li class="breadcrumb-item"><a href="modelopt.torch.html">torch</a></li>
+          <li class="breadcrumb-item"><a href="modelopt.torch.opt.html">opt</a></li>
+      <li class="breadcrumb-item active">conversion</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../../_sources/reference/generated/modelopt.torch.opt.conversion.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="conversion">
+<h1>conversion<a class="headerlink" href="#conversion" title="Link to this heading"></a></h1>
+<p id="module-modelopt.torch.opt.conversion">Module to handle model converting and restoring for optimization methods.</p>
+<p>When applying a model optimization algorithm, we usually need to modify the model in each step
+(mode) of the algorithm. This module provides the state manager, which is a standardized interface
+(class) to record and store state information in the model.</p>
+<p>Op top of the state manager, this module provides utilities to save a history of these modifications
+(“modelopt state dict”) and restoring a unmodified model to the state indicated in the state dict.</p>
+<p class="rubric">Classes</p>
+<table class="autosummary longtable docutils align-default">
+<tbody>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.opt.conversion.ModeloptStateManager" title="modelopt.torch.opt.conversion.ModeloptStateManager"><code class="xref py py-obj docutils literal notranslate"><span class="pre">ModeloptStateManager</span></code></a></p></td>
+<td><p>A class to handle the modelopt state stored for each mode corresponding to a task/mode.</p></td>
+</tr>
+</tbody>
+</table>
+<p class="rubric">Functions</p>
+<table class="autosummary longtable docutils align-default">
+<tbody>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.opt.conversion.apply_mode" title="modelopt.torch.opt.conversion.apply_mode"><code class="xref py py-obj docutils literal notranslate"><span class="pre">apply_mode</span></code></a></p></td>
+<td><p>Apply the provided modes the model, record the changes, and return the model.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.opt.conversion.load_modelopt_state" title="modelopt.torch.opt.conversion.load_modelopt_state"><code class="xref py py-obj docutils literal notranslate"><span class="pre">load_modelopt_state</span></code></a></p></td>
+<td><p>Load the modelopt state from a file.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.opt.conversion.modelopt_state" title="modelopt.torch.opt.conversion.modelopt_state"><code class="xref py py-obj docutils literal notranslate"><span class="pre">modelopt_state</span></code></a></p></td>
+<td><p>Return the modelopt state dict describing the modifications to the model.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.opt.conversion.restore" title="modelopt.torch.opt.conversion.restore"><code class="xref py py-obj docutils literal notranslate"><span class="pre">restore</span></code></a></p></td>
+<td><p>Load the checkpoint, restore the modelopt model modifications, and load the model's weights.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.opt.conversion.restore_from_modelopt_state" title="modelopt.torch.opt.conversion.restore_from_modelopt_state"><code class="xref py py-obj docutils literal notranslate"><span class="pre">restore_from_modelopt_state</span></code></a></p></td>
+<td><p>Restore the model architecture from the modelopt state dictionary based on the user-provided model.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.opt.conversion.save" title="modelopt.torch.opt.conversion.save"><code class="xref py py-obj docutils literal notranslate"><span class="pre">save</span></code></a></p></td>
+<td><p>Save a model's state dict together with the modelopt state dict to restore its architecture.</p></td>
+</tr>
+</tbody>
+</table>
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.opt.conversion.ModeloptStateManager">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">ModeloptStateManager</span></span><a class="headerlink" href="#modelopt.torch.opt.conversion.ModeloptStateManager" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<p>A class to handle the modelopt state stored for each mode corresponding to a task/mode.</p>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.opt.conversion.ModeloptStateManager.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">init_state</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.opt.conversion.ModeloptStateManager.__init__" title="Link to this definition"></a></dt>
+<dd><p>Initialize state manager.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>model</strong> (<em>Module</em><em> | </em><em>None</em>) – Module that has modelopt_state stored. If None, a fake module is created to store
+any state that might be added with the manager.</p></li>
+<li><p><strong>init_state</strong> (<em>bool</em>) – Whether to initialize the modelopt state for the model if it does not exist.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.opt.conversion.ModeloptStateManager.add_mode">
+<span class="sig-name descname"><span class="pre">add_mode</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">mode</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">config</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">metadata</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.opt.conversion.ModeloptStateManager.add_mode" title="Link to this definition"></a></dt>
+<dd><p>Add mode and update state in-place.</p>
+<p>Note that self._state is a list (preserves insertion order of keys) and we can therefore
+recall the order of modes!</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>mode</strong> (<a class="reference internal" href="modelopt.torch.opt.mode.html#modelopt.torch.opt.mode.ModeDescriptor" title="modelopt.torch.opt.mode.ModeDescriptor"><em>ModeDescriptor</em></a><em> | </em><em>str</em>)</p></li>
+<li><p><strong>config</strong> (<a class="reference internal" href="modelopt.torch.opt.config.html#modelopt.torch.opt.config.ModeloptBaseConfig" title="modelopt.torch.opt.config.ModeloptBaseConfig"><em>ModeloptBaseConfig</em></a>)</p></li>
+<li><p><strong>metadata</strong> (<em>dict</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>]</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.opt.conversion.ModeloptStateManager.check_mode">
+<span class="sig-name descname"><span class="pre">check_mode</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">mode</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.opt.conversion.ModeloptStateManager.check_mode" title="Link to this definition"></a></dt>
+<dd><p>Check if the proposed mode is compatible with the current state.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>mode</strong> (<a class="reference internal" href="modelopt.torch.opt.mode.html#modelopt.torch.opt.mode.ModeDescriptor" title="modelopt.torch.opt.mode.ModeDescriptor"><em>ModeDescriptor</em></a><em> | </em><em>str</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.opt.conversion.ModeloptStateManager.get_config_class">
+<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">get_config_class</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">mode</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">config</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.opt.conversion.ModeloptStateManager.get_config_class" title="Link to this definition"></a></dt>
+<dd><p>Standardize the provided config to the corresponding config class.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>mode</strong> (<a class="reference internal" href="modelopt.torch.opt.mode.html#modelopt.torch.opt.mode.ModeDescriptor" title="modelopt.torch.opt.mode.ModeDescriptor"><em>ModeDescriptor</em></a><em> | </em><em>str</em>)</p></li>
+<li><p><strong>config</strong> (<em>dict</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>]</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference internal" href="modelopt.torch.opt.config.html#modelopt.torch.opt.config.ModeloptBaseConfig" title="modelopt.torch.opt.config.ModeloptBaseConfig"><em>ModeloptBaseConfig</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="modelopt.torch.opt.conversion.ModeloptStateManager.has_state">
+<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">has_state</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></em><a class="headerlink" href="#modelopt.torch.opt.conversion.ModeloptStateManager.has_state" title="Link to this definition"></a></dt>
+<dd><p>Return whether the model has a non-trivial modelopt state.</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.opt.conversion.ModeloptStateManager.has_state_for_mode_type">
+<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">has_state_for_mode_type</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">mode_type</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">*</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">model</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">state</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.opt.conversion.ModeloptStateManager.has_state_for_mode_type" title="Link to this definition"></a></dt>
+<dd><p>Check if the model or modelopt state contains state from any modes of a given type.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>mode_type</strong> (<em>str</em>) – The type of mode to check for.
+Example types: <code class="docutils literal notranslate"><span class="pre">quantization</span></code>, <code class="docutils literal notranslate"><span class="pre">distill</span></code>, <code class="docutils literal notranslate"><span class="pre">nas</span></code>, <code class="docutils literal notranslate"><span class="pre">prune</span></code>, <code class="docutils literal notranslate"><span class="pre">speculative</span></code>, etc.</p></li>
+<li><p><strong>model</strong> (<em>Module</em><em> | </em><em>None</em>) – A model to check for state.</p></li>
+<li><p><strong>state</strong> (<em>dict</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>] </em><em>| </em><em>None</em>) – A modelopt state extracted from a model.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>bool</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.opt.conversion.ModeloptStateManager.is_converted">
+<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">is_converted</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">is_root</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.opt.conversion.ModeloptStateManager.is_converted" title="Link to this definition"></a></dt>
+<dd><p>Check if model is converted.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>model</strong> (<em>Module</em>) – A model to be checked for state/metadata from the convert process.</p></li>
+<li><p><strong>is_root</strong> (<em>bool</em>) – Additionally check whether the module with state is the root module.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>True if the model contains modelopt state indicating that it has been converted.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>bool</em></p>
+</dd>
+</dl>
+<p>This method raises an assertion when multiple modelopt_states are detected or when is_root is
+set to True but the module with state is not the root module.</p>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="modelopt.torch.opt.conversion.ModeloptStateManager.last_mode">
+<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">last_mode</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference internal" href="modelopt.torch.opt.mode.html#modelopt.torch.opt.mode.ModeDescriptor" title="modelopt.torch.opt.mode.ModeDescriptor"><span class="pre">ModeDescriptor</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#modelopt.torch.opt.conversion.ModeloptStateManager.last_mode" title="Link to this definition"></a></dt>
+<dd><p>Return the last mode applied to the model (last stored mode).</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.opt.conversion.ModeloptStateManager.load_state_dict">
+<span class="sig-name descname"><span class="pre">load_state_dict</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">state_dict</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">version</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.opt.conversion.ModeloptStateManager.load_state_dict" title="Link to this definition"></a></dt>
+<dd><p>Load the provided <code class="docutils literal notranslate"><span class="pre">state_dict</span></code> to the modelopt_state.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>state_dict</strong> (<em>list</em><em>[</em><em>tuple</em><em>[</em><em>str</em><em>, </em><em>dict</em><em>[</em><em>str</em><em>, </em><em>dict</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>]</em><em>]</em><em>]</em><em>]</em>)</p></li>
+<li><p><strong>version</strong> (<em>str</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.opt.conversion.ModeloptStateManager.modes_with_states">
+<span class="sig-name descname"><span class="pre">modes_with_states</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.opt.conversion.ModeloptStateManager.modes_with_states" title="Link to this definition"></a></dt>
+<dd><p>Yield the mode together with the full config and metadata from the state.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>Iterator</em>[<em>tuple</em>[<a class="reference internal" href="modelopt.torch.opt.mode.html#modelopt.torch.opt.mode.ModeDescriptor" title="modelopt.torch.opt.mode.ModeDescriptor"><em>ModeDescriptor</em></a>, <a class="reference internal" href="modelopt.torch.opt.config.html#modelopt.torch.opt.config.ModeloptBaseConfig" title="modelopt.torch.opt.config.ModeloptBaseConfig"><em>ModeloptBaseConfig</em></a>, <em>dict</em>[<em>str</em>, <em>Any</em>]]]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.opt.conversion.ModeloptStateManager.remove_state">
+<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">remove_state</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.opt.conversion.ModeloptStateManager.remove_state" title="Link to this definition"></a></dt>
+<dd><p>Delete the state dict from the model.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>model</strong> (<em>Module</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.opt.conversion.ModeloptStateManager.state_dict">
+<span class="sig-name descname"><span class="pre">state_dict</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.opt.conversion.ModeloptStateManager.state_dict" title="Link to this definition"></a></dt>
+<dd><p>Return the metadata of the model.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>list</em>[<em>tuple</em>[<em>str</em>, <em>dict</em>[<em>str</em>, <em>dict</em>[<em>str</em>, <em>Any</em>]]]]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="modelopt.torch.opt.conversion.ModeloptStateManager.state_version">
+<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">state_version</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><a class="headerlink" href="#modelopt.torch.opt.conversion.ModeloptStateManager.state_version" title="Link to this definition"></a></dt>
+<dd><p>Return the version of modelopt state contained in the state manager.</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.opt.conversion.ModeloptStateManager.transfer_state_dict">
+<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">transfer_state_dict</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model_from</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">model_to</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.opt.conversion.ModeloptStateManager.transfer_state_dict" title="Link to this definition"></a></dt>
+<dd><p>Transfer the state (same instance) from one model to another.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>model_from</strong> (<em>Module</em>)</p></li>
+<li><p><strong>model_to</strong> (<em>Module</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.opt.conversion.ModeloptStateManager.update_last_state_before_new_mode">
+<span class="sig-name descname"><span class="pre">update_last_state_before_new_mode</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.opt.conversion.ModeloptStateManager.update_last_state_before_new_mode" title="Link to this definition"></a></dt>
+<dd><p>Update the metadata and config of the last mode applied to the model.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>model</strong> (<em>Module</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.opt.conversion.ModeloptStateManager.update_last_state_before_save">
+<span class="sig-name descname"><span class="pre">update_last_state_before_save</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.opt.conversion.ModeloptStateManager.update_last_state_before_save" title="Link to this definition"></a></dt>
+<dd><p>Update the metadata and config of the last mode applied to the model.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>model</strong> (<em>Module</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.opt.conversion.apply_mode">
+<span class="sig-name descname"><span class="pre">apply_mode</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">mode</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">registry</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">init_state</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">mode_kwargs</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.opt.conversion.apply_mode" title="Link to this definition"></a></dt>
+<dd><p>Apply the provided modes the model, record the changes, and return the model.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>model</strong> (<em>Module</em><em> | </em><em>type</em><em>[</em><em>Module</em><em>] </em><em>| </em><em>tuple</em><em> | </em><em>Callable</em>) – A model-like object. Can be an nn.Module, a model class type, or a tuple.
+tuple must be of the form <code class="docutils literal notranslate"><span class="pre">(model_cls,)</span></code> or <code class="docutils literal notranslate"><span class="pre">(model_cls,</span> <span class="pre">args)</span></code> or
+<code class="docutils literal notranslate"><span class="pre">(model_cls,</span> <span class="pre">args,</span> <span class="pre">kwargs)</span></code>. Model will be initialized as
+<code class="docutils literal notranslate"><span class="pre">model_cls(*args,</span> <span class="pre">**kwargs)</span></code>.</p></li>
+<li><p><strong>mode</strong> (<a class="reference internal" href="modelopt.torch.opt.mode.html#modelopt.torch.opt.mode.ModeDescriptor" title="modelopt.torch.opt.mode.ModeDescriptor"><em>ModeDescriptor</em></a><em> | </em><em>str</em><em> | </em><em>list</em><em>[</em><a class="reference internal" href="modelopt.torch.opt.mode.html#modelopt.torch.opt.mode.ModeDescriptor" title="modelopt.torch.opt.mode.ModeDescriptor"><em>ModeDescriptor</em></a><em> | </em><em>str</em><em>] </em><em>| </em><em>list</em><em>[</em><em>tuple</em><em>[</em><em>str</em><em>, </em><em>dict</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>]</em><em>]</em><em>]</em>) – A mode, a list of modes or a list of tuples containing the mode and its config. The
+mode may be specified as a string or as the actual
+<a class="reference internal" href="modelopt.torch.opt.mode.html#modelopt.torch.opt.mode.ModeDescriptor" title="modelopt.torch.opt.mode.ModeDescriptor"><code class="xref py py-class docutils literal notranslate"><span class="pre">ModeDescriptor</span></code></a> class such as
+<code class="xref py py-class docutils literal notranslate"><span class="pre">QuantizeModeDescriptor</span></code> class.</p></li>
+<li><p><strong>registry</strong> (<em>_ModeRegistryCls</em><em> | </em><em>None</em>) – An optional mode registry from which to retrieve the mode. If not provided, all
+registries will be searched.</p></li>
+<li><p><strong>init_state</strong> (<em>bool</em><em> | </em><em>None</em>) – Flag indicating whether we should initialize the state manager for the model. If
+not provided, it will be inferred from the model. This flag can be used to enforce a
+certain behavior. For example, for <code class="docutils literal notranslate"><span class="pre">init_state=True</span></code> the state manager will raise an
+error if the model already contains state.</p></li>
+<li><p><strong>mode_kwargs</strong> (<em>dict</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>] </em><em>| </em><em>list</em><em>[</em><em>dict</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>]</em><em>] </em><em>| </em><em>None</em>) – Optional keyword arguments for mode conversion. Can be a single dictionary
+(applied to all modes) or a list of dictionaries (one per mode). These arguments
+are passed to each mode’s convert entrypoint but are not saved in modelopt state.
+This is useful for passing non-serializable objects (like custom functions) that aren’t
+needed when restoring the model.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>The converted model after applying the desired modes.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>Module</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.opt.conversion.load_modelopt_state">
+<span class="sig-name descname"><span class="pre">load_modelopt_state</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">modelopt_state_path</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">**</span></span><span class="n"><span class="pre">kwargs</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.opt.conversion.load_modelopt_state" title="Link to this definition"></a></dt>
+<dd><p>Load the modelopt state from a file.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>modelopt_state_path</strong> (<em>str</em><em> | </em><em>PathLike</em>) – Target file location.</p></li>
+<li><p><strong>**kwargs</strong> – additional args for <code class="docutils literal notranslate"><span class="pre">torch.load()</span></code>.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>A modelopt state dictionary describing the modifications to the model.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>dict</em>[<em>str</em>, <em>Any</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.opt.conversion.modelopt_state">
+<span class="sig-name descname"><span class="pre">modelopt_state</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.opt.conversion.modelopt_state" title="Link to this definition"></a></dt>
+<dd><p>Return the modelopt state dict describing the modifications to the model.</p>
+<p>Note that the returned <code class="docutils literal notranslate"><span class="pre">modelopt_state</span></code> does not contain the model parameters such as weights and biases.
+<code class="docutils literal notranslate"><span class="pre">modelopt_state</span></code> is useful for saving and loading various modelopt optimization states separately from the
+model parameters. For example:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">modelopt.torch.opt</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">mto</span>
+
+<span class="c1"># Save the modelopt state and model weights separately</span>
+<span class="n">torch</span><span class="o">.</span><span class="n">save</span><span class="p">(</span><span class="n">mto</span><span class="o">.</span><span class="n">modelopt_state</span><span class="p">(</span><span class="n">model</span><span class="p">),</span> <span class="s2">&quot;modelopt_state.pt&quot;</span><span class="p">)</span> <span class="c1"># Save the modelopt state</span>
+<span class="n">torch</span><span class="o">.</span><span class="n">save</span><span class="p">(</span><span class="n">model</span><span class="o">.</span><span class="n">state_dict</span><span class="p">(),</span> <span class="s2">&quot;model_weights.pt&quot;</span><span class="p">)</span> <span class="c1"># Save the model weights</span>
+</pre></div>
+</div>
+<p>If you want to save the model weights and the modelopt state together, please use
+<a class="reference internal" href="#modelopt.torch.opt.conversion.save" title="modelopt.torch.opt.conversion.save"><code class="xref py py-meth docutils literal notranslate"><span class="pre">mto.save()</span></code></a>.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>model</strong> (<em>Module</em>) – the modelopt-modified model.</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>An modelopt state dictionary describing the modifications to the model.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>dict</em>[<em>str</em>, <em>Any</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.opt.conversion.restore">
+<span class="sig-name descname"><span class="pre">restore</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">f</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">**</span></span><span class="n"><span class="pre">kwargs</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.opt.conversion.restore" title="Link to this definition"></a></dt>
+<dd><p>Load the checkpoint, restore the modelopt model modifications, and load the model’s weights.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>model</strong> (<em>Module</em><em> | </em><em>type</em><em>[</em><em>Module</em><em>] </em><em>| </em><em>tuple</em><em> | </em><em>Callable</em>) – A model-like object. Can be an nn.Module, a model class type, or a tuple.
+tuple must be of the form <code class="docutils literal notranslate"><span class="pre">(model_cls,)</span></code> or <code class="docutils literal notranslate"><span class="pre">(model_cls,</span> <span class="pre">args)</span></code> or <code class="docutils literal notranslate"><span class="pre">(model_cls,</span> <span class="pre">args,</span> <span class="pre">kwargs)</span></code>.
+Model will be initialized as <code class="docutils literal notranslate"><span class="pre">model_cls(*args,</span> <span class="pre">**kwargs)</span></code>.</p></li>
+<li><p><strong>f</strong> (<em>str</em><em> | </em><em>PathLike</em><em> | </em><em>BinaryIO</em>) – Target file location generated by <a class="reference internal" href="#modelopt.torch.opt.conversion.save" title="modelopt.torch.opt.conversion.save"><code class="xref py py-meth docutils literal notranslate"><span class="pre">mto.save()</span></code></a>.</p></li>
+<li><p><strong>**kwargs</strong> – additional args for <code class="docutils literal notranslate"><span class="pre">torch.load()</span></code>.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>The model with original weights and stored architecture.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>Module</em></p>
+</dd>
+</dl>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>Note that wrappers such as DistributedDataParallel are <cite>not</cite> supported during the restore
+process. Please wrap the model after the restore process.</p>
+</div>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.opt.conversion.restore_from_modelopt_state">
+<span class="sig-name descname"><span class="pre">restore_from_modelopt_state</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">modelopt_state</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">modelopt_state_path</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.opt.conversion.restore_from_modelopt_state" title="Link to this definition"></a></dt>
+<dd><p>Restore the model architecture from the modelopt state dictionary based on the user-provided model.</p>
+<p>This method does not restore the model parameters such as weights, biases and quantization scales.
+Please load the weights and biases with the original checkpoint loading method after restoring
+modelopt states with <cite>restore_from_modelopt_state</cite>. For example:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">modelopt.torch.opt</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">mto</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">modelopt.torch.utils</span><span class="w"> </span><span class="kn">import</span> <span class="n">safe_load</span>
+
+<span class="n">model</span> <span class="o">=</span> <span class="o">...</span>  <span class="c1"># Create the model-like object</span>
+
+<span class="c1"># Restore the previously saved modelopt state followed by model weights</span>
+<span class="n">mto</span><span class="o">.</span><span class="n">restore_from_modelopt_state</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="n">modelopt_state_path</span><span class="o">=</span><span class="s2">&quot;modelopt_state.pt&quot;</span><span class="p">)</span>
+<span class="n">model</span><span class="o">.</span><span class="n">load_state_dict</span><span class="p">(</span><span class="n">safe_load</span><span class="p">(</span><span class="s2">&quot;model_weights.pt&quot;</span><span class="p">),</span> <span class="o">...</span><span class="p">)</span>  <span class="c1"># Load the model weights</span>
+</pre></div>
+</div>
+<p>If you want to restore the model weights and the modelopt state with saved scales, please use
+<a class="reference internal" href="#modelopt.torch.opt.conversion.restore" title="modelopt.torch.opt.conversion.restore"><code class="xref py py-meth docutils literal notranslate"><span class="pre">mto.restore()</span></code></a>.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>model</strong> (<em>Module</em><em> | </em><em>type</em><em>[</em><em>Module</em><em>] </em><em>| </em><em>tuple</em><em> | </em><em>Callable</em>) – A model-like object. Can be an nn.Module, a model class type, or a tuple.
+tuple must be of the form <code class="docutils literal notranslate"><span class="pre">(model_cls,)</span></code> or <code class="docutils literal notranslate"><span class="pre">(model_cls,</span> <span class="pre">args)</span></code> or
+<code class="docutils literal notranslate"><span class="pre">(model_cls,</span> <span class="pre">args,</span> <span class="pre">kwargs)</span></code>. Model will be initialized as
+<code class="docutils literal notranslate"><span class="pre">model_cls(*args,</span> <span class="pre">**kwargs)</span></code>.</p></li>
+<li><p><strong>modelopt_state</strong> (<em>dict</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>] </em><em>| </em><em>None</em>) – The modelopt state dict describing the modelopt modifications to the model. The
+<code class="docutils literal notranslate"><span class="pre">modelopt_state</span></code> can be generated via
+<a class="reference internal" href="#modelopt.torch.opt.conversion.modelopt_state" title="modelopt.torch.opt.conversion.modelopt_state"><code class="xref py py-meth docutils literal notranslate"><span class="pre">mto.modelopt_state()</span></code></a>.
+Cannot be used with modelopt_state_path.</p></li>
+<li><p><strong>modelopt_state_path</strong> (<em>str</em><em> | </em><em>PathLike</em><em> | </em><em>None</em>) – The path to the modelopt state file.
+Cannot be used with modelopt_state.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>A modified model architecture based on the restored modifications with the unmodified
+weights as stored in the provided <code class="docutils literal notranslate"><span class="pre">model</span></code> argument.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>Module</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.opt.conversion.save">
+<span class="sig-name descname"><span class="pre">save</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">f</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">**</span></span><span class="n"><span class="pre">kwargs</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.opt.conversion.save" title="Link to this definition"></a></dt>
+<dd><p>Save a model’s state dict together with the modelopt state dict to restore its architecture.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>model</strong> (<em>Module</em>) – Any model.</p></li>
+<li><p><strong>f</strong> (<em>str</em><em> | </em><em>PathLike</em><em> | </em><em>BinaryIO</em>) – Target file location.</p></li>
+<li><p><strong>**kwargs</strong> – additional args for <code class="docutils literal notranslate"><span class="pre">torch.save()</span></code>.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="modelopt.torch.opt.config.html" class="btn btn-neutral float-left" title="config" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="modelopt.torch.opt.dynamic.html" class="btn btn-neutral float-right" title="dynamic" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2023-2025, NVIDIA Corporation.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

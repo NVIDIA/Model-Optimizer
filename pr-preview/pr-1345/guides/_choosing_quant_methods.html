@@ -1,0 +1,268 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Best practices to choose the right quantization methods &mdash; Model Optimizer 0.0.1.dev1+gc05d1e598</title>
+      <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
+      <link rel="stylesheet" type="text/css" href="../_static/tabs.css?v=4c969af8" />
+      <link rel="stylesheet" type="text/css" href="../_static/togglebutton.css?v=9c3e77be" />
+      <link rel="stylesheet" type="text/css" href="../_static/autodoc_pydantic.css" />
+      <link rel="stylesheet" type="text/css" href="../_static/custom.css?v=7a224f4b" />
+
+  
+      <script src="../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../_static/documentation_options.js?v=5929fcd5"></script>
+      <script src="../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
+      <script src="../_static/copybutton.js?v=20d3d275"></script>
+      <script src="../_static/tabs.js?v=3ee01567"></script>
+      <script>let toggleHintShow = 'Click to show';</script>
+      <script>let toggleHintHide = 'Click to hide';</script>
+      <script>let toggleOpenOnPrint = 'true';</script>
+      <script src="../_static/togglebutton.js?v=b8b12719"></script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+    <script src="../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+    <link rel="next" title="PyTorch Quantization" href="_pytorch_quantization.html" />
+    <link rel="prev" title="Basic Concepts" href="_basic_quantization.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../index.html" class="icon icon-home">
+            Model Optimizer
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../getting_started/1_overview.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../getting_started/2_installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch to ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - Windows</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_qat" rel="noopener noreferrer" target="_blank">Quick Start: QAT</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning" rel="noopener noreferrer" target="_blank">Quick Start: Pruning</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_distill" rel="noopener noreferrer" target="_blank">Quick Start: Distillation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/speculative_decoding" rel="noopener noreferrer" target="_blank">Quick Start: Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_sparsity" rel="noopener noreferrer" target="_blank">Quick Start: Sparsity</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Guides</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="0_support_matrix.html">Support Matrix</a></li>
+<li class="toctree-l1"><a class="reference internal" href="10_recipes.html">Recipes</a></li>
+<li class="toctree-l1 current"><a class="reference internal" href="1_quantization.html">Quantization</a><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="_basic_quantization.html">Basic Concepts</a></li>
+<li class="toctree-l2 current"><a class="current reference internal" href="#">Best practices to choose the right quantization methods</a></li>
+<li class="toctree-l2"><a class="reference internal" href="_pytorch_quantization.html">PyTorch Quantization</a></li>
+<li class="toctree-l2"><a class="reference internal" href="_quant_cfg.html">Quantization Configuration (quant_cfg)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="_customized_model_quantization.html">Guides to quantize a customized model from Hugging Face for TensorRT-LLM deployment</a></li>
+<li class="toctree-l2"><a class="reference internal" href="_compress_quantized_models.html">Compress quantized models</a></li>
+<li class="toctree-l2"><a class="reference internal" href="_onnx_quantization.html">ONNX Quantization - Linux (Beta)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="windows_guides/_ONNX_PTQ_guide.html">ONNX Quantization - Windows</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="2_save_load.html">Saving &amp; Restoring</a></li>
+<li class="toctree-l1"><a class="reference internal" href="3_pruning.html">Pruning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="4_distillation.html">Distillation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="5_speculative_decoding.html">Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference internal" href="6_sparsity.html">Sparsity</a></li>
+<li class="toctree-l1"><a class="reference internal" href="7_nas.html">NAS</a></li>
+<li class="toctree-l1"><a class="reference internal" href="8_autocast.html">AutoCast (ONNX)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="9_autotune.html">Autotune (ONNX)</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Deployment</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../deployment/1_tensorrt_llm.html">TensorRT-LLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../deployment/2_onnxruntime.html">Onnxruntime</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../deployment/3_unified_hf.html">Unified HuggingFace Checkpoint</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Examples</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../examples/0_all_examples.html">All GitHub Examples</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Reference</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../reference/0_changelog.html">Changelog</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../reference/1_modelopt_api.html">modelopt API</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Support</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../support/1_contact.html">Contact us</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../support/2_faqs.html">FAQs</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../index.html">Model Optimizer</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content style-external-links">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="1_quantization.html">Quantization</a></li>
+      <li class="breadcrumb-item active">Best practices to choose the right quantization methods</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../_sources/guides/_choosing_quant_methods.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="best-practices-to-choose-the-right-quantization-methods">
+<h1>Best practices to choose the right quantization methods<a class="headerlink" href="#best-practices-to-choose-the-right-quantization-methods" title="Link to this heading"></a></h1>
+<p>A quantization method comprises three primary components:</p>
+<ol class="arabic simple">
+<li><p>Weight precision format</p></li>
+<li><p>Activation precision format</p></li>
+<li><p>Calibration algorithms</p></li>
+</ol>
+<p>Typically, in the context of small-batch inference scenarios (batch size ≤ 4), the inference is often ‘memory-bound’. In memory-bound inference, the throughput is limited by the weight loading time from GPU memory to GPU cache - i.e, inference is memory bandwidth limited.
+In this regime of operation, weight-only quantization methods such as INT4 AWQ or INT4-FP8 AWQ gives superior performance improvement.</p>
+<p>Conversely, for large-batch inference scenarios, such as serving scenarios (batch size ≥ 16), both memory bandwidth and computation density become crucial factors.
+Consequently, it’s recommended to opt for a quantization method that has both weights &amp; activation quantization as well as lower precision computation kernels. For batch size ≥ 16, the choice of quantization method can be model specific.</p>
+<p>We suggest prioritizing using FP8 first, as FP8 causes very little accuracy degradation and gives strong performance.
+If FP8 performance does not meet your requirements, you could try INT4-FP8 AWQ.
+If your deployment is on Ampere GPUs or earlier, we recommend using INT4 AWQ or INT8 SQ.</p>
+<p>Based on specific use cases, users might have different tolerances on accuracy degradation and calibration time. The table below summarizes the tradeoffs* to consider when choosing a quantization method.</p>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Quantization Methods</p></th>
+<th class="head"><p>Performance
+small-batch</p></th>
+<th class="head"><p>Performance
+large-batch</p></th>
+<th class="head"><p>Accuracy
+degradation</p></th>
+<th class="head"><p>Details</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>FP8</p></td>
+<td><p>Medium</p></td>
+<td><p>Medium</p></td>
+<td><p>Very Low</p></td>
+<td><ul class="simple">
+<li><p>FP8 per-tensor weight &amp; activation quantization with min-max calibration.</p></li>
+<li><p>Compresses FP16/BF16 model to 50% of original size.</p></li>
+<li><p>Calibration time: minutes**.</p></li>
+<li><p>Deploy via TensorRT, TensorRT-LLM. Supported GPUs: Ada, Hopper and later.</p></li>
+</ul>
+</td>
+</tr>
+<tr class="row-odd"><td><p>INT8 SmoothQuant</p></td>
+<td><p>Medium</p></td>
+<td><p>Medium</p></td>
+<td><p>Medium</p></td>
+<td><ul class="simple">
+<li><p>8-bit integer quantization with a variant of <a class="reference external" href="https://arxiv.org/pdf/2211.10438.pdf" rel="noopener noreferrer" target="_blank">SmoothQuant</a> calibration.</p></li>
+<li><p>Per-channel weight quantization, per-tensor activation quantization.</p></li>
+<li><p>Compresses FP16/BF16 model to 50% of original size</p></li>
+<li><p>Calibration time: minutes**.</p></li>
+<li><p>Deploy using TensorRT, TensorRT-LLM. Supported on most GPUs.</p></li>
+</ul>
+</td>
+</tr>
+<tr class="row-even"><td><p>INT4 Weights only AWQ
+(W4A16)</p></td>
+<td><p>High</p></td>
+<td><p>Low</p></td>
+<td><p>Low</p></td>
+<td><ul class="simple">
+<li><p>4-bit integer group-wise/block-wise weight only quantization with <a class="reference external" href="https://arxiv.org/pdf/2306.00978.pdf" rel="noopener noreferrer" target="_blank">AWQ</a> calibration.</p></li>
+<li><p>Compresses FP16/BF16 model to 25% of original size.</p></li>
+<li><p>Calibration time: tens of minutes**.</p></li>
+<li><p>Deploy via TensorRT-LLM. Supported GPUs: Ampere and later.</p></li>
+</ul>
+</td>
+</tr>
+<tr class="row-odd"><td><p>INT4-FP8 AWQ (W4A8)</p></td>
+<td><p>High</p></td>
+<td><p>Medium</p></td>
+<td><p>Low</p></td>
+<td><ul class="simple">
+<li><p>4-bit integer group-wise/block-wise weight quantization, FP8 per-tensor activation quantization &amp; <a class="reference external" href="https://arxiv.org/pdf/2306.00978.pdf" rel="noopener noreferrer" target="_blank">AWQ</a> calibration.</p></li>
+<li><p>Compresses FP16/BF16 model to 25% of original size.</p></li>
+<li><p>Calibration time: tens of minutes**.</p></li>
+<li><p>Deploy via TensorRT-LLM. Supported GPUs: Ada, Hopper and later.</p></li>
+</ul>
+</td>
+</tr>
+</tbody>
+</table>
+<div class="line-block">
+<div class="line">* The performance and impact are measured on 10+ popular LLMs. We’ll follow up with more data points.</div>
+<div class="line">** Calibration time is subject to the actual model size.</div>
+</div>
+<dl class="simple">
+<dt>Please see how to apply these quantization methods below:</dt><dd><ul class="simple">
+<li><p><a class="reference internal" href="_pytorch_quantization.html"><span class="doc">Quantizing pytorch models</span></a></p></li>
+<li><p><a class="reference internal" href="_onnx_quantization.html"><span class="doc">Quantizing ONNX models</span></a></p></li>
+</ul>
+</dd>
+</dl>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="_basic_quantization.html" class="btn btn-neutral float-left" title="Basic Concepts" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="_pytorch_quantization.html" class="btn btn-neutral float-right" title="PyTorch Quantization" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2023-2025, NVIDIA Corporation.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

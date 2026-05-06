@@ -1,0 +1,1883 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="./">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Python Module Index &mdash; Model Optimizer 0.0.1.dev1+g66c375ded</title>
+      <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="_static/copybutton.css?v=76b2166b" />
+      <link rel="stylesheet" type="text/css" href="_static/tabs.css?v=4c969af8" />
+      <link rel="stylesheet" type="text/css" href="_static/togglebutton.css?v=9c3e77be" />
+      <link rel="stylesheet" type="text/css" href="_static/autodoc_pydantic.css" />
+      <link rel="stylesheet" type="text/css" href="_static/custom.css?v=7a224f4b" />
+
+  
+      <script src="_static/jquery.js?v=5d32c60e"></script>
+      <script src="_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="_static/documentation_options.js?v=5929fcd5"></script>
+      <script src="_static/doctools.js?v=9bcbadda"></script>
+      <script src="_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="_static/clipboard.min.js?v=a7894cd8"></script>
+      <script src="_static/copybutton.js?v=20d3d275"></script>
+      <script src="_static/tabs.js?v=3ee01567"></script>
+      <script>let toggleHintShow = 'Click to show';</script>
+      <script>let toggleHintHide = 'Click to hide';</script>
+      <script>let toggleOpenOnPrint = 'true';</script>
+      <script src="_static/togglebutton.js?v=b8b12719"></script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+    <script src="_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+ 
+
+
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="index.html" class="icon icon-home">
+            Model Optimizer
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="getting_started/1_overview.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="getting_started/2_installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch to ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - Windows</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_qat" rel="noopener noreferrer" target="_blank">Quick Start: QAT</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning" rel="noopener noreferrer" target="_blank">Quick Start: Pruning</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_distill" rel="noopener noreferrer" target="_blank">Quick Start: Distillation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/speculative_decoding" rel="noopener noreferrer" target="_blank">Quick Start: Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_sparsity" rel="noopener noreferrer" target="_blank">Quick Start: Sparsity</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Guides</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="guides/0_support_matrix.html">Support Matrix</a></li>
+<li class="toctree-l1"><a class="reference internal" href="guides/10_recipes.html">Recipes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="guides/1_quantization.html">Quantization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="guides/2_save_load.html">Saving &amp; Restoring</a></li>
+<li class="toctree-l1"><a class="reference internal" href="guides/3_pruning.html">Pruning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="guides/4_distillation.html">Distillation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="guides/5_speculative_decoding.html">Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference internal" href="guides/6_sparsity.html">Sparsity</a></li>
+<li class="toctree-l1"><a class="reference internal" href="guides/7_nas.html">NAS</a></li>
+<li class="toctree-l1"><a class="reference internal" href="guides/8_autocast.html">AutoCast (ONNX)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="guides/9_autotune.html">Autotune (ONNX)</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Deployment</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="deployment/1_tensorrt_llm.html">TensorRT-LLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="deployment/2_onnxruntime.html">Onnxruntime</a></li>
+<li class="toctree-l1"><a class="reference internal" href="deployment/3_unified_hf.html">Unified HuggingFace Checkpoint</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Examples</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="examples/0_all_examples.html">All GitHub Examples</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Reference</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="reference/0_changelog.html">Changelog</a></li>
+<li class="toctree-l1"><a class="reference internal" href="reference/1_modelopt_api.html">modelopt API</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Support</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="support/1_contact.html">Contact us</a></li>
+<li class="toctree-l1"><a class="reference internal" href="support/2_faqs.html">FAQs</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="index.html">Model Optimizer</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content style-external-links">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">Python Module Index</li>
+      <li class="wy-breadcrumbs-aside">
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+
+   <h1>Python Module Index</h1>
+
+   <div class="modindex-jumpbox">
+   <a href="#cap-m"><strong>m</strong></a>
+   </div>
+
+   <table class="indextable modindextable">
+     <tr class="pcap"><td></td><td>&#160;</td><td></td></tr>
+     <tr class="cap" id="cap-m"><td></td><td>
+       <strong>m</strong></td><td></td></tr>
+     <tr>
+       <td><img src="_static/minus.png" class="toggler"
+              id="toggle-1" style="display: none" alt="-" /></td>
+       <td>
+       <code class="xref">modelopt</code></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.deploy.html#module-modelopt.deploy"><code class="xref">modelopt.deploy</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.deploy.llm.html#module-modelopt.deploy.llm"><code class="xref">modelopt.deploy.llm</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.deploy.llm.generate.html#module-modelopt.deploy.llm.generate"><code class="xref">modelopt.deploy.llm.generate</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.onnx.html#module-modelopt.onnx"><code class="xref">modelopt.onnx</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.onnx.autocast.html#module-modelopt.onnx.autocast"><code class="xref">modelopt.onnx.autocast</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.onnx.autocast.convert.html#module-modelopt.onnx.autocast.convert"><code class="xref">modelopt.onnx.autocast.convert</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.onnx.autocast.graphsanitizer.html#module-modelopt.onnx.autocast.graphsanitizer"><code class="xref">modelopt.onnx.autocast.graphsanitizer</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.onnx.autocast.logging_config.html#module-modelopt.onnx.autocast.logging_config"><code class="xref">modelopt.onnx.autocast.logging_config</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.onnx.autocast.nodeclassifier.html#module-modelopt.onnx.autocast.nodeclassifier"><code class="xref">modelopt.onnx.autocast.nodeclassifier</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.onnx.autocast.precisionconverter.html#module-modelopt.onnx.autocast.precisionconverter"><code class="xref">modelopt.onnx.autocast.precisionconverter</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.onnx.autocast.referencerunner.html#module-modelopt.onnx.autocast.referencerunner"><code class="xref">modelopt.onnx.autocast.referencerunner</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.onnx.autocast.utils.html#module-modelopt.onnx.autocast.utils"><code class="xref">modelopt.onnx.autocast.utils</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.onnx.export.html#module-modelopt.onnx.export"><code class="xref">modelopt.onnx.export</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.onnx.graph_surgery.html#module-modelopt.onnx.graph_surgery"><code class="xref">modelopt.onnx.graph_surgery</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.onnx.llm_export_utils.html#module-modelopt.onnx.llm_export_utils"><code class="xref">modelopt.onnx.llm_export_utils</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.onnx.llm_export_utils.export_utils.html#module-modelopt.onnx.llm_export_utils.export_utils"><code class="xref">modelopt.onnx.llm_export_utils.export_utils</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.onnx.llm_export_utils.quantization_utils.html#module-modelopt.onnx.llm_export_utils.quantization_utils"><code class="xref">modelopt.onnx.llm_export_utils.quantization_utils</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.onnx.llm_export_utils.surgeon_utils.html#module-modelopt.onnx.llm_export_utils.surgeon_utils"><code class="xref">modelopt.onnx.llm_export_utils.surgeon_utils</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.onnx.logging_config.html#module-modelopt.onnx.logging_config"><code class="xref">modelopt.onnx.logging_config</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.onnx.op_types.html#module-modelopt.onnx.op_types"><code class="xref">modelopt.onnx.op_types</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.onnx.quantization.html#module-modelopt.onnx.quantization"><code class="xref">modelopt.onnx.quantization</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.onnx.quantization.autotune.html#module-modelopt.onnx.quantization.autotune"><code class="xref">modelopt.onnx.quantization.autotune</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.onnx.quantization.calib_utils.html#module-modelopt.onnx.quantization.calib_utils"><code class="xref">modelopt.onnx.quantization.calib_utils</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.onnx.quantization.extensions.html#module-modelopt.onnx.quantization.extensions"><code class="xref">modelopt.onnx.quantization.extensions</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.onnx.quantization.fp8.html#module-modelopt.onnx.quantization.fp8"><code class="xref">modelopt.onnx.quantization.fp8</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.onnx.quantization.graph_utils.html#module-modelopt.onnx.quantization.graph_utils"><code class="xref">modelopt.onnx.quantization.graph_utils</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.onnx.quantization.gs_patching.html#module-modelopt.onnx.quantization.gs_patching"><code class="xref">modelopt.onnx.quantization.gs_patching</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.onnx.quantization.int4.html#module-modelopt.onnx.quantization.int4"><code class="xref">modelopt.onnx.quantization.int4</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.onnx.quantization.int8.html#module-modelopt.onnx.quantization.int8"><code class="xref">modelopt.onnx.quantization.int8</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.onnx.quantization.operators.html#module-modelopt.onnx.quantization.operators"><code class="xref">modelopt.onnx.quantization.operators</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.onnx.quantization.ort_patching.html#module-modelopt.onnx.quantization.ort_patching"><code class="xref">modelopt.onnx.quantization.ort_patching</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.onnx.quantization.ort_utils.html#module-modelopt.onnx.quantization.ort_utils"><code class="xref">modelopt.onnx.quantization.ort_utils</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.onnx.quantization.partitioning.html#module-modelopt.onnx.quantization.partitioning"><code class="xref">modelopt.onnx.quantization.partitioning</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.onnx.quantization.qdq_utils.html#module-modelopt.onnx.quantization.qdq_utils"><code class="xref">modelopt.onnx.quantization.qdq_utils</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.onnx.quantization.quant_utils.html#module-modelopt.onnx.quantization.quant_utils"><code class="xref">modelopt.onnx.quantization.quant_utils</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.onnx.trt_utils.html#module-modelopt.onnx.trt_utils"><code class="xref">modelopt.onnx.trt_utils</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.onnx.utils.html#module-modelopt.onnx.utils"><code class="xref">modelopt.onnx.utils</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.html#module-modelopt.torch"><code class="xref">modelopt.torch</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.distill.html#module-modelopt.torch.distill"><code class="xref">modelopt.torch.distill</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.distill.config.html#module-modelopt.torch.distill.config"><code class="xref">modelopt.torch.distill.config</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.distill.distillation.html#module-modelopt.torch.distill.distillation"><code class="xref">modelopt.torch.distill.distillation</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.distill.distillation_model.html#module-modelopt.torch.distill.distillation_model"><code class="xref">modelopt.torch.distill.distillation_model</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.distill.layerwise_distillation_model.html#module-modelopt.torch.distill.layerwise_distillation_model"><code class="xref">modelopt.torch.distill.layerwise_distillation_model</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.distill.loss_balancers.html#module-modelopt.torch.distill.loss_balancers"><code class="xref">modelopt.torch.distill.loss_balancers</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.distill.losses.html#module-modelopt.torch.distill.losses"><code class="xref">modelopt.torch.distill.losses</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.distill.mode.html#module-modelopt.torch.distill.mode"><code class="xref">modelopt.torch.distill.mode</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.distill.plugins.html#module-modelopt.torch.distill.plugins"><code class="xref">modelopt.torch.distill.plugins</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.distill.registry.html#module-modelopt.torch.distill.registry"><code class="xref">modelopt.torch.distill.registry</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.export.html#module-modelopt.torch.export"><code class="xref">modelopt.torch.export</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.export.convert_hf_config.html#module-modelopt.torch.export.convert_hf_config"><code class="xref">modelopt.torch.export.convert_hf_config</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.export.diffusers_utils.html#module-modelopt.torch.export.diffusers_utils"><code class="xref">modelopt.torch.export.diffusers_utils</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.export.distribute.html#module-modelopt.torch.export.distribute"><code class="xref">modelopt.torch.export.distribute</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.export.hf_config_map.html#module-modelopt.torch.export.hf_config_map"><code class="xref">modelopt.torch.export.hf_config_map</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.export.layer_utils.html#module-modelopt.torch.export.layer_utils"><code class="xref">modelopt.torch.export.layer_utils</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.export.mcore_config_map.html#module-modelopt.torch.export.mcore_config_map"><code class="xref">modelopt.torch.export.mcore_config_map</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.export.model_config.html#module-modelopt.torch.export.model_config"><code class="xref">modelopt.torch.export.model_config</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.export.model_config_export.html#module-modelopt.torch.export.model_config_export"><code class="xref">modelopt.torch.export.model_config_export</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.export.model_config_utils.html#module-modelopt.torch.export.model_config_utils"><code class="xref">modelopt.torch.export.model_config_utils</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.export.model_utils.html#module-modelopt.torch.export.model_utils"><code class="xref">modelopt.torch.export.model_utils</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.export.moe_utils.html#module-modelopt.torch.export.moe_utils"><code class="xref">modelopt.torch.export.moe_utils</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.export.plugins.html#module-modelopt.torch.export.plugins"><code class="xref">modelopt.torch.export.plugins</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.export.postprocess.html#module-modelopt.torch.export.postprocess"><code class="xref">modelopt.torch.export.postprocess</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.export.quant_utils.html#module-modelopt.torch.export.quant_utils"><code class="xref">modelopt.torch.export.quant_utils</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.export.tensorrt_llm_type.html#module-modelopt.torch.export.tensorrt_llm_type"><code class="xref">modelopt.torch.export.tensorrt_llm_type</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.export.tensorrt_llm_utils.html#module-modelopt.torch.export.tensorrt_llm_utils"><code class="xref">modelopt.torch.export.tensorrt_llm_utils</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.export.transformer_engine.html#module-modelopt.torch.export.transformer_engine"><code class="xref">modelopt.torch.export.transformer_engine</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.export.unified_export_hf.html#module-modelopt.torch.export.unified_export_hf"><code class="xref">modelopt.torch.export.unified_export_hf</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.export.unified_export_megatron.html#module-modelopt.torch.export.unified_export_megatron"><code class="xref">modelopt.torch.export.unified_export_megatron</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.kernels.html#module-modelopt.torch.kernels"><code class="xref">modelopt.torch.kernels</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.kernels.common.html#module-modelopt.torch.kernels.common"><code class="xref">modelopt.torch.kernels.common</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.kernels.common.attention.html#module-modelopt.torch.kernels.common.attention"><code class="xref">modelopt.torch.kernels.common.attention</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.kernels.quantization.html#module-modelopt.torch.kernels.quantization"><code class="xref">modelopt.torch.kernels.quantization</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.kernels.quantization.attention.html#module-modelopt.torch.kernels.quantization.attention"><code class="xref">modelopt.torch.kernels.quantization.attention</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.kernels.quantization.conv.html#module-modelopt.torch.kernels.quantization.conv"><code class="xref">modelopt.torch.kernels.quantization.conv</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.kernels.quantization.conv.bench_implicit_gemm.html#module-modelopt.torch.kernels.quantization.conv.bench_implicit_gemm"><code class="xref">modelopt.torch.kernels.quantization.conv.bench_implicit_gemm</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.kernels.quantization.conv.implicit_gemm_cuda.html#module-modelopt.torch.kernels.quantization.conv.implicit_gemm_cuda"><code class="xref">modelopt.torch.kernels.quantization.conv.implicit_gemm_cuda</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.kernels.quantization.gemm.html#module-modelopt.torch.kernels.quantization.gemm"><code class="xref">modelopt.torch.kernels.quantization.gemm</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.kernels.quantization.gemm.fp4_kernel.html#module-modelopt.torch.kernels.quantization.gemm.fp4_kernel"><code class="xref">modelopt.torch.kernels.quantization.gemm.fp4_kernel</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.kernels.quantization.gemm.fp4_kernel_hopper.html#module-modelopt.torch.kernels.quantization.gemm.fp4_kernel_hopper"><code class="xref">modelopt.torch.kernels.quantization.gemm.fp4_kernel_hopper</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.kernels.quantization.gemm.fp8_kernel.html#module-modelopt.torch.kernels.quantization.gemm.fp8_kernel"><code class="xref">modelopt.torch.kernels.quantization.gemm.fp8_kernel</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.kernels.quantization.gemm.gptq_fused_kernel.html#module-modelopt.torch.kernels.quantization.gemm.gptq_fused_kernel"><code class="xref">modelopt.torch.kernels.quantization.gemm.gptq_fused_kernel</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.kernels.quantization.gemm.nvfp4_quant.html#module-modelopt.torch.kernels.quantization.gemm.nvfp4_quant"><code class="xref">modelopt.torch.kernels.quantization.gemm.nvfp4_quant</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.kernels.sparsity.html#module-modelopt.torch.kernels.sparsity"><code class="xref">modelopt.torch.kernels.sparsity</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.kernels.sparsity.attention.html#module-modelopt.torch.kernels.sparsity.attention"><code class="xref">modelopt.torch.kernels.sparsity.attention</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.kernels.sparsity.gemm.html#module-modelopt.torch.kernels.sparsity.gemm"><code class="xref">modelopt.torch.kernels.sparsity.gemm</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.nas.html#module-modelopt.torch.nas"><code class="xref">modelopt.torch.nas</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.nas.algorithms.html#module-modelopt.torch.nas.algorithms"><code class="xref">modelopt.torch.nas.algorithms</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.nas.autonas.html#module-modelopt.torch.nas.autonas"><code class="xref">modelopt.torch.nas.autonas</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.nas.conversion.html#module-modelopt.torch.nas.conversion"><code class="xref">modelopt.torch.nas.conversion</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.nas.hparams.html#module-modelopt.torch.nas.hparams"><code class="xref">modelopt.torch.nas.hparams</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.nas.hparams.concat.html#module-modelopt.torch.nas.hparams.concat"><code class="xref">modelopt.torch.nas.hparams.concat</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.nas.hparams.container.html#module-modelopt.torch.nas.hparams.container"><code class="xref">modelopt.torch.nas.hparams.container</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.nas.modules.html#module-modelopt.torch.nas.modules"><code class="xref">modelopt.torch.nas.modules</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.nas.modules.container.html#module-modelopt.torch.nas.modules.container"><code class="xref">modelopt.torch.nas.modules.container</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.nas.modules.conv.html#module-modelopt.torch.nas.modules.conv"><code class="xref">modelopt.torch.nas.modules.conv</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.nas.modules.linear.html#module-modelopt.torch.nas.modules.linear"><code class="xref">modelopt.torch.nas.modules.linear</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.nas.modules.norm.html#module-modelopt.torch.nas.modules.norm"><code class="xref">modelopt.torch.nas.modules.norm</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.nas.modules.utils.html#module-modelopt.torch.nas.modules.utils"><code class="xref">modelopt.torch.nas.modules.utils</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.nas.patch.html#module-modelopt.torch.nas.patch"><code class="xref">modelopt.torch.nas.patch</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.nas.plugins.html#module-modelopt.torch.nas.plugins"><code class="xref">modelopt.torch.nas.plugins</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.nas.registry.html#module-modelopt.torch.nas.registry"><code class="xref">modelopt.torch.nas.registry</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.nas.search_space.html#module-modelopt.torch.nas.search_space"><code class="xref">modelopt.torch.nas.search_space</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.nas.traced_hp.html#module-modelopt.torch.nas.traced_hp"><code class="xref">modelopt.torch.nas.traced_hp</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.nas.utils.html#module-modelopt.torch.nas.utils"><code class="xref">modelopt.torch.nas.utils</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.opt.html#module-modelopt.torch.opt"><code class="xref">modelopt.torch.opt</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.opt.config.html#module-modelopt.torch.opt.config"><code class="xref">modelopt.torch.opt.config</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.opt.config_loader.html#module-modelopt.torch.opt.config_loader"><code class="xref">modelopt.torch.opt.config_loader</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.opt.conversion.html#module-modelopt.torch.opt.conversion"><code class="xref">modelopt.torch.opt.conversion</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.opt.dynamic.html#module-modelopt.torch.opt.dynamic"><code class="xref">modelopt.torch.opt.dynamic</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.opt.hparam.html#module-modelopt.torch.opt.hparam"><code class="xref">modelopt.torch.opt.hparam</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.opt.mode.html#module-modelopt.torch.opt.mode"><code class="xref">modelopt.torch.opt.mode</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.opt.plugins.html#module-modelopt.torch.opt.plugins"><code class="xref">modelopt.torch.opt.plugins</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.opt.plugins.huggingface.html#module-modelopt.torch.opt.plugins.huggingface"><code class="xref">modelopt.torch.opt.plugins.huggingface</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.opt.searcher.html#module-modelopt.torch.opt.searcher"><code class="xref">modelopt.torch.opt.searcher</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.opt.utils.html#module-modelopt.torch.opt.utils"><code class="xref">modelopt.torch.opt.utils</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.peft.html#module-modelopt.torch.peft"><code class="xref">modelopt.torch.peft</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.peft.config.html#module-modelopt.torch.peft.config"><code class="xref">modelopt.torch.peft.config</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.peft.conversion.html#module-modelopt.torch.peft.conversion"><code class="xref">modelopt.torch.peft.conversion</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.peft.convert.html#module-modelopt.torch.peft.convert"><code class="xref">modelopt.torch.peft.convert</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.peft.custom.html#module-modelopt.torch.peft.custom"><code class="xref">modelopt.torch.peft.custom</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.peft.lora.html#module-modelopt.torch.peft.lora"><code class="xref">modelopt.torch.peft.lora</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.peft.lora.layer.html#module-modelopt.torch.peft.lora.layer"><code class="xref">modelopt.torch.peft.lora.layer</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.peft.lora.plugins.html#module-modelopt.torch.peft.lora.plugins"><code class="xref">modelopt.torch.peft.lora.plugins</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.peft.mode.html#module-modelopt.torch.peft.mode"><code class="xref">modelopt.torch.peft.mode</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.prune.html#module-modelopt.torch.prune"><code class="xref">modelopt.torch.prune</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.prune.fastnas.html#module-modelopt.torch.prune.fastnas"><code class="xref">modelopt.torch.prune.fastnas</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.prune.gradnas.html#module-modelopt.torch.prune.gradnas"><code class="xref">modelopt.torch.prune.gradnas</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.prune.importance_hooks.html#module-modelopt.torch.prune.importance_hooks"><code class="xref">modelopt.torch.prune.importance_hooks</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.prune.importance_hooks.base_hooks.html#module-modelopt.torch.prune.importance_hooks.base_hooks"><code class="xref">modelopt.torch.prune.importance_hooks.base_hooks</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.prune.importance_hooks.base_hooks_analysis.html#module-modelopt.torch.prune.importance_hooks.base_hooks_analysis"><code class="xref">modelopt.torch.prune.importance_hooks.base_hooks_analysis</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.prune.importance_hooks.compare_module_outputs.html#module-modelopt.torch.prune.importance_hooks.compare_module_outputs"><code class="xref">modelopt.torch.prune.importance_hooks.compare_module_outputs</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.prune.importance_hooks.expert_removal_hooks.html#module-modelopt.torch.prune.importance_hooks.expert_removal_hooks"><code class="xref">modelopt.torch.prune.importance_hooks.expert_removal_hooks</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.prune.importance_hooks.plugins.html#module-modelopt.torch.prune.importance_hooks.plugins"><code class="xref">modelopt.torch.prune.importance_hooks.plugins</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.prune.plugins.html#module-modelopt.torch.prune.plugins"><code class="xref">modelopt.torch.prune.plugins</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.prune.pruning.html#module-modelopt.torch.prune.pruning"><code class="xref">modelopt.torch.prune.pruning</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.html#module-modelopt.torch.puzzletron"><code class="xref">modelopt.torch.puzzletron</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.activation_scoring.html#module-modelopt.torch.puzzletron.activation_scoring"><code class="xref">modelopt.torch.puzzletron.activation_scoring</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.activation_scoring.activation_hooks.html#module-modelopt.torch.puzzletron.activation_scoring.activation_hooks"><code class="xref">modelopt.torch.puzzletron.activation_scoring.activation_hooks</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.activation_scoring.activation_hooks.utils.html#module-modelopt.torch.puzzletron.activation_scoring.activation_hooks.utils"><code class="xref">modelopt.torch.puzzletron.activation_scoring.activation_hooks.utils</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.activation_scoring.score_pruning_activations.html#module-modelopt.torch.puzzletron.activation_scoring.score_pruning_activations"><code class="xref">modelopt.torch.puzzletron.activation_scoring.score_pruning_activations</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.anymodel.html#module-modelopt.torch.puzzletron.anymodel"><code class="xref">modelopt.torch.puzzletron.anymodel</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.anymodel.converter.html#module-modelopt.torch.puzzletron.anymodel.converter"><code class="xref">modelopt.torch.puzzletron.anymodel.converter</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.anymodel.converter.base.html#module-modelopt.torch.puzzletron.anymodel.converter.base"><code class="xref">modelopt.torch.puzzletron.anymodel.converter.base</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.anymodel.converter.convert_any_model.html#module-modelopt.torch.puzzletron.anymodel.converter.convert_any_model"><code class="xref">modelopt.torch.puzzletron.anymodel.converter.convert_any_model</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.anymodel.converter.converter_factory.html#module-modelopt.torch.puzzletron.anymodel.converter.converter_factory"><code class="xref">modelopt.torch.puzzletron.anymodel.converter.converter_factory</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.anymodel.model_descriptor.html#module-modelopt.torch.puzzletron.anymodel.model_descriptor"><code class="xref">modelopt.torch.puzzletron.anymodel.model_descriptor</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.anymodel.model_descriptor.base.html#module-modelopt.torch.puzzletron.anymodel.model_descriptor.base"><code class="xref">modelopt.torch.puzzletron.anymodel.model_descriptor.base</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.anymodel.model_descriptor.model_descriptor_factory.html#module-modelopt.torch.puzzletron.anymodel.model_descriptor.model_descriptor_factory"><code class="xref">modelopt.torch.puzzletron.anymodel.model_descriptor.model_descriptor_factory</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.anymodel.models.html#module-modelopt.torch.puzzletron.anymodel.models"><code class="xref">modelopt.torch.puzzletron.anymodel.models</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.anymodel.models.gpt_oss.html#module-modelopt.torch.puzzletron.anymodel.models.gpt_oss"><code class="xref">modelopt.torch.puzzletron.anymodel.models.gpt_oss</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_converter.html#module-modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_converter"><code class="xref">modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_converter</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.html#module-modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor"><code class="xref">modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_pruned_to_mxfp4.html#module-modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_pruned_to_mxfp4"><code class="xref">modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_pruned_to_mxfp4</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.anymodel.models.llama.html#module-modelopt.torch.puzzletron.anymodel.models.llama"><code class="xref">modelopt.torch.puzzletron.anymodel.models.llama</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.anymodel.models.llama.llama_converter.html#module-modelopt.torch.puzzletron.anymodel.models.llama.llama_converter"><code class="xref">modelopt.torch.puzzletron.anymodel.models.llama.llama_converter</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.anymodel.models.llama.llama_model_descriptor.html#module-modelopt.torch.puzzletron.anymodel.models.llama.llama_model_descriptor"><code class="xref">modelopt.torch.puzzletron.anymodel.models.llama.llama_model_descriptor</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.anymodel.models.mistral_small.html#module-modelopt.torch.puzzletron.anymodel.models.mistral_small"><code class="xref">modelopt.torch.puzzletron.anymodel.models.mistral_small</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_converter.html#module-modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_converter"><code class="xref">modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_converter</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_model_descriptor.html#module-modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_model_descriptor"><code class="xref">modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_model_descriptor</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.anymodel.models.nemotron_h.html#module-modelopt.torch.puzzletron.anymodel.models.nemotron_h"><code class="xref">modelopt.torch.puzzletron.anymodel.models.nemotron_h</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_converter.html#module-modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_converter"><code class="xref">modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_converter</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.html#module-modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor"><code class="xref">modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.anymodel.models.nemotron_h_v2.html#module-modelopt.torch.puzzletron.anymodel.models.nemotron_h_v2"><code class="xref">modelopt.torch.puzzletron.anymodel.models.nemotron_h_v2</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.anymodel.models.nemotron_h_v2.nemotron_h_v2_converter.html#module-modelopt.torch.puzzletron.anymodel.models.nemotron_h_v2.nemotron_h_v2_converter"><code class="xref">modelopt.torch.puzzletron.anymodel.models.nemotron_h_v2.nemotron_h_v2_converter</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.anymodel.models.nemotron_h_v2.nemotron_h_v2_model_descriptor.html#module-modelopt.torch.puzzletron.anymodel.models.nemotron_h_v2.nemotron_h_v2_model_descriptor"><code class="xref">modelopt.torch.puzzletron.anymodel.models.nemotron_h_v2.nemotron_h_v2_model_descriptor</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.anymodel.models.qwen2.html#module-modelopt.torch.puzzletron.anymodel.models.qwen2"><code class="xref">modelopt.torch.puzzletron.anymodel.models.qwen2</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.anymodel.models.qwen2.qwen2_converter.html#module-modelopt.torch.puzzletron.anymodel.models.qwen2.qwen2_converter"><code class="xref">modelopt.torch.puzzletron.anymodel.models.qwen2.qwen2_converter</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.anymodel.models.qwen2.qwen2_model_descriptor.html#module-modelopt.torch.puzzletron.anymodel.models.qwen2.qwen2_model_descriptor"><code class="xref">modelopt.torch.puzzletron.anymodel.models.qwen2.qwen2_model_descriptor</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.anymodel.models.qwen3.html#module-modelopt.torch.puzzletron.anymodel.models.qwen3"><code class="xref">modelopt.torch.puzzletron.anymodel.models.qwen3</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.anymodel.models.qwen3.qwen3_converter.html#module-modelopt.torch.puzzletron.anymodel.models.qwen3.qwen3_converter"><code class="xref">modelopt.torch.puzzletron.anymodel.models.qwen3.qwen3_converter</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.anymodel.models.qwen3.qwen3_model_descriptor.html#module-modelopt.torch.puzzletron.anymodel.models.qwen3.qwen3_model_descriptor"><code class="xref">modelopt.torch.puzzletron.anymodel.models.qwen3.qwen3_model_descriptor</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.anymodel.models.qwen3_vl.html#module-modelopt.torch.puzzletron.anymodel.models.qwen3_vl"><code class="xref">modelopt.torch.puzzletron.anymodel.models.qwen3_vl</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.anymodel.models.qwen3_vl.qwen3_vl_converter.html#module-modelopt.torch.puzzletron.anymodel.models.qwen3_vl.qwen3_vl_converter"><code class="xref">modelopt.torch.puzzletron.anymodel.models.qwen3_vl.qwen3_vl_converter</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.anymodel.models.qwen3_vl.qwen3_vl_model_descriptor.html#module-modelopt.torch.puzzletron.anymodel.models.qwen3_vl.qwen3_vl_model_descriptor"><code class="xref">modelopt.torch.puzzletron.anymodel.models.qwen3_vl.qwen3_vl_model_descriptor</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.anymodel.puzzformer.html#module-modelopt.torch.puzzletron.anymodel.puzzformer"><code class="xref">modelopt.torch.puzzletron.anymodel.puzzformer</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.anymodel.puzzformer.no_op.html#module-modelopt.torch.puzzletron.anymodel.puzzformer.no_op"><code class="xref">modelopt.torch.puzzletron.anymodel.puzzformer.no_op</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.anymodel.puzzformer.patcher.html#module-modelopt.torch.puzzletron.anymodel.puzzformer.patcher"><code class="xref">modelopt.torch.puzzletron.anymodel.puzzformer.patcher</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.block_config.html#module-modelopt.torch.puzzletron.block_config"><code class="xref">modelopt.torch.puzzletron.block_config</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.build_library_and_stats.html#module-modelopt.torch.puzzletron.build_library_and_stats"><code class="xref">modelopt.torch.puzzletron.build_library_and_stats</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.dataset.html#module-modelopt.torch.puzzletron.dataset"><code class="xref">modelopt.torch.puzzletron.dataset</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.dataset.prepare_dataset.html#module-modelopt.torch.puzzletron.dataset.prepare_dataset"><code class="xref">modelopt.torch.puzzletron.dataset.prepare_dataset</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.entrypoint.html#module-modelopt.torch.puzzletron.entrypoint"><code class="xref">modelopt.torch.puzzletron.entrypoint</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.mip.html#module-modelopt.torch.puzzletron.mip"><code class="xref">modelopt.torch.puzzletron.mip</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.mip.mip_and_realize_models.html#module-modelopt.torch.puzzletron.mip.mip_and_realize_models"><code class="xref">modelopt.torch.puzzletron.mip.mip_and_realize_models</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.mip.mip_with_multi_layer_replacements.html#module-modelopt.torch.puzzletron.mip.mip_with_multi_layer_replacements"><code class="xref">modelopt.torch.puzzletron.mip.mip_with_multi_layer_replacements</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.mip.run_puzzle.html#module-modelopt.torch.puzzletron.mip.run_puzzle"><code class="xref">modelopt.torch.puzzletron.mip.run_puzzle</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.mip.sweep.html#module-modelopt.torch.puzzletron.mip.sweep"><code class="xref">modelopt.torch.puzzletron.mip.sweep</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.mip.utils.html#module-modelopt.torch.puzzletron.mip.utils"><code class="xref">modelopt.torch.puzzletron.mip.utils</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.plugins.html#module-modelopt.torch.puzzletron.plugins"><code class="xref">modelopt.torch.puzzletron.plugins</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.pruning.html#module-modelopt.torch.puzzletron.pruning"><code class="xref">modelopt.torch.puzzletron.pruning</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.pruning.expert_removal_pruning_mixin.html#module-modelopt.torch.puzzletron.pruning.expert_removal_pruning_mixin"><code class="xref">modelopt.torch.puzzletron.pruning.expert_removal_pruning_mixin</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.pruning.ffn_intermediate_pruning_mixin.html#module-modelopt.torch.puzzletron.pruning.ffn_intermediate_pruning_mixin"><code class="xref">modelopt.torch.puzzletron.pruning.ffn_intermediate_pruning_mixin</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.pruning.kv_heads_pruning_mixin.html#module-modelopt.torch.puzzletron.pruning.kv_heads_pruning_mixin"><code class="xref">modelopt.torch.puzzletron.pruning.kv_heads_pruning_mixin</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.pruning.pruning_ckpts.html#module-modelopt.torch.puzzletron.pruning.pruning_ckpts"><code class="xref">modelopt.torch.puzzletron.pruning.pruning_ckpts</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.pruning.pruning_mixin.html#module-modelopt.torch.puzzletron.pruning.pruning_mixin"><code class="xref">modelopt.torch.puzzletron.pruning.pruning_mixin</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.pruning.pruning_utils.html#module-modelopt.torch.puzzletron.pruning.pruning_utils"><code class="xref">modelopt.torch.puzzletron.pruning.pruning_utils</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.puzzletron_nas_plugin.html#module-modelopt.torch.puzzletron.puzzletron_nas_plugin"><code class="xref">modelopt.torch.puzzletron.puzzletron_nas_plugin</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.replacement_library.html#module-modelopt.torch.puzzletron.replacement_library"><code class="xref">modelopt.torch.puzzletron.replacement_library</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.replacement_library.build_replacement_library.html#module-modelopt.torch.puzzletron.replacement_library.build_replacement_library"><code class="xref">modelopt.torch.puzzletron.replacement_library.build_replacement_library</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.replacement_library.library.html#module-modelopt.torch.puzzletron.replacement_library.library"><code class="xref">modelopt.torch.puzzletron.replacement_library.library</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.replacement_library.replacement_utils.html#module-modelopt.torch.puzzletron.replacement_library.replacement_utils"><code class="xref">modelopt.torch.puzzletron.replacement_library.replacement_utils</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.scoring.html#module-modelopt.torch.puzzletron.scoring"><code class="xref">modelopt.torch.puzzletron.scoring</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.sewing_kit.html#module-modelopt.torch.puzzletron.sewing_kit"><code class="xref">modelopt.torch.puzzletron.sewing_kit</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.sewing_kit.core.html#module-modelopt.torch.puzzletron.sewing_kit.core"><code class="xref">modelopt.torch.puzzletron.sewing_kit.core</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.sewing_kit.passage.html#module-modelopt.torch.puzzletron.sewing_kit.passage"><code class="xref">modelopt.torch.puzzletron.sewing_kit.passage</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.sewing_kit.utils.html#module-modelopt.torch.puzzletron.sewing_kit.utils"><code class="xref">modelopt.torch.puzzletron.sewing_kit.utils</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.subblock_stats.html#module-modelopt.torch.puzzletron.subblock_stats"><code class="xref">modelopt.torch.puzzletron.subblock_stats</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.subblock_stats.calc_subblock_params_and_memory.html#module-modelopt.torch.puzzletron.subblock_stats.calc_subblock_params_and_memory"><code class="xref">modelopt.torch.puzzletron.subblock_stats.calc_subblock_params_and_memory</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.subblock_stats.calc_subblock_stats.html#module-modelopt.torch.puzzletron.subblock_stats.calc_subblock_stats"><code class="xref">modelopt.torch.puzzletron.subblock_stats.calc_subblock_stats</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.tools.html#module-modelopt.torch.puzzletron.tools"><code class="xref">modelopt.torch.puzzletron.tools</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.tools.bypassed_training.html#module-modelopt.torch.puzzletron.tools.bypassed_training"><code class="xref">modelopt.torch.puzzletron.tools.bypassed_training</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.tools.bypassed_training.child_init.html#module-modelopt.torch.puzzletron.tools.bypassed_training.child_init"><code class="xref">modelopt.torch.puzzletron.tools.bypassed_training.child_init</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.tools.checkpoint_utils.html#module-modelopt.torch.puzzletron.tools.checkpoint_utils"><code class="xref">modelopt.torch.puzzletron.tools.checkpoint_utils</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.tools.checkpoint_utils_hf.html#module-modelopt.torch.puzzletron.tools.checkpoint_utils_hf"><code class="xref">modelopt.torch.puzzletron.tools.checkpoint_utils_hf</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.tools.common.html#module-modelopt.torch.puzzletron.tools.common"><code class="xref">modelopt.torch.puzzletron.tools.common</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.tools.hydra_utils.html#module-modelopt.torch.puzzletron.tools.hydra_utils"><code class="xref">modelopt.torch.puzzletron.tools.hydra_utils</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.tools.kd_model.html#module-modelopt.torch.puzzletron.tools.kd_model"><code class="xref">modelopt.torch.puzzletron.tools.kd_model</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.tools.post_init_sparse.html#module-modelopt.torch.puzzletron.tools.post_init_sparse"><code class="xref">modelopt.torch.puzzletron.tools.post_init_sparse</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.tools.sharded_checkpoint_utils.html#module-modelopt.torch.puzzletron.tools.sharded_checkpoint_utils"><code class="xref">modelopt.torch.puzzletron.tools.sharded_checkpoint_utils</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.tools.validate_model.html#module-modelopt.torch.puzzletron.tools.validate_model"><code class="xref">modelopt.torch.puzzletron.tools.validate_model</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.tools.validate_puzzle_with_multi_replacements.html#module-modelopt.torch.puzzletron.tools.validate_puzzle_with_multi_replacements"><code class="xref">modelopt.torch.puzzletron.tools.validate_puzzle_with_multi_replacements</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.tools.validation_utils.html#module-modelopt.torch.puzzletron.tools.validation_utils"><code class="xref">modelopt.torch.puzzletron.tools.validation_utils</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.utils.html#module-modelopt.torch.puzzletron.utils"><code class="xref">modelopt.torch.puzzletron.utils</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.utils.checkpoint_manager.html#module-modelopt.torch.puzzletron.utils.checkpoint_manager"><code class="xref">modelopt.torch.puzzletron.utils.checkpoint_manager</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.utils.data.html#module-modelopt.torch.puzzletron.utils.data"><code class="xref">modelopt.torch.puzzletron.utils.data</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.utils.data.dataloaders.html#module-modelopt.torch.puzzletron.utils.data.dataloaders"><code class="xref">modelopt.torch.puzzletron.utils.data.dataloaders</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.utils.data.dataset.html#module-modelopt.torch.puzzletron.utils.data.dataset"><code class="xref">modelopt.torch.puzzletron.utils.data.dataset</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.utils.dummy_modules.html#module-modelopt.torch.puzzletron.utils.dummy_modules"><code class="xref">modelopt.torch.puzzletron.utils.dummy_modules</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.utils.misc.html#module-modelopt.torch.puzzletron.utils.misc"><code class="xref">modelopt.torch.puzzletron.utils.misc</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.utils.parsing.html#module-modelopt.torch.puzzletron.utils.parsing"><code class="xref">modelopt.torch.puzzletron.utils.parsing</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.utils.validate_runtime_pipeline.html#module-modelopt.torch.puzzletron.utils.validate_runtime_pipeline"><code class="xref">modelopt.torch.puzzletron.utils.validate_runtime_pipeline</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.puzzletron.utils.validation.html#module-modelopt.torch.puzzletron.utils.validation"><code class="xref">modelopt.torch.puzzletron.utils.validation</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.quantization.html#module-modelopt.torch.quantization"><code class="xref">modelopt.torch.quantization</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.quantization.algorithms.html#module-modelopt.torch.quantization.algorithms"><code class="xref">modelopt.torch.quantization.algorithms</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.quantization.backends.html#module-modelopt.torch.quantization.backends"><code class="xref">modelopt.torch.quantization.backends</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.quantization.backends.utils.html#module-modelopt.torch.quantization.backends.utils"><code class="xref">modelopt.torch.quantization.backends.utils</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.quantization.calib.html#module-modelopt.torch.quantization.calib"><code class="xref">modelopt.torch.quantization.calib</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.quantization.calib.bias.html#module-modelopt.torch.quantization.calib.bias"><code class="xref">modelopt.torch.quantization.calib.bias</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.quantization.calib.calibrator.html#module-modelopt.torch.quantization.calib.calibrator"><code class="xref">modelopt.torch.quantization.calib.calibrator</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.quantization.calib.histogram.html#module-modelopt.torch.quantization.calib.histogram"><code class="xref">modelopt.torch.quantization.calib.histogram</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.quantization.calib.max.html#module-modelopt.torch.quantization.calib.max"><code class="xref">modelopt.torch.quantization.calib.max</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.quantization.calib.mse.html#module-modelopt.torch.quantization.calib.mse"><code class="xref">modelopt.torch.quantization.calib.mse</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.quantization.config.html#module-modelopt.torch.quantization.config"><code class="xref">modelopt.torch.quantization.config</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.quantization.conversion.html#module-modelopt.torch.quantization.conversion"><code class="xref">modelopt.torch.quantization.conversion</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.quantization.export_onnx.html#module-modelopt.torch.quantization.export_onnx"><code class="xref">modelopt.torch.quantization.export_onnx</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.quantization.extensions.html#module-modelopt.torch.quantization.extensions"><code class="xref">modelopt.torch.quantization.extensions</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.quantization.mode.html#module-modelopt.torch.quantization.mode"><code class="xref">modelopt.torch.quantization.mode</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.quantization.model_calib.html#module-modelopt.torch.quantization.model_calib"><code class="xref">modelopt.torch.quantization.model_calib</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.quantization.model_quant.html#module-modelopt.torch.quantization.model_quant"><code class="xref">modelopt.torch.quantization.model_quant</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.quantization.nn.html#module-modelopt.torch.quantization.nn"><code class="xref">modelopt.torch.quantization.nn</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.quantization.nn.functional.html#module-modelopt.torch.quantization.nn.functional"><code class="xref">modelopt.torch.quantization.nn.functional</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.quantization.nn.modules.html#module-modelopt.torch.quantization.nn.modules"><code class="xref">modelopt.torch.quantization.nn.modules</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.quantization.nn.modules.quant_activations.html#module-modelopt.torch.quantization.nn.modules.quant_activations"><code class="xref">modelopt.torch.quantization.nn.modules.quant_activations</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.quantization.nn.modules.quant_batchnorm.html#module-modelopt.torch.quantization.nn.modules.quant_batchnorm"><code class="xref">modelopt.torch.quantization.nn.modules.quant_batchnorm</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.quantization.nn.modules.quant_conv.html#module-modelopt.torch.quantization.nn.modules.quant_conv"><code class="xref">modelopt.torch.quantization.nn.modules.quant_conv</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.quantization.nn.modules.quant_instancenorm.html#module-modelopt.torch.quantization.nn.modules.quant_instancenorm"><code class="xref">modelopt.torch.quantization.nn.modules.quant_instancenorm</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.quantization.nn.modules.quant_layernorm.html#module-modelopt.torch.quantization.nn.modules.quant_layernorm"><code class="xref">modelopt.torch.quantization.nn.modules.quant_layernorm</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.quantization.nn.modules.quant_linear.html#module-modelopt.torch.quantization.nn.modules.quant_linear"><code class="xref">modelopt.torch.quantization.nn.modules.quant_linear</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.quantization.nn.modules.quant_module.html#module-modelopt.torch.quantization.nn.modules.quant_module"><code class="xref">modelopt.torch.quantization.nn.modules.quant_module</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.quantization.nn.modules.quant_pooling.html#module-modelopt.torch.quantization.nn.modules.quant_pooling"><code class="xref">modelopt.torch.quantization.nn.modules.quant_pooling</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.quantization.nn.modules.quant_rnn.html#module-modelopt.torch.quantization.nn.modules.quant_rnn"><code class="xref">modelopt.torch.quantization.nn.modules.quant_rnn</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.quantization.nn.modules.tensor_quantizer.html#module-modelopt.torch.quantization.nn.modules.tensor_quantizer"><code class="xref">modelopt.torch.quantization.nn.modules.tensor_quantizer</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.quantization.plugins.html#module-modelopt.torch.quantization.plugins"><code class="xref">modelopt.torch.quantization.plugins</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.quantization.qtensor.html#module-modelopt.torch.quantization.qtensor"><code class="xref">modelopt.torch.quantization.qtensor</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.quantization.qtensor.base_qtensor.html#module-modelopt.torch.quantization.qtensor.base_qtensor"><code class="xref">modelopt.torch.quantization.qtensor.base_qtensor</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.quantization.qtensor.fp8_tensor.html#module-modelopt.torch.quantization.qtensor.fp8_tensor"><code class="xref">modelopt.torch.quantization.qtensor.fp8_tensor</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.quantization.qtensor.int4_tensor.html#module-modelopt.torch.quantization.qtensor.int4_tensor"><code class="xref">modelopt.torch.quantization.qtensor.int4_tensor</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.quantization.qtensor.int8_tensor.html#module-modelopt.torch.quantization.qtensor.int8_tensor"><code class="xref">modelopt.torch.quantization.qtensor.int8_tensor</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.quantization.qtensor.mxfp4_tensor.html#module-modelopt.torch.quantization.qtensor.mxfp4_tensor"><code class="xref">modelopt.torch.quantization.qtensor.mxfp4_tensor</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.quantization.qtensor.mxfp8_tensor.html#module-modelopt.torch.quantization.qtensor.mxfp8_tensor"><code class="xref">modelopt.torch.quantization.qtensor.mxfp8_tensor</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.quantization.qtensor.nf4_tensor.html#module-modelopt.torch.quantization.qtensor.nf4_tensor"><code class="xref">modelopt.torch.quantization.qtensor.nf4_tensor</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.quantization.qtensor.nvfp4_tensor.html#module-modelopt.torch.quantization.qtensor.nvfp4_tensor"><code class="xref">modelopt.torch.quantization.qtensor.nvfp4_tensor</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.quantization.tensor_quant.html#module-modelopt.torch.quantization.tensor_quant"><code class="xref">modelopt.torch.quantization.tensor_quant</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.quantization.utils.html#module-modelopt.torch.quantization.utils"><code class="xref">modelopt.torch.quantization.utils</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.sparsity.html#module-modelopt.torch.sparsity"><code class="xref">modelopt.torch.sparsity</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.sparsity.attention_sparsity.html#module-modelopt.torch.sparsity.attention_sparsity"><code class="xref">modelopt.torch.sparsity.attention_sparsity</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.sparsity.attention_sparsity.calibration.html#module-modelopt.torch.sparsity.attention_sparsity.calibration"><code class="xref">modelopt.torch.sparsity.attention_sparsity.calibration</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.sparsity.attention_sparsity.config.html#module-modelopt.torch.sparsity.attention_sparsity.config"><code class="xref">modelopt.torch.sparsity.attention_sparsity.config</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.sparsity.attention_sparsity.conversion.html#module-modelopt.torch.sparsity.attention_sparsity.conversion"><code class="xref">modelopt.torch.sparsity.attention_sparsity.conversion</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.sparsity.attention_sparsity.methods.html#module-modelopt.torch.sparsity.attention_sparsity.methods"><code class="xref">modelopt.torch.sparsity.attention_sparsity.methods</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.sparsity.attention_sparsity.mode.html#module-modelopt.torch.sparsity.attention_sparsity.mode"><code class="xref">modelopt.torch.sparsity.attention_sparsity.mode</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.sparsity.attention_sparsity.model_sparsify.html#module-modelopt.torch.sparsity.attention_sparsity.model_sparsify"><code class="xref">modelopt.torch.sparsity.attention_sparsity.model_sparsify</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.sparsity.attention_sparsity.plugins.html#module-modelopt.torch.sparsity.attention_sparsity.plugins"><code class="xref">modelopt.torch.sparsity.attention_sparsity.plugins</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.sparsity.attention_sparsity.sparse_attention.html#module-modelopt.torch.sparsity.attention_sparsity.sparse_attention"><code class="xref">modelopt.torch.sparsity.attention_sparsity.sparse_attention</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.sparsity.attention_sparsity.stats_manager.html#module-modelopt.torch.sparsity.attention_sparsity.stats_manager"><code class="xref">modelopt.torch.sparsity.attention_sparsity.stats_manager</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.sparsity.attention_sparsity.utils.html#module-modelopt.torch.sparsity.attention_sparsity.utils"><code class="xref">modelopt.torch.sparsity.attention_sparsity.utils</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.sparsity.weight_sparsity.html#module-modelopt.torch.sparsity.weight_sparsity"><code class="xref">modelopt.torch.sparsity.weight_sparsity</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.sparsity.weight_sparsity.config.html#module-modelopt.torch.sparsity.weight_sparsity.config"><code class="xref">modelopt.torch.sparsity.weight_sparsity.config</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.sparsity.weight_sparsity.magnitude.html#module-modelopt.torch.sparsity.weight_sparsity.magnitude"><code class="xref">modelopt.torch.sparsity.weight_sparsity.magnitude</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.sparsity.weight_sparsity.mode.html#module-modelopt.torch.sparsity.weight_sparsity.mode"><code class="xref">modelopt.torch.sparsity.weight_sparsity.mode</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.sparsity.weight_sparsity.module.html#module-modelopt.torch.sparsity.weight_sparsity.module"><code class="xref">modelopt.torch.sparsity.weight_sparsity.module</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.sparsity.weight_sparsity.plugins.html#module-modelopt.torch.sparsity.weight_sparsity.plugins"><code class="xref">modelopt.torch.sparsity.weight_sparsity.plugins</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.sparsity.weight_sparsity.searcher.html#module-modelopt.torch.sparsity.weight_sparsity.searcher"><code class="xref">modelopt.torch.sparsity.weight_sparsity.searcher</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.sparsity.weight_sparsity.sparsegpt.html#module-modelopt.torch.sparsity.weight_sparsity.sparsegpt"><code class="xref">modelopt.torch.sparsity.weight_sparsity.sparsegpt</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.sparsity.weight_sparsity.sparsification.html#module-modelopt.torch.sparsity.weight_sparsity.sparsification"><code class="xref">modelopt.torch.sparsity.weight_sparsity.sparsification</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.speculative.html#module-modelopt.torch.speculative"><code class="xref">modelopt.torch.speculative</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.speculative.config.html#module-modelopt.torch.speculative.config"><code class="xref">modelopt.torch.speculative.config</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.speculative.dflash.html#module-modelopt.torch.speculative.dflash"><code class="xref">modelopt.torch.speculative.dflash</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.speculative.dflash.conversion.html#module-modelopt.torch.speculative.dflash.conversion"><code class="xref">modelopt.torch.speculative.dflash.conversion</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.speculative.dflash.default_config.html#module-modelopt.torch.speculative.dflash.default_config"><code class="xref">modelopt.torch.speculative.dflash.default_config</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.speculative.dflash.dflash_model.html#module-modelopt.torch.speculative.dflash.dflash_model"><code class="xref">modelopt.torch.speculative.dflash.dflash_model</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.speculative.eagle.html#module-modelopt.torch.speculative.eagle"><code class="xref">modelopt.torch.speculative.eagle</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.speculative.eagle.conversion.html#module-modelopt.torch.speculative.eagle.conversion"><code class="xref">modelopt.torch.speculative.eagle.conversion</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.speculative.eagle.default_config.html#module-modelopt.torch.speculative.eagle.default_config"><code class="xref">modelopt.torch.speculative.eagle.default_config</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.speculative.eagle.eagle_model.html#module-modelopt.torch.speculative.eagle.eagle_model"><code class="xref">modelopt.torch.speculative.eagle.eagle_model</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.speculative.eagle.utils.html#module-modelopt.torch.speculative.eagle.utils"><code class="xref">modelopt.torch.speculative.eagle.utils</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.speculative.medusa.html#module-modelopt.torch.speculative.medusa"><code class="xref">modelopt.torch.speculative.medusa</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.speculative.medusa.conversion.html#module-modelopt.torch.speculative.medusa.conversion"><code class="xref">modelopt.torch.speculative.medusa.conversion</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.speculative.medusa.medusa_model.html#module-modelopt.torch.speculative.medusa.medusa_model"><code class="xref">modelopt.torch.speculative.medusa.medusa_model</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.speculative.mode.html#module-modelopt.torch.speculative.mode"><code class="xref">modelopt.torch.speculative.mode</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.speculative.plugins.html#module-modelopt.torch.speculative.plugins"><code class="xref">modelopt.torch.speculative.plugins</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.speculative.speculative_decoding.html#module-modelopt.torch.speculative.speculative_decoding"><code class="xref">modelopt.torch.speculative.speculative_decoding</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.speculative.utils.html#module-modelopt.torch.speculative.utils"><code class="xref">modelopt.torch.speculative.utils</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.trace.html#module-modelopt.torch.trace"><code class="xref">modelopt.torch.trace</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.trace.analyzer.html#module-modelopt.torch.trace.analyzer"><code class="xref">modelopt.torch.trace.analyzer</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.trace.modules.html#module-modelopt.torch.trace.modules"><code class="xref">modelopt.torch.trace.modules</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.trace.modules.concat.html#module-modelopt.torch.trace.modules.concat"><code class="xref">modelopt.torch.trace.modules.concat</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.trace.modules.nn.html#module-modelopt.torch.trace.modules.nn"><code class="xref">modelopt.torch.trace.modules.nn</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.trace.plugins.html#module-modelopt.torch.trace.plugins"><code class="xref">modelopt.torch.trace.plugins</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.trace.symbols.html#module-modelopt.torch.trace.symbols"><code class="xref">modelopt.torch.trace.symbols</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.trace.tracer.html#module-modelopt.torch.trace.tracer"><code class="xref">modelopt.torch.trace.tracer</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.utils.html#module-modelopt.torch.utils"><code class="xref">modelopt.torch.utils</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.utils.cpp_extension.html#module-modelopt.torch.utils.cpp_extension"><code class="xref">modelopt.torch.utils.cpp_extension</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.utils.dataset_utils.html#module-modelopt.torch.utils.dataset_utils"><code class="xref">modelopt.torch.utils.dataset_utils</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.utils.distributed.html#module-modelopt.torch.utils.distributed"><code class="xref">modelopt.torch.utils.distributed</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.utils.graph.html#module-modelopt.torch.utils.graph"><code class="xref">modelopt.torch.utils.graph</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.utils.import_utils.html#module-modelopt.torch.utils.import_utils"><code class="xref">modelopt.torch.utils.import_utils</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.utils.list.html#module-modelopt.torch.utils.list"><code class="xref">modelopt.torch.utils.list</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.utils.logging.html#module-modelopt.torch.utils.logging"><code class="xref">modelopt.torch.utils.logging</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.utils.memory_monitor.html#module-modelopt.torch.utils.memory_monitor"><code class="xref">modelopt.torch.utils.memory_monitor</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.utils.nemotron_vlm_dataset_utils.html#module-modelopt.torch.utils.nemotron_vlm_dataset_utils"><code class="xref">modelopt.torch.utils.nemotron_vlm_dataset_utils</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.utils.network.html#module-modelopt.torch.utils.network"><code class="xref">modelopt.torch.utils.network</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.utils.perf.html#module-modelopt.torch.utils.perf"><code class="xref">modelopt.torch.utils.perf</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.utils.plugins.html#module-modelopt.torch.utils.plugins"><code class="xref">modelopt.torch.utils.plugins</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.utils.random.html#module-modelopt.torch.utils.random"><code class="xref">modelopt.torch.utils.random</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.utils.regex.html#module-modelopt.torch.utils.regex"><code class="xref">modelopt.torch.utils.regex</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.utils.robust_json.html#module-modelopt.torch.utils.robust_json"><code class="xref">modelopt.torch.utils.robust_json</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.utils.serialization.html#module-modelopt.torch.utils.serialization"><code class="xref">modelopt.torch.utils.serialization</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.utils.speech_dataset_utils.html#module-modelopt.torch.utils.speech_dataset_utils"><code class="xref">modelopt.torch.utils.speech_dataset_utils</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.utils.tensor.html#module-modelopt.torch.utils.tensor"><code class="xref">modelopt.torch.utils.tensor</code></a></td><td>
+       <em></em></td></tr>
+     <tr class="cg-1">
+       <td></td>
+       <td>&#160;&#160;&#160;
+       <a href="reference/generated/modelopt.torch.utils.vlm_dataset_utils.html#module-modelopt.torch.utils.vlm_dataset_utils"><code class="xref">modelopt.torch.utils.vlm_dataset_utils</code></a></td><td>
+       <em></em></td></tr>
+   </table>
+
+
+           </div>
+          </div>
+          <footer>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2023-2025, NVIDIA Corporation.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

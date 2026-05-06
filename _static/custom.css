@@ -1,0 +1,40 @@
+/* Hide Warnings outputs from rendered Jupyter Notebooks */
+div.nboutput.container div.output_area.stderr {
+    display: none;
+    visibility: hidden;
+}
+
+/* Increase the width of the content area (default 800px) */
+div.wy-nav-content {
+    max-width: 1000px;
+}
+
+/* Show a `$` sign before bash code-blocks */
+div.highlight-bash pre::before {
+    content: "$ ";
+}
+
+/* Reduce margin from left sidebar titles */
+p.caption {
+    margin-top: 0.25em !important;
+}
+
+/* Reduce padding from left sidebar items */
+a.reference.internal {
+    padding-top: 0;
+}
+
+.wy-table-responsive table td,
+.wy-table-responsive table th {
+    white-space: normal;
+}
+
+.wy-table-responsive {
+    margin-bottom: 24px;
+    max-width: 100%;
+    overflow: visible;
+}
+
+.wy-table-responsive th p {
+    margin-bottom: unset;
+}

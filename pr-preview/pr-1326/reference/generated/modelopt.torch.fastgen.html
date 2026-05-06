@@ -1,0 +1,1047 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>fastgen &mdash; Model Optimizer 0.0.1.dev1+gbe67be553</title>
+      <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="../../_static/copybutton.css?v=76b2166b" />
+      <link rel="stylesheet" type="text/css" href="../../_static/tabs.css?v=4c969af8" />
+      <link rel="stylesheet" type="text/css" href="../../_static/togglebutton.css?v=9c3e77be" />
+      <link rel="stylesheet" type="text/css" href="../../_static/autodoc_pydantic.css" />
+      <link rel="stylesheet" type="text/css" href="../../_static/custom.css?v=7a224f4b" />
+
+  
+      <script src="../../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../../_static/documentation_options.js?v=5929fcd5"></script>
+      <script src="../../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="../../_static/clipboard.min.js?v=a7894cd8"></script>
+      <script src="../../_static/copybutton.js?v=20d3d275"></script>
+      <script src="../../_static/tabs.js?v=3ee01567"></script>
+      <script>let toggleHintShow = 'Click to show';</script>
+      <script>let toggleHintHide = 'Click to hide';</script>
+      <script>let toggleOpenOnPrint = 'true';</script>
+      <script src="../../_static/togglebutton.js?v=b8b12719"></script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+    <script src="../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" />
+    <link rel="next" title="flow_matching" href="modelopt.torch.fastgen.flow_matching.html" />
+    <link rel="prev" title="unified_export_megatron" href="modelopt.torch.export.unified_export_megatron.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../../index.html" class="icon icon-home">
+            Model Optimizer
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../getting_started/1_overview.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../getting_started/2_installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch to ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - Windows</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_qat" rel="noopener noreferrer" target="_blank">Quick Start: QAT</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning" rel="noopener noreferrer" target="_blank">Quick Start: Pruning</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_distill" rel="noopener noreferrer" target="_blank">Quick Start: Distillation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/speculative_decoding" rel="noopener noreferrer" target="_blank">Quick Start: Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_sparsity" rel="noopener noreferrer" target="_blank">Quick Start: Sparsity</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Guides</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/0_support_matrix.html">Support Matrix</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/10_recipes.html">Recipes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/1_quantization.html">Quantization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/2_save_load.html">Saving &amp; Restoring</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/3_pruning.html">Pruning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/4_distillation.html">Distillation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/5_speculative_decoding.html">Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/6_sparsity.html">Sparsity</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/7_nas.html">NAS</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/8_autocast.html">AutoCast (ONNX)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/9_autotune.html">Autotune (ONNX)</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Deployment</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/1_tensorrt_llm.html">TensorRT-LLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/2_onnxruntime.html">Onnxruntime</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/3_unified_hf.html">Unified HuggingFace Checkpoint</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Examples</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../examples/0_all_examples.html">All GitHub Examples</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Reference</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="../0_changelog.html">Changelog</a></li>
+<li class="toctree-l1 current"><a class="reference internal" href="../1_modelopt_api.html">modelopt API</a><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="modelopt.deploy.html">deploy</a></li>
+<li class="toctree-l2"><a class="reference internal" href="modelopt.onnx.html">onnx</a></li>
+<li class="toctree-l2 current"><a class="reference internal" href="modelopt.torch.html">torch</a><ul class="current">
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.distill.html">distill</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.export.html">export</a></li>
+<li class="toctree-l3 current"><a class="current reference internal" href="#">fastgen</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.fastgen.flow_matching.html">flow_matching</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.fastgen.losses.html">losses</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.fastgen.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.fastgen.utils.html">utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.torch.fastgen.DMDConfig"><code class="docutils literal notranslate"><span class="pre">DMDConfig</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.torch.fastgen.DMDPipeline"><code class="docutils literal notranslate"><span class="pre">DMDPipeline</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.torch.fastgen.DistillationConfig"><code class="docutils literal notranslate"><span class="pre">DistillationConfig</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.torch.fastgen.DistillationPipeline"><code class="docutils literal notranslate"><span class="pre">DistillationPipeline</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.torch.fastgen.EMAConfig"><code class="docutils literal notranslate"><span class="pre">EMAConfig</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.torch.fastgen.ExponentialMovingAverage"><code class="docutils literal notranslate"><span class="pre">ExponentialMovingAverage</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.torch.fastgen.SampleTimestepConfig"><code class="docutils literal notranslate"><span class="pre">SampleTimestepConfig</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.torch.fastgen.create_fake_score"><code class="docutils literal notranslate"><span class="pre">create_fake_score()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.torch.fastgen.load_config"><code class="docutils literal notranslate"><span class="pre">load_config()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.torch.fastgen.load_dmd_config"><code class="docutils literal notranslate"><span class="pre">load_dmd_config()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.kernels.html">kernels</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.nas.html">nas</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.opt.html">opt</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.peft.html">peft</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.prune.html">prune</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.puzzletron.html">puzzletron</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.quantization.html">quantization</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.sparsity.html">sparsity</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.speculative.html">speculative</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.trace.html">trace</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.utils.html">utils</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Support</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../support/1_contact.html">Contact us</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../support/2_faqs.html">FAQs</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../index.html">Model Optimizer</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content style-external-links">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="../1_modelopt_api.html">modelopt API</a></li>
+          <li class="breadcrumb-item"><a href="modelopt.torch.html">torch</a></li>
+      <li class="breadcrumb-item active">fastgen</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../../_sources/reference/generated/modelopt.torch.fastgen.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="fastgen">
+<h1>fastgen<a class="headerlink" href="#fastgen" title="Link to this heading"></a></h1>
+<p class="rubric">Modules</p>
+<table class="autosummary longtable docutils align-default">
+<tbody>
+<tr class="row-odd"><td><p><a class="reference internal" href="modelopt.torch.fastgen.flow_matching.html#module-modelopt.torch.fastgen.flow_matching" title="modelopt.torch.fastgen.flow_matching"><code class="xref py py-obj docutils literal notranslate"><span class="pre">modelopt.torch.fastgen.flow_matching</span></code></a></p></td>
+<td><p>Rectified-flow (RF) helpers: forward process, inversions, timestep sampling.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="modelopt.torch.fastgen.losses.html#module-modelopt.torch.fastgen.losses" title="modelopt.torch.fastgen.losses"><code class="xref py py-obj docutils literal notranslate"><span class="pre">modelopt.torch.fastgen.losses</span></code></a></p></td>
+<td><p>Pure loss functions used by the fastgen distillation pipelines.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="modelopt.torch.fastgen.plugins.html#module-modelopt.torch.fastgen.plugins" title="modelopt.torch.fastgen.plugins"><code class="xref py py-obj docutils literal notranslate"><span class="pre">modelopt.torch.fastgen.plugins</span></code></a></p></td>
+<td><p>Optional plugins for the fastgen subpackage (gated via <code class="docutils literal notranslate"><span class="pre">import_plugin</span></code>).</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="modelopt.torch.fastgen.utils.html#module-modelopt.torch.fastgen.utils" title="modelopt.torch.fastgen.utils"><code class="xref py py-obj docutils literal notranslate"><span class="pre">modelopt.torch.fastgen.utils</span></code></a></p></td>
+<td><p>Small tensor helpers shared across the fastgen subpackage.</p></td>
+</tr>
+</tbody>
+</table>
+<p id="module-modelopt.torch.fastgen">Framework-agnostic diffusion step-distillation losses (FastGen port).</p>
+<p><code class="docutils literal notranslate"><span class="pre">modelopt.torch.fastgen</span></code> is a loss-computation library. It accepts already-built
+<code class="docutils literal notranslate"><span class="pre">nn.Module</span></code> references (student / teacher / fake-score / optional discriminator) and
+returns scalar loss tensors. It does <strong>not</strong> load models, manage optimizers, wrap
+anything as a <code class="docutils literal notranslate"><span class="pre">DynamicModule</span></code>, or register itself in any mode registry.</p>
+<p>Typical usage with a YAML-driven config:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">modelopt.torch.fastgen</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">mtf</span>
+
+<span class="n">student</span><span class="p">,</span> <span class="n">teacher</span> <span class="o">=</span> <span class="n">build_wan_student_and_teacher</span><span class="p">(</span><span class="o">...</span><span class="p">)</span>
+<span class="n">fake_score</span> <span class="o">=</span> <span class="n">mtf</span><span class="o">.</span><span class="n">create_fake_score</span><span class="p">(</span><span class="n">teacher</span><span class="p">)</span>
+
+<span class="n">cfg</span> <span class="o">=</span> <span class="n">mtf</span><span class="o">.</span><span class="n">load_dmd_config</span><span class="p">(</span><span class="s2">&quot;general/distillation/dmd2_wan22_5b&quot;</span><span class="p">)</span>
+
+<span class="c1"># If GAN is enabled, expose intermediate teacher features to the discriminator.</span>
+<span class="k">if</span> <span class="n">cfg</span><span class="o">.</span><span class="n">gan_loss_weight_gen</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">:</span>
+    <span class="n">mtf</span><span class="o">.</span><span class="n">plugins</span><span class="o">.</span><span class="n">wan22</span><span class="o">.</span><span class="n">attach_feature_capture</span><span class="p">(</span><span class="n">teacher</span><span class="p">,</span> <span class="n">feature_indices</span><span class="o">=</span><span class="p">[</span><span class="mi">15</span><span class="p">,</span> <span class="mi">22</span><span class="p">,</span> <span class="mi">29</span><span class="p">])</span>
+
+<span class="n">pipeline</span> <span class="o">=</span> <span class="n">mtf</span><span class="o">.</span><span class="n">DMDPipeline</span><span class="p">(</span><span class="n">student</span><span class="p">,</span> <span class="n">teacher</span><span class="p">,</span> <span class="n">fake_score</span><span class="p">,</span> <span class="n">cfg</span><span class="p">,</span> <span class="n">discriminator</span><span class="o">=</span><span class="n">disc</span><span class="p">)</span>
+
+<span class="c1"># Inside the training loop (framework-owned):</span>
+<span class="k">if</span> <span class="n">step</span> <span class="o">%</span> <span class="n">cfg</span><span class="o">.</span><span class="n">student_update_freq</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+    <span class="n">losses</span> <span class="o">=</span> <span class="n">pipeline</span><span class="o">.</span><span class="n">compute_student_loss</span><span class="p">(</span>
+        <span class="n">latents</span><span class="p">,</span> <span class="n">noise</span><span class="p">,</span> <span class="n">text_embeds</span><span class="p">,</span> <span class="n">negative_encoder_hidden_states</span><span class="o">=</span><span class="n">neg_embeds</span>
+    <span class="p">)</span>
+    <span class="n">losses</span><span class="p">[</span><span class="s2">&quot;total&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">backward</span><span class="p">()</span>
+    <span class="n">student_opt</span><span class="o">.</span><span class="n">step</span><span class="p">()</span>
+    <span class="n">pipeline</span><span class="o">.</span><span class="n">update_ema</span><span class="p">()</span>
+<span class="k">else</span><span class="p">:</span>
+    <span class="n">f</span> <span class="o">=</span> <span class="n">pipeline</span><span class="o">.</span><span class="n">compute_fake_score_loss</span><span class="p">(</span><span class="n">latents</span><span class="p">,</span> <span class="n">noise</span><span class="p">,</span> <span class="n">text_embeds</span><span class="p">)</span>
+    <span class="n">f</span><span class="p">[</span><span class="s2">&quot;total&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">backward</span><span class="p">()</span>
+    <span class="n">fake_score_opt</span><span class="o">.</span><span class="n">step</span><span class="p">()</span>
+    <span class="k">if</span> <span class="n">disc</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="n">d</span> <span class="o">=</span> <span class="n">pipeline</span><span class="o">.</span><span class="n">compute_discriminator_loss</span><span class="p">(</span><span class="n">latents</span><span class="p">,</span> <span class="n">noise</span><span class="p">,</span> <span class="n">text_embeds</span><span class="p">)</span>
+        <span class="n">d</span><span class="p">[</span><span class="s2">&quot;total&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">backward</span><span class="p">()</span>
+        <span class="n">disc_opt</span><span class="o">.</span><span class="n">step</span><span class="p">()</span>
+</pre></div>
+</div>
+<p class="rubric">Classes</p>
+<table class="autosummary longtable docutils align-default">
+<tbody>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.fastgen.DMDPipeline" title="modelopt.torch.fastgen.DMDPipeline"><code class="xref py py-obj docutils literal notranslate"><span class="pre">DMDPipeline</span></code></a></p></td>
+<td><p>DMD2 loss pipeline.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.fastgen.DistillationPipeline" title="modelopt.torch.fastgen.DistillationPipeline"><code class="xref py py-obj docutils literal notranslate"><span class="pre">DistillationPipeline</span></code></a></p></td>
+<td><p>Hold student/teacher references and expose shared utilities.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.fastgen.ExponentialMovingAverage" title="modelopt.torch.fastgen.ExponentialMovingAverage"><code class="xref py py-obj docutils literal notranslate"><span class="pre">ExponentialMovingAverage</span></code></a></p></td>
+<td><p>FSDP2-aware EMA tracker for a PyTorch module.</p></td>
+</tr>
+</tbody>
+</table>
+<p class="rubric">Functions</p>
+<table class="autosummary longtable docutils align-default">
+<tbody>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.fastgen.create_fake_score" title="modelopt.torch.fastgen.create_fake_score"><code class="xref py py-obj docutils literal notranslate"><span class="pre">create_fake_score</span></code></a></p></td>
+<td><p>Return a trainable fake-score network initialized from the teacher.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.fastgen.load_config" title="modelopt.torch.fastgen.load_config"><code class="xref py py-obj docutils literal notranslate"><span class="pre">load_config</span></code></a></p></td>
+<td><p>Load a YAML file and return the parsed mapping.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.fastgen.load_dmd_config" title="modelopt.torch.fastgen.load_dmd_config"><code class="xref py py-obj docutils literal notranslate"><span class="pre">load_dmd_config</span></code></a></p></td>
+<td><p>Load a YAML file and construct a <a class="reference internal" href="#modelopt.torch.fastgen.DMDConfig" title="modelopt.torch.fastgen.DMDConfig"><code class="xref py py-class docutils literal notranslate"><span class="pre">DMDConfig</span></code></a>.</p></td>
+</tr>
+</tbody>
+</table>
+<dl class="py class pydantic_model">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.DMDConfig">
+<em class="property"><span class="pre">ModeloptConfig</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">DMDConfig</span></span><a class="headerlink" href="#modelopt.torch.fastgen.DMDConfig" title="Link to this definition"></a></dt>
+<dd><p>Bases: <a class="reference internal" href="#modelopt.torch.fastgen.DistillationConfig" title="modelopt.torch.fastgen.config.DistillationConfig"><code class="xref py py-class docutils literal notranslate"><span class="pre">DistillationConfig</span></code></a></p>
+<p>Hyperparameters for DMD / DMD2 distribution-matching distillation.</p>
+<p>Default values are tuned for Wan 2.2 5B; callers fine-tune them per model.
+See <code class="docutils literal notranslate"><span class="pre">FastGen/fastgen/configs/experiments/WanT2V/config_dmd2_wan22_5b.py</span></code>.</p>
+<p><details  class="autodoc_pydantic_collapsable_json">
+<summary>Show default config as JSON</summary><dl class="field-list simple">
+<dt class="field-odd">Default config (JSON)<span class="colon">:</span></dt>
+<dd class="field-odd"><p></p></dd>
+</dl>
+<div class="highlight-json notranslate"><div class="highlight"><pre><span></span><span class="p">{</span>
+<span class="w">   </span><span class="nt">&quot;pred_type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;flow&quot;</span><span class="p">,</span>
+<span class="w">   </span><span class="nt">&quot;guidance_scale&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span>
+<span class="w">   </span><span class="nt">&quot;sample_t_cfg&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span>
+<span class="w">   </span><span class="nt">&quot;student_sample_steps&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">   </span><span class="nt">&quot;student_sample_type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;ode&quot;</span><span class="p">,</span>
+<span class="w">   </span><span class="nt">&quot;num_train_timesteps&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span>
+<span class="w">   </span><span class="nt">&quot;student_update_freq&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">5</span><span class="p">,</span>
+<span class="w">   </span><span class="nt">&quot;fake_score_pred_type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;x0&quot;</span><span class="p">,</span>
+<span class="w">   </span><span class="nt">&quot;gan_loss_weight_gen&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">0.0</span><span class="p">,</span>
+<span class="w">   </span><span class="nt">&quot;gan_use_same_t_noise&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span>
+<span class="w">   </span><span class="nt">&quot;gan_r1_reg_weight&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">0.0</span><span class="p">,</span>
+<span class="w">   </span><span class="nt">&quot;gan_r1_reg_alpha&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">0.1</span><span class="p">,</span>
+<span class="w">   </span><span class="nt">&quot;ema&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+</details></p><dl class="py attribute pydantic_field">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.DMDConfig.ema">
+<em class="property"><span class="pre">field</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">ema</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference internal" href="#modelopt.torch.fastgen.EMAConfig" title="modelopt.torch.fastgen.EMAConfig"><span class="pre">EMAConfig</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#modelopt.torch.fastgen.DMDConfig.ema" title="Link to this definition"></a></dt>
+<dd><p><details  class="autodoc_pydantic_collapsable_json">
+<summary>Show details</summary><p>If set, an exponential moving average of the student is maintained and updated via <code class="docutils literal notranslate"><span class="pre">DMDPipeline.update_ema</span></code>.</p>
+</details></p></dd></dl>
+
+<dl class="py attribute pydantic_field">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.DMDConfig.fake_score_pred_type">
+<em class="property"><span class="pre">field</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">fake_score_pred_type</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">PredType</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#modelopt.torch.fastgen.DMDConfig.fake_score_pred_type" title="Link to this definition"></a></dt>
+<dd><p><details  class="autodoc_pydantic_collapsable_json">
+<summary>Show details</summary><p>Parameterization used when training the fake score. If <code class="docutils literal notranslate"><span class="pre">None</span></code> falls back to <a class="reference internal" href="#modelopt.torch.fastgen.DistillationConfig.pred_type" title="modelopt.torch.fastgen.DistillationConfig.pred_type"><code class="xref py py-attr docutils literal notranslate"><span class="pre">DistillationConfig.pred_type</span></code></a>.</p>
+</details></p></dd></dl>
+
+<dl class="py attribute pydantic_field">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.DMDConfig.gan_loss_weight_gen">
+<em class="property"><span class="pre">field</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">gan_loss_weight_gen</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">float</span></em><a class="headerlink" href="#modelopt.torch.fastgen.DMDConfig.gan_loss_weight_gen" title="Link to this definition"></a></dt>
+<dd><p><details  class="autodoc_pydantic_collapsable_json">
+<summary>Show details</summary><p>Weight of the GAN generator term in the student loss. <code class="docutils literal notranslate"><span class="pre">0</span></code> disables the GAN branch.</p>
+</details></p></dd></dl>
+
+<dl class="py attribute pydantic_field">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.DMDConfig.gan_r1_reg_alpha">
+<em class="property"><span class="pre">field</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">gan_r1_reg_alpha</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">float</span></em><a class="headerlink" href="#modelopt.torch.fastgen.DMDConfig.gan_r1_reg_alpha" title="Link to this definition"></a></dt>
+<dd><p><details  class="autodoc_pydantic_collapsable_json">
+<summary>Show details</summary><p>Standard deviation of the perturbation applied to real data when computing the approximate R1 term.</p>
+</details></p></dd></dl>
+
+<dl class="py attribute pydantic_field">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.DMDConfig.gan_r1_reg_weight">
+<em class="property"><span class="pre">field</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">gan_r1_reg_weight</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">float</span></em><a class="headerlink" href="#modelopt.torch.fastgen.DMDConfig.gan_r1_reg_weight" title="Link to this definition"></a></dt>
+<dd><p><details  class="autodoc_pydantic_collapsable_json">
+<summary>Show details</summary><p>Weight of the approximate-R1 regularization term for the discriminator update. <code class="docutils literal notranslate"><span class="pre">0</span></code> disables R1. Recommended range when enabled: 100-1000.</p>
+</details></p></dd></dl>
+
+<dl class="py attribute pydantic_field">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.DMDConfig.gan_use_same_t_noise">
+<em class="property"><span class="pre">field</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">gan_use_same_t_noise</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></em><a class="headerlink" href="#modelopt.torch.fastgen.DMDConfig.gan_use_same_t_noise" title="Link to this definition"></a></dt>
+<dd><p><details  class="autodoc_pydantic_collapsable_json">
+<summary>Show details</summary><p>If True, reuse the same <code class="docutils literal notranslate"><span class="pre">t</span></code> and <code class="docutils literal notranslate"><span class="pre">eps</span></code> for real and fake samples in the discriminator update.</p>
+</details></p></dd></dl>
+
+<dl class="py attribute pydantic_field">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.DMDConfig.student_update_freq">
+<em class="property"><span class="pre">field</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">student_update_freq</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></em><a class="headerlink" href="#modelopt.torch.fastgen.DMDConfig.student_update_freq" title="Link to this definition"></a></dt>
+<dd><p><details  class="autodoc_pydantic_collapsable_json">
+<summary>Show details</summary><p>One student step for every <code class="docutils literal notranslate"><span class="pre">student_update_freq</span></code> fake-score / discriminator steps. Matches FastGen’s DMD2 alternation. Not read by DMDPipeline; the training loop is expected to enforce the alternation.</p>
+</details></p></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.DMDConfig.from_yaml">
+<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">from_yaml</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">config_file</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.fastgen.DMDConfig.from_yaml" title="Link to this definition"></a></dt>
+<dd><p>Construct a <a class="reference internal" href="#modelopt.torch.fastgen.DMDConfig" title="modelopt.torch.fastgen.DMDConfig"><code class="xref py py-class docutils literal notranslate"><span class="pre">DMDConfig</span></code></a> from a YAML file.</p>
+<p>Thin wrapper around <code class="xref py py-func docutils literal notranslate"><span class="pre">modelopt.torch.fastgen.loader.load_dmd_config()</span></code>.
+The resolver searches the built-in <code class="docutils literal notranslate"><span class="pre">modelopt_recipes/</span></code> package first, then
+the filesystem. Suffixes (<code class="docutils literal notranslate"><span class="pre">.yml</span></code> / <code class="docutils literal notranslate"><span class="pre">.yaml</span></code>) may be omitted.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>config_file</strong> (<em>str</em><em> | </em><em>Path</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference internal" href="#modelopt.torch.fastgen.DMDConfig" title="modelopt.torch.fastgen.DMDConfig"><em>DMDConfig</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.DMDPipeline">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">DMDPipeline</span></span><a class="headerlink" href="#modelopt.torch.fastgen.DMDPipeline" title="Link to this definition"></a></dt>
+<dd><p>Bases: <a class="reference internal" href="#modelopt.torch.fastgen.DistillationPipeline" title="modelopt.torch.fastgen.pipeline.DistillationPipeline"><code class="xref py py-class docutils literal notranslate"><span class="pre">DistillationPipeline</span></code></a></p>
+<p>DMD2 loss pipeline.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>student</strong> – Trainable student module. Must be callable with <code class="docutils literal notranslate"><span class="pre">(hidden_states,</span> <span class="pre">timestep,</span>
+<span class="pre">encoder_hidden_states=...,</span> <span class="pre">**kwargs)</span></code> and return either a <code class="docutils literal notranslate"><span class="pre">Tensor</span></code>, a
+<code class="docutils literal notranslate"><span class="pre">(Tensor,</span> <span class="pre">...)</span></code> tuple (as diffusers returns with <code class="docutils literal notranslate"><span class="pre">return_dict=False</span></code>), or an
+object with a <code class="docutils literal notranslate"><span class="pre">.sample</span></code> attribute.</p></li>
+<li><p><strong>teacher</strong> – Frozen reference module with the same call signature. If <code class="docutils literal notranslate"><span class="pre">discriminator</span></code>
+is provided, feature-capture hooks must be attached to <code class="docutils literal notranslate"><span class="pre">teacher</span></code> before
+calling <code class="docutils literal notranslate"><span class="pre">compute_*_loss</span></code> — see <code class="xref py py-func docutils literal notranslate"><span class="pre">modelopt.torch.fastgen.plugins.wan22.attach_feature_capture()</span></code>.</p></li>
+<li><p><strong>fake_score</strong> – Trainable auxiliary module (same signature as teacher/student). Used to
+approximate the student’s generated distribution for the VSD gradient.</p></li>
+<li><p><strong>config</strong> – <a class="reference internal" href="#modelopt.torch.fastgen.DMDConfig" title="modelopt.torch.fastgen.config.DMDConfig"><code class="xref py py-class docutils literal notranslate"><span class="pre">DMDConfig</span></code></a> with the hyperparameters.</p></li>
+<li><p><strong>discriminator</strong> – Optional discriminator. Required when <code class="docutils literal notranslate"><span class="pre">config.gan_loss_weight_gen</span> <span class="pre">&gt;</span> <span class="pre">0</span></code>.
+Must accept <code class="docutils literal notranslate"><span class="pre">list[Tensor]</span></code> (the captured teacher features) and return a 2D logit tensor.</p></li>
+</ul>
+</dd>
+</dl>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.DMDPipeline.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">student</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">teacher</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">fake_score</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">config</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">*</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">discriminator</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.fastgen.DMDPipeline.__init__" title="Link to this definition"></a></dt>
+<dd><p>Wire up student / teacher / fake-score / discriminator and create the EMA tracker.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>student</strong> (<em>nn.Module</em>)</p></li>
+<li><p><strong>teacher</strong> (<em>nn.Module</em>)</p></li>
+<li><p><strong>fake_score</strong> (<em>nn.Module</em>)</p></li>
+<li><p><strong>config</strong> (<a class="reference internal" href="#modelopt.torch.fastgen.DMDConfig" title="modelopt.torch.fastgen.DMDConfig"><em>DMDConfig</em></a>)</p></li>
+<li><p><strong>discriminator</strong> (<em>nn.Module</em><em> | </em><em>None</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.DMDPipeline.compute_discriminator_loss">
+<span class="sig-name descname"><span class="pre">compute_discriminator_loss</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">latents</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">noise</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">encoder_hidden_states</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">**</span></span><span class="n"><span class="pre">model_kwargs</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.fastgen.DMDPipeline.compute_discriminator_loss" title="Link to this definition"></a></dt>
+<dd><p>Compute the discriminator update loss (GAN + optional R1).</p>
+<p>Teacher and student forwards are wrapped in <code class="docutils literal notranslate"><span class="pre">torch.no_grad()</span></code>; gradient flows
+only through the discriminator.</p>
+<p>Returns a dict with <code class="docutils literal notranslate"><span class="pre">&quot;gan_disc&quot;</span></code> and <code class="docutils literal notranslate"><span class="pre">&quot;total&quot;</span></code>. When
+<code class="docutils literal notranslate"><span class="pre">config.gan_r1_reg_weight</span> <span class="pre">&gt;</span> <span class="pre">0</span></code> the dict also contains <code class="docutils literal notranslate"><span class="pre">&quot;r1&quot;</span></code>.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>latents</strong> (<em>Tensor</em>)</p></li>
+<li><p><strong>noise</strong> (<em>Tensor</em>)</p></li>
+<li><p><strong>encoder_hidden_states</strong> (<em>Tensor</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>model_kwargs</strong> (<em>Any</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>dict</em>[<em>str</em>, <em>Tensor</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.DMDPipeline.compute_fake_score_loss">
+<span class="sig-name descname"><span class="pre">compute_fake_score_loss</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">latents</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">noise</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">encoder_hidden_states</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">**</span></span><span class="n"><span class="pre">model_kwargs</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.fastgen.DMDPipeline.compute_fake_score_loss" title="Link to this definition"></a></dt>
+<dd><p>Compute the fake-score (auxiliary) update loss.</p>
+<p>The fake score is trained with denoising score matching against the student’s
+generated samples. The student forward is wrapped in <code class="docutils literal notranslate"><span class="pre">torch.no_grad()</span></code> — the
+gradient here is w.r.t. <code class="docutils literal notranslate"><span class="pre">fake_score</span></code> only.</p>
+<p>Returns a dict with <code class="docutils literal notranslate"><span class="pre">&quot;fake_score&quot;</span></code> and <code class="docutils literal notranslate"><span class="pre">&quot;total&quot;</span></code> (both equal).</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>latents</strong> (<em>Tensor</em>)</p></li>
+<li><p><strong>noise</strong> (<em>Tensor</em>)</p></li>
+<li><p><strong>encoder_hidden_states</strong> (<em>Tensor</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>model_kwargs</strong> (<em>Any</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>dict</em>[<em>str</em>, <em>Tensor</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.DMDPipeline.compute_student_loss">
+<span class="sig-name descname"><span class="pre">compute_student_loss</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">latents</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">noise</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">encoder_hidden_states</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">*</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">negative_encoder_hidden_states</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">guidance_scale</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">**</span></span><span class="n"><span class="pre">model_kwargs</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.fastgen.DMDPipeline.compute_student_loss" title="Link to this definition"></a></dt>
+<dd><p>Compute the student update losses.</p>
+<p>The returned dict always contains <code class="docutils literal notranslate"><span class="pre">&quot;vsd&quot;</span></code> and <code class="docutils literal notranslate"><span class="pre">&quot;total&quot;</span></code>. When the GAN branch
+is enabled (<code class="docutils literal notranslate"><span class="pre">discriminator</span> <span class="pre">is</span> <span class="pre">not</span> <span class="pre">None</span></code> and <code class="docutils literal notranslate"><span class="pre">config.gan_loss_weight_gen</span> <span class="pre">&gt;</span> <span class="pre">0</span></code>),
+<code class="docutils literal notranslate"><span class="pre">&quot;gan_gen&quot;</span></code> is also present.</p>
+<p>Gradient flow summary:</p>
+<ul class="simple">
+<li><p>VSD gradient: flows through <code class="docutils literal notranslate"><span class="pre">student</span></code> only (<code class="docutils literal notranslate"><span class="pre">teacher_x0</span></code> is detached,
+<code class="docutils literal notranslate"><span class="pre">fake_score_x0</span></code> is computed under <code class="docutils literal notranslate"><span class="pre">torch.no_grad()</span></code>).</p></li>
+<li><p>GAN generator gradient: flows through <code class="docutils literal notranslate"><span class="pre">student</span></code> via the feature-capture
+hooks on the teacher. The teacher forward is therefore <strong>not</strong> wrapped in
+<code class="docutils literal notranslate"><span class="pre">torch.no_grad()</span></code> when the GAN branch is active.</p></li>
+</ul>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>latents</strong> (<em>Tensor</em>) – Real clean-data latents <code class="docutils literal notranslate"><span class="pre">x_0</span></code>. Used only when
+<code class="docutils literal notranslate"><span class="pre">student_sample_steps</span> <span class="pre">&gt;</span> <span class="pre">1</span></code> to construct <code class="docutils literal notranslate"><span class="pre">input_student</span></code>.</p></li>
+<li><p><strong>noise</strong> (<em>Tensor</em>) – Pure Gaussian noise tensor matching <code class="docutils literal notranslate"><span class="pre">latents</span></code> in shape/dtype.</p></li>
+<li><p><strong>encoder_hidden_states</strong> (<em>Tensor</em><em> | </em><em>None</em>) – Positive conditioning passed unchanged to all three
+models.</p></li>
+<li><p><strong>negative_encoder_hidden_states</strong> (<em>Tensor</em><em> | </em><em>None</em>) – Negative conditioning used by classifier-free
+guidance. Required when <code class="docutils literal notranslate"><span class="pre">guidance_scale</span></code> (or <code class="xref py py-attr docutils literal notranslate"><span class="pre">DMDConfig.guidance_scale</span></code>)
+is not <code class="docutils literal notranslate"><span class="pre">None</span></code>.</p></li>
+<li><p><strong>guidance_scale</strong> (<em>float</em><em> | </em><em>None</em>) – Overrides <code class="xref py py-attr docutils literal notranslate"><span class="pre">DMDConfig.guidance_scale</span></code> for this call.
+<code class="docutils literal notranslate"><span class="pre">None</span></code> keeps the config-level value.</p></li>
+<li><p><strong>**model_kwargs</strong> (<em>Any</em>) – Forwarded verbatim to <code class="docutils literal notranslate"><span class="pre">student</span></code>, <code class="docutils literal notranslate"><span class="pre">teacher</span></code>, and <code class="docutils literal notranslate"><span class="pre">fake_score</span></code>.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>Dictionary with keys <code class="docutils literal notranslate"><span class="pre">&quot;vsd&quot;</span></code>, <code class="docutils literal notranslate"><span class="pre">&quot;total&quot;</span></code>, and optionally <code class="docutils literal notranslate"><span class="pre">&quot;gan_gen&quot;</span></code>.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>dict</em>[<em>str</em>, <em>Tensor</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.DMDPipeline.config">
+<span class="sig-name descname"><span class="pre">config</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference internal" href="#modelopt.torch.fastgen.DMDConfig" title="modelopt.torch.fastgen.DMDConfig"><span class="pre">DMDConfig</span></a></em><a class="headerlink" href="#modelopt.torch.fastgen.DMDPipeline.config" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.DMDPipeline.ema">
+<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">ema</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference internal" href="#modelopt.torch.fastgen.ExponentialMovingAverage" title="modelopt.torch.fastgen.ema.ExponentialMovingAverage"><span class="pre">ExponentialMovingAverage</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#modelopt.torch.fastgen.DMDPipeline.ema" title="Link to this definition"></a></dt>
+<dd><p>Reference to the student EMA tracker, if configured.</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.DMDPipeline.update_ema">
+<span class="sig-name descname"><span class="pre">update_ema</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="o"><span class="pre">*</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">iteration</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.fastgen.DMDPipeline.update_ema" title="Link to this definition"></a></dt>
+<dd><p>Update the student EMA tracker (no-op if <code class="docutils literal notranslate"><span class="pre">config.ema</span></code> is <code class="docutils literal notranslate"><span class="pre">None</span></code>).</p>
+<p>Typically called after the student optimizer step. If <code class="docutils literal notranslate"><span class="pre">iteration</span></code> is not
+provided, an internal counter is auto-incremented.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>iteration</strong> (<em>int</em><em> | </em><em>None</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class pydantic_model">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.DistillationConfig">
+<em class="property"><span class="pre">ModeloptConfig</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">DistillationConfig</span></span><a class="headerlink" href="#modelopt.torch.fastgen.DistillationConfig" title="Link to this definition"></a></dt>
+<dd><p>Bases: <a class="reference internal" href="modelopt.torch.opt.config.html#modelopt.torch.opt.config.ModeloptBaseConfig" title="modelopt.torch.opt.config.ModeloptBaseConfig"><code class="xref py py-class docutils literal notranslate"><span class="pre">ModeloptBaseConfig</span></code></a></p>
+<p>Shared hyperparameters for diffusion step-distillation methods.</p>
+<p>Concrete methods subclass this config to add method-specific fields
+(see <a class="reference internal" href="#modelopt.torch.fastgen.DMDConfig" title="modelopt.torch.fastgen.DMDConfig"><code class="xref py py-class docutils literal notranslate"><span class="pre">DMDConfig</span></code></a>).</p>
+<p><details  class="autodoc_pydantic_collapsable_json">
+<summary>Show default config as JSON</summary><dl class="field-list simple">
+<dt class="field-odd">Default config (JSON)<span class="colon">:</span></dt>
+<dd class="field-odd"><p></p></dd>
+</dl>
+<div class="highlight-json notranslate"><div class="highlight"><pre><span></span><span class="p">{</span>
+<span class="w">   </span><span class="nt">&quot;pred_type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;flow&quot;</span><span class="p">,</span>
+<span class="w">   </span><span class="nt">&quot;guidance_scale&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span>
+<span class="w">   </span><span class="nt">&quot;sample_t_cfg&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span>
+<span class="w">   </span><span class="nt">&quot;student_sample_steps&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">   </span><span class="nt">&quot;student_sample_type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;ode&quot;</span><span class="p">,</span>
+<span class="w">   </span><span class="nt">&quot;num_train_timesteps&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+</details></p><dl class="py attribute pydantic_field">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.DistillationConfig.guidance_scale">
+<em class="property"><span class="pre">field</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">guidance_scale</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">float</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#modelopt.torch.fastgen.DistillationConfig.guidance_scale" title="Link to this definition"></a></dt>
+<dd><p><details  class="autodoc_pydantic_collapsable_json">
+<summary>Show details</summary><p>Classifier-free guidance scale. If <code class="docutils literal notranslate"><span class="pre">None</span></code> CFG is disabled.</p>
+</details></p></dd></dl>
+
+<dl class="py attribute pydantic_field">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.DistillationConfig.num_train_timesteps">
+<em class="property"><span class="pre">field</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">num_train_timesteps</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#modelopt.torch.fastgen.DistillationConfig.num_train_timesteps" title="Link to this definition"></a></dt>
+<dd><p><details  class="autodoc_pydantic_collapsable_json">
+<summary>Show details</summary><p>If set, the pipeline rescales the continuous RF timestep <code class="docutils literal notranslate"><span class="pre">t</span> <span class="pre">∈</span> <span class="pre">[0,</span> <span class="pre">1]</span></code> to <code class="docutils literal notranslate"><span class="pre">num_train_timesteps</span> <span class="pre">*</span> <span class="pre">t</span></code> before passing it to the model. Matches the diffusers convention used by Wan 2.2 / SD3 / Flux (<code class="docutils literal notranslate"><span class="pre">num_train_timesteps</span> <span class="pre">=</span> <span class="pre">1000</span></code>). Leave <code class="docutils literal notranslate"><span class="pre">None</span></code> when the model wrapper already handles the rescaling internally.</p>
+</details></p></dd></dl>
+
+<dl class="py attribute pydantic_field">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.DistillationConfig.pred_type">
+<em class="property"><span class="pre">field</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">pred_type</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">PredType</span></em><a class="headerlink" href="#modelopt.torch.fastgen.DistillationConfig.pred_type" title="Link to this definition"></a></dt>
+<dd><p><details  class="autodoc_pydantic_collapsable_json">
+<summary>Show details</summary><p>Quantity predicted by the teacher / student network.</p>
+</details></p></dd></dl>
+
+<dl class="py attribute pydantic_field">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.DistillationConfig.sample_t_cfg">
+<em class="property"><span class="pre">field</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">sample_t_cfg</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference internal" href="#modelopt.torch.fastgen.SampleTimestepConfig" title="modelopt.torch.fastgen.SampleTimestepConfig"><span class="pre">SampleTimestepConfig</span></a></em><em class="property"> <span class="pre">[Optional]</span></em><a class="headerlink" href="#modelopt.torch.fastgen.DistillationConfig.sample_t_cfg" title="Link to this definition"></a></dt>
+<dd><p><details  class="autodoc_pydantic_collapsable_json">
+<summary>Show details</summary><p>Timestep distribution used for both the teacher forward and the VSD / DSM losses.</p>
+</details></p></dd></dl>
+
+<dl class="py attribute pydantic_field">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.DistillationConfig.student_sample_steps">
+<em class="property"><span class="pre">field</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">student_sample_steps</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></em><a class="headerlink" href="#modelopt.torch.fastgen.DistillationConfig.student_sample_steps" title="Link to this definition"></a></dt>
+<dd><p><details  class="autodoc_pydantic_collapsable_json">
+<summary>Show details</summary><p>Number of denoising steps the distilled student performs at inference.</p>
+</details></p></dd></dl>
+
+<dl class="py attribute pydantic_field">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.DistillationConfig.student_sample_type">
+<em class="property"><span class="pre">field</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">student_sample_type</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Literal</span><span class="p"><span class="pre">[</span></span><span class="s"><span class="pre">'sde'</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="s"><span class="pre">'ode'</span></span><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#modelopt.torch.fastgen.DistillationConfig.student_sample_type" title="Link to this definition"></a></dt>
+<dd><p><details  class="autodoc_pydantic_collapsable_json">
+<summary>Show details</summary><p>Integrator used when unrolling the student over <code class="docutils literal notranslate"><span class="pre">student_sample_steps</span> <span class="pre">&gt;</span> <span class="pre">1</span></code> steps. Not read by DMDPipeline at training time — consumed by inference samplers that unroll the student over <code class="docutils literal notranslate"><span class="pre">student_sample_steps</span> <span class="pre">&gt;</span> <span class="pre">1</span></code> steps.</p>
+</details></p></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.DistillationPipeline">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">DistillationPipeline</span></span><a class="headerlink" href="#modelopt.torch.fastgen.DistillationPipeline" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<p>Hold student/teacher references and expose shared utilities.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>student</strong> – Trainable student module. The pipeline does not wrap it — its lifecycle
+(<code class="docutils literal notranslate"><span class="pre">train()</span></code> / <code class="docutils literal notranslate"><span class="pre">eval()</span></code>, <code class="docutils literal notranslate"><span class="pre">requires_grad_</span></code>, sharding, optimizer) remains
+owned by the caller.</p></li>
+<li><p><strong>teacher</strong> – Reference module. Frozen here via <code class="docutils literal notranslate"><span class="pre">eval()</span></code> + <code class="docutils literal notranslate"><span class="pre">requires_grad_(False)</span></code>.</p></li>
+<li><p><strong>config</strong> – A <a class="reference internal" href="#modelopt.torch.fastgen.DistillationConfig" title="modelopt.torch.fastgen.DistillationConfig"><code class="xref py py-class docutils literal notranslate"><span class="pre">DistillationConfig</span></code></a> (or subclass).</p></li>
+</ul>
+</dd>
+</dl>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.DistillationPipeline.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">student</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">teacher</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">config</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.fastgen.DistillationPipeline.__init__" title="Link to this definition"></a></dt>
+<dd><p>Store student / teacher references and freeze the teacher.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>student</strong> (<em>nn.Module</em>)</p></li>
+<li><p><strong>teacher</strong> (<em>nn.Module</em>)</p></li>
+<li><p><strong>config</strong> (<a class="reference internal" href="#modelopt.torch.fastgen.DistillationConfig" title="modelopt.torch.fastgen.DistillationConfig"><em>DistillationConfig</em></a>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.DistillationPipeline.device">
+<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">device</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">device</span></em><a class="headerlink" href="#modelopt.torch.fastgen.DistillationPipeline.device" title="Link to this definition"></a></dt>
+<dd><p>Device of the first student parameter (best-effort; falls back to CPU).</p>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.DistillationPipeline.dtype">
+<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">dtype</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">dtype</span></em><a class="headerlink" href="#modelopt.torch.fastgen.DistillationPipeline.dtype" title="Link to this definition"></a></dt>
+<dd><p>Dtype of the first student parameter (best-effort; falls back to float32).</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.DistillationPipeline.sample_timesteps">
+<span class="sig-name descname"><span class="pre">sample_timesteps</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">n</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">*</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">device</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">dtype</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">torch.float32</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.fastgen.DistillationPipeline.sample_timesteps" title="Link to this definition"></a></dt>
+<dd><p>Sample <code class="docutils literal notranslate"><span class="pre">n</span></code> training timesteps according to <code class="xref py py-attr docutils literal notranslate"><span class="pre">config</span></code>.``sample_t_cfg``.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>n</strong> (<em>int</em>)</p></li>
+<li><p><strong>device</strong> (<em>device</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>dtype</strong> (<em>dtype</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>Tensor</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class pydantic_model">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.EMAConfig">
+<em class="property"><span class="pre">ModeloptConfig</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">EMAConfig</span></span><a class="headerlink" href="#modelopt.torch.fastgen.EMAConfig" title="Link to this definition"></a></dt>
+<dd><p>Bases: <a class="reference internal" href="modelopt.torch.opt.config.html#modelopt.torch.opt.config.ModeloptBaseConfig" title="modelopt.torch.opt.config.ModeloptBaseConfig"><code class="xref py py-class docutils literal notranslate"><span class="pre">ModeloptBaseConfig</span></code></a></p>
+<p>Exponential moving average (EMA) hyperparameters for the student network.</p>
+<p><details  class="autodoc_pydantic_collapsable_json">
+<summary>Show default config as JSON</summary><dl class="field-list simple">
+<dt class="field-odd">Default config (JSON)<span class="colon">:</span></dt>
+<dd class="field-odd"><p></p></dd>
+</dl>
+<div class="highlight-json notranslate"><div class="highlight"><pre><span></span><span class="p">{</span>
+<span class="w">   </span><span class="nt">&quot;decay&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">0.9999</span><span class="p">,</span>
+<span class="w">   </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;constant&quot;</span><span class="p">,</span>
+<span class="w">   </span><span class="nt">&quot;start_iter&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">   </span><span class="nt">&quot;gamma&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">16.97</span><span class="p">,</span>
+<span class="w">   </span><span class="nt">&quot;halflife_kimg&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">500.0</span><span class="p">,</span>
+<span class="w">   </span><span class="nt">&quot;rampup_ratio&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">0.05</span><span class="p">,</span>
+<span class="w">   </span><span class="nt">&quot;batch_size&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">   </span><span class="nt">&quot;fsdp2&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">   </span><span class="nt">&quot;mode&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;full_tensor&quot;</span><span class="p">,</span>
+<span class="w">   </span><span class="nt">&quot;dtype&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;float32&quot;</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+</details></p><dl class="py attribute pydantic_field">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.EMAConfig.batch_size">
+<em class="property"><span class="pre">field</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">batch_size</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></em><a class="headerlink" href="#modelopt.torch.fastgen.EMAConfig.batch_size" title="Link to this definition"></a></dt>
+<dd><p><details  class="autodoc_pydantic_collapsable_json">
+<summary>Show details</summary><p>Per-step global batch size used to convert iterations to nimg for the halflife schedule.</p>
+</details></p></dd></dl>
+
+<dl class="py attribute pydantic_field">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.EMAConfig.decay">
+<em class="property"><span class="pre">field</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">decay</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">float</span></em><a class="headerlink" href="#modelopt.torch.fastgen.EMAConfig.decay" title="Link to this definition"></a></dt>
+<dd><p><details  class="autodoc_pydantic_collapsable_json">
+<summary>Show details</summary><p>Decay coefficient for <code class="docutils literal notranslate"><span class="pre">type='constant'</span></code>. Ignored for <code class="docutils literal notranslate"><span class="pre">halflife</span></code>/<code class="docutils literal notranslate"><span class="pre">power</span></code>.</p>
+</details></p></dd></dl>
+
+<dl class="py attribute pydantic_field">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.EMAConfig.dtype">
+<em class="property"><span class="pre">field</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">dtype</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Literal</span><span class="p"><span class="pre">[</span></span><span class="s"><span class="pre">'float32'</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="s"><span class="pre">'bfloat16'</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="s"><span class="pre">'float16'</span></span><span class="p"><span class="pre">]</span></span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#modelopt.torch.fastgen.EMAConfig.dtype" title="Link to this definition"></a></dt>
+<dd><p><details  class="autodoc_pydantic_collapsable_json">
+<summary>Show details</summary><p>Precision of the EMA parameter shadows. Defaults to <code class="docutils literal notranslate"><span class="pre">float32</span></code> so EMA updates remain numerically meaningful even when the live model is bf16/fp16 (cf. FastGen, which instantiates its EMA module in the net’s construction dtype — typically fp32). Pass <code class="docutils literal notranslate"><span class="pre">None</span></code> to keep param shadows in the live parameter’s dtype. Buffer shadows always track the live dtype regardless of this setting.</p>
+</details></p></dd></dl>
+
+<dl class="py attribute pydantic_field">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.EMAConfig.fsdp2">
+<em class="property"><span class="pre">field</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">fsdp2</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></em><a class="headerlink" href="#modelopt.torch.fastgen.EMAConfig.fsdp2" title="Link to this definition"></a></dt>
+<dd><p><details  class="autodoc_pydantic_collapsable_json">
+<summary>Show details</summary><p>If True, the EMA uses <code class="docutils literal notranslate"><span class="pre">DTensor.full_tensor()</span></code> to gather sharded parameters before updating.</p>
+</details></p></dd></dl>
+
+<dl class="py attribute pydantic_field">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.EMAConfig.gamma">
+<em class="property"><span class="pre">field</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">gamma</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">float</span></em><a class="headerlink" href="#modelopt.torch.fastgen.EMAConfig.gamma" title="Link to this definition"></a></dt>
+<dd><p><details  class="autodoc_pydantic_collapsable_json">
+<summary>Show details</summary><p>Exponent for <code class="docutils literal notranslate"><span class="pre">type='power'</span></code> (<code class="docutils literal notranslate"><span class="pre">beta</span> <span class="pre">=</span> <span class="pre">(1</span> <span class="pre">-</span> <span class="pre">1/iter)**(gamma</span> <span class="pre">+</span> <span class="pre">1)</span></code>).</p>
+</details></p></dd></dl>
+
+<dl class="py attribute pydantic_field">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.EMAConfig.halflife_kimg">
+<em class="property"><span class="pre">field</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">halflife_kimg</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">float</span></em><a class="headerlink" href="#modelopt.torch.fastgen.EMAConfig.halflife_kimg" title="Link to this definition"></a></dt>
+<dd><p><details  class="autodoc_pydantic_collapsable_json">
+<summary>Show details</summary><p>Halflife in thousands of images for <code class="docutils literal notranslate"><span class="pre">type='halflife'</span></code>.</p>
+</details></p></dd></dl>
+
+<dl class="py attribute pydantic_field">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.EMAConfig.mode">
+<em class="property"><span class="pre">field</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">mode</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Literal</span><span class="p"><span class="pre">[</span></span><span class="s"><span class="pre">'full_tensor'</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="s"><span class="pre">'local_shard'</span></span><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#modelopt.torch.fastgen.EMAConfig.mode" title="Link to this definition"></a></dt>
+<dd><p><details  class="autodoc_pydantic_collapsable_json">
+<summary>Show details</summary><p><code class="docutils literal notranslate"><span class="pre">full_tensor</span></code> performs an all_gather per parameter (higher memory, exact global EMA). <code class="docutils literal notranslate"><span class="pre">local_shard</span></code> updates each rank’s local DTensor shard in place (low memory fallback).</p>
+</details></p></dd></dl>
+
+<dl class="py attribute pydantic_field">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.EMAConfig.rampup_ratio">
+<em class="property"><span class="pre">field</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">rampup_ratio</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">float</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#modelopt.torch.fastgen.EMAConfig.rampup_ratio" title="Link to this definition"></a></dt>
+<dd><p><details  class="autodoc_pydantic_collapsable_json">
+<summary>Show details</summary><p>Rampup fraction for <code class="docutils literal notranslate"><span class="pre">type='halflife'</span></code>; pass <code class="docutils literal notranslate"><span class="pre">None</span></code> to disable rampup.</p>
+</details></p></dd></dl>
+
+<dl class="py attribute pydantic_field">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.EMAConfig.start_iter">
+<em class="property"><span class="pre">field</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">start_iter</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></em><a class="headerlink" href="#modelopt.torch.fastgen.EMAConfig.start_iter" title="Link to this definition"></a></dt>
+<dd><p><details  class="autodoc_pydantic_collapsable_json">
+<summary>Show details</summary><p>Iteration at which EMA tracking begins (EMA is initialized from the live weights at this step).</p>
+</details></p></dd></dl>
+
+<dl class="py attribute pydantic_field">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.EMAConfig.type">
+<em class="property"><span class="pre">field</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">type</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Literal</span><span class="p"><span class="pre">[</span></span><span class="s"><span class="pre">'constant'</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="s"><span class="pre">'halflife'</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="s"><span class="pre">'power'</span></span><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#modelopt.torch.fastgen.EMAConfig.type" title="Link to this definition"></a></dt>
+<dd><p><details  class="autodoc_pydantic_collapsable_json">
+<summary>Show details</summary><p>Schedule used to compute the per-step decay coefficient.</p>
+</details></p></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.ExponentialMovingAverage">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">ExponentialMovingAverage</span></span><a class="headerlink" href="#modelopt.torch.fastgen.ExponentialMovingAverage" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<p>FSDP2-aware EMA tracker for a PyTorch module.</p>
+<p>The tracker stores a shadow state dict: parameters are promoted per
+<a class="reference internal" href="#modelopt.torch.fastgen.EMAConfig.dtype" title="modelopt.torch.fastgen.EMAConfig.dtype"><code class="xref py py-attr docutils literal notranslate"><span class="pre">EMAConfig.dtype</span></code></a> (default fp32) while buffers are kept in the live module’s
+dtype. Buffers are replicated across ranks and stepped via <code class="docutils literal notranslate"><span class="pre">copy_</span></code> rather than
+<code class="docutils literal notranslate"><span class="pre">lerp_</span></code>, so the bf16-roundoff argument that motivates parameter promotion
+doesn’t apply — preserving the live dtype makes the buffer restore exact.</p>
+<p>By default the tracker materialises the full tensor per parameter
+(<code class="docutils literal notranslate"><span class="pre">mode='full_tensor'</span></code>) so the EMA represents the globally averaged weights even
+when the model is sharded across ranks. A <code class="docutils literal notranslate"><span class="pre">mode='local_shard'</span></code> fallback is
+available for memory-constrained settings — it does not all-gather and therefore
+each rank holds an EMA of its local shard only.</p>
+<p>Example:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">ema</span> <span class="o">=</span> <span class="n">ExponentialMovingAverage</span><span class="p">(</span><span class="n">student</span><span class="p">,</span> <span class="n">EMAConfig</span><span class="p">(</span><span class="n">decay</span><span class="o">=</span><span class="mf">0.999</span><span class="p">))</span>
+<span class="k">for</span> <span class="n">step</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">max_steps</span><span class="p">):</span>
+    <span class="o">...</span>  <span class="c1"># compute loss, backward, optimizer.step()</span>
+    <span class="n">ema</span><span class="o">.</span><span class="n">update</span><span class="p">(</span><span class="n">student</span><span class="p">,</span> <span class="n">iteration</span><span class="o">=</span><span class="n">step</span><span class="p">)</span>
+
+<span class="n">ema</span><span class="o">.</span><span class="n">copy_to</span><span class="p">(</span><span class="n">student_for_eval</span><span class="p">)</span>  <span class="c1"># publish for inference</span>
+</pre></div>
+</div>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.ExponentialMovingAverage.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">config</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.fastgen.ExponentialMovingAverage.__init__" title="Link to this definition"></a></dt>
+<dd><p>Pre-allocate the shadow state from <code class="docutils literal notranslate"><span class="pre">model</span></code>’s parameters and buffers.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>model</strong> (<em>nn.Module</em>)</p></li>
+<li><p><strong>config</strong> (<a class="reference internal" href="#modelopt.torch.fastgen.EMAConfig" title="modelopt.torch.fastgen.EMAConfig"><em>EMAConfig</em></a>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.ExponentialMovingAverage.copy_to">
+<span class="sig-name descname"><span class="pre">copy_to</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">target</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.fastgen.ExponentialMovingAverage.copy_to" title="Link to this definition"></a></dt>
+<dd><p>Load the shadow state into <code class="docutils literal notranslate"><span class="pre">target</span></code> (which should share the tracked module’s structure).</p>
+<p>The target is expected to be an unsharded module (i.e. the caller has unwrapped
+any FSDP2 wrappers before calling). For sharded targets, prefer saving the
+shadow via <a class="reference internal" href="#modelopt.torch.fastgen.ExponentialMovingAverage.state_dict" title="modelopt.torch.fastgen.ExponentialMovingAverage.state_dict"><code class="xref py py-meth docutils literal notranslate"><span class="pre">state_dict()</span></code></a> and reloading it through the framework’s usual
+checkpoint path.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>target</strong> (<em>Module</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.ExponentialMovingAverage.load_state_dict">
+<span class="sig-name descname"><span class="pre">load_state_dict</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">state</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.fastgen.ExponentialMovingAverage.load_state_dict" title="Link to this definition"></a></dt>
+<dd><p>Restore the shadow state from a previously saved dict.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>state</strong> (<em>dict</em><em>[</em><em>str</em><em>, </em><em>Tensor</em><em>]</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.ExponentialMovingAverage.state_dict">
+<span class="sig-name descname"><span class="pre">state_dict</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.fastgen.ExponentialMovingAverage.state_dict" title="Link to this definition"></a></dt>
+<dd><p>Return the shadow state (parameters + buffers) for checkpointing.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>dict</em>[<em>str</em>, <em>Tensor</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.ExponentialMovingAverage.update">
+<span class="sig-name descname"><span class="pre">update</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">*</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">iteration</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.fastgen.ExponentialMovingAverage.update" title="Link to this definition"></a></dt>
+<dd><p>Update the shadow state from <code class="docutils literal notranslate"><span class="pre">model</span></code> at the given iteration.</p>
+<p>Skips updates before <a class="reference internal" href="#modelopt.torch.fastgen.EMAConfig.start_iter" title="modelopt.torch.fastgen.EMAConfig.start_iter"><code class="xref py py-attr docutils literal notranslate"><span class="pre">EMAConfig.start_iter</span></code></a>. On the iteration that equals
+<code class="docutils literal notranslate"><span class="pre">start_iter</span></code> the shadow is (re-)initialised from the live weights; after that
+it is updated with <code class="docutils literal notranslate"><span class="pre">shadow</span> <span class="pre">=</span> <span class="pre">beta</span> <span class="pre">*</span> <span class="pre">shadow</span> <span class="pre">+</span> <span class="pre">(1</span> <span class="pre">-</span> <span class="pre">beta)</span> <span class="pre">*</span> <span class="pre">live</span></code>.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>model</strong> (<em>Module</em>)</p></li>
+<li><p><strong>iteration</strong> (<em>int</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class pydantic_model">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.SampleTimestepConfig">
+<em class="property"><span class="pre">ModeloptConfig</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">SampleTimestepConfig</span></span><a class="headerlink" href="#modelopt.torch.fastgen.SampleTimestepConfig" title="Link to this definition"></a></dt>
+<dd><p>Bases: <a class="reference internal" href="modelopt.torch.opt.config.html#modelopt.torch.opt.config.ModeloptBaseConfig" title="modelopt.torch.opt.config.ModeloptBaseConfig"><code class="xref py py-class docutils literal notranslate"><span class="pre">ModeloptBaseConfig</span></code></a></p>
+<p>Timestep sampling distribution for diffusion training.</p>
+<p><details  class="autodoc_pydantic_collapsable_json">
+<summary>Show default config as JSON</summary><dl class="field-list simple">
+<dt class="field-odd">Default config (JSON)<span class="colon">:</span></dt>
+<dd class="field-odd"><p></p></dd>
+</dl>
+<div class="highlight-json notranslate"><div class="highlight"><pre><span></span><span class="p">{</span>
+<span class="w">   </span><span class="nt">&quot;time_dist_type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;shifted&quot;</span><span class="p">,</span>
+<span class="w">   </span><span class="nt">&quot;min_t&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">0.001</span><span class="p">,</span>
+<span class="w">   </span><span class="nt">&quot;max_t&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">0.999</span><span class="p">,</span>
+<span class="w">   </span><span class="nt">&quot;shift&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">5.0</span><span class="p">,</span>
+<span class="w">   </span><span class="nt">&quot;p_mean&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">0.0</span><span class="p">,</span>
+<span class="w">   </span><span class="nt">&quot;p_std&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">1.0</span><span class="p">,</span>
+<span class="w">   </span><span class="nt">&quot;t_list&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+</details></p><dl class="py attribute pydantic_field">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.SampleTimestepConfig.max_t">
+<em class="property"><span class="pre">field</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">max_t</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">float</span></em><a class="headerlink" href="#modelopt.torch.fastgen.SampleTimestepConfig.max_t" title="Link to this definition"></a></dt>
+<dd><p><details  class="autodoc_pydantic_collapsable_json">
+<summary>Show details</summary><p>Upper bound of the sampling range (clamped before use).</p>
+</details></p></dd></dl>
+
+<dl class="py attribute pydantic_field">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.SampleTimestepConfig.min_t">
+<em class="property"><span class="pre">field</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">min_t</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">float</span></em><a class="headerlink" href="#modelopt.torch.fastgen.SampleTimestepConfig.min_t" title="Link to this definition"></a></dt>
+<dd><p><details  class="autodoc_pydantic_collapsable_json">
+<summary>Show details</summary><p>Lower bound of the sampling range (clamped before use).</p>
+</details></p></dd></dl>
+
+<dl class="py attribute pydantic_field">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.SampleTimestepConfig.p_mean">
+<em class="property"><span class="pre">field</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">p_mean</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">float</span></em><a class="headerlink" href="#modelopt.torch.fastgen.SampleTimestepConfig.p_mean" title="Link to this definition"></a></dt>
+<dd><p><details  class="autodoc_pydantic_collapsable_json">
+<summary>Show details</summary><p>Mean of the underlying normal for <code class="docutils literal notranslate"><span class="pre">logitnormal</span></code> / <code class="docutils literal notranslate"><span class="pre">lognormal</span></code>.</p>
+</details></p></dd></dl>
+
+<dl class="py attribute pydantic_field">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.SampleTimestepConfig.p_std">
+<em class="property"><span class="pre">field</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">p_std</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">float</span></em><a class="headerlink" href="#modelopt.torch.fastgen.SampleTimestepConfig.p_std" title="Link to this definition"></a></dt>
+<dd><p><details  class="autodoc_pydantic_collapsable_json">
+<summary>Show details</summary><p>Standard deviation of the underlying normal for <code class="docutils literal notranslate"><span class="pre">logitnormal</span></code> / <code class="docutils literal notranslate"><span class="pre">lognormal</span></code>.</p>
+</details></p></dd></dl>
+
+<dl class="py attribute pydantic_field">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.SampleTimestepConfig.shift">
+<em class="property"><span class="pre">field</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">shift</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">float</span></em><a class="headerlink" href="#modelopt.torch.fastgen.SampleTimestepConfig.shift" title="Link to this definition"></a></dt>
+<dd><p><details  class="autodoc_pydantic_collapsable_json">
+<summary>Show details</summary><p>Shift factor for <code class="docutils literal notranslate"><span class="pre">time_dist_type='shifted'</span></code>; must be &gt;= 1.</p>
+</details></p></dd></dl>
+
+<dl class="py attribute pydantic_field">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.SampleTimestepConfig.t_list">
+<em class="property"><span class="pre">field</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">t_list</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">list</span><span class="p"><span class="pre">[</span></span><span class="pre">float</span><span class="p"><span class="pre">]</span></span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#modelopt.torch.fastgen.SampleTimestepConfig.t_list" title="Link to this definition"></a></dt>
+<dd><p><details  class="autodoc_pydantic_collapsable_json">
+<summary>Show details</summary><p>Explicit timestep schedule used when <code class="docutils literal notranslate"><span class="pre">DMDConfig.student_sample_steps</span> <span class="pre">&gt;</span> <span class="pre">1</span></code>. The final element must be <code class="docutils literal notranslate"><span class="pre">0.0</span></code>.</p>
+</details></p></dd></dl>
+
+<dl class="py attribute pydantic_field">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.SampleTimestepConfig.time_dist_type">
+<em class="property"><span class="pre">field</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">time_dist_type</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">TimeDistType</span></em><a class="headerlink" href="#modelopt.torch.fastgen.SampleTimestepConfig.time_dist_type" title="Link to this definition"></a></dt>
+<dd><p><details  class="autodoc_pydantic_collapsable_json">
+<summary>Show details</summary><p>Distribution used to sample the training timestep <code class="docutils literal notranslate"><span class="pre">t</span></code>. Rectified-flow models typically use <code class="docutils literal notranslate"><span class="pre">shifted</span></code> (Wan 2.2) or <code class="docutils literal notranslate"><span class="pre">logitnormal</span></code> (SD3, Flux).</p>
+</details></p></dd></dl>
+
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.create_fake_score">
+<span class="sig-name descname"><span class="pre">create_fake_score</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">teacher</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">*</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">deep_copy</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.fastgen.create_fake_score" title="Link to this definition"></a></dt>
+<dd><p>Return a trainable fake-score network initialized from the teacher.</p>
+<p>This is the unit-test / single-script path; frameworks that do meta-init + FSDP2
+wrapping will typically construct the fake score themselves and pass it directly
+into <a class="reference internal" href="#modelopt.torch.fastgen.DMDPipeline" title="modelopt.torch.fastgen.methods.dmd.DMDPipeline"><code class="xref py py-class docutils literal notranslate"><span class="pre">DMDPipeline</span></code></a>.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>teacher</strong> (<em>nn.Module</em>) – The already-built teacher module. Must already have its weights loaded.</p></li>
+<li><p><strong>deep_copy</strong> (<em>bool</em>) – If True, <code class="xref py py-func docutils literal notranslate"><span class="pre">copy.deepcopy()</span></code> the teacher; if False, reuse the same
+instance (only sensible if the caller can guarantee it is no longer held
+elsewhere as the frozen teacher).</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>A copy of <code class="docutils literal notranslate"><span class="pre">teacher</span></code> in training mode with all parameters requiring gradients.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>nn.Module</p>
+</dd>
+</dl>
+<section id="fsdp2-caveat">
+<h2>FSDP2 caveat<a class="headerlink" href="#fsdp2-caveat" title="Link to this heading"></a></h2>
+<p><code class="docutils literal notranslate"><span class="pre">copy.deepcopy(teacher)</span></code> is <strong>not safe</strong> when the teacher is already FSDP2-wrapped
+(DTensor parameters + FSDP pre/post hooks + meta-init bookkeeping). For Stage-2 FSDP2
+training, skip this factory and construct the fake score under meta-init, then
+rank-0-load weights and let <code class="docutils literal notranslate"><span class="pre">sync_module_states</span></code> broadcast:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="k">with</span> <span class="n">meta_init_context</span><span class="p">():</span>
+    <span class="n">fake_score</span> <span class="o">=</span> <span class="n">build_teacher_from_config</span><span class="p">(</span><span class="n">teacher_config</span><span class="p">)</span>
+<span class="k">if</span> <span class="n">is_rank0</span><span class="p">():</span>
+    <span class="n">fake_score</span><span class="o">.</span><span class="n">load_state_dict</span><span class="p">(</span><span class="n">teacher</span><span class="o">.</span><span class="n">state_dict</span><span class="p">(),</span> <span class="n">strict</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
+<span class="c1"># Wrap with FSDP2(..., sync_module_states=True) to broadcast from rank 0.</span>
+</pre></div>
+</div>
+<p>The pattern mirrors FastGen’s
+<code class="docutils literal notranslate"><span class="pre">methods/distribution_matching/dmd2.py::DMD2Model.build_model</span></code>. A dedicated
+<code class="docutils literal notranslate"><span class="pre">create_fake_score_meta</span></code> factory is planned alongside the Stage-2 training example.</p>
+<dl class="field-list simple">
+<dt class="field-odd">raises RuntimeError<span class="colon">:</span></dt>
+<dd class="field-odd"><p>When <code class="docutils literal notranslate"><span class="pre">deep_copy=True</span></code> and the teacher looks FSDP-wrapped
+    (either FSDP1 via <code class="docutils literal notranslate"><span class="pre">_fsdp_wrapped_module</span></code> or FSDP2 via DTensor
+    parameters). The <code class="docutils literal notranslate"><span class="pre">deep_copy=False</span></code> branch skips the check because
+    reusing the teacher directly is compatible with an FSDP-wrapped input.</p>
+</dd>
+</dl>
+</section>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.load_config">
+<span class="sig-name descname"><span class="pre">load_config</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">config_file</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.fastgen.load_config" title="Link to this definition"></a></dt>
+<dd><p>Load a YAML file and return the parsed mapping.</p>
+<p>Mirrors <code class="xref py py-func docutils literal notranslate"><span class="pre">modelopt.recipe._config_loader.load_config()</span></code> in spirit but without
+the ExMy-num-bits post-processing that is specific to quantization recipes.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>config_file</strong> (<em>str</em><em> | </em><em>Path</em>) – YAML path. Suffix is optional; resolution searches the built-in
+<code class="docutils literal notranslate"><span class="pre">modelopt_recipes/</span></code> package first, then the filesystem.</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>The parsed dictionary. An empty file yields <code class="docutils literal notranslate"><span class="pre">{}</span></code>.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>dict</em>[<em>str</em>, <em>Any</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.load_dmd_config">
+<span class="sig-name descname"><span class="pre">load_dmd_config</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">config_file</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.fastgen.load_dmd_config" title="Link to this definition"></a></dt>
+<dd><p>Load a YAML file and construct a <a class="reference internal" href="#modelopt.torch.fastgen.DMDConfig" title="modelopt.torch.fastgen.DMDConfig"><code class="xref py py-class docutils literal notranslate"><span class="pre">DMDConfig</span></code></a>.</p>
+<p>The YAML is validated against <a class="reference internal" href="#modelopt.torch.fastgen.DMDConfig" title="modelopt.torch.fastgen.DMDConfig"><code class="xref py py-class docutils literal notranslate"><span class="pre">DMDConfig</span></code></a>’s Pydantic schema — unknown keys
+raise <code class="docutils literal notranslate"><span class="pre">ValidationError</span></code>.</p>
+<p>Example YAML:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">pred_type</span><span class="p">:</span> <span class="n">flow</span>
+<span class="n">guidance_scale</span><span class="p">:</span> <span class="mf">5.0</span>
+<span class="n">student_sample_steps</span><span class="p">:</span> <span class="mi">2</span>
+<span class="n">gan_loss_weight_gen</span><span class="p">:</span> <span class="mf">0.03</span>
+<span class="n">sample_t_cfg</span><span class="p">:</span>
+  <span class="n">time_dist_type</span><span class="p">:</span> <span class="n">shifted</span>
+  <span class="n">t_list</span><span class="p">:</span> <span class="p">[</span><span class="mf">0.999</span><span class="p">,</span> <span class="mf">0.833</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">]</span>
+<span class="n">ema</span><span class="p">:</span>
+  <span class="n">decay</span><span class="p">:</span> <span class="mf">0.9999</span>
+</pre></div>
+</div>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>config_file</strong> (<em>str</em><em> | </em><em>Path</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference internal" href="#modelopt.torch.fastgen.DMDConfig" title="modelopt.torch.fastgen.config.DMDConfig"><em>DMDConfig</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="modelopt.torch.export.unified_export_megatron.html" class="btn btn-neutral float-left" title="unified_export_megatron" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="modelopt.torch.fastgen.flow_matching.html" class="btn btn-neutral float-right" title="flow_matching" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2023-2025, NVIDIA Corporation.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

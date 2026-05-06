@@ -1,0 +1,66 @@
+quant\_utils
+============
+
+.. List the submodules
+
+
+
+
+
+.. Autodoc anything defined in the module itself
+
+   TODO: WE DON'T USE THIS OPTION RIGHT NOW BUT WE CAN REACTIVATE IF WANTED
+   We use :ignore-module-all: so sphinx does not document the same module twice, even if it is reimported
+   For reimports that should be documented somewhere other than where they are defined, the re-imports
+   __module__ should be manually overridden -- i.e. in the ``__init__.py`` which contains ``from xxx import YYY``,
+   add in ``YYY.__module__ = __name__``.
+
+.. automodule:: modelopt.torch.export.quant_utils
+   :members:
+   :undoc-members:
+
+   .. Also show members without docstrings. Only members from __all__ are considered as per conf.py
+   .. Ideally we should add docstrings for these members.
+
+
+   .. Overview table of available classes in the module
+   
+   
+   
+
+
+   .. Overview table of available functions in the module
+   
+   
+   .. rubric:: Functions
+
+   .. autosummary::
+      :nosignatures:
+   
+      adjust_attn_amax_values
+      all_items_same
+      from_quantized_weight
+      fuse_prequant_layernorm
+      fuse_prequant_to_linear
+      get_activation_scaling_factor
+      get_kv_cache_bias
+      get_kv_cache_dtype
+      get_kv_cache_scaling_factor
+      get_prequant_scaling_factor
+      get_quant_config
+      get_quantization_format
+      get_scaling_factor
+      get_scaling_factor_from_weight
+      get_weight_block_size
+      get_weight_scaling_factor
+      get_weight_scaling_factor_2
+      has_quantized_modules
+      maybe_transpose_expert_weight_dimensions
+      pack_int4_in_uint8
+      postprocess_state_dict
+      preprocess_linear_fusion
+      process_layer_quant_config
+      resmooth_and_get_scale
+      to_quantized_weight
+   
+   

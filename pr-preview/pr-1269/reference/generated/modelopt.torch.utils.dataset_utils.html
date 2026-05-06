@@ -1,0 +1,457 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>dataset_utils &mdash; Model Optimizer 0.0.1.dev1+gb15f0244a</title>
+      <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="../../_static/copybutton.css?v=76b2166b" />
+      <link rel="stylesheet" type="text/css" href="../../_static/tabs.css?v=4c969af8" />
+      <link rel="stylesheet" type="text/css" href="../../_static/togglebutton.css?v=9c3e77be" />
+      <link rel="stylesheet" type="text/css" href="../../_static/autodoc_pydantic.css" />
+      <link rel="stylesheet" type="text/css" href="../../_static/custom.css?v=7a224f4b" />
+
+  
+      <script src="../../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../../_static/documentation_options.js?v=5929fcd5"></script>
+      <script src="../../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="../../_static/clipboard.min.js?v=a7894cd8"></script>
+      <script src="../../_static/copybutton.js?v=20d3d275"></script>
+      <script src="../../_static/tabs.js?v=3ee01567"></script>
+      <script>let toggleHintShow = 'Click to show';</script>
+      <script>let toggleHintHide = 'Click to hide';</script>
+      <script>let toggleOpenOnPrint = 'true';</script>
+      <script src="../../_static/togglebutton.js?v=b8b12719"></script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+    <script src="../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" />
+    <link rel="next" title="distributed" href="modelopt.torch.utils.distributed.html" />
+    <link rel="prev" title="cpp_extension" href="modelopt.torch.utils.cpp_extension.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../../index.html" class="icon icon-home">
+            Model Optimizer
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../getting_started/1_overview.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../getting_started/2_installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch to ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - Windows</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_qat" rel="noopener noreferrer" target="_blank">Quick Start: QAT</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning" rel="noopener noreferrer" target="_blank">Quick Start: Pruning</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_distill" rel="noopener noreferrer" target="_blank">Quick Start: Distillation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/speculative_decoding" rel="noopener noreferrer" target="_blank">Quick Start: Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_sparsity" rel="noopener noreferrer" target="_blank">Quick Start: Sparsity</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Guides</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/0_support_matrix.html">Support Matrix</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/10_recipes.html">Recipes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/1_quantization.html">Quantization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/2_save_load.html">Saving &amp; Restoring</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/3_pruning.html">Pruning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/4_distillation.html">Distillation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/5_speculative_decoding.html">Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/6_sparsity.html">Sparsity</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/7_nas.html">NAS</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/8_autocast.html">AutoCast (ONNX)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/9_autotune.html">Autotune (ONNX)</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Deployment</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/1_tensorrt_llm.html">TensorRT-LLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/2_onnxruntime.html">Onnxruntime</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/3_unified_hf.html">Unified HuggingFace Checkpoint</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Examples</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../examples/0_all_examples.html">All GitHub Examples</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Reference</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="../0_changelog.html">Changelog</a></li>
+<li class="toctree-l1 current"><a class="reference internal" href="../1_modelopt_api.html">modelopt API</a><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="modelopt.deploy.html">deploy</a></li>
+<li class="toctree-l2"><a class="reference internal" href="modelopt.onnx.html">onnx</a></li>
+<li class="toctree-l2 current"><a class="reference internal" href="modelopt.torch.html">torch</a><ul class="current">
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.distill.html">distill</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.export.html">export</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.kernels.html">kernels</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.nas.html">nas</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.opt.html">opt</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.peft.html">peft</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.prune.html">prune</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.puzzletron.html">puzzletron</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.quantization.html">quantization</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.sparsity.html">sparsity</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.speculative.html">speculative</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.trace.html">trace</a></li>
+<li class="toctree-l3 current"><a class="reference internal" href="modelopt.torch.utils.html">utils</a><ul class="current">
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.cpp_extension.html">cpp_extension</a></li>
+<li class="toctree-l4 current"><a class="current reference internal" href="#">dataset_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.distributed.html">distributed</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.graph.html">graph</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.import_utils.html">import_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.list.html">list</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.logging.html">logging</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.memory_monitor.html">memory_monitor</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.nemotron_vlm_dataset_utils.html">nemotron_vlm_dataset_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.network.html">network</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.perf.html">perf</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.random.html">random</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.regex.html">regex</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.robust_json.html">robust_json</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.serialization.html">serialization</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.speech_dataset_utils.html">speech_dataset_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.tensor.html">tensor</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.vlm_dataset_utils.html">vlm_dataset_utils</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Support</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../support/1_contact.html">Contact us</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../support/2_faqs.html">FAQs</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../index.html">Model Optimizer</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content style-external-links">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="../1_modelopt_api.html">modelopt API</a></li>
+          <li class="breadcrumb-item"><a href="modelopt.torch.html">torch</a></li>
+          <li class="breadcrumb-item"><a href="modelopt.torch.utils.html">utils</a></li>
+      <li class="breadcrumb-item active">dataset_utils</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../../_sources/reference/generated/modelopt.torch.utils.dataset_utils.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="dataset-utils">
+<h1>dataset_utils<a class="headerlink" href="#dataset-utils" title="Link to this heading"></a></h1>
+<p id="module-modelopt.torch.utils.dataset_utils">Utility functions for getting samples and forward loop function for different datasets.</p>
+<p class="rubric">Functions</p>
+<table class="autosummary longtable docutils align-default">
+<tbody>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.utils.dataset_utils.create_forward_loop" title="modelopt.torch.utils.dataset_utils.create_forward_loop"><code class="xref py py-obj docutils literal notranslate"><span class="pre">create_forward_loop</span></code></a></p></td>
+<td><p>Creates and returns a forward loop function configured for a specific model, dataset, and tokenizer.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.utils.dataset_utils.download_hf_dataset_as_jsonl" title="modelopt.torch.utils.dataset_utils.download_hf_dataset_as_jsonl"><code class="xref py py-obj docutils literal notranslate"><span class="pre">download_hf_dataset_as_jsonl</span></code></a></p></td>
+<td><p>Download a Hugging Face dataset and save as JSONL files.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.utils.dataset_utils.get_dataset_dataloader" title="modelopt.torch.utils.dataset_utils.get_dataset_dataloader"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_dataset_dataloader</span></code></a></p></td>
+<td><p>Get a dataloader with the dataset name and tokenizer of the target model.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.utils.dataset_utils.get_dataset_samples" title="modelopt.torch.utils.dataset_utils.get_dataset_samples"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_dataset_samples</span></code></a></p></td>
+<td><p>Load a portion of a dataset with the dataset name and a given size.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.utils.dataset_utils.get_jsonl_text_samples" title="modelopt.torch.utils.dataset_utils.get_jsonl_text_samples"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_jsonl_text_samples</span></code></a></p></td>
+<td><p>Load up to <code class="docutils literal notranslate"><span class="pre">num_samples</span></code> entries from a JSONL file using the <code class="docutils literal notranslate"><span class="pre">text</span></code> field.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.utils.dataset_utils.get_max_batch_size" title="modelopt.torch.utils.dataset_utils.get_max_batch_size"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_max_batch_size</span></code></a></p></td>
+<td><p>Get the maximum batch size that can be used for the model.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.utils.dataset_utils.get_supported_datasets" title="modelopt.torch.utils.dataset_utils.get_supported_datasets"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_supported_datasets</span></code></a></p></td>
+<td><p>Retrieves a list of datasets supported.</p></td>
+</tr>
+</tbody>
+</table>
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.utils.dataset_utils.create_forward_loop">
+<span class="sig-name descname"><span class="pre">create_forward_loop</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">dataset_name</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'cnn_dailymail'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">tokenizer</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">batch_size</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">num_samples</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">512</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">max_sample_length</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">512</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">device</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">include_labels</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">dataloader</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">allowed_non_tensor_keys</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.utils.dataset_utils.create_forward_loop" title="Link to this definition"></a></dt>
+<dd><p>Creates and returns a forward loop function configured for a specific model, dataset, and tokenizer.</p>
+<p>This function initializes a forward loop function tailored to process batches of data from the specified dataset
+using the given model and tokenizer. The forward loop function, when called, iterates over the dataset, applies the
+tokenizer to prepare the input data, feeds it into the model, and returns the model’s predictions.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>model</strong> (<em>Module</em><em> | </em><em>None</em>) – The PyTorch model for inference.</p></li>
+<li><p><strong>dataset_name</strong> (<em>str</em>) – The name of the dataset to be used. Must be one of the datasets in get_supported_datasets().</p></li>
+<li><p><strong>tokenizer</strong> (<em>PreTrainedTokenizerBase</em><em> | </em><em>None</em>) – The tokenizer used to preprocess text data into a format suitable
+for the model.</p></li>
+<li><p><strong>batch_size</strong> (<em>int</em>) – Batch size of the returned dataloader. If 0 is provided, we auto determine the batch_size.</p></li>
+<li><p><strong>num_samples</strong> (<em>int</em>) – Number of samples from the dataset.</p></li>
+<li><p><strong>max_sample_length</strong> (<em>int</em>) – Maximum length of a sample.</p></li>
+<li><p><strong>device</strong> (<em>str</em><em> | </em><em>None</em>) – Target device for the returned dataloader.</p></li>
+<li><p><strong>include_labels</strong> (<em>bool</em>) – Whether to include labels in the dataloader.</p></li>
+<li><p><strong>dataloader</strong> (<em>DataLoader</em><em> | </em><em>None</em>) – If provided, use the provided dataloader instead.</p></li>
+<li><p><strong>allowed_non_tensor_keys</strong> (<em>set</em><em> | </em><em>None</em>) – Set of key names whose batch values may be non-tensor types.
+Useful when the dataloader yields batches with non-standard fields (e.g., nested
+model outputs).</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>Callable</em></p>
+</dd>
+</dl>
+<p>Example usage for quantization:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">modelopt.torch.quantization</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">mtq</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">modelopt.torch.utils</span><span class="w"> </span><span class="kn">import</span> <span class="n">create_forward_loop</span>
+
+<span class="c1"># Initialize model and tokenizer</span>
+<span class="c1"># ...</span>
+
+<span class="c1"># Create forward loop for calibration</span>
+<span class="n">forward_loop</span> <span class="o">=</span> <span class="n">create_forward_loop</span><span class="p">(</span>
+    <span class="n">model</span><span class="o">=</span><span class="n">model</span><span class="p">,</span> <span class="n">dataset_name</span><span class="o">=</span><span class="s2">&quot;cnn_dailymail&quot;</span><span class="p">,</span> <span class="n">tokenizer</span><span class="o">=</span><span class="n">tokenizer</span>
+<span class="p">)</span>
+
+<span class="c1"># Quantize the model with the calibration dataset</span>
+<span class="n">mtq</span><span class="o">.</span><span class="n">quantize</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="n">quant_cfg</span><span class="p">,</span> <span class="n">forward_loop</span><span class="o">=</span><span class="n">forward_loop</span><span class="p">)</span>
+</pre></div>
+</div>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p><dl class="simple">
+<dt>A forward loop function that can be called with no arguments. When called, this function iterates over</dt><dd><p>the dataset specified by <cite>dataset_name</cite>.</p>
+</dd>
+</dl>
+</p>
+</dd>
+<dt class="field-even">Parameters<span class="colon">:</span></dt>
+<dd class="field-even"><ul class="simple">
+<li><p><strong>model</strong> (<em>Module</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>dataset_name</strong> (<em>str</em>)</p></li>
+<li><p><strong>tokenizer</strong> (<em>PreTrainedTokenizerBase</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>batch_size</strong> (<em>int</em>)</p></li>
+<li><p><strong>num_samples</strong> (<em>int</em>)</p></li>
+<li><p><strong>max_sample_length</strong> (<em>int</em>)</p></li>
+<li><p><strong>device</strong> (<em>str</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>include_labels</strong> (<em>bool</em>)</p></li>
+<li><p><strong>dataloader</strong> (<em>DataLoader</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>allowed_non_tensor_keys</strong> (<em>set</em><em> | </em><em>None</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>Callable</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.utils.dataset_utils.download_hf_dataset_as_jsonl">
+<span class="sig-name descname"><span class="pre">download_hf_dataset_as_jsonl</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">dataset_name</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">output_dir</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">json_keys</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">['text']</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">name</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">split</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">max_samples_per_split</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">num_proc</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.utils.dataset_utils.download_hf_dataset_as_jsonl" title="Link to this definition"></a></dt>
+<dd><p>Download a Hugging Face dataset and save as JSONL files.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>dataset_name</strong> (<em>str</em>) – Name or HuggingFace path of the dataset to download</p></li>
+<li><p><strong>output_dir</strong> (<em>str</em><em> | </em><em>Path</em>) – Directory to save the JSONL files</p></li>
+<li><p><strong>json_keys</strong> (<em>str</em><em> | </em><em>list</em><em>[</em><em>str</em><em>]</em>) – Key or list of keys to extract from the dataset. Defaults to [“text”].</p></li>
+<li><p><strong>name</strong> (<em>str</em><em> | </em><em>None</em>) – Name of the subset to download</p></li>
+<li><p><strong>split</strong> (<em>str</em><em> | </em><em>None</em>) – Split of the dataset to download. Defaults to None (all splits).</p></li>
+<li><p><strong>max_samples_per_split</strong> (<em>int</em><em> | </em><em>None</em>) – Maximum number of samples to download per split. Defaults to None.</p></li>
+<li><p><strong>num_proc</strong> (<em>int</em><em> | </em><em>None</em>) – Number of processes to use for parallel processing. Defaults to None.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>List of paths to downloaded JSONL files.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>list</em>[<em>str</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.utils.dataset_utils.get_dataset_dataloader">
+<span class="sig-name descname"><span class="pre">get_dataset_dataloader</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">dataset_name</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'cnn_dailymail'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">tokenizer</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">batch_size</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">num_samples</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">512</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">max_sample_length</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">512</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">device</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">include_labels</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">apply_chat_template</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.utils.dataset_utils.get_dataset_dataloader" title="Link to this definition"></a></dt>
+<dd><p>Get a dataloader with the dataset name and tokenizer of the target model.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>dataset_name</strong> (<em>str</em><em> | </em><em>list</em><em>[</em><em>str</em><em>]</em>) – Name of the dataset to load, or a path to a <code class="docutils literal notranslate"><span class="pre">.jsonl</span></code> file.
+If a <code class="docutils literal notranslate"><span class="pre">.jsonl</span></code> file is provided, each line must be a JSON object with a <code class="docutils literal notranslate"><span class="pre">text</span></code> field.</p></li>
+<li><p><strong>tokenizer</strong> (<em>PreTrainedTokenizerBase</em><em> | </em><em>None</em>) – Instance of HuggingFace tokenizer.</p></li>
+<li><p><strong>batch_size</strong> (<em>int</em>) – Batch size of the returned dataloader.</p></li>
+<li><p><strong>num_samples</strong> (<em>int</em><em> | </em><em>list</em><em>[</em><em>int</em><em>]</em>) – Number of samples from the dataset.</p></li>
+<li><p><strong>max_sample_length</strong> (<em>int</em>) – Maximum length of a sample.</p></li>
+<li><p><strong>device</strong> (<em>device</em><em> | </em><em>None</em>) – Target device for the returned dataloader.</p></li>
+<li><p><strong>include_labels</strong> (<em>bool</em>) – Whether to include labels in the dataloader.</p></li>
+<li><p><strong>apply_chat_template</strong> (<em>bool</em>) – Whether to apply the chat template to the samples
+(if supported by the dataset).</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>An instance of dataloader.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>DataLoader</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.utils.dataset_utils.get_dataset_samples">
+<span class="sig-name descname"><span class="pre">get_dataset_samples</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">dataset_name</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">num_samples</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">*</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">apply_chat_template</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">tokenizer</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">split</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.utils.dataset_utils.get_dataset_samples" title="Link to this definition"></a></dt>
+<dd><p>Load a portion of a dataset with the dataset name and a given size.</p>
+<p>Supports both registered datasets (in <code class="docutils literal notranslate"><span class="pre">SUPPORTED_DATASET_CONFIG</span></code>) and arbitrary
+HuggingFace datasets.  Unregistered datasets are auto-detected by column names:
+<code class="docutils literal notranslate"><span class="pre">messages</span></code>/<code class="docutils literal notranslate"><span class="pre">conversations</span></code> (chat), <code class="docutils literal notranslate"><span class="pre">prompt</span></code>, <code class="docutils literal notranslate"><span class="pre">text</span></code>, or <code class="docutils literal notranslate"><span class="pre">input</span></code>.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>dataset_name</strong> (<em>str</em>) – Name or HuggingFace path of the dataset to load, a local directory path,
+or a path to a <code class="docutils literal notranslate"><span class="pre">.jsonl</span></code> file.  For local directory paths, the
+predefined config from <code class="docutils literal notranslate"><span class="pre">SUPPORTED_DATASET_CONFIG</span></code> is matched if the base folder name
+matches a registered key (e.g. <code class="docutils literal notranslate"><span class="pre">/hf-local/abisee/cnn_dailymail</span></code> matches <code class="docutils literal notranslate"><span class="pre">cnn_dailymail</span></code> key).</p></li>
+<li><p><strong>num_samples</strong> (<em>int</em>) – Number of samples to load from the dataset.</p></li>
+<li><p><strong>apply_chat_template</strong> (<em>bool</em>) – Whether to apply the chat template to the samples
+(if supported by the dataset).  For unregistered datasets with a
+<code class="docutils literal notranslate"><span class="pre">messages</span></code> column, chat template is always applied regardless of
+this flag.</p></li>
+<li><p><strong>tokenizer</strong> (<em>PreTrainedTokenizerBase</em><em> | </em><em>None</em>) – Tokenizer to use for applying the chat template to the samples.
+No tokenization is done and plain text is still returned.</p></li>
+<li><p><strong>split</strong> (<em>str</em><em> | </em><em>list</em><em>[</em><em>str</em><em>] </em><em>| </em><em>None</em>) – Override the split(s) to load.  Accepts a single split name or a list.
+If <code class="docutils literal notranslate"><span class="pre">None</span></code>, uses the splits defined in <code class="docutils literal notranslate"><span class="pre">SUPPORTED_DATASET_CONFIG</span></code> for
+registered datasets, or <code class="docutils literal notranslate"><span class="pre">[&quot;train&quot;]</span></code> for unregistered datasets.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>The list of samples.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>Samples</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.utils.dataset_utils.get_jsonl_text_samples">
+<span class="sig-name descname"><span class="pre">get_jsonl_text_samples</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">jsonl_path</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">num_samples</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">key</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'text'</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.utils.dataset_utils.get_jsonl_text_samples" title="Link to this definition"></a></dt>
+<dd><p>Load up to <code class="docutils literal notranslate"><span class="pre">num_samples</span></code> entries from a JSONL file using the <code class="docutils literal notranslate"><span class="pre">text</span></code> field.</p>
+<p>Each non-empty line must be a JSON object containing a <code class="docutils literal notranslate"><span class="pre">text</span></code> field.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>jsonl_path</strong> (<em>str</em>)</p></li>
+<li><p><strong>num_samples</strong> (<em>int</em>)</p></li>
+<li><p><strong>key</strong> (<em>str</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>list</em>[<em>str</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.utils.dataset_utils.get_max_batch_size">
+<span class="sig-name descname"><span class="pre">get_max_batch_size</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">max_sample_length</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">512</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">sample_memory_usage_ratio</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1.0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">sample_input_single_batch</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">enable_grad</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.utils.dataset_utils.get_max_batch_size" title="Link to this definition"></a></dt>
+<dd><p>Get the maximum batch size that can be used for the model.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>model</strong> (<em>Module</em>)</p></li>
+<li><p><strong>max_sample_length</strong> (<em>int</em>)</p></li>
+<li><p><strong>sample_memory_usage_ratio</strong> (<em>float</em>)</p></li>
+<li><p><strong>sample_input_single_batch</strong> (<em>Tensor</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>enable_grad</strong> (<em>bool</em>)</p></li>
+</ul>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.utils.dataset_utils.get_supported_datasets">
+<span class="sig-name descname"><span class="pre">get_supported_datasets</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.utils.dataset_utils.get_supported_datasets" title="Link to this definition"></a></dt>
+<dd><p>Retrieves a list of datasets supported.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>A list of strings, where each string is the name of a supported dataset.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>list</em>[<em>str</em>]</p>
+</dd>
+</dl>
+<p>Example usage:</p>
+<blockquote>
+<div><div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">modelopt.torch.utils</span><span class="w"> </span><span class="kn">import</span> <span class="n">get_supported_datasets</span>
+
+<span class="nb">print</span><span class="p">(</span><span class="s2">&quot;Supported datasets:&quot;</span><span class="p">,</span> <span class="n">get_supported_datasets</span><span class="p">())</span>
+</pre></div>
+</div>
+</div></blockquote>
+</dd></dl>
+
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="modelopt.torch.utils.cpp_extension.html" class="btn btn-neutral float-left" title="cpp_extension" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="modelopt.torch.utils.distributed.html" class="btn btn-neutral float-right" title="distributed" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2023-2025, NVIDIA Corporation.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

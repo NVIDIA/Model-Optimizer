@@ -1,0 +1,78 @@
+graph\_utils
+============
+
+.. List the submodules
+
+
+
+
+
+.. Autodoc anything defined in the module itself
+
+   TODO: WE DON'T USE THIS OPTION RIGHT NOW BUT WE CAN REACTIVATE IF WANTED
+   We use :ignore-module-all: so sphinx does not document the same module twice, even if it is reimported
+   For reimports that should be documented somewhere other than where they are defined, the re-imports
+   __module__ should be manually overridden -- i.e. in the ``__init__.py`` which contains ``from xxx import YYY``,
+   add in ``YYY.__module__ = __name__``.
+
+.. automodule:: modelopt.onnx.quantization.graph_utils
+   :members:
+   :undoc-members:
+
+   .. Also show members without docstrings. Only members from __all__ are considered as per conf.py
+   .. Ideally we should add docstrings for these members.
+
+
+   .. Overview table of available classes in the module
+   
+   
+   
+
+
+   .. Overview table of available functions in the module
+   
+   
+   .. rubric:: Functions
+
+   .. autosummary::
+      :nosignatures:
+   
+      build_non_residual_input_map
+      cast_custom_ops
+      classify_partially_quantized_weighted_ops
+      classify_partition_nodes
+      convert_fp16_io
+      expand_node_names_from_patterns
+      filter_quantizable_kgen_heads
+      find_conv_to_layernorm_nodes
+      find_mha_partitions
+      find_nodes_from_convs_to_exclude
+      find_nodes_from_matmul_to_exclude
+      find_nodes_from_mha_to_exclude
+      find_nodes_to_exclude
+      get_concat_eliminated_tensors
+      get_extended_model_outputs
+      get_fusible_backbone
+      get_input_shapes
+      get_layer_info
+      get_layer_precision_mapping
+      get_resize_scales
+      get_tensor_consumer_node_indices
+      get_tensor_consumer_nodes
+      get_tensor_from_name
+      get_tensor_producer_nodes
+      has_const_input
+      has_path_type
+      insert_fp8_mha_casts
+      insert_matmul_casts
+      is_const_input
+      match_fp8_mha_pattern
+      print_stat
+      remove_output_initializers
+      remove_partial_input_qdq
+      remove_redundant_cast_nodes
+      should_quantize_to_8bit
+      validate_8bit_layers
+      validate_op_types_spelling
+   
+   

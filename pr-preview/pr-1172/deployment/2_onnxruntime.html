@@ -1,0 +1,217 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Onnxruntime &mdash; Model Optimizer 0.0.1.dev1+g63c475576</title>
+      <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
+      <link rel="stylesheet" type="text/css" href="../_static/tabs.css?v=4c969af8" />
+      <link rel="stylesheet" type="text/css" href="../_static/togglebutton.css?v=9c3e77be" />
+      <link rel="stylesheet" type="text/css" href="../_static/autodoc_pydantic.css" />
+      <link rel="stylesheet" type="text/css" href="../_static/custom.css?v=7a224f4b" />
+
+  
+      <script src="../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../_static/documentation_options.js?v=5929fcd5"></script>
+      <script src="../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
+      <script src="../_static/copybutton.js?v=20d3d275"></script>
+      <script src="../_static/tabs.js?v=3ee01567"></script>
+      <script>let toggleHintShow = 'Click to show';</script>
+      <script>let toggleHintHide = 'Click to hide';</script>
+      <script>let toggleOpenOnPrint = 'true';</script>
+      <script src="../_static/togglebutton.js?v=b8b12719"></script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+    <script src="../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+    <link rel="next" title="Unified HuggingFace Checkpoint" href="3_unified_hf.html" />
+    <link rel="prev" title="TensorRT-LLM" href="1_tensorrt_llm.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../index.html" class="icon icon-home">
+            Model Optimizer
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../getting_started/1_overview.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../getting_started/2_installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch to ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - Windows</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_qat" rel="noopener noreferrer" target="_blank">Quick Start: QAT</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning" rel="noopener noreferrer" target="_blank">Quick Start: Pruning</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_distill" rel="noopener noreferrer" target="_blank">Quick Start: Distillation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/speculative_decoding" rel="noopener noreferrer" target="_blank">Quick Start: Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_sparsity" rel="noopener noreferrer" target="_blank">Quick Start: Sparsity</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Guides</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../guides/0_support_matrix.html">Support Matrix</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/10_recipes.html">Recipes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/1_quantization.html">Quantization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/2_save_load.html">Saving &amp; Restoring</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/3_pruning.html">Pruning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/4_distillation.html">Distillation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/5_speculative_decoding.html">Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/6_sparsity.html">Sparsity</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/7_nas.html">NAS</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/8_autocast.html">AutoCast (ONNX)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/9_autotune.html">Autotune (ONNX)</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Deployment</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="1_tensorrt_llm.html">TensorRT-LLM</a></li>
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Onnxruntime</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#id1">ONNX Runtime GenAI</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#id2">ONNX Runtime</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#collection-of-optimized-onnx-models">Collection of optimized ONNX models</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="3_unified_hf.html">Unified HuggingFace Checkpoint</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Examples</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../examples/0_all_examples.html">All GitHub Examples</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Reference</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../reference/0_changelog.html">Changelog</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../reference/1_modelopt_api.html">modelopt API</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Support</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../support/1_contact.html">Contact us</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../support/2_faqs.html">FAQs</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../index.html">Model Optimizer</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content style-external-links">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">Onnxruntime</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../_sources/deployment/2_onnxruntime.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="onnxruntime">
+<span id="onnxruntime-deployment"></span><h1>Onnxruntime<a class="headerlink" href="#onnxruntime" title="Link to this heading"></a></h1>
+<p>Once an ONNX FP16 model is quantized using Model Optimizer on Windows, the resulting quantized ONNX model can be deployed via the <a class="reference external" href="https://onnxruntime.ai/docs/genai/" rel="noopener noreferrer" target="_blank">ONNX Runtime GenAI</a> or <a class="reference external" href="https://onnxruntime.ai/" rel="noopener noreferrer" target="_blank">ONNX Runtime</a>.</p>
+<p>ONNX Runtime uses execution providers (EPs) to run models efficiently across a range of backends, including:</p>
+<ul class="simple">
+<li><p><strong>CUDA EP:</strong> Utilizes NVIDIA GPUs for fast inference with CUDA and cuDNN libraries.</p></li>
+<li><p><strong>DirectML EP:</strong> Enables deployment on a wide range of GPUs.</p></li>
+<li><p><strong>TensorRT-RTX EP:</strong> Targets NVIDIA RTX GPUs, leveraging TensorRT for further optimized inference.</p></li>
+<li><p><strong>CPU EP:</strong> Provides a fallback to run inference on the system’s CPU when specialized hardware is unavailable.</p></li>
+</ul>
+<p>Choose the EP that best matches your model, hardware and deployment requirements.</p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>Currently, DirectML backend doesn’t support 8-bit precision. So, 8-bit quantized models should be deployed on other backends like ORT-CUDA etc. However, DML path does support INT4 quantized models.</p>
+</div>
+<section id="id1">
+<h2>ONNX Runtime GenAI<a class="headerlink" href="#id1" title="Link to this heading"></a></h2>
+<p>ONNX Runtime GenAI offers a streamlined solution for deploying generative AI models with optimized performance and functionality.</p>
+<p><strong>Key Features</strong>:</p>
+<ul class="simple">
+<li><p><strong>Enhanced Optimizations</strong>: Supports optimizations specific to generative AI, including efficient KV cache management and logits processing.</p></li>
+<li><p><strong>Flexible Sampling Methods</strong>: Offers various sampling techniques, such as greedy search, beam search, and top-p/top-k sampling, to suit different deployment needs.</p></li>
+<li><p><strong>Control Options</strong>: Use the high-level <code class="docutils literal notranslate"><span class="pre">generate()</span></code> method for rapid deployment or execute each iteration of the model in a loop for fine-grained control.</p></li>
+<li><p><strong>Multi-Language API Support</strong>: Provides APIs for Python, C#, and C/C++, allowing seamless integration across a range of applications.</p></li>
+</ul>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>ONNX Runtime GenAI models are typically tied to the execution provider (EP) they were built with; a model exported for one EP (e.g., CUDA or DirectML) is generally not compatible with other EPs. To run inference on a different backend, re-export or convert the model specifically for that target EP.</p>
+</div>
+<p><strong>Getting Started</strong>:</p>
+<p>Refer to the <a class="reference external" href="https://onnxruntime.ai/docs/genai/" rel="noopener noreferrer" target="_blank">ONNX Runtime GenAI documentation</a> for an in-depth guide on installation, setup, and usage.</p>
+<p><strong>Examples</strong>:</p>
+<ul class="simple">
+<li><p>Explore <a class="reference external" href="https://github.com/microsoft/onnxruntime-genai/tree/main/examples/python//" rel="noopener noreferrer" target="_blank">inference scripts</a> in the ORT GenAI example repository for generating output sequences using a single function call.</p></li>
+<li><p>Follow the <a class="reference external" href="https://onnxruntime.ai/docs/genai/tutorials/" rel="noopener noreferrer" target="_blank">ORT GenAI tutorials</a> for a step-by-step walkthrough of inference with DirectML using the ORT GenAI package (e.g., refer to the Phi3 tutorial).</p></li>
+</ul>
+</section>
+<section id="id2">
+<h2>ONNX Runtime<a class="headerlink" href="#id2" title="Link to this heading"></a></h2>
+<p>Alternatively, the quantized model can be deployed using <a class="reference external" href="https://onnxruntime.ai/" rel="noopener noreferrer" target="_blank">ONNX Runtime</a>. This method requires manual management of model inputs, including KV cache inputs and attention masks, for each iteration within the generation loop.</p>
+<p><strong>Examples and Documentation</strong></p>
+<p>For further details and examples, please refer to the <a class="reference external" href="https://onnxruntime.ai/docs/api/python/" rel="noopener noreferrer" target="_blank">ONNX Runtime documentation</a>.</p>
+</section>
+<section id="collection-of-optimized-onnx-models">
+<h2>Collection of optimized ONNX models<a class="headerlink" href="#collection-of-optimized-onnx-models" title="Link to this heading"></a></h2>
+<p>The ready-to-deploy optimized ONNX models from ModelOpt-Windows are available at HuggingFace <a class="reference external" href="https://huggingface.co/collections/nvidia/optimized-onnx-models-for-nvidia-rtx-gpus" rel="noopener noreferrer" target="_blank">NVIDIA collections</a>. Follow the instructions provided along with the published models for deployment.</p>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="1_tensorrt_llm.html" class="btn btn-neutral float-left" title="TensorRT-LLM" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="3_unified_hf.html" class="btn btn-neutral float-right" title="Unified HuggingFace Checkpoint" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2023-2025, NVIDIA Corporation.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

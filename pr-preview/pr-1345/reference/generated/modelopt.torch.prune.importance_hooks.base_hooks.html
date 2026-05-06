@@ -1,0 +1,794 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>base_hooks &mdash; Model Optimizer 0.0.1.dev1+gc05d1e598</title>
+      <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="../../_static/copybutton.css?v=76b2166b" />
+      <link rel="stylesheet" type="text/css" href="../../_static/tabs.css?v=4c969af8" />
+      <link rel="stylesheet" type="text/css" href="../../_static/togglebutton.css?v=9c3e77be" />
+      <link rel="stylesheet" type="text/css" href="../../_static/autodoc_pydantic.css" />
+      <link rel="stylesheet" type="text/css" href="../../_static/custom.css?v=7a224f4b" />
+
+  
+      <script src="../../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../../_static/documentation_options.js?v=5929fcd5"></script>
+      <script src="../../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="../../_static/clipboard.min.js?v=a7894cd8"></script>
+      <script src="../../_static/copybutton.js?v=20d3d275"></script>
+      <script src="../../_static/tabs.js?v=3ee01567"></script>
+      <script>let toggleHintShow = 'Click to show';</script>
+      <script>let toggleHintHide = 'Click to hide';</script>
+      <script>let toggleOpenOnPrint = 'true';</script>
+      <script src="../../_static/togglebutton.js?v=b8b12719"></script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+    <script src="../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" />
+    <link rel="next" title="base_hooks_analysis" href="modelopt.torch.prune.importance_hooks.base_hooks_analysis.html" />
+    <link rel="prev" title="importance_hooks" href="modelopt.torch.prune.importance_hooks.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../../index.html" class="icon icon-home">
+            Model Optimizer
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../getting_started/1_overview.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../getting_started/2_installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch to ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - Windows</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_qat" rel="noopener noreferrer" target="_blank">Quick Start: QAT</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning" rel="noopener noreferrer" target="_blank">Quick Start: Pruning</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_distill" rel="noopener noreferrer" target="_blank">Quick Start: Distillation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/speculative_decoding" rel="noopener noreferrer" target="_blank">Quick Start: Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_sparsity" rel="noopener noreferrer" target="_blank">Quick Start: Sparsity</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Guides</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/0_support_matrix.html">Support Matrix</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/10_recipes.html">Recipes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/1_quantization.html">Quantization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/2_save_load.html">Saving &amp; Restoring</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/3_pruning.html">Pruning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/4_distillation.html">Distillation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/5_speculative_decoding.html">Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/6_sparsity.html">Sparsity</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/7_nas.html">NAS</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/8_autocast.html">AutoCast (ONNX)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/9_autotune.html">Autotune (ONNX)</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Deployment</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/1_tensorrt_llm.html">TensorRT-LLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/2_onnxruntime.html">Onnxruntime</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/3_unified_hf.html">Unified HuggingFace Checkpoint</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Examples</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../examples/0_all_examples.html">All GitHub Examples</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Reference</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="../0_changelog.html">Changelog</a></li>
+<li class="toctree-l1 current"><a class="reference internal" href="../1_modelopt_api.html">modelopt API</a><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="modelopt.deploy.html">deploy</a></li>
+<li class="toctree-l2"><a class="reference internal" href="modelopt.onnx.html">onnx</a></li>
+<li class="toctree-l2 current"><a class="reference internal" href="modelopt.torch.html">torch</a><ul class="current">
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.distill.html">distill</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.export.html">export</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.kernels.html">kernels</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.nas.html">nas</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.opt.html">opt</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.peft.html">peft</a></li>
+<li class="toctree-l3 current"><a class="reference internal" href="modelopt.torch.prune.html">prune</a><ul class="current">
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.prune.fastnas.html">fastnas</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.prune.gradnas.html">gradnas</a></li>
+<li class="toctree-l4 current"><a class="reference internal" href="modelopt.torch.prune.importance_hooks.html">importance_hooks</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.prune.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.prune.pruning.html">pruning</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.puzzletron.html">puzzletron</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.quantization.html">quantization</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.sparsity.html">sparsity</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.speculative.html">speculative</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.trace.html">trace</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.utils.html">utils</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Support</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../support/1_contact.html">Contact us</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../support/2_faqs.html">FAQs</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../index.html">Model Optimizer</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content style-external-links">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="../1_modelopt_api.html">modelopt API</a></li>
+          <li class="breadcrumb-item"><a href="modelopt.torch.html">torch</a></li>
+          <li class="breadcrumb-item"><a href="modelopt.torch.prune.html">prune</a></li>
+          <li class="breadcrumb-item"><a href="modelopt.torch.prune.importance_hooks.html">importance_hooks</a></li>
+      <li class="breadcrumb-item active">base_hooks</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../../_sources/reference/generated/modelopt.torch.prune.importance_hooks.base_hooks.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="base-hooks">
+<h1>base_hooks<a class="headerlink" href="#base-hooks" title="Link to this heading"></a></h1>
+<p id="module-modelopt.torch.prune.importance_hooks.base_hooks">Forward hooks for activation-based importance estimation.</p>
+<p class="rubric">Classes</p>
+<table class="autosummary longtable docutils align-default">
+<tbody>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.prune.importance_hooks.base_hooks.ForwardHook" title="modelopt.torch.prune.importance_hooks.base_hooks.ForwardHook"><code class="xref py py-obj docutils literal notranslate"><span class="pre">ForwardHook</span></code></a></p></td>
+<td><p>Base class for PyTorch forward hooks.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.prune.importance_hooks.base_hooks.IndependentChannelContributionHook" title="modelopt.torch.prune.importance_hooks.base_hooks.IndependentChannelContributionHook"><code class="xref py py-obj docutils literal notranslate"><span class="pre">IndependentChannelContributionHook</span></code></a></p></td>
+<td><p>Hook for channel importance estimation using weight norms and activation magnitudes.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.prune.importance_hooks.base_hooks.IndependentKvHeadContributionHook" title="modelopt.torch.prune.importance_hooks.base_hooks.IndependentKvHeadContributionHook"><code class="xref py py-obj docutils literal notranslate"><span class="pre">IndependentKvHeadContributionHook</span></code></a></p></td>
+<td><p>Hook for estimating KV head importance based on contribution analysis.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.prune.importance_hooks.base_hooks.IterativeChannelContributionHook" title="modelopt.torch.prune.importance_hooks.base_hooks.IterativeChannelContributionHook"><code class="xref py py-obj docutils literal notranslate"><span class="pre">IterativeChannelContributionHook</span></code></a></p></td>
+<td><p>Hook for iterative channel pruning based on contribution analysis.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.prune.importance_hooks.base_hooks.L2NormHook" title="modelopt.torch.prune.importance_hooks.base_hooks.L2NormHook"><code class="xref py py-obj docutils literal notranslate"><span class="pre">L2NormHook</span></code></a></p></td>
+<td><p>Hook for accumulating activation statistics for importance estimation.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.prune.importance_hooks.base_hooks.LayerNormContributionHook" title="modelopt.torch.prune.importance_hooks.base_hooks.LayerNormContributionHook"><code class="xref py py-obj docutils literal notranslate"><span class="pre">LayerNormContributionHook</span></code></a></p></td>
+<td><p>Hook for estimating channel importance based on layer normalization activations.</p></td>
+</tr>
+</tbody>
+</table>
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.prune.importance_hooks.base_hooks.ForwardHook">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">ForwardHook</span></span><a class="headerlink" href="#modelopt.torch.prune.importance_hooks.base_hooks.ForwardHook" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">ABC</span></code></p>
+<p>Base class for PyTorch forward hooks.</p>
+<p>This follows the PyTorch forward hook API where the second
+parameter is ‘args’ (a tuple of positional arguments passed to forward()).</p>
+<dl class="simple">
+<dt>Usage:</dt><dd><p>hook = MyHook()
+module.register_forward_hook(hook)</p>
+</dd>
+</dl>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.prune.importance_hooks.base_hooks.ForwardHook.accumulate">
+<em class="property"><span class="pre">abstract</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">accumulate</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.prune.importance_hooks.base_hooks.ForwardHook.accumulate" title="Link to this definition"></a></dt>
+<dd><p>Return accumulated importance scores.</p>
+<p>This method should be called after all forward passes to retrieve
+the final importance scores for each channel/feature.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>Tensor of importance scores, one per channel/feature.</p>
+</dd>
+<dt class="field-even">Raises<span class="colon">:</span></dt>
+<dd class="field-even"><p><strong>AssertionError</strong> – If no activations have been collected yet.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>Tensor</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.prune.importance_hooks.base_hooks.ForwardHook.dump_activations_logs">
+<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">dump_activations_logs</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">activation_hooks</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">activations_log_dir</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">args</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.prune.importance_hooks.base_hooks.ForwardHook.dump_activations_logs" title="Link to this definition"></a></dt>
+<dd><p>Default implementation for dumping final activation scores logs to disk.</p>
+<p>This is called only at the end of scoring to save final results.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>activation_hooks</strong> (<em>dict</em><em>[</em><em>str</em><em>, </em><a class="reference internal" href="#modelopt.torch.prune.importance_hooks.base_hooks.ForwardHook" title="modelopt.torch.prune.importance_hooks.base_hooks.ForwardHook"><em>ForwardHook</em></a><em>]</em>)</p></li>
+<li><p><strong>activations_log_dir</strong> (<em>Path</em><em> | </em><em>str</em>)</p></li>
+<li><p><strong>args</strong> (<em>DictConfig</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.prune.importance_hooks.base_hooks.ForwardHook.get_progress_info">
+<span class="sig-name descname"><span class="pre">get_progress_info</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.prune.importance_hooks.base_hooks.ForwardHook.get_progress_info" title="Link to this definition"></a></dt>
+<dd><p>Get progress information for this hook.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p><dl class="simple">
+<dt>Progress information (e.g., current iteration, samples processed).</dt><dd><p>Default implementation returns empty dict.</p>
+</dd>
+</dl>
+</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>dict</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.prune.importance_hooks.base_hooks.ForwardHook.load_state_dict">
+<em class="property"><span class="pre">abstract</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">load_state_dict</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">state_dict</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.prune.importance_hooks.base_hooks.ForwardHook.load_state_dict" title="Link to this definition"></a></dt>
+<dd><p>Load the internal state from a checkpoint.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>state_dict</strong> (<em>dict</em>) – State dictionary previously returned by state_dict()</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.prune.importance_hooks.base_hooks.ForwardHook.save_hook_states">
+<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">save_hook_states</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">activation_hooks</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">activations_log_dir</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.prune.importance_hooks.base_hooks.ForwardHook.save_hook_states" title="Link to this definition"></a></dt>
+<dd><p>Save hook states for checkpointing (separate from final results).</p>
+<p>This can be called periodically during scoring.
+Note: Synchronization should be handled at a higher level to avoid deadlocks.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>activation_hooks</strong> (<em>dict</em><em>[</em><em>str</em><em>, </em><a class="reference internal" href="#modelopt.torch.prune.importance_hooks.base_hooks.ForwardHook" title="modelopt.torch.prune.importance_hooks.base_hooks.ForwardHook"><em>ForwardHook</em></a><em>]</em>)</p></li>
+<li><p><strong>activations_log_dir</strong> (<em>Path</em><em> | </em><em>str</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.prune.importance_hooks.base_hooks.ForwardHook.state_dict">
+<em class="property"><span class="pre">abstract</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">state_dict</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.prune.importance_hooks.base_hooks.ForwardHook.state_dict" title="Link to this definition"></a></dt>
+<dd><p>Return the internal state for checkpointing.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p><dl class="simple">
+<dt>State dictionary containing checkpoint data.</dt><dd><p>Can contain tensors, ints, lists, etc.</p>
+</dd>
+</dl>
+</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>dict</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.prune.importance_hooks.base_hooks.ForwardHook.to_dict">
+<em class="property"><span class="pre">abstract</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">to_dict</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.prune.importance_hooks.base_hooks.ForwardHook.to_dict" title="Link to this definition"></a></dt>
+<dd><p>Convert hook results to dictionary format for saving.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>Dictionary containing result tensors (e.g., “score”, “channels_importance_ascending”).</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>dict</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.prune.importance_hooks.base_hooks.IndependentChannelContributionHook">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">IndependentChannelContributionHook</span></span><a class="headerlink" href="#modelopt.torch.prune.importance_hooks.base_hooks.IndependentChannelContributionHook" title="Link to this definition"></a></dt>
+<dd><p>Bases: <a class="reference internal" href="#modelopt.torch.prune.importance_hooks.base_hooks.ForwardHook" title="modelopt.torch.prune.importance_hooks.base_hooks.ForwardHook"><code class="xref py py-class docutils literal notranslate"><span class="pre">ForwardHook</span></code></a></p>
+<p>Hook for channel importance estimation using weight norms and activation magnitudes.</p>
+<p>Computes channel importance as the product of:
+- L2 norm of each column in the weight matrix (how much each input channel affects output)
+- Mean absolute activation for each channel (how strongly each channel is activated)</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>linear_layer</strong> – The linear projection layer to analyze. Must have a <cite>weight</cite> attribute
+and either <cite>in_features</cite> (nn.Linear) or <cite>input_size</cite> (Megatron RowParallelLinear).</p>
+</dd>
+</dl>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.prune.importance_hooks.base_hooks.IndependentChannelContributionHook.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">linear_layer</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.prune.importance_hooks.base_hooks.IndependentChannelContributionHook.__init__" title="Link to this definition"></a></dt>
+<dd><p>Initialize the independent channel contribution hook.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>linear_layer</strong> (<em>Module</em>)</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.prune.importance_hooks.base_hooks.IndependentChannelContributionHook.accumulate">
+<span class="sig-name descname"><span class="pre">accumulate</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.prune.importance_hooks.base_hooks.IndependentChannelContributionHook.accumulate" title="Link to this definition"></a></dt>
+<dd><p>Return importance scores as a tensor.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>Tensor of importance scores (weight_norm * activations), one per channel.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>Tensor</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.prune.importance_hooks.base_hooks.IndependentChannelContributionHook.load_state_dict">
+<span class="sig-name descname"><span class="pre">load_state_dict</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">state_dict</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.prune.importance_hooks.base_hooks.IndependentChannelContributionHook.load_state_dict" title="Link to this definition"></a></dt>
+<dd><p>Load the internal state from a checkpoint.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>state_dict</strong> (<em>dict</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.prune.importance_hooks.base_hooks.IndependentChannelContributionHook.state_dict">
+<span class="sig-name descname"><span class="pre">state_dict</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.prune.importance_hooks.base_hooks.IndependentChannelContributionHook.state_dict" title="Link to this definition"></a></dt>
+<dd><p>Save the internal state for checkpointing.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>dict</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.prune.importance_hooks.base_hooks.IndependentChannelContributionHook.to_dict">
+<span class="sig-name descname"><span class="pre">to_dict</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.prune.importance_hooks.base_hooks.IndependentChannelContributionHook.to_dict" title="Link to this definition"></a></dt>
+<dd><p>Convert results to dict with channel importance scores.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>Dict with “score” (weight_norm * activations), “weight_norm”, and
+“agg_channel_activations”.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>dict</em>[<em>str</em>, <em>Tensor</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.prune.importance_hooks.base_hooks.IndependentKvHeadContributionHook">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">IndependentKvHeadContributionHook</span></span><a class="headerlink" href="#modelopt.torch.prune.importance_hooks.base_hooks.IndependentKvHeadContributionHook" title="Link to this definition"></a></dt>
+<dd><p>Bases: <a class="reference internal" href="#modelopt.torch.prune.importance_hooks.base_hooks.ForwardHook" title="modelopt.torch.prune.importance_hooks.base_hooks.ForwardHook"><code class="xref py py-class docutils literal notranslate"><span class="pre">ForwardHook</span></code></a></p>
+<p>Hook for estimating KV head importance based on contribution analysis.</p>
+<p>Measures the contribution of each KV head group to the output projection
+by computing L2 norms of per-head outputs.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>linear_layer</strong> – The output projection layer (o_proj).</p></li>
+<li><p><strong>activation_hooks_kwargs</strong> – Configuration dict with:
+- model: The model instance (to get config).
+- block_config: Block configuration with attention settings.
+- optimize_for (str, optional): “latency” or “memory”. Defaults to “memory”.</p></li>
+</ul>
+</dd>
+</dl>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.prune.importance_hooks.base_hooks.IndependentKvHeadContributionHook.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">linear_layer</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">activation_hooks_kwargs</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.prune.importance_hooks.base_hooks.IndependentKvHeadContributionHook.__init__" title="Link to this definition"></a></dt>
+<dd><p>Initialize the KV head contribution hook.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>linear_layer</strong> (<em>Linear</em>)</p></li>
+<li><p><strong>activation_hooks_kwargs</strong> (<em>dict</em>)</p></li>
+</ul>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.prune.importance_hooks.base_hooks.IndependentKvHeadContributionHook.accumulate">
+<span class="sig-name descname"><span class="pre">accumulate</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.prune.importance_hooks.base_hooks.IndependentKvHeadContributionHook.accumulate" title="Link to this definition"></a></dt>
+<dd><p>Return accumulated KV head importance scores.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>Tensor of importance scores, one per KV head.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>Tensor</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.prune.importance_hooks.base_hooks.IndependentKvHeadContributionHook.load_state_dict">
+<span class="sig-name descname"><span class="pre">load_state_dict</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">state_dict</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.prune.importance_hooks.base_hooks.IndependentKvHeadContributionHook.load_state_dict" title="Link to this definition"></a></dt>
+<dd><p>Load the internal state from a checkpoint.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>state_dict</strong> (<em>dict</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.prune.importance_hooks.base_hooks.IndependentKvHeadContributionHook.state_dict">
+<span class="sig-name descname"><span class="pre">state_dict</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.prune.importance_hooks.base_hooks.IndependentKvHeadContributionHook.state_dict" title="Link to this definition"></a></dt>
+<dd><p>Return the internal state for checkpointing.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>dict</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.prune.importance_hooks.base_hooks.IndependentKvHeadContributionHook.to_dict">
+<span class="sig-name descname"><span class="pre">to_dict</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.prune.importance_hooks.base_hooks.IndependentKvHeadContributionHook.to_dict" title="Link to this definition"></a></dt>
+<dd><p>Convert to dict format for saving.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>Dict with “score” tensor containing KV head importance scores.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>dict</em>[<em>str</em>, <em>Tensor</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.prune.importance_hooks.base_hooks.IterativeChannelContributionHook">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">IterativeChannelContributionHook</span></span><a class="headerlink" href="#modelopt.torch.prune.importance_hooks.base_hooks.IterativeChannelContributionHook" title="Link to this definition"></a></dt>
+<dd><p>Bases: <a class="reference internal" href="#modelopt.torch.prune.importance_hooks.base_hooks.ForwardHook" title="modelopt.torch.prune.importance_hooks.base_hooks.ForwardHook"><code class="xref py py-class docutils literal notranslate"><span class="pre">ForwardHook</span></code></a></p>
+<p>Hook for iterative channel pruning based on contribution analysis.</p>
+<p>Progressively identifies and removes the least important input channels of a linear layer
+by measuring channel contribution as the L2 norm of output change when removed.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>linear_layer</strong> – The linear projection layer to analyze. Must have a <cite>weight</cite> attribute
+and either <cite>in_features</cite> (nn.Linear) or <cite>input_size</cite> (Megatron RowParallelLinear).</p></li>
+<li><p><strong>activation_hooks_kwargs</strong> – Configuration dict with:
+- validation_full_iters (int): Number of pruning iterations.
+- clear_gpu_memory (bool, optional): Clear GPU memory during computation.
+- calibration_method (str, optional): “scale_by_magnitude” or None.</p></li>
+</ul>
+</dd>
+</dl>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.prune.importance_hooks.base_hooks.IterativeChannelContributionHook.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">linear_layer</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">activation_hooks_kwargs</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.prune.importance_hooks.base_hooks.IterativeChannelContributionHook.__init__" title="Link to this definition"></a></dt>
+<dd><p>Initialize the iterative channel contribution hook.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>linear_layer</strong> (<em>Module</em>)</p></li>
+<li><p><strong>activation_hooks_kwargs</strong> (<em>dict</em>)</p></li>
+</ul>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.prune.importance_hooks.base_hooks.IterativeChannelContributionHook.accumulate">
+<span class="sig-name descname"><span class="pre">accumulate</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.prune.importance_hooks.base_hooks.IterativeChannelContributionHook.accumulate" title="Link to this definition"></a></dt>
+<dd><p>Return importance scores as a tensor.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>Tensor of importance scores, one per channel. Lower scores indicate less important channels.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>Tensor</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.prune.importance_hooks.base_hooks.IterativeChannelContributionHook.get_progress_info">
+<span class="sig-name descname"><span class="pre">get_progress_info</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.prune.importance_hooks.base_hooks.IterativeChannelContributionHook.get_progress_info" title="Link to this definition"></a></dt>
+<dd><p>Get progress information for this hook.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>Progress information including iteration count and pruned channels.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>dict</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.prune.importance_hooks.base_hooks.IterativeChannelContributionHook.load_state_dict">
+<span class="sig-name descname"><span class="pre">load_state_dict</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">state_dict</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.prune.importance_hooks.base_hooks.IterativeChannelContributionHook.load_state_dict" title="Link to this definition"></a></dt>
+<dd><p>Load the internal state from a checkpoint.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>state_dict</strong> (<em>dict</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.prune.importance_hooks.base_hooks.IterativeChannelContributionHook.state_dict">
+<span class="sig-name descname"><span class="pre">state_dict</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.prune.importance_hooks.base_hooks.IterativeChannelContributionHook.state_dict" title="Link to this definition"></a></dt>
+<dd><p>Save the internal state for checkpointing.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>dict</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.prune.importance_hooks.base_hooks.IterativeChannelContributionHook.to_dict">
+<span class="sig-name descname"><span class="pre">to_dict</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.prune.importance_hooks.base_hooks.IterativeChannelContributionHook.to_dict" title="Link to this definition"></a></dt>
+<dd><p>Convert pruning results to dict with channel importance rankings.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>Dict with “score” (importance rank per channel) and
+“channels_importance_ascending” (channel indices in ascending importance).</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>dict</em>[<em>str</em>, <em>Tensor</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.prune.importance_hooks.base_hooks.L2NormHook">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">L2NormHook</span></span><a class="headerlink" href="#modelopt.torch.prune.importance_hooks.base_hooks.L2NormHook" title="Link to this definition"></a></dt>
+<dd><p>Bases: <a class="reference internal" href="#modelopt.torch.prune.importance_hooks.base_hooks.ForwardHook" title="modelopt.torch.prune.importance_hooks.base_hooks.ForwardHook"><code class="xref py py-class docutils literal notranslate"><span class="pre">ForwardHook</span></code></a></p>
+<p>Hook for accumulating activation statistics for importance estimation.</p>
+<p>Activations are computed as mean over seq_len and then squared and summed over batch_size.
+In the accumulate() method we take the square root of the sum to get the L2 norm.</p>
+<p>This is the base version without tensor parallelism support.
+For megatron with TP &gt; 1, use MegatronL2NormHook instead.</p>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.prune.importance_hooks.base_hooks.L2NormHook.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.prune.importance_hooks.base_hooks.L2NormHook.__init__" title="Link to this definition"></a></dt>
+<dd><p>Initialize the L2NormHook.</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.prune.importance_hooks.base_hooks.L2NormHook.accumulate">
+<span class="sig-name descname"><span class="pre">accumulate</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.prune.importance_hooks.base_hooks.L2NormHook.accumulate" title="Link to this definition"></a></dt>
+<dd><p>Return the accumulated L2 norm of activations.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>Tensor of accumulated scores, one per channel</p>
+</dd>
+<dt class="field-even">Raises<span class="colon">:</span></dt>
+<dd class="field-even"><p><strong>AssertionError</strong> – If no activations have been collected yet</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>Tensor</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.prune.importance_hooks.base_hooks.L2NormHook.load_state_dict">
+<span class="sig-name descname"><span class="pre">load_state_dict</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">state_dict</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.prune.importance_hooks.base_hooks.L2NormHook.load_state_dict" title="Link to this definition"></a></dt>
+<dd><p>Load activations from checkpoint.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>state_dict</strong> (<em>dict</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.prune.importance_hooks.base_hooks.L2NormHook.state_dict">
+<span class="sig-name descname"><span class="pre">state_dict</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.prune.importance_hooks.base_hooks.L2NormHook.state_dict" title="Link to this definition"></a></dt>
+<dd><p>Return the state dictionary containing activations.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>dict</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.prune.importance_hooks.base_hooks.L2NormHook.to_dict">
+<span class="sig-name descname"><span class="pre">to_dict</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.prune.importance_hooks.base_hooks.L2NormHook.to_dict" title="Link to this definition"></a></dt>
+<dd><p>Convert to dict format for saving.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>dict</em>[<em>str</em>, <em>Tensor</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.prune.importance_hooks.base_hooks.LayerNormContributionHook">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">LayerNormContributionHook</span></span><a class="headerlink" href="#modelopt.torch.prune.importance_hooks.base_hooks.LayerNormContributionHook" title="Link to this definition"></a></dt>
+<dd><p>Bases: <a class="reference internal" href="#modelopt.torch.prune.importance_hooks.base_hooks.ForwardHook" title="modelopt.torch.prune.importance_hooks.base_hooks.ForwardHook"><code class="xref py py-class docutils literal notranslate"><span class="pre">ForwardHook</span></code></a></p>
+<p>Hook for estimating channel importance based on layer normalization activations.</p>
+<p>Aggregates mean absolute activation values per channel for a layer normalization layer.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>layernorm_layer</strong> – The layer normalization layer.</p></li>
+<li><p><strong>activation_hooks_kwargs</strong> – The activation hooks kwargs (not used).</p></li>
+</ul>
+</dd>
+</dl>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.prune.importance_hooks.base_hooks.LayerNormContributionHook.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">layernorm_layer</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">activation_hooks_kwargs</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.prune.importance_hooks.base_hooks.LayerNormContributionHook.__init__" title="Link to this definition"></a></dt>
+<dd><p>Aggregates mean absolute activation values per channel for a layer normalization layer.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>layernorm_layer</strong> (<em>Module</em>) – The layer normalization layer</p></li>
+<li><p><strong>activation_hooks_kwargs</strong> (<em>dict</em>) – The activation hooks kwargs (not used)</p></li>
+</ul>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.prune.importance_hooks.base_hooks.LayerNormContributionHook.accumulate">
+<span class="sig-name descname"><span class="pre">accumulate</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.prune.importance_hooks.base_hooks.LayerNormContributionHook.accumulate" title="Link to this definition"></a></dt>
+<dd><p>Return accumulated channel importance scores.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>Tensor</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.prune.importance_hooks.base_hooks.LayerNormContributionHook.dump_activations_logs">
+<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">dump_activations_logs</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">activation_hooks</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">activations_log_dir</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">args</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.prune.importance_hooks.base_hooks.LayerNormContributionHook.dump_activations_logs" title="Link to this definition"></a></dt>
+<dd><p>At the end of the default implementation of dumping activation scores to disc.</p>
+<p>Save aggregated channel importance results.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>activation_hooks</strong> (<em>dict</em><em>[</em><em>str</em><em>, </em><a class="reference internal" href="#modelopt.torch.prune.importance_hooks.base_hooks.ForwardHook" title="modelopt.torch.prune.importance_hooks.base_hooks.ForwardHook"><em>ForwardHook</em></a><em>]</em>)</p></li>
+<li><p><strong>activations_log_dir</strong> (<em>Path</em><em> | </em><em>str</em>)</p></li>
+<li><p><strong>args</strong> (<em>DictConfig</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.prune.importance_hooks.base_hooks.LayerNormContributionHook.load_state_dict">
+<span class="sig-name descname"><span class="pre">load_state_dict</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">state_dict</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.prune.importance_hooks.base_hooks.LayerNormContributionHook.load_state_dict" title="Link to this definition"></a></dt>
+<dd><p>Load the internal state from a checkpoint.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>state_dict</strong> (<em>dict</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.prune.importance_hooks.base_hooks.LayerNormContributionHook.state_dict">
+<span class="sig-name descname"><span class="pre">state_dict</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.prune.importance_hooks.base_hooks.LayerNormContributionHook.state_dict" title="Link to this definition"></a></dt>
+<dd><p>Return the internal state for checkpointing.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>dict</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.prune.importance_hooks.base_hooks.LayerNormContributionHook.to_dict">
+<span class="sig-name descname"><span class="pre">to_dict</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.prune.importance_hooks.base_hooks.LayerNormContributionHook.to_dict" title="Link to this definition"></a></dt>
+<dd><p>Convert to dict format for saving.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>dict</em>[<em>str</em>, <em>Tensor</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="modelopt.torch.prune.importance_hooks.html" class="btn btn-neutral float-left" title="importance_hooks" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="modelopt.torch.prune.importance_hooks.base_hooks_analysis.html" class="btn btn-neutral float-right" title="base_hooks_analysis" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2023-2025, NVIDIA Corporation.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

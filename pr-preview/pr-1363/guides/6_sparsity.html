@@ -1,0 +1,322 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Sparsity &mdash; Model Optimizer 0.0.1.dev1+gf0c037956</title>
+      <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
+      <link rel="stylesheet" type="text/css" href="../_static/tabs.css?v=4c969af8" />
+      <link rel="stylesheet" type="text/css" href="../_static/togglebutton.css?v=9c3e77be" />
+      <link rel="stylesheet" type="text/css" href="../_static/autodoc_pydantic.css" />
+      <link rel="stylesheet" type="text/css" href="../_static/custom.css?v=7a224f4b" />
+
+  
+      <script src="../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../_static/documentation_options.js?v=5929fcd5"></script>
+      <script src="../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
+      <script src="../_static/copybutton.js?v=20d3d275"></script>
+      <script src="../_static/tabs.js?v=3ee01567"></script>
+      <script>let toggleHintShow = 'Click to show';</script>
+      <script>let toggleHintHide = 'Click to hide';</script>
+      <script>let toggleOpenOnPrint = 'true';</script>
+      <script src="../_static/togglebutton.js?v=b8b12719"></script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+    <script src="../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+    <link rel="next" title="NAS" href="7_nas.html" />
+    <link rel="prev" title="Speculative Decoding" href="5_speculative_decoding.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../index.html" class="icon icon-home">
+            Model Optimizer
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../getting_started/1_overview.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../getting_started/2_installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch to ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - Windows</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_qat" rel="noopener noreferrer" target="_blank">Quick Start: QAT</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning" rel="noopener noreferrer" target="_blank">Quick Start: Pruning</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_distill" rel="noopener noreferrer" target="_blank">Quick Start: Distillation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/speculative_decoding" rel="noopener noreferrer" target="_blank">Quick Start: Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_sparsity" rel="noopener noreferrer" target="_blank">Quick Start: Sparsity</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Guides</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="0_support_matrix.html">Support Matrix</a></li>
+<li class="toctree-l1"><a class="reference internal" href="10_recipes.html">Recipes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="1_quantization.html">Quantization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="2_save_load.html">Saving &amp; Restoring</a></li>
+<li class="toctree-l1"><a class="reference internal" href="3_pruning.html">Pruning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="4_distillation.html">Distillation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="5_speculative_decoding.html">Speculative Decoding</a></li>
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Sparsity</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#introduction">Introduction</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#post-training-sparsification">Post-Training Sparsification</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#save-and-restore-the-sparse-model">Save and restore the sparse model</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#sparsity-concepts">Sparsity Concepts</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#structured-and-unstructured-sparsity">Structured and Unstructured Sparsity</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#n-m-sparsity">N:M Sparsity</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#sparsification-algorithm">Sparsification algorithm</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="7_nas.html">NAS</a></li>
+<li class="toctree-l1"><a class="reference internal" href="8_autocast.html">AutoCast (ONNX)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="9_autotune.html">Autotune (ONNX)</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Deployment</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../deployment/1_tensorrt_llm.html">TensorRT-LLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../deployment/2_onnxruntime.html">Onnxruntime</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../deployment/3_unified_hf.html">Unified HuggingFace Checkpoint</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Examples</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../examples/0_all_examples.html">All GitHub Examples</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Reference</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../reference/0_changelog.html">Changelog</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../reference/1_modelopt_api.html">modelopt API</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Support</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../support/1_contact.html">Contact us</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../support/2_faqs.html">FAQs</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../index.html">Model Optimizer</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content style-external-links">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">Sparsity</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../_sources/guides/6_sparsity.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="sparsity">
+<h1>Sparsity<a class="headerlink" href="#sparsity" title="Link to this heading"></a></h1>
+<section id="introduction">
+<h2>Introduction<a class="headerlink" href="#introduction" title="Link to this heading"></a></h2>
+<p>ModelOpt’s Sparsity module (<a class="reference internal" href="../reference/generated/modelopt.torch.sparsity.html#module-modelopt.torch.sparsity" title="modelopt.torch.sparsity"><code class="xref py py-mod docutils literal notranslate"><span class="pre">modelopt.torch.sparsity</span></code></a>) enables
+you to sparsify the weights of your model. This can be useful for reducing the memory footprint of
+your model and can also be used to speed up inference.</p>
+<p>Follow the steps described below to obtain a model with sparse weights using ModelOpt’s Sparsity
+module <a class="reference internal" href="../reference/generated/modelopt.torch.sparsity.html#module-modelopt.torch.sparsity" title="modelopt.torch.sparsity"><code class="xref py py-mod docutils literal notranslate"><span class="pre">modelopt.torch.sparsity</span></code></a>:</p>
+<ol class="arabic simple">
+<li><p><strong>Training</strong>:You can either train your model using the existing training pipeline or load a
+pre-trained checkpoint for your model.</p></li>
+<li><p><strong>Sparsification</strong>: Sparsify the model using the provided
+<code class="xref py py-meth docutils literal notranslate"><span class="pre">mts.sparsify</span></code> API.</p></li>
+<li><p><strong>Checkpoint and re-load</strong>: Save the model via <a class="reference internal" href="../reference/generated/modelopt.torch.opt.conversion.html#modelopt.torch.opt.conversion.save" title="modelopt.torch.opt.conversion.save"><code class="xref py py-meth docutils literal notranslate"><span class="pre">mto.save</span></code></a>
+and restore via <a class="reference internal" href="../reference/generated/modelopt.torch.opt.conversion.html#modelopt.torch.opt.conversion.restore" title="modelopt.torch.opt.conversion.restore"><code class="xref py py-meth docutils literal notranslate"><span class="pre">mto.restore</span></code></a>. See
+<a class="reference internal" href="2_save_load.html#save-restore"><span class="std std-ref">saving and loading of ModelOpt-modified model</span></a> to learn more.</p></li>
+</ol>
+<p><em>To find out more about Sparsity and related concepts, please refer to the section on</em>
+<a class="reference internal" href="#sparsity-concepts"><span class="std std-ref">Sparsity Concepts</span></a>.</p>
+</section>
+<section id="post-training-sparsification">
+<span id="sparsity-pts"></span><h2>Post-Training Sparsification<a class="headerlink" href="#post-training-sparsification" title="Link to this heading"></a></h2>
+<p>Post-training sparsification is the process of converting a dense model to a sparse model without
+retraining. The simplest way to sparsify a model is to use
+the <code class="xref py py-meth docutils literal notranslate"><span class="pre">mts.sparsify</span></code> API.</p>
+<p>The <code class="xref py py-meth docutils literal notranslate"><span class="pre">mts.sparsify</span></code> API takes a sparsity
+config and a sparsity format as input and returns a sparse model. The sparsity config is a
+dictionary specifying the layers to sparsify and the optional dataloader for
+calibration in data-driven sparsity, e.g., SparseGPT.</p>
+<p><code class="xref py py-meth docutils literal notranslate"><span class="pre">mts.sparsify()</span></code> supports <a class="reference external" href="https://github.com/NVIDIA/apex/tree/master/apex/contrib/sparsity" rel="noopener noreferrer" target="_blank">NVIDIA ASP</a> and <a class="reference external" href="https://arxiv.org/abs/2301.00774" rel="noopener noreferrer" target="_blank">SparseGPT</a> methods for magnitude-based
+and data-driven sparsity, respectively.</p>
+<p>Example usage:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">torch</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">transformers</span><span class="w"> </span><span class="kn">import</span> <span class="n">AutoModelForCausalLM</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">modelopt.torch.sparsity</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">mts</span>
+
+<span class="c1"># User-defined model</span>
+<span class="n">model</span> <span class="o">=</span> <span class="n">AutoModelForCausalLM</span><span class="o">.</span><span class="n">from_pretrained</span><span class="p">(</span><span class="s2">&quot;EleutherAI/gpt-j-6b&quot;</span><span class="p">)</span>
+
+<span class="c1"># Configure and convert for sparsity</span>
+<span class="n">sparsity_config</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="c1"># data_loader is required for sparsity calibration</span>
+    <span class="s2">&quot;data_loader&quot;</span><span class="p">:</span> <span class="n">calib_dataloader</span><span class="p">,</span>
+    <span class="s2">&quot;collect_func&quot;</span><span class="p">:</span> <span class="k">lambda</span> <span class="n">x</span><span class="p">:</span> <span class="n">x</span><span class="p">,</span>
+<span class="p">}</span>
+<span class="n">sparse_model</span> <span class="o">=</span> <span class="n">mts</span><span class="o">.</span><span class="n">sparsify</span><span class="p">(</span>
+    <span class="n">model</span><span class="p">,</span>
+    <span class="s2">&quot;sparsegpt&quot;</span><span class="p">,</span>  <span class="c1"># or &quot;sparse_magnitude&quot;</span>
+    <span class="n">config</span><span class="o">=</span><span class="n">sparsity_config</span><span class="p">,</span>
+<span class="p">)</span>
+</pre></div>
+</div>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p><cite>data_loader</cite> is only required in case of data-driven sparsity, e.g., for calibration in
+<code class="docutils literal notranslate"><span class="pre">sparsegpt</span></code>. <cite>sparse_magnitude</cite> does not require <cite>data_loader</cite> as it uses magnitude-based
+method for thresholding.</p>
+</div>
+<section id="save-and-restore-the-sparse-model">
+<h3>Save and restore the sparse model<a class="headerlink" href="#save-and-restore-the-sparse-model" title="Link to this heading"></a></h3>
+<p>To store the sparse model for future usage, call
+<a class="reference internal" href="../reference/generated/modelopt.torch.opt.conversion.html#modelopt.torch.opt.conversion.save" title="modelopt.torch.opt.conversion.save"><code class="xref py py-meth docutils literal notranslate"><span class="pre">mto.save()</span></code></a>:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">mto</span><span class="o">.</span><span class="n">save</span><span class="p">(</span><span class="n">sparse_model</span><span class="p">,</span> <span class="s2">&quot;modelopt_sparse_model.pth&quot;</span><span class="p">)</span>
+</pre></div>
+</div>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p><a class="reference internal" href="../reference/generated/modelopt.torch.opt.conversion.html#modelopt.torch.opt.conversion.save" title="modelopt.torch.opt.conversion.save"><code class="xref py py-meth docutils literal notranslate"><span class="pre">mto.save()</span></code></a> will save the model state_dict,
+along with the sparse masks and metadata to correctly re-create the sparse model later.</p>
+</div>
+<p>To restore the saved sparse model you can use
+<a class="reference internal" href="../reference/generated/modelopt.torch.opt.conversion.html#modelopt.torch.opt.conversion.restore" title="modelopt.torch.opt.conversion.restore"><code class="xref py py-meth docutils literal notranslate"><span class="pre">mto.restore()</span></code></a>:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">modelopt.torch.opt</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">mto</span>
+
+<span class="c1"># Re-initialize the original, unmodified model</span>
+<span class="n">model</span> <span class="o">=</span> <span class="n">AutoModelForCausalLM</span><span class="o">.</span><span class="n">from_pretrained</span><span class="p">(</span><span class="s2">&quot;EleutherAI/gpt-j-6b&quot;</span><span class="p">)</span>
+
+<span class="c1"># Restore the sparse model and metadata.</span>
+<span class="n">sparse_model</span> <span class="o">=</span> <span class="n">mto</span><span class="o">.</span><span class="n">restore</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="s2">&quot;modelopt_sparse_model.pth&quot;</span><span class="p">)</span>
+</pre></div>
+</div>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p><a class="reference internal" href="../reference/generated/modelopt.torch.opt.conversion.html#modelopt.torch.opt.conversion.restore" title="modelopt.torch.opt.conversion.restore"><code class="xref py py-meth docutils literal notranslate"><span class="pre">mto.restore()</span></code></a> will restore the model state_dict,
+along with the sparse masks and metadata of each sparse module. The plain pytorch module will be
+converted to a sparse module. The sparsity mask will be automatically enforced when the model
+weight is accessed.</p>
+</div>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p><code class="xref py py-meth docutils literal notranslate"><span class="pre">mts.export()</span></code> will export the sparse
+model to a plain pytorch model. The sparse masks will be applied to model weights and all the
+sparse metadata will be removed. After exporting, sparsity will no longer be enforced during
+subsequent fine-tuning. If you want to continue fine-tuning, do not export the model.</p>
+</div>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>Please see <a class="reference internal" href="2_save_load.html#save-restore"><span class="std std-ref">saving and restoring of ModelOpt-modified models</span></a> to learn
+about all the available options for saving and restoring.</p>
+</div>
+</section>
+</section>
+<section id="sparsity-concepts">
+<span id="id1"></span><h2>Sparsity Concepts<a class="headerlink" href="#sparsity-concepts" title="Link to this heading"></a></h2>
+<p>Below, we will provide an overview of ModelOpt’s sparsity feature as well as its basic
+concepts and terminology.</p>
+<section id="structured-and-unstructured-sparsity">
+<h3>Structured and Unstructured Sparsity<a class="headerlink" href="#structured-and-unstructured-sparsity" title="Link to this heading"></a></h3>
+<p>Weight sparsity is a model optimization technique where a fraction of the weights in a model are set
+to zero. Model sparsity can be broadly categorized as structured and unstructured sparsity.
+Unstructured sparsity refers to the case where the zero weights are randomly distributed across the
+weight matrix. Unstructured sparsity is more flexible but can lead to poor utilization on
+highly-parallelized hardware architectures like GPUs. Structured sparsity, on the other hand, is
+more efficient in terms of memory access and can be exploited to achieve higher math throughput.
+Structured sparsity can usually be achieved by enforcing a specific sparsity pattern on the weights.</p>
+</section>
+<section id="n-m-sparsity">
+<h3>N:M Sparsity<a class="headerlink" href="#n-m-sparsity" title="Link to this heading"></a></h3>
+<p>N:M sparsity refers to special type of fine-grained structured pattern, where in each block of M
+contiguous elements, at most N are nonzeros. Due to its regularity N:M sparsity can be efficiently
+implemented on GPU architecture and provides the following benefits:</p>
+<blockquote>
+<div><ul class="simple">
+<li><p><strong>Reduced memory bandwidth requirement:</strong> N:M Sparsity pattern have a smaller memory bandwidth
+requirement than both dense weights and weights with unstructured sparsity pattern.</p></li>
+<li><p><strong>Higher math throughput:</strong> Sparse Tensor Cores deliver higher math throughput for
+matrix-multiply operations when the first argument is a compressed N:M sparse matrix.
+For example, 2:4 sparsity pattern allows for 2x higher math throughput on sparse Tensor Cores.</p></li>
+</ul>
+</div></blockquote>
+<p>On current Nvidia architectures (Ampere or later), <a class="reference external" href="https://arxiv.org/abs/2104.08378" rel="noopener noreferrer" target="_blank">2:4 Sparsity</a>, where in each block of four
+contiguous elements two are nonzeros, is supported for accelerated inference on sparse Tensor Cores.</p>
+</section>
+<section id="sparsification-algorithm">
+<h3>Sparsification algorithm<a class="headerlink" href="#sparsification-algorithm" title="Link to this heading"></a></h3>
+<p>There are many ways to achieve weight sparsity. A commonly-used approach is magnitude-based sparsity
+where in block of M elements, the N largest elements are retained and the rest are set to
+zero. Magnitude-based sparsity is simple and easy to implement, but may not retain the accuracy of
+the original model as well. Other methods such as data-driven sparsity, e.g., Optimal Brain Surgeon,
+usually delivers better accuracy. ModelOpt supports both  magnitude-based (<a class="reference external" href="https://github.com/NVIDIA/apex/tree/master/apex/contrib/sparsity" rel="noopener noreferrer" target="_blank">NVIDIA ASP</a>) and
+data-driven sparsity (<a class="reference external" href="https://arxiv.org/abs/2301.00774" rel="noopener noreferrer" target="_blank">SparseGPT</a>).</p>
+</section>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="5_speculative_decoding.html" class="btn btn-neutral float-left" title="Speculative Decoding" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="7_nas.html" class="btn btn-neutral float-right" title="NAS" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2023-2025, NVIDIA Corporation.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>
