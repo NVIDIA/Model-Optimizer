@@ -745,9 +745,7 @@ def run_bypassed_training(cfg: DictConfig):
             micro_batch_size=cfg.bypass.training.micro_batch_size,
             load_dataset_fn=load_dataset_fn,
             keep_in_memory=cfg.bypass.data.keep_in_memory,
-            source_datasets_to_discard=cfg.bypass.data.get(
-                "source_datasets_to_discard", tuple()
-            ),
+            source_datasets_to_discard=cfg.bypass.data.get("source_datasets_to_discard", tuple()),
             bos_rate=cfg.bypass.data.bos_rate,
             shuffle_seed=cfg.bypass.data.shuffle_train_data_seed,
         )
@@ -769,8 +767,8 @@ def run_bypassed_training(cfg: DictConfig):
                 dataset_name=cfg.bypass.data.val_dataset_name,
                 keep_in_memory=cfg.bypass.data.keep_in_memory,
                 source_datasets_to_discard=cfg.bypass.data.get(
-                "source_datasets_to_discard", tuple()
-            ),
+                    "source_datasets_to_discard", tuple()
+                ),
                 bos_rate=cfg.bypass.data.bos_rate,
             )
 
