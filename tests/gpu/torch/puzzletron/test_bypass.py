@@ -759,8 +759,13 @@ def _test_bypass_resume_from_checkpoint_job(
     size: int,
 ):
     puzzle_dir, _, hydra_cfg = _setup_hydra_cfg_and_pruning(
-        project_root_path, tmp_path, rank, size,
-        hf_model_name, converter, hybrid_override_pattern,
+        project_root_path,
+        tmp_path,
+        rank,
+        size,
+        hf_model_name,
+        converter,
+        hybrid_override_pattern,
     )
 
     # ---- Phase 1: train + save ---------------------------------------------
@@ -884,8 +889,13 @@ def _test_bypass_subblock_modes_job(
     size: int,
 ):
     puzzle_dir, _, hydra_cfg = _setup_hydra_cfg_and_pruning(
-        project_root_path, tmp_path, rank, size,
-        hf_model_name, converter, hybrid_override_pattern,
+        project_root_path,
+        tmp_path,
+        rank,
+        size,
+        hf_model_name,
+        converter,
+        hybrid_override_pattern,
     )
 
     bypass_cfg_dict = _make_bypass_cfg_dict(has_moe_layers, hydra_cfg)
