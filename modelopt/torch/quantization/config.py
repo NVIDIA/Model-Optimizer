@@ -688,6 +688,14 @@ class MseCalibConfig(QuantizeAlgorithmConfig):
         "start_multiplier, and stop_multiplier are ignored.",
     )
 
+    fp8_scale_sweep_stride: int | None = ModeloptField(
+        default=1,
+        ge=1,
+        title="Stride for FP8 scale sweep candidates.",
+        description="Subsample every Nth valid FP8 E4M3 scale candidate when fp8_scale_sweep is True. "
+        "A value of 1 preserves the exhaustive sweep.",
+    )
+
     distributed_sync: bool | None = ModeloptField(
         default=True,
         title="Whether to sync the amax across the distributed processes.",

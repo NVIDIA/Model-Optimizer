@@ -110,26 +110,44 @@ def _has_expert_parallelism(module: nn.Module) -> bool:
     return ps is not None and ps.expert_model_parallel_group.is_initialized()
 
 
-def _check_moe_calibration_complete(quantizer, parallel_state):
-    """Raise error if MoE calibration is incomplete (some ranks have amax, others don't)."""
+def _is_dynamic_block_quantizer(quantizer) -> bool:
+    block_sizes = getattr(quantizer, "block_sizes", None)
+    if isinstance(block_sizes, dict):
+        return block_sizes.get("type") == "dynamic"
+    return getattr(block_sizes, "type", None) == "dynamic"
+
+
+def _iter_leaf_quantizers(quantizer):
     if isinstance(quantizer, SequentialQuantizer):
         for _q in quantizer:
-            _check_moe_calibration_complete(_q, parallel_state)
+            yield from _iter_leaf_quantizers(_q)
         return
-    for group in [
-        parallel_state.data_parallel_group,
-        parallel_state.expert_model_parallel_group,
-        parallel_state.tensor_parallel_group,
-    ]:
-        if not group.is_initialized():
+    yield quantizer
+
+
+def _check_moe_calibration_complete(quantizer, parallel_state):
+    """Raise error if MoE calibration is incomplete across distributed MoE ranks."""
+    for leaf_quantizer in _iter_leaf_quantizers(quantizer):
+        if _is_dynamic_block_quantizer(leaf_quantizer):
             continue
-        has_amax = getattr(quantizer, "_amax", None) is not None
-        amax_states = DistributedProcessGroup.get_dist_syncd_obj(has_amax, group, lambda objs: objs)
-        if any(amax_states) and not all(amax_states):
-            raise RuntimeError(
-                "MoE calibration incomplete: some experts received no tokens during calibration. "
-                "Increase --calib-size to ensure all experts see calibration data."
+
+        has_amax = getattr(leaf_quantizer, "_amax", None) is not None
+        for group in [
+            parallel_state.data_parallel_group,
+            parallel_state.expert_model_parallel_group,
+            parallel_state.tensor_parallel_group,
+        ]:
+            if not group.is_initialized():
+                continue
+            amax_states = DistributedProcessGroup.get_dist_syncd_obj(
+                has_amax, group, lambda objs: objs
             )
+            if any(amax_states) and not all(amax_states):
+                raise RuntimeError(
+                    "MoE calibration incomplete: some experts received no tokens during "
+                    "calibration. Increase --calib-size to ensure all experts see calibration "
+                    "data."
+                )
 
 
 @torch.no_grad()
@@ -184,13 +202,13 @@ def max_calibrate(
 
     def sync_quantizer_amax_across_dp_ep(quantizer, parallel_state):
         """Synchronize the amax across all ranks in the data parallel and expert parallel groups."""
-        if isinstance(quantizer, SequentialQuantizer):
-            for _q in quantizer:
-                sync_quantizer_amax_across_dp_ep(_q, parallel_state)
-            return
-        if getattr(quantizer, "_amax", None) is not None:
-            quantizer.sync_amax_across_distributed_group(parallel_state.data_parallel_group)
-            quantizer.sync_amax_across_distributed_group(parallel_state.expert_model_parallel_group)
+        for leaf_quantizer in _iter_leaf_quantizers(quantizer):
+            if _is_dynamic_block_quantizer(leaf_quantizer):
+                continue
+            leaf_quantizer.sync_amax_across_distributed_group(parallel_state.data_parallel_group)
+            leaf_quantizer.sync_amax_across_distributed_group(
+                parallel_state.expert_model_parallel_group
+            )
         # TODO: create sync_bias_across_distributed_group
 
     # Step 2:Sync amax across data parallelism
@@ -235,7 +253,7 @@ def max_calibrate(
                 )
             # Skip amax sync for INT4 / W4A8 block quantization
             # Sync amax for NVFP4 (dynamic per-block, static per-tensor quantized scale)
-            if getattr(quantizer.block_sizes, "type", None) == "dynamic":
+            if _is_dynamic_block_quantizer(quantizer):
                 return
 
         if quantizer.axis in axes_for_sync and quantizer.amax is not None:
@@ -323,6 +341,7 @@ def mse_calibrate(
     start_multiplier: float = 0.25,
     stop_multiplier: float = 4.0,
     fp8_scale_sweep: bool = False,
+    fp8_scale_sweep_stride: int = 1,
 ):
     """Calibrate the model using MSE-based amax search.
 
@@ -342,6 +361,8 @@ def mse_calibrate(
             for NVFP4 per-block quantization instead of using multipliers.
             This is specifically designed for optimizing the FP8-quantized
             per-block scales in NVFP4 format (default: False).
+        fp8_scale_sweep_stride: Subsample every Nth FP8 E4M3 candidate when
+            fp8_scale_sweep is enabled. A value of 1 preserves exhaustive sweep.
 
     See :class:`MseCalibConfig <modelopt.torch.quantization.config.MseCalibConfig>` for
     details on the remaining arguments.
@@ -397,6 +418,7 @@ def mse_calibrate(
                         axis=module._calibrator._axis,
                         global_amax=module.global_amax,
                         quant_func=partial(_mse_quant_func, quantizer=module),
+                        fp8_scale_sweep_stride=fp8_scale_sweep_stride,
                     )
                     continue
 

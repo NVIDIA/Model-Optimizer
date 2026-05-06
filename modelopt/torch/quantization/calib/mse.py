@@ -181,10 +181,12 @@ class NVFP4MSECalibrator(MseCalibrator):
         axis: int | tuple | list | None = None,
         quant_func: Callable | None = None,
         error_func: Callable | None = None,
+        fp8_scale_sweep_stride: int = 1,
     ):
         """Initialize NVFP4 MSE calibrator with per-block and global amax."""
         super().__init__(amax=amax, axis=axis, quant_func=quant_func, error_func=error_func)
         self._global_amax = global_amax
+        self._fp8_scale_sweep_stride = max(1, fp8_scale_sweep_stride or 1)
 
     def _compute_candidate_amax(self, candidates: torch.Tensor) -> torch.Tensor:
         if candidates.ndim != 0:  # Called during final compute amax
@@ -197,4 +199,9 @@ class NVFP4MSECalibrator(MseCalibrator):
         fp8_values = uint8_values.view(torch.float8_e4m3fn).float()
         valid_mask = torch.isfinite(fp8_values) & (fp8_values > 0)
         fp8_values = fp8_values[valid_mask]
+        if self._fp8_scale_sweep_stride > 1:
+            candidates = fp8_values[:: self._fp8_scale_sweep_stride]
+            if candidates[-1] != fp8_values[-1]:
+                candidates = torch.cat([candidates, fp8_values[-1:]])
+            fp8_values = candidates
         return fp8_values / 448.0

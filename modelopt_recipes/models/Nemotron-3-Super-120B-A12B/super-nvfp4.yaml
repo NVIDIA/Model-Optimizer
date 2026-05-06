@@ -1,0 +1,134 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Mirrors the published nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4 hf_quant_config.json:
+#   - MoE routed experts:     NVFP4 W4A4 weight MSE, group_size 16
+#     HF names:               mixer.experts.<N>.{up,down}_proj
+#     Megatron-Core names:    mlp.experts.local_experts.<N>.linear_fc{1,2}
+#   - MoE shared experts:     FP8 per-tensor
+#     HF names:               mixer.shared_experts.{up,down}_proj
+#     Megatron-Core names:    mlp.shared_experts.linear_fc{1,2}
+#   - Mamba mixer linears (mixer.{in,out}_proj):                   FP8 per-tensor
+#   - KV cache:                                                    FP8
+#   - Attention linears ({q,k,v}_proj):                            BF16 (not quantized)
+#   - MTP head, lm_head, output, mamba conv1d:                     BF16 (not quantized)
+#   - Latent MOE (fc1_latent_proj, fc2_latent_proj):               BF16 (not quantized)
+#   - SSM cache:                                                   FP32 (can be set to FP16 in VLLM)
+#
+# Calibration: weight MSE with FP8-scale sweep over the 128 e4m3 scale values
+# (NVFP4 weights use static block scales selected by MSE; FP8 per-tensor scales
+# are also chosen via MSE search instead of plain amax).
+metadata:
+  recipe_type: ptq
+  description: Super NVFP4 mixed precision — sparse MoE experts NVFP4 (W4A4, group_size 16); shared experts, mamba in/out_proj
+    FP8 per-tensor; FP8 KV cache; everything else(lm_head/MTP/latent MOE) stay BF16. Weight-MSE calibration with FP8 scale sweep.
+quantize:
+  algorithm:
+    method: mse
+    fp8_scale_sweep: true
+  quant_cfg:
+    # Disable all layers by default so that these layers stay in original BF16 precision:
+    # lm_head, output projection, MoE routers/gates, Latent MOE, MTP head, mamba conv1d.
+    - quantizer_name: '*'
+      enable: false
+
+    # MoE routed experts -> NVFP4 W4A4, block_size 16, e4m3 scale.
+    # Weight uses static block scales (chosen by MSE); activations stay dynamic.
+    # HF/export names: backbone.layers.*.mixer.experts.*.{up,down}_proj.
+    - quantizer_name: '*mixer.experts.*weight_quantizer'
+      enable: true
+      cfg:
+        block_sizes:
+          -1: 16
+          type: static
+          scale_bits: e4m3
+        num_bits: e2m1
+    - quantizer_name: '*mixer.experts.*input_quantizer'
+      enable: true
+      cfg:
+        block_sizes:
+          -1: 16
+          type: dynamic
+          scale_bits: e4m3
+        num_bits: e2m1
+    # Megatron-Core/PTQ names: decoder.layers.*.mlp.experts.local_experts.*.linear_fc{1,2}.
+    - quantizer_name: '*mlp.experts*weight_quantizer'
+      enable: true
+      cfg:
+        block_sizes:
+          -1: 16
+          type: static
+          scale_bits: e4m3
+        num_bits: e2m1
+    - quantizer_name: '*mlp.experts*input_quantizer'
+      enable: true
+      cfg:
+        block_sizes:
+          -1: 16
+          type: dynamic
+          scale_bits: e4m3
+        num_bits: e2m1
+
+    # MoE shared experts -> FP8 per-tensor.
+    # HF/export names: backbone.layers.*.mixer.shared_experts.{up,down}_proj.
+    - quantizer_name: '*mixer.shared_experts.*weight_quantizer'
+      enable: true
+      cfg:
+        num_bits: e4m3
+        axis:
+    - quantizer_name: '*mixer.shared_experts.*input_quantizer'
+      enable: true
+      cfg:
+        num_bits: e4m3
+        axis:
+    # Megatron-Core/PTQ names: decoder.layers.*.mlp.shared_experts.linear_fc{1,2}.
+    - quantizer_name: '*mlp.shared_experts*weight_quantizer'
+      enable: true
+      cfg:
+        num_bits: e4m3
+        axis:
+    - quantizer_name: '*mlp.shared_experts*input_quantizer'
+      enable: true
+      cfg:
+        num_bits: e4m3
+        axis:
+
+    # Mamba mixer linears -> FP8 per-tensor.
+    - quantizer_name: '*mixer.in_proj*weight_quantizer'
+      enable: true
+      cfg:
+        num_bits: e4m3
+        axis:
+    - quantizer_name: '*mixer.in_proj*input_quantizer'
+      enable: true
+      cfg:
+        num_bits: e4m3
+        axis:
+    - quantizer_name: '*mixer.out_proj*weight_quantizer'
+      enable: true
+      cfg:
+        num_bits: e4m3
+        axis:
+    - quantizer_name: '*mixer.out_proj*input_quantizer'
+      enable: true
+      cfg:
+        num_bits: e4m3
+        axis:
+
+    # KV cache -> FP8.
+    - quantizer_name: '*[kv]_bmm_quantizer'
+      enable: true
+      cfg:
+        num_bits: e4m3
