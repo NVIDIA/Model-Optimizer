@@ -13,24 +13,43 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Parity + speedup tests for the fused NVFP4 FP8 scale sweep Triton kernel.
+"""Parity + speedup tests for the NVFP4 FP8 scale sweep Triton fast path.
 
-Compares :class:`TritonNVFP4MSECalibrator` against the reference
-:class:`NVFP4MSECalibrator` on the same inputs and asserts the resulting per-block
-amax tensors are bit-identical. Also reports a wall-clock speedup number for the
-weight-MSE search step on a representative LLM-sized weight.
+Compares the Triton fast path inside :class:`NVFP4MSECalibrator` against its
+reference 126-step Python sweep on the same inputs and asserts the resulting
+per-block amax tensors are bit-identical. Also reports a wall-clock speedup
+number for the weight-MSE search step on a representative LLM-sized weight,
+plus dispatch coverage for the conditions that gate the fast path.
 """
 
+import os
 import time
+from contextlib import contextmanager
 
 import pytest
 import torch
 from conftest import requires_triton
 
-from modelopt.torch.quantization.calib import NVFP4MSECalibrator, TritonNVFP4MSECalibrator
+from modelopt.torch.quantization.calib import NVFP4MSECalibrator
 from modelopt.torch.quantization.tensor_quant import static_blockwise_fp4_fake_quant
 
 BLOCK_SIZE = 16
+
+
+@contextmanager
+def _force_sweep_path(triton_enabled: bool):
+    """Pin the NVFP4 sweep dispatch to the requested path for the duration of the
+    block, restoring the prior environment afterwards."""
+    key = "MODELOPT_NVFP4_TRITON_SWEEP"
+    prev = os.environ.get(key)
+    os.environ[key] = "1" if triton_enabled else "0"
+    try:
+        yield
+    finally:
+        if prev is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = prev
 
 
 def _reference_quant_func(global_amax):
@@ -42,26 +61,27 @@ def _reference_quant_func(global_amax):
     return quant_func
 
 
-def _run_reference(x, per_block_amax, global_amax):
-    cal = NVFP4MSECalibrator(
+def _make_calibrator(per_block_amax, global_amax):
+    return NVFP4MSECalibrator(
         amax=per_block_amax,
         axis=0,
         global_amax=global_amax,
         quant_func=_reference_quant_func(global_amax),
     )
-    cal.collect(x)
-    return cal.compute_amax()
+
+
+def _run_reference(x, per_block_amax, global_amax):
+    with _force_sweep_path(triton_enabled=False):
+        cal = _make_calibrator(per_block_amax, global_amax)
+        cal.collect(x)
+        return cal.compute_amax()
 
 
 def _run_triton(x, per_block_amax, global_amax):
-    cal = TritonNVFP4MSECalibrator(
-        amax=per_block_amax,
-        axis=0,
-        global_amax=global_amax,
-        quant_func=_reference_quant_func(global_amax),
-    )
-    cal.collect(x)
-    return cal.compute_amax()
+    with _force_sweep_path(triton_enabled=True):
+        cal = _make_calibrator(per_block_amax, global_amax)
+        cal.collect(x)
+        return cal.compute_amax()
 
 
 @requires_triton
@@ -125,6 +145,7 @@ def test_quantized_output_matches():
 
 @requires_triton
 def test_reset_allows_recollect():
+    """After the fast path runs, a second collect() requires reset() in between."""
     torch.manual_seed(0)
     device = "cuda"
     num_blocks = 32
@@ -132,22 +153,20 @@ def test_reset_allows_recollect():
     per_block_amax = x.abs().amax(dim=-1)
     global_amax = per_block_amax.max()
 
-    cal = TritonNVFP4MSECalibrator(
-        amax=per_block_amax,
-        axis=0,
-        global_amax=global_amax,
-    )
-    cal.collect(x)
-    first = cal.compute_amax().clone()
-
-    # collect() is one-shot per cycle until reset() is called.
-    with pytest.raises(RuntimeError, match="one-shot"):
+    with _force_sweep_path(triton_enabled=True):
+        cal = _make_calibrator(per_block_amax, global_amax)
         cal.collect(x)
+        first = cal.compute_amax().clone()
+        assert cal._best_amax_fast is not None  # fast path was taken
 
-    cal.reset()
-    # After reset, the same calibrator instance can be re-used.
-    cal.collect(x)
-    assert torch.equal(first, cal.compute_amax())
+        # Second collect after the fast path is not allowed without a reset.
+        with pytest.raises(RuntimeError, match="multi-collect after the fast path"):
+            cal.collect(x)
+
+        cal.reset()
+        # After reset, the same calibrator instance can be re-used; fast path runs again.
+        cal.collect(x)
+        assert torch.equal(first, cal.compute_amax())
 
 
 @requires_triton
@@ -175,17 +194,96 @@ def test_input_validation():
 
 
 @requires_triton
-def test_mse_calibrate_dispatch(monkeypatch):
-    """``mse_calibrate(fp8_scale_sweep=True)`` must install the right calibrator class.
+def test_dispatch_fast_path_default():
+    """Default config on CUDA with no error_func takes the Triton fast path."""
+    torch.manual_seed(0)
+    num_blocks = 32
+    x = torch.randn(num_blocks, BLOCK_SIZE, device="cuda", dtype=torch.float32)
+    per_block_amax = x.abs().amax(dim=-1)
+    global_amax = per_block_amax.max()
 
-    Default path: ``TritonNVFP4MSECalibrator``.
-    With ``MODELOPT_NVFP4_TRITON_SWEEP=0``: ``NVFP4MSECalibrator`` (and not its subclass).
+    with _force_sweep_path(triton_enabled=True):
+        cal = _make_calibrator(per_block_amax, global_amax)
+        cal.collect(x)
+        # Fast path stashes the final amax directly; reference accumulator stays empty.
+        assert cal._best_amax_fast is not None
+        assert cal._losses_sum is None
+
+
+@requires_triton
+def test_dispatch_env_optout_falls_back():
+    """``MODELOPT_NVFP4_TRITON_SWEEP=0`` forces the reference 126-step sweep."""
+    torch.manual_seed(0)
+    num_blocks = 32
+    x = torch.randn(num_blocks, BLOCK_SIZE, device="cuda", dtype=torch.float32)
+    per_block_amax = x.abs().amax(dim=-1)
+    global_amax = per_block_amax.max()
+
+    with _force_sweep_path(triton_enabled=False):
+        cal = _make_calibrator(per_block_amax, global_amax)
+        cal.collect(x)
+        assert cal._best_amax_fast is None
+        assert cal._losses_sum is not None
+
+
+@requires_triton
+def test_dispatch_custom_error_func_falls_back():
+    """A non-None ``error_func`` keeps the reference path so the user's metric is honored.
+
+    This protects custom error-function callers (e.g. local-Hessian calibration's
+    Hessian-weighted error) from silently being routed through a kernel that only
+    knows squared-error.
     """
+    torch.manual_seed(0)
+    num_blocks = 32
+    x = torch.randn(num_blocks, BLOCK_SIZE, device="cuda", dtype=torch.float32)
+    per_block_amax = x.abs().amax(dim=-1)
+    global_amax = per_block_amax.max()
+
+    def hessian_like_error(a, b):
+        return (a - b).pow(2)  # placeholder; the point is "non-None"
+
+    with _force_sweep_path(triton_enabled=True):
+        cal = NVFP4MSECalibrator(
+            amax=per_block_amax,
+            axis=0,
+            global_amax=global_amax,
+            quant_func=_reference_quant_func(global_amax),
+            error_func=hessian_like_error,
+        )
+        cal.collect(x)
+        assert cal._best_amax_fast is None
+        assert cal._losses_sum is not None
+
+
+@requires_triton
+def test_dispatch_cpu_path_excluded():
+    """The fast-path predicate must reject CPU inputs (kernel is CUDA-only).
+
+    Tests the dispatch decision directly via the predicate rather than running
+    ``collect()``, since the reference NVFP4 fake-quant kernel is itself CUDA-only —
+    NVFP4 calibration as a whole isn't a CPU code path.
+    """
+    torch.manual_seed(0)
+    num_blocks = 32
+    x_cpu = torch.randn(num_blocks, BLOCK_SIZE, dtype=torch.float32)
+    # Build the calibrator on CUDA so other predicate guards aren't the rejection cause.
+    per_block_amax = x_cpu.abs().amax(dim=-1).cuda()
+    global_amax = per_block_amax.max()
+
+    with _force_sweep_path(triton_enabled=True):
+        cal = _make_calibrator(per_block_amax, global_amax)
+        assert cal._can_use_triton_fast_path(x_cpu) is False
+
+
+@requires_triton
+def test_mse_calibrate_end_to_end(monkeypatch):
+    """End-to-end: the ``mse``/``fp8_scale_sweep=True`` path produces the same quantized
+    weights with the fast path on (default) and off (``MODELOPT_NVFP4_TRITON_SWEEP=0``)."""
     from _test_utils.torch.quantization.models import SimpleLinear
 
     import modelopt.torch.quantization as mtq
     from modelopt.torch.quantization.extensions import get_cuda_ext_mx
-    from modelopt.torch.quantization.nn import TensorQuantizer
 
     if get_cuda_ext_mx() is None:
         pytest.skip("cuda_ext_mx is not available")
@@ -206,7 +304,15 @@ def test_mse_calibrate_dispatch(monkeypatch):
         "algorithm": {"method": "mse", "fp8_scale_sweep": True},
     }
 
-    def _quantize_and_get_weight_calibrators(model):
+    def _run_calibrated(env_value):
+        torch.manual_seed(0)
+        model = SimpleLinear().cuda()
+        # Snapshot the pre-calibration weights so both runs start from identical state.
+        weight_snapshots = {n: p.detach().clone() for n, p in model.named_parameters()}
+        if env_value is None:
+            monkeypatch.delenv("MODELOPT_NVFP4_TRITON_SWEEP", raising=False)
+        else:
+            monkeypatch.setenv("MODELOPT_NVFP4_TRITON_SWEEP", env_value)
         calib_data = [model.get_input().cuda() for _ in range(2)]
 
         def forward_loop(m):
@@ -214,25 +320,20 @@ def test_mse_calibrate_dispatch(monkeypatch):
                 m(batch)
 
         mtq.quantize(model, cfg, forward_loop=forward_loop)
-        return [
-            type(m._calibrator)
-            for name, m in model.named_modules()
-            if isinstance(m, TensorQuantizer)
-            and name.endswith("weight_quantizer")
-            and getattr(m, "_calibrator", None) is not None
-        ]
+        # Run a deterministic input through and snapshot the output.
+        torch.manual_seed(1)
+        x = torch.randn(4, 16, device="cuda")
+        with torch.no_grad():
+            y = model(x).detach().clone()
+        return y, weight_snapshots
 
-    # Default: triton path.
-    monkeypatch.delenv("MODELOPT_NVFP4_TRITON_SWEEP", raising=False)
-    types_default = _quantize_and_get_weight_calibrators(SimpleLinear().cuda())
-    assert types_default, "expected at least one weight quantizer with a calibrator"
-    assert all(t is TritonNVFP4MSECalibrator for t in types_default), types_default
-
-    # Opt-out: reference path, exact class match (TritonNVFP4MSECalibrator is a subclass).
-    monkeypatch.setenv("MODELOPT_NVFP4_TRITON_SWEEP", "0")
-    types_optout = _quantize_and_get_weight_calibrators(SimpleLinear().cuda())
-    assert types_optout, "expected at least one weight quantizer with a calibrator"
-    assert all(t is NVFP4MSECalibrator for t in types_optout), types_optout
+    y_default, w0 = _run_calibrated(env_value=None)
+    y_optout, w1 = _run_calibrated(env_value="0")
+    # Both runs must start from the same weights (sanity: SimpleLinear is deterministic
+    # under the same seed) before we compare post-calibration outputs.
+    for name in w0:
+        assert torch.equal(w0[name], w1[name]), name
+    assert torch.equal(y_default, y_optout)
 
 
 def _bench(fn, warmup=2, iters=5):
@@ -296,7 +397,7 @@ def test_speedup_report(capsys):
         print(
             f"\n[NVFP4 FP8 sweep] weight=({cout},{cin}) "
             f"n_blocks={n_blocks} block_size={BLOCK_SIZE}\n"
-            f"  reference NVFP4MSECalibrator: {ref_t * 1e3:8.2f} ms\n"
-            f"  triton TritonNVFP4MSECalibrator: {tri_t * 1e3:8.2f} ms\n"
+            f"  reference path: {ref_t * 1e3:8.2f} ms\n"
+            f"  triton fast path: {tri_t * 1e3:8.2f} ms\n"
             f"  speedup: {speedup:.1f}x"
         )
