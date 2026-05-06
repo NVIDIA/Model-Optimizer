@@ -23,7 +23,6 @@ from typing import (
     Callable,
     ContextManager,
     Generic,
-    Literal,
     Optional,
     Protocol,
     TypeVar,
@@ -459,24 +458,10 @@ def _get_group_kwarg_if_necessary() -> dict:
 # Loss functions for bypass distillation (blockwise local knowledge distillation)
 # ──────────────────────────────────────────────────────────────────────────────
 
-Reduction = Literal["none", "mean", "sum"]
-
-
-def normalized_mse_loss(
-    input: torch.Tensor,
-    target: torch.Tensor,
-    reduction: Reduction = "mean",
-    epsilon: float = 1e-6,
-) -> torch.Tensor:
-    """MSE loss normalized by the variance of the target.
-
-    Dividing by the target's self-MSE makes the loss scale-invariant, so that
-    blocks whose activations have large magnitude do not dominate training.
-    """
-    loss = F.mse_loss(input, target, reduction=reduction) / F.mse_loss(
-        target, torch.zeros_like(target) + epsilon, reduction=reduction
-    )
-    return loss
+# `normalized_mse_loss` already lives in tools.kd_model — re-export it here so
+# bypass-distillation imports stay co-located with the per-vector / per-batch
+# variants below, without duplicating the implementation.
+from modelopt.torch.puzzletron.tools.kd_model import normalized_mse_loss  # noqa: E402, F401
 
 
 def vectorwise_normalized_mse_loss(

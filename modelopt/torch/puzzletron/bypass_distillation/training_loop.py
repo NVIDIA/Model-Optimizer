@@ -701,7 +701,7 @@ def run_bypassed_training(cfg: DictConfig):
 
         tokenizer = AutoTokenizer.from_pretrained(
             cfg.teacher_dir,
-            trust_remote_code=True,
+            trust_remote_code=trust_remote_code,
             token=True,
         )
 
@@ -948,12 +948,13 @@ def run_bypassed_training(cfg: DictConfig):
         aprint("Finished training successfully!")
         dist.barrier()
 
-    except Exception as e:
+    except Exception:
+        # Print the traceback explicitly so distributed runs surface it on every
+        # rank's stderr (workers under torchrun otherwise lose ordering), then
+        # re-raise so test frameworks see the real exception instead of a
+        # generic SystemExit(1).
         print(traceback.format_exc(), file=sys.stderr)
-        if isinstance(e, SystemExit):
-            raise e
-        else:
-            sys.exit(1)
+        raise
 
     dist.barrier()
     if dist.is_master():
