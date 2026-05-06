@@ -122,10 +122,16 @@ class NVFP4QTensor(BaseQuantizedTensor):
             expected_shape = (*weight.shape[:-1], num_blocks_per_row)
             per_block_scale = per_block_scale.view(expected_shape)
 
-            # Quantize scales to FP8
+            # Quantize scales to FP8. Saturate to the fp8_e4m3fn max (448) before the
+            # cast: when the [==0]=1.0 safety net above fires (per_block_amax was zero
+            # for an all-zero weight block) and global_amax is small, the pre-cast value
+            # explodes to ``1.0 * 448 / (global_amax/6)``. fp8_e4m3fn has no Inf, so any
+            # value >= 480 casts to NaN — clamp first to keep the stored byte finite.
             if not keep_high_precision:
-                per_block_scale = (per_block_scale * 448.0 / per_block_scale_max).to(
-                    torch.float8_e4m3fn
+                per_block_scale = (
+                    (per_block_scale * 448.0 / per_block_scale_max)
+                    .clamp_(max=448.0)
+                    .to(torch.float8_e4m3fn)
                 )
             return per_block_scale, weights_scaling_factor_2
         else:
