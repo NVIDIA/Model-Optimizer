@@ -1,0 +1,130 @@
+# @package bypass
+# Bypass Distillation Configuration
+# This config defines parameters for blockwise local distillation (BLD),
+# which trains alternative transformer block configurations using per-block
+# knowledge distillation from a teacher model.
+
+# Runtime Configuration
+dtype: "bf16"  # Model precision: bf16 for efficiency, fp32 for stability
+seed: 42       # Random seed for reproducibility
+
+# Experiment Tracking
+experiment_id:      # Unique identifier for this experiment. Will be dynamically set
+experiment_dir:     # Directory for this experiment. Will be dynamically set
+iter_num: 1         # Current iteration number
+step_num: 1         # Current step number within iteration
+token_count: 0      # Token count tracker (auto-updated during training)
+
+# Data Configuration
+data:
+  data_column: "messages"
+  block_size: 512                   # Sequence length (tokens per sample)
+  bos_rate: 0.5
+  fim_rate: 0
+  fim_spm_rate: 0
+  source_datasets_to_discard: []
+  load_from_disk: true              # Load preprocessed data from disk or from stream
+  keep_in_memory: false
+  val_dataset_name: valid
+  max_eval_samples: 4
+  eval_samples_per_process: null    # Samples per GPU during distributed eval (auto if null)
+  shuffle_train_data_seed: ${random_int:0,9999}     # Seed for shuffling train data
+
+# Training Configuration
+training:
+  learning_rate: 1e-4               # Initial learning rate (1e-4 = 0.0001)
+  training_tokens: 1e+4             # Total training tokens (10K tokens - sanity check)
+  micro_batch_size: 2
+  val_micro_batch_size: 1
+  warmup_ratio: 0.05
+  warmup_steps: ${warmup_steps:${.training_tokens},${..data.block_size},${.micro_batch_size},${.warmup_ratio}}  # Auto-calculated warmup steps
+  min_lr_factor: 1e-5
+  grad_accumulation_steps: 1
+  skip_first_batches: 0           # Use for debugging or to skip few batches which cause crashes or optimization issues.
+  weight_decay: 0.1
+  decay_lr: true
+  beta1: 0.9
+  beta2: 0.95
+  use_grad_scaling: false
+  grad_clip: 1.0
+  grad_clip_type: norm
+  clipping_count: 0
+  log_interval: 5
+  eval_interval: 5
+
+# Model Loading Configuration
+resume_checkpoint_path: null    # Path to resume training from checkpoint
+find_last_ckpt_for_resume: True   # Auto-resume by finding last checkpoint (bool)
+parameter_count: null
+init_checkpoint_path: null      # Path to initialize weights from
+
+model:
+  student_weights_dtype: "bf16"   # Student model weight precision
+
+  model_overrides:
+    delete_old_checkpoints: true     # Clean up old checkpoints to save disk space
+    save_interval_seconds: 12900     # Save checkpoint every ~3.5 hours
+    save_interval: 1e+9              # Save checkpoint every 1B steps (effectively disabled)
+    save_checkpoint_when_done: true  # Save final checkpoint when training completes
+
+# Architecture modifications for student model
+  model_config_overrides:
+    ffn:
+      - intermediate_size:
+        no_op:                  # Disable FFN entirely (true/false)
+    attention:
+      - num_key_value_heads:       # Number of kv-heads (for GQA)
+        no_op:                  # Disable attention entirely (true/false)
+
+# Model Factory Configuration - Controls student model creation and initialization
+model_factory:
+  factory: bypass_factory_fn                 # Unified factory supporting all layer types
+  block_loss_func: normalized_mse_loss      # Loss function for comparing teacher/student blocks. vectorwise_normalized_mse_loss / batched_normalized_mse_loss / normalized_mse_loss
+  gqa_init_mode: AverageKV                  # How to initialize K/V heads in GQA. All options here: GQAInitMode
+  mlp_init_mode: Truncate                   # MLP initialization. All options here: MlpInitMode
+  mlp_init_config:                          # Configuration for MLP initialization (if needed)
+    activations_log_dir: null               # Directory with activation statistics (required for PruneByActivationsLog)
+  linear_init_mode: FromTeacher             # How to initialize linear layers: FromTeacher, Random, etc.
+  submodule_for_loss_calculation: null      # Specific submodule for loss calc.
+  keys_to_learn: null                       # What parameters to train. Either "entire_block", or specific submodules. Computed dynamically.
+
+# Validation Configuration
+disable_initial_validate: false
+validate_teacher_model: true
+validate_student_model: true
+disable_validation: false          # Enable validation to exercise all code paths
+best_val_loss: 1e+9                # Track best validation loss achieved
+
+# Performance Optimization
+compile: false                     # Use PyTorch compilation
+disable_fa2: false                 # Disable Flash Attention 2 (false = use FA2 if available)
+teacher_model_load_on_cpu: false
+
+# Checkpoint Management
+save_checkpoint_before_training: false   # Save initial checkpoint before training
+disable_checkpoint_save: false          # Disable all checkpoint saving
+save_best_ckpt: true                    # Save checkpoint when validation improves
+kill_after_first_save: false           # Exit after first checkpoint save (for testing)
+realize_best_or_latest: "best"
+
+wandb_log: false
+wandb:
+  project:
+  entity:
+
+# Multiple bypass configurations to train sequentially.
+# Each entry overrides model.model_config_overrides and optionally model_factory.keys_to_learn.
+# If empty or absent, a single run uses the settings above.
+configs:
+  - model_config_overrides:
+      ffn:
+        - intermediate_size: 3072
+      attention:
+        - num_key_value_heads: 8
+    keys_to_learn: subblock_ffn
+  - model_config_overrides:
+      ffn:
+        - intermediate_size: 5888
+      attention:
+        - num_key_value_heads: 8
+    keys_to_learn: subblock_ffn

@@ -1,0 +1,120 @@
+# @package bypass
+# Bypass Distillation Configuration — Nemotron-3-Nano-30B-A3B (KV-heads-only toy task).
+#
+# Trains a single 1-KV-head variant per attention layer using per-block knowledge
+# distillation against the teacher (`subblock_attention` keys only — FFN/MoE/Mamba
+# blocks are frozen). The trained weights are saved into the replacement library
+# and consumed by the MIP solver alongside the no_op variant.
+#
+# Tutorial budget: ~10M tokens (quick sanity, ~30 min on 4×H100). Increase
+# `training_tokens` for a stronger bypass effect.
+
+# Runtime Configuration
+dtype: "bf16"
+seed: 42
+
+# Experiment Tracking (auto-set by set_experiment_id → "bypass_heads_1")
+experiment_id:
+experiment_dir:
+iter_num: 1
+step_num: 1
+token_count: 0
+
+# Data Configuration
+data:
+  data_column: "messages"
+  block_size: 4096
+  bos_rate: 0.5
+  fim_rate: 0
+  fim_spm_rate: 0
+  source_datasets_to_discard: []
+  load_from_disk: true
+  keep_in_memory: false
+  val_dataset_name: valid
+  max_eval_samples: 4
+  eval_samples_per_process: null
+  shuffle_train_data_seed: ${random_int:0,9999}
+
+# Training Configuration
+training:
+  learning_rate: 3e-4
+  training_tokens: 1e+7              # 10M tokens (toy budget)
+  micro_batch_size: 2
+  val_micro_batch_size: 2
+  warmup_ratio: 0.05
+  warmup_steps: ${warmup_steps:${.training_tokens},${..data.block_size},${.micro_batch_size},${.warmup_ratio}}
+  min_lr_factor: 1e-5
+  grad_accumulation_steps: 8
+  skip_first_batches: 0
+  weight_decay: 0.1
+  decay_lr: true
+  beta1: 0.9
+  beta2: 0.95
+  use_grad_scaling: false
+  grad_clip: 1.0
+  grad_clip_type: norm
+  clipping_count: 0
+  log_interval: 100
+  eval_interval: 100
+
+# Model Loading Configuration
+resume_checkpoint_path: null
+find_last_ckpt_for_resume: True
+parameter_count: null
+init_checkpoint_path: null
+
+model:
+  student_weights_dtype: "bf16"
+
+  model_overrides:
+    delete_old_checkpoints: true
+    save_interval_seconds: 12900
+    save_interval: 1e+9
+    save_checkpoint_when_done: true
+
+  # Architecture override: only attention is touched. FFN/MoE/Mamba sub-blocks
+  # use teacher weights verbatim (the `ffn` key is omitted on purpose).
+  model_config_overrides:
+    attention:
+      - num_key_value_heads: 1
+        no_op:
+
+# Model Factory Configuration
+model_factory:
+  factory: bypass_factory_fn
+  block_loss_func: normalized_mse_loss
+  gqa_init_mode: AverageKV
+  mlp_init_mode: Truncate          # FFN is frozen; this knob is dormant for KV-only tasks
+  mlp_init_config:
+    activations_log_dir: null
+  linear_init_mode: FromTeacher
+  submodule_for_loss_calculation: null
+  keys_to_learn: subblock_attention   # train ONLY the attention sub-block
+
+# Validation Configuration
+disable_initial_validate: false
+validate_teacher_model: true
+validate_student_model: true
+disable_validation: false
+best_val_loss: 1e+9
+
+# Performance Optimization
+compile: false
+disable_fa2: false
+teacher_model_load_on_cpu: false
+
+# Checkpoint Management
+save_checkpoint_before_training: false
+disable_checkpoint_save: false
+save_best_ckpt: true
+kill_after_first_save: false
+realize_best_or_latest: "best"
+
+wandb_log: false
+wandb:
+  project:
+  entity:
+
+# Single architectural variant — `set_experiment_id` produces "bypass_heads_1".
+# Add more entries here to train multiple variants in one bypass run.
+configs: []

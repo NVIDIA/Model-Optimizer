@@ -52,6 +52,7 @@ class MlpInitMode(Enum):
     PruneByActivationsLog = "PruneByActivationsLog"
     ExpertRemoval = "ExpertRemoval"
     ConcatExpertsIntoDenseFFN = "ConcatExpertsIntoDenseFFN"
+    MoEChannelPruning = "MoEChannelPruning"
 
 
 class LinearInitMode(Enum):
@@ -64,6 +65,22 @@ class HiddenSizeInitMode(Enum):
     Truncate = "Truncate"
     PruneByChannelRanking = "PruneByChannelRanking"
     CopyAsIs = "CopyAsIs"
+
+
+def _lm_attrs(config):
+    """Return the language-model sub-config for VL configs, else the config itself.
+
+    VL configs nest language-model fields like ``num_attention_heads``, ``head_dim``,
+    and ``hidden_size`` under a sub-config. The attribute name varies by family —
+    ``text_config`` (Qwen3-VL, Llava, Idefics) and ``language_config`` (Llama-4 and
+    a handful of others) are both common. Probe both before falling back to the
+    raw config.
+    """
+    for attr in ("text_config", "language_config"):
+        sub = getattr(config, attr, None)
+        if sub is not None:
+            return sub
+    return config
 
 
 def resolve_pruning_mixin(
@@ -224,10 +241,13 @@ def _init_attention_weights(
     head_size,
     mlp_init_config,
 ):
-    assert new_config.num_attention_heads == original_config.num_attention_heads, (
-        f"({new_config.num_attention_heads=}) != ({original_config.num_attention_heads=})"
+    new_lm = _lm_attrs(new_config)
+    orig_lm = _lm_attrs(original_config)
+    assert new_lm.num_attention_heads == orig_lm.num_attention_heads, (
+        f"({new_lm.num_attention_heads=}) != ({orig_lm.num_attention_heads=})"
     )
-    num_q_heads = new_config.num_attention_heads
+    num_q_heads = new_lm.num_attention_heads
+    # block_configs lives on the outer puzzletron-converted config, not on text_config.
     num_kv_heads = new_config.block_configs[layer_idx].attention.num_key_value_heads
     orig_num_kv_heads = original_config.block_configs[layer_idx].attention.num_key_value_heads
 
@@ -372,17 +392,27 @@ def _init_attention_biases(
     head_size,
     mlp_init_config,
 ):
-    assert new_config.num_attention_heads == original_config.num_attention_heads, (
-        f"({new_config.num_attention_heads=}) != ({original_config.num_attention_heads=})"
+    new_lm = _lm_attrs(new_config)
+    orig_lm = _lm_attrs(original_config)
+    assert new_lm.num_attention_heads == orig_lm.num_attention_heads, (
+        f"({new_lm.num_attention_heads=}) != ({orig_lm.num_attention_heads=})"
     )
-    num_q_heads = new_config.num_attention_heads
+    num_q_heads = new_lm.num_attention_heads
+    # block_configs lives on the outer puzzletron-converted config, not on text_config.
     num_kv_heads = new_config.block_configs[layer_idx].attention.num_key_value_heads
     orig_num_kv_heads = original_config.block_configs[layer_idx].attention.num_key_value_heads
     n_heads_in_group = num_q_heads // num_kv_heads
     orig_n_heads_in_group = num_q_heads // orig_num_kv_heads
 
-    o_proj_bias = new_config.o_proj_bias
-    attention_bias = new_config.attention_bias
+    # Some HF native configs (e.g. GptOssConfig) don't expose o_proj_bias / attention_bias as
+    # top-level attributes the way puzzletron's DeciLM-style configs do. Fall back to probing
+    # the new state dict for the actual bias keys when the attribute is missing.
+    o_proj_bias = getattr(new_config, "o_proj_bias", None)
+    if o_proj_bias is None:
+        o_proj_bias = o_key in new_state_dict
+    attention_bias = getattr(new_config, "attention_bias", None)
+    if attention_bias is None:
+        attention_bias = q_key in new_state_dict
 
     # If no biases
     if not (o_proj_bias or attention_bias):

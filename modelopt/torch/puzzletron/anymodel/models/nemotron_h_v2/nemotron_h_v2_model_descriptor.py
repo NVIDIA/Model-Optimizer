@@ -29,11 +29,19 @@ from ....pruning.ffn_intermediate_pruning_mixin import (
     FFNIntermediateLayerDescriptor,
     FFNIntermediatePruningMixIn,
 )
+from ....pruning.kv_heads_pruning_mixin import (
+    KVHeadsLayerDescriptor,
+    KVHeadsPruningMixIn,
+)
 from ....pruning.pruning_mixin import PruningMixIn
 from ...model_descriptor import ModelDescriptor, ModelDescriptorFactory
 from ...puzzformer.no_op import MatchingZeros, Same
 
-__all__ = ["NemotronHV2FFNIntermediateLayerDescriptor", "NemotronHV2ModelDescriptor"]
+__all__ = [
+    "NemotronHV2FFNIntermediateLayerDescriptor",
+    "NemotronHV2KVHeadsLayerDescriptor",
+    "NemotronHV2ModelDescriptor",
+]
 
 
 def get_dynamic_modules(module_cls_str: str) -> List[Type[nn.Module]]:
@@ -67,6 +75,15 @@ class NemotronHV2FFNIntermediateLayerDescriptor(FFNIntermediateLayerDescriptor):
     down_proj_name: str = "mixer.down_proj"
     ffn_prefix_name: str = "backbone.layers.{layer_idx}.mixer"
     linear_weight_names: List[str] = field(default_factory=lambda: ["down_proj", "up_proj"])
+
+
+@dataclass
+class NemotronHV2KVHeadsLayerDescriptor(KVHeadsLayerDescriptor):
+    o_proj_name: str = "mixer.o_proj"
+    attn_prefix_name: str = "backbone.layers.{layer_idx}.mixer"
+    qkvo_weight_names: List[str] = field(
+        default_factory=lambda: ["q_proj", "k_proj", "v_proj", "o_proj"]
+    )
 
 
 @ModelDescriptorFactory.register_decorator("nemotron_h_v2")
@@ -251,5 +268,6 @@ class NemotronHV2ModelDescriptor(ModelDescriptor):
             "ffn_intermediate": FFNIntermediatePruningMixIn(
                 NemotronHV2FFNIntermediateLayerDescriptor()
             ),
+            "kv_heads": KVHeadsPruningMixIn(NemotronHV2KVHeadsLayerDescriptor()),
             # TODO: Add expert removal support when ExpertRemovalPruningMixIn is migrated
         }

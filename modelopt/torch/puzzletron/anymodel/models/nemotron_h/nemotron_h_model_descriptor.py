@@ -29,11 +29,19 @@ from ....pruning.expert_removal_pruning_mixin import (
     ExpertRemovalLayerDescriptor,
     ExpertRemovalPruningMixIn,
 )
+from ....pruning.kv_heads_pruning_mixin import (
+    KVHeadsLayerDescriptor,
+    KVHeadsPruningMixIn,
+)
 from ....pruning.pruning_mixin import PruningMixIn
 from ...model_descriptor import ModelDescriptor, ModelDescriptorFactory
 from ...puzzformer.no_op import MatchingZeros, Same
 
-__all__ = ["NemotronHExpertRemovalLayerDescriptor", "NemotronHModelDescriptor"]
+__all__ = [
+    "NemotronHExpertRemovalLayerDescriptor",
+    "NemotronHKVHeadsLayerDescriptor",
+    "NemotronHModelDescriptor",
+]
 
 
 def get_dynamic_modules(module_cls_str: str) -> List[Type[nn.Module]]:
@@ -49,6 +57,15 @@ def get_dynamic_modules(module_cls_str: str) -> List[Type[nn.Module]]:
                 matches.append(obj)
 
     return matches
+
+
+@dataclass
+class NemotronHKVHeadsLayerDescriptor(KVHeadsLayerDescriptor):
+    o_proj_name: str = "mixer.o_proj"
+    attn_prefix_name: str = "backbone.layers.{layer_idx}.mixer"
+    qkvo_weight_names: List[str] = field(
+        default_factory=lambda: ["q_proj", "k_proj", "v_proj", "o_proj"]
+    )
 
 
 @dataclass
@@ -251,4 +268,5 @@ class NemotronHModelDescriptor(ModelDescriptor):
     def pruning_mixins() -> Dict[str, PruningMixIn]:
         return {
             "experts_removal": ExpertRemovalPruningMixIn(NemotronHExpertRemovalLayerDescriptor()),
+            "kv_heads": KVHeadsPruningMixIn(NemotronHKVHeadsLayerDescriptor()),
         }

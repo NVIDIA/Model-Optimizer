@@ -31,7 +31,7 @@ from transformers import PreTrainedTokenizerBase
 from ...tools.logger import mprint
 from .dataset import ConstantLengthDataset
 
-__all__ = ["create_validation_dataloader", "create_padded_tensor"]
+__all__ = ["create_train_dataloader", "create_validation_dataloader", "create_padded_tensor"]
 
 
 def collate_none_fn(
@@ -71,6 +71,54 @@ def load_streaming_fn(
     )
 
     return dataset
+
+
+def create_train_dataloader(
+    seed: int,
+    tokenizer: PreTrainedTokenizerBase,
+    block_size: int,
+    dataset_path: str | Mapping[str, Dataset],
+    content_field: str,
+    fim_rate: float,
+    fim_spm_rate: float,
+    micro_batch_size: int,
+    load_dataset_fn: LoadDatasetFn = load_from_disk_fn,
+    dataset_name: str = "train",
+    keep_in_memory: bool = False,
+    shuffle_seed: int | None = None,
+    source_datasets_to_discard: Sequence[str] = (),
+    bos_rate: float = 1.0,
+    num_workers: int = 0,
+) -> DataLoader:
+    """Create an infinite training DataLoader over ConstantLengthDataset."""
+    if isinstance(dataset_path, str):
+        dataset = load_dataset_fn(dataset_path, content_field, keep_in_memory)
+    else:
+        dataset = dataset_path
+
+    train_data = dataset[dataset_name]
+    if shuffle_seed is not None:
+        train_data = train_data.shuffle(seed=shuffle_seed, keep_in_memory=True)
+
+    train_dataset = ConstantLengthDataset(
+        tokenizer,
+        train_data,
+        infinite=True,
+        seq_length=block_size,
+        content_field=content_field,
+        fim_rate=fim_rate,
+        fim_spm_rate=fim_spm_rate,
+        seed=seed,
+        source_datasets_to_discard=source_datasets_to_discard,
+        bos_rate=bos_rate,
+    )
+
+    return DataLoader(
+        train_dataset,
+        batch_size=micro_batch_size,
+        pin_memory=True,
+        num_workers=num_workers,
+    )
 
 
 def create_validation_dataloader(

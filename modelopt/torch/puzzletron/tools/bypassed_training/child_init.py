@@ -83,26 +83,30 @@ def _process_single_layer(
     keys_to_remove = {}
     layer_out_state_dict = {}
 
-    # Delegate to pruning_mixin if available
+    # Delegate to pruning_mixin if available (supports a single mixin or a list of mixins).
+    # When the bypass factory composes multiple mixins (e.g. experts_removal + kv_heads),
+    # it passes them as a list so each can contribute its slice of the layer state dict.
     if pruning_mixin is not None:
-        _layer_out = pruning_mixin.prune_single_layer(
-            layer_idx=layer_idx,
-            parent_state_dict=parent_state_dict,
-            new_state_dict=new_state_dict,
-            original_config=original_config,
-            new_config=new_config,
-            gqa_init_mode=gqa_init_mode,
-            mlp_init_mode=mlp_init_mode,
-            mlp_init_config=mlp_init_config,
-            linear_init_mode=linear_init_mode,
-            ignored_keys=ignored_keys,
-            keys=keys,
-            is_original_mha=is_original_mha,
-            head_size=head_size,
-            hidden_size=hidden_size,
-            keys_to_remove=keys_to_remove,
-        )
-        layer_out_state_dict.update(_layer_out)
+        _mixins = pruning_mixin if isinstance(pruning_mixin, list) else [pruning_mixin]
+        for _mixin in _mixins:
+            _layer_out = _mixin.prune_single_layer(
+                layer_idx=layer_idx,
+                parent_state_dict=parent_state_dict,
+                new_state_dict=new_state_dict,
+                original_config=original_config,
+                new_config=new_config,
+                gqa_init_mode=gqa_init_mode,
+                mlp_init_mode=mlp_init_mode,
+                mlp_init_config=mlp_init_config,
+                linear_init_mode=linear_init_mode,
+                ignored_keys=ignored_keys,
+                keys=keys,
+                is_original_mha=is_original_mha,
+                head_size=head_size,
+                hidden_size=hidden_size,
+                keys_to_remove=keys_to_remove,
+            )
+            layer_out_state_dict.update(_layer_out)
         return layer_out_state_dict, keys_to_remove
 
     # Legacy inline processing (fallback when no pruning_mixin)
@@ -791,7 +795,7 @@ def update_model_config(
 
     def override(item, item_overrides):
         if item_overrides is None:
-            return item_overrides
+            return item  # None override means "keep original value"
         if dataclasses.is_dataclass(item):
             assert isinstance(item_overrides, dict)
             return dataclass_override(item, item_overrides)
