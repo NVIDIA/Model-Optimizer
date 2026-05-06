@@ -323,7 +323,7 @@ def get_dataset_samples(
             if apply_chat_template and "chat_key" in dataset_config:
                 kwargs: dict[str, Any] = {}
                 tools = sample.get("tools")
-                if tools:
+                if tools is not None:
                     kwargs["tools"] = tools
                 return tokenizer.apply_chat_template(  # type: ignore[union-attr]
                     sample[dataset_config["chat_key"]], tokenize=False, **kwargs
