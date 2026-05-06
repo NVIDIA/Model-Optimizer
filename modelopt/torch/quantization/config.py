@@ -1683,6 +1683,7 @@ W4A8_NVFP4_FP8_CFG = {
     ],
     "algorithm": "max",
 }
+W4A16_NVFP4_CFG = _nvfp4_selective_quant_cfg(["*"], weight_only=True)
 
 MXFP4_MLP_WEIGHT_ONLY_CFG = {
     "quant_cfg": [
@@ -1739,6 +1740,7 @@ choices: set[str] = {
     "NVFP4_FP8_MHA_CONFIG",
     "NVFP4_KV_CFG",
     "NVFP4_KV_ROTATE_CFG",
+    "W4A16_NVFP4_CFG",
     "W4A8_NVFP4_FP8_CFG",
     "NVFP4_SVDQUANT_DEFAULT_CFG",
     "W4A8_AWQ_BETA_CFG",

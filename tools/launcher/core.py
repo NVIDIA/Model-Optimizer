@@ -50,6 +50,9 @@ def get_default_env(experiment_title=None):
         "HF_HOME": f"/{title}/hf-cache",
         "HF_TOKEN": os.getenv("HF_TOKEN", ""),
         "MLM_SKIP_INSTALL": "1",
+        # DockerExecutor runs as the host UID, which may not be in the container's
+        # /etc/passwd; setting USER prevents getpass.getuser() from calling pwd.getpwuid().
+        "USER": os.getenv("USER", "docker"),
     }
     return slurm_env, local_env
 

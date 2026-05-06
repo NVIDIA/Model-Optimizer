@@ -53,9 +53,9 @@ esac
 IFS=","
 for qformat in $QFORMAT; do
     case $qformat in
-    fp8 | fp8_pc_pt | fp8_pb_wo | int8_wo | int8_sq | int4_awq | w4a8_awq | fp16 | bf16 | nvfp4 | nvfp4_awq | nvfp4_mse | w4a8_nvfp4_fp8 | w4a8_mxfp4_fp8 | nvfp4_experts_only | nvfp4_mlp_only | nvfp4_omlp_only | nvfp4_svdquant | mxfp8 | nvfp4_local_hessian) ;;
+    fp8 | fp8_pc_pt | fp8_pb_wo | int8_wo | int8_sq | int4_awq | w4a8_awq | fp16 | bf16 | nvfp4 | nvfp4_awq | nvfp4_mse | w4a8_nvfp4_fp8 | w4a8_mxfp4_fp8 | nvfp4_experts_only | nvfp4_mlp_only | nvfp4_omlp_only | nvfp4_svdquant | mxfp8 | nvfp4_local_hessian | w4a16_nvfp4) ;;
     *)
-        echo "Unknown quant argument: Expected one of: [fp8, fp8_pc_pt, fp8_pb_wo, int8_wo, int8_sq, int4_awq, w4a8_awq, fp16, bf16, nvfp4, nvfp4_awq, nvfp4_mse, w4a8_nvfp4_fp8, w4a8_mxfp4_fp8, nvfp4_experts_only, nvfp4_mlp_only, nvfp4_omlp_only, nvfp4_svdquant, mxfp8, nvfp4_local_hessian]" >&2
+        echo "Unknown quant argument: Expected one of: [fp8, fp8_pc_pt, fp8_pb_wo, int8_wo, int8_sq, int4_awq, w4a8_awq, fp16, bf16, nvfp4, nvfp4_awq, nvfp4_mse, w4a8_nvfp4_fp8, w4a8_mxfp4_fp8, nvfp4_experts_only, nvfp4_mlp_only, nvfp4_omlp_only, nvfp4_svdquant, mxfp8, nvfp4_local_hessian, w4a16_nvfp4]" >&2
         exit 1
         ;;
     esac
@@ -125,6 +125,10 @@ fi
 
 if $TRUST_REMOTE_CODE; then
     PTQ_ARGS+=" --trust_remote_code "
+fi
+
+if [ -n "${EXCLUDE_MODULES:-}" ]; then
+    PTQ_ARGS+=" --exclude_modules ${EXCLUDE_MODULES} "
 fi
 
 if $USE_SEQ_DEVICE_MAP; then
@@ -200,6 +204,12 @@ if [[ $TASKS =~ "quant" ]] || [[ ! -d "$SAVE_PATH" ]] || [[ ! $(ls -A $SAVE_PATH
 
     if [[ "$SPARSITY_FMT" != "dense" ]]; then
         echo "Sparse quantization detected (SPARSITY_FMT=$SPARSITY_FMT). Please deploy with the TRT-LLM using trtllm-build. Checkpoint export_path: $SAVE_PATH"
+        exit 0
+    fi
+
+    if [ "$QFORMAT" = "w4a16_nvfp4" ]; then
+        echo "w4a16_nvfp4 checkpoint exported to $SAVE_PATH"
+        echo "To serve on vLLM, convert to compressed-tensors"
         exit 0
     fi
 
