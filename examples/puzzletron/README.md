@@ -359,7 +359,7 @@ calc_subblock_stats:
 
 mip:
   human_constraints:
-    target_latency: 20  # ms
+    target_latency: 20  # seconds
 ```
 
 Because vLLM startup adds substantial overhead during stats collection, extend the distributed process group timeout accordingly:
