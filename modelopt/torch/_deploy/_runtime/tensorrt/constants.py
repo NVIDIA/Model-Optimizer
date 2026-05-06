@@ -32,10 +32,6 @@ ONE_MEBI_IN_BYTES = 1 << 20
 ONE_GIBI_IN_BYTES = 1 << 30
 
 # TensorRT conversion tool names
-TRTEXEC = "trtexec"
-
-# trtexec path within docker
-TRTEXEC_PATH = "trtexec"
 DEFAULT_ARTIFACT_DIR = "modelopt_build/trt_artifacts"
 
 # Default conversion params
