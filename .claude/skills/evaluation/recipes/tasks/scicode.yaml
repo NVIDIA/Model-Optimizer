@@ -1,0 +1,16 @@
+# SciCode (NeMo Skills, chat)
+# Primary metric: pass@1[avg-of-3] subtask_accuracy
+# Run time: Long | Repeats: 3
+  - name: ns_scicode
+    nemo_evaluator_config:
+      config:
+        params:
+          max_retries: 10
+          extra:
+            num_repeats: 3
+      target:
+        api_endpoint:
+          adapter_config:
+            params_to_remove:
+              - max_new_tokens
+              - max_completion_tokens

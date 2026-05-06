@@ -1,0 +1,19 @@
+# AIME 2025 (NeMo Skills, chat)
+# Primary metric: pass@1[avg-of-16] symbolic_correct
+# Run time: Long (reasoning models generate lengthy thinking traces) | Repeats: 16
+# Note: The AA variant (simple_evals.AIME_2025) requires JUDGE_API_KEY.
+#       This NeMo Skills variant uses symbolic scoring — no external API keys needed.
+  - name: ns_aime2025
+    nemo_evaluator_config:
+      config:
+        params:
+          request_timeout: 100000
+          max_retries: 10
+          extra:
+            num_repeats: 16
+      target:
+        api_endpoint:
+          adapter_config:
+            params_to_remove:
+              - max_new_tokens
+              - max_completion_tokens

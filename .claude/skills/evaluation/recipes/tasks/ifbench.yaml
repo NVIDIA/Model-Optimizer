@@ -1,0 +1,15 @@
+# IFBench (NeMo Skills, chat)
+# Primary metric: pass@1[avg-of-8] prompt_strict_accuracy
+# Run time: Super Short | Repeats: 8
+  - name: ns_ifbench
+    nemo_evaluator_config:
+      config:
+        params:
+          extra:
+            num_repeats: 8
+      target:
+        api_endpoint:
+          adapter_config:
+            params_to_remove:
+              - max_new_tokens
+              - max_completion_tokens

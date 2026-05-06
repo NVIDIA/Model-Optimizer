@@ -1,0 +1,17 @@
+# LiveCodeBench v6 (NeMo Skills, chat)
+# Primary metric: pass@1[avg-of-3] accuracy
+# Run time: Medium | Repeats: 3
+  - name: ns_livecodebench
+    nemo_evaluator_config:
+      config:
+        params:
+          max_retries: 10
+          extra:
+            dataset_split: test_v6_2408_2505
+            num_repeats: 3
+      target:
+        api_endpoint:
+          adapter_config:
+            params_to_remove:
+              - max_new_tokens
+              - max_completion_tokens
