@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import transformers
 from packaging import version
 from torch import Tensor
@@ -1321,6 +1322,108 @@ try:
 
     if GptOssExperts not in QuantModuleRegistry:
         QuantModuleRegistry.register({GptOssExperts: "hf.GptOssExperts"})(_QuantGptOssExperts)
+except ImportError:
+    pass
+
+
+class _QuantDeepseekV4Experts(_QuantFunctionalMixin):
+    """Quantized wrapper for ``transformers.models.deepseek_v4.DeepseekV4Experts``.
+
+    ``DeepseekV4Experts`` stacks all routed experts into two tensors:
+
+        gate_up_proj : ``(num_experts, 2 * intermediate_dim, hidden_dim)``
+        down_proj    : ``(num_experts, hidden_dim, intermediate_dim)``
+
+    Both use the standard ``(out, in)`` orientation with ``in`` as the last
+    dim, so ModelOpt's per-channel / per-block quantization works directly
+    without the transposed helper that ``_QuantGptOssExperts`` needs.
+
+    Activation quantization:
+      * ``hidden_states`` is quantized once at forward entry by
+        ``gate_up_proj_input_quantizer`` — matching ``_QuantGptOssExperts``
+        so percentile/histogram calibrators see the full pre-routing batch.
+      * ``down_proj`` inputs (the gated intermediate) are quantized inside
+        the intercepted ``F.linear`` by matching ``weight.shape[0]`` against
+        ``self.hidden_dim``. Weight-shape dispatch (rather than a per-call
+        parity flag) keeps the wrapper correct under nested or re-entrant
+        ``F.linear`` calls.
+    """
+
+    @staticmethod
+    def _get_quantized_weight(quantizer, module, weight):
+        # MoE weight is accessed once per hit expert in one forward pass; cache.
+        if module._enable_weight_quantization:
+            if hasattr(quantizer, "_cached_quant_val"):
+                return quantizer._cached_quant_val
+            quantizer._cached_quant_val = quantizer(weight)
+            return quantizer._cached_quant_val
+        return weight
+
+    def _setup_for_weight_quantization(self):
+        self._register_dynamic_attribute(
+            "gate_up_proj",
+            partial(self._get_quantized_weight, self.gate_up_proj_weight_quantizer),
+        )
+        self._register_dynamic_attribute(
+            "down_proj",
+            partial(self._get_quantized_weight, self.down_proj_weight_quantizer),
+        )
+
+    def _setup(self):
+        assert not hasattr(self, "kernel_layer_name"), (
+            "ModelOpt quantization does not support patched forward for kernel_hub"
+        )
+        self.gate_up_proj_input_quantizer = TensorQuantizer()
+        self.gate_up_proj_weight_quantizer = TensorQuantizer()
+        self.down_proj_input_quantizer = TensorQuantizer()
+        self.down_proj_weight_quantizer = TensorQuantizer()
+        self._register_temp_attribute("_enable_weight_quantization", False)
+        self._setup_for_weight_quantization()
+
+    @property
+    def functionals_to_replace(self):
+        _real_linear = F.linear
+        # Dispatch by weight shape: down_proj's sliced weight has leading
+        # dim == hidden_dim; gate_up's is 2 * intermediate_dim.
+        hidden_dim = self.hidden_dim
+
+        def _quantized_linear(input, weight, bias=None):
+            # Only intercept the down projection here; gate_up input is
+            # already quantized once at forward() entry. Anything else
+            # dispatched through F.linear (e.g. a nested submodule or
+            # router call) is passed through untouched.
+            if weight.shape[0] == hidden_dim and weight.shape[-1] == self.intermediate_dim:
+                input = self.down_proj_input_quantizer(input)
+            return _real_linear(input, weight, bias)
+
+        return [(F, "linear", _quantized_linear)]
+
+    @contextmanager
+    def quantize_weight(self):
+        """Context in which the stacked MoE weights are served quantized."""
+        self._enable_weight_quantization = True
+        try:
+            yield
+        finally:
+            for m in self.modules():
+                if isinstance(m, TensorQuantizer) and hasattr(m, "_cached_quant_val"):
+                    delattr(m, "_cached_quant_val")
+        self._enable_weight_quantization = False
+
+    def forward(self, hidden_states, top_k_index, top_k_weights):
+        """Forward with quantization enabled."""
+        hidden_states = self.gate_up_proj_input_quantizer(hidden_states)
+        with self.quantize_weight():
+            return super().forward(hidden_states, top_k_index, top_k_weights)
+
+
+try:
+    from transformers.models.deepseek_v4.modeling_deepseek_v4 import DeepseekV4Experts
+
+    if DeepseekV4Experts not in QuantModuleRegistry:
+        QuantModuleRegistry.register({DeepseekV4Experts: "hf.DeepseekV4Experts"})(
+            _QuantDeepseekV4Experts
+        )
 except ImportError:
     pass
 

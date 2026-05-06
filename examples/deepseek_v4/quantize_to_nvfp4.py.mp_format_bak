@@ -1,0 +1,335 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Apply calibrated amax to produce an NVFP4 DS-V4 checkpoint (MP-sharded form).
+
+Consumes the per-rank amax dump produced by ``ptq.py`` (i.e.
+``amax_dict_rank{i}-mp{mp}.pt``) and the MP-sharded checkpoint
+(output of DS's ``inference/convert.py``), emits a new MP-sharded
+checkpoint where every routed-expert weight is stored in NVFP4 packed
+form with three NVFP4 scale tensors:
+
+    <path>.weight          NVFP4-packed uint8, shape (out, in//2)
+    <path>.weight_scale    per-block scale (E4M3), shape (out, in//16)
+    <path>.weight_scale_2  per-tensor scale (FP32 scalar)
+    <path>.input_scale     per-tensor activation scale (FP32 scalar)
+
+All non-expert tensors are copied byte-for-byte from the source shard (this
+keeps attention / dense / router / embeddings in their native FP8+UE8M0 /
+BF16 form — we do not re-quantize them). Ancillary files (tokenizer.json,
+etc.) are **hard-linked** from the source.
+
+Output layout: identical 8-shard MP naming (``model{r}-mp{mp}.safetensors``)
+as the input. A separate tool (``reorganize_to_original_layout.py``) can
+convert this to the original HF 64-shard release layout by inverting the
+TP-split ``inference/convert.py`` performed forward.
+
+Uncalibrated-expert handling: some routed experts receive zero tokens during
+calibration (common in V4's first ``n_hash_layers`` where routing is a
+deterministic ``tid2eid`` lookup; occasionally in score-routed layers for
+outlier experts; entire MTP block if MTP is inactive). For those:
+
+  * ``weight_amax`` is computed on the fly from the dequantized BF16 weight
+    itself (``bf16.abs().max()``).
+  * ``input_amax`` falls back to the max input_amax across the other experts
+    in the same ``(block, projection)`` bucket.
+  * If an entire bucket has no observed experts (e.g. inactive MTP), the
+    fallback is a constant ``1.0`` and the case is logged.
+
+Usage (single compute node, CPU-default; dequant/requant math is cheap
+relative to shard I/O):
+
+    srun --container-image=dsv4-ready.sqsh ... \\
+        python quantize_to_nvfp4.py \\
+            --amax_path    /home/mxin/.../amax-nvfp4-experts \\
+            --source_ckpt  /home/mxin/.../DeepSeek-V4-Pro-mp8-mxfp4 \\
+            --output_ckpt  /home/mxin/.../DeepSeek-V4-Pro-mp8-nvfp4-experts \\
+            --world_size   8
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import sys
+from collections import defaultdict
+from pathlib import Path
+
+import torch
+from safetensors import safe_open
+from safetensors.torch import save_file
+
+try:
+    from modelopt.torch.quantization.qtensor import MXFP4QTensor, NVFP4QTensor
+except ImportError:
+    _MO = Path("/home/mxin/mxin/dsv4/sources/Model-Optimizer")
+    sys.path.insert(0, str(_MO))
+    from modelopt.torch.quantization.qtensor import MXFP4QTensor, NVFP4QTensor
+
+
+# Matches routed-expert weights in both ``layers.N.ffn.experts.M.w{1,2,3}``
+# (regular MoE blocks) and ``mtp.N.ffn.experts.M.w{1,2,3}`` (MTP blocks).
+_EXPERT_WEIGHT_RE = re.compile(
+    r"^(?:mtp\.\d+|layers\.\d+)\.ffn\.experts\.\d+\.w[123]\.weight$"
+)
+
+_AMAX_KEY_RE = re.compile(
+    r"^(?P<block>(?:mtp\.\d+|layers\.\d+))\.ffn\.experts\.(?P<eid>\d+)\.(?P<proj>w[123])"
+    r"_(?P<which>weight|input)_quantizer\._amax$"
+)
+
+_SHARD_FILENAME_RE = re.compile(r"^model\d+-mp\d+\.safetensors$")
+
+
+def _log(msg: str) -> None:
+    print(msg, flush=True)
+
+
+def _amax_to_nvfp4_scale_2(amax: torch.Tensor) -> torch.Tensor:
+    """``amax / (fp4_max * fp8_max) = amax / (6 * 448)``; returns a 0-d fp32 scalar."""
+    return (amax.float() / (6.0 * 448.0)).to(torch.float32).reshape(())
+
+
+# ---------------------------------------------------------------------------
+# amax loading
+# ---------------------------------------------------------------------------
+
+
+def _load_merged_amax(
+    amax_path: Path, world_size: int
+) -> tuple[dict[str, torch.Tensor], dict[tuple[str, str], torch.Tensor]]:
+    """Union-merge per-rank amax dumps, fuse w1/w3 input amax per expert, and
+    compute a per-``(block, proj)`` input-amax fallback."""
+    merged: dict[str, torch.Tensor] = {}
+    for r in range(world_size):
+        fp = amax_path / f"amax_dict_rank{r}-mp{world_size}.pt"
+        assert fp.exists(), f"missing {fp}"
+        rank_state = torch.load(str(fp), map_location="cpu", weights_only=True)
+        for k, v in rank_state.items():
+            assert _AMAX_KEY_RE.match(k), f"unexpected amax key schema: {k!r}"
+            assert k not in merged, (
+                f"collision across ranks on {k!r} — routed experts are expected rank-sharded"
+            )
+            merged[k] = v
+    _log(f"[load] merged {len(merged)} amax entries across {world_size} ranks")
+
+    fused = 0
+    for k in list(merged.keys()):
+        if k.endswith("w1_input_quantizer._amax"):
+            k3 = k.replace("w1_input", "w3_input")
+            if k3 in merged:
+                shared = torch.maximum(merged[k], merged[k3])
+                merged[k] = shared
+                merged[k3] = shared
+                fused += 1
+    _log(f"[load] fused w1/w3 input amax on {fused} experts")
+
+    buckets: dict[tuple[str, str], list[torch.Tensor]] = defaultdict(list)
+    for k, v in merged.items():
+        m = _AMAX_KEY_RE.match(k)
+        assert m is not None
+        if m.group("which") == "input":
+            buckets[(m.group("block"), m.group("proj"))].append(v)
+    input_fallback = {
+        key: torch.stack([t.reshape(-1) for t in vals]).flatten().max()
+        for key, vals in buckets.items()
+    }
+    _log(f"[load] input-fallback buckets: {len(input_fallback)} populated")
+    return merged, input_fallback
+
+
+def _lookup_amax(
+    amax: dict[str, torch.Tensor], expert_path: str, which: str
+) -> torch.Tensor | None:
+    return amax.get(f"{expert_path}_{which}_quantizer._amax")
+
+
+# ---------------------------------------------------------------------------
+# Quantization
+# ---------------------------------------------------------------------------
+
+
+def _quantize_weight_nvfp4(
+    mxfp4_weight: torch.Tensor,
+    mxfp4_scale: torch.Tensor,
+    weight_amax: torch.Tensor | None,
+    device: str,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, bool]:
+    """MXFP4 + UE8M0 → BF16 → NVFP4 packed. If ``weight_amax`` is None, it is
+    synthesized from the dequantized BF16 weight itself."""
+    bf16 = MXFP4QTensor.dequantize_packed(
+        mxfp4_weight.to(device), mxfp4_scale.to(device),
+        block_size=32, dtype=torch.bfloat16,
+    )
+    synthesized = weight_amax is None
+    if synthesized:
+        weight_amax = bf16.abs().max()
+    weight_scale_2 = _amax_to_nvfp4_scale_2(weight_amax.to(device))
+    q_tensor, weight_scale, _ = NVFP4QTensor.quantize(
+        bf16, 16, None, weight_scale_2, try_tensorrt=False
+    )
+    return q_tensor._quantized_data, weight_scale, weight_scale_2, synthesized
+
+
+def convert_shard(
+    src_shard: Path,
+    dst_shard: Path,
+    amax: dict[str, torch.Tensor],
+    input_fallback: dict[tuple[str, str], torch.Tensor],
+    device: str,
+    stats: dict[str, int],
+) -> None:
+    out: dict[str, torch.Tensor] = {}
+
+    with safe_open(str(src_shard), framework="pt", device="cpu") as f:
+        all_keys = list(f.keys())
+        expert_weight_keys = [k for k in all_keys if _EXPERT_WEIGHT_RE.match(k)]
+        scale_siblings = {
+            k[: -len(".weight")] + ".scale"
+            for k in expert_weight_keys
+            if k[: -len(".weight")] + ".scale" in all_keys
+        }
+
+        for key in all_keys:
+            if key in scale_siblings:
+                continue  # consumed alongside its paired .weight
+
+            if _EXPERT_WEIGHT_RE.match(key):
+                expert_path = key[: -len(".weight")]
+                scale_key = expert_path + ".scale"
+                assert scale_key in all_keys, f"no paired scale for {key}"
+
+                m = re.match(
+                    r"^(?P<block>(?:mtp\.\d+|layers\.\d+))\.ffn\.experts\.\d+\.(?P<proj>w[123])$",
+                    expert_path,
+                )
+                assert m is not None
+                block = m.group("block")
+                proj = m.group("proj")
+                block_kind = (
+                    "mtp" if block.startswith("mtp")
+                    else ("hash" if int(block.split(".")[1]) < stats["_n_hash_layers"] else "score")
+                )
+
+                weight_amax = _lookup_amax(amax, expert_path, "weight")
+                input_amax = _lookup_amax(amax, expert_path, "input")
+                used_fallback_input = False
+                if input_amax is None:
+                    input_amax = input_fallback.get((block, proj))
+                    used_fallback_input = input_amax is not None
+                if input_amax is None:
+                    input_amax = torch.tensor(1.0)
+                    stats[f"input_total_fallback_{block_kind}"] += 1
+
+                w = f.get_tensor(key)
+                s = f.get_tensor(scale_key)
+                packed, weight_scale, weight_scale_2, weight_synth = _quantize_weight_nvfp4(
+                    w, s, weight_amax, device=device
+                )
+                input_scale = _amax_to_nvfp4_scale_2(input_amax).to(weight_scale_2.device)
+
+                out[key] = packed.cpu()
+                out[expert_path + ".weight_scale"] = weight_scale.cpu()
+                out[expert_path + ".weight_scale_2"] = weight_scale_2.cpu()
+                out[expert_path + ".input_scale"] = input_scale.cpu()
+
+                stats["experts_total"] += 1
+                stats[f"experts_{block_kind}"] += 1
+                if weight_synth:
+                    stats[f"weight_synth_{block_kind}"] += 1
+                if used_fallback_input:
+                    stats[f"input_fallback_{block_kind}"] += 1
+            else:
+                out[key] = f.get_tensor(key)
+                stats["passthrough"] += 1
+
+    save_file(out, str(dst_shard))
+
+
+def _hard_link_aux(src: Path, dst: Path) -> None:
+    """Hard-link everything that is not an MP shard file."""
+    assert os.stat(src).st_dev == os.stat(dst).st_dev, "hard links require same filesystem"
+    for item in src.iterdir():
+        if not item.is_file():
+            continue
+        if _SHARD_FILENAME_RE.match(item.name):
+            continue
+        target = dst / item.name
+        if target.exists():
+            target.unlink()
+        os.link(item, target)
+
+
+def _write_manifest(output_ckpt: Path, quantized_layers: list[str]) -> None:
+    cfg = {
+        "quantization": {
+            "quant_algo": "NVFP4",
+            "group_size": 16,
+            "quantized_layers": {name: {"quant_algo": "NVFP4"} for name in quantized_layers},
+            "exclude_modules": [
+                "*.attn.*", "*.ffn.shared_experts.*", "*.ffn.gate.*",
+                "embed.weight", "head.weight", "*.hc_*",
+            ],
+        }
+    }
+    (output_ckpt / "hf_quant_config.json").write_text(json.dumps(cfg, indent=2))
+
+
+def main():
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    p.add_argument("--amax_path", type=Path, required=True)
+    p.add_argument("--source_ckpt", type=Path, required=True,
+                   help="MP-sharded DS-V4 checkpoint dir (from inference/convert.py)")
+    p.add_argument("--output_ckpt", type=Path, required=True)
+    p.add_argument("--world_size", type=int, required=True,
+                   help="MP size used at calibration time; must match shard count")
+    p.add_argument("--device", default="cpu",
+                   help="device for MXFP4 dequant + NVFP4 quant ('cpu' safe default)")
+    p.add_argument("--n_hash_layers", type=int, default=3,
+                   help="diagnostic only — used to label hash-routed layers in stats")
+    args = p.parse_args()
+
+    args.output_ckpt.mkdir(parents=True, exist_ok=True)
+    _log(f"[config] source={args.source_ckpt}  output={args.output_ckpt}  "
+         f"mp={args.world_size}  device={args.device}")
+
+    amax, input_fallback = _load_merged_amax(args.amax_path, args.world_size)
+
+    shards = sorted(args.source_ckpt.glob(f"model*-mp{args.world_size}.safetensors"))
+    assert len(shards) == args.world_size, (
+        f"expected {args.world_size} shards, got {len(shards)}: {shards}"
+    )
+
+    stats: dict[str, int] = defaultdict(int)
+    stats["_n_hash_layers"] = args.n_hash_layers
+
+    for idx, src in enumerate(shards):
+        dst = args.output_ckpt / src.name
+        _log(f"[shard {idx + 1}/{len(shards)}] {src.name}")
+        convert_shard(src, dst, amax, input_fallback, args.device, stats)
+
+    stats.pop("_n_hash_layers", None)
+    _log("[stats]")
+    for k in sorted(stats.keys()):
+        _log(f"  {k:40s} {stats[k]}")
+
+    # Enumerate quantized expert layer names for the manifest.
+    quantized: set[str] = set()
+    for src in shards:
+        with safe_open(str(src), framework="pt", device="cpu") as f:
+            for k in f.keys():
+                if _EXPERT_WEIGHT_RE.match(k):
+                    quantized.add(k[: -len(".weight")])
+
+    _write_manifest(args.output_ckpt, sorted(quantized))
+    _log(f"[aux] hard-linking ancillary files from {args.source_ckpt}")
+    _hard_link_aux(args.source_ckpt, args.output_ckpt)
+    _log(f"[done] {args.output_ckpt}  ({len(quantized)} quantized expert layers)")
+
+
+if __name__ == "__main__":
+    main()
