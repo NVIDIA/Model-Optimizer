@@ -15,7 +15,6 @@
 
 import argparse
 import copy
-import os
 import random
 import time
 import warnings
@@ -104,7 +103,6 @@ QUANT_CFG_CHOICES: dict[str, dict[str, Any]] = {
     "int8_sq": mtq.INT8_SMOOTHQUANT_CFG,
     "int8_wo": mtq.INT8_WEIGHT_ONLY_CFG,
     "fp8": mtq.FP8_DEFAULT_CFG,
-    "fp8_w8a8": mtq.FP8_DEFAULT_CFG,
     "int4_awq": mtq.INT4_AWQ_CFG,
     "w4a8_awq": mtq.W4A8_AWQ_BETA_CFG,
     "nvfp4": mtq.NVFP4_DEFAULT_CFG,
@@ -139,41 +137,25 @@ _KV_CAST_FORMATS = {"fp8_cast", "nvfp4_cast"}
 mto.enable_huggingface_checkpointing()
 
 
-NVFP4_W4A16_CFG = {
-    "quant_cfg": [
-        {"quantizer_name": "*", "enable": False},
-        {
-            "quantizer_name": "*weight_quantizer",
-            "cfg": {
-                "num_bits": (2, 1),
-                "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
-            },
-        },
-        {"quantizer_name": "*input_quantizer", "enable": False},
-        *_default_disabled_quantizer_cfg,
-    ],
-    "algorithm": "max",
-}
-
-FP8_W8A16_CFG = {
-    "quant_cfg": [
-        {"quantizer_name": "*", "enable": False},
-        {
-            "quantizer_name": "*weight_quantizer",
-            "cfg": {"num_bits": (4, 3), "axis": None},
-        },
-        {"quantizer_name": "*input_quantizer", "enable": False},
-        *_default_disabled_quantizer_cfg,
-    ],
-    "algorithm": "max",
-}
-
-QUANT_CFG_CHOICES.update(
-    {
-        "nvfp4_w4a16": NVFP4_W4A16_CFG,
-        "fp8_w8a16": FP8_W8A16_CFG,
-    }
+_QWEN36_AUTOQ_DISABLED_LAYERS = (
+    "*shared_expert_gate*",
+    "*linear_attn.in_proj_a*",
+    "*linear_attn.in_proj_b*",
 )
+_VLM_AUTOQ_DISABLED_LAYERS = ("*visual*", "*mtp*", "*vision_tower*")
+
+
+def get_auto_quantize_disabled_layers(model) -> list[str]:
+    """Return layer patterns that should be excluded from AutoQuantize search."""
+    disabled_layers = [
+        entry["quantizer_name"]
+        for entry in _default_disabled_quantizer_cfg
+        if "parent_class" not in entry and entry["quantizer_name"] != "*lm_head*"
+    ]
+    disabled_layers.extend(p for p in _QWEN36_AUTOQ_DISABLED_LAYERS if p not in disabled_layers)
+    if is_multimodal_model(model):
+        disabled_layers.extend(p for p in _VLM_AUTOQ_DISABLED_LAYERS if p not in disabled_layers)
+    return disabled_layers
 
 
 def extract_and_prepare_language_model_from_vl(full_model):
@@ -351,7 +333,6 @@ def auto_quantize(
         qformat
         in [
             "fp8",
-            "fp8_w8a8",
             "int8_sq",
             "int8_wo",
             "int4_awq",
@@ -366,8 +347,6 @@ def auto_quantize(
             "nvfp4_omlp_only",
             "nvfp4_local_hessian",
             "mxfp8",
-            "nvfp4_w4a16",
-            "fp8_w8a16",
         ]
         for qformat in qformat_list
     ), "One or more quantization formats provided are not supported for unified checkpoint export"
@@ -390,44 +369,6 @@ def auto_quantize(
             f"Invalid auto_quantize_method: {auto_quantize_method}. Must be 'gradient' or 'kl_div'"
         )
 
-    # Let AutoQuantize search lm_head, but keep modules out that vLLM either
-    # constructs as BF16-only paths today or has known unsafe fused dispatch for.
-    disabled_layers = [
-        entry["quantizer_name"]
-        for entry in _default_disabled_quantizer_cfg
-        if "parent_class" not in entry and entry["quantizer_name"] != "*lm_head*"
-    ]
-    enable_linear_attn_big3 = os.environ.get("MODELOPT_AUTOQ_ENABLE_LINEAR_ATTN_BIG3") == "1"
-    enable_linear_attn_all = os.environ.get("MODELOPT_AUTOQ_ENABLE_LINEAR_ATTN_ALL") == "1"
-    enable_shared_expert = os.environ.get("MODELOPT_AUTOQ_ENABLE_SHARED_EXPERT") == "1"
-    if enable_linear_attn_all:
-        enable_linear_attn_big3 = True
-    autoq_extra_disabled = [
-        "*shared_expert_gate*",
-        # Keep the GDN a/b projections in BF16 even for "all linear_attn"
-        # searches. Prior healthy NVFP4 controls excluded these small
-        # projections, while low-end full-search checkpoints quantized them.
-        "*linear_attn.in_proj_a*",
-        "*linear_attn.in_proj_b*",
-    ]
-    if not enable_shared_expert:
-        autoq_extra_disabled.append("*mlp.shared_expert*")
-    if not enable_linear_attn_big3:
-        autoq_extra_disabled.extend(
-            [
-                "*linear_attn.in_proj_qkv*",
-                "*linear_attn.in_proj_z*",
-                "*linear_attn.out_proj*",
-            ]
-        )
-    for pat in autoq_extra_disabled:
-        if pat not in disabled_layers:
-            disabled_layers.append(pat)
-    if is_multimodal_model(language_model):
-        for pat in ("*visual*", "*mtp*", "*vision_tower*"):
-            if pat not in disabled_layers:
-                disabled_layers.append(pat)
-
     language_model, _ = mtq.auto_quantize(
         language_model,
         constraints={"effective_bits": args.auto_quantize_bits},
@@ -442,13 +383,11 @@ def auto_quantize(
             len(calib_dataloader), max(auto_quantize_score_size // args.batch_size, 1)
         ),
         verbose=True,
-        disabled_layers=disabled_layers,
+        disabled_layers=get_auto_quantize_disabled_layers(language_model),
         method=auto_quantize_method,
         checkpoint=auto_quantize_checkpoint,
         cost_model=args.auto_quantize_cost_model,
         active_moe_expert_ratio=args.auto_quantize_active_moe_expert_ratio,
-        cost_lower_bound=args.auto_quantize_cost_lower_bound,
-        cost_objective=args.auto_quantize_cost_objective,
     )
 
     calibrate_loop = create_forward_loop(dataloader=calib_dataloader)
@@ -1488,27 +1427,6 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--auto_quantize_cost_lower_bound",
-        type=float,
-        default=None,
-        help=(
-            "Optional lower bound, as a fraction of the requested effective-bits budget, "
-            "for the auto_quantize LP. Active-MoE cost mode uses a best-effort lower bound "
-            "by default when this is omitted."
-        ),
-    )
-    parser.add_argument(
-        "--auto_quantize_cost_objective",
-        type=str,
-        default="sensitivity",
-        choices=["sensitivity", "active_moe"],
-        help=(
-            "Objective for auto_quantize LP. 'sensitivity' minimizes quantization sensitivity. "
-            "'active_moe' minimizes active routed-MoE cost while the cost model constraint "
-            "still controls the requested budget."
-        ),
-    )
-    parser.add_argument(
         "--moe_calib_experts_ratio",
         type=float,
         default=None,
@@ -1535,17 +1453,12 @@ def parse_args() -> argparse.Namespace:
         parser.error("--auto_quantize_active_moe_expert_ratio must be in the range (0.0, 1.0].")
     if (
         args.auto_quantize_cost_model == "weight"
-        and args.auto_quantize_cost_objective != "active_moe"
         and args.auto_quantize_active_moe_expert_ratio is not None
     ):
         parser.error(
             "--auto_quantize_active_moe_expert_ratio requires "
-            "--auto_quantize_cost_model active_moe or --auto_quantize_cost_objective active_moe."
+            "--auto_quantize_cost_model active_moe."
         )
-    if args.auto_quantize_cost_lower_bound is not None and not (
-        0.0 < args.auto_quantize_cost_lower_bound <= 1.0
-    ):
-        parser.error("--auto_quantize_cost_lower_bound must be in the range (0.0, 1.0].")
 
     if args.specdec_offline_dataset is not None and args.sparsity_fmt != "dense":
         parser.error("--specdec_offline_dataset is only supported with --sparsity_fmt dense (PTQ).")

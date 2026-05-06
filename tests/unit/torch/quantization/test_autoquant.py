@@ -24,7 +24,6 @@ from _test_utils.torch.quantization.models import SimpleConv, SimpleConvLinear, 
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
-from modelopt.torch.opt.searcher import LPS
 from modelopt.torch.quantization.algorithms import (
     AutoQuantizeGradientSearcher,
     QuantRecipe,
@@ -193,24 +192,9 @@ def test_auto_quantize_active_moe_cost_model(num_experts_attr):
     assert all("active_costs" in stats for stats in search_history["candidate_stats"].values())
 
 
-def test_lps_cbc_env_controls(monkeypatch):
-    monkeypatch.setenv("MODELOPT_LPS_CBC_GAP_REL", "0.001")
-    monkeypatch.setenv("MODELOPT_LPS_CBC_TIME_LIMIT", "12")
-
-    lps = LPS(
-        name="test_env_cbc_controls",
-        constraints={"cost": 1.0},
-        constraints_to_candidate_costs={"cost": [[0.0, 1.0]]},
-        candidate_scores=[[0.0, 1.0]],
-    )
-
-    assert lps.solver.optionsDict["gapRel"] == pytest.approx(0.001)
-    assert lps.solver.timeLimit == pytest.approx(12.0)
-
-
 def test_active_moe_search_prefers_budget_lower_bound():
     searcher = AutoQuantizeGradientSearcher()
-    searcher.config = {"cost_model": "active_moe", "cost_lower_bound": None}
+    searcher.config = {"cost_model": "active_moe"}
     searcher.cost_model = "active_moe"
     searcher.candidate_stats = {
         "layers.0.mlp.quant_recipe": {
@@ -224,24 +208,6 @@ def test_active_moe_search_prefers_budget_lower_bound():
 
     assert is_satisfied
     assert best_recipes["layers.0.mlp.quant_recipe"]["format"] == "near_budget"
-
-
-def test_active_moe_cost_objective_minimizes_active_cost():
-    searcher = AutoQuantizeGradientSearcher()
-    searcher.config = {"cost_model": "weight", "cost_objective": "active_moe"}
-    searcher.candidate_stats = {
-        "layers.0.mlp.quant_recipe": {
-            "formats": ["low_sensitivity", "low_active_cost"],
-            "costs": [4.0, 4.0],
-            "active_costs": [10.0, 1.0],
-            "scores": [0.0, 100.0],
-        }
-    }
-
-    best_recipes, is_satisfied = searcher.run_search_with_stats(5.0)
-
-    assert is_satisfied
-    assert best_recipes["layers.0.mlp.quant_recipe"]["format"] == "low_active_cost"
 
 
 # use this config to test custom quantization config
@@ -643,3 +609,28 @@ def test_get_auto_quantize_config(method):
     fresh_model = mtq.quantize(fresh_model, config, forward_loop=lambda m: m(model.get_input()))
     output = fresh_model(model.get_input())
     assert output is not None
+
+
+def test_get_auto_quantize_config_keeps_selected_lm_head_enabled():
+    recipe = QuantRecipe(mtq.FP8_DEFAULT_CFG)
+    search_state = {
+        "best": {"recipe": {"lm_head.quant_recipe": recipe}},
+        "candidate_stats": {"lm_head.quant_recipe": {"module_names": ["lm_head"]}},
+    }
+
+    config = mtq.get_auto_quantize_config(search_state)
+    quant_cfg = config["quant_cfg"]
+
+    default_disable_idx = next(
+        idx for idx, entry in enumerate(quant_cfg) if entry["quantizer_name"] == "*lm_head*"
+    )
+    weight_idx = next(
+        idx
+        for idx, entry in enumerate(quant_cfg)
+        if entry["quantizer_name"] == "lm_head.weight_quantizer"
+    )
+    weight_entry = quant_cfg[weight_idx]
+
+    assert default_disable_idx < weight_idx
+    assert weight_entry["enable"] is True
+    assert weight_entry["cfg"]["num_bits"] == (4, 3)

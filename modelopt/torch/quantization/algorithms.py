@@ -505,8 +505,6 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             "checkpoint": None,
             "cost_model": "weight",
             "active_moe_expert_ratio": None,
-            "cost_lower_bound": None,
-            "cost_objective": "sensitivity",
         }
 
     @property
@@ -517,8 +515,6 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             "cost_model": "weight",
             "active_moe_expert_ratio": None,
             "cost_denominator": None,
-            "cost_lower_bound": None,
-            "cost_objective": "sensitivity",
             "candidate_stats": defaultdict(dict),
             "quantizer_states": {},
             "best": {"recipe": {}, "constraints": {}, "score": float("inf"), "is_satisfied": False},
@@ -539,23 +535,13 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                 f"Invalid cost_model: {config['cost_model']}. "
                 "Valid options are 'weight' and 'active_moe'."
             )
-        if config["cost_objective"] not in ("sensitivity", "active_moe"):
-            raise ValueError(
-                f"Invalid cost_objective: {config['cost_objective']}. "
-                "Valid options are 'sensitivity' and 'active_moe'."
-            )
         active_moe_expert_ratio = config["active_moe_expert_ratio"]
         if active_moe_expert_ratio is not None and not (0.0 < active_moe_expert_ratio <= 1.0):
             raise ValueError("active_moe_expert_ratio must be in the range (0.0, 1.0].")
-        if (
-            config["cost_model"] == "active_moe" or config["cost_objective"] == "active_moe"
-        ) and active_moe_expert_ratio is None:
+        if config["cost_model"] == "active_moe" and active_moe_expert_ratio is None:
             raise ValueError(
                 "active_moe_expert_ratio must be set when using active_moe cost accounting."
             )
-        cost_lower_bound = config["cost_lower_bound"]
-        if cost_lower_bound is not None and not (0.0 < cost_lower_bound <= 1.0):
-            raise ValueError("cost_lower_bound must be in the range (0.0, 1.0].")
         return config
 
     def load_search_checkpoint(self) -> bool:
@@ -812,8 +798,6 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         self.cost_model = self.config["cost_model"]
         self.active_moe_expert_ratio = self.config["active_moe_expert_ratio"]
         self.cost_denominator = getattr(self, "cost_denominator", None)
-        self.cost_lower_bound = self.config["cost_lower_bound"]
-        self.cost_objective = self.config["cost_objective"]
 
         search_recipes = self._get_search_recipes(self.config["quantization_formats"])
         self._verify_constraint(search_recipes)
@@ -930,12 +914,6 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         return constraints, "weight_size_after_compression"
 
     def _get_search_lower_bounds(self):
-        cost_lower_bound = getattr(self, "cost_lower_bound", None)
-        if cost_lower_bound is None:
-            cost_lower_bound = getattr(self, "config", {}).get("cost_lower_bound")
-        if cost_lower_bound is not None:
-            return [cost_lower_bound, None]
-
         cost_model = getattr(self, "cost_model", getattr(self, "config", {}).get("cost_model"))
         if cost_model == "active_moe":
             return [0.99, 0.90, None]
@@ -1294,12 +1272,7 @@ class AutoQuantizeGradientSearcher(_AutoQuantizeBaseSearcher):
                     ]
                 },
                 candidate_scores=[
-                    (
-                        candidate_stat["active_costs"]
-                        if self.config.get("cost_objective") == "active_moe"
-                        else candidate_stat["scores"]
-                    )
-                    for candidate_stat in self.candidate_stats.values()
+                    candidate_stat["scores"] for candidate_stat in self.candidate_stats.values()
                 ],
                 objective_type="minimize",
                 verbose=verbose,
@@ -1562,6 +1535,7 @@ def get_auto_quantize_config(search_state, constraints=None, verbose=False):
         return v
 
     quant_cfg: list[dict] = [{"quantizer_name": "*", "enable": False}]
+    per_module_entries: list[dict] = []
     _per_module_attrs = ("input_quantizer", "weight_quantizer", "output_quantizer")
     # Track global (non per-module) recipe entries.  Last recipe wins for each pattern.
     global_entries: dict[str, dict] = {}
@@ -1582,7 +1556,7 @@ def get_auto_quantize_config(search_state, constraints=None, verbose=False):
                     }
                     if matched_cfg is not None:
                         entry["cfg"] = _cfg_to_dict(matched_cfg)
-                    quant_cfg.append(entry)
+                    per_module_entries.append(entry)
 
         # Collect non-per-module entries (e.g. *[kv]_bmm_quantizer) from winning recipes.
         for recipe_entry in recipe.config.quant_cfg:
@@ -1599,7 +1573,10 @@ def get_auto_quantize_config(search_state, constraints=None, verbose=False):
                 ge["cfg"] = _cfg_to_dict(cfg)
             global_entries[pattern] = ge
 
+    # Keep path-scoped recipe entries before explicit module entries so selected
+    # modules override default disables such as ``*lm_head*``.
     quant_cfg.extend(global_entries.values())
+    quant_cfg.extend(per_module_entries)
     warnings.warn(
         "get_auto_quantize_config: returned config uses algorithm='max'. "
         "Per-recipe calibration algorithms (e.g. smoothquant, awq) are not preserved. "
@@ -1629,12 +1606,8 @@ def _resolve_best_recipe(search_state, constraints, verbose=False):
 
     searcher.candidate_stats = candidate_stats
     searcher.cost_model = search_state.get("cost_model", "weight")
-    searcher.cost_lower_bound = search_state.get("cost_lower_bound")
-    searcher.cost_objective = search_state.get("cost_objective", "sensitivity")
     searcher.config = {
         "cost_model": searcher.cost_model,
-        "cost_lower_bound": searcher.cost_lower_bound,
-        "cost_objective": searcher.cost_objective,
     }
     best_recipe_info, _ = searcher.run_search_with_stats(max_weight_size, verbose=verbose)
 
@@ -1656,6 +1629,8 @@ def _match_quantizer_cfg(quant_cfg, quantizer_attr):
     matched = None
     matched_enable = None
     for entry in quant_cfg:
+        if "parent_class" in entry:
+            continue
         pattern = entry["quantizer_name"]
         cfg = entry.get("cfg")
         enable = entry.get("enable", True)

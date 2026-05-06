@@ -333,8 +333,6 @@ def auto_quantize(
     checkpoint: str | None = None,
     cost_model: str = "weight",
     active_moe_expert_ratio: float | None = None,
-    cost_lower_bound: float | None = None,
-    cost_objective: str = "sensitivity",
 ):
     r"""Perform optimal per-layer quantization by searching for the best quantization formats per-layer.
 
@@ -491,12 +489,6 @@ def auto_quantize(
         active_moe_expert_ratio: Ratio of routed MoE experts active per token, normally
             ``num_experts_per_tok / num_experts``. If omitted with ``cost_model="active_moe"``, the
             ratio is inferred from common model config fields when available.
-        cost_lower_bound: Optional lower bound, as a fraction of the requested cost budget, for
-            the AutoQuantize LP. If omitted, ``cost_model="active_moe"`` uses a best-effort lower
-            bound so solutions consume the requested active-weight budget instead of undershooting it.
-        cost_objective: Objective for the AutoQuantize LP. ``"sensitivity"`` (default) minimizes
-            quantization sensitivity. ``"active_moe"`` minimizes active routed-MoE cost while the
-            normal ``cost_model`` constraint still controls the requested budget.
 
     Returns: A tuple (model, state_dict) where ``model`` is the searched and quantized model and
         ``state_dict`` contains the history and detailed stats of the search procedure.
@@ -582,27 +574,11 @@ def auto_quantize(
         raise ValueError(
             f"Invalid cost_model: {cost_model}. Valid options are 'weight' and 'active_moe'."
         )
-    if cost_objective not in ("sensitivity", "active_moe"):
-        raise ValueError(
-            f"Invalid cost_objective: {cost_objective}. "
-            "Valid options are 'sensitivity' and 'active_moe'."
-        )
     if active_moe_expert_ratio is not None and not (0.0 < active_moe_expert_ratio <= 1.0):
         raise ValueError("active_moe_expert_ratio must be in the range (0.0, 1.0].")
-    if (
-        cost_model == "weight"
-        and cost_objective != "active_moe"
-        and active_moe_expert_ratio is not None
-    ):
-        raise ValueError(
-            "active_moe_expert_ratio requires cost_model='active_moe' "
-            "or cost_objective='active_moe'."
-        )
-    if cost_lower_bound is not None and not (0.0 < cost_lower_bound <= 1.0):
-        raise ValueError("cost_lower_bound must be in the range (0.0, 1.0].")
-    if (
-        cost_model == "active_moe" or cost_objective == "active_moe"
-    ) and active_moe_expert_ratio is None:
+    if cost_model == "weight" and active_moe_expert_ratio is not None:
+        raise ValueError("active_moe_expert_ratio requires cost_model='active_moe'.")
+    if cost_model == "active_moe" and active_moe_expert_ratio is None:
         active_moe_expert_ratio = _infer_active_moe_expert_ratio(model)
         if active_moe_expert_ratio is None:
             raise ValueError(
@@ -628,8 +604,6 @@ def auto_quantize(
         "checkpoint": checkpoint,
         "cost_model": cost_model,
         "active_moe_expert_ratio": active_moe_expert_ratio,
-        "cost_lower_bound": cost_lower_bound,
-        "cost_objective": cost_objective,
     }
     # Disable all quantizers; AutoQuantize will enable the needed ones
     set_quantizer_by_cfg(model, [{"quantizer_name": "*", "enable": False}])
