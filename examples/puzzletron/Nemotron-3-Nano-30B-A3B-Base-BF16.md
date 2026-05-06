@@ -19,9 +19,11 @@ Both runs use the same MIP solver and the same constraint (`target_num_kv_heads:
 - Container: `nvcr.io/nvidia/nemo:26.04` or later.
 - `pip install -e ".[dev]"` from the modelopt repo root.
 - Mamba kernels (required by Nemotron-3-Nano's hybrid backbone):
+
   ```bash
   pip install mamba-ssm[causal-conv1d] --no-build-isolation
   ```
+
 - HF auth set up so the model is downloadable: `huggingface-cli login`.
 
 ## Step A — pipeline without bypass
@@ -37,7 +39,7 @@ This runs the 8-step puzzletron pipeline (convert → score pruning activations 
 
 When the realize-model step finishes, the log lines at `${puzzle_dir}/log.txt` contain:
 
-```
+```text
 validate_model_with_kl_div(model_name='teacher', ...)
 Average losses = {'lm_loss': ..., 'token_accuracy_top_1': ..., 'token_accuracy_top_5': ..., 'token_accuracy_top_10': ...}
 ...

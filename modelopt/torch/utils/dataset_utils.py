@@ -249,7 +249,10 @@ def get_dataset_samples(
     if dataset_name.endswith(".jsonl"):
         return get_jsonl_text_samples(dataset_name, num_samples, key="text")
 
-    from datasets import load_dataset
+    # Import via submodule: HF `datasets` uses lazy `__getattr__` at the package
+    # level (PEP 562), so `from datasets import load_dataset` fails mypy with
+    # `attr-defined`. The submodule path bypasses the lazy loader.
+    from datasets.load import load_dataset
 
     local_dataset_path = None
     if os.path.exists(dataset_name):  # Local path
@@ -753,8 +756,10 @@ def download_hf_dataset_as_jsonl(
     Returns:
         List of paths to downloaded JSONL files.
     """
-    from datasets import load_dataset
+    # See note above: import via submodule to satisfy mypy.
     from huggingface_hub.utils import build_hf_headers
+
+    from datasets.load import load_dataset
 
     print(f"Downloading dataset {dataset_name} from Hugging Face")
     if isinstance(json_keys, str):

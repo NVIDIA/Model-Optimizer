@@ -31,18 +31,23 @@ import traceback
 from collections import OrderedDict, defaultdict
 from pathlib import Path
 from statistics import mean
-from typing import Optional, Type, cast
+from typing import Optional
 
-import datasets
 import torch
 import torch.distributed
 import transformers
 from omegaconf import DictConfig
 from torch.utils.data.dataloader import DataLoader
-from transformers import AutoTokenizer, PreTrainedTokenizerBase, PretrainedConfig
+from transformers import AutoTokenizer, PretrainedConfig, PreTrainedTokenizerBase
 
+import datasets
+import datasets.utils.logging
+import modelopt.torch.puzzletron.bypass_distillation.stitched_model_factory as stitched_model_factory_module
 import modelopt.torch.utils.distributed as dist
-from modelopt.torch.puzzletron.anymodel.model_descriptor import ModelDescriptor, ModelDescriptorFactory
+from modelopt.torch.puzzletron.anymodel.model_descriptor import (
+    ModelDescriptor,
+    ModelDescriptorFactory,
+)
 from modelopt.torch.puzzletron.sewing_kit import InputArgs, StitchedModule
 from modelopt.torch.puzzletron.sewing_kit.utils import fake_tensor
 from modelopt.torch.puzzletron.tools.checkpoint_utils_hf import load_model_config
@@ -55,8 +60,6 @@ from .bypass_checkpoint_utils import find_latest_run_dir, load_local_state, save
 from .bypass_utils import get_distributed_modules_ownership, set_experiment_dir, set_experiment_id
 from .data_classes import GlobalRank, IterNum, IterStatistics, LocalTrainingStats, TimeToSaveSignal
 from .stitched_model_factory import StitchedModuleDescriptor, StitchedModulesProcessOwnership
-
-import modelopt.torch.puzzletron.bypass_distillation.stitched_model_factory as stitched_model_factory_module
 
 time_start = time.time()
 
@@ -113,7 +116,7 @@ def launch_bypass_distillation(hydra_cfg: DictConfig) -> None:
 
 def train(
     cfg: DictConfig,
-    descriptor: Type[ModelDescriptor],
+    descriptor: ModelDescriptor,
     student_model: torch.nn.Module,
     student_stitched_model: StitchedModule,
     teacher_stitched_model: StitchedModule,
@@ -145,9 +148,7 @@ def train(
     ]
     # Indices of stitched modules owned by the current process
     owned_stitched_module_indices = [
-        i
-        for i, owner in enumerate(stitched_modules_process_ownership)
-        if owner == dist.rank()
+        i for i, owner in enumerate(stitched_modules_process_ownership) if owner == dist.rank()
     ]
     mprint(f"{global_stitched_modules_count=}")
     mprint(f"{num_stitched_modules_per_process=}")
@@ -187,9 +188,7 @@ def train(
     min_owned_index = min(owned_stitched_module_indices)
     max_owned_index = max(owned_stitched_module_indices)
     prev_rank: Optional[int] = (
-        None
-        if min_owned_index - 1 < 0
-        else stitched_modules_process_ownership[min_owned_index - 1]
+        None if min_owned_index - 1 < 0 else stitched_modules_process_ownership[min_owned_index - 1]
     )
     next_rank: Optional[int] = (
         None
@@ -199,7 +198,9 @@ def train(
 
     torch.cuda.synchronize()
 
-    mprint(f'Grad scaling status: {"enabled" if cfg.bypass.training.use_grad_scaling else "disabled"}')
+    mprint(
+        f"Grad scaling status: {'enabled' if cfg.bypass.training.use_grad_scaling else 'disabled'}"
+    )
 
     train_iterator = iter(train_dataloader)
 
@@ -295,13 +296,11 @@ def train(
                 del stitched_module_output
                 grad_scaler.scale(stitched_module_loss).backward()
             else:
-                stitched_module_loss = torch.full(
-                    [1], fill_value=torch.nan, dtype=torch.float32
-                )
+                stitched_module_loss = torch.full([1], fill_value=torch.nan, dtype=torch.float32)
 
-            iter_stitched_module_losses[stitched_module_name] = (
-                stitched_module_loss.to("cpu").item()
-            )
+            iter_stitched_module_losses[stitched_module_name] = stitched_module_loss.to(
+                "cpu"
+            ).item()
 
             del stitched_module_loss
 
@@ -334,9 +333,7 @@ def train(
                                     clip_value=grad_clip,
                                 )
                         else:
-                            raise RuntimeError(
-                                f"Invalid {cfg.bypass.training.grad_clip_type}"
-                            )
+                            raise RuntimeError(f"Invalid {cfg.bypass.training.grad_clip_type}")
 
                     assert grad_scaler is not None
                     grad_scaler.step(optimizer)
@@ -380,7 +377,10 @@ def train(
         if dist.is_master():
             if cfg.bypass.model.model_overrides.save_interval_seconds is not None:
                 time_now = time.time()
-                if time_now - time_last_save >= cfg.bypass.model.model_overrides.save_interval_seconds:
+                if (
+                    time_now - time_last_save
+                    >= cfg.bypass.model.model_overrides.save_interval_seconds
+                ):
                     mprint(
                         f"Time to save! {cfg.bypass.model.model_overrides.save_interval_seconds=}, "
                         f"{time_last_save=}, {time_now=}"
@@ -409,14 +409,12 @@ def train(
                 highest_iter = list(log_chunk.keys())[-1]
                 highest_iter_stats = iter_stats_history[highest_iter]
 
-                losses_by_name = defaultdict[str, list[float]](lambda: [])
+                losses_by_name = defaultdict[str, list[float]](list)
                 for losses in log_chunk.values():
                     for name, loss in losses.items():
                         losses_by_name[name].append(loss)
 
-                losses_by_name_avg = {
-                    name: mean(losses) for name, losses in losses_by_name.items()
-                }
+                losses_by_name_avg = {name: mean(losses) for name, losses in losses_by_name.items()}
 
                 # Update best losses tracking
                 for name, current_loss in losses_by_name_avg.items():
@@ -516,9 +514,7 @@ def train(
                             if old_ckpt_path.name != subdir_name:
                                 shutil.rmtree(str(old_ckpt_path))
                     if cfg.bypass.kill_after_first_save:
-                        raise RuntimeError(
-                            "Done saving checkpoint, kill_after_first_save=True"
-                        )
+                        raise RuntimeError("Done saving checkpoint, kill_after_first_save=True")
 
         # Checkpoint saving (step-based or time-based)
         if not is_accumulating and (
@@ -552,14 +548,10 @@ def train(
 
                 if cfg.bypass.kill_after_first_save:
                     dist.barrier()
-                    raise RuntimeError(
-                        "Done saving checkpoint, kill_after_first_save=True"
-                    )
+                    raise RuntimeError("Done saving checkpoint, kill_after_first_save=True")
 
                 if cfg.bypass.model.model_overrides.delete_old_checkpoints and dist.is_master():
-                    existing_ckpt_paths = list(
-                        Path(cfg.bypass.experiment_dir).glob("iter-*")
-                    )
+                    existing_ckpt_paths = list(Path(cfg.bypass.experiment_dir).glob("iter-*"))
                     for old_ckpt_path in existing_ckpt_paths:
                         if old_ckpt_path.name != subdir_name:
                             shutil.rmtree(str(old_ckpt_path))
@@ -691,7 +683,7 @@ def run_bypassed_training(cfg: DictConfig):
         if cfg.bypass.training.warmup_steps is None:
             cfg.bypass.training.warmup_steps = 0
 
-        mprint(f'\n{format_global_config(cfg.bypass, "Bypass Configurations")}')
+        mprint(f"\n{format_global_config(cfg.bypass, 'Bypass Configurations')}")
         mprint(f"Max token count:  {cfg.bypass.training.max_token_count:,}")
 
         seed = cfg.bypass.seed
@@ -705,9 +697,7 @@ def run_bypassed_training(cfg: DictConfig):
 
         assert teacher_model_config is not None
 
-        mprint(
-            f"Load and shard model with: {owned_block_indexes=}, {cfg.teacher_dir=}"
-        )
+        mprint(f"Load and shard model with: {owned_block_indexes=}, {cfg.teacher_dir=}")
         teacher_model = load_and_shard_model(
             descriptor=descriptor,
             checkpoint_path=cfg.teacher_dir,
@@ -730,7 +720,9 @@ def run_bypassed_training(cfg: DictConfig):
         else:
             max_eval_samples = cfg.bypass.data.max_eval_samples
 
-        load_dataset_fn = load_streaming_fn if not cfg.bypass.data.load_from_disk else load_from_disk_fn
+        load_dataset_fn = (
+            load_streaming_fn if not cfg.bypass.data.load_from_disk else load_from_disk_fn
+        )
 
         train_dataloader = create_train_dataloader(
             seed=seed,
@@ -764,9 +756,7 @@ def run_bypassed_training(cfg: DictConfig):
                 load_dataset_fn=load_dataset_fn,
                 dataset_name=cfg.bypass.data.val_dataset_name,
                 keep_in_memory=cfg.bypass.data.keep_in_memory,
-                source_datasets_to_discard=cfg.bypass.get(
-                    "source_datasets_to_discard", tuple()
-                ),
+                source_datasets_to_discard=cfg.bypass.get("source_datasets_to_discard", tuple()),
                 bos_rate=cfg.bypass.data.bos_rate,
             )
 
@@ -778,9 +768,8 @@ def run_bypassed_training(cfg: DictConfig):
         dist.barrier()
 
         with torch.device(device):
-            stitched_model_factory_fn = cast(
-                stitched_model_factory_module.StitchedModelFactoryFn,
-                getattr(stitched_model_factory_module, cfg.bypass.model_factory.factory),
+            stitched_model_factory_fn = getattr(
+                stitched_model_factory_module, cfg.bypass.model_factory.factory
             )
             (
                 student_model,
@@ -804,9 +793,7 @@ def run_bypassed_training(cfg: DictConfig):
         elif cfg.bypass.find_last_ckpt_for_resume:
             _ckpt_dir = find_latest_run_dir(run_parent_dir=cfg.bypass.experiment_dir)
             if _ckpt_dir is None:
-                mprint(
-                    "Couldn't find any run dir for resume, assuming this is the first job"
-                )
+                mprint("Couldn't find any run dir for resume, assuming this is the first job")
             else:
                 mprint(
                     f"`cfg.bypass.find_last_ckpt_for_resume` is True. "
@@ -882,9 +869,11 @@ def run_bypassed_training(cfg: DictConfig):
         dist.barrier()
         mprint("Performing dummy runs on stitched modules:")
         torch.cuda.synchronize()
-        with torch.no_grad(), torch.autocast(
-            device_type="cuda", dtype=torch.bfloat16
-        ), torch.device(device):
+        with (
+            torch.no_grad(),
+            torch.autocast(device_type="cuda", dtype=torch.bfloat16),
+            torch.device(device),
+        ):
             input_ids = torch.ones(
                 (cfg.bypass.training.micro_batch_size, cfg.bypass.data.block_size),
                 dtype=torch.long,

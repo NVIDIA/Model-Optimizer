@@ -27,7 +27,7 @@ data:
   keep_in_memory: false
   val_dataset_name: valid
   max_eval_samples: 4
-  eval_samples_per_process: null    # Samples per GPU during distributed eval (auto if null)
+  eval_samples_per_process:         # Samples per GPU during distributed eval (auto if null)
   shuffle_train_data_seed: ${random_int:0,9999}     # Seed for shuffling train data
 
 # Training Configuration
@@ -53,10 +53,10 @@ training:
   eval_interval: 5
 
 # Model Loading Configuration
-resume_checkpoint_path: null    # Path to resume training from checkpoint
-find_last_ckpt_for_resume: True   # Auto-resume by finding last checkpoint (bool)
-parameter_count: null
-init_checkpoint_path: null      # Path to initialize weights from
+resume_checkpoint_path:         # Path to resume training from checkpoint
+find_last_ckpt_for_resume: true   # Auto-resume by finding last checkpoint (bool)
+parameter_count:
+init_checkpoint_path:           # Path to initialize weights from
 
 model:
   student_weights_dtype: "bf16"   # Student model weight precision
@@ -83,10 +83,10 @@ model_factory:
   gqa_init_mode: AverageKV                  # How to initialize K/V heads in GQA. All options here: GQAInitMode
   mlp_init_mode: Truncate                   # MLP initialization. All options here: MlpInitMode
   mlp_init_config:                          # Configuration for MLP initialization (if needed)
-    activations_log_dir: null               # Directory with activation statistics (required for PruneByActivationsLog)
+    activations_log_dir:                    # Directory with activation statistics (required for PruneByActivationsLog)
   linear_init_mode: FromTeacher             # How to initialize linear layers: FromTeacher, Random, etc.
-  submodule_for_loss_calculation: null      # Specific submodule for loss calc.
-  keys_to_learn: null                       # What parameters to train. Either "entire_block", or specific submodules. Computed dynamically.
+  submodule_for_loss_calculation:           # Specific submodule for loss calc.
+  keys_to_learn:                            # What parameters to train. Either "entire_block", or specific submodules. Computed dynamically.
 
 # Validation Configuration
 disable_initial_validate: false

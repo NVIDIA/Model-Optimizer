@@ -15,7 +15,6 @@
 
 """Unit tests for normalized MSE loss functions in sewing_kit/utils.py."""
 
-import pytest
 import torch
 
 from modelopt.torch.puzzletron.sewing_kit.utils import (
@@ -23,7 +22,6 @@ from modelopt.torch.puzzletron.sewing_kit.utils import (
     normalized_mse_loss,
     vectorwise_normalized_mse_loss,
 )
-
 
 # ---------------------------------------------------------------------------
 # normalized_mse_loss

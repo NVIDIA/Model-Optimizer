@@ -19,7 +19,6 @@ from collections.abc import Callable, Mapping, Sequence
 from functools import partial
 from typing import Protocol, TypeVar
 
-import datasets
 import torch
 import torch.distributed
 from accelerate import Accelerator
@@ -27,6 +26,14 @@ from torch.utils.data import DataLoader, Dataset, IterableDataset
 from torch.utils.data._utils.collate import collate, default_collate_fn_map
 from tqdm import tqdm
 from transformers import PreTrainedTokenizerBase
+
+# Import via submodules: HF `datasets` uses lazy `__getattr__` at the package level
+# (PEP 562), so mypy can't see top-level names — `from datasets import DatasetDict`
+# fails with `attr-defined`. Submodule paths bypass the lazy loader.
+from datasets.arrow_dataset import Dataset as HFDataset
+from datasets.dataset_dict import DatasetDict
+from datasets.features import Features, Value
+from datasets.load import load_dataset, load_from_disk
 
 from ...tools.logger import mprint
 from .dataset import ConstantLengthDataset
@@ -53,18 +60,18 @@ class LoadDatasetFn(Protocol):
 def load_from_disk_fn(
     dataset_path: str, content_field: str, keep_in_memory: bool = False
 ) -> Mapping[str, Dataset]:
-    return datasets.load_from_disk(dataset_path, keep_in_memory=keep_in_memory)
+    return load_from_disk(dataset_path, keep_in_memory=keep_in_memory)
 
 
 def load_streaming_fn(
     dataset_path: str, content_field: str, keep_in_memory: bool = False
 ) -> Mapping[str, Dataset]:
-    dataset = datasets.load_dataset(
+    dataset = load_dataset(
         dataset_path,
         streaming=True,
-        features=datasets.Features(
+        features=Features(
             {
-                content_field: datasets.Value(dtype="string"),
+                content_field: Value(dtype="string"),
             }
         ),
         keep_in_memory=keep_in_memory,
@@ -147,13 +154,13 @@ def create_validation_dataloader(
         if isinstance(dataset, str):
             dataset = load_dataset_fn(dataset, content_field, keep_in_memory)
 
-        if isinstance(dataset, datasets.Dataset | torch.utils.data.Dataset):
+        if isinstance(dataset, HFDataset | torch.utils.data.Dataset):
             valid_data = dataset
             mprint(
                 "#### Path to specific dataset was given (not DatasetDict), taking it as-is ####"
             )
         else:
-            assert isinstance(dataset, datasets.DatasetDict)
+            assert isinstance(dataset, DatasetDict)
             if dataset_name == "__auto__":
                 val_split_options = []
                 for val_key_prefix in ("val", "test"):

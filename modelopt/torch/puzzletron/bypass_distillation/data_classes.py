@@ -18,7 +18,6 @@
 import dataclasses
 from typing import TypeAlias
 
-
 IterNum: TypeAlias = int
 GlobalRank: TypeAlias = int
 

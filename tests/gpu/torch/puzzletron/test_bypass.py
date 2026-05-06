@@ -120,10 +120,13 @@ def _mlp_init_settings(has_moe_layers: bool, hydra_cfg) -> tuple[str, dict]:
     if not has_moe_layers:
         return "Truncate", {"activations_log_dir": None}
 
-    mlp_init_config = OmegaConf.to_container(
-        hydra_cfg.pruning.get("mlp_init_config_yaml", OmegaConf.create({})),
-        resolve=True,
-    ) or {}
+    mlp_init_config = (
+        OmegaConf.to_container(
+            hydra_cfg.pruning.get("mlp_init_config_yaml", OmegaConf.create({})),
+            resolve=True,
+        )
+        or {}
+    )
     mlp_init_config["activations_log_dir"] = str(hydra_cfg.pruning.activations_log_dir)
     return "ExpertRemoval", mlp_init_config
 
@@ -293,9 +296,7 @@ def _setup_hydra_cfg_and_pruning(
         tmp_path, rank, hf_model_name, hybrid_override_pattern
     )
 
-    hydra_config_dir = str(
-        project_root_path / "tests/gpu/torch/puzzletron/resources/configs"
-    )
+    hydra_config_dir = str(project_root_path / "tests/gpu/torch/puzzletron/resources/configs")
     # Per-family hydra config name follows the layout configs/<family>/<basename>/<basename>.
     hydra_config_name = f"{hf_model_name}/{Path(hf_model_name).name}"
 
@@ -378,8 +379,13 @@ def _test_bypass_block_pruning_job(
     size: int,
 ):
     puzzle_dir, _, hydra_cfg = _setup_hydra_cfg_and_pruning(
-        project_root_path, tmp_path, rank, size,
-        hf_model_name, converter, hybrid_override_pattern,
+        project_root_path,
+        tmp_path,
+        rank,
+        size,
+        hf_model_name,
+        converter,
+        hybrid_override_pattern,
     )
 
     bypass_cfg_dict = _make_bypass_cfg_dict(has_moe_layers, hydra_cfg)
@@ -451,15 +457,20 @@ def _test_bypass_kv_head_compression_job(
     size: int,
 ):
     puzzle_dir, _, hydra_cfg = _setup_hydra_cfg_and_pruning(
-        project_root_path, tmp_path, rank, size,
-        hf_model_name, converter, hybrid_override_pattern,
+        project_root_path,
+        tmp_path,
+        rank,
+        size,
+        hf_model_name,
+        converter,
+        hybrid_override_pattern,
     )
 
     bypass_cfg_dict = _make_bypass_cfg_dict(
         has_moe_layers,
         hydra_cfg,
-        block_pruned=False,        # keep FFN/experts at teacher
-        attention_pruned=True,     # halve KV heads
+        block_pruned=False,  # keep FFN/experts at teacher
+        attention_pruned=True,  # halve KV heads
     )
     OmegaConf.update(hydra_cfg, "bypass", bypass_cfg_dict, merge=True)
 
@@ -530,8 +541,13 @@ def _test_bypass_multi_config_sequential_job(
     size: int,
 ):
     puzzle_dir, _, hydra_cfg = _setup_hydra_cfg_and_pruning(
-        project_root_path, tmp_path, rank, size,
-        hf_model_name, converter, hybrid_override_pattern,
+        project_root_path,
+        tmp_path,
+        rank,
+        size,
+        hf_model_name,
+        converter,
+        hybrid_override_pattern,
     )
 
     configs_list = [
@@ -623,8 +639,13 @@ def _test_bypass_checkpoint_contents_job(
     size: int,
 ):
     puzzle_dir, _, hydra_cfg = _setup_hydra_cfg_and_pruning(
-        project_root_path, tmp_path, rank, size,
-        hf_model_name, converter, hybrid_override_pattern,
+        project_root_path,
+        tmp_path,
+        rank,
+        size,
+        hf_model_name,
+        converter,
+        hybrid_override_pattern,
     )
 
     bypass_cfg_dict = _make_bypass_cfg_dict(has_moe_layers, hydra_cfg)

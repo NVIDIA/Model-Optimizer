@@ -28,10 +28,7 @@ from ....pruning.expert_removal_pruning_mixin import (
     ExpertRemovalLayerDescriptor,
     ExpertRemovalPruningMixIn,
 )
-from ....pruning.kv_heads_pruning_mixin import (
-    KVHeadsLayerDescriptor,
-    KVHeadsPruningMixIn,
-)
+from ....pruning.kv_heads_pruning_mixin import KVHeadsLayerDescriptor, KVHeadsPruningMixIn
 
 # Expert removal is supported for unquantized models (test models).
 # Production models use MXFP4 quantized MoE with combined tensors

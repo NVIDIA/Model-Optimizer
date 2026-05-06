@@ -222,7 +222,10 @@ def _get_vlm_dataset(
     """
     # Load the dataset
     if dataset_name in SUPPORTED_VLM_DATASET_CONFIG:
-        from datasets import load_dataset
+        # Import via submodule: HF `datasets` uses lazy `__getattr__` at the package
+        # level (PEP 562), so `from datasets import load_dataset` fails mypy with
+        # `attr-defined`. The submodule path bypasses the lazy loader.
+        from datasets.load import load_dataset
 
         cfg = SUPPORTED_VLM_DATASET_CONFIG[dataset_name]["config"].copy()
         streaming = bool(cfg.pop("streaming", False))
@@ -273,7 +276,8 @@ def _get_vlm_dataset(
                 for subset in subsets
             ]
             try:
-                from datasets import interleave_datasets
+                # See note above: import via submodule to satisfy mypy.
+                from datasets.combine import interleave_datasets
 
                 ds = interleave_datasets(streams)
             except Exception:

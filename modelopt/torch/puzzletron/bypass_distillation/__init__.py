@@ -20,3 +20,5 @@ block configurations using per-block knowledge distillation from a teacher model
 """
 
 from .training_loop import launch_bypass_distillation
+
+__all__ = ["launch_bypass_distillation"]

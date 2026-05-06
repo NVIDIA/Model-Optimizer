@@ -152,7 +152,8 @@ def run_mip_only(hydra_config_path: str):
     # Check if sweep mode is enabled
     if hasattr(hydra_cfg.mip, "sweep") and hydra_cfg.mip.sweep.get("enabled", False):
         mtpz.tools.mprint(
-            f"Puzzletron Progress {mip_step}/{total_steps}: running MIP sweep for multiple compression rates (multi-gpu)"
+            f"Puzzletron Progress {mip_step}/{total_steps}:"
+            " running MIP sweep for multiple compression rates (multi-gpu)"
         )
         mtpz.mip.run_mip_sweep(hydra_cfg)
     else:

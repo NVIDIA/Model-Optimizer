@@ -21,7 +21,7 @@ import re
 from argparse import Namespace
 from collections import OrderedDict
 from pathlib import Path
-from typing import Any, Callable, Mapping, Optional, Sequence, Type
+from typing import Any, Callable, Mapping, Optional, Sequence
 
 import torch
 from omegaconf import DictConfig, OmegaConf
@@ -31,11 +31,7 @@ from transformers import PretrainedConfig, PreTrainedModel
 
 import modelopt.torch.utils.distributed as dist
 from modelopt.torch.puzzletron.anymodel.model_descriptor import ModelDescriptor
-from modelopt.torch.puzzletron.pruning.pruning_utils import (
-    GQAInitMode,
-    LinearInitMode,
-    MlpInitMode,
-)
+from modelopt.torch.puzzletron.pruning.pruning_utils import GQAInitMode, LinearInitMode, MlpInitMode
 from modelopt.torch.puzzletron.sewing_kit import (
     ExternalTarget,
     FunctionTarget,
@@ -75,31 +71,14 @@ class StitchedModuleDescriptor:
     grad_scaler: Optional[GradScaler] = None
 
 
-def default_factory(
-    teacher_model: PreTrainedModel,
-    descriptor: Type[ModelDescriptor],
-    config: Config,
-    model_blocks_process_ownership: Sequence[int],
-    student_model: Optional[PreTrainedModel] = None,
-) -> tuple[
-    PreTrainedModel,
-    StitchedModule,
-    StitchedModule,
-    StitchedModule,
-    OrderedDict[str, StitchedModuleDescriptor],
-    PretrainedConfig,
-]:
-    raise NotImplementedError()
-
-
-StitchedModelFactoryFn = type(default_factory)
-
-_SUBBLOCK_KEYS_TO_LEARN = frozenset({"subblock_ffn", "subblock_attention", "subblock_mamba", "entire_block"})
+_SUBBLOCK_KEYS_TO_LEARN = frozenset(
+    {"subblock_ffn", "subblock_attention", "subblock_mamba", "entire_block"}
+)
 
 
 def _set_keys_to_learn(
     model: PreTrainedModel,
-    descriptor: Type[ModelDescriptor],
+    descriptor: ModelDescriptor,
     keys_to_learn: str | Sequence[str],
 ) -> None:
     """Set ``requires_grad=True`` on parameters selected by ``keys_to_learn``.
@@ -114,66 +93,60 @@ def _set_keys_to_learn(
     if isinstance(keys_to_learn, Sequence) and not isinstance(keys_to_learn, str):
         param_names = set(keys_to_learn)
     # If keys_to_learn is a single string.
+    # If keys_to_learn is a single string that is a subblock key.
+    elif keys_to_learn in _SUBBLOCK_KEYS_TO_LEARN:
+        lm_config = descriptor.get_language_model_config(model.config)
+        weight_groups = descriptor.get_weight_groups(
+            model.state_dict().keys(), lm_config.num_hidden_layers
+        )
+
+        attn_group_names = [
+            group_name for group_name in weight_groups.keys() if group_name.endswith("_attention")
+        ]
+        ffn_group_names = [
+            group_name for group_name in weight_groups.keys() if group_name.endswith("_ffn")
+        ]
+        if keys_to_learn == "subblock_attention":
+            group_names = attn_group_names
+        elif keys_to_learn == "subblock_ffn":
+            group_names = ffn_group_names
+        elif keys_to_learn == "subblock_mamba":
+            group_names = attn_group_names  # Mamba params live in _attention groups
+        else:  # entire_block
+            group_names = attn_group_names + ffn_group_names
+
+        block_configs = getattr(lm_config, "block_configs", None)
+
+        collected: list[str] = []
+        for group_name in group_names:
+            # For hybrid models (e.g. NemotronH), a single "_attention" group
+            # name can contain either Mamba SSM params *or* GQA params depending
+            # on the block.  Use the block config — not the keys_to_learn string
+            # — to decide whether each block belongs to the current subblock type.
+            if block_configs is not None:
+                m = re.match(r"block_(\d+)_attention", group_name)
+                if m:
+                    block_idx = int(m.group(1))
+                    if block_idx < len(block_configs):
+                        is_mamba = (
+                            getattr(block_configs[block_idx].attention, "mamba", None) is not None
+                        )
+                        # subblock_attention → GQA blocks only (not Mamba)
+                        # subblock_mamba     → Mamba blocks only (not GQA)
+                        # entire_block       → all blocks (no filtering)
+                        if keys_to_learn == "subblock_attention" and is_mamba:
+                            continue
+                        if keys_to_learn == "subblock_mamba" and not is_mamba:
+                            continue
+            collected.extend(weight_groups[group_name])
+        param_names = set(collected)
+    # If keys_to_learn is a single string that is not a subblock key, treat as regex.
     else:
-        # If keys_to_learn is a single string that is a subblock key.
-        if keys_to_learn in _SUBBLOCK_KEYS_TO_LEARN:
-            lm_config = descriptor.get_language_model_config(model.config)
-            weight_groups = descriptor.get_weight_groups(
-                model.state_dict().keys(), lm_config.num_hidden_layers
-            )
-
-            attn_group_names = [
-                group_name
-                for group_name in weight_groups.keys()
-                if group_name.endswith("_attention")
-            ]
-            ffn_group_names = [
-                group_name
-                for group_name in weight_groups.keys()
-                if group_name.endswith("_ffn")
-            ]
-            if keys_to_learn == "subblock_attention":
-                group_names = attn_group_names
-            elif keys_to_learn == "subblock_ffn":
-                group_names = ffn_group_names
-            elif keys_to_learn == "subblock_mamba":
-                group_names = attn_group_names  # Mamba params live in _attention groups
-            else:  # entire_block
-                group_names = attn_group_names + ffn_group_names
-
-            block_configs = getattr(lm_config, "block_configs", None)
-
-            param_names = []
-            for group_name in group_names:
-                # For hybrid models (e.g. NemotronH), a single "_attention" group
-                # name can contain either Mamba SSM params *or* GQA params depending
-                # on the block.  Use the block config — not the keys_to_learn string
-                # — to decide whether each block belongs to the current subblock type.
-                if block_configs is not None:
-                    m = re.match(r"block_(\d+)_attention", group_name)
-                    if m:
-                        block_idx = int(m.group(1))
-                        if block_idx < len(block_configs):
-                            is_mamba = (
-                                getattr(block_configs[block_idx].attention, "mamba", None)
-                                is not None
-                            )
-                            # subblock_attention → GQA blocks only (not Mamba)
-                            # subblock_mamba     → Mamba blocks only (not GQA)
-                            # entire_block       → all blocks (no filtering)
-                            if keys_to_learn == "subblock_attention" and is_mamba:
-                                continue
-                            if keys_to_learn == "subblock_mamba" and not is_mamba:
-                                continue
-                param_names.extend(weight_groups[group_name])
-            param_names = set(param_names)
-        # If keys_to_learn is a single string that is not a subblock key, treat as regex.
-        else:
-            param_names = {
-                param_name
-                for param_name, _ in model.named_parameters()
-                if re.search(keys_to_learn, param_name)
-            }
+        param_names = {
+            param_name
+            for param_name, _ in model.named_parameters()
+            if re.search(keys_to_learn, param_name)
+        }
     # In pipeline-parallel training a rank may own only blocks that don't match
     # keys_to_learn (e.g. a rank with only Mamba blocks during subblock_attention
     # bypass has no GQA params after the _mamba rename).  That is a valid state:
@@ -198,7 +171,7 @@ def _get_all_non_persistent_buffers_set(module: torch.nn.Module) -> set[str]:
 
 def bypass_factory_fn(
     teacher_model: PreTrainedModel,
-    descriptor: Type[ModelDescriptor],
+    descriptor: ModelDescriptor,
     cfg: DictConfig,
     model_blocks_process_ownership: Sequence[int],
     student_model: Optional[PreTrainedModel] = None,
@@ -241,11 +214,12 @@ def bypass_factory_fn(
     device = torch.device(f"cuda:{dist.local_rank()}")
     model_config_overrides = cfg.model.model_config_overrides
 
-    block_loss_func = {
+    _block_loss_funcs: dict[str, Callable[..., Any]] = {
         "normalized_mse_loss": normalized_mse_loss,
         "vectorwise_normalized_mse_loss": vectorwise_normalized_mse_loss,
         "batched_normalized_mse_loss": batched_normalized_mse_loss,
-    }[cfg.model_factory.block_loss_func]
+    }
+    block_loss_func = _block_loss_funcs[cfg.model_factory.block_loss_func]
     mprint(f"{block_loss_func.__name__=}")
 
     owned_block_indexes = set(
@@ -366,9 +340,7 @@ def bypass_factory_fn(
 
         # GQA init mode is optional: only relevant when the student has fewer KV heads than
         # the teacher. Defaults to AverageKV and is a no-op when head counts are equal.
-        gqa_init_mode = GQAInitMode(
-            cfg.model_factory.get("gqa_init_mode", GQAInitMode.AverageKV)
-        )
+        gqa_init_mode = GQAInitMode(cfg.model_factory.get("gqa_init_mode", GQAInitMode.AverageKV))
 
         student_state_dict = create_child_state_dict(
             pruning_mixin=pruning_mixin,
@@ -595,9 +567,7 @@ def bypass_factory_fn(
             }
 
             trainable_params = {
-                p_name: p
-                for p_name, p in student_module_parameters.items()
-                if p.requires_grad
+                p_name: p for p_name, p in student_module_parameters.items() if p.requires_grad
             }
 
             optimizer = (
@@ -638,7 +608,6 @@ def bypass_factory_fn(
         stitched_module_descriptors,
         student_model_config,
     )
-
 
 
 # Backward-compatible name aliases

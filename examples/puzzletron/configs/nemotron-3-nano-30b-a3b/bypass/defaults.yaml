@@ -32,7 +32,7 @@ data:
   keep_in_memory: false
   val_dataset_name: valid
   max_eval_samples: 4
-  eval_samples_per_process: null
+  eval_samples_per_process:
   shuffle_train_data_seed: ${random_int:0,9999}
 
 # Training Configuration
@@ -58,10 +58,10 @@ training:
   eval_interval: 100
 
 # Model Loading Configuration
-resume_checkpoint_path: null
-find_last_ckpt_for_resume: True
-parameter_count: null
-init_checkpoint_path: null
+resume_checkpoint_path:
+find_last_ckpt_for_resume: true
+parameter_count:
+init_checkpoint_path:
 
 model:
   student_weights_dtype: "bf16"
@@ -86,9 +86,9 @@ model_factory:
   gqa_init_mode: AverageKV
   mlp_init_mode: Truncate          # FFN is frozen; this knob is dormant for KV-only tasks
   mlp_init_config:
-    activations_log_dir: null
+    activations_log_dir:
   linear_init_mode: FromTeacher
-  submodule_for_loss_calculation: null
+  submodule_for_loss_calculation:
   keys_to_learn: subblock_attention   # train ONLY the attention sub-block
 
 # Validation Configuration

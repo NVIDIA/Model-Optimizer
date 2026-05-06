@@ -58,9 +58,7 @@ def test_uneven_distribution():
 )
 def test_total_equals_module_count(module_count, world_size):
     """The length of the ownership list must always equal module_count."""
-    ownership = get_distributed_modules_ownership(
-        module_count=module_count, world_size=world_size
-    )
+    ownership = get_distributed_modules_ownership(module_count=module_count, world_size=world_size)
     assert len(ownership) == module_count
 
 

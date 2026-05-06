@@ -18,7 +18,7 @@
 import re
 from collections import OrderedDict
 from pathlib import Path
-from typing import Optional, Type, Union
+from typing import Optional, Union
 
 import torch
 from omegaconf import DictConfig
@@ -157,7 +157,7 @@ def _save_local_state(
 
 def save_bypass_checkpoint(
     cfg: DictConfig,
-    descriptor: Type[ModelDescriptor],
+    descriptor: ModelDescriptor,
     model: torch.nn.Module,
     stitched_module_descriptors: OrderedDict[str, StitchedModuleDescriptor],
     checkpoint_dir: Path | str,

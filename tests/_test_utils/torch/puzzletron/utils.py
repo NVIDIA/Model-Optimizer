@@ -19,11 +19,11 @@ from pathlib import Path
 import pytest
 import torch
 from _test_utils.torch.transformers_models import get_tiny_tokenizer
-from datasets import Dataset, DatasetDict
 from transformers import AutoConfig, AutoModelForCausalLM, PreTrainedTokenizerBase
 
 import modelopt.torch.puzzletron as mtpz
 import modelopt.torch.utils.distributed as dist
+from datasets import Dataset, DatasetDict
 from modelopt.torch.export import copy_hf_ckpt_remote_code
 
 # Shared parametrize tuple for puzzletron GPU integration tests.
@@ -57,9 +57,7 @@ PUZZLETRON_FAMILIES = [
     pytest.param("openai/gpt-oss-20b", "gpt_oss", None, True, id="gpt-oss-20b"),
     pytest.param("Qwen/Qwen2.5-7B-Instruct", "qwen2", None, False, id="qwen2.5-7B"),
     pytest.param("Qwen/Qwen3-8B", "qwen3", None, False, id="qwen3-8B"),
-    pytest.param(
-        "Qwen/Qwen3-VL-30B-A3B-Instruct", "qwen3_vl", None, True, id="qwen3-VL-30B-A3B"
-    ),
+    pytest.param("Qwen/Qwen3-VL-30B-A3B-Instruct", "qwen3_vl", None, True, id="qwen3-VL-30B-A3B"),
 ]
 
 

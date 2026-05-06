@@ -29,10 +29,7 @@ from ....pruning.expert_removal_pruning_mixin import (
     ExpertRemovalLayerDescriptor,
     ExpertRemovalPruningMixIn,
 )
-from ....pruning.kv_heads_pruning_mixin import (
-    KVHeadsLayerDescriptor,
-    KVHeadsPruningMixIn,
-)
+from ....pruning.kv_heads_pruning_mixin import KVHeadsLayerDescriptor, KVHeadsPruningMixIn
 from ....pruning.pruning_mixin import PruningMixIn
 from ...model_descriptor import ModelDescriptor, ModelDescriptorFactory
 from ...puzzformer.no_op import MatchingZeros, Same
