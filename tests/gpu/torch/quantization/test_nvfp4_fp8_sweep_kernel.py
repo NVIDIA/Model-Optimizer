@@ -153,7 +153,7 @@ def test_reset_allows_recollect():
 @requires_triton
 def test_input_validation():
     """``nvfp4_fp8_scale_sweep`` should reject malformed inputs cleanly."""
-    from modelopt.torch.kernels.quantization.gemm import fp8_scale_candidates, nvfp4_fp8_scale_sweep
+    from modelopt.torch.kernels.quantization.gemm import nvfp4_fp8_scale_sweep
 
     device = "cuda"
     x = torch.randn(64, BLOCK_SIZE, device=device)
@@ -173,11 +173,66 @@ def test_input_validation():
     with pytest.raises(ValueError, match="not divisible"):
         nvfp4_fp8_scale_sweep(x, g, block_size=15)
 
-    # Empty / wrong-rank candidates.
-    with pytest.raises(ValueError, match="non-empty 1-D"):
-        nvfp4_fp8_scale_sweep(x, g, candidates=torch.empty(0, device=device))
-    with pytest.raises(ValueError, match="non-empty 1-D"):
-        nvfp4_fp8_scale_sweep(x, g, candidates=fp8_scale_candidates(device).reshape(2, -1))
+
+@requires_triton
+def test_mse_calibrate_dispatch(monkeypatch):
+    """``mse_calibrate(fp8_scale_sweep=True)`` must install the right calibrator class.
+
+    Default path: ``TritonNVFP4MSECalibrator``.
+    With ``MODELOPT_NVFP4_TRITON_SWEEP=0``: ``NVFP4MSECalibrator`` (and not its subclass).
+    """
+    from _test_utils.torch.quantization.models import SimpleLinear
+
+    import modelopt.torch.quantization as mtq
+    from modelopt.torch.quantization.extensions import get_cuda_ext_mx
+    from modelopt.torch.quantization.nn import TensorQuantizer
+
+    if get_cuda_ext_mx() is None:
+        pytest.skip("cuda_ext_mx is not available")
+
+    cfg = {
+        "quant_cfg": [
+            {
+                "quantizer_name": "*weight_quantizer",
+                "cfg": {
+                    "num_bits": (2, 1),
+                    "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
+                    "axis": None,
+                },
+                "enable": True,
+            },
+            {"quantizer_name": "*input_quantizer", "enable": False},
+        ],
+        "algorithm": {"method": "mse", "fp8_scale_sweep": True},
+    }
+
+    def _quantize_and_get_weight_calibrators(model):
+        calib_data = [model.get_input().cuda() for _ in range(2)]
+
+        def forward_loop(m):
+            for batch in calib_data:
+                m(batch)
+
+        mtq.quantize(model, cfg, forward_loop=forward_loop)
+        return [
+            type(m._calibrator)
+            for name, m in model.named_modules()
+            if isinstance(m, TensorQuantizer)
+            and name.endswith("weight_quantizer")
+            and getattr(m, "_calibrator", None) is not None
+        ]
+
+    # Default: triton path.
+    monkeypatch.delenv("MODELOPT_NVFP4_TRITON_SWEEP", raising=False)
+    types_default = _quantize_and_get_weight_calibrators(SimpleLinear().cuda())
+    assert types_default, "expected at least one weight quantizer with a calibrator"
+    assert all(t is TritonNVFP4MSECalibrator for t in types_default), types_default
+
+    # Opt-out: reference path, exact class match (TritonNVFP4MSECalibrator is a subclass).
+    monkeypatch.setenv("MODELOPT_NVFP4_TRITON_SWEEP", "0")
+    types_optout = _quantize_and_get_weight_calibrators(SimpleLinear().cuda())
+    assert types_optout, "expected at least one weight quantizer with a calibrator"
+    assert all(t is NVFP4MSECalibrator for t in types_optout), types_optout
 
 
 def _bench(fn, warmup=2, iters=5):

@@ -113,7 +113,6 @@ def nvfp4_fp8_scale_sweep(
     x: torch.Tensor,
     global_amax: torch.Tensor,
     block_size: int = 16,
-    candidates: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Find the per-block FP8 scale that minimizes NVFP4 quantization MSE.
 
@@ -126,8 +125,6 @@ def nvfp4_fp8_scale_sweep(
             ``block_size``; layout is treated as a flat ``[N_BLOCKS, BLOCK_SIZE]``.
         global_amax: Scalar FP32 global amax (``= reduce_amax(per_block_amax)``).
         block_size: NVFP4 block size (typically 16).
-        candidates: Optional precomputed candidate tensor of shape ``[126]`` (must
-            be the FP8 E4M3 valid values divided by 448). Built lazily if omitted.
 
     Returns:
         ``best_amax`` of shape ``[N_BLOCKS]``, fp32, on the same device as ``x``.
@@ -139,13 +136,7 @@ def nvfp4_fp8_scale_sweep(
     if x.numel() % block_size != 0:
         raise ValueError(f"x.numel() ({x.numel()}) is not divisible by block_size ({block_size}).")
 
-    if candidates is None:
-        candidates = fp8_scale_candidates(x.device)
-    candidates = candidates.contiguous().to(device=x.device, dtype=torch.float32)
-    if candidates.ndim != 1 or candidates.numel() == 0:
-        raise ValueError(
-            f"candidates must be a non-empty 1-D tensor; got shape {tuple(candidates.shape)}."
-        )
+    candidates = fp8_scale_candidates(x.device).to(dtype=torch.float32)
 
     n_blocks = x.numel() // block_size
     x_flat = x.contiguous().view(-1)
