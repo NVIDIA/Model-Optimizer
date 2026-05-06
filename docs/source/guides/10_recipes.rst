@@ -54,14 +54,18 @@ A recipe contains two top-level sections: ``metadata`` and a type-specific
 configuration section (for example, ``quantize`` for PTQ recipes).  These can live
 in a single YAML file or be split across files in a directory.
 
+Recipes support two authoring styles: **inline** (all values written directly)
+and **import-based** (reusable snippets referenced via ``$import``).  Both
+styles can be used in a single-file or directory layout.
+
 Single-file format
 ------------------
 
-The simplest form is a single ``.yml`` or ``.yaml`` file.  Here is a PTQ example:
+The simplest form is a single ``.yaml`` file.
+
+**Inline style** — all config values are written directly:
 
 .. code-block:: yaml
-
-   # modelopt_recipes/general/ptq/fp8_default-fp8_kv.yml
 
    metadata:
      recipe_type: ptq
@@ -81,10 +85,41 @@ The simplest form is a single ``.yml`` or ``.yaml`` file.  Here is a PTQ example
            num_bits: e4m3
            axis:
        - quantizer_name: '*[kv]_bmm_quantizer'
-         enable: true
          cfg:
            num_bits: e4m3
        # ... standard exclusions omitted for brevity
+
+**Import style** — the same recipe using reusable config snippets:
+
+.. code-block:: yaml
+
+   imports:
+     base_disable_all: configs/ptq/units/base_disable_all
+     default_disabled: configs/ptq/units/default_disabled_quantizers
+     fp8: configs/numerics/fp8
+
+   metadata:
+     recipe_type: ptq
+     description: FP8 per-tensor weight and activation (W8A8), FP8 KV cache, max calibration.
+
+   quantize:
+     algorithm: max
+     quant_cfg:
+       - $import: base_disable_all
+       - quantizer_name: '*input_quantizer'
+         cfg:
+           $import: fp8
+       - quantizer_name: '*weight_quantizer'
+         cfg:
+           $import: fp8
+       - quantizer_name: '*[kv]_bmm_quantizer'
+         cfg:
+           $import: fp8
+       - $import: default_disabled
+
+Both styles produce identical results at load time.  The import style reduces
+duplication when multiple recipes share the same numeric formats or exclusion
+lists.  See :ref:`composable-imports` below for the full ``$import`` specification.
 
 Directory format
 ----------------
@@ -96,18 +131,17 @@ example:
 .. code-block:: text
 
    my_recipe/
-     recipe.yml      # metadata section
-     quantize.yml    # quantize section (quant_cfg + algorithm)
+     metadata.yaml    # metadata section body
+     quantize.yaml    # quantize section (+ optional imports)
 
-``recipe.yml``:
+``metadata.yaml``:
 
 .. code-block:: yaml
 
-   metadata:
-     recipe_type: ptq
-     description: My custom NVFP4 recipe.
+   recipe_type: ptq
+   description: My custom NVFP4 recipe.
 
-``quantize.yml``:
+``quantize.yaml``:
 
 .. code-block:: yaml
 
@@ -123,6 +157,218 @@ example:
        cfg:
          num_bits: e4m3
          axis:
+
+Both inline and import styles work with the directory format.  Imports are
+scoped to the file that declares them; for PTQ quantization snippets, declare
+the relevant ``imports`` section in ``quantize.yaml``.
+
+.. _composable-imports:
+
+Composable imports
+------------------
+
+Recipes can import **reusable config snippets** via the ``imports`` section.
+This eliminates duplication — numeric format definitions and standard exclusion
+lists are authored once and referenced by name across recipes.
+
+The ``imports`` section is a dict mapping short names to config file paths.
+References use the explicit ``{$import: name}`` marker so they are never
+confused with literal values.
+
+.. note::
+
+   ``imports`` (no ``$``) is a **top-level structural section** — like
+   ``metadata`` or ``quantize``, it declares the recipe's dependencies.
+   ``$import`` (with ``$``) is an **inline directive** that appears inside
+   data values and gets resolved at load time.
+
+The ``$import`` marker can appear anywhere in the recipe:
+
+- As a **dict value** — the marker is replaced with the snippet content, or
+  merged with inline overrides when sibling keys are present.
+- As a **list element** — the surrounding list's schema and the imported
+  snippet's ``modelopt-schema`` determine whether the imported snippet is
+  appended as one element or spliced as multiple elements.
+
+As a **dict value**, ``$import`` supports composition with clear override
+precedence (lowest to highest):
+
+1. **Imports in list order** — ``$import: [base, override]``: later snippets
+   override earlier ones on key conflicts.
+2. **Inline keys** — extra keys alongside ``$import`` override all imported
+   values.
+
+This is equivalent to calling ``dict.update()`` in order: imports first (in
+list order), then inline keys last.
+
+.. code-block:: yaml
+
+   # Single import
+   cfg:
+     $import: nvfp4
+
+   # Import + override — import nvfp4, then override type inline
+   cfg:
+     $import: nvfp4    # imports {num_bits: e2m1, block_sizes: {-1: 16, type: dynamic, ...}}
+     block_sizes:
+       -1: 16
+       type: static    # overrides type: dynamic → static calibration
+
+   # Multiple imports — later snippet overrides earlier on conflict
+   cfg:
+     $import: [base_format, kv_tweaks]   # kv_tweaks wins on shared keys
+
+   # All three: multi-import + inline override
+   cfg:
+     $import: [bits, scale]
+     axis: 0            # highest precedence
+
+As a **list element**, ``$import`` must be the only key — extra keys alongside
+a list import are not supported.  List imports require a typed containing list
+and a schema-declared snippet:
+
+* If the snippet schema is the same list type as the containing list, its
+  entries are spliced into the surrounding list.
+* If the snippet schema is the list element type, it is appended as one list
+  item.
+
+.. code-block:: yaml
+
+   imports:
+     base_disable_all: configs/ptq/units/base_disable_all
+     default_disabled: configs/ptq/units/default_disabled_quantizers
+     fp8: configs/numerics/fp8
+
+   metadata:
+     recipe_type: ptq
+     description: FP8 W8A8, FP8 KV cache.
+
+   quantize:
+     algorithm: max
+     quant_cfg:
+       - $import: base_disable_all          # appended from a single-entry snippet
+       - quantizer_name: '*weight_quantizer'
+         cfg:
+           $import: fp8                     # cfg value replaced with imported dict
+       - $import: default_disabled          # spliced from a multi-element list snippet
+
+In this example:
+
+- ``$import: base_disable_all`` and ``$import: default_disabled`` are **list elements**
+  — ``base_disable_all`` is appended as one entry, while ``default_disabled`` is
+  a YAML list spliced into ``quant_cfg``.
+- ``$import: fp8`` under ``cfg`` is a **dict value** — the snippet (a YAML dict of
+  quantizer attributes) replaces the ``cfg`` field.
+
+Import paths are resolved via :func:`~modelopt.recipe.load_config` — the
+built-in ``modelopt_recipes/`` library is checked first, then the filesystem.
+
+**Recursive imports:** An imported snippet may itself contain an ``imports``
+section.  Each file's imports are scoped to that file — the same name can be
+used in different files without conflict.  Circular imports are detected and
+raise ``ValueError``.
+
+Multi-document snippets
+^^^^^^^^^^^^^^^^^^^^^^^
+
+Dict-valued snippets (e.g., numeric format definitions) can use ``imports``
+directly because the ``imports`` key and the snippet content are both part of
+the same YAML mapping.  List-valued snippets have a problem: YAML only allows
+one root node per document, so a file cannot be both a mapping (for
+``imports``) and a list (for entries) at the same time.
+
+The solution is **multi-document YAML**: the first document holds the
+``imports``, and the second document (after ``---``) holds the list content.
+The loader parses both documents, resolves ``$import`` markers in the content,
+and returns the resolved list:
+
+.. code-block:: yaml
+
+   # configs/ptq/units/kv_fp8.yaml — list snippet that imports a dict snippet
+   # modelopt-schema: modelopt.torch.quantization.config.QuantizerCfgListConfig
+   imports:
+     fp8: configs/numerics/fp8
+   ---
+   - quantizer_name: '*[kv]_bmm_quantizer'
+     cfg:
+       $import: fp8
+
+This enables full composability — list snippets can reference dict snippets,
+dict snippets can reference other dict snippets, and recipes can reference
+any of them.  All import resolution happens at load time with the same
+precedence rules.
+
+Schema modelines
+^^^^^^^^^^^^^^^^^
+
+Reusable snippets referenced from an ``imports`` section must declare the
+Pydantic-compatible schema they are expected to satisfy using a
+``modelopt-schema`` comment preamble.  The comment is ignored by YAML itself,
+but ModelOpt's loader reads it before parsing and validates the resolved
+snippet payload after any imports have been expanded:
+
+.. code-block:: yaml
+
+   # modelopt-schema: modelopt.torch.quantization.config.QuantizerAttributeConfig
+   num_bits: e2m1
+   block_sizes:
+     -1: 16
+     type: dynamic
+     scale_bits: e4m3
+
+The schema comment is metadata only; it is not returned as part of the loaded
+config, and validation does not expand Pydantic defaults into the snippet.
+
+Top-level recipe files are validated by :func:`~modelopt.recipe.load_recipe`;
+they do not need ``modelopt-schema`` comments.  The comments are the contract
+for reusable snippets, especially snippets under ``modelopt_recipes/configs/``:
+every file referenced from an ``imports`` section must declare
+``modelopt-schema``, whether it is imported into a dict value or a list.
+Schemas should be concrete ModelOpt config types, Pydantic models,
+``TypedDict`` classes, or explicitly typed container aliases such as
+``list[QuantizerCfgEntry]``.  Untyped list schemas are not supported for list
+imports because the loader must know the element type.  For safety,
+``modelopt-schema`` paths must resolve under the ``modelopt.`` package.
+
+List imports are schema-driven.  When a typed list field such as
+``quant_cfg: list[QuantizerCfgEntry]`` contains a bare import entry, the
+imported snippet must declare its own ``modelopt-schema``:
+
+* If the snippet schema is the same list type, e.g. ``QuantizerCfgListConfig``,
+  the imported entries are spliced into the containing list.
+* If the snippet schema is the element type, e.g. ``QuantizerCfgEntry``, the
+  imported entry is appended as a single list item.
+* If the containing list or imported snippet has no schema, or the snippet
+  schema is neither the list type nor the element type, loading raises
+  ``ValueError``.
+
+Built-in config snippets
+^^^^^^^^^^^^^^^^^^^^^^^^
+
+Reusable snippets are stored under ``modelopt_recipes/configs/``:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 45 55
+
+   * - Snippet path
+     - Description
+   * - ``configs/numerics/fp8``
+     - FP8 E4M3 quantizer attributes
+   * - ``configs/numerics/nvfp4``
+     - NVFP4 E2M1 blockwise, dynamic calibration, FP8 scales (default)
+   * - ``configs/numerics/nvfp4_static``
+     - NVFP4 E2M1 blockwise, static calibration, FP8 scales
+   * - ``configs/ptq/units/base_disable_all``
+     - Disable all quantizers (deny-all-then-configure pattern)
+   * - ``configs/ptq/units/default_disabled_quantizers``
+     - Standard exclusions (LM head, routers, BatchNorm, etc.)
+   * - ``configs/ptq/units/kv_fp8``
+     - FP8 E4M3 KV cache quantization (multi-document, imports ``fp8``)
+   * - ``configs/ptq/units/kv_fp8_cast``
+     - FP8 E4M3 KV cache with constant amax (skips KV calibration)
+   * - ``configs/ptq/units/kv_nvfp4_cast``
+     - NVFP4 KV cache with constant amax (skips KV calibration)
 
 
 Metadata section
@@ -235,15 +481,21 @@ General PTQ recipes are model-agnostic and apply to any supported architecture:
 
    * - Recipe path
      - Description
-   * - ``general/ptq/fp8_default-fp8_kv``
-     - FP8 per-tensor W8A8, FP8 KV cache, max calibration
-   * - ``general/ptq/nvfp4_default-fp8_kv``
-     - NVFP4 W4A4 with FP8 KV cache, max calibration
-   * - ``general/ptq/nvfp4_mlp_only-fp8_kv``
+   * - ``general/ptq/fp8_default-kv_fp8_cast``
+     - FP8 per-tensor W8A8, FP8 KV cache with constant amax, max calibration
+   * - ``general/ptq/fp8_default-kv_fp8``
+     - FP8 per-tensor W8A8, FP8 KV cache with data-driven calibration
+   * - ``general/ptq/nvfp4_default-kv_fp8_cast``
+     - NVFP4 W4A4, FP8 KV cache with constant amax, max calibration
+   * - ``general/ptq/nvfp4_default-kv_fp8``
+     - NVFP4 W4A4, FP8 KV cache with data-driven calibration
+   * - ``general/ptq/nvfp4_default-kv_nvfp4_cast``
+     - NVFP4 W4A4, NVFP4 KV cache with constant amax, max calibration
+   * - ``general/ptq/nvfp4_mlp_only-kv_fp8``
      - NVFP4 for MLP layers only, FP8 KV cache
-   * - ``general/ptq/nvfp4_experts_only-fp8_kv``
+   * - ``general/ptq/nvfp4_experts_only-kv_fp8``
      - NVFP4 for MoE expert layers only, FP8 KV cache
-   * - ``general/ptq/nvfp4_omlp_only-fp8_kv``
+   * - ``general/ptq/nvfp4_omlp_only-kv_fp8``
      - NVFP4 for output projection + MLP layers, FP8 KV cache
 
 Model-specific recipes
@@ -277,7 +529,7 @@ type depends on the ``recipe_type`` in the metadata:
    from modelopt.recipe import load_recipe
 
    # Load a built-in recipe by relative path (suffix optional)
-   recipe = load_recipe("general/ptq/fp8_default-fp8_kv")
+   recipe = load_recipe("general/ptq/fp8_default-kv_fp8_cast")
 
    # For PTQ recipes, the quantize dict can be passed directly to mtq.quantize()
    import modelopt.torch.quantization as mtq
@@ -287,7 +539,7 @@ type depends on the ``recipe_type`` in the metadata:
 .. code-block:: python
 
    # Load a custom recipe from the filesystem (file or directory)
-   recipe = load_recipe("/path/to/my_custom_recipe.yml")
+   recipe = load_recipe("/path/to/my_custom_ptq.yaml")
    # or: recipe = load_recipe("/path/to/my_recipe_dir/")
 
 Command-line usage
@@ -299,7 +551,7 @@ Some example scripts accept a ``--recipe`` flag.  For instance, the PTQ example:
 
    python examples/llm_ptq/hf_ptq.py \
        --model Qwen/Qwen3-8B \
-       --recipe general/ptq/fp8_default-fp8_kv \
+       --recipe general/ptq/fp8_default-kv_fp8_cast \
        --export_path build/fp8 \
        --calib_size 512 \
        --export_fmt hf
@@ -340,8 +592,8 @@ This means built-in recipes can be referenced without any prefix:
 .. code-block:: python
 
    # These are all equivalent:
-   load_recipe("general/ptq/fp8_default-fp8_kv")
-   load_recipe("general/ptq/fp8_default-fp8_kv.yml")
+   load_recipe("general/ptq/fp8_default-kv_fp8_cast")
+   load_recipe("general/ptq/fp8_default-kv_fp8_cast.yaml")
 
 
 Writing a custom recipe
@@ -355,11 +607,15 @@ To create a custom recipe:
 3. Update the ``metadata.description`` to describe your changes.
 4. Save the file (or directory) and pass its path to ``load_recipe()`` or ``--recipe``.
 
-Example -- creating a custom PTQ recipe (INT8 per-channel):
+Example -- creating a custom PTQ recipe using imports:
 
 .. code-block:: yaml
 
-   # my_int8_recipe.yml
+   # my_int8_ptq.yaml
+   imports:
+     base_disable_all: configs/ptq/units/base_disable_all
+     default_disabled: configs/ptq/units/default_disabled_quantizers
+
    metadata:
      recipe_type: ptq
      description: INT8 per-channel weight, per-tensor activation.
@@ -367,8 +623,7 @@ Example -- creating a custom PTQ recipe (INT8 per-channel):
    quantize:
      algorithm: max
      quant_cfg:
-       - quantizer_name: '*'
-         enable: false
+       - $import: base_disable_all
        - quantizer_name: '*weight_quantizer'
          cfg:
            num_bits: 8
@@ -377,10 +632,11 @@ Example -- creating a custom PTQ recipe (INT8 per-channel):
          cfg:
            num_bits: 8
            axis:
-       - quantizer_name: '*lm_head*'
-         enable: false
-       - quantizer_name: '*output_layer*'
-         enable: false
+       - $import: default_disabled
+
+The built-in snippets (``base_disable_all``, ``default_disabled``) handle the
+deny-all prefix and standard exclusions.  Only the format-specific entries need
+to be written inline.
 
 
 Recipe repository layout
@@ -394,15 +650,36 @@ The ``modelopt_recipes/`` package is organized as follows:
    +-- __init__.py
    +-- general/                    # Model-agnostic recipes
    |   +-- ptq/
-   |       +-- fp8_default-fp8_kv.yml
-   |       +-- nvfp4_default-fp8_kv.yml
-   |       +-- nvfp4_mlp_only-fp8_kv.yml
-   |       +-- nvfp4_experts_only-fp8_kv.yml
-   |       +-- nvfp4_omlp_only-fp8_kv.yml
+   |       +-- fp8_default-kv_fp8_cast.yaml
+   |       +-- fp8_default-kv_fp8.yaml
+   |       +-- nvfp4_default-kv_fp8_cast.yaml
+   |       +-- nvfp4_default-kv_fp8.yaml
+   |       +-- nvfp4_default-kv_nvfp4_cast.yaml
+   |       +-- nvfp4_mlp_only-kv_fp8.yaml
+   |       +-- nvfp4_experts_only-kv_fp8.yaml
+   |       +-- nvfp4_omlp_only-kv_fp8.yaml
    +-- models/                     # Model-specific recipes
    |   +-- Step3.5-Flash/
    |       +-- nvfp4-mlp-only.yaml
-   +-- configs/                    # Shared configuration fragments
+   +-- configs/                    # Reusable config snippets (imported via $import)
+       +-- numerics/               # Numeric format definitions
+       |   +-- fp8.yaml
+       |   +-- nvfp4_static.yaml
+       |   +-- nvfp4.yaml
+       +-- ptq/
+           +-- units/                # Reusable quant_cfg building blocks
+           |   +-- base_disable_all.yaml
+           |   +-- default_disabled_quantizers.yaml
+           |   +-- kv_fp8.yaml
+           |   +-- kv_fp8_cast.yaml
+           |   +-- kv_nvfp4_cast.yaml
+           |   +-- w8a8_fp8_fp8.yaml
+           |   +-- w4a4_nvfp4_nvfp4.yaml
+           +-- presets/              # Complete configs (backward compat with *_CFG dicts)
+               +-- model/
+               |   +-- fp8.yaml
+               +-- kv/
+                   +-- fp8.yaml
 
 
 Recipe data model
@@ -411,7 +688,9 @@ Recipe data model
 Recipes are validated at load time using Pydantic models:
 
 :class:`~modelopt.recipe.config.ModelOptRecipeBase`
-   Base class for all recipe types.  Contains ``recipe_type`` and ``description``.
+   Base class for all recipe types.  Contains ``metadata`` as a
+   :class:`~modelopt.recipe.config.RecipeMetadataConfig` mapping, with
+   ``recipe_type`` and ``description`` convenience properties.
 
 :class:`~modelopt.recipe.config.ModelOptPTQRecipe`
    PTQ-specific recipe.  Adds the ``quantize`` field (a dict with ``quant_cfg`` and
