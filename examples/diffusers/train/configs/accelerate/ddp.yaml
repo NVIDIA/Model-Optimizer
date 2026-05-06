@@ -1,0 +1,14 @@
+# DDP Configuration (model-agnostic, simpler alternative to FSDP)
+#
+# Usage:
+#   accelerate launch \
+#       --config_file configs/accelerate/ddp.yaml \
+#       --num_processes 8 \
+#       run.py --config configs/wan_distillation.yaml
+
+distributed_type: MULTI_GPU
+downcast_bf16: 'no'
+enable_cpu_affinity: false
+
+num_machines: 1
+num_processes: 8
