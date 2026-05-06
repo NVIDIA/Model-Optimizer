@@ -80,9 +80,9 @@ from .model_config import (
     QUANTIZATION_NVFP4,
     QUANTIZATION_NVFP4_AWQ,
     QUANTIZATION_NVFP4_SVDQUANT,
-    QUANTIZATION_W4A16_NVFP4,
     QUANTIZATION_W4A8_AWQ,
     QUANTIZATION_W4A8_NVFP4_FP8,
+    QUANTIZATION_W4A16_NVFP4,
 )
 from .model_utils import get_language_model_from_vl, is_multimodal_model
 from .moe_utils import _export_fused_experts

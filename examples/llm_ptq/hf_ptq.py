@@ -789,7 +789,7 @@ def export_quantized(
                 if args.qformat == "w4a16_nvfp4":
                     warnings.warn(
                         "TensorRT-LLM and SGLang do not support this format. "
-                        "To serve on vLLM, convert the NVFP4 W4A16 checkpoint to compressed-tensors format."
+                        "vLLM deployment support is in progress."
                     )
 
         # Restore default padding and export the tokenizer as well.
