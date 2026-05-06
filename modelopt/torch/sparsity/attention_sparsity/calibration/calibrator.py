@@ -275,7 +275,7 @@ class DynamicThresholdCalibrator:
             avg_s = np.mean([p["sparsity"] for p in points])
             print(f"  {threshold:<12.4f} {avg_sf:<12.2f} {avg_s:<12.2%} {len(points):<8}")
 
-        return {
+        result = {
             "phase": phase,
             "a": float(a),
             "b": float(b),
@@ -283,9 +283,13 @@ class DynamicThresholdCalibrator:
             "num_data_points": int(np.sum(valid_mask)),
             "total_samples": len(all_data_points),
             "calibration_type": "exponential",
+            "fit_logspace": self.fit_logspace,
             "min_observed_sparsity": min_observed_sparsity,
             "max_observed_sparsity": max_observed_sparsity,
         }
+        if self.fit_logspace:
+            result["log_a"] = float(log_a)
+        return result
 
     def _enable_calibration_mode(self, modules: list[nn.Module]):
         """Enable calibration mode on sparse attention modules."""
