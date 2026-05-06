@@ -460,8 +460,12 @@ def _get_group_kwarg_if_necessary() -> dict:
 
 # `normalized_mse_loss` already lives in tools.kd_model — re-export it here so
 # bypass-distillation imports stay co-located with the per-vector / per-batch
-# variants below, without duplicating the implementation.
-from modelopt.torch.puzzletron.tools.kd_model import normalized_mse_loss  # noqa: E402, F401
+# variants below, without duplicating the implementation. The `as
+# normalized_mse_loss` form is PEP 484's explicit re-export (mypy treats
+# `from X import Y` as a private import otherwise).
+from modelopt.torch.puzzletron.tools.kd_model import (  # noqa: E402
+    normalized_mse_loss as normalized_mse_loss,
+)
 
 
 def vectorwise_normalized_mse_loss(

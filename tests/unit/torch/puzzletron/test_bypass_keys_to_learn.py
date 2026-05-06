@@ -29,10 +29,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from modelopt.torch.puzzletron.bypass_distillation.stitched_model_factory import (
-    _set_keys_to_learn,
-)
-
+from modelopt.torch.puzzletron.bypass_distillation.stitched_model_factory import _set_keys_to_learn
 
 # ---------------------------------------------------------------------------
 # Fixtures: a minimal Llama-shaped model and a Llama-shaped descriptor stub

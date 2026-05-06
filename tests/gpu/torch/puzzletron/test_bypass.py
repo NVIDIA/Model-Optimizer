@@ -935,7 +935,6 @@ def _test_bypass_subblock_modes_job(
         ffn_changed = False
         attn_changed = False
         for state_dict_path in (start_dir / "stitched").glob("block_*.state_dict.pth"):
-            block_name = state_dict_path.stem.replace(".state_dict", "")
             end_path = end_dir / "stitched" / state_dict_path.name
             if not end_path.exists():
                 continue
@@ -1032,8 +1031,13 @@ def _test_bypass_then_build_library_job(
     size: int,
 ):
     puzzle_dir, _, hydra_cfg = _setup_hydra_cfg_and_pruning(
-        project_root_path, tmp_path, rank, size,
-        hf_model_name, converter, hybrid_override_pattern,
+        project_root_path,
+        tmp_path,
+        rank,
+        size,
+        hf_model_name,
+        converter,
+        hybrid_override_pattern,
     )
 
     bypass_cfg_dict = _make_bypass_cfg_dict(has_moe_layers, hydra_cfg)
@@ -1057,8 +1061,7 @@ def _test_bypass_then_build_library_job(
         discovered = build_lib._get_last_checkpoint_from_each_experiment(puzzle_dir)
         bypass_resolved = bypass_symlink.resolve()
         assert bypass_resolved in discovered, (
-            f"Bypass run not discovered. Resolved={bypass_resolved}, "
-            f"discovered={discovered}"
+            f"Bypass run not discovered. Resolved={bypass_resolved}, discovered={discovered}"
         )
         # The resolved bypass path must contain "bypass" + "bypass_runs" in its
         # parts so the priority sort picks it up.

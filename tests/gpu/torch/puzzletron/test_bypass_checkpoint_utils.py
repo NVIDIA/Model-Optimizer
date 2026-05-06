@@ -47,7 +47,6 @@ from modelopt.torch.puzzletron.bypass_distillation.stitched_model_factory import
     StitchedModuleDescriptor,
 )
 
-
 # ---------------------------------------------------------------------------
 # Fixture: silence the dist helpers so the save/load functions run on a
 # single GPU process without `torchrun` / NCCL setup.
@@ -85,9 +84,7 @@ def _make_descriptor(
     module = nn.Linear(4, 4, bias=False)
     owned_parameters = dict(module.named_parameters())
     owned_buffers: dict[str, torch.Tensor] = {}
-    optimizer = (
-        torch.optim.AdamW(list(module.parameters()), lr=1e-3) if with_optimizer else None
-    )
+    optimizer = torch.optim.AdamW(list(module.parameters()), lr=1e-3) if with_optimizer else None
     scaler = (
         GradScaler(device="cpu", enabled=True, init_scale=grad_scaler_init_scale)
         if with_scaler
@@ -107,9 +104,7 @@ def _make_descriptor(
 # ---------------------------------------------------------------------------
 
 
-def test_save_local_state_writes_state_dict_optimizer_and_grad_scaler(
-    tmp_path: Path, bcu_no_dist
-):
+def test_save_local_state_writes_state_dict_optimizer_and_grad_scaler(tmp_path: Path, bcu_no_dist):
     bcu = bcu_no_dist
     descriptor = _make_descriptor()
     descriptors = OrderedDict([("block_0", descriptor)])
@@ -124,9 +119,7 @@ def test_save_local_state_writes_state_dict_optimizer_and_grad_scaler(
     assert (stitched / "block_0.grad_scaler.pth").exists()
 
 
-def test_save_local_state_skips_grad_scaler_when_descriptor_has_none(
-    tmp_path: Path, bcu_no_dist
-):
+def test_save_local_state_skips_grad_scaler_when_descriptor_has_none(tmp_path: Path, bcu_no_dist):
     bcu = bcu_no_dist
     descriptor = _make_descriptor(with_scaler=False)
     descriptors = OrderedDict([("block_0", descriptor)])
@@ -139,9 +132,7 @@ def test_save_local_state_skips_grad_scaler_when_descriptor_has_none(
     assert not (stitched / "block_0.grad_scaler.pth").exists()
 
 
-def test_save_local_state_skips_optimizer_when_descriptor_has_none(
-    tmp_path: Path, bcu_no_dist
-):
+def test_save_local_state_skips_optimizer_when_descriptor_has_none(tmp_path: Path, bcu_no_dist):
     """Pipeline-parallel idle ranks pass optimizer=None; no file should appear."""
     bcu = bcu_no_dist
     descriptor = _make_descriptor(with_optimizer=False, with_scaler=False)

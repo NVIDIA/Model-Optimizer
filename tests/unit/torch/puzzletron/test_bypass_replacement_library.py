@@ -37,7 +37,6 @@ import pytest
 
 from modelopt.torch.puzzletron.replacement_library import build_replacement_library as brl
 
-
 # ---------------------------------------------------------------------------
 # Filesystem fixture: tiny puzzle_dir with three checkpoints
 # ---------------------------------------------------------------------------
@@ -84,7 +83,9 @@ def puzzle_dir_with_three_ckpts(tmp_path: Path, monkeypatch) -> Path:
     _write_minimal_config(ckpts / "teacher")
 
     # Bypass: real dir under bypass/bypass_runs/, symlinked from ckpts/.
-    bypass_real = puzzle_dir / "bypass" / "bypass_runs" / "bypass_ffn_256_heads_4" / "iter-000010-ckpt"
+    bypass_real = (
+        puzzle_dir / "bypass" / "bypass_runs" / "bypass_ffn_256_heads_4" / "iter-000010-ckpt"
+    )
     _write_minimal_config(bypass_real)
     (ckpts / "bypass_ffn_256_heads_4").symlink_to(bypass_real, target_is_directory=True)
 
