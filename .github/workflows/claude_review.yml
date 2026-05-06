@@ -1,0 +1,203 @@
+name: Claude Code Review
+
+on:
+  issue_comment:
+    types: [created]
+
+jobs:
+  # ──────────────────────────────────────────────────────────────────
+  # Deep ModelOpt-focused review covering numerical correctness,
+  # mode/state composition, export compatibility, and backward
+  # compatibility for saved checkpoints / recipes.
+  #
+  # CodeRabbit (.coderabbit.yaml) auto-reviews every PR for routine
+  # bugs, typos, style, and security anti-patterns — this Claude job
+  # is on-demand and complements that with deeper architectural
+  # analysis. Trigger: /claude review
+  # ──────────────────────────────────────────────────────────────────
+  review:
+    name: Claude Review
+    if: |
+      github.event_name == 'issue_comment' &&
+      github.event.issue.pull_request &&
+      contains(github.event.comment.body, '/claude review') &&
+      contains(fromJson('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      id-token: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      PR_NUMBER: ${{ github.event.issue.number }}
+    steps:
+      - name: Get PR info
+        id: pr-info
+        run: |
+          PR_DATA=$(gh pr view $PR_NUMBER --repo $REPO --json headRefOid,baseRefName)
+          echo "sha=$(echo $PR_DATA | jq -r .headRefOid)" >> $GITHUB_OUTPUT
+          echo "base_ref=$(echo $PR_DATA | jq -r .baseRefName)" >> $GITHUB_OUTPUT
+
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+          ref: ${{ steps.pr-info.outputs.sha }}
+
+      - name: Fetch base branch for diff analysis
+        run: git fetch origin ${{ steps.pr-info.outputs.base_ref }}
+
+      - name: React to trigger comment
+        run: |
+          gh api repos/$REPO/issues/comments/${{ github.event.comment.id }}/reactions \
+            --method POST \
+            -f content='eyes'
+
+      - name: Run Claude Review
+        uses: anthropics/claude-code-action@v1
+        env:
+          ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          trigger_phrase: "/claude review"
+          show_full_output: true
+          claude_args: |
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*),Bash(git diff:*),Bash(git show:*),Bash(git log:*),Read"
+            --model "${{ vars.CLAUDE_MODEL }}"
+          prompt: |
+            REPO: ${{ env.REPO }}
+            PR NUMBER: ${{ env.PR_NUMBER }}
+            BASE REF: origin/${{ steps.pr-info.outputs.base_ref }}
+
+            Mandatory workflow — never skip or reorder:
+            1. Read the PR diff first (gh pr diff).
+            2. Read CLAUDE.md and CONTRIBUTING.md for project conventions and architecture.
+            3. For changed files under `modelopt/torch/<sub-package>/`, read the sub-package's
+               `__init__.py` plus any `mode.py` / `config.py` to understand mode registration
+               and config schema.
+            4. Only then perform the review using that context.
+
+            You are performing a deep code review on a **NVIDIA Model Optimizer (ModelOpt)** PR.
+            ModelOpt is NVIDIA's open-source library for model optimization (quantization, pruning,
+            distillation, sparsity, speculative decoding, NAS, PEFT) targeting PyTorch / ONNX /
+            HuggingFace / Megatron, with deployment into TRT-LLM / vLLM / SGLang.
+
+            Apply general correctness reasoning to whichever ModelOpt sub-package the diff touches —
+            you already know the algorithms (quantization formulas, distillation losses, N:M sparsity
+            mask selection, speculative draft-token alignment, etc.). The prompt below covers the
+            **ModelOpt-specific structural concerns** that you can't infer from the diff alone.
+
+            ## Division of labor with CodeRabbit
+
+            CodeRabbit (`.coderabbit.yaml`) already auto-reviews every PR with the `chill` profile
+            and runs a hard pre-merge gate on security anti-patterns. **Do NOT duplicate its work.**
+            Specifically, do NOT comment on:
+            - Style, formatting, or naming nits (handled by ruff + CodeRabbit)
+            - Simple typos in code/comments/strings (CodeRabbit catches these)
+            - The security anti-patterns enumerated in `.coderabbit.yaml`:
+              `torch.load(weights_only=False)` without justification, `numpy.load(allow_pickle=True)`
+              without justification, hardcoded `trust_remote_code=True`, `eval`/`exec` on external
+              input, `# nosec` bypasses, non-permissive new PIP dependencies — these are already
+              gated. Skip them entirely.
+            - Generic "consider adding a test" suggestions for trivial changes.
+
+            Your value is in things CodeRabbit's pattern-matching cannot do well: tracing dataflow
+            across multiple files, reasoning about mode/state composition, judging export
+            compatibility, and catching algorithm-level correctness bugs.
+
+            ## Review Procedure
+
+            1. Get PR metadata: `gh pr view $PR_NUMBER --repo $REPO --json title,body,baseRefName,headRefName,files,additions,deletions,changedFiles,author`
+            2. Get the full diff: `gh pr diff $PR_NUMBER --repo $REPO`
+               - For large PRs (>50 files), prioritize source code over config/lock/auto-generated files.
+            3. For each significant changed file, read the full file for surrounding context.
+            4. Trace the algorithm end-to-end through the diff. Verify the math/logic matches the
+               intended technique (whatever sub-package it belongs to).
+            5. For each newly introduced variable/argument/field, verify it has a meaningful runtime
+               use path — not just declaration/docstring or discard assignment (`_ = new_arg`).
+               Use Grep to search for usage beyond declaration sites.
+            6. Post findings as inline comments with severity and category tags.
+
+            ## Critical Issues (Must Fix)
+
+            ### Algorithm Correctness
+            - Verify the implementation matches the intended technique. Apply your knowledge of the
+              relevant algorithm family (quantization scales/rounding/saturation, distillation loss
+              composition, sparsity mask selection, pruning importance scoring, speculative draft
+              acceptance, NAS supernet weight sharing, etc.).
+            - Watch for silent numerical bugs: missing fp32 upcast in reductions, wrong reduction
+              dimension, division-by-zero guards, casts that wrap instead of saturate, gradient
+              flow through stop_gradient boundaries.
+            - Watch for state corruption across calibration / search / training passes — leftover
+              statistics from a previous run are a common foot-gun.
+
+            ### Mode & State Composability (ModelOpt-specific)
+            - **Mode registration**: New modes must register correctly with `apply_mode()` /
+              `restore()`, declare their dependencies, and produce a `modelopt_state` entry that
+              round-trips through save/restore.
+            - **State dict schema**: Modified `modelopt_state` schema must include a migration path
+              or version bump — silently changing keys breaks restore for existing checkpoints.
+            - **Restore fidelity**: After `restore(model, state)`, the model must be functionally
+              identical to the saved one. Verify module replacements, hooks, and parameters are
+              re-applied.
+            - **Plugin laziness**: Optional integrations (HF, Megatron, TRT-LLM, ONNX) must not
+              hard-import at module load — gate behind `import_plugin()` so users without those
+              extras don't break.
+
+            ### Export Compatibility (ModelOpt-specific)
+            - HF export (`unified_export_hf.py`) must produce a checkpoint that loads cleanly in
+              transformers and matches the on-device dtype.
+            - TRT-LLM export (`model_config_export.py`) must emit a valid `config.json` with
+              correct `quant_algo`, `kv_cache_quant_algo`, scale tensor names, and weight layout.
+            - ONNX export must use opsets and operator versions supported by the target consumer
+              (TRT, ORT).
+
+            ## Important Issues (Should Fix)
+
+            ### Backward Compatibility
+            - Renamed or removed arguments / config fields without deprecation path — breaks
+              existing user scripts.
+            - `modelopt_recipes/*.yaml` schema changes without a version bump — old recipes
+              silently misparse.
+            - Changed defaults silently alter behavior for users relying on them.
+            - Changed function signatures, return types, or side effects in
+              `modelopt/torch/*/__init__.py` (public API) without a backward-compat shim.
+            - Modified `modelopt_state` keys/structure without migration — makes existing
+              optimized checkpoints unloadable.
+
+            ### Performance
+            - Unnecessary CPU-GPU synchronization in hot paths: `.item()`, `.cpu()`,
+              `torch.cuda.synchronize()`, Python-side tensor value checks.
+            - Memory regressions: double-allocating weights, holding tensors past their lifetime.
+
+            ## Suggestions (Nice to Have)
+            - Stale, imprecise, or misleading comments/docstrings — a wrong docstring is worse
+              than none.
+            - Missing shape/dtype assertions at module/parallelism boundaries where they would
+              catch real bugs.
+            - Functions mixing many unrelated responsibilities that would benefit from splitting.
+
+            ## Comment Format
+
+            Prefix each comment with severity and category tag:
+            - `**[CRITICAL Algorithm]**`, `**[CRITICAL ModeState]**`, `**[CRITICAL Export]**`
+            - `**[IMPORTANT Compatibility]**`, `**[IMPORTANT Performance]**`
+            - `**[SUGGESTION]**`
+
+            For each finding, explain: (1) what the issue is, (2) why it matters (impact/risk), (3) specific suggestion for fix.
+
+            Only use inline ```suggestion blocks for simple, self-contained line replacements (typos,
+            renames, single-line fixes). For structural changes that add, remove, or reorganize blocks
+            of code, use a top-level PR comment with a code block showing the proposed change instead.
+
+            ## Completion
+
+            After posting all inline comments, post a summary PR comment:
+            - List total findings by severity (CRITICAL: N, IMPORTANT: N, SUGGESTION: N)
+            - Highlight the most impactful findings
+            - Overall assessment of the PR's risk level
+
+            If no significant issues are found, approve the PR:
+            gh pr review $PR_NUMBER --repo $REPO --approve --body "Claude review passed — no significant issues found. LGTM"
