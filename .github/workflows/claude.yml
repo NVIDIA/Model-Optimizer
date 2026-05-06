@@ -52,6 +52,7 @@ jobs:
         )
       )
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
       pull-requests: write
@@ -67,6 +68,13 @@ jobs:
         uses: anthropics/claude-code-action@v1
         env:
           ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
+          # NVIDIA inference proxy (LiteLLM-based) rejects two fields
+          # the Claude Code SDK sends by default. Set per NVIDIA/OSMO's
+          # workflow which has hit and solved both issues:
+          #   - `context_management` → disable experimental betas
+          #   - `cache_control.ephemeral.scope` → disable prompt caching
+          CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: "1"
+          DISABLE_PROMPT_CACHING: "1"
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           claude_args: |
