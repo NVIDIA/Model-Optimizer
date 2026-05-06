@@ -929,6 +929,97 @@ class QDQAutotunerBase:
             for p in self.profiled_patterns
         )
 
+    def _sample_concat_group_mutation(
+        self,
+        selected_points: list,
+        all_points: list,
+        region: "Region",
+    ) -> list:
+        """Probabilistically add or remove a full Concat input group as an atomic unit.
+
+        TRT requires ALL inputs of a Concat to be INT8 for INT8 Concat fusion;
+        partial quantization has no benefit. This method treats Concat input sets
+        as atomic groups — randomly choosing to add all inputs of one Concat, or
+        remove all inputs of one Concat, as a single mutation step.
+
+        Called with adaptive probability (min 5%, scaling with budget) during scheme
+        generation to inject Concat-aware samples into the search space without forcing
+        all schemes to have full groups.
+
+        Args:
+            selected_points: Currently selected NodeInputInsertionPoint list
+            all_points: Full set of available NodeInputInsertionPoint list
+            region: The region being profiled
+
+        Returns:
+            Updated list with one Concat group atomically added or removed
+        """
+        # Identify which local node indices are Concat ops
+        node_indices = region.get_nodes(sort=True)
+        concat_local_indices = set()
+        for local_idx, node_idx in enumerate(node_indices):
+            node = self.graph.nodes[node_idx]
+            if node.op == "Concat":
+                concat_local_indices.add(local_idx)
+
+        if not concat_local_indices:
+            return selected_points
+
+        # Build groups: concat_node_index -> all available insertion points for that Concat
+        concat_groups: dict[int, list] = {}
+        for p in all_points:
+            if p.node_index in concat_local_indices:
+                concat_groups.setdefault(p.node_index, []).append(p)
+
+        if not concat_groups:
+            return selected_points
+
+        # Identify fully-present and absent Concat groups in current selection
+        selected_keys = {(p.node_index, p.input_index) for p in selected_points}
+        full_groups = []  # Concat groups fully present (can remove)
+        absent_groups = []  # Concat groups fully absent (can add)
+
+        for concat_idx, group_points in concat_groups.items():
+            group_keys = {(p.node_index, p.input_index) for p in group_points}
+            present = group_keys & selected_keys
+            if len(present) == len(group_keys):
+                full_groups.append(concat_idx)
+            elif len(present) == 0:
+                absent_groups.append(concat_idx)
+            # Partial groups: also eligible for completion (add missing siblings)
+            elif len(present) < len(group_keys):
+                absent_groups.append(concat_idx)
+
+        # Choose action only from feasible options to avoid no-op mutations
+        actions = []
+        if absent_groups:
+            actions.append("add")
+        if full_groups:
+            actions.append("remove")
+        if not actions:
+            return selected_points
+        action = random.choice(actions)
+
+        if action == "add":
+            target = random.choice(absent_groups)
+            points_to_add = []
+            for p in concat_groups[target]:
+                if (p.node_index, p.input_index) not in selected_keys:
+                    points_to_add.append(p)
+            logger.debug(
+                f"Concat group mutation: added {len(points_to_add)} points for Concat node {target}"
+            )
+            return selected_points + points_to_add
+
+        elif action == "remove":
+            target = random.choice(full_groups)
+            group_keys = {(p.node_index, p.input_index) for p in concat_groups[target]}
+            result = [p for p in selected_points if (p.node_index, p.input_index) not in group_keys]
+            logger.debug(
+                f"Concat group mutation: removed {len(group_keys)} points for Concat node {target}"
+            )
+            return result
+
     def _mutate_insertion_points(
         self, base_points, all_points, point_type: str, max_mutations: int
     ) -> list:
@@ -1055,6 +1146,17 @@ class QDQAutotunerBase:
                     point_type,
                     max_mutations,
                 ),
+            )
+
+        # Probabilistically apply Concat-group-aware mutation: atomically add or remove
+        # all inputs of a Concat as a group. Probability adapts to budget:
+        # - Large budget (>=100): 5% → at least 5 samples
+        # - Small budget (<100): min_samples/budget, clamped to [0.05, 0.5]
+        num_schemes = max(len(pattern_schemes.schemes), 1)
+        concat_prob = min(max(self.config.concat_group_min_samples / num_schemes, 0.05), 0.5)
+        if random.random() < concat_prob:
+            scheme.node_inputs = self._sample_concat_group_mutation(
+                scheme.node_inputs, full_insertion_scheme.node_inputs, region
             )
 
         return scheme
