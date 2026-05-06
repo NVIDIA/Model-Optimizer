@@ -13,14 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""API for sparsification algorithms.
+"""KV cache sparsity algorithms for LLM inference optimization."""
 
-This module provides access to both weight sparsity and attention sparsity algorithms.
-For backward compatibility, weight sparsity APIs are re-exported at the module level.
-"""
-
-# Import weight sparsity for backward compatibility
-# Import kv_cache to register KV cache sparsity modes
-from . import kv_cache
-from .weight_sparsity import mode, module, plugins
-from .weight_sparsity.sparsification import *
+from . import mode
+from .config import *
+from .conversion import *
+from .model_sparsify import *
