@@ -236,9 +236,9 @@ Both strategies can be combined. An optional automatic NAS search can be enabled
 
 ### 3.3 Walkthrough: Qwen3-8B → 7B parameters
 
-**▶ Data preparation:** Run notebook [`00_prerequisites.ipynb`](00_prerequisites.ipynb) to prepare the data and evaluate the original model.
+**→ Data preparation:** Run notebook [`00_prerequisites.ipynb`](00_prerequisites.ipynb) to prepare the data and evaluate the original model.
 
-**▶ Minitron pruning and distillation:** Run notebook [`scenario1_minitron.ipynb`](scenario1_minitron.ipynb) for the full end-to-end pipeline (prune → distill → evaluate).
+**→ Minitron pruning and distillation:** Run notebook [`scenario1_minitron.ipynb`](scenario1_minitron.ipynb) for the full end-to-end pipeline (prune → distill → evaluate).
 
 #### Results
 
@@ -254,7 +254,7 @@ Distillation recovers **+1.28 percentage points** of MMLU accuracy with just 100
 
 To validate that Minitron is the right choice for this scenario, we also ran Puzzletron at the same ~7B parameter target. Puzzletron produces a 36-layer heterogeneous model with variable FFN widths per layer (some as low as 2560) and selective attention removal.
 
-▶ See notebook [`scenario1_puzzletron.ipynb`](scenario1_puzzletron.ipynb) to reproduce this run.
+→ See notebook [`scenario1_puzzletron.ipynb`](scenario1_puzzletron.ipynb) to reproduce this run.
 
 | Model | Parameters | MMLU (pruned) | MMLU (distilled) | % of Teacher |
 |---|---|---|---|---|
@@ -302,9 +302,9 @@ Puzzletron compresses a model through an automated NAS pipeline:
 
 ### 4.3 Walkthrough: Qwen3-8B - 126,215 MiB → 78,000 MiB memory target
 
-**▶ Data preparation:** Run notebook [`00_prerequisites.ipynb`](00_prerequisites.ipynb) to prepare the data and evaluate the original model (if not already done).
+**→ Data preparation:** Run notebook [`00_prerequisites.ipynb`](00_prerequisites.ipynb) to prepare the data and evaluate the original model (if not already done).
 
-**▶ Puzzletron NAS and distillation:** Run notebook [`scenario2_puzzletron.ipynb`](scenario2_puzzletron.ipynb) for the full end-to-end pipeline (prune → NAS search → distill → evaluate).
+**→ Puzzletron NAS and distillation:** Run notebook [`scenario2_puzzletron.ipynb`](scenario2_puzzletron.ipynb) for the full end-to-end pipeline (prune → NAS search → distill → evaluate).
 
 #### Results
 
@@ -316,7 +316,8 @@ Puzzletron compresses a model through an automated NAS pipeline:
 
 The pre-distillation accuracy is near-random (MMLU has a 25% baseline for 4-choice questions); this is expected at >35% compression. Distillation recovers **+28.61 percentage points**, transforming a non-functional model into a usable one.
 
-#### Puzzletron architecture details
+<details>
+<summary><b>Puzzletron architecture details</b> — per-layer block configuration (click to expand)</summary>
 
 ```text
 block_0:   attention  kv_heads_8    ffn  intermediate_12288
@@ -357,11 +358,13 @@ block_34:  attention  kv_heads_8    ffn  intermediate_12288
 block_35:  attention  kv_heads_8    ffn  intermediate_9984
 ```
 
+</details>
+
 ### 4.4 Comparison with Minitron at the same memory target
 
 To validate that Puzzletron is the right choice for this scenario, we also ran Minitron at the same memory budget. To match ~78,000 MiB, Minitron drops 14 of 36 layers (keeping 22), producing a 5.49B parameter model.
 
-▶ See notebook [`scenario2_minitron.ipynb`](scenario2_minitron.ipynb) to reproduce this run.
+→ See notebook [`scenario2_minitron.ipynb`](scenario2_minitron.ipynb) to reproduce this run.
 
 | Model | Memory Footprint | MMLU (pruned) | MMLU (distilled) | % of Teacher |
 |---|---|---|---|---|
@@ -447,6 +450,9 @@ Several observations stand out:
 
 The two scenarios in this guide represent two specific points on a continuous compression curve. Complementary experiments using Puzzletron's MIP sweep mode (which re-runs the MIP solver across multiple memory targets without repeating the full NAS pipeline) allowed us to sample additional points and compare both methods side-by-side across the full spectrum.
 
+<details>
+<summary>Click to expand — chart + observations across the full compression spectrum</summary>
+
 ![Puzzletron vs. Minitron Memory Sweep on Qwen3-8B](figures/memory_sweep_combined.png)
 
 Several observations stand out:
@@ -456,6 +462,8 @@ Several observations stand out:
 **At 80% memory, Minitron wins post-distillation, despite losing pre-distillation.** Before distillation, Puzzletron (0.5910) leads Minitron (0.5084) by +8.3pp. After distillation, Minitron (0.7302) overtakes Puzzletron (0.6921) by +3.8pp. This is a concrete example of the architecture ranking flip described in [Section 6.4](#64-architecture-ranking-can-flip-after-distillation).
 
 **The crossover point lies somewhere between 20% and 38% compression.** Below ~20% compression, Minitron consistently wins post-distillation. Beyond ~38%, Puzzletron pulls decisively ahead. The exact crossover will depend on the model, the distillation budget, and the Puzzletron search space — but this range provides a practical guideline.
+
+</details>
 
 ### 5.6 Decision rules
 
@@ -625,6 +633,9 @@ As shown in [Section 5.4](#54-benchmark-specific-behavior), the relative ranking
 
 Puzzletron's heterogeneous models require a few extra steps to serve with vLLM. Below is the procedure for the Scenario 1 Puzzletron model (`distilled_Qwen3-8B-Puzzle-7B`); the same steps apply to any Puzzletron checkpoint. The walkthrough below is kept self-contained to reproduce the exact throughput-vs-latency curves in [Section 7](#7-inference-performance) end-to-end. For the canonical, kept-up-to-date deployment instructions, see also [Deploy compressed model in vLLM](https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/puzzletron#deploy-compressed-model-in-vllm) in the Puzzletron example.
 
+<details>
+<summary><b>Reproduction steps</b> — install vLLM, patch config, serve, benchmark with AIPerf (click to expand)</summary>
+
 **Step 1 — Install vLLM with AnyModel support:**
 
 ```bash
@@ -685,3 +696,5 @@ done
 ```
 
 > **Note:** For Minitron models and the baseline, skip Step 2 — standard vLLM serves them directly.
+
+</details>
