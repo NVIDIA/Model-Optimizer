@@ -36,6 +36,8 @@ from pathlib import Path
 
 import yaml
 
+_YAML_PARSE_ERROR = object()
+
 
 def _check_quant_cfg(quant_cfg, label: str) -> list[str]:
     """Validate quant_cfg format. *label* is used in error messages."""
@@ -51,26 +53,37 @@ def _check_quant_cfg(quant_cfg, label: str) -> list[str]:
             if not isinstance(entry, dict):
                 errors.append(
                     f"{label}: quant_cfg[{i}] must be a dict with "
-                    f"'quantizer_name', got {type(entry).__name__}. "
+                    f"'quantizer_name' or '$import', got {type(entry).__name__}. "
                     "See https://nvidia.github.io/Model-Optimizer/guides/_quant_cfg.html"
                 )
+                continue
+            # {$import: name} entries are resolved at load time
+            if "$import" in entry:
+                ref = entry["$import"]
+                if not isinstance(ref, (str, list)) or (
+                    isinstance(ref, list) and not all(isinstance(r, str) for r in ref)
+                ):
+                    errors.append(
+                        f"{label}: quant_cfg[{i}] '$import' must be a string or list of strings, "
+                        f"got {type(ref).__name__}: {ref!r}"
+                    )
                 continue
             if "quantizer_name" not in entry:
                 errors.append(
                     f"{label}: quant_cfg[{i}] is missing 'quantizer_name'. "
-                    "Each entry must have an explicit 'quantizer_name' key. "
+                    "Each entry must have an explicit 'quantizer_name' or '$import' key. "
                     "See https://nvidia.github.io/Model-Optimizer/guides/_quant_cfg.html"
                 )
     return errors
 
 
-def _load_yaml(path: Path) -> dict | None:
-    """Load a YAML file, returning None on parse failure."""
+def _load_yaml(path: Path):
+    """Load the first YAML document, returning _YAML_PARSE_ERROR on parse failure."""
     try:
-        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        docs = list(yaml.safe_load_all(path.read_text(encoding="utf-8")))
     except Exception:
-        return None
-    return data if isinstance(data, dict) else None
+        return _YAML_PARSE_ERROR
+    return docs[0] if docs else None
 
 
 def _check_single_file_recipe(path: Path) -> list[str]:
@@ -78,8 +91,10 @@ def _check_single_file_recipe(path: Path) -> list[str]:
     errors: list[str] = []
     label = str(path)
     data = _load_yaml(path)
-    if data is None:
+    if data is _YAML_PARSE_ERROR:
         return [f"{label}: failed to parse YAML"]
+    if not isinstance(data, dict):
+        return []  # not a recipe file
 
     metadata = data.get("metadata")
     if not isinstance(metadata, dict) or "recipe_type" not in metadata:
@@ -106,14 +121,16 @@ def _check_single_file_recipe(path: Path) -> list[str]:
 
 
 def _check_dir_recipe(dir_path: Path) -> list[str]:
-    """Check a directory-format recipe (recipe.yml + quantize.yml)."""
+    """Check a directory-format recipe (metadata.yml + quantize.yml)."""
     errors: list[str] = []
 
     for name in ("quantize.yml", "quantize.yaml"):
         quantize_file = dir_path / name
         if quantize_file.is_file():
             data = _load_yaml(quantize_file)
-            if data is not None:
+            if data is _YAML_PARSE_ERROR:
+                errors.append(f"{quantize_file}: failed to parse YAML")
+            elif isinstance(data, dict):
                 quant_cfg = data.get("quant_cfg")
                 if quant_cfg is not None:
                     errors.extend(_check_quant_cfg(quant_cfg, str(quantize_file)))
@@ -138,7 +155,7 @@ def _try_load_recipe(path: str) -> list[str]:
 
 def _is_dir_recipe(dir_path: Path) -> bool:
     """Return True if *dir_path* is a directory-format recipe."""
-    return any((dir_path / n).is_file() for n in ("recipe.yml", "recipe.yaml"))
+    return any((dir_path / n).is_file() for n in ("metadata.yml", "metadata.yaml"))
 
 
 def _is_recipe_file(path: Path) -> bool:
@@ -151,12 +168,24 @@ def _is_recipe_file(path: Path) -> bool:
     report the actual error.
     """
     data = _load_yaml(path)
-    if data is None:
+    if data is _YAML_PARSE_ERROR:
         return True  # let load_recipe report the parse error
+    if not isinstance(data, dict):
+        return False  # not a recipe file at all
     metadata = data.get("metadata")
     if not isinstance(metadata, dict) or "recipe_type" not in metadata:
         return False  # not a recipe file at all
     return metadata["recipe_type"] == "ptq"
+
+
+def _is_metadata_file(path: Path) -> bool:
+    """Return True if *path* looks like a directory recipe metadata file."""
+    data = _load_yaml(path)
+    if data is _YAML_PARSE_ERROR:
+        return True  # let load_recipe report the parse error
+    if not isinstance(data, dict):
+        return False
+    return data.get("recipe_type") == "ptq"
 
 
 def _resolve_recipes(changed_files: list[str]) -> dict[Path, str]:
@@ -171,10 +200,10 @@ def _resolve_recipes(changed_files: list[str]) -> dict[Path, str]:
 
         # Check if this file is inside a directory-format recipe.
         if _is_dir_recipe(path.parent):
-            # Directory recipes have a recipe.yml with metadata; check it.
-            for name in ("recipe.yml", "recipe.yaml"):
+            # Directory recipes have a metadata.yml with top-level metadata fields.
+            for name in ("metadata.yml", "metadata.yaml"):
                 candidate = path.parent / name
-                if candidate.is_file() and _is_recipe_file(candidate):
+                if candidate.is_file() and _is_metadata_file(candidate):
                     recipes.setdefault(path.parent, "dir")
                     break
         elif path.is_file() and path.suffix in (".yml", ".yaml"):

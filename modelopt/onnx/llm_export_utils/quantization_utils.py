@@ -64,7 +64,7 @@ def get_quant_config(precision, lm_head_precision="fp16"):
         quant_cfg = copy.deepcopy(mtq.NVFP4_DEFAULT_CFG)
 
     elif precision == "int4_awq":
-        quant_cfg = copy.deepcopy(mtq.INT4_AWQ_CFG)  # type: ignore[arg-type]
+        quant_cfg = copy.deepcopy(mtq.INT4_AWQ_CFG)
 
     else:
         raise ValueError(f"Unsupported precision: {precision}")
