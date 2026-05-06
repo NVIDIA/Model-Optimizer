@@ -842,6 +842,7 @@ class Config:
     minimum_schemes_to_mutate: int = 10
     maximum_mutations: int = 3
     maximum_generation_attempts: int = 100
+    concat_group_min_samples: int = 5  # Minimum Concat-group-aware mutations per region
 
     # Pattern Cache Settings
     pattern_cache_minimum_distance: int = 4
