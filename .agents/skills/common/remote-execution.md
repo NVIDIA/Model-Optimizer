@@ -9,8 +9,9 @@ Read this when Claude Code runs on a different machine than the target GPU clust
 Config locations (checked in order, first found wins):
 
 1. `~/.config/modelopt/clusters.yaml` — user-level (not committed, recommended)
-2. `.claude/clusters.yaml` — project-level (can be committed for shared defaults)
-3. Interactive input — if neither file exists, ask the user (see SKILL.md Step 0) and write `~/.config/modelopt/clusters.yaml` before proceeding
+2. `.agents/clusters.yaml` — project-level, canonical (can be committed for shared defaults)
+3. `.claude/clusters.yaml` — project-level, back-compat
+4. Interactive input — if no file exists, ask the user (see SKILL.md Step 0) and write `~/.config/modelopt/clusters.yaml` before proceeding
 
 ```yaml
 clusters:
@@ -38,7 +39,7 @@ rsync -av /path/to/local/checkpoint <cluster-login>:<cluster-workspace>/checkpoi
 
 Use the `workspace` path from your cluster config as the destination. Compute nodes on a given cluster share the same storage as its login node, so once staged, the path works everywhere on that cluster.
 
-See `.claude/clusters.yaml.example` for a fully annotated example with multiple cluster types.
+See `.agents/clusters.yaml.example` for a fully annotated example with multiple cluster types.
 
 ---
 
@@ -153,5 +154,5 @@ remote_sync_from <remote_output_subdir> /local/output/
 ## Reference Files
 
 - **`skills/common/remote_exec.sh`** — Full utility library (session, run, sync, SLURM, Docker helpers)
-- **`.claude/clusters.yaml`** — Active cluster configuration
-- **`.claude/clusters.yaml.example`** — Annotated example config
+- **`.agents/clusters.yaml`** — Active cluster configuration (canonical; `.claude/clusters.yaml` also accepted for back-compat)
+- **`.agents/clusters.yaml.example`** — Annotated example config

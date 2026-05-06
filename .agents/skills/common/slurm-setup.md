@@ -215,7 +215,7 @@ which docker 2>/dev/null && echo "RUNTIME=docker"
 
 | Runtime | Typical clusters | SLURM integration |
 | --- | --- | --- |
-| **enroot/pyxis** | NVIDIA internal (DGX Cloud, EOS, Selene, GCP-NRT) | `srun --container-image` |
+| **enroot/pyxis** | HPC clusters with container runtime (e.g. DGX Cloud and similar Slurm + container setups) | `srun --container-image` |
 | **Docker** | Bare-metal / on-prem with GPU | `docker run` inside job script |
 
 ### Step 2: Check credentials for the image's registry

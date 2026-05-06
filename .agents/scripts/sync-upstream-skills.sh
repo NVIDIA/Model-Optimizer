@@ -21,15 +21,18 @@
 # NOT managed by this script — update it manually when pulling upstream changes.
 #
 # Usage:
-#   .claude/scripts/sync-upstream-skills.sh            # re-vendor at the pinned SHA
-#   UPSTREAM_SHA=<sha> .claude/scripts/sync-upstream-skills.sh   # bump to a new SHA
+#   .agents/scripts/sync-upstream-skills.sh            # re-vendor at the pinned SHA
+#   UPSTREAM_SHA=<sha> .agents/scripts/sync-upstream-skills.sh   # bump to a new SHA
 #
 # Requires: gh, base64, awk. Run from the repo root.
 #
-# The script overwrites .claude/skills/<skill>/ with upstream contents and
+# The script overwrites .agents/skills/<skill>/ with upstream contents and
 # re-applies our provenance lines into each SKILL.md frontmatter. If you have
 # local changes to a vendored skill, they will be lost — that is expected,
 # since vendored-verbatim skills should not be modified locally.
+#
+# Note: .claude/skills/ (and other agent-specific skill dirs) are symlinks to
+# .agents/skills/ — see .agents/README.md.
 
 set -euo pipefail
 
@@ -40,7 +43,7 @@ SHORT_SHA="${SHA:0:7}"
 
 UPSTREAM_REPO="NVIDIA-NeMo/Evaluator"
 UPSTREAM_BASE="packages/nemo-evaluator-launcher/.claude/skills"
-DEST_BASE=".claude/skills"
+DEST_BASE=".agents/skills"
 
 if [[ ! -d "$DEST_BASE" ]]; then
     echo "error: run from the repo root (expected $DEST_BASE/ to exist)" >&2
@@ -116,7 +119,7 @@ inject_provenance() {
                 print "license: Apache-2.0"
                 print "# Vendored verbatim from NVIDIA NeMo Evaluator (commit " short ")"
                 print "# https://github.com/NVIDIA-NeMo/Evaluator/tree/" sha "/packages/nemo-evaluator-launcher/.claude/skills/" skill
-                print "# To re-sync: .claude/scripts/sync-upstream-skills.sh"
+                print "# To re-sync: .agents/scripts/sync-upstream-skills.sh"
                 if (extra != "") {
                     n = split(extra, lines, "\\|")
                     for (i = 1; i <= n; i++) print "# " lines[i]

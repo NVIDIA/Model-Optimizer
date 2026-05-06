@@ -70,7 +70,7 @@ tail -200 $LOGS/client-*.log
 - **CUDA OOM**: Increase `deployment.tensor_parallel_size` to shard across more GPUs. For multi-node: increase `execution.num_nodes` and set `deployment.pipeline_parallel_size`. As last resort: add `--max-model-len <lower_value>` to `deployment.extra_args`. Do NOT quantize as a first fix — scale compute instead.
 - **Missing model/checkpoint**: `FileNotFoundError` or `RepositoryNotFoundError` or `GatedRepoError: 403` — verify `deployment.checkpoint_path` or `deployment.hf_model_handle`. For gated models, set `HF_TOKEN` via `deployment.env_vars`.
 - **Bad `extra_args`**: `unrecognized arguments` or `unexpected keyword argument` — check flags against deployment engine version. Some flags change between versions (e.g., `--rope-scaling` removed in vLLM > 0.11.0).
-- **Image pull failure**: `manifest not found` or `pyxis: child 1 failed` — verify image tag exists. Drop `:5005` from GitLab container registry URLs.
+- **Image pull failure**: `manifest not found` or `pyxis: child 1 failed` — verify image tag exists. If the image is on an on-prem GitLab registry, drop the registry port suffix (e.g. `:5005`) from the URL.
 - **GPU driver mismatch**: `CUDA driver version is insufficient` — use an older container image matching the host CUDA driver.
 - **Health check timeout / connection refused**: Server didn't start — check server logs first. Increase `execution.endpoint_readiness_timeout` (seconds). SLURM default: `null` (falls back to walltime).
 - **Server crashed mid-eval**: `Connection reset by peer` — check server logs for OOM. Reduce `parallelism` (concurrent requests). Check SLURM logs for preemption or walltime exceeded.
@@ -80,7 +80,7 @@ tail -200 $LOGS/client-*.log
 - **Config validation**: `MissingMandatoryValue` (unfilled `???`), `ValidationError` (type mismatch), `ScannerError` (invalid YAML) — run `--dry-run` to catch these upfront.
 - **Walltime exceeded**: `CANCELLED DUE TO TIME LIMIT` — NEL submits paired restart jobs that automatically resume when walltime expires, so this is often expected behavior, not a failure. Only increase `execution.walltime` if the evaluation isn't making progress across restarts.
 - **Preemption**: `CANCELLED DUE TO PREEMPTION` — the paired restart job should automatically resume. If it doesn't, use non-preemptible partition, or re-run.
-- **Container not found**: Applies to both `deployment.image` and task-level eval container. Drop `:5005` from GitLab registry URLs.
+- **Container not found**: Applies to both `deployment.image` and task-level eval container. For on-prem GitLab registries, drop the registry port suffix (e.g. `:5005`) from the URL.
 - Troubleshooting docs: list files with WebFetch `https://api.github.com/repos/NVIDIA-NeMo/Evaluator/contents/docs/troubleshooting`, then fetch relevant ones from `https://raw.githubusercontent.com/NVIDIA-NeMo/Evaluator/main/docs/troubleshooting/<file>`
 
 **Fix Slurm invalid account/partition:**

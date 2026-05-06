@@ -1,6 +1,7 @@
 # ModelOpt Remote Cluster Configuration
 # Copy to ~/.config/modelopt/clusters.yaml (user-level, recommended)
-# or .claude/clusters.yaml (project-level, can be committed).
+# or .agents/clusters.yaml (project-level, can be committed).
+# .claude/clusters.yaml is also accepted for back-compat.
 
 clusters:
   # GPU workstation or SLURM login node
