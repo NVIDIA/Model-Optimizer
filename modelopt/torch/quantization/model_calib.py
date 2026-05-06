@@ -16,6 +16,7 @@
 """Calibration utilities."""
 
 import math
+import os
 import time
 import warnings
 from collections.abc import Callable
@@ -37,7 +38,7 @@ from modelopt.torch.utils import print_rank_0
 from modelopt.torch.utils.distributed import DistributedProcessGroup, ParallelState
 from modelopt.torch.utils.network import bind_forward_method, unpatch_forward_method
 
-from .calib import MseCalibrator, NVFP4MSECalibrator, _Calibrator
+from .calib import MseCalibrator, NVFP4MSECalibrator, TritonNVFP4MSECalibrator, _Calibrator
 from .conversion import create_and_replace_svdquant_linear_on_the_fly, set_quantizer_by_cfg_context
 from .nn import NVFP4StaticQuantizer, QuantModule, SequentialQuantizer, TensorQuantizer
 from .utils import (
@@ -354,6 +355,11 @@ def mse_calibrate(
     weight_quantizers = []
     seen_modules = set()
 
+    # Triton-fused FP8 sweep is on by default for NVFP4 static quant; set
+    # MODELOPT_NVFP4_TRITON_SWEEP=0 to fall back to the reference for debugging.
+    use_triton_fp8_sweep = os.environ.get("MODELOPT_NVFP4_TRITON_SWEEP", "1") != "0"
+    nvfp4_calibrator_cls = TritonNVFP4MSECalibrator if use_triton_fp8_sweep else NVFP4MSECalibrator
+
     for name, module in list(model.named_modules()):
         if isinstance(module, TensorQuantizer) and not module._disabled:
             if module._calibrator is not None and not module._dynamic and hasattr(module, "_amax"):
@@ -391,8 +397,7 @@ def mse_calibrate(
                         continue
 
                 if fp8_scale_sweep and is_nvfp4_static:
-                    # Replace calibrator with NVFP4MSECalibrator
-                    module._calibrator = NVFP4MSECalibrator(
+                    module._calibrator = nvfp4_calibrator_cls(
                         amax=initial_amax,
                         axis=module._calibrator._axis,
                         global_amax=module.global_amax,
