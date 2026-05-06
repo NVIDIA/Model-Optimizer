@@ -16,19 +16,16 @@
 
 """Runtime statistics calculation for NAS subblock benchmarking via vLLM."""
 
-import json
-import os
-import subprocess
 import tempfile
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from pathlib import Path
 
-import torch
 from omegaconf import DictConfig
 from tqdm import tqdm
-from transformers import AutoModelForCausalLM, AutoTokenizer, LlamaConfig, LlamaForCausalLM
+from transformers import AutoModelForCausalLM, LlamaConfig, LlamaForCausalLM
 
-from modelopt.torch.puzzletron.anymodel.converter import Converter
+from modelopt.torch.nas.subblock_stats.runtime_utils import RuntimeConfig, save_model
+from modelopt.torch.nas.subblock_stats.runtime_vllm import run_vllm_latency_benchmark
 from modelopt.torch.puzzletron.anymodel.models.llama import LlamaModelDescriptor
 from modelopt.torch.puzzletron.anymodel.puzzformer import deci_x_patcher
 from modelopt.torch.puzzletron.block_config import (
@@ -89,98 +86,17 @@ def create_benchmark_model(
     return model
 
 
-def save_model_as_anymodel(model, output_dir: Path, descriptor, num_hidden_layers: int):
-    """Save a model checkpoint in AnyModel subblock-safetensors format."""
-    # Save standard model checkpoint (as safetensors, HF format)
-    model.save_pretrained(output_dir, safe_serialization=True)
-
-    # Convert/slice weights into AnyModel subblock_safetensors format
-    Converter.convert_model_weights(
-        input_dir=output_dir,
-        output_dir=output_dir,
-        descriptor=descriptor,
-        num_hidden_layers=num_hidden_layers,
-    )
-    # Load the model config.json, update "architectures" to ["AnyModel"], and write back to disk.
-
-    config_path = output_dir / "config.json"
-    if config_path.exists():
-        with open(config_path) as f:
-            config_data = json.load(f)
-        config_data["architectures"] = ["AnyModel"]
-        with open(config_path, "w") as f:
-            json.dump(config_data, f, indent=2)
-
-
-def save_model(
-    model: LlamaForCausalLM, tokenizer_path: Path, output_path: Path, num_hidden_layers: int
-) -> None:
-    """Save model weights as AnyModel and copy the tokenizer to ``output_path``."""
-    model.to(dtype=torch.bfloat16).save_pretrained(output_path)
-    save_model_as_anymodel(model, output_path, LlamaModelDescriptor, num_hidden_layers)
-
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
-    tokenizer.save_pretrained(output_path)
-
-
-@dataclass(frozen=True)
-class RuntimeConfig:
-    """Configuration for a vLLM latency benchmark run."""
-
-    vocab_size: int
-    hidden_size: int
-    num_attention_heads: int
-    master_puzzle_dir: str
-    tokenizer_path: str
-    synth_dataset_num_requests: int
-    repeat_block_n_times: int
-    prefill_seq_len: int
-    generation_seq_len: int
-    batch_size: int
-    num_iters: int
-    num_warmup_iters: int
-
-
-def run_vllm_latency_benchmark(model_path: Path, runtime_config: RuntimeConfig):
-    """Run ``vllm bench latency`` and return the average latency in milliseconds."""
-    output_json_path = model_path / "vllm_latency_benchmark.json"
-
-    cmd = [
-        "vllm",
-        "bench",
-        "latency",
-        "--model",
-        str(model_path),
-        "--input-len",
-        str(runtime_config.prefill_seq_len),
-        "--output-len",
-        str(runtime_config.generation_seq_len),
-        "--batch-size",
-        str(runtime_config.batch_size),
-        "--output-json",
-        str(output_json_path),
-        "--max-model-len",
-        str(runtime_config.prefill_seq_len + runtime_config.generation_seq_len),
-        "--num-iters-warmup",
-        str(runtime_config.num_warmup_iters),
-        "--num-iters",
-        str(runtime_config.num_iters),
-        "--max-num-seqs",
-        "1",
-        "--distributed-executor-backend",
-        "external_launcher",
-        "--tensor-parallel-size",
-        "1",
-        "--pipeline-parallel-size",
-        "1",
-    ]
-    os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
-    subprocess.run(cmd)
-
-    with open(output_json_path) as f:
-        vllm_results = json.load(f)
-    print(vllm_results)
-    return vllm_results["avg_latency"] * 1000  # convert to milliseconds
+def calc_model_runtime(model: LlamaForCausalLM, runtime_config: RuntimeConfig) -> float:
+    """Measure total runtime of a model via vLLM latency benchmark."""
+    with tempfile.TemporaryDirectory() as model_tmpdir:
+        save_model(
+            model,
+            Path(runtime_config.tokenizer_path),
+            Path(model_tmpdir),
+            num_hidden_layers=runtime_config.repeat_block_n_times + 1,
+        )
+        model_total_runtime_ms = run_vllm_latency_benchmark(Path(model_tmpdir), runtime_config)
+    return model_total_runtime_ms
 
 
 def calc_subblock_runtime(
@@ -207,16 +123,7 @@ def calc_subblock_runtime(
         block_config=block_config,
         repeat_block_n_times=runtime_config.repeat_block_n_times,
     )
-    with tempfile.TemporaryDirectory() as model_tmpdir:
-        save_model(
-            model,
-            Path(runtime_config.tokenizer_path),
-            Path(model_tmpdir),
-            num_hidden_layers=runtime_config.repeat_block_n_times + 1,
-        )
-        subblock_total_runtime_ms = run_vllm_latency_benchmark(Path(model_tmpdir), runtime_config)
-
-    return subblock_total_runtime_ms
+    return calc_model_runtime(model, runtime_config)
 
 
 def calc_no_block_runtime(runtime_config: RuntimeConfig) -> float:
@@ -267,15 +174,22 @@ def calc_runtime_for_subblocks(
 
     runtime_by_subblock_dict = {}
 
-    baseline_runtime_ms = calc_subblock_runtime(runtime_config, None)
+    baseline_runtime_ms = calc_subblock_runtime(runtime_config, subblock_config=None)
 
     for subblock_config in tqdm(
         sorted(subblock_config_set),
-        desc=(
-            f"Computing runtime_by_subblock_dict [hidden_size={hidden_size}, "
-            f"num_subblocks={len(subblock_config_set)}]"
-        ),
+        desc=(f"Computing runtime for {len(subblock_config_set)} subblocks\n"),
     ):
+        if isinstance(subblock_config, AttentionConfig):
+            num_key_value_heads = subblock_config.num_key_value_heads
+            desc = f"AttentionConfig(num_key_value_heads={num_key_value_heads})"
+        elif isinstance(subblock_config, FFNConfig):
+            intermediate_size = subblock_config.intermediate_size
+            desc = f"FFNConfig(intermediate_size={intermediate_size})"
+        else:
+            raise ValueError(f"Unsupported subblock type: {type(subblock_config)}")
+        print(f"Computing runtime for subblock: {desc} {subblock_config.no_op=}")
+
         if subblock_config.no_op:
             total_runtime_ms = 0.0
         else:
