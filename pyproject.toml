@@ -307,7 +307,9 @@ skips = [
 addopts = "-v -ra --instafail --cov-report=term-missing --cov-report=html --cov-report=xml:coverage.xml --cov-config=pyproject.toml --durations=50 --strict-markers"
 pythonpath = ["tests/"]
 markers = [
+    "integration: Tests that require external services or other non-hermetic dependencies",
     "manual: Only run when --run-manual is given",
+    "network: Tests that require network access",
     "release: Regression tests that should be run before every release",
 ]
 
