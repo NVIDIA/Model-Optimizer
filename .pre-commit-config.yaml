@@ -71,6 +71,12 @@ repos:
         # configs/ contains reusable snippets (not full recipes) — skip recipe validation
         exclude: ^modelopt_recipes/configs/
 
+      - id: check-pydantic-config-compat
+        name: check pydantic config backward compatibility
+        entry: python tools/precommit/check_pydantic_config_compat.py
+        language: system
+        files: ^modelopt/.*\.py$
+
   # Instructions to change license file if ever needed:
   # https://github.com/Lucas-C/pre-commit-hooks#removing-old-license-and-replacing-it-with-a-new-one
   - repo: https://github.com/Lucas-C/pre-commit-hooks
