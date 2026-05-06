@@ -524,21 +524,9 @@ def load_model(args: argparse.Namespace):
                 : len(args.dataset)
             ]
 
-            # We only quantize the language model for VLMs other than the type supported above.
-            # For AutoQuantize, skip the eager visual-disable side-effect: it
-            # registers ``modelopt`` state on each visual sibling, which
-            # ``mtq.auto_quantize → apply_mode → is_converted`` then trips on
-            # ("Model has multiple modelopt states!"). AutoQuantize handles
-            # visual/mtp via ``disabled_layers`` patterns instead, so the
-            # extraction is unnecessary for that path.
-            #
-            # For ``--recipe`` mode on a VLM, lm_head sits on the OUTER
-            # CausalLM. Recipe rules can't see it via the inner language
-            # backbone, so we keep ``language_model = full_model`` here and
-            # let ``quantize_main`` strip visual/mtp siblings around
-            # ``mtq.quantize`` (so registration/calibration stays fast and
-            # batch_size auto-detect doesn't collapse to 1).
-            if args.auto_quantize_bits is None and args.recipe is None:
+            # AutoQuantize walks the outer CausalLM so lm_head is visible to the
+            # search. Visual/MTP siblings are excluded by disabled-layer patterns.
+            if args.auto_quantize_bits is None:
                 extracted_lm, extracted_model_type = extract_and_prepare_language_model_from_vl(
                     full_model
                 )
@@ -660,51 +648,12 @@ def mono_quantize(
                     else None,
                 )
 
-        # When ``--recipe`` is given on a VLM we keep ``language_model =
-        # full_model`` (so recipe rules can match lm_head) but ``mtq.quantize``
-        # would otherwise walk and register quantizers on every Linear in the
-        # visual encoder + MTP head.
-        stripped_vlm_modules: dict[str, torch.nn.Module] = {}
-        if args.recipe is not None and language_model is full_model:
-            for path in ("model.visual", "mtp"):
-                parts = path.split(".")
-                parent = full_model
-                ok = True
-                for p in parts[:-1]:
-                    if not hasattr(parent, p):
-                        ok = False
-                        break
-                    parent = getattr(parent, p)
-                if ok and hasattr(parent, parts[-1]):
-                    mod = getattr(parent, parts[-1])
-                    if mod is not None and isinstance(mod, torch.nn.Module):
-                        stripped_vlm_modules[path] = mod
-                        setattr(parent, parts[-1], None)
-            if stripped_vlm_modules:
-                print(
-                    "[recipe] stripped VLM siblings before mtq.quantize: "
-                    + ", ".join(stripped_vlm_modules.keys())
-                )
-
         if calibration_only:
             language_model = mtq.calibrate(
                 language_model, quant_cfg["algorithm"], forward_loop=calibrate_loop
             )
         else:
             language_model = mtq.quantize(language_model, quant_cfg, forward_loop=calibrate_loop)
-
-        # Restore stripped VLM siblings so export sees the full model.
-        for path, mod in stripped_vlm_modules.items():
-            parts = path.split(".")
-            parent = full_model
-            for p in parts[:-1]:
-                parent = getattr(parent, p)
-            setattr(parent, parts[-1], mod)
-        if stripped_vlm_modules:
-            print(
-                "[recipe] restored VLM siblings after mtq.quantize: "
-                + ", ".join(stripped_vlm_modules.keys())
-            )
 
         # For VL models, update full_model to use the quantized language model
         if is_nemotron_vl_model:
