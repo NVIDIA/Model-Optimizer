@@ -27,7 +27,6 @@ import pytest
 
 from modelopt.torch.puzzletron.sewing_kit.passage import InputArgs
 
-
 # ---------------------------------------------------------------------------
 # Construction
 # ---------------------------------------------------------------------------

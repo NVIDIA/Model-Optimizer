@@ -32,16 +32,13 @@ import torch.nn as nn
 
 from modelopt.torch.puzzletron.sewing_kit.core import (
     ExternalTarget,
+    InputsLoopFoundException,
     ModuleTarget,
     Needle,
     Node,
     OnlyInternalNodesException,
     StitchDescriptor,
 )
-from modelopt.torch.puzzletron.sewing_kit.core import (
-    InputsLoopFoundException,
-)
-
 
 # ---------------------------------------------------------------------------
 # get_node_for_target: lazy creation, cached lookup

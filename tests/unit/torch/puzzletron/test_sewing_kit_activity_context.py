@@ -82,10 +82,8 @@ def test_max_depth_one_allows_single_push():
 
 def test_max_depth_one_rejects_second_push():
     ctx: ActivityContext[str] = ActivityContext(max_depth=1)
-    with ctx("a"):
-        with pytest.raises(ActivityContextMaxDepthException):
-            with ctx("b"):
-                pass
+    with ctx("a"), pytest.raises(ActivityContextMaxDepthException), ctx("b"):
+        pass
     # Stack must have unwound to empty even after the exception.
     assert len(ctx) == 0
 
@@ -97,19 +95,16 @@ def test_max_depth_one_rejects_second_push():
 
 def test_no_duplicates_rejects_repeat_value():
     ctx: ActivityContext[str] = ActivityContext(no_duplicates=True)
-    with ctx("x"):
-        with pytest.raises(ActivityContextDuplicateException):
-            with ctx("x"):
-                pass
+    with ctx("x"), pytest.raises(ActivityContextDuplicateException), ctx("x"):
+        pass
     # Stack unwound; the still-active "x" was preserved through the failed push.
     assert len(ctx) == 0
 
 
 def test_no_duplicates_allows_distinct_values():
     ctx: ActivityContext[str] = ActivityContext(no_duplicates=True)
-    with ctx("x"):
-        with ctx("y"):
-            assert "x" in ctx and "y" in ctx
+    with ctx("x"), ctx("y"):
+        assert "x" in ctx and "y" in ctx
 
 
 # ---------------------------------------------------------------------------
@@ -127,7 +122,8 @@ def test_reversed_pushes_to_front_and_pops_from_front():
             # b inserted at front of stack.
             assert ctx[0] == "b"
             assert ctx[1] == "a"
-        # Pop from front: only "a" left.
+        # Pop from front: only "a" left — runs between the inner and outer
+        # exits, which is why these withs can't be combined.
         assert list(ctx[:]) == ["a"]
 
 
@@ -140,10 +136,9 @@ def test_stack_unwinds_when_body_raises():
     """A bug here would leak stack frames — the next forward pass would see
     a stale active passage. This is the silent-failure scenario."""
     ctx: ActivityContext[str] = ActivityContext()
-    with pytest.raises(ValueError, match="boom"):
-        with ctx("a"):
-            assert ctx.get_active() == "a"
-            raise ValueError("boom")
+    with pytest.raises(ValueError, match="boom"), ctx("a"):
+        assert ctx.get_active() == "a"
+        raise ValueError("boom")
     assert len(ctx) == 0
 
 
