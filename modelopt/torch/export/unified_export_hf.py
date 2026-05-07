@@ -1130,6 +1130,32 @@ def _unpatch_revert_weight_conversion(patches: list[tuple[Any, Any]]) -> None:
         mod.revert_weight_conversion = original
 
 
+def _sanitize_generation_config_for_save(model: torch.nn.Module) -> None:
+    """Coerce ``model.generation_config`` so it passes transformers' strict validation.
+
+    Some upstream HF checkpoints ship a ``generation_config.json`` that mixes
+    ``do_sample=False`` with sampling-only attrs (``top_p``, ``top_k``, ...).
+    Newer transformers raise ``ValueError("GenerationConfig is invalid: ...")``
+    inside ``save_pretrained``, blocking export. We try a strict validate and
+    on failure flip ``do_sample`` to ``True`` so the upstream sampling intent
+    is preserved (rather than silently dropping ``top_p`` etc.). Quietly does
+    nothing if the model has no generation_config or it's already valid.
+    """
+    gc = getattr(model, "generation_config", None)
+    if gc is None or not hasattr(gc, "validate"):
+        return
+    try:
+        gc.validate(strict=True)
+        return
+    except Exception:
+        pass
+    if not getattr(gc, "do_sample", False):
+        try:
+            gc.do_sample = True
+        except Exception:
+            pass
+
+
 def export_speculative_decoding(
     model: torch.nn.Module,
     dtype: torch.dtype | None = None,
@@ -1210,6 +1236,12 @@ def export_hf_checkpoint(
         # We must patch both the source module and the importing module since
         # modeling_utils does `from core_model_loading import revert_weight_conversion`.
         _patches = _patch_revert_weight_conversion()
+
+        # Some upstream HF checkpoints ship a generation_config.json that fails
+        # transformers' strict validation on save (e.g. ``top_p`` set without
+        # ``do_sample=True`` — newer transformers raises). Flip ``do_sample`` to
+        # the sampling-attrs intent so save_pretrained can write the file.
+        _sanitize_generation_config_for_save(model)
 
         try:
             model.save_pretrained(

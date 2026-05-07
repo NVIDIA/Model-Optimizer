@@ -87,11 +87,25 @@ def _export_fused_experts(module: nn.Module, dtype: torch.dtype) -> None:
                 and w_quantizer._amax.dim() >= 1
             ):
                 amax = w_quantizer._amax
+                # Static block-quant calibration (e.g. NVFP4 MSE FP8 sweep)
+                # produces a per-block _amax with shape (num_blocks_total, ...)
+                # where num_blocks_total = fused_total * blocks_per_row. That
+                # shape collapses the row axis we want to slice on. Restore the
+                # row dimension so the dim-0 slicing below splits gate / up
+                # correctly.  No-op when _amax is already aligned with fused_total.
+                if amax.numel() != fused_total and amax.numel() % fused_total == 0:
+                    amax = amax.contiguous().view(fused_total, amax.numel() // fused_total)
                 amax_dim0 = amax.shape[0]
                 if fused_total % amax_dim0 == 0:
                     slice_start = fused_start * amax_dim0 // fused_total
                     slice_end = (fused_start + weight_slice.shape[0]) * amax_dim0 // fused_total
-                    w_quantizer.amax = amax[slice_start:slice_end].contiguous()
+                    sliced = amax[slice_start:slice_end].contiguous()
+                    # The amax setter refuses shape changes once `_amax` exists,
+                    # so drop the existing buffer before re-registering with the
+                    # sliced shape.
+                    if hasattr(w_quantizer, "_amax"):
+                        delattr(w_quantizer, "_amax")
+                    w_quantizer.amax = sliced
                 else:
                     warnings.warn(
                         f"Expert {idx} {proj_name}: fused amax dim0 ({amax_dim0}) does not "
