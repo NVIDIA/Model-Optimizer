@@ -25,6 +25,14 @@ from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
 
 from .eagle.default_config import default_eagle_config, default_kimik2_eagle_config
 
+# Permissive schema for `model:` / `data:` / `training:` recipe snippets used
+# via $import in modelopt_recipes/configs/speculative_decoding/. Real field
+# validation happens downstream in transformers.HfArgumentParser.parse_dict()
+# (examples/speculative_decoding/main.py); this alias exists so snippets can
+# satisfy load_config()'s requirement that modelopt-schema paths resolve under
+# the modelopt.* namespace.
+SpeculativeArgsSnippet = dict
+
 kimik2_eagle_default_config = deepcopy(default_kimik2_eagle_config)
 
 eagle3_default_config = deepcopy(default_eagle_config)
@@ -130,18 +138,6 @@ class DFlashConfig(ModeloptBaseConfig):
         data_args = ctx.get("data_args")
         if data_args is not None and isinstance(data, dict):
             data["dflash_offline"] = getattr(data_args, "offline_data_path", None) is not None
-        return data
-
-    @model_validator(mode="before")
-    @classmethod
-    def _resolve_mask_token_id(cls, data: Any, info: ValidationInfo) -> Any:
-        """Auto-detect ``dflash_mask_token_id`` from tokenizer when provided in context."""
-        if not isinstance(data, dict) or data.get("dflash_mask_token_id") is not None:
-            return data
-        ctx = info.context if info.context else {}
-        tokenizer = ctx.get("tokenizer")
-        if tokenizer is not None and getattr(tokenizer, "mask_token_id", None) is not None:
-            data["dflash_mask_token_id"] = tokenizer.mask_token_id
         return data
 
     @model_validator(mode="after")

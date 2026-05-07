@@ -49,6 +49,7 @@ from transformers.trainer_utils import get_last_checkpoint
 
 import modelopt.torch.opt as mto
 import modelopt.torch.speculative as mtsp
+from modelopt.recipe import load_config
 from modelopt.torch.speculative.config import DFlashConfig, EagleConfig
 from modelopt.torch.speculative.utils import load_vlm_or_llm, patch_transformers5_params_loading
 from modelopt.torch.utils import print_rank_0
@@ -167,10 +168,14 @@ def _load_config(config_path: str, overrides: list[str] = ()) -> tuple[dict, dic
         eagle_cfg: Eagle section dict (EagleConfig fields), passed directly to mtsp.convert()
         dflash_cfg: DFlash section dict (DFlashConfig fields), passed directly to mtsp.convert()
     """
-    merged = OmegaConf.load(config_path)
+    # Resolve $import / imports: via modelopt's loader, then layer OmegaConf
+    # dotlist overrides on top.
+    cfg = load_config(config_path)
+    assert isinstance(cfg, dict), f"Top-level recipe must be a YAML mapping: {config_path}"
     if overrides:
-        merged = OmegaConf.merge(merged, OmegaConf.from_dotlist(list(overrides)))
-    cfg = OmegaConf.to_container(merged, resolve=True)
+        merged = OmegaConf.merge(OmegaConf.create(cfg), OmegaConf.from_dotlist(list(overrides)))
+        cfg = OmegaConf.to_container(merged, resolve=True)
+        assert isinstance(cfg, dict)
 
     # Eagle/DFlash sections map directly to config fields — no field enumeration needed.
     eagle_cfg = cfg.get("eagle", {})
@@ -318,8 +323,15 @@ def train():
                 model.eagle_module.d2t = torch.load(data_args.draft_vocab_cache, weights_only=True)
                 print_rank_0(f"Loaded draft vocab cache from {data_args.draft_vocab_cache}.")
         elif training_args.mode == "dflash":
+            # Mask-token resolution: recipe value wins; otherwise fall back to the
+            # tokenizer's built-in mask_token_id. DFlashConfig still raises if neither
+            # source provides one.
+            if dflash_cfg.get("dflash_mask_token_id") is None:
+                tok_mask_id = getattr(tokenizer, "mask_token_id", None)
+                if tok_mask_id is not None:
+                    dflash_cfg["dflash_mask_token_id"] = tok_mask_id
             dflash_cfg = DFlashConfig.model_validate(
-                dflash_cfg, context={"tokenizer": tokenizer, "data_args": data_args}
+                dflash_cfg, context={"data_args": data_args}
             ).model_dump()
             mtsp.convert(model, [("dflash", dflash_cfg)])
         else:
