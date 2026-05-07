@@ -487,10 +487,20 @@ def batched_normalized_mse_loss(
 
     Useful when activations within a batch item should be normalized independently
     rather than normalizing across the full batch.
+
+    Note: this slightly diverges from the original Puzzle implementation. With
+    per-batch-element normalization, an all-zero target slice produces a
+    denominator of ``epsilon ** 2 ~= 1e-12``, which then explodes the loss for
+    that slice (the global-reduction variant in ``normalized_mse_loss`` dilutes
+    it across non-zero elements, hiding the issue). We clamp the denominator
+    to a floor of ``epsilon`` so the per-element minimum matches the intent of
+    the epsilon term. The clamp only triggers on near-zero target slices —
+    typical activations are unaffected.
     """
     norm_dims = list(set(range(input.ndim)) - set(batch_dims))
     norm_of_target_vectors = F.mse_loss(
         target, torch.zeros_like(target) + epsilon, reduction="none"
     ).mean(norm_dims)
+    norm_of_target_vectors = norm_of_target_vectors.clamp(min=epsilon)
     loss = F.mse_loss(input, target, reduction="none").mean(norm_dims) / norm_of_target_vectors
     return loss.mean()

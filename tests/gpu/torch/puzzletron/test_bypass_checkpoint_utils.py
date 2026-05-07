@@ -13,25 +13,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Save/load round-trip tests for ``bypass_checkpoint_utils``.
+"""Load round-trip tests for ``bypass_checkpoint_utils``.
 
-These tests pin two correctness-critical pieces of ``bypass_checkpoint_utils``:
+These pin that ``load_local_state`` correctly restores the optimizer and
+grad-scaler state from disk into a fresh descriptor — the resume path's
+main job after the recent dedupe (weights are now loaded from the HF
+checkpoint via ``load_and_shard_model``, not from ``stitched/*.pth``).
 
-1. ``_save_local_state`` persists the GradScaler state alongside the optimizer
-   state (regression coverage for the recent CodeRabbit-driven fix — without
-   it, fp16 + use_grad_scaling=True runs silently lost the running scale +
-   growth tracker on resume).
-2. ``load_local_state`` restores it from disk.
-
-Lives under ``tests/gpu/`` because the production ``load_local_state`` builds
-``torch.device(f"cuda:{rank}")`` for ``map_location``, so a real CUDA device
-is required to round-trip ``torch.load`` without monkeypatching the device
-machinery. The full bypass GPU integration test cannot cover this path
-because the test infrastructure ships bf16 and ``GradScaler.step()`` is
-fp16-only (raises ``NotImplementedError:
+Lives under ``tests/gpu/`` because the production ``load_local_state``
+builds ``torch.device(f"cuda:{rank}")`` for ``map_location``, so a real CUDA
+device is required to round-trip ``torch.load`` without monkeypatching the
+device machinery. The full bypass GPU integration test cannot cover this
+path because the test infrastructure ships bf16 and ``GradScaler.step()``
+is fp16-only (raises ``NotImplementedError:
 _amp_foreach_non_finite_check_and_unscale_cuda not implemented for 'BFloat16'``).
-These tests sidestep that by hitting the save/load functions directly,
-without ever invoking ``.step()``.
+These tests sidestep that by hitting the load functions directly, without
+ever invoking ``.step()``.
+
+The corresponding save tests live in tests/unit/torch/puzzletron/
+test_bypass_checkpoint_utils.py — ``_save_local_state`` no longer touches
+CUDA, so it doesn't need a GPU lane.
 """
 
 from collections import OrderedDict
@@ -97,52 +98,6 @@ def _make_descriptor(
         optimizer=optimizer,
         grad_scaler=scaler,
     )
-
-
-# ---------------------------------------------------------------------------
-# Save: every relevant artifact lands on disk
-# ---------------------------------------------------------------------------
-
-
-def test_save_local_state_writes_state_dict_optimizer_and_grad_scaler(tmp_path: Path, bcu_no_dist):
-    bcu = bcu_no_dist
-    descriptor = _make_descriptor()
-    descriptors = OrderedDict([("block_0", descriptor)])
-
-    bcu._save_local_state(descriptors, tmp_path)
-
-    stitched = tmp_path / "stitched"
-    assert (stitched / "block_0.state_dict.pth").exists()
-    assert (stitched / "block_0.optimizer_state.pth").exists()
-    # The CodeRabbit-driven fix added this third file. Without it, resuming
-    # an fp16 + grad-scaling run would default-init the scaler.
-    assert (stitched / "block_0.grad_scaler.pth").exists()
-
-
-def test_save_local_state_skips_grad_scaler_when_descriptor_has_none(tmp_path: Path, bcu_no_dist):
-    bcu = bcu_no_dist
-    descriptor = _make_descriptor(with_scaler=False)
-    descriptors = OrderedDict([("block_0", descriptor)])
-
-    bcu._save_local_state(descriptors, tmp_path)
-
-    stitched = tmp_path / "stitched"
-    assert (stitched / "block_0.state_dict.pth").exists()
-    # No scaler in the descriptor → no .grad_scaler.pth file written.
-    assert not (stitched / "block_0.grad_scaler.pth").exists()
-
-
-def test_save_local_state_skips_optimizer_when_descriptor_has_none(tmp_path: Path, bcu_no_dist):
-    """Pipeline-parallel idle ranks pass optimizer=None; no file should appear."""
-    bcu = bcu_no_dist
-    descriptor = _make_descriptor(with_optimizer=False, with_scaler=False)
-    descriptors = OrderedDict([("block_0", descriptor)])
-
-    bcu._save_local_state(descriptors, tmp_path)
-
-    stitched = tmp_path / "stitched"
-    assert (stitched / "block_0.state_dict.pth").exists()
-    assert not (stitched / "block_0.optimizer_state.pth").exists()
 
 
 # ---------------------------------------------------------------------------

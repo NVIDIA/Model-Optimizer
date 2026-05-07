@@ -51,16 +51,14 @@ from modelopt.torch.puzzletron.sewing_kit import InputArgs, StitchedModule
 from modelopt.torch.puzzletron.sewing_kit.utils import fake_tensor
 from modelopt.torch.puzzletron.tools.checkpoint_utils_hf import load_model_config
 from modelopt.torch.puzzletron.tools.logger import aprint, mprint
-from modelopt.torch.puzzletron.tools.robust_json import json_load
 from modelopt.torch.puzzletron.tools.sharded_checkpoint_utils import load_and_shard_model
 from modelopt.torch.puzzletron.utils.parsing import format_global_config, format_stitched_losses
+from modelopt.torch.utils.robust_json import json_load
 
 from .bypass_checkpoint_utils import find_latest_run_dir, load_local_state, save_bypass_checkpoint
 from .bypass_utils import get_distributed_modules_ownership, set_experiment_dir, set_experiment_id
 from .data_classes import GlobalRank, IterNum, IterStatistics, LocalTrainingStats, TimeToSaveSignal
 from .stitched_model_factory import StitchedModuleDescriptor, StitchedModulesProcessOwnership
-
-time_start = time.time()
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -132,7 +130,12 @@ def train(
 
     dist.barrier()
 
-    time_last_save = time_start
+    # Anchor the time-based save interval at training start, not module import.
+    # Earlier this was a module-level `time_start = time.time()`, which made
+    # the first time-based save fire immediately if the module was imported
+    # well before train() actually ran (e.g. via test collection or Hydra config
+    # resolution).
+    time_last_save = time.time()
     iter_t0 = time.time()
 
     resumed_iter_num = cfg.bypass.iter_num
@@ -284,7 +287,11 @@ def train(
 
         input_overrides["teacher_inputs"] = InputArgs(fake_input_ids)
 
-        iter_stitched_module_losses: dict[str, float] = {}
+        # Collect per-block loss tensors and batch the GPU→CPU copy to a
+        # single sync point at the end of the per-block loop. Doing
+        # ``.to("cpu").item()`` per block forced one CUDA synchronization per
+        # block per iter, serialising the GPU pipeline across N blocks.
+        iter_loss_tensors: dict[str, torch.Tensor] = {}
 
         for local_stitched_module_index, (
             stitched_module_name,
@@ -306,11 +313,15 @@ def train(
                 del stitched_module_output
                 grad_scaler.scale(stitched_module_loss).backward()
             else:
-                stitched_module_loss = torch.full([1], fill_value=torch.nan, dtype=torch.float32)
+                # Match the device of the optimizer-yes branch so all per-block
+                # loss tensors can be stacked into a single GPU tensor below.
+                stitched_module_loss = torch.full(
+                    [1], fill_value=torch.nan, dtype=torch.float32, device=device
+                )
 
-            iter_stitched_module_losses[stitched_module_name] = stitched_module_loss.to(
-                "cpu"
-            ).item()
+            # Detach to drop the autograd graph (we already called backward
+            # above) and defer the GPU→CPU copy to after the per-block loop.
+            iter_loss_tensors[stitched_module_name] = stitched_module_loss.detach()
 
             del stitched_module_loss
 
@@ -349,6 +360,19 @@ def train(
                     grad_scaler.step(optimizer)
                     grad_scaler.update()
                     optimizer.zero_grad(set_to_none=True)
+
+        # Single GPU→CPU sync for all per-block losses collected above. Stacking
+        # into a 1-D tensor lets us issue exactly one ``.to("cpu")`` instead of
+        # one per block.
+        if iter_loss_tensors:
+            loss_stack = torch.stack(
+                [t.flatten()[0] for t in iter_loss_tensors.values()]
+            )
+            iter_stitched_module_losses: dict[str, float] = dict(
+                zip(iter_loss_tensors.keys(), loss_stack.to("cpu").tolist())
+            )
+        else:
+            iter_stitched_module_losses = {}
 
         # Collect losses from all ranks using all_gather_object
         local_training_stats = LocalTrainingStats(
@@ -660,12 +684,39 @@ def run_bypassed_training(cfg: DictConfig):
         ):
             teacher_model_config.text_config.use_cache = False
 
+        # Resume detection has to run BEFORE the weight-loading branch below
+        # so a resume can route through ``load_and_shard_model`` (the HF
+        # checkpoint at ``resume_checkpoint_path`` is now the single source
+        # of truth for weights — see _save_local_state docstring).
+        # set_experiment_id / set_experiment_dir are idempotent and only
+        # depend on cfg.bypass.model.model_config_overrides + cfg.puzzle_dir,
+        # so it's safe to call them this early.
+        set_experiment_id(cfg)
+        set_experiment_dir(cfg)
+        resume_checkpoint_path: Optional[str] = None
+        if cfg.bypass.resume_checkpoint_path is not None:
+            resume_checkpoint_path = cfg.bypass.resume_checkpoint_path
+        elif cfg.bypass.find_last_ckpt_for_resume:
+            _ckpt_dir = find_latest_run_dir(run_parent_dir=cfg.bypass.experiment_dir)
+            if _ckpt_dir is None:
+                mprint("Couldn't find any run dir for resume, assuming this is the first job")
+            else:
+                mprint(
+                    f"`cfg.bypass.find_last_ckpt_for_resume` is True. "
+                    f"Auto-found a checkpoint to resume: `{_ckpt_dir}`"
+                )
+                resume_checkpoint_path = _ckpt_dir
+
+        # Both ``init_checkpoint_path`` and ``resume_checkpoint_path`` point at
+        # an HF-format directory; share the same loader. ``init_checkpoint_path``
+        # wins if both are set (explicit user override beats auto-detect).
+        weight_load_path = cfg.bypass.init_checkpoint_path or resume_checkpoint_path
         student_model = None
-        if cfg.bypass.init_checkpoint_path is not None:
-            mprint(f"Loading student model from {cfg.bypass.init_checkpoint_path}")
+        if weight_load_path is not None:
+            mprint(f"Loading student model from {weight_load_path}")
             student_model = load_and_shard_model(
                 descriptor=descriptor,
-                checkpoint_path=cfg.bypass.init_checkpoint_path,
+                checkpoint_path=weight_load_path,
                 owned_block_indexes=owned_block_indexes,
             )
 
@@ -772,10 +823,8 @@ def run_bypassed_training(cfg: DictConfig):
                 bos_rate=cfg.bypass.data.bos_rate,
             )
 
-        # Set ID from experiment configuration
-        set_experiment_id(cfg)
-        # Set directory for experiment ID
-        set_experiment_dir(cfg)
+        # set_experiment_id / set_experiment_dir already ran above (before
+        # weight loading) so the resume detection could use experiment_dir.
 
         dist.barrier()
 
@@ -798,21 +847,10 @@ def run_bypassed_training(cfg: DictConfig):
                 student_model=student_model,
             )
 
-        # Check whether to resume from checkpoint
-        resume_checkpoint_path = None
-        if cfg.bypass.resume_checkpoint_path is not None:
-            resume_checkpoint_path = cfg.bypass.resume_checkpoint_path
-        elif cfg.bypass.find_last_ckpt_for_resume:
-            _ckpt_dir = find_latest_run_dir(run_parent_dir=cfg.bypass.experiment_dir)
-            if _ckpt_dir is None:
-                mprint("Couldn't find any run dir for resume, assuming this is the first job")
-            else:
-                mprint(
-                    f"`cfg.bypass.find_last_ckpt_for_resume` is True. "
-                    f"Auto-found a checkpoint to resume: `{_ckpt_dir}`"
-                )
-                resume_checkpoint_path = _ckpt_dir
-
+        # ``resume_checkpoint_path`` was determined earlier (before weight
+        # loading); the student weights are already in place via
+        # ``load_and_shard_model``. Only the optimizer/scaler state needs to
+        # be restored from the per-block ``stitched/`` files.
         if resume_checkpoint_path:
             load_local_state(
                 stitched_module_descriptors=stitched_module_descriptors,

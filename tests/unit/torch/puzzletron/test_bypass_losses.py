@@ -113,3 +113,23 @@ def test_batched_normalized_mse_loss_custom_dims():
     assert loss.ndim == 0  # scalar
     assert torch.isfinite(loss)
     assert loss.item() > 0.0
+
+
+def test_batched_normalized_mse_loss_zero_target_does_not_explode():
+    """All-zero target slice would otherwise divide by epsilon**2 ~= 1e-12 and
+    blow the loss up to ~1e12; the clamp on the per-vector denominator floors
+    that at epsilon, keeping the loss bounded for the all-zero-target case.
+
+    Without the clamp, this test asserts a value on the order of 1e12 instead
+    of a small finite number.
+    """
+    # One batch element with all-zero target; non-zero input forces a positive
+    # numerator so the division actually exercises the denominator path.
+    input_ = torch.full((1, 8), 1.0)
+    target = torch.zeros(1, 8)
+    loss = batched_normalized_mse_loss(input_, target)
+    assert torch.isfinite(loss)
+    # With clamp(min=epsilon=1e-6), denominator is ≈ epsilon, numerator is
+    # mse(1.0, 0.0) = 1.0 → loss ≈ 1.0 / 1e-6 = 1e6 (not 1e12). Use a loose
+    # upper bound to pin "doesn't explode" without coupling to epsilon's value.
+    assert loss.item() < 1e9

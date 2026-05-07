@@ -196,24 +196,33 @@ def test_save_local_file_overwrite_false_skips_existing(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
-# _save_local_state — CPU-mirror of the three GPU save tests so codecov sees them
+# _save_local_state: optimizer + grad_scaler only.
+# Weights deliberately do NOT land here — the HF checkpoint at the same
+# directory carries the full student state dict via ``save_checkpoint``.
+# Saving the per-block weights again would just double the disk footprint.
 # ---------------------------------------------------------------------------
 
 
-def test_save_local_state_writes_state_dict_optimizer_and_grad_scaler(tmp_path: Path, bcu_no_dist):
+def test_save_local_state_writes_optimizer_and_grad_scaler(tmp_path: Path, bcu_no_dist):
     descriptors = OrderedDict([("block_0", _make_descriptor())])
     bcu_no_dist._save_local_state(descriptors, tmp_path)
     stitched = tmp_path / "stitched"
-    assert (stitched / "block_0.state_dict.pth").exists()
     assert (stitched / "block_0.optimizer_state.pth").exists()
     assert (stitched / "block_0.grad_scaler.pth").exists()
+
+
+def test_save_local_state_does_not_write_weights_state_dict(tmp_path: Path, bcu_no_dist):
+    """Pin the de-duplication: weights live in the HF checkpoint, not here."""
+    descriptors = OrderedDict([("block_0", _make_descriptor())])
+    bcu_no_dist._save_local_state(descriptors, tmp_path)
+    assert not (tmp_path / "stitched" / "block_0.state_dict.pth").exists()
 
 
 def test_save_local_state_skips_grad_scaler_when_descriptor_has_none(tmp_path: Path, bcu_no_dist):
     descriptors = OrderedDict([("block_0", _make_descriptor(with_scaler=False))])
     bcu_no_dist._save_local_state(descriptors, tmp_path)
     stitched = tmp_path / "stitched"
-    assert (stitched / "block_0.state_dict.pth").exists()
+    assert (stitched / "block_0.optimizer_state.pth").exists()
     assert not (stitched / "block_0.grad_scaler.pth").exists()
 
 
@@ -223,8 +232,8 @@ def test_save_local_state_skips_optimizer_when_descriptor_has_none(tmp_path: Pat
     )
     bcu_no_dist._save_local_state(descriptors, tmp_path)
     stitched = tmp_path / "stitched"
-    assert (stitched / "block_0.state_dict.pth").exists()
     assert not (stitched / "block_0.optimizer_state.pth").exists()
+    assert not (stitched / "block_0.grad_scaler.pth").exists()
 
 
 # ---------------------------------------------------------------------------

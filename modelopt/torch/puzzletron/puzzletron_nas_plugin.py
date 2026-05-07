@@ -342,22 +342,41 @@ class PuzzletronSearcher(BaseSearcher):
         puzzle_dir = Path(self.model.puzzle_dir)
         replacement_library_path = puzzle_dir / "replacement_library.json"
         subblock_stats_path = puzzle_dir / hydra_cfg.calc_subblock_stats.subblock_stats_filename
-        # Detect a stale library: any ckpts/* entry newer than the library file means
-        # a new replacement (e.g. bypass-trained subblocks) appeared after the last build
-        # and must be picked up. Without this check, our skip-if-done would happily reuse
-        # a no-bypass library even after bypass completes.
+        # Detect a stale library: any ckpts/* entry whose finalisation marker
+        # is newer than the library file means a new replacement (e.g. bypass-
+        # trained subblocks) appeared after the last build and must be picked
+        # up. Without this check, our skip-if-done would happily reuse a
+        # no-bypass library even after bypass completes.
+        #
+        # We probe ``config.json`` rather than the directory mtime because:
+        # 1. directory mtime tracks "an entry was added/removed", not "a file
+        #    inside was modified" — adding new shards to an existing checkpoint
+        #    dir wouldn't bump the dir mtime;
+        # 2. ``entry.resolve()`` on a dangling symlink raises (or returns a
+        #    non-existent path), which the previous code's ``resolved.exists()``
+        #    silently treated as "not stale";
+        # 3. ``config.json`` is written last when a checkpoint is finalised —
+        #    its mtime is the real "checkpoint ready" timestamp.
+        # The check is conservative: false positives just trigger a rebuild,
+        # which is safe.
         ckpts_dir = puzzle_dir / "ckpts"
         library_is_stale = False
         if replacement_library_path.exists() and ckpts_dir.exists():
             library_mtime = replacement_library_path.stat().st_mtime
             for entry in ckpts_dir.iterdir():
-                # Resolve symlinks (bypass + pruning checkpoints land here as symlinks
-                # to the real directories elsewhere under puzzle_dir).
-                resolved = entry.resolve() if entry.is_symlink() else entry
-                if resolved.exists() and resolved.stat().st_mtime > library_mtime:
+                # `Path.stat()` follows symlinks by default, so this works
+                # whether `entry` is a real dir or a symlink to one (the
+                # bypass and pruning pipelines both land here as symlinks).
+                # `try` guards against dangling symlinks (FileNotFoundError).
+                config_path = entry / "config.json"
+                try:
+                    config_mtime = config_path.stat().st_mtime
+                except (FileNotFoundError, OSError):
+                    continue
+                if config_mtime > library_mtime:
                     library_is_stale = True
                     mprint(
-                        f"Replacement library is stale: '{entry.name}' is newer than the existing library, will rebuild."
+                        f"Replacement library is stale: '{entry.name}/config.json' is newer than the existing library, will rebuild."
                     )
                     break
         if dist.is_master():

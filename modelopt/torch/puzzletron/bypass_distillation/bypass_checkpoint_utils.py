@@ -28,7 +28,7 @@ import modelopt.torch.utils.distributed as dist
 from modelopt.torch.puzzletron.anymodel.model_descriptor import ModelDescriptor
 from modelopt.torch.puzzletron.tools.checkpoint_utils_hf import save_checkpoint
 from modelopt.torch.puzzletron.tools.logger import aprint, mprint
-from modelopt.torch.puzzletron.tools.robust_json import json_dump
+from modelopt.torch.utils.robust_json import json_dump
 
 from .stitched_model_factory import StitchedModuleDescriptor
 
@@ -73,10 +73,16 @@ def load_local_state(
     stitched_module_descriptors: OrderedDict[str, StitchedModuleDescriptor],
     checkpoint_path: str | Path,
 ) -> None:
-    """Load local state from a checkpoint.
+    """Load optimizer and grad-scaler state for each stitched module.
 
-    Loads both optimizer and state dicts into stitched module descriptors.
-    Modifies stitched_module_descriptors in place.
+    Weights are NOT loaded here — they live in the HF checkpoint at
+    ``checkpoint_path`` and must be loaded into the student model via
+    ``load_and_shard_model`` before this function runs (typically by setting
+    ``init_checkpoint_path`` to the resume directory). This avoids
+    persisting the same parameters twice (once in ``stitched/*.pth`` and
+    once in the HF state dict).
+
+    Modifies ``stitched_module_descriptors`` in place.
     """
     device = torch.device(f"cuda:{dist.local_rank()}")
     load_dir = Path(checkpoint_path)
@@ -85,17 +91,8 @@ def load_local_state(
         raise RuntimeError(f'Can\'t load local state. "{load_dir}" does not exist.')
 
     for stitched_module_name, stitched_module_descriptor in stitched_module_descriptors.items():
-        stitched_module = stitched_module_descriptor.stitched_module
         optimizer = stitched_module_descriptor.optimizer
         grad_scaler = stitched_module_descriptor.grad_scaler
-
-        state_dict_path = load_dir / "stitched" / f"{stitched_module_name}.state_dict.pth"
-        mprint(f"Loading state dict for module {stitched_module_name} from {state_dict_path}")
-        loaded_state_dict = torch.load(state_dict_path, map_location=device, weights_only=True)
-        loaded_state_dict = {**stitched_module.state_dict(), **loaded_state_dict}
-
-        stitched_module.load_state_dict(loaded_state_dict)
-        del loaded_state_dict
 
         if optimizer is not None:
             optimizer_state_path = (
@@ -144,6 +141,16 @@ def _save_local_state(
     checkpoint_dir: Path | str,
     overwrite=True,
 ) -> None:
+    """Persist optimizer and grad-scaler state for each stitched module.
+
+    Weights are intentionally NOT saved here. The same trainable parameters
+    would otherwise land on disk twice — once as ``stitched/{block}.state_dict.pth``
+    and once as part of the HF checkpoint that ``save_bypass_checkpoint``
+    writes at the top level via ``save_checkpoint(model, ...)``. The HF
+    checkpoint is the single source of truth for weights; this directory
+    only carries the optimizer/scaler state that the HF format doesn't
+    cover.
+    """
     save_dir = Path(checkpoint_dir) / "stitched"
 
     if dist.is_master():
@@ -158,17 +165,9 @@ def _save_local_state(
         optimizer = stitched_module_descriptor.optimizer
         grad_scaler = stitched_module_descriptor.grad_scaler
 
-        state_dict_path = save_dir / f"{stitched_module_name}.state_dict.pth"
-        aprint(f"Saving state dict for module {stitched_module_name} to {state_dict_path}")
-        state_dict = {
-            **stitched_module_descriptor.owned_parameters,
-            **stitched_module_descriptor.owned_buffers,
-        }
-        _save_local_file(state_dict, state_dict_path, overwrite=overwrite)
-
         if optimizer is not None:
             optimizer_state_path = save_dir / f"{stitched_module_name}.optimizer_state.pth"
-            mprint(
+            aprint(
                 f"Saving optimizer state for module {stitched_module_name} to {optimizer_state_path}"
             )
             _save_local_file(optimizer.state_dict(), optimizer_state_path, overwrite=overwrite)

@@ -522,6 +522,12 @@ def bypass_factory_fn(
             )
             student_stitched_module_name = f"block_{global_block_index}"
             student_submodule_target = ModuleTarget("student_submodule", module)
+            # When a block returns a tuple, ``v[0]`` is the hidden state by
+            # HF convention — every HF transformer block (Llama, Qwen, GPT-OSS,
+            # NemotronH, …) returns ``(hidden_states, *aux)``, with ``aux``
+            # varying (attention weights, KV cache, router logits, …) but
+            # element 0 always being the hidden state. Puzzletron is HF-format-
+            # only, so this assumption holds across every supported family.
             student_stitched_module = (
                 Needle()
                 .stitch(
@@ -557,11 +563,6 @@ def bypass_factory_fn(
             )
 
             assert "learning_rate" in cfg.training
-            num_trainable_params = sum(
-                p.requires_grad and submodule_name in p_name
-                for p_name, p in student_stitched_module.named_parameters()
-                if "dummy_param" not in p_name  # exclude placeholder params
-            )
             # Do NOT enable dummy params: blocks with no real trainable parameters
             # (e.g. Mamba blocks during an attention-only bypass run) should produce
             # NaN loss so they are excluded from statistics — identical to the

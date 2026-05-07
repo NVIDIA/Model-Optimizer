@@ -178,8 +178,18 @@ class GptOssModelDescriptor(ModelDescriptor):
         Note: Expert removal works for unquantized models (test models).
         Production models use MXFP4 quantization which is not yet supported.
         """
+        # Single instance shared between the canonical key and the legacy alias
+        # so resolve_pruning_mixin returns the same object regardless of which
+        # name a caller uses.
+        expert_mixin = ExpertRemovalPruningMixIn(GptOssExpertRemovalLayerDescriptor())
         return {
-            "experts_removal": ExpertRemovalPruningMixIn(GptOssExpertRemovalLayerDescriptor()),
+            "experts_removal": expert_mixin,
+            # Backward-compat alias: this key was "expert_removal" before the
+            # bypass branch standardised on "experts_removal" (matching the
+            # NemotronH descriptor). Kept so external scripts that still call
+            # `resolve_pruning_mixin("expert_removal", GptOssModelDescriptor)`
+            # continue to work. Remove after a deprecation cycle.
+            "expert_removal": expert_mixin,
             "kv_heads": KVHeadsPruningMixIn(GptOssKVHeadsLayerDescriptor()),
         }
 
