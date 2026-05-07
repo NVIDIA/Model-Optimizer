@@ -591,7 +591,7 @@ def _get_lr(cfg: DictConfig, step: int) -> float:
         lr = cfg.bypass.training.min_lr
     # 3) in between, use cosine decay down to min learning rate
     else:
-        decay_ratio = (step - warmup_steps - 1) / (lr_decay_steps - warmup_steps)
+        decay_ratio = (step - warmup_steps) / (lr_decay_steps - warmup_steps)
         assert 0 <= decay_ratio <= 1
         coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))  # coeff ranges 0..1
         lr = cfg.bypass.training.min_lr + coeff * (
