@@ -49,18 +49,7 @@ dense | sparsegpt) ;;
     ;;
 esac
 
-#Iterate over list of qformats provided and check if they are valid
-IFS=","
-for qformat in $QFORMAT; do
-    case $qformat in
-    fp8 | fp8_pc_pt | fp8_pb_wo | int8_wo | int8_sq | int4_awq | w4a8_awq | fp16 | bf16 | nvfp4 | nvfp4_awq | nvfp4_mse | w4a8_nvfp4_fp8 | w4a8_mxfp4_fp8 | nvfp4_experts_only | nvfp4_mlp_only | nvfp4_omlp_only | nvfp4_svdquant | mxfp8 | nvfp4_local_hessian) ;;
-    *)
-        echo "Unknown quant argument: Expected one of: [fp8, fp8_pc_pt, fp8_pb_wo, int8_wo, int8_sq, int4_awq, w4a8_awq, fp16, bf16, nvfp4, nvfp4_awq, nvfp4_mse, w4a8_nvfp4_fp8, w4a8_mxfp4_fp8, nvfp4_experts_only, nvfp4_mlp_only, nvfp4_omlp_only, nvfp4_svdquant, mxfp8, nvfp4_local_hessian]" >&2
-        exit 1
-        ;;
-    esac
-done
-IFS=" "
+# Quant format / recipe validation is delegated to hf_ptq.py.
 
 script_dir="$(dirname "$(readlink -f "$0")")"
 
@@ -72,7 +61,14 @@ fi
 
 QFORMAT_MODIFIED="${QFORMAT//,/_}"
 
-MODEL_NAME=$(basename $MODEL_PATH | sed 's/[^0-9a-zA-Z\-]/_/g')_${QFORMAT_MODIFIED}${KV_CACHE_QUANT:+_kv_${KV_CACHE_QUANT}}
+# When using --recipe, build the model name from the recipe basename (without
+# directory or .yaml suffix) so each recipe gets its own SAVE_PATH.
+if [ -n "$RECIPE" ]; then
+    RECIPE_TAG=$(basename "$RECIPE" .yaml | sed 's/[^0-9a-zA-Z\-]/_/g')
+    MODEL_NAME=$(basename $MODEL_PATH | sed 's/[^0-9a-zA-Z\-]/_/g')_recipe_${RECIPE_TAG}
+else
+    MODEL_NAME=$(basename $MODEL_PATH | sed 's/[^0-9a-zA-Z\-]/_/g')_${QFORMAT_MODIFIED}${KV_CACHE_QUANT:+_kv_${KV_CACHE_QUANT}}
+fi
 
 SAVE_PATH=${ROOT_SAVE_PATH}/saved_models_${MODEL_NAME}
 
@@ -177,11 +173,16 @@ if [[ $TASKS =~ "quant" ]] || [[ ! -d "$SAVE_PATH" ]] || [[ ! $(ls -A $SAVE_PATH
 
     if [[ "$MODEL_CONFIG_EXIST" == false ]]; then
         echo "Quantizing original model..."
+        if [ -n "$RECIPE" ]; then
+            QUANT_SPEC_ARGS="--recipe=$RECIPE"
+        else
+            QUANT_SPEC_ARGS="--qformat=${QFORMAT// /,}"
+        fi
         python hf_ptq.py \
             --pyt_ckpt_path=$MODEL_PATH \
             --export_path=$SAVE_PATH \
             --sparsity_fmt=$SPARSITY_FMT \
-            --qformat="${QFORMAT// /,}" \
+            $QUANT_SPEC_ARGS \
             --calib_size=$CALIB_SIZE \
             --batch_size=$CALIB_BATCH_SIZE \
             --inference_tensor_parallel=$TP \
@@ -203,13 +204,18 @@ if [[ $TASKS =~ "quant" ]] || [[ ! -d "$SAVE_PATH" ]] || [[ ! $(ls -A $SAVE_PATH
         exit 0
     fi
 
-    if [[ "$QFORMAT" == *"nvfp4"* ]] || [[ "$KV_CACHE_QUANT" == *"nvfp4"* ]]; then
+    if [[ "$QFORMAT" == *"nvfp4"* ]] || [[ "$KV_CACHE_QUANT" == *"nvfp4"* ]] || [[ "$RECIPE" == *"nvfp4"* ]]; then
         cuda_major=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader -i 0 | cut -d. -f1)
 
         if [ "$cuda_major" -lt 10 ]; then
             echo "Please deploy the NVFP4 checkpoint on a Blackwell GPU. Checkpoint export_path: $SAVE_PATH"
             exit 0
         fi
+    fi
+
+    if [ -n "$RECIPE" ]; then
+        echo "Recipe $RECIPE used. Please deploy with TensorRT-LLM directly. Checkpoint export_path: $SAVE_PATH"
+        exit 0
     fi
 
     if [[ ! " fp8 nvfp4 bf16 fp16 " =~ " ${QFORMAT} " ]]; then
