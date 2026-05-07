@@ -22,7 +22,7 @@ imports:
 
 metadata:
   recipe_type: ptq
-  description: NVFP4 static weight (MSE FP8-scale sweep) and dynamic activation for all linear layers (W4A4), FP8 KV cache with constant amax.
+  description: NVFP4 static weight (MSE FP8-scale sweep) and dynamic activation for MLP/MoE linear layers (W4A4), FP8 KV cache with constant amax.
 quantize:
   algorithm:
     method: mse

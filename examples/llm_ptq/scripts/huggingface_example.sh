@@ -65,9 +65,9 @@ QFORMAT_MODIFIED="${QFORMAT//,/_}"
 # directory or .yaml suffix) so each recipe gets its own SAVE_PATH.
 if [ -n "$RECIPE" ]; then
     RECIPE_TAG=$(basename "$RECIPE" .yaml | sed 's/[^0-9a-zA-Z\-]/_/g')
-    MODEL_NAME=$(basename $MODEL_PATH | sed 's/[^0-9a-zA-Z\-]/_/g')_recipe_${RECIPE_TAG}
+    MODEL_NAME=$(basename "$MODEL_PATH" | sed 's/[^0-9a-zA-Z\-]/_/g')_recipe_${RECIPE_TAG}
 else
-    MODEL_NAME=$(basename $MODEL_PATH | sed 's/[^0-9a-zA-Z\-]/_/g')_${QFORMAT_MODIFIED}${KV_CACHE_QUANT:+_kv_${KV_CACHE_QUANT}}
+    MODEL_NAME=$(basename "$MODEL_PATH" | sed 's/[^0-9a-zA-Z\-]/_/g')_${QFORMAT_MODIFIED}${KV_CACHE_QUANT:+_kv_${KV_CACHE_QUANT}}
 fi
 
 SAVE_PATH=${ROOT_SAVE_PATH}/saved_models_${MODEL_NAME}
@@ -159,17 +159,6 @@ else
 fi
 
 if [[ $TASKS =~ "quant" ]] || [[ ! -d "$SAVE_PATH" ]] || [[ ! $(ls -A $SAVE_PATH) ]]; then
-
-    if [ "$qformat" == "bf16" ] || [ "$qformat" == "fp16" ]; then
-        if [ -d "$MODEL_PATH" ]; then
-            MODEL_CONFIG_EXIST=true
-            MODEL_CONFIG=$MODEL_PATH/config.json
-            for file in $MODEL_PATH/*; do ln -sf "$file" $SAVE_PATH/; done
-        else
-            echo "Please use the model directory where the config.json file is present."
-            exit 1
-        fi
-    fi
 
     if [[ "$MODEL_CONFIG_EXIST" == false ]]; then
         echo "Quantizing original model..."
