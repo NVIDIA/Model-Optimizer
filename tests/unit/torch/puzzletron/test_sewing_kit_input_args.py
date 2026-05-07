@@ -76,8 +76,11 @@ def test_add_does_not_mutate_operands():
 
 
 def test_add_rejects_non_input_args():
+    # ``__add__`` enforces InputArgs+InputArgs only via an internal assert.
+    # ruff's RUF005 auto-fix to ``[*InputArgs(1), 2]`` would silently replace
+    # the operator call we're testing — keep the explicit ``+`` form.
     with pytest.raises(AssertionError):
-        InputArgs(1) + [2]  # type: ignore[operator]
+        InputArgs(1) + [2]  # type: ignore[operator]  # noqa: RUF005
 
 
 # ---------------------------------------------------------------------------

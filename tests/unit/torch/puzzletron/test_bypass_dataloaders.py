@@ -40,7 +40,6 @@ from modelopt.torch.puzzletron.utils.data.dataloaders import (
     realize_dataset_in_memory,
 )
 
-
 # ---------------------------------------------------------------------------
 # realize_dataset_in_memory: pure list materialisation with optional cap
 # ---------------------------------------------------------------------------

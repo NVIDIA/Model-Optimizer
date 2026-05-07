@@ -28,8 +28,9 @@ from modelopt.torch.puzzletron.sewing_kit.utils import (
     ActivityContext,
     ActivityContextDuplicateException,
     ActivityContextMaxDepthException,
+    is_submodule_of,
+    is_submodule_or_same,
 )
-
 
 # ---------------------------------------------------------------------------
 # Basic push/pop semantics via the ``with ctx(value):`` form
@@ -145,12 +146,6 @@ def test_stack_unwinds_when_body_raises():
 # ---------------------------------------------------------------------------
 # is_submodule_of / is_submodule_or_same — string predicates used by passage.py
 # ---------------------------------------------------------------------------
-
-
-from modelopt.torch.puzzletron.sewing_kit.utils import (  # noqa: E402
-    is_submodule_of,
-    is_submodule_or_same,
-)
 
 
 def test_is_submodule_of_proper_descendant():

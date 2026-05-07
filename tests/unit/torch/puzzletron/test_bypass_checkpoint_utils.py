@@ -30,6 +30,7 @@ What's covered here (CPU-only, codecov-visible):
       ``args.json`` dump, ``saving_completed`` marker, master-only gating.
 """
 
+import os
 from collections import OrderedDict
 from pathlib import Path
 
@@ -43,7 +44,6 @@ from modelopt.torch.puzzletron.bypass_distillation import bypass_checkpoint_util
 from modelopt.torch.puzzletron.bypass_distillation.stitched_model_factory import (
     StitchedModuleDescriptor,
 )
-
 
 # ---------------------------------------------------------------------------
 # Shared fixture: silence the dist helpers so these run single-process / CPU.
@@ -284,17 +284,13 @@ def test_save_bypass_checkpoint_creates_latest_symlink_and_marker(
     latest = experiment_dir / "latest"
     assert latest.is_symlink()
     # Symlink target is relative — just the dir name, so it resolves under experiment_dir.
-    import os
-
     assert os.readlink(latest) == "iter-000007-ckpt"
     assert latest.resolve() == checkpoint_dir.resolve()
     assert (checkpoint_dir / "args.json").exists()
     assert (checkpoint_dir / "saving_completed").exists()
 
 
-def test_save_bypass_checkpoint_replaces_existing_latest_symlink(
-    tmp_path: Path, patched_save
-):
+def test_save_bypass_checkpoint_replaces_existing_latest_symlink(tmp_path: Path, patched_save):
     """A stale ``latest`` from a prior save must be replaced, not appended to.
     Without ``unlink(missing_ok=True)`` the symlink_to() call would raise
     FileExistsError mid-save and leave the run unable to checkpoint."""
@@ -314,8 +310,6 @@ def test_save_bypass_checkpoint_replaces_existing_latest_symlink(
         stitched_module_descriptors=OrderedDict(),
         checkpoint_dir=new_target,
     )
-
-    import os
 
     assert os.readlink(experiment_dir / "latest") == "iter-000007-ckpt"
 
