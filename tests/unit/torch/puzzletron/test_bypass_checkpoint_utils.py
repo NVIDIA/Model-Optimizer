@@ -200,9 +200,7 @@ def test_save_local_file_overwrite_false_skips_existing(tmp_path: Path):
 # ---------------------------------------------------------------------------
 
 
-def test_save_local_state_writes_state_dict_optimizer_and_grad_scaler(
-    tmp_path: Path, bcu_no_dist
-):
+def test_save_local_state_writes_state_dict_optimizer_and_grad_scaler(tmp_path: Path, bcu_no_dist):
     descriptors = OrderedDict([("block_0", _make_descriptor())])
     bcu_no_dist._save_local_state(descriptors, tmp_path)
     stitched = tmp_path / "stitched"
@@ -211,9 +209,7 @@ def test_save_local_state_writes_state_dict_optimizer_and_grad_scaler(
     assert (stitched / "block_0.grad_scaler.pth").exists()
 
 
-def test_save_local_state_skips_grad_scaler_when_descriptor_has_none(
-    tmp_path: Path, bcu_no_dist
-):
+def test_save_local_state_skips_grad_scaler_when_descriptor_has_none(tmp_path: Path, bcu_no_dist):
     descriptors = OrderedDict([("block_0", _make_descriptor(with_scaler=False))])
     bcu_no_dist._save_local_state(descriptors, tmp_path)
     stitched = tmp_path / "stitched"
@@ -221,9 +217,7 @@ def test_save_local_state_skips_grad_scaler_when_descriptor_has_none(
     assert not (stitched / "block_0.grad_scaler.pth").exists()
 
 
-def test_save_local_state_skips_optimizer_when_descriptor_has_none(
-    tmp_path: Path, bcu_no_dist
-):
+def test_save_local_state_skips_optimizer_when_descriptor_has_none(tmp_path: Path, bcu_no_dist):
     descriptors = OrderedDict(
         [("block_0", _make_descriptor(with_optimizer=False, with_scaler=False))]
     )
@@ -264,9 +258,7 @@ def patched_save(monkeypatch, bcu_no_dist):
     return bcu_no_dist
 
 
-def test_save_bypass_checkpoint_creates_latest_symlink_and_marker(
-    tmp_path: Path, patched_save
-):
+def test_save_bypass_checkpoint_creates_latest_symlink_and_marker(tmp_path: Path, patched_save):
     experiment_dir = tmp_path / "exp"
     experiment_dir.mkdir()
     checkpoint_dir = experiment_dir / "iter-000007-ckpt"
