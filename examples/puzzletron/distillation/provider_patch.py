@@ -57,6 +57,44 @@ _PATCH_SENTINEL = "_mbridge_provider_patch_applied"
 _DISTILLATION_PATCH_SENTINEL = "_mbridge_distillation_patch_applied"
 
 
+def _has_fully_pruned_slot(block_configs: Optional[List[Any]]) -> bool:
+    """Return True iff any block has both ``attention.no_op`` and ``ffn.no_op`` set.
+
+    Puzzletron's MIP solver may prune a slot entirely (both subblocks set to no-op).
+    On the HF AnyModel side those slots are rendered as identity passthroughs (see
+    ``NemotronHV3ModelDescriptor._block_no_op_post_init``) and the saver writes no
+    ``block_<i>_attention.safetensors`` / ``block_<i>_ffn.safetensors`` for them.
+
+    On the MCore side, however, ``MambaStack`` knows only the layer-symbol set
+    ``{M, G, *, -, E}`` — it has no ``NoOp`` symbol — so it builds a full
+    ``TransformerLayer`` / ``MambaLayer`` / etc. for every slot, regardless of
+    ``no_op`` flags. With nothing to copy in from the HF state_dict, the
+    weights stay at default init (often zero) and gradients NaN at iter 1.
+
+    When this helper returns True, callers should set ``apply_no_ops=True`` on
+    ``mbridge_patcher`` so ``_apply_no_ops()`` replaces the doubly-pruned slot's
+    submodules with ``NoOpWithBias`` after construction, restoring HF↔MCore
+    structural isomorphism.
+
+    Both ``BlockConfig`` objects (with ``.attention.no_op`` etc.) and plain dicts
+    (with ``["attention"]["no_op"]``) are accepted.
+    """
+    if not block_configs:
+        return False
+    for bc in block_configs:
+        attn = getattr(bc, "attention", None) if not isinstance(bc, dict) else bc.get("attention")
+        ffn = getattr(bc, "ffn", None) if not isinstance(bc, dict) else bc.get("ffn")
+        attn_no_op = (
+            getattr(attn, "no_op", False) if not isinstance(attn, dict) else attn.get("no_op", False)
+        ) if attn is not None else False
+        ffn_no_op = (
+            getattr(ffn, "no_op", False) if not isinstance(ffn, dict) else ffn.get("no_op", False)
+        ) if ffn is not None else False
+        if attn_no_op and ffn_no_op:
+            return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -195,11 +233,19 @@ def _patched_provide(self: Any, *args: Any, **kwargs: Any) -> Any:
 
     # Mamba/hybrid providers: each MambaStack slot is already a single dedicated layer type
     # chosen by the spec (MambaLayer, TransformerLayer for attention, MLPLayer, or
-    # MoETransformerLayer).  The spec handles the "no_op" concept intrinsically — there is
-    # no combined attention+MLP TransformerLayer to partially disable.  Setting
-    # apply_no_ops=False prevents incorrectly replacing non-existent submodules.
+    # MoETransformerLayer). For the canonical (un-pruned) Nemotron-H pattern, the spec
+    # alone is sufficient — there is no combined attention+MLP TransformerLayer to
+    # partially disable, and apply_no_ops=False would just be a noisy no-op.
+    #
+    # However, Puzzletron's MIP solver may prune *entire* slots, marking both
+    # block_config.attention.no_op and block_config.ffn.no_op as True. The
+    # MambaStack layer-symbol set ({M, G, *, -, E}) has no NoOp symbol, so MambaStack
+    # still builds a full TransformerLayer / MambaLayer / etc. for that slot, with
+    # uninitialised weights (no rows in the HF state_dict). _apply_no_ops() must run
+    # to replace those submodules with NoOpWithBias; otherwise iter-1 gradients NaN
+    # (see distill.py `_ParamNormProbe` diagnostic for confirmation).
     is_mamba_provider = "Mamba" in type(self).__name__
-    apply_no_ops = not is_mamba_provider
+    apply_no_ops = (not is_mamba_provider) or _has_fully_pruned_slot(block_configs)
 
     logger.info(
         "%s.provide(): activating mbridge_patcher "
@@ -285,9 +331,13 @@ def apply_distillation_patch() -> None:
             return _call_orig()
 
         # Detect student architecture: Mamba providers use the spec as the no_op mechanism,
-        # so apply_no_ops=False prevents incorrect submodule replacement.
+        # so apply_no_ops=False prevents incorrect submodule replacement — *unless* the
+        # block_configs contain a fully-pruned slot (attention.no_op && ffn.no_op), in
+        # which case _apply_no_ops() must run to replace the still-built TransformerLayer
+        # with NoOpWithBias. See _has_fully_pruned_slot() docstring and `_patched_provide`
+        # for the full explanation.
         is_student_mamba = "Mamba" in self._super_class.__name__
-        apply_no_ops = not is_student_mamba
+        apply_no_ops = (not is_student_mamba) or _has_fully_pruned_slot(student_bc)
 
         logger.info(
             "DistillationProvider.provide(): activating mbridge_patcher for student "

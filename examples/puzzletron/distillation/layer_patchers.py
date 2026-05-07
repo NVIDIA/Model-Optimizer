@@ -12,96 +12,31 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Context manager that patches MCore layer construction for heterogeneous AnyModel models.
+"""Patch MCore layer construction for heterogeneous AnyModel/Puzzletron checkpoints.
 
-Problem statement
------------------
-Megatron Bridge providers (``GPTModelProvider``, ``MambaModelProvider``, etc.) are dataclasses
-that hold a *single* global ``TransformerConfig``. When ``provider.provide()`` builds the model,
-MCore constructs every decoder layer using this one shared config. For heterogeneous
-(AnyModel / Puzzletron) checkpoints, each layer has its own architecture: different
-``num_moe_experts``, ``ffn_hidden_size``, GQA ``num_query_groups``, Mamba state dims, etc.
-Building all layers from the same global config produces the wrong weight shapes and causes
-weight-loading failures.
+Megatron Bridge providers hold a single global ``TransformerConfig``. When
+``provider.provide()`` builds the model, every decoder layer is constructed from
+this one shared config — wrong for heterogeneous (AnyModel / Puzzletron)
+checkpoints where each layer can have its own ``num_moe_experts``,
+``ffn_hidden_size``, GQA grouping, Mamba state dims, etc.
 
-How the patcher works
----------------------
-The patcher intercepts MCore's per-layer construction by monkey-patching
-``megatron.core.transformer.spec_utils.build_module``.  Every transformer layer is built
-through this single function, so intercepting it lets us inject per-layer config overrides
-before the layer's ``__init__`` runs.
+The :func:`mbridge_patcher` context manager intercepts MCore's per-layer
+construction by monkey-patching ``build_module`` in three module namespaces and
+``MambaLayer.__init__``, injecting per-layer config overrides from the
+provider's ``block_configs`` and (optionally) replacing disabled subblocks with
+:class:`NoOpWithBias` / :class:`NoOpRMSNorm`.
 
-Three module-level references to ``build_module`` must be patched simultaneously:
+See the docstrings of the individual functions / classes for the details:
 
-    1. ``megatron.core.transformer.spec_utils``        — the primary definition.
-    2. ``megatron.core.transformer.transformer_block`` — a local alias imported at module load.
-    3. ``megatron.core.ssm.mamba_block``               — another local alias (critical!).
-
-Why mamba_block needs its own patch
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-``megatron.core.ssm.mamba_block`` (``MambaStack``) does::
-
-    from megatron.core.transformer.spec_utils import build_module   # top-of-file import
-
-This creates a local reference in the ``mamba_block`` module namespace.  Patching only
-``spec_utils.build_module`` leaves ``mamba_block.build_module`` pointing at the original,
-so all 52 slots of a hybrid MambaModel (Mamba, MoE, attention) are built with the *global*
-config and the per-layer overrides are never applied.  Patching the local reference fixes
-this.
-
-MambaLayer.__init__ patching
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-``MambaLayer`` is not built via ``build_module`` — MambaStack calls it directly.  So we also
-patch ``MambaLayer.__init__`` to inject Mamba-specific per-layer overrides (``mamba_state_dim``,
-``mamba_head_dim``, ``mamba_num_groups``, ``mamba_num_heads``).
-
-No-op submodule replacement (GPT models only)
-----------------------------------------------
-For GPT / dense-attention models, a BlockConfig may mark the attention or MLP sub-block as
-``no_op``.  After the layer is instantiated with the correct config, those submodules are
-replaced with ``NoOpWithBias``.
-
-**Why IdentityOp is wrong for this job**
-
-MCore's bias-dropout-add residual path expects the output of ``self_attention()`` and
-``mlp()`` to be a *tuple* ``(output_tensor, bias_or_None)``::
-
-    # megatron/core/fusions/fused_bias_dropout.py
-    def _bias_dropout_add_func(x_with_bias, residual, prob, training):
-        x, bias = x_with_bias   # ← unpacking requires a 2-tuple
-
-``IdentityOp.forward(x, *args, **kwargs)`` returns the plain tensor ``x``.  Passing that to
-the BDA function raises ``TypeError: cannot unpack non-sequence Tensor``.
-
-**``NoOpWithBias`` — the correct replacement**
-
-``NoOpWithBias.forward(x, *args, **kwargs)`` returns ``(torch.zeros_like(x), None)``.
-Plugging that into the BDA formula::
-
-    bda((zeros, None), residual, dropout) = dropout(zeros) + residual = residual
-
-The block leaves the hidden state unchanged — exactly the semantics of "no_op".
-
-**MoE ``is_moe_layer`` flag**
-
-When a MoE layer's MLP is replaced with ``NoOpWithBias``, the ``is_moe_layer`` flag on the
-layer (set at ``__init__`` time based on ``isinstance(self.mlp, MoELayer)``) must be reset to
-``False``.  If left as ``True``, the CUDA-graph early-return path in the transformer-layer
-forward runs::
-
-    cudagraph_outputs = self.mlp(pre_mlp_layernorm_output)
-    return cudagraph_outputs + [residual]   # treats tuple as a list → crash
-
-Setting ``layer.is_moe_layer = False`` ensures this path is never taken.
-
-Mamba/hybrid models — apply_no_ops=False
------------------------------------------
-In ``MambaStack``, each slot is *already* a single dedicated MCore layer type chosen by the
-layer spec: ``MambaLayer``, ``TransformerLayer`` (attention slot), ``MLPLayer``, or
-``MoETransformerLayer``.  The spec itself encodes the "no_op" concept — there is no combined
-attention + MLP layer to partially disable.  Setting ``apply_no_ops=False`` (which is done
-automatically by ``_patched_provide`` in ``provider_patch.py``) prevents the patcher from
-incorrectly trying to replace non-existent submodules.
+  * :class:`NoOpWithBias`, :class:`NoOpRMSNorm` — why ``IdentityOp`` is the wrong
+    no-op replacement (output-tuple contract, distributed-checkpoint sharding).
+  * :func:`_apply_no_ops` and :data:`_NO_OP_RULES` — which subblocks get
+    replaced and why we skip layers whose ``*_bda`` is already ``IdentityFuncOp``.
+  * :func:`mbridge_patcher` — the three ``build_module`` namespaces that must be
+    patched simultaneously (``spec_utils``, ``transformer_block``, ``mamba_block``)
+    and why ``MambaLayer`` needs its own ``__init__`` patch.
+  * ``provider_patch._has_fully_pruned_slot`` — when ``apply_no_ops=True`` is
+    needed for Mamba/hybrid providers (fully-pruned ``M`` / ``E`` slots).
 """
 
 from __future__ import annotations
@@ -111,11 +46,14 @@ import logging
 import sys
 import threading
 from contextlib import contextmanager
-from typing import Any, List, Optional, Union
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 import torch
-
 from block_config_utils import MCoreLayerOverrides, get_overrides_for_layer
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 logger = logging.getLogger(__name__)
 
@@ -142,70 +80,61 @@ def _get_ctx():
 
 
 # ---------------------------------------------------------------------------
-# NoOpWithBias — the correct no-op replacement for attention and MLP submodules
+# No-op replacement modules
 # ---------------------------------------------------------------------------
 
 
 class NoOpWithBias(torch.nn.Module):
-    """A no-op module that satisfies MCore's (output, bias) contract.
+    """No-op module that satisfies MCore's ``(output, bias)`` tuple contract.
 
-    MCore's ``bias_dropout_add_func`` expects the output of ``self_attention()`` and ``mlp()``
-    to be a 2-tuple ``(output_tensor, optional_bias)``.  This module returns
-    ``(torch.zeros_like(x), None)`` so that::
+    MCore's ``bias_dropout_add_func`` expects the output of ``self_attention()``
+    and ``mlp()`` to be a 2-tuple ``(output_tensor, optional_bias)``. This
+    module returns ``(torch.zeros_like(x), None)`` so that::
 
         bda((zeros, None), residual, dropout) = dropout(zeros) + residual = residual
 
-    i.e., the block has zero contribution to the hidden state — the correct semantics for
-    a disabled ("no_op") attention or MLP slot.
+    i.e. the block has zero contribution to the hidden state — the correct
+    semantics for a disabled subblock.
 
-    The input ``x`` is the post-layernorm hidden states fed to the submodule.  Its shape
-    always matches the expected output shape (same hidden dimension), so ``zeros_like(x)``
-    produces a correctly shaped zero tensor without any extra shape bookkeeping.
+    ``IdentityOp.forward(x)`` returns the bare tensor and would raise
+    ``TypeError: cannot unpack non-sequence Tensor`` in the BDA path, which is
+    why we cannot simply reuse it here.
 
-    Transformer-Engine / Megatron submodules often expose ``get_extra_state`` /
-    ``set_extra_state`` so ``state_dict`` includes ``_extra_state``.  Megatron distributed
-    checkpointing wraps each ``_extra_state`` as a ``ShardedObject`` with one replica per
-    tensor-parallel rank.  If a replacement module omits ``_extra_state`` on some ranks only,
-    validation fails (missing shard).  These hooks mirror Megatron's ``ColumnParallelLinear``
-    pattern: empty extra state, but present on every rank.
+    The ``get_extra_state`` / ``set_extra_state`` hooks mirror the pattern used
+    by Megatron's TE submodules so distributed-checkpoint sharding (one
+    ``ShardedObject`` replica per TP rank) does not fail validation when
+    ``_extra_state`` is missing on some ranks only.
     """
 
     def forward(self, x: torch.Tensor, *args: Any, **kwargs: Any):
         return torch.zeros_like(x), None
 
     def get_extra_state(self) -> None:
-        """Return empty TE-compatible extra state for distributed checkpoint sharding."""
         return None
 
     def set_extra_state(self, state: Any) -> None:
-        """Ignore loaded extra state (no TE buffers on this no-op)."""
         return None
 
 
 class NoOpRMSNorm(torch.nn.Module):
     """No-op stand-in for ``torch.nn.RMSNorm`` / MCore wrapped RMS norms.
 
-    Transformer layers call ``input_layernorm(x)`` and ``pre_mlp_layernorm(x)`` with a
-    single tensor and expect a tensor back.  This module returns ``x`` unchanged (identity),
-    has **no** ``weight`` parameter, and accepts extra ``*args`` / ``**kwargs`` so calls
-    that match a broader norm API remain valid.
+    Returns ``x`` unchanged, has no ``weight`` parameter, and accepts arbitrary
+    extra ``*args`` / ``**kwargs`` so calls matching a broader norm API stay
+    valid. Contrast with :class:`NoOpWithBias`, which implements the
+    ``(output, bias)`` tuple contract for ``self_attention`` / ``mlp``.
 
-    Contrast with :class:`NoOpWithBias`, which implements the ``(output, bias)`` tuple
-    contract required by ``self_attention`` and ``mlp``.
-
-    See :class:`NoOpWithBias` docstring for why ``get_extra_state`` / ``set_extra_state``
-    are required for Megatron ``torch_dist`` checkpoints when replacing TE norms.
+    See :class:`NoOpWithBias` for why ``get_extra_state`` / ``set_extra_state``
+    are required for ``torch_dist`` checkpoint sharding when replacing TE norms.
     """
 
     def forward(self, x: torch.Tensor, *args: Any, **kwargs: Any) -> torch.Tensor:
-        return torch.zeros_like(x) #x
+        return x
 
     def get_extra_state(self) -> None:
-        """Return empty TE-compatible extra state for distributed checkpoint sharding."""
         return None
 
     def set_extra_state(self, state: Any) -> None:
-        """Ignore loaded extra state (no TE buffers on this no-op)."""
         return None
 
 
@@ -217,13 +146,13 @@ class NoOpRMSNorm(torch.nn.Module):
 def _apply_config_overrides(config: Any, overrides: dict) -> Any:
     """Return a *shallow copy* of ``config`` with ``overrides`` applied.
 
-    Shallow copy avoids deep-copying CUDA tensors or ``ProcessGroup`` objects that may
-    live on the config.  The original config is never mutated.
+    Shallow copy avoids deep-copying CUDA tensors or ``ProcessGroup`` objects
+    that may live on the config. The original config is never mutated.
 
     Raises:
         AttributeError: If an override key does not exist on the config object.
-            This is a hard error — a typo in the override key would silently produce the
-            wrong model if we allowed it to pass through.
+            A typo would silently produce the wrong model if we allowed it
+            through.
     """
     if not overrides:
         return config
@@ -238,60 +167,188 @@ def _apply_config_overrides(config: Any, overrides: dict) -> Any:
     return patched
 
 
-# ---------------------------------------------------------------------------
-# No-op submodule replacement (GPT models only)
-# ---------------------------------------------------------------------------
+def _lookup_and_apply_config(
+    ctx: Any,
+    config: Any,
+    idx: int,
+    *,
+    strict_mamba_slot: bool = False,
+) -> tuple[MCoreLayerOverrides | None, Any]:
+    """Look up per-layer overrides for ``idx`` and apply ``config_overrides``.
 
+    Reads ``num_attention_heads`` / ``hidden_size`` / ``block_configs`` from the
+    thread-local patcher context, falling back to the corresponding fields on
+    ``config`` when the context value is unset. Returns the
+    :class:`MCoreLayerOverrides` for this layer (or ``None``) plus a (possibly
+    new) ``config`` with ``overrides.config_overrides`` applied via
+    :func:`_apply_config_overrides`.
 
-def _apply_no_ops(layer: Any, overrides: MCoreLayerOverrides, global_layer_number: int) -> None:
-    """Replace disabled attention/MLP submodules with ``NoOpWithBias`` on a built layer.
-
-    Must be called after the layer has been fully constructed so the submodule attributes
-    exist.
-
-    Side effects:
-        - If attention_no_op: replaces ``layer.self_attention`` with ``NoOpWithBias()``.
-        - If mlp_no_op: replaces ``layer.mlp`` with ``NoOpWithBias()`` and resets
-          ``layer.is_moe_layer = False`` (see module docstring for why).
+    The ``strict_mamba_slot`` flag is forwarded to ``get_overrides_for_layer``
+    and should be ``True`` only from the MambaLayer path (each MambaStack slot
+    is a single dedicated subblock type).
     """
-    if overrides.attention_no_op:
-        if not hasattr(layer, "self_attention"):
-            logger.warning(
-                "Layer %d: attention_no_op=True but layer has no self_attention attribute "
-                "(layer type=%s). Skipping.",
-                global_layer_number,
-                type(layer).__name__,
-            )
-        else:
-            logger.debug(
-                "Layer %d: replacing self_attention with NoOpWithBias", global_layer_number
-            )
-            #TODO check if input_layernorm is an IdentityOp
-            layer.self_attention = NoOpWithBias()
+    overrides = get_overrides_for_layer(
+        ctx.block_configs,
+        idx,
+        num_attention_heads=ctx.num_attention_heads or getattr(config, "num_attention_heads", 1),
+        hidden_size=ctx.hidden_size or getattr(config, "hidden_size", 0),
+        strict_mamba_slot=strict_mamba_slot,
+    )
+    if overrides and overrides.config_overrides:
+        return overrides, _apply_config_overrides(config, overrides.config_overrides)
+    return overrides, config
 
-    if overrides.mlp_no_op:
-        if not hasattr(layer, "mlp"):
-            logger.warning(
-                "Layer %d: mlp_no_op=True but layer has no mlp attribute "
-                "(layer type=%s). Skipping.",
-                global_layer_number,
-                type(layer).__name__,
-            )
-        else:
-            logger.debug(
-                "Layer %d: replacing mlp with NoOpWithBias", global_layer_number
-            )
-            layer.pre_mlp_layernorm = NoOpRMSNorm()
-            layer.mlp = NoOpWithBias()
 
-            # Critical: reset is_moe_layer so the CUDA graph MoE early-return path is not
-            # taken with our NoOpWithBias (see module docstring for the full explanation).
-            if getattr(layer, "is_moe_layer", False):
-                layer.is_moe_layer = False
-                logger.debug(
-                    "Layer %d: reset is_moe_layer=False after mlp no_op replacement",
-                    global_layer_number,
-                )
+# ---------------------------------------------------------------------------
+# No-op submodule replacement
+# ---------------------------------------------------------------------------
+
+
+def _is_identity_func_op(module: Any) -> bool:
+    """Return True iff ``module`` is MCore's ``IdentityFuncOp``.
+
+    When MCore wires a subblock as ``submodule = IdentityOp`` and
+    ``bda = IdentityFuncOp`` (the canonical no-op pattern for inactive
+    subblocks in MambaStack — e.g. the attention block of an ``E`` slot or the
+    MLP block of a ``*`` slot), the call chain
+    ``bda(...)( submodule(x), residual, dropout )`` evaluates to
+    ``submodule(x) = x`` — a pure tensor pass-through. Replacing
+    ``submodule`` with :class:`NoOpWithBias` (which returns
+    ``(zeros_like(x), None)``) would turn that into a tuple-returning
+    expression that breaks the next layer's ``pre_mlp_layernorm``. Detecting
+    this lets :func:`_apply_no_ops` leave the canonical chain alone.
+    """
+    try:
+        from megatron.core.transformer.identity_op import IdentityFuncOp
+    except ImportError:
+        return False
+    return isinstance(module, IdentityFuncOp)
+
+
+def _reset_is_moe_layer(layer: Any, idx: int) -> None:
+    """Clear ``layer.is_moe_layer`` after the mlp subblock is no-op'd.
+
+    If left as ``True``, the CUDA-graph early-return path in the
+    transformer-layer forward executes
+    ``cudagraph_outputs = self.mlp(pre_mlp_layernorm_output)`` and then treats
+    its tuple result as a list — crashing. Resetting here ensures that path
+    is never taken for a no-op'd MoE slot.
+    """
+    if getattr(layer, "is_moe_layer", False):
+        layer.is_moe_layer = False
+        logger.debug("Layer %d: reset is_moe_layer=False after mlp no_op replacement", idx)
+
+
+@dataclass(frozen=True)
+class _NoOpRule:
+    """Declarative rule for replacing one disabled subblock on a built MCore layer.
+
+    Maps a BlockConfig flag (``attention_no_op`` / ``mlp_no_op``) to:
+
+    * ``layer_attr`` — submodule attribute we want to disable
+      (``self_attention`` / ``mixer`` / ``mlp``).
+    * ``bda_attr`` — accompanying ``*_bda`` attribute. When already
+      ``IdentityFuncOp`` the surrounding chain is a pure tensor pass-through,
+      so the rule is skipped (see :func:`_is_identity_func_op`).
+    * ``norm_attr`` — pre-subblock norm to also replace with
+      :class:`NoOpRMSNorm`, or ``None`` if the layer has no separate norm.
+    * ``post_hook`` — additional fix-up after replacement (currently used
+      only by the mlp rule, see :func:`_reset_is_moe_layer`).
+    * ``flag_group`` — used only by the post-loop diagnostic to detect that
+      an ``attention_no_op`` flag was set on a layer with neither
+      ``self_attention`` nor ``mixer``.
+    """
+
+    flag_attr: str
+    layer_attr: str
+    bda_attr: str
+    norm_attr: str | None
+    description: str
+    post_hook: Callable[[Any, int], None] | None = None
+
+
+_NO_OP_RULES: tuple[_NoOpRule, ...] = (
+    # TransformerLayer attention subblock
+    _NoOpRule(
+        flag_attr="attention_no_op",
+        layer_attr="self_attention",
+        bda_attr="self_attn_bda",
+        norm_attr=None,
+        description="self_attention",
+    ),
+    # MambaLayer SSM subblock — fully-pruned `M` slot from the MIP solver.
+    # Without this rule the SSM mixer keeps its uninitialised weights and
+    # bf16 backward NaNs at iter 1.
+    _NoOpRule(
+        flag_attr="attention_no_op",
+        layer_attr="mixer",
+        bda_attr="mamba_bda",
+        norm_attr="norm",
+        description="MambaLayer mixer",
+    ),
+    # TransformerLayer mlp subblock
+    _NoOpRule(
+        flag_attr="mlp_no_op",
+        layer_attr="mlp",
+        bda_attr="mlp_bda",
+        norm_attr="pre_mlp_layernorm",
+        description="mlp",
+        post_hook=_reset_is_moe_layer,
+    ),
+)
+
+
+def _apply_no_ops(layer: Any, overrides: MCoreLayerOverrides, idx: int) -> None:
+    """Replace disabled subblock submodules with :class:`NoOpWithBias` on a built layer.
+
+    Iterates over :data:`_NO_OP_RULES` and replaces ``layer.<layer_attr>`` with
+    :class:`NoOpWithBias` (and the matching norm with :class:`NoOpRMSNorm`) when
+
+      * the BlockConfig flag for that subblock is set, AND
+      * the layer has the corresponding attribute, AND
+      * the accompanying ``*_bda`` is **not** ``IdentityFuncOp`` — otherwise
+        the canonical Mamba/hybrid no-op chain (pure tensor pass-through)
+        would break if we substituted a tuple-returning module.
+
+    Diagnostic: warns if ``attention_no_op`` is set on a layer with neither
+    ``self_attention`` nor ``mixer``, indicating a new MCore layer class we
+    don't know how to lower (the slot will likely NaN at iter 1).
+    """
+    attention_handled = False
+
+    for rule in _NO_OP_RULES:
+        if not getattr(overrides, rule.flag_attr):
+            continue
+        if not hasattr(layer, rule.layer_attr):
+            continue
+
+        if rule.flag_attr == "attention_no_op":
+            attention_handled = True
+
+        if _is_identity_func_op(getattr(layer, rule.bda_attr, None)):
+            logger.debug(
+                "Layer %d: %s no-op left as-is (bda is IdentityFuncOp, canonical "
+                "Mamba/hybrid pass-through)",
+                idx,
+                rule.description,
+            )
+            continue
+
+        setattr(layer, rule.layer_attr, NoOpWithBias())
+        if rule.norm_attr is not None:
+            setattr(layer, rule.norm_attr, NoOpRMSNorm())
+        logger.debug("Layer %d: replaced %s with NoOpWithBias", idx, rule.description)
+
+        if rule.post_hook is not None:
+            rule.post_hook(layer, idx)
+
+    if overrides.attention_no_op and not attention_handled:
+        logger.warning(
+            "Layer %d (%s): attention_no_op=True but layer has no recognised "
+            "attention/mixer subblock. Skipping — fully-pruned slot may NaN at iter 1.",
+            idx,
+            type(layer).__name__,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -301,7 +358,7 @@ def _apply_no_ops(layer: Any, overrides: MCoreLayerOverrides, global_layer_numbe
 
 @contextmanager
 def mbridge_patcher(
-    block_configs: Optional[List[Union["BlockConfig", dict]]],
+    block_configs: list[Any] | None,
     num_attention_heads: int,
     hidden_size: int,
     *,
@@ -309,58 +366,75 @@ def mbridge_patcher(
 ):
     """Patch MCore layer construction to inject per-layer config from ``block_configs``.
 
-    This context manager must be active during ``provider.provide()`` (or transitively
-    during ``provide_distributed_model()``) for the overrides to take effect.  The
-    ``provider_patch.py`` module activates this automatically when ``block_configs`` is set
-    on the provider.
+    This context manager must be active during ``provider.provide()`` (or
+    transitively during ``provide_distributed_model()``) for the overrides to
+    take effect. ``provider_patch.py`` activates this automatically when
+    ``block_configs`` is set on the provider.
 
-    The patcher covers three ``build_module`` namespaces (see module docstring for why all
-    three are necessary) and ``MambaLayer.__init__``.
+    Three ``build_module`` namespaces must be patched simultaneously because
+    they each hold an independent module-level reference to the function:
+
+      1. ``megatron.core.transformer.spec_utils`` — the primary definition.
+      2. ``megatron.core.transformer.transformer_block`` — local alias.
+      3. ``megatron.core.ssm.mamba_block`` — local alias used by ``MambaStack``.
+
+    Without (3), every slot of a hybrid MambaModel would be built with the
+    *global* config and per-layer overrides would never apply.
+
+    ``MambaLayer`` is constructed directly (not via ``build_module``), so we
+    additionally patch ``MambaLayer.__init__`` to inject Mamba-specific
+    overrides (``mamba_state_dim``, ``mamba_head_dim``, ``mamba_num_groups``,
+    ``mamba_num_heads``) and to run :func:`_apply_no_ops` for fully-pruned
+    ``M`` slots.
 
     Args:
-        block_configs: List of BlockConfig-like objects (one per decoder layer/slot), or
-            ``None`` / empty list to make this context a no-op.
-        num_attention_heads: Global model ``num_attention_heads`` (used for GQA validation
-            and as fallback when ``config.num_attention_heads`` is unavailable).
+        block_configs: List of BlockConfig-like objects (one per decoder
+            layer/slot), or ``None`` / empty list to make this context a no-op.
+        num_attention_heads: Global model ``num_attention_heads`` (used for
+            GQA validation and as fallback when ``config.num_attention_heads``
+            is unavailable).
         hidden_size: Global model ``hidden_size``.
-        apply_no_ops: If ``True`` (default, appropriate for GPT-style models), replace
-            disabled attention/MLP submodules with ``NoOpWithBias`` after construction.
-            Set ``False`` for Mamba/hybrid models where the MambaStack layer spec already
-            assigns each slot to a single dedicated MCore layer type — no post-construction
-            submodule replacement is needed or correct.
+        apply_no_ops: If ``True`` (default, appropriate for GPT-style models),
+            replace disabled attention/MLP submodules with
+            :class:`NoOpWithBias` after construction. Set ``False`` for
+            canonical (un-pruned) Mamba/hybrid models where the MambaStack
+            layer spec already assigns each slot to a single dedicated MCore
+            layer type. ``provider_patch._has_fully_pruned_slot`` flips this
+            back to ``True`` when the MIP solver fully prunes a slot.
     """
     if not block_configs:
-        # Nothing to do. Yield immediately rather than importing / patching anything.
         yield
         return
 
-    # --- Ensure all module namespaces are loaded before we capture their build_module ---
-    import megatron.core.transformer.spec_utils        # noqa: F401  ensure loaded
-    import megatron.core.transformer.transformer_block  # noqa: F401  ensure loaded
+    import megatron.core.transformer.spec_utils
+    import megatron.core.transformer.transformer_block
 
     has_mamba_block = False
     try:
         import megatron.core.ssm.mamba_block  # noqa: F401  ensure loaded
+
         has_mamba_block = True
     except ImportError:
         logger.debug("megatron.core.ssm.mamba_block not available; skipping mamba_block patch")
 
-    from megatron.core.transformer.transformer_layer import TransformerLayer, get_transformer_layer_offset
+    from megatron.core.transformer.transformer_layer import (
+        TransformerLayer,
+        get_transformer_layer_offset,
+    )
     from megatron.core.utils import get_pg_rank
 
-    spec_utils_mod        = sys.modules["megatron.core.transformer.spec_utils"]
+    spec_utils_mod = sys.modules["megatron.core.transformer.spec_utils"]
     transformer_block_mod = sys.modules["megatron.core.transformer.transformer_block"]
-    mamba_block_mod       = sys.modules.get("megatron.core.ssm.mamba_block") if has_mamba_block else None
+    mamba_block_mod = sys.modules.get("megatron.core.ssm.mamba_block") if has_mamba_block else None
 
     orig_build_module = spec_utils_mod.build_module
 
-    # --- Save and populate thread-local context ---
     ctx = _get_ctx()
     saved_state = (ctx.block_configs, ctx.num_attention_heads, ctx.hidden_size, ctx.apply_no_ops)
-    ctx.block_configs        = block_configs
-    ctx.num_attention_heads  = num_attention_heads
-    ctx.hidden_size          = hidden_size
-    ctx.apply_no_ops         = apply_no_ops
+    ctx.block_configs = block_configs
+    ctx.num_attention_heads = num_attention_heads
+    ctx.hidden_size = hidden_size
+    ctx.apply_no_ops = apply_no_ops
 
     # -------------------------------------------------------------------------
     # build_module replacement
@@ -368,8 +442,7 @@ def mbridge_patcher(
 
     def patched_build_module(spec_or_module: Any, *args: Any, **kwargs: Any) -> Any:
         """Intercept TransformerLayer construction and apply per-layer config overrides."""
-
-        # Step 1: Resolve the module class from the spec argument.
+        # Resolve the module class from the spec argument.
         if isinstance(spec_or_module, type):
             module_cls = spec_or_module
         elif hasattr(spec_or_module, "module") and isinstance(
@@ -377,26 +450,19 @@ def mbridge_patcher(
         ):
             module_cls = spec_or_module.module
         else:
-            # Not a type or typed spec (e.g. a string or callable spec) — pass through.
             return orig_build_module(spec_or_module, *args, **kwargs)
 
-
-        # Step 2: Only intercept TransformerLayer and its subclasses.
-        #
-        # Using issubclass (not name matching) is critical: MambaStack uses
-        # MoETransformerLayer and MLPLayer, both of which are subclasses of TransformerLayer
-        # but have different names. A name-only check would silently miss them.
+        # Only intercept TransformerLayer and its subclasses. Using issubclass (not
+        # name matching) is critical: MambaStack uses MoETransformerLayer and
+        # MLPLayer, both of which subclass TransformerLayer under different names.
         if not (isinstance(module_cls, type) and issubclass(module_cls, TransformerLayer)):
             return orig_build_module(spec_or_module, *args, **kwargs)
 
-        # Step 3: Compute the global 1-based layer number.
-        #
-        # layer_number in kwargs is the *local* layer index within the current PP stage
-        # (1-based, starting from 1 for the first layer on this stage).
-        # To index into block_configs correctly, we need the *global* layer number.
-        layer_number  = kwargs.get("layer_number", 1)
-        config        = kwargs.get("config")
-        vp_stage      = kwargs.get("vp_stage")
+        # Compute the global 1-based layer number from the local index plus
+        # the PP-stage offset.
+        layer_number = kwargs.get("layer_number", 1)
+        config = kwargs.get("config")
+        vp_stage = kwargs.get("vp_stage")
         pg_collection = kwargs.get("pg_collection")
 
         if config is None or ctx.block_configs is None:
@@ -404,9 +470,10 @@ def mbridge_patcher(
 
         if pg_collection is None:
             # pg_collection is normally passed in kwargs by MCore ≥ 0.9.
-            # Provide a best-effort fallback for older MCore builds.
+            # Best-effort fallback for older MCore builds.
             try:
                 from megatron.core.process_groups_config import ProcessGroupCollection
+
                 pg_collection = ProcessGroupCollection.use_mpu_process_groups()
             except Exception:
                 pass
@@ -418,17 +485,8 @@ def mbridge_patcher(
         )
         global_layer_number = layer_number + pp_offset
 
-        # Step 4: Look up per-layer overrides.
-        effective_num_heads = ctx.num_attention_heads or getattr(config, "num_attention_heads", 1)
-        effective_hidden    = ctx.hidden_size or getattr(config, "hidden_size", 0)
-        overrides = get_overrides_for_layer(
-            ctx.block_configs,
-            global_layer_number,
-            num_attention_heads=effective_num_heads,
-            hidden_size=effective_hidden,
-        )
+        overrides, patched_config = _lookup_and_apply_config(ctx, config, global_layer_number)
 
-        # Step 5: Apply config overrides before building the layer.
         if overrides and overrides.config_overrides:
             logger.debug(
                 "Layer %d (%s): applying config overrides %s",
@@ -437,12 +495,10 @@ def mbridge_patcher(
                 overrides.config_overrides,
             )
             kwargs = dict(kwargs)
-            kwargs["config"] = _apply_config_overrides(config, overrides.config_overrides)
+            kwargs["config"] = patched_config
 
-        # Step 6: Build the layer with the (potentially overridden) config.
         layer = orig_build_module(spec_or_module, *args, **kwargs)
 
-        # Step 7: Optionally replace disabled submodules with no-ops.
         if overrides and (overrides.attention_no_op or overrides.mlp_no_op):
             if ctx.apply_no_ops:
                 _apply_no_ops(layer, overrides, global_layer_number)
@@ -477,20 +533,20 @@ def mbridge_patcher(
         ):
             """Inject per-layer Mamba config overrides before MambaLayer.__init__ runs.
 
-            In MambaStack, layer_number is already the *global* 1-based index:
-                layer_number = i + 1 + pp_layer_offset   (set in mamba_block.py)
-            So we use it directly as the index into block_configs without any additional
-            PP offset calculation.
+            In MambaStack, ``layer_number`` is already the *global* 1-based index
+            (set in mamba_block.py as ``i + 1 + pp_layer_offset``), so we use it
+            directly as the index into ``block_configs``.
+
+            After ``orig_mamba_init`` constructs ``self.mixer`` / ``self.norm`` /
+            ``self.mamba_bda``, we run :func:`_apply_no_ops` so fully-pruned ``M``
+            slots get their SSM mixer replaced with :class:`NoOpWithBias`.
+            ``patched_build_module`` only intercepts ``TransformerLayer`` subclasses,
+            so MambaLayer cannot rely on it for no-op replacement.
             """
+            overrides = None
             if ctx.block_configs:
-                effective_num_heads = ctx.num_attention_heads or getattr(config, "num_attention_heads", 1)
-                effective_hidden    = ctx.hidden_size or getattr(config, "hidden_size", 0)
-                overrides = get_overrides_for_layer(
-                    ctx.block_configs,
-                    layer_number,
-                    num_attention_heads=effective_num_heads,
-                    hidden_size=effective_hidden,
-                    strict_mamba_slot=True,  # each MambaStack slot must be a single subblock type
+                overrides, config = _lookup_and_apply_config(
+                    ctx, config, layer_number, strict_mamba_slot=True
                 )
                 if overrides and overrides.config_overrides:
                     logger.debug(
@@ -498,9 +554,15 @@ def mbridge_patcher(
                         layer_number,
                         overrides.config_overrides,
                     )
-                    config = _apply_config_overrides(config, overrides.config_overrides)
 
             orig_mamba_init(self_layer, config, submodules, layer_number, *args, **kwargs)
+
+            if (
+                ctx.apply_no_ops
+                and overrides is not None
+                and (overrides.attention_no_op or overrides.mlp_no_op)
+            ):
+                _apply_no_ops(self_layer, overrides, layer_number)
 
         MambaLayer.__init__ = patched_mamba_init
         has_mamba_layer_patch = True
@@ -514,10 +576,10 @@ def mbridge_patcher(
     # -------------------------------------------------------------------------
 
     try:
-        spec_utils_mod.build_module        = patched_build_module
+        spec_utils_mod.build_module = patched_build_module
         transformer_block_mod.build_module = patched_build_module
         if mamba_block_mod is not None:
-            mamba_block_mod.build_module   = patched_build_module
+            mamba_block_mod.build_module = patched_build_module
 
         logger.info(
             "mbridge_patcher: active — block_configs=%d layers, apply_no_ops=%s, "
@@ -530,16 +592,14 @@ def mbridge_patcher(
         yield
 
     finally:
-        # Restore all patches unconditionally, even if an exception occurred.
-        spec_utils_mod.build_module        = orig_build_module
+        spec_utils_mod.build_module = orig_build_module
         transformer_block_mod.build_module = orig_build_module
         if mamba_block_mod is not None:
-            mamba_block_mod.build_module   = orig_build_module
+            mamba_block_mod.build_module = orig_build_module
 
         if has_mamba_layer_patch:
-            MambaLayer.__init__ = orig_mamba_init  # noqa: F821  (defined above in try block)
+            MambaLayer.__init__ = orig_mamba_init
 
-        # Restore thread-local context to the values that were active before this call.
         ctx.block_configs, ctx.num_attention_heads, ctx.hidden_size, ctx.apply_no_ops = saved_state
 
         logger.info("mbridge_patcher: exited, all patches restored")

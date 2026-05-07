@@ -120,14 +120,20 @@ from __future__ import annotations
 import argparse
 import logging
 import os
-import sys
-from pathlib import Path
-from typing import Optional
+from typing import Any
 
 import torch
-from omegaconf import OmegaConf
-
-from megatron.bridge import AutoBridge
+from _common import (
+    DEFAULT_CONFIG_FILE,
+    MODEL_REGISTRY,
+    _build_provider,
+    _get_block_configs,
+    _get_model_descriptor,
+    _load_bridge,
+    _load_hf_config,
+    configure_logging,
+    run_entrypoint,
+)
 from megatron.bridge.models.distillation_provider import convert_to_distillation_provider
 from megatron.bridge.recipes.common import _pretrain_common
 from megatron.bridge.training.config import ConfigContainer
@@ -138,110 +144,28 @@ from megatron.bridge.training.utils.omegaconf_utils import (
     create_omegaconf_dict_config,
     parse_hydra_overrides,
 )
-from megatron.bridge.utils.common_utils import get_rank_safe, print_rank_0
+from megatron.bridge.utils.common_utils import get_rank_safe
+from omegaconf import OmegaConf
+
 from modelopt.torch.puzzletron.anymodel.converter import *
 from modelopt.torch.puzzletron.anymodel.model_descriptor import *
 
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
-
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s %(name)s %(levelname)s — %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)],
-)
-
+configure_logging()
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Model registry
-# ---------------------------------------------------------------------------
-
-# Maps --student / --teacher key → (hf_model_id, anymodel_converter_name)
-#
-#   hf_model_id:          Default load path when --{student,teacher}-checkpoint is omitted.
-#   anymodel_converter:   Key for ConverterFactory and ModelDescriptorFactory.
-#                         Also determines block_configs generation fallback.
-MODEL_REGISTRY: dict[str, tuple[str, str]] = {
-    "gptoss": ("openai/gpt-oss-20b",                         "gpt_oss"),
-    "nemo":   ("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", "nemotron_h_v2"),
-    "llama":  ("meta-llama/Llama-3.2-3B-Instruct",           "llama"),
-    "qwen":   ("Qwen/Qwen3-8B",                              "qwen3"),
-}
-
-SCRIPT_DIR: Path = Path(__file__).parent.resolve()
-DEFAULT_CONFIG_FILE: Path = SCRIPT_DIR / "kd-container-default.yaml"
-
-
-# ---------------------------------------------------------------------------
-# Model loading helpers
-# ---------------------------------------------------------------------------
-
-
-def _load_hf_config(load_path: str, trust_remote_code: bool):
-    """Load only the HuggingFace config (no weights) from a path or Hub model ID."""
-    from transformers import AutoConfig
-    logger.info("Loading HF config from %r", load_path)
-    return AutoConfig.from_pretrained(load_path, trust_remote_code=trust_remote_code)
-
-
-def _get_block_configs(hf_config, converter_name: str) -> Optional[list]:
-    """Load or generate block_configs for a model.
-
-    Priority:
-        1. ``hf_config.block_configs`` — set by AnyModel when saving (canonical source).
-        2. ``ConverterFactory`` — generated from global model config (fallback).
-        3. ``None`` — homogeneous model (no per-layer overrides).
-    """
-    from block_config_utils import load_block_configs
-    return load_block_configs(hf_config, converter_name)
-
-
-def _get_model_descriptor(converter_name: str):
-    """Return the AnyModel ModelDescriptor for the given converter name, or None."""
-    try:
-        print(f"### converter_name: {converter_name}")
-        from modelopt.torch.puzzletron.anymodel.model_descriptor import ModelDescriptorFactory
-        print(f"### ModelDescriptorFactory: {ModelDescriptorFactory}")
-        descriptor = ModelDescriptorFactory.get(converter_name)
-        if descriptor is None:
-            logger.warning("No AnyModel descriptor found for converter '%s'", converter_name)
-        return descriptor
-    except ImportError:
-        logger.warning("ModelOpt AnyModel not installed; cannot obtain model descriptor")
-        return None
-
-
-def _load_bridge(load_path: str, trust_remote_code: bool, descriptor) -> "AutoBridge":
-    """Load an HF model into a Megatron Bridge object.
-
-    If an AnyModel descriptor is available, the model is loaded inside ``deci_x_patcher``,
-    which patches the HF model's ``from_pretrained`` path to correctly construct
-    heterogeneous layers (different sub-layer types per slot).  For standard homogeneous
-    models the patcher is a no-op, so using it unconditionally is safe.
-    """
-    if descriptor is not None:
-        from modelopt.torch.puzzletron.anymodel.puzzformer import deci_x_patcher
-        logger.info("Loading HF model via deci_x_patcher (descriptor=%s)", type(descriptor).__name__)
-        with deci_x_patcher(model_descriptor=descriptor):
-            return AutoBridge.from_hf_pretrained(load_path, trust_remote_code=trust_remote_code)
-    else:
-        logger.info("Loading HF model without deci_x_patcher (AnyModel not available)")
-        return AutoBridge.from_hf_pretrained(load_path, trust_remote_code=trust_remote_code)
-
-
-def _build_provider(bridge: "AutoBridge") -> "ModelProviderMixin":
-    """Convert a Bridge to a Megatron model provider with weight loading registered."""
-    return bridge.to_megatron_provider(load_weights=True)
-
+if os.environ.get("MBRIDGE_PATCHER_DEBUG", "0").lower() in ("1", "true", "yes", "on"):
+    logging.getLogger("layer_patchers").setLevel(logging.DEBUG)
+    logging.getLogger("provider_patch").setLevel(logging.DEBUG)
+    logging.getLogger("__main__").setLevel(logging.DEBUG)
 
 # ---------------------------------------------------------------------------
 # ConfigContainer construction
 # ---------------------------------------------------------------------------
 
 
-def _build_distill_config_container(distill_provider, student_checkpoint_path: str) -> ConfigContainer:
+def _build_distill_config_container(
+    distill_provider, student_checkpoint_path: str
+) -> ConfigContainer:
     """Build a :class:`ConfigContainer` for distillation using Bridge ``_pretrain_common()`` defaults.
 
     Sets ``model`` to the :class:`DistillationProvider`, points the HF tokenizer at the
@@ -281,12 +205,205 @@ def _sync_teacher_config_from_student(distill_provider) -> None:
     for attr in _SHARED_PARALLEL_ATTRS:
         if hasattr(teacher, attr):
             setattr(teacher, attr, getattr(distill_provider, attr))
-    for attr in ("tensor_model_parallel_size", "pipeline_model_parallel_size"):
-        if getattr(distill_provider, attr) != getattr(teacher, attr):
-            raise RuntimeError(
-                f"Teacher/student {attr} mismatch after re-sync: "
-                f"student={getattr(distill_provider, attr)}, teacher={getattr(teacher, attr)}."
+
+
+# ---------------------------------------------------------------------------
+# Hybrid MoE aux-loss tracker fix
+# ---------------------------------------------------------------------------
+# Bridge's `training_log` passes ``num_layers = hybrid_layer_pattern.count("E")``
+# (e.g. 13) to ``track_moe_metrics`` for hybrid models, but Megatron-Core MoE
+# routers write into ``tracker[name]["values"]`` of size ``self.config.num_layers``
+# (e.g. 56 — the *full* pattern length, see core/transformer/moe/router.py).
+#
+# When ``_apply_no_ops`` (in layer_patchers.py) replaces the MLP of a fully
+# pruned ``E`` slot with ``NoOpWithBias`` and resets ``is_moe_layer=False``, the
+# router for that layer never fires.  If a particular PP stage ends up with
+# *zero* surviving MoE layers, no router on that stage writes to the tracker,
+# so ``track_moe_metrics(..., force_initialize=True)`` creates the entry with
+# size 13 on those ranks while ranks on stages with surviving MoE layers still
+# carry size-56 tensors from their routers.
+#
+# The first cross-PP ``all_reduce`` inside
+# ``reduce_aux_losses_tracker_across_ranks`` then deadlocks (NCCL silently
+# hangs on mismatched buffer sizes).  py-spy stack:
+#     all_reduce -> reduce_aux_losses_tracker_across_ranks
+#                -> track_moe_metrics -> training_log
+#
+# Fix: monkey-patch ``track_moe_metrics`` to override the ``num_layers``
+# argument with ``config.num_layers`` (matching the router) and synthesise
+# ``moe_layer_freq`` from ``hybrid_layer_pattern`` so the per-MoE-layer
+# averaging denominator (``num_moe_layers`` at moe_utils.py:1090) stays
+# correct (= count of "E" slots).
+def _install_hybrid_moe_aux_loss_size_fix(config: ConfigContainer) -> None:
+    """Align track_moe_metrics's tracker size with what MoE routers actually use.
+
+    No-op for non-hybrid models or when no MoE experts are configured.
+    """
+    model_cfg = config.model
+    rank0 = get_rank_safe() == 0
+
+    def _info(msg: str, *args: Any) -> None:
+        # Use print (not logger) so the message survives even if the logger is
+        # not yet configured / muted on rank 0 at this point in startup.
+        if rank0:
+            print("[MoEAuxFix-install] " + (msg % args if args else msg), flush=True)
+
+    is_hybrid = getattr(model_cfg, "is_hybrid_model", False)
+    num_experts = getattr(model_cfg, "num_moe_experts", None)
+    pattern: str = getattr(model_cfg, "hybrid_layer_pattern", "") or ""
+    full_num_layers: int | None = getattr(model_cfg, "num_layers", None)
+    block_configs = getattr(model_cfg, "block_configs", None)
+
+    # For Puzzletron heterogeneous students, ``hybrid_layer_pattern`` is empty
+    # because layer types are encoded per-layer in ``block_configs`` instead.
+    # We therefore derive ``moe_layer_freq`` from ``block_configs`` when
+    # available, and otherwise fall back to None (only affects the per-layer
+    # logging denominator, not the all_reduce size).
+    moe_layer_freq: list[int] | None = None
+    if pattern:
+        moe_layer_freq = [1 if c == "E" else 0 for c in pattern]
+    elif block_configs:
+        derived: list[int] = []
+        for bc in block_configs:
+            ffn = getattr(bc, "ffn", None) if not isinstance(bc, dict) else bc.get("ffn")
+            if ffn is None:
+                derived.append(0)
+                continue
+            ffn_no_op = (
+                getattr(ffn, "no_op", False)
+                if not isinstance(ffn, dict)
+                else ffn.get("no_op", False)
             )
+            ffn_type = (
+                getattr(ffn, "block_type", None)
+                if not isinstance(ffn, dict)
+                else ffn.get("block_type")
+            )
+            ffn_type_str = str(ffn_type).lower() if ffn_type is not None else ""
+            is_moe = (not ffn_no_op) and ("moe" in ffn_type_str or "expert" in ffn_type_str)
+            derived.append(1 if is_moe else 0)
+        if any(derived):
+            moe_layer_freq = derived
+
+    moe_count = sum(moe_layer_freq) if moe_layer_freq else 0
+    _info(
+        "called: model_cls=%s is_hybrid_model=%s num_moe_experts=%s "
+        "num_layers=%s hybrid_layer_pattern_len=%d count_E=%d "
+        "block_configs_len=%s moe_layer_freq_sum=%s",
+        type(model_cfg).__name__,
+        is_hybrid,
+        num_experts,
+        full_num_layers,
+        len(pattern),
+        pattern.count("E"),
+        len(block_configs) if block_configs is not None else None,
+        moe_count if moe_layer_freq is not None else None,
+    )
+
+    if not is_hybrid:
+        _info("skip: is_hybrid_model is False")
+        return
+    if num_experts is None:
+        _info("skip: num_moe_experts is None")
+        return
+    if full_num_layers is None:
+        _info("skip: num_layers missing")
+        return
+
+    import megatron.core.transformer.moe.moe_utils as _moe_utils
+
+    # Bridge does `from ...moe_utils import track_moe_metrics` (named import),
+    # so train_utils binds the original at import time and patching only
+    # _moe_utils.track_moe_metrics has NO effect on the binding train_utils
+    # actually calls. We must patch BOTH module dicts: the canonical source
+    # AND every importer that already grabbed the name.
+    targets: list[tuple[Any, str]] = [(_moe_utils, "track_moe_metrics")]
+    try:
+        import megatron.bridge.training.utils.train_utils as _bridge_train_utils
+
+        if hasattr(_bridge_train_utils, "track_moe_metrics"):
+            targets.append((_bridge_train_utils, "track_moe_metrics"))
+    except ImportError:
+        _info("skip: megatron.bridge.training.utils.train_utils not importable")
+
+    if getattr(_moe_utils.track_moe_metrics, "_hybrid_size_fix_applied", False):
+        _info("skip: already applied (idempotent)")
+        return
+
+    orig_track_moe_metrics = _moe_utils.track_moe_metrics
+
+    def _describe_moe_layer_freq(value: Any) -> str:
+        # Megatron-Core overloads moe_layer_freq as either an int (periodicity),
+        # a list[int] (per-layer 0/1 mask), or None. The diagnostic must handle
+        # all three or it will explode (e.g. sum(int) -> TypeError).
+        if value is None:
+            return "None"
+        if isinstance(value, (list, tuple)):
+            return f"list(len={len(value)}, sum={sum(value)})"
+        return f"scalar({value!r})"
+
+    def _patched_track_moe_metrics(*args: Any, **kwargs: Any) -> Any:
+        kwargs["num_layers"] = full_num_layers
+        kwargs.setdefault("moe_layer_freq", moe_layer_freq)
+        if kwargs.get("moe_layer_freq") is None:
+            kwargs["moe_layer_freq"] = moe_layer_freq
+
+        # Per-rank diagnostics around the cross-rank all_reduces inside
+        # track_moe_metrics → reduce_aux_losses_tracker_across_ranks.  If a
+        # rank prints "[MoEAuxFix] enter" but never prints "[MoEAuxFix] exit",
+        # that rank is the one stuck in the all_reduce.  Compare the printed
+        # tracker buffer sizes across ranks — they MUST all match (= full_num_layers
+        # + (mtp_num_layers or 0)) for the PP all_reduce to succeed.
+        rank = get_rank_safe()
+        iteration = kwargs.get("iteration", "?")
+        if logger.isEnabledFor(logging.DEBUG):
+            tracker = _moe_utils.get_moe_layer_wise_logging_tracker()
+            sizes_before = {k: tuple(v["values"].shape) for k, v in tracker.items()}
+            keys_before = sorted(tracker.keys())
+            logger.debug(
+                "[MoEAuxFix] enter rank=%s iter=%s num_layers_arg=%s "
+                "moe_layer_freq=%s tracker_keys=%s tracker_sizes=%s",
+                rank,
+                iteration,
+                kwargs["num_layers"],
+                _describe_moe_layer_freq(kwargs["moe_layer_freq"]),
+                keys_before,
+                sizes_before,
+            )
+        try:
+            ret = orig_track_moe_metrics(*args, **kwargs)
+        except Exception as exc:
+            logger.error("[MoEAuxFix] EXCEPTION rank=%s iter=%s: %r", rank, iteration, exc)
+            raise
+        logger.debug("[MoEAuxFix] exit rank=%s iter=%s", rank, iteration)
+        return ret
+
+    _patched_track_moe_metrics._hybrid_size_fix_applied = True  # type: ignore[attr-defined]
+
+    patched_locations = []
+    for mod, attr in targets:
+        try:
+            setattr(mod, attr, _patched_track_moe_metrics)
+            patched_locations.append(f"{mod.__name__}.{attr}")
+        except Exception as exc:
+            _info("warn: failed to patch %s.%s: %r", mod.__name__, attr, exc)
+
+    moe_slots = sum(moe_layer_freq) if moe_layer_freq else 0
+    _info(
+        "INSTALLED: num_layers=%d MoE slots=%s (out of %d) patched=%s",
+        full_num_layers,
+        moe_slots if moe_layer_freq is not None else "unknown",
+        len(pattern),
+        patched_locations,
+    )
+    logger.info(
+        "Installed hybrid MoE aux-loss tracker size fix: num_layers=%d, "
+        "MoE slots=%s (out of %d), patched=%s",
+        full_num_layers,
+        moe_slots if moe_layer_freq is not None else "unknown",
+        len(pattern),
+        patched_locations,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -294,7 +411,7 @@ def _sync_teacher_config_from_student(distill_provider) -> None:
 # ---------------------------------------------------------------------------
 
 
-def main(args: argparse.Namespace) -> None:  # noqa: C901 (complexity OK for an orchestration fn)
+def main(args: argparse.Namespace) -> None:
     _validate_registry_keys(args)
 
     student_hf_id, student_converter = MODEL_REGISTRY[args.student]
@@ -346,12 +463,20 @@ def main(args: argparse.Namespace) -> None:  # noqa: C901 (complexity OK for an 
     #                              wrapped in mbridge_patcher.
     # ------------------------------------------------------------------
     logger.info("Step 4: Applying provider patches")
+    from model_bridge_patch import apply_patch as apply_model_bridge_patch
     from provider_patch import (
         apply_distillation_patch,
         apply_patch,
         set_provider_block_configs,
         set_student_block_configs,
     )
+
+    # Patches the upstream Megatron-Bridge model_bridge module to (a) make
+    # _megatron_local_name_to_global heterogeneous-EP-aware and (b) report
+    # any Megatron parameter the HF->Megatron load left untouched (which is
+    # the iter-1 NaN root cause for heterogeneous students).
+    # Replaces the previous bind-mount of a full upstream model_bridge.py copy.
+    apply_model_bridge_patch()
     apply_patch()
     apply_distillation_patch()
 
@@ -363,6 +488,7 @@ def main(args: argparse.Namespace) -> None:  # noqa: C901 (complexity OK for an 
     logger.info("Step 5: Loading HF models into Megatron Bridge")
     student_bridge = _load_bridge(student_path, args.trust_remote_code, student_descriptor)
     teacher_bridge = _load_bridge(teacher_path, args.trust_remote_code, teacher_descriptor)
+
     logger.info("  student bridge: %s", type(student_bridge).__name__)
     logger.info("  teacher bridge: %s", type(teacher_bridge).__name__)
 
@@ -377,7 +503,6 @@ def main(args: argparse.Namespace) -> None:  # noqa: C901 (complexity OK for an 
     logger.info("  student provider: %s", type(student_provider).__name__)
     logger.info("  teacher provider: %s", type(teacher_provider).__name__)
 
-    student_provider.seq_length = 4096
     student_provider.tensor_model_parallel_size = args.tensor_model_parallel_size
     student_provider.sequence_parallel = student_provider.tensor_model_parallel_size > 1
     student_provider.pipeline_model_parallel_size = args.pipeline_model_parallel_size
@@ -387,8 +512,7 @@ def main(args: argparse.Namespace) -> None:  # noqa: C901 (complexity OK for an 
     student_provider.expert_tensor_parallel_size = args.expert_tensor_parallel_size
     student_provider.hetereogenous_dist_checkpoint = True
 
-    # Fix teacher to match student
-    teacher_provider.seq_length = student_provider.seq_length
+    # Teacher is always aligned to student parallelism settings.
     teacher_provider.tensor_model_parallel_size = student_provider.tensor_model_parallel_size
     teacher_provider.sequence_parallel = student_provider.sequence_parallel
     teacher_provider.pipeline_model_parallel_size = student_provider.pipeline_model_parallel_size
@@ -451,7 +575,16 @@ def main(args: argparse.Namespace) -> None:  # noqa: C901 (complexity OK for an 
         merged_cfg = parse_hydra_overrides(merged_cfg, args.overrides)
 
     final_cfg_dict = OmegaConf.to_container(merged_cfg, resolve=True)
+
+    # Bridge's apply_overrides(...) re-binds the teacher's hybrid_override_pattern
+    # / mtp_hybrid_override_pattern fields when applying the merged config dict
+    # (they live on the student, not the teacher, in the merged dict). Snapshot
+    # them so we can put them back on distill_provider.teacher afterwards.
+    teacher_hop = getattr(distill_provider.teacher, "hybrid_override_pattern", None)
+    teacher_mtp_hop = getattr(distill_provider.teacher, "mtp_hybrid_override_pattern", None)
     apply_overrides(config, final_cfg_dict, excluded_fields)
+    object.__setattr__(distill_provider.teacher, "hybrid_override_pattern", teacher_hop)
+    object.__setattr__(distill_provider.teacher, "mtp_hybrid_override_pattern", teacher_mtp_hop)
 
     _sync_teacher_config_from_student(config.model)
 
@@ -473,14 +606,21 @@ def main(args: argparse.Namespace) -> None:  # noqa: C901 (complexity OK for an 
     logger.info("Step 10: Starting distillation")
     logger.info("Rank: %s", get_rank_safe())
 
+    config.model.teacher.finalize()
+
+    # Fix Bridge↔MCore tracker-size mismatch that deadlocks training_log when a
+    # PP stage has zero surviving MoE layers (see helper docstring above).
+    _install_hybrid_moe_aux_loss_size_fix(config)
+
     try:
-        distill(config=config)
+        distill(config)
     except Exception as e:
         logger.error("Error during distillation: %s", e)
         raise e
     finally:
         if torch.distributed.is_initialized():
             torch.distributed.destroy_process_group()
+
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -529,7 +669,7 @@ def _parse_args() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
-    # --- Model selection ---
+    # --student, --trust-remote-code ---
     parser.add_argument(
         "--student",
         required=True,
@@ -540,6 +680,13 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--trust-remote-code",
+        action="store_true",
+        help="Pass trust_remote_code=True to HuggingFace config/model loading.",
+    )
+
+    # --- Student checkpoint ---
+    parser.add_argument(
         "--student-checkpoint",
         default=None,
         metavar="PATH",
@@ -549,6 +696,8 @@ def _parse_args() -> argparse.Namespace:
             "If omitted, the model is loaded from HuggingFace Hub."
         ),
     )
+
+    # --- Teacher ---
     parser.add_argument(
         "--teacher",
         required=True,
@@ -569,7 +718,7 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
 
-    # --- Configuration ---
+    # --- Configuration file ---
     parser.add_argument(
         "--config-file",
         default=str(DEFAULT_CONFIG_FILE) if DEFAULT_CONFIG_FILE.exists() else None,
@@ -579,11 +728,6 @@ def _parse_args() -> argparse.Namespace:
             "Merged on top of the base config before CLI overrides are applied. "
             "Defaults to kd-container-default.yaml in the script directory (if it exists)."
         ),
-    )
-    parser.add_argument(
-        "--trust-remote-code",
-        action="store_true",
-        help="Pass trust_remote_code=True to HuggingFace config/model loading.",
     )
 
     # --- Megatron parallelism (student + teacher providers; YAML / Hydra can still override) ---
@@ -630,9 +774,4 @@ def _parse_args() -> argparse.Namespace:
 
 
 if __name__ == "__main__":
-    args = _parse_args()
-    try:
-        main(args)
-    finally:
-        if torch.distributed.is_initialized():
-            torch.distributed.destroy_process_group()
+    run_entrypoint(main, _parse_args)
