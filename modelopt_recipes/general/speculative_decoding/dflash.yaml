@@ -1,16 +1,21 @@
-# DFlash speculative-decoding training recipe. Override fields via OmegaConf dotlist on the CLI.
+# DFlash speculative-decoding training recipe. Override fields via OmegaConf dotlist on the CLI
+# or by importing this file from a per-model recipe in modelopt_recipes/models/.
 
 metadata:
   recipe_type: speculative_dflash
   description: DFlash training recipe (model/data/training/dflash bundled).
 
-# maps to ModelArguments (main.py)
+imports:
+  dflash_default: configs/speculative_decoding/dflash/default
+  dflash_training_default: configs/speculative_decoding/dflash/training_default
+
+# maps to ModelArguments
 model:
   model_name_or_path:
   trust_remote_code: false
   use_fake_base_for_offline: false
 
-# maps to DataArguments (main.py)
+# maps to DataArguments
 data:
   data_path:
   offline_data_path:
@@ -19,45 +24,13 @@ data:
   # Templates are in modelopt_recipes/general/speculative_decoding/chat_templates/
   chat_template:
 
-# maps to TrainingArguments (main.py)
+# maps to TrainingArguments
 training:
-  # --- commonly modified ---
-  output_dir:
-  num_train_epochs: 10
-  per_device_train_batch_size: 1
-  learning_rate: 6.0e-4
-  warmup_steps: 100
-  training_seq_len: 4096
-  logging_steps: 100
-  save_steps: 5000
-  cp_size: 1
-  dp_shard_size: 1
-  disable_tqdm: true
-  estimate_ar: false
-  ar_validate_steps: 0
-  answer_only_loss: true
-
-  # --- rarely modified ---
-  do_eval: false
-  lr_scheduler_type: linear
-  save_strategy: steps
-  weight_decay: 0.0
-  dataloader_drop_last: true
-  bf16: true
-  tf32: true
-  remove_unused_columns: false
-  ddp_find_unused_parameters: true
-  ddp_timeout: 1800
-  report_to: tensorboard
+  $import: dflash_training_default
 
 # maps to DFlashConfig (modelopt/torch/speculative/config.py).
+# Per-model recipes should also set ``dflash_mask_token_id``; otherwise main.py
+# falls back to ``tokenizer.mask_token_id``, and DFlashConfig raises if neither
+# source provides one.
 dflash:
-  dflash_block_size: 8
-  dflash_num_anchors: 512
-  dflash_use_torch_compile: false
-  dflash_self_logit_distillation: true
-  dflash_loss_decay_factor: 4.0
-  dflash_architecture_config:
-    num_hidden_layers: 5
-    # mask_token_id: auto-detected from model vocab (override for specific models)
-    # sliding_window and layer_types are inherited from base model config automatically
+  $import: dflash_default

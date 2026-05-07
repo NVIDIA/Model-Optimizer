@@ -1,0 +1,38 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Default EagleConfig values for EAGLE3 training. Imported into the `eagle:` section of recipes.
+# eagle_offline is derived from data.offline_data_path; do not set here.
+
+# modelopt-schema: modelopt.torch.speculative.config.EagleConfig
+eagle_decoder_type: llama
+eagle_ttt_steps: 3
+eagle_mix_hidden_states: false
+eagle_use_torch_compile: true
+eagle_self_logit_distillation: true
+eagle_freeze_base_model: true
+eagle_loss_decay_factor: 0.9
+eagle_hidden_state_distillation: false
+eagle_reuse_base_decoder: false
+eagle_report_acc: true
+eagle_enable_nvtx: false
+# Rope scaling: disable during training (default_config.py uses rope_type=default),
+# inject YaRN during export for long-context inference.
+eagle_export_rope_scaling:
+  rope_type: yarn
+  factor: 32.0
+  original_max_position_embeddings: 2048
+# overwrite to modelopt/torch/speculative/eagle/default_config.py
+eagle_architecture_config: {}

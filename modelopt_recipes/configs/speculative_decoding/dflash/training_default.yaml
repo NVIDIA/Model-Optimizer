@@ -1,0 +1,38 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Default `training:` section values for DFlash training. Imported into the
+# `training:` section of recipes. HF trainer fields flow through SpecTrainingArgs
+# via ``extra='allow'`` and are re-validated by transformers.TrainingArguments
+# in main.py.
+
+# modelopt-schema: modelopt.torch.speculative.plugins.hf_training_args.TrainingArguments
+
+# --- commonly modified ---
+output_dir:
+num_train_epochs: 10
+per_device_train_batch_size: 1
+learning_rate: 6.0e-4
+warmup_steps: 100
+training_seq_len: 4096
+logging_steps: 100
+save_steps: 5000
+cp_size: 1
+dp_shard_size: 1
+disable_tqdm: true
+estimate_ar: false
+ar_validate_steps: 0
+answer_only_loss: true
+
+# --- rarely modified ---
+do_eval: false
+lr_scheduler_type: linear
+save_strategy: steps
+weight_decay: 0.0
+dataloader_drop_last: true
+bf16: true
+tf32: true
+remove_unused_columns: false
+ddp_find_unused_parameters: true
+ddp_timeout: 1800
+report_to: tensorboard

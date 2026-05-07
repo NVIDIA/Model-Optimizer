@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Default DFlashConfig values for DFlash training. Imported into the `dflash:`
+# section of recipes. ``dflash_mask_token_id`` is intentionally omitted; per-model
+# recipes should provide it explicitly, and main.py falls back to
+# ``tokenizer.mask_token_id`` when neither does.
+
+# modelopt-schema: modelopt.torch.speculative.config.DFlashConfig
+dflash_block_size: 8
+dflash_num_anchors: 512
+dflash_use_torch_compile: false
+dflash_self_logit_distillation: true
+dflash_loss_decay_factor: 4.0
+dflash_architecture_config:
+  num_hidden_layers: 5
+  # mask_token_id: auto-detected from model vocab (override for specific models)
+  # sliding_window and layer_types are inherited from base model config automatically
