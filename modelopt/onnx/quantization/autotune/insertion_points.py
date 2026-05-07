@@ -369,13 +369,23 @@ def skip_invalid_insertion_points(
                         producer = node.inputs[0].inputs[0]
                         if producer.op in ["Conv", "ConvTranspose"]:
                             return True
-                # Conv -> [BN ->] Add: main-path Conv output feeding Add should not be
-                # quantized separately — TRT fuses Conv+Add+Relu as one INT8 kernel.
-                # Heuristic: a "main-path" Conv's activation input has a single
-                # consumer (this Conv), whereas a downsample/projection Conv's
-                # activation input fans out to multiple consumers.
+                # Conv -> [BN ->] Add -> Relu: skip quantizing the main-path Conv
+                # output feeding Add to preserve TRT Conv+Add+Relu INT8 fusion.
+                # Guards:
+                #   1. The Add output has a single consumer and that consumer is Relu
+                #      (otherwise TRT cannot fuse, and skipping removes a legitimate
+                #      quantization point).
+                #   2. The Conv feeding Add is a "main-path" Conv (its activation input
+                #      has a single consumer), not a downsample/projection Conv (whose
+                #      activation input fans out to multiple consumers).
                 if node.op == "Add":
-                    if inp.inputs:
+                    # Guard 1: Add must feed exactly one Relu
+                    add_out = node.outputs[0] if node.outputs else None
+                    if add_out is None or len(add_out.outputs) != 1:
+                        pass  # Add fans out or has no consumer — skip not applicable
+                    elif add_out.outputs[0].op != "Relu":
+                        pass  # Add does not feed Relu — fusion impossible
+                    elif inp.inputs:
                         producer = inp.inputs[0]
                         # Unwrap optional BN
                         conv_node = None
@@ -389,6 +399,7 @@ def skip_invalid_insertion_points(
                                 and bn_act.inputs[0].op in ["Conv", "ConvTranspose"]
                             ):
                                 conv_node = bn_act.inputs[0]
+                        # Guard 2: main-path Conv (single consumer on activation input)
                         if conv_node is not None and conv_node.inputs:
                             conv_act_input = conv_node.inputs[0]
                             if len(conv_act_input.outputs) == 1:

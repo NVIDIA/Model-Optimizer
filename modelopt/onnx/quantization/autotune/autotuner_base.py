@@ -974,12 +974,27 @@ class QDQAutotunerBase:
         if not concat_groups:
             return selected_points
 
+        # Determine the real arity of each Concat node (number of actual inputs).
+        # If some inputs were filtered out earlier (e.g. non-float, small tensors),
+        # the group in all_points is incomplete and can never satisfy TRT's "all
+        # Concat inputs quantized" requirement — skip such groups entirely.
+        complete_concat_groups: dict[int, list] = {}
+        for concat_idx, group_points in concat_groups.items():
+            global_node_idx = node_indices[concat_idx]
+            concat_node = self.graph.nodes[global_node_idx]
+            real_arity = len(concat_node.inputs)
+            if len(group_points) == real_arity:
+                complete_concat_groups[concat_idx] = group_points
+
+        if not complete_concat_groups:
+            return selected_points
+
         # Identify fully-present and absent Concat groups in current selection
         selected_keys = {(p.node_index, p.input_index) for p in selected_points}
         full_groups = []  # Concat groups fully present (can remove)
         absent_groups = []  # Concat groups fully absent (can add)
 
-        for concat_idx, group_points in concat_groups.items():
+        for concat_idx, group_points in complete_concat_groups.items():
             group_keys = {(p.node_index, p.input_index) for p in group_points}
             present = group_keys & selected_keys
             if len(present) == len(group_keys):
@@ -1003,7 +1018,7 @@ class QDQAutotunerBase:
         if action == "add":
             target = random.choice(absent_groups)
             points_to_add = []
-            for p in concat_groups[target]:
+            for p in complete_concat_groups[target]:
                 if (p.node_index, p.input_index) not in selected_keys:
                     points_to_add.append(p)
             logger.debug(
@@ -1013,7 +1028,7 @@ class QDQAutotunerBase:
 
         elif action == "remove":
             target = random.choice(full_groups)
-            group_keys = {(p.node_index, p.input_index) for p in concat_groups[target]}
+            group_keys = {(p.node_index, p.input_index) for p in complete_concat_groups[target]}
             result = [p for p in selected_points if (p.node_index, p.input_index) not in group_keys]
             logger.debug(
                 f"Concat group mutation: removed {len(group_keys)} points for Concat node {target}"
