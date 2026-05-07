@@ -300,6 +300,94 @@ class TestExportFusedExperts:
         if QuantModuleRegistry.get(expert_type) is not None:
             QuantModuleRegistry.unregister(expert_type)
 
+    def test_uncalibrated_expert_gate_up_share_amax(self, monkeypatch):
+        """gate_proj and up_proj must share weight_scale_2 even when an expert
+        was never routed during calibration.
+
+        Regression for the bug where ``_export_fused_experts``'s per-projection
+        fallback computed amax independently from the gate and up halves of the
+        fused tensor — producing mismatched ``weight_scale_2`` values for any
+        uncalibrated expert. vLLM fuses W1 (gate) and W3 (up) at load time and
+        asserts a single shared scale; mismatched scales corrupted MoE output.
+        The fix derives the fallback amax once from the fused ``gate_up[idx]``
+        tensor before the deepcopies, so gate's clone and up's clone start with
+        the same amax.
+        """
+        from modelopt.torch.export.moe_utils import _export_fused_experts
+
+        # Build experts where gate and up have very different magnitudes —
+        # any per-half fallback would clearly produce different amaxes.
+        experts = _SyntheticFusedExperts()
+        gate = torch.randn(NUM_EXPERTS, INTERMEDIATE_DIM, HIDDEN_DIM) * 0.02
+        up = torch.randn(NUM_EXPERTS, INTERMEDIATE_DIM, HIDDEN_DIM) * 0.20
+        with torch.no_grad():
+            experts.gate_up_proj.copy_(torch.cat([gate, up], dim=1))
+
+        expert_type = type(experts)
+        if QuantModuleRegistry.get(expert_type) is None:
+            QuantModuleRegistry.register({expert_type: "test.SyntheticFusedExperts"})(
+                _QuantFusedExperts
+            )
+        try:
+            converted = QuantModuleRegistry.convert(experts)
+
+            # Leave every expert weight quantizer uncalibrated (no _amax).
+            # Mark them enabled to exercise the export-time fallback path.
+            for q in converted.gate_up_proj_weight_quantizers:
+                q._disabled = False
+            for q in converted.down_proj_weight_quantizers:
+                q._disabled = False
+
+            # Capture the amax each per-projection wrapper carries into the
+            # FP4 quantization step. Patching here avoids needing CUDA / FP4.
+            seen = {}  # (expert_idx, proj_name) -> amax tensor
+
+            def _spy_export(wrapper, dtype):
+                # Identify which expert/projection this wrapper belongs to by
+                # matching the weight tensor against the fused parameters.
+                w = wrapper.weight.data
+                # gate_up_proj is (N, 2*INTER, HIDDEN); split halves are
+                # contiguous .data views or .contiguous() copies — we can match
+                # by shape and value identity for this synthetic case.
+                amax = wrapper.weight_quantizer._amax.detach().clone()
+                # Identify by matching against gate vs. up slices of each expert.
+                for idx in range(NUM_EXPERTS):
+                    g_slice = converted.gate_up_proj.data[idx, :INTERMEDIATE_DIM, :]
+                    u_slice = converted.gate_up_proj.data[idx, INTERMEDIATE_DIM:, :]
+                    d_slice = converted.down_proj.data[idx]
+                    if w.shape == g_slice.shape and torch.equal(w, g_slice):
+                        seen[(idx, "gate_proj")] = amax
+                        return
+                    if w.shape == u_slice.shape and torch.equal(w, u_slice):
+                        seen[(idx, "up_proj")] = amax
+                        return
+                    if w.shape == d_slice.shape and torch.equal(w, d_slice):
+                        seen[(idx, "down_proj")] = amax
+                        return
+
+            monkeypatch.setattr(
+                "modelopt.torch.export.unified_export_hf._export_quantized_weight",
+                _spy_export,
+            )
+
+            _export_fused_experts(converted, torch.float16)
+
+            # Assert: for every expert, gate's amax matches up's amax.
+            for idx in range(NUM_EXPERTS):
+                g_amax = seen.get((idx, "gate_proj"))
+                u_amax = seen.get((idx, "up_proj"))
+                assert g_amax is not None and u_amax is not None, (
+                    f"Expert {idx}: missing recorded amax (gate={g_amax}, up={u_amax})"
+                )
+                assert torch.allclose(g_amax, u_amax), (
+                    f"Expert {idx}: gate amax {g_amax.item()} != up amax {u_amax.item()}. "
+                    f"Uncalibrated fused experts must share gate/up amax so that "
+                    f"weight_scale_2 stays consistent across the fusion."
+                )
+        finally:
+            if QuantModuleRegistry.get(expert_type) is not None:
+                QuantModuleRegistry.unregister(expert_type)
+
 
 # ---------------------------------------------------------------------------
 # Tests for force_eager_experts_impl_on_the_fly
