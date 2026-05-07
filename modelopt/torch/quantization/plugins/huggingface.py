@@ -900,6 +900,27 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
         self._down_proj_linear = False
         return super().forward(*args, **kwargs)
 
+    def iter_weights_for_calibration(self):
+        """Yield ``(weight_slice, quantizer)`` pairs for every per-expert weight quantizer.
+
+        Overrides the default :meth:`QuantModule.iter_weights_for_calibration`,
+        which uses ``weight_attr_names`` + singular ``*_weight_quantizer`` and
+        therefore silently skips fused-experts modules. Without this override,
+        weight-only calibration paths (``mse_calibrate``, ``weight_only_quantize``)
+        never reach per-expert weight quantizers — leaving any expert that the
+        forward-pass max-calibration didn't route to with no ``_amax``.
+        """
+        for weight_name, quantizers_name in (
+            ("gate_up_proj", "gate_up_proj_weight_quantizers"),
+            ("down_proj", "down_proj_weight_quantizers"),
+        ):
+            weight = getattr(self, weight_name, None)
+            quantizers = getattr(self, quantizers_name, None)
+            if weight is None or quantizers is None:
+                continue
+            for idx, q in enumerate(quantizers):
+                yield weight[idx], q
+
     def fold_weight(self, keep_attrs: bool = False):
         """Fold per-expert weight quantizers into the fused 3-D weights.
 

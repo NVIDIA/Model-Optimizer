@@ -53,7 +53,6 @@ from .utils import (
     promote_nvfp4_static_quantizers,
     quantizer_attr_names,
     reduce_amax,
-    weight_attr_names,
 )
 from .utils.calib_utils import _GPTQ_HELPER_REGISTRY, GPTQHelper
 
@@ -85,8 +84,9 @@ _GROUPED_WEIGHT_QUANTIZER_PATTERNS: tuple[tuple[str, ...], ...] = (
 
 
 def _is_calibrated_nvfp4_static_weight_quantizer(q) -> bool:
-    """True for an NVFP4-static weight quantizer that ``max_calibrate`` already
-    populated with a per-block ``_amax`` and that is currently enabled.
+    """Check whether ``q`` is an enabled, calibrated NVFP4-static weight quantizer.
+
+    True when ``max_calibrate`` already populated a per-block ``_amax``.
     """
     return (
         isinstance(q, TensorQuantizer)
@@ -98,9 +98,9 @@ def _is_calibrated_nvfp4_static_weight_quantizer(q) -> bool:
 
 
 def _collect_grouped_linears(model: nn.Module) -> list[list[nn.Module]]:
-    """Find groups of Linear-like submodules whose NVFP4-static weight quantizers
-    should share ``global_amax`` (Q/K/V under one attention parent; gate/up under
-    one MLP parent).
+    """Find Linear-like submodule groups whose NVFP4-static weight quantizers should share global_amax.
+
+    Groups are Q/K/V under one attention parent and gate/up under one MLP parent.
     """
     groups: list[list[nn.Module]] = []
     wq_attr = quantizer_attr_names("weight").weight_quantizer
@@ -117,6 +117,50 @@ def _collect_grouped_linears(model: nn.Module) -> list[list[nn.Module]]:
             if len(members) >= 2:
                 groups.append(members)
     return groups
+
+
+@torch.no_grad()
+def _bootstrap_uncalibrated_weight_quantizers(model: nn.Module) -> int:
+    """Run a max-style amax collection on weight quantizers whose ``_amax`` is missing.
+
+    Forward-pass max calibration only populates per-expert weight quantizers in
+    fused-experts containers when tokens are routed to that expert. "Dead"
+    experts that received no tokens end up with no ``_amax``, which causes
+    ``mse_calibrate``'s subsequent walk to skip them and forces the export-time
+    fallback to derive separate per-half amax for gate/up. This helper walks
+    every QuantModule's :meth:`iter_weights_for_calibration` pairs and, for any
+    quantizer that lacks ``_amax``, runs the existing calibrator (typically
+    :class:`MaxCalibrator`) on the corresponding weight slice — populating
+    ``_amax`` from the weight rather than from runtime activations.
+
+    Returns the number of quantizers bootstrapped (mostly for diagnostics).
+    """
+    n = 0
+    for module in model.modules():
+        if not isinstance(module, QuantModule):
+            continue
+        try:
+            pairs = list(module.iter_weights_for_calibration())
+        except Exception:
+            continue
+        for weight, q in pairs:
+            if not isinstance(q, TensorQuantizer) or q._disabled or q._dynamic:
+                continue
+            if q._calibrator is None:
+                continue
+            if hasattr(q, "_amax") and q._amax is not None and not torch.all(q._amax == 0):
+                continue
+            q.disable_quant()
+            q.enable_calib()
+            q(weight)
+            if q._calibrator.compute_amax() is not None:
+                q.load_calib_amax()
+            q.enable_quant()
+            q.disable_calib()
+            if hasattr(q._calibrator, "reset"):
+                q._calibrator.reset()
+            n += 1
+    return n
 
 
 @torch.no_grad()
@@ -440,6 +484,14 @@ def mse_calibrate(
     # Step 1: First get initial amax using max calibration
     max_calibrate(model, forward_loop, distributed_sync)
 
+    # Step 1a: Bootstrap any weight quantizer that didn't receive an _amax from
+    # the forward-pass max calibration (typical of dead MoE experts in fused-
+    # experts containers). Without this, the dead-expert per-expert quantizers
+    # would be silently skipped by step 2's `hasattr(_amax)` gate, leaving the
+    # export-time fallback to derive separate gate/up amaxes from each half of
+    # the fused weight (breaking the gate==up weight_scale_2 invariant).
+    _bootstrap_uncalibrated_weight_quantizers(model)
+
     # Step 1b: Sync global_amax across sibling NVFP4-static weight quantizers
     # (q/k/v_proj under one attention block; gate/up — a.k.a. w1/w3 — under one
     # MLP block) so their FP8 scale-of-scales matches and the per-block FP8
@@ -447,10 +499,9 @@ def mse_calibrate(
     # (e.g. fused QKV / fused gate_up_proj).
     sync_grouped_weight_global_amax(model)
 
-    # Step 2: Replace calibrators with MseCalibrator for enabled quantizers
-    # and identify weight quantizers
-    weight_quantizers = []
-    seen_modules = set()
+    # Step 2: Replace calibrators with MseCalibrator for enabled quantizers.
+    # (Weight-quantizer discovery + calibration happens in step 3 below using
+    # iter_weights_for_calibration.)
 
     # Triton-fused FP8 sweep is on by default for NVFP4 static quant; set
     # MODELOPT_NVFP4_TRITON_SWEEP=0 to fall back to the reference for debugging.
@@ -509,52 +560,80 @@ def mse_calibrate(
                     quant_func=partial(_mse_quant_func, quantizer=module),
                 )
 
-    # Identify weight quantizers by checking if they have corresponding weight parameters
+    # Step 3+4: discover and calibrate weight quantizers via
+    # iter_weights_for_calibration, which yields (weight_or_slice, quantizer)
+    # pairs. For non-fused QuantModules, this is one pair per weight (same as
+    # the previous singular-only walk). For fused-experts containers
+    # (transformers 5.x: gate_up_proj / down_proj as 3-D Parameters with per-
+    # expert quantizer ModuleLists) it yields one pair per expert per
+    # projection — so every per-expert weight quantizer gets MSE-calibrated,
+    # not just the ones that received forward-pass tokens.
     name_to_module = dict(model.named_modules())
+    weight_calib_seen: set[int] = set()
+
+    # Pre-count for an accurate tqdm total (the same iter is cheap to repeat;
+    # actually run-time work happens in the second pass).
+    total_to_calib = 0
     for parent_module in name_to_module.values():
-        if parent_module in seen_modules:
+        if id(parent_module) in weight_calib_seen or not isinstance(parent_module, QuantModule):
             continue
-        for weight_name in weight_attr_names(parent_module):
-            weight_quantizer_name = quantizer_attr_names(weight_name).weight_quantizer
-            weight_quantizer = getattr(parent_module, weight_quantizer_name, None)
-            if isinstance(weight_quantizer, TensorQuantizer) and weight_quantizer.is_enabled:
-                if getattr(weight_quantizer, "_calibrator", None) is not None:
-                    weight_quantizers.append((parent_module, weight_name, weight_quantizer))
-        seen_modules.add(parent_module)
+        try:
+            pairs = list(parent_module.iter_weights_for_calibration())
+        except Exception:
+            continue
+        for _, q in pairs:
+            if (
+                isinstance(q, TensorQuantizer)
+                and q.is_enabled
+                and getattr(q, "_calibrator", None) is not None
+            ):
+                total_to_calib += 1
 
-    # Step 3: Calibrate weight quantizers ONE AT A TIME with immediate amax computation
-    # This prevents massive memory accumulation seen in large models
-    for idx, (parent_module, weight_name, weight_quantizer) in enumerate(
-        tqdm(weight_quantizers, desc="MSE weight calibration")
-    ):
-        # Enable calibration mode for the weight quantizer
-        weight_quantizer.disable_quant()
-        weight_quantizer.enable_calib()
+    pbar = tqdm(total=total_to_calib, desc="MSE weight calibration")
+    n_calibrated = 0
+    for parent_module in name_to_module.values():
+        if id(parent_module) in weight_calib_seen:
+            continue
+        weight_calib_seen.add(id(parent_module))
+        if not isinstance(parent_module, QuantModule):
+            continue
         with enable_weight_access_and_writeback(parent_module, model, name_to_module):
-            weight = getattr(parent_module, weight_name)
-            weight_quantizer(weight)
+            try:
+                pairs = list(parent_module.iter_weights_for_calibration())
+            except Exception:
+                pairs = []
+            for weight, weight_quantizer in pairs:
+                if not (
+                    isinstance(weight_quantizer, TensorQuantizer)
+                    and weight_quantizer.is_enabled
+                    and getattr(weight_quantizer, "_calibrator", None) is not None
+                ):
+                    continue
+                weight_quantizer.disable_quant()
+                weight_quantizer.enable_calib()
+                weight_quantizer(weight)
 
-        # IMMEDIATELY compute amax and reset calibrator to free memory
-        cal = getattr(weight_quantizer, "_calibrator", None)
-        if cal is not None and cal.compute_amax() is not None:
-            weight_quantizer.load_calib_amax()
+                cal = weight_quantizer._calibrator
+                if cal.compute_amax() is not None:
+                    weight_quantizer.load_calib_amax()
 
-        weight_quantizer.enable_quant()
-        weight_quantizer.disable_calib()
+                weight_quantizer.enable_quant()
+                weight_quantizer.disable_calib()
 
-        # Synchronize ALL CUDA devices before resetting to ensure all async operations complete
-        # This is critical for multi-GPU setups where tensors may be on different devices
-        if torch.cuda.is_available():
-            for dev_id in range(torch.cuda.device_count()):
-                torch.cuda.synchronize(torch.device(f"cuda:{dev_id}"))
+                if torch.cuda.is_available():
+                    for dev_id in range(torch.cuda.device_count()):
+                        torch.cuda.synchronize(torch.device(f"cuda:{dev_id}"))
 
-        if cal is not None and hasattr(cal, "reset"):
-            cal.reset()
+                if hasattr(cal, "reset"):
+                    cal.reset()
 
-        if (idx + 1) % 10 == 0 and torch.cuda.is_available():
-            for dev_id in range(torch.cuda.device_count()):
-                torch.cuda.synchronize(torch.device(f"cuda:{dev_id}"))
-            torch.cuda.empty_cache()
+                pbar.update(1)
+                n_calibrated += 1
+                if n_calibrated % 10 == 0 and torch.cuda.is_available():
+                    for dev_id in range(torch.cuda.device_count()):
+                        torch.cuda.synchronize(torch.device(f"cuda:{dev_id}"))
+                    torch.cuda.empty_cache()
+    pbar.close()
 
     if torch.cuda.is_available():
         for dev_id in range(torch.cuda.device_count()):
