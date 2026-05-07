@@ -365,9 +365,7 @@ def train(
         # into a 1-D tensor lets us issue exactly one ``.to("cpu")`` instead of
         # one per block.
         if iter_loss_tensors:
-            loss_stack = torch.stack(
-                [t.flatten()[0] for t in iter_loss_tensors.values()]
-            )
+            loss_stack = torch.stack([t.flatten()[0] for t in iter_loss_tensors.values()])
             iter_stitched_module_losses: dict[str, float] = dict(
                 zip(iter_loss_tensors.keys(), loss_stack.to("cpu").tolist())
             )
