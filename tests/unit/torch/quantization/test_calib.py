@@ -312,6 +312,47 @@ def test_padded_awq():
     model(torch.randn(2, 16, 16))
 
 
+def test_awq_lite_uncalibrated_linear_keeps_input_quantizer_enabled():
+    """Regression test for NVBug 6143871.
+
+    awq_lite.setup() disables the input_quantizer at the start of search. The
+    calibrated branch re-enables it inside postprocess(); the uncalibrated
+    branch (no cache-pass tokens, e.g. an MoE expert that never gets routed)
+    must do the same — otherwise downstream export (set_expert_quantizer_amax
+    + _export_quantized_weight) drops the input_scale buffer and inference
+    runtimes that read per-expert input_scale (e.g. TRT-LLM CutlassFusedMoE)
+    crash with KeyError on '<idx>.w1.input_scale'.
+    """
+
+    class _TwoBranchModel(nn.Module):
+        """Two parallel linears; only the first is exercised by forward_loop."""
+
+        def __init__(self):
+            super().__init__()
+            self.calibrated = nn.Linear(16, 16, bias=False)
+            self.uncalibrated = nn.Linear(16, 16, bias=False)
+
+        def forward(self, x, branch="calibrated"):
+            if branch == "calibrated":
+                return self.calibrated(x)
+            return self.uncalibrated(x)
+
+    torch.manual_seed(0)
+    model = _TwoBranchModel()
+
+    def _forward_loop(m):
+        for _ in range(2):
+            m(torch.randn(2, 16, 16), branch="calibrated")
+
+    mtq.quantize(model, mtq.NVFP4_AWQ_LITE_CFG, _forward_loop)
+
+    assert model.calibrated.input_quantizer.is_enabled
+    assert model.uncalibrated.input_quantizer.is_enabled, (
+        "Uncalibrated linear's input_quantizer must remain enabled after "
+        "awq_lite postprocess so export emits input_scale (NVBug 6143871)."
+    )
+
+
 def test_smoothquant_enable_disable():
     torch.manual_seed(1234)
     model = _SimpleMLP()
