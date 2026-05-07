@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# MXFP8 dynamic block quantizer attributes with E8M0 scales.
+# MXFP8 E4M3 dynamic block quantizer attributes with E8M0 scales.
 
 # modelopt-schema: modelopt.torch.quantization.config.QuantizerAttributeConfig
 num_bits: e4m3

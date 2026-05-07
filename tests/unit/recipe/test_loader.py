@@ -1429,7 +1429,7 @@ def test_modelopt_schema_comment_validates_after_import_resolution(tmp_path):
     }
 
 
-def test_import_dict_snippet_in_union_typed_list_field(tmp_path):
+def test_import_dict_snippet_imports_in_union_typed_list_field(tmp_path):
     """A bare import can append into QuantizerCfgEntry.cfg's list branch."""
     (tmp_path / "int4.yaml").write_text(
         "# modelopt-schema: modelopt.torch.quantization.config.QuantizerAttributeConfig\n"
@@ -1458,6 +1458,31 @@ def test_import_dict_snippet_in_union_typed_list_field(tmp_path):
 
     data = load_config(config_file)
 
+    assert _cfg_to_dict(data["quant_cfg"][0]["cfg"]) == [
+        {"num_bits": 4, "block_sizes": {-1: 128, "type": "static"}},
+        {"num_bits": (4, 3)},
+    ]
+
+
+def test_import_dict_snippet_in_union_typed_list_field_with_inline_item(tmp_path):
+    """A dict snippet can be imported as one item inside QuantizerCfgEntry.cfg list."""
+    _write_quantizer_attribute(
+        tmp_path / "int4.yaml",
+        "num_bits: 4\nblock_sizes:\n  -1: 128\n  type: static\n",
+    )
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        f"# modelopt-schema: modelopt.torch.quantization.config.QuantizeConfig\n"
+        f"imports:\n"
+        f"  int4: {tmp_path / 'int4.yaml'}\n"
+        f"algorithm: awq_lite\n"
+        f"quant_cfg:\n"
+        f"  - quantizer_name: '*weight_quantizer'\n"
+        f"    cfg:\n"
+        f"      - $import: int4\n"
+        f"      - num_bits: e4m3\n"
+    )
+    data = load_config(config_file)
     assert _cfg_to_dict(data["quant_cfg"][0]["cfg"]) == [
         {"num_bits": 4, "block_sizes": {-1: 128, "type": "static"}},
         {"num_bits": (4, 3)},
