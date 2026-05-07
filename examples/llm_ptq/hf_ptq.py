@@ -1135,7 +1135,7 @@ def quantize_main(
             quant_cfg = copy.deepcopy(quant_cfg)
             force_weight_quantizers_static(quant_cfg["quant_cfg"])
 
-        if args.qformat in QUANT_CFG_CHOICES:
+        if args.recipe is not None or args.qformat in QUANT_CFG_CHOICES:
             mono_quantize(
                 args,
                 quant_cfg,
