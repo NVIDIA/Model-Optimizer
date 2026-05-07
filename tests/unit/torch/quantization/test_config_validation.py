@@ -525,3 +525,88 @@ class TestQuantizeConfigValidators:
             algorithm="max",
         )
         assert len(cfg.quant_cfg) == 2
+
+
+class TestNVFP4BlockSizeValidation:
+    """NVFP4 block_size must be constrained to {16, 32} per Blackwell MMA tile geometry."""
+
+    def test_nvfp4_block_16_accepted(self):
+        """block_size=16 is the canonical NVFP4 tile — must pass."""
+        cfg = QuantizeConfig(
+            quant_cfg=[
+                {
+                    "quantizer_name": "*weight_quantizer",
+                    "cfg": {
+                        "num_bits": (2, 1),
+                        "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+                    },
+                },
+            ],
+            algorithm="max",
+        )
+        assert cfg.quant_cfg[0]["cfg"]["block_sizes"][-1] == 16
+
+    def test_nvfp4_block_32_accepted(self):
+        """block_size=32 is the alternative Blackwell MMA tile — must pass."""
+        cfg = QuantizeConfig(
+            quant_cfg=[
+                {
+                    "quantizer_name": "*weight_quantizer",
+                    "cfg": {
+                        "num_bits": (2, 1),
+                        "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (4, 3)},
+                    },
+                },
+            ],
+            algorithm="max",
+        )
+        assert cfg.quant_cfg[0]["cfg"]["block_sizes"][-1] == 32
+
+    @pytest.mark.parametrize("bad_size", [8, 64, 128, 4, 256])
+    def test_nvfp4_illegal_block_size_rejected(self, bad_size):
+        """block_size ∉ {16, 32} must fail at config construction time."""
+        with pytest.raises(ValidationError, match="NVFP4 block_size must be 16 or 32"):
+            QuantizeConfig(
+                quant_cfg=[
+                    {
+                        "quantizer_name": "*weight_quantizer",
+                        "cfg": {
+                            "num_bits": (2, 1),
+                            "block_sizes": {-1: bad_size, "scale_bits": (4, 3)},
+                        },
+                    },
+                ],
+                algorithm="max",
+            )
+
+    def test_non_nvfp4_block_size_unaffected(self):
+        """INT4 block_size=128 must still pass — constraint is NVFP4-only."""
+        cfg = QuantizeConfig(
+            quant_cfg=[
+                {
+                    "quantizer_name": "*weight_quantizer",
+                    "cfg": {
+                        "num_bits": 4,
+                        "block_sizes": {-1: 128, "type": "static"},
+                    },
+                },
+            ],
+            algorithm="max",
+        )
+        assert cfg.quant_cfg[0]["cfg"]["block_sizes"][-1] == 128
+
+    def test_nvfp4_without_scale_bits_unaffected(self):
+        """num_bits=(2,1) without scale_bits=(4,3) is not NVFP4 — no constraint."""
+        cfg = QuantizeConfig(
+            quant_cfg=[
+                {
+                    "quantizer_name": "*weight_quantizer",
+                    "cfg": {
+                        "num_bits": (2, 1),
+                        "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
+                    },
+                },
+            ],
+            algorithm=None,
+        )
+        assert cfg.quant_cfg[0]["cfg"]["block_sizes"][-1] == 32

@@ -455,6 +455,13 @@ class QuantizerAttributeConfig(ModeloptBaseConfig):
                 assert _k in ["type", "scale_bits", "scale_block_sizes"]
             else:
                 assert isinstance(_k, int) and (_v is None or isinstance(_v, int))
+        # NVFP4 (Blackwell MMA): block_size must be 16 or 32
+        if info.data.get("num_bits") == (2, 1) and v.get("scale_bits") == (4, 3):
+            for _k, _v in v.items():
+                if isinstance(_k, int) and _v is not None:
+                    assert _v in (16, 32), (
+                        f"NVFP4 block_size must be 16 or 32 (Blackwell MMA tile), got {_v}"
+                    )
         return v
 
     @field_validator("bias")
