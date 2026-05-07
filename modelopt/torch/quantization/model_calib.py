@@ -52,7 +52,6 @@ from .utils import (
     promote_nvfp4_static_quantizers,
     quantizer_attr_names,
     reduce_amax,
-    weight_attr_names,
 )
 from .utils.calib_utils import _GPTQ_HELPER_REGISTRY, GPTQHelper
 
@@ -64,93 +63,104 @@ __all__ = [
     "max_calibrate",
     "smoothquant",
     "svdquant",
-    "sync_grouped_weight_global_amax",
 ]
 
 
-# Sibling weight-quantizer name groups whose ``global_amax`` should share an
-# FP8 scale-of-scales. All members of a group sit under the same parent module
-# (e.g. one self-attention or one MLP block) and either consume the same input
-# tensor or get fused at deployment, so a divergent global_amax across siblings
-# would split their FP8 grids and skew the round.
-_GROUPED_WEIGHT_QUANTIZER_PATTERNS: tuple[tuple[str, ...], ...] = (
-    # Standard self-attention (skipped for fused qkv_proj — single weight).
-    ("q_proj", "k_proj", "v_proj"),
-    # Gated MLP, modern naming (Llama / Qwen / Mistral / etc.).
-    ("gate_proj", "up_proj"),
-    # Gated MLP, older Mixtral-style naming.
-    ("w1", "w3"),
-)
-
-
-def _is_calibrated_nvfp4_static_weight_quantizer(q) -> bool:
-    """True for an NVFP4-static weight quantizer that ``max_calibrate`` already
-    populated with a per-block ``_amax`` and that is currently enabled.
-    """
+def _is_calibrated_nvfp4_static(q) -> bool:
+    """True iff ``q`` is an enabled NVFP4-static weight quantizer with ``_amax`` set."""
     return (
         isinstance(q, TensorQuantizer)
         and not q._disabled
         and q.is_nvfp4_static
-        and hasattr(q, "_amax")
-        and q._amax is not None
+        and getattr(q, "_amax", None) is not None
     )
 
 
 def _collect_grouped_linears(model: nn.Module) -> list[list[nn.Module]]:
-    """Find groups of Linear-like submodules whose NVFP4-static weight quantizers
-    should share ``global_amax`` (Q/K/V under one attention parent; gate/up under
-    one MLP parent).
-    """
+    """Collect sibling groups (Q/K/V, gate/up) with calibrated NVFP4-static weight quantizers."""
+    # Inline: layer_utils → quant_utils → model_calib cycle.
+    from modelopt.torch.export.layer_utils import _GATE_UP_PAIRS
+
+    # Reuses the existing gate/up pairs and adds Q/K/V (no equivalent constant
+    # in export). Single source for the gate/up half avoids parallel lists.
+    patterns: tuple[tuple[str, ...], ...] = (("q_proj", "k_proj", "v_proj"), *_GATE_UP_PAIRS)
     groups: list[list[nn.Module]] = []
     wq_attr = quantizer_attr_names("weight").weight_quantizer
     for parent in model.modules():
-        for sibling_names in _GROUPED_WEIGHT_QUANTIZER_PATTERNS:
-            members: list[nn.Module] = []
-            for n in sibling_names:
-                child = getattr(parent, n, None)
-                if child is None:
-                    continue
-                wq = getattr(child, wq_attr, None)
-                if _is_calibrated_nvfp4_static_weight_quantizer(wq):
-                    members.append(child)
+        for sibling_names in patterns:
+            members = [
+                child
+                for child in (getattr(parent, n, None) for n in sibling_names)
+                if child is not None and _is_calibrated_nvfp4_static(getattr(child, wq_attr, None))
+            ]
             if len(members) >= 2:
                 groups.append(members)
     return groups
 
 
 @torch.no_grad()
-def sync_grouped_weight_global_amax(model: nn.Module) -> int:
-    """Sync ``global_amax`` across sibling NVFP4-static weight quantizers.
+def _bootstrap_uncalibrated_weight_quantizers(model: nn.Module) -> int:
+    """Re-run weight calibration on the weight tensor for quantizers missing ``_amax``.
 
-    For each group of siblings (Q/K/V projections under one attention parent;
-    gate/up — a.k.a. ``w1``/``w3`` — under one MLP parent) unifies the
-    NVFP4 ``global_amax`` so the per-block FP8 round picks scales against a
-    consistent FP8 grid across the group during MSE / local-Hessian search.
-
-    Reuses :func:`modelopt.torch.export.quant_utils.preprocess_linear_fusion`
-    (whose ``NVFP4StaticQuantizer`` branch performs the same
-    ``max(stack(global_amax))`` unification at export time). To call it before
-    MSE, this helper first promotes each grouped weight quantizer to
-    :class:`NVFP4StaticQuantizer` with its local ``global_amax`` (=
-    ``reduce_amax(_amax)``); ``preprocess_linear_fusion`` then unifies in
-    place.
-
-    Must be called after ``max_calibrate`` has populated each weight
-    quantizer's ``_amax``. Idempotent. Returns the number of groups synced.
+    Covers MoE experts that ``max_calibrate`` skipped (no routed tokens) so MSE
+    doesn't drop them and break the gate==up ``weight_scale_2`` export invariant.
+    Activation quantizers on those modules remain uncalibrated; emits a warning.
     """
+    name_to_module = dict(model.named_modules())
+    n = 0
+    for module in name_to_module.values():
+        if not isinstance(module, QuantModule):
+            continue
+        with enable_weight_access_and_writeback(module, model, name_to_module):
+            for weight, q in module.iter_weights_for_calibration():
+                if not isinstance(q, TensorQuantizer) or q._disabled or q._dynamic:
+                    continue
+                if q._calibrator is None:
+                    continue
+                if getattr(q, "_amax", None) is not None and not torch.all(q._amax == 0):
+                    continue
+                q.disable_quant()
+                q.enable_calib()
+                q(weight)
+                if q._calibrator.compute_amax() is not None:
+                    q.load_calib_amax()
+                q.enable_quant()
+                q.disable_calib()
+                if hasattr(q._calibrator, "reset"):
+                    q._calibrator.reset()
+                n += 1
+    if n > 0:
+        warnings.warn(
+            f"Bootstrapped {n} weight quantizer(s) with no routed calibration tokens; "
+            f"their activation quantizers (if any) remain uncalibrated. "
+            f"Increase calib size/seq len to activate all experts.",
+            stacklevel=2,
+        )
+    return n
+
+
+@torch.no_grad()
+def _sync_grouped_weight_global_amax(model: nn.Module) -> int:
+    """Unify NVFP4 ``global_amax`` across Q/K/V and gate/up sibling weight quantizers.
+
+    Run after ``max_calibrate``. Sibling discovery is name-based via
+    ``_collect_grouped_linears``; non-matching architectures (wqkv, fused
+    qkv_proj, DeepSeek variants, single-Linear fused gate_up_proj) silently
+    fall back to per-module global_amax. Fused-experts containers already
+    share a single quantizer across gate/up halves and need no sync.
+    """
+    # quant_utils imports back from this module; top-level would cycle.
     from modelopt.torch.export.quant_utils import preprocess_linear_fusion
 
+    wq_attr = quantizer_attr_names("weight").weight_quantizer
     n_groups = 0
     for group in _collect_grouped_linears(model):
-        # Promote each member's weight quantizer so `preprocess_linear_fusion`
-        # sees post-conversion NVFP4StaticQuantizers (its NVFP4 branch reads
-        # `global_amax`, which only exists post-promotion).
-        wq_attr = quantizer_attr_names("weight").weight_quantizer
         for child in group:
             wq = getattr(child, wq_attr)
             if not isinstance(wq, NVFP4StaticQuantizer):
-                local_global = reduce_amax(wq._amax, axis=None)
-                NVFP4StaticQuantizer.from_tensor_quantizer(wq, global_amax=local_global)
+                NVFP4StaticQuantizer.from_tensor_quantizer(
+                    wq, global_amax=reduce_amax(wq._amax, axis=None)
+                )
         preprocess_linear_fusion(group)
         n_groups += 1
     return n_groups
@@ -436,37 +446,24 @@ def mse_calibrate(
     See :class:`MseCalibConfig <modelopt.torch.quantization.config.MseCalibConfig>` for
     details on the remaining arguments.
     """
-    # Step 1: First get initial amax using max calibration
+    # Step 1: max calibrate, bootstrap dead-expert weight quantizers,
+    # unify grouped NVFP4 global_amax so MSE sees a consistent FP8 grid.
     max_calibrate(model, forward_loop, distributed_sync)
+    _bootstrap_uncalibrated_weight_quantizers(model)
+    _sync_grouped_weight_global_amax(model)
 
-    # Step 1b: Sync global_amax across sibling NVFP4-static weight quantizers
-    # (q/k/v_proj under one attention block; gate/up — a.k.a. w1/w3 — under one
-    # MLP block) so their FP8 scale-of-scales matches and the per-block FP8
-    # round uses a consistent grid. No-op when there are no sibling groups
-    # (e.g. fused QKV / fused gate_up_proj).
-    sync_grouped_weight_global_amax(model)
-
-    # Step 2: Replace calibrators with MseCalibrator for enabled quantizers
-    # and identify weight quantizers
-    weight_quantizers = []
-    seen_modules = set()
-
+    # Step 2: replace calibrators with MseCalibrator for enabled quantizers.
     for name, module in list(model.named_modules()):
         if isinstance(module, TensorQuantizer) and not module._disabled:
             if module._calibrator is not None and not module._dynamic and hasattr(module, "_amax"):
-                # Get the initial amax from max calibration
                 initial_amax = module._amax.clone().detach()
-
                 is_nvfp4_static = module.is_nvfp4_static
 
-                if is_nvfp4_static:
-                    # If sync_grouped_weight_global_amax already promoted this
-                    # quantizer (it's a sibling in a Q/K/V or gate/up group),
-                    # its global_amax has been unified across the group; just
-                    # leave it. Otherwise convert + set local global_amax.
-                    if not isinstance(module, NVFP4StaticQuantizer):
-                        global_amax = reduce_amax(initial_amax, axis=None)
-                        NVFP4StaticQuantizer.from_tensor_quantizer(module, global_amax=global_amax)
+                # Promote standalone NVFP4-static quantizers; grouped siblings
+                # already promoted by _sync_grouped_weight_global_amax above.
+                if is_nvfp4_static and not isinstance(module, NVFP4StaticQuantizer):
+                    global_amax = reduce_amax(initial_amax, axis=None)
+                    NVFP4StaticQuantizer.from_tensor_quantizer(module, global_amax=global_amax)
 
                 if fp8_scale_sweep:
                     # Check if backend has a registered custom calibrator factory.
@@ -506,52 +503,48 @@ def mse_calibrate(
                     quant_func=partial(_mse_quant_func, quantizer=module),
                 )
 
-    # Identify weight quantizers by checking if they have corresponding weight parameters
+    # Step 3: calibrate weight quantizers via iter_weights_for_calibration.
     name_to_module = dict(model.named_modules())
+    seen_modules: set[int] = set()
+    pbar = tqdm(desc="MSE weight calibration")
+    n_calibrated = 0
     for parent_module in name_to_module.values():
-        if parent_module in seen_modules:
+        if id(parent_module) in seen_modules or not isinstance(parent_module, QuantModule):
             continue
-        for weight_name in weight_attr_names(parent_module):
-            weight_quantizer_name = quantizer_attr_names(weight_name).weight_quantizer
-            weight_quantizer = getattr(parent_module, weight_quantizer_name, None)
-            if isinstance(weight_quantizer, TensorQuantizer) and weight_quantizer.is_enabled:
-                if getattr(weight_quantizer, "_calibrator", None) is not None:
-                    weight_quantizers.append((parent_module, weight_name, weight_quantizer))
-        seen_modules.add(parent_module)
-
-    # Step 3: Calibrate weight quantizers ONE AT A TIME with immediate amax computation
-    # This prevents massive memory accumulation seen in large models
-    for idx, (parent_module, weight_name, weight_quantizer) in enumerate(
-        tqdm(weight_quantizers, desc="MSE weight calibration")
-    ):
-        # Enable calibration mode for the weight quantizer
-        weight_quantizer.disable_quant()
-        weight_quantizer.enable_calib()
+        seen_modules.add(id(parent_module))
         with enable_weight_access_and_writeback(parent_module, model, name_to_module):
-            weight = getattr(parent_module, weight_name)
-            weight_quantizer(weight)
+            for weight, weight_quantizer in parent_module.iter_weights_for_calibration():
+                if not (
+                    isinstance(weight_quantizer, TensorQuantizer)
+                    and weight_quantizer.is_enabled
+                    and getattr(weight_quantizer, "_calibrator", None) is not None
+                ):
+                    continue
+                weight_quantizer.disable_quant()
+                weight_quantizer.enable_calib()
+                weight_quantizer(weight)
 
-        # IMMEDIATELY compute amax and reset calibrator to free memory
-        cal = getattr(weight_quantizer, "_calibrator", None)
-        if cal is not None and cal.compute_amax() is not None:
-            weight_quantizer.load_calib_amax()
+                cal = weight_quantizer._calibrator
+                if cal.compute_amax() is not None:
+                    weight_quantizer.load_calib_amax()
 
-        weight_quantizer.enable_quant()
-        weight_quantizer.disable_calib()
+                weight_quantizer.enable_quant()
+                weight_quantizer.disable_calib()
 
-        # Synchronize ALL CUDA devices before resetting to ensure all async operations complete
-        # This is critical for multi-GPU setups where tensors may be on different devices
-        if torch.cuda.is_available():
-            for dev_id in range(torch.cuda.device_count()):
-                torch.cuda.synchronize(torch.device(f"cuda:{dev_id}"))
+                if torch.cuda.is_available():
+                    for dev_id in range(torch.cuda.device_count()):
+                        torch.cuda.synchronize(torch.device(f"cuda:{dev_id}"))
 
-        if cal is not None and hasattr(cal, "reset"):
-            cal.reset()
+                if hasattr(cal, "reset"):
+                    cal.reset()
 
-        if (idx + 1) % 10 == 0 and torch.cuda.is_available():
-            for dev_id in range(torch.cuda.device_count()):
-                torch.cuda.synchronize(torch.device(f"cuda:{dev_id}"))
-            torch.cuda.empty_cache()
+                pbar.update(1)
+                n_calibrated += 1
+                if n_calibrated % 10 == 0 and torch.cuda.is_available():
+                    for dev_id in range(torch.cuda.device_count()):
+                        torch.cuda.synchronize(torch.device(f"cuda:{dev_id}"))
+                    torch.cuda.empty_cache()
+    pbar.close()
 
     if torch.cuda.is_available():
         for dev_id in range(torch.cuda.device_count()):
@@ -706,10 +699,7 @@ def local_hessian_calibrate(
     print_rank_0("local_hessian: Running max calibration for all quantizers...")
     max_calibrate(model, forward_loop, distributed_sync)
 
-    # Sync global_amax across sibling NVFP4-static weight quantizers
-    # (q/k/v_proj, gate/up_proj a.k.a. w1/w3) so the FP8 scale-of-scales
-    # is consistent across the group. Idempotent; no-op when fused.
-    sync_grouped_weight_global_amax(model)
+    _sync_grouped_weight_global_amax(model)
 
     # Setup helpers for all quantized linear modules
     name_to_module = dict(model.named_modules())

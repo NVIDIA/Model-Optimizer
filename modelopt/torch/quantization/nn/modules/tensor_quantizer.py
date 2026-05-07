@@ -516,13 +516,7 @@ class TensorQuantizer(nn.Module):
 
     @property
     def is_nvfp4_static(self):
-        """Check if this quantizer is configured for NVFP4 static block quantization.
-
-        Format-only check (does not consider whether ``_amax`` has been
-        populated by calibration). True when the quantizer holds E2M1 weights
-        with E4M3 per-block scales in a static layout — i.e. the two-level
-        scaling NVFP4 path consumed by :class:`NVFP4StaticQuantizer`.
-        """
+        """True for E2M1 weights + E4M3 per-block scales in static layout (format-only check)."""
         return (
             self.is_static_block_quant
             and self._num_bits == (2, 1)

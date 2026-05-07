@@ -1241,10 +1241,6 @@ def export_hf_checkpoint(
         # modeling_utils does `from core_model_loading import revert_weight_conversion`.
         _patches = _patch_revert_weight_conversion()
 
-        # Some upstream HF checkpoints ship a generation_config.json that fails
-        # transformers' strict validation on save (e.g. ``top_p`` set without
-        # ``do_sample=True`` — newer transformers raises). Flip ``do_sample`` to
-        # the sampling-attrs intent so save_pretrained can write the file.
         _sanitize_generation_config_for_save(model)
 
         try:
