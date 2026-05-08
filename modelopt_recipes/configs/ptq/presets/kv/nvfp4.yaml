@@ -17,9 +17,7 @@
 
 # modelopt-schema: modelopt.torch.quantization.config.QuantizeConfig
 imports:
-  nvfp4: configs/numerics/nvfp4
+  kv_nvfp4: configs/ptq/units/kv_nvfp4
 
 quant_cfg:
-  - quantizer_name: '*[kv]_bmm_quantizer'
-    cfg:
-      $import: nvfp4
+  - $import: kv_nvfp4

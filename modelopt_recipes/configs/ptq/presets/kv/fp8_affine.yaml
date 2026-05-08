@@ -16,11 +16,8 @@
 # FP8 E4M3 affine KV cache quantization fragment.
 
 # modelopt-schema: modelopt.torch.quantization.config.QuantizeConfig
+imports:
+  kv_fp8_affine: configs/ptq/units/kv_fp8_affine
+
 quant_cfg:
-  - quantizer_name: '*[kv]_bmm_quantizer'
-    cfg:
-      num_bits: e4m3
-      bias:
-        -2:
-        -4:
-        type: static
+  - $import: kv_fp8_affine

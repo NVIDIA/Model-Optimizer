@@ -17,18 +17,8 @@
 
 # modelopt-schema: modelopt.torch.quantization.config.QuantizeConfig
 imports:
-  nvfp4: configs/numerics/nvfp4
+  kv_nvfp4_rotate: configs/ptq/units/kv_nvfp4_rotate
 
 algorithm: max
 quant_cfg:
-  - quantizer_name: '*q_bmm_quantizer'
-    cfg:
-      rotate: true
-    enable: false
-  - quantizer_name: '*k_bmm_quantizer'
-    cfg:
-      $import: nvfp4
-      rotate: true
-  - quantizer_name: '*v_bmm_quantizer'
-    cfg:
-      $import: nvfp4
+  - $import: kv_nvfp4_rotate

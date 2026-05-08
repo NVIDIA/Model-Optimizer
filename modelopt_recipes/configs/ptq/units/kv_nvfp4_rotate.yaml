@@ -13,11 +13,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# NVFP4 affine KV cache quantization fragment.
+# NVFP4 KV cache quantization with rotation.
 
-# modelopt-schema: modelopt.torch.quantization.config.QuantizeConfig
+# modelopt-schema: modelopt.torch.quantization.config.QuantizerCfgListConfig
 imports:
-  kv_nvfp4_affine: configs/ptq/units/kv_nvfp4_affine
-
-quant_cfg:
-  - $import: kv_nvfp4_affine
+  nvfp4: configs/numerics/nvfp4
+---
+  - quantizer_name: '*q_bmm_quantizer'
+    cfg:
+      rotate: true
+    enable: false
+  - quantizer_name: '*k_bmm_quantizer'
+    cfg:
+      $import: nvfp4
+      rotate: true
+  - quantizer_name: '*v_bmm_quantizer'
+    cfg:
+      $import: nvfp4
