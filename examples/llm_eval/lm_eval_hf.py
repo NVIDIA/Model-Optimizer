@@ -248,6 +248,7 @@ def _inject_modelopt_args_into_model_args(args):
     model_args = dict(args.model_args) if args.model_args else {}
 
     if getattr(args, "trust_remote_code", False):
+        # Propagate the user-provided --trust_remote_code flag (not hardcoded).
         datasets.config.HF_DATASETS_TRUST_REMOTE_CODE = True
         model_args["trust_remote_code"] = True
         args.trust_remote_code = None
@@ -264,7 +265,16 @@ if __name__ == "__main__":
     setup_logging()
     cli = HarnessCLI()
     # The `run` subcommand owns the model/task arguments; extend that parser.
-    _add_modelopt_args(cli._subparsers.choices["run"])
+    # `_subparsers` is private API; guard so a future lm-eval refactor surfaces a
+    # clear error instead of an opaque AttributeError.
+    try:
+        run_parser = cli._subparsers.choices["run"]
+    except (AttributeError, KeyError) as e:
+        raise RuntimeError(
+            "Cannot locate lm-eval's `run` subparser; the HarnessCLI internals may "
+            f"have changed. Installed lm-eval version: {version('lm_eval')}."
+        ) from e
+    _add_modelopt_args(run_parser)
     args = cli.parse_args()
     _inject_modelopt_args_into_model_args(args)
     cli.execute(args)
