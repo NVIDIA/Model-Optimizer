@@ -41,7 +41,9 @@ def test_lm_eval_hf(tmp_path):
 
 @minimum_sm(89)
 def test_qwen3_eval_fp8(tmp_path):
-    model_dir = create_tiny_qwen3_dir(tmp_path, with_tokenizer=True)
+    # Bump max_position_embeddings: TRT-LLM serve rejects prompts longer than
+    # max_seq_len, and the default (32) is shorter than even simple MMLU prompts.
+    model_dir = create_tiny_qwen3_dir(tmp_path, with_tokenizer=True, max_position_embeddings=2048)
     try:
         run_llm_ptq_command(
             model=str(model_dir),
