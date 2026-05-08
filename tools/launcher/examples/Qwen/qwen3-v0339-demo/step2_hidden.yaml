@@ -1,0 +1,45 @@
+# EAGLE3 Speculative Decoding — Step 2: Hidden State Dump
+# Qwen3-v0339-demo
+#
+# Runs the target model to capture hidden states from the synthetic data
+# generated in step1_synth.yaml. These hidden states are used as training data
+# for the EAGLE3 draft head.
+#
+# This is the second step in a 4-step pipeline:
+#   step1_synth.yaml       — synthetic data generation
+#   step2_hidden.yaml      — hidden-state dump (this file)
+#   step3_train.yaml       — offline training
+#   step4_speed_eval.yaml  — SPEED Eval
+#
+# Requires artifacts from step1_synth.yaml in /scratchspace/data
+#
+# Usage:
+#   uv run slurm.py --yaml modules/Model-Optimizer/tools/launcher/examples/Qwen/qwen3-v0339-demo/step2_hidden.yaml --yes
+#   uv run slurm.py --yaml modules/Model-Optimizer/tools/launcher/examples/Qwen/qwen3-v0339-demo/step2_hidden.yaml --dry-run
+
+job_name: qwen3-v0339-demo_EAGLE3_step2_hidden
+
+pipeline:
+  allow_to_fail: false
+  skip: false
+  note: "Step 2: Dump hidden states from target model"
+
+  global_vars:
+    hf_model: /hf-local/Qwen/qwen3-v0339-demo
+
+  task_0:
+    script: common/eagle3/dump_offline_data.sh
+    args:
+      - --input-data /scratchspace/data
+      - --output-dir /scratchspace/offline_hidden_states
+      - --max-seq-len 8192
+      - --tp 8
+      - --moe-ep 8
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 8
+      gpus_per_node: 8
+      container: nvcr.io/nvidia/tensorrt-llm/release:1.2.0
