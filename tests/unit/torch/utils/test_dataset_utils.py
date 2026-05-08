@@ -627,7 +627,6 @@ def _hf_dump_to_jsonl(name: str, split: str, path) -> str:
 
 
 @pytest.mark.integration
-@pytest.mark.network
 class TestHfTinyDataset:
     """End-to-end coverage with a real (tiny) HF dataset."""
 

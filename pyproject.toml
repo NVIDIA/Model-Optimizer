@@ -309,7 +309,6 @@ pythonpath = ["tests/"]
 markers = [
     "integration: Tests that require external services or other non-hermetic dependencies",
     "manual: Only run when --run-manual is given",
-    "network: Tests that require network access",
     "release: Regression tests that should be run before every release",
 ]
 
