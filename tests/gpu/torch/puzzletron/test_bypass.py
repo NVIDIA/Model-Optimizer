@@ -720,7 +720,7 @@ def test_bypass_resume_from_checkpoint(
     """Two-phase test: train + save, then re-launch with resume and verify continuity.
 
     Phase 1: short bypass run (2 steps), checkpoint saved under
-        ``puzzle_dir/bypass/bypass_runs/<exp_id>/iter-NNNNNN-ckpt/``.
+        ``puzzle_dir/bypass/bypass_runs/<exp_id>/step-NNNNNN-ckpt/``.
     Phase 2: same hydra_cfg + ``find_last_ckpt_for_resume=True`` + double the
         training_tokens budget. The resume path in
         ``training_loop.run_bypassed_training:805-840`` must restore
@@ -910,15 +910,15 @@ def _test_bypass_subblock_modes_job(
     if rank == 0:
         expected_experiment_id = _expected_experiment_id(bypass_cfg_dict)
         experiment_dir = puzzle_dir / "bypass/bypass_runs" / expected_experiment_id
-        # `start-iter-*` is the pre-training snapshot (saved when
+        # `start-step-*` is the pre-training snapshot (saved when
         # save_checkpoint_before_training=True). The post-training snapshot
-        # under this short-budget config lives at `final-iter-*` (saved by the
-        # early-exit branch in training_loop.py); the periodic `iter-*` save
+        # under this short-budget config lives at `final-step-*` (saved by the
+        # early-exit branch in training_loop.py); the periodic `step-*` save
         # never fires because the budget is only 2 steps. `latest` is updated
         # by every `save_bypass_checkpoint` call, so post-training it points at
-        # the most recent save (the `final-iter-*` one).
-        start_dirs = sorted(experiment_dir.glob("start-iter-*-ckpt"))
-        assert start_dirs, f"Expected a start-iter-* checkpoint under {experiment_dir}"
+        # the most recent save (the `final-step-*` one).
+        start_dirs = sorted(experiment_dir.glob("start-step-*-ckpt"))
+        assert start_dirs, f"Expected a start-step-* checkpoint under {experiment_dir}"
         start_dir = start_dirs[0]
         end_dir = experiment_dir / "latest"
         assert end_dir.exists(), f"Expected `latest` symlink under {experiment_dir}"

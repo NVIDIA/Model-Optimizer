@@ -243,13 +243,16 @@ def convert_puzzletron_model(model: nn.Module, config: PuzzletronConfig) -> Conv
     # Step 5: Bypass distillation (optional, distributed processing)
     if has_bypass:
         bypass_step, _ = _progress_step(hydra_cfg, "bypass")
-        # Skip if a previous run already produced bypass checkpoints. The realize step
-        # writes a `latest` symlink under each experiment_dir; if any exists, bypass has
-        # completed and rerunning would waste 5-15 min on teacher load + dataloader setup
-        # before its own resume-from-checkpoint logic short-circuits.
+        # Skip only if a previous run finished training cleanly. The training loop
+        # writes a `_DONE` sentinel in each experiment_dir on successful completion;
+        # earlier we keyed off the `latest` symlink instead, but that symlink is
+        # rewritten on every periodic save, so a Ctrl-C'd partial run would falsely
+        # look completed and the pipeline would skip ahead to stats. Skipping here
+        # avoids 5-15 min of teacher load + dataloader setup before the inner
+        # resume-from-checkpoint logic short-circuits a re-entered finished run.
         bypass_runs_dir = Path(config.puzzle_dir) / "bypass" / "bypass_runs"
         bypass_done = bypass_runs_dir.exists() and any(
-            (run_dir / "latest").exists()
+            (run_dir / "_DONE").exists()
             for run_dir in bypass_runs_dir.iterdir()
             if run_dir.is_dir()
         )

@@ -7,9 +7,9 @@ A minimal end-to-end demonstration that **bypass distillation improves quality**
 The teacher has 6 attention layers (each with `num_key_value_heads=2`) interleaved between Mamba and MoE-FFN blocks — **12 KV heads total** across the whole model. We compress to **9 KV heads (75% of teacher)** in two ways and compare:
 
 1. **Without bypass** — replacement library uses Truncate-init weights (KV heads sliced from teacher; no further training).
-2. **With bypass** — the bypass step runs ~10M tokens of per-block knowledge distillation, training a 1-KV-head variant per attention layer against the teacher.
+2. **With bypass** — the bypass step runs ~50M tokens of per-block knowledge distillation, training a 1-KV-head variant per attention layer against the teacher.
 
-Both runs use the same MIP solver and the same constraint (`target_num_kv_heads: 9`), so MIP picks per attention layer from `{teacher 2-head, 1-head, no_op}` (the no_op variant lets the solver drop attention entirely on a layer if doing so is cheap enough). FFN/MoE/Mamba blocks are copied verbatim from the teacher in both runs — only attention weights change.
+Both runs use the same MIP solver and the same constraint (`target_num_kv_heads: 9`), so MIP picks per attention layer from `{teacher 2-head, 1-head}`. FFN/MoE/Mamba blocks are copied verbatim from the teacher in both runs — only attention weights change.
 
 **Metrics:** `lm_loss` and `token_accuracy_top_1` measured against the same held-out dataset by the realize-model step (printed automatically to `puzzle_dir/log.txt`).
 
@@ -70,7 +70,7 @@ torchrun --nproc_per_node=8 examples/puzzletron/main.py \
     --config examples/puzzletron/configs/nemotron-3-nano-30b-a3b/nemotron-3-nano-30b-a3b.yaml
 ```
 
-Skip-if-done caching reuses Step A's converted teacher checkpoint, activation scores, and pruned checkpoints. Only Step 5 (bypass distillation, ~60 min for 10M tokens) and the downstream library/scoring/MIP rerun. Wall-clock: roughly **+1.5 h** on top of Step A.
+Skip-if-done caching reuses Step A's converted teacher checkpoint, activation scores, and pruned checkpoints. Only Step 5 (bypass distillation, ~50M tokens) and the downstream library/scoring/MIP rerun.
 
 Bypass writes its outputs under `${puzzle_dir}/bypass/bypass_runs/bypass_heads_1/` and creates a symlink `${puzzle_dir}/ckpts/bypass_heads_1` that the replacement library builder picks up automatically.
 
@@ -84,14 +84,14 @@ Reducing total KV heads from 12 → 9 (75% of teacher) at fixed FFN/MoE/Mamba on
 |------------------------------|----------------------:|----------:|-----------------------:|
 | Teacher                      | 12                    | 0.5950    | 0.8468                 |
 | Pruned, **no bypass** (Truncate-init) | 9            | 0.6347    | 0.8373                 |
-| Pruned, **with bypass** (10M-token BLD) | 9          | **0.6055**| **0.8441**             |
+| Pruned, **with bypass** (50M-token BLD) | 9          | **0.6055**| **0.8441**             |
 
 **Bypass closes ~74% of the regression gap** at this compression budget:
 
 - `lm_loss` gap to teacher: `0.0397` without bypass → `0.0105` with bypass — bypass recovers **74%**.
 - `token_accuracy_top_1` gap to teacher: `0.0095` without bypass → `0.0027` with bypass — bypass recovers **72%**.
 
-For 10M tokens of per-block KD, that's a substantial lift on a real 30B-A3B teacher.
+For 50M tokens of per-block KD, that's a substantial lift on a real 30B-A3B teacher.
 
 ## Going further: full accuracy recovery
 

@@ -37,7 +37,7 @@ training:
   micro_batch_size: 2
   val_micro_batch_size: 1
   warmup_ratio: 0.05
-  warmup_steps: ${warmup_steps:${.training_tokens},${..data.block_size},${.micro_batch_size},${.warmup_ratio}}  # Auto-calculated warmup steps
+  warmup_steps: ${warmup_steps:${.training_tokens},${..data.block_size},${.micro_batch_size},${.grad_accumulation_steps},${.warmup_ratio}}  # Auto-calculated warmup steps
   min_lr_factor: 1e-5
   grad_accumulation_steps: 1
   skip_first_batches: 0           # Use for debugging or to skip few batches which cause crashes or optimization issues.

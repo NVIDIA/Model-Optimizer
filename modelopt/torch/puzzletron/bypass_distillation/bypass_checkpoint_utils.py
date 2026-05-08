@@ -26,7 +26,7 @@ from tqdm import tqdm
 
 import modelopt.torch.utils.distributed as dist
 from modelopt.torch.puzzletron.anymodel.model_descriptor import ModelDescriptor
-from modelopt.torch.puzzletron.tools.checkpoint_utils_hf import save_checkpoint
+from modelopt.torch.puzzletron.tools.checkpoint_utils_hf import save_checkpoint_from_shards
 from modelopt.torch.puzzletron.tools.logger import aprint, mprint
 from modelopt.torch.utils.robust_json import json_dump
 
@@ -34,28 +34,34 @@ from .stitched_model_factory import StitchedModuleDescriptor
 
 
 def find_latest_run_dir(run_parent_dir: Union[str, Path]) -> str | None:
-    """Find the latest plain-iter checkpoint directory within a run parent directory.
+    """Find the latest plain-step checkpoint directory within a run parent directory.
 
     Resume must pick a directory created by the step-interval / time-based / final save
-    paths (named ``iter-NNNNNN-ckpt``) — not ``best-iter-*`` (which corresponds to a
+    paths (named ``step-NNNNNN-ckpt``) — not ``best-step-*`` (which corresponds to a
     validation-best snapshot whose optimizer state may be stale relative to the latest
-    iter), nor ``start-iter-*`` / ``final-iter-*`` (markers, not resume points).
+    step), nor ``start-step-*`` / ``final-step-*`` (markers, not resume points).
     """
     run_parent_dir = Path(run_parent_dir)
 
     # Check for the "latest" symlink — set only by save_bypass_checkpoint, always
-    # points at a plain ``iter-*`` directory. Fast path.
+    # points at a plain ``step-*`` directory. Fast path.
     latest_dir = run_parent_dir / "latest"
     if latest_dir.exists() and (latest_dir / "saving_completed").exists():
         return str(latest_dir)
 
-    # Fallback: scan plain ``iter-NNNNNN-ckpt`` directories only.
-    iter_re = re.compile(r"^iter-(\d+)-ckpt$")
+    # Fallback: scan plain ``step-NNNNNN-ckpt`` directories only.
+    # Treat a missing parent dir as "no previous runs" rather than fatal — this
+    # handles two cases cleanly: a freshly-wiped bypass dir, and the race where
+    # non-master ranks reach this function before master finishes the
+    # ``set_experiment_dir`` mkdir on a shared filesystem.
+    if not run_parent_dir.exists():
+        return None
+    step_re = re.compile(r"^step-(\d+)-ckpt$")
     candidate_dirs: list[tuple[int, Path]] = []
     for d in run_parent_dir.iterdir():
         if not d.is_dir():
             continue
-        match = iter_re.match(d.name)
+        match = step_re.match(d.name)
         if match:
             candidate_dirs.append((int(match.group(1)), d))
 
@@ -207,8 +213,13 @@ def save_bypass_checkpoint(
         checkpoint_dir=checkpoint_dir,
         overwrite=cfg.bypass.model.model_overrides.delete_old_checkpoints,
     )
-    # Save as HF checkpoint
-    save_checkpoint(model=model, checkpoint_dir=checkpoint_dir, descriptor=descriptor)
+    # Save as HF checkpoint. Must use the gather-aware variant: bypass training is
+    # pipeline-parallel so each rank's `model.state_dict()` only carries its own
+    # owned blocks. The unsharded `save_checkpoint` would have every rank write a
+    # partial `model.safetensors.index.json` to the same path (last writer wins),
+    # producing an index that omits most ranks' weights — resume then leaves params
+    # on the meta device.
+    save_checkpoint_from_shards(model=model, checkpoint_dir=checkpoint_dir, descriptor=descriptor)
 
     if dist.is_master():
         # Create 'latest' symlink

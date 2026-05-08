@@ -159,7 +159,7 @@ def _format_attention_config(attention_config) -> str:
 
     num_kv_heads = attention_config.num_key_value_heads
     if num_kv_heads is not None:
-        return f"{num_kv_heads} kv heads"
+        return f"🐙 {num_kv_heads} kv heads"
 
     if attention_config.replace_with_linear:
         return "linear replacement"
@@ -193,12 +193,12 @@ def _format_ffn_config(ffn_config) -> str:
 
     ffn_intermediate = ffn_config.intermediate_size
     if ffn_intermediate is not None:
-        return f"ffn_intermediate = {ffn_intermediate}"
+        return f"🧱 ffn_dim = {ffn_intermediate}"
 
     # Check for MoE configuration
     moe_config = ffn_config.moe
     if moe_config:
-        return "MoE"
+        return "🔀 MoE"
 
     if ffn_config.sparsify:
         return "sparse"
@@ -311,6 +311,7 @@ def format_stitched_losses(
     losses_dict: dict[str, float],
     best_steps_dict: dict[str, int] | None = None,
     best_values_dict: dict[str, float] | None = None,
+    initial_values_dict: dict[str, float] | None = None,
     step_number: int | None = None,
     title: str = "Stitched Module Losses",
 ) -> str:
@@ -321,6 +322,9 @@ def format_stitched_losses(
         losses_dict: Dictionary with block names as keys and current loss values as floats
         best_steps_dict: Optional dictionary with block names as keys and best step numbers as values
         best_values_dict: Optional dictionary with block names as keys and best loss values as floats
+        initial_values_dict: Optional dictionary with block names as keys and initial loss values
+            (from the first log chunk) as floats. Used to render the "Δ from initial" column as
+            a per-block training-progress signal.
         step_number: Optional current step number to include in summary
         title: Title to display at the top of the formatted output
 
@@ -329,11 +333,11 @@ def format_stitched_losses(
 
     Example output:
         ╭─────────────────── Stitched Module Losses ──────────────────╮
-        │ Block │ Loss Value │ Best Step │ Best Value │ Change from avg  │
-        │───────┼────────────┼───────────┼────────────┼──────────────────│
-        │  00   │ 6.21e-03   │   Step 5  │ 5.95e-03   │ ↑ +2.6e-04       │
-        │  01   │ 5.14e-04   │   Step 12 │ 5.14e-04   │ ↓ -1.2e-04       │
-        │  02   │ 9.84e-05   │   Step 15 │ 9.84e-05   │ ↓ -3.1e-04       │
+        │ Block │ Loss Value │ Δ from initial   │ Best Value │ Best Step │
+        │───────┼────────────┼──────────────────┼────────────┼───────────│
+        │  00   │ 6.21e-03   │ ↓ -3.2e-04 (-5%) │ 5.95e-03   │   Step 5  │
+        │  01   │ 5.14e-04   │ ↓ -1.8e-03 (-78%)│ 5.14e-04   │   Step 12 │
+        │  02   │ 9.84e-05   │ ↓ -4.1e-04 (-81%)│ 9.84e-05   │   Step 15 │
         ╰──────────────────────────────────────────────────────────────╯
     """
     if not losses_dict:
@@ -349,6 +353,8 @@ def format_stitched_losses(
         best_steps_dict = {k: v for k, v in best_steps_dict.items() if k in losses_dict}
     if best_values_dict:
         best_values_dict = {k: v for k, v in best_values_dict.items() if k in losses_dict}
+    if initial_values_dict:
+        initial_values_dict = {k: v for k, v in initial_values_dict.items() if k in losses_dict}
 
     if not losses_dict:
         return "❌ No trainable blocks found"
@@ -371,10 +377,10 @@ def format_stitched_losses(
         f"│{' ' * title_padding}{title}{' ' * (box_width - 2 - title_padding - len(title))}│"
     )
     separator = (
-        f"│ {'Block':<5} │ {'Loss Value':<12} │ {'Best Step':<10} │ "
-        f"{'Best Value':<12} │ {'Change from avg':<18} │"
+        f"│ {'Block':<5} │ {'Loss Value':<12} │ {'Δ from initial':<18} │ "
+        f"{'Best Value':<12} │ {'Best Step':<10} │"
     )
-    divider = f"│{'─' * 7}┼{'─' * 14}┼{'─' * 12}┼{'─' * 14}┼{'─' * 20}│"
+    divider = f"│{'─' * 7}┼{'─' * 14}┼{'─' * 20}┼{'─' * 14}┼{'─' * 12}│"
 
     lines.extend([header, title_line, separator, divider])
 
@@ -397,26 +403,33 @@ def format_stitched_losses(
             best_value = loss_value  # Assume current is best if no history
             best_value_str = f"{best_value:.2e}"
 
-        # Calculate change from average
-        change_from_avg = loss_value - avg_loss
-        if abs(change_from_avg) > 1e-8:  # Only show if meaningful
-            change_str = f"{abs(change_from_avg):.1e}"
-            if change_from_avg > 0:
-                # Current is above average (worse for loss)
-                change_display = f"↑ +{change_str}"
+        # Calculate change from initial: current loss minus the block's loss in the
+        # first log chunk we saw. Per-block training-progress signal — answers "is
+        # bypass distillation actually reducing this block's loss?" and stays
+        # apples-to-apples even when blocks have very different intrinsic loss scales.
+        if initial_values_dict and block_name in initial_values_dict:
+            initial_value = initial_values_dict[block_name]
+            delta = loss_value - initial_value
+            if abs(delta) > 1e-8:
+                pct = (delta / initial_value * 100.0) if initial_value != 0.0 else 0.0
+                # Clamp percentage display to keep the cell within the 18-char column
+                # even on pathological divergence (e.g. a block whose loss 10x'd).
+                pct_clamped = max(-999.0, min(999.0, pct))
+                arrow = "↓" if delta < 0 else "↑"
+                sign = "-" if delta < 0 else "+"
+                change_display = f"{arrow} {sign}{abs(delta):.1e} ({pct_clamped:+.0f}%)"
             else:
-                # Current is below average (better for loss)
-                change_display = f"↓ -{change_str}"
+                change_display = "↔ 0.0e+00"
         else:
-            # At average value
-            change_display = "↔ 0.0e+00"
+            # No baseline supplied (callers may omit initial_values_dict).
+            change_display = "  --"
 
         # Format the line
         block_display = block_name.replace("block_", "").zfill(2)
 
         line = (
-            f"│ {block_display:<5} │ {loss_str:<12} │ {best_step_str:<10} │ "
-            f"{best_value_str:<12} │ {change_display:<18} │"
+            f"│ {block_display:<5} │ {loss_str:<12} │ {change_display:<18} │ "
+            f"{best_value_str:<12} │ {best_step_str:<10} │"
         )
         lines.append(line)
 

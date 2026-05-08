@@ -62,9 +62,9 @@ def puzzle_dir_with_three_ckpts(tmp_path: Path, monkeypatch) -> Path:
           ckpts/
             teacher/                       # real dir
               config.json
-            bypass_ffn_256_heads_4 -> ../bypass/bypass_runs/.../iter-000010-ckpt
+            bypass_ffn_256_heads_4 -> ../bypass/bypass_runs/.../step-000010-ckpt
             pruned_intermediate_256 -> ../pruning/pruned_intermediate_256
-          bypass/bypass_runs/bypass_ffn_256_heads_4/iter-000010-ckpt/
+          bypass/bypass_runs/bypass_ffn_256_heads_4/step-000010-ckpt/
             config.json
           pruning/pruned_intermediate_256/
             config.json
@@ -84,7 +84,7 @@ def puzzle_dir_with_three_ckpts(tmp_path: Path, monkeypatch) -> Path:
 
     # Bypass: real dir under bypass/bypass_runs/, symlinked from ckpts/.
     bypass_real = (
-        puzzle_dir / "bypass" / "bypass_runs" / "bypass_ffn_256_heads_4" / "iter-000010-ckpt"
+        puzzle_dir / "bypass" / "bypass_runs" / "bypass_ffn_256_heads_4" / "step-000010-ckpt"
     )
     _write_minimal_config(bypass_real)
     (ckpts / "bypass_ffn_256_heads_4").symlink_to(bypass_real, target_is_directory=True)
@@ -111,7 +111,7 @@ def test_get_last_checkpoint_from_each_experiment_finds_all_three(
 ):
     discovered = brl._get_last_checkpoint_from_each_experiment(puzzle_dir_with_three_ckpts)
     discovered_names = {p.name for p in discovered}
-    assert discovered_names == {"teacher", "iter-000010-ckpt", "pruned_intermediate_256"}
+    assert discovered_names == {"teacher", "step-000010-ckpt", "pruned_intermediate_256"}
 
 
 def test_get_last_checkpoint_from_each_experiment_resolves_symlinks(
@@ -124,7 +124,7 @@ def test_get_last_checkpoint_from_each_experiment_resolves_symlinks(
     in p.parts``, which only succeeds on the resolved path.
     """
     discovered = brl._get_last_checkpoint_from_each_experiment(puzzle_dir_with_three_ckpts)
-    bypass_path = next(p for p in discovered if p.name == "iter-000010-ckpt")
+    bypass_path = next(p for p in discovered if p.name == "step-000010-ckpt")
     assert "bypass" in bypass_path.parts
     assert "bypass_runs" in bypass_path.parts
     # And the pruning entry must NOT pick up "bypass" anywhere in its parts.
@@ -175,7 +175,7 @@ def test_bypass_priority_orders_bypass_before_pruning(puzzle_dir_with_three_ckpt
     non_teacher_sorted = sorted(discovered - {teacher}, key=_bypass_priority)
 
     # Bypass must come first; pruning must come second.
-    assert non_teacher_sorted[0].name == "iter-000010-ckpt"
+    assert non_teacher_sorted[0].name == "step-000010-ckpt"
     assert non_teacher_sorted[1].name == "pruned_intermediate_256"
 
 
@@ -185,10 +185,10 @@ def test_bypass_priority_is_stable_for_two_bypass_checkpoints(tmp_path: Path):
     Without this, ``set`` iteration order changes the picked-first checkpoint
     across Python invocations, defeating the whole point of the priority sort.
     """
-    p1 = tmp_path / "puzzle/bypass/bypass_runs/bypass_a/iter-000010-ckpt"
-    p2 = tmp_path / "puzzle/bypass/bypass_runs/bypass_b/iter-000020-ckpt"
+    p1 = tmp_path / "puzzle/bypass/bypass_runs/bypass_a/step-000010-ckpt"
+    p2 = tmp_path / "puzzle/bypass/bypass_runs/bypass_b/step-000020-ckpt"
     paths = {p2, p1}  # insert in non-sorted order
     out = sorted(paths, key=_bypass_priority)
-    assert [p.name for p in out] == ["iter-000010-ckpt", "iter-000020-ckpt"]
+    assert [p.name for p in out] == ["step-000010-ckpt", "step-000020-ckpt"]
     # Repeated runs hit the same order.
     assert sorted({p1, p2}, key=_bypass_priority) == out

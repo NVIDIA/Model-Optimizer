@@ -38,11 +38,11 @@ data:
 # Training Configuration
 training:
   learning_rate: 3e-4
-  training_tokens: 1e+7              # 10M tokens (toy budget)
+  training_tokens: 5e+7              # 50M tokens (toy budget)
   micro_batch_size: 2
   val_micro_batch_size: 2
   warmup_ratio: 0.05
-  warmup_steps: ${warmup_steps:${.training_tokens},${..data.block_size},${.micro_batch_size},${.warmup_ratio}}
+  warmup_steps: ${warmup_steps:${.training_tokens},${..data.block_size},${.micro_batch_size},${.grad_accumulation_steps},${.warmup_ratio}}
   min_lr_factor: 1e-5
   grad_accumulation_steps: 8
   skip_first_batches: 0
@@ -69,7 +69,7 @@ model:
   model_overrides:
     delete_old_checkpoints: true
     save_interval_seconds: 12900
-    save_interval: 1e+9
+    save_interval: 100
     save_checkpoint_when_done: true
 
   # Architecture override: only attention is touched. FFN/MoE/Mamba sub-blocks

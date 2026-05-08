@@ -15,11 +15,11 @@ dataset_path: ??? # path to Nemotron-Post-Training-Dataset-v2
 skip_realize_model: false
 
 # KV-heads-only pruning: lock off FFN/MoE-side variants. The replacement library
-# exposes {teacher 2-head, 1-head, no_op} per attention layer; FFN and Mamba
+# exposes {teacher 2-head, 1-head} per attention layer; FFN and Mamba
 # blocks are copied verbatim from the teacher.
 build_replacement_library:
   add_ffn_no_ops: false
-  add_attention_no_ops: true
+  add_attention_no_ops: false
 
 calc_subblock_stats:
   batch_sizes: [64, 96, 128]

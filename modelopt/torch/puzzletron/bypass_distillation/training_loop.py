@@ -104,6 +104,13 @@ def launch_bypass_distillation(hydra_cfg: DictConfig) -> None:
         hydra_cfg.bypass.token_count = 0
         hydra_cfg.bypass.best_val_loss = 1e9
         hydra_cfg.bypass.training.clipping_count = 0
+        # Per-block bookkeeping for the Stitched-Module-Losses table. Mirrored
+        # into cfg.bypass on every log chunk so save_bypass_checkpoint's
+        # args.json snapshot carries them, and resume can restore the columns
+        # instead of trivially re-anchoring to the first post-resume chunk.
+        hydra_cfg.bypass.best_losses_by_name = {}
+        hydra_cfg.bypass.best_steps_by_name = {}
+        hydra_cfg.bypass.initial_losses_by_name = {}
 
         run_bypassed_training(hydra_cfg)
         mprint(f"Bypass config {i + 1}/{len(configs_list)} completed")
@@ -164,7 +171,7 @@ def train(
 
     # Save checkpoint before training starts
     if cfg.bypass.save_checkpoint_before_training and not cfg.bypass.disable_checkpoint_save:
-        subdir_name = f"start-iter-{cfg.bypass.iter_num:06d}-ckpt"
+        subdir_name = f"start-step-{cfg.bypass.step_num:06d}-ckpt"
         save_bypass_checkpoint(
             cfg=cfg,
             descriptor=descriptor,
@@ -219,9 +226,13 @@ def train(
     dist.barrier()
 
     step_to_save = None
-    # Track best loss value for each block
-    best_losses_by_name = dict[str, float]()
-    best_steps_by_name = dict[str, int]()
+    # Track best loss value for each block. Seeded from cfg.bypass so resume
+    # picks up where the previous run left off (run_bypassed_training restores
+    # these from args.json before train_pipeline_parallel runs).
+    best_losses_by_name: dict[str, float] = dict(cfg.bypass.get("best_losses_by_name", {}))
+    best_steps_by_name: dict[str, int] = dict(cfg.bypass.get("best_steps_by_name", {}))
+    # Anchor for the "Δ from initial" column: per-block loss from the first log chunk.
+    initial_losses_by_name: dict[str, float] = dict(cfg.bypass.get("initial_losses_by_name", {}))
     # Buffer variables
     input_ids = torch.zeros(1, 1, dtype=torch.int64)
 
@@ -241,7 +252,7 @@ def train(
                 and not cfg.bypass.disable_checkpoint_save
             ):
                 mprint("Saving final checkpoint before training completion")
-                subdir_name = f"final-iter-{cfg.bypass.iter_num:06d}-ckpt"
+                subdir_name = f"final-step-{cfg.bypass.step_num:06d}-ckpt"
                 save_bypass_checkpoint(
                     cfg=cfg,
                     descriptor=descriptor,
@@ -252,7 +263,7 @@ def train(
                 )
 
                 if cfg.bypass.model.model_overrides.delete_old_checkpoints and dist.is_master():
-                    existing_ckpt_paths = list(Path(cfg.bypass.experiment_dir).glob("iter-*"))
+                    existing_ckpt_paths = list(Path(cfg.bypass.experiment_dir).glob("step-*"))
                     for old_ckpt_path in existing_ckpt_paths:
                         if old_ckpt_path.name != subdir_name:
                             shutil.rmtree(str(old_ckpt_path))
@@ -427,15 +438,20 @@ def train(
         # Logging
         if dist.is_master():
             assert stitched_losses_history is not None
-            while len(stitched_losses_history) >= cfg.bypass.training.log_interval:
+            # log_interval is in optimizer-step units; the underlying history is
+            # per-iter (micro-batch), so the chunk window is grad_accum × wider.
+            iters_per_log_chunk = (
+                cfg.bypass.training.log_interval * cfg.bypass.training.grad_accumulation_steps
+            )
+            while len(stitched_losses_history) >= iters_per_log_chunk:
                 lowest_iter = next(iter(stitched_losses_history.keys()))
 
                 log_chunk = {
                     it: losses
                     for it, losses in stitched_losses_history.items()
-                    if it - lowest_iter < cfg.bypass.training.log_interval
+                    if it - lowest_iter < iters_per_log_chunk
                 }
-                if len(log_chunk) < cfg.bypass.training.log_interval:
+                if len(log_chunk) < iters_per_log_chunk:
                     break
 
                 highest_iter = list(log_chunk.keys())[-1]
@@ -448,24 +464,40 @@ def train(
 
                 losses_by_name_avg = {name: mean(losses) for name, losses in losses_by_name.items()}
 
-                # Update best losses tracking
+                # Anchor "Δ from initial" at the very first iter's per-block losses
+                # (lowest_iter — typically iter 1 on a fresh run, the resumed iter
+                # otherwise). Using the first chunk's *average* would tautologically
+                # make Δ == 0 on the first row, since "Loss Value" is that same average.
+                if not initial_losses_by_name:
+                    initial_losses_by_name.update(stitched_losses_history[lowest_iter])
+
+                # Update best losses tracking. Record the optimizer-step number
+                # so the "Best Step" column matches the header's "step N/max" units.
                 for name, current_loss in losses_by_name_avg.items():
                     if name not in best_losses_by_name or current_loss < best_losses_by_name[name]:
                         best_losses_by_name[name] = current_loss
-                        best_steps_by_name[name] = highest_iter
+                        best_steps_by_name[name] = highest_iter_stats.step_num
+
+                # Mirror to cfg.bypass so save_bypass_checkpoint's args.json snapshot
+                # carries these forward across resumes.
+                cfg.bypass.best_losses_by_name = dict(best_losses_by_name)
+                cfg.bypass.best_steps_by_name = dict(best_steps_by_name)
+                cfg.bypass.initial_losses_by_name = dict(initial_losses_by_name)
 
                 chunk_iter_durations = [
                     iter_stats_history[it].iter_duration for it in log_chunk.keys()
                 ]
                 avg_chunk_iter_duration = mean(chunk_iter_durations)
+                # Report time in step units (= grad_accum × per-iter), since one
+                # step is one optimizer update — what the user actually thinks of
+                # as "a training step." Tokens/sec is invariant to that framing.
+                avg_step_time = (
+                    avg_chunk_iter_duration * cfg.bypass.training.grad_accumulation_steps
+                )
                 avg_token_speed = cfg.bypass.training.tokens_per_iter / avg_chunk_iter_duration
                 mprint(
-                    # `highest_iter` is in micro-batch units (iter_num); compare against
-                    # max_iters (= max_steps × grad_accumulation_steps), not max_steps,
-                    # so the progress fraction is in consistent units.
-                    f"iter {highest_iter}/{cfg.bypass.training.max_iters:,}"
-                    f" (step {highest_iter_stats.step_num}/{cfg.bypass.training.max_steps:,}):"
-                    f" avg_iter_time={avg_chunk_iter_duration * 1000:.2f}ms"
+                    f"step {highest_iter_stats.step_num}/{cfg.bypass.training.max_steps:,}:"
+                    f" avg_step_time={avg_step_time * 1000:.2f}ms"
                     f" avg_token_speed={avg_token_speed:,.0f}[tok/s]"
                 )
                 mprint(
@@ -473,7 +505,8 @@ def train(
                         losses_dict=losses_by_name_avg,
                         best_steps_dict=best_steps_by_name,
                         best_values_dict=best_losses_by_name,
-                        step_number=highest_iter,
+                        initial_values_dict=initial_losses_by_name,
+                        step_number=highest_iter_stats.step_num,
                         title="Stitched Module Losses",
                     )
                 )
@@ -484,14 +517,13 @@ def train(
 
                         wandb.log(
                             {
-                                "iter": highest_iter,
                                 "step": highest_iter_stats.step_num,
                                 "token_count": highest_iter_stats.token_count,
                                 "token_speed": avg_token_speed,
                                 "lr": highest_iter_stats.lr,
                                 "grad_clipping": highest_iter_stats.clipping_count,
                             },
-                            step=highest_iter,
+                            step=highest_iter_stats.step_num,
                         )
                     except ImportError:
                         pass
@@ -529,7 +561,7 @@ def train(
             if val_loss < cfg.bypass.best_val_loss:
                 cfg.bypass.best_val_loss = val_loss
                 if not cfg.bypass.disable_checkpoint_save and cfg.bypass.save_best_ckpt:
-                    subdir_name = f"best-iter-{cfg.bypass.iter_num:06d}-ckpt"
+                    subdir_name = f"best-step-{cfg.bypass.step_num:06d}-ckpt"
                     save_bypass_checkpoint(
                         cfg=cfg,
                         descriptor=descriptor,
@@ -539,10 +571,10 @@ def train(
                         reference_checkpoint_dir=cfg.teacher_dir,
                     )
                     # Keep only the most recent best-checkpoint when delete_old_checkpoints
-                    # is enabled — mirrors the iter-*/final-iter-* cleanup elsewhere so a
+                    # is enabled — mirrors the step-*/final-step-* cleanup elsewhere so a
                     # long run with many validation improvements doesn't fill the disk.
                     if cfg.bypass.model.model_overrides.delete_old_checkpoints and dist.is_master():
-                        for old_ckpt_path in Path(cfg.bypass.experiment_dir).glob("best-iter-*"):
+                        for old_ckpt_path in Path(cfg.bypass.experiment_dir).glob("best-step-*"):
                             if old_ckpt_path.name != subdir_name:
                                 shutil.rmtree(str(old_ckpt_path))
                     if cfg.bypass.kill_after_first_save:
@@ -568,7 +600,7 @@ def train(
                 ):
                     mprint("Saving final checkpoint")
 
-                subdir_name = f"iter-{cfg.bypass.iter_num:06d}-ckpt"
+                subdir_name = f"step-{cfg.bypass.step_num:06d}-ckpt"
                 save_bypass_checkpoint(
                     cfg=cfg,
                     descriptor=descriptor,
@@ -583,7 +615,7 @@ def train(
                     raise RuntimeError("Done saving checkpoint, kill_after_first_save=True")
 
                 if cfg.bypass.model.model_overrides.delete_old_checkpoints and dist.is_master():
-                    existing_ckpt_paths = list(Path(cfg.bypass.experiment_dir).glob("iter-*"))
+                    existing_ckpt_paths = list(Path(cfg.bypass.experiment_dir).glob("step-*"))
                     for old_ckpt_path in existing_ckpt_paths:
                         if old_ckpt_path.name != subdir_name:
                             shutil.rmtree(str(old_ckpt_path))
@@ -725,11 +757,18 @@ def run_bypassed_training(cfg: DictConfig):
         cfg.bypass.training.tokens_per_iter = (
             cfg.bypass.data.block_size * cfg.bypass.training.batch_size_per_iter
         )
-        cfg.bypass.training.max_steps = math.ceil(
+        # max_iters = micro-batches needed to consume training_tokens.
+        # max_steps = optimizer steps (one per grad_accumulation_steps micro-batches).
+        # The loop terminates on `step_num > max_steps`, so max_steps must be in
+        # optimizer-step units. Previously the formulas were swapped: max_steps was
+        # set to ceil(tokens/tokens_per_iter) (semantically iters), then max_iters
+        # was multiplied by grad_accum, giving an effective training budget of
+        # `grad_accumulation_steps × training_tokens` instead of training_tokens.
+        cfg.bypass.training.max_iters = math.ceil(
             cfg.bypass.training.training_tokens / cfg.bypass.training.tokens_per_iter
         )
-        cfg.bypass.training.max_iters = (
-            cfg.bypass.training.max_steps * cfg.bypass.training.grad_accumulation_steps
+        cfg.bypass.training.max_steps = math.ceil(
+            cfg.bypass.training.max_iters / cfg.bypass.training.grad_accumulation_steps
         )
         cfg.bypass.training.max_token_count = (
             cfg.bypass.training.max_iters * cfg.bypass.training.tokens_per_iter
@@ -858,12 +897,21 @@ def run_bypassed_training(cfg: DictConfig):
             # Load resume ckpt bypass configs and extract resume iter_num
             resume_cfg = DictConfig(json_load(Path(resume_checkpoint_path) / "args.json"))
 
-            # Resume stats
-            cfg.bypass.iter_num = resume_cfg.iter_num
+            # Resume stats. Bump iter_num / step_num by 1: args.json records the
+            # iter/step that *just completed* — the increments at the bottom of the
+            # loop body run after save, so the saved values are inclusive. Restoring
+            # them as-is would re-execute the already-saved iter (visible as
+            # "iter 899" instead of "iter 900" in the first post-resume log chunk).
+            cfg.bypass.iter_num = resume_cfg.iter_num + 1
             cfg.bypass.token_count = resume_cfg.token_count
-            cfg.bypass.step_num = resume_cfg.step_num
+            cfg.bypass.step_num = resume_cfg.step_num + 1
             cfg.bypass.best_val_loss = resume_cfg.best_val_loss
             cfg.bypass.training.clipping_count = resume_cfg.training.clipping_count
+            # Per-block bookkeeping. .get() defaults handle resume from older ckpts
+            # that predate these fields.
+            cfg.bypass.best_losses_by_name = resume_cfg.get("best_losses_by_name", {})
+            cfg.bypass.best_steps_by_name = resume_cfg.get("best_steps_by_name", {})
+            cfg.bypass.initial_losses_by_name = resume_cfg.get("initial_losses_by_name", {})
             mprint(f"Resume from iter_num: {cfg.bypass.iter_num}")
 
             # Only copy wandb.run_id if it exists in resume config
@@ -983,6 +1031,12 @@ def run_bypassed_training(cfg: DictConfig):
 
         aprint("Finished training successfully!")
         dist.barrier()
+
+        # Mark training as complete. The pipeline's skip-if-done check looks for this
+        # sentinel — *not* the periodic `latest` symlink, which is rewritten on every
+        # save and would otherwise make a Ctrl-C'd partial run look completed.
+        if dist.is_master():
+            (Path(cfg.bypass.experiment_dir) / "_DONE").touch()
 
     except Exception:
         # Print the traceback explicitly so distributed runs surface it on every
