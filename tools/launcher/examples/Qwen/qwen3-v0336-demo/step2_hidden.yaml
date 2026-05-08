@@ -1,0 +1,35 @@
+# EAGLE3 speculative decoding pipeline Step 2: Hidden-state dump
+#
+# Step 2 of 4-step spec_decoding_release pipeline:
+#   task_0: Dump hidden states — run target model to capture hidden states
+#
+# Usage:
+#   uv run launch.py --yaml examples/Qwen/qwen3-v0336-demo/step2_hidden.yaml --yes
+#   uv run slurm.py --yaml modules/Model-Optimizer/tools/launcher/examples/Qwen/qwen3-v0336-demo/step2_hidden.yaml --dry-run
+
+job_name: qwen3-v0336-demo_step2_hidden
+pipeline:
+  allow_to_fail: false
+  skip: false
+  note:
+
+  global_vars:
+    hf_model: /hf-local/Qwen/qwen3-v0336-demo
+
+  # Step 2: Dump hidden states from target model
+  task_0:
+    script: common/eagle3/dump_offline_data.sh
+    args:
+      - --input-data /scratchspace/data
+      - --output-dir /scratchspace/offline_hidden_states
+      - --max-seq-len 8192
+      - --tp 8
+      - --moe-ep 8
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 8
+      gpus_per_node: 8
+      container: nvcr.io/nvidia/tensorrt-llm/release:1.2.0
