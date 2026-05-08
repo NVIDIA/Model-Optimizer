@@ -45,6 +45,14 @@ if [ -z "$DRAFT" ] && [ -n "${DRAFT_CKPT_DIR:-}" ]; then
     DRAFT=$(ls -d ${DRAFT_CKPT_DIR}/exported-checkpoint-* 2>/dev/null | sort -t- -k3 -n | tail -1)
     if [ -n "$DRAFT" ]; then
         echo "Auto-detected draft model: ${DRAFT}"
+    else
+        # Fail fast: caller asked for a draft from training output, but training
+        # produced nothing. Without this, we'd fall through to the self-draft
+        # branch and vLLM would reject the config with a confusing
+        # "num_speculative_tokens was provided but without speculative model" error.
+        echo "ERROR: DRAFT_CKPT_DIR=${DRAFT_CKPT_DIR} contains no exported-checkpoint-* directory."
+        echo "       The upstream training task likely failed to produce a draft model."
+        exit 1
     fi
 fi
 METHOD=${SPEC_METHOD:-eagle}

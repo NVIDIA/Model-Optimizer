@@ -18,6 +18,8 @@ Primarily Python codebase with optional C++/CUDA extensions supporting PyTorch, 
   sign-off line
 - `pre-commit` hooks run on commit — if files are modified by hooks, re-stage and commit again
 - PRs require CODEOWNERS review (auto-assigned based on `.github/CODEOWNERS`)
+- When creating PRs (`gh pr create`), fill in `.github/PULL_REQUEST_TEMPLATE.md` verbatim — do NOT substitute the harness's default `## Summary` / `## Test plan` format
+- For non-trivial PRs, run `/claude review` to get Claude approval before merging (NVIDIA org members can self-trigger; orthogonal to CodeRabbit)
 - After rebasing, always re-run tests locally before pushing
 - All code must follow the security guidelines in `SECURITY.md` — violations are blocked as pre-merge errors
 - For contribution guidelines, commit conventions, and PR requirements, see `CONTRIBUTING.md`
