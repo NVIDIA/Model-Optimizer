@@ -45,6 +45,9 @@ export PATH=$PATH:/workspace/.local/bin
 ###################################################################################################
 
 trap 'error_handler $0 $LINENO' ERR
+# Without this, the ERR trap sets FAIL_EXIT=1 but the script still exits 0,
+# masking training failures (e.g. CUDA OOM) as Slurm SUCCEEDED.
+trap 'exit_handler' EXIT
 
 # Auto-detect head node IP for multi-node training
 NUM_NODES=${NUM_NODES:-1}
