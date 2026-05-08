@@ -48,13 +48,14 @@ pipeline:
       container: vllm/vllm-openai:latest
 
   # Step 2: Dump hidden states from target model
+  # Uses HF backend (device_map=auto) — mistral3/Mistral3ForConditionalGeneration is not
+  # supported by TRT-LLM hidden state extraction.
   task_1:
-    script: common/eagle3/dump_offline_data.sh
+    script: common/eagle3/dump_offline_data_hf.sh
     args:
       - --input-data /scratchspace/data
       - --output-dir /scratchspace/offline_hidden_states
       - --max-seq-len 8192
-      - --tp 4
     environment:
       - HF_MODEL_CKPT: <<global_vars.hf_model>>
     slurm_config:
@@ -62,7 +63,7 @@ pipeline:
       nodes: 1
       ntasks_per_node: 1
       gpus_per_node: 4
-      container: vllm/vllm-openai:latest
+      container: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc10
 
   # Step 3: Train EAGLE3 draft head (offline)
   task_2:
