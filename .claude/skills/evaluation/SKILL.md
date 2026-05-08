@@ -30,7 +30,7 @@ Config Generation Progress:
 - [ ] Step 5: Confirm tasks (iterative)
 - [ ] Step 6: Advanced - Multi-node (Data Parallel)
 - [ ] Step 7: Advanced - Interceptors
-- [ ] Step 7.5: Check container registry auth (SLURM only)
+- [ ] Step 7.5: Check container registry auth for private images (SLURM only)
 - [ ] Step 8: Run the evaluation
 ```
 
@@ -114,24 +114,21 @@ Ask for model path. Determine type:
 
 **Auto-detect ModelOpt quantization format** (checkpoint paths only):
 
-Check for `hf_quant_config.json` in the checkpoint directory:
+Check `config.json` first for a `quantization_config` section with `quant_method: "modelopt"`. If absent, check the legacy/backward-compatible `hf_quant_config.json`:
 
 ```bash
+cat <checkpoint_path>/config.json 2>/dev/null
 cat <checkpoint_path>/hf_quant_config.json 2>/dev/null
 ```
 
-If found, read `quantization.quant_algo` and set the correct vLLM/SGLang quantization flag in `deployment.extra_args`:
+If ModelOpt quantization is detected, read the quantization algorithm from `quantization_config.quant_algo` or `quantization.quant_algo`.
 
-| `quant_algo` | Flag to add |
-|-------------|-------------|
-| `FP8` | `--quantization modelopt` |
-| `W4A8_AWQ` | `--quantization modelopt` |
-| `NVFP4`, `NVFP4_AWQ` | `--quantization modelopt_fp4` |
-| Other values | Try `--quantization modelopt`; consult vLLM/SGLang docs if unsure |
+- **vLLM:** Do not add a `--quantization` flag by default. Recent vLLM reads `quantization_config` / `hf_quant_config.json` and selects the ModelOpt backend automatically; adding a stale or mismatched flag can cause a config mismatch. Only add an explicit flag if the model card, vLLM version, or dry-run error requires it.
+- **SGLang:** Use SGLang-specific docs/model-card guidance. For offline ModelOpt checkpoints, recent SGLang can parse the config in many cases; if an explicit flag is required, common values are `--quantization modelopt_fp8` for FP8 and `--quantization modelopt_fp4` for NVFP4. Some exported ModelOpt flows document `--quantization modelopt`; verify against the installed SGLang version.
 
-If no `hf_quant_config.json`, also check `config.json` for a `quantization_config` section with `quant_method: "modelopt"`. If neither is found, the checkpoint is unquantized — no flag needed.
+If neither file contains a ModelOpt quantization config, treat the checkpoint as unquantized — no quantization flag needed.
 
-> **Note:** Some models require additional env vars for deployment (e.g., `VLLM_NVFP4_GEMM_BACKEND=marlin` for Nemotron Super). These are not in `hf_quant_config.json` — they are discovered during model card research below.
+> **Note:** Some models require additional env vars for deployment (e.g., `VLLM_NVFP4_GEMM_BACKEND=marlin` for Nemotron Super). These may not be in the quantization config files — they are discovered during model card research below.
 
 **Auto-detect deployment settings from checkpoint:**
 
@@ -165,6 +162,8 @@ When a quantized checkpoint is detected, read `references/quantization-benchmark
 When a quantized checkpoint is detected, identify the matching baseline before launching the full quantized run. The baseline is usually the pre-quantization source model/checkpoint for this run, but it may itself be quantized (for example, an FP8 checkpoint used as the baseline for an NVFP4 checkpoint). First infer the baseline from the PTQ source model/checkpoint in the workspace or config used to create the quantized checkpoint. If it cannot be inferred, ask the user for the baseline model/checkpoint or an existing baseline invocation/run path. If no matching baseline exists, prepare a companion baseline config and launch it before or alongside the quantized config. The baseline config should match the quantized config's benchmark versions, task configs, serving args, token limits, dataset setup, credentials, cluster, and container as closely as possible; change only the model/checkpoint and adjust quantization-specific flags to match the baseline checkpoint. Do not treat the quantized score as release-ready until the baseline comparison exists.
 
 Read `references/model-card-research.md` for the full extraction checklist (sampling params, reasoning config, ARM64 compatibility, pre_cmd, etc.). Use WebSearch to research the model card, present findings, and ask the user to confirm.
+
+For reasoning-capable models, prefer reasoning mode for evaluation because it usually produces the highest task scores; configure the model-card-specific on/off control and any reasoning budget or effort setting. If the user wants lower variance/noise, lower latency/cost, or an apples-to-apples comparison against non-reasoning baselines, also consider a non-reasoning companion run.
 
 **Step 4: Fill in remaining missing values**
 
@@ -222,7 +221,7 @@ If the user needs multi-node evaluation (model >120B, or more throughput), read 
 
 - The docs may show incorrect parameter names for logging. Use `max_logged_requests` and `max_logged_responses` (NOT `max_saved_*` or `max_*`).
 
-**Step 7.5: Check container registry authentication (SLURM only)**
+**Step 7.5: Check container registry authentication for private images (SLURM only)**
 
 NEL's default deployment images by framework:
 
@@ -233,24 +232,27 @@ NEL's default deployment images by framework:
 | TRT-LLM | `nvcr.io/nvidia/tensorrt-llm/release:...` | NGC |
 | Evaluation tasks | `nvcr.io/nvidia/eval-factory/*:26.03` | NGC |
 
-Before submitting, verify the cluster has credentials for the deployment image. See `skills/common/slurm-setup.md` section 6 for the full procedure.
+Before submitting, identify the exact deployment and evaluation-task images that will be pulled. If the images are public, skip the registry-authentication preflight; pyxis/enroot can pull public images without stored credentials. Do not require credentials just because the registry is DockerHub or NGC.
+
+Only verify cluster credentials when an image is private or access-restricted (private DockerHub repo, private NGC repo, internal registry, or user-provided image that is not known to be public). See `skills/common/slurm-setup.md` section 6 for the credential setup procedure.
 
 ```bash
 ssh <host> "grep -E '^\s*machine\s+' ~/.config/enroot/.credentials 2>/dev/null"
 ```
 
 **Decision flow (check before submitting):**
-1. Check if the cluster has credentials for the default DockerHub image (see command above)
-2. If DockerHub credentials exist → use the default image and submit
-3. If DockerHub credentials are missing but can be added → add them (see `slurm-setup.md` section 6), then submit
-4. If DockerHub credentials cannot be added → override `deployment.image` to the NGC alternative and submit:
+1. If the selected images are public → submit without an auth preflight
+2. If any selected image is private or access-restricted → check for credentials for that image's registry (see command above)
+3. If credentials exist → use the selected image and submit
+4. If credentials are missing but can be added → add them (see `slurm-setup.md` section 6), then submit
+5. If credentials cannot be added → switch to a public image when a compatible one exists, for example:
 
    ```yaml
    deployment:
      image: nvcr.io/nvidia/vllm:<YY.MM>-py3  # check https://catalog.ngc.nvidia.com/orgs/nvidia/containers/vllm for latest tag
    ```
 
-5. **Do not retry more than once** without fixing the auth issue
+6. **Do not retry more than once** after an auth failure without fixing credentials or switching images
 
 **Step 8: Run the evaluation**
 
@@ -340,6 +342,6 @@ Config Generation Progress:
 - [ ] Step 5: Confirm tasks (iterative)
 - [ ] Step 6: Advanced - Multi-node (Data Parallel)
 - [ ] Step 7: Advanced - Interceptors
-- [ ] Step 7.5: Check container registry auth (SLURM only)
+- [ ] Step 7.5: Check container registry auth for private images (SLURM only)
 - [ ] Step 8: Run the evaluation
 ```

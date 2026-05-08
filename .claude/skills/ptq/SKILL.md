@@ -59,6 +59,10 @@ If a model-specific recipe exists, use `--recipe <path>` — it may contain tune
 
 Use `--qformat <name>` (e.g., `--qformat nvfp4`). Format definitions: `modelopt/torch/quantization/config.py`. General PTQ recipes in `modelopt_recipes/general/ptq/` correspond to the same formats — `--qformat` is the simpler way to use them.
 
+Before running PTQ, sanity-check the selected qformat/recipe against the model structure. Inspect the recipe's include/exclude patterns and summarize which layer groups will be quantized and approximately how many modules/layers match (attention projections, MLP projections, experts, etc.). If the match count is 0, or far smaller than expected for the model, stop and fix the recipe or ask the user before launching calibration.
+
+If the source checkpoint is already quantized and the requested recipe/config reduces quantization coverage, confirm that intent with the user before running. For example, if an FP8 checkpoint is used as input and the recipe excludes some layers so they would fall back to BF16 instead of staying quantized, call out the affected layer groups and ask whether that FP8-to-BF16 fallback is intended.
+
 > NVFP4 can be calibrated on Hopper but requires Blackwell for inference.
 
 ## Step 4 — Run PTQ
