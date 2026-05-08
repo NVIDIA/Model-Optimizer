@@ -1555,7 +1555,7 @@ def fp4qdq_to_2dq(onnx_model: onnx.ModelProto, verbose: bool = False) -> onnx.Mo
     def _get_precision_dtype() -> str:
         precision_dtype = "Half"
         for initializer in graph.initializer:
-            if initializer.data_type == 16:
+            if initializer.data_type == onnx.TensorProto.BFLOAT16:
                 precision_dtype = "BFloat16"
                 break
         return precision_dtype
@@ -1570,7 +1570,9 @@ def fp4qdq_to_2dq(onnx_model: onnx.ModelProto, verbose: bool = False) -> onnx.Mo
     for node in fp4_qdq_nodes:
         idx1 = initializer_indices.get(node.input[0], None)
         assert idx1 is not None, f"Initializer for weight '{node.input[0]}' not found."
-        block_size = node.attribute[0].i
+        block_size_attr = next((attr for attr in node.attribute if attr.name == "block_size"), None)
+        assert block_size_attr is not None, f"block_size attribute not found for {node.name}"
+        block_size = block_size_attr.i
         initializers_to_delete.append(initializers[idx1].name)
         logger.debug(
             f"Processing FP4QDQ node for weight {node.input[0]} with block size {block_size}"
