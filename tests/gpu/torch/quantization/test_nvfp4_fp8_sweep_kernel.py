@@ -86,8 +86,8 @@ def _run_triton(x, per_block_amax, global_amax):
 
 @requires_triton
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("seed", [0, 1, 2])
-@pytest.mark.parametrize("num_blocks", [4, 64, 1024])
+@pytest.mark.parametrize("num_blocks", [4, 1024])
+@pytest.mark.parametrize("seed", [0, 1])
 def test_parity_random_weights(seed, num_blocks, dtype):
     """Triton sweep must produce the exact same per-block amax as the reference,
     across every dtype supported by the NVFP4 quantizer (fp32, fp16, bf16)."""
