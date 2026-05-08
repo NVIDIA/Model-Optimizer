@@ -391,7 +391,9 @@ def mse_calibrate(
                         continue
 
                 if fp8_scale_sweep and is_nvfp4_static:
-                    # Replace calibrator with NVFP4MSECalibrator
+                    # NVFP4MSECalibrator internally selects a fused Triton kernel for
+                    # the standard squared-error sweep; set MODELOPT_NVFP4_TRITON_SWEEP=0
+                    # to force the reference Python sweep for debugging.
                     module._calibrator = NVFP4MSECalibrator(
                         amax=initial_amax,
                         axis=module._calibrator._axis,
