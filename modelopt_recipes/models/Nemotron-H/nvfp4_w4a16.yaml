@@ -15,39 +15,35 @@
 
 # NVFP4 W4A16 (weight-only) recipe for Nemotron-H hybrid models.
 #
-# Mirrors the general ``nvfp4_w4a16`` qformat (NVFP4_W4A16_CFG) but additionally
-# re-enables quantization of ``lm_head`` and the input token embedding. On
-# Nemotron-3-Nano-4B those two 131072x3136 tables account for ~21% of model
-# parameters, so leaving them at bf16 wastes most of the NVFP4 memory benefit.
-#
 # Coverage:
-#   * Linear layers in attention + MLP: NVFP4 W4A16 weight-only.
-#   * lm_head: NVFP4 W4A16 weight-only (re-enabled here; default disables it).
-#   * Input embedding (``backbone.embeddings`` / ``model.embed_tokens``):
-#     NVFP4 W4A16 weight-only via ``QuantEmbedding``. Embedding inputs are
-#     integer indices, so the input quantizer is intentionally not enabled.
-#   * Mamba ``*mixer.conv1d*``: kept at bf16 (default exclusion).
-#
-# Notes for vLLM consumption:
-#   * ``vllm.compressed-tensors`` consumes packed NVFP4 weights for ``Linear``
-#     and ``Embedding`` layers when the corresponding kernels are present. As
-#     of vLLM 0.19, ``ParallelLMHead`` and ``VocabParallelEmbedding`` need an
-#     additional patch to dispatch ``CompressedTensorsLinearMethod``; see the
-#     PR notes for details. If the target deployment is stock vLLM and you
-#     can't apply that patch, use the general ``nvfp4_w4a16`` qformat
-#     instead, which leaves ``lm_head`` and embeddings at bf16.
+#   * Attention + MLP linears (``mixer.{q,k,v,o}_proj``,
+#     ``mixer.{up,down}_proj``):  NVFP4 W4A16 weight-only.
+#   * Mamba ``mixer.out_proj``:    NVFP4 W4A16 weight-only.
+#   * ``lm_head``:                  bf16 (excluded).
+#   * Input embedding (``backbone.embeddings``):
+#                                   bf16 (excluded).
+#   * Mamba ``mixer.conv1d``:      bf16 (excluded).
+#   * Mamba ``mixer.in_proj``:     bf16 (excluded). Output dim 17504 is not
+#                                   divisible by Marlin's FP4 tile size (64),
+#                                   so quantizing it forces a downstream
+#                                   dequantization fallback in the
+#                                   compressed-tensors convert path; it also
+#                                   destroys post-PTQ accuracy on
+#                                   Nemotron-3-Nano-4B (model collapses to
+#                                   repeating ``<|im_end|>``).
 
 metadata:
   recipe_type: ptq
-  description: NVFP4 W4A16 weight-only for Nemotron-H, including lm_head and input embedding.
+  description: NVFP4 W4A16 weight-only for Nemotron-H (linears only; lm_head, embedding, Mamba in_proj + conv1d stay bf16).
 quantize:
   algorithm: max
   quant_cfg:
-    # Start with everything disabled, then enable layers explicitly.
+    # Start with everything disabled.
     - quantizer_name: '*'
       enable: false
 
-    # Quantize all Linear weight quantizers (attention q/k/v/o + MLP up/down).
+    # Quantize all weight quantizers (attention q/k/v/o + MLP up/down + Mamba
+    # out_proj). Specific exclusions follow.
     - quantizer_name: '*weight_quantizer'
       enable: true
       cfg:
@@ -57,70 +53,17 @@ quantize:
           scale_bits: e4m3
         num_bits: e2m1
 
-    # Standard exclusions copied from ``_default_disabled_quantizer_cfg``.
-    # Order matters: later entries override earlier ones in
-    # ``modelopt.torch.quantization.set_quantizer_by_cfg``.
-    - quantizer_name: '*lm_head*'
+    # Exclude lm_head and the input embedding (kept at bf16).
+    - quantizer_name: '*lm_head*weight_quantizer'
       enable: false
-    - quantizer_name: '*proj_out.*'
+    - quantizer_name: '*embeddings*weight_quantizer'
       enable: false
-    - quantizer_name: '*block_sparse_moe.gate*'
-      enable: false
-    - quantizer_name: '*router*'
-      enable: false
-    - quantizer_name: '*mlp.gate.*'
-      enable: false
-    - quantizer_name: '*mlp.shared_expert_gate.*'
-      enable: false
-    - quantizer_name: '*linear_attn.conv1d*'
-      enable: false
+
+    # Mamba causal conv1d stays at bf16.
     - quantizer_name: '*mixer.conv1d*'
       enable: false
-    - quantizer_name: '*output_layer*'
-      enable: false
-    - quantizer_name: 'output.*'
-      enable: false
-    - parent_class: 'nn.BatchNorm1d'
-      quantizer_name: '*'
-      enable: false
-    - parent_class: 'nn.BatchNorm2d'
-      quantizer_name: '*'
-      enable: false
-    - parent_class: 'nn.BatchNorm3d'
-      quantizer_name: '*'
-      enable: false
-    - parent_class: 'nn.LeakyReLU'
-      quantizer_name: '*'
-      enable: false
 
-    # Nemotron-H specific overrides: re-enable the weight quantizer for
-    # ``lm_head`` and the input embedding. These come AFTER the default
-    # disables above so they take precedence (last matching entry wins).
-    - quantizer_name: '*lm_head*weight_quantizer'
-      enable: true
-      cfg:
-        block_sizes:
-          -1: 16
-          type: dynamic
-          scale_bits: e4m3
-        num_bits: e2m1
-
-    # Two embedding patterns cover both the Nemotron-H remote-code path
-    # (``backbone.embeddings``) and the standard transformers naming
-    # (``model.embed_tokens``).
-    - quantizer_name: '*embeddings*weight_quantizer'
-      enable: true
-      cfg:
-        block_sizes:
-          -1: 16
-          type: dynamic
-          scale_bits: e4m3
-        num_bits: e2m1
-    - quantizer_name: '*embed_tokens*weight_quantizer'
-      enable: true
-      cfg:
-        block_sizes:
-          -1: 16
-          type: dynamic
-          scale_bits: e4m3
-        num_bits: e2m1
+    # Mamba in_proj stays at bf16 — see header for the Marlin tile alignment
+    # and accuracy collapse rationale.
+    - quantizer_name: '*mixer.in_proj*'
+      enable: false
