@@ -65,6 +65,8 @@ Prompt the user with "I'll ask you 5 questions to build the base config we'll ad
 - NIM
 - TRT-LLM
 
+Prefer vLLM for NEL self-deployment unless the user explicitly asks for another runtime, the model card requires another runtime, or the evaluation targets an already-running endpoint (`deployment: none`).
+
 3. Auto-export:
 
 - None (auto-export disabled)
@@ -158,6 +160,10 @@ Combine all detected flags into a single `deployment.extra_args` override. The r
 
 When a quantized checkpoint is detected, read `references/quantization-benchmarks.md` for benchmark sensitivity rankings and recommended sets. Present recommendations to the user and ask which to include.
 
+**Baseline comparison preflight:**
+
+When a quantized checkpoint is detected, identify the matching baseline before launching the full quantized run. The baseline is usually the pre-quantization source model/checkpoint for this run, but it may itself be quantized (for example, an FP8 checkpoint used as the baseline for an NVFP4 checkpoint). First infer the baseline from the PTQ source model/checkpoint in the workspace or config used to create the quantized checkpoint. If it cannot be inferred, ask the user for the baseline model/checkpoint or an existing baseline invocation/run path. If no matching baseline exists, prepare a companion baseline config and launch it before or alongside the quantized config. The baseline config should match the quantized config's benchmark versions, task configs, serving args, token limits, dataset setup, credentials, cluster, and container as closely as possible; change only the model/checkpoint and adjust quantization-specific flags to match the baseline checkpoint. Do not treat the quantized score as release-ready until the baseline comparison exists.
+
 Read `references/model-card-research.md` for the full extraction checklist (sampling params, reasoning config, ARM64 compatibility, pre_cmd, etc.). Use WebSearch to research the model card, present findings, and ask the user to confirm.
 
 **Step 4: Fill in remaining missing values**
@@ -171,7 +177,8 @@ Read `references/model-card-research.md` for the full extraction checklist (samp
 Show tasks in the current config. Loop until the user confirms the task list is final:
 
 1. Tell the user: "Run `nel ls tasks` to see all available tasks".
-2. Ask if they want to add/remove tasks or add/remove/modify task-specific parameter overrides.
+2. If the task list includes GPQA Diamond / `gpqa_diamond_aa_v3` / `GPQA` or SciCode / `scicode_aa_v2`, read `references/reference-benchmark-configs.md`, then apply the matching YAML file (`references/gpqa_diamond_aa_v3.yaml` or `references/scicode_aa_v2.yaml`) unless the user explicitly asks for different sampling or prompt settings.
+3. Ask if they want to add/remove tasks or add/remove/modify task-specific parameter overrides.
    To add per-task `nemo_evaluator_config` as specified by the user, e.g.:
 
    ```yaml
@@ -185,8 +192,8 @@ Show tasks in the current config. Loop until the user confirms the task list is 
              ...
    ```
 
-3. Apply changes.
-4. Show updated list and ask: "Is the task list final, or do you want to make more changes?"
+4. Apply changes.
+5. Show updated list and ask: "Is the task list final, or do you want to make more changes?"
 
 **Known Issues**
 

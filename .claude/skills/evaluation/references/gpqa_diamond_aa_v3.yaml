@@ -1,0 +1,8 @@
+tasks:
+  - name: nemo_skills.ns_gpqa
+    nemo_evaluator_config:
+      config:
+        params:
+          extra:
+            num_repeats: 8
+            args: ++prompt_config=eval/aai/mcq-4choices ++inference.tokens_to_generate=null
