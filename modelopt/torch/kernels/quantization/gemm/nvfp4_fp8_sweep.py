@@ -32,17 +32,10 @@ import torch
 import triton
 import triton.language as tl
 
+from ._fp8_scale_candidates import fp8_scale_candidates
 from .nvfp4_quant import fp4_round_magnitude
 
 __all__ = ["fp8_scale_candidates", "nvfp4_fp8_scale_sweep"]
-
-
-def fp8_scale_candidates(device: torch.device | str = "cpu") -> torch.Tensor:
-    """Return the 126 valid finite positive FP8 E4M3 scale candidates / 448."""
-    uint8_values = torch.arange(0, 128, dtype=torch.uint8, device=device)
-    fp8_values = uint8_values.view(torch.float8_e4m3fn).float()
-    valid_mask = torch.isfinite(fp8_values) & (fp8_values > 0)
-    return fp8_values[valid_mask] / 448.0
 
 
 # Selected from a (BLOCKS_PER_PROGRAM, num_warps) sweep on B300:
@@ -93,11 +86,11 @@ def _fp8_scale_sweep_kernel(
     for k in tl.static_range(NUM_CANDIDATES):
         c = tl.load(candidates_ptr + k).to(tl.float32)
         scale = c * global_amax / 6.0
-        # Avoid divide-by-zero when global_amax == 0; the resulting err == w_abs² is
-        # the same for every candidate, so any best_idx is fine.
+        # Avoid divide-by-zero when global_amax == 0; in that case w_abs is also zero
+        # (global_amax = max|w|), so the loss is zero for every candidate either way.
         scale_safe = tl.where(scale == 0.0, 1.0, scale)
         q_mag = fp4_round_magnitude(w_abs / scale_safe)
-        diff = w_abs - q_mag * scale
+        diff = w_abs - q_mag * scale_safe
         loss = tl.sum(diff * diff, axis=1)  # [BLOCKS_PER_PROGRAM]
         is_better = loss < best_loss
         best_loss = tl.where(is_better, loss, best_loss)

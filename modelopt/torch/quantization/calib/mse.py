@@ -203,17 +203,12 @@ class NVFP4MSECalibrator(MseCalibrator):
         return torch.ones_like(self._initial_amax) * self._global_amax * candidates
 
     def _generate_candidates(self, device: torch.device) -> torch.Tensor:
-        """Generate 126 valid FP8 E4M3 scale candidates.
+        """Generate the 126 valid FP8 E4M3 scale candidates."""
+        from modelopt.torch.kernels.quantization.gemm._fp8_scale_candidates import (
+            fp8_scale_candidates,
+        )
 
-        Kept in sync with ``fp8_scale_candidates`` in
-        ``modelopt.torch.kernels.quantization.gemm.nvfp4_fp8_sweep`` — the FP8 E4M3
-        spec is fixed, and the parity test exercises both paths against each other.
-        """
-        uint8_values = torch.arange(0, 128, dtype=torch.uint8, device=device)
-        fp8_values = uint8_values.view(torch.float8_e4m3fn).float()
-        valid_mask = torch.isfinite(fp8_values) & (fp8_values > 0)
-        fp8_values = fp8_values[valid_mask]
-        return fp8_values / 448.0
+        return fp8_scale_candidates(device)
 
     def _can_use_triton_fast_path(self, x: torch.Tensor) -> bool:
         """Whether the Triton fast path is usable for this ``collect`` input.

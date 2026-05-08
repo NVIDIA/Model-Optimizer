@@ -85,14 +85,17 @@ def _run_triton(x, per_block_amax, global_amax):
 
 
 @requires_triton
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("seed", [0, 1, 2])
 @pytest.mark.parametrize("num_blocks", [4, 64, 1024])
-def test_parity_random_weights(seed, num_blocks):
-    """Triton sweep must produce the exact same per-block amax as the reference."""
+def test_parity_random_weights(seed, num_blocks, dtype):
+    """Triton sweep must produce the exact same per-block amax as the reference,
+    across every dtype supported by the NVFP4 quantizer (fp32, fp16, bf16)."""
     torch.manual_seed(seed)
     device = "cuda"
-    x = torch.randn(num_blocks, BLOCK_SIZE, device=device, dtype=torch.float32)
-    per_block_amax = x.abs().amax(dim=-1)
+    x = torch.randn(num_blocks, BLOCK_SIZE, device=device, dtype=dtype)
+    # Promote to fp32 for the per-block amax (matches what max_calibrate produces).
+    per_block_amax = x.float().abs().amax(dim=-1)
     global_amax = per_block_amax.max()
 
     ref = _run_reference(x, per_block_amax, global_amax)
@@ -102,27 +105,10 @@ def test_parity_random_weights(seed, num_blocks):
     # Both pick from the same 126-element discrete candidate set, so any disagreement
     # would show up as a non-zero diff (not a small float epsilon). Demand exact match.
     assert torch.equal(ref, tri), (
-        f"Triton sweep diverged from reference: max |diff| = "
+        f"Triton sweep diverged from reference (dtype={dtype}): max |diff| = "
         f"{(ref - tri).abs().max().item():.3e}, "
         f"differing blocks = {(ref != tri).sum().item()} / {num_blocks}"
     )
-
-
-@requires_triton
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
-def test_parity_dtypes(dtype):
-    """Sweep must agree across the dtypes supported by the NVFP4 quantizer."""
-    torch.manual_seed(42)
-    device = "cuda"
-    num_blocks = 256
-    x = torch.randn(num_blocks, BLOCK_SIZE, device=device, dtype=dtype)
-    # Promote to fp32 for the per-block amax (matches what max_calibrate produces).
-    per_block_amax = x.float().abs().amax(dim=-1)
-    global_amax = per_block_amax.max()
-
-    ref = _run_reference(x, per_block_amax, global_amax)
-    tri = _run_triton(x, per_block_amax, global_amax)
-    assert torch.equal(ref, tri)
 
 
 @requires_triton
