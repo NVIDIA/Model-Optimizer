@@ -25,9 +25,6 @@ from _test_utils.torch.transformers_models import create_tiny_qwen3_dir
 
 
 def test_lm_eval_hf(tmp_path):
-    """End-to-end smoke test: run lm_eval_hf.py against a tiny qwen3 on a 2-sample
-    slice of hellaswag. Verifies the HarnessCLI integration (lm-eval >= 0.4.10)
-    plus our HFLM.create_from_arg_obj override actually execute."""
     model_dir = create_tiny_qwen3_dir(tmp_path, with_tokenizer=True)
 
     cmd_parts = extend_cmd_parts(
