@@ -41,22 +41,24 @@ All active jobs are tracked in `.claude/active_jobs.json`. This file is the sing
 Every time a job is submitted (by any skill or manually):
 
 1. **Add an entry** to `.claude/active_jobs.json`. Create the file if it doesn't exist.
-2. **Set up a durable recurring cron** (if one isn't already running) that polls all registered jobs every 15 minutes. The cron prompt should: read the registry, check each job, report state changes to the user, remove completed jobs, and delete itself when the registry is empty.
+2. **Start a durable monitor** (if one isn't already watching the registry) that polls all registered jobs until they reach terminal status. Prefer the Claude Code `Monitor` tool when it is available: write a small watcher that reads the registry on each poll, checks every job with the appropriate method below, prints state-change events, updates `last_status`, removes terminal jobs, and exits when the registry is empty.
+
+The monitor should terminate naturally when every registered job has reached a terminal state. If the `Monitor` tool is not available in the current harness, run an equivalent background process that implements the same loop and lets the agent resume/restart when the process exits.
 
 Always do both steps. Don't try to predict job duration.
 
 ---
 
-## On Cron Fire / Status Check
+## On Monitor Event / Status Check
 
-Whether triggered by the cron or by the user asking "check status":
+Whether triggered by monitor output or by the user asking "check status":
 
 1. **Read the registry** from `.claude/active_jobs.json`
 2. **Check each job** using the appropriate method (see below)
 3. **Report only state changes** — compare against `last_status` in registry
 4. **Update `last_status`** in the registry
-5. **Remove completed jobs** — any job in a terminal state (COMPLETED, FAILED, CANCELLED, KILLED)
-6. **If registry is empty** — delete the recurring cron
+5. **Remove completed jobs** — any job in a terminal state (COMPLETED, FAILED, CANCELLED, KILLED, TIMEOUT, NODE_FAIL, OUT_OF_MEMORY, PREEMPTED, BOOT_FAIL, DEADLINE)
+6. **If registry is empty** — let the monitor exit
 
 ---
 
@@ -76,7 +78,7 @@ Whether triggered by the cron or by the user asking "check status":
 
 ### Raw SLURM jobs (`type: slurm`)
 
-- **Check:** `ssh <host> "squeue -j <id> -h -o '%T %M %R'"` — if empty, job left the queue
+- **Check:** `ssh <host> "sacct -j <id> --format=JobID%12,JobName%25,State%12,Elapsed%10 -n"` and filter out `extern`, `batch`, and step rows like `.<step>`. Use `sacct` for the termination check; `squeue` can lag in `COMPLETING` after `sacct` reports a terminal state.
 - **On completion:** `ssh <host> "sacct -j <id> --format=State,ExitCode,Elapsed -n"`
 - **On failure:** Check the job's output log file
 
