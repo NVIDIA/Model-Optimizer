@@ -55,6 +55,7 @@ from modelopt.torch.quantization import set_quantizer_by_cfg_context
 from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
 from modelopt.torch.quantization.qtensor import MXFP8QTensor, NVFP4QTensor
 from modelopt.torch.quantization.utils import fsdp2_aware_weight_update, quantizer_attr_names
+from modelopt.torch.utils.dataset_utils import _disable_use_cache
 
 try:
     from modelopt.torch.sparsity.attention_sparsity.conversion import export_sparse_attention_config
@@ -213,11 +214,14 @@ def collect_shared_input_modules(
     if not handles:
         return input_to_linear, output_to_layernorm
 
-    # Run dummy forward pass to collect modules sharing same input
+    # Run dummy forward pass to collect modules sharing same input.
+    # `_disable_use_cache` keeps the probe forward working on configs that don't
+    # set `use_cache` (e.g., stepfun-ai/Step-3.5-Flash's Step3p5Config).
     try:
         with (
             torch.no_grad(),
             set_quantizer_by_cfg_context(model, [{"quantizer_name": "*", "enable": False}]),
+            _disable_use_cache(model),
         ):
             dummy_forward_fn()
     finally:
