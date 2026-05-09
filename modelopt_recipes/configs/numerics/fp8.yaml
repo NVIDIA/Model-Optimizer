@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# FP8 E4M3 quantizer attributes (per-tensor; used for weight/activation/KV).
+# FP8 E4M3 per-tensor quantizer attributes.
 
 # modelopt-schema: modelopt.torch.quantization.config.QuantizerAttributeConfig
 num_bits: e4m3

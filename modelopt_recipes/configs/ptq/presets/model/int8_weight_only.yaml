@@ -19,14 +19,14 @@
 imports:
   base_disable_all: configs/ptq/units/base_disable_all
   default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
-  int8: configs/numerics/int8
+  int8_per_channel: configs/numerics/int8_per_channel
 
 algorithm: max
 quant_cfg:
   - $import: base_disable_all
   - quantizer_name: '*weight_quantizer'
     cfg:
-      $import: int8
+      $import: int8_per_channel
   - quantizer_name: '*input_quantizer'
     enable: false
   - $import: default_disabled_quantizers

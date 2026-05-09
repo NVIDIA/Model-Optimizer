@@ -13,8 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# INT8 per-channel weight quantizer attributes.
+# INT4 static per-block quantizer attributes.
 
 # modelopt-schema: modelopt.torch.quantization.config.QuantizerAttributeConfig
-num_bits: 8
-axis: 0
+num_bits: 4
+block_sizes:
+  -1: 128
+  type: static
