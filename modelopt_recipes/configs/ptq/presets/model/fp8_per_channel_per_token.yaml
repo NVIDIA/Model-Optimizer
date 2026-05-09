@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# FP8 per-channel weights and per-token dynamic activations.
+# QuantizeConfig preset for FP8 E4M3 per-channel weights and per-token dynamic inputs.
 
 # modelopt-schema: modelopt.torch.quantization.config.QuantizeConfig
 imports:

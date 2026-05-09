@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# NVFP4 MLP-only preset.
+# QuantizeConfig preset for dynamic NVFP4 W4A4 quantization on MLP/MoE layers only.
 
 # modelopt-schema: modelopt.torch.quantization.config.QuantizeConfig
 imports:

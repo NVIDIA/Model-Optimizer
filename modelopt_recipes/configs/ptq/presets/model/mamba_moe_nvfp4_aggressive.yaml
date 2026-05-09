@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Mamba-MoE NVFP4 aggressive preset.
+# QuantizeConfig preset for NVFP4 W4A4 Mamba-MoE quantization with shared exclusions.
 
 # modelopt-schema: modelopt.torch.quantization.config.QuantizeConfig
 imports:

@@ -13,9 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Model-specific PTQ recipe for Step3.5-Flash NVFP4 MLP/MoE quantization with FP8 KV cache.
+
 metadata:
   recipe_type: ptq
-  description: NVFP4 static weight and dynamic activation for MoE/MLP projections (W4A4), FP8 KV cache, max calibration.
+  description: >-
+    Step3.5-Flash PTQ recipe that enables dynamic NVFP4 on MoE/MLP weight and input quantizers,
+    enables FP8 KV-cache quantizers, and leaves other quantizers disabled.
 quantize:
   algorithm: max
   quant_cfg:

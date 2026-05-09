@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# MXFP4 dynamic block quantization preset.
+# QuantizeConfig preset for dynamic MXFP4 block quantization on weights and inputs.
 
 # modelopt-schema: modelopt.torch.quantization.config.QuantizeConfig
 imports:

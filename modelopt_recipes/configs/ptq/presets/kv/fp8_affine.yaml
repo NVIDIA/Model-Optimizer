@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# FP8 E4M3 affine KV cache quantization fragment.
+# Partial QuantizeConfig that enables affine FP8 E4M3 KV-cache quantizers.
 
 # modelopt-schema: modelopt.torch.quantization.config.QuantizeConfig
 imports:

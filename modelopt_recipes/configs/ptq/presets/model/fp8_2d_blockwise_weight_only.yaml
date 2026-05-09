@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# FP8 2D blockwise fake quantization config for DeepSeek models.
+# QuantizeConfig preset for FP8 E4M3 2D blockwise weight-only quantization.
 
 # modelopt-schema: modelopt.torch.quantization.config.QuantizeConfig
 imports:

@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# NVFP4 block-size-32 weights with FP8 activations.
+# QuantizeConfig preset for W4A8 with NVFP4 block-size-32 weights and FP8 inputs.
 
 # modelopt-schema: modelopt.torch.quantization.config.QuantizeConfig
 imports:

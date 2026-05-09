@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# INT8 per-channel quantizer attributes.
+# Per-channel INT8 quantizer attributes with axis 0.
 
 # modelopt-schema: modelopt.torch.quantization.config.QuantizerAttributeConfig
 num_bits: 8

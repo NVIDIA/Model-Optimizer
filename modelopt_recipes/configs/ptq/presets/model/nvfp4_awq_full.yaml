@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# NVFP4 AWQ full preset.
+# QuantizeConfig preset for NVFP4 W4A4 quantization with full AWQ calibration.
 
 # modelopt-schema: modelopt.torch.quantization.config.QuantizeConfig
 imports:

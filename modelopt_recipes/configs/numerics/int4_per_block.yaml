@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# INT4 static per-block quantizer attributes.
+# Static INT4 quantizer attributes with 128-value blocks on the last dimension.
 
 # modelopt-schema: modelopt.torch.quantization.config.QuantizerAttributeConfig
 num_bits: 4

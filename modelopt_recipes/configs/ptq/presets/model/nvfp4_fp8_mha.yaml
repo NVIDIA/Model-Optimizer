@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Diffusers NVFP4 preset with FP8 MHA quantizers.
+# QuantizeConfig preset for Diffusers NVFP4 with FP8 attention quantizers.
 
 # modelopt-schema: modelopt.torch.quantization.config.QuantizeConfig
 imports:

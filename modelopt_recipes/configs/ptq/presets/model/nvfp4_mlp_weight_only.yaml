@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# NVFP4 MLP weight-only preset with block size 32.
+# QuantizeConfig preset for NVFP4 block-size-32 weight-only quantization on MLP/MoE layers.
 
 # modelopt-schema: modelopt.torch.quantization.config.QuantizeConfig
 imports:

@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# NVFP4 W4A4 with static weight scales optimized by local Hessian calibration.
+# QuantizeConfig preset for NVFP4 W4A4 with static weight scales from local-Hessian calibration.
 
 # modelopt-schema: modelopt.torch.quantization.config.QuantizeConfig
 imports:

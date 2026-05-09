@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# W4A8 AWQ beta: INT4 blockwise weights followed by FP8 weights, FP8 activations.
+# QuantizeConfig preset for W4A8 AWQ-lite with INT4 block weights and FP8 inputs.
 
 # modelopt-schema: modelopt.torch.quantization.config.QuantizeConfig
 imports:

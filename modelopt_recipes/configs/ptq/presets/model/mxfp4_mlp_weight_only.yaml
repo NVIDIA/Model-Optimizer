@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# MXFP4 MLP weight-only preset.
+# QuantizeConfig preset for dynamic MXFP4 block weight-only quantization on MLP/MoE layers.
 
 # modelopt-schema: modelopt.torch.quantization.config.QuantizeConfig
 imports:

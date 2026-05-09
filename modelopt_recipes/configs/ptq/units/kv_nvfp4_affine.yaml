@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# NVFP4 affine KV cache quantization.
+# QuantizerCfgList snippet that enables affine NVFP4 KV-cache quantizers.
 
 # modelopt-schema: modelopt.torch.quantization.config.QuantizerCfgListConfig
 imports:

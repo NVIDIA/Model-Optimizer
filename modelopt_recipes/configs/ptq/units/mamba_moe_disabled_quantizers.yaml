@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Mamba-MoE exclusions shared by the aggressive and conservative presets.
+# QuantizerCfgList snippet with Mamba/MoE-specific exclusion patterns.
 
 # modelopt-schema: modelopt.torch.quantization.config.QuantizerCfgListConfig
   - quantizer_name: '*fc1_latent_proj*'
