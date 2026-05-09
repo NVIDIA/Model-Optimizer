@@ -14,7 +14,6 @@
 # limitations under the License.
 
 # FP8 E4M3 KV cache quantization preset.
-# Equivalent to the hardcoded FP8_KV_CFG in config.py.
 # This is a partial config (no algorithm, no base_disable_all) — designed
 # to be merged with a primary model quantization config.
 
