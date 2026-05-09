@@ -21,8 +21,11 @@ except ImportError:  # Python < 3.11
     from importlib.abc import Traversable
 from pathlib import Path
 
-from ._config_loader import BUILTIN_RECIPES_LIB, load_config
-from .config import ModelOptPTQRecipe, ModelOptRecipeBase, RecipeType
+from modelopt.torch.opt.config_loader import BUILTIN_CONFIG_ROOT as BUILTIN_RECIPES_LIB
+from modelopt.torch.opt.config_loader import load_config
+from modelopt.torch.quantization.config import QuantizeConfig
+
+from .config import ModelOptPTQRecipe, ModelOptRecipeBase, RecipeMetadataConfig, RecipeType
 
 __all__ = ["load_config", "load_recipe"]
 
@@ -56,7 +59,7 @@ def load_recipe(recipe_path: str | Path | Traversable) -> ModelOptRecipeBase:
 
     * A ``.yml`` / ``.yaml`` file with ``metadata`` and ``quantize`` sections.
       The suffix may be omitted and will be probed automatically.
-    * A directory containing ``recipe.yml`` (metadata) and ``quantize.yml``.
+    * A directory containing ``metadata.yml`` and ``quantize.yml``.
 
     The path may be relative to the built-in recipes library or an absolute /
     relative filesystem path.
@@ -86,9 +89,18 @@ def _load_recipe_from_file(recipe_file: Path | Traversable) -> ModelOptRecipeBas
     The file must contain a ``metadata`` section with at least ``recipe_type``,
     plus a ``quant_cfg`` mapping and an optional ``algorithm`` for PTQ recipes.
     """
-    data = load_config(recipe_file)
+    data = load_config(recipe_file, schema_type=ModelOptPTQRecipe)
+    if not isinstance(data, dict):
+        raise ValueError(
+            f"Recipe file {recipe_file} must be a YAML mapping, got {type(data).__name__}."
+        )
 
     metadata = data.get("metadata", {})
+    if not isinstance(metadata, dict):
+        raise ValueError(
+            f"Recipe file {recipe_file} field 'metadata' must be a mapping, "
+            f"got {type(metadata).__name__}."
+        )
     recipe_type = metadata.get("recipe_type")
     if recipe_type is None:
         raise ValueError(f"Recipe file {recipe_file} must contain a 'metadata.recipe_type' field.")
@@ -97,45 +109,53 @@ def _load_recipe_from_file(recipe_file: Path | Traversable) -> ModelOptRecipeBas
         if "quantize" not in data:
             raise ValueError(f"PTQ recipe file {recipe_file} must contain 'quantize'.")
         return ModelOptPTQRecipe(
-            recipe_type=RecipeType.PTQ,
-            description=metadata.get("description", "PTQ recipe."),
+            metadata=metadata,
             quantize=data["quantize"],
         )
     raise ValueError(f"Unsupported recipe type: {recipe_type!r}")
 
 
-def _load_recipe_from_dir(recipe_dir: Path | Traversable) -> ModelOptRecipeBase:
-    """Load a recipe from a directory containing ``recipe.yml`` and ``quantize.yml``."""
-    recipe_file = None
-    for name in ("recipe.yml", "recipe.yaml"):
-        candidate = recipe_dir.joinpath(name)
+def _find_recipe_section_file(
+    recipe_dir: Path | Traversable, section_name: str
+) -> Path | Traversable:
+    """Find ``<section_name>.yml`` or ``<section_name>.yaml`` in a recipe directory."""
+    for suffix in (".yml", ".yaml"):
+        candidate = recipe_dir.joinpath(section_name + suffix)
         if candidate.is_file():
-            recipe_file = candidate
-            break
-    if recipe_file is None:
-        raise ValueError(
-            f"Cannot find a recipe descriptor in {recipe_dir}. Looked for: recipe.yml, recipe.yaml"
-        )
+            return candidate
+    raise ValueError(
+        f"Cannot find {section_name} in {recipe_dir}. "
+        f"Looked for: {section_name}.yml, {section_name}.yaml"
+    )
 
-    metadata = load_config(recipe_file).get("metadata", {})
+
+def _load_recipe_from_dir(recipe_dir: Path | Traversable) -> ModelOptRecipeBase:
+    """Load a recipe from a directory containing ``metadata.yml`` and ``quantize.yml``.
+
+    Each file is loaded independently. The file name provides the recipe
+    section key: ``metadata.yml`` becomes metadata, and ``quantize.yml`` becomes
+    quantize.
+    """
+    metadata_file = _find_recipe_section_file(recipe_dir, "metadata")
+
+    metadata = load_config(metadata_file, schema_type=RecipeMetadataConfig)
+    if not isinstance(metadata, dict):
+        raise ValueError(
+            f"Metadata file {metadata_file} must be a YAML mapping, got {type(metadata).__name__}."
+        )
     recipe_type = metadata.get("recipe_type")
     if recipe_type is None:
-        raise ValueError(f"Recipe file {recipe_file} must contain a 'metadata.recipe_type' field.")
+        raise ValueError(f"Metadata file {metadata_file} must contain a 'recipe_type' field.")
 
     if recipe_type == RecipeType.PTQ:
-        quantize_file = None
-        for name in ("quantize.yml", "quantize.yaml"):
-            candidate = recipe_dir.joinpath(name)
-            if candidate.is_file():
-                quantize_file = candidate
-                break
-        if quantize_file is None:
+        quantize_file = _find_recipe_section_file(recipe_dir, "quantize")
+        quantize_data = load_config(quantize_file, schema_type=QuantizeConfig)
+        if not isinstance(quantize_data, dict):
             raise ValueError(
-                f"Cannot find quantize in {recipe_dir}. Looked for: quantize.yml, quantize.yaml"
+                f"{quantize_file} must be a YAML mapping, got {type(quantize_data).__name__}."
             )
         return ModelOptPTQRecipe(
-            recipe_type=RecipeType.PTQ,
-            description=metadata.get("description", "PTQ recipe."),
-            quantize=load_config(quantize_file),
+            metadata=metadata,
+            quantize=quantize_data,
         )
     raise ValueError(f"Unsupported recipe type: {recipe_type!r}")

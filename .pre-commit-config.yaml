@@ -68,6 +68,8 @@ repos:
         entry: python tools/precommit/check_modelopt_recipes.py
         language: system
         files: ^modelopt_recipes/
+        # configs/ contains reusable snippets (not full recipes) — skip recipe validation
+        exclude: ^modelopt_recipes/configs/
 
   # Instructions to change license file if ever needed:
   # https://github.com/Lucas-C/pre-commit-hooks#removing-old-license-and-replacing-it-with-a-new-one
