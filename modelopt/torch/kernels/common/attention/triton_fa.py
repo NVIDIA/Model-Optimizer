@@ -79,6 +79,22 @@ _FWD_CONFIGS = [
 if "PYTEST_VERSION" in __import__("os").environ:
     _FWD_CONFIGS = [triton.Config({"BLOCK_M": 128, "BLOCK_N": 64}, num_stages=1, num_warps=4)]
 
+# Tile granularity (BLOCK_M, BLOCK_N) determines the per-tile skip decision.
+# The calibration kernel in modelopt.torch.kernels.sparsity.attention.calibrate
+# is hard-pinned to (BLOCK_M=128, BLOCK_N=64); if inference autotune picks
+# anything different, the same threshold yields a different runtime sparsity
+# than calibration measured. To keep calibration and inference aligned we pin
+# the forward kernel to the same config whenever skip-softmax is active.
+_FWD_CONFIGS_SKIP_SOFTMAX = [
+    triton.Config({"BLOCK_M": 128, "BLOCK_N": 64}, num_stages=1, num_warps=4)
+]
+
+
+def _prune_skip_softmax_configs(configs, named_args, **kwargs):
+    if kwargs.get("APPLY_SKIP_SOFTMAX", False):
+        return _FWD_CONFIGS_SKIP_SOFTMAX
+    return configs
+
 
 # ---------------------------------------------------------------------------
 # Masking helper
@@ -109,7 +125,11 @@ def _apply_mask(
 # ---------------------------------------------------------------------------
 # Forward kernel
 # ---------------------------------------------------------------------------
-@triton.autotune(configs=_FWD_CONFIGS, key=["N_CTX", "HEAD_DIM"])
+@triton.autotune(
+    configs=_FWD_CONFIGS,
+    key=["N_CTX", "HEAD_DIM", "APPLY_SKIP_SOFTMAX"],
+    prune_configs_by={"early_config_prune": _prune_skip_softmax_configs},
+)
 @triton.jit
 def _attn_fwd(
     Q,  # [total_q, num_q_heads, head_dim] query tensor
@@ -145,7 +165,7 @@ def _attn_fwd(
     NUM_SINK_TOKENS: tl.constexpr = 0,  # KV positions before this are kept dense (attention sinks)
     DENSE_WINDOW_SIZE: tl.constexpr = 64,  # Tokens near diagonal kept dense (absolute, BLOCK_N-independent)
     APPLY_SKIP_SOFTMAX: tl.constexpr = False,  # Skip KV tiles with negligible scores
-    SKIP_THRESHOLD_LOG2: tl.constexpr = 0.0,  # log2(lambda) * sm_scale, pre-scaled for comparison on scaled scores
+    SKIP_THRESHOLD_LOG2: tl.constexpr = 0.0,  # log2(lambda); post-sm_scale interpretation — matches LLM-side flash_skip_softmax and TRT-LLM
     Sparsity_total=None,  # Optional int64 scalar for counting total tiles (atomic)
     Sparsity_skipped=None,  # Optional int64 scalar for counting skipped tiles (atomic)
     MEASURE_SPARSITY: tl.constexpr = False,  # When True, count total/skipped tiles via atomic adds
@@ -666,17 +686,22 @@ class _Attention(torch.autograd.Function):
         # Skip-softmax threshold in scaled log2 space for the kernel.
         # Two modes:
         #   1. raw_threshold: passed directly as skip_threshold_log2 (for testing)
-        #   2. lambda threshold: converted via log2(lambda) * sm_scale
+        #   2. lambda threshold: converted via log2(lambda)
+        # Lambda is interpreted in *post-softmax-scale* space (the fraction of
+        # the running attention-weight max a tile must fall below). This matches
+        # both the LLM-side flash_skip_softmax kernel (uses log(lambda)) and the
+        # TRT-LLM deployment kernel (skips when expf(post_sm_scale_diff) <
+        # threshold/seqlen). An earlier version multiplied by sm_scale here for
+        # an unscaled-score reading of the BLASST paper, which left the exported
+        # threshold_scale_factor off by lambda^sm_scale relative to TRT-LLM's
+        # interpretation and produced near-zero achieved sparsity for moderate
+        # target_sparsity.
         if skip_softmax_raw_threshold is not None:
             apply_skip = True
             skip_threshold_log2 = skip_softmax_raw_threshold
         elif skip_softmax_threshold is not None and skip_softmax_threshold > 0.0:
             apply_skip = True
-            # The BLASST reference (https://arxiv.org/pdf/2512.12087) checks
-            # ln(lambda) on unscaled scores. Our kernel works in log2-scaled space
-            # (scores pre-multiplied by qk_scale = sm_scale * LOG2E), so we
-            # pre-scale: threshold_scaled = log2(lambda) * sm_scale.
-            skip_threshold_log2 = math.log2(skip_softmax_threshold) * sm_scale
+            skip_threshold_log2 = math.log2(skip_softmax_threshold)
         else:
             apply_skip = False
             skip_threshold_log2 = 0.0

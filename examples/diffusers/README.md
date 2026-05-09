@@ -307,7 +307,7 @@ By following these steps, your PEFT LoRA model should be efficiently quantized u
 
 ## Sparse Attention (Skip-Softmax)
 
-Skip-softmax sparse attention skips KV tiles whose attention scores are negligible during the softmax computation, reducing FLOPs without retraining. An exponential model (`scale_factor = a * exp(b * target_sparsity)`) is calibrated once, then the target sparsity can be adjusted at runtime without recalibration.
+Skip-softmax sparse attention skips KV tiles whose attention scores are negligible during the softmax computation, reducing FLOPs without retraining. An exponential model (`scale_factor = a * exp(b * target_sparsity)`) is calibrated once, then the target sparsity can be adjusted at runtime without recalibration. Calibrated coefficients can be exported as a Hugging Face checkpoint (per-component `config.json` plus a top-level `sparse.yaml`) consumed directly by TRT-LLM's `SkipSoftmaxAttentionConfig.resolve_for_target_sparsity` — no extra conversion needed downstream.
 
 ### Getting Started
 
@@ -351,10 +351,11 @@ The 14B model automatically sparsifies both `transformer` and `transformer_2`.
 
 ```bash
 
-# 5B/14B model
+# 5B/14B model — calibrate and export a TRT-LLM-ready checkpoint
 python sparsity/wan22_skip_softmax.py \
     --model-path Wan-AI/Wan2.2-T2V-A14B-Diffusers|Wan-AI/Wan2.2-TI2V-5B-Diffusers \
     --calibrate --target-sparsity 0.5 --calib-size 4 \
+    --export-dir /path/to/wan22-skip-softmax-ckpt \
     --prompt "A sunset over mountains" --output out.mp4
 ```
 

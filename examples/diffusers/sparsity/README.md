@@ -43,10 +43,11 @@ python wan22_skip_softmax.py \
     --raw-threshold -0.7 \
     --prompt "A cat playing piano" --output out.mp4
 
-# With calibration
+# Calibrate + export for TRT-LLM deployment (typical flow)
 python wan22_skip_softmax.py \
     --model-path /path/to/Wan2.2-T2V-A14B-Diffusers \
-    --calibrate --target-sparsity 0.5 \
+    --calibrate --target-sparsity 0.5 --calib-size 4 \
+    --export-dir /path/to/wan22-skip-softmax-ckpt \
     --prompt "A cat playing piano" --output out.mp4
 
 # Dense baseline (no sparsity, for comparison)
@@ -62,15 +63,28 @@ python wan22_skip_softmax.py \
     --prompt "A cat playing piano" --output out.mp4
 ```
 
+`--export-dir` writes a Hugging Face checkpoint (config.json per component
+plus a top-level `sparse.yaml`) carrying the calibrated
+`threshold_scale_factor` block. TRT-LLM's
+`SkipSoftmaxAttentionConfig.resolve_for_target_sparsity` reads the
+`(a, b)` directly via `coeffs['a'] * math.exp(coeffs['b'] * sparsity)` —
+no extra conversion needed downstream.
+
 ## Threshold Modes
 
 | Mode | How threshold reaches the kernel | Use case |
 |------|----------------------------------|----------|
 | **Raw threshold** (`--raw-threshold -0.7`) | Passed directly as `skip_threshold_log2` — no conversion | Quick testing, sweeps |
-| **Calibrated** (`--calibrate --target-sparsity 0.5`) | `scale_factor = a * exp(b * target)`, then backend computes `threshold = scale_factor / seq_k`, then kernel converts `log2(threshold) * sm_scale` | Production use with automatic seqlen adaptation |
-| **Static lambda** (default `skip_softmax_threshold=0.1`) | `log2(lambda) * sm_scale` | Fallback when neither raw nor calibrated |
+| **Calibrated** (`--calibrate --target-sparsity 0.5`) | `scale_factor = a * exp(b * target)`, then backend computes `threshold = scale_factor / seq_k`, then kernel uses `log2(threshold)` | Production use with automatic seqlen adaptation |
+| **Static lambda** (default `skip_softmax_threshold=0.1`) | `log2(lambda)` | Fallback when neither raw nor calibrated |
+
+Lambda is interpreted in *post-softmax-scale* space (matches both the LLM
+`flash_skip_softmax` path and TRT-LLM's deployment kernel rule
+`expf(local_max - global_max) < threshold / seq_k` on post-sm_scale
+scores).
 
 ## Known Issues
 
 - **14B dual transformer calibration**: Transformers are calibrated sequentially — transformer_2's calibration runs while transformer_1 is already sparsified, introducing asymmetric calibration conditions.
+- **Resolution-dependent fit**: The kernel's intrinsic `S(λ)` curve depends on the spatial resolution (different attention statistics at 480×832 vs 720×1280). For tightest target ≈ achieved alignment, calibrate at the deployment `(height, width, frames)`. Within a fixed spatial resolution, achieved sparsity stays roughly aligned across frame counts.
 - **Minimum achievable sparsity**: Even the strictest threshold may yield 30-40% sparsity on diffusion models (many tiles are inherently negligible). Targets below this floor cause extrapolation; an inference-time warning is emitted.

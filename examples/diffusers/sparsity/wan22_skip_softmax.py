@@ -191,8 +191,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--calib-frames",
         type=int,
-        default=151,
-        help="Number of frames for calibration",
+        default=None,
+        help="Number of frames for calibration (default: same as --num-frames).",
     )
     parser.add_argument(
         "--calib-size",
@@ -423,11 +423,14 @@ def main() -> None:
             if args.calibrate:
                 print("Warning: --calibrate is ignored when --raw-threshold is set")
         elif args.calibrate:
+            calib_frames = (
+                args.calib_frames if args.calib_frames is not None else args.num_frames
+            )
             forward_loop = build_calibration_forward_loop(
                 pipe,
                 calib_size=args.calib_size,
                 num_steps=args.calib_steps,
-                num_frames=args.calib_frames,
+                num_frames=calib_frames,
                 height=args.height,
                 width=args.width,
                 seed=args.seed,

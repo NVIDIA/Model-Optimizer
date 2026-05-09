@@ -450,35 +450,31 @@ def export_sparse_attention_config(model: nn.Module) -> dict[str, Any] | None:
     }
 
     # Build threshold_scale_factor from calibration params.
-    # The formula depends on the fitting mode used during calibration:
-    #   - Linear-space fit: scale_factor = a * exp(b * target_sparsity)
-    #   - Log-space fit:    log(scale_factor) = log_a + b * target_sparsity
+    # Always export ``a`` and ``b`` in the canonical ``a * exp(b * S)`` form.
+    # TRT-LLM's deployment resolver (SkipSoftmaxAttentionConfig.resolve_for_target_sparsity)
+    # reads ``a`` directly via ``coeffs['a'] * math.exp(coeffs['b'] * sparsity)`` and does
+    # not understand ``log_a``; for log-space fits we re-export ``a = exp(log_a)``. The
+    # original ``log_a`` is retained alongside as a diagnostic for downstream inspection.
     if calibration_params is not None:
         first_phase = next((p for p in ["prefill", "decode"] if p in calibration_params), None)
         fit_logspace = first_phase is not None and calibration_params[first_phase].get(
             "fit_logspace", False
         )
 
-        if fit_logspace:
-            threshold_scale_factor: dict[str, Any] = {
-                "formula": "log_a + b * target_sparsity",
+        threshold_scale_factor: dict[str, Any] = {
+            "formula": "a * exp(b * target_sparsity)",
+        }
+        for phase in ["prefill", "decode"]:
+            if phase not in calibration_params:
+                continue
+            params = calibration_params[phase]
+            entry: dict[str, Any] = {
+                "a": params["a"],
+                "b": params["b"],
             }
-            for phase in ["prefill", "decode"]:
-                if phase in calibration_params and "log_a" in calibration_params[phase]:
-                    threshold_scale_factor[phase] = {
-                        "log_a": calibration_params[phase]["log_a"],
-                        "b": calibration_params[phase]["b"],
-                    }
-        else:
-            threshold_scale_factor = {
-                "formula": "a * exp(b * target_sparsity)",
-            }
-            for phase in ["prefill", "decode"]:
-                if phase in calibration_params:
-                    threshold_scale_factor[phase] = {
-                        "a": calibration_params[phase]["a"],
-                        "b": calibration_params[phase]["b"],
-                    }
+            if fit_logspace and "log_a" in params:
+                entry["log_a"] = params["log_a"]
+            threshold_scale_factor[phase] = entry
 
         group_0["threshold_scale_factor"] = threshold_scale_factor
 
