@@ -273,13 +273,17 @@ def train(
     # skip_first_batches against it) on non-master ranks wastes startup time
     # and memory proportional to the dataset, since each tokenizes the full
     # corpus only to throw it away.
-    train_iterator = iter(train_dataloader) if dist.is_master() else None
+    train_iterator = None
+    if dist.is_master():
+        assert train_dataloader is not None
+        train_iterator = iter(train_dataloader)
 
     # Advance past the first `skip_first_batches` batches before the training loop
     # starts. Used either to skip a known-bad batch range during debugging, or to
     # roll the data iterator forward when resuming a run (model + optimizer state
     # are restored from the checkpoint, but the dataloader itself starts fresh).
     if dist.is_master() and skip_first_batches > 0:
+        assert train_iterator is not None
         mprint(f"Skipping first {skip_first_batches} batches before training")
         for _ in range(skip_first_batches):
             next(train_iterator)
@@ -364,6 +368,7 @@ def train(
                     param_group["lr"] = lr
 
         if dist.is_master():
+            assert train_iterator is not None
             train_data = next(train_iterator)
             input_ids = train_data["input_ids"]
             input_ids = input_ids.to(device)
