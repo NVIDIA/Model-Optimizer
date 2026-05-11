@@ -146,6 +146,7 @@ After diagnosis, provide:
 3. **How to re-run** — skip earlier successful steps by pointing to existing scratchspace artifacts
 
 To skip task_0 and task_1 and re-run from task_2:
+
 ```bash
 uv run launch.py --yaml examples/<Org>/<Model>/hf_offline_eagle3.yaml \
     pipeline.task_0.skip=true \
@@ -154,6 +155,7 @@ uv run launch.py --yaml examples/<Org>/<Model>/hf_offline_eagle3.yaml \
 ```
 
 To run only task_1 standalone (using existing task_0 data):
+
 ```bash
 uv run launch.py --yaml examples/<Org>/<Model>/hf_offline_eagle3.yaml \
     pipeline.task_0.skip=true \
