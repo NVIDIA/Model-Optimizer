@@ -30,7 +30,7 @@ Determine these values from the HuggingFace model card, `config.json`, and vLLM 
 
 OCI-HSG nodes: **4 GPUs × 192 GB HBM3e = 768 GB per node**
 
-```
+```text
 BF16 weight size  = total_params × 2 bytes
 GPUs needed       = ceil(weight_size_GB / 192)
 nodes             = ceil(gpus_needed / 4)

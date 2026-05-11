@@ -56,7 +56,7 @@ Confirm via log messages:
 
 In the task_3 log, find:
 
-```
+```text
 Average Acceptance Length {'accept': X, 'count': Y, 'ratio': Z.ZZ}
 ```
 
