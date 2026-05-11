@@ -999,10 +999,7 @@ class QDQAutotunerBase:
             present = group_keys & selected_keys
             if len(present) == len(group_keys):
                 full_groups.append(concat_idx)
-            elif len(present) == 0:
-                absent_groups.append(concat_idx)
-            # Partial groups: also eligible for completion (add missing siblings)
-            elif len(present) < len(group_keys):
+            elif len(present) == 0 or len(present) < len(group_keys):
                 absent_groups.append(concat_idx)
 
         # Choose action only from feasible options to avoid no-op mutations
