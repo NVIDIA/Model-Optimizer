@@ -250,12 +250,23 @@ def convert_puzzletron_model(model: nn.Module, config: PuzzletronConfig) -> Conv
         # look completed and the pipeline would skip ahead to stats. Skipping here
         # avoids 5-15 min of teacher load + dataloader setup before the inner
         # resume-from-checkpoint logic short-circuits a re-entered finished run.
+        # For sweeps (`bypass.configs` non-empty), require one `_DONE` per config
+        # so a partial sweep (e.g. 1/2 configs done, then crash) re-enters and
+        # `launch_bypass_distillation` no-ops the completed configs via their
+        # own resume short-circuit.
         bypass_runs_dir = Path(config.puzzle_dir) / "bypass" / "bypass_runs"
-        bypass_done = bypass_runs_dir.exists() and any(
-            (run_dir / "_DONE").exists()
-            for run_dir in bypass_runs_dir.iterdir()
-            if run_dir.is_dir()
+        _configs_list = hydra_cfg.bypass.get("configs", None)
+        _expected_done = len(_configs_list) if _configs_list else 1
+        _done_count = (
+            sum(
+                1
+                for run_dir in bypass_runs_dir.iterdir()
+                if run_dir.is_dir() and (run_dir / "_DONE").exists()
+            )
+            if bypass_runs_dir.exists()
+            else 0
         )
+        bypass_done = _done_count >= _expected_done
         if bypass_done:
             mprint(
                 f"Puzzletron Progress {bypass_step}/{N}: bypass distillation already completed, skipping"

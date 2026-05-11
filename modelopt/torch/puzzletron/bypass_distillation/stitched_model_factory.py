@@ -303,6 +303,10 @@ def bypass_factory_fn(
                 for b in teacher_model.config.block_configs
                 if b.attention is not None and b.attention.num_key_value_heads is not None
             ]
+            assert len(_student_kv) == len(_teacher_kv), (
+                f"KV-head block-config length mismatch: student={len(_student_kv)} "
+                f"teacher={len(_teacher_kv)} — check model_config_overrides"
+            )
             if _student_kv != _teacher_kv:
                 _mixins.append(_kv_mixin)
 
@@ -328,6 +332,10 @@ def bypass_factory_fn(
                 for b in teacher_model.config.block_configs
                 if b.ffn is not None and b.ffn.intermediate_size is not None
             ]
+            assert len(_student_ffn) == len(_teacher_ffn), (
+                f"FFN-intermediate block-config length mismatch: student={len(_student_ffn)} "
+                f"teacher={len(_teacher_ffn)} — check model_config_overrides"
+            )
             if _student_ffn != _teacher_ffn:
                 _mixins.append(_ffn_mixin)
 

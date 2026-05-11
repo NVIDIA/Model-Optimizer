@@ -496,6 +496,11 @@ def batched_normalized_mse_loss(
     to a floor of ``epsilon`` so the per-element minimum matches the intent of
     the epsilon term. The clamp only triggers on near-zero target slices —
     typical activations are unaffected.
+
+    The denominator uses ``MSE(target, epsilon_tensor)`` rather than
+    ``mean(target ** 2)`` for consistency with ``normalized_mse_loss``; the
+    ``clamp(min=epsilon)`` below already handles zero-target slices, so the
+    epsilon offset inside the MSE is redundant but harmless at ``1e-6``.
     """
     norm_dims = list(set(range(input.ndim)) - set(batch_dims))
     norm_of_target_vectors = F.mse_loss(

@@ -32,7 +32,7 @@ __all__ = [
 ]
 
 
-def warmup_steps(tokens: int, block: int, mbs: int, grad_accum: int, pct: float = 0.05) -> int:
+def warmup_steps(tokens: int, block: int, mbs: int, grad_accum: int = 1, pct: float = 0.05) -> int:
     """
     Calculate warmup steps in optimizer-step units.
 
@@ -47,6 +47,16 @@ def warmup_steps(tokens: int, block: int, mbs: int, grad_accum: int, pct: float 
     return max(1, round(w))
 
 
+def _warmup_steps_resolver(*args):
+    # Arity-aware shim: legacy 4-arg configs (tokens, block, mbs, pct) predate
+    # grad_accum and must keep working — route the 4th arg to `pct` and let
+    # grad_accum default to 1.
+    if len(args) == 4:
+        t, b, m, p = args
+        return warmup_steps(t, b, m, pct=p)
+    return warmup_steps(*args)
+
+
 def register_hydra_resolvers():
     OmegaConf.register_new_resolver("to_path", lambda x: Path(x))
     OmegaConf.register_new_resolver(
@@ -55,9 +65,7 @@ def register_hydra_resolvers():
     OmegaConf.register_new_resolver(
         "timedelta_minutes", lambda x: datetime.timedelta(minutes=x) if x is not None else None
     )
-    OmegaConf.register_new_resolver(
-        "warmup_steps", lambda t, b, m, g, p: warmup_steps(t, b, m, g, p)
-    )
+    OmegaConf.register_new_resolver("warmup_steps", _warmup_steps_resolver)
     OmegaConf.register_new_resolver("get_object", lambda x: get_object(x))
 
 

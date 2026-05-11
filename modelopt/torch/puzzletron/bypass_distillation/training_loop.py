@@ -348,16 +348,19 @@ def train(
                             if grad_norm > grad_clip:
                                 cfg.bypass.training.clipping_count += 1
                         elif cfg.bypass.training.grad_clip_type == "value":
-                            max_abs_grad_per_param = [
-                                p.grad.abs().max().item()
+                            # Stack per-param maxes into a single GPU tensor and
+                            # reduce before `.item()` so we sync once per block
+                            # instead of once per parameter (see per-block batching
+                            # rationale at lines 301-304).
+                            grad_maxes = [
+                                p.grad.abs().max()
                                 for p in stitched_module.parameters()
                                 if p.grad is not None
                             ]
-                            max_abs_grad = (
-                                max(max_abs_grad_per_param)
-                                if len(max_abs_grad_per_param) > 0
-                                else 0.0
-                            )
+                            if grad_maxes:
+                                max_abs_grad = torch.stack(grad_maxes).max().item()
+                            else:
+                                max_abs_grad = 0.0
                             if max_abs_grad > grad_clip:
                                 cfg.bypass.training.clipping_count += 1
                                 torch.nn.utils.clip_grad_value_(
@@ -639,6 +642,11 @@ def _get_lr(cfg: DictConfig, step: int) -> float:
 
     # 1) linear warmup for warmup_steps steps
     if step <= warmup_steps:
+        if warmup_steps == 0:
+            # Defensive: training loop's step starts at 1 so this branch is
+            # unreachable today, but a future caller passing step=0 would hit
+            # a ZeroDivisionError on `step / warmup_steps` below.
+            return cfg.bypass.training.learning_rate
         lr = cfg.bypass.training.learning_rate * step / warmup_steps
     # 2) if step > lr_decay_steps, return min learning rate
     elif step > lr_decay_steps:
