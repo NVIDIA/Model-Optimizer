@@ -32,6 +32,7 @@ Config Generation Progress:
 - [ ] Step 7: Advanced - Interceptors
 - [ ] Step 7.5: Check container registry auth for private images (SLURM only)
 - [ ] Step 8: Run the evaluation
+- [ ] Step 9: Verify evaluation comparability
 ```
 
 **Step 1: Check prerequisites**
@@ -306,6 +307,18 @@ After the dry-run, check the output from `nel` for any problems with the config.
 
 After job submission, register the job per the **monitor skill** for durable cross-session tracking. For one-off queries (live status, debugging a failed run, analyzing results) use the **launching-evals skill**; for querying past runs in MLflow use **accessing-mlflow**.
 
+**Step 9: Verify evaluation comparability**
+
+Before treating a baseline-vs-quantized delta as a model quality result, verify the two runs are comparable:
+
+1. Confirm the prompt text and chat template/rendered messages match between the baseline and quantized evaluations.
+2. Confirm generation settings match, including temperature, top_p, top_k, max tokens, stop strings, reasoning mode/budget, and any task-specific overrides.
+3. If reasoning traces are present, confirm they are stripped or ignored before scoring, consistently for both runs.
+4. Confirm the number of evaluated samples matches for each task and split.
+5. Confirm the same accuracy metric/score field is used for the baseline and quantized comparison.
+
+If any item differs, either rerun with matched settings or label the result as not an apples-to-apples quantization comparison.
+
 **NEL-specific diagnostics** (for debugging failures):
 
 ```bash
@@ -344,4 +357,5 @@ Config Generation Progress:
 - [ ] Step 7: Advanced - Interceptors
 - [ ] Step 7.5: Check container registry auth for private images (SLURM only)
 - [ ] Step 8: Run the evaluation
+- [ ] Step 9: Verify evaluation comparability
 ```
