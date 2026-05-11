@@ -4,13 +4,9 @@ Before treating an exported checkpoint as ready for deployment/evaluation, verif
 
 ## Required checks
 
-1. The quantized checkpoint is smaller on disk than the baseline/source checkpoint and has lower estimated bits per weight. If the size is similar, explain why (for example, only part of the model was quantized) before proceeding.
+1. The quantized checkpoint is smaller on disk than the baseline/source checkpoint and has lower estimated bits per weight. A partial-quantization recipe may not shrink every tensor, but it should still match the intended quantization coverage. If the size reduction is small or missing, explain why before proceeding.
 2. The weights that were actually quantized match what the requested qformat/recipe/config targeted. Quantization config patterns may silently miss layers if the model uses non-standard naming — this only surfaces later as deployment failures when the serving framework tries to load unquantized weights as quantized.
 3. Metadata that should not change still matches the baseline/source model. Compare generation settings, tokenizer files, chat template, model architecture fields, max positions/context length, and special tokens; quantization should affect weights and quantization metadata, not silently change prompting or generation behavior.
-
-## Size / bits check
-
-Compare checkpoint size against the baseline/source checkpoint and estimate bits per weight from tensor dtypes and file sizes. A partial-quantization recipe may not shrink every tensor, but it should still match the intended quantization coverage. Call out any small or missing size reduction before deployment/evaluation.
 
 ## Expected quantization patterns by recipe
 
