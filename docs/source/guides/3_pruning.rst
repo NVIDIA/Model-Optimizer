@@ -20,6 +20,7 @@ attention heads of the model. More details on these pruning modes is as follows:
     the embedding hidden size, mlp ffn hidden size, transformer attention heads, GQA query groups,
     mamba heads and head dimension, and number of layers of the model.
     Checkout more details of the algorithm in the `paper <https://arxiv.org/abs/2408.11796>`_.
+#.  ``puzzletron``: An advanced LLM/VLM pruning method by NVIDIA using Mixed Integer Programming (MIP) based NAS search algorithm.
 #.  ``fastnas``: A pruning method recommended for Computer Vision models. Given a pretrained model,
     FastNAS finds the subnet which maximizes the score function while meeting the given constraints.
 
@@ -53,7 +54,7 @@ Prerequisites
    specifying an upper bound in terms of absolute number (``3e-6``) or a percentage (``"60%"``).
 #. You should also specify the pruning algorithm (``mode``), you would like to use. Depending on the
    mode, you will need to provide additional ``config`` parameters like ``score_func`` (``fastnas`` mode)
-   ``dataloader``, ``checkpoint``, etc. The most common score function
+   ``data_loader``, ``checkpoint``, etc. The most common score function
    is the validation accuracy of the model and is used to rank the sub-nets sampled from the search space.
    Loss function is used to run some forward and backward passes on the train dataloader to get the gradients.
 #. Please see the API reference of :meth:`mtp.prune() <modelopt.torch.prune.pruning.prune>` for more details.
