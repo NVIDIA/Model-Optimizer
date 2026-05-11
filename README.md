@@ -137,6 +137,15 @@ more fine-grained control on installed dependencies or for alternative docker im
 | Distillation | [View Support Matrix](./examples/llm_distill/README.md#support-matrix) |
 | Speculative Decoding | [View Support Matrix](./examples/speculative_decoding/README.md#support-matrix) |
 
+## Deprecation Policy
+
+Model Optimizer follows a structured approach to managing deprecated features:
+
+- **Communication:** Deprecation notices are documented in the [Changelog](https://nvidia.github.io/Model-Optimizer/reference/0_changelog.html). Deprecated items include source code statements indicating deprecation timing, with runtime warnings issued upon use.
+- **Migration Period:** Since Model Optimizer is still pre-1.0, we provide a 1-release (~1-month) migration period after deprecation. During this window, deprecated features continue functioning while issuing warnings.
+- **Scope:** The policy addresses both complete deprecations (entire APIs removed) and partial ones (specific parameters removed while methods remain).
+- **Removal:** Following the migration period, deprecated elements are removed in alignment with semantic versioning standards, potentially including breaking changes in minor version updates while Model Optimizer remains in 0.x.
+
 ## Contributing
 
 Model Optimizer is now open source! We welcome any feedback, feature requests and PRs.
