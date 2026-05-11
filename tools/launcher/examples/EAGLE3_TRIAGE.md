@@ -20,8 +20,9 @@ Model checkpoint (HuggingFace)
          ▼
 ┌──────────────────┐
 │  Task 1: Dump    │  Target model runs forward pass, saves hidden states
-│  (hidden states) │  Script: common/eagle3/dump_offline_data.sh  (TRT-LLM)
-└────────┬─────────┘        or  dump_offline_data_hf.sh  (HF/vLLM fallback)
+│  (hidden states) │  Script: common/eagle3/dump_offline_data.sh       (TRT-LLM)
+└────────┬─────────┘        or  dump_offline_data_hf.sh   (HF device_map=auto)
+                           or  dump_offline_data_vllm.sh  (vLLM + speculators)
          │
          ▼
 ┌──────────────────┐
@@ -60,7 +61,7 @@ flowchart TD
     T0_CHECK -->|Cancelled - time limit| T0_TIMEOUT[⚠ TIMEOUT\nJob wall-clock limit too short.\nNote: afterany deps ensure\ntask_1 still runs.\nFix: increase time limit\nor reduce dataset size.]
 
     %% ── task_1 ──────────────────────────────────────────────────
-    T1_CHECK -->|No - script not found| T1_SCRIPT[⚠ MISSING_SCRIPT\ndump_offline_data_vllm.sh does not exist.\nUse dump_offline_data_hf.sh\n(HF device_map=auto, no TP/EP flags)\nor dump_offline_data.sh\n(TRT-LLM, needs --tp / --moe-ep).]
+    T1_CHECK -->|No - script not found| T1_SCRIPT[⚠ MISSING_SCRIPT\nVerify script path. Three backends:\n• dump_offline_data_vllm.sh (vLLM + speculators)\n• dump_offline_data_hf.sh (HF device_map=auto)\n• dump_offline_data.sh (TRT-LLM, --tp/--moe-ep)]
     T1_CHECK -->|Yes| T1_RUN{Runs OK?}
     T1_RUN -->|No - OOM| T1_OOM[⚠ OOM\nIncrease TP, add EP,\nor switch to _hf script.]
     T1_RUN -->|No - NCCL error| T1_NCCL[⚠ NCCL\nNetwork/multi-node issue.\nRetry or reduce EP.]
@@ -97,40 +98,46 @@ Tests run on OCI-HSG cluster (GB200 nodes, 4 × 192 GB HBM3e per node).
 
 | # | Model | Type | Size | task_0 | task_1 | task_2 | task_3 | Notes |
 |---|-------|------|------|--------|--------|--------|--------|-------|
-| 1 | Ministral-3-8B | Dense | 8B | ⏱ TIMEOUT (3277/3295) | ❌ MISSING_SCRIPT | ❌ (no data from t1) | ❌ CASCADE | Tokenizer regex warning (non-fatal) |
-| 2 | Ministral-3-14B | Dense | 14B | ⏱ TIMEOUT | ❌ MISSING_SCRIPT | ❌ (no data from t1) | 🔍 (no log) | — |
-| 3 | GPT-OSS-20B | Dense | 20B | ❌ TOKENIZER | ❌ MISSING_SCRIPT | ❌ (no data from t1) | ❌ CASCADE | TIKTOKEN_RS_CACHE_DIR not populated |
-| 4 | MiniMax-M2.5 | MoE | 230B/10B | ⏱ TIMEOUT | ❌ MISSING_SCRIPT | ❌ (no data from t1) | ❌ TRUST_REMOTE_CODE | trust_remote_code needed at bench |
-| 5 | Qwen3.5-35B-A3B | MoE | 35B/3B | ⏱ TIMEOUT | ❌ MISSING_SCRIPT | ❌ (no data from t1) | ❌ CASCADE | — |
-| 6 | Step-3.5-Flash | MoE/SWA | 197B/11B | ⏱ TIMEOUT | ❌ MISSING_SCRIPT | ❌ (no data from t1) | ❌ CASCADE | SWA attention — untested past t1 |
-| 7 | DeepSeek-V3.2 | MoE/MLA | 685B/37B | 🔍 (tarball only) | ❌ MISSING_SCRIPT + OOM | ❌ (no data from t1) | ❌ CASCADE | 2-node, t1 OOM-killed (SIGTERM) |
+| 1 | Ministral-3-8B | Dense | 8B | ⏱ TIMEOUT (3277/3295) | 🔁 NEEDS RERUN (_vllm) | 🔲 | 🔲 | task_0 nearly complete (99%); t1 re-run needed |
+| 2 | Ministral-3-14B | Dense | 14B | ⏱ TIMEOUT | 🔁 NEEDS RERUN (_vllm) | 🔲 | 🔲 | — |
+| 3 | GPT-OSS-20B | Dense | 20B | ❌ TOKENIZER | 🔁 NEEDS RERUN (_vllm) | 🔲 | 🔲 | Fix: populate TIKTOKEN_RS_CACHE_DIR first |
+| 4 | MiniMax-M2.5 | MoE | 230B/10B | ⏱ TIMEOUT | 🔁 NEEDS RERUN (_vllm) | 🔲 | ❌ TRUST_REMOTE_CODE | trust_remote_code needed at bench |
+| 5 | Qwen3.5-35B-A3B | MoE | 35B/3B | ⏱ TIMEOUT | 🔁 NEEDS RERUN (_vllm) | 🔲 | 🔲 | — |
+| 6 | Step-3.5-Flash | MoE/SWA | 197B/11B | ⏱ TIMEOUT | 🔁 NEEDS RERUN (_vllm) | 🔲 | 🔲 | SWA: use _vllm or _hf script |
+| 7 | DeepSeek-V3.2 | MoE/MLA | 685B/37B | 🔍 (tarball only) | 🔁 NEEDS RERUN (_vllm, 2-node) | 🔲 | 🔲 | 2-node; previous t1 OOM-killed |
 | 8 | Kimi-K2.5 | MoE/MLA | 1T/32B | 🔲 | 🔲 | 🔲 | 🔲 | MLA attention: verify eagle_decoder_type |
 | 9 | GLM-5 | MoE/DSA | 744B/40B | 🔲 | 🔲 | 🔲 | 🔲 | Gated, 2-node |
 | 10 | Kimi-K2.5-NVFP4 | NVFP4 | ~591GB | 🔲 | 🔲 | 🔲 | 🔲 | Blackwell required; t1/t2 use BF16 base |
 
-**Legend:** ✅ Pass · ❌ Fail · ⏱ Timeout · 🔍 Inconclusive · 🔲 Not yet tested
+**Legend:** ✅ Pass · ❌ Fail · ⏱ Timeout · 🔍 Inconclusive · 🔲 Not yet tested · 🔁 Rerun needed
 
 ---
 
 ## Known Issues
 
-### Issue 1: Missing `dump_offline_data_vllm.sh` (Task 1 — universal) — OPEN
+### Issue 1: Missing `dump_offline_data_vllm.sh` (Task 1 — universal) — FIXED ✅
 
 **Symptom:** `/usr/bin/bash: .../dump_offline_data_vllm.sh: No such file or directory`
 
-**Affected:** All 7 models tested (root cause of universal task_1 failure).
+**Affected:** All 7 models tested (root cause of universal task_1 failure in first round).
 
-**Root cause:** Quick-fail pipeline configs reference `dump_offline_data_vllm.sh`, which was
-planned but not created. Two scripts exist: `dump_offline_data.sh` (TRT-LLM based, requires
-`--tp`/`--moe-ep`) and `dump_offline_data_hf.sh` (HF `device_map="auto"`, no parallelism args,
-works for any model supported by HF Transformers).
+**Root cause:** Quick-fail pipeline configs referenced `dump_offline_data_vllm.sh`, which had
+not yet been created. Only two scripts existed: `dump_offline_data.sh` (TRT-LLM) and
+`dump_offline_data_hf.sh` (HF `device_map="auto"`).
 
-**Status:** `dump_offline_data_hf.sh` was created as a fallback and is working for standalone
-task_1 re-runs (Ministral-3-8B, MiniMax-M2.5, Qwen3.5-35B-A3B, Step-3.5-Flash). The
-quick-fail pipeline configs still reference the non-existent `_vllm` script.
+**Fix applied:** `dump_offline_data_vllm.sh` and its backing script
+`compute_hidden_states_vllm.py` were ported from a parallel sandbox branch. The vLLM script
+uses `VllmHiddenStatesGenerator` from the `speculators` library and saves output in the same
+`.pt` format as the HF variant. Both files are now in:
+- `tools/launcher/common/eagle3/dump_offline_data_vllm.sh`
+- `examples/speculative_decoding/collect_hidden_states/compute_hidden_states_vllm.py`
 
-**Fix:** Update quick-fail configs to use `dump_offline_data_hf.sh` for models not supported
-by TRT-LLM, or rename `_hf` → `_vllm` if it covers the intended use case.
+Three backends now available for task_1:
+| Backend | Script | When to use |
+|---------|--------|-------------|
+| TRT-LLM | `dump_offline_data.sh` | Pure-text models with TRT-LLM support; needs `--tp`/`--moe-ep` |
+| HF | `dump_offline_data_hf.sh` | VLMs, custom-code models, SWA; `device_map="auto"` |
+| vLLM | `dump_offline_data_vllm.sh` | Broad coverage via vLLM model implementations; requires `speculators` |
 
 ---
 
