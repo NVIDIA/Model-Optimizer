@@ -1023,10 +1023,10 @@ class QDQAutotunerBase:
 
         if action == "add":
             target = random.choice(absent_groups)
-            points_to_add = []
-            for p in complete_concat_groups[target]:
-                if (p.node_index, p.input_index) not in selected_keys:
-                    points_to_add.append(p)
+            points_to_add = [
+                p for p in complete_concat_groups[target]
+                if (p.node_index, p.input_index) not in selected_keys
+            ]
             logger.debug(
                 f"Concat group mutation: added {len(points_to_add)} points for Concat node {target}"
             )
@@ -1040,6 +1040,8 @@ class QDQAutotunerBase:
                 f"Concat group mutation: removed {len(group_keys)} points for Concat node {target}"
             )
             return result
+
+        return selected_points
 
     def _mutate_insertion_points(
         self, base_points, all_points, point_type: str, max_mutations: int
