@@ -576,7 +576,7 @@ class _CheckpointState:
         return cls(checkpoint_dir, num_layers, start_layer=start)
 
     def setup_resume(self, layers: nn.ModuleList) -> list | None:
-        """Load output_meta for skip layers 0..K-1, return next_inputs for layer K..
+        """Load output_meta for skip layers 0..K-1, return next_inputs for layer K.
 
         Sets ``output_meta`` on each already-calibrated layer so that
         skip mode can produce correctly shaped dummy outputs.
