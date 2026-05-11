@@ -30,11 +30,7 @@ because they're symmetric. This test pins the contract.
 
 import torch
 
-from modelopt.torch.puzzletron.sewing_kit.core import (
-    ExternalTarget,
-    FunctionTarget,
-    Needle,
-)
+from modelopt.torch.puzzletron.sewing_kit.core import ExternalTarget, FunctionTarget, Needle
 from modelopt.torch.puzzletron.sewing_kit.passage import InputArgs
 
 

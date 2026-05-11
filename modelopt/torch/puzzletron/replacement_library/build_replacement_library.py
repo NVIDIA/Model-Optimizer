@@ -476,8 +476,8 @@ def _infer_subblocks_to_extract(
     else:
         if bypass_args_path.exists():
             bypass_config = json_load(bypass_args_path)
-            keys_to_learn = (
-                bypass_config.get("model_factory", {}).get("keys_to_learn", "entire_block")
+            keys_to_learn = bypass_config.get("model_factory", {}).get(
+                "keys_to_learn", "entire_block"
             )
         else:
             bypass_config = json.loads(bypass_config_path.read_text())

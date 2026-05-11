@@ -69,9 +69,7 @@ def get_bypass_run_identity(cfg: DictConfig) -> dict[str, Any]:
             "mlp_init_mode": model_factory.get("mlp_init_mode"),
             "mlp_init_config": model_factory.get("mlp_init_config"),
             "linear_init_mode": model_factory.get("linear_init_mode"),
-            "submodule_for_loss_calculation": model_factory.get(
-                "submodule_for_loss_calculation"
-            ),
+            "submodule_for_loss_calculation": model_factory.get("submodule_for_loss_calculation"),
             "keys_to_learn": model_factory.get("keys_to_learn"),
         },
         "training": {
@@ -285,7 +283,9 @@ def expected_bypass_runs(cfg: DictConfig) -> list[dict[str, Any]]:
             if "keys_to_learn" in override:
                 run_cfg.bypass.model_factory.keys_to_learn = override.keys_to_learn
         set_experiment_id(run_cfg)
-        experiment_dir = Path(run_cfg.puzzle_dir) / "bypass" / "bypass_runs" / run_cfg.bypass.experiment_id
+        experiment_dir = (
+            Path(run_cfg.puzzle_dir) / "bypass" / "bypass_runs" / run_cfg.bypass.experiment_id
+        )
         runs.append(
             {
                 "experiment_id": run_cfg.bypass.experiment_id,

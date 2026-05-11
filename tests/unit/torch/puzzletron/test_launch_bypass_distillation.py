@@ -48,7 +48,7 @@ def _base_cfg(configs=None):
             "token_count": 999_999,
             "best_val_loss": 0.0,
             "training": {"clipping_count": 42},
-        }
+        },
     }
     if configs is not None:
         cfg["bypass"]["configs"] = configs
