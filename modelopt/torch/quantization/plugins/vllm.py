@@ -24,8 +24,22 @@ from itertools import chain
 
 import torch
 
+
+def _vllm_module_spec_exists(name: str) -> bool:
+    """True if *name* is importable; safe when parent packages are absent.
+
+    ``importlib.util.find_spec`` can raise ``ModuleNotFoundError`` for nested
+    names (e.g. ``vllm.attention.layers``) when ``vllm.attention`` was removed
+    in newer vLLM layouts, instead of returning ``None``.
+    """
+    try:
+        return importlib.util.find_spec(name) is not None
+    except ModuleNotFoundError:
+        return False
+
+
 # Try multiple import paths for vLLM compatibility across versions
-if importlib.util.find_spec("vllm.attention"):
+if _vllm_module_spec_exists("vllm.attention"):
     import vllm.attention as vllm_attention  # vllm < 0.16.0
 else:
     import vllm.model_executor.layers.attention as vllm_attention  # vllm >= 0.16.0
@@ -50,12 +64,16 @@ for module_path in [
     except ImportError:
         continue
 
+<<<<<<< HEAD
 try:
     _has_attention_layers = importlib.util.find_spec("vllm.attention.layers") is not None
 except (ModuleNotFoundError, ValueError):
     _has_attention_layers = False
 
 if _has_attention_layers:  # vllm < 0.15.0
+=======
+if _vllm_module_spec_exists("vllm.attention.layers"):  # vllm < 0.15.0
+>>>>>>> 48eb4ea2 (First commit)
     from vllm.attention.layers.cross_attention import CrossAttention
     from vllm.attention.layers.encoder_only_attention import EncoderOnlyAttention
 else:
@@ -68,12 +86,16 @@ else:
     except ImportError:
         EncoderOnlyAttention = None
 
+<<<<<<< HEAD
 try:
     _has_attention_layer = importlib.util.find_spec("vllm.attention.layer") is not None
 except (ModuleNotFoundError, ValueError):
     _has_attention_layer = False
 
 if _has_attention_layer:
+=======
+if _vllm_module_spec_exists("vllm.attention.layer"):
+>>>>>>> 48eb4ea2 (First commit)
     import vllm.attention.layer as vllm_attention
 
 try:

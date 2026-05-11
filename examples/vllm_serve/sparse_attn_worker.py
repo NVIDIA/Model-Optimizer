@@ -34,7 +34,11 @@ import os
 from typing import Any
 
 from fakequant_worker import disable_compilation
-from vllm.attention.layer import Attention as VLLMAttention
+try:
+    from vllm.attention.layer import Attention as VLLMAttention  # vllm < 0.16
+except ModuleNotFoundError:
+    from vllm.model_executor.layers.attention import Attention as VLLMAttention  # vllm >= 0.16
+
 from vllm.v1.worker.gpu_worker import Worker as BaseWorker
 
 import modelopt.torch.sparsity.attention_sparsity as mtsa
@@ -47,6 +51,7 @@ from modelopt.torch.sparsity.attention_sparsity.plugins.vllm import ModelOptSpar
 sparse_config: dict[str, Any] = {
     "sparse_cfg": os.environ.get("SPARSE_ATTN_CFG", None),
     "calib_config_path": os.environ.get("SPARSE_CALIB_CONFIG_PATH", None),
+    "skip_softmax_threshold": os.environ.get("SKIP_SOFTMAX_THRESHOLD", None),
 }
 
 
@@ -129,11 +134,16 @@ def _replace_attention_impl(worker, config: dict):
     if cfg is None:
         return
 
+    env_threshold = config.get("skip_softmax_threshold")
+    env_threshold = float(env_threshold) if env_threshold is not None else None
+
     model = worker.model_runner.model
     if hasattr(model, "unwrap"):
         model = model.unwrap()
 
     patched = 0
+    # Group layers by their sparse_kw config so we can print a concise summary.
+    config_groups: dict[tuple, list[str]] = {}
     for name, module in model.named_modules():
         if not isinstance(module, VLLMAttention):
             continue
@@ -152,8 +162,10 @@ def _replace_attention_impl(worker, config: dict):
             sparse_kw["num_sink_tokens"] = layer_cfg.get("num_sink_tokens", 0)
             sparse_kw["dense_window_size"] = layer_cfg.get("dense_window_size", 1)
         threshold = layer_cfg.get("skip_softmax_threshold")
+        if env_threshold is not None:
+            threshold = env_threshold
         if threshold:
-            sparse_kw["skip_softmax_threshold"] = threshold
+            sparse_kw["skip_softmax_threshold"] = float(threshold)
 
         # Replace impl and store per-layer config
         old_impl = module.impl
@@ -176,7 +188,26 @@ def _replace_attention_impl(worker, config: dict):
         new_impl.sparse_kw = sparse_kw
         module.impl = new_impl
         patched += 1
-    print(f"[ModelOpt] Sparse attention: replaced impl on {patched} attention layers")
+        config_groups.setdefault(tuple(sorted(sparse_kw.items())), []).append(name)
+
+    print(
+        f"[ModelOpt] Sparse attention: replaced impl on {patched} attention layers",
+        flush=True,
+    )
+    for kw_items, layer_names in config_groups.items():
+        kw = dict(kw_items)
+        variants = []
+        if "sparsity_n" in kw:
+            variants.append(f"{kw['sparsity_n']}:{kw['sparsity_m']} N:M")
+        if "skip_softmax_threshold" in kw:
+            variants.append(f"skip_softmax(threshold={kw['skip_softmax_threshold']})")
+        variant_str = " + ".join(variants) if variants else "dense (no sparse kernel)"
+        print(
+            f"[ModelOpt]   kernel={variant_str} "
+            f"sparse_kw={kw} layers={len(layer_names)} "
+            f"(e.g. {layer_names[0]})",
+            flush=True,
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -25,6 +25,7 @@ with paged KV cache support. Integration approach:
 """
 
 import torch
+from vllm.logger import init_logger
 from vllm.v1.attention.backends.flash_attn import (
     FlashAttentionBackend,
     FlashAttentionImpl,
@@ -32,6 +33,10 @@ from vllm.v1.attention.backends.flash_attn import (
 )
 
 from modelopt.torch.kernels.triton_fa import attention as triton_attention
+
+logger = init_logger(__name__)
+
+_LOGGED_CONFIGS: set[tuple] = set()
 
 
 class ModelOptSparseAttentionImpl(FlashAttentionImpl):
@@ -71,6 +76,30 @@ class ModelOptSparseAttentionImpl(FlashAttentionImpl):
 
         # Per-layer sparse kwargs (set by _replace_attention_impl in the worker)
         sparse_kw = getattr(self, "sparse_kw", {})
+
+        # Log once per unique sparse_kw config so each variant is reported
+        # the first time it actually executes (prefill or decode).
+        kw_key = tuple(sorted(sparse_kw.items()))
+        if kw_key not in _LOGGED_CONFIGS:
+            variants = []
+            if "sparsity_n" in sparse_kw:
+                variants.append(
+                    f"{sparse_kw['sparsity_n']}:{sparse_kw['sparsity_m']} N:M"
+                )
+            if "skip_softmax_threshold" in sparse_kw:
+                variants.append(
+                    f"skip_softmax(threshold={sparse_kw['skip_softmax_threshold']})"
+                )
+            variant_str = " + ".join(variants) if variants else "dense"
+            msg = (
+                f"[ModelOpt] sparse Triton kernel active: kernel={variant_str} "
+                f"phase={'prefill' if is_prefill else 'decode'} "
+                f"layer={layer.__class__.__name__} "
+                f"sparse_kw={sparse_kw}"
+            )
+            logger.warning(msg)
+            print(msg, flush=True)
+            _LOGGED_CONFIGS.add(kw_key)
 
         # Prepare metadata for our kernel
         q = query[:num_actual_tokens].contiguous()

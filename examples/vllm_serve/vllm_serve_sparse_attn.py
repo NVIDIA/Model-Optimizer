@@ -19,6 +19,11 @@ Usage:
     SPARSE_ATTN_CFG=SPARSE_SOFTMAX_DEFAULT python vllm_serve_sparse_attn.py \\
         meta-llama/Llama-3.1-8B --max-model-len 8192
 
+2:4 sparsity + skip-softmax (configurable threshold):
+    SPARSE_ATTN_CFG=SPARSE_SOFTMAX_SKIP_DEFAULT \\
+    SKIP_SOFTMAX_THRESHOLD=0.05 \\
+        python vllm_serve_sparse_attn.py meta-llama/Llama-3.1-8B
+
 Combined with quantization:
     QUANT_CFG=INT8_SMOOTHQUANT_CFG SPARSE_ATTN_CFG=SPARSE_SOFTMAX_DEFAULT \\
         python vllm_serve_sparse_attn.py meta-llama/Llama-3.1-8B
@@ -44,6 +49,7 @@ else:
 additional_env_vars = {
     "SPARSE_ATTN_CFG",
     "SPARSE_CALIB_CONFIG_PATH",
+    "SKIP_SOFTMAX_THRESHOLD",
     "QUANT_DATASET",
     "QUANT_CALIB_SIZE",
     "QUANT_CFG",
@@ -85,6 +91,16 @@ def main():
     else:
         print("Warning: No SPARSE_ATTN_CFG or QUANT_CFG set. Running standard vLLM.")
         worker_cls = None
+
+    if has_sparse:
+        print(
+            "[ModelOpt] Sparse attention enabled: "
+            f"SPARSE_ATTN_CFG={os.environ.get('SPARSE_ATTN_CFG')} "
+            f"SPARSE_CALIB_CONFIG_PATH={os.environ.get('SPARSE_CALIB_CONFIG_PATH')} "
+            f"SKIP_SOFTMAX_THRESHOLD={os.environ.get('SKIP_SOFTMAX_THRESHOLD')} "
+            f"worker_cls={worker_cls}",
+            flush=True,
+        )
 
     if worker_cls:
         parser.set_defaults(worker_cls=worker_cls)
