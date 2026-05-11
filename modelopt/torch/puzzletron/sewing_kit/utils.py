@@ -35,7 +35,6 @@ import torch._C
 import torch._dynamo
 import torch.distributed
 import torch.nn as nn
-import torch.nn.functional as F
 import torch.utils._pytree as pytree
 from torch import Tensor
 from torch._subclasses import FakeTensor, FakeTensorMode
@@ -483,29 +482,14 @@ def batched_normalized_mse_loss(
     epsilon: float = 1e-6,
     batch_dims: Sequence[int] = (0,),
 ) -> torch.Tensor:
-    """Like normalized_mse_loss, but normalization is done on non-batch dims, then averaged.
+    """Per-batch-element relative-L2 loss.
 
-    Useful when activations within a batch item should be normalized independently
-    rather than normalizing across the full batch.
-
-    Note: this slightly diverges from the original Puzzle implementation. With
-    per-batch-element normalization, an all-zero target slice produces a
-    denominator of ``epsilon ** 2 ~= 1e-12``, which then explodes the loss for
-    that slice (the global-reduction variant in ``normalized_mse_loss`` dilutes
-    it across non-zero elements, hiding the issue). We clamp the denominator
-    to a floor of ``epsilon`` so the per-element minimum matches the intent of
-    the epsilon term. The clamp only triggers on near-zero target slices —
-    typical activations are unaffected.
-
-    The denominator uses ``MSE(target, epsilon_tensor)`` rather than
-    ``mean(target ** 2)`` for consistency with ``normalized_mse_loss``; the
-    ``clamp(min=epsilon)`` below already handles zero-target slices, so the
-    epsilon offset inside the MSE is redundant but harmless at ``1e-6``.
+    For each batch element, computes ``||input - target||^2 / (||target||^2 + eps)``
+    over the non-batch dims, then averages across batch elements. The additive
+    ``epsilon`` in the denominator handles all-zero target slices without a hard
+    clamp and makes the loss scale-invariant when ``||target||^2 >> eps``.
     """
-    norm_dims = list(set(range(input.ndim)) - set(batch_dims))
-    norm_of_target_vectors = F.mse_loss(
-        target, torch.zeros_like(target) + epsilon, reduction="none"
-    ).mean(norm_dims)
-    norm_of_target_vectors = norm_of_target_vectors.clamp(min=epsilon)
-    loss = F.mse_loss(input, target, reduction="none").mean(norm_dims) / norm_of_target_vectors
-    return loss.mean()
+    norm_dims = [d for d in range(input.ndim) if d not in batch_dims]
+    num = ((input - target) ** 2).sum(dim=norm_dims)
+    den = (target**2).sum(dim=norm_dims) + epsilon
+    return (num / den).mean()

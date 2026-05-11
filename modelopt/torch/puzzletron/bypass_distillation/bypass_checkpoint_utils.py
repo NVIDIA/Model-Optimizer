@@ -15,6 +15,7 @@
 
 """Checkpoint utilities for bypass distillation."""
 
+import os
 import re
 from collections import OrderedDict
 from pathlib import Path
@@ -222,10 +223,15 @@ def save_bypass_checkpoint(
     save_checkpoint_from_shards(model=model, checkpoint_dir=checkpoint_dir, descriptor=descriptor)
 
     if dist.is_master():
-        # Create 'latest' symlink
+        # Create 'latest' symlink via tmp-symlink + atomic rename so concurrent
+        # readers on a shared filesystem never observe a missing `latest`. The
+        # plain unlink + symlink_to pair leaves a brief window where the link
+        # doesn't exist; Path.replace (== os.replace) is atomic on POSIX.
         latest_symlink = Path(cfg.bypass.experiment_dir) / "latest"
-        latest_symlink.unlink(missing_ok=True)
-        latest_symlink.symlink_to(checkpoint_dir.name)
+        tmp_symlink = latest_symlink.with_name(f".latest_tmp_{os.getpid()}")
+        tmp_symlink.unlink(missing_ok=True)
+        tmp_symlink.symlink_to(checkpoint_dir.name)
+        tmp_symlink.replace(latest_symlink)
         # Save config args json
         json_dump(cfg.bypass, checkpoint_dir / "args.json")
         # Save completed file

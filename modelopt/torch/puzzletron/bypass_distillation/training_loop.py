@@ -57,7 +57,7 @@ from modelopt.torch.utils.robust_json import json_load
 
 from .bypass_checkpoint_utils import find_latest_run_dir, load_local_state, save_bypass_checkpoint
 from .bypass_utils import get_distributed_modules_ownership, set_experiment_dir, set_experiment_id
-from .data_classes import GlobalRank, IterNum, IterStatistics, LocalTrainingStats, TimeToSaveSignal
+from .data_classes import GlobalRank, IterNum, IterStatistics, TimeToSaveSignal
 from .stitched_model_factory import StitchedModuleDescriptor, StitchedModulesProcessOwnership
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -118,6 +118,30 @@ def launch_bypass_distillation(hydra_cfg: DictConfig) -> None:
     mprint("Bypass distillation sweep completed")
 
 
+def _flush_loss_buffer(
+    local_buffer: dict[int, dict[str, float]],
+    stitched_losses_history: Optional[dict[int, dict[str, float]]],
+) -> None:
+    """All-gather buffered per-iter losses and merge into master's history.
+
+    Pickle-based ``all_gather_object`` was previously called on every micro-batch;
+    batching to log-chunk boundaries reduces that cost ~``iters_per_log_chunk``×.
+    All ranks must call this so the collective doesn't deadlock; only master
+    actually accumulates into ``stitched_losses_history``.
+    """
+    if not local_buffer:
+        return
+    gathered: list[Optional[dict[int, dict[str, float]]]] = [None] * dist.size()
+    torch.distributed.all_gather_object(gathered, local_buffer)
+    if dist.is_master():
+        assert stitched_losses_history is not None
+        for rank_buf in gathered:
+            if rank_buf is None:
+                continue
+            for it, losses in rank_buf.items():
+                stitched_losses_history.setdefault(it, {}).update(losses)
+
+
 def train(
     cfg: DictConfig,
     descriptor: ModelDescriptor,
@@ -126,7 +150,7 @@ def train(
     teacher_stitched_model: StitchedModule,
     stitched_module_descriptors: OrderedDict[str, StitchedModuleDescriptor],
     stitched_modules_process_ownership: StitchedModulesProcessOwnership,
-    train_dataloader: DataLoader,
+    train_dataloader: Optional[DataLoader],
     val_dataloader: Optional[DataLoader],
     student_model_config: PretrainedConfig,
     skip_first_batches: int = 0,
@@ -211,13 +235,18 @@ def train(
         f"Grad scaling status: {'enabled' if cfg.bypass.training.use_grad_scaling else 'disabled'}"
     )
 
-    train_iterator = iter(train_dataloader)
+    # Only master consumes the dataloader — `next(train_iterator)` is gated by
+    # `if dist.is_master()` further down. Building the iterator (or running
+    # skip_first_batches against it) on non-master ranks wastes startup time
+    # and memory proportional to the dataset, since each tokenizes the full
+    # corpus only to throw it away.
+    train_iterator = iter(train_dataloader) if dist.is_master() else None
 
     # Advance past the first `skip_first_batches` batches before the training loop
     # starts. Used either to skip a known-bad batch range during debugging, or to
     # roll the data iterator forward when resuming a run (model + optimizer state
     # are restored from the checkpoint, but the dataloader itself starts fresh).
-    if skip_first_batches > 0:
+    if dist.is_master() and skip_first_batches > 0:
         mprint(f"Skipping first {skip_first_batches} batches before training")
         for _ in range(skip_first_batches):
             next(train_iterator)
@@ -233,8 +262,21 @@ def train(
     best_steps_by_name: dict[str, int] = dict(cfg.bypass.get("best_steps_by_name", {}))
     # Anchor for the "Δ from initial" column: per-block loss from the first log chunk.
     initial_losses_by_name: dict[str, float] = dict(cfg.bypass.get("initial_losses_by_name", {}))
-    # Buffer variables
-    input_ids = torch.zeros(1, 1, dtype=torch.int64)
+
+    # log_interval is in optimizer-step units; multiply by grad_accum to land in
+    # micro-batch units, which is what the per-iter loss collection counts.
+    iters_per_log_chunk = (
+        cfg.bypass.training.log_interval * cfg.bypass.training.grad_accumulation_steps
+    )
+    # Per-rank local buffer of {iter_num: {block_name: loss}}. We accumulate
+    # losses locally on every rank and only collide them via all_gather_object
+    # at log-chunk boundaries — the object collective is pickle-based and
+    # was previously the per-iter sync cost. See `_flush_loss_buffer` below.
+    local_losses_buffer: dict[int, dict[str, float]] = {}
+    # Buffer variables. Initialise on the active device so non-master ranks
+    # never hand a CPU tensor to a downstream GPU op if the master-only-fetch
+    # invariant is ever relaxed (today only master replaces this in the loop).
+    input_ids = torch.zeros(1, 1, dtype=torch.int64, device=device)
 
     aprint(
         f"previous rank: {str(prev_rank):<5} next rank: {str(next_rank):<5} {owned_stitched_module_indices=}"
@@ -247,6 +289,11 @@ def train(
         # and incremented at the END of each iteration, so we must use `>` (not `>=`)
         # to ensure step `max_steps` itself runs before exiting.
         if cfg.bypass.step_num > cfg.bypass.training.max_steps:
+            # Drain any residual buffered losses (< log-chunk boundary) so the
+            # final partial chunk's stats reach master and can be logged before
+            # the function returns. Must run on every rank — collective op.
+            _flush_loss_buffer(local_losses_buffer, stitched_losses_history)
+            local_losses_buffer.clear()
             if (
                 cfg.bypass.model.model_overrides.save_checkpoint_when_done
                 and not cfg.bypass.disable_checkpoint_save
@@ -386,25 +433,17 @@ def train(
         else:
             iter_stitched_module_losses = {}
 
-        # Collect losses from all ranks using all_gather_object
-        local_training_stats = LocalTrainingStats(
-            iter_num=cfg.bypass.iter_num,
-            stitched_module_losses=iter_stitched_module_losses,
-        )
-        all_training_stats = [None] * dist.size()
-        torch.distributed.all_gather_object(all_training_stats, local_training_stats)
+        if dist.is_master() and cfg.bypass.iter_num == resumed_iter_num:
+            mprint(f"Starting from iter {cfg.bypass.iter_num}")
 
-        if dist.is_master():
-            if cfg.bypass.iter_num == resumed_iter_num:
-                mprint(f"Starting from iter {cfg.bypass.iter_num}")
-
-            # Merge all stats into the losses history
-            assert stitched_losses_history is not None
-            merged_losses: dict[str, float] = {}
-            for stats in all_training_stats:
-                if stats is not None:
-                    merged_losses.update(stats.stitched_module_losses)
-            stitched_losses_history[cfg.bypass.iter_num] = merged_losses
+        # Buffer this rank's per-block losses locally. The collide-across-ranks
+        # gather happens only at log-chunk boundaries (`_flush_loss_buffer`),
+        # which cuts the per-iter pickle-based all_gather_object cost down to
+        # one gather per `iters_per_log_chunk` micro-batches.
+        local_losses_buffer[cfg.bypass.iter_num] = iter_stitched_module_losses
+        if len(local_losses_buffer) >= iters_per_log_chunk:
+            _flush_loss_buffer(local_losses_buffer, stitched_losses_history)
+            local_losses_buffer.clear()
 
         cfg.bypass.token_count += cfg.bypass.training.tokens_per_iter
         iter_t1 = time.time()
@@ -441,11 +480,9 @@ def train(
         # Logging
         if dist.is_master():
             assert stitched_losses_history is not None
-            # log_interval is in optimizer-step units; the underlying history is
-            # per-iter (micro-batch), so the chunk window is grad_accum × wider.
-            iters_per_log_chunk = (
-                cfg.bypass.training.log_interval * cfg.bypass.training.grad_accumulation_steps
-            )
+            # `iters_per_log_chunk` is computed once before the loop (in
+            # micro-batch units = log_interval × grad_accum) and reused for
+            # both the gather-batching threshold and this log drain.
             while len(stitched_losses_history) >= iters_per_log_chunk:
                 lowest_iter = next(iter(stitched_losses_history.keys()))
 
@@ -830,23 +867,37 @@ def run_bypassed_training(cfg: DictConfig):
             load_streaming_fn if not cfg.bypass.data.load_from_disk else load_from_disk_fn
         )
 
-        train_dataloader = create_train_dataloader(
-            seed=seed,
-            tokenizer=tokenizer,
-            block_size=cfg.bypass.data.block_size,
-            dataset_path=cfg.dataset_path,
-            content_field=cfg.bypass.data.data_column,
-            fim_rate=cfg.bypass.data.fim_rate,
-            fim_spm_rate=cfg.bypass.data.fim_spm_rate,
-            micro_batch_size=cfg.bypass.training.micro_batch_size,
-            load_dataset_fn=load_dataset_fn,
-            keep_in_memory=cfg.bypass.data.keep_in_memory,
-            source_datasets_to_discard=cfg.bypass.data.get("source_datasets_to_discard", tuple()),
-            bos_rate=cfg.bypass.data.bos_rate,
-            shuffle_seed=cfg.bypass.data.shuffle_train_data_seed,
-        )
+        # Only master ever fetches from the train dataloader (training_loop.train
+        # gates `next(train_iterator)` on `dist.is_master()`), so skip the
+        # potentially-large HF dataset load + tokenisation on non-master ranks.
+        if dist.is_master():
+            train_dataloader = create_train_dataloader(
+                seed=seed,
+                tokenizer=tokenizer,
+                block_size=cfg.bypass.data.block_size,
+                dataset_path=cfg.dataset_path,
+                content_field=cfg.bypass.data.data_column,
+                fim_rate=cfg.bypass.data.fim_rate,
+                fim_spm_rate=cfg.bypass.data.fim_spm_rate,
+                micro_batch_size=cfg.bypass.training.micro_batch_size,
+                load_dataset_fn=load_dataset_fn,
+                keep_in_memory=cfg.bypass.data.keep_in_memory,
+                source_datasets_to_discard=cfg.bypass.data.get(
+                    "source_datasets_to_discard", tuple()
+                ),
+                bos_rate=cfg.bypass.data.bos_rate,
+                shuffle_seed=cfg.bypass.data.shuffle_train_data_seed,
+            )
+        else:
+            train_dataloader = None
 
         val_dataloader = None
+        # Note: val_dataloader is kept constructed on every rank even though only
+        # master reads from it inside calculate_losses_pipeline. The validation
+        # block uses `val_dataloader is not None` as a "validation enabled" gate
+        # that must agree across ranks — and calculate_losses_pipeline itself is
+        # pipeline-parallel and requires every rank to enter it. Skipping
+        # construction on non-master ranks would break those invariants.
         if not cfg.bypass.disable_validation:
             val_dataloader = create_validation_dataloader(
                 accelerator=None,

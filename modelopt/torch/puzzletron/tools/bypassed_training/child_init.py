@@ -86,9 +86,14 @@ def _process_single_layer(
     # Delegate to pruning_mixin if available (supports a single mixin or a list of mixins).
     # When the bypass factory composes multiple mixins (e.g. experts_removal + kv_heads),
     # it passes them as a list so each can contribute its slice of the layer state dict.
+    # Each mixin gets its own copy of keys_to_remove and the unions are merged afterward,
+    # so ordering between mixins can't corrupt the state dict even if a future pair of
+    # mixins ever happens to touch overlapping keys.
     if pruning_mixin is not None:
         _mixins = pruning_mixin if isinstance(pruning_mixin, list) else [pruning_mixin]
+        merged_keys_to_remove = dict(keys_to_remove)
         for _mixin in _mixins:
+            mixin_keys = dict(keys_to_remove)
             _layer_out = _mixin.prune_single_layer(
                 layer_idx=layer_idx,
                 parent_state_dict=parent_state_dict,
@@ -104,10 +109,11 @@ def _process_single_layer(
                 is_original_mha=is_original_mha,
                 head_size=head_size,
                 hidden_size=hidden_size,
-                keys_to_remove=keys_to_remove,
+                keys_to_remove=mixin_keys,
             )
             layer_out_state_dict.update(_layer_out)
-        return layer_out_state_dict, keys_to_remove
+            merged_keys_to_remove.update(mixin_keys)
+        return layer_out_state_dict, merged_keys_to_remove
 
     # Legacy inline processing (fallback when no pruning_mixin)
 

@@ -219,7 +219,9 @@ def convert_puzzletron_model(model: nn.Module, config: PuzzletronConfig) -> Conv
     activations_log_dir = Path(hydra_cfg.pruning.activations_log_dir)
     if activations_log_dir.exists() and any(activations_log_dir.glob("rank_*.pth")):
         mprint(
-            f"Puzzletron Progress {score_step}/{N}: pruning activation scores already exist, skipping scoring"
+            f"Puzzletron Progress {score_step}/{N}: pruning activation scores already "
+            f"exist at {activations_log_dir} — delete this directory to re-score with "
+            f"the current config."
         )
         dist.barrier()
     else:
@@ -231,7 +233,9 @@ def convert_puzzletron_model(model: nn.Module, config: PuzzletronConfig) -> Conv
     if dist.is_master():
         if pruned_ckpts_dir.exists() and any(pruned_ckpts_dir.iterdir()):
             mprint(
-                f"Puzzletron Progress {prune_step}/{N}: pruned checkpoints already exist, skipping pruning"
+                f"Puzzletron Progress {prune_step}/{N}: pruned checkpoints already "
+                f"exist at {pruned_ckpts_dir} — delete this directory to re-prune with "
+                f"the current config."
             )
         else:
             mprint(

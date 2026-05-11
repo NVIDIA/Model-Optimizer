@@ -72,11 +72,11 @@ def _lm_attrs(config):
 
     VL configs nest language-model fields like ``num_attention_heads``, ``head_dim``,
     and ``hidden_size`` under a sub-config. The attribute name varies by family —
-    ``text_config`` (Qwen3-VL, Llava, Idefics) and ``language_config`` (Llama-4 and
-    a handful of others) are both common. Probe both before falling back to the
-    raw config.
+    ``text_config`` (Qwen3-VL, Llava, Idefics), ``language_config`` (Llama-4 and a
+    handful of others), and ``llm_config`` (InternVL and friends) are all common.
+    Probe each before falling back to the raw config.
     """
-    for attr in ("text_config", "language_config"):
+    for attr in ("text_config", "language_config", "llm_config"):
         sub = getattr(config, attr, None)
         if sub is not None:
             return sub

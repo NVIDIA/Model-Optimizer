@@ -54,6 +54,12 @@ def _warmup_steps_resolver(*args):
     if len(args) == 4:
         t, b, m, p = args
         return warmup_steps(t, b, m, pct=p)
+    # A 5-arg call where the 4th arg is a fractional float almost certainly
+    # means `pct` landed in the `grad_accum` slot — `int(0.05) == 0` would
+    # later raise ZeroDivisionError inside `warmup_steps`. Treat it as legacy.
+    if len(args) == 5 and isinstance(args[3], float) and args[3] < 1.0:
+        t, b, m, p, _ = args
+        return warmup_steps(t, b, m, pct=p)
     return warmup_steps(*args)
 
 
