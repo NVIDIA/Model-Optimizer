@@ -8,7 +8,7 @@ Claude can update the status table, diagram, and issue catalog when new results 
 
 ## Pipeline Overview
 
-```
+```text
 Model checkpoint (HuggingFace)
         │
         ▼
@@ -103,7 +103,7 @@ Tests run on OCI-HSG cluster (GB200 nodes, 4 × 192 GB HBM3e per node).
 | 3 | GPT-OSS-20B | Dense | 20B | ❌ TOKENIZER | 🔁 NEEDS RERUN (_vllm) | 🔲 | 🔲 | Fix: populate TIKTOKEN_RS_CACHE_DIR first |
 | 4 | MiniMax-M2.5 | MoE | 230B/10B | ⏱ TIMEOUT | 🔁 NEEDS RERUN (_vllm) | 🔲 | ❌ TRUST_REMOTE_CODE | trust_remote_code needed at bench |
 | 5 | Qwen3.5-35B-A3B | MoE | 35B/3B | ⏱ TIMEOUT | 🔁 NEEDS RERUN (_vllm) | 🔲 | 🔲 | — |
-| 6 | Step-3.5-Flash | MoE/SWA | 197B/11B | ⏱ TIMEOUT | 🔁 NEEDS RERUN (_vllm) | 🔲 | 🔲 | SWA: use _vllm or _hf script |
+| 6 | Step-3.5-Flash | MoE/SWA | 197B/11B | ⏱ TIMEOUT | 🔁 NEEDS RERUN (_vllm) | 🔲 | 🔲 | SWA: use _vllm or_hf script |
 | 7 | DeepSeek-V3.2 | MoE/MLA | 685B/37B | 🔍 (tarball only) | 🔁 NEEDS RERUN (_vllm, 2-node) | 🔲 | 🔲 | 2-node; previous t1 OOM-killed |
 | 8 | Kimi-K2.5 | MoE/MLA | 1T/32B | 🔲 | 🔲 | 🔲 | 🔲 | MLA attention: verify eagle_decoder_type |
 | 9 | GLM-5 | MoE/DSA | 744B/40B | 🔲 | 🔲 | 🔲 | 🔲 | Gated, 2-node |
@@ -133,6 +133,7 @@ uses `VllmHiddenStatesGenerator` from the `speculators` library and saves output
 - `examples/speculative_decoding/collect_hidden_states/compute_hidden_states_vllm.py`
 
 Three backends now available for task_1:
+
 | Backend | Script | When to use |
 |---------|--------|-------------|
 | TRT-LLM | `dump_offline_data.sh` | Pure-text models with TRT-LLM support; needs `--tp`/`--moe-ep` |
@@ -185,7 +186,8 @@ path before submitting task_0.
 ### Issue 5: MiniMax-M2.5 missing `trust_remote_code` at benchmark (Task 3) — OPEN
 
 **Symptom:**
-```
+
+```text
 ValueError: The repository ... contains custom code... Please pass trust_remote_code=True
 ```
 
@@ -223,6 +225,7 @@ When a new model completes testing:
 4. Mark resolved issues as **FIXED ✅** and update the status in the table.
 
 Per-model results template:
+
 ```markdown
 #### Model: <name>
 - **Date tested:** YYYY-MM-DD

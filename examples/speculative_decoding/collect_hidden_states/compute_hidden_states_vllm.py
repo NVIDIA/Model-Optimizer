@@ -66,9 +66,7 @@ def main(args: argparse.Namespace) -> None:
             "json", data_files={"train": f"{args.input_data}/*.jsonl"}, split="train"
         )
     else:
-        raise ValueError(
-            f"input_data must be a .jsonl file or directory, got: {args.input_data}"
-        )
+        raise ValueError(f"input_data must be a .jsonl file or directory, got: {args.input_data}")
     print(f"Loaded {len(dataset)} conversations from {args.input_data}")
 
     # Shard data
@@ -93,9 +91,7 @@ def main(args: argparse.Namespace) -> None:
         dataset = dataset.select(range(args.debug_max_num_conversations))
 
     # Tokenize conversations
-    tokenizer = AutoTokenizer.from_pretrained(
-        args.model, trust_remote_code=args.trust_remote_code
-    )
+    tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=args.trust_remote_code)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.chat_template = tokenizer.chat_template.replace(REMOVE_THINK_CHAT_TEMPLATE, "")
@@ -125,7 +121,9 @@ def main(args: argparse.Namespace) -> None:
         prompts.append(input_ids.squeeze(0))
         conversation_ids.append(conversation_id)
 
-    print(f"Prepared {len(prompts)} prompts ({num_skipped_too_long} skipped too long, {num_invalid} invalid)")
+    print(
+        f"Prepared {len(prompts)} prompts ({num_skipped_too_long} skipped too long, {num_invalid} invalid)"
+    )
 
     if len(prompts) == 0:
         print("No prompts to process.")
@@ -135,6 +133,7 @@ def main(args: argparse.Namespace) -> None:
     tp = args.tp
     if tp is None:
         import torch as _torch
+
         tp = _torch.cuda.device_count()
 
     generator = VllmHiddenStatesGenerator(
@@ -149,9 +148,7 @@ def main(args: argparse.Namespace) -> None:
 
     # Save in the same format as compute_hidden_states_hf.py
     num_success = 0
-    for conv_id, result in tqdm(
-        zip(conversation_ids, results), total=len(results), desc="Saving"
-    ):
+    for conv_id, result in tqdm(zip(conversation_ids, results), total=len(results), desc="Saving"):
         input_ids = result["input_ids"]
         hidden_states_dict = result["hidden_states"]
 
@@ -164,9 +161,7 @@ def main(args: argparse.Namespace) -> None:
         # Aux layers = all except the last
         aux_layers = layer_indices[:-1]
         if aux_layers:
-            aux_hidden_states = torch.cat(
-                [hidden_states_dict[i].cpu() for i in aux_layers], dim=-1
-            )
+            aux_hidden_states = torch.cat([hidden_states_dict[i].cpu() for i in aux_layers], dim=-1)
         else:
             aux_hidden_states = torch.empty(0)
 
