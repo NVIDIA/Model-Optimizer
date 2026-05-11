@@ -75,14 +75,14 @@ onnx = [
 hf = [
     "accelerate>=1.0.0",
     "datasets>=3.0.0",
-    "deepspeed>=0.9.6; platform_system != 'Darwin' and platform_system != 'Windows'",
+    "deepspeed>=0.9.6,<0.19; platform_system != 'Darwin' and platform_system != 'Windows'",
     "diffusers>=0.32.2",
     "huggingface_hub>=0.24.0",
     "nltk",
     "peft>=0.17.0",
-    "sentencepiece>=0.2.1",                                                           # Also implicitly used in test_unified_export_megatron, test_vllm_fakequant_megatron_export
+    "sentencepiece>=0.2.1",                                                                 # Also implicitly used in test_unified_export_megatron, test_vllm_fakequant_megatron_export
     "tiktoken",
-    "transformers>=4.56,<5.6",                                                        # Should match modelopt/torch/__init__.py and noxfile.py
+    "transformers>=4.56,<5.6",                                                              # Should match modelopt/torch/__init__.py and noxfile.py
     "wonderwords",
 ]
 
