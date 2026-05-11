@@ -181,6 +181,10 @@ class GradientBinarySearcher(BinarySearcher):
 
     def before_search(self) -> None:
         """Setup search with gradient-based score."""
+        warnings.warn(
+            "GradNAS pruning algorithm is deprecated and will be removed in the future.",
+            DeprecationWarning,
+        )
         # initialize here to keep DMRegistry empty during imports
         GradientBinarySearcher.SETUP_GRADIENT_FUNC = {
             DMRegistry[nn.Linear]: _setup_grad_manager_linear,
