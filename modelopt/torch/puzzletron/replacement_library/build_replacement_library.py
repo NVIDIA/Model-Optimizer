@@ -39,7 +39,7 @@ from typing import Any, Type
 import pandas as pd
 from omegaconf import DictConfig
 
-from modelopt.torch.utils import json_dump
+from modelopt.torch.utils import json_dump, json_load
 
 from ..anymodel.model_descriptor import ModelDescriptor, ModelDescriptorFactory
 from ..block_config import AttentionConfig, BlockConfig, FFNConfig
@@ -468,16 +468,35 @@ def _infer_subblocks_to_extract(
     if (checkpoint_dir / "replacement_library.json").exists():
         return []
     bypass_config_path = checkpoint_dir / "bypass_config.json"
-    if (checkpoint_dir in checkpoints_to_split) or (not bypass_config_path.exists()):
+    bypass_args_path = checkpoint_dir / "args.json"
+    if (checkpoint_dir in checkpoints_to_split) or (
+        not bypass_config_path.exists() and not bypass_args_path.exists()
+    ):
         subblocks_to_extract = ["block", "attention", "ffn"]
     else:
-        bypass_config = json.loads(bypass_config_path.read_text())
-        keys_to_learn = bypass_config.get("keys_to_learn", "entire_block")
-        if keys_to_learn == "entire_block":
+        if bypass_args_path.exists():
+            bypass_config = json_load(bypass_args_path)
+            keys_to_learn = (
+                bypass_config.get("model_factory", {}).get("keys_to_learn", "entire_block")
+            )
+        else:
+            bypass_config = json.loads(bypass_config_path.read_text())
+            keys_to_learn = bypass_config.get("keys_to_learn", "entire_block")
+
+        keys_text = " ".join(keys_to_learn) if isinstance(keys_to_learn, list) else keys_to_learn
+        learns_ffn = isinstance(keys_text, str) and ("ffn" in keys_text or "mlp" in keys_text)
+        learns_attention = isinstance(keys_text, str) and (
+            "attn" in keys_text or "attention" in keys_text or "mamba" in keys_text
+        )
+        if keys_text == "entire_block":
             subblocks_to_extract = ["block"]
-        elif "mlp" in keys_to_learn and "attn" not in keys_to_learn:
+        elif learns_ffn and learns_attention:
+            subblocks_to_extract = ["attention", "ffn"]
+        elif keys_text == "subblock_ffn" or (learns_ffn and not learns_attention):
             subblocks_to_extract = ["ffn"]
-        elif "attn" in keys_to_learn and "mlp" not in keys_to_learn:
+        elif keys_text in ("subblock_attention", "subblock_mamba") or (
+            learns_attention and not learns_ffn
+        ):
             subblocks_to_extract = ["attention"]
         else:
             raise ValueError(f"Unrecognized {keys_to_learn=}")

@@ -234,6 +234,7 @@ def _resume_job(project_root_path: Path, tmp_path: Path, rank: int, size: int):
     # Reset cfg.bypass to a fresh dict (experiment_id back to None so
     # set_experiment_id recomputes the same id from model_config_overrides).
     cfg_dict_resume = _bypass_cfg_dict(find_last_ckpt_for_resume=True)
+    cfg_dict_resume["training"]["training_tokens"] = TRAINING_TOKENS * 2
     OmegaConf.update(hydra_cfg, "bypass", cfg_dict_resume, merge=True)
     bypass_distillation.launch_bypass_distillation(hydra_cfg)
     dist.barrier()

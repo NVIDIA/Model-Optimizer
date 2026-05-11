@@ -37,7 +37,7 @@ import datasets
 import torch
 import torch.distributed
 import transformers
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 from torch.utils.data.dataloader import DataLoader
 from transformers import AutoTokenizer, PretrainedConfig, PreTrainedTokenizerBase
 
@@ -56,7 +56,14 @@ from modelopt.torch.puzzletron.utils.parsing import format_global_config, format
 from modelopt.torch.utils.robust_json import json_load
 
 from .bypass_checkpoint_utils import find_latest_run_dir, load_local_state, save_bypass_checkpoint
-from .bypass_utils import get_distributed_modules_ownership, set_experiment_dir, set_experiment_id
+from .bypass_utils import (
+    bypass_run_is_complete,
+    get_distributed_modules_ownership,
+    load_bypass_state,
+    mark_bypass_run_completed,
+    set_experiment_dir,
+    set_experiment_id,
+)
 from .data_classes import GlobalRank, IterNum, IterStatistics, TimeToSaveSignal
 from .stitched_model_factory import StitchedModuleDescriptor, StitchedModulesProcessOwnership
 
@@ -82,14 +89,31 @@ def launch_bypass_distillation(hydra_cfg: DictConfig) -> None:
 
     if not configs_list:
         # Single config mode — run once with whatever is in bypass already
+        set_experiment_id(hydra_cfg)
+        set_experiment_dir(hydra_cfg)
+        if bypass_run_is_complete(hydra_cfg):
+            mprint(
+                f"Bypass distillation already completed for {hydra_cfg.bypass.experiment_id}, skipping"
+            )
+            return
         mprint("Starting bypass distillation (single config)")
         run_bypassed_training(hydra_cfg)
         mprint("Bypass distillation completed")
         return
 
+    base_model_config_overrides = OmegaConf.to_container(
+        hydra_cfg.bypass.model.model_config_overrides, resolve=True
+    )
+    base_keys_to_learn = hydra_cfg.bypass.model_factory.keys_to_learn
+
     mprint(f"Starting bypass distillation sweep ({len(configs_list)} configs)")
     for i, override in enumerate(configs_list):
         mprint(f"Bypass config {i + 1}/{len(configs_list)}: {override}")
+
+        hydra_cfg.bypass.model.model_config_overrides = OmegaConf.create(
+            base_model_config_overrides
+        )
+        hydra_cfg.bypass.model_factory.keys_to_learn = base_keys_to_learn
 
         # Apply overrides for this run
         if "model_config_overrides" in override:
@@ -112,8 +136,16 @@ def launch_bypass_distillation(hydra_cfg: DictConfig) -> None:
         hydra_cfg.bypass.best_steps_by_name = {}
         hydra_cfg.bypass.initial_losses_by_name = {}
 
-        run_bypassed_training(hydra_cfg)
-        mprint(f"Bypass config {i + 1}/{len(configs_list)} completed")
+        set_experiment_id(hydra_cfg)
+        set_experiment_dir(hydra_cfg)
+        if bypass_run_is_complete(hydra_cfg):
+            mprint(
+                f"Bypass config {i + 1}/{len(configs_list)} "
+                f"({hydra_cfg.bypass.experiment_id}) already completed, skipping"
+            )
+        else:
+            run_bypassed_training(hydra_cfg)
+            mprint(f"Bypass config {i + 1}/{len(configs_list)} completed")
 
     mprint("Bypass distillation sweep completed")
 
@@ -203,6 +235,7 @@ def train(
             stitched_module_descriptors=stitched_module_descriptors,
             checkpoint_dir=Path(cfg.bypass.experiment_dir) / subdir_name,
             reference_checkpoint_dir=cfg.teacher_dir,
+            checkpoint_role="start",
         )
 
     # Track statistics for each iteration
@@ -307,6 +340,7 @@ def train(
                     stitched_module_descriptors=stitched_module_descriptors,
                     checkpoint_dir=Path(cfg.bypass.experiment_dir) / subdir_name,
                     reference_checkpoint_dir=cfg.teacher_dir,
+                    checkpoint_role="final",
                 )
 
                 if cfg.bypass.model.model_overrides.delete_old_checkpoints and dist.is_master():
@@ -609,6 +643,7 @@ def train(
                         stitched_module_descriptors=stitched_module_descriptors,
                         checkpoint_dir=Path(cfg.bypass.experiment_dir) / subdir_name,
                         reference_checkpoint_dir=cfg.teacher_dir,
+                        checkpoint_role="best",
                     )
                     # Keep only the most recent best-checkpoint when delete_old_checkpoints
                     # is enabled — mirrors the step-*/final-step-* cleanup elsewhere so a
@@ -624,21 +659,12 @@ def train(
         if not is_accumulating and (
             (cfg.bypass.step_num % cfg.bypass.model.model_overrides.save_interval) == 0
             or step_to_save == cfg.bypass.step_num
-            or (
-                cfg.bypass.model.model_overrides.save_checkpoint_when_done
-                and cfg.bypass.step_num > cfg.bypass.training.max_steps
-            )
         ):
             if not cfg.bypass.disable_checkpoint_save:
                 if (cfg.bypass.step_num % cfg.bypass.model.model_overrides.save_interval) == 0:
                     mprint("Saving step-interval checkpoint")
                 elif step_to_save == cfg.bypass.step_num:
                     mprint("Saving time-based checkpoint")
-                elif (
-                    cfg.bypass.model.model_overrides.save_checkpoint_when_done
-                    and cfg.bypass.step_num > cfg.bypass.training.max_steps
-                ):
-                    mprint("Saving final checkpoint")
 
                 subdir_name = f"step-{cfg.bypass.step_num:06d}-ckpt"
                 save_bypass_checkpoint(
@@ -648,6 +674,7 @@ def train(
                     stitched_module_descriptors=stitched_module_descriptors,
                     checkpoint_dir=Path(cfg.bypass.experiment_dir) / subdir_name,
                     reference_checkpoint_dir=cfg.teacher_dir,
+                    checkpoint_role="resume",
                 )
 
                 if cfg.bypass.kill_after_first_save:
@@ -712,6 +739,12 @@ def run_bypassed_training(cfg: DictConfig):
 
     device = torch.device(f"cuda:{dist.local_rank()}")
 
+    set_experiment_id(cfg)
+    set_experiment_dir(cfg)
+    if bypass_run_is_complete(cfg):
+        mprint(f"Bypass run {cfg.bypass.experiment_id} is already complete, skipping")
+        return
+
     descriptor = ModelDescriptorFactory.get(cfg.descriptor)
     trust_remote_code = descriptor.requires_trust_remote_code()
     teacher_model_config = load_model_config(cfg.teacher_dir, trust_remote_code=trust_remote_code)
@@ -766,9 +799,9 @@ def run_bypassed_training(cfg: DictConfig):
         # set_experiment_id / set_experiment_dir are idempotent and only
         # depend on cfg.bypass.model.model_config_overrides + cfg.puzzle_dir,
         # so it's safe to call them this early.
-        set_experiment_id(cfg)
-        set_experiment_dir(cfg)
         resume_checkpoint_path: Optional[str] = None
+        resume_cfg: Optional[DictConfig] = None
+        resume_skip_first_batches = cfg.bypass.training.skip_first_batches
         if cfg.bypass.resume_checkpoint_path is not None:
             resume_checkpoint_path = cfg.bypass.resume_checkpoint_path
         elif cfg.bypass.find_last_ckpt_for_resume:
@@ -781,6 +814,17 @@ def run_bypassed_training(cfg: DictConfig):
                     f"Auto-found a checkpoint to resume: `{_ckpt_dir}`"
                 )
                 resume_checkpoint_path = _ckpt_dir
+
+        if resume_checkpoint_path:
+            resume_cfg = DictConfig(json_load(Path(resume_checkpoint_path) / "args.json"))
+            saved_skip = resume_cfg.training.get(
+                "skip_first_batches", cfg.bypass.training.skip_first_batches
+            )
+            resume_skip_first_batches = saved_skip + resume_cfg.iter_num
+            if "data" in resume_cfg and "shuffle_train_data_seed" in resume_cfg.data:
+                cfg.bypass.data.shuffle_train_data_seed = resume_cfg.data.shuffle_train_data_seed
+            if "seed" in resume_cfg:
+                cfg.bypass.seed = resume_cfg.seed
 
         # Both ``init_checkpoint_path`` and ``resume_checkpoint_path`` point at
         # an HF-format directory; share the same loader. ``init_checkpoint_path``
@@ -953,17 +997,17 @@ def run_bypassed_training(cfg: DictConfig):
                 checkpoint_path=resume_checkpoint_path,
             )
 
-            # Load resume ckpt bypass configs and extract resume iter_num
-            resume_cfg = DictConfig(json_load(Path(resume_checkpoint_path) / "args.json"))
+            assert resume_cfg is not None
 
-            # Resume stats. Bump iter_num / step_num by 1: args.json records the
-            # iter/step that *just completed* — the increments at the bottom of the
-            # loop body run after save, so the saved values are inclusive. Restoring
-            # them as-is would re-execute the already-saved iter (visible as
-            # "iter 899" instead of "iter 900" in the first post-resume log chunk).
-            cfg.bypass.iter_num = resume_cfg.iter_num + 1
+            # Periodic checkpoints are saved before the loop increments counters,
+            # so their args.json is inclusive and needs a +1 bump. Final
+            # checkpoints are saved after the loop already advanced beyond the
+            # last completed step, so their counters are already the next values.
+            resume_from_final = Path(resume_checkpoint_path).name.startswith("final-step-")
+            counter_bump = 0 if resume_from_final else 1
+            cfg.bypass.iter_num = resume_cfg.iter_num + counter_bump
             cfg.bypass.token_count = resume_cfg.token_count
-            cfg.bypass.step_num = resume_cfg.step_num + 1
+            cfg.bypass.step_num = resume_cfg.step_num + counter_bump
             cfg.bypass.best_val_loss = resume_cfg.best_val_loss
             cfg.bypass.training.clipping_count = resume_cfg.training.clipping_count
             # Per-block bookkeeping. .get() defaults handle resume from older ckpts
@@ -1084,18 +1128,12 @@ def run_bypassed_training(cfg: DictConfig):
             train_dataloader=train_dataloader,
             val_dataloader=val_dataloader,
             student_model_config=student_model_config,
-            skip_first_batches=cfg.bypass.training.skip_first_batches,
+            skip_first_batches=resume_skip_first_batches,
             tokenizer=tokenizer,
         )
 
         aprint("Finished training successfully!")
         dist.barrier()
-
-        # Mark training as complete. The pipeline's skip-if-done check looks for this
-        # sentinel — *not* the periodic `latest` symlink, which is rewritten on every
-        # save and would otherwise make a Ctrl-C'd partial run look completed.
-        if dist.is_master():
-            (Path(cfg.bypass.experiment_dir) / "_DONE").touch()
 
     except Exception:
         # Print the traceback explicitly so distributed runs surface it on every
@@ -1108,15 +1146,38 @@ def run_bypassed_training(cfg: DictConfig):
     dist.barrier()
     if dist.is_master():
         mprint("Realizing bypass checkpoints")
-        realize_bypass_checkpoints(cfg)
+        realized_checkpoint, ckpts_symlink = realize_bypass_checkpoints(cfg)
+        mark_bypass_run_completed(cfg, realized_checkpoint, ckpts_symlink)
+    dist.barrier()
 
 
-def realize_bypass_checkpoints(cfg: DictConfig):
+def realize_bypass_checkpoints(cfg: DictConfig) -> tuple[Path, Path]:
     """Create symlinks from bypass checkpoint directories to the ckpts directory."""
-    checkpoint_dir = Path(cfg.bypass.experiment_dir) / "latest"
-    if not checkpoint_dir.exists():
-        mprint(f"Could not find checkpoint directory: {checkpoint_dir}")
-        return
+    state = load_bypass_state(cfg.bypass.experiment_dir) or {}
+    checkpoints = state.get("checkpoints", {})
+    realize_mode = cfg.bypass.get("realize_best_or_latest", "latest")
+    if realize_mode == "best":
+        role_preference = ("best", "final", "resume")
+    elif realize_mode == "latest":
+        role_preference = ("final", "resume", "best")
+    else:
+        raise ValueError(f"Invalid bypass.realize_best_or_latest={realize_mode!r}")
+
+    checkpoint_dir = None
+    for role in role_preference:
+        candidate = checkpoints.get(role)
+        if candidate and Path(candidate).exists():
+            checkpoint_dir = Path(candidate)
+            break
+
+    if checkpoint_dir is None:
+        fallback = Path(cfg.bypass.experiment_dir) / "latest"
+        if fallback.exists():
+            checkpoint_dir = fallback
+        else:
+            raise FileNotFoundError(
+                f"Could not find a bypass checkpoint to realize in {cfg.bypass.experiment_dir}"
+            )
 
     ckpts_dir = Path(cfg.puzzle_dir) / "ckpts"
     ckpts_dir.mkdir(parents=True, exist_ok=True)
@@ -1127,3 +1188,4 @@ def realize_bypass_checkpoints(cfg: DictConfig):
 
     symlink_name.symlink_to(checkpoint_dir, target_is_directory=True)
     mprint(f"Created symlink: {symlink_name} -> {checkpoint_dir}")
+    return checkpoint_dir, symlink_name

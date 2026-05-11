@@ -72,7 +72,7 @@ torchrun --nproc_per_node=8 examples/puzzletron/main.py \
 
 Skip-if-done caching reuses Step A's converted teacher checkpoint, activation scores, and pruned checkpoints. Only Step 5 (bypass distillation, ~50M tokens) and the downstream library/scoring/MIP rerun.
 
-Bypass writes its outputs under `${puzzle_dir}/bypass/bypass_runs/bypass_heads_1/` and creates a symlink `${puzzle_dir}/ckpts/bypass_heads_1` that the replacement library builder picks up automatically.
+Bypass writes its outputs under `${puzzle_dir}/bypass/bypass_runs/<bypass_experiment_id>/` and creates a symlink `${puzzle_dir}/ckpts/<bypass_experiment_id>` that the replacement library builder picks up automatically.
 
 Capture `solution_0`'s `token_accuracy_top_1` from the new realize-model log section.
 

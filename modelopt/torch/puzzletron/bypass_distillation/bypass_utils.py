@@ -15,11 +15,124 @@
 
 """Utility functions for bypass distillation."""
 
+import hashlib
+import json
 from pathlib import Path
+from typing import Any
 
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 
 import modelopt.torch.utils.distributed as dist
+from modelopt.torch.utils.robust_json import json_dump, json_load
+
+BYPASS_STATE_FILENAME = "bypass_state.json"
+
+
+def _to_plain_container(value: Any) -> Any:
+    if isinstance(value, DictConfig):
+        return OmegaConf.to_container(value, resolve=True)
+    return value
+
+
+def _slug(value: Any) -> str:
+    text = str(value).strip().lower().replace("subblock_", "")
+    keep = [ch if ch.isalnum() else "_" for ch in text]
+    slug = "".join(keep).strip("_")
+    while "__" in slug:
+        slug = slug.replace("__", "_")
+    return slug or "custom"
+
+
+def get_bypass_run_identity(cfg: DictConfig) -> dict[str, Any]:
+    """Return the config subset that defines a bypass output.
+
+    The full Hydra config carries mutable runtime counters, checkpoint paths and
+    logging fields.  Those should not decide whether a completed bypass run can
+    be reused.  This identity intentionally keeps architecture, training budget,
+    data shape and learning-target fields, because changing any of them changes
+    the produced checkpoint.
+    """
+    bypass = _to_plain_container(cfg.bypass)
+    training = bypass.get("training", {})
+    data = bypass.get("data", {})
+    model = bypass.get("model", {})
+    model_factory = bypass.get("model_factory", {})
+    return {
+        "model": {
+            "student_weights_dtype": model.get("student_weights_dtype"),
+            "model_config_overrides": model.get("model_config_overrides"),
+        },
+        "model_factory": {
+            "factory": model_factory.get("factory"),
+            "block_loss_func": model_factory.get("block_loss_func"),
+            "gqa_init_mode": model_factory.get("gqa_init_mode"),
+            "mlp_init_mode": model_factory.get("mlp_init_mode"),
+            "mlp_init_config": model_factory.get("mlp_init_config"),
+            "linear_init_mode": model_factory.get("linear_init_mode"),
+            "submodule_for_loss_calculation": model_factory.get(
+                "submodule_for_loss_calculation"
+            ),
+            "keys_to_learn": model_factory.get("keys_to_learn"),
+        },
+        "training": {
+            "learning_rate": training.get("learning_rate"),
+            "training_tokens": training.get("training_tokens"),
+            "micro_batch_size": training.get("micro_batch_size"),
+            "grad_accumulation_steps": training.get("grad_accumulation_steps"),
+            "weight_decay": training.get("weight_decay"),
+            "decay_lr": training.get("decay_lr"),
+            "beta1": training.get("beta1"),
+            "beta2": training.get("beta2"),
+            "grad_clip": training.get("grad_clip"),
+            "grad_clip_type": training.get("grad_clip_type"),
+            "warmup_ratio": training.get("warmup_ratio"),
+            "min_lr_factor": training.get("min_lr_factor"),
+        },
+        "data": {
+            "block_size": data.get("block_size"),
+            "data_column": data.get("data_column"),
+            "fim_rate": data.get("fim_rate"),
+            "fim_spm_rate": data.get("fim_spm_rate"),
+            "bos_rate": data.get("bos_rate"),
+            "source_datasets_to_discard": data.get("source_datasets_to_discard"),
+        },
+        "seed": bypass.get("seed"),
+        "dtype": bypass.get("dtype"),
+    }
+
+
+def get_bypass_config_fingerprint(cfg: DictConfig) -> str:
+    identity = get_bypass_run_identity(cfg)
+    payload = json.dumps(identity, sort_keys=True, default=str, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def get_bypass_experiment_fingerprint(cfg: DictConfig) -> str:
+    """Return a stable ID fingerprint for the architecture and learning target.
+
+    Training budget and data settings are deliberately excluded so a longer
+    rerun can resume the same architecture from its previous final checkpoint.
+    The full config fingerprint is still recorded in bypass_state.json and used
+    for skip-if-complete decisions.
+    """
+    identity = get_bypass_run_identity(cfg)
+    experiment_identity = {
+        "model": identity["model"],
+        "model_factory": {
+            "factory": identity["model_factory"]["factory"],
+            "block_loss_func": identity["model_factory"]["block_loss_func"],
+            "keys_to_learn": identity["model_factory"]["keys_to_learn"],
+            "gqa_init_mode": identity["model_factory"]["gqa_init_mode"],
+            "mlp_init_mode": identity["model_factory"]["mlp_init_mode"],
+            "mlp_init_config": identity["model_factory"]["mlp_init_config"],
+            "linear_init_mode": identity["model_factory"]["linear_init_mode"],
+            "submodule_for_loss_calculation": identity["model_factory"][
+                "submodule_for_loss_calculation"
+            ],
+        },
+    }
+    payload = json.dumps(experiment_identity, sort_keys=True, default=str, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def set_experiment_id(cfg: DictConfig) -> None:
@@ -50,8 +163,18 @@ def set_experiment_id(cfg: DictConfig) -> None:
         ):
             parts.append(f"heads_{attn_override['num_key_value_heads']}")
 
-    if parts:
-        cfg.bypass.experiment_id = "bypass_" + "_".join(parts)
+    keys_to_learn = cfg.bypass.model_factory.get("keys_to_learn", None)
+    if keys_to_learn not in (None, "entire_block"):
+        parts.append(_slug(keys_to_learn))
+
+    if not parts:
+        parts.append("custom")
+
+    # Keep the readable architecture prefix, but suffix it with the config
+    # fingerprint so two runs with the same architecture but different learning
+    # target or training budget cannot collide in the same experiment_dir.
+    cfg.bypass.experiment_id = "bypass_" + "_".join(parts)
+    cfg.bypass.experiment_id += f"_{get_bypass_experiment_fingerprint(cfg)[:8]}"
 
 
 def set_experiment_dir(cfg: DictConfig) -> None:
@@ -64,6 +187,113 @@ def set_experiment_dir(cfg: DictConfig) -> None:
     cfg.bypass.experiment_dir = str(experiment_dir)
     if dist.is_master():
         experiment_dir.mkdir(parents=True, exist_ok=True)
+
+
+def get_bypass_state_path(experiment_dir: str | Path) -> Path:
+    return Path(experiment_dir) / BYPASS_STATE_FILENAME
+
+
+def load_bypass_state(experiment_dir: str | Path) -> dict[str, Any] | None:
+    state_path = get_bypass_state_path(experiment_dir)
+    if not state_path.exists():
+        return None
+    return json_load(state_path)
+
+
+def write_bypass_state(cfg: DictConfig, state: dict[str, Any]) -> None:
+    if not dist.is_master():
+        return
+    json_dump(state, get_bypass_state_path(cfg.bypass.experiment_dir))
+
+
+def _base_bypass_state(cfg: DictConfig) -> dict[str, Any]:
+    return {
+        "version": 1,
+        "experiment_id": cfg.bypass.get("experiment_id", None),
+        "config_fingerprint": get_bypass_config_fingerprint(cfg),
+        "identity": get_bypass_run_identity(cfg),
+        "status": "running",
+        "checkpoints": {},
+        "realized_checkpoint": None,
+        "ckpts_symlink": None,
+    }
+
+
+def update_bypass_checkpoint_state(
+    cfg: DictConfig, checkpoint_dir: str | Path, checkpoint_role: str
+) -> None:
+    if not dist.is_master():
+        return
+    state = load_bypass_state(cfg.bypass.experiment_dir) or _base_bypass_state(cfg)
+    state["status"] = "running"
+    state["config_fingerprint"] = get_bypass_config_fingerprint(cfg)
+    state["identity"] = get_bypass_run_identity(cfg)
+    state.setdefault("checkpoints", {})[checkpoint_role] = str(Path(checkpoint_dir))
+    write_bypass_state(cfg, state)
+
+
+def mark_bypass_run_completed(
+    cfg: DictConfig, realized_checkpoint: str | Path, ckpts_symlink: str | Path
+) -> None:
+    state = load_bypass_state(cfg.bypass.experiment_dir) or _base_bypass_state(cfg)
+    state["status"] = "completed"
+    state["config_fingerprint"] = get_bypass_config_fingerprint(cfg)
+    state["identity"] = get_bypass_run_identity(cfg)
+    state["realized_checkpoint"] = str(realized_checkpoint)
+    state["ckpts_symlink"] = str(ckpts_symlink)
+    write_bypass_state(cfg, state)
+    if dist.is_master():
+        (Path(cfg.bypass.experiment_dir) / "_DONE").touch()
+
+
+def bypass_run_is_complete(cfg: DictConfig) -> bool:
+    state = load_bypass_state(cfg.bypass.experiment_dir)
+    if state is None:
+        return False
+    if state.get("status") != "completed":
+        return False
+    if state.get("config_fingerprint") != get_bypass_config_fingerprint(cfg):
+        return False
+    realized = state.get("realized_checkpoint")
+    symlink = state.get("ckpts_symlink")
+    if not realized or not Path(realized).exists():
+        return False
+    if not symlink or not Path(symlink).exists():
+        return False
+    return True
+
+
+def expected_bypass_runs(cfg: DictConfig) -> list[dict[str, Any]]:
+    """Return expected run metadata for the current bypass config or sweep."""
+    runs: list[dict[str, Any]] = []
+    configs_list = cfg.bypass.get("configs", None)
+    overrides = configs_list if configs_list else [None]
+
+    for override in overrides:
+        run_cfg = OmegaConf.create(
+            {
+                "puzzle_dir": cfg.puzzle_dir,
+                "descriptor": cfg.get("descriptor", None),
+                "bypass": OmegaConf.to_container(cfg.bypass, resolve=True),
+            }
+        )
+        OmegaConf.set_struct(run_cfg, False)
+        if override:
+            run_cfg.bypass.experiment_id = None
+            if "model_config_overrides" in override:
+                run_cfg.bypass.model.model_config_overrides = override.model_config_overrides
+            if "keys_to_learn" in override:
+                run_cfg.bypass.model_factory.keys_to_learn = override.keys_to_learn
+        set_experiment_id(run_cfg)
+        experiment_dir = Path(run_cfg.puzzle_dir) / "bypass" / "bypass_runs" / run_cfg.bypass.experiment_id
+        runs.append(
+            {
+                "experiment_id": run_cfg.bypass.experiment_id,
+                "experiment_dir": str(experiment_dir),
+                "config_fingerprint": get_bypass_config_fingerprint(run_cfg),
+            }
+        )
+    return runs
 
 
 def get_distributed_modules_ownership(module_count: int, world_size: int) -> list[int]:

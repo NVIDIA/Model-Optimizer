@@ -31,6 +31,7 @@ A regression in either path silently discards bypass-trained weights — exactly
 the kind of bug that's invisible in normal CI runs.
 """
 
+import json
 from pathlib import Path
 
 import pytest
@@ -192,3 +193,33 @@ def test_bypass_priority_is_stable_for_two_bypass_checkpoints(tmp_path: Path):
     assert [p.name for p in out] == ["step-000010-ckpt", "step-000020-ckpt"]
     # Repeated runs hit the same order.
     assert sorted({p1, p2}, key=_bypass_priority) == out
+
+
+def test_infer_subblocks_to_extract_reads_args_json_attention(tmp_path: Path):
+    checkpoint_dir = tmp_path / "bypass_ckpt"
+    checkpoint_dir.mkdir()
+    (checkpoint_dir / "args.json").write_text(
+        json.dumps({"model_factory": {"keys_to_learn": "subblock_attention"}})
+    )
+
+    assert brl._infer_subblocks_to_extract(checkpoint_dir, []) == ["attention"]
+
+
+def test_infer_subblocks_to_extract_reads_args_json_ffn(tmp_path: Path):
+    checkpoint_dir = tmp_path / "bypass_ckpt"
+    checkpoint_dir.mkdir()
+    (checkpoint_dir / "args.json").write_text(
+        json.dumps({"model_factory": {"keys_to_learn": "subblock_ffn"}})
+    )
+
+    assert brl._infer_subblocks_to_extract(checkpoint_dir, []) == ["ffn"]
+
+
+def test_infer_subblocks_to_extract_reads_args_json_entire_block(tmp_path: Path):
+    checkpoint_dir = tmp_path / "bypass_ckpt"
+    checkpoint_dir.mkdir()
+    (checkpoint_dir / "args.json").write_text(
+        json.dumps({"model_factory": {"keys_to_learn": "entire_block"}})
+    )
+
+    assert brl._infer_subblocks_to_extract(checkpoint_dir, []) == ["block"]

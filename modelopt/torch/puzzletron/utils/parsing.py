@@ -117,7 +117,7 @@ def format_block_configs(config) -> str:
         ╭─────────────────────── Model Architecture ────────────────────────╮
         │  Layer  1  │  Attention: no_op                │  FFN: mult = 4.95   │
         │  Layer  2  │  Attention: 4 heads in group     │  FFN: mult = 4.95   │
-        │  Layer  3  │  Attention: 4 heads in group     │  FFN: no_op         │
+        │  Layer  3  │  Attention: no_op                │  FFN: no_op         │
         ╰────────────────────────────────────────────────────────────────────╯
     """
     if not hasattr(config, "block_configs") or not config.block_configs:
@@ -288,7 +288,7 @@ def format_global_config(config: DictConfig, title: str = "Global Configuration"
                 # Regular key-value pair
                 indent_str = "  " * (indent + 1)
                 value_str = _format_value(value).replace("  " * 0, "").strip()
-                line = f"│  {indent_str} {key}: {value_str}"
+                line = f"│  {indent_str} • {key}: {value_str}"
                 # Pad to box width
                 if len(line) >= box_width - 1:
                     # Truncate long lines

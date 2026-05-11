@@ -66,6 +66,7 @@ import modelopt.torch.puzzletron.pruning.pruning_ckpts as pruning_ckpts
 import modelopt.torch.puzzletron.replacement_library.build_replacement_library as build_lib
 import modelopt.torch.utils.distributed as dist
 from modelopt.torch.puzzletron.anymodel import convert_model
+from modelopt.torch.puzzletron.bypass_distillation.bypass_checkpoint_utils import find_latest_run_dir
 from modelopt.torch.puzzletron.bypass_distillation.bypass_utils import set_experiment_id
 from modelopt.torch.puzzletron.tools.hydra_utils import initialize_hydra_config_for_dir
 
@@ -778,10 +779,12 @@ def _test_bypass_resume_from_checkpoint_job(
 
     expected_experiment_id = _expected_experiment_id(phase1_cfg)
     experiment_dir = puzzle_dir / "bypass/bypass_runs" / expected_experiment_id
-    args_json_path = experiment_dir / "latest" / "args.json"
-    stitched_dir = experiment_dir / "latest" / "stitched"
 
     if rank == 0:
+        resume_checkpoint = find_latest_run_dir(experiment_dir)
+        assert resume_checkpoint is not None, f"Phase 1 missing resume checkpoint: {experiment_dir}"
+        args_json_path = Path(resume_checkpoint) / "args.json"
+        stitched_dir = Path(resume_checkpoint) / "stitched"
         # Phase 1 must have produced the canonical artifacts.
         assert args_json_path.exists(), f"Phase 1 missing args.json: {args_json_path}"
         with open(args_json_path) as f:
@@ -807,8 +810,11 @@ def _test_bypass_resume_from_checkpoint_job(
     dist.barrier()
 
     if rank == 0:
-        assert args_json_path.exists(), "Phase 2 should still have args.json"
-        with open(args_json_path) as f:
+        phase2_resume_checkpoint = find_latest_run_dir(experiment_dir)
+        assert phase2_resume_checkpoint is not None, f"Phase 2 missing checkpoint: {experiment_dir}"
+        phase2_args_json_path = Path(phase2_resume_checkpoint) / "args.json"
+        assert phase2_args_json_path.exists(), "Phase 2 should have args.json"
+        with open(phase2_args_json_path) as f:
             phase2_state = json.load(f)
         phase2_iter_num = phase2_state["iter_num"]
         # The resumed run must have moved past phase 1's last iter — proves
@@ -914,19 +920,16 @@ def _test_bypass_subblock_modes_job(
         # save_checkpoint_before_training=True). The post-training snapshot
         # under this short-budget config lives at `final-step-*` (saved by the
         # early-exit branch in training_loop.py); the periodic `step-*` save
-        # never fires because the budget is only 2 steps. `latest` is updated
-        # by every `save_bypass_checkpoint` call, so post-training it points at
-        # the most recent save (the `final-step-*` one).
+        # never fires because the budget is only 2 steps. `latest` is now a
+        # resume pointer only, so use the final checkpoint directly.
         start_dirs = sorted(experiment_dir.glob("start-step-*-ckpt"))
         assert start_dirs, f"Expected a start-step-* checkpoint under {experiment_dir}"
         start_dir = start_dirs[0]
-        end_dir = experiment_dir / "latest"
-        assert end_dir.exists(), f"Expected `latest` symlink under {experiment_dir}"
-        # Resolve to the real directory so glob below works regardless of the
-        # symlink-vs-directory distinction.
-        end_dir = end_dir.resolve()
+        final_dirs = sorted(experiment_dir.glob("final-step-*-ckpt"))
+        assert final_dirs, f"Expected a final-step-* checkpoint under {experiment_dir}"
+        end_dir = final_dirs[-1].resolve()
         assert end_dir != start_dir.resolve(), (
-            f"`latest` still points at the pre-training snapshot {end_dir} — "
+            f"Final checkpoint still points at the pre-training snapshot {end_dir} - "
             "no post-training checkpoint was written."
         )
 

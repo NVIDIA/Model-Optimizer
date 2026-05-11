@@ -165,6 +165,20 @@ def test_find_latest_run_dir_falls_through_when_latest_lacks_marker(tmp_path: Pa
     assert bcu.find_latest_run_dir(tmp_path) == str(completed)
 
 
+def test_find_latest_run_dir_ignores_latest_to_best_checkpoint(tmp_path: Path):
+    """`latest` is a resume pointer, so old symlinks to best checkpoints are ignored."""
+    best = tmp_path / "best-step-000020-ckpt"
+    best.mkdir()
+    (best / "saving_completed").touch()
+    (tmp_path / "latest").symlink_to(best.name)
+
+    completed = tmp_path / "step-000010-ckpt"
+    completed.mkdir()
+    (completed / "saving_completed").touch()
+
+    assert bcu.find_latest_run_dir(tmp_path) == str(completed)
+
+
 # ---------------------------------------------------------------------------
 # _save_local_file
 # ---------------------------------------------------------------------------
@@ -313,6 +327,30 @@ def test_save_bypass_checkpoint_replaces_existing_latest_symlink(tmp_path: Path,
     )
 
     assert os.readlink(experiment_dir / "latest") == "step-000007-ckpt"
+
+
+def test_save_bypass_checkpoint_best_does_not_replace_latest(tmp_path: Path, patched_save):
+    experiment_dir = tmp_path / "exp"
+    experiment_dir.mkdir()
+    resume_target = experiment_dir / "step-000003-ckpt"
+    resume_target.mkdir()
+    best_target = experiment_dir / "best-step-000007-ckpt"
+    best_target.mkdir()
+    (experiment_dir / "latest").symlink_to(resume_target.name)
+
+    cfg = _make_save_cfg(experiment_dir)
+    patched_save.save_bypass_checkpoint(
+        cfg=cfg,
+        descriptor=None,
+        model=None,
+        stitched_module_descriptors=OrderedDict(),
+        checkpoint_dir=best_target,
+        checkpoint_role="best",
+    )
+
+    assert os.readlink(experiment_dir / "latest") == "step-000003-ckpt"
+    assert (best_target / "saving_completed").exists()
+    assert (best_target / "bypass_config.json").exists()
 
 
 def test_save_bypass_checkpoint_master_only_skips_symlink_on_non_master(

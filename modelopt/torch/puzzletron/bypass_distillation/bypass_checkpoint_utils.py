@@ -31,23 +31,36 @@ from modelopt.torch.puzzletron.tools.checkpoint_utils_hf import save_checkpoint_
 from modelopt.torch.puzzletron.tools.logger import aprint, mprint
 from modelopt.torch.utils.robust_json import json_dump
 
+from .bypass_utils import load_bypass_state, update_bypass_checkpoint_state
 from .stitched_model_factory import StitchedModuleDescriptor
 
 
 def find_latest_run_dir(run_parent_dir: Union[str, Path]) -> str | None:
     """Find the latest plain-step checkpoint directory within a run parent directory.
 
-    Resume must pick a directory created by the step-interval / time-based / final save
-    paths (named ``step-NNNNNN-ckpt``) — not ``best-step-*`` (which corresponds to a
-    validation-best snapshot whose optimizer state may be stale relative to the latest
-    step), nor ``start-step-*`` / ``final-step-*`` (markers, not resume points).
+    Resume prefers the manifest's final checkpoint, then the latest plain step
+    checkpoint. It must not pick ``best-step-*`` because validation-best snapshots
+    can be stale relative to the latest optimizer state, nor ``start-step-*``.
     """
     run_parent_dir = Path(run_parent_dir)
 
-    # Check for the "latest" symlink — set only by save_bypass_checkpoint, always
-    # points at a plain ``step-*`` directory. Fast path.
+    state = load_bypass_state(run_parent_dir)
+    if state is not None:
+        checkpoints = state.get("checkpoints", {})
+        for role in ("final", "resume"):
+            candidate = checkpoints.get(role)
+            if candidate and (Path(candidate) / "saving_completed").exists():
+                return str(candidate)
+
+    # Check for the "latest" symlink. Current checkpoints only update it for
+    # plain periodic resume checkpoints, but older runs may have pointed it at a
+    # best/start/final checkpoint. Validate the target name before accepting it.
     latest_dir = run_parent_dir / "latest"
-    if latest_dir.exists() and (latest_dir / "saving_completed").exists():
+    if (
+        latest_dir.exists()
+        and re.match(r"^step-\d+-ckpt$", latest_dir.resolve().name)
+        and (latest_dir / "saving_completed").exists()
+    ):
         return str(latest_dir)
 
     # Fallback: scan plain ``step-NNNNNN-ckpt`` directories only.
@@ -202,6 +215,7 @@ def save_bypass_checkpoint(
     stitched_module_descriptors: OrderedDict[str, StitchedModuleDescriptor],
     checkpoint_dir: Path | str,
     reference_checkpoint_dir: Optional[Path] = None,
+    checkpoint_role: str = "resume",
 ) -> None:
     """Save a bypass distillation checkpoint."""
     checkpoint_dir = Path(checkpoint_dir)
@@ -223,20 +237,27 @@ def save_bypass_checkpoint(
     save_checkpoint_from_shards(model=model, checkpoint_dir=checkpoint_dir, descriptor=descriptor)
 
     if dist.is_master():
-        # Create 'latest' symlink via tmp-symlink + atomic rename so concurrent
-        # readers on a shared filesystem never observe a missing `latest`. The
-        # plain unlink + symlink_to pair leaves a brief window where the link
-        # doesn't exist; Path.replace (== os.replace) is atomic on POSIX.
-        latest_symlink = Path(cfg.bypass.experiment_dir) / "latest"
-        tmp_symlink = latest_symlink.with_name(f".latest_tmp_{os.getpid()}")
-        tmp_symlink.unlink(missing_ok=True)
-        tmp_symlink.symlink_to(checkpoint_dir.name)
-        tmp_symlink.replace(latest_symlink)
+        if checkpoint_role == "resume":
+            # Create 'latest' symlink via tmp-symlink + atomic rename so concurrent
+            # readers on a shared filesystem never observe a missing `latest`. The
+            # plain unlink + symlink_to pair leaves a brief window where the link
+            # doesn't exist; Path.replace (== os.replace) is atomic on POSIX.
+            latest_symlink = Path(cfg.bypass.experiment_dir) / "latest"
+            tmp_symlink = latest_symlink.with_name(f".latest_tmp_{os.getpid()}")
+            tmp_symlink.unlink(missing_ok=True)
+            tmp_symlink.symlink_to(checkpoint_dir.name)
+            tmp_symlink.replace(latest_symlink)
         # Save config args json
         json_dump(cfg.bypass, checkpoint_dir / "args.json")
+        model_factory_cfg = cfg.bypass.get("model_factory", {})
+        json_dump(
+            {"keys_to_learn": model_factory_cfg.get("keys_to_learn", "entire_block")},
+            checkpoint_dir / "bypass_config.json",
+        )
         # Save completed file
         completed_file = checkpoint_dir / "saving_completed"
         completed_file.touch()
+        update_bypass_checkpoint_state(cfg, checkpoint_dir, checkpoint_role)
 
     dist.barrier()
     mprint("Checkpoint save done")

@@ -13,7 +13,7 @@
 dtype: "bf16"
 seed: 42
 
-# Experiment Tracking (auto-set by set_experiment_id → "bypass_heads_1")
+# Experiment Tracking (auto-set from architecture, keys_to_learn, and a config fingerprint)
 experiment_id:
 experiment_dir:
 iter_num: 1
@@ -115,6 +115,6 @@ wandb:
   project:
   entity:
 
-# Single architectural variant — `set_experiment_id` produces "bypass_heads_1".
+# Single architectural variant. `set_experiment_id` produces a readable, fingerprinted ID.
 # Add more entries here to train multiple variants in one bypass run.
 configs: []

@@ -37,6 +37,8 @@ def _base_cfg(configs=None):
     is mocked so its richer requirements are irrelevant here.
     """
     cfg = {
+        "puzzle_dir": "/private/tmp/puzzletron_bypass_unit",
+        "descriptor": "test_descriptor",
         "bypass": {
             "model": {"model_config_overrides": {"intermediate_size": 1024}},
             "model_factory": {"keys_to_learn": "subblock_ffn"},
@@ -108,7 +110,7 @@ def test_keys_to_learn_override_applied(monkeypatch):
 
 def test_per_run_state_reset_before_each_call(monkeypatch):
     """Every sweep entry must see iter_num=1, step_num=1, token_count=0,
-    best_val_loss=1e9, clipping_count=0, experiment_id=None — even when the
+    best_val_loss=1e9, clipping_count=0, and a fresh experiment_id even when the
     previous entry left the cfg in some other state."""
     snapshots = _record_calls(monkeypatch)
     cfg = _base_cfg(
@@ -119,7 +121,7 @@ def test_per_run_state_reset_before_each_call(monkeypatch):
     )
     tl.launch_bypass_distillation(cfg)
     for snap in snapshots:
-        assert snap["bypass"]["experiment_id"] is None
+        assert snap["bypass"]["experiment_id"].startswith("bypass_ffn_")
         assert snap["bypass"]["iter_num"] == 1
         assert snap["bypass"]["step_num"] == 1
         assert snap["bypass"]["token_count"] == 0
@@ -136,3 +138,16 @@ def test_override_without_keys_to_learn_leaves_cfg_value_untouched(monkeypatch):
     tl.launch_bypass_distillation(cfg)
     # keys_to_learn was set to "subblock_ffn" in _base_cfg — must survive.
     assert snapshots[0]["bypass"]["model_factory"]["keys_to_learn"] == "subblock_ffn"
+
+
+def test_sweep_entry_without_keys_to_learn_uses_base_not_previous_override(monkeypatch):
+    snapshots = _record_calls(monkeypatch)
+    cfg = _base_cfg(
+        configs=[
+            {"keys_to_learn": "subblock_attention"},
+            {"model_config_overrides": {"intermediate_size": 256}},
+        ]
+    )
+    tl.launch_bypass_distillation(cfg)
+    assert snapshots[0]["bypass"]["model_factory"]["keys_to_learn"] == "subblock_attention"
+    assert snapshots[1]["bypass"]["model_factory"]["keys_to_learn"] == "subblock_ffn"

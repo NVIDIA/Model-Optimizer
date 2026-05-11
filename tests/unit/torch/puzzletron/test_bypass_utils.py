@@ -16,9 +16,11 @@
 """Unit tests for get_distributed_modules_ownership in bypass_utils.py."""
 
 import pytest
+from omegaconf import OmegaConf
 
 from modelopt.torch.puzzletron.bypass_distillation.bypass_utils import (
     get_distributed_modules_ownership,
+    set_experiment_id,
 )
 
 
@@ -83,3 +85,76 @@ def test_single_module():
     ownership = get_distributed_modules_ownership(module_count=1, world_size=2)
     assert ownership == [0]
     assert len(ownership) == 1
+
+
+def _experiment_cfg(keys_to_learn: str):
+    return OmegaConf.create(
+        {
+            "descriptor": "test_descriptor",
+            "bypass": {
+                "experiment_id": None,
+                "dtype": "bf16",
+                "seed": 42,
+                "data": {
+                    "block_size": 64,
+                    "data_column": "text",
+                    "fim_rate": 0,
+                    "fim_spm_rate": 0,
+                    "bos_rate": 1.0,
+                    "source_datasets_to_discard": [],
+                },
+                "training": {
+                    "learning_rate": 1e-4,
+                    "training_tokens": 1024,
+                    "micro_batch_size": 1,
+                    "grad_accumulation_steps": 1,
+                    "weight_decay": 0.1,
+                    "decay_lr": True,
+                    "beta1": 0.9,
+                    "beta2": 0.95,
+                    "grad_clip": 1.0,
+                    "grad_clip_type": "norm",
+                    "warmup_ratio": 0.05,
+                    "min_lr_factor": 1e-5,
+                },
+                "model": {
+                    "student_weights_dtype": "bf16",
+                    "model_config_overrides": {
+                        "attention": [{"num_key_value_heads": 1, "no_op": None}]
+                    },
+                },
+                "model_factory": {
+                    "factory": "bypass_factory_fn",
+                    "block_loss_func": "normalized_mse_loss",
+                    "gqa_init_mode": "AverageKV",
+                    "mlp_init_mode": "Truncate",
+                    "mlp_init_config": {"activations_log_dir": None},
+                    "linear_init_mode": "FromTeacher",
+                    "submodule_for_loss_calculation": None,
+                    "keys_to_learn": keys_to_learn,
+                },
+            },
+        }
+    )
+
+
+def test_experiment_id_includes_learning_target_and_fingerprint():
+    attention_cfg = _experiment_cfg("subblock_attention")
+    ffn_cfg = _experiment_cfg("subblock_ffn")
+
+    set_experiment_id(attention_cfg)
+    set_experiment_id(ffn_cfg)
+
+    assert attention_cfg.bypass.experiment_id.startswith("bypass_heads_1_attention_")
+    assert ffn_cfg.bypass.experiment_id.startswith("bypass_heads_1_ffn_")
+    assert attention_cfg.bypass.experiment_id != ffn_cfg.bypass.experiment_id
+
+
+def test_experiment_id_falls_back_when_no_architecture_parts_exist():
+    cfg = _experiment_cfg("entire_block")
+    cfg.bypass.model.model_config_overrides = {}
+
+    set_experiment_id(cfg)
+
+    assert cfg.bypass.experiment_id.startswith("bypass_custom_")
+    assert cfg.bypass.experiment_id != "bypass_None"

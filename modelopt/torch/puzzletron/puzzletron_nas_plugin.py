@@ -41,6 +41,10 @@ from . import bypass_distillation
 from .activation_scoring import launch_score_activations
 from .anymodel.converter import ConverterFactory
 from .anymodel.model_descriptor import ModelDescriptorFactory
+from .bypass_distillation.bypass_utils import (
+    expected_bypass_runs,
+    load_bypass_state,
+)
 from .build_library_and_stats import launch_build_library_and_stats
 from .mip import launch_mip_and_realize_model
 from .pruning import launch_prune_ckpt
@@ -247,37 +251,31 @@ def convert_puzzletron_model(model: nn.Module, config: PuzzletronConfig) -> Conv
     # Step 5: Bypass distillation (optional, distributed processing)
     if has_bypass:
         bypass_step, _ = _progress_step(hydra_cfg, "bypass")
-        # Skip only if a previous run finished training cleanly. The training loop
-        # writes a `_DONE` sentinel in each experiment_dir on successful completion;
-        # earlier we keyed off the `latest` symlink instead, but that symlink is
-        # rewritten on every periodic save, so a Ctrl-C'd partial run would falsely
-        # look completed and the pipeline would skip ahead to stats. Skipping here
-        # avoids 5-15 min of teacher load + dataloader setup before the inner
-        # resume-from-checkpoint logic short-circuits a re-entered finished run.
-        # For sweeps (`bypass.configs` non-empty), require one `_DONE` per config
-        # so a partial sweep (e.g. 1/2 configs done, then crash) re-enters and
-        # `launch_bypass_distillation` no-ops the completed configs via their
-        # own resume short-circuit.
-        bypass_runs_dir = Path(config.puzzle_dir) / "bypass" / "bypass_runs"
-        _configs_list = hydra_cfg.bypass.get("configs", None)
-        _expected_done = len(_configs_list) if _configs_list else 1
-        _done_count = (
-            sum(
-                1
-                for run_dir in bypass_runs_dir.iterdir()
-                if run_dir.is_dir() and (run_dir / "_DONE").exists()
-            )
-            if bypass_runs_dir.exists()
-            else 0
-        )
-        bypass_done = _done_count >= _expected_done
+        # Skip only when every expected bypass run has a matching manifest, a
+        # completed status, the same config fingerprint, and a realized ckpts/
+        # symlink. Counting arbitrary `_DONE` files is not config-specific and
+        # can skip the current sweep because of stale unrelated runs.
+        expected_runs = expected_bypass_runs(hydra_cfg)
+        incomplete_runs = []
+        for expected_run in expected_runs:
+            state = load_bypass_state(expected_run["experiment_dir"])
+            symlink = Path(config.puzzle_dir) / "ckpts" / expected_run["experiment_id"]
+            if (
+                state is None
+                or state.get("status") != "completed"
+                or state.get("config_fingerprint") != expected_run["config_fingerprint"]
+                or not symlink.exists()
+            ):
+                incomplete_runs.append(expected_run["experiment_id"])
+        bypass_done = len(incomplete_runs) == 0
         if bypass_done:
             mprint(
                 f"Puzzletron Progress {bypass_step}/{N}: bypass distillation already completed, skipping"
             )
         else:
             mprint(
-                f"Puzzletron Progress {bypass_step}/{N}: running bypass distillation (multi-gpu)"
+                f"Puzzletron Progress {bypass_step}/{N}: running bypass distillation "
+                f"(multi-gpu); incomplete runs: {incomplete_runs}"
             )
             bypass_distillation.launch_bypass_distillation(hydra_cfg)
         dist.barrier()
