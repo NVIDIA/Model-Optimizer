@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 from unittest.mock import Mock, patch
 
 import pytest
@@ -301,4 +302,34 @@ def test_get_dataset_samples_with_unsupported_minipile_dataset(tmp_path, test_lo
 
     assert isinstance(samples, list)
     assert len(samples) == 5
+    assert all(isinstance(s, str) and len(s) > 0 for s in samples)
+
+
+@pytest.mark.parametrize(
+    "dataset_key",
+    [
+        "nemotron-sft-instruction-following-chat-v2",
+        "nemotron-science-v1",
+        "nemotron-competitive-programming-v1",
+        "nemotron-sft-agentic-v2",
+        "nemotron-math-v2",
+        "nemotron-sft-swe-v2",
+        "nemotron-sft-multilingual-v1",
+    ],
+)
+def test_get_dataset_samples_new_nemotron(dataset_key):
+    """Smoke-test the 7 newly registered nvidia/Nemotron-* calibration datasets.
+
+    Skipped when ``HF_TOKEN`` is unset because these datasets live behind the HF Hub
+    and the CI runner may not have credentials.
+    """
+    pytest.importorskip("datasets")
+    pytest.importorskip("huggingface_hub")
+    if not os.environ.get("HF_TOKEN"):
+        pytest.skip("HF_TOKEN not set; skipping nvidia/Nemotron-* dataset smoke test")
+
+    samples = get_dataset_samples(dataset_key, num_samples=2)
+
+    assert isinstance(samples, list)
+    assert len(samples) == 2
     assert all(isinstance(s, str) and len(s) > 0 for s in samples)

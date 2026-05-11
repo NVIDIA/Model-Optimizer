@@ -250,7 +250,10 @@ class CausalModel(SeqToSeqModel):
             if self.attn_implementation:
                 args["attn_implementation"] = self.attn_implementation
             self.model = AutoModelForCausalLM.from_pretrained(
-                self.model_path, trust_remote_code=self.trust_remote_code, **args
+                self.model_path,
+                trust_remote_code=self.trust_remote_code,
+                ignore_mismatched_sizes=True,
+                **args,
             )
             self.model.eval()
             if "device_map" not in args:

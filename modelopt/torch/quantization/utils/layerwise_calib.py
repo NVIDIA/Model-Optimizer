@@ -240,7 +240,17 @@ class LayerActivationCollector:
                 return output
 
             if info.mode == "capture":
-                info.collected_inputs.append((args, kwargs))
+                # Offload captured inputs to CPU at append time. For early layers
+                # on a single GPU (e.g. layer 0–2 on GPU 0 with seq_device_map),
+                # accumulating thousands of batches' worth of (bs × seq × hidden)
+                # activations on-device saturates that GPU during the capture loop
+                # and OOMs before _set_layer_states gets a chance to move them.
+                # The "run" branch already handles CPU-resident inputs (see the
+                # device-check above), so storing on CPU is safe end-to-end.
+                cpu = torch.device("cpu")
+                info.collected_inputs.append(
+                    (_move_to_device(args, cpu), _move_to_device(kwargs, cpu))
+                )
                 raise _EarlyStopForwardError()
 
             return self._original_forward(*args, **kwargs)

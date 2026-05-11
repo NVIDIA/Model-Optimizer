@@ -89,6 +89,7 @@ def create_from_arg_obj(cls: type[T], arg_dict: dict, additional_config: dict | 
     auto_quantize_checkpoint = arg_dict.pop("auto_quantize_checkpoint", None)
     calib_batch_size = arg_dict.pop("calib_batch_size", None)
     calib_size = arg_dict.pop("calib_size", 512)
+    calib_data = arg_dict.pop("data", "cnn_dailymail")
     compress = arg_dict.pop("compress", False)
 
     # Sparse attention arguments
@@ -120,6 +121,7 @@ def create_from_arg_obj(cls: type[T], arg_dict: dict, additional_config: dict | 
             tokenizer=model_obj.tokenizer,
             batch_size=calib_batch_size,
             calib_size=calib_size,
+            data=calib_data,
             auto_quantize_bits=auto_quantize_bits,
             auto_quantize_method=auto_quantize_method,
             auto_quantize_score_size=auto_quantize_score_size,
@@ -176,6 +178,17 @@ def setup_parser_with_modelopt_args():
     )
     parser.add_argument(
         "--calib_size", type=int, help="Calibration size for quantization", default=512
+    )
+    parser.add_argument(
+        "--data",
+        type=str,
+        default="cnn_dailymail",
+        help=(
+            "Calibration dataset name for on-the-fly quantization. Forwarded to "
+            "modelopt.torch.utils.dataset_utils.get_dataset_dataloader. "
+            "Use any key from get_supported_datasets() (e.g. 'nemotron-math-v2', "
+            "'nemotron-science-v1', 'cnn_dailymail')."
+        ),
     )
     parser.add_argument(
         "--auto_quantize_bits",
@@ -243,6 +256,7 @@ if __name__ == "__main__":
             "auto_quantize_checkpoint": args.auto_quantize_checkpoint,
             "calib_batch_size": args.calib_batch_size,
             "calib_size": args.calib_size,
+            "data": args.data,
             "compress": args.compress,
             "sparse_cfg": args.sparse_cfg,
         }
