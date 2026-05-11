@@ -1021,7 +1021,9 @@ class QDQAutotunerBase:
             logger.debug(
                 f"Concat group mutation: added {len(points_to_add)} points for Concat node {target}"
             )
-            return selected_points + points_to_add
+            # Rebuild in all_points order so scheme identity is independent of mutation history
+            result_keys = selected_keys | {(p.node_index, p.input_index) for p in points_to_add}
+            return [p for p in all_points if (p.node_index, p.input_index) in result_keys]
 
         elif action == "remove":
             target = random.choice(full_groups)
