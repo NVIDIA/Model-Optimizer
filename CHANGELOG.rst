@@ -15,6 +15,8 @@ Changelog
   - ``from modelopt.torch.quantization.src.conv.implicit_gemm_cuda import ...`` → ``from modelopt.torch.kernels.quantization.conv.implicit_gemm_cuda import ...``
   - ``from modelopt.torch.sparsity.attention_sparsity.kernels import ...`` → ``from modelopt.torch.kernels.sparsity.attention import ...``
 
+- Deprecated GradNAS pruning algorithm as it is not actively maintained and supports very limited and old models. It is recommended to use Minitron or Puzzletron pruning for LLM models. Also deprecates related ``examples/chained_optimizations`` directory.
+
 **New Features**
 
 - Add composable ``$import`` system for recipe YAML configs, enabling reusable config snippets referenced via ``{$import: name}`` markers. All built-in PTQ recipes converted to use imports with shared snippets under ``modelopt_recipes/configs/`` (numeric formats, quant_cfg building blocks, presets). See :ref:`composable-imports`.
@@ -512,7 +514,7 @@ Changelog
 - New APIs and examples: :mod:`modelopt.torch.prune` for pruning Conv, Linear, and Attention heads for
   NVIDIA Megatron-core GPT-style models (e.g. Llama 3), PyTorch Computer Vision models, and HuggingFace Bert/GPT-J models.
 - New API: :mod:`modelopt.torch.distill` for knowledge distillation, along with guides and example.
-- New Example: `HF BERT Prune, Distill & Quantize <https://github.com/NVIDIA/Model-Optimizer/blob/main/examples/chained_optimizations>`_
+- New Example: HF BERT Prune, Distill & Quantize
   showcasing how to chain pruning, distillation, and quantization to achieve the best performance on a given model.
 - Added INT8/FP8 DQ-only support for ONNX model.
 - New API: :mod:`modelopt.torch.speculative` for end-to-end support of Medusa models.

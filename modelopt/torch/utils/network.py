@@ -587,7 +587,7 @@ def create_param_grad_clear_hook(param):
     The hook will be fired after the gradient is accumulated for the parameter.
     Important: For this to work, ``accum_grad`` should be kept alive as longs as this utility is needed.
     """
-    # For methods such as AutoQuantize, gradnas involving backward -
+    # For methods such as AutoQuantize, involving backward -
     # We want to clear parameter gradients as soon as they are computed to save memory
     # This can be done by register_post_accumulate_grad_hook
     # However torch <= 2.0 does not have register_post_accumulate_grad_hook

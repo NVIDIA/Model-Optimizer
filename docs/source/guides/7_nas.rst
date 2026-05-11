@@ -63,7 +63,7 @@ Example usage:
 
 .. note::
 
-    The NAS API's are a super-set of the pruning API's. You can use the pruning modes (e.g. ``"fastnas"``, ``"gradnas"``, etc.)
+    The NAS API's are a super-set of the pruning API's. You can use the pruning modes (e.g. ``"fastnas"``)
     here as well.
 
 .. note::
@@ -369,12 +369,6 @@ can be converted into searchable units:
     # and depth of the model.
     megatron.core.models.gpt.GPTModel
     megatron.core.models.mamba.MambaModel
-
-    # We convert Hugging Face Attention layers to automatically search over the number of heads
-    # and MLP hidden size.
-    # Make sure `config.use_cache` is set to False during pruning.
-    transformers.models.bert.modeling_bert.BertAttention
-    transformers.models.gptj.modeling_gptj.GPTJAttention
 
 Generating a search space
 ^^^^^^^^^^^^^^^^^^^^^^^^^

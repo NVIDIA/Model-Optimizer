@@ -8,7 +8,7 @@ Pruning
     `ResNet20 on CIFAR-10 Notebook <https://github.com/NVIDIA/Model-Optimizer/blob/main/examples/pruning/cifar_resnet.ipynb>`_
     for an end-to-end example of pruning.
 
-ModelOpt provides three main pruning methods (aka ``mode``) - Minitron, FastNAS and GradNAS - via a unified API
+ModelOpt provides three main pruning methods (aka ``mode``) - Minitron, FastNAS - via a unified API
 :meth:`mtp.prune <modelopt.torch.prune.pruning.prune>`. Given a model,
 these methods finds the subnet which meets the given deployment constraints (e.g. FLOPs, parameters)
 from your provided base model with little to no accuracy degradation (depending on how aggressive is the pruning).
@@ -22,8 +22,6 @@ attention heads of the model. More details on these pruning modes is as follows:
     Checkout more details of the algorithm in the `paper <https://arxiv.org/abs/2408.11796>`_.
 #.  ``fastnas``: A pruning method recommended for Computer Vision models. Given a pretrained model,
     FastNAS finds the subnet which maximizes the score function while meeting the given constraints.
-#.  ``gradnas``: A light-weight pruning method recommended for language models like Hugging Face BERT and GPT-J.
-    It uses the gradient information to prune the model's linear layers and attention heads to meet the given constraints.
 
 Follow the steps described below to obtain the optimal model satisfying your
 requirements using :mod:`mtp<modelopt.torch.prune>`:
@@ -55,7 +53,7 @@ Prerequisites
    specifying an upper bound in terms of absolute number (``3e-6``) or a percentage (``"60%"``).
 #. You should also specify the pruning algorithm (``mode``), you would like to use. Depending on the
    mode, you will need to provide additional ``config`` parameters like ``score_func`` (``fastnas`` mode)
-   or ``loss_func`` (``gradnas`` mode), ``dataloader``, ``checkpoint``, etc. The most common score function
+   ``dataloader``, ``checkpoint``, etc. The most common score function
    is the validation accuracy of the model and is used to rank the sub-nets sampled from the search space.
    Loss function is used to run some forward and backward passes on the train dataloader to get the gradients.
 #. Please see the API reference of :meth:`mtp.prune() <modelopt.torch.prune.pruning.prune>` for more details.
@@ -128,9 +126,7 @@ possible network configurations and an optimal configuration is then searched fo
     via ``DistributedDataParallel`` in PyTorch.
 
     Currently, the API does not support pruning pytorch Fully Sharded Data Parallel (FSDP) models
-    so you would need to run pruning on a CPU and then finetune using FSDP. Note that GradNAS is
-    much much faster than FastNAS (hence feasible on CPU as well) and is recommended for
-    language models like BERT and GPT-J 6B.
+    so you would need to run pruning on a CPU and then finetune using FSDP.
 
 
 Storing the pruned model
