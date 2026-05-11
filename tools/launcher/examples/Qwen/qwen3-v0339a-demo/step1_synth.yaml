@@ -1,0 +1,34 @@
+# EAGLE3 offline speculative decoding pipeline — Step 1: Data synthesis
+# for qwen3-v0339a-demo
+
+job_name: qwen3-v0339a-demo_EAGLE3_offline_step1
+
+pipeline:
+  allow_to_fail: false
+  skip: false
+  note:
+
+  global_vars:
+    hf_model: /hf-local/Qwen/qwen3-v0339a-demo
+
+  task_0:
+    script: common/tensorrt_llm/query.sh
+    args:
+      - --model <<global_vars.hf_model>>
+      - --tp_size 8
+      - --ep_size 8
+      - --max_num_tokens 32000
+      - --port 8000
+      - --host 0.0.0.0
+      - --trust_remote_code
+      - --
+      - --data /hf-local/modelopt/Speculative-Decoding-Prompt-Samples
+      - --save /scratchspace/data
+    environment:
+      - HF_LOCAL: /hf-local
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 8
+      gpus_per_node: 8
+      container: nvcr.io/nvidia/tensorrt-llm/release:1.2.0

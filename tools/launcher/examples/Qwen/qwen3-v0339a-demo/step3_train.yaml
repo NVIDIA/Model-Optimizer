@@ -1,0 +1,29 @@
+# EAGLE3 offline speculative decoding pipeline — Step 3: Train EAGLE3 draft head
+# for qwen3-v0339a-demo
+
+job_name: qwen3-v0339a-demo_EAGLE3_offline_step3
+
+pipeline:
+  allow_to_fail: false
+  skip: false
+  note:
+
+  global_vars:
+    hf_model: /hf-local/Qwen/qwen3-v0339a-demo
+
+  task_0:
+    script: common/eagle3/train_eagle.sh
+    args:
+      - --config modules/Model-Optimizer/modelopt_recipes/general/speculative_decoding/eagle3.yaml
+      - model.model_name_or_path=<<global_vars.hf_model>>
+      - data.offline_data_path=/scratchspace/offline_hidden_states
+      - training.output_dir=/scratchspace/eagle3
+      - training.training_seq_len=4096
+      - training.disable_tqdm=true
+      - training.ar_validate_steps=500000
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 8
+      container: nvcr.io/nvidia/tensorrt-llm/release:1.2.0
