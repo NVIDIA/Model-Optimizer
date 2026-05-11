@@ -23,7 +23,6 @@ per-layer calibration progress to disk.
 
 from __future__ import annotations
 
-import contextlib
 import json
 import os
 import shutil
@@ -641,6 +640,12 @@ class _CheckpointState:
 
         print_rank_0(f"Checkpoint: restored {self.start_layer} previously calibrated layers")
 
+    def prune_old_next_inputs(self, layer_idx: int) -> None:
+        """Delete the next_inputs.pt two layers back, keeping only the last two on disk."""
+        old = os.path.join(_layer_dir(self.checkpoint_dir, layer_idx - 2), "next_inputs.pt")
+        if os.path.isfile(old):
+            os.remove(old)
+
     def save(
         self,
         layer_idx: int,
@@ -687,13 +692,7 @@ class _CheckpointState:
             self.num_layers,
         )
 
-        # Prune the next_inputs.pt for the layer two back — we only need the
-        # last two to support resume from the most recent commit point. Done
-        # after the manifest write so a crash here is harmless.
-        stale = layer_idx - 2
-        if stale >= 0:
-            with contextlib.suppress(FileNotFoundError):
-                os.remove(os.path.join(_layer_dir(self.checkpoint_dir, stale), "next_inputs.pt"))
+        self.prune_old_next_inputs(layer_idx)
 
         suffix = " (final)" if next_layer_inputs is None else ""
         print_rank_0(f"Checkpoint: saved layer {layer_idx}{suffix}")

@@ -1732,9 +1732,7 @@ def layerwise_calibrate(
 
     If ``checkpoint_dir`` is passed (via ``calib_kwargs``), per-layer checkpoints
     are saved after each layer completes. On restart, calibration resumes from
-    the last completed layer. To bound disk usage, only the two most recent
-    layers' ``next_inputs.pt`` are retained — older copies are pruned after
-    each successful save.
+    the last completed layer.
     """
     checkpoint_dir = calib_kwargs.pop("checkpoint_dir", None)
 
