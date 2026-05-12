@@ -164,8 +164,15 @@ class TestNVFP4MSECalibrator:
         assert torch.all(torch.isfinite(candidates))
         assert torch.all(candidates > 0)
 
-    def test_collect_and_compute_amax(self, device):
-        """Test collect and compute_amax workflow."""
+    def test_collect_and_compute_amax(self, device, monkeypatch):
+        """Test reference-path collect and compute_amax workflow.
+
+        Pinned to the reference 126-step sweep (``MODELOPT_NVFP4_TRITON_SWEEP=0``)
+        because this test inspects ``_losses_sum``, which only the reference path
+        populates; the Triton fast path produces ``_best_amax_fast`` directly and
+        is covered separately in ``test_nvfp4_fp8_sweep_kernel.py``.
+        """
+        monkeypatch.setenv("MODELOPT_NVFP4_TRITON_SWEEP", "0")
         num_blocks = 8
         block_size = 16
         per_block_amax = torch.ones(num_blocks, device=device)
@@ -193,8 +200,14 @@ class TestNVFP4MSECalibrator:
         assert torch.all(torch.isfinite(amax))
         assert torch.all(amax > 0)
 
-    def test_multiple_collections(self, device):
-        """Test that multiple collections accumulate correctly."""
+    def test_multiple_collections(self, device, monkeypatch):
+        """Test that multiple collections accumulate correctly.
+
+        Multi-collect is reference-path-only — the Triton fast path is one-shot
+        and refuses a second ``collect()`` until ``reset()``. Forcing the env var
+        keeps this exercising the accumulator.
+        """
+        monkeypatch.setenv("MODELOPT_NVFP4_TRITON_SWEEP", "0")
         num_blocks = 4
         block_size = 16
         per_block_amax = torch.ones(num_blocks, device=device)
