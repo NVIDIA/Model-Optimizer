@@ -98,7 +98,7 @@ Tests run on OCI-HSG cluster (GB200 nodes, 4 × 192 GB HBM3e per node).
 
 | # | Model | Type | Size | task_0 | task_1 | task_2 | task_3 | Notes |
 |---|-------|------|------|--------|--------|--------|--------|-------|
-| 1 | Ministral-3-8B | Dense | 8B | ⏱ TIMEOUT (3277/3295) | 🔁 NEEDS RERUN (_vllm) | 🔲 | 🔲 | task_0 nearly complete (99%); t1 re-run needed |
+| 1 | Ministral-3-8B | Dense | 8B | 🔁 RERUNNING (--num-shards 3) | 🔁 RERUNNING (speculators pin) | 🔲 | 🔲 | Issues 6+7 fixed; re-run in progress |
 | 2 | Ministral-3-14B | Dense | 14B | ⏱ TIMEOUT | 🔁 NEEDS RERUN (_vllm) | 🔲 | 🔲 | — |
 | 3 | GPT-OSS-20B | Dense | 20B | ❌ TOKENIZER | 🔁 NEEDS RERUN (_vllm) | 🔲 | 🔲 | Fix: populate TIKTOKEN_RS_CACHE_DIR first |
 | 4 | MiniMax-M2.5 | MoE | 230B/10B | ⏱ TIMEOUT | 🔁 NEEDS RERUN (_vllm) | 🔲 | ❌ TRUST_REMOTE_CODE | trust_remote_code needed at bench |
@@ -201,7 +201,42 @@ that require it.
 
 ---
 
-### Issue 6: DeepSeek-V3.2 task_1 OOM (Task 1) — OPEN
+### Issue 6: `speculators>=0.5.0` breaks `VllmHiddenStatesGenerator` (Task 1) — FIXED ✅
+
+**Symptom:**
+
+```text
+ImportError: cannot import name 'VllmHiddenStatesGenerator' from 'speculators.data_generation'
+```
+
+**Affected:** All models using `dump_offline_data_vllm.sh` with `vllm/vllm-openai:latest` container.
+
+**Root cause:** `speculators==0.5.0` (released after the script was written) removed
+`VllmHiddenStatesGenerator` from `speculators.data_generation`. The install line
+`pip install speculators` in the script picks up the latest version.
+
+**Fix applied:** Pin to `pip install "speculators<0.5.0"` in `dump_offline_data_vllm.sh`.
+
+---
+
+### Issue 7: `query.py` auto-downgrades shards → empty data on timeout (Task 0) — FIXED ✅
+
+**Symptom:** task_0 times out; `/scratchspace/data/` is empty despite partial generation.
+
+**Affected:** Models with datasets ≤ 33,000 samples where `num_shards * 100 > dataset_size`.
+
+**Root cause:** `query.py` auto-downgrades `--num-shards` to `min(16, dataset_size//100)`
+when the default of 1000 is too large relative to dataset size. For 3295 samples this
+becomes 1 shard, meaning all data is processed in one batch and nothing is saved until
+the entire map completes. A timeout yields zero data.
+
+**Fix applied:** Pass `--num-shards 3` explicitly in task_0 args. Since `3*100=300 < 3295`,
+the auto-downgrade is bypassed. Data is saved incrementally across 3 shard files (~1100
+samples each). Partial data survives a timeout.
+
+---
+
+### Issue 8: DeepSeek-V3.2 task_1 OOM (Task 1) — OPEN
 
 **Symptom:** `pyxis: child terminated with signal 15` (SIGTERM, likely OOM-triggered)
 
