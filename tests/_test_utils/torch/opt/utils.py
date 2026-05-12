@@ -23,7 +23,7 @@ def apply_mode_with_sampling(model, mode):
         model = mto.apply_mode(model, mode=m, init_state=i == 0)
         config = mtn.get_subnet_config(model)
         ss_size = search_space_size(model)
-        if m in ["fastnas", "autonas", "gradnas"]:
+        if m in ["fastnas", "autonas"]:
             while config == mtn.get_subnet_config(model) and ss_size > 1:
                 mtn.sample(model)
     return model
