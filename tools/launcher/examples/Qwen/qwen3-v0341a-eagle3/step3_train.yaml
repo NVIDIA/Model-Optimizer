@@ -1,0 +1,34 @@
+# EAGLE3 offline draft-head training for qwen3-v0341a-eagle3.
+#
+# Standalone step3_train pipeline: trains the EAGLE3 draft head
+# using hidden states produced by step2_hidden_state.
+#
+# Usage:
+#   uv run slurm.py --yaml modules/Model-Optimizer/tools/launcher/examples/Qwen/qwen3-v0341a-eagle3/step3_train.yaml --dry-run
+
+job_name: qwen3-v0341a-eagle3_EAGLE3_train
+pipeline:
+  allow_to_fail: false
+  skip: false
+  note:
+
+  global_vars:
+    hf_model: /hf-local/Qwen/qwen3-v0341a-eagle3
+
+  # Step 3: Train EAGLE3 draft head (offline, single task)
+  task_0:
+    script: common/eagle3/train_eagle.sh
+    args:
+      - --config modules/Model-Optimizer/modelopt_recipes/general/speculative_decoding/eagle3.yaml
+      - model.model_name_or_path=<<global_vars.hf_model>>
+      - data.offline_data_path=/scratchspace/offline_hidden_states
+      - training.output_dir=/scratchspace/eagle3
+      - training.training_seq_len=4096
+      - training.disable_tqdm=true
+      - training.ar_validate_steps=500000
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 8
+      container: nvcr.io/nvidia/tensorrt-llm/release:1.2.0
