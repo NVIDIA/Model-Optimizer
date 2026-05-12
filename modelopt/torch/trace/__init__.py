@@ -22,4 +22,3 @@ from .tracer import *
 # isort: off
 # Import in the end to avoid import errors from partially initialized module
 from .analyzer import *
-from . import plugins

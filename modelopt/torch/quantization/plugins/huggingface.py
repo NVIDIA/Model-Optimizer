@@ -901,13 +901,11 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
         return super().forward(*args, **kwargs)
 
     def iter_weights_for_calibration(self):
-        """Yield ``(weight_slice, quantizer)`` pairs for each expert and weight type.
+        """Yield ``(weight_slice, quantizer)`` per-expert pairs.
 
-        The base implementation resolves singular ``*_weight_quantizer`` names via
-        ``quantizer_attr_names``, but fused experts store per-expert quantizers as
-        ``nn.ModuleList`` attributes (``gate_up_proj_weight_quantizers``,
-        ``down_proj_weight_quantizers``).  Override to yield the per-expert slice
-        and its corresponding quantizer directly.
+        The base impl uses singular ``*_weight_quantizer`` and skips fused-
+        experts modules, so weight-only calibration never reaches per-expert
+        quantizers without this override.
         """
         for weight_name, quantizers_name in (
             ("gate_up_proj", "gate_up_proj_weight_quantizers"),

@@ -40,6 +40,14 @@ Test that `nel` is installed with `nel --version`. If not, instruct the user to 
 
 If the user already has a config file (e.g., "run this config", "evaluate with my-config.yaml"), skip to Step 8. Optionally review it for common issues (missing `???` values, quantization flags) before running.
 
+**Shortcut: use pre-built task snippets.** If the user asks for a specific benchmark (e.g., "run MMLU-Pro", "evaluate with AIME"), check `recipes/tasks/` (relative to this skill's directory) for a matching task snippet. Available: mmlu_pro, gpqa, aime2025, livecodebench, ifbench, scicode. Task snippets contain only the task-specific config (name, params, repeats) — not the full NEL config. To use them:
+
+1. Read the task snippet(s) the user wants
+2. Use `recipes/examples/example_eval.yaml` as the base config template
+3. Replace the `tasks:` section with the selected snippet(s)
+4. Do Step 3 (auto-detect model settings from checkpoint) and Step 4 (fill in `???` values)
+5. Proceed to Step 7.5/8
+
 **Step 2: Build the base config file**
 
 Prompt the user with "I'll ask you 5 questions to build the base config we'll adjust in the next steps". Guide the user through the 5 questions using AskUserQuestion:
@@ -122,6 +130,29 @@ If found, read `quantization.quant_algo` and set the correct vLLM/SGLang quantiz
 If no `hf_quant_config.json`, also check `config.json` for a `quantization_config` section with `quant_method: "modelopt"`. If neither is found, the checkpoint is unquantized — no flag needed.
 
 > **Note:** Some models require additional env vars for deployment (e.g., `VLLM_NVFP4_GEMM_BACKEND=marlin` for Nemotron Super). These are not in `hf_quant_config.json` — they are discovered during model card research below.
+
+**Auto-detect deployment settings from checkpoint:**
+
+Read `config.json` from the checkpoint (or HF model card) and build `deployment.extra_args` dynamically:
+
+```bash
+cat <checkpoint_path>/config.json 2>/dev/null
+```
+
+| Field in `config.json` | What to set | Example |
+| --- | --- | --- |
+| `max_position_embeddings` | `--max-model-len <value>` | `131072` → `--max-model-len 131072` |
+| `auto_map` exists | `--trust-remote-code` | Only add if model has custom code |
+
+Then use WebSearch to check the model card (HuggingFace page) for deployment-specific settings:
+
+| Model card signal | What to set |
+| --- | --- |
+| Reasoning model (thinking/CoT) | `--reasoning-parser` and `--reasoning-parser-plugin` if a custom parser is provided |
+| Tool-calling support | `--enable-auto-tool-choice --tool-call-parser <parser>` |
+| Custom vLLM flags documented | Add as specified (e.g., `--mamba_ssm_cache_dtype float32`) |
+
+Combine all detected flags into a single `deployment.extra_args` override. The recipe's default `--max-model-len 32768` is a fallback — always prefer the value from `config.json`.
 
 **Quantization-aware benchmark defaults:**
 
@@ -218,7 +249,13 @@ ssh <host> "grep -E '^\s*machine\s+' ~/.config/enroot/.credentials 2>/dev/null"
 
 Print the following commands to the user. Propose to execute them in order to confirm the config works as expected before the full run.
 
-**Important**: Export required environment variables based on your config. If any tokens or keys are missing (e.g. `HF_TOKEN`, `NGC_API_KEY`, `api_key_name` from the config), ask the user to put them in a `.env` file in the project root so you can run `set -a && source .env && set +a` (or equivalent) before executing `nel run` commands.
+**Important**: Export required environment variables based on your config. If any tokens or keys are missing, point the user to `recipes/env.example` — it lists all possible keys with notes on which tasks need them. Ask the user to copy it, fill in their keys, and source it:
+
+```bash
+cp recipes/env.example .env
+# Edit .env with your keys
+set -a && source .env && set +a
+```
 
 ```bash
 # If using pre_cmd or post_cmd (review pre_cmd content before enabling — it runs arbitrary commands):

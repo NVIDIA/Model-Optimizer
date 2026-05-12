@@ -553,28 +553,6 @@ def search(
 
                     The ``score_func`` is required for ``autonas`` and ``fastnas`` modes. It will be
                     evaluated on models in eval mode (``model.eval()``).
-            * ``loss_func``: A ``Callable`` which takes the model output (i.e output of ``model.forward()``)
-              and the batch of data as its inputs and returns a scalar loss.
-              This is a required argument if the model is converted via ``gradnas`` mode.
-
-              It should be possible to run a backward pass on the loss value returned by this method.
-
-              ``collect_func`` will be used to gather the inputs to ``model.forward()``
-              from a batch of data yielded by``data_loader``.
-
-              ``loss_func`` should support the following usage:
-
-                .. code-block:: python
-
-                    for i, batch in enumerate(data_loader):
-                        if i >= max_iter_data_loader:
-                            break
-
-                        # Assuming collect_func returns a tuple of arguments
-                        output = model(*collect_func(batch))
-
-                        loss = loss_func(output, batch)
-                        loss.backward()
 
             .. note::
 
