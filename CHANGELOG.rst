@@ -23,6 +23,10 @@ Changelog
 - Add ``--cast_mxfp4_to_nvfp4`` flag to ``examples/llm_ptq/hf_ptq.py`` for closed-form, bit-exact MXFP4 → NVFP4 weight conversion. Supports the GPT-OSS family (``openai/gpt-oss-20b``, ``openai/gpt-oss-120b``). See `examples/llm_ptq/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq#mxfp4--nvfp4-cast-for-gpt-oss>`__ for usage.
 - DeepSeek PTQ (``examples/deepseek/ptq.py``) now defaults to native top-k calibration with post-hoc per-layer peer-max sync of expert ``input_quantizer.amax``; the all-experts path is preserved behind ``--calib_all_experts``.
 
+**Bug Fixes**
+
+- Enforce NVFP4 block_size in {16, 32} during QuantizerAttributeConfig validation. Illegal block sizes (e.g. 64, 128) previously passed silently, corrupting scale tensors at Blackwell MMA export time after wasting GPU hours on calibration. The check now fires at Pydantic config construction time.
+
 0.44 (2026-05-18)
 ^^^^^^^^^^^^^^^^^
 
