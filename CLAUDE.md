@@ -9,6 +9,11 @@ Primarily Python codebase with optional C++/CUDA extensions supporting PyTorch, 
 > If a `CLAUDE.local.md` file exists alongside this file, read and respect it — it contains
 > developer-specific overrides that supplement this shared guidance.
 
+> **Skills live in `.agents/skills/`** — `.claude/skills/` is a symlink to
+> `.agents/skills/` for back-compat. See `.agents/README.md` for the convention
+> (used to share skills/scripts/cluster-config across Claude Code, Codex, Cursor,
+> etc.). Always edit files under `.agents/`, not the symlink path.
+
 ## Rules (Read First)
 
 **CRITICAL (YOU MUST):**

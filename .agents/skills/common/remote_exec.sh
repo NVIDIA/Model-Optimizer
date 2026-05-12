@@ -41,12 +41,17 @@
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 _remote_config_file() {
-    # Find clusters.yaml: user-level > project-level
+    # Find clusters.yaml: user-level > project-level.
+    # Project-level is checked at .agents/clusters.yaml (canonical) and then
+    # .claude/clusters.yaml (back-compat).
     local user_config="${HOME}/.config/modelopt/clusters.yaml"
     local project_config
-    # Walk up from pwd looking for .claude/clusters.yaml
     local dir="$PWD"
     while [[ "$dir" != "/" ]]; do
+        if [[ -f "$dir/.agents/clusters.yaml" ]]; then
+            project_config="$dir/.agents/clusters.yaml"
+            break
+        fi
         if [[ -f "$dir/.claude/clusters.yaml" ]]; then
             project_config="$dir/.claude/clusters.yaml"
             break
@@ -196,7 +201,7 @@ remote_load_cluster() {
     if [[ -z "$config_file" ]]; then
         echo "ERROR: No clusters.yaml found. Provide cluster info interactively or create one." >&2
         echo "  User config:    ~/.config/modelopt/clusters.yaml" >&2
-        echo "  Project config: .claude/clusters.yaml" >&2
+        echo "  Project config: .agents/clusters.yaml (or .claude/clusters.yaml)" >&2
         return 1
     fi
 
