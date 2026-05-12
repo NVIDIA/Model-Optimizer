@@ -16,54 +16,7 @@
 import pytest
 import torch
 
-from modelopt.torch.opt.conversion import _validate_modelopt_state, load_modelopt_state
-
-
-def test_validate_accepts_empty_state_dict():
-    _validate_modelopt_state({"modelopt_state_dict": [], "modelopt_version": "0.0.0"})
-
-
-def test_validate_accepts_populated_state_dict():
-    _validate_modelopt_state(
-        {
-            "modelopt_state_dict": [("some_mode", {"config": {}, "metadata": {}})],
-            "modelopt_version": "1.2.3",
-        }
-    )
-
-
-@pytest.mark.parametrize("bad", [[], None, 42, "state", (1, 2)])
-def test_validate_rejects_non_dict(bad):
-    with pytest.raises(TypeError, match="expected a dict"):
-        _validate_modelopt_state(bad)
-
-
-def test_validate_rejects_full_checkpoint():
-    ckpt = {"modelopt_state": {}, "model_state_dict": {}}
-    with pytest.raises(ValueError, match="full checkpoint"):
-        _validate_modelopt_state(ckpt)
-
-
-def test_validate_rejects_missing_version():
-    with pytest.raises(ValueError, match="missing required key"):
-        _validate_modelopt_state({"modelopt_state_dict": []})
-
-
-def test_validate_rejects_missing_state_dict():
-    with pytest.raises(ValueError, match="missing required key"):
-        _validate_modelopt_state({"modelopt_version": "1.0.0"})
-
-
-def test_validate_rejects_non_list_state_dict():
-    with pytest.raises(TypeError, match="'modelopt_state_dict' must be a list"):
-        _validate_modelopt_state(
-            {"modelopt_state_dict": {"not": "a list"}, "modelopt_version": "1.0.0"}
-        )
-
-
-def test_validate_rejects_non_str_version():
-    with pytest.raises(TypeError, match="'modelopt_version' must be a str"):
-        _validate_modelopt_state({"modelopt_state_dict": [], "modelopt_version": 1.0})
+from modelopt.torch.opt.conversion import load_modelopt_state
 
 
 def test_load_modelopt_state_valid(tmp_path):

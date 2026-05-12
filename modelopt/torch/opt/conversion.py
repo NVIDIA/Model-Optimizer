@@ -521,8 +521,7 @@ def _validate_modelopt_state(state: Any) -> None:
     """
     if not isinstance(state, dict):
         raise TypeError(
-            "Invalid modelopt state file: expected a dict, got "
-            f"{type(state).__name__}."
+            f"Invalid modelopt state file: expected a dict, got {type(state).__name__}."
         )
 
     # Detect a full checkpoint (from ``mto.save()``) passed by mistake.
