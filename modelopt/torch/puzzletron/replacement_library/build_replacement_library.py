@@ -39,7 +39,7 @@ from typing import Any, Type
 import pandas as pd
 from omegaconf import DictConfig
 
-from modelopt.torch.utils import json_dump
+from modelopt.torch.utils import json_dump, json_load
 
 from ..anymodel.model_descriptor import ModelDescriptor, ModelDescriptorFactory
 from ..block_config import AttentionConfig, BlockConfig, FFNConfig
@@ -212,7 +212,21 @@ def _build_subblocks_df(
     checkpoint_dirs = _get_last_checkpoint_from_each_experiment(
         master_puzzle_dir, trust_remote_code=trust_remote_code
     )
-    checkpoint_dirs = [teacher_checkpoint_dir] + list(checkpoint_dirs - {teacher_checkpoint_dir})
+
+    # Order the non-teacher checkpoints so that downstream `drop_duplicates(keep="first")`
+    # deterministically prefers bypass-trained subblocks over Truncate-init pruned ones
+    # when both produce a row with the same architectural identifier. Without this,
+    # `set` iteration order makes the choice random (hash-of-path) and we'd sometimes
+    # discard the BLD-trained weights we just paid 30+ min to compute.
+    #
+    # Priority (lowest sort key wins): 0 = bypass-trained, 1 = everything else.
+    # Bypass checkpoints land under `<puzzle_dir>/bypass/bypass_runs/<exp_id>/<latest>`.
+    def _checkpoint_priority(p: Path) -> tuple[int, str]:
+        is_bypass = "bypass" in p.parts and "bypass_runs" in p.parts
+        return (0 if is_bypass else 1, str(p))
+
+    non_teacher_dirs = sorted(checkpoint_dirs - {teacher_checkpoint_dir}, key=_checkpoint_priority)
+    checkpoint_dirs = [teacher_checkpoint_dir] + non_teacher_dirs
     checkpoints_to_split = [teacher_checkpoint_dir]
 
     subblock_rows = []
@@ -455,11 +469,21 @@ def _infer_subblocks_to_extract(
     if (checkpoint_dir / "replacement_library.json").exists():
         return []
     bypass_config_path = checkpoint_dir / "bypass_config.json"
-    if (checkpoint_dir in checkpoints_to_split) or (not bypass_config_path.exists()):
+    bypass_args_path = checkpoint_dir / "args.json"
+    if (checkpoint_dir in checkpoints_to_split) or (
+        not bypass_config_path.exists() and not bypass_args_path.exists()
+    ):
         subblocks_to_extract = ["block", "attention", "ffn"]
     else:
-        bypass_config = json.loads(bypass_config_path.read_text())
-        keys_to_learn = bypass_config.get("keys_to_learn", "entire_block")
+        if bypass_args_path.exists():
+            bypass_config = json_load(bypass_args_path)
+            keys_to_learn = bypass_config.get("model_factory", {}).get(
+                "keys_to_learn", "entire_block"
+            )
+        else:
+            bypass_config = json.loads(bypass_config_path.read_text())
+            keys_to_learn = bypass_config.get("keys_to_learn", "entire_block")
+
         subblocks_to_extract = learned_subblocks_from_keys_to_learn(keys_to_learn)
     return subblocks_to_extract
 

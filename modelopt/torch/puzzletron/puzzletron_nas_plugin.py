@@ -37,10 +37,12 @@ from modelopt.torch.opt.mode import (
 )
 from modelopt.torch.opt.searcher import BaseSearcher, SearchStateDict
 
+from . import bypass_distillation
 from .activation_scoring import launch_score_activations
 from .anymodel.converter import ConverterFactory
 from .anymodel.model_descriptor import ModelDescriptorFactory
 from .build_library_and_stats import launch_build_library_and_stats
+from .bypass_distillation.bypass_utils import expected_bypass_runs, load_bypass_state
 from .mip import launch_mip_and_realize_model
 from .pruning import launch_prune_ckpt
 from .scoring import launch_scoring
@@ -100,10 +102,69 @@ class PuzzletronConfig(ModeloptBaseConfig):
     )
 
 
+_StageName = str
+
+# Canonical stage order. Stages absent from a given run (e.g. "bypass" when
+# bypass isn't configured) are skipped, but the rest keep their relative order.
+_STAGE_ORDER: tuple[_StageName, ...] = (
+    "start",
+    "convert",
+    "score_activations",
+    "prune",
+    "bypass",
+    "build_library",
+    "score_blocks",
+    "mip",
+    "complete",
+)
+
+
+def _total_steps(hydra_cfg) -> int:
+    """Return total pipeline step count: 9 with bypass, 8 without."""
+    return 9 if hydra_cfg.get("bypass", None) is not None else 8
+
+
+def _progress_step(hydra_cfg, stage: _StageName) -> tuple[int, int]:
+    """Return ``(step_number, total_steps)`` for a given pipeline stage.
+
+    Single source of truth for the user-facing ``Puzzletron Progress N/T`` strings —
+    keeps numbering coherent across ``main.py``, ``convert_puzzletron_model``, and
+    ``PuzzletronSearcher.run_search``, and shifts MIP/realize automatically when
+    bypass is added or removed.
+    """
+    has_bypass = hydra_cfg.get("bypass", None) is not None
+    total = _total_steps(hydra_cfg)
+    step = 0
+    for s in _STAGE_ORDER:
+        if s == "bypass" and not has_bypass:
+            continue
+        step += 1
+        if s == stage:
+            return step, total
+    raise ValueError(f"Unknown pipeline stage: {stage!r}")
+
+
+def _find_incomplete_bypass_runs(hydra_cfg, puzzle_dir: str | Path) -> list[str]:
+    expected_runs = expected_bypass_runs(hydra_cfg)
+    incomplete_runs = []
+    for expected_run in expected_runs:
+        state = load_bypass_state(expected_run["experiment_dir"])
+        symlink = Path(puzzle_dir) / "ckpts" / expected_run["experiment_id"]
+        if (
+            state is None
+            or state.get("status") != "completed"
+            or state.get("config_fingerprint") != expected_run["config_fingerprint"]
+            or not symlink.exists()
+        ):
+            incomplete_runs.append(expected_run["experiment_id"])
+    return incomplete_runs
+
+
 def convert_puzzletron_model(model: nn.Module, config: PuzzletronConfig) -> ConvertReturnType:
     """1. Convert the model from HF format to AnyModel format.
     2. Score the pruning activations.
-    3. Prune the model and save pruned checkpoints
+    3. Prune the model and save pruned checkpoints.
+    4. (Optional) Run bypass distillation.
 
     The output of this step will be used by mnt.search() to perform the NAS search.
     """
@@ -125,36 +186,104 @@ def convert_puzzletron_model(model: nn.Module, config: PuzzletronConfig) -> Conv
     # Instantiate nested Hydra configs (e.g., pruning_mixin, hook_class)
     hydra_cfg = hydra.utils.instantiate(hydra_cfg)
 
-    # Convert HuggingFace model to Puzzletron heterogeneous format (generic, uses descriptor from config)
+    has_bypass = hydra_cfg.get("bypass", None) is not None
+    convert_step, N = _progress_step(hydra_cfg, "convert")
+    score_step, _ = _progress_step(hydra_cfg, "score_activations")
+    prune_step, _ = _progress_step(hydra_cfg, "prune")
+
+    # Step 2: Convert HuggingFace model to Puzzletron heterogeneous format
+    hf_ckpt_teacher_dir = "ckpts/teacher"  # TODO: make it configurable
+    teacher_dir = Path(config.puzzle_dir) / hf_ckpt_teacher_dir
     if dist.is_master():
-        mprint(
-            "Puzzletron Progress 2/8: converting model to Puzzletron heterogeneous format (single-gpu)"
-        )
-        hf_ckpt_teacher_dir = "ckpts/teacher"  # TODO: make it configurable
+        if (teacher_dir / "config.json").exists():
+            mprint(
+                f"Puzzletron Progress {convert_step}/{N}: teacher checkpoint already exists, skipping conversion"
+            )
+        else:
+            mprint(
+                f"Puzzletron Progress {convert_step}/{N}: converting model to Puzzletron heterogeneous format (single-gpu)"
+            )
 
-        # Get descriptor and converter from the hydra config
-        descriptor_name = hydra_cfg.descriptor
-        descriptor = ModelDescriptorFactory.get(descriptor_name)
-        converter = ConverterFactory.get(descriptor_name)
+            # Get descriptor and converter from the hydra config
+            descriptor_name = hydra_cfg.descriptor
+            descriptor = ModelDescriptorFactory.get(descriptor_name)
+            converter = ConverterFactory.get(descriptor_name)
 
-        converter.convert(
-            descriptor=descriptor,
-            input_dir=Path(config.input_model_path),
-            output_dir=Path(config.puzzle_dir) / hf_ckpt_teacher_dir,
-        )
+            # Auto-download from HuggingFace if path doesn't exist locally
+            input_model_path = config.input_model_path
+            if not Path(input_model_path).exists():
+                from huggingface_hub import snapshot_download
+
+                if input_model_path.startswith("https://huggingface.co/"):
+                    model_id = "/".join(input_model_path.rstrip("/").split("/")[-2:])
+                else:
+                    model_id = input_model_path  # assume HF model ID like "org/model-name"
+                mprint(
+                    f"Downloading HuggingFace model '{model_id}' — this may take several minutes "
+                    f"for large models. Other ranks are waiting at a barrier."
+                )
+                input_model_path = snapshot_download(repo_id=model_id)
+                mprint(f"Downloaded to: {input_model_path}")
+
+            converter.convert(
+                descriptor=descriptor,
+                input_dir=Path(input_model_path),
+                output_dir=teacher_dir,
+            )
     dist.barrier()
 
-    # Score_pruning_activations (distributed processing)
-    mprint("Puzzletron Progress 3/8: scoring pruning activations (multi-gpu)")
-    launch_score_activations(hydra_cfg)
-
-    # Prune the model and save pruned checkpoints
-    if dist.is_master():
+    # Step 3: Score pruning activations (distributed processing)
+    activations_log_dir = Path(hydra_cfg.pruning.activations_log_dir)
+    if activations_log_dir.exists() and any(activations_log_dir.glob("rank_*.pth")):
         mprint(
-            "Puzzletron Progress 4/8: pruning the model and saving pruned checkpoints (single-gpu)"
+            f"Puzzletron Progress {score_step}/{N}: pruning activation scores already "
+            f"exist at {activations_log_dir} — delete this directory to re-score with "
+            f"the current config."
         )
-        launch_prune_ckpt(hydra_cfg)
+        dist.barrier()
+    else:
+        mprint(f"Puzzletron Progress {score_step}/{N}: scoring pruning activations (multi-gpu)")
+        launch_score_activations(hydra_cfg)
+
+    # Step 4: Prune the model and save pruned checkpoints (single process)
+    pruned_ckpts_dir = Path(hydra_cfg.pruning.pruned_ckpts_output_dir)
+    if dist.is_master():
+        if pruned_ckpts_dir.exists() and any(pruned_ckpts_dir.iterdir()):
+            mprint(
+                f"Puzzletron Progress {prune_step}/{N}: pruned checkpoints already "
+                f"exist at {pruned_ckpts_dir} — delete this directory to re-prune with "
+                f"the current config."
+            )
+        else:
+            mprint(
+                f"Puzzletron Progress {prune_step}/{N}: pruning the model and saving pruned checkpoints (single-gpu)"
+            )
+            launch_prune_ckpt(hydra_cfg)
     dist.barrier()
+
+    # Step 5: Bypass distillation (optional, distributed processing)
+    if has_bypass:
+        bypass_step, _ = _progress_step(hydra_cfg, "bypass")
+        # Skip only when every expected bypass run has a matching manifest, a
+        # completed status, the same config fingerprint, and a realized ckpts/
+        # symlink. Counting arbitrary `_DONE` files is not config-specific and
+        # can skip the current sweep because of stale unrelated runs.
+        incomplete_runs = (
+            _find_incomplete_bypass_runs(hydra_cfg, config.puzzle_dir) if dist.is_master() else None
+        )
+        incomplete_runs = dist.broadcast(incomplete_runs, src=0)
+        bypass_done = len(incomplete_runs) == 0
+        if bypass_done:
+            mprint(
+                f"Puzzletron Progress {bypass_step}/{N}: bypass distillation already completed, skipping"
+            )
+        else:
+            mprint(
+                f"Puzzletron Progress {bypass_step}/{N}: running bypass distillation "
+                f"(multi-gpu); incomplete runs: {incomplete_runs}"
+            )
+            bypass_distillation.launch_bypass_distillation(hydra_cfg)
+        dist.barrier()
 
     return model, {}
 
@@ -226,18 +355,71 @@ class PuzzletronSearcher(BaseSearcher):
         # Instantiate nested Hydra configs (e.g., pruning_mixin, hook_class)
         hydra_cfg = hydra.utils.instantiate(hydra_cfg)
 
-        # Build_library_and_stats (single process)
+        library_step, N = _progress_step(hydra_cfg, "build_library")
+        scoring_step, _ = _progress_step(hydra_cfg, "score_blocks")
+        mip_step, _ = _progress_step(hydra_cfg, "mip")
+
+        # Build replacement library and subblock statistics (single process)
+        puzzle_dir = Path(self.model.puzzle_dir)
+        replacement_library_path = puzzle_dir / "replacement_library.json"
+        subblock_stats_path = puzzle_dir / hydra_cfg.calc_subblock_stats.subblock_stats_filename
+        # Detect a stale library: any ckpts/* entry whose finalisation marker
+        # is newer than the library file means a new replacement (e.g. bypass-
+        # trained subblocks) appeared after the last build and must be picked
+        # up. Without this check, our skip-if-done would happily reuse a
+        # no-bypass library even after bypass completes.
+        #
+        # We probe ``config.json`` rather than the directory mtime because:
+        # 1. directory mtime tracks "an entry was added/removed", not "a file
+        #    inside was modified" — adding new shards to an existing checkpoint
+        #    dir wouldn't bump the dir mtime;
+        # 2. ``entry.resolve()`` on a dangling symlink raises (or returns a
+        #    non-existent path), which the previous code's ``resolved.exists()``
+        #    silently treated as "not stale";
+        # 3. ``config.json`` is written last when a checkpoint is finalised —
+        #    its mtime is the real "checkpoint ready" timestamp.
+        # The check is conservative: false positives just trigger a rebuild,
+        # which is safe.
+        ckpts_dir = puzzle_dir / "ckpts"
+        library_is_stale = False
+        if replacement_library_path.exists() and ckpts_dir.exists():
+            library_mtime = replacement_library_path.stat().st_mtime
+            for entry in ckpts_dir.iterdir():
+                # `Path.stat()` follows symlinks by default, so this works
+                # whether `entry` is a real dir or a symlink to one (the
+                # bypass and pruning pipelines both land here as symlinks).
+                # `try` guards against dangling symlinks (FileNotFoundError).
+                config_path = entry / "config.json"
+                try:
+                    config_mtime = config_path.stat().st_mtime
+                except (FileNotFoundError, OSError):
+                    continue
+                if config_mtime > library_mtime:
+                    library_is_stale = True
+                    mprint(
+                        f"Replacement library is stale: '{entry.name}/config.json' is newer than the existing library, will rebuild."
+                    )
+                    break
         if dist.is_master():
-            mprint(
-                "Puzzletron Progress 5/8: building replacement library and subblock statistics (single-gpu)"
-            )
-            launch_build_library_and_stats(hydra_cfg)
+            if (
+                replacement_library_path.exists()
+                and subblock_stats_path.exists()
+                and not library_is_stale
+            ):
+                mprint(
+                    f"Puzzletron Progress {library_step}/{N}: replacement library and subblock stats already exist, skipping"
+                )
+            else:
+                mprint(
+                    f"Puzzletron Progress {library_step}/{N}: building replacement library and subblock statistics (single-gpu)"
+                )
+                launch_build_library_and_stats(hydra_cfg)
         dist.barrier()
 
-        # Calc_one_block_scores (distributed processing)
-        mprint("Puzzletron Progress 6/8: calculating one block scores (multi-gpu)")
+        # Calculate one block scores (distributed processing)
+        mprint(f"Puzzletron Progress {scoring_step}/{N}: calculating one block scores (multi-gpu)")
         launch_scoring(hydra_cfg)
 
-        # mip_and_realize_models (distributed processing)
-        mprint("Puzzletron Progress 7/8: running MIP and realizing models (multi-gpu)")
+        # MIP search and realize models (distributed processing)
+        mprint(f"Puzzletron Progress {mip_step}/{N}: running MIP and realizing models (multi-gpu)")
         launch_mip_and_realize_model(hydra_cfg)
