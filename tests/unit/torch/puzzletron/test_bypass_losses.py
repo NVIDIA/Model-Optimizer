@@ -15,6 +15,7 @@
 
 """Unit tests for normalized MSE loss functions in sewing_kit/utils.py."""
 
+import pytest
 import torch
 
 from modelopt.torch.puzzletron.sewing_kit.utils import (
@@ -149,6 +150,22 @@ def test_batched_normalized_mse_loss_scale_invariance():
     baseline = batched_normalized_mse_loss(input_, target)
     scaled = batched_normalized_mse_loss(10.0 * input_, 10.0 * target)
     assert torch.allclose(baseline, scaled, rtol=1e-4, atol=1e-6)
+
+
+def test_batched_normalized_mse_loss_rejects_shape_mismatch():
+    input_ = torch.randn(2, 3)
+    target = torch.randn(2, 1)
+
+    with pytest.raises(ValueError, match="input and target shapes must match exactly"):
+        batched_normalized_mse_loss(input_, target)
+
+
+def test_batched_normalized_mse_loss_rejects_invalid_batch_dim():
+    input_ = torch.randn(2, 3)
+    target = torch.randn(2, 3)
+
+    with pytest.raises(ValueError, match="batch_dims contains invalid dimension"):
+        batched_normalized_mse_loss(input_, target, batch_dims=(2,))
 
 
 def test_format_stitched_losses_keeps_trainable_nan_visible():

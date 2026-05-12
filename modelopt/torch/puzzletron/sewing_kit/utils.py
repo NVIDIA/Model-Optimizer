@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import inspect
+import operator
 from contextlib import contextmanager
 from typing import (
     TYPE_CHECKING,
@@ -489,7 +490,53 @@ def batched_normalized_mse_loss(
     ``epsilon`` in the denominator handles all-zero target slices without a hard
     clamp and makes the loss scale-invariant when ``||target||^2 >> eps``.
     """
-    norm_dims = [d for d in range(input.ndim) if d not in batch_dims]
+    input_shape = tuple(input.shape)
+    target_shape = tuple(target.shape)
+
+    try:
+        raw_batch_dims = tuple(operator.index(dim) for dim in batch_dims)
+    except TypeError as exc:
+        raise ValueError(
+            f"batch_dims must be an iterable of integer dimensions; got {batch_dims!r} "
+            f"for input shape {input_shape} and target shape {target_shape}"
+        ) from exc
+
+    resolved_batch_dims = []
+    for dim in raw_batch_dims:
+        if dim < -input.ndim or dim >= input.ndim:
+            raise ValueError(
+                f"batch_dims contains invalid dimension {dim} for input.ndim={input.ndim}; "
+                f"input shape={input_shape}, target shape={target_shape}, "
+                f"batch_dims={raw_batch_dims}, norm_dims=None"
+            )
+        resolved_batch_dims.append(dim % input.ndim)
+
+    if len(set(resolved_batch_dims)) != len(resolved_batch_dims):
+        raise ValueError(
+            f"batch_dims contains duplicate dimensions after normalization; "
+            f"input shape={input_shape}, target shape={target_shape}, "
+            f"batch_dims={tuple(resolved_batch_dims)}, norm_dims=None"
+        )
+
+    norm_dims = tuple(d for d in range(input.ndim) if d not in set(resolved_batch_dims))
+
+    if input.ndim != target.ndim:
+        raise ValueError(
+            f"input and target must have the same number of dimensions; "
+            f"input shape={input_shape}, target shape={target_shape}, "
+            f"batch_dims={tuple(resolved_batch_dims)}, norm_dims={norm_dims}"
+        )
+    if input_shape != target_shape:
+        mismatched_dims = tuple(
+            dim for dim, (input_size, target_size) in enumerate(zip(input_shape, target_shape))
+            if input_size != target_size
+        )
+        raise ValueError(
+            f"input and target shapes must match exactly; mismatched_dims={mismatched_dims}, "
+            f"input shape={input_shape}, target shape={target_shape}, "
+            f"batch_dims={tuple(resolved_batch_dims)}, norm_dims={norm_dims}"
+        )
+
     num = ((input - target) ** 2).sum(dim=norm_dims)
     den = (target**2).sum(dim=norm_dims) + epsilon
     return (num / den).mean()

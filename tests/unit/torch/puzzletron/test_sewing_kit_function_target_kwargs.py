@@ -135,5 +135,6 @@ def test_function_target_kwargs_independent_of_stitch_order():
     )
 
     assert received["args"] == ()
+    assert set(received["kwargs"].keys()) == {"input", "target"}
     assert torch.equal(received["kwargs"]["input"], student_value)
     assert torch.equal(received["kwargs"]["target"], teacher_value)

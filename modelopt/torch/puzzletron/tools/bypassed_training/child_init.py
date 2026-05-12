@@ -22,6 +22,8 @@ import json
 import os
 import re
 import time
+from collections import ChainMap
+from collections.abc import Iterator, MutableMapping
 from copy import deepcopy
 from functools import partial
 from pathlib import Path
@@ -50,6 +52,49 @@ __all__ = ["create_child_state_dict", "update_model_config"]
 IgnoreFn = Callable[[str], bool]
 
 default_ignore_fn: IgnoreFn = lambda _: False
+
+
+class _PerLayerKeysView(MutableMapping[str, str]):
+    def __init__(self, base: dict[str, str]) -> None:
+        self._base = base
+        self._overrides: dict[str, str] = {}
+        self._removed: dict[str, str] = {}
+
+    def __getitem__(self, key: str) -> str:
+        if key in self._removed:
+            raise KeyError(key)
+        if key in self._overrides:
+            return self._overrides[key]
+        return self._base[key]
+
+    def __setitem__(self, key: str, value: str) -> None:
+        self._removed.pop(key, None)
+        self._overrides[key] = value
+
+    def __delitem__(self, key: str) -> None:
+        if key in self._removed:
+            raise KeyError(key)
+        if key in self._overrides:
+            self._removed[key] = self._overrides.pop(key)
+        elif key in self._base:
+            self._removed[key] = self._base[key]
+        else:
+            raise KeyError(key)
+
+    def __iter__(self) -> Iterator[str]:
+        yield from self._overrides.keys()
+        for key in self._base:
+            if key not in self._overrides and key not in self._removed:
+                yield key
+
+    def __len__(self) -> int:
+        return sum(1 for _ in self)
+
+    def __contains__(self, key: object) -> bool:
+        return key not in self._removed and (key in self._overrides or key in self._base)
+
+    def removed_items(self) -> dict[str, str]:
+        return dict(self._removed)
 
 
 class Printer:
@@ -89,12 +134,13 @@ def _process_single_layer(
     # pruning FFN channels and another pruning hidden-size dimensions).
     if pruning_mixin is not None:
         _mixins = pruning_mixin if isinstance(pruning_mixin, list) else [pruning_mixin]
-        merged_keys_to_remove = dict(keys_to_remove)
-        current_parent_state_dict = dict(parent_state_dict)
-        current_new_state_dict = dict(new_state_dict)
-        current_keys = dict(keys)
+        merged_keys_to_remove = {}
+        parent_layer_updates = {}
+        new_layer_updates = {}
+        current_parent_state_dict = ChainMap(parent_layer_updates, parent_state_dict)
+        current_new_state_dict = ChainMap(new_layer_updates, new_state_dict)
+        current_keys = _PerLayerKeysView(keys)
         for _mixin in _mixins:
-            keys_before_mixin = dict(current_keys)
             mixin_keys_to_remove = {}
             _layer_out = _mixin.prune_single_layer(
                 layer_idx=layer_idx,
@@ -114,15 +160,9 @@ def _process_single_layer(
                 keys_to_remove=mixin_keys_to_remove,
             )
             layer_out_state_dict.update(_layer_out)
-            current_parent_state_dict.update(_layer_out)
-            current_new_state_dict.update(_layer_out)
-            merged_keys_to_remove.update(
-                {
-                    key: original_key
-                    for key, original_key in keys_before_mixin.items()
-                    if key not in current_keys
-                }
-            )
+            parent_layer_updates.update(_layer_out)
+            new_layer_updates.update(_layer_out)
+            merged_keys_to_remove.update(current_keys.removed_items())
             merged_keys_to_remove.update(mixin_keys_to_remove)
         return layer_out_state_dict, merged_keys_to_remove
 

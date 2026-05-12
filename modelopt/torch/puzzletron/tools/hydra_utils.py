@@ -41,10 +41,34 @@ def warmup_steps(tokens: int, block: int, mbs: int, grad_accum: int, pct: float)
     / grad_accum. The LR scheduler in ``_get_lr`` is indexed by ``step_num``
     (optimizer steps), so warmup must be in the same units.
     """
-    grad_accum = int(grad_accum)
+    try:
+        tokens = int(tokens)
+        block = int(block)
+        mbs = int(mbs)
+        grad_accum = int(grad_accum)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "tokens, block, mbs, and grad_accum must be integers or castable to int; "
+            f"got tokens={tokens!r}, block={block!r}, mbs={mbs!r}, grad_accum={grad_accum!r}"
+        ) from exc
+
+    try:
+        pct = float(pct)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"pct must be a float or castable to float, got {pct!r}") from exc
+
+    if tokens < 0:
+        raise ValueError(f"tokens must be >= 0, got {tokens!r}")
+    if block <= 0:
+        raise ValueError(f"block must be > 0, got {block!r}")
+    if mbs <= 0:
+        raise ValueError(f"mbs must be > 0, got {mbs!r}")
     if grad_accum < 1:
         raise ValueError(f"grad_accum must be >= 1, got {grad_accum!r}")
-    iters = (int(tokens) // int(block)) // int(mbs)
+    if not 0.0 <= pct <= 1.0:
+        raise ValueError(f"pct must be between 0.0 and 1.0 inclusive, got {pct!r}")
+
+    iters = (tokens // block) // mbs
     steps = max(1, iters // grad_accum)
     w = pct * steps
     return max(1, round(w))

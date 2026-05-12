@@ -35,6 +35,14 @@ FIM_TOKEN_END_LIST = ["prefix>", "middle>", "suffix>", "pad>"]
 CODEGEN_FIM_TOKENS = ["<mask_1>", "<|endoftext|>", "<sep>"]
 
 
+def _message_content_to_text(content) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, dict) and "text" in content:
+        return str(content["text"])
+    return str(content)
+
+
 class ConstantLengthDataset(IterableDataset):
     """Iterable dataset that returns constant length chunks of tokens from stream of text files.
 
@@ -135,9 +143,11 @@ class ConstantLengthDataset(IterableDataset):
                                 else:
                                     # Base models have no chat template — concatenate message
                                     # contents separated by newlines as plain text.
-                                    sample = "\n".join(m["content"] for m in sample)
+                                    sample = "\n".join(
+                                        _message_content_to_text(m["content"]) for m in sample
+                                    )
                             else:
-                                sample = sample[0]["content"]
+                                sample = _message_content_to_text(sample[0]["content"])
                     else:
                         sample = sample[self.tokens_field]
                     sample = sample[: self.max_sample_length]

@@ -39,6 +39,7 @@ from modelopt.torch.puzzletron.utils.data.dataloaders import (
     load_streaming_fn,
     realize_dataset_in_memory,
 )
+from modelopt.torch.puzzletron.utils.data.dataset import ConstantLengthDataset
 
 # ---------------------------------------------------------------------------
 # realize_dataset_in_memory: pure list materialisation with optional cap
@@ -179,6 +180,54 @@ def test_create_train_dataloader_rejects_num_workers_gt_zero():
             micro_batch_size=1,
             num_workers=2,
         )
+
+
+class _NoChatTemplateTokenizer:
+    eos_token_id = 1
+    bos_token_id = None
+
+    def __init__(self):
+        self.seen_texts = None
+        self.vocab = {}
+
+    def __call__(self, texts, truncation=False):
+        self.seen_texts = texts
+        return {"input_ids": [[0] for _ in texts]}
+
+
+class _ConversationDataset:
+    column_names = ("text",)
+
+    def __iter__(self):
+        yield {
+            "text": [
+                {"role": "user", "content": {"text": "hello"}},
+                {"role": "assistant", "content": {"value": 3}},
+            ]
+        }
+
+
+def test_constant_length_dataset_no_chat_template_normalizes_message_content():
+    tokenizer = _NoChatTemplateTokenizer()
+    dataset = ConstantLengthDataset(
+        tokenizer,
+        _ConversationDataset(),
+        infinite=False,
+        seq_length=2,
+        num_of_sequences=1,
+        chars_per_token=100,
+        content_field="text",
+        fim_rate=0.0,
+        fim_spm_rate=0.0,
+        label_shift=False,
+    )
+
+    realized = list(dataset)
+
+    assert tokenizer.seen_texts == ["hello\n{'value': 3}"]
+    assert len(realized) == 1
+    assert torch.equal(realized[0]["input_ids"], torch.tensor([0, 1]))
+    assert torch.equal(realized[0]["targets"], torch.tensor([0, 1]))
 
 
 # ---------------------------------------------------------------------------
