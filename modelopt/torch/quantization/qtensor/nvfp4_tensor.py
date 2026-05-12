@@ -79,6 +79,16 @@ class NVFP4QTensor(BaseQuantizedTensor):
             return weight_quantizer._amax.float() / (6.0 * 448.0)
 
     @classmethod
+    def _cast_per_block_scale_to_fp8(cls, per_block_scale: torch.Tensor) -> torch.Tensor:
+        """Clamp to FP8 E4M3FN representable range, then cast.
+
+        FP8 E4M3FN has no Inf and a smallest positive subnormal of ``2**-9`` (~0.00195).
+        Values below the min silently underflow to 0 (zero outputs at inference); values
+        above 448 cast to NaN.
+        """
+        return per_block_scale.clamp(min=2**-9, max=448.0).to(torch.float8_e4m3fn)
+
+    @classmethod
     def get_weights_scaling_factor_from_quantizer(
         cls,
         weight_quantizer,
@@ -122,17 +132,9 @@ class NVFP4QTensor(BaseQuantizedTensor):
             expected_shape = (*weight.shape[:-1], num_blocks_per_row)
             per_block_scale = per_block_scale.view(expected_shape)
 
-            # Quantize scales to FP8. Saturate to the fp8_e4m3fn max (448) before the
-            # cast: when the [==0]=1.0 safety net above fires (per_block_amax was zero
-            # for an all-zero weight block) and global_amax is small, the pre-cast value
-            # explodes to ``1.0 * 448 / (global_amax/6)``. fp8_e4m3fn has no Inf, so any
-            # value >= 480 casts to NaN — clamp first to keep the stored byte finite.
             if not keep_high_precision:
-                fp8_e4m3fn_min = 2**-9  # 0.001953125 — smallest positive subnormal
-                per_block_scale = (
-                    (per_block_scale * 448.0 / per_block_scale_max)
-                    .clamp(min=fp8_e4m3fn_min, max=448.0)
-                    .to(torch.float8_e4m3fn)
+                per_block_scale = cls._cast_per_block_scale_to_fp8(
+                    per_block_scale * 448.0 / per_block_scale_max
                 )
             return per_block_scale, weights_scaling_factor_2
         else:
@@ -172,15 +174,8 @@ class NVFP4QTensor(BaseQuantizedTensor):
         )
         # Set all zero values in scale to 1.0
         per_block_scale[per_block_scale == 0] = 1.0
-        # Convert to torch.float8_e4m3fn
         if not keep_high_precision:
-            # Clamp to the minimum positive FP8 E4M3FN subnormal (~0.00195 = 2^-9) before
-            # casting.  Without this, blocks whose scale falls below the FP8 representable
-            # range silently underflow to 0, causing those blocks to produce zero output at
-            # inference even when the weights are non-trivial.
-            fp8_e4m3fn_min = 2**-9  # 0.001953125 — smallest positive subnormal
-            per_block_scale = per_block_scale.clamp(min=fp8_e4m3fn_min)
-            per_block_scale = per_block_scale.to(torch.float8_e4m3fn)
+            per_block_scale = cls._cast_per_block_scale_to_fp8(per_block_scale)
         return per_block_scale, weights_scaling_factor_2
 
     @classmethod
