@@ -8,7 +8,7 @@ Pruning
     `ResNet20 on CIFAR-10 Notebook <https://github.com/NVIDIA/Model-Optimizer/blob/main/examples/pruning/cifar_resnet.ipynb>`_
     for an end-to-end example of pruning.
 
-ModelOpt provides three main pruning methods (aka ``mode``) - Minitron, FastNAS - via a unified API
+ModelOpt provides three main pruning methods (aka ``mode``) - Minitron, Puzzletron, and FastNAS - via a unified API
 :meth:`mtp.prune <modelopt.torch.prune.pruning.prune>`. Given a model,
 these methods finds the subnet which meets the given deployment constraints (e.g. FLOPs, parameters)
 from your provided base model with little to no accuracy degradation (depending on how aggressive is the pruning).
@@ -53,10 +53,9 @@ Prerequisites
 #. You can provide one search constraint for either ``flops`` or ``params`` by
    specifying an upper bound in terms of absolute number (``3e-6``) or a percentage (``"60%"``).
 #. You should also specify the pruning algorithm (``mode``), you would like to use. Depending on the
-   mode, you will need to provide additional ``config`` parameters like ``score_func`` (``fastnas`` mode)
+   mode, you will need to provide additional ``config`` parameters like ``score_func`` (``fastnas`` mode),
    ``data_loader``, ``checkpoint``, etc. The most common score function
    is the validation accuracy of the model and is used to rank the sub-nets sampled from the search space.
-   Loss function is used to run some forward and backward passes on the train dataloader to get the gradients.
 #. Please see the API reference of :meth:`mtp.prune() <modelopt.torch.prune.pruning.prune>` for more details.
 
 Below we show an example using :class:`"fastnas" <modelopt.torch.prune.fastnas.FastNASModeDescriptor>`.
