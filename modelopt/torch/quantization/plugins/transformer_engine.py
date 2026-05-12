@@ -75,11 +75,17 @@ class _QuantTELinear(_ParallelLinear):
     def te_quantized_linear_fn(package, func_name, self, *args, **kwargs):
         """Quantized version specifically for TE with weight first, then input."""
         _assert_te_fp8_enabled()
-        # Locate `weight` and `inp` by parameter name in the live `_Linear.forward`
+        # Locate `weight` and `inp` by parameter name in the un-patched `_Linear.forward`
         # signature — robust to TE versions that insert positional args between them
         # (e.g. `weight_fp8` in TE 1.x, `weight_workspace` in TE 2.15).
+        # NOTE: we're called from inside `replace_function`'s context, so
+        # `_Linear.forward` may currently point at the `functools.partial` wrapper
+        # (whose signature collapses to `*args, **kwargs`). The original is cached at
+        # `_Linear._forward` while the patch is active (when `_apply` is patched
+        # instead, `_forward` is absent and `forward` is itself the original).
         # `_forward` path receives a leading None (placeholder ctx); `_apply` does not.
-        names = list(inspect.signature(te_linear._Linear.forward).parameters)
+        orig_forward = getattr(te_linear._Linear, "_forward", te_linear._Linear.forward)
+        names = list(inspect.signature(orig_forward).parameters)
         ctx_offset = 0 if func_name == "_forward" else 1
         weight_pos = names.index("weight") - ctx_offset
         inp_pos = names.index("inp") - ctx_offset
@@ -154,8 +160,14 @@ class _QuantTEGroupedLinear(_ParallelLinear):
         # slot was renamed from `m_splits` (TE < 2.10) to `non_tensor_args` (TE
         # 2.10+, where m_splits is now at non_tensor_args[0]). `*weights_and_biases`
         # is always the trailing variadic — 2 * num_gemms tensors (weights, then biases).
+        # See `te_quantized_linear_fn` for why we look up `_forward` here.
         # `_forward` path receives a leading None (placeholder ctx); `_apply` does not.
-        sig_params = list(inspect.signature(te_grouped_linear._GroupedLinear.forward).parameters)
+        orig_forward = getattr(
+            te_grouped_linear._GroupedLinear,
+            "_forward",
+            te_grouped_linear._GroupedLinear.forward,
+        )
+        sig_params = list(inspect.signature(orig_forward).parameters)
         ctx_offset = 0 if func_name == "_forward" else 1
         inp_pos = sig_params.index("inp") - ctx_offset
         if "non_tensor_args" in sig_params:
