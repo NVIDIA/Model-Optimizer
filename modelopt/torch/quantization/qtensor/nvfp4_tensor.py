@@ -171,9 +171,12 @@ class NVFP4QTensor(BaseQuantizedTensor):
         )
         # Set all zero values in scale to 1.0
         per_block_scale[per_block_scale == 0] = 1.0
-        # Convert to torch.float8_e4m3fn
+        # Convert to torch.float8_e4m3fn. fp8_e4m3fn has no Inf, so any
+        # value >= 480 casts to NaN. Clamp to the maximum finite value before
+        # casting so exported weight_scale stays finite when an externally
+        # calibrated global scale makes a per-block scale too large.
         if not keep_high_precision:
-            per_block_scale = per_block_scale.to(torch.float8_e4m3fn)
+            per_block_scale = per_block_scale.clamp_(max=448.0).to(torch.float8_e4m3fn)
         return per_block_scale, weights_scaling_factor_2
 
     @classmethod
