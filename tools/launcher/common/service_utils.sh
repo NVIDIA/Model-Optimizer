@@ -18,8 +18,8 @@
 native_mpi_rank=$OMPI_COMM_WORLD_RANK
 native_mpi_local_rank=$OMPI_COMM_WORLD_LOCAL_RANK
 # Works with Slurm launching with `--mpi=pmix`
-mpi_rank=${PMIX_RANK:-$native_mpi_rank}
-mpi_local_rank=${PMIX_LOCAL_RANK:-$native_mpi_local_rank}
+mpi_rank=${PMIX_RANK:-${native_mpi_rank:-${SLURM_PROCID:-0}}}
+mpi_local_rank=${PMIX_LOCAL_RANK:-${native_mpi_local_rank:-${SLURM_LOCALID:-0}}}
 
 FAIL=0
 FAIL_EXIT=0
@@ -48,8 +48,23 @@ function report_result {
 }
 
 function util_install_extra_dep {
+    local _marker=/tmp/.nmm_extra_dep_installed
+    if [[ -f "$_marker" ]]; then
+        return 0
+    fi
     if [[ "$mpi_local_rank" -eq 0 ]]; then
         pip install diskcache
+        local _nvrx_dir
+        _nvrx_dir="$(mktemp -d)/nvidia-resiliency-ext"
+        git clone --depth 1 https://github.com/NVIDIA/nvidia-resiliency-ext "${_nvrx_dir}" \
+            && pip install "${_nvrx_dir}"
+        touch "$_marker"
+    else
+        local _waited=0
+        while [[ ! -f "$_marker" && $_waited -lt 600 ]]; do
+            sleep 1
+            _waited=$((_waited + 1))
+        done
     fi
 }
 
