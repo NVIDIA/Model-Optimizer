@@ -20,6 +20,7 @@ import dataclasses
 import re
 from argparse import Namespace
 from collections import OrderedDict
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional, Sequence
 
@@ -56,6 +57,8 @@ from modelopt.torch.puzzletron.tools.logger import mprint
 from modelopt.torch.puzzletron.tools.sharded_checkpoint_utils import create_sharded_model
 from modelopt.torch.puzzletron.utils.parsing import format_block_configs, parse_dtype
 
+from .bypass_utils import normalize_keys_to_learn
+
 StitchedModulesProcessOwnership = list[int]
 SyncDistributedModelWeightsFn = Callable[[], None]
 Config = Mapping[str, Any]
@@ -71,9 +74,62 @@ class StitchedModuleDescriptor:
     grad_scaler: Optional[GradScaler] = None
 
 
-_SUBBLOCK_KEYS_TO_LEARN = frozenset(
-    {"subblock_ffn", "subblock_attention", "subblock_mamba", "entire_block"}
-)
+def _autocast_context(descriptor: ModelDescriptor):
+    return (
+        torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+        if descriptor.uses_autocast()
+        else nullcontext()
+    )
+
+
+def _param_names_for_subblock_key(
+    model: PreTrainedModel,
+    descriptor: ModelDescriptor,
+    subblock_key: str,
+) -> set[str]:
+    lm_config = descriptor.get_language_model_config(model.config)
+    weight_groups = descriptor.get_weight_groups(
+        model.state_dict().keys(), lm_config.num_hidden_layers
+    )
+
+    attn_group_names = [
+        group_name for group_name in weight_groups.keys() if group_name.endswith("_attention")
+    ]
+    ffn_group_names = [
+        group_name for group_name in weight_groups.keys() if group_name.endswith("_ffn")
+    ]
+    if subblock_key == "subblock_attention":
+        group_names = attn_group_names
+    elif subblock_key == "subblock_ffn":
+        group_names = ffn_group_names
+    elif subblock_key == "subblock_mamba":
+        group_names = attn_group_names  # Mamba params live in _attention groups
+    elif subblock_key == "entire_block":
+        group_names = attn_group_names + ffn_group_names
+    else:
+        raise ValueError(f"Unsupported subblock key: {subblock_key!r}")
+
+    # block_configs lives on the outer puzzletron-converted config for nested
+    # HF configs (for example Qwen3-VL), not necessarily on the language sub-config.
+    block_configs = getattr(model.config, "block_configs", None) or getattr(
+        lm_config, "block_configs", None
+    )
+
+    collected: list[str] = []
+    for group_name in group_names:
+        if block_configs is not None:
+            m = re.match(r"block_(\d+)_attention", group_name)
+            if m:
+                block_idx = int(m.group(1))
+                if block_idx < len(block_configs):
+                    attention_cfg = getattr(block_configs[block_idx], "attention", None)
+                    is_mamba = getattr(attention_cfg, "mamba", None) is not None
+                    if subblock_key == "subblock_attention" and is_mamba:
+                        continue
+                    if subblock_key == "subblock_mamba" and not is_mamba:
+                        continue
+        collected.extend(weight_groups[group_name])
+    return set(collected)
 
 
 def _set_keys_to_learn(
@@ -83,74 +139,29 @@ def _set_keys_to_learn(
 ) -> None:
     """Set ``requires_grad=True`` on parameters selected by ``keys_to_learn``.
 
-    * A **sequence of strings** (not a bare ``str``): each string is a full parameter
-      name; gradients are enabled only where ``named_parameters()`` names match exactly.
+    * A **sequence of subblock keys** enables all listed subblocks.
+    * Any other **sequence of strings** is treated as exact parameter names.
     * A **single string**: if it is ``"subblock_ffn"``, ``"subblock_attention"``, or
       ``"entire_block"``, enables gradients for the corresponding descriptor weight
       groups; otherwise ``re.search`` is applied to each parameter name.
     """
-    # If keys_to_learn is a sequence of strings.
-    if isinstance(keys_to_learn, Sequence) and not isinstance(keys_to_learn, str):
-        param_names = set(keys_to_learn)
-    # If keys_to_learn is a single string.
-    # If keys_to_learn is a single string that is a subblock key.
-    elif keys_to_learn in _SUBBLOCK_KEYS_TO_LEARN:
-        lm_config = descriptor.get_language_model_config(model.config)
-        weight_groups = descriptor.get_weight_groups(
-            model.state_dict().keys(), lm_config.num_hidden_layers
-        )
-
-        attn_group_names = [
-            group_name for group_name in weight_groups.keys() if group_name.endswith("_attention")
-        ]
-        ffn_group_names = [
-            group_name for group_name in weight_groups.keys() if group_name.endswith("_ffn")
-        ]
-        if keys_to_learn == "subblock_attention":
-            group_names = attn_group_names
-        elif keys_to_learn == "subblock_ffn":
-            group_names = ffn_group_names
-        elif keys_to_learn == "subblock_mamba":
-            group_names = attn_group_names  # Mamba params live in _attention groups
-        else:  # entire_block
-            group_names = attn_group_names + ffn_group_names
-
-        block_configs = getattr(lm_config, "block_configs", None)
-
-        collected: list[str] = []
-        for group_name in group_names:
-            # For hybrid models (e.g. NemotronH), a single "_attention" group
-            # name can contain either Mamba SSM params *or* GQA params depending
-            # on the block.  Use the block config — not the keys_to_learn string
-            # — to decide whether each block belongs to the current subblock type.
-            if block_configs is not None:
-                m = re.match(r"block_(\d+)_attention", group_name)
-                if m:
-                    block_idx = int(m.group(1))
-                    if block_idx < len(block_configs):
-                        is_mamba = (
-                            getattr(block_configs[block_idx].attention, "mamba", None) is not None
-                        )
-                        # subblock_attention → GQA blocks only (not Mamba)
-                        # subblock_mamba     → Mamba blocks only (not GQA)
-                        # entire_block       → all blocks (no filtering)
-                        if keys_to_learn == "subblock_attention" and is_mamba:
-                            continue
-                        if keys_to_learn == "subblock_mamba" and not is_mamba:
-                            continue
-            collected.extend(weight_groups[group_name])
-        param_names = set(collected)
-    # If keys_to_learn is a single string that is not a subblock key, treat as regex.
+    normalized = normalize_keys_to_learn(keys_to_learn)
+    if normalized["mode"] == "subblocks":
+        param_names = set()
+        for subblock_key in normalized["subblocks"]:
+            param_names.update(_param_names_for_subblock_key(model, descriptor, subblock_key))
+    elif normalized["mode"] == "exact_names":
+        param_names = set(normalized["param_names"])
     else:
         param_names = {
             param_name
             for param_name, _ in model.named_parameters()
-            if re.search(keys_to_learn, param_name)
+            if re.search(normalized["regex"], param_name)
         }
     # In pipeline-parallel training a rank may own only blocks that don't match
     # keys_to_learn (e.g. a rank with only Mamba blocks during subblock_attention
     # bypass has no GQA params after the _mamba rename).  That is a valid state:
-    # all its blocks will produce NaN loss and be excluded from statistics.
+    # those blocks are tracked as non-trainable and omitted from numeric loss stats.
     if not param_names:
         return
 
@@ -232,7 +243,7 @@ def bypass_factory_fn(
     if student_model is None:
         mprint("Creating student model from teacher model")
 
-        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+        with _autocast_context(descriptor):
             if isinstance(model_config_overrides, DictConfig):
                 config_to_override = OmegaConf.to_container(model_config_overrides, resolve=True)
             else:
@@ -428,7 +439,7 @@ def bypass_factory_fn(
     teacher_buffers = set(teacher_model.buffers())
 
     # Setup the student model's submodules for knowledge distillation training
-    with torch.autocast(device_type="cuda", dtype=torch.bfloat16), torch.device(device):
+    with _autocast_context(descriptor), torch.device(device):
         stitched_module_descriptors = OrderedDict[str, StitchedModuleDescriptor]()
         submodule_for_loss_calculation = cfg.model_factory.submodule_for_loss_calculation
 
@@ -621,6 +632,18 @@ def bypass_factory_fn(
         teacher_stitched_module = teacher_stitcher.knot(ignore_extra_overrides=True)
         teacher_val_stitched_module = teacher_val_stitcher.knot(ignore_extra_overrides=True)
         student_val_stitched_module = student_val_stitcher.knot(ignore_extra_overrides=True)
+
+    local_trainable_param_count = sum(
+        p.numel()
+        for descriptor_ in stitched_module_descriptors.values()
+        for p in descriptor_.owned_parameters.values()
+        if p.requires_grad
+    )
+    global_trainable_param_count = dist.allreduce(local_trainable_param_count, reduction="sum")
+    if global_trainable_param_count == 0:
+        raise ValueError(
+            f"keys_to_learn={keys_to_learn!r} did not match any trainable student parameters"
+        )
 
     return (
         student_model,

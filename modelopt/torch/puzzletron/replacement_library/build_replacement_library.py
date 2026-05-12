@@ -43,6 +43,7 @@ from modelopt.torch.utils import json_dump, json_load
 
 from ..anymodel.model_descriptor import ModelDescriptor, ModelDescriptorFactory
 from ..block_config import AttentionConfig, BlockConfig, FFNConfig
+from ..bypass_distillation.bypass_utils import learned_subblocks_from_keys_to_learn
 from ..mip.utils import sort_replacements
 from ..tools.checkpoint_utils import (
     SAFETENSORS_SUBBLOCKS_DIR_NAME,
@@ -483,23 +484,7 @@ def _infer_subblocks_to_extract(
             bypass_config = json.loads(bypass_config_path.read_text())
             keys_to_learn = bypass_config.get("keys_to_learn", "entire_block")
 
-        keys_text = " ".join(keys_to_learn) if isinstance(keys_to_learn, list) else keys_to_learn
-        learns_ffn = isinstance(keys_text, str) and ("ffn" in keys_text or "mlp" in keys_text)
-        learns_attention = isinstance(keys_text, str) and (
-            "attn" in keys_text or "attention" in keys_text or "mamba" in keys_text
-        )
-        if keys_text == "entire_block":
-            subblocks_to_extract = ["block"]
-        elif learns_ffn and learns_attention:
-            subblocks_to_extract = ["attention", "ffn"]
-        elif keys_text == "subblock_ffn" or (learns_ffn and not learns_attention):
-            subblocks_to_extract = ["ffn"]
-        elif keys_text in ("subblock_attention", "subblock_mamba") or (
-            learns_attention and not learns_ffn
-        ):
-            subblocks_to_extract = ["attention"]
-        else:
-            raise ValueError(f"Unrecognized {keys_to_learn=}")
+        subblocks_to_extract = learned_subblocks_from_keys_to_learn(keys_to_learn)
     return subblocks_to_extract
 
 

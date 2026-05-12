@@ -144,6 +144,22 @@ def _progress_step(hydra_cfg, stage: _StageName) -> tuple[int, int]:
     raise ValueError(f"Unknown pipeline stage: {stage!r}")
 
 
+def _find_incomplete_bypass_runs(hydra_cfg, puzzle_dir: str | Path) -> list[str]:
+    expected_runs = expected_bypass_runs(hydra_cfg)
+    incomplete_runs = []
+    for expected_run in expected_runs:
+        state = load_bypass_state(expected_run["experiment_dir"])
+        symlink = Path(puzzle_dir) / "ckpts" / expected_run["experiment_id"]
+        if (
+            state is None
+            or state.get("status") != "completed"
+            or state.get("config_fingerprint") != expected_run["config_fingerprint"]
+            or not symlink.exists()
+        ):
+            incomplete_runs.append(expected_run["experiment_id"])
+    return incomplete_runs
+
+
 def convert_puzzletron_model(model: nn.Module, config: PuzzletronConfig) -> ConvertReturnType:
     """1. Convert the model from HF format to AnyModel format.
     2. Score the pruning activations.
@@ -252,18 +268,10 @@ def convert_puzzletron_model(model: nn.Module, config: PuzzletronConfig) -> Conv
         # completed status, the same config fingerprint, and a realized ckpts/
         # symlink. Counting arbitrary `_DONE` files is not config-specific and
         # can skip the current sweep because of stale unrelated runs.
-        expected_runs = expected_bypass_runs(hydra_cfg)
-        incomplete_runs = []
-        for expected_run in expected_runs:
-            state = load_bypass_state(expected_run["experiment_dir"])
-            symlink = Path(config.puzzle_dir) / "ckpts" / expected_run["experiment_id"]
-            if (
-                state is None
-                or state.get("status") != "completed"
-                or state.get("config_fingerprint") != expected_run["config_fingerprint"]
-                or not symlink.exists()
-            ):
-                incomplete_runs.append(expected_run["experiment_id"])
+        incomplete_runs = (
+            _find_incomplete_bypass_runs(hydra_cfg, config.puzzle_dir) if dist.is_master() else None
+        )
+        incomplete_runs = dist.broadcast(incomplete_runs, src=0)
         bypass_done = len(incomplete_runs) == 0
         if bypass_done:
             mprint(

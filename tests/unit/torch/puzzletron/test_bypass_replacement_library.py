@@ -215,6 +215,16 @@ def test_infer_subblocks_to_extract_reads_args_json_ffn(tmp_path: Path):
     assert brl._infer_subblocks_to_extract(checkpoint_dir, []) == ["ffn"]
 
 
+def test_infer_subblocks_to_extract_reads_subblock_list(tmp_path: Path):
+    checkpoint_dir = tmp_path / "bypass_ckpt"
+    checkpoint_dir.mkdir()
+    (checkpoint_dir / "args.json").write_text(
+        json.dumps({"model_factory": {"keys_to_learn": ["subblock_attention", "subblock_ffn"]}})
+    )
+
+    assert brl._infer_subblocks_to_extract(checkpoint_dir, []) == ["attention", "ffn"]
+
+
 def test_infer_subblocks_to_extract_reads_args_json_entire_block(tmp_path: Path):
     checkpoint_dir = tmp_path / "bypass_ckpt"
     checkpoint_dir.mkdir()
@@ -223,3 +233,14 @@ def test_infer_subblocks_to_extract_reads_args_json_entire_block(tmp_path: Path)
     )
 
     assert brl._infer_subblocks_to_extract(checkpoint_dir, []) == ["block"]
+
+
+def test_infer_subblocks_to_extract_rejects_regex_keys_to_learn(tmp_path: Path):
+    checkpoint_dir = tmp_path / "bypass_ckpt"
+    checkpoint_dir.mkdir()
+    (checkpoint_dir / "args.json").write_text(
+        json.dumps({"model_factory": {"keys_to_learn": "q_proj"}})
+    )
+
+    with pytest.raises(ValueError, match="requires keys_to_learn"):
+        brl._infer_subblocks_to_extract(checkpoint_dir, [])

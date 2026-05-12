@@ -51,23 +51,20 @@ Record the teacher's `token_accuracy_top_1` and `solution_0`'s `token_accuracy_t
 
 ## Step B — pipeline with bypass
 
-Add `bypass: defaults` to the `defaults:` list of `NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16.yaml` (replace the existing empty `- bypass:` entry):
+Use the bypass-enabled config, which overrides the base config's empty `- bypass:` entry with `bypass: defaults`:
 
 ```yaml
 defaults:
-  - pruning: kv_heads_pruning
-  - scoring: ../validate_solutions_defaults
-  - realize_model: ../validate_solutions_defaults
-  - bypass: defaults                    # <-- changed from `bypass:`
-  - override hydra/hydra_logging: disabled
+  - nemotron-3-nano-30b-a3b
+  - override bypass: defaults
   - _self_
 ```
 
-Re-run the same command:
+Run the bypass config:
 
 ```bash
 torchrun --nproc_per_node=8 examples/puzzletron/main.py \
-    --config examples/puzzletron/configs/nemotron-3-nano-30b-a3b/nemotron-3-nano-30b-a3b.yaml
+    --config examples/puzzletron/configs/nemotron-3-nano-30b-a3b/nemotron-3-nano-30b-a3b-with-bypass.yaml
 ```
 
 Skip-if-done caching reuses Step A's converted teacher checkpoint, activation scores, and pruned checkpoints. Only Step 5 (bypass distillation, ~50M tokens) and the downstream library/scoring/MIP rerun.

@@ -17,21 +17,77 @@
 
 import hashlib
 import json
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig, ListConfig, OmegaConf
 
 import modelopt.torch.utils.distributed as dist
 from modelopt.torch.utils.robust_json import json_dump, json_load
 
 BYPASS_STATE_FILENAME = "bypass_state.json"
+BYPASS_SUBBLOCK_KEYS_TO_LEARN = frozenset(
+    {"subblock_ffn", "subblock_attention", "subblock_mamba", "entire_block"}
+)
 
 
 def _to_plain_container(value: Any) -> Any:
-    if isinstance(value, DictConfig):
+    if isinstance(value, (DictConfig, ListConfig)):
         return OmegaConf.to_container(value, resolve=True)
     return value
+
+
+def normalize_keys_to_learn(keys_to_learn: Any) -> dict[str, Any]:
+    """Normalize bypass ``keys_to_learn`` into one explicit interpretation.
+
+    Supported forms:
+    - a single subblock key (``subblock_ffn``, ``subblock_attention``,
+      ``subblock_mamba``, or ``entire_block``);
+    - a sequence containing only subblock keys;
+    - a regex string;
+    - a sequence of exact parameter names.
+    """
+    keys_to_learn = _to_plain_container(keys_to_learn)
+    if isinstance(keys_to_learn, str):
+        if keys_to_learn in BYPASS_SUBBLOCK_KEYS_TO_LEARN:
+            return {"mode": "subblocks", "subblocks": (keys_to_learn,)}
+        return {"mode": "regex", "regex": keys_to_learn}
+
+    if isinstance(keys_to_learn, Sequence):
+        values = tuple(keys_to_learn)
+        if not all(isinstance(value, str) for value in values):
+            raise TypeError(f"keys_to_learn entries must be strings, got {keys_to_learn!r}")
+        if values and all(value in BYPASS_SUBBLOCK_KEYS_TO_LEARN for value in values):
+            if "entire_block" in values and len(set(values)) > 1:
+                raise ValueError("keys_to_learn cannot mix 'entire_block' with other subblock keys")
+            return {"mode": "subblocks", "subblocks": tuple(dict.fromkeys(values))}
+        if any(value in BYPASS_SUBBLOCK_KEYS_TO_LEARN for value in values):
+            raise ValueError("keys_to_learn cannot mix subblock keys with exact parameter names")
+        return {"mode": "exact_names", "param_names": values}
+
+    raise TypeError(f"Unsupported keys_to_learn={keys_to_learn!r}")
+
+
+def learned_subblocks_from_keys_to_learn(keys_to_learn: Any) -> list[str]:
+    """Return replacement-library subblocks represented by ``keys_to_learn``."""
+    normalized = normalize_keys_to_learn(keys_to_learn)
+    if normalized["mode"] != "subblocks":
+        raise ValueError(
+            "Replacement-library extraction requires keys_to_learn to be a subblock key "
+            f"or list of subblock keys, got {keys_to_learn!r}"
+        )
+
+    subblocks = set(normalized["subblocks"])
+    if subblocks == {"entire_block"}:
+        return ["block"]
+
+    out: list[str] = []
+    if "subblock_attention" in subblocks or "subblock_mamba" in subblocks:
+        out.append("attention")
+    if "subblock_ffn" in subblocks:
+        out.append("ffn")
+    return out
 
 
 def _slug(value: Any) -> str:
@@ -87,12 +143,26 @@ def get_bypass_run_identity(cfg: DictConfig) -> dict[str, Any]:
             "min_lr_factor": training.get("min_lr_factor"),
         },
         "data": {
+            "dataset_path": cfg.get("dataset_path", None),
             "block_size": data.get("block_size"),
             "data_column": data.get("data_column"),
             "fim_rate": data.get("fim_rate"),
             "fim_spm_rate": data.get("fim_spm_rate"),
             "bos_rate": data.get("bos_rate"),
             "source_datasets_to_discard": data.get("source_datasets_to_discard"),
+            "load_from_disk": data.get("load_from_disk"),
+            "keep_in_memory": data.get("keep_in_memory"),
+            "shuffle_train_data_seed": data.get("shuffle_train_data_seed"),
+            "val_dataset_name": data.get("val_dataset_name"),
+            "max_eval_samples": data.get("max_eval_samples"),
+            "eval_samples_per_process": data.get("eval_samples_per_process"),
+        },
+        "validation": {
+            "disable_validation": bypass.get("disable_validation"),
+            "save_best_ckpt": bypass.get("save_best_ckpt"),
+            "realize_best_or_latest": bypass.get("realize_best_or_latest"),
+            "eval_interval": training.get("eval_interval"),
+            "val_micro_batch_size": training.get("val_micro_batch_size"),
         },
         "seed": bypass.get("seed"),
         "dtype": bypass.get("dtype"),
@@ -271,6 +341,7 @@ def expected_bypass_runs(cfg: DictConfig) -> list[dict[str, Any]]:
         run_cfg = OmegaConf.create(
             {
                 "puzzle_dir": cfg.puzzle_dir,
+                "dataset_path": cfg.get("dataset_path", None),
                 "descriptor": cfg.get("descriptor", None),
                 "bypass": OmegaConf.to_container(cfg.bypass, resolve=True),
             }

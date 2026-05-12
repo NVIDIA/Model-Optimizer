@@ -19,6 +19,7 @@ import pytest
 from omegaconf import OmegaConf
 
 from modelopt.torch.puzzletron.bypass_distillation.bypass_utils import (
+    get_bypass_config_fingerprint,
     get_distributed_modules_ownership,
     set_experiment_id,
 )
@@ -91,6 +92,7 @@ def _experiment_cfg(keys_to_learn: str):
     return OmegaConf.create(
         {
             "descriptor": "test_descriptor",
+            "dataset_path": "/tmp/dataset_a",
             "bypass": {
                 "experiment_id": None,
                 "dtype": "bf16",
@@ -102,6 +104,12 @@ def _experiment_cfg(keys_to_learn: str):
                     "fim_spm_rate": 0,
                     "bos_rate": 1.0,
                     "source_datasets_to_discard": [],
+                    "load_from_disk": True,
+                    "keep_in_memory": False,
+                    "shuffle_train_data_seed": 123,
+                    "val_dataset_name": "valid",
+                    "max_eval_samples": 4,
+                    "eval_samples_per_process": None,
                 },
                 "training": {
                     "learning_rate": 1e-4,
@@ -133,6 +141,9 @@ def _experiment_cfg(keys_to_learn: str):
                     "submodule_for_loss_calculation": None,
                     "keys_to_learn": keys_to_learn,
                 },
+                "disable_validation": False,
+                "save_best_ckpt": True,
+                "realize_best_or_latest": "best",
             },
         }
     )
@@ -158,3 +169,26 @@ def test_experiment_id_falls_back_when_no_architecture_parts_exist():
 
     assert cfg.bypass.experiment_id.startswith("bypass_custom_")
     assert cfg.bypass.experiment_id != "bypass_None"
+
+
+def test_config_fingerprint_changes_with_dataset_path():
+    cfg = _experiment_cfg("subblock_attention")
+    original = get_bypass_config_fingerprint(cfg)
+    cfg.dataset_path = "/tmp/dataset_b"
+    assert get_bypass_config_fingerprint(cfg) != original
+
+
+def test_config_fingerprint_changes_with_shuffle_seed():
+    cfg = _experiment_cfg("subblock_attention")
+    original = get_bypass_config_fingerprint(cfg)
+    cfg.bypass.data.shuffle_train_data_seed = 456
+    assert get_bypass_config_fingerprint(cfg) != original
+
+
+def test_experiment_id_does_not_change_with_dataset_path():
+    cfg_a = _experiment_cfg("subblock_attention")
+    cfg_b = _experiment_cfg("subblock_attention")
+    cfg_b.dataset_path = "/tmp/dataset_b"
+    set_experiment_id(cfg_a)
+    set_experiment_id(cfg_b)
+    assert cfg_a.bypass.experiment_id == cfg_b.bypass.experiment_id

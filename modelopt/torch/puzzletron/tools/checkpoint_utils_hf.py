@@ -275,9 +275,10 @@ def _save_checkpoint(
     save_model_config(model_config, checkpoint_dir)
 
     # Phase 2: Build weight map using descriptor and write index
+    lm_config = descriptor.get_language_model_config(model_config)
     subblock_keys = descriptor.get_weight_groups(
         layer_names=state_dict.keys(),
-        num_hidden_layers=model_config.num_hidden_layers,
+        num_hidden_layers=lm_config.num_hidden_layers,
     )
 
     weight_map = {}

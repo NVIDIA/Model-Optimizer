@@ -29,6 +29,7 @@ import sys
 import time
 import traceback
 from collections import OrderedDict, defaultdict
+from contextlib import nullcontext
 from pathlib import Path
 from statistics import mean
 from typing import Optional
@@ -70,6 +71,14 @@ from .stitched_model_factory import StitchedModuleDescriptor, StitchedModulesPro
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 
+def _autocast_context(descriptor: ModelDescriptor):
+    return (
+        torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+        if descriptor.uses_autocast()
+        else nullcontext()
+    )
+
+
 def launch_bypass_distillation(hydra_cfg: DictConfig) -> None:
     """Top-level entry point for bypass distillation stage.
 
@@ -91,7 +100,10 @@ def launch_bypass_distillation(hydra_cfg: DictConfig) -> None:
         # Single config mode — run once with whatever is in bypass already
         set_experiment_id(hydra_cfg)
         set_experiment_dir(hydra_cfg)
-        if bypass_run_is_complete(hydra_cfg):
+        dist.barrier()
+        bypass_complete = bypass_run_is_complete(hydra_cfg) if dist.is_master() else None
+        bypass_complete = dist.broadcast(bypass_complete, src=0)
+        if bypass_complete:
             mprint(
                 f"Bypass distillation already completed for {hydra_cfg.bypass.experiment_id}, skipping"
             )
@@ -138,7 +150,10 @@ def launch_bypass_distillation(hydra_cfg: DictConfig) -> None:
 
         set_experiment_id(hydra_cfg)
         set_experiment_dir(hydra_cfg)
-        if bypass_run_is_complete(hydra_cfg):
+        dist.barrier()
+        bypass_complete = bypass_run_is_complete(hydra_cfg) if dist.is_master() else None
+        bypass_complete = dist.broadcast(bypass_complete, src=0)
+        if bypass_complete:
             mprint(
                 f"Bypass config {i + 1}/{len(configs_list)} "
                 f"({hydra_cfg.bypass.experiment_id}) already completed, skipping"
@@ -299,6 +314,11 @@ def train(
     best_steps_by_name: dict[str, int] = dict(cfg.bypass.get("best_steps_by_name", {}))
     # Anchor for the "Δ from initial" column: per-block loss from the first log chunk.
     initial_losses_by_name: dict[str, float] = dict(cfg.bypass.get("initial_losses_by_name", {}))
+    non_trainable_stitched_module_names = {
+        name
+        for name, descriptor in stitched_module_descriptors.items()
+        if descriptor.optimizer is None
+    }
 
     # log_interval is in optimizer-step units; multiply by grad_accum to land in
     # micro-batch units, which is what the per-iter loss collection counts.
@@ -373,7 +393,7 @@ def train(
             input_ids = train_data["input_ids"]
             input_ids = input_ids.to(device)
 
-        with torch.autocast(device_type="cuda", dtype=torch.bfloat16), torch.no_grad():
+        with _autocast_context(descriptor), torch.no_grad():
             teacher_input_ids = input_ids if prev_rank is None else fake_input_ids
             teacher_output = teacher_stitched_model({}, {}, teacher_input_ids)
 
@@ -401,24 +421,25 @@ def train(
             if optimizer is not None:
                 assert grad_scaler is not None
 
-                with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                with _autocast_context(descriptor):
                     stitched_module_output = stitched_module(
                         input_overrides=input_overrides,
                         output_overrides=output_overrides,
                     )
                 stitched_module_loss = stitched_module_output.captured_outputs["loss"]
                 del stitched_module_output
-                grad_scaler.scale(stitched_module_loss).backward()
-            else:
-                # Match the device of the optimizer-yes branch so all per-block
-                # loss tensors can be stacked into a single GPU tensor below.
-                stitched_module_loss = torch.full(
-                    [1], fill_value=torch.nan, dtype=torch.float32, device=device
+                scaled_stitched_module_loss = (
+                    stitched_module_loss / cfg.bypass.training.grad_accumulation_steps
                 )
-
-            # Detach to drop the autograd graph (we already called backward
-            # above) and defer the GPU→CPU copy to after the per-block loop.
-            iter_loss_tensors[stitched_module_name] = stitched_module_loss.detach()
+                grad_scaler.scale(scaled_stitched_module_loss).backward()
+                iter_loss_tensors[stitched_module_name] = stitched_module_loss.detach()
+                del scaled_stitched_module_loss
+            else:
+                # No real trainable parameters on this rank/block. Keep this out
+                # of the numeric loss stream so genuine non-finite losses from
+                # trainable blocks remain visible instead of being conflated with
+                # an intentional "not trainable" sentinel.
+                stitched_module_loss = None
 
             del stitched_module_loss
 
@@ -542,6 +563,14 @@ def train(
                         losses_by_name[name].append(loss)
 
                 losses_by_name_avg = {name: mean(losses) for name, losses in losses_by_name.items()}
+                non_finite_losses_by_name = {
+                    name: loss
+                    for name, loss in losses_by_name_avg.items()
+                    if not math.isfinite(loss)
+                }
+                if non_finite_losses_by_name:
+                    cfg.bypass.non_finite_losses_by_name = dict(non_finite_losses_by_name)
+                    mprint(f"Non-finite stitched losses detected: {non_finite_losses_by_name}")
 
                 # Anchor "Δ from initial" at the very first iter's per-block losses
                 # (lowest_iter — typically iter 1 on a fresh run, the resumed iter
@@ -553,6 +582,8 @@ def train(
                 # Update best losses tracking. Record the optimizer-step number
                 # so the "Best Step" column matches the header's "step N/max" units.
                 for name, current_loss in losses_by_name_avg.items():
+                    if not math.isfinite(current_loss):
+                        continue
                     if name not in best_losses_by_name or current_loss < best_losses_by_name[name]:
                         best_losses_by_name[name] = current_loss
                         best_steps_by_name[name] = highest_iter_stats.step_num
@@ -585,6 +616,7 @@ def train(
                         best_steps_dict=best_steps_by_name,
                         best_values_dict=best_losses_by_name,
                         initial_values_dict=initial_losses_by_name,
+                        not_trainable_names=non_trainable_stitched_module_names,
                         step_number=highest_iter_stats.step_num,
                         title="Stitched Module Losses",
                     )
@@ -1075,7 +1107,7 @@ def run_bypassed_training(cfg: DictConfig):
         torch.cuda.synchronize()
         with (
             torch.no_grad(),
-            torch.autocast(device_type="cuda", dtype=torch.bfloat16),
+            _autocast_context(descriptor),
             torch.device(device),
         ):
             input_ids = torch.ones(

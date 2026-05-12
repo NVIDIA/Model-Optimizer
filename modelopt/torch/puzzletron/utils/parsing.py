@@ -312,6 +312,7 @@ def format_stitched_losses(
     best_steps_dict: dict[str, int] | None = None,
     best_values_dict: dict[str, float] | None = None,
     initial_values_dict: dict[str, float] | None = None,
+    not_trainable_names: set[str] | None = None,
     step_number: int | None = None,
     title: str = "Stitched Module Losses",
 ) -> str:
@@ -341,14 +342,13 @@ def format_stitched_losses(
         ╰──────────────────────────────────────────────────────────────╯
     """
     if not losses_dict:
+        if not_trainable_names:
+            return (
+                "No trainable losses found; "
+                f"skipped {len(not_trainable_names)} non-trainable blocks"
+            )
         return "❌ No losses found"
 
-    # Filter out nan entries — these are no-op blocks (e.g. Mamba) with no trainable
-    # parameters. The training loop sets their stitched_module_loss to NaN intentionally
-    # (see training_loop.py); filtering them here keeps the table focused on the
-    # actually-trained blocks while still surfacing real NaNs (which would only appear
-    # on a block that does have an optimizer and has diverged).
-    losses_dict = {k: v for k, v in losses_dict.items() if not math.isnan(v)}
     if best_steps_dict:
         best_steps_dict = {k: v for k, v in best_steps_dict.items() if k in losses_dict}
     if best_values_dict:
@@ -356,16 +356,17 @@ def format_stitched_losses(
     if initial_values_dict:
         initial_values_dict = {k: v for k, v in initial_values_dict.items() if k in losses_dict}
 
-    if not losses_dict:
-        return "❌ No trainable blocks found"
-
     lines = []
 
     # Calculate statistics
     loss_values = list(losses_dict.values())
-    max_loss = max(loss_values)
-    min_loss = min(loss_values)
-    avg_loss = sum(loss_values) / len(loss_values)
+    finite_loss_values = [value for value in loss_values if math.isfinite(value)]
+    if finite_loss_values:
+        max_loss = max(finite_loss_values)
+        min_loss = min(finite_loss_values)
+        avg_loss = sum(finite_loss_values) / len(finite_loss_values)
+    else:
+        max_loss = min_loss = avg_loss = float("nan")
 
     # Calculate box width for new layout (removed Bar column)
     box_width = 74
@@ -409,8 +410,11 @@ def format_stitched_losses(
         # apples-to-apples even when blocks have very different intrinsic loss scales.
         if initial_values_dict and block_name in initial_values_dict:
             initial_value = initial_values_dict[block_name]
-            delta = loss_value - initial_value
-            if abs(delta) > 1e-8:
+            if not math.isfinite(loss_value) or not math.isfinite(initial_value):
+                change_display = "non-finite"
+            else:
+                delta = loss_value - initial_value
+            if math.isfinite(loss_value) and math.isfinite(initial_value) and abs(delta) > 1e-8:
                 pct = (delta / initial_value * 100.0) if initial_value != 0.0 else 0.0
                 # Clamp percentage display to keep the cell within the 18-char column
                 # even on pathological divergence (e.g. a block whose loss 10x'd).
@@ -418,7 +422,7 @@ def format_stitched_losses(
                 arrow = "↓" if delta < 0 else "↑"
                 sign = "-" if delta < 0 else "+"
                 change_display = f"{arrow} {sign}{abs(delta):.1e} ({pct_clamped:+.0f}%)"
-            else:
+            elif math.isfinite(loss_value) and math.isfinite(initial_value):
                 change_display = "↔ 0.0e+00"
         else:
             # No baseline supplied (callers may omit initial_values_dict).
@@ -441,6 +445,8 @@ def format_stitched_losses(
     if step_number is not None:
         summary_parts.append(f"Step {step_number}")
     summary_parts.extend([f"Avg={avg_loss:.2e}", f"Max={max_loss:.2e}", f"Min={min_loss:.2e}"])
+    if not_trainable_names:
+        summary_parts.append(f"Skipped={len(not_trainable_names)}")
 
     summary_text = ", ".join(summary_parts)
     summary = f"│ Summary: {summary_text}"
@@ -464,7 +470,9 @@ def format_stitched_losses(
             best_step_values = []
             for block_name, best_step in best_steps_dict.items():
                 if best_step == modal_best_step and block_name in best_values_dict:
-                    best_step_values.append(best_values_dict[block_name])
+                    best_value = best_values_dict[block_name]
+                    if math.isfinite(best_value):
+                        best_step_values.append(best_value)
 
             if best_step_values:
                 best_step_avg = sum(best_step_values) / len(best_step_values)

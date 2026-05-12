@@ -2,7 +2,7 @@ defaults:
   - pruning: kv_heads_pruning
   - scoring: ../validate_solutions_defaults
   - realize_model: ../validate_solutions_defaults
-  - bypass: defaults
+  - bypass:
   - override hydra/hydra_logging: disabled
   - _self_
 

@@ -144,6 +144,27 @@ def test_entire_block_trains_attention_and_mlp():
     assert trainable == {n for n, _ in model.named_parameters()}
 
 
+def test_subblock_key_list_trains_union_of_subblocks():
+    model = _make_dense_model(num_layers=2)
+    descriptor = _make_descriptor(num_layers=2)
+    _set_keys_to_learn(model, descriptor, ["subblock_attention", "subblock_ffn"])
+    trainable = _trainable_names(model)
+    assert any(".self_attn." in n for n in trainable), trainable
+    assert any(".mlp." in n for n in trainable), trainable
+    assert trainable == {n for n, _ in model.named_parameters()}
+
+
+def test_mixed_subblock_and_exact_name_list_raises():
+    model = _make_dense_model(num_layers=2)
+    descriptor = _make_descriptor(num_layers=2)
+    with pytest.raises(ValueError, match="mix subblock keys"):
+        _set_keys_to_learn(
+            model,
+            descriptor,
+            ["subblock_attention", "model.layers.0.self_attn.q_proj.weight"],
+        )
+
+
 # ---------------------------------------------------------------------------
 # Hybrid model: subblock_mamba vs subblock_attention should partition by
 # block_configs[i].attention.mamba — this is the path most likely to

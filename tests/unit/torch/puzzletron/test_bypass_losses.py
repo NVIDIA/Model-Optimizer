@@ -22,6 +22,7 @@ from modelopt.torch.puzzletron.sewing_kit.utils import (
     normalized_mse_loss,
     vectorwise_normalized_mse_loss,
 )
+from modelopt.torch.puzzletron.utils.parsing import format_stitched_losses
 
 # ---------------------------------------------------------------------------
 # normalized_mse_loss
@@ -148,3 +149,17 @@ def test_batched_normalized_mse_loss_scale_invariance():
     baseline = batched_normalized_mse_loss(input_, target)
     scaled = batched_normalized_mse_loss(10.0 * input_, 10.0 * target)
     assert torch.allclose(baseline, scaled, rtol=1e-4, atol=1e-6)
+
+
+def test_format_stitched_losses_keeps_trainable_nan_visible():
+    out = format_stitched_losses(
+        {"block_0": float("nan"), "block_1": 1.0},
+        initial_values_dict={"block_0": 0.5, "block_1": 2.0},
+        not_trainable_names={"block_2"},
+        step_number=3,
+    )
+
+    assert "nan" in out
+    assert "non-finite" in out
+    assert "Skipped=1" in out
+    assert "No trainable blocks found" not in out

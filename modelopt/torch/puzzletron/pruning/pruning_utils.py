@@ -83,6 +83,14 @@ def _lm_attrs(config):
     return config
 
 
+def _lm_head_dim(config) -> int:
+    lm_config = _lm_attrs(config)
+    head_dim = getattr(lm_config, "head_dim", None)
+    if head_dim is not None:
+        return head_dim
+    return lm_config.hidden_size // lm_config.num_attention_heads
+
+
 def resolve_pruning_mixin(
     pruning_mixin, descriptor: Type[ModelDescriptor]
 ) -> PruningMixIn | List[PruningMixIn]:
@@ -468,8 +476,8 @@ def _init_attention_biases(
         assert not is_original_mha, (
             "Degrouping can only be done on original models that are GQA themselves."
         )
-        n_groups = new_config.num_attention_heads // n_heads_in_group
-        orig_n_groups = original_config.num_attention_heads // orig_n_heads_in_group
+        n_groups = new_lm.num_attention_heads // n_heads_in_group
+        orig_n_groups = orig_lm.num_attention_heads // orig_n_heads_in_group
         assert n_groups % orig_n_groups == 0, f"{n_groups=} must be a divisor of {orig_n_groups=}"
         n_repeats = n_groups // orig_n_groups
         if n_repeats > 1:
