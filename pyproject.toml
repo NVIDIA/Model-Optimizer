@@ -49,6 +49,8 @@ dependencies = [
     "rich",
     "safetensors",
     "scipy",
+    "uvloop>=0.22.1",
+    "vllm==0.20.1",
 ]
 
 [project.optional-dependencies]

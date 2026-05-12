@@ -142,7 +142,7 @@ def _apply_sparse_nm_to_qk_tile(
 def _skip_softmax_decision(
     scores,
     row_max,
-    SKIP_THRESHOLD_LOG2: tl.constexpr,
+    skip_threshold_log2,
     Sparsity_total,
     Sparsity_skipped,
     MEASURE_SPARSITY: tl.constexpr,
@@ -167,7 +167,7 @@ def _skip_softmax_decision(
     """
     tile_row_max = tl.max(scores, 1)  # [BLOCK_M] — ~m_i^(j) (scaled)
     # Per-row: True if row's tile max is negligible vs running max
-    can_skip = tile_row_max < (row_max + SKIP_THRESHOLD_LOG2)
+    can_skip = tile_row_max < (row_max + skip_threshold_log2)
     # Per-tile: skip entire tile only if ALL rows are negligible
     skip_tile = tl.min(can_skip.to(tl.int32)) == 1
 

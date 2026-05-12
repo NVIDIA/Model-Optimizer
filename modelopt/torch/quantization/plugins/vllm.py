@@ -64,16 +64,7 @@ for module_path in [
     except ImportError:
         continue
 
-<<<<<<< HEAD
-try:
-    _has_attention_layers = importlib.util.find_spec("vllm.attention.layers") is not None
-except (ModuleNotFoundError, ValueError):
-    _has_attention_layers = False
-
-if _has_attention_layers:  # vllm < 0.15.0
-=======
 if _vllm_module_spec_exists("vllm.attention.layers"):  # vllm < 0.15.0
->>>>>>> 48eb4ea2 (First commit)
     from vllm.attention.layers.cross_attention import CrossAttention
     from vllm.attention.layers.encoder_only_attention import EncoderOnlyAttention
 else:
@@ -86,16 +77,7 @@ else:
     except ImportError:
         EncoderOnlyAttention = None
 
-<<<<<<< HEAD
-try:
-    _has_attention_layer = importlib.util.find_spec("vllm.attention.layer") is not None
-except (ModuleNotFoundError, ValueError):
-    _has_attention_layer = False
-
-if _has_attention_layer:
-=======
 if _vllm_module_spec_exists("vllm.attention.layer"):
->>>>>>> 48eb4ea2 (First commit)
     import vllm.attention.layer as vllm_attention
 
 try:

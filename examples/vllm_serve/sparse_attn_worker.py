@@ -15,9 +15,10 @@
 
 """Custom vLLM workers for sparse attention.
 
-``SparseAttnWorker``: Replaces ``FlashAttentionImpl`` with
-``ModelOptSparseAttentionImpl`` on each Attention module after model loading.
-The sparse impl uses the ModelOpt Triton kernel for both prefill and decode.
+``SparseAttnWorker``: Replaces attention implementations with ModelOpt sparse
+variants on each Attention module after model loading.  For MHA/GQA models the
+impl is replaced entirely; for MLA models (DeepSeek) the prefill methods are
+monkey-patched on the existing impl.
 
 ``SparseQuantWorker``: Applies quantization first, then sparse attention via
 direct module walk (registry stacking does not work due to ``_DMRegistryCls``
@@ -42,7 +43,17 @@ except ModuleNotFoundError:
 from vllm.v1.worker.gpu_worker import Worker as BaseWorker
 
 import modelopt.torch.sparsity.attention_sparsity as mtsa
-from modelopt.torch.sparsity.attention_sparsity.plugins.vllm import ModelOptSparseAttentionImpl
+from modelopt.torch.sparsity.attention_sparsity.plugins.vllm import (
+    ModelOptSparseAttentionImpl,
+    patch_mla_impl_for_sparse,
+)
+
+try:
+    from vllm.model_executor.layers.attention.mla_attention import MLACommonImpl
+
+    _HAS_MLA = True
+except ImportError:
+    _HAS_MLA = False
 
 # ---------------------------------------------------------------------------
 # Configuration from environment variables
@@ -121,8 +132,32 @@ def _match_sparse_config(module_name: str, sparse_cfg: dict) -> dict | None:
     return None
 
 
+def _build_sparse_kw(layer_cfg: dict, env_threshold: float | None) -> dict:
+    """Extract sparse kernel kwargs from a per-layer config dict.
+
+    ``env_threshold`` (from SKIP_SOFTMAX_THRESHOLD) overrides any per-layer
+    ``skip_softmax_threshold`` when set.
+    """
+    sparse_kw: dict = {}
+    sparsity_n = layer_cfg.get("sparsity_n", 0)
+    if sparsity_n > 0:
+        sparse_kw["sparsity_n"] = sparsity_n
+        sparse_kw["sparsity_m"] = layer_cfg.get("sparsity_m", 4)
+        sparse_kw["num_sink_tokens"] = layer_cfg.get("num_sink_tokens", 0)
+        sparse_kw["dense_window_size"] = layer_cfg.get("dense_window_size", 1)
+    threshold = layer_cfg.get("skip_softmax_threshold")
+    if env_threshold is not None:
+        threshold = env_threshold
+    if threshold:
+        sparse_kw["skip_softmax_threshold"] = float(threshold)
+    return sparse_kw
+
+
 def _replace_attention_impl(worker, config: dict):
-    """Replace FlashAttentionImpl with ModelOptSparseAttentionImpl on all Attention layers.
+    """Replace attention impls with ModelOpt sparse variants on all Attention layers.
+
+    Handles both MHA/GQA layers (replace impl entirely) and MLA layers
+    (monkey-patch prefill methods on the existing impl).
 
     Shared by SparseAttnWorker and SparseQuantWorker.
     """
@@ -141,7 +176,8 @@ def _replace_attention_impl(worker, config: dict):
     if hasattr(model, "unwrap"):
         model = model.unwrap()
 
-    patched = 0
+    patched_mha = 0
+    patched_mla = 0
     # Group layers by their sparse_kw config so we can print a concise summary.
     config_groups: dict[tuple, list[str]] = {}
     for name, module in model.named_modules():
@@ -153,21 +189,16 @@ def _replace_attention_impl(worker, config: dict):
         if layer_cfg is None or not layer_cfg.get("enable", True):
             continue
 
-        # Build per-layer sparse kwargs
-        sparse_kw = {}
-        sparsity_n = layer_cfg.get("sparsity_n", 0)
-        if sparsity_n > 0:
-            sparse_kw["sparsity_n"] = sparsity_n
-            sparse_kw["sparsity_m"] = layer_cfg.get("sparsity_m", 4)
-            sparse_kw["num_sink_tokens"] = layer_cfg.get("num_sink_tokens", 0)
-            sparse_kw["dense_window_size"] = layer_cfg.get("dense_window_size", 1)
-        threshold = layer_cfg.get("skip_softmax_threshold")
-        if env_threshold is not None:
-            threshold = env_threshold
-        if threshold:
-            sparse_kw["skip_softmax_threshold"] = float(threshold)
+        sparse_kw = _build_sparse_kw(layer_cfg, env_threshold)
 
-        # Replace impl and store per-layer config
+        # MLA layers: monkey-patch prefill methods (decode unchanged)
+        if _HAS_MLA and isinstance(module.impl, MLACommonImpl):
+            patch_mla_impl_for_sparse(module.impl, sparse_kw)
+            patched_mla += 1
+            config_groups.setdefault(tuple(sorted(sparse_kw.items())), []).append(name)
+            continue
+
+        # MHA/GQA layers: replace impl entirely
         old_impl = module.impl
         new_impl = ModelOptSparseAttentionImpl(
             num_heads=old_impl.num_heads,
@@ -178,8 +209,8 @@ def _replace_attention_impl(worker, config: dict):
             sliding_window=None,  # overwritten below
             kv_cache_dtype=old_impl.kv_cache_dtype,
             logits_soft_cap=old_impl.logits_soft_cap,
-            attn_type=old_impl.attn_type,
-            kv_sharing_target_layer_name=old_impl.kv_sharing_target_layer_name,
+            attn_type=getattr(old_impl, "attn_type", module.attn_type),
+            kv_sharing_target_layer_name=getattr(old_impl, "kv_sharing_target_layer_name", None),
         )
         # Copy the already-transformed sliding_window tuple directly,
         # since __init__ transforms int -> (sw-1, 0) and we can't reverse it.
@@ -187,11 +218,18 @@ def _replace_attention_impl(worker, config: dict):
         # Store per-layer sparse kwargs on the impl for forward() to read
         new_impl.sparse_kw = sparse_kw
         module.impl = new_impl
-        patched += 1
+        patched_mha += 1
         config_groups.setdefault(tuple(sorted(sparse_kw.items())), []).append(name)
 
+    total = patched_mha + patched_mla
+    parts = []
+    if patched_mha:
+        parts.append(f"{patched_mha} MHA/GQA")
+    if patched_mla:
+        parts.append(f"{patched_mla} MLA")
+    detail = " + ".join(parts) if parts else "0"
     print(
-        f"[ModelOpt] Sparse attention: replaced impl on {patched} attention layers",
+        f"[ModelOpt] Sparse attention: configured {total} attention layers ({detail})",
         flush=True,
     )
     for kw_items, layer_names in config_groups.items():

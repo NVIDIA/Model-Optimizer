@@ -22,9 +22,17 @@ with paged KV cache support. Integration approach:
 - Only ``impl`` is swapped from FlashAttentionImpl to ModelOptSparseAttentionImpl
 - KV cache update is handled by vLLM (inherited ``do_kv_cache_update``)
 - Only ``forward()`` is overridden to call our Triton kernel for both prefill and decode
+
+For MLA (Multi-Latent Attention) models like DeepSeek, a different strategy is used:
+the MLA impl's prefill methods are monkey-patched to call our Triton kernel in
+contiguous (non-paged) mode, since MLA decompresses KV latents before attention.
 """
 
+import importlib.util
+import types
+
 import torch
+import torch.nn.functional as F
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.flash_attn import (
     FlashAttentionBackend,
@@ -32,7 +40,12 @@ from vllm.v1.attention.backends.flash_attn import (
     FlashAttentionMetadata,
 )
 
-from modelopt.torch.kernels.triton_fa import attention as triton_attention
+from modelopt.torch.kernels.common.attention.triton_fa import attention as triton_attention
+from modelopt.torch.kernels.common.attention.triton_fa import attention_with_lse
+
+_HAS_MLA = (
+    importlib.util.find_spec("vllm.model_executor.layers.attention.mla_attention") is not None
+)
 
 logger = init_logger(__name__)
 
@@ -160,3 +173,101 @@ class ModelOptSparseAttentionBackend(FlashAttentionBackend):
     def get_impl_cls() -> type:
         """Return the attention implementation class."""
         return ModelOptSparseAttentionImpl
+
+
+# ---------------------------------------------------------------------------
+# MLA (Multi-Latent Attention) sparse prefill support
+# ---------------------------------------------------------------------------
+# MLA models (DeepSeek) decompress KV latents to full Q, K, V tensors before
+# calling attention in the prefill path. We replace the prefill methods on the
+# MLA impl to use our Triton kernel in contiguous mode. V is zero-padded to
+# match Q/K head_dim; the caller (_forward_prefill) slices the output back to
+# V's head_dim when _pad_v=True.
+#
+# Decode is unchanged — it uses specialized MLA-aware backends (FlashInfer MLA,
+# FlashMLA, TRT-LLM) that operate on compressed latents.
+# ---------------------------------------------------------------------------
+
+
+def _modelopt_mla_run_prefill_new_tokens(self, prefill, q, k, v, return_softmax_lse):
+    """ModelOpt sparse attention for MLA new tokens (causal).
+
+    Replaces ``MLACommonImpl._run_prefill_new_tokens`` when sparse attention
+    is enabled. Pads V to Q's head_dim, calls the ModelOpt Triton kernel in
+    contiguous mode, and returns LSE in ``[num_heads, total_tokens]`` format.
+    """
+    padded_v = F.pad(v, [0, q.shape[-1] - v.shape[-1]]) if v.shape[-1] < q.shape[-1] else v
+
+    cu = prefill.query_start_loc
+    batch = cu.shape[0] - 1
+    b_start_loc = cu[:batch]
+    b_seq_len = cu[1 : batch + 1] - cu[:batch]
+
+    o, lse = attention_with_lse(
+        q,
+        k,
+        padded_v,
+        b_start_loc=b_start_loc,
+        b_seq_len=b_seq_len,
+        max_input_len=prefill.max_query_len,
+        is_causal=True,
+        softmax_scale=self.scale,
+        **self._modelopt_sparse_kw,
+    )
+
+    if return_softmax_lse:
+        return o, lse.transpose(0, 1).contiguous()
+    return o
+
+
+def _modelopt_mla_run_prefill_context_chunk(self, prefill, chunk_idx, q, k, v):
+    """ModelOpt sparse attention for MLA context chunks (non-causal).
+
+    Replaces ``MLACommonImpl._run_prefill_context_chunk``.  Always returns
+    ``(output, lse)`` since chunked context needs LSE for merging.
+    """
+    padded_v = F.pad(v, [0, q.shape[-1] - v.shape[-1]]) if v.shape[-1] < q.shape[-1] else v
+
+    cu_q = prefill.query_start_loc
+    cu_k = prefill.chunked_context.cu_seq_lens[chunk_idx]
+    batch = cu_q.shape[0] - 1
+
+    sparse_kw = dict(self._modelopt_sparse_kw)
+    sparse_kw["dense_window_size"] = 0  # no dense window for non-causal context
+
+    o, lse = attention_with_lse(
+        q,
+        k,
+        padded_v,
+        b_start_loc=cu_q[:batch],
+        b_seq_len=cu_q[1 : batch + 1] - cu_q[:batch],
+        max_input_len=prefill.max_query_len,
+        is_causal=False,
+        softmax_scale=self.scale,
+        b_start_loc_k=cu_k[:batch],
+        b_seq_len_k=cu_k[1 : batch + 1] - cu_k[:batch],
+        max_input_len_k=prefill.chunked_context.max_seq_lens[chunk_idx],
+        **sparse_kw,
+    )
+
+    return o, lse.transpose(0, 1).contiguous()
+
+
+def patch_mla_impl_for_sparse(impl, sparse_kw: dict) -> None:
+    """Monkey-patch an MLACommonImpl to use ModelOpt sparse prefill.
+
+    Sets ``_pad_v=True`` so that ``_forward_prefill`` slices the output back
+    to ``v_head_dim`` after attention. Replaces the prefill method pointers
+    with our Triton-kernel-based implementations.
+
+    Args:
+        impl: An ``MLACommonImpl`` instance (or subclass like ``FlashInferMLAImpl``).
+        sparse_kw: Sparse attention config dict with keys like ``sparsity_n``,
+            ``sparsity_m``, ``num_sink_tokens``, ``dense_window_size``.
+    """
+    impl._modelopt_sparse_kw = sparse_kw
+    impl._pad_v = True
+    impl._run_prefill_new_tokens = types.MethodType(_modelopt_mla_run_prefill_new_tokens, impl)
+    impl._run_prefill_context_chunk = types.MethodType(
+        _modelopt_mla_run_prefill_context_chunk, impl
+    )

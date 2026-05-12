@@ -235,16 +235,12 @@ def _attn_fwd(
     NUM_SINK_TOKENS: tl.constexpr = 0,  # KV positions before this are kept dense (attention sinks)
     DENSE_WINDOW_SIZE: tl.constexpr = 64,  # Tokens near diagonal kept dense (absolute, BLOCK_N-independent)
     APPLY_SKIP_SOFTMAX: tl.constexpr = False,  # Skip KV tiles with negligible scores
-<<<<<<< HEAD:modelopt/torch/kernels/common/attention/triton_fa.py
-    SKIP_THRESHOLD_LOG2: tl.constexpr = 0.0,  # log2(lambda) * sm_scale, pre-scaled for comparison on scaled scores
-    Sparsity_total=None,  # Optional int64 scalar for counting total tiles (atomic)
-    Sparsity_skipped=None,  # Optional int64 scalar for counting skipped tiles (atomic)
-    MEASURE_SPARSITY: tl.constexpr = False,  # When True, count total/skipped tiles via atomic adds
-=======
     SKIP_THRESHOLD_LOG2: tl.constexpr = 0.0,  # Fixed mode: log2(lambda) * sm_scale, pre-scaled for scaled scores
     USE_SKIP_SCALE_FACTOR: tl.constexpr = False,  # Scale-factor mode: threshold = scale_factor / seq_k per sequence
     SKIP_THRESHOLD_SCALE_LOG2: tl.constexpr = 0.0,  # Scale-factor mode: log2(scale_factor) * sm_scale
->>>>>>> 48eb4ea2 (First commit):modelopt/torch/kernels/triton_fa.py
+    Sparsity_total=None,  # Optional int64 scalar for counting total tiles (atomic)
+    Sparsity_skipped=None,  # Optional int64 scalar for counting skipped tiles (atomic)
+    MEASURE_SPARSITY: tl.constexpr = False,  # When True, count total/skipped tiles via atomic adds
     IS_PAGED: tl.constexpr = False,  # Whether K/V are in paged cache
     K_cache=None,  # [num_blocks, page_size, num_kv_heads, head_dim] paged K
     V_cache=None,  # [num_blocks, page_size, num_kv_heads, head_dim] paged V
@@ -367,43 +363,14 @@ def _attn_fwd(
         # just consults it under its constexpr guard.
         skip_tile = False
         if APPLY_SKIP_SOFTMAX:
-<<<<<<< HEAD:modelopt/torch/kernels/common/attention/triton_fa.py
             skip_tile = _skip_softmax_decision(
                 scores,
                 row_max,
-                SKIP_THRESHOLD_LOG2,
+                skip_threshold_log2,
                 Sparsity_total,
                 Sparsity_skipped,
                 MEASURE_SPARSITY,
             )
-=======
-            # --- Skip-softmax (BLASST, https://arxiv.org/pdf/2512.12087) ---
-            #
-            # Algorithm: During FlashAttention's block-wise computation, we
-            # maintain a running maximum m_i^(j) across blocks. If a block's
-            # local maximum ~m_i^(j) is significantly smaller than the running
-            # maximum m_i^(j):
-            #
-            #   ~m_i^(j) - m_i^(j) < ln(lambda)
-            #
-            # then exp(~m_i^(j) - m_i^(j)) < lambda ≈ 0, meaning the block's
-            # contribution to the final output is negligible. We skip the
-            # softmax computation, V load, and BMM2 computation entirely.
-            #
-            # Two modes are supported (selected by USE_SKIP_SCALE_FACTOR):
-            #   - Fixed: lambda is a constant set by the caller.
-            #   - Scale-factor: lambda = scale_factor / seq_k_per_sequence,
-            #     mirroring the PyTorch FlashSkipSoftmax calibrated path. The
-            #     per-program threshold was computed above using seq_len_kv.
-            #
-            # The threshold lives in pre-scaled log2 space so it compares
-            # directly against scaled scores (BLASST semantics on unscaled).
-            tile_row_max = tl.max(scores, 1)  # [BLOCK_M] — ~m_i^(j) (scaled)
-            # Per-row: True if row's tile max is negligible vs running max
-            can_skip = tile_row_max < (row_max + skip_threshold_log2)
-            # Per-tile: skip entire tile only if ALL rows are negligible
-            skip_tile = tl.min(can_skip.to(tl.int32)) == 1
->>>>>>> 48eb4ea2 (First commit):modelopt/torch/kernels/triton_fa.py
 
         if not skip_tile:
             # --- Online softmax update ---
@@ -853,13 +820,10 @@ class _Attention(torch.autograd.Function):
         num_sink_tokens,
         dense_window_size,
         skip_softmax_threshold,
-<<<<<<< HEAD:modelopt/torch/kernels/common/attention/triton_fa.py
         skip_softmax_raw_threshold,
         measure_sparsity,
-=======
         skip_softmax_threshold_scale_prefill,
         skip_softmax_threshold_scale_decode,
->>>>>>> 48eb4ea2 (First commit):modelopt/torch/kernels/triton_fa.py
         k_cache,
         v_cache,
         block_table,
@@ -891,33 +855,21 @@ class _Attention(torch.autograd.Function):
         # Triton tiles must be powers of 2; pad head dim
         BLOCK_D = triton.next_power_of_2(HEAD_DIM)
 
-<<<<<<< HEAD:modelopt/torch/kernels/common/attention/triton_fa.py
-        # Skip-softmax threshold in scaled log2 space for the kernel.
-        # Two modes:
-        #   1. raw_threshold: passed directly as skip_threshold_log2 (for testing)
-        #   2. lambda threshold: converted via log2(lambda) * sm_scale
-        if skip_softmax_raw_threshold is not None:
-            apply_skip = True
-            skip_threshold_log2 = skip_softmax_raw_threshold
-        elif skip_softmax_threshold is not None and skip_softmax_threshold > 0.0:
-            apply_skip = True
-            # The BLASST reference (https://arxiv.org/pdf/2512.12087) checks
-            # ln(lambda) on unscaled scores. Our kernel works in log2-scaled space
-            # (scores pre-multiplied by qk_scale = sm_scale * LOG2E), so we
-            # pre-scale: threshold_scaled = log2(lambda) * sm_scale.
-=======
         # Skip-softmax: convert threshold to scaled log2 space for the kernel.
         # The BLASST reference (https://arxiv.org/pdf/2512.12087) checks
         # ln(lambda) on unscaled scores. Our kernel works in log2-scaled space
         # (scores pre-multiplied by qk_scale = sm_scale * LOG2E), so we
         # pre-scale: threshold_scaled = log2(lambda) * sm_scale.
         #
-        # Two modes (mutually exclusive):
+        # Three modes (mutually exclusive, listed by precedence):
+        #   - Raw: skip_softmax_raw_threshold passed directly as the kernel's
+        #     ``skip_threshold_log2`` (for testing).
         #   - Fixed: skip_softmax_threshold = lambda (a constant).
         #   - Scale-factor: per-phase scale_factor; effective threshold is
         #     scale_factor / seq_k_per_sequence, computed inside the kernel.
         #     Phase is inferred here from max_input_len (decode iff == 1),
         #     matching the FlashSkipSoftmax PyTorch convention.
+        raw_mode = skip_softmax_raw_threshold is not None
         fixed_mode = skip_softmax_threshold is not None and skip_softmax_threshold > 0.0
         scale_prefill_set = (
             skip_softmax_threshold_scale_prefill is not None
@@ -938,10 +890,12 @@ class _Attention(torch.autograd.Function):
             else skip_softmax_threshold_scale_prefill
         )
         use_scale_factor = active_scale is not None and active_scale > 0.0
-        apply_skip = fixed_mode or use_scale_factor
+        apply_skip = raw_mode or fixed_mode or use_scale_factor
 
-        if fixed_mode:
->>>>>>> 48eb4ea2 (First commit):modelopt/torch/kernels/triton_fa.py
+        if raw_mode:
+            skip_threshold_log2 = skip_softmax_raw_threshold
+            skip_threshold_scale_log2 = 0.0
+        elif fixed_mode:
             skip_threshold_log2 = math.log2(skip_softmax_threshold) * sm_scale
             skip_threshold_scale_log2 = 0.0
         elif use_scale_factor:
@@ -1002,14 +956,11 @@ class _Attention(torch.autograd.Function):
             DENSE_WINDOW_SIZE=dense_window_size,
             APPLY_SKIP_SOFTMAX=apply_skip,
             SKIP_THRESHOLD_LOG2=skip_threshold_log2,
-<<<<<<< HEAD:modelopt/torch/kernels/common/attention/triton_fa.py
+            USE_SKIP_SCALE_FACTOR=use_scale_factor,
+            SKIP_THRESHOLD_SCALE_LOG2=skip_threshold_scale_log2,
             Sparsity_total=sparsity_total,
             Sparsity_skipped=sparsity_skipped,
             MEASURE_SPARSITY=do_measure,
-=======
-            USE_SKIP_SCALE_FACTOR=use_scale_factor,
-            SKIP_THRESHOLD_SCALE_LOG2=skip_threshold_scale_log2,
->>>>>>> 48eb4ea2 (First commit):modelopt/torch/kernels/triton_fa.py
             IS_PAGED=is_paged,
             K_cache=k_cache,
             V_cache=v_cache,
@@ -1179,13 +1130,10 @@ class _Attention(torch.autograd.Function):
             None,  # num_sink_tokens
             None,  # dense_window_size
             None,  # skip_softmax_threshold
-<<<<<<< HEAD:modelopt/torch/kernels/common/attention/triton_fa.py
             None,  # skip_softmax_raw_threshold
             None,  # measure_sparsity
-=======
             None,  # skip_softmax_threshold_scale_prefill
             None,  # skip_softmax_threshold_scale_decode
->>>>>>> 48eb4ea2 (First commit):modelopt/torch/kernels/triton_fa.py
             None,  # k_cache
             None,  # v_cache
             None,  # block_table
@@ -1211,13 +1159,10 @@ def attention(
     num_sink_tokens: int = 0,
     dense_window_size: int = 64,
     skip_softmax_threshold: float | None = None,
-<<<<<<< HEAD:modelopt/torch/kernels/common/attention/triton_fa.py
     skip_softmax_raw_threshold: float | None = None,
     measure_sparsity: bool = False,
-=======
     skip_softmax_threshold_scale_prefill: float | None = None,
     skip_softmax_threshold_scale_decode: float | None = None,
->>>>>>> 48eb4ea2 (First commit):modelopt/torch/kernels/triton_fa.py
     k_cache: torch.Tensor | None = None,
     v_cache: torch.Tensor | None = None,
     block_table: torch.Tensor | None = None,
@@ -1253,7 +1198,6 @@ def attention(
             softmax contribution is negligible. Tiles are skipped entirely
             (no softmax, V load, or BMM2). The threshold is applied on
             unscaled scores. Set to ``None`` or ``0`` to disable.
-<<<<<<< HEAD:modelopt/torch/kernels/common/attention/triton_fa.py
         skip_softmax_raw_threshold: Raw ``skip_threshold_log2`` value passed
             directly to the kernel without conversion. The kernel skips tiles
             where ``tile_row_max < row_max + raw_threshold``. Typical values
@@ -1264,7 +1208,6 @@ def attention(
             and skipped tiles via atomic counters. The counts are stored as
             ``_sparsity_total`` and ``_sparsity_skipped`` attributes on the
             returned output tensor.
-=======
         skip_softmax_threshold_scale_prefill: Scale-factor mode (prefill).
             When set, the effective skip threshold is computed per sequence
             as ``scale_factor / seq_k`` (matches the FlashSkipSoftmax PyTorch
@@ -1275,7 +1218,6 @@ def attention(
             Same semantics as ``skip_softmax_threshold_scale_prefill`` but
             applied when ``max_input_len == 1`` (decode). Mutually exclusive
             with ``skip_softmax_threshold``.
->>>>>>> 48eb4ea2 (First commit):modelopt/torch/kernels/triton_fa.py
         k_cache: Paged K cache [num_blocks, page_size, num_kv_heads, head_dim].
             When provided, K/V are read from paged cache via block_table
             instead of from contiguous k/v tensors.
@@ -1306,13 +1248,10 @@ def attention(
         num_sink_tokens,
         dense_window_size,
         skip_softmax_threshold,
-<<<<<<< HEAD:modelopt/torch/kernels/common/attention/triton_fa.py
         skip_softmax_raw_threshold,
         measure_sparsity,
-=======
         skip_softmax_threshold_scale_prefill,
         skip_softmax_threshold_scale_decode,
->>>>>>> 48eb4ea2 (First commit):modelopt/torch/kernels/triton_fa.py
         k_cache,
         v_cache,
         block_table,
@@ -1320,4 +1259,143 @@ def attention(
     )
 
 
-__all__ = ["LOG2E", "_apply_mask", "attention"]
+def attention_with_lse(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    b_start_loc: torch.Tensor,
+    b_seq_len: torch.Tensor,
+    max_input_len: int,
+    is_causal: bool = True,
+    softmax_scale: float | None = None,
+    b_start_loc_k: torch.Tensor | None = None,
+    b_seq_len_k: torch.Tensor | None = None,
+    max_input_len_k: int | None = None,
+    *,
+    sparsity_n: int = 0,
+    sparsity_m: int = 4,
+    num_sink_tokens: int = 0,
+    dense_window_size: int = 64,
+    skip_softmax_threshold: float | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Variable-length flash attention returning both output and LSE.
+
+    Same interface as :func:`attention` but returns ``(output, lse)`` where
+    *lse* is the log-sum-exp in **natural-log** space with shape
+    ``[total_q_tokens, num_q_heads]``.  Intended for inference workloads that
+    need LSE for attention-state merging (e.g. MLA chunked prefill).
+
+    This function does **not** support paged KV cache or autograd — use the
+    contiguous Q/K/V path only.
+
+    Args:
+        q: [total_q_tokens, num_q_heads, head_dim]
+        k: [total_kv_tokens, num_kv_heads, head_dim]
+        v: [total_kv_tokens, num_kv_heads, head_dim]
+        b_start_loc: [batch] start offset of each Q sequence in the flat tensor.
+        b_seq_len: [batch] length of each Q sequence.
+        max_input_len: Maximum Q sequence length (for grid sizing).
+        is_causal: Whether to apply causal masking.
+        softmax_scale: Scale factor (default: 1/sqrt(head_dim)).
+        b_start_loc_k: [batch] start offset for K/V (None = same as Q).
+        b_seq_len_k: [batch] length for K/V (None = same as Q).
+        max_input_len_k: Maximum K/V sequence length (None = same as Q).
+        sparsity_n: N:M sparsity — keep top-N of every M attention scores.
+        sparsity_m: N:M sparsity — group size (4 or 8).
+        num_sink_tokens: KV positions before this index are kept dense.
+        dense_window_size: Tokens near the query diagonal kept dense.
+        skip_softmax_threshold: BLASST threshold lambda.
+
+    Returns:
+        (output, lse):
+            output: [total_q_tokens, num_q_heads, head_dim]
+            lse: [total_q_tokens, num_q_heads] in natural-log space
+    """
+    sm_scale = 1.0 / (q.shape[2] ** 0.5) if softmax_scale is None else softmax_scale
+
+    HEAD_DIM = q.shape[2]
+    num_q_heads = q.shape[1]
+    num_kv_heads = k.shape[1]
+    kv_group_num = num_q_heads // num_kv_heads
+    batch = b_seq_len.shape[0]
+
+    if b_seq_len_k is None:
+        b_seq_len_k = b_seq_len
+        b_start_loc_k = b_start_loc
+
+    if b_start_loc_k is None:
+        b_start_loc_k = torch.zeros_like(b_start_loc)
+
+    qk_scale = sm_scale * LOG2E
+    BLOCK_D = triton.next_power_of_2(HEAD_DIM)
+
+    apply_skip = skip_softmax_threshold is not None and skip_softmax_threshold > 0.0
+    if apply_skip:
+        assert skip_softmax_threshold is not None
+        skip_threshold_log2 = math.log2(skip_softmax_threshold) * sm_scale
+    else:
+        skip_threshold_log2 = 0.0
+
+    o = torch.empty_like(q)
+    lse = torch.empty(q.shape[0], num_q_heads, device=q.device, dtype=torch.float32)
+
+    def grid(META):
+        return (batch, num_q_heads, triton.cdiv(max_input_len, META["BLOCK_M"]))
+
+    _attn_fwd[grid](
+        q,
+        k,
+        v,
+        qk_scale,
+        sm_scale,
+        b_start_loc,
+        b_seq_len,
+        b_start_loc_k,
+        b_seq_len_k,
+        o,
+        lse,
+        q.stride(0),
+        q.stride(1),
+        k.stride(0),
+        k.stride(1),
+        v.stride(0),
+        v.stride(1),
+        o.stride(0),
+        o.stride(1),
+        lse.stride(0),
+        lse.stride(1),
+        N_CTX=max_input_len,
+        kv_group_num=kv_group_num,
+        BLOCK_D=BLOCK_D,
+        IS_CAUSAL=is_causal,
+        HEAD_DIM=HEAD_DIM,
+        STORE_LSE=True,
+        SPARSITY_N=sparsity_n,
+        SPARSITY_M=sparsity_m,
+        NUM_SINK_TOKENS=num_sink_tokens,
+        DENSE_WINDOW_SIZE=dense_window_size,
+        APPLY_SKIP_SOFTMAX=apply_skip,
+        SKIP_THRESHOLD_LOG2=skip_threshold_log2,
+        IS_PAGED=False,
+        K_cache=None,
+        V_cache=None,
+        Block_table=None,
+        stride_kc_block=0,
+        stride_kc_pos=0,
+        stride_kc_head=0,
+        stride_vc_block=0,
+        stride_vc_pos=0,
+        stride_vc_head=0,
+        PAGE_SIZE=16,
+        max_blocks_per_seq=0,
+    )
+
+    # Convert LSE from log2 space to natural-log space.
+    # Kernel stores: row_max + log2(row_sum) where row_max is in log2-scaled space.
+    # Standard LSE = stored_lse * ln(2).
+    lse.mul_(math.log(2))
+
+    return o, lse
+
+
+__all__ = ["LOG2E", "_apply_mask", "attention", "attention_with_lse"]

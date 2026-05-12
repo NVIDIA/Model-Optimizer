@@ -725,11 +725,8 @@ __all__ = [
     "SKIP_SOFTMAX_DEFAULT",
     "SKIP_SOFTMAX_TRITON_DEFAULT",
     "SPARSE_SOFTMAX_DEFAULT",
-<<<<<<< HEAD
-    "VSA_DEFAULT",
-=======
     "SPARSE_SOFTMAX_SKIP_DEFAULT",
->>>>>>> 48eb4ea2 (First commit)
+    "VSA_DEFAULT",
     "CalibrationConfig",
     "FlashSkipSoftmaxConfig",
     "SparseAttentionAttributeConfig",
