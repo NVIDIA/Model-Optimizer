@@ -60,6 +60,20 @@ jobs:
         with:
           fetch-depth: 1
 
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install and enable pre-commit hooks
+        # Installs the git hook so any `git commit` Claude runs is
+        # subject to the same lint/format/license-header checks as a
+        # local developer commit — preventing PRs that fail CI on
+        # code-quality.
+        run: |
+          pip install pre-commit
+          pre-commit install
+
       - name: Run Claude
         uses: anthropics/claude-code-action@v1
         env:
@@ -74,5 +88,5 @@ jobs:
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           claude_args: |
-            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr create:*),Bash(gh issue view:*),Bash(gh issue comment:*),Bash(git diff:*),Bash(git show:*),Bash(git log:*),Bash(git checkout:*),Bash(git add:*),Bash(git commit:*),Bash(git push:*),Read,Edit,Write,Grep,Glob"
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr create:*),Bash(gh issue view:*),Bash(gh issue comment:*),Bash(git diff:*),Bash(git show:*),Bash(git log:*),Bash(git status:*),Bash(git checkout:*),Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(pre-commit:*),Read,Edit,Write,Grep,Glob"
             --model "${{ vars.CLAUDE_MODEL }}"
