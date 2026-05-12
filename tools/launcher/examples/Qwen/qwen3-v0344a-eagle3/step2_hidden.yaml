@@ -1,0 +1,33 @@
+# Hidden-state dump launcher for qwen3-v0344a-eagle3 (EAGLE3 step2).
+#
+# Standalone task extracted from the monolithic hf_offline_eagle3 pipeline.
+# Writes hidden states to /scratchspace/offline_hidden_states for step3.
+#
+# Usage:
+#   uv run slurm.py --yaml examples/Qwen/qwen3-v0344a-eagle3/step2_hidden.yaml --dry-run
+
+job_name: qwen3-v0344a-eagle3_EAGLE3_hidden_dump
+pipeline:
+  allow_to_fail: false
+  skip: false
+  note:
+
+  global_vars:
+    hf_model: /hf-local/Qwen/qwen3-v0344a-eagle3
+
+  task_0:
+    script: common/eagle3/dump_offline_data.sh
+    args:
+      - --input-data /scratchspace/data
+      - --output-dir /scratchspace/offline_hidden_states
+      - --max-seq-len 8192
+      - --tp 8
+      - --moe-ep 8
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 8
+      gpus_per_node: 8
+      container: nvcr.io/nvidia/tensorrt-llm/release:1.2.0
