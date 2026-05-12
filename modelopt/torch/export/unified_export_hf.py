@@ -1134,6 +1134,19 @@ def _unpatch_revert_weight_conversion(patches: list[tuple[Any, Any]]) -> None:
         mod.revert_weight_conversion = original
 
 
+def _sanitize_generation_config_for_save(model: torch.nn.Module) -> None:
+    """Force ``do_sample=True`` when generation_config has ``top_k``/``top_p`` set.
+
+    Newer transformers reject ``do_sample=False`` mixed with sampling attrs in
+    ``save_pretrained``'s strict validate.
+    """
+    gc = getattr(model, "generation_config", None)
+    if gc is None:
+        return
+    if getattr(gc, "top_k", None) is not None or getattr(gc, "top_p", None) is not None:
+        gc.do_sample = True
+
+
 def export_speculative_decoding(
     model: torch.nn.Module,
     dtype: torch.dtype | None = None,
@@ -1227,6 +1240,8 @@ def export_hf_checkpoint(
         # We must patch both the source module and the importing module since
         # modeling_utils does `from core_model_loading import revert_weight_conversion`.
         _patches = _patch_revert_weight_conversion()
+
+        _sanitize_generation_config_for_save(model)
 
         try:
             model.save_pretrained(
