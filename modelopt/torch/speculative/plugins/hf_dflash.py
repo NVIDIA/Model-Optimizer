@@ -322,7 +322,7 @@ class HFDFlashModel(DFlashModel):
             base_logits: Base model logits for KD loss [B, seq_len, vocab], or None for CE.
 
         Returns:
-            (loss, accuracy) tuple.
+            (loss, accuracy) tuple.yes. 
         """
         bsz, seq_len = input_ids.shape
         block_size = self.dflash_block_size
@@ -383,13 +383,26 @@ class HFDFlashModel(DFlashModel):
             with torch.no_grad():
                 preds = flat_logits.argmax(dim=-1)
                 correct = (preds == flat_targets) & (binary_eval_mask > 0.5)
-                accuracy = correct.sum().float() / (binary_eval_mask.sum() + 1e-6)
-                accuracy = accuracy.item()
+                accuracy = (correct.sum().float() / (binary_eval_mask.sum() + 1e-6)).item()
+
+                # Simulated accept length: per kept block, count consecutive correct
+                # predictions from pos 1 until the first miss (or end of block).
+                # Range: [0, block_size - 1]. Averaged over block_keep_mask blocks.
+                correct_3d = correct.view(bsz, n_blocks, block_size).float()
+                cumprod = torch.cumprod(correct_3d[..., 1:], dim=-1)
+                per_block_accept_len = cumprod.sum(dim=-1)
+                kept_f = block_keep_mask.float()
+                sim_accept_len = (
+                    (per_block_accept_len * kept_f).sum() / (kept_f.sum() + 1e-6)
+                ).item()
+
+                stats = {"sim_accept_len": sim_accept_len}
         else:
             loss = flat_logits.sum() * 0.0
             accuracy = 0.0
+            stats = {"sim_accept_len": 0.0}
 
-        return loss, accuracy
+        return loss, accuracy, stats
 
     def forward(
         self,
@@ -495,7 +508,13 @@ class HFDFlashModel(DFlashModel):
         if n_blocks == 0 or not block_keep_mask.any():
             # Zero loss that still flows through dflash_module for DDP gradient sync
             dummy = self.dflash_module.fc.weight.sum() * 0.0
-            return ModelOutput(loss=dummy, logits=base_outputs.logits, train_acc=[[0.0]])
+            empty_stats = {"sim_accept_len": 0.0}
+            return ModelOutput(
+                loss=dummy,
+                logits=base_outputs.logits,
+                train_acc=[[0.0]],
+                train_stats=empty_stats,
+            )
 
         # 4. Build draft inputs
         noise_embedding = self._build_noise_embedding(
@@ -516,7 +535,7 @@ class HFDFlashModel(DFlashModel):
 
         # 6. Compute loss and accuracy
         logits = self._base_model_lm_head(hidden)
-        loss, accuracy = self._compute_loss(
+        loss, accuracy, train_stats = self._compute_loss(
             logits,
             input_ids,
             anchor_positions,
@@ -529,6 +548,7 @@ class HFDFlashModel(DFlashModel):
             loss=loss,
             logits=base_outputs.logits,
             train_acc=[[accuracy]],
+            train_stats=train_stats,
         )
 
     @torch.no_grad()

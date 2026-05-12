@@ -1,0 +1,10 @@
+chat_template_args:
+  thinking: true
+engine_args:
+  mem_fraction_static: 0.9
+  speculative_num_draft_tokens: 8
+  # cuda_graph_max_bs: 128
+  speculative_dflash_draft_window_size: 4096
+  disable_cuda_graph: true
+sampling_kwargs:
+  temperature: 0

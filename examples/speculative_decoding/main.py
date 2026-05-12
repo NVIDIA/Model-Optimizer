@@ -53,7 +53,7 @@ from modelopt.torch.speculative.config import DFlashConfig, EagleConfig
 from modelopt.torch.speculative.utils import load_vlm_or_llm, patch_transformers5_params_loading
 from modelopt.torch.utils import print_rank_0
 
-torch.manual_seed(0)
+torch.manual_seed(3)
 mto.enable_huggingface_checkpointing()
 
 
@@ -250,6 +250,9 @@ def train():
 
     checkpoint = training_args.resume_from_checkpoint or last_checkpoint
 
+    #NOTE: patch for k25 dflash
+    # checkpoint=None
+
     use_offline_training = data_args.offline_data_path is not None
 
     if checkpoint:
@@ -370,7 +373,15 @@ def train():
     )
 
     print_rank_0("Start training...")
-    trainer.train(resume_from_checkpoint=checkpoint)
+    # trainer.train(resume_from_checkpoint=checkpoint)
+    #NOTE:patch for k25 dflash
+    trainer.create_optimizer_and_scheduler(num_training_steps=training_args.max_steps)
+    optimizer_path = os.path.join(checkpoint, "optimizer.pt")
+    trainer.optimizer.load_state_dict(torch.load(optimizer_path, map_location="cpu"))
+    for param_group in trainer.optimizer.param_groups:
+        param_group["lr"] = training_args.learning_rate
+    print_rank_0(f"Loaded optimizer from {optimizer_path}")
+    trainer.train() #NOTE: patch for k25 dflash
     trainer.save_state()
     trainer.save_model(training_args.output_dir)
 
