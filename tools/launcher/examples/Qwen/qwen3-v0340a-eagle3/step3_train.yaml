@@ -1,0 +1,40 @@
+# Step 3 — offline EAGLE3 draft-head training for `qwen3-v0340a-eagle3` (qwen family).
+#
+# Extracted from the monolithic 4-task pipeline:
+#   tools/launcher/examples/Qwen/Qwen3-8B/hf_offline_eagle3.yaml (task_2)
+#
+# This file is a complete `pipeline:` block with exactly one task so that
+# `slurm.py --dry-run` validates cleanly.
+#
+# step3_train reads from `/scratchspace/offline_hidden_states` (output of step2).
+# When step3 runs as a separate Slurm job from step2, the scratchspace must
+# persist across both. If a dry-run surfaces a "path not found" error reading
+# hidden states, the workflow may need a shared NFS / S3 staging path — do not
+# silently work around it.
+
+job_name: qwen3-v0340a-eagle3_EAGLE3_train
+
+pipeline:
+  allow_to_fail: false
+  skip: false
+  note:
+
+  global_vars:
+    hf_model: /hf-local/Qwen/qwen3-v0340a-eagle3
+
+  task_0:
+    script: common/eagle3/train_eagle.sh
+    args:
+      - --config modules/Model-Optimizer/modelopt_recipes/general/speculative_decoding/eagle3.yaml
+      - model.model_name_or_path=<<global_vars.hf_model>>
+      - data.offline_data_path=/scratchspace/offline_hidden_states
+      - training.output_dir=/scratchspace/eagle3
+      - training.training_seq_len=4096
+      - training.disable_tqdm=true
+      - training.ar_validate_steps=500000
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 8
+      container: nvcr.io/nvidia/tensorrt-llm/release:1.2.0
