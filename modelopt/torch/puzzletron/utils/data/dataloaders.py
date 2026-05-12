@@ -118,7 +118,7 @@ def create_train_dataloader(
         if isinstance(train_data, datasets.IterableDataset):
             train_data = train_data.shuffle(seed=shuffle_seed)
         else:
-            train_data = train_data.shuffle(seed=shuffle_seed, keep_in_memory=True)
+            train_data = train_data.shuffle(seed=shuffle_seed, keep_in_memory=keep_in_memory)
 
     train_dataset = ConstantLengthDataset(
         tokenizer,

@@ -493,6 +493,9 @@ def batched_normalized_mse_loss(
     input_shape = tuple(input.shape)
     target_shape = tuple(target.shape)
 
+    if epsilon <= 0:
+        raise ValueError(f"epsilon must be strictly positive, got {epsilon!r}")
+
     try:
         raw_batch_dims = tuple(operator.index(dim) for dim in batch_dims)
     except TypeError as exc:
@@ -528,7 +531,8 @@ def batched_normalized_mse_loss(
         )
     if input_shape != target_shape:
         mismatched_dims = tuple(
-            dim for dim, (input_size, target_size) in enumerate(zip(input_shape, target_shape))
+            dim
+            for dim, (input_size, target_size) in enumerate(zip(input_shape, target_shape))
             if input_size != target_size
         )
         raise ValueError(
