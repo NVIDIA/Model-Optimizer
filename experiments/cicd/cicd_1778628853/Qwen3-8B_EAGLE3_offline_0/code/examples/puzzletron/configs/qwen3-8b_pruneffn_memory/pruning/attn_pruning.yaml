@@ -1,0 +1,16 @@
+defaults:
+  - pruning_defaults
+
+activations_log_dir: ${puzzle_dir}/pruning/pruning_scores/attn_${pruning.activation_hooks_kwargs.method}/${pruning.experiment_id}
+
+activation_hooks_kwargs:
+  method: independent_kv_head_contribution
+  optimize_for: memory    # IndependentKvHeadContributionHook implementation that consumes less memory
+  target_layer: "self_attn.o_proj"
+  layer_input_descriptors_path:
+
+# n_heads_in_group: 4
+# num_attention_heads: 32       # num query heads
+# num_kv_heads: 32 / 4 = 8      # num_query_heads // n_heads_in_group
+n_heads_in_group_list: [8, 16, 32]      # num_kv_heads = [4, 2, 1]
+gqa_init_mode: "PruneKVHeads"

@@ -1,0 +1,104 @@
+_target_: nemo_run.core.execution.slurm.SlurmExecutor
+account: ''
+additional_parameters: null
+array: null
+comment: null
+constraint: null
+container_env: null
+container_image: nvcr.io/nvidia/tensorrt-llm/release:1.2.0
+container_mounts:
+- /hf-local:/hf-local
+- /home/omniml_data_3/cicd/cicd/cicd_1778628853:/scratchspace
+- /home/omniml_data_3/cicd/cicd/cicd_1778628853/Qwen3-8B_EAGLE3_offline_1/code/modules/Model-Optimizer/modelopt:/usr/local/lib/python3.12/dist-packages/modelopt
+- /home/omniml_data_3/cicd/cicd/cicd_1778628853/Qwen3-8B_EAGLE3_offline_1/code/modules/Model-Optimizer/modelopt_recipes:/usr/local/lib/python3.12/dist-packages/modelopt_recipes
+- /home/omniml_data_3/cicd/cicd:/cicd
+cpus_per_gpu: null
+cpus_per_task: null
+dependencies: []
+dependency_type: afterok
+env_vars: {}
+exclude: null
+exclusive: null
+experiment_id: cicd_1778628853
+gpus_per_node: 8
+gpus_per_task: null
+gres: null
+het_group_indices: null
+heterogeneous: false
+job_details:
+  _target_: nemo_run.core.execution.slurm.SlurmJobDetails
+  folder: null
+  job_name: null
+  ray_log_prefix: ray-
+job_dir: /tmp/pensieve-intern-agent-q88wspea/target/experiments/cicd/cicd_1778628853/Qwen3-8B_EAGLE3_offline_1
+job_name_prefix: null
+launcher:
+  _target_: nemo_run.core.execution.launcher.Launcher
+  nsys_extra_args:
+  - --force-overwrite=true
+  - --capture-range=cudaProfilerApi
+  - --capture-range-end=stop
+  - --cuda-graph-trace=node
+  - --cuda-event-trace=false
+  nsys_filename: profile_%p
+  nsys_folder: nsys_profile
+  nsys_gpu_metrics: false
+  nsys_profile: false
+  nsys_trace:
+  - nvtx
+  - cuda
+mem: '0'
+mem_per_cpu: null
+mem_per_gpu: null
+memory_measure: false
+monitor_group_job: true
+monitor_group_job_wait_time: 60
+network: null
+nodes: 1
+ntasks_per_node: 8
+open_mode: append
+packager:
+  _target_: nemo_run.core.packaging.pattern.PatternPackager
+  debug: false
+  include_pattern:
+  - modelopt/*
+  - modelopt_recipes/*
+  - tests/*
+  - examples/*
+  - pyproject.toml
+  - tools/launcher/common/*
+  - tools/launcher/examples/*
+  - tools/*
+  relative_path:
+  - /tmp/pensieve-intern-agent-q88wspea/target
+  - /tmp/pensieve-intern-agent-q88wspea/target
+  - /tmp/pensieve-intern-agent-q88wspea/target
+  - /tmp/pensieve-intern-agent-q88wspea/target
+  - /tmp/pensieve-intern-agent-q88wspea/target
+  - /tmp/pensieve-intern-agent-q88wspea/target
+  - /tmp/pensieve-intern-agent-q88wspea/target
+  - /tmp/pensieve-intern-agent-q88wspea/target
+  symlink_from_remote_dir: null
+partition: batch
+poll_estimated_start_time: true
+qos: null
+ray_template: ray.sub.j2
+retries: 0
+segment: null
+setup_lines: null
+signal: null
+srun_args:
+- --no-container-mount-home
+time: 04:00:00
+torchrun_nproc_per_node: null
+tunnel:
+  _target_: nemo_run.core.tunnel.client.SSHTunnel
+  host: ''
+  identity: null
+  job_dir: /home/omniml_data_3/cicd/cicd/cicd_1778628853
+  packaging_jobs: {}
+  port: 22
+  pre_command: null
+  shell: null
+  user: root
+wait_time_for_group_job: 30
