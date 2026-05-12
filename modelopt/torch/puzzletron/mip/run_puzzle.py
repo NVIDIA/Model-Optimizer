@@ -81,6 +81,7 @@ class PuzzleConstraints:
         "target_throughput",
         "target_latency",
         "target_time_to_first_token",
+        "target_num_kv_heads",
         "num_params",
         "stats.has_attention",
     }
@@ -166,6 +167,10 @@ class PuzzleConstraints:
         # Memory constraints
         if "target_memory" in self.constraints:
             mip_constraints["stats.memory_mib"] = self.constraints["target_memory"]
+
+        # Total KV-heads constraint (sum across attention layers; used for KV-cache-only sweeps)
+        if "target_num_kv_heads" in self.constraints:
+            mip_constraints["stats.num_kv_heads"] = self.constraints["target_num_kv_heads"]
 
         # Throughput constraints
         throughput_constraints = []
