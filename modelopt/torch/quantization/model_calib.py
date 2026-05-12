@@ -391,7 +391,9 @@ def mse_calibrate(
                         continue
 
                 if fp8_scale_sweep and is_nvfp4_static:
-                    # Replace calibrator with NVFP4MSECalibrator
+                    # NVFP4MSECalibrator internally selects a fused Triton kernel for
+                    # the standard squared-error sweep; set MODELOPT_NVFP4_TRITON_SWEEP=0
+                    # to force the reference Python sweep for debugging.
                     module._calibrator = NVFP4MSECalibrator(
                         amax=initial_amax,
                         axis=module._calibrator._axis,
@@ -1316,6 +1318,21 @@ def awq_lite(
                     dtype=w_dtype,
                     device=w_device,
                 )
+                # Mirror the calibrated postprocess path, gated on
+                # is_input_quantized so weight-only AWQ configs (where
+                # setup() never disabled input_quantizer) stay untouched.
+                # Collapse any per-channel _amax left over from cache_mode
+                # max_calibrate into a per-tensor scalar so
+                # preprocess_linear_fusion's numel==1 assertion passes, and
+                # re-enable the quantizer (awq_lite.setup disabled it).
+                if module.awq_lite.is_input_quantized:
+                    if module.input_quantizer.amax is not None:
+                        act_amax = module.input_quantizer.amax
+                        module.input_quantizer._amax_for_smoothing = act_amax.cpu()
+                        module.input_quantizer.reset_amax()
+                        module.input_quantizer.axis = None
+                        module.input_quantizer.amax = act_amax.amax()
+                    module.input_quantizer.enable()
             else:
                 with enable_weight_access_and_writeback(module, model, name_to_module):
                     postprocess(module, name)
