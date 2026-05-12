@@ -32,14 +32,31 @@ __all__ = [
 ]
 
 
-def warmup_steps(tokens: int, block: int, mbs: int, pct: float = 0.05) -> int:
+def warmup_steps(tokens: int, block: int, mbs: int, grad_accum: int, pct: float) -> int:
     """
-    Calculate warmup steps based on total tokens, block size, micro batch size, and warmup percentage.
-    Used as a resolver in hydra configs.
+    Calculate warmup steps in optimizer-step units.
+
+    total_iters = tokens / (block * mbs) gives micro-batches; one optimizer step
+    consumes ``grad_accum`` micro-batches, so total optimizer steps = total_iters
+    / grad_accum. The LR scheduler in ``_get_lr`` is indexed by ``step_num``
+    (optimizer steps), so warmup must be in the same units.
     """
-    steps = (int(tokens) // int(block)) // int(mbs)
+    grad_accum = int(grad_accum)
+    if grad_accum < 1:
+        raise ValueError(f"grad_accum must be >= 1, got {grad_accum!r}")
+    iters = (int(tokens) // int(block)) // int(mbs)
+    steps = max(1, iters // grad_accum)
     w = pct * steps
     return max(1, round(w))
+
+
+def _warmup_steps_resolver(*args):
+    if len(args) != 5:
+        raise ValueError(
+            "warmup_steps resolver expects exactly 5 arguments: "
+            "(tokens, block, micro_batch_size, grad_accumulation_steps, warmup_ratio)"
+        )
+    return warmup_steps(*args)
 
 
 def register_hydra_resolvers():
@@ -50,7 +67,7 @@ def register_hydra_resolvers():
     OmegaConf.register_new_resolver(
         "timedelta_minutes", lambda x: datetime.timedelta(minutes=x) if x is not None else None
     )
-    OmegaConf.register_new_resolver("warmup_steps", lambda t, b, m, p: warmup_steps(t, b, m, p))
+    OmegaConf.register_new_resolver("warmup_steps", _warmup_steps_resolver)
     OmegaConf.register_new_resolver("get_object", lambda x: get_object(x))
 
 

@@ -128,7 +128,14 @@ class ConstantLengthDataset(IterableDataset):
                             and {"content", "role"}.issubset(sample[0])
                         ):
                             if len(sample) > 1:
-                                sample = self.tokenizer.apply_chat_template(sample, tokenize=False)
+                                if getattr(self.tokenizer, "chat_template", None) is not None:
+                                    sample = self.tokenizer.apply_chat_template(
+                                        sample, tokenize=False
+                                    )
+                                else:
+                                    # Base models have no chat template — concatenate message
+                                    # contents separated by newlines as plain text.
+                                    sample = "\n".join(m["content"] for m in sample)
                             else:
                                 sample = sample[0]["content"]
                     else:
