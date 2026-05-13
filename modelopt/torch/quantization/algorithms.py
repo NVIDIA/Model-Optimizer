@@ -1094,10 +1094,8 @@ class AutoQuantizeGradientSearcher(_AutoQuantizeBaseSearcher):
         return best_recipes, is_satisfied
 
 
-# TODO: Enable torch compile for this function
-# Currently modelopt.onnx is breaking this
+@torch.compile(dynamic=True)
 def _get_log_softmax_dist(logits: torch.Tensor, tp_group) -> torch.Tensor:
-    # TODO: test this
     dtype = logits.dtype
     max_logits = torch.amax(logits, dim=-1, keepdim=True)
     torch.distributed.all_reduce(max_logits, op=torch.distributed.ReduceOp.MAX, group=tp_group)
