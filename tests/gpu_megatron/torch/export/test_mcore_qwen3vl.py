@@ -142,7 +142,7 @@ class TestQwen3VLImportMapping:
         assert mapping.func_kwargs == REPLICATE
 
     @pytest.mark.parametrize(
-        "key,expected_kwargs",
+        ("key", "expected_kwargs"),
         [
             ("word_embeddings", COL_TP),
             ("output_layer", COL_TP),
