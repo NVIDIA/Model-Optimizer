@@ -318,6 +318,22 @@ class LogitsKLLoss(BaseLoss):
         """
         predictions, targets = self.pre_forward(predictions, targets)
 
+        if torch.distributed.is_initialized() and torch.distributed.get_rank() == 0:
+            if not hasattr(self, "_dbg_call"):
+                self._dbg_call = 0
+            with torch.no_grad():
+                s = predictions.float()
+                t = targets.float()
+                print(
+                    f"[LogitsKLLoss call={self._dbg_call}] "
+                    f"student: mean={s.mean().item():.5f} std={s.std().item():.5f} "
+                    f"min={s.min().item():.3f} max={s.max().item():.3f} shape={tuple(predictions.shape)} | "
+                    f"teacher: mean={t.mean().item():.5f} std={t.std().item():.5f} "
+                    f"min={t.min().item():.3f} max={t.max().item():.3f}",
+                    flush=True,
+                )
+            self._dbg_call += 1
+
         # Division by temp should happen prior to finding max for both student and teacher.
         output_teacher = targets.float() / self._temperature
         output_student = predictions.float() / self._temperature
