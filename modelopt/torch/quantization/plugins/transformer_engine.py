@@ -18,6 +18,8 @@
 import copy
 import os
 import inspect
+import copy
+import os
 import warnings
 
 import torch
@@ -196,8 +198,9 @@ class _QuantTEGroupedLinear(_ParallelLinear):
 
         new_args = list(args)
         new_args[inp_pos] = self.input_quantizer(args[inp_pos])
-        for i in range(weights_start, weights_start + num_gemms):
-            new_args[i] = self.weight_quantizer(args[i])
+        for gemm_idx in range(num_gemms):
+            pos = weights_start + gemm_idx
+            new_args[pos] = self._get_weight_quantizer(gemm_idx)(args[pos])
         output = getattr(package, func_name)(*new_args)
         # TE 2.15+ returns `(out, new_workspaces)`; TE <= 2.14 returns just `out`.
         # Only the activation tensor participates in output quantization.
