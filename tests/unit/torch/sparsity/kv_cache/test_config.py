@@ -25,44 +25,24 @@ def test_budget_only():
     """Setting only budget is valid."""
     config = TriAttentionConfig(budget=2048)
     assert config.budget == 2048
-    assert config.target_sparsity_ratio is None
 
 
-def test_target_sparsity_only():
-    """Setting only target_sparsity_ratio is valid."""
-    config = TriAttentionConfig(target_sparsity_ratio=0.7)
-    assert config.budget is None
-    assert config.target_sparsity_ratio == 0.7
-
-
-def test_both_budget_and_sparsity_raises():
-    """Setting both budget and target_sparsity_ratio raises."""
-    with pytest.raises(ValidationError, match="Cannot set both"):
+def test_target_sparsity_ratio_is_not_supported():
+    """Ratio-based eviction is not part of the TriAttention API."""
+    with pytest.raises(ValidationError):
         TriAttentionConfig(budget=2048, target_sparsity_ratio=0.7)
 
 
-def test_neither_budget_nor_sparsity_raises():
-    """Setting neither budget nor target_sparsity_ratio raises."""
-    with pytest.raises(ValidationError, match="Must set exactly one"):
+def test_missing_budget_raises():
+    """TriAttention requires an explicit budget."""
+    with pytest.raises(ValidationError, match="requires 'budget'"):
         TriAttentionConfig()
 
 
-def test_target_sparsity_out_of_range_low():
-    """target_sparsity_ratio <= 0 raises."""
-    with pytest.raises(ValidationError, match="must be in"):
-        TriAttentionConfig(target_sparsity_ratio=0.0)
-
-
-def test_target_sparsity_out_of_range_high():
-    """target_sparsity_ratio >= 1 raises."""
-    with pytest.raises(ValidationError, match="must be in"):
-        TriAttentionConfig(target_sparsity_ratio=1.0)
-
-
-def test_target_sparsity_negative():
-    """Negative target_sparsity_ratio raises."""
-    with pytest.raises(ValidationError):
-        TriAttentionConfig(target_sparsity_ratio=-0.1)
+def test_non_positive_budget_raises():
+    """Budget must be positive."""
+    with pytest.raises(ValidationError, match="budget must be positive"):
+        TriAttentionConfig(budget=0)
 
 
 def test_config_custom_values():
@@ -91,17 +71,6 @@ def test_config_serialization_roundtrip_budget():
     data = config.model_dump()
     restored = TriAttentionConfig(**data)
     assert restored.budget == 1024
-    assert restored.target_sparsity_ratio is None
-    assert restored.prune_interval == 64
-
-
-def test_config_serialization_roundtrip_sparsity():
-    """Config with target_sparsity_ratio survives serialization roundtrip."""
-    config = TriAttentionConfig(target_sparsity_ratio=0.5, prune_interval=64)
-    data = config.model_dump()
-    restored = TriAttentionConfig(**data)
-    assert restored.budget is None
-    assert restored.target_sparsity_ratio == 0.5
     assert restored.prune_interval == 64
 
 

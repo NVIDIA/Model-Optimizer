@@ -207,38 +207,18 @@ def test_select_keys_top_k_exceeds_size():
     assert mask.shape == scores.shape
 
 
-def test_select_keys_percentile_basic():
-    """Percentile selection evicts target fraction."""
-    scores = torch.arange(10, dtype=torch.float32)
-    # sparsity=0.7 → evict 70%, keep top 30% (3 tokens)
-    mask = select_keys_to_keep(scores, target_sparsity_ratio=0.7)
-    assert mask.dtype == torch.bool
-    assert mask.sum().item() == 3
-    # Top 3 by score are indices 7, 8, 9
-    assert mask[7].item() is True
-    assert mask[8].item() is True
-    assert mask[9].item() is True
-
-
-def test_select_keys_percentile_half():
-    """50% sparsity keeps half the tokens."""
-    scores = torch.arange(20, dtype=torch.float32)
-    mask = select_keys_to_keep(scores, target_sparsity_ratio=0.5)
-    assert mask.sum().item() == 10
-
-
-def test_select_keys_both_raises():
-    """Setting both budget and target_sparsity_ratio raises."""
+def test_select_keys_missing_budget_raises():
+    """Budget is required for selection."""
     scores = torch.rand(10)
-    with pytest.raises(ValueError, match="exactly one"):
-        select_keys_to_keep(scores, kv_budget=5, target_sparsity_ratio=0.5)
-
-
-def test_select_keys_neither_raises():
-    """Setting neither budget nor target_sparsity_ratio raises."""
-    scores = torch.rand(10)
-    with pytest.raises(ValueError, match="exactly one"):
+    with pytest.raises(ValueError, match="requires kv_budget"):
         select_keys_to_keep(scores)
+
+
+def test_select_keys_non_positive_budget_raises():
+    """Budget must be positive."""
+    scores = torch.rand(10)
+    with pytest.raises(ValueError, match="must be positive"):
+        select_keys_to_keep(scores, kv_budget=0)
 
 
 def test_select_keys_empty_scores():

@@ -92,20 +92,8 @@ def test_update_metadata():
     assert metadata["triattention_config"]["budget"] == 512
 
 
-def test_convert_metadata_with_sparsity_ratio():
-    """Metadata serializes target_sparsity_ratio when set."""
-    model = nn.Linear(16, 16)
-    config = TriAttentionConfig(target_sparsity_ratio=0.7)
-
-    _, metadata = convert_triattention(model, config)
-
-    serialized = metadata["triattention_config"]
-    assert serialized["target_sparsity_ratio"] == 0.7
-    assert serialized["budget"] is None
-
-
 def test_convert_metadata_with_budget():
-    """Metadata has budget set and target_sparsity_ratio None."""
+    """Metadata has budget set."""
     model = nn.Linear(16, 16)
     config = TriAttentionConfig(budget=1024)
 
@@ -113,16 +101,3 @@ def test_convert_metadata_with_budget():
 
     serialized = metadata["triattention_config"]
     assert serialized["budget"] == 1024
-    assert serialized["target_sparsity_ratio"] is None
-
-
-def test_update_metadata_with_sparsity_ratio():
-    """update_triattention_metadata serializes target_sparsity_ratio."""
-    model = nn.Linear(16, 16)
-    config = TriAttentionConfig(target_sparsity_ratio=0.5)
-    metadata = {}
-
-    update_triattention_metadata(model, config, metadata)
-
-    assert metadata["triattention_config"]["target_sparsity_ratio"] == 0.5
-    assert metadata["triattention_config"]["budget"] is None

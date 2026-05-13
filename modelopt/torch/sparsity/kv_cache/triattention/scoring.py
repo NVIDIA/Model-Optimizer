@@ -55,10 +55,11 @@ def compute_frequency_statistics_from_means(
 
     Args:
         q_mean_complex: Mean of Q in complex frequency domain, shape (freq_count,).
-        q_abs_mean: Mean of |Q| in frequency domain, shape (freq_count,).
+        q_abs_mean: Mean of ``|Q|`` in frequency domain, shape (freq_count,).
         k_unrot: Unrotated key vectors, shape (num_keys, head_dim).
         style: RoPE pairing style.
-        disable_mlr: If True, use q_abs_mean directly instead of (q_abs_mean - |q_mean|).
+        disable_mlr: If True, use ``q_abs_mean`` directly instead of
+            ``q_abs_mean - |q_mean|``.
 
     Returns:
         amp: Amplitude, shape (num_keys, freq_count).
@@ -135,37 +136,27 @@ def select_keys_to_keep(
     scores: torch.Tensor,
     *,
     kv_budget: int | None = None,
-    target_sparsity_ratio: float | None = None,
 ) -> torch.Tensor:
     """Select which keys to retain based on importance scores.
-
-    Exactly one of ``kv_budget`` or ``target_sparsity_ratio`` must be provided.
 
     Args:
         scores: Importance scores, shape (num_keys,). Higher = more important.
         kv_budget: Absolute number of tokens to retain. Keeps top-K.
             If budget >= num_keys, keeps all.
-        target_sparsity_ratio: Fraction of tokens to evict, in (0, 1).
-            Keeps top (1 - ratio) fraction. Example: 0.7 → keep top 30%.
 
     Returns:
         Boolean mask, shape (num_keys,). True = keep, False = evict.
     """
-    budget_set = kv_budget is not None
-    sparsity_set = target_sparsity_ratio is not None
-    if budget_set == sparsity_set:
-        raise ValueError(
-            "select_keys_to_keep requires exactly one of kv_budget or target_sparsity_ratio"
-        )
+    if kv_budget is None:
+        raise ValueError("select_keys_to_keep requires kv_budget")
+    if kv_budget <= 0:
+        raise ValueError(f"kv_budget must be positive, got {kv_budget}")
 
     num_keys = scores.shape[0]
     if num_keys == 0:
         return torch.zeros(0, dtype=torch.bool, device=scores.device)
 
-    if budget_set:
-        k = min(kv_budget, num_keys)
-    else:
-        k = max(1, round(num_keys * (1.0 - target_sparsity_ratio)))
+    k = min(kv_budget, num_keys)
 
     if k >= num_keys:
         return torch.ones(num_keys, dtype=torch.bool, device=scores.device)

@@ -33,29 +33,19 @@ class TriAttentionConfig(ModeloptBaseConfig):
     pre-RoPE Q/K concentration. Calibration computes per-head frequency statistics;
     at runtime, the serving engine scores and evicts tokens periodically.
 
-    Exactly one of ``budget`` or ``target_sparsity_ratio`` must be set:
-
-    - ``budget``: absolute token count to retain per head (fixed-size cache).
-    - ``target_sparsity_ratio``: fraction of tokens to evict at each pruning step.
-      Cache size auto-scales with generation length. Value in (0, 1).
+    ``budget`` is the absolute token count to retain per head after each pruning
+    round. Runtime compression follows slack/sawtooth semantics: grow until
+    ``budget + prune_interval`` tokens are present, then evict back to
+    ``budget``.
     """
 
-    # Eviction policy (exactly one must be set)
+    # Eviction policy
     budget: int | None = ModeloptField(
         default=None,
         title="KV token budget (absolute).",
         description=(
-            "Number of KV tokens to retain per head after pruning. "
-            "Mutually exclusive with target_sparsity_ratio."
-        ),
-    )
-    target_sparsity_ratio: float | None = ModeloptField(
-        default=None,
-        title="Target sparsity ratio (percentile-based).",
-        description=(
-            "Fraction of tokens to evict at each pruning step, in (0, 1). "
-            "Example: 0.7 means evict 70% of tokens (keep top 30% by score). "
-            "Mutually exclusive with budget."
+            "Number of KV tokens to retain per head after pruning. Runtime "
+            "compression triggers after prune_interval additional tokens."
         ),
     )
 
@@ -127,16 +117,10 @@ class TriAttentionConfig(ModeloptBaseConfig):
         return v
 
     @model_validator(mode="after")
-    def validate_budget_or_sparsity(self) -> TriAttentionConfig:
-        """Exactly one of budget or target_sparsity_ratio must be set."""
-        budget_set = self.budget is not None
-        sparsity_set = self.target_sparsity_ratio is not None
-        if not budget_set and not sparsity_set:
-            raise ValueError("Must set exactly one of 'budget' or 'target_sparsity_ratio'")
-        if budget_set and sparsity_set:
-            raise ValueError("Cannot set both 'budget' and 'target_sparsity_ratio'; pick one")
-        if sparsity_set and not (0.0 < self.target_sparsity_ratio < 1.0):
-            raise ValueError(
-                f"target_sparsity_ratio must be in (0, 1), got {self.target_sparsity_ratio}"
-            )
+    def validate_budget(self) -> TriAttentionConfig:
+        """Validate the fixed KV token budget."""
+        if self.budget is None:
+            raise ValueError("TriAttention requires 'budget' to be set")
+        if self.budget <= 0:
+            raise ValueError(f"budget must be positive, got {self.budget}")
         return self
