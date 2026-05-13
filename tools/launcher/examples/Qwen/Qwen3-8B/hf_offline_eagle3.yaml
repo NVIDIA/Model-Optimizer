@@ -53,7 +53,7 @@ pipeline:
       - --output-dir /scratchspace/offline_hidden_states
       - --max-seq-len 8192
       - --tp 8
-      - --moe-ep 8
+      - --moe-ep 1
     environment:
       - HF_MODEL_CKPT: <<global_vars.hf_model>>
     slurm_config:
