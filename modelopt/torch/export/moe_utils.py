@@ -110,11 +110,19 @@ def _export_fused_experts(module: nn.Module, dtype: torch.dtype) -> None:
                 and w_quantizer._amax.dim() >= 1
             ):
                 amax = w_quantizer._amax
+                # Per-block _amax (NVFP4 static) collapses the row axis we want
+                # to slice on; restore it so dim-0 slicing splits gate/up.
+                if amax.numel() != fused_total and amax.numel() % fused_total == 0:
+                    amax = amax.contiguous().view(fused_total, amax.numel() // fused_total)
                 amax_dim0 = amax.shape[0]
                 if fused_total % amax_dim0 == 0:
                     slice_start = fused_start * amax_dim0 // fused_total
                     slice_end = (fused_start + weight_slice.shape[0]) * amax_dim0 // fused_total
-                    w_quantizer.amax = amax[slice_start:slice_end].contiguous()
+                    sliced = amax[slice_start:slice_end].contiguous()
+                    # The amax setter refuses shape changes; drop _amax first.
+                    if hasattr(w_quantizer, "_amax"):
+                        delattr(w_quantizer, "_amax")
+                    w_quantizer.amax = sliced
                 else:
                     warnings.warn(
                         f"Expert {idx} {proj_name}: fused amax dim0 ({amax_dim0}) does not "

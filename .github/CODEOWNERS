@@ -35,7 +35,6 @@ modelopt_recipes @NVIDIA/modelopt-recipes-codeowners
 # Examples
 /README.md @NVIDIA/modelopt-examples-codeowners
 /examples @NVIDIA/modelopt-examples-codeowners
-/examples/chained_optimizations @NVIDIA/modelopt-torch-nas-prune-codeowners
 /examples/cnn_qat @NVIDIA/modelopt-examples-cnn_qat-codeowners
 /examples/deepseek @NVIDIA/modelopt-deploy-codeowners
 /examples/diffusers @NVIDIA/modelopt-examples-diffusers-codeowners

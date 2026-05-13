@@ -25,11 +25,6 @@ from torchvision.models.resnet import BasicBlock
 
 from modelopt.torch.utils import random
 
-try:
-    import transformers as tf
-except ImportError:  # unavailable for external unit tests
-    tf = None
-
 DependencyDict = dict[str, set[str]]
 DepthDict = dict[str, list[int]]
 
@@ -2088,95 +2083,6 @@ class DepthModel4(BaseExampleModel):
         return 0
 
 
-class BaseTransformerModel(BaseExampleModel):
-    def __init__(self, model_type, config):
-        super().__init__()
-        self.config = config
-        self.main = model_type(self.config).eval()
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.main(x)
-
-    def get_args(self):
-        return (self.main.dummy_inputs["input_ids"],)
-
-    def get_num_searchable_symbols(self):
-        return len(self.get_expected_dependencies())
-
-
-class BertQAModel(BaseTransformerModel):
-    def __init__(self) -> None:
-        config = tf.BertConfig(
-            vocab_size=64,
-            hidden_size=8,
-            num_hidden_layers=2,
-            num_attention_heads=4,
-            intermediate_size=16,
-            max_position_embeddings=32,
-        )
-        super().__init__(tf.BertForQuestionAnswering, config)
-
-    def get_expected_dependencies(self) -> DependencyDict:
-        return {
-            **{
-                f"main.bert.encoder.layer.{i}.attention.num_attention_heads": {
-                    f"main.bert.encoder.layer.{i}.attention.hidden_dim"
-                }
-                for i in range(self.config.num_hidden_layers)
-            },
-            **{
-                f"main.bert.encoder.layer.{i}.intermediate.dense.out_features": {
-                    f"main.bert.encoder.layer.{i}.output.dense.in_features"
-                }
-                for i in range(self.config.num_hidden_layers)
-            },
-        }
-
-    def get_num_configurable_hparams(self):
-        return 2 * self.config.num_hidden_layers  # mlp intermediate size and attn heads per layer
-
-    def get_num_sortable_hparams(self):
-        return 2 * self.config.num_hidden_layers  # mlp intermediate size and attn heads per layer
-
-
-class GPTJModel(BaseTransformerModel):
-    def __init__(self) -> None:
-        config = tf.GPTJConfig(
-            vocab_size=64,
-            n_positions=8,
-            n_embd=16,
-            n_layer=2,
-            n_head=4,
-            rotary_dim=4,
-            bos_token_id=0,
-            eos_token_id=1,
-            use_cache=False,  # Else sorting will not be correct
-        )
-        super().__init__(tf.GPTJForCausalLM, config)
-
-    def get_expected_dependencies(self) -> DependencyDict:
-        return {
-            **{
-                f"main.transformer.h.{i}.attn.num_attention_heads": {
-                    f"main.transformer.h.{i}.attn.hidden_dim"
-                }
-                for i in range(self.config.n_layer)
-            },
-            **{
-                f"main.transformer.h.{i}.mlp.fc_in.out_features": {
-                    f"main.transformer.h.{i}.mlp.fc_out.in_features"
-                }
-                for i in range(self.config.n_layer)
-            },
-        }
-
-    def get_num_configurable_hparams(self):
-        return 2 * self.config.num_hidden_layers  # mlp intermediate size and attn heads per layer
-
-    def get_num_sortable_hparams(self):
-        return 2 * self.config.num_hidden_layers  # mlp intermediate size and attn heads per layer
-
-
 def get_example_models():
     return {
         type(model).__name__: model
@@ -2238,12 +2144,4 @@ def get_example_models():
             DepthModel3(),
             DepthModel4(),
         ]
-        + (
-            [
-                BertQAModel(),
-                GPTJModel(),
-            ]
-            if tf is not None
-            else []
-        )
     }

@@ -957,13 +957,7 @@ def promote_nvfp4_static_quantizers(model: nn.Module) -> int:
     for _name, module in list(model.named_modules()):
         if isinstance(module, TensorQuantizer) and not module._disabled:
             if module._calibrator is not None and not module._dynamic and hasattr(module, "_amax"):
-                is_nvfp4_static = (
-                    module.is_static_block_quant
-                    and module._num_bits == (2, 1)
-                    and module._block_sizes is not None
-                    and module._block_sizes.get("scale_bits") == (4, 3)
-                )
-                if is_nvfp4_static:
+                if module.is_nvfp4_static:
                     initial_amax = module._amax.clone().detach()
                     global_amax = reduce_amax(initial_amax, axis=None)
                     NVFP4StaticQuantizer.from_tensor_quantizer(module, global_amax=global_amax)
