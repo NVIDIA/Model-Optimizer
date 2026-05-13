@@ -43,7 +43,7 @@ pipeline:
       nodes: 1
       ntasks_per_node: 8
       gpus_per_node: 8
-      container: nvcr.io/nvidia/tensorrt-llm/release:1.2.0
+      container: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc10
 
   # Step 2: Dump hidden states from target model
   task_1:
@@ -79,7 +79,7 @@ pipeline:
       nodes: 1
       ntasks_per_node: 1
       gpus_per_node: 8
-      container: nvcr.io/nvidia/tensorrt-llm/release:1.2.0
+      container: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc10
 
   # Step 4: Benchmark speculative decoding (VLLM backend)
   task_3:
