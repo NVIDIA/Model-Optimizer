@@ -19,7 +19,10 @@ from types import SimpleNamespace
 
 import torch
 
-from modelopt.torch.quantization.qtensor.nvfp4_tensor import NVFP4QTensor
+from modelopt.torch.quantization.qtensor.nvfp4_tensor import (
+    NVFP4QTensor,
+    _cast_per_block_scale_to_fp8,
+)
 
 _FP8_E4M3FN_MIN = 2**-9  # 0.001953125 — smallest positive FP8 E4M3FN subnormal
 _FP8_E4M3FN_MAX = 448.0
@@ -74,14 +77,14 @@ class TestNVFP4ScaleClamping:
     def test_helper_clamps_overflow_to_max(self):
         """Values above 448 must saturate to 448, not cast to NaN (fp8_e4m3fn has no Inf)."""
         oversized = torch.tensor([100.0, 448.0, 1e3, 1e6])
-        out = NVFP4QTensor._cast_per_block_scale_to_fp8(oversized).float()
+        out = _cast_per_block_scale_to_fp8(oversized).float()
         assert torch.isfinite(out).all(), f"FP8 cast produced non-finite values: {out.tolist()}"
         assert (out <= _FP8_E4M3FN_MAX).all(), f"FP8 cast values exceed 448: {out.tolist()}"
 
     def test_helper_clamps_underflow_to_min(self):
         """Values below the FP8 subnormal must clamp up, not collapse to 0."""
         tiny = torch.tensor([0.0, 1e-12, 1e-6, _FP8_E4M3FN_MIN / 2])
-        out = NVFP4QTensor._cast_per_block_scale_to_fp8(tiny).float()
+        out = _cast_per_block_scale_to_fp8(tiny).float()
         assert (out > 0).all(), f"FP8 cast produced zero scales: {out.tolist()}"
 
     def test_static_path_no_nan_when_block_amax_zero(self):

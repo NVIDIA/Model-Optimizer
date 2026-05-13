@@ -28,6 +28,11 @@ e2m1_values = torch.tensor([0, 0.5, 1, 1.5, 2, 3, 4, 6, 0, -0.5, -1, -1.5, -2, -
 __all__ = ["NVFP4QTensor"]
 
 
+def _cast_per_block_scale_to_fp8(per_block_scale: torch.Tensor) -> torch.Tensor:
+    """Clamp to FP8 E4M3FN range [2**-9, 448] and cast — avoids underflow→0 / overflow→NaN."""
+    return per_block_scale.clamp(min=2**-9, max=448.0).to(torch.float8_e4m3fn)
+
+
 class NVFP4QTensor(BaseQuantizedTensor):
     """Implements the INT4 quantization on tensors for more efficient storage or computation.
 
@@ -79,16 +84,6 @@ class NVFP4QTensor(BaseQuantizedTensor):
             return weight_quantizer._amax.float() / (6.0 * 448.0)
 
     @classmethod
-    def _cast_per_block_scale_to_fp8(cls, per_block_scale: torch.Tensor) -> torch.Tensor:
-        """Clamp to FP8 E4M3FN representable range, then cast.
-
-        FP8 E4M3FN has no Inf and a smallest positive subnormal of ``2**-9`` (~0.00195).
-        Values below the min silently underflow to 0 (zero outputs at inference); values
-        above 448 cast to NaN.
-        """
-        return per_block_scale.clamp(min=2**-9, max=448.0).to(torch.float8_e4m3fn)
-
-    @classmethod
     def get_weights_scaling_factor_from_quantizer(
         cls,
         weight_quantizer,
@@ -133,7 +128,8 @@ class NVFP4QTensor(BaseQuantizedTensor):
             per_block_scale = per_block_scale.view(expected_shape)
 
             if not keep_high_precision:
-                per_block_scale = cls._cast_per_block_scale_to_fp8(
+                # The [==0]=1.0 safety net + small global_amax can drive the pre-cast value above 448 (PR #1397).
+                per_block_scale = _cast_per_block_scale_to_fp8(
                     per_block_scale * 448.0 / per_block_scale_max
                 )
             return per_block_scale, weights_scaling_factor_2
@@ -175,7 +171,7 @@ class NVFP4QTensor(BaseQuantizedTensor):
         # Set all zero values in scale to 1.0
         per_block_scale[per_block_scale == 0] = 1.0
         if not keep_high_precision:
-            per_block_scale = cls._cast_per_block_scale_to_fp8(per_block_scale)
+            per_block_scale = _cast_per_block_scale_to_fp8(per_block_scale)
         return per_block_scale, weights_scaling_factor_2
 
     @classmethod

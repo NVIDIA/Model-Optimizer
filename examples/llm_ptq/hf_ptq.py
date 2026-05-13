@@ -833,6 +833,12 @@ def pre_quantize(
         first_non_pad = (preview_input_ids[0] != tokenizer.pad_token_id).nonzero(as_tuple=True)[0]
         if first_non_pad.numel() > 0:
             preview_input_ids = preview_input_ids[:, first_non_pad[0] :]
+        else:
+            warnings.warn(
+                "Preview calibration sample is entirely padding; generated preview will be "
+                "degenerate. Check tokenizer padding side / dataset preprocessing.",
+                stacklevel=2,
+            )
 
     # Generate preview before quantization
     if args.skip_generate:
