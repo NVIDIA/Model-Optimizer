@@ -1,0 +1,16 @@
+# GPQA Diamond (NeMo Skills, chat)
+# Primary metric: pass@1[avg-of-5] symbolic_correct
+# Run time: Short | Repeats: 5
+  - name: ns_gpqa
+    nemo_evaluator_config:
+      config:
+        params:
+          extra:
+            args: ++prompt_config=eval/aai/mcq-4choices
+            num_repeats: 5
+      target:
+        api_endpoint:
+          adapter_config:
+            params_to_remove:
+              - max_new_tokens
+              - max_completion_tokens

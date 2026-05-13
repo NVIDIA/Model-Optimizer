@@ -28,7 +28,7 @@ def use_channel_div_4():
     it would globally change the config for other tests.
     """
     # modes to patch
-    modes_to_patch = ["fastnas", "autonas", "gradnas"]
+    modes_to_patch = ["fastnas", "autonas"]
 
     # lookup to store original divisor values
     lookups_divisor = defaultdict(lambda: defaultdict(dict))
