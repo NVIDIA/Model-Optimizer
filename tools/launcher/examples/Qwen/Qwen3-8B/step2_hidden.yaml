@@ -1,0 +1,40 @@
+# EAGLE3 offline speculative decoding pipeline for Qwen3-8B.
+#
+# 4-step pipeline:
+#   task_0: Data synthesis — query TRT-LLM server to generate prompt samples
+#   task_1: Dump hidden states — run target model to capture hidden states
+#   task_2: Offline training — train the EAGLE3 draft head
+#   task_3: Benchmark — evaluate speculative decoding speedup via VLLM
+#
+# All tasks share /scratchspace to pass artifacts between steps.
+#
+# Usage:
+#   uv run launch.py --yaml examples/Qwen/Qwen3-8B/hf_offline_eagle3.yaml --yes
+#   uv run slurm.py --yaml modules/Model-Optimizer/tools/launcher/examples/Qwen/Qwen3-8B/hf_offline_eagle3.yaml --yes
+
+job_name: Qwen3-8B_EAGLE3_hidden_dump
+pipeline:
+  allow_to_fail: false
+  skip: false
+  note:
+
+  global_vars:
+    hf_model: /hf-local/Qwen/Qwen3-8B
+
+  # Step 2: Dump hidden states from target model
+  task_0:
+    script: common/eagle3/dump_offline_data.sh
+    args:
+      - --input-data /scratchspace/data
+      - --output-dir /scratchspace/offline_hidden_states
+      - --max-seq-len 8192
+      - --tp 8
+      - --moe-ep 8
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 8
+      gpus_per_node: 8
+      container: nvcr.io/nvidia/tensorrt-llm/release:1.2.0
