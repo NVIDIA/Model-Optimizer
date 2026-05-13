@@ -1,51 +1,53 @@
-# Minimal-Developer Principles
+# Coding Principles
 
-Guidelines for writing production code. Key values: simplicity, minimalism, and
-elegance.
+Guidelines for production code in ModelOpt. Key values: simplicity, minimalism,
+and elegance.
 
-## Philosophy
+## Principles
 
-- **Be Surgical, Minimal edits.** Touch only what the task requires. No speculative
-  refactors, drive-by cleanup, or half-finished implementations.
-- **Good design simplifies code.** Good architecture makes code easier to read
-  and easier to change. Use abstractions that put code at the right level, and
-  keep designs extensible for known needs without over-engineering for
-  speculative future cases. Heavy branching and conditional logic are design
-  smells because they are hard to read and prone to bugs.
+- **Design for simplicity.** Before planning non-trivial changes, choose the
+  design that keeps code easiest to read and change. Put behavior at the right
+  level, tie extensibility to known needs, and treat heavy branching or
+  conditional logic as bad design smells.
+- **Be surgical.** Touch the code required to solve the actual problem, whether
+  that is one line or a broader design change. Avoid speculative refactors,
+  drive-by cleanup, unrelated rewrites, and half-finished implementations.
+- **Fix root causes.** Prefer the right fix over the most local patch. Do not
+  paper over symptoms with temporary fixes unless the temporary nature and
+  follow-up are explicit.
 - **Respect ownership and layering.** Keep behavior in the layer that owns it.
   Parent abstractions should contain shared contracts and shared behavior, not
   child-specific special cases.
-- **Prefer clean extension over branching.** When behavior varies, use explicit
-  extension points such as strategies, adapters, callbacks, or overrides. Update
-  a parent or shared base when it is the right extension point, but do not add
-  extension points for speculative future cases.
-- **Use helpers for duplication and right-level abstraction.** Add helpers when
-  they remove duplicated code across multiple places or let higher-level code
-  use helpful names while low-level details stay abstracted away.
-- **Use meaningful names.** Methods, variables, objects, and helpers should make
-  intent clear at the point of use.
-- **Code should read like prose.** Well-written code is self-explanatory and
-  elegant. Keep high-level orchestration clear, and move low-level mechanics
-  into well-named helpers when that improves readability.
-- **Critical code first.** Order files so the most important or user-facing code
-  appears before helper details when local conventions allow it.
-- **Validate at boundaries, then trust invariants.** Check untrusted inputs at system boundaries such as user input, external APIs, files, networks, and process boundaries. After validation, internal code should trust its types and invariants instead of adding defensive checks for states that should be impossible.
-- **Comments explain why.** Code is the source of truth for what happens and
+- **Use abstractions to simplify.** Add helpers, base classes, registries,
+  adapters, plugins, or other abstractions when they remove real duplication,
+  clarify ownership, or put behavior at the right level. Do not add abstractions
+  for speculative future cases.
+- **Prefer extension over branching.** When behavior varies, use explicit
+  extension points such as adapters, registries, callbacks, plugins, or
+  overrides. Update a parent or shared base when it is the right extension
+  point. Do not add extension points for speculative future cases.
+- **Make code readable at the point of use.** Names, types, and structure should
+  make intent clear. Keep high-level orchestration clear, and move low-level
+  mechanics into well-named helpers when that improves readability.
+- **Put critical code first.** Order files so the most important or user-facing
+  code appears before helper details when local conventions allow it.
+- **Validate outside input once.** Check user input, files, network responses,
+  and external API results at the edge. Keep internal code simple instead of
+  repeatedly checking for impossible states.
+- **Comments explain why, concisely.** Code is the source of truth for what happens and
   how. Add comments only when the reason is not obvious. Redundant comments are
   a maintainability burden. If a comment feels necessary, first check whether
   better design or naming would make the code explain itself.
-- **Preserve existing comments.** Minimalism applies to new comments; do not
-  delete existing comments casually. Production code is shared by many
-  developers, and unnecessary changes to others' code create avoidable review and
-  approval overhead.
-- **Docstrings scale with API level.** Higher-level and user-visible APIs
-  deserve useful docstrings, including examples when helpful. Lower-level
-  internals should use minimal docstrings, or none, when well-named identifiers
-  are enough.
-- **Remove dead code.** Delete unused imports, unreachable branches, and
-  obsolete placeholders.
-- **Use workspace-relative paths** in commands and file references unless an
-  absolute path is needed to disambiguate.
+- **Apply comment guidance to new comments only.** Use these standards only when adding
+  new comments. Do not rewrite or delete existing comments as cleanup;
+- **Scale documentation to the API.** Higher-level and user-visible APIs deserve
+  useful docstrings, including examples when helpful. Lower-level internals need
+  docstrings only when names, types, and structure are not enough.
+- **Remove dead code.** Delete unused imports, unreachable branches, obsolete
+  placeholders, stale TODOs, and debug code when they are part of the touched
+  behavior.
+- **Use workspace-relative paths.** Use relative paths in commands and file
+  references unless an absolute path is needed to disambiguate.
 
 ## Testing
 
@@ -62,10 +64,19 @@ elegance.
 
 - **Avoid stray CPU-GPU syncs.** Tensor metadata such as `tensor.shape` is safe
   to read, but scalar extraction or CPU transfers such as `tensor.item()`,
-  `float(tensor)`, `bool(tensor)`, `tensor.cpu()`, and `tensor.numpy()` can force
-  CPU-GPU synchronization. Keep computation on GPU unless the CPU actually needs
-  the value.
+  `float(tensor)`, `bool(tensor)`, `tensor.cpu()`, `tensor.numpy()`, etc. can
+  force CPU-GPU synchronization. Keep computation on GPU unless the CPU actually
+  needs the value.
 - **Use rank-aware logging.** Default to `print_rank_0` instead of `print` and
   `warn_rank_0` instead of generic warnings. Use per-rank output only when each
   process needs to report distinct state. Generic prints and warnings clog
   distributed logs.
+- **Respect distributed invariants.** Avoid hidden synchronization, global state,
+  per-rank file races, or assumptions that only hold on a single process.
+
+## Compatibility
+
+- **Preserve config and checkpoint compatibility.** Treat ModelOpt config schemas
+  and checkpoint formats as persisted contracts. When changing configs such as
+  `QuantizeConfig`, maintain backward compatibility with previous ModelOpt
+  checkpoints unless a breaking change is explicit and intentionally handled.

@@ -79,7 +79,7 @@ If you are an external contributor, seek guidance from `@NVIDIA/modelopt-setup-c
 
 See [`modelopt/torch/quantization/utils/calib_utils.py`](./modelopt/torch/quantization/utils/calib_utils.py) for an example of the correct license header format.
 
-## 📝 Writing tests
+## 📝 Writing and running tests
 
 We use [pytest](https://docs.pytest.org/) for all tests. For any new features / examples, make sure to add tests and that the coverage check in your PR passes. The tests are organized into the following directories:
 
@@ -89,7 +89,17 @@ We use [pytest](https://docs.pytest.org/) for all tests. For any new features / 
 - `tests/gpu_trtllm`: Fast GPU-based unit tests for the core ModelOpt library for TensorRT-LLM features. In most cases, they should not take more than a few seconds to run.
 - `tests/examples`: Integration tests for ModelOpt examples. They should not take more than a few minutes to run. Please refer to [example test README](./tests/examples/README.md) for more details.
 
-Please refer to [noxfile.py](./noxfile.py) for more details on how to run the tests and their dependencies.
+For focused local validation, run `pytest` directly on the relevant test path. For example:
+
+```bash
+pytest tests/unit/torch/quantization
+```
+
+For standard repo sessions and dependency setup, use [noxfile.py](./noxfile.py). Run `nox -l` to list available sessions, then run the matching session with `nox -s <session>`. For example, `partial_unit` covers the broader torch unit test suite, including areas such as quantization:
+
+```bash
+nox -s "partial_unit-3.12(torch)"
+```
 
 ## ✍️ Signing your work
 
