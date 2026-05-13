@@ -121,9 +121,7 @@ class TestQwen3VLImportMapping:
         assert isinstance(qwen3vl_causal_lm_import["linear_qkv"], QKVMerging)
 
     def test_mlp_uses_gated_merging(self):
-        assert isinstance(
-            qwen3vl_causal_lm_import["linear_fc1"], GatedMLPMerging
-        )
+        assert isinstance(qwen3vl_causal_lm_import["linear_fc1"], GatedMLPMerging)
 
     @pytest.mark.parametrize(
         "key",
@@ -192,14 +190,17 @@ class TestQwen3VLExportMapping:
         assert isinstance(qwen3vl_causal_lm_export["linear_qkv"], QKVSlicing)
 
     def test_mlp_uses_gated_slicing(self):
-        assert isinstance(
-            qwen3vl_causal_lm_export["linear_fc1"], GatedMLPSlicing
-        )
+        assert isinstance(qwen3vl_causal_lm_export["linear_fc1"], GatedMLPSlicing)
 
     def test_export_has_no_parallel_config(self):
         """Export mappings should not have parallel configs."""
-        for key in ["word_embeddings", "final_layernorm", "output_layer",
-                     "input_layernorm", "linear_proj"]:
+        for key in [
+            "word_embeddings",
+            "final_layernorm",
+            "output_layer",
+            "input_layernorm",
+            "linear_proj",
+        ]:
             mapping = qwen3vl_causal_lm_export[key]
             assert "parallel_config" not in mapping.func_kwargs
 
@@ -208,9 +209,7 @@ class TestQwen3VLImportExportSymmetry:
     """Test that import and export mappings are consistent."""
 
     def test_same_mcore_keys(self):
-        assert set(qwen3vl_causal_lm_import.keys()) == set(
-            qwen3vl_causal_lm_export.keys()
-        )
+        assert set(qwen3vl_causal_lm_import.keys()) == set(qwen3vl_causal_lm_export.keys())
 
     @pytest.mark.parametrize(
         "key",
@@ -256,12 +255,8 @@ class TestQwen3VLvsQwen3Difference:
             qwen3_causal_lm_import,
         )
 
-        assert set(qwen3vl_causal_lm_import.keys()) == set(
-            qwen3_causal_lm_import.keys()
-        )
-        assert set(qwen3vl_causal_lm_export.keys()) == set(
-            qwen3_causal_lm_export.keys()
-        )
+        assert set(qwen3vl_causal_lm_import.keys()) == set(qwen3_causal_lm_import.keys())
+        assert set(qwen3vl_causal_lm_export.keys()) == set(qwen3_causal_lm_export.keys())
 
     @pytest.mark.parametrize(
         "key",
@@ -290,9 +285,7 @@ class TestQwen3VLvsQwen3Difference:
         qwen3_prefix = qwen3_causal_lm_import[key].target_name_or_prefix
         qwen3vl_prefix = qwen3vl_causal_lm_import[key].target_name_or_prefix
         expected = qwen3_prefix.replace("model.", "model.language_model.", 1)
-        assert qwen3vl_prefix == expected, (
-            f"{key}: expected '{expected}', got '{qwen3vl_prefix}'"
-        )
+        assert qwen3vl_prefix == expected, f"{key}: expected '{expected}', got '{qwen3vl_prefix}'"
 
     def test_output_layer_same(self):
         """lm_head is at root level for both Qwen3 and Qwen3-VL."""

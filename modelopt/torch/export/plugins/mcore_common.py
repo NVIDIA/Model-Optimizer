@@ -39,10 +39,7 @@ from .mcore_qwen import (
     qwen25_causal_lm_export,
     qwen25_causal_lm_import,
 )
-from .mcore_qwen3vl import (
-    qwen3vl_causal_lm_export,
-    qwen3vl_causal_lm_import,
-)
+from .mcore_qwen3vl import qwen3vl_causal_lm_export, qwen3vl_causal_lm_import
 
 all_mcore_hf_export_mapping: dict[str, Any] = {
     "DeepseekV2ForCausalLM": deepseek_causal_lm_export,
