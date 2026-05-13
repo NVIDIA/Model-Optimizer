@@ -16,7 +16,7 @@
 imports:
   base_disable_all: configs/ptq/units/base_disable_all
   default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
-  w4a16_nvfp4: configs/ptq/units/w4a16_nvfp4
+  w4a16_nvfp4: configs/ptq/units/w4_nvfp4
 
 metadata:
   recipe_type: ptq
