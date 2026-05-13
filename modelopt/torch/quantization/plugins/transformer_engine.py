@@ -93,6 +93,10 @@ class _QuantTELinear(_ParallelLinear):
         new_args[weight_pos] = self.weight_quantizer(args[weight_pos])
         new_args[inp_pos] = self.input_quantizer(args[inp_pos])
         output = getattr(package, func_name)(*new_args, **kwargs)
+        # TE 2.15+ returns `(out, new_weight_workspace)`; TE <= 2.14 returns just `out`.
+        # Only the activation tensor participates in output quantization.
+        if isinstance(output, tuple):
+            return (self.output_quantizer(output[0]), *output[1:])
         return self.output_quantizer(output)
 
     # Override the quantized linear function
@@ -181,6 +185,10 @@ class _QuantTEGroupedLinear(_ParallelLinear):
         for i in range(weights_start, weights_start + num_gemms):
             new_args[i] = self.weight_quantizer(args[i])
         output = getattr(package, func_name)(*new_args)
+        # TE 2.15+ returns `(out, new_workspaces)`; TE <= 2.14 returns just `out`.
+        # Only the activation tensor participates in output quantization.
+        if isinstance(output, tuple):
+            return (self.output_quantizer(output[0]), *output[1:])
         return self.output_quantizer(output)
 
     # Override the quantized linear function
