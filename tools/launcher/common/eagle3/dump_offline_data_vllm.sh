@@ -31,6 +31,7 @@ source ${SCRIPT_DIR}/../service_utils.sh
 #   --input-data, --output-dir, --max-seq-len, etc.
 ###################################################################################################
 
+pip uninstall -y torchvision 2>/dev/null || true
 pip install "speculators<0.5.0" datasets 2>/dev/null || true
 
 if [ -z ${SLURM_ARRAY_TASK_ID} ]; then
