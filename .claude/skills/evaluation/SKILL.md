@@ -18,6 +18,17 @@ If `MODELOPT_WORKSPACE_ROOT` is set, read `skills/common/workspace-management.md
 
 This skill is often the final stage of the PTQ → Deploy → Eval pipeline. If the model required runtime patches during deployment (transformers upgrade, framework source fixes), carry those patches into the NEL config via `deployment.command`.
 
+### NEL Timeout and Resume Behavior
+
+NEL submissions commonly create a dependency chain of SLURM jobs. The first job
+runs the evaluation and writes response/result caches. A dependent follow-on job
+resumes from those caches if the first job times out, then queues another follow-on
+job so long-running evals can continue across walltime windows.
+
+Do not assume a timeout means the evaluation failed or produced invalid results.
+Treat timeouts as expected resume events until `nel status`/`nel info`, artifacts,
+and logs show a terminal failure or invalid run.
+
 ### Workflow
 
 ```text
