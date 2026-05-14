@@ -644,7 +644,6 @@ def get_quantization_format(module) -> str | None:
                 return QUANTIZATION_NVFP4_AWQ
             if getattr(layer, "fused_with_prequant", False):
                 return QUANTIZATION_NVFP4_AWQ
-            # W4A16 weight-only: input_quantizer absent or disabled
             if input_quantizer is None or not input_quantizer.is_enabled:
                 if scale_bits == (4, 3):
                     return QUANTIZATION_W4A16_NVFP4
