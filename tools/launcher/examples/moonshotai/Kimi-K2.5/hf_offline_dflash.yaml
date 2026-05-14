@@ -1,0 +1,57 @@
+# DFlash offline speculative decoding pipeline for moonshotai/Kimi-K2.5.
+#
+# task_0: Data synthesis — query vLLM server to generate prompt samples.
+#
+# Subsequent tasks (hidden-state dump, offline training, benchmark) are
+# added by their respective downstream stages (hidden_state_dump_support /
+# training_support / run_pipeline) once each is independently cluster-tested.
+# Don't add them here speculatively — each stage carries its own evidence.
+#
+# Usage:
+#   uv run launch.py --yaml examples/moonshotai/Kimi-K2.5/hf_offline_dflash.yaml --yes
+#   uv run slurm.py --yaml modules/Model-Optimizer/tools/launcher/examples/moonshotai/Kimi-K2.5/hf_offline_dflash.yaml --yes
+
+job_name: Kimi-K2.5_DFlash_offline
+pipeline:
+  allow_to_fail: false
+  skip: false
+  note:
+
+  global_vars:
+    hf_model: /hf-local/moonshotai/Kimi-K2.6
+
+  # Step 1: Data synthesis via vLLM server.
+  # TRT-LLM release:1.2.0 doesn't register KimiK25ForConditionalGeneration
+  # (validated on cw-dfw 2026-05-14, Slurm 11770213) — fell back to vLLM
+  # which loads the model via `--trust-remote-code`.
+  # Args before "--" go to vllm serve; args after "--" go to common/query.py.
+  task_0:
+    script: common/vllm/query.sh
+    args:
+      - --model <<global_vars.hf_model>>
+      - --tensor-parallel-size 8
+      - --max-num-seqs 32
+      - --max-model-len 4096
+      - --gpu-memory-utilization 0.95  # Kimi-K2 weights are ~595 GB bf16 on
+                                       # 8x80 GB = 93% weight occupancy; default
+                                       # 0.9 leaves -1.1 GiB for KV cache.
+      - --port 8000
+      - --host 0.0.0.0
+      - --trust-remote-code
+      - --enforce-eager  # vllm-openai:latest is missing torch/bin/ptxas for
+                         # inductor autotuning; eager mode skips that path
+      - --
+      - --data /nemo_run/code/modules/Model-Optimizer/examples/dataset/synthetic_conversations_1k.jsonl
+      - --save /scratchspace/data
+    environment:
+      - HF_LOCAL: /hf-local
+      - VLLM_STARTUP_TIMEOUT: "1800"  # Kimi-K2.6 weight load alone is ~7.7 min
+                                      # at 71 GiB/GPU; default 600s in query.sh
+                                      # is not enough to also cover KV cache
+                                      # profiling + encoder cache init
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 8
+      container: vllm/vllm-openai:latest
