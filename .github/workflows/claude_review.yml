@@ -81,7 +81,7 @@ jobs:
 
             Mandatory workflow — never skip or reorder:
             1. Read the PR diff first (gh pr diff).
-            2. Read CLAUDE.md (symlinked to .agents/README.md), .agents/developer-guidelines.md,
+            2. Read AGENTS.md, .agents/developer-guidelines.md,
                and CONTRIBUTING.md for project conventions, coding principles, and architecture.
             3. For changed files under `modelopt/torch/<sub-package>/`, read the sub-package's
                `__init__.py` plus any `mode.py` / `config.py` to understand mode registration

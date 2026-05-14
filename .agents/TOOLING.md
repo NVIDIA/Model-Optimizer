@@ -5,9 +5,8 @@ of the always-loaded agent instructions.
 
 ## Shared Instructions
 
-Update `.agents/README.md` for repository-wide agent instructions. The root
-`AGENTS.md` and `CLAUDE.md` files are symlinked to `.agents/README.md`, so
-changes there apply to both Codex and Claude Code.
+Update `AGENTS.md` for repository-wide agent instructions. `CLAUDE.md` is
+symlinked to `AGENTS.md`, so changes there apply to both Codex and Claude Code.
 
 ## Local Overrides
 
