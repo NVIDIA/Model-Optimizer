@@ -177,7 +177,11 @@ For reasoning-capable models, prefer reasoning mode for evaluation because it us
 Show tasks in the current config. Loop until the user confirms the task list is final:
 
 1. Tell the user: "Run `nel ls tasks` to see all available tasks".
-2. If the task list includes GPQA Diamond / `gpqa_diamond_aa_v3` / `GPQA` or SciCode / `scicode_aa_v2`, read `references/reference-benchmark-configs.md`, then apply the matching YAML file (`references/gpqa_diamond_aa_v3.yaml` or `references/scicode_aa_v2.yaml`) unless the user explicitly asks for different sampling or prompt settings.
+2. If the task list includes a benchmark with a pre-built snippet in `recipes/tasks/`,
+   prefer that snippet over hand-written task overrides unless the user explicitly asks
+   for different sampling or prompt settings. For reasoning-mode comparisons, keep the
+   recipe repeat counts; for tasks without a recipe, use `num_repeats >= 3` when the
+   benchmark supports repeats.
 3. Ask if they want to add/remove tasks or add/remove/modify task-specific parameter overrides.
    To add per-task `nemo_evaluator_config` as specified by the user, e.g.:
 
