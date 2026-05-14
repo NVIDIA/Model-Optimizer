@@ -40,7 +40,8 @@ from modelopt.torch.opt.plugins.megatron import (
 )
 from modelopt.torch.utils.distributed import ParallelState
 
-from ..nn import QuantModule, QuantModuleRegistry, TensorQuantizer
+from ..conversion import maybe_promote_nvfp4_static_quantizer
+from ..nn import QuantModule, QuantModuleRegistry, SequentialQuantizer, TensorQuantizer
 from ..nn.modules.quant_linear import RealQuantLinear
 from ..qtensor import QTensorWrapper
 from ..utils import sync_moe_expert_amax
@@ -66,6 +67,35 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 __all__ = []
+
+
+def _check_static_block_tp_supported(model: torch.nn.Module) -> None:
+    """Raise under TP>1: static-block _amax is shard-local but sharded_state_dict treats it as replicated."""
+    offending = []
+    for name, module in model.named_modules():
+        if not isinstance(module, QuantModule):
+            continue
+        parallel_state = getattr(module, "parallel_state", None)
+        if parallel_state is None:
+            continue
+        tp_group = getattr(parallel_state, "tensor_parallel_group", None)
+        if tp_group is None or not tp_group.is_initialized() or tp_group.world_size() <= 1:
+            continue
+        weight_quantizer = getattr(module, "weight_quantizer", None)
+        if weight_quantizer is None:
+            continue
+        leaves = (
+            list(weight_quantizer)
+            if isinstance(weight_quantizer, SequentialQuantizer)
+            else [weight_quantizer]
+        )
+        if any(leaf.is_static_block_quant for leaf in leaves):
+            offending.append((name, tp_group.world_size()))
+    if offending:
+        raise NotImplementedError(
+            "Static-block NVFP4 weight quantization (e.g. MSE) is not supported with TP > 1. Please re-run with TP=1. "
+            f"Offending modules (showing first 5 of {len(offending)}): {offending[:5]}"
+        )
 
 
 def real_quant_module_get_extra_state(self) -> dict:
@@ -190,7 +220,9 @@ def quant_module_set_extra_state(self, state: Any):
     if quantizer_state is not None:
         for name, module in self.named_modules():
             if isinstance(module, TensorQuantizer):
-                module.set_from_modelopt_state(quantizer_state[name], properties_only=False)
+                quantizer_substate = quantizer_state[name]
+                maybe_promote_nvfp4_static_quantizer(module, quantizer_substate)
+                module.set_from_modelopt_state(quantizer_substate, properties_only=False)
         self.modelopt_post_restore()
 
     # Handle real_quantizer_state and q_tensor_state
@@ -399,6 +431,9 @@ class _MegatronColumnParallelLinear(_MegatronParallelLinear):
         """
         shard_axis_dict = {}
         for k in state_dict:
+            # Static NVFP4 _global_amax is a replicated scalar; only per-block _amax shards.
+            if k.endswith("_global_amax"):
+                continue
             if "weight_quantizer." in k:
                 weight_quantizer_axis = self.get_submodule(k.rsplit(".", 1)[0]).axis
                 if weight_quantizer_axis is not None:
@@ -427,6 +462,9 @@ class _MegatronRowParallelLinear(_MegatronParallelLinear):
         """
         shard_axis_dict = {}
         for k in state_dict:
+            # Static NVFP4 _global_amax is a replicated scalar; only per-block _amax shards.
+            if k.endswith("_global_amax"):
+                continue
             if "weight_quantizer." in k:
                 weight_quantizer_axis = None
                 if isinstance(self.weight_quantizer, TensorQuantizer):

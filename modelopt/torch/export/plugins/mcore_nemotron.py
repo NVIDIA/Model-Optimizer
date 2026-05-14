@@ -131,7 +131,10 @@ nemotron_h_causal_lm_export: dict[str, CustomModuleMapping] = {
     "input_layernorm": NameRemapping("backbone.layers.{}.norm."),
     "linear_qkv": QKVSlicing("backbone.layers.{}.mixer."),
     "linear_proj": NameRemapping("backbone.layers.{}.mixer.o_proj."),
-    "core_attention": SelfAttentionScaling("backbone.layers.{}.mixer."),
+    "core_attention": SelfAttentionScaling(
+        "backbone.layers.{}.mixer.",
+        func_kwargs={"k_scale_name": "k_proj.k_scale", "v_scale_name": "v_proj.v_scale"},
+    ),
     # MLP
     "pre_mlp_layernorm": NameRemapping("backbone.layers.{}.norm."),
     "linear_fc1": NameRemapping("backbone.layers.{}.mixer.up_proj."),
