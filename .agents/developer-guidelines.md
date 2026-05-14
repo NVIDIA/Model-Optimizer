@@ -29,15 +29,17 @@ and elegance.
   make intent clear. Keep high-level orchestration clear, move low-level
   mechanics into well-named helpers when helpful, and put critical code before
   helper details when local conventions allow it.
-- **Validate at boundaries.** Check user input, files, network responses, and
-  external API results at the edge. Keep internal code simple by trusting types
-  and invariants instead of repeatedly checking for impossible states.
-- **Comment cautiously.** Code is the source of truth for what happens and how.
-  Add comments only when the reason is not obvious. Apply this guidance to new
-  comments only; do not rewrite or delete existing comments as cleanup.
+- **Comment cautiously.** Code should be clear and be the source of truth
+  for what happens, how it happens, and why; use comments only when the why is
+  not obvious from the code. First ask whether better names, clearer structure,
+  or simpler code can explain the intent without a comment. (Apply this guidance
+  to new comments only; do not rewrite or delete existing comments.)
 - **Scale documentation to the API.** Higher-level and user-visible APIs deserve
   useful docstrings, including examples when helpful. Lower-level internals need
   docstrings only when names, types, and structure are not enough.
+- **Validate at boundaries.** Check user input, files, network responses, and
+  external API results at the edge. Keep internal code simple by trusting types
+  and invariants instead of repeatedly checking for impossible states.
 - **Remove touched dead code.** Delete unused imports, unreachable branches,
   obsolete placeholders, stale TODOs, and debug code when they are part of the
   behavior you are already touching.
