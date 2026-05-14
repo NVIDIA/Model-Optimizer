@@ -1249,7 +1249,9 @@ INT8_WEIGHT_ONLY_CFG = {
     "algorithm": "max",
 }
 
-FP8_DEFAULT_CFG: dict[str, Any] = load_config("configs/ptq/presets/model/fp8")
+FP8_DEFAULT_CFG: dict[str, Any] = load_config("configs/ptq/presets/model/fp8").model_dump(
+    exclude_unset=True
+)
 
 MAMBA_MOE_FP8_AGGRESSIVE_CFG = {
     "quant_cfg": [
@@ -1494,7 +1496,9 @@ MXINT8_DEFAULT_CFG = {
 # KV-cache configs are designed to be merged with a primary quantization config (e.g.
 # FP8_DEFAULT_CFG) that already contains _base_disable_all.  They intentionally omit both
 # _base_disable_all and "algorithm" because these are provided by the primary config.
-FP8_KV_CFG: dict[str, Any] = load_config("configs/ptq/presets/kv/fp8")
+FP8_KV_CFG: dict[str, Any] = load_config("configs/ptq/presets/kv/fp8").model_dump(
+    exclude_unset=True
+)
 
 FP8_AFFINE_KV_CFG = {
     "quant_cfg": [
