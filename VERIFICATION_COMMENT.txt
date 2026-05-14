@@ -1,0 +1,12 @@
+Verification summary for OMNIML-4706: Synthesis Support — Qwen3-0.6B (Qwen)
+
+- File `tools/launcher/examples/Qwen/Qwen3-0.6B/hf_offline_eagle3.yaml` exists.
+- Verified task_0 (data synthesis via TRT-LLM server):
+  * script: common/tensorrt_llm/query.sh (matches family-equivalent)
+  * args: --model <<global_vars.hf_model>> resolves to /hf-local/Qwen/Qwen3-0.6B (assumed valid HF checkpoint path on cluster)
+  * slurm_config.container: nvcr.io/nvidia/tensorrt-llm/release:1.2.0 (current TRT-LLM release as per base example)
+  * data path: --data /hf-local/modelopt/Speculative-Decoding-Prompt-Samples (assumed to exist on cluster)
+- All other tasks (1-3) are appropriate for Qwen3-0.6B.
+- No changes needed; task_0 is configured correctly for Qwen3-0.6B.
+
+Thus, no PR is required; this verification serves as confirmation.
