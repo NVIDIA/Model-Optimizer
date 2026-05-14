@@ -135,7 +135,15 @@ Report the path and size to the user.
 
 ### Post-quantization validation
 
-Read `references/checkpoint-validation.md` and perform the checkpoint size/bits, quantized-weight coverage, and metadata consistency checks before using the checkpoint for deployment/evaluation.
+This is a required gate before any deployment or evaluation submission. Do not submit an eval, start a serving job, or hand off the checkpoint as ready until the gate has passed.
+
+Read `references/checkpoint-validation.md` and perform all three validation groups on the exact checkpoint path that will be deployed/evaluated:
+
+1. Check output size and estimated bits per weight against the baseline/source checkpoint.
+2. Check quantized-weight coverage against the requested qformat/recipe/config.
+3. Check metadata consistency against the baseline/source model.
+
+Report the gate result before moving on. The report must include source size, output size, output/source size ratio, layer precision counts (for example NVFP4, FP8, INT4, BF16/unquantized excluded, unexpected unquantized, declaration mismatches), and metadata diffs. If the output/source ratio is >= 1.0 for a compression recipe, if any intended layer group is missing quantization, or if metadata changed unexpectedly, stop and fix the checkpoint or ask the user before proceeding.
 
 **Next steps**: If the user wants to deploy or evaluate the quantized checkpoint, use the **deployment** or **evaluation** skill. The checkpoint workspace carries over. If the model required patches during PTQ (e.g., transformers upgrade), the same fixes will likely be needed at deployment and evaluation time.
 
@@ -164,7 +172,7 @@ Read `references/checkpoint-validation.md` and perform the checkpoint size/bits,
 | `references/launcher-guide.md` | Step 4B only (launcher path) |
 | `tools/launcher/CLAUDE.md` | Step 4B only, if you need more launcher detail |
 | `references/unsupported-models.md` | Step 4C only (unlisted model) |
-| `references/checkpoint-validation.md` | Step 5: validate quantization pattern matches recipe |
+| `references/checkpoint-validation.md` | Step 5: mandatory post-PTQ gate before deployment/evaluation |
 | `skills/common/remote-execution.md` | Step 4A/4C only, if target is remote |
 | `skills/common/slurm-setup.md` | Step 4A/4C only, if using SLURM manually (not launcher) |
 | `references/slurm-setup-ptq.md` | Step 4A/4C only, PTQ-specific SLURM (container, GPU sizing, FSDP2) |
