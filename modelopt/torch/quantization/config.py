@@ -1037,6 +1037,11 @@ def normalize_quant_cfg_list(
     if isinstance(v, dict):
         _warn_legacy()
         v = [{k: val} for k, val in v.items()]
+    elif not isinstance(v, list):
+        raise ValueError(
+            f"quant_cfg must be a list of entries (or a legacy flat dict), got "
+            f"{type(v).__name__}: {v!r}."
+        )
 
     def _dict_to_entry(key: str, value) -> list[dict[str, Any]]:
         """Convert a single legacy key-value pair to one or more entry dicts."""
@@ -1127,22 +1132,32 @@ class QuantizeConfig(ModeloptBaseConfig):
 
     @field_validator("quant_cfg", mode="before")
     @classmethod
-    def normalize_quant_cfg(cls, v):
-        """Normalize quant_cfg entries: convert dict and tuple forms to QuantizerCfgEntry dicts."""
-        if not isinstance(v, (list, dict)):
-            return v
+    def normalize_quant_cfg(cls, v: Any) -> QuantizeQuantCfgType:
+        """Normalize raw quant_cfg input into a ``list[QuantizerCfgEntry]``.
+
+        Delegates to :func:`normalize_quant_cfg_list`, which accepts every supported input
+        shape (new-format list, legacy single-key-dict list, legacy flat dict, and lists
+        containing already-validated ``QuantizerCfgEntry`` instances) and rejects anything
+        else with a clear ``ValueError`` before pydantic's field-type check would see it.
+        """
         return normalize_quant_cfg_list(v)
 
     @field_validator("quant_cfg", mode="after")
     @classmethod
-    def validate_quant_cfg_entries(cls, v):
-        """Validate quantizer attribute configs to surface errors (e.g. invalid axis/block_sizes)."""
+    def validate_quant_cfg_entries(cls, v: QuantizeQuantCfgType) -> QuantizeQuantCfgType:
+        """Validate each entry's ``cfg`` against :class:`QuantizerAttributeConfig`.
+
+        Runs after the ``mode="before"`` normalizer and pydantic's field-type check, so
+        every element here is already a :class:`QuantizerCfgEntry`.  This second pass
+        surfaces attribute-level errors (e.g. invalid ``axis`` / ``block_sizes``) that the
+        per-entry ``QuantizerCfgEntry`` validator doesn't inspect.
+        """
         qac_fields = set(QuantizerAttributeConfig.model_fields.keys())
         for entry in v:
-            cfg = entry.get("cfg")
+            cfg = entry.cfg
             if cfg is None:
                 continue
-            cfgs = cfg if isinstance(cfg, list) else [cfg]
+            cfgs: list[dict[str, Any]] = cfg if isinstance(cfg, list) else [cfg]
             for c in cfgs:
                 if isinstance(c, dict) and qac_fields & set(c.keys()):
                     QuantizerAttributeConfig.model_validate(c)
