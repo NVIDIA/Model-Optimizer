@@ -153,8 +153,7 @@ Please read our [Contributing](./CONTRIBUTING.md) guidelines for details on how 
 
 ## AI Agents
 
-For AI-assisted development setup, including local Claude Code and Codex
-override files, see the [agent tooling notes](./.agents/TOOLING.md).
+For AI-assisted development setup, see the [agent tooling notes](./.agents/TOOLING.md).
 
 ### Top Contributors
 

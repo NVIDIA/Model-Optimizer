@@ -95,10 +95,10 @@ For lightweight focused local validation, run `pytest` directly on the relevant 
 pytest tests/unit/torch/quantization
 ```
 
-For broader repo validation and dependency setup, use [noxfile.py](./noxfile.py). Run `nox -l` to list available sessions, then run the matching session with `nox -s <session>`. The `partial_unit-3.12(torch)` session covers the broader torch unit test suite and installs heavier dependencies, including `megatron-core`:
+For broader repo validation and dependency setup, use [noxfile.py](./noxfile.py). Run `nox -l` to list available sessions, then run the matching session with `nox -s <session>`. The `unit-3.12(torch_211, tf_latest)` session runs `tests/unit` with a specific Torch and Transformers combination:
 
 ```bash
-nox -s "partial_unit-3.12(torch)"
+nox -s "unit-3.12(torch_211, tf_latest)"
 ```
 
 ## ✍️ Signing your work
