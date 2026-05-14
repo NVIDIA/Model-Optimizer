@@ -33,11 +33,13 @@ except ImportError:  # Python < 3.11
 import re
 import sys
 from pathlib import Path
-from typing import Any, Union, get_args, get_origin, get_type_hints
+from typing import Any, TypeVar, Union, get_args, get_origin, get_type_hints, overload
 
 import yaml
 from pydantic import TypeAdapter
 from typing_extensions import NotRequired, Required, is_typeddict
+
+from modelopt.torch.opt.config import ModeloptBaseConfig
 
 
 @dataclass
@@ -590,6 +592,33 @@ def _find_import_marker(obj: Any, context: str = "root") -> tuple[Any, str] | No
             if found is not None:
                 return found
     return None
+
+
+_SchemaT = TypeVar("_SchemaT", bound=ModeloptBaseConfig)
+
+
+@overload
+def load_config(
+    config_path: str | Path | Traversable,
+    *,
+    schema_type: type[_SchemaT],
+) -> _SchemaT: ...
+
+
+@overload
+def load_config(
+    config_path: str | Path | Traversable,
+    *,
+    schema_type: type[list[_SchemaT]],
+) -> list[_SchemaT]: ...
+
+
+@overload
+def load_config(
+    config_path: str | Path | Traversable,
+    *,
+    schema_type: None = None,
+) -> Any: ...
 
 
 def load_config(

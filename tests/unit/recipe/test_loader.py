@@ -184,7 +184,7 @@ def test_load_recipe_unsupported_type_raises(tmp_path):
     """load_recipe raises ValueError for an unknown recipe_type."""
     bad = tmp_path / "bad.yml"
     bad.write_text(CFG_RECIPE_UNSUPPORTED_TYPE)
-    # Schema-driven validation reports the failure via the TypedDict's enum check.
+    # Schema-driven validation reports the failure via the metadata schema's enum check.
     with pytest.raises(ValueError, match="recipe_type"):
         load_recipe(bad)
 

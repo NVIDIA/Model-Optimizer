@@ -123,26 +123,10 @@ def _load_recipe_from_dir(recipe_dir: Path | Traversable) -> ModelOptRecipeBase:
     quantize.
     """
     metadata_file = _find_recipe_section_file(recipe_dir, "metadata")
-
     metadata = load_config(metadata_file, schema_type=RecipeMetadataConfig)
-    if not isinstance(metadata, dict):
-        raise ValueError(
-            f"Metadata file {metadata_file} must be a YAML mapping, got {type(metadata).__name__}."
-        )
-    recipe_type = metadata.get("recipe_type")
-    if recipe_type is None:
-        raise ValueError(f"Metadata file {metadata_file} must contain a 'recipe_type' field.")
 
-    if recipe_type == RecipeType.PTQ:
+    if metadata.recipe_type == RecipeType.PTQ:
         quantize_file = _find_recipe_section_file(recipe_dir, "quantize")
         quantize_cfg = load_config(quantize_file, schema_type=QuantizeConfig)
-        if not isinstance(quantize_cfg, QuantizeConfig):
-            raise ValueError(
-                f"{quantize_file} must produce a {QuantizeConfig.__name__}, "
-                f"got {type(quantize_cfg).__name__}."
-            )
-        return ModelOptPTQRecipe(
-            metadata=metadata,
-            quantize=quantize_cfg,
-        )
-    raise ValueError(f"Unsupported recipe type: {recipe_type!r}")
+        return ModelOptPTQRecipe(metadata=metadata, quantize=quantize_cfg)
+    raise ValueError(f"Unsupported recipe type: {metadata.recipe_type!r}")
