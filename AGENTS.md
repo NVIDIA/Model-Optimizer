@@ -11,7 +11,7 @@ These instructions apply to AI-assisted work in this repository.
 ## Coding guidelines
 
 - **Coding guide:** Code development and review require reading and following
-  [.agents/developer-guidelines.md](/home/scratch.akuriparambi_coreai/Model-Optimizer-Agent/.agents/developer-guidelines.md);
+  [.agents/developer-guidelines.md](.agents/developer-guidelines.md);
   do not skip this step.
 
 ## Iterative development
