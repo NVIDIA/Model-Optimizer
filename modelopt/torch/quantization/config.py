@@ -152,7 +152,7 @@ the layer named ``lm_head``,  you can create a custom config and quantize your m
 
 import copy
 import warnings
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any, Literal
 
 from pydantic import AliasChoices, ValidationInfo, field_validator, model_validator
@@ -977,16 +977,18 @@ class GPTQCalibConfig(QuantizeAlgorithmConfig):
 QuantizeQuantCfgType = list[QuantizerCfgEntry]
 QuantizerCfgListConfig = QuantizeQuantCfgType
 
-# Pre-normalization input shape: a sequence whose entries can be raw dicts (any of the
-# legacy / new dict forms) or already-validated QuantizerCfgEntry instances.
-# ``Sequence`` (rather than ``list``) keeps the alias covariant so callers can pass
-# ``list[QuantizerCfgEntry]`` without an invariance error.
-RawQuantizeQuantCfgType = Sequence[QuantizerCfgEntry | dict[str, Any]]
+# Pre-normalization input shape: either a sequence of already-validated
+# :class:`QuantizerCfgEntry` instances, or a sequence of raw mappings (any of the legacy /
+# new dict forms).  Splitting the union into two ``Sequence[...]`` arms — rather than
+# ``Sequence[QuantizerCfgEntry | Mapping[str, Any]]`` — keeps each arm covariant in its
+# element type, so callers can pass ``list[QuantizerCfgEntry]`` or ``list[dict]`` without
+# tripping invariance.
+RawQuantizeQuantCfgType = Sequence[QuantizerCfgEntry] | Sequence[Mapping[str, Any]]
 
 # Legacy flat-dict input shape (``{"*": ..., "*weight_quantizer": ...}``).  Accepted by
 # ``normalize_quant_cfg_list`` for backward compatibility but emits a DeprecationWarning;
 # new code should use a list of :class:`QuantizerCfgEntry`-shaped entries instead.
-DeprecatedQuantCfgType = dict[str, Any]
+DeprecatedQuantCfgType = Mapping[str, Any]
 
 _QuantizeAlgoCfgType = str | dict | QuantizeAlgorithmConfig | None
 
@@ -1037,12 +1039,12 @@ def normalize_quant_cfg_list(
         )
 
     # Legacy flat-dict format: {"*": {...}, "*weight_quantizer": {...}} → list of single-key dicts.
-    if isinstance(v, dict):
+    if isinstance(v, Mapping):
         _warn_legacy()
         v = [{k: val} for k, val in v.items()]
-    elif not isinstance(v, list):
+    elif not isinstance(v, Sequence) or isinstance(v, (str, bytes)):
         raise ValueError(
-            f"quant_cfg must be a list of entries (or a legacy flat dict), got "
+            f"quant_cfg must be a sequence of entries (or a legacy flat mapping), got "
             f"{type(v).__name__}: {v!r}."
         )
 
@@ -1053,8 +1055,10 @@ def normalize_quant_cfg_list(
             key = "*"
 
         if isinstance(key, str) and key.startswith("nn."):
-            if not isinstance(value, dict):
-                raise ValueError(f"For 'nn.*' scoped format, value must be a dict, got {value!r}")
+            if not isinstance(value, Mapping):
+                raise ValueError(
+                    f"For 'nn.*' scoped format, value must be a mapping, got {value!r}"
+                )
             # Support multi-key nn.*-scoped dicts by emitting one entry per sub-key.
             entries: list[dict[str, Any]] = []
             for q_path, sub_cfg in value.items():
@@ -1071,7 +1075,7 @@ def normalize_quant_cfg_list(
                 entries.append(entry)
             return entries
         else:
-            if isinstance(value, dict):
+            if isinstance(value, Mapping):
                 cfg = {k: val for k, val in value.items() if k != "enable"} or None
                 enable = value.get("enable")
             else:
@@ -1091,15 +1095,15 @@ def normalize_quant_cfg_list(
         if isinstance(raw, QuantizerCfgEntry):
             result.append(raw)
             continue
-        if isinstance(raw, dict) and "quantizer_name" in raw:
+        if isinstance(raw, Mapping) and "quantizer_name" in raw:
             entries: list[dict[str, Any]] = [dict(raw)]  # copy to avoid mutating caller's data
-        elif isinstance(raw, dict) and len(raw) == 1:
+        elif isinstance(raw, Mapping) and len(raw) == 1:
             key, val = next(iter(raw.items()))
             entries = [dict(e) for e in _dict_to_entry(key, val)]
             if not _warned_legacy:
                 _warn_legacy()
                 _warned_legacy = True
-        elif isinstance(raw, dict) and len(raw) > 1 and any(k.startswith("nn.") for k in raw):
+        elif isinstance(raw, Mapping) and len(raw) > 1 and any(k.startswith("nn.") for k in raw):
             # Legacy flat dict with nn.*-scoped keys mixed with other keys — expand all pairs.
             entries = []
             for k, val in raw.items():
@@ -1135,7 +1139,9 @@ class QuantizeConfig(ModeloptBaseConfig):
 
     @field_validator("quant_cfg", mode="before")
     @classmethod
-    def normalize_quant_cfg(cls, v: Any) -> QuantizeQuantCfgType:
+    def normalize_quant_cfg(
+        cls, v: RawQuantizeQuantCfgType | DeprecatedQuantCfgType
+    ) -> QuantizeQuantCfgType:
         """Normalize raw quant_cfg input into a ``list[QuantizerCfgEntry]``.
 
         Delegates to :func:`normalize_quant_cfg_list`, which accepts every supported input
@@ -1788,7 +1794,7 @@ choices: set[str] = {
 }
 
 
-def need_calibration(config):
+def need_calibration(config: QuantizeConfig | Mapping[str, Any]) -> bool:
     """Check if calibration is needed for the given config."""
     if config["algorithm"] is not None and config["algorithm"] != "max":
         return True
@@ -1796,8 +1802,8 @@ def need_calibration(config):
     def _not_dynamic(cfg):
         return cfg.get("enable", True) and cfg.get("type", "") != "dynamic"
 
-    quant_cfg: list = config.get("quant_cfg") or []
-    quant_cfg = normalize_quant_cfg_list(quant_cfg)
+    raw_quant_cfg: RawQuantizeQuantCfgType | DeprecatedQuantCfgType = config.get("quant_cfg") or []
+    quant_cfg: list[QuantizerCfgEntry] = normalize_quant_cfg_list(raw_quant_cfg)
     for entry in quant_cfg:
         name = entry["quantizer_name"]
         raw_cfg = entry.get("cfg")
