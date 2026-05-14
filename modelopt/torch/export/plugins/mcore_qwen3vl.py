@@ -15,106 +15,39 @@
 
 """Custom mapping from Qwen3-VL Hugging Face models to Megatron Core models.
 
-Qwen3-VL model structure differs from Qwen3:
-- Language model weights are under `model.language_model.` prefix
-- Visual encoder weights are under `model.visual.` prefix
+Qwen3-VL differs from Qwen3 in one structural way: language-model weights live
+under ``model.language_model.`` instead of ``model.``, while ``lm_head.weight``
+remains at the root level.  The mappings below are derived automatically from
+the Qwen3 mappings by inserting ``language_model.`` after ``model.`` for every
+prefix that starts with ``model.``.
 
-This module handles the language model conversion for PTQ/QAT workflows.
-Visual components are typically kept in full precision.
+Note: the visual encoder (``model.visual.*``) is intentionally excluded — this
+mapping covers only the language-model decoder used for quantization and export.
 
-HuggingFace Qwen3-VL-8B structure:
-- model.language_model.embed_tokens.weight
-- model.language_model.layers.{L}.input_layernorm.weight
-- model.language_model.layers.{L}.self_attn.q_proj.weight
-- model.language_model.layers.{L}.self_attn.k_proj.weight
-- model.language_model.layers.{L}.self_attn.v_proj.weight
-- model.language_model.layers.{L}.self_attn.q_norm.weight
-- model.language_model.layers.{L}.self_attn.k_norm.weight
-- model.language_model.layers.{L}.self_attn.o_proj.weight
-- model.language_model.layers.{L}.post_attention_layernorm.weight
-- model.language_model.layers.{L}.mlp.gate_proj.weight
-- model.language_model.layers.{L}.mlp.up_proj.weight
-- model.language_model.layers.{L}.mlp.down_proj.weight
-- model.language_model.norm.weight
-- lm_head.weight
+Reference: https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct/blob/main/model.safetensors.index.json
 """
 
-from .mcore_custom import (
-    COL_ETP,
-    COL_TP,
-    REPLICATE,
-    ROW_ETP,
-    ROW_TP,
-    CustomModuleMapping,
-    GatedMLPMerging,
-    GatedMLPSlicing,
-    NameRemapping,
-    QKVMerging,
-    QKVSlicing,
-)
+from .mcore_custom import CustomModuleMapping
+from .mcore_qwen import qwen3_causal_lm_export, qwen3_causal_lm_import
 
-# Import rules: HuggingFace -> Megatron Core
-qwen3vl_causal_lm_import: dict[str, CustomModuleMapping] = {
-    # Embeddings - note the language_model prefix
-    "word_embeddings": NameRemapping("model.language_model.embed_tokens.", COL_TP),
-    # Final layer norm
-    "final_layernorm": NameRemapping("model.language_model.norm.", REPLICATE),
-    # Output layer (lm_head is at root level, not under language_model)
-    "output_layer": NameRemapping("lm_head.", COL_TP),
-    # Attention - input layernorm
-    "input_layernorm": NameRemapping("model.language_model.layers.{}.input_layernorm.", REPLICATE),
-    # Attention - QKV projection (merged)
-    "linear_qkv": QKVMerging("model.language_model.layers.{}.self_attn.", COL_TP),
-    # Attention - output projection
-    "linear_proj": NameRemapping("model.language_model.layers.{}.self_attn.o_proj.", ROW_TP),
-    # Attention - Q/K layer norms (Qwen3 uses RMSNorm on Q and K)
-    "q_layernorm": NameRemapping("model.language_model.layers.{}.self_attn.q_norm.", REPLICATE),
-    "k_layernorm": NameRemapping("model.language_model.layers.{}.self_attn.k_norm.", REPLICATE),
-    # MLP - pre-MLP layernorm (post_attention_layernorm in HF)
-    "pre_mlp_layernorm": NameRemapping(
-        "model.language_model.layers.{}.post_attention_layernorm.", REPLICATE
-    ),
-    # MLP - gate_proj + up_proj merged into linear_fc1
-    "linear_fc1": GatedMLPMerging("model.language_model.layers.{}.mlp.", COL_TP),
-    # MLP - down_proj as linear_fc2
-    "linear_fc2": NameRemapping("model.language_model.layers.{}.mlp.down_proj.", ROW_TP),
-    # MoE support (for Qwen3-VL MoE variants like 30B-A3B)
-    "router": NameRemapping("model.language_model.layers.{}.mlp.gate.", REPLICATE),
-    "local_experts.linear_fc1": GatedMLPMerging(
-        "model.language_model.layers.{}.mlp.experts.{}.", COL_ETP
-    ),
-    "local_experts.linear_fc2": NameRemapping(
-        "model.language_model.layers.{}.mlp.experts.{}.down_proj.", ROW_ETP
-    ),
-}
 
-# Export rules: Megatron Core -> HuggingFace
-qwen3vl_causal_lm_export: dict[str, CustomModuleMapping] = {
-    # Embeddings
-    "word_embeddings": NameRemapping("model.language_model.embed_tokens."),
-    # Final layer norm
-    "final_layernorm": NameRemapping("model.language_model.norm."),
-    # Output layer
-    "output_layer": NameRemapping("lm_head."),
-    # Attention - input layernorm
-    "input_layernorm": NameRemapping("model.language_model.layers.{}.input_layernorm."),
-    # Attention - QKV projection (sliced back to separate q/k/v)
-    "linear_qkv": QKVSlicing("model.language_model.layers.{}.self_attn."),
-    # Attention - output projection
-    "linear_proj": NameRemapping("model.language_model.layers.{}.self_attn.o_proj."),
-    # Attention - Q/K layer norms
-    "q_layernorm": NameRemapping("model.language_model.layers.{}.self_attn.q_norm."),
-    "k_layernorm": NameRemapping("model.language_model.layers.{}.self_attn.k_norm."),
-    # MLP - pre-MLP layernorm
-    "pre_mlp_layernorm": NameRemapping("model.language_model.layers.{}.post_attention_layernorm."),
-    # MLP - linear_fc1 sliced back to gate_proj + up_proj
-    "linear_fc1": GatedMLPSlicing("model.language_model.layers.{}.mlp."),
-    # MLP - down_proj
-    "linear_fc2": NameRemapping("model.language_model.layers.{}.mlp.down_proj."),
-    # MoE support
-    "router": NameRemapping("model.language_model.layers.{}.mlp.gate."),
-    "local_experts.linear_fc1": GatedMLPSlicing("model.language_model.layers.{}.mlp.experts.{}."),
-    "local_experts.linear_fc2": NameRemapping(
-        "model.language_model.layers.{}.mlp.experts.{}.down_proj."
-    ),
-}
+def _with_language_model_prefix(
+    mapping: dict[str, CustomModuleMapping],
+) -> dict[str, CustomModuleMapping]:
+    """Derive a VL mapping from a base Qwen3 mapping.
+
+    Rewrites every ``target_name_or_prefix`` that starts with ``model.`` to
+    ``model.language_model.<rest>``.  Prefixes that do not start with
+    ``model.`` (e.g. ``lm_head.``) are left unchanged.
+    """
+    result = {}
+    for key, m in mapping.items():
+        prefix = m.target_name_or_prefix
+        if prefix.startswith("model."):
+            prefix = "model.language_model." + prefix[len("model.") :]
+        result[key] = type(m)(target_name_or_prefix=prefix, func_kwargs=m.func_kwargs)
+    return result
+
+
+qwen3vl_causal_lm_import = _with_language_model_prefix(qwen3_causal_lm_import)
+qwen3vl_causal_lm_export = _with_language_model_prefix(qwen3_causal_lm_export)
