@@ -679,6 +679,16 @@ def _process_quantized_modules(
                     raise AssertionError(
                         f"Failed to export module '{name}' (type={type(sub_module).__name__}): {e}"
                     ) from e
+            elif isinstance(sub_module, nn.Embedding) and hasattr(sub_module, "weight_quantizer"):
+                # Quantized nn.Embedding: pack the embedding table the same way as Linear
+                # weights so downstream loaders see the NVFP4/FP8/INT-packed bytes + scales.
+                try:
+                    with fsdp2_aware_weight_update(model, sub_module, reshard=False):
+                        _export_quantized_weight(sub_module, dtype)
+                except AssertionError as e:
+                    raise AssertionError(
+                        f"Failed to export embedding '{name}' (type={type(sub_module).__name__}): {e}"
+                    ) from e
             elif (
                 "Llama4TextExperts" in type(sub_module).__name__
                 or "GptOssExperts" in type(sub_module).__name__
