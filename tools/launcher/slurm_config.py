@@ -33,6 +33,7 @@ class SlurmConfig:
     port: int = 22
     account: str = None
     partition: str = "batch"
+    qos: str = None
     container: str = None
     modelopt_install_path: str = "/usr/local/lib/python3.12/dist-packages/modelopt"
     container_mounts: list[str] = None
@@ -51,6 +52,7 @@ def slurm_factory(
     host: str = os.environ.get("SLURM_HOST", ""),
     account: str = os.environ.get("SLURM_ACCOUNT", ""),
     partition: str = os.environ.get("SLURM_PARTITION", "batch"),
+    qos: str = os.environ.get("SLURM_QOS", None),
     nodes: int = 1,
     ntasks_per_node: int = 1,
     gpus_per_node: int = 1,
@@ -68,6 +70,7 @@ def slurm_factory(
         host=host,
         account=account,
         partition=partition,
+        qos=qos,
         nodes=nodes,
         ntasks_per_node=ntasks_per_node,
         gpus_per_node=gpus_per_node,
