@@ -34,6 +34,7 @@ class TestQuantBatchNormND:
             (nn.BatchNorm1d, (2, NUM_CHANNELS, 8)),
             (nn.BatchNorm2d, (2, NUM_CHANNELS, 8, 8)),
             (nn.BatchNorm3d, (2, NUM_CHANNELS, 8, 8, 8)),
+            (nn.SyncBatchNorm, (2, NUM_CHANNELS, 8, 8)),
         ],
     )
     def test_no_quant(self, original_cls, input_shape):
@@ -60,6 +61,7 @@ class TestQuantBatchNormND:
             (nn.BatchNorm1d, (2, NUM_CHANNELS, 8)),
             (nn.BatchNorm2d, (2, NUM_CHANNELS, 8, 8)),
             (nn.BatchNorm3d, (2, NUM_CHANNELS, 8, 8, 8)),
+            (nn.SyncBatchNorm, (2, NUM_CHANNELS, 8, 8)),
         ],
     )
     def test_fake_quant_per_tensor(self, original_cls, input_shape):
@@ -86,6 +88,7 @@ class TestQuantBatchNormND:
             (nn.BatchNorm1d, (2, NUM_CHANNELS, 8)),
             (nn.BatchNorm2d, (2, NUM_CHANNELS, 8, 8)),
             (nn.BatchNorm3d, (2, NUM_CHANNELS, 8, 8, 8)),
+            (nn.SyncBatchNorm, (2, NUM_CHANNELS, 8, 8)),
         ],
     )
     def test_fake_quant_per_channel(self, original_cls, input_shape):
