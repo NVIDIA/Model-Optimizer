@@ -981,9 +981,12 @@ QuantizerCfgListConfig = QuantizeQuantCfgType
 # legacy / new dict forms) or already-validated QuantizerCfgEntry instances.
 # ``Sequence`` (rather than ``list``) keeps the alias covariant so callers can pass
 # ``list[QuantizerCfgEntry]`` without an invariance error.
-# ``normalize_quant_cfg_list`` additionally accepts a single legacy flat ``dict`` for the
-# whole list, but that path is deprecated and not surfaced in this alias.
 RawQuantizeQuantCfgType = Sequence[QuantizerCfgEntry | dict[str, Any]]
+
+# Legacy flat-dict input shape (``{"*": ..., "*weight_quantizer": ...}``).  Accepted by
+# ``normalize_quant_cfg_list`` for backward compatibility but emits a DeprecationWarning;
+# new code should use a list of :class:`QuantizerCfgEntry`-shaped entries instead.
+DeprecatedQuantCfgType = dict[str, Any]
 
 _QuantizeAlgoCfgType = str | dict | QuantizeAlgorithmConfig | None
 
@@ -991,7 +994,7 @@ QuantizeAlgoCfgType = _QuantizeAlgoCfgType | list[_QuantizeAlgoCfgType] | None
 
 
 def normalize_quant_cfg_list(
-    v: RawQuantizeQuantCfgType | dict[str, Any],
+    v: RawQuantizeQuantCfgType | DeprecatedQuantCfgType,
 ) -> list[QuantizerCfgEntry]:
     """Normalize a raw quant_cfg into a list of :class:`QuantizerCfgEntry` instances.
 
