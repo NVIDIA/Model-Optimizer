@@ -16,7 +16,7 @@ and conciseness.
 - **Respect inheritance boundaries.** Parent abstractions should define shared contracts and
   shared behavior, not child-specific special cases.
 - **Don't repeat yourself; keep a single source of truth.** Consolidate repeated logic or intent with a shared helper, API,
-  or abstraction when doing so keeps the design simpler. Avoid parallel implementations that can drift out of sync.
+  or abstraction when doing so keeps the design simpler. Avoid duplication that can drift out of sync.
 - **Comment cautiously.** Comments should add context, not translate code into English.
   Prefer making the code self-explanatory first. Use comments only for non-obvious
   intent or constraints that remain unclear from the code. Apply this guidance to new
