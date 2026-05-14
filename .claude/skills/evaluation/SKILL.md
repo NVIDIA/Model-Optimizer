@@ -32,6 +32,9 @@ Config Generation Progress:
 - [ ] Step 7: Advanced - Interceptors
 - [ ] Step 7.5: Check container registry auth for private images (SLURM only)
 - [ ] Step 8: Run the evaluation
+  - [ ] Step 8.1: Dry-run / NEL CLI config validation
+  - [ ] Step 8.2: Limited-samples canary
+  - [ ] Step 8.3: Full evaluation
 - [ ] Step 9: Verify evaluation comparability
 ```
 
@@ -261,7 +264,9 @@ ssh <host> "grep -E '^\s*machine\s+' ~/.config/enroot/.credentials 2>/dev/null"
 
 **Step 8: Run the evaluation**
 
-Print the following commands to the user. Propose to execute them in order to confirm the config works as expected before the full run.
+Use a gated `dry-run -> canary -> full-run` sequence. Run the commands directly
+when the user has asked you to launch evals; otherwise, ask before submitting jobs.
+Do not submit the full run until the dry-run and limited-samples canary both pass.
 
 **Important**: Export required environment variables based on your config. If any tokens or keys are missing, point the user to `recipes/env.example` — it lists all possible keys with notes on which tasks need them. Ask the user to copy it, fill in their keys, and source it:
 
@@ -279,33 +284,60 @@ export NEMO_EVALUATOR_TRUST_PRE_CMD=1
 export DUMMY_API_KEY=dummy
 ```
 
-1. **Dry-run** (validates config without running):
+**Step 8.1: Dry-run / NEL CLI config validation** (validates config without running):
 
-   ```bash
-   nel run --config <config_path> --dry-run
-   ```
+```bash
+nel run --config <config_path> --dry-run
+```
 
-2. **Test with limited samples** (quick validation run):
+Check the NEL output before launching anything. Fix unresolved `???` values,
+bad Hydra overrides, missing env var references, invalid mounts, image/container
+problems, sbatch issues, and obvious deployment argument errors before moving on.
 
-   ```bash
-   nel run --config <config_path> -o ++evaluation.nemo_evaluator_config.config.params.limit_samples=10
-   ```
+**Step 8.2: Limited-samples canary** (operational validation before production):
 
-3. **Re-run a single task** (useful for debugging or re-testing after config changes):
+```bash
+nel run --config <config_path> -o ++evaluation.nemo_evaluator_config.config.params.limit_samples=10
+```
 
-   ```bash
-   nel run --config <config_path> -t <task_name>
-   ```
+Use the canary to tune parallelism and catch runtime failures that the dry-run
+cannot catch: judge API auth/rate-limit errors, evaluation container failures,
+code-execution sandbox/container errors, vLLM health/OOM issues, bad request
+formatting, log path problems, and unexpectedly low evaluated-sample counts.
+Inspect logs before accepting the canary, not just result files:
 
-   Combine with `-o` for limited samples: `nel run --config <config_path> -t <task_name> -o ++evaluation.nemo_evaluator_config.config.params.limit_samples=10`
+```bash
+nel status <canary_invocation_id>
+nel info <canary_invocation_id> --logs
+ssh <user>@<host> "grep -i 'error\|failed\|exception\|timeout\|unauthorized' <log_path>/*.log"
+```
 
-4. **Full evaluation** (production run):
+If the benchmark set mixes different dependency profiles, canary each risky
+class or task: LLM-judge tasks, code-execution tasks, and ordinary model-only
+tasks can fail for different reasons. For evals that depend on inference judges
+or code execution containers, start with conservative `parallelism` and raise it
+only after the canary logs show those dependencies are healthy. Do not over-raise
+parallelism just to saturate the model server; judge services and code containers
+often become the bottleneck or failure point first.
 
-   ```bash
-   nel run --config <config_path>
-   ```
+**Single-task rerun** (useful for canary debugging or re-testing after config changes):
 
-After the dry-run, check the output from `nel` for any problems with the config. If there are no problems, propose to first execute the test run with limited samples and then execute the full evaluation. If there are problems, resolve them before executing the full evaluation.
+```bash
+nel run --config <config_path> -t <task_name>
+```
+
+Combine with `-o` for limited samples: `nel run --config <config_path> -t <task_name> -o ++evaluation.nemo_evaluator_config.config.params.limit_samples=10`
+
+**Step 8.3: Full evaluation** (production run after the canary passes):
+
+```bash
+nel run --config <config_path>
+```
+
+Before the full run, remove the `limit_samples` override and keep only the
+parallelism/settings that the canary validated. If the canary fails, fix the
+config, credentials, image/container, judge setup, code-execution environment, or
+parallelism, then rerun the canary before launching the full evaluation.
 
 **Monitoring Progress**
 
@@ -361,5 +393,8 @@ Config Generation Progress:
 - [ ] Step 7: Advanced - Interceptors
 - [ ] Step 7.5: Check container registry auth for private images (SLURM only)
 - [ ] Step 8: Run the evaluation
+  - [ ] Step 8.1: Dry-run / NEL CLI config validation
+  - [ ] Step 8.2: Limited-samples canary
+  - [ ] Step 8.3: Full evaluation
 - [ ] Step 9: Verify evaluation comparability
 ```

@@ -22,7 +22,9 @@
       "Presents task list and waits for user confirmation before proceeding",
       "Configures request and response logging interceptors under evaluation.nemo_evaluator_config.config.target.api_endpoint.adapter_config using correct field names (max_logged_requests/max_logged_responses, not max_saved_*)",
       "Handles dry-run failure for missing HF_TOKEN_FOR_GPQA_DIAMOND by offering to fix the config",
-      "Successfully submits test run with limit_samples=10 after dry-run passes",
+      "Successfully submits a limited-samples canary with limit_samples=10 after dry-run passes",
+      "Inspects canary logs for judge, evaluation container, deployment, and code-execution errors before allowing the full run",
+      "Tunes parallelism from canary results and avoids over-raising it for judge-backed or code-execution tasks",
       "Provides monitoring commands (nel status, nel info --logs) and inspects server logs via SSH when asked"
     ]
   },
@@ -41,7 +43,8 @@
       "Recommends accuracy-sensitive benchmarks from references/quantization-benchmarks.md",
       "Searches web for Llama-3.1-8B model card and extracts sampling params, context length, TP settings",
       "Fills in remaining missing values by asking user",
-      "Runs dry-run, then test with limit_samples=10, then full evaluation",
+      "Runs dry-run, then a limited-samples canary with limit_samples=10, then full evaluation only after canary log checks pass",
+      "Tunes parallelism from the canary and avoids over-raising it when benchmarks depend on inference judges or code execution containers",
       "Reports accuracy results per benchmark"
     ]
   },
@@ -58,7 +61,8 @@
       "Reads references/quantization-benchmarks.md and recommends accuracy-sensitive benchmarks",
       "Uses WebSearch to research model card for sampling params and context length",
       "Fills in SLURM-specific values: hostname, account, partition from user input",
-      "Runs dry-run validation before full evaluation",
+      "Runs dry-run validation and a limited-samples canary before full evaluation",
+      "Checks canary logs for judge, container, deployment, and code-execution failures before treating the run as ready",
       "Provides SSH-based log monitoring commands for SLURM execution"
     ]
   }

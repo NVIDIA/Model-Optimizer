@@ -25,7 +25,7 @@
 # Run a single task:
 #   nel run --config ... -t ns_gpqa
 #
-# Smoke test (2 samples):
+# Canary (2 samples): use this before a full run to validate logs and tune parallelism.
 #   nel run --config ... -o ++evaluation.nemo_evaluator_config.config.params.limit_samples=2
 defaults:
   - execution: slurm/default
