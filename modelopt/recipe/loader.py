@@ -89,29 +89,15 @@ def _load_recipe_from_file(recipe_file: Path | Traversable) -> ModelOptRecipeBas
     The file must contain a ``metadata`` section with at least ``recipe_type``,
     plus a ``quant_cfg`` mapping and an optional ``algorithm`` for PTQ recipes.
     """
-    data = load_config(recipe_file, schema_type=ModelOptPTQRecipe)
-    if not isinstance(data, dict):
+    recipe = load_config(recipe_file, schema_type=ModelOptPTQRecipe)
+    if not isinstance(recipe, ModelOptPTQRecipe):
         raise ValueError(
-            f"Recipe file {recipe_file} must be a YAML mapping, got {type(data).__name__}."
+            f"Recipe file {recipe_file} must produce a {ModelOptPTQRecipe.__name__}, "
+            f"got {type(recipe).__name__}."
         )
-
-    metadata = data.get("metadata", {})
-    if not isinstance(metadata, dict):
-        raise ValueError(
-            f"Recipe file {recipe_file} field 'metadata' must be a mapping, "
-            f"got {type(metadata).__name__}."
-        )
-    recipe_type = metadata.get("recipe_type")
-    if recipe_type is None:
-        raise ValueError(f"Recipe file {recipe_file} must contain a 'metadata.recipe_type' field.")
-
+    recipe_type = recipe.recipe_type
     if recipe_type == RecipeType.PTQ:
-        if "quantize" not in data:
-            raise ValueError(f"PTQ recipe file {recipe_file} must contain 'quantize'.")
-        return ModelOptPTQRecipe(
-            metadata=metadata,
-            quantize=data["quantize"],
-        )
+        return recipe
     raise ValueError(f"Unsupported recipe type: {recipe_type!r}")
 
 
@@ -149,13 +135,14 @@ def _load_recipe_from_dir(recipe_dir: Path | Traversable) -> ModelOptRecipeBase:
 
     if recipe_type == RecipeType.PTQ:
         quantize_file = _find_recipe_section_file(recipe_dir, "quantize")
-        quantize_data = load_config(quantize_file, schema_type=QuantizeConfig)
-        if not isinstance(quantize_data, dict):
+        quantize_cfg = load_config(quantize_file, schema_type=QuantizeConfig)
+        if not isinstance(quantize_cfg, QuantizeConfig):
             raise ValueError(
-                f"{quantize_file} must be a YAML mapping, got {type(quantize_data).__name__}."
+                f"{quantize_file} must produce a {QuantizeConfig.__name__}, "
+                f"got {type(quantize_cfg).__name__}."
             )
         return ModelOptPTQRecipe(
             metadata=metadata,
-            quantize=quantize_data,
+            quantize=quantize_cfg,
         )
     raise ValueError(f"Unsupported recipe type: {recipe_type!r}")

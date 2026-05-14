@@ -170,19 +170,22 @@ def test_load_recipe_missing_recipe_type_raises(tmp_path):
         load_recipe(bad)
 
 
-def test_load_recipe_missing_quantize_raises(tmp_path):
-    """load_recipe raises ValueError when quantize is absent for a PTQ recipe."""
-    bad = tmp_path / "bad.yml"
-    bad.write_text(CFG_RECIPE_MISSING_quantize)
-    with pytest.raises(ValueError, match="quantize"):
-        load_recipe(bad)
+def test_load_recipe_missing_quantize_uses_default(tmp_path):
+    """``quantize`` is optional in a PTQ recipe; absence yields an empty default config."""
+    from modelopt.torch.quantization.config import QuantizeConfig
+
+    good = tmp_path / "good.yml"
+    good.write_text(CFG_RECIPE_MISSING_quantize)
+    recipe = load_recipe(good)
+    assert isinstance(recipe.quantize, QuantizeConfig)
 
 
 def test_load_recipe_unsupported_type_raises(tmp_path):
     """load_recipe raises ValueError for an unknown recipe_type."""
     bad = tmp_path / "bad.yml"
     bad.write_text(CFG_RECIPE_UNSUPPORTED_TYPE)
-    with pytest.raises(ValueError, match="Unsupported recipe type"):
+    # Schema-driven validation reports the failure via the TypedDict's enum check.
+    with pytest.raises(ValueError, match="recipe_type"):
         load_recipe(bad)
 
 
@@ -916,8 +919,13 @@ def test_import_mixed_tree(tmp_path):
     data = load_config(config_file)
     # Dict import inside list entry
     assert data["quant_cfg"][0]["cfg"] == {"num_bits": (4, 3)}
-    # List splice
-    assert data["quant_cfg"][1] == {"quantizer_name": "*lm_head*", "enable": False}
+    # List splice — entries are normalized by QuantizeConfig.quant_cfg's validator,
+    # which fills in defaults for missing ``enable`` / ``cfg`` keys.
+    assert data["quant_cfg"][1] == {
+        "quantizer_name": "*lm_head*",
+        "enable": False,
+        "cfg": None,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1089,8 +1097,10 @@ def test_builtin_config_snippets_with_modelopt_schema(config_path):
     assert data
 
 
-def test_modelopt_schema_comment_validates_without_changing_payload(tmp_path):
-    """modelopt-schema validates the resolved payload but load_config still returns a plain dict."""
+def test_modelopt_schema_comment_returns_instance(tmp_path):
+    """A ``modelopt-schema`` comment makes load_config return an instance of that schema."""
+    from modelopt.torch.quantization.config import QuantizerAttributeConfig
+
     config_file = tmp_path / "fp8.yaml"
     config_file.write_text(
         "# modelopt-schema: modelopt.torch.quantization.config.QuantizerAttributeConfig\n"
@@ -1098,7 +1108,9 @@ def test_modelopt_schema_comment_validates_without_changing_payload(tmp_path):
         "axis:\n"
     )
     data = load_config(config_file)
-    assert data == {"num_bits": (4, 3), "axis": None}
+    assert isinstance(data, QuantizerAttributeConfig)
+    assert data.num_bits == (4, 3)
+    assert data.axis is None
 
 
 def test_modelopt_schema_comment_validation_error(tmp_path):
