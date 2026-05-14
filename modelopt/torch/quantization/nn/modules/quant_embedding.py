@@ -124,9 +124,15 @@ class _QuantEmbedding(QuantModule):
             # Caught any config or call that managed to flip _disabled to False.
             raise RuntimeError(_INPUT_QUANTIZER_ERR)
         if is_torch_export_mode():
-            return super().forward(input, *args, **kwargs)
-        with self.quantize_weight():
+            # quantize_weight()'s attribute write is not allowed under torch.export;
+            # weight quantization is still applied inline via _get_quantized_weight's
+            # is_torch_export_mode() branch. Apply output_quantizer in this path too
+            # so users who opt into output activation quantization don't silently
+            # lose it during export — matches QuantInputBase.forward's behavior.
             output = super().forward(input, *args, **kwargs)
+        else:
+            with self.quantize_weight():
+                output = super().forward(input, *args, **kwargs)
         return self.output_quantizer(output)
 
 

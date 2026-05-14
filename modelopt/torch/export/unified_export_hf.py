@@ -682,13 +682,31 @@ def _process_quantized_modules(
             elif isinstance(sub_module, nn.Embedding) and hasattr(sub_module, "weight_quantizer"):
                 # Quantized nn.Embedding: pack the embedding table the same way as Linear
                 # weights so downstream loaders see the NVFP4/FP8/INT-packed bytes + scales.
-                try:
-                    with fsdp2_aware_weight_update(model, sub_module, reshard=False):
-                        _export_quantized_weight(sub_module, dtype)
-                except AssertionError as e:
-                    raise AssertionError(
-                        f"Failed to export embedding '{name}' (type={type(sub_module).__name__}): {e}"
-                    ) from e
+                # Skip packing when the embedding's weight is tied to another module
+                # (e.g. tied_word_embeddings → lm_head): _export_quantized_weight reassigns
+                # the .weight attribute to a new uint8 Parameter, which severs the Python-
+                # level tie and leaves the other module pointing at a stale float Parameter.
+                tied_to = [
+                    other_name
+                    for other_name, other_module in model.named_modules()
+                    if other_module is not sub_module
+                    and getattr(other_module, "weight", None) is sub_module.weight
+                ]
+                if tied_to:
+                    warnings.warn(
+                        f"Skipping quantized weight packing for embedding '{name}': its "
+                        f"weight Parameter is shared with {tied_to} (weight tying). Packing "
+                        "would break the tie and produce stale weights in the tied module(s). "
+                        "The embedding will be exported as its fake-quantized float weight."
+                    )
+                else:
+                    try:
+                        with fsdp2_aware_weight_update(model, sub_module, reshard=False):
+                            _export_quantized_weight(sub_module, dtype)
+                    except AssertionError as e:
+                        raise AssertionError(
+                            f"Failed to export embedding '{name}' (type={type(sub_module).__name__}): {e}"
+                        ) from e
             elif (
                 "Llama4TextExperts" in type(sub_module).__name__
                 or "GptOssExperts" in type(sub_module).__name__
