@@ -10,14 +10,13 @@ and conciseness.
 - **Design for simplicity and readability.** Choose the design that is easiest to understand and maintain.
   Code is read top to bottom: put high-level behavior first, hide lower-level details behind well-named helpers,
   and treat heavy branching as a signal to reconsider the design.
-- **Prefer modular, composable solutions.** Avoid input-specific or case-specific hard-coding. Use
-  existing helpers, base classes, registries, and plugins when they fit. Keep scope limited to known
-  cases; don't add complexity for speculative future needs.
-- **Respect inheritance.** Parent abstractions should contain shared contracts and
+- **Prefer modular, composable solutions.** Avoid input-specific or case-specific hard-coding.
+  Use existing extension points when they fit. If none fit, add a simple, focused helper,
+  class, or plugin that cleanly captures the new behavior. Keep scope limited to known cases.
+- **Respect inheritance boundaries.** Parent abstractions should define shared contracts and
   shared behavior, not child-specific special cases.
-- **Don't repeat yourself.** Reuse existing helpers, APIs, and classes when possible. Prefer reusing or
-  generalizing existing code when it keeps the design simpler. If the same logic or intent appears elsewhere,
-  consolidate it.
+- **Don't repeat yourself.** Consolidate repeated logic or intent with a shared helper, API,
+  or abstraction when doing so keeps the design simpler.
 - **Comment cautiously.** Comments should add context, not translate code into English.
   Prefer making the code self-explanatory first. Use comments only for non-obvious
   intent or constraints that remain unclear from the code. Apply this guidance to new
