@@ -2,8 +2,8 @@
 #
 # A balanced set of benchmarks for validating quantized model quality.
 # Copy this file and customize for your needs.
-# Task snippets in recipes/tasks/ define per-task configs — the agent
-# composes them into a runnable config like this one.
+# Task references in recipes/tasks/ define benchmark requirements and YAML
+# fragments — the agent composes them into a runnable config like this one.
 #
 # Includes:
 #   - MMLU-Pro (knowledge, completions)

@@ -56,13 +56,15 @@ Test that `nel` is installed with `nel --version`. If not, instruct the user to 
 
 If the user already has a config file (e.g., "run this config", "evaluate with my-config.yaml"), skip to Step 8. Optionally review it for common issues (missing `???` values, quantization flags) before running.
 
-**Shortcut: use pre-built task snippets.** If the user asks for a specific benchmark (e.g., "run MMLU-Pro", "evaluate with AIME"), check `recipes/tasks/` (relative to this skill's directory) for a matching task snippet. Available: mmlu_pro, gpqa, aime2025, livecodebench, ifbench, scicode. Task snippets contain only the task-specific config (name, params, repeats) — not the full NEL config. To use them:
+**Shortcut: use task references.** For named benchmarks, read the matching
+`recipes/tasks/<name>.md` before creating or editing the config. Available:
+mmlu_pro, gpqa, aime2025, livecodebench, ifbench, scicode.
 
-1. Read the task snippet(s) the user wants
+1. Read the task reference(s) the user wants.
 2. Use `recipes/examples/example_eval.yaml` as the base config template
-3. Replace the `tasks:` section with the selected snippet(s)
-4. Do Step 3 (auto-detect model settings from checkpoint) and Step 4 (fill in `???` values)
-5. Proceed to Step 7.5/8
+3. Copy the selected YAML fragment(s) into `evaluation.tasks`.
+4. Apply any notes from the reference.
+5. Do Step 3, Step 4, then Step 7.5/8.
 
 **Step 2: Build the base config file**
 
@@ -192,11 +194,9 @@ For reasoning-capable models, prefer reasoning mode for evaluation because it us
 Show tasks in the current config. Loop until the user confirms the task list is final:
 
 1. Tell the user: "Run `nel ls tasks` to see all available tasks".
-2. If the task list includes a benchmark with a pre-built snippet in `recipes/tasks/`,
-   prefer that snippet over hand-written task overrides unless the user explicitly asks
-   for different sampling or prompt settings. For reasoning-mode comparisons, keep the
-   recipe repeat counts; for tasks without a recipe, use `num_repeats >= 3` when the
-   benchmark supports repeats.
+2. If the task list includes a benchmark with a reference in `recipes/tasks/`,
+   read it before editing the config and prefer its YAML fragment unless the user
+   asks for different settings. Keep the reference repeat counts.
 3. Ask if they want to add/remove tasks or add/remove/modify task-specific parameter overrides.
    To add per-task `nemo_evaluator_config` as specified by the user, e.g.:
 
@@ -369,6 +369,10 @@ For each completed invocation/run directory, whether baseline, quantized, or a s
 6. If reasoning traces are present, confirm they are parsed/stripped/ignored before scoring consistently. Check for parser errors, unmatched reasoning delimiters, `finish_reason: length`, reasoning text leaked into answers, answers stripped with the reasoning, or reasoning disabled when the config intended it to be active.
 
 Report the run-validation summary before any score: log scan status, sample accounting, reasoning/answer parsing status, and any errors or warnings found. If any validation item fails, either rerun/fix it or label the result as incomplete or invalid.
+
+For score harvesting, use the `Score Extraction` Python snippet from the matching
+task reference in `recipes/tasks/<task>.md`. Do not rely on ad hoc `results.yml`
+greps when a task reference defines the canonical score and stderr fields.
 
 **Step 10: Verify baseline-vs-quantized comparability**
 
