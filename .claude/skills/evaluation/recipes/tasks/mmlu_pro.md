@@ -1,0 +1,33 @@
+# MMLU-Pro
+
+## Task Details
+
+- Task: `ns_mmlu_pro`
+- Harness: NeMo Skills, chat
+- Primary metric: `symbolic_correct`
+- Run time: Short
+- Repeats: 1
+
+## Params
+
+## YAML Fragment
+
+Use this inside the top-level `evaluation.tasks` list:
+
+```yaml
+- name: ns_mmlu_pro
+  nemo_evaluator_config:
+    config:
+      params:
+        extra:
+          num_repeats: 1
+          args: ++prompt_config=eval/aai/mcq-10choices-boxed ++inference.tokens_to_generate=null
+    target:
+      api_endpoint:
+        adapter_config:
+          params_to_remove:
+            - max_new_tokens
+            - max_completion_tokens
+```
+
+## Score Extraction
