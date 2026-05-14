@@ -151,6 +151,11 @@ Model Optimizer follows a structured approach to managing deprecated features:
 Model Optimizer is now open source! We welcome any feedback, feature requests and PRs.
 Please read our [Contributing](./CONTRIBUTING.md) guidelines for details on how to contribute to this project.
 
+## AI Agents
+
+For AI-assisted development setup, including local Claude Code and Codex
+override files, see the [agent tooling notes](./.agents/TOOLING.md).
+
 ### Top Contributors
 
 [![Contributors](https://contrib.rocks/image?repo=NVIDIA/Model-Optimizer)](https://github.com/NVIDIA/Model-Optimizer/graphs/contributors)
