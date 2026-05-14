@@ -46,7 +46,8 @@ Config Generation Progress:
   - [ ] Step 8.1: Dry-run / NEL CLI config validation
   - [ ] Step 8.2: Limited-samples canary
   - [ ] Step 8.3: Full evaluation
-- [ ] Step 9: Verify evaluation comparability
+- [ ] Step 9: Verify completed evaluation run
+- [ ] Step 10: Verify baseline-vs-quantized comparability
 ```
 
 **Step 1: Check prerequisites**
@@ -320,7 +321,7 @@ Inspect logs before accepting the canary, not just result files:
 ```bash
 nel status <canary_invocation_id>
 nel info <canary_invocation_id> --logs
-ssh <user>@<host> "grep -i 'error\|failed\|exception\|timeout\|unauthorized' <log_path>/*.log"
+ssh <user>@<host> "grep -i 'traceback\|exception\|error\|failed\|oom\|killed\|timeout\|unauthorized\|rate limit\|sandbox\|container\|judge\|parse\|scoring' <log_path>/*.log"
 ```
 
 If the benchmark set mixes different dependency profiles, canary each risky
@@ -354,17 +355,32 @@ parallelism, then rerun the canary before launching the full evaluation.
 
 After job submission, register the job per the **monitor skill** for durable cross-session tracking. For one-off queries (live status, debugging a failed run, analyzing results) use the **launching-evals skill**; for querying past runs in MLflow use **accessing-mlflow**.
 
-**Step 9: Verify evaluation comparability**
+**Step 9: Verify completed evaluation run**
 
-Before treating a baseline-vs-quantized delta as a model quality result, verify the two runs are comparable:
+Before pulling/reporting scores, validate the completed run itself. Do not accept a run as complete just because `results.yml` or a summary file exists.
+
+For each completed invocation/run directory, whether baseline, quantized, or a single-model run:
+
+1. Inspect client, server/deployment, SLURM, judge, and task-specific/code-execution logs as applicable. Search for `Traceback`, `Exception`, `ERROR`, `FAILED`, `OOM`, `Killed`, `timeout`, `rate limit`, `unauthorized`, `connection refused/reset`, `health check`, `sandbox`, `container`, `judge`, `parse`, `scoring`, and task-specific failure strings.
+2. Confirm the inference server loaded the intended checkpoint/model and stayed healthy through the run: no startup failure, mid-run crash/restart, OOM, request validation failure, max-context truncation, quantization load error, or repeated 4xx/5xx responses.
+3. For judge-backed tasks, confirm judge calls succeeded and were parsed/scored correctly: no auth/rate-limit failures, malformed judge responses, invalid JSON, missing scores, or fallback/default scores.
+4. For code-execution tasks, inspect executor/sandbox/container logs for setup failures, package install failures, timeouts, thread/process exhaustion, permission errors, harness crashes, or skipped tests that would make scores non-comparable.
+5. Confirm sample accounting: expected samples/repeats match completed, scored samples; no unexpected dropped/skipped/failed samples, `unknown_agent_error`, `failed_samples_policy` aborts, empty outputs, or partial result files.
+6. If reasoning traces are present, confirm they are parsed/stripped/ignored before scoring consistently. Check for parser errors, unmatched reasoning delimiters, `finish_reason: length`, reasoning text leaked into answers, answers stripped with the reasoning, or reasoning disabled when the config intended it to be active.
+
+Report the run-validation summary before any score: log scan status, sample accounting, reasoning/answer parsing status, and any errors or warnings found. If any validation item fails, either rerun/fix it or label the result as incomplete or invalid.
+
+**Step 10: Verify baseline-vs-quantized comparability**
+
+Before treating a baseline-vs-quantized delta as a model quality result, verify the validated runs are comparable:
 
 1. Confirm the prompt text and chat template/rendered messages match between the baseline and quantized evaluations.
 2. Confirm generation settings match, including temperature, top_p, top_k, max tokens, stop strings, reasoning mode/budget, and any task-specific overrides.
-3. If reasoning traces are present, confirm they are stripped or ignored before scoring, consistently for both runs.
-4. Confirm the number of evaluated samples matches for each task and split.
+3. Confirm reasoning-trace handling is consistent between runs.
+4. Confirm the number of evaluated/scored samples matches for each task and split.
 5. Confirm the same accuracy metric/score field is used for the baseline and quantized comparison.
 
-If any item differs, either rerun with matched settings or label the result as not an apples-to-apples quantization comparison.
+Report the comparability summary alongside the score: prompt/template status, generation-setting status, sample-count status, reasoning-handling status, and the exact score field used. If any item differs, either rerun with matched settings or label the result as not an apples-to-apples quantization comparison.
 
 **NEL-specific diagnostics** (for debugging failures):
 
@@ -380,7 +396,7 @@ nel info <invocation_id> --logs
 ssh <user>@<host> "tail -100 <log_path>/server-<slurm_job_id>-*.log"   # deployment errors
 ssh <user>@<host> "tail -100 <log_path>/client-<slurm_job_id>.log"     # evaluation errors
 ssh <user>@<host> "tail -100 <log_path>/slurm-<slurm_job_id>.log"      # scheduling/walltime
-ssh <user>@<host> "grep -i 'error\|failed' <log_path>/*.log"           # search all logs
+ssh <user>@<host> "grep -i 'traceback\|exception\|error\|failed\|oom\|killed\|timeout\|unauthorized\|rate limit\|sandbox\|container\|judge\|parse\|scoring' <log_path>/*.log"  # search all logs
 ```
 
 ---
@@ -407,5 +423,6 @@ Config Generation Progress:
   - [ ] Step 8.1: Dry-run / NEL CLI config validation
   - [ ] Step 8.2: Limited-samples canary
   - [ ] Step 8.3: Full evaluation
-- [ ] Step 9: Verify evaluation comparability
+- [ ] Step 9: Verify completed evaluation run
+- [ ] Step 10: Verify baseline-vs-quantized comparability
 ```
