@@ -1,50 +1,34 @@
 # Coding Principles
 
-Guidelines for production code in ModelOpt. Key values: simplicity, minimalism,
-and elegance.
+Guidelines for production code in ModelOpt. Key values: simplicity, modularity,
+and conciseness.
 
 ## Principles
 
-- **Be surgical.** Touch the code required to solve the actual problem, whether
-  that is one line or a broader design change. Avoid speculative refactors,
-  drive-by cleanup, unrelated rewrites, and half-finished implementations.
-- **Fix root causes.** Prefer the right fix over the most local patch. Do not
-  paper over symptoms with temporary fixes unless the temporary nature and
-  follow-up are explicit.
-- **Design for simplicity.** Choose the design that keeps code easiest to read
-  and change. Put behavior at the right level, tie extensibility to known needs,
-  and treat heavy branching or conditional logic as bad design smells.
-- **Respect ownership.** Keep behavior in the layer that owns it. Parent
-  abstractions should contain shared contracts and shared behavior, not
-  child-specific special cases.
-- **Keep one source of truth.** Put shared behavior, configuration, constants,
-  validation, and documentation in the single place that owns them. Reuse
-  existing helpers and shared APIs instead of copying logic or duplicating
-  state.
-- **Abstract to simplify.** Use helpers, base classes, registries, adapters,
-  plugins, or extension points when they remove real duplication, clarify
-  ownership, support current variation, or make call sites simpler. Do not add
-  abstractions for speculative future cases.
-- **Make code readable at the point of use.** Names, types, and structure should
-  make intent clear. Keep high-level orchestration clear, move low-level
-  mechanics into well-named helpers when helpful, and put critical code before
-  helper details when local conventions allow it.
-- **Comment cautiously.** Code should be clear and be the source of truth
-  for what happens, how it happens, and why; use comments only when the why is
-  not obvious from the code. First ask whether better names, clearer structure,
-  or simpler code can explain the intent without a comment. (Apply this guidance
-  to new comments only; do not rewrite or delete existing comments.)
-- **Scale documentation to the API.** Higher-level and user-visible APIs deserve
-  useful docstrings, including examples when helpful. Lower-level internals need
-  docstrings only when names, types, and structure are not enough.
-- **Validate at boundaries.** Check user input, files, network responses, and
-  external API results at the edge. Keep internal code simple by trusting types
-  and invariants instead of repeatedly checking for impossible states.
-- **Remove touched dead code.** Delete unused imports, unreachable branches,
-  obsolete placeholders, stale TODOs, and debug code when they are part of the
-  behavior you are already touching.
-- **Use workspace-relative paths.** Use relative paths in commands and file
-  references unless an absolute path is needed to disambiguate.
+- **Prefer simple, surgical changes.** Touch only what the task requires. Avoid speculative
+  refactors, broad rewrites, and "while we're here" cleanups.
+- **Design for simplicity and readability.** Choose the design that is easiest to understand and maintain.
+  Code is read top to bottom: put high-level behavior first, hide lower-level details behind well-named helpers,
+  and treat heavy branching as a signal to reconsider the design.
+- **Prefer modular, composable solutions.** Avoid input-specific or case-specific hard-coding. Use
+  existing helpers, base classes, registries, and plugins when they fit. Keep scope limited to known
+  cases; don't add complexity for speculative future needs.
+- **Respect inheritance.** Parent abstractions should contain shared contracts and
+  shared behavior, not child-specific special cases.
+- **Don't repeat yourself.** Reuse existing helpers, APIs, and classes when possible. Prefer reusing or
+  generalizing existing code when it keeps the design simpler. If the same logic or intent appears elsewhere,
+  consolidate it.
+- **Comment cautiously.** Comments should add context, not translate code into English.
+  Prefer making the code self-explanatory first. Use comments only for non-obvious
+  intent or constraints that remain unclear from the code. Apply this guidance to new
+  comments only; do not rewrite or delete existing comments just for style.
+- **Document public APIs.** Public and higher-level APIs should have docstrings, including examples when useful.
+  Internal helpers should usually be self-documenting through clear names and structure.
+- **Fix the bug cause, not the side effect.** For bug fixes, find the root cause instead of patching for its side effect.
+- **Validate external input once.** Check types and values at the interface boundary. Internal code can trust those
+  checks and avoid redundant assertions.
+- **Remove dead code.** Delete unused imports, unreachable branches, and obsolete helpers.
+- **Use relative paths** from the repo root in commands and file references.
 
 ## Testing
 
@@ -59,21 +43,17 @@ and elegance.
 
 ## Performant AI Code
 
-- **Avoid stray CPU-GPU syncs.** Tensor metadata such as `tensor.shape` is safe
-  to read, but scalar extraction or CPU transfers such as `tensor.item()`,
-  `float(tensor)`, `bool(tensor)`, `tensor.cpu()`, `tensor.numpy()`, etc. can
-  force CPU-GPU synchronization. Keep computation on GPU unless the CPU actually
-  needs the value.
-- **Use rank-aware logging.** Default to `print_rank_0` instead of `print` and
-  `warn_rank_0` instead of generic warnings. Use per-rank output only when each
-  process needs to report distinct state. Generic prints and warnings clog
-  distributed logs.
-- **Respect distributed invariants.** Avoid hidden synchronization, global state,
-  per-rank file races, or assumptions that only hold on a single process.
+- **Keep tensor work on the GPU and avoid unnecessary CPU-GPU syncs.** Reading metadata such as `tensor.shape` is fine.
+  Avoid Python scalar extraction and operators such as `tensor.item()`, `float(tensor)`, or `min(tensor)` because they
+  can trigger CPU-GPU syncs. Use PyTorch tensor ops such as `tensor.min()` by default, and only extract Python scalars
+  when the CPU needs the value. Tensor-value-based Python branching can also break CUDA graphs.
+- **Develop with distributed processing in mind.** Examples: Use `print_rank_0` or `warn_rank_0`
+  when possible to avoid noisy logs. Guard shared side effects, such as
+  file writes or shared state updates, against race conditions between ranks.
 
 ## Compatibility
 
-- **Preserve config and checkpoint compatibility.** Treat ModelOpt config schemas
-  and checkpoint formats as persisted contracts. When changing configs such as
-  `QuantizeConfig`, maintain backward compatibility with previous ModelOpt
-  checkpoints unless a breaking change is explicit and intentionally handled.
+- **Preserve config and checkpoint backward compatibility.** ModelOpt checkpoints include serialized
+  `ModeloptBaseConfig` instances such as `QuantizeConfig`. If these Pydantic-based configs change
+  without backward compatibility handling, older checkpoints may no longer load. Make breaking changes
+  explicit and intentional.
