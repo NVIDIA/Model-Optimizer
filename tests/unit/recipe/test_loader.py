@@ -515,7 +515,15 @@ def test_import_entry_element_schema_appends(tmp_path):
         f"    - $import: disable_all\n"
     )
     recipe = load_recipe(recipe_file)
-    assert recipe.quantize["quant_cfg"] == [{"quantizer_name": "*", "cfg": None, "enable": False}]
+    # Entry was loaded against the QuantizerCfgEntry pydantic schema, so it is now a
+    # model instance — compare via model_dump for the dict-shape check.
+    assert len(recipe.quantize["quant_cfg"]) == 1
+    assert recipe.quantize["quant_cfg"][0].model_dump() == {
+        "quantizer_name": "*",
+        "parent_class": None,
+        "cfg": None,
+        "enable": False,
+    }
 
 
 def test_import_entry_wrong_schema_raises(tmp_path):
@@ -856,7 +864,8 @@ def test_import_list_splice_outside_typed_list_raises(tmp_path):
     """A bare $import in an untyped list is rejected."""
     _write_quantizer_cfg_list(
         tmp_path / "extra_tasks.yml",
-        "- quantizer_name: '*weight_quantizer'\n- quantizer_name: '*input_quantizer'\n",
+        "- quantizer_name: '*weight_quantizer'\n  enable: false\n"
+        "- quantizer_name: '*input_quantizer'\n  enable: false\n",
     )
     config_file = tmp_path / "config.yml"
     config_file.write_text(
@@ -920,9 +929,11 @@ def test_import_mixed_tree(tmp_path):
     # Dict import inside list entry
     assert data["quant_cfg"][0]["cfg"] == {"num_bits": (4, 3)}
     # List splice — entries are normalized by QuantizeConfig.quant_cfg's validator,
-    # which fills in defaults for missing ``enable`` / ``cfg`` keys.
-    assert data["quant_cfg"][1] == {
+    # which fills in defaults for missing ``enable`` / ``cfg`` keys.  Entries are now
+    # QuantizerCfgEntry pydantic instances, so compare via model_dump.
+    assert data["quant_cfg"][1].model_dump() == {
         "quantizer_name": "*lm_head*",
+        "parent_class": None,
         "enable": False,
         "cfg": None,
     }
@@ -1157,7 +1168,14 @@ def test_modelopt_schema_comment_validates_after_import_resolution(tmp_path):
         f"    $import: fp8\n"
     )
     data = load_config(config_file)
-    assert data == [{"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": (4, 3)}}]
+    # data is a list of QuantizerCfgEntry pydantic instances, not raw dicts.
+    assert len(data) == 1
+    assert data[0].model_dump() == {
+        "quantizer_name": "*weight_quantizer",
+        "parent_class": None,
+        "cfg": {"num_bits": (4, 3)},
+        "enable": True,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1262,7 +1280,13 @@ def test_load_config_list_valued_yaml(tmp_path):
     data = load_config(cfg_file)
     assert isinstance(data, list)
     assert len(data) == 2
-    assert data[0] == {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8}}
+    # Entries are QuantizerCfgEntry pydantic instances after schema validation.
+    assert data[0].model_dump() == {
+        "quantizer_name": "*weight_quantizer",
+        "parent_class": None,
+        "cfg": {"num_bits": 8},
+        "enable": True,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1274,7 +1298,8 @@ def test_import_dict_value_resolves_to_list_raises(tmp_path):
     """$import in dict value position raises when snippet is a list."""
     _write_quantizer_cfg_list(
         tmp_path / "entries.yml",
-        "- quantizer_name: '*weight_quantizer'\n- quantizer_name: '*input_quantizer'\n",
+        "- quantizer_name: '*weight_quantizer'\n  enable: false\n"
+        "- quantizer_name: '*input_quantizer'\n  enable: false\n",
     )
     config_file = tmp_path / "config.yml"
     config_file.write_text(

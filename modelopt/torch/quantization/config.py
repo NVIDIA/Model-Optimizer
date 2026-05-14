@@ -152,23 +152,70 @@ the layer named ``lm_head``,  you can create a custom config and quantize your m
 
 import copy
 import warnings
-from typing import Any, Literal, cast
+from collections.abc import Sequence
+from typing import Any, Literal
 
 from pydantic import AliasChoices, ValidationInfo, field_validator, model_validator
-from typing_extensions import Required, TypedDict
 
 from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
 from modelopt.torch.opt.config_loader import load_config
 from modelopt.torch.utils.network import ConstructorLike
 
 
-class QuantizerCfgEntry(TypedDict, total=False):
+class QuantizerCfgEntry(ModeloptBaseConfig):
     """A single entry in a ``quant_cfg`` list."""
 
-    quantizer_name: Required[str]  # matched against quantizer module names
-    parent_class: str | None  # optional; filters by pytorch module class name (e.g. "nn.Linear")
-    cfg: dict[str, Any] | list[dict[str, Any]] | None  # quantizer attribute config(s)
-    enable: bool | None  # toggles matched quantizers on/off; independent of cfg
+    quantizer_name: str = ModeloptField(
+        default=...,
+        title="Quantizer name pattern.",
+        description="Glob pattern matched against quantizer module names.",
+    )
+    parent_class: str | None = ModeloptField(
+        default=None,
+        title="Optional parent-class filter.",
+        description="If provided, only quantizers whose parent module matches this PyTorch class "
+        "name (e.g. ``'nn.Linear'``) are affected.",
+    )
+    cfg: dict[str, Any] | list[dict[str, Any]] | None = ModeloptField(
+        default=None,
+        title="Quantizer attribute config.",
+        description="A ``QuantizerAttributeConfig``-shaped dict, or a list of such dicts for "
+        "sequential quantizers. ``None`` leaves the existing attribute config untouched.",
+    )
+    enable: bool = ModeloptField(
+        default=True,
+        title="Enable the quantizer.",
+        description="Toggle matched quantizers on/off; independent of ``cfg``.",
+    )
+
+    @model_validator(mode="after")
+    def _validate_instruction(self):
+        """Reject entries that carry no instruction beyond the path selector."""
+        fields_set = self.model_fields_set
+        if "cfg" not in fields_set and "enable" not in fields_set:
+            raise ValueError(
+                f"QuantizerCfgEntry must specify 'cfg', 'enable', or both. An entry with only "
+                f"'quantizer_name'={self.quantizer_name!r} has no effect (implicit enable=True "
+                "is not allowed; set it explicitly)."
+            )
+
+        if self.enable and self.cfg is not None:
+            if isinstance(self.cfg, dict):
+                is_invalid = len(self.cfg) == 0
+            elif isinstance(self.cfg, list):
+                is_invalid = len(self.cfg) == 0 or any(
+                    not isinstance(item, dict) or len(item) == 0 for item in self.cfg
+                )
+            else:
+                is_invalid = True
+            if is_invalid:
+                raise ValueError(
+                    f"QuantizerCfgEntry 'cfg' must be a non-empty dict or a non-empty list of "
+                    f"non-empty dicts when enabling quantizer {self.quantizer_name!r}, got "
+                    f"{type(self.cfg).__name__}: {self.cfg!r}. Either provide quantizer "
+                    "attributes in 'cfg' or remove 'cfg' and set 'enable' explicitly."
+                )
+        return self
 
 
 def find_quant_cfg_entry_by_path(
@@ -197,7 +244,7 @@ def find_quant_cfg_entry_by_path(
     """
     result = None
     for entry in quant_cfg_list:
-        if isinstance(entry, dict) and entry.get("quantizer_name") == quantizer_name:
+        if entry.get("quantizer_name") == quantizer_name:
             result = entry
     if result is None:
         raise KeyError(f"No quant_cfg entry with quantizer_name={quantizer_name!r}")
@@ -930,13 +977,23 @@ class GPTQCalibConfig(QuantizeAlgorithmConfig):
 QuantizeQuantCfgType = list[QuantizerCfgEntry]
 QuantizerCfgListConfig = QuantizeQuantCfgType
 
+# Pre-normalization input shape: a sequence whose entries can be raw dicts (any of the
+# legacy / new dict forms) or already-validated QuantizerCfgEntry instances.
+# ``Sequence`` (rather than ``list``) keeps the alias covariant so callers can pass
+# ``list[QuantizerCfgEntry]`` without an invariance error.
+# ``normalize_quant_cfg_list`` additionally accepts a single legacy flat ``dict`` for the
+# whole list, but that path is deprecated and not surfaced in this alias.
+RawQuantizeQuantCfgType = Sequence[QuantizerCfgEntry | dict[str, Any]]
+
 _QuantizeAlgoCfgType = str | dict | QuantizeAlgorithmConfig | None
 
 QuantizeAlgoCfgType = _QuantizeAlgoCfgType | list[_QuantizeAlgoCfgType] | None
 
 
-def normalize_quant_cfg_list(v: dict | list) -> list[QuantizerCfgEntry]:
-    """Normalize a raw quant_cfg into a list of :class:`QuantizerCfgEntry` dicts.
+def normalize_quant_cfg_list(
+    v: RawQuantizeQuantCfgType | dict[str, Any],
+) -> list[QuantizerCfgEntry]:
+    """Normalize a raw quant_cfg into a list of :class:`QuantizerCfgEntry` instances.
 
     Supports the following input forms:
 
@@ -951,35 +1008,19 @@ def normalize_quant_cfg_list(v: dict | list) -> list[QuantizerCfgEntry]:
     - Legacy ``nn.*``-scoped format: ``{"nn.<Class>": {"<quantizer_name>": <cfg>}}`` — converted
       to a new-format entry with ``parent_class`` set.
 
-    **Validation** — an entry is rejected if it carries no instruction, i.e. it specifies neither
-    ``cfg`` nor ``enable``.  Concretely, the following are invalid:
-
-    - An empty entry ``{}``.
-    - An entry with only ``quantizer_name`` and no other keys — the only effect would be an
-      implicit ``enable=True``, which must be stated explicitly.
-    - An entry with ``enable=True`` (explicit or implicit) whose ``cfg`` is not a non-empty
-      ``dict`` or ``list`` — e.g. ``{"quantizer_name": "*", "cfg": {}}`` or
-      ``{"quantizer_name": "*", "cfg": 42}``.  An enabled quantizer must have a valid
-      configuration.
-
-    **Normalization** — after conversion and validation every entry is put into canonical form:
-
-    - ``enable`` is set to ``True`` if not explicitly specified.
-    - ``cfg`` is set to ``None`` if not present in the entry.
-
-    Every returned entry is therefore guaranteed to have the keys ``quantizer_name``, ``enable``,
-    and ``cfg`` (plus optionally ``parent_class``).
+    Each normalized dict is then constructed into a :class:`QuantizerCfgEntry`, whose own
+    validator enforces that every entry specifies ``cfg``, ``enable``, or both, and that any
+    ``cfg`` for an enabled quantizer is a non-empty dict or non-empty list of non-empty dicts.
 
     Args:
         v: A list of raw quant_cfg entries in any supported format, or a legacy flat dict.
 
     Returns:
-        A list of :class:`QuantizerCfgEntry` dicts in canonical normalized form.
+        A list of validated :class:`QuantizerCfgEntry` instances.
 
     Raises:
-        ValueError: If any entry has only ``quantizer_name`` with neither ``cfg`` nor ``enable``,
-            if ``enable=True`` with an empty or non-dict/list ``cfg``, or if the entry format
-            is not recognized.
+        ValueError: If any entry's shape is not recognized, or if it fails
+            :class:`QuantizerCfgEntry` validation (missing instruction or invalid ``cfg``).
     """
 
     def _warn_legacy():
@@ -997,8 +1038,8 @@ def normalize_quant_cfg_list(v: dict | list) -> list[QuantizerCfgEntry]:
         _warn_legacy()
         v = [{k: val} for k, val in v.items()]
 
-    def _dict_to_entry(key: str, value) -> list[QuantizerCfgEntry]:
-        """Convert a single legacy key-value pair to one or more QuantizerCfgEntry dicts."""
+    def _dict_to_entry(key: str, value) -> list[dict[str, Any]]:
+        """Convert a single legacy key-value pair to one or more entry dicts."""
         # Legacy "default" key was a catch-all applied as "*" in the old conversion code.
         if key == "default":
             key = "*"
@@ -1007,12 +1048,12 @@ def normalize_quant_cfg_list(v: dict | list) -> list[QuantizerCfgEntry]:
             if not isinstance(value, dict):
                 raise ValueError(f"For 'nn.*' scoped format, value must be a dict, got {value!r}")
             # Support multi-key nn.*-scoped dicts by emitting one entry per sub-key.
-            entries: list[QuantizerCfgEntry] = []
+            entries: list[dict[str, Any]] = []
             for q_path, sub_cfg in value.items():
                 sub_cfg = dict(sub_cfg)
                 enable = sub_cfg.pop("enable", None)
                 cfg = sub_cfg or None
-                entry: QuantizerCfgEntry = {
+                entry: dict[str, Any] = {
                     "parent_class": key,
                     "quantizer_name": q_path,
                     "cfg": cfg,
@@ -1036,8 +1077,14 @@ def normalize_quant_cfg_list(v: dict | list) -> list[QuantizerCfgEntry]:
     result: list[QuantizerCfgEntry] = []
     _warned_legacy = False
     for raw in v:
+        # Already-validated QuantizerCfgEntry instances (e.g. produced by load_config on a
+        # snippet schematized with `# modelopt-schema: QuantizerCfgEntry`, then spread into
+        # a quant_cfg list) are passed through unchanged.
+        if isinstance(raw, QuantizerCfgEntry):
+            result.append(raw)
+            continue
         if isinstance(raw, dict) and "quantizer_name" in raw:
-            entries = [dict(raw)]  # copy to avoid mutating caller's data
+            entries: list[dict[str, Any]] = [dict(raw)]  # copy to avoid mutating caller's data
         elif isinstance(raw, dict) and len(raw) == 1:
             key, val = next(iter(raw.items()))
             entries = [dict(e) for e in _dict_to_entry(key, val)]
@@ -1055,42 +1102,10 @@ def normalize_quant_cfg_list(v: dict | list) -> list[QuantizerCfgEntry]:
         else:
             raise ValueError(f"Invalid quant_cfg entry: {raw!r}.")
 
-        for entry in entries:
-            # Validate: must carry at least one instruction beyond the path selector.
-            if "cfg" not in entry and "enable" not in entry:
-                raise ValueError(
-                    f"Invalid quant_cfg entry: {raw!r} — each entry must specify 'cfg', 'enable', "
-                    "or both. An entry with only 'quantizer_name' has no effect (implicit "
-                    "enable=True is not allowed; set it explicitly)."
-                )
-
-            # Validate: when cfg is present and enable=True, cfg must be a non-empty
-            # dict or list.  An empty cfg would attempt to create a
-            # QuantizerAttributeConfig with no actual configuration.
-            cfg = entry.get("cfg")
-            enable = entry.get("enable", True)
-            if enable and cfg is not None:
-                if isinstance(cfg, dict):
-                    is_invalid = len(cfg) == 0
-                elif isinstance(cfg, list):
-                    is_invalid = len(cfg) == 0 or any(
-                        not isinstance(item, dict) or len(item) == 0 for item in cfg
-                    )
-                else:
-                    is_invalid = True
-                if is_invalid:
-                    raise ValueError(
-                        f"Invalid quant_cfg entry: {raw!r} — 'cfg' must be a non-empty dict "
-                        f"or a non-empty list of non-empty dicts when enabling a quantizer "
-                        f"(got {type(cfg).__name__}: {cfg!r}). Either provide quantizer "
-                        "attributes in 'cfg' or remove 'cfg' and set 'enable' explicitly."
-                    )
-
-            # Normalize: make enable and cfg always explicit.
-            entry.setdefault("enable", True)
-            entry.setdefault("cfg", None)
-
-            result.append(cast("QuantizerCfgEntry", entry))
+        # Constructing each QuantizerCfgEntry runs its model_validator, which enforces the
+        # at-least-one-of('cfg', 'enable') and cfg-shape constraints. Defaults for absent
+        # 'cfg' / 'enable' are filled by the pydantic field defaults.
+        result.extend(QuantizerCfgEntry(**entry) for entry in entries)
     return result
 
 
@@ -1157,15 +1172,13 @@ class _QuantizeExportConfig(ModeloptBaseConfig):
     """An empty config."""
 
 
-_base_disable_all: list[QuantizerCfgEntry] = [
-    cast("QuantizerCfgEntry", load_config("configs/ptq/units/base_disable_all"))
-]
+_base_disable_all: list[QuantizerCfgEntry] = [load_config("configs/ptq/units/base_disable_all")]
 
 _default_disabled_quantizer_cfg: list[QuantizerCfgEntry] = load_config(
     "configs/ptq/units/default_disabled_quantizers"
 )
 
-_mamba_moe_disabled_quantizer_cfg: list[QuantizerCfgEntry] = [
+_mamba_moe_disabled_quantizer_cfg: list[QuantizerCfgEntry | dict[str, Any]] = [
     {"quantizer_name": "*fc1_latent_proj*", "enable": False},  # Skip Latent MOE
     {"quantizer_name": "*fc2_latent_proj*", "enable": False},  # Skip Latent MOE
     {"quantizer_name": "*q_proj*", "enable": False},  # Skip QKV Linear (HF naming)
@@ -1490,7 +1503,7 @@ def _nvfp4_selective_quant_cfg(
     algorithm: str | dict = "max",
 ) -> dict:
     """Build an NVFP4 config that quantizes only the specified layer patterns."""
-    quant_cfg: list[QuantizerCfgEntry] = []
+    quant_cfg: list[QuantizerCfgEntry | dict[str, Any]] = []
     quant_cfg.extend(_base_disable_all)
     for pattern in layer_patterns:
         # Deep-copy the quantizer dict so each config constant gets its own instance.
