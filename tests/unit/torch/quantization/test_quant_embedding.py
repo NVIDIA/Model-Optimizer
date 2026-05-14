@@ -92,24 +92,22 @@ class TestQuantEmbedding:
         with pytest.raises(RuntimeError, match="nn.Embedding"):
             getattr(qemb.input_quantizer, method)()
 
-    def test_forward_raises_if_input_quantizer_enabled(self):
-        """Forward catches back-door flips of input_quantizer._disabled."""
-        qemb = _make_quant_embedding()
-        qemb.input_quantizer._disabled = False
-        with pytest.raises(RuntimeError, match="nn.Embedding"):
-            qemb(torch.randint(0, VOCAB_SIZE, (4, 6)))
+    def test_wildcard_config_keeps_input_quantizer_disabled(self):
+        """set_from_attribute_config absorbs any cfg but force-disables input_quantizer.
 
-    def test_wildcard_config_accepted_then_opt_out(self):
-        """Wildcard cfg on ``*input_quantizer`` must not raise — stock NVFP4_DEFAULT_CFG relies on it.
-        A follow-up ``enable: false`` rule restores the disabled state."""
+        Stock recipes' ``*input_quantizer`` wildcard (and the default ``QuantizeConfig``
+        ``"*"`` rule) target every quantizer including the embedding's input slot.
+        The quantizer must end up disabled regardless of what the cfg said.
+        """
         qemb = _make_quant_embedding()
         set_quantizer_attributes_partial(
             qemb,
             "*input_quantizer",
             QuantizerAttributeConfig(num_bits=8, axis=None).model_dump(),
         )
-        set_quantizer_attributes_partial(qemb, "*input_quantizer", {"enable": False})
-        qemb(torch.randint(0, VOCAB_SIZE, (4, 6)))  # forward succeeds
+        assert not qemb.input_quantizer.is_enabled
+        # Forward still works — input_quantizer is disabled and never applied.
+        qemb(torch.randint(0, VOCAB_SIZE, (4, 6)))
 
 
 def _embedding_nvfp4_cfg() -> dict:

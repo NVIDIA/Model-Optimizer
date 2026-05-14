@@ -39,12 +39,13 @@ class _UnsettableInputQuantizer(TensorQuantizer):
     """TensorQuantizer slot for nn.Embedding.input — present but not enable-able.
 
     Embedding inputs are integer indices that cannot be fake-quantized. The attribute
-    is kept so introspection code (export, calibration helpers) can find it. Wildcard
-    configs (e.g. ``NVFP4_DEFAULT_CFG``'s ``*input_quantizer``) are accepted silently
-    so that the standard "deny-all → enable wildcards → opt-out specific layers"
-    pattern in the stock configs still works. Direct calls to ``enable*()`` raise
-    immediately, and ``_QuantEmbedding.forward`` raises if the final state ends up
-    enabled (e.g. a user explicitly targeted this quantizer).
+    is kept so introspection code (export, calibration helpers) can find it.
+
+    Wildcard configs (e.g. the default ``QuantizeConfig`` ``"*"`` rule or
+    ``NVFP4_DEFAULT_CFG``'s ``*input_quantizer``) are accepted silently, then the
+    quantizer is force-disabled — wildcards don't really mean "enable embedding
+    input quant", they mean "enable input quant in general". Direct, explicit
+    attempts (calling ``enable``/``enable_quant``/``enable_calib``) raise loudly.
     """
 
     def enable(self):
@@ -59,6 +60,17 @@ class _UnsettableInputQuantizer(TensorQuantizer):
         """Disallowed for embedding inputs."""
         raise RuntimeError(_INPUT_QUANTIZER_ERR)
 
+    def set_from_attribute_config(self, attribute_cfg):
+        """Apply the config like any quantizer, then force-disable us.
+
+        This absorbs wildcard configs from stock recipes without raising. The
+        quantizer's other attributes (``num_bits``, ``axis``, etc.) take on the
+        config values for introspection, but ``_disabled`` is forced back to
+        ``True`` so forward is always a no-op.
+        """
+        super().set_from_attribute_config(attribute_cfg)
+        self._disabled = True
+
 
 @QuantModuleRegistry.register({nn.Embedding: "nn.Embedding"})
 class _QuantEmbedding(QuantModule):
@@ -66,14 +78,16 @@ class _QuantEmbedding(QuantModule):
 
     The literal input to ``nn.Embedding`` is integer indices, which cannot be
     fake-quantized. The ``input_quantizer`` attribute is kept (for symmetry with
-    other quant modules and for introspection by export/calibration code) but
-    configuring it raises — see ``_UnsettableInputQuantizer``. Only the embedding
+    other quant modules and for introspection by export/calibration code) but is
+    permanently disabled — see ``_UnsettableInputQuantizer``. Only the embedding
     table (weight) and the lookup output (an activation feeding downstream layers)
     are quantizable.
 
     Quantizer roles:
         - ``weight_quantizer``: quantizes the embedding table (``self.weight``).
-        - ``input_quantizer``: permanently disabled placeholder — raises on configure.
+        - ``input_quantizer``: permanently disabled placeholder — direct
+          ``enable*()`` calls raise; configs that target it are absorbed and the
+          quantizer is force-disabled.
         - ``output_quantizer``: optional activation quantizer for the lookup output,
           disabled by default.
     """
@@ -119,10 +133,13 @@ class _QuantEmbedding(QuantModule):
         self._register_dynamic_attribute("weight", self._get_quantized_weight)
 
     def forward(self, input, *args, **kwargs):
-        """Quantize the embedding table, look up, then optionally quantize the output."""
-        if self.input_quantizer.is_enabled:
-            # Caught any config or call that managed to flip _disabled to False.
-            raise RuntimeError(_INPUT_QUANTIZER_ERR)
+        """Quantize the embedding table, look up, then optionally quantize the output.
+
+        ``input_quantizer`` is intentionally never applied — embedding inputs are
+        integer indices. ``_UnsettableInputQuantizer.set_from_attribute_config``
+        keeps that quantizer disabled regardless of what configs target it, so we
+        rely on that invariant rather than a runtime check here.
+        """
         if is_torch_export_mode():
             # quantize_weight()'s attribute write is not allowed under torch.export;
             # weight quantization is still applied inline via _get_quantized_weight's
