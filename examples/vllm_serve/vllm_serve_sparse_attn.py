@@ -15,13 +15,17 @@
 
 """Launch vLLM with sparse attention.
 
-Usage:
-    SPARSE_ATTN_CFG=SPARSE_SOFTMAX_DEFAULT python vllm_serve_sparse_attn.py \\
-        meta-llama/Llama-3.1-8B --max-model-len 8192
+Configuration is read exclusively from ``<ckpt>/config.json``'s
+``sparse_attention_config`` block, written during calibration by
+``examples/llm_sparsity/attention_sparsity/hf_sa.py``. If the checkpoint has
+no such block, the worker logs a message and the server runs as standard
+vLLM.
 
-Combined with quantization:
-    QUANT_CFG=INT8_SMOOTHQUANT_CFG SPARSE_ATTN_CFG=SPARSE_SOFTMAX_DEFAULT \\
-        python vllm_serve_sparse_attn.py meta-llama/Llama-3.1-8B
+Combined sparse attention + quantization is not handled by this launcher; it
+will be added in a follow-up PR once the combined path is tested.
+
+Usage:
+    python vllm_serve_sparse_attn.py <path/to/modelopt-exported-ckpt>
 """
 
 import os
@@ -40,27 +44,6 @@ if vllm_version <= version.parse("0.11.0"):
 else:
     from vllm.utils.argparse_utils import FlexibleArgumentParser
 
-# Pass sparse attention env vars to ray workers (if supported by this vLLM version)
-additional_env_vars = {
-    "SPARSE_ATTN_CFG",
-    "SPARSE_CALIB_CONFIG_PATH",
-    "QUANT_DATASET",
-    "QUANT_CALIB_SIZE",
-    "QUANT_CFG",
-    "AMAX_FILE_PATH",
-    "KV_QUANT_CFG",
-}
-
-try:
-    if vllm_version <= version.parse("0.11.0"):
-        from vllm.executor.ray_distributed_executor import RayDistributedExecutor
-    else:
-        from vllm.v1.executor.ray_executor import RayDistributedExecutor
-    if hasattr(RayDistributedExecutor, "ADDITIONAL_ENV_VARS"):
-        RayDistributedExecutor.ADDITIONAL_ENV_VARS.update(additional_env_vars)
-except ImportError:
-    pass  # Ray not installed, single-node only
-
 
 def main():
     """Launch vLLM with sparse attention worker."""
@@ -72,22 +55,10 @@ def main():
     repo_root = str(Path(__file__).resolve().parent)
     if repo_root not in sys.path:
         sys.path.insert(0, repo_root)
-    os.environ["PYTHONPATH"] = os.environ.get("PYTHONPATH", "") + ":" + f"{repo_root}"
+    current = os.environ.get("PYTHONPATH")
+    os.environ["PYTHONPATH"] = os.pathsep.join([current, repo_root]) if current else repo_root
 
-    # Select worker based on env vars
-    has_quant = os.environ.get("QUANT_CFG") or os.environ.get("KV_QUANT_CFG")
-    has_sparse = os.environ.get("SPARSE_ATTN_CFG") or os.environ.get("SPARSE_CALIB_CONFIG_PATH")
-
-    if has_quant and has_sparse:
-        worker_cls = "sparse_attn_worker.SparseQuantWorker"
-    elif has_sparse:
-        worker_cls = "sparse_attn_worker.SparseAttnWorker"
-    else:
-        print("Warning: No SPARSE_ATTN_CFG or QUANT_CFG set. Running standard vLLM.")
-        worker_cls = None
-
-    if worker_cls:
-        parser.set_defaults(worker_cls=worker_cls)
+    parser.set_defaults(worker_cls="sparse_attn_worker.SparseAttnWorker")
 
     args = parser.parse_args()
     uvloop.run(run_server(args))

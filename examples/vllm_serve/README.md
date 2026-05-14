@@ -95,6 +95,28 @@ MODELOPT_STATE_PATH=<vllm_fq_modelopt_state.pth> python vllm_serve_fakequant.py 
 QUANT_CFG=<quant_cfg> QUANT_FILE_PATH=<quantizer_state.pth> python vllm_serve_fakequant.py <model_path> -tp 8 --host 0.0.0.0 --port 8000
 ```
 
+## Serve a model with sparse attention in vLLM
+
+Apply ModelOpt sparse attention at serve time. The launcher replaces vLLM's `FlashAttentionImpl` with `ModelOptSparseAttentionImpl` (Triton kernel with paged KV cache support) on every attention layer right after model load.
+
+The configuration is read from the checkpoint's `config.json` `sparse_attention_config` block, written by ModelOpt's HF export during calibration. Today the launcher recognizes `sparse_algo: softmax_skip` and maps it to `SKIP_SOFTMAX_TRITON_DEFAULT`. Per-layer / per-seqlen threshold mapping and N:M sparsity (sparsity_n / sparsity_m / sink / dense-window) require extending `export_sparse_attention_config` to serialize per-layer `method_config`; both are on the roadmap.
+
+Workflow:
+
+1. Calibrate and export the model with `examples/llm_sparsity/attention_sparsity/hf_sa.py`. This writes `sparse_attention_config` into the exported checkpoint's `config.json`.
+2. Serve the exported checkpoint with `--enforce-eager` (CUDA graph capture is not yet validated with the sparse attention kernel — see Known Problems):
+
+   ```bash
+   python vllm_serve_sparse_attn.py <EXPORT_DIR> --enforce-eager -tp 8 --host 0.0.0.0 --port 8000
+   ```
+
+If the checkpoint has no `sparse_attention_config`, the worker logs a message and passes through — vLLM runs unchanged. Quant-only flows are handled by `vllm_serve_fakequant.py`; combined sparse + quant will land in a follow-up PR.
+
+Limitations:
+
+- Chunked prefill is not supported (`max-num-batched-tokens` must be `>= max_model_len`); the worker raises `NotImplementedError` if a chunked-prefill batch reaches the kernel.
+- CUDA graph capture is not validated yet — use `--enforce-eager`.
+
 ## Known Problems
 
 1. **MCore reload does not use `MODELOPT_STATE_PATH`**; use `QUANT_FILE_PATH` and make sure `QUANT_CFG` matches the quantization recipe used for the original MCore model (otherwise quantizer keys/config won’t align).

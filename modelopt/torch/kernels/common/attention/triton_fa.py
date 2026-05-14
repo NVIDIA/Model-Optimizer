@@ -797,6 +797,15 @@ class _Attention(torch.autograd.Function):
 
         is_paged = k_cache is not None
 
+        # Backward indexes contiguous K/V via b_start_loc_k. In paged mode, callers
+        # pass dummy k/v (e.g. torch.empty(0, ...)) and KV lives in k_cache/v_cache,
+        # so dK/dV would be computed against the dummies — silently incorrect. Fail
+        # fast instead of allowing autograd to produce wrong gradients.
+        if is_paged and (q.requires_grad or k.requires_grad or v.requires_grad):
+            raise NotImplementedError(
+                "Paged KV cache path is forward-only; backward is not implemented."
+            )
+
         # Prefill: Q/K/V are the same packed tensor, reuse Q offsets for K/V.
         # Decode: K/V is a separate KV cache tensor, caller must pass explicit metadata.
         if b_seq_len_k is None:
@@ -1132,6 +1141,12 @@ def attention(
 
     Returns:
         Output tensor [total_q_tokens, num_q_heads, head_dim].
+
+    Note:
+        The paged KV path (``k_cache``/``v_cache`` not None) is forward-only —
+        ``backward`` raises ``NotImplementedError`` if any of ``q``/``k``/``v``
+        require grad, because the saved ``k``/``v`` are dummy tensors in paged
+        mode and dK/dV would be silently incorrect.
     """
     _load_sparsity_helpers()
     sm_scale = 1.0 / (q.shape[2] ** 0.5) if softmax_scale is None else softmax_scale
