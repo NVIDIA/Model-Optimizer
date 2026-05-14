@@ -32,7 +32,6 @@ from modelopt.torch.export.plugins.mcore_qwen3vl import (
     qwen3vl_causal_lm_import,
 )
 
-
 # All mcore keys that a dense (non-MoE) Qwen3-VL model should have
 DENSE_MCORE_KEYS = {
     "word_embeddings",
@@ -60,9 +59,7 @@ class TestQwen3VLRegistration:
     """Test that Qwen3-VL is registered in the global mapping."""
 
     def test_registered_in_export_mapping(self):
-        from modelopt.torch.export.plugins.mcore_common import (
-            all_mcore_hf_export_mapping,
-        )
+        from modelopt.torch.export.plugins.mcore_common import all_mcore_hf_export_mapping
 
         assert "Qwen3VLForConditionalGeneration" in all_mcore_hf_export_mapping
         assert (
@@ -71,9 +68,7 @@ class TestQwen3VLRegistration:
         )
 
     def test_registered_in_import_mapping(self):
-        from modelopt.torch.export.plugins.mcore_common import (
-            all_mcore_hf_import_mapping,
-        )
+        from modelopt.torch.export.plugins.mcore_common import all_mcore_hf_import_mapping
 
         assert "Qwen3VLForConditionalGeneration" in all_mcore_hf_import_mapping
         assert (
@@ -278,9 +273,7 @@ class TestQwen3VLvsQwen3Difference:
     )
     def test_vl_adds_language_model_prefix(self, key):
         """Qwen3-VL should have 'language_model.' inserted after 'model.'."""
-        from modelopt.torch.export.plugins.mcore_qwen import (
-            qwen3_causal_lm_import,
-        )
+        from modelopt.torch.export.plugins.mcore_qwen import qwen3_causal_lm_import
 
         qwen3_prefix = qwen3_causal_lm_import[key].target_name_or_prefix
         qwen3vl_prefix = qwen3vl_causal_lm_import[key].target_name_or_prefix
@@ -289,9 +282,7 @@ class TestQwen3VLvsQwen3Difference:
 
     def test_output_layer_same(self):
         """lm_head is at root level for both Qwen3 and Qwen3-VL."""
-        from modelopt.torch.export.plugins.mcore_qwen import (
-            qwen3_causal_lm_import,
-        )
+        from modelopt.torch.export.plugins.mcore_qwen import qwen3_causal_lm_import
 
         assert (
             qwen3vl_causal_lm_import["output_layer"].target_name_or_prefix
