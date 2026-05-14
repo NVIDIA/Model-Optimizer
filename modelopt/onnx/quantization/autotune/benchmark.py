@@ -342,6 +342,7 @@ class TrtExecBenchmark(Benchmark):
         timing_runs: int = 10,
         plugin_libraries: list[str] | None = None,
         trtexec_args: list[str] | None = None,
+        network_timeout_seconds: float = 60 * 5,  # 5 minutes
     ):
         """Initialize the trtexec benchmark.
 
@@ -353,12 +354,16 @@ class TrtExecBenchmark(Benchmark):
             trtexec_args: Additional command-line arguments to pass to trtexec.
                          These are appended after the standard arguments.
                          Example: ['--fp16', '--workspace=4096', '--verbose']
+        network_timeout_seconds: Timeout for network operations in seconds.
+            Default is 5 minutes.  This is the timeout for uploading an engine to the remote device
+            and running trtexec_safe.  If the timeout is exceeded, the benchmark will fail.
         """
         super().__init__(timing_cache_file, warmup_runs, timing_runs, plugin_libraries)
         self.trtexec_args = list(trtexec_args) if trtexec_args is not None else []
         self.temp_dir = tempfile.mkdtemp(prefix="trtexec_benchmark_")
         self.engine_path = os.path.join(self.temp_dir, "engine.trt")
         self.temp_model_path = os.path.join(self.temp_dir, "temp_model.onnx")
+        self.network_timeout_seconds = network_timeout_seconds
         self.logger.debug(f"Created temporary engine directory: {self.temp_dir}")
         self.logger.debug(f"Temporary model path: {self.temp_model_path}")
 
@@ -448,7 +453,9 @@ class TrtExecBenchmark(Benchmark):
             cmd = [*self._base_cmd, f"--onnx={model_path}"]
             full_cmd = ["trtexec", *cmd]
             self.logger.debug(f"Running: {' '.join(full_cmd)}")
-            result = _run_trtexec(cmd)
+            # We do not specify a timeout for engine build since this could take a very long time
+            # trtexec has its own timeout wrt the remote timing server
+            result = _run_trtexec(cmd, timeout=None)
             self._write_log_file(
                 log_file,
                 "\n".join(
@@ -486,7 +493,9 @@ class TrtExecBenchmark(Benchmark):
                     f"{self.remote_user}@{self.remote_ip}:{shlex.quote(self.remote_engine_path)}",
                 ]
                 scp_cmd = ssh_pass + scp_cmd
-                result = subprocess.run(scp_cmd, capture_output=True, text=True)  # nosec B603
+                result = subprocess.run(
+                    scp_cmd, capture_output=True, text=True, timeout=self.network_timeout_seconds
+                )  # nosec B603
                 if result.returncode != 0:
                     self.logger.error(f"Failed to push engine to remote device: {result.stderr}")
                     return float("inf")
@@ -501,7 +510,12 @@ class TrtExecBenchmark(Benchmark):
                     f"--loadEngine={shlex.quote(self.remote_engine_path)}",
                 ]
                 trtexec_safe_cmd = ssh_pass + trtexec_safe_cmd
-                result = subprocess.run(trtexec_safe_cmd, capture_output=True, text=True)  # nosec B603
+                result = subprocess.run(
+                    trtexec_safe_cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=self.network_timeout_seconds,
+                )  # nosec B603
                 latency_pattern = _SAFE_PATTERN
                 if result.returncode != 0:
                     # fallback and try trtexec with "--safe" in case this is a safety proxy target
@@ -516,7 +530,12 @@ class TrtExecBenchmark(Benchmark):
                     ]
                     trtexec_safe_cmd = ssh_pass + trtexec_safe_cmd
 
-                    result = subprocess.run(trtexec_safe_cmd, capture_output=True, text=True)  # nosec B603
+                    result = subprocess.run(
+                        trtexec_safe_cmd,
+                        capture_output=True,
+                        text=True,
+                        timeout=self.network_timeout_seconds,
+                    )  # nosec B603
                     latency_pattern = _STD_PATTERN
             if result.returncode != 0:
                 self.logger.error(
@@ -537,6 +556,9 @@ class TrtExecBenchmark(Benchmark):
                 f"{e.filename} not found, please ensure system dependencies are installed and in the PATH: \n"
                 "ssh, scp, sshpass, trtexec"
             )
+            return float("inf")
+        except subprocess.TimeoutExpired as e:
+            self.logger.error(f"Benchmark timed out: {e}")
             return float("inf")
         except Exception as e:
             self.logger.error(f"Benchmark failed: {e}")

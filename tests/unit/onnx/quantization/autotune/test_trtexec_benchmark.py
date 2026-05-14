@@ -707,6 +707,129 @@ def test_remote_run_both_safe_paths_fail_returns_inf(remote_bench, tmp_path):
         assert remote_bench.run(str(tmp_path / "m.onnx")) == float("inf")
 
 
+# --- network_timeout_seconds ---
+
+
+def test_network_timeout_default_is_five_minutes(tmp_path):
+    """Default network timeout is 5 minutes (300s)."""
+    b = TrtExecBenchmark(timing_cache_file=str(tmp_path / "cache.bin"))
+    assert b.network_timeout_seconds == 300
+
+
+def test_network_timeout_custom_value_stored(tmp_path):
+    """User-supplied ``network_timeout_seconds`` is stored on the instance."""
+    b = TrtExecBenchmark(
+        timing_cache_file=str(tmp_path / "cache.bin"),
+        network_timeout_seconds=12.5,
+    )
+    assert b.network_timeout_seconds == 12.5
+
+
+def test_local_trtexec_call_uses_no_timeout(bench, tmp_path):
+    """The local engine build path passes ``timeout=None`` (engine builds can be long)."""
+    proc = _make_proc(stdout="[I] GPU Compute Time: median = 1.0 ms")
+    with patch("subprocess.run", return_value=proc) as run_mock:
+        bench.run(str(tmp_path / "m.onnx"))
+
+    # Exactly one subprocess call for the local pipeline; timeout must be None.
+    assert run_mock.call_count == 1
+    assert run_mock.call_args.kwargs.get("timeout") is None
+
+
+@pytest.mark.usefixtures("trtexec_version_ok")
+def test_remote_pipeline_passes_timeout_to_scp_and_ssh(tmp_path):
+    """scp, ssh trtexec_safe, and the ssh fallback all receive ``network_timeout_seconds``."""
+    timeout = 7.0
+    b = TrtExecBenchmark(
+        timing_cache_file=str(tmp_path / "cache.bin"),
+        trtexec_args=[f"--remoteAutoTuningConfig={_REMOTE_URL}"],
+        network_timeout_seconds=timeout,
+    )
+
+    trtexec_proc = _make_proc(stdout="")
+    scp_proc = _make_proc()
+    safe_fail = _make_proc(returncode=1, stderr="trtexec_safe not found")
+    fallback_proc = _make_proc(stdout="[I] GPU Compute Time: median = 4.0 ms")
+
+    with patch(
+        "subprocess.run",
+        side_effect=[trtexec_proc, scp_proc, safe_fail, fallback_proc],
+    ) as run_mock:
+        b.run(str(tmp_path / "m.onnx"))
+
+    # Engine build (call 0) has no timeout; the three remote calls all use it.
+    assert run_mock.call_args_list[0].kwargs.get("timeout") is None
+    for idx in (1, 2, 3):  # scp, ssh trtexec_safe, ssh fallback
+        assert run_mock.call_args_list[idx].kwargs.get("timeout") == timeout, (
+            f"call {idx} did not receive timeout={timeout}"
+        )
+
+
+@pytest.mark.usefixtures("trtexec_version_ok")
+def test_scp_timeout_returns_inf_and_logs(tmp_path, caplog):
+    """A ``subprocess.TimeoutExpired`` during the scp step returns ``inf`` and is logged."""
+    import subprocess
+
+    b = TrtExecBenchmark(
+        timing_cache_file=str(tmp_path / "cache.bin"),
+        trtexec_args=[f"--remoteAutoTuningConfig={_REMOTE_URL}"],
+        network_timeout_seconds=1.0,
+    )
+    trtexec_proc = _make_proc(stdout="")
+    timeout_exc = subprocess.TimeoutExpired(cmd=["scp"], timeout=1.0)
+
+    with (
+        caplog.at_level("ERROR", logger="modelopt.onnx"),
+        patch("subprocess.run", side_effect=[trtexec_proc, timeout_exc]),
+    ):
+        assert b.run(str(tmp_path / "m.onnx")) == float("inf")
+
+    assert any("timed out" in r.getMessage().lower() for r in caplog.records)
+
+
+@pytest.mark.usefixtures("trtexec_version_ok")
+def test_ssh_trtexec_safe_timeout_returns_inf(tmp_path):
+    """A timeout on the ssh ``trtexec_safe`` call also returns ``inf``."""
+    import subprocess
+
+    b = TrtExecBenchmark(
+        timing_cache_file=str(tmp_path / "cache.bin"),
+        trtexec_args=[f"--remoteAutoTuningConfig={_REMOTE_URL}"],
+        network_timeout_seconds=1.0,
+    )
+    trtexec_proc = _make_proc(stdout="")
+    scp_proc = _make_proc()
+    timeout_exc = subprocess.TimeoutExpired(cmd=["ssh"], timeout=1.0)
+
+    with patch(
+        "subprocess.run",
+        side_effect=[trtexec_proc, scp_proc, timeout_exc],
+    ):
+        assert b.run(str(tmp_path / "m.onnx")) == float("inf")
+
+
+@pytest.mark.usefixtures("trtexec_version_ok")
+def test_ssh_fallback_timeout_returns_inf(tmp_path):
+    """A timeout on the ``trtexec --safe`` fallback ssh call returns ``inf``."""
+    import subprocess
+
+    b = TrtExecBenchmark(
+        timing_cache_file=str(tmp_path / "cache.bin"),
+        trtexec_args=[f"--remoteAutoTuningConfig={_REMOTE_URL}"],
+        network_timeout_seconds=1.0,
+    )
+    trtexec_proc = _make_proc(stdout="")
+    scp_proc = _make_proc()
+    safe_fail = _make_proc(returncode=1, stderr="trtexec_safe failed")
+    timeout_exc = subprocess.TimeoutExpired(cmd=["ssh"], timeout=1.0)
+
+    with patch(
+        "subprocess.run",
+        side_effect=[trtexec_proc, scp_proc, safe_fail, timeout_exc],
+    ):
+        assert b.run(str(tmp_path / "m.onnx")) == float("inf")
+
+
 # --- pattern constants ---
 
 
