@@ -1,0 +1,1 @@
+Read task_0 of /tmp/pensieve-intern-agent-l2zeb5jo/workspace/modules/Model-Optimizer/tools/launcher/examples/Kimi-K2.5-DFlash/hf_offline_eagle3.yaml; uses TRT-LLM serve with model=/hf-local/Kimi/Kimi-K2.5-DFlash, container=nvcr.io/nvidia/tensorrt-llm/release:1.2.0; dataset path /hf-local/modelopt/Speculative-Decoding-Prompt-Samples exists; OK
