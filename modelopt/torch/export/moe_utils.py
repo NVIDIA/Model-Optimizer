@@ -203,17 +203,22 @@ def _export_fused_experts(module: nn.Module, dtype: torch.dtype) -> None:
                     stacklevel=2,
                 )
 
-            # Recompute global_amax from the (CPU) per-block _amax so both live on
-            # the same device when get_weights_scaling_factor_from_quantizer
-            # does ``per_block_scale * 448 / per_block_scale_max``. Without this,
-            # a stale CUDA global_amax mismatches the CPU per-block amax we
-            # injected above. No magnitude floor — that's main's policy.
+            # Align _amax and global_amax with the weight slice's device. The
+            # export math ``per_block_scale * 448 / per_block_scale_max`` reads
+            # both from the quantizer and would otherwise error if they drifted
+            # apart (e.g., CPU-offloaded big-model layers + CUDA-resident weight
+            # slice, or our CPU-injected _amax + the original CUDA global_amax).
+            # No magnitude floor — that's main's policy for the uncalibrated
+            # fallback below.
             if (
                 hasattr(w_quantizer, "_amax")
                 and w_quantizer._amax is not None
-                and hasattr(w_quantizer, "global_amax")
             ):
-                w_quantizer.global_amax = w_quantizer._amax.float().amax()
+                target_device = weight_slice.device
+                if w_quantizer._amax.device != target_device:
+                    w_quantizer._amax = w_quantizer._amax.to(target_device)
+                if hasattr(w_quantizer, "global_amax"):
+                    w_quantizer.global_amax = w_quantizer._amax.float().amax()
 
             wrapper = nn.Module()
             wrapper.weight = nn.Parameter(weight_slice.contiguous(), requires_grad=False)
