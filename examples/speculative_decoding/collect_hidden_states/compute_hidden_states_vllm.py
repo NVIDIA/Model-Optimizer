@@ -137,9 +137,8 @@ def main(args: argparse.Namespace) -> None:
         tp = _torch.cuda.device_count()
 
     generator = VllmHiddenStatesGenerator(
-        model=args.model,
+        model_path=args.model,
         tensor_parallel_size=tp,
-        trust_remote_code=args.trust_remote_code,
         max_model_len=args.max_seq_len,
     )
 
@@ -150,18 +149,15 @@ def main(args: argparse.Namespace) -> None:
     num_success = 0
     for conv_id, result in tqdm(zip(conversation_ids, results), total=len(results), desc="Saving"):
         input_ids = result["input_ids"]
-        hidden_states_dict = result["hidden_states"]
+        # speculators returns hidden_states as a list of tensors ordered by layer_ids
+        hidden_states_list = result["hidden_states"]
 
-        # Sort layer indices
-        layer_indices = sorted(hidden_states_dict.keys())
+        # Last element = output hidden states (last captured layer)
+        output_hidden_states = hidden_states_list[-1].cpu()
 
-        # Last layer = output hidden states
-        output_hidden_states = hidden_states_dict[layer_indices[-1]].cpu()
-
-        # Aux layers = all except the last
-        aux_layers = layer_indices[:-1]
-        if aux_layers:
-            aux_hidden_states = torch.cat([hidden_states_dict[i].cpu() for i in aux_layers], dim=-1)
+        # All but the last = aux layers, concatenated along the hidden dim
+        if len(hidden_states_list) > 1:
+            aux_hidden_states = torch.cat([h.cpu() for h in hidden_states_list[:-1]], dim=-1)
         else:
             aux_hidden_states = torch.empty(0)
 
