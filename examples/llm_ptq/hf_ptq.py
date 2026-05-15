@@ -541,14 +541,11 @@ def load_model(args: argparse.Namespace):
             ]
 
             # We only quantize the language model for VLMs other than the type supported above.
-            # For AutoQuantize, skip the eager visual-disable side-effect: it registers modelopt
-            # state on each visual sibling, which auto_quantize handles through disabled patterns.
-            #
-            # Also skip extraction when a recipe is given: in Qwen3.5/3.6-MoE VLMs, lm_head sits
+            # Recipe mode is the exception: in Qwen3.5/3.6-MoE VLMs, lm_head sits
             # on the outer CausalLM, not the inner language backbone. A recipe that targets
             # lm_head must therefore quantize against the full model and explicitly keep visual
             # and MTP siblings disabled.
-            if args.auto_quantize_bits is None and args.recipe is None:
+            if args.recipe is None:
                 extracted_lm, extracted_model_type = extract_and_prepare_language_model_from_vl(
                     full_model
                 )
