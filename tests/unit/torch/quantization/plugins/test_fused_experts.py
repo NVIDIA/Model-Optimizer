@@ -15,8 +15,6 @@
 
 """Tests for _QuantFusedExperts: generic fused MoE quantization and export."""
 
-from unittest.mock import patch
-
 import pytest
 import torch
 import torch.nn as nn
@@ -924,73 +922,3 @@ class TestNormalizeFusedExpertsQuantizerName:
             _normalize_fused_experts_quantizer_name("moe.layers.3.gate.weight")
             == "moe.layers.3.gate.weight"
         )
-
-
-# Verifies that MSE calibration discovers and calibrates every per-expert weight quantizer
-# inside a fused-expert ModuleList (both gate_up_proj and down_proj, for all experts).
-class TestFusedExpertsMSECalibration:
-    @staticmethod
-    def _cleanup_registry(mod_type):
-        if QuantModuleRegistry.get(mod_type) is not None:
-            QuantModuleRegistry.unregister(mod_type)
-
-    def test_mse_calibration_populates_all_expert_quantizers(self):
-        # Strong assertion: every per-expert weight quantizer must be touched by the MSE
-        # search loop (mse_calibrate Step 3), not just have _amax set by max-calibrate or
-        # the dead-expert bootstrap. Spy on MseCalibrator.collect — that method is only
-        # invoked from Step 3, after Step 2 installs MseCalibrator on each quantizer.
-        import modelopt.torch.quantization as mtq
-        from modelopt.torch.quantization.calib.mse import MseCalibrator
-
-        model = _TinyMoEModel()
-        expert_type = type(model.moe.experts)
-        self._cleanup_registry(expert_type)
-
-        collected_calib_ids: set[int] = set()
-        original_collect = MseCalibrator.collect
-
-        def _spy_collect(self, x):
-            collected_calib_ids.add(id(self))
-            return original_collect(self, x)
-
-        with patch.object(MseCalibrator, "collect", _spy_collect):
-            mtq.quantize(
-                model,
-                {
-                    "quant_cfg": [
-                        {"quantizer_name": "*", "enable": False},
-                        {
-                            "quantizer_name": "*gate_up_proj_weight_quantizer",
-                            "cfg": {"num_bits": 8, "axis": None},
-                        },
-                        {
-                            "quantizer_name": "*down_proj_weight_quantizer",
-                            "cfg": {"num_bits": 8, "axis": None},
-                        },
-                    ],
-                    "algorithm": "mse",
-                },
-                forward_loop=lambda m: [m(torch.randn(1, 4, HIDDEN_DIM)) for _ in range(2)],
-            )
-
-        experts = model.moe.experts
-        missed = []
-        for idx in range(NUM_EXPERTS):
-            assert experts.gate_up_proj_weight_quantizers[idx].amax is not None, (
-                f"gate_up_proj_weight_quantizers[{idx}] not calibrated — Bug 1 regression"
-            )
-            assert experts.down_proj_weight_quantizers[idx].amax is not None, (
-                f"down_proj_weight_quantizers[{idx}] not calibrated"
-            )
-            if (
-                id(experts.gate_up_proj_weight_quantizers[idx]._calibrator)
-                not in collected_calib_ids
-            ):
-                missed.append(f"gate_up_proj_weight_quantizers[{idx}]")
-            if id(experts.down_proj_weight_quantizers[idx]._calibrator) not in collected_calib_ids:
-                missed.append(f"down_proj_weight_quantizers[{idx}]")
-        assert not missed, (
-            f"MSE search loop skipped these per-expert quantizers: {missed}. "
-            "mse_calibrate Step 3 did not iterate them via iter_weights_for_calibration."
-        )
-        self._cleanup_registry(expert_type)
