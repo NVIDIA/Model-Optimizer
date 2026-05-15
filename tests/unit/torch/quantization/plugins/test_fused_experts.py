@@ -645,7 +645,7 @@ class TestFusedExpertsCalibration:
         """
         import modelopt.torch.quantization as mtq
         from modelopt.torch.quantization.model_calib import (
-            _bootstrap_uncalibrated_weight_quantizers,
+            _bootstrap_uncalibrated_static_weight_quantizers,
         )
 
         model = _TinyMoEModel()
@@ -699,7 +699,7 @@ class TestFusedExpertsCalibration:
                 f"Dead expert {idx} down_proj should be uncalibrated pre-bootstrap"
             )
 
-        n_bootstrapped = _bootstrap_uncalibrated_weight_quantizers(model)
+        n_bootstrapped = _bootstrap_uncalibrated_static_weight_quantizers(model)
         assert n_bootstrapped >= 2 * len(dead), (
             f"Expected ≥{2 * len(dead)} bootstrapped (gate_up + down per dead expert), "
             f"got {n_bootstrapped}"

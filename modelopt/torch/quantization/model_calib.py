@@ -229,9 +229,6 @@ def _iter_leaf_quantizers(quantizer):
 def _check_moe_calibration_complete(quantizer, parallel_state):
     """Raise error if MoE calibration is incomplete across distributed MoE ranks."""
     for leaf_quantizer in _iter_leaf_quantizers(quantizer):
-        if leaf_quantizer.is_block_quant:
-            continue
-
         has_amax = getattr(leaf_quantizer, "_amax", None) is not None
         for group in [
             parallel_state.data_parallel_group,
