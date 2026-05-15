@@ -62,12 +62,21 @@ The base class adds ModelOpt-specific behavior on top of Pydantic:
 
 * ``extra="forbid"`` rejects unknown keys by default.
 * ``validate_assignment=True`` revalidates field updates after construction.
-* ``ModeloptField(...)`` requires every field to declare a default value.
-* ``model_dump()`` and ``model_dump_json()`` default to aliases and suppress
-  Pydantic serialization warnings.
-* Mapping-style access, such as ``cfg["field"]``, ``cfg.get("field")``,
-  ``cfg.items()``, and ``cfg.update({...})``, keeps config objects compatible
-  with existing dict-oriented code.
+* ``ModeloptField(...)`` is a thin wrapper over Pydantic ``Field`` that asserts a
+  default value is supplied, so every config field is constructible without
+  explicit arguments.
+* ``model_dump()`` and ``model_dump_json()`` default to ``by_alias=True`` and
+  ``warnings=False``, so serialized output uses the documented field aliases
+  and Pydantic serializer warnings are suppressed.
+* ``ModeloptBaseConfig`` inherits from ``collections.abc.MutableMapping``, so
+  config objects can be used wherever dict-style access is expected:
+  ``cfg["field"]`` / ``cfg["field"] = value``, ``cfg.get("field")``,
+  ``key in cfg``, ``len(cfg)``, ``iter(cfg)``, ``cfg.keys()``, ``cfg.values()``,
+  ``cfg.items()``, ``cfg.update({...})``, plus the ``MutableMapping`` mixins
+  ``pop``, ``setdefault``, and ``popitem``. Keys use aliases when defined.
+  ``cfg["unknown"] = ...`` raises ``KeyError`` rather than silently adding a
+  new key; ``del cfg["field"]`` raises ``TypeError`` because schema fields are
+  not removable.
 * ``__init_subclass__`` registers each config subclass with PyTorch safe
   globals so config objects can be deserialized by ``torch.load`` with
   ``weights_only=True``.
@@ -93,17 +102,25 @@ A typical config schema is a regular Pydantic model with field validators:
        def normalize_quant_cfg(cls, v):
            return normalize_quant_cfg_list(v) if isinstance(v, (list, dict)) else v
 
-Not every reusable config shape needs its own top-level config class. Some
-YAML fragments are validated by narrower schema contracts:
+Not every reusable config shape needs its own top-level config class. Any
+type that Pydantic's ``TypeAdapter`` can validate is acceptable as a snippet
+schema:
 
-* Pydantic model classes work for object snippets such as one quantizer rule.
-* ``list[T]`` aliases work for list snippets such as a group of quantizer rules.
-* unions and other Pydantic ``TypeAdapter``-compatible annotations can be used
-  when the reusable data shape is a typed container rather than a standalone
-  model class.
+* Pydantic model classes (``ModeloptBaseConfig`` subclasses or other
+  ``BaseModel`` subclasses) for object snippets such as a single quantizer
+  rule (``QuantizerCfgEntry``) or a numeric format
+  (``QuantizerAttributeConfig``).
+* ``list[T]`` aliases for list snippets. For example,
+  ``QuantizerCfgListConfig`` is defined as ``list[QuantizerCfgEntry]``.
+* ``TypedDict`` and ``list[TypedDict]`` shapes when a plain dict layout is the
+  natural representation. These return validated dict/list data rather than
+  model instances.
+* Unions and other ``TypeAdapter``-compatible annotations when the reusable
+  data shape is a typed container rather than a standalone model class.
 
 The important invariant is that the schema lives in Python, while YAML remains
-data.
+data. Snippet schemas are validation contracts; they are not arbitrary Python
+execution hooks.
 
 
 Validation model
@@ -138,22 +155,31 @@ Top-level configs
 -----------------
 
 Top-level user configs do not always need a ``modelopt-schema`` comment. The
-owning API often supplies schema context directly:
+owning API often supplies schema context directly through ``schema_type=``:
 
 .. code-block:: python
 
    from modelopt.recipe import load_config
    from modelopt.torch.quantization.config import QuantizeConfig
 
-   data = load_config("configs/ptq/presets/model/fp8", schema_type=QuantizeConfig)
-   cfg = QuantizeConfig.model_validate(data)
+   cfg = load_config("configs/ptq/presets/model/fp8", schema_type=QuantizeConfig)
+   # cfg is a validated QuantizeConfig instance.
 
-``schema_type`` has one narrow loader responsibility: it provides typing context
-for import resolution, especially for deciding whether a list import should
-append one element or splice several elements. It is not a blanket request to
-validate a top-level file. Top-level validation is performed by the owning
-config object, or by ``load_config()`` when the top-level YAML file itself
-contains ``# modelopt-schema: ...``.
+An *effective schema* is selected from the explicit ``schema_type`` argument
+and the file's ``# modelopt-schema: ...`` comment, with ``schema_type``
+winning when both are present. When an effective schema exists, it serves
+two purposes:
+
+* It guides import resolution, especially deciding whether a list import
+  should append one element or splice several elements.
+* It validates the resolved payload and returns it as an instance of that
+  schema — a Pydantic model instance for ``BaseModel`` schemas, or a
+  validated ``dict`` / ``list`` for ``TypedDict`` and ``list[TypedDict]``
+  schemas.
+
+When neither a ``schema_type`` argument nor a schema comment is supplied,
+``load_config()`` returns the resolved payload as plain ``dict`` or ``list``
+data without validation.
 
 
 YAML loading
@@ -178,8 +204,11 @@ on recipes.
 6. Recursively resolve nested imports, detect circular imports, and validate
    imported snippets against their declared schemas.
 7. Walk the YAML tree and replace ``$import`` references.
-8. Validate the top-level payload if the file declares ``modelopt-schema``.
-9. Return resolved plain Python ``dict`` or ``list`` data.
+8. Select the effective top-level schema (``schema_type=`` argument wins over
+   ``# modelopt-schema:`` comment when both are present).
+9. If an effective schema exists, validate the resolved payload and return a
+   schema instance (a Pydantic model, or a validated ``dict`` / ``list`` for
+   ``TypedDict``-shaped schemas); otherwise return the plain resolved data.
 
 The loader is not a general templating engine. It only understands YAML data,
 ``imports``, ``$import``, schema comments, and the ``eXmY`` numeric shorthand.
@@ -227,8 +256,7 @@ validation, serialize the resolved config rather than the authoring-time YAML:
    from modelopt.recipe import load_config
    from modelopt.torch.quantization.config import QuantizeConfig
 
-   data = load_config("configs/ptq/presets/model/fp8", schema_type=QuantizeConfig)
-   cfg = QuantizeConfig.model_validate(data)
+   cfg = load_config("configs/ptq/presets/model/fp8", schema_type=QuantizeConfig)
 
    with open("resolved_quantize.yaml", "w", encoding="utf-8") as f:
        yaml.safe_dump(cfg.model_dump(), f)
@@ -299,17 +327,40 @@ validation; YAML remains data.
 Alternatives considered
 -----------------------
 
-The main alternative is to move more composition knowledge into Python, either
-through hard-coded fragment registries, Python-owned name-to-file mappings, or
-factory-style configs. Those approaches are useful for object construction, but
-they make ordinary YAML reuse depend on Python edits or make Python callables
-part of the canonical config representation.
+Several other approaches can give YAML configs some form of composability.
+Each was considered and rejected for ModelOpt's library-of-configs use case:
+
+* **Plain YAML anchors and aliases** reuse data inside one file but do not
+  compose across files and do not validate fragments independently.
+* **Hard-coded Python registries** map well-known names like ``nvfp4`` to
+  Python-side constants. Adding a new fragment requires a Python edit, and
+  YAML can only reference what Python has pre-declared.
+* **YAML files with Python-side name-to-file mappings** keep fragment data in
+  YAML, but the registration of each fragment still lives in Python. Adding a
+  new fragment requires both a YAML file and a Python edit.
+* **General config frameworks such as OmegaConf and Hydra** provide deep merge
+  and ``${...}`` interpolation, but there is no native cross-file include
+  keyword, no native list-concatenation primitive, and the list
+  append-vs-splice rule must still come from somewhere ModelOpt-specific.
+  OmegaConf can be useful at the edges (for example for CLI dotted overrides
+  or environment-variable substitution applied after import resolution) but
+  is not sufficient as the composition primitive.
+* **Python factory systems such as Fiddle or nemo_run** ``_factory_`` make
+  Python callables the canonical config representation. They are a good fit
+  when the audience is exclusively Python engineers and configs primarily
+  build runnable objects. They are a poor fit for ModelOpt because reusable
+  fragments are typically small typed values (numeric formats, quantizer-list
+  entries), persisting a factory-based config loses provenance unless the
+  on-disk format ties to Python qualified names, and Fiddle-style
+  ``@auto_config`` cannot return bare ``dict`` or ``list`` values without a
+  wrapper class that duplicates the Pydantic schema.
 
 ModelOpt uses a small YAML DSL instead: each file declares its own imports,
 references them with ``$import``, and resolves to plain data before validation.
 This keeps the import graph self-describing, lets config authors add reusable
-fragments as YAML, and still validates every resolved value against Python
-schemas.
+fragments as YAML without Python edits, and still validates every resolved
+value against Python schemas. The on-disk representation is plain YAML data,
+so persisted configs do not depend on Python qualified names.
 
 
 Import declarations
@@ -414,18 +465,38 @@ loader resolves imports in the second document and returns the resolved list.
 Composition error model
 -----------------------
 
-The loader raises ``ValueError`` for invalid composition, including:
+The loader raises ``ValueError`` for invalid input. The full set of conditions
+covers file-shape, schema declaration, and composition rules:
 
-* ``imports`` is not a mapping;
-* an import path is empty or cannot be resolved;
-* a ``$import`` reference is not listed in the file-local ``imports`` mapping;
+File-shape errors:
+
+* the YAML file cannot be located on the filesystem or in built-in
+  ``modelopt_recipes``;
+* a YAML file contains more than two documents;
+* the root of a single-document file is not a mapping or a list;
+* in a two-document file, the first document is not a mapping or the second
+  document is neither a mapping nor a list;
+* multiple ``# modelopt-schema:`` comments are present in the preamble.
+
+Schema-declaration errors:
+
+* a schema path does not start with ``modelopt.``;
+* a schema path is missing a module or attribute component, or it fails to
+  resolve to a real Python object;
 * an imported snippet does not declare ``modelopt-schema``;
-* a schema path does not resolve under ``modelopt.``;
-* an imported snippet does not validate against its declared schema;
-* a list import has no typed containing list;
+* an imported snippet does not validate against its declared schema.
+
+Composition errors:
+
+* ``imports`` is present but is not a mapping;
+* an import path is empty;
+* a ``$import`` reference appears in a file that declares no ``imports``;
+* a ``$import`` name is not listed in the file-local ``imports`` mapping;
+* a dict-form ``$import`` resolves to something other than a dict;
+* a list import is used without a typed containing list;
 * a list import schema is neither the containing list schema nor its element
   schema;
-* a circular import is detected.
+* a circular import is detected (reported with the import chain).
 
 These failures are load-time errors by design. A composed config should either
 resolve to valid plain data or fail before the owning optimization pass starts.
@@ -437,15 +508,34 @@ Consumers of the config system
 The config system is shared infrastructure. Current consumers include:
 
 * lower-level optimization configs such as PTQ ``QuantizeConfig``;
-* built-in YAML config snippets under ``modelopt_recipes/configs``;
-* higher-level recipes, which package metadata together with one or more
-  type-specific config sections.
+* built-in YAML config snippets under ``modelopt_recipes/configs`` (numeric
+  formats, reusable quantizer-entry units, model-level presets);
+* higher-level recipes under ``modelopt_recipes/general`` and
+  ``modelopt_recipes/models``, which package metadata together with one or
+  more type-specific config sections.
 
 Recipes do not define separate config semantics. ``load_recipe()`` is a
-consumer-specific wrapper: it uses ``load_config()`` to resolve YAML, supplies
-schema context for each recipe section, and then constructs a typed recipe
-object. The general contract remains the same: YAML authoring data resolves to
-plain Python data, and Python schemas validate the result.
+consumer-specific wrapper that uses ``load_config()`` to resolve YAML, supplies
+schema context for each recipe section, and returns a validated
+``ModelOptRecipeBase`` subclass instance. Both ``metadata`` and ``quantize``
+sections are required:
+
+* A **file recipe** is a single YAML file that declares
+  ``# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe`` and is loaded
+  with ``schema_type=ModelOptPTQRecipe``; both ``metadata`` and ``quantize``
+  sections live in the same file. ``load_config()`` returns a fully validated
+  ``ModelOptPTQRecipe`` instance directly.
+* A **directory recipe** is a directory containing ``metadata.yaml`` /
+  ``metadata.yml`` and ``quantize.yaml`` / ``quantize.yml``. Each file is
+  loaded with its own schema (``RecipeMetadataConfig`` and ``QuantizeConfig``,
+  both ``ModeloptBaseConfig`` subclasses), and the recipe is assembled as
+  ``ModelOptPTQRecipe(metadata=..., quantize=...)`` from the validated
+  sections.
+
+The general contract remains the same: YAML authoring data resolves to plain
+Python data, Python schemas validate the result, and validated configs are
+returned as schema instances. Callers can move between dict and model views
+through ``cfg.model_dump()`` and ``Schema.model_validate(data)``.
 
 
 Authoring guidelines
