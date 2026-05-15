@@ -26,7 +26,6 @@ quantize:
     - quantizer_name: '*'
       enable: false
     - quantizer_name: '*moe*weight_quantizer'
-      enable: true
       cfg:
         block_sizes:
           -1: 16
@@ -34,7 +33,6 @@ quantize:
           scale_bits: e4m3
         num_bits: e2m1
     - quantizer_name: '*moe*input_quantizer'
-      enable: true
       cfg:
         block_sizes:
           -1: 16
@@ -42,7 +40,6 @@ quantize:
           scale_bits: e4m3
         num_bits: e2m1
     - quantizer_name: '*mlp*weight_quantizer'
-      enable: true
       cfg:
         block_sizes:
           -1: 16
@@ -50,7 +47,6 @@ quantize:
           scale_bits: e4m3
         num_bits: e2m1
     - quantizer_name: '*mlp*input_quantizer'
-      enable: true
       cfg:
         block_sizes:
           -1: 16
@@ -58,7 +54,6 @@ quantize:
           scale_bits: e4m3
         num_bits: e2m1
     - quantizer_name: '*[kv]_bmm_quantizer'
-      enable: true
       cfg:
         num_bits: e4m3
     - quantizer_name: '*share_expert*'

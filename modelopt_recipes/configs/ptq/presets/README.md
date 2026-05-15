@@ -25,6 +25,10 @@ own imports have been resolved.
   be merged on top of a `model/` preset via `$import` to produce a
   complete config. Example: `kv/fp8.yaml` (the YAML source of
   `FP8_KV_CFG`).
+- **`diffusers/`** — Diffusers-specific full quantization presets. These
+  files are complete configs used by the Diffusers examples, including
+  attention and softmax quantizer choices that differ from the generic
+  `model/` presets.
 
 **Note:** The main purpose of these presets is to support the existing
 `hf_ptq.py` script's `--qformat` / `--kv_cache_qformat` flags and other
