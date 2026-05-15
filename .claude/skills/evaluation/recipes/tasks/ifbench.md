@@ -4,7 +4,7 @@
 
 - Task: `ns_ifbench`
 - Harness: NeMo Skills, chat
-- Primary metric: `pass@1[avg-of-8] prompt_strict_accuracy`
+- Primary metric: `pass@1[avg-of-8] prompt_loose_accuracy`
 - Run time: Super short
 - Repeats: 8
 
@@ -30,3 +30,9 @@ Use this inside the top-level `evaluation.tasks` list:
 ```
 
 ## Score Extraction
+
+IFBench accuracy comes from:
+
+```text
+results.groups.ifbench.metrics."pass@1[avg-of-N]".scores.prompt_loose_accuracy.value
+```
