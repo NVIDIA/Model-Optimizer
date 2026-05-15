@@ -59,8 +59,37 @@ def _export_fused_experts(module: nn.Module, dtype: torch.dtype) -> None:
     # 2-3. Split + export each per-expert projection.
     fused_dim0 = gate_up.shape[1]  # 2 * expert_dim
 
+    def _safe_cpu_amax(quantizer_src: nn.Module) -> torch.Tensor | None:
+        """Extract _amax to CPU float32, surfacing+clearing any pending CUDA error first.
+
+        Layerwise calibration's _save_layer + full_restore can leave the per-expert
+        ``_amax`` as a CUDA tensor reconstructed from a serialized view with non-zero
+        storage offset. Touching it directly (``torch.all`` / ``deepcopy``) then triggers
+        ``cudaErrorIllegalAddress``. Synchronizing first surfaces the latent error so the
+        subsequent ``.detach().cpu()`` either succeeds on a clean tensor or we fall through
+        to ``None`` and treat the expert as uncalibrated.
+        """
+        amax = getattr(quantizer_src, "_amax", None)
+        if amax is None or not isinstance(amax, torch.Tensor):
+            return None
+        try:
+            if amax.is_cuda:
+                torch.cuda.synchronize(amax.device)
+            return amax.detach().cpu().float()
+        except Exception:
+            return None
+
     for idx in range(n):
         expert = nn.Module()
+
+        # Pre-extract both per-expert amaxes to CPU *before* the projection loop's
+        # deepcopy. deepcopy calls .clone() on CUDA tensors — if the stored _amax
+        # has corrupt storage (under-calibrated experts after layerwise calib), the
+        # clone triggers an async CUDA illegal-memory-access error. Synchronizing in
+        # _safe_cpu_amax surfaces the error here so subsequent operations work on
+        # safe CPU float32 tensors.
+        gu_amax_cpu = _safe_cpu_amax(module.gate_up_proj_weight_quantizers[idx])
+        down_amax_cpu = _safe_cpu_amax(module.down_proj_weight_quantizers[idx])
 
         # If the gate_up source quantizer was never calibrated (rare expert
         # that received no calibration tokens), derive its amax once from the
@@ -72,11 +101,11 @@ def _export_fused_experts(module: nn.Module, dtype: torch.dtype) -> None:
         # mismatched weight_scale_2 and garbled MoE output at inference.
         gate_up_q = module.gate_up_proj_weight_quantizers[idx]
         if getattr(gate_up_q, "is_enabled", False) and (
-            not hasattr(gate_up_q, "_amax")
-            or gate_up_q._amax is None
-            or torch.all(gate_up_q._amax == 0)
+            gu_amax_cpu is None or bool(torch.all(gu_amax_cpu == 0))
         ):
             gate_up_q.amax = gate_up[idx].abs().amax().to(torch.float32)
+            # Refresh the CPU amax we'll inject below.
+            gu_amax_cpu = _safe_cpu_amax(gate_up_q)
             warnings.warn(
                 f"Expert {idx} gate_up_proj weight quantizer was not calibrated "
                 f"(amax missing or zero). Using fused-tensor amax as fallback "
@@ -100,7 +129,23 @@ def _export_fused_experts(module: nn.Module, dtype: torch.dtype) -> None:
             i_quantizer = gate_up_input_q if is_gate_up else down_input_q
 
             # gate/up share a weight quantizer — clone so each gets independent amax.
-            w_quantizer = copy.deepcopy(w_quantizer_src) if is_gate_up else w_quantizer_src
+            # Null _amax on source before deepcopy so the (possibly corrupt) CUDA tensor
+            # is never cloned; restore afterwards for the sibling projection. The CPU
+            # amax we pre-extracted gets injected in its place.
+            if is_gate_up:
+                _saved_amax = getattr(w_quantizer_src, "_amax", None)
+                try:
+                    w_quantizer_src._amax = None
+                    w_quantizer = copy.deepcopy(w_quantizer_src)
+                finally:
+                    w_quantizer_src._amax = _saved_amax
+                if gu_amax_cpu is not None:
+                    w_quantizer._amax = gu_amax_cpu
+            else:
+                w_quantizer = w_quantizer_src
+                if down_amax_cpu is not None:
+                    # Replace any CUDA-resident _amax with the safe CPU copy.
+                    w_quantizer._amax = down_amax_cpu
 
             # For per-channel amax (dim >= 1), proportionally slice dim-0
             # to match the split weight.
@@ -109,7 +154,7 @@ def _export_fused_experts(module: nn.Module, dtype: torch.dtype) -> None:
                 and w_quantizer._amax is not None
                 and w_quantizer._amax.dim() >= 1
             ):
-                amax = w_quantizer._amax
+                amax = w_quantizer._amax  # already CPU float32 thanks to _safe_cpu_amax
                 # Per-block _amax (NVFP4 static) collapses the row axis we want
                 # to slice on; restore it so dim-0 slicing splits gate/up.
                 if amax.numel() != fused_total and amax.numel() % fused_total == 0:
@@ -132,13 +177,14 @@ def _export_fused_experts(module: nn.Module, dtype: torch.dtype) -> None:
                     )
 
             # If the weight quantizer was never calibrated, compute amax from weights.
+            # All amax tests below operate on the safe CPU tensor injected above.
             if (
                 hasattr(w_quantizer, "is_enabled")
                 and w_quantizer.is_enabled
                 and (
                     not hasattr(w_quantizer, "_amax")
                     or w_quantizer._amax is None
-                    or torch.all(w_quantizer._amax == 0)
+                    or bool(torch.all(w_quantizer._amax == 0))
                 )
             ):
                 w_quantizer.amax = weight_slice.abs().amax().to(torch.float32)
