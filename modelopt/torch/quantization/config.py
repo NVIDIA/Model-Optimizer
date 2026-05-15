@@ -188,6 +188,33 @@ class QuantizerCfgEntry(ModeloptBaseConfig):
         description="Toggle matched quantizers on/off; independent of ``cfg``.",
     )
 
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_empty_cfg_when_disabled(cls, values):
+        """Treat ``enable=False`` with an empty ``cfg`` as a pure disable.
+
+        Downstream, any non-``None`` ``cfg`` is applied as a full quantizer-attribute
+        replacement.  An entry like ``{cfg: {}, enable: False}`` would therefore reset
+        the quantizer's attributes back to schema defaults — and if a later rule
+        re-enables the quantizer, it would come back with defaults rather than the
+        config it originally carried.  Normalise an empty ``cfg`` (empty dict, empty
+        list, or a list of empty dicts) to ``None`` so a disable-only entry behaves
+        like one.
+        """
+        if not isinstance(values, dict):
+            return values
+        if values.get("enable") is False:
+            cfg = values.get("cfg")
+            cfg_is_empty = (isinstance(cfg, dict) and len(cfg) == 0) or (
+                isinstance(cfg, list)
+                and (
+                    len(cfg) == 0 or all(isinstance(item, dict) and len(item) == 0 for item in cfg)
+                )
+            )
+            if cfg_is_empty:
+                values = {**values, "cfg": None}
+        return values
+
     @model_validator(mode="after")
     def _validate_instruction(self):
         """Reject entries that carry no instruction beyond the path selector."""

@@ -214,19 +214,49 @@ class TestNormalizeQuantCfgList:
                 [{"quantizer_name": "*weight_quantizer", "cfg": [42], "enable": True}]
             )
 
-    def test_empty_cfg_dict_enable_false_accepted(self):
-        """Entry with cfg={} and enable=False is allowed (disable-only entry)."""
+    def test_empty_cfg_dict_enable_false_normalized_to_none(self):
+        """Entry with cfg={} and enable=False is normalised to cfg=None (disable-only).
+
+        A non-``None`` cfg is applied as a full quantizer-attribute replacement, so an
+        empty cfg paired with enable=False would silently reset the quantizer's
+        attributes.  Normalisation to ``None`` makes the entry behave like a pure
+        disable, preserving the existing attribute config.
+        """
         result = normalize_quant_cfg_list(
             [{"quantizer_name": "*input_quantizer", "cfg": {}, "enable": False}]
         )
         assert result[0]["enable"] is False
+        assert result[0]["cfg"] is None
 
-    def test_empty_cfg_list_enable_false_accepted(self):
-        """Entry with cfg=[] and enable=False is allowed (disable-only entry)."""
+    def test_empty_cfg_list_enable_false_normalized_to_none(self):
+        """Entry with cfg=[] and enable=False is normalised to cfg=None."""
         result = normalize_quant_cfg_list(
             [{"quantizer_name": "*input_quantizer", "cfg": [], "enable": False}]
         )
         assert result[0]["enable"] is False
+        assert result[0]["cfg"] is None
+
+    def test_cfg_list_of_empty_dicts_enable_false_normalized_to_none(self):
+        """Entry with cfg=[{}] and enable=False is normalised to cfg=None."""
+        result = normalize_quant_cfg_list(
+            [{"quantizer_name": "*input_quantizer", "cfg": [{}], "enable": False}]
+        )
+        assert result[0]["enable"] is False
+        assert result[0]["cfg"] is None
+
+    def test_nonempty_cfg_enable_false_preserved(self):
+        """Entry with a non-empty cfg and enable=False keeps the cfg (disable+replace)."""
+        result = normalize_quant_cfg_list(
+            [
+                {
+                    "quantizer_name": "*input_quantizer",
+                    "cfg": {"num_bits": 4},
+                    "enable": False,
+                }
+            ]
+        )
+        assert result[0]["enable"] is False
+        assert result[0]["cfg"] == {"num_bits": 4}
 
     def test_new_format_with_list_cfg(self):
         """cfg can be a list of dicts for SequentialQuantizer."""
