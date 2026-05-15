@@ -72,6 +72,75 @@ SUPPORTED_DATASET_CONFIG: dict[str, Any] = {
         "preprocess": lambda sample: "\n".join(turn["content"] for turn in sample["messages"]),
         "chat_key": "messages",
     },
+    "nemotron-sft-instruction-following-chat-v2": {
+        # Skips ``reasoning_on`` split: heterogeneous messages schema fails streaming cast.
+        "config": {
+            "path": "nvidia/Nemotron-SFT-Instruction-Following-Chat-v2",
+            "split": ["reasoning_off"],
+        },
+        "preprocess": lambda sample: "\n".join(turn["content"] for turn in sample["messages"]),
+        "chat_key": "messages",
+    },
+    "nemotron-science-v1": {
+        "config": {
+            "path": "nvidia/Nemotron-Science-v1",
+            "split": ["MCQ", "RQA"],
+        },
+        "preprocess": lambda sample: "\n".join(turn["content"] for turn in sample["messages"]),
+        "chat_key": "messages",
+    },
+    "nemotron-competitive-programming-v1": {
+        # Skips ``infinibyte_part0[0|1]``: heterogeneous schema fails streaming cast.
+        "config": {
+            "path": "nvidia/Nemotron-Competitive-Programming-v1",
+            "split": [
+                "competitive_coding_cpp_part00",
+                "competitive_coding_cpp_part01",
+                "competitive_coding_python_part00",
+                "competitive_coding_python_part01",
+            ],
+        },
+        "preprocess": lambda sample: "\n".join(turn["content"] for turn in sample["messages"]),
+        "chat_key": "messages",
+    },
+    "nemotron-sft-agentic-v2": {
+        # Skips ``search`` split: heterogeneous messages schema fails streaming cast.
+        "config": {
+            "path": "nvidia/Nemotron-SFT-Agentic-v2",
+            "split": ["interactive_agent", "tool_calling"],
+        },
+        "preprocess": lambda sample: "\n".join(turn["content"] for turn in sample["messages"]),
+        "chat_key": "messages",
+    },
+    "nemotron-math-v2": {
+        "config": {
+            "path": "nvidia/Nemotron-Math-v2",
+            "split": ["high_part00", "high_part01", "high_part02", "medium", "low"],
+        },
+        "preprocess": lambda sample: "\n".join(turn["content"] for turn in sample["messages"]),
+        "chat_key": "messages",
+    },
+    "nemotron-sft-swe-v2": {
+        # Skips ``openhands_swe`` split: heterogeneous schema fails streaming cast.
+        "config": {
+            "path": "nvidia/Nemotron-SFT-SWE-v2",
+            "split": ["agentless"],
+        },
+        "preprocess": lambda sample: "\n".join(turn["content"] for turn in sample["messages"]),
+        "chat_key": "messages",
+    },
+    "nemotron-sft-multilingual-v1": {
+        "config": {
+            "path": "nvidia/Nemotron-SFT-Multilingual-v1",
+            "split": [
+                "code_de", "code_es", "code_fr", "code_it", "code_ja", "code_zh",
+                "math_de", "math_es", "math_fr", "math_it", "math_ja", "math_zh",
+                "stem_de", "stem_es", "stem_fr", "stem_it", "stem_ja", "stem_zh",
+            ],
+        },
+        "preprocess": lambda sample: "\n".join(turn["content"] for turn in sample["messages"]),
+        "chat_key": "messages",
+    },
     "magpie": {
         "config": {
             "path": "Magpie-Align/Magpie-Pro-MT-300K-v0.1",
