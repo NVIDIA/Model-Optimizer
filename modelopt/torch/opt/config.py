@@ -129,8 +129,17 @@ class ModeloptBaseConfig(BaseModel, MutableMapping):
             raise KeyError(key) from None
 
     def __setitem__(self, key: str, value: Any) -> None:
-        """Set the value for the given key (can be name or alias of field)."""
-        setattr(self, self.get_field_name_from_key(key), value)
+        """Set the value for the given key (can be name or alias of field).
+
+        Raises :class:`KeyError` (not :class:`AttributeError`) for unknown keys so the
+        class matches the :class:`MutableMapping` protocol — both for direct
+        ``cfg["unknown"] = value`` writes and for inherited mixin helpers like
+        ``setdefault`` that write through ``__setitem__``.
+        """
+        try:
+            setattr(self, self.get_field_name_from_key(key), value)
+        except AttributeError:
+            raise KeyError(key) from None
 
     def __delitem__(self, key: str) -> None:
         """Reject key deletion.
