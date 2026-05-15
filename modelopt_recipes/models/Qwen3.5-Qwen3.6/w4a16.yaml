@@ -4,10 +4,10 @@
 metadata:
   recipe_type: ptq
   description: >
-    W4A16 PTQ recipe for Qwen3.6-35B-A3B: W4A16 NVFP4 for routed MoE experts,
-    shared experts, and lm_head; FP8 for self-attention and the large
-    linear-attention projections; FP8 KV cache with constant amax (fp8_cast
-    behavior).
+    W4A16 PTQ recipe for Qwen3.5/Qwen3.6 models: W4A16 NVFP4 for dense MLP,
+    routed MoE, shared-expert MLP projections, and lm_head; FP8 for
+    self-attention and the large linear-attention projections; FP8 KV cache
+    with constant amax (fp8_cast behavior).
 
 quantize:
   algorithm:
@@ -18,8 +18,10 @@ quantize:
     - quantizer_name: '*'
       enable: false
 
-    # W4A16 NVFP4 targets in the exported hf_quant_config.json.
-    - quantizer_name: '*mlp.experts*weight_quantizer'
+    # W4A16 NVFP4 MLP projection targets. Matching the gate/up/down projection
+    # names covers dense MLPs, shared experts, and fused MoE expert quantizers
+    # such as gate_up_proj_weight_quantizers.N/down_proj_weight_quantizers.N.
+    - quantizer_name: '*mlp*gate_proj*weight_quantizer*'
       enable: true
       cfg: &nvfp4_cfg
         block_sizes:
@@ -27,10 +29,10 @@ quantize:
           type: dynamic
           scale_bits: e4m3
         num_bits: e2m1
-    - quantizer_name: '*block_sparse_moe*weight_quantizer'
+    - quantizer_name: '*mlp*up_proj*weight_quantizer*'
       enable: true
       cfg: *nvfp4_cfg
-    - quantizer_name: '*mlp.shared_expert*weight_quantizer'
+    - quantizer_name: '*mlp*down_proj*weight_quantizer*'
       enable: true
       cfg: *nvfp4_cfg
     - quantizer_name: '*lm_head*weight_quantizer'
