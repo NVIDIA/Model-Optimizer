@@ -4,11 +4,10 @@
 metadata:
   recipe_type: ptq
   description: >
-    Qwen3.6-35B-A3B mixed PTQ recipe matching the
-    Qwen3.6-35B-A3B-2p06GB-per-token checkpoint policy: W4A16 NVFP4 for routed
-    MoE experts, shared experts, and lm_head; FP8 for self-attention and the
-    large linear-attention projections; FP8 KV cache with constant amax
-    (fp8_cast behavior).
+    W4A16 PTQ recipe for Qwen3.6-35B-A3B: W4A16 NVFP4 for routed MoE experts,
+    shared experts, and lm_head; FP8 for self-attention and the large
+    linear-attention projections; FP8 KV cache with constant amax (fp8_cast
+    behavior).
 
 quantize:
   algorithm:
