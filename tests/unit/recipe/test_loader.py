@@ -41,6 +41,10 @@ metadata:
 quantize: {}
 """
 
+CFG_RECIPE_MISSING_METADATA = """\
+quantize: {}
+"""
+
 CFG_RECIPE_MISSING_quantize = """\
 metadata:
   recipe_type: ptq
@@ -49,6 +53,7 @@ metadata:
 CFG_RECIPE_UNSUPPORTED_TYPE = """\
 metadata:
   recipe_type: unknown_type
+quantize: {}
 """
 
 QUANTIZER_ATTRIBUTE_SCHEMA = (
@@ -170,14 +175,20 @@ def test_load_recipe_missing_recipe_type_raises(tmp_path):
         load_recipe(bad)
 
 
-def test_load_recipe_missing_quantize_uses_default(tmp_path):
-    """``quantize`` is optional in a PTQ recipe; absence yields an empty default config."""
-    from modelopt.torch.quantization.config import QuantizeConfig
+def test_load_recipe_missing_quantize_raises(tmp_path):
+    """A PTQ recipe missing the ``quantize`` section is rejected (no silent default)."""
+    bad = tmp_path / "bad.yml"
+    bad.write_text(CFG_RECIPE_MISSING_quantize)
+    with pytest.raises(ValueError, match="quantize"):
+        load_recipe(bad)
 
-    good = tmp_path / "good.yml"
-    good.write_text(CFG_RECIPE_MISSING_quantize)
-    recipe = load_recipe(good)
-    assert isinstance(recipe.quantize, QuantizeConfig)
+
+def test_load_recipe_missing_metadata_raises(tmp_path):
+    """A recipe missing the ``metadata`` section is rejected (no silent default)."""
+    bad = tmp_path / "bad.yml"
+    bad.write_text(CFG_RECIPE_MISSING_METADATA)
+    with pytest.raises(ValueError, match="metadata"):
+        load_recipe(bad)
 
 
 def test_load_recipe_unsupported_type_raises(tmp_path):

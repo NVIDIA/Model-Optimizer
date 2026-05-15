@@ -22,7 +22,7 @@ from enum import Enum
 from pydantic import Field
 
 from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
-from modelopt.torch.quantization.config import QuantizeConfig
+from modelopt.torch.quantization.config import QuantizeConfig  # noqa: TC001
 
 
 class RecipeType(str, Enum):
@@ -56,9 +56,10 @@ class ModelOptRecipeBase(ModeloptBaseConfig):
     """
 
     metadata: RecipeMetadataConfig = Field(
-        default_factory=lambda: RecipeMetadataConfig(recipe_type=RecipeType.PTQ),
         title="Metadata",
-        description="Recipe metadata containing the recipe type and description.",
+        description="Recipe metadata containing the recipe type and description. "
+        "Required: a recipe without a ``metadata`` section is rejected so that a "
+        "missing section can't silently fall back to a default recipe type.",
     )
 
     @property
@@ -75,9 +76,9 @@ class ModelOptRecipeBase(ModeloptBaseConfig):
 class ModelOptPTQRecipe(ModelOptRecipeBase):
     """Our config class for PTQ recipes."""
 
-    quantize: QuantizeConfig = ModeloptField(
-        default=QuantizeConfig(),
+    quantize: QuantizeConfig = Field(
         title="PTQ config",
-        description="PTQ config containing quant_cfg and algorithm.",
-        validate_default=True,
+        description="PTQ config containing quant_cfg and algorithm. Required: a PTQ "
+        "recipe without a ``quantize`` section is rejected so that a missing section "
+        "can't silently fall back to the default INT8 config.",
     )
