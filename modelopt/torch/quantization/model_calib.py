@@ -16,7 +16,6 @@
 """Calibration utilities."""
 
 import math
-import os
 import time
 import warnings
 from collections.abc import Callable
@@ -1767,15 +1766,7 @@ def layerwise_calibrate(
             start_layer, resumed_inputs, forward_loop
         )
 
-        _debug_max_layers = int(os.environ.get("MO_DEBUG_MAX_LAYERS", "0") or "0")
-
         for layer_idx in range(start_layer, num_layers):
-            if _debug_max_layers > 0 and layer_idx >= _debug_max_layers:
-                print_rank_0(
-                    f"MO_DEBUG_MAX_LAYERS={_debug_max_layers}: stopping layerwise "
-                    f"calibration after layer {layer_idx - 1}/{num_layers}"
-                )
-                break
             layer = transformer_layers[layer_idx]
 
             def _layer_forward_loop(m, _inputs=layer_inputs):
