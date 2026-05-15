@@ -17,7 +17,7 @@
 
 import fnmatch
 import json
-from collections.abc import Callable, ItemsView, Iterator, KeysView, ValuesView
+from collections.abc import Callable, ItemsView, Iterator, KeysView, MutableMapping, ValuesView
 from typing import Any, TypeAlias
 
 import torch
@@ -57,11 +57,18 @@ def ModeloptField(default: Any = PydanticUndefined, **kwargs):  # noqa: N802
 # TODO: expand config classes to searcher
 
 
-class ModeloptBaseConfig(BaseModel):
+class ModeloptBaseConfig(BaseModel, MutableMapping):
     """Our config base class for mode configuration.
 
     The base class extends the capabilities of pydantic's BaseModel to provide additional methods
     and properties for easier access and manipulation of the configuration.
+
+    Inherits from :class:`collections.abc.MutableMapping` so instances satisfy
+    ``isinstance(cfg, Mapping)`` / ``isinstance(cfg, MutableMapping)`` checks and pick up the
+    mixin methods (``pop``, ``popitem``, ``setdefault``, ``clear``).  Schema fields are fixed,
+    so ``__delitem__`` raises :class:`TypeError`; the inherited ``pop`` / ``clear`` /
+    ``popitem`` therefore also raise on any existing key, while ``pop(key, default)`` for a
+    missing key still returns the default normally.
     """
 
     model_config = PyDanticConfigDict(extra="forbid", validate_assignment=True)
@@ -110,18 +117,40 @@ class ModeloptBaseConfig(BaseModel):
             return False
 
     def __getitem__(self, key: str) -> Any:
-        """Get the value for the given key (can be name or alias of field)."""
-        return getattr(self, self.get_field_name_from_key(key))
+        """Get the value for the given key (can be name or alias of field).
+
+        Raises :class:`KeyError` for missing keys so the class behaves like a regular
+        :class:`Mapping` — required for the inherited ``MutableMapping`` mixin methods
+        (``pop``, ``setdefault``, ...) to dispatch correctly.
+        """
+        try:
+            return getattr(self, self.get_field_name_from_key(key))
+        except AttributeError:
+            raise KeyError(key) from None
 
     def __setitem__(self, key: str, value: Any) -> None:
         """Set the value for the given key (can be name or alias of field)."""
         setattr(self, self.get_field_name_from_key(key), value)
 
+    def __delitem__(self, key: str) -> None:
+        """Reject key deletion.
+
+        ``ModeloptBaseConfig`` exposes a fixed pydantic schema, so removing a key is
+        ill-defined: schema fields can't disappear, and silently resetting them to their
+        defaults would surprise callers.  Raise ``TypeError`` instead.  Defined so the
+        class fully satisfies the ``MutableMapping`` protocol (``__delitem__`` is
+        required), without committing to actual deletion semantics.
+        """
+        raise TypeError(
+            f"{type(self).__name__} does not support key deletion; schema fields are "
+            f"fixed (attempted to delete {key!r})."
+        )
+
     def get(self, key: str, default: Any = None) -> Any:
         """Get the value for the given key (can be name or alias) or default if not found."""
         try:
             return self[key]
-        except AttributeError:
+        except KeyError:
             return default
 
     def __len__(self) -> int:
