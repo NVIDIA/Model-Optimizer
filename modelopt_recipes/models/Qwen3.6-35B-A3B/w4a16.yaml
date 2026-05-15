@@ -7,7 +7,8 @@ metadata:
     Qwen3.6-35B-A3B mixed PTQ recipe matching the
     Qwen3.6-35B-A3B-2p06GB-per-token checkpoint policy: W4A16 NVFP4 for routed
     MoE experts, shared experts, and lm_head; FP8 for self-attention and the
-    large linear-attention projections; FP8 KV cache.
+    large linear-attention projections; FP8 KV cache with constant amax
+    (fp8_cast behavior).
 
 quantize:
   algorithm:
@@ -68,10 +69,14 @@ quantize:
       enable: true
       cfg: *fp8_cfg
 
-    # FP8 KV cache.
+    # FP8 KV cache with constant amax. This matches fp8_cast behavior and
+    # avoids exporting per-layer KV scale tensors.
     - quantizer_name: '*[kv]_bmm_quantizer'
       enable: true
-      cfg: *fp8_cfg
+      cfg:
+        num_bits: e4m3
+        axis: null
+        use_constant_amax: true
 
     # Explicitly keep non-reference targets unquantized.
     - quantizer_name: '*linear_attn.conv1d*'
