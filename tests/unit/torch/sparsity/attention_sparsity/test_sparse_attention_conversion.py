@@ -369,6 +369,10 @@ class TestExportSparseAttentionConfig:
                     "prefill": {"a": 3.14, "b": 7.5},
                     "decode": {"a": 0.5, "b": 9.0},
                 }
+                module._sparse_method_instance.target_sparse_ratio = {
+                    "prefill": 0.4,
+                    "decode": 0.6,
+                }
 
         out = export_sparse_attention_config(model)
         assert out is not None
@@ -376,4 +380,5 @@ class TestExportSparseAttentionConfig:
         tsf = out["threshold_scale_factor"]
         assert tsf["prefill"] == {"a": 3.14, "b": 7.5}
         assert tsf["decode"] == {"a": 0.5, "b": 9.0}
+        assert out["target_sparse_ratio"] == {"prefill": 0.4, "decode": 0.6}
         assert out["producer"]["name"] == "modelopt"

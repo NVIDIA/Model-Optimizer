@@ -234,7 +234,7 @@ def _attn_fwd(
     NUM_SINK_TOKENS: tl.constexpr = 0,  # KV positions before this are kept dense (attention sinks)
     DENSE_WINDOW_SIZE: tl.constexpr = 64,  # Tokens near diagonal kept dense (absolute, BLOCK_N-independent)
     APPLY_SKIP_SOFTMAX: tl.constexpr = False,  # Skip KV tiles with negligible scores
-    SKIP_THRESHOLD_LOG2: tl.constexpr = 0.0,  # log2(lambda) * sm_scale, pre-scaled for comparison on scaled scores
+    SKIP_THRESHOLD_LOG2: tl.constexpr = 0.0,  # log2(lambda) in the kernel's scaled log2 score space
     Sparsity_total=None,  # Optional int64 scalar for counting total tiles (atomic)
     Sparsity_skipped=None,  # Optional int64 scalar for counting skipped tiles (atomic)
     MEASURE_SPARSITY: tl.constexpr = False,  # When True, count total/skipped tiles via atomic adds
@@ -824,20 +824,18 @@ class _Attention(torch.autograd.Function):
         # Triton tiles must be powers of 2; pad head dim
         BLOCK_D = triton.next_power_of_2(HEAD_DIM)
 
-        # Skip-softmax threshold in scaled log2 space for the kernel.
+        # Skip-softmax threshold in the kernel's scaled log2 score space.
         # Two modes:
         #   1. raw_threshold: passed directly as skip_threshold_log2 (for testing)
-        #   2. lambda threshold: converted via log2(lambda) * sm_scale
+        #   2. lambda threshold: converted via log2(lambda)
         if skip_softmax_raw_threshold is not None:
             apply_skip = True
             skip_threshold_log2 = skip_softmax_raw_threshold
         elif skip_softmax_threshold is not None and skip_softmax_threshold > 0.0:
             apply_skip = True
-            # The BLASST reference (https://arxiv.org/pdf/2512.12087) checks
-            # ln(lambda) on unscaled scores. Our kernel works in log2-scaled space
-            # (scores pre-multiplied by qk_scale = sm_scale * LOG2E), so we
-            # pre-scale: threshold_scaled = log2(lambda) * sm_scale.
-            skip_threshold_log2 = math.log2(skip_softmax_threshold) * sm_scale
+            # scores already include sm_scale and LOG2E, so the lambda cutoff is
+            # just converted from natural-log probability space to log2 space.
+            skip_threshold_log2 = math.log2(skip_softmax_threshold)
         else:
             apply_skip = False
             skip_threshold_log2 = 0.0
@@ -1119,8 +1117,7 @@ def attention(
             (https://arxiv.org/pdf/2512.12087). Skip KV tiles where
             ``exp(tile_max - running_max) < lambda``, meaning the tile's
             softmax contribution is negligible. Tiles are skipped entirely
-            (no softmax, V load, or BMM2). The threshold is applied on
-            unscaled scores. Set to ``None`` or ``0`` to disable.
+            (no softmax, V load, or BMM2). Set to ``None`` or ``0`` to disable.
         skip_softmax_raw_threshold: Raw ``skip_threshold_log2`` value passed
             directly to the kernel without conversion. The kernel skips tiles
             where ``tile_row_max < row_max + raw_threshold``. Typical values

@@ -156,8 +156,8 @@ def _skip_softmax_decision(
     < lambda ~= 0`` and the block's contribution to the output is negligible.
     The caller may then skip the softmax computation, V load, and BMM2.
 
-    The threshold is pre-scaled to log2 space by the Python wrapper so it can
-    be compared directly against the already-scaled scores.
+    The threshold is converted to the kernel's scaled log2 score space by the
+    Python wrapper so it can be compared directly against ``scores``.
 
     Returns:
         True when *all* Q rows in the tile satisfy the skip criterion.
