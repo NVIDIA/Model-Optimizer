@@ -92,8 +92,15 @@ def _replace_attention_impl(worker):
             sparse_kw["num_sink_tokens"] = layer_cfg.get("num_sink_tokens", 0)
             sparse_kw["dense_window_size"] = layer_cfg.get("dense_window_size", 64)
         threshold = layer_cfg.get("skip_softmax_threshold")
-        if threshold:
+        if threshold is not None:
             sparse_kw["skip_softmax_threshold"] = threshold
+        raw_threshold = layer_cfg.get("skip_softmax_raw_threshold")
+        if raw_threshold is not None:
+            sparse_kw["skip_softmax_raw_threshold"] = raw_threshold
+        threshold_scale_factor = layer_cfg.get("threshold_scale_factor")
+        if threshold_scale_factor is not None:
+            sparse_kw["threshold_scale_factor"] = threshold_scale_factor
+            sparse_kw["target_sparse_ratio"] = layer_cfg.get("target_sparse_ratio")
 
         new_impl = _clone_sparse_impl(module.impl)
         new_impl.sparse_kw = sparse_kw

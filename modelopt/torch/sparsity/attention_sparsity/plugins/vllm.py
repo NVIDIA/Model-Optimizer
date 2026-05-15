@@ -27,6 +27,8 @@ Vllm-free config helpers (``match_sparse_config`` / ``load_from_checkpoint_metad
 live in ``plugins/sparse_attn_config.py`` and are unit-testable without vLLM.
 """
 
+import math
+
 import torch
 from vllm.v1.attention.backends.flash_attn import (
     FlashAttentionBackend,
@@ -35,6 +37,48 @@ from vllm.v1.attention.backends.flash_attn import (
 )
 
 from modelopt.torch.kernels.common.attention.triton_fa import attention as triton_attention
+
+
+def _target_sparse_ratio_for_phase(target_sparse_ratio, phase: str) -> float:
+    """Return target sparsity for a phase, defaulting old checkpoint metadata."""
+    if isinstance(target_sparse_ratio, (float, int)):
+        return float(target_sparse_ratio)
+    if isinstance(target_sparse_ratio, dict):
+        return float(target_sparse_ratio.get(phase, 0.5))
+    return 0.5
+
+
+def _resolve_skip_softmax_calibration(
+    sparse_kw: dict,
+    *,
+    is_prefill: bool,
+    max_seq_len: int,
+) -> None:
+    """Convert exported calibration params into the scalar threshold kernel API."""
+    threshold_scale_factor = sparse_kw.pop("threshold_scale_factor", None)
+    sparse_target_ratio = sparse_kw.pop("target_sparse_ratio", None)
+    if threshold_scale_factor is None or sparse_kw.get("skip_softmax_raw_threshold") is not None:
+        return
+
+    phase = "prefill" if is_prefill else "decode"
+    params = threshold_scale_factor.get(phase) if isinstance(threshold_scale_factor, dict) else None
+    if not isinstance(params, dict):
+        return
+
+    try:
+        a = float(params["a"])
+        b = float(params["b"])
+        seq_len = int(max_seq_len)
+    except (KeyError, TypeError, ValueError):
+        return
+    if a <= 0.0 or seq_len <= 0:
+        return
+
+    target = _target_sparse_ratio_for_phase(sparse_target_ratio, phase)
+    scale_factor = a * math.exp(b * target)
+    # The current Triton kernel accepts one scalar threshold per launch. Use
+    # the max KV length in the scheduled batch; shorter sequences are denser.
+    sparse_kw["skip_softmax_threshold"] = scale_factor / seq_len
 
 
 class ModelOptSparseAttentionImpl(FlashAttentionImpl):
@@ -97,7 +141,12 @@ class ModelOptSparseAttentionImpl(FlashAttentionImpl):
         page_size = key_cache.shape[1]
 
         # Per-layer sparse kwargs (set by _replace_attention_impl in the worker)
-        sparse_kw = getattr(self, "sparse_kw", {})
+        sparse_kw = dict(getattr(self, "sparse_kw", {}))
+        _resolve_skip_softmax_calibration(
+            sparse_kw,
+            is_prefill=is_prefill,
+            max_seq_len=attn_metadata.max_seq_len,
+        )
 
         # Prepare metadata for our kernel
         q = query[:num_actual_tokens].contiguous()

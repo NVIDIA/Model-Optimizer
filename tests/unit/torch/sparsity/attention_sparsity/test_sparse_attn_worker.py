@@ -15,15 +15,20 @@
 
 """Unit tests for sparse attention vLLM worker compatibility helpers."""
 
+import math
+
 import pytest
+import torch
 
 pytest.importorskip("vllm")
 
+from vllm.v1.attention.backends.flash_attn import FlashAttentionImpl
+
+from modelopt.torch.sparsity.attention_sparsity.plugins import vllm as vllm_plugin
 from modelopt.torch.sparsity.attention_sparsity.plugins.vllm import (
     ModelOptSparseAttentionImpl,
     _clone_sparse_impl,
 )
-from vllm.v1.attention.backends.flash_attn import FlashAttentionImpl
 
 
 def _make_old_impl():
@@ -60,3 +65,61 @@ def test_clone_sparse_impl_rejects_non_none_sinks():
 
     with pytest.raises(NotImplementedError, match="sinks"):
         _clone_sparse_impl(old_impl)
+
+
+@pytest.mark.parametrize(
+    ("max_query_len", "seq_len", "phase", "expected_scale"),
+    [
+        (8, 8, "prefill", 2.0 * math.exp(3.0 * 0.4)),
+        (1, 16, "decode", 5.0 * math.exp(7.0 * 0.6)),
+    ],
+)
+def test_forward_resolves_calibrated_skip_softmax_threshold(
+    monkeypatch, max_query_len, seq_len, phase, expected_scale
+):
+    """Forward should convert checkpoint calibration params to kernel threshold."""
+    impl = _clone_sparse_impl(_make_old_impl())
+    impl.sparse_kw = {
+        "threshold_scale_factor": {
+            "formula": "a * exp(b * target_sparsity)",
+            "prefill": {"a": 2.0, "b": 3.0},
+            "decode": {"a": 5.0, "b": 7.0},
+        },
+        "target_sparse_ratio": {"prefill": 0.4, "decode": 0.6},
+    }
+    q = torch.zeros(max_query_len, impl.num_heads, impl.head_size, dtype=torch.float16)
+    kv_cache = torch.zeros(2, 1, seq_len, impl.num_kv_heads, impl.head_size, dtype=torch.float16)
+    attn_metadata = type(
+        "AttnMetadata",
+        (),
+        {
+            "num_actual_tokens": max_query_len,
+            "max_query_len": max_query_len,
+            "max_seq_len": seq_len,
+            "query_start_loc": torch.tensor([0, max_query_len], dtype=torch.int32),
+            "seq_lens": torch.tensor([seq_len], dtype=torch.int32),
+            "block_table": torch.zeros(1, 1, dtype=torch.int32),
+        },
+    )()
+    captured = {}
+
+    def fake_attention(q, **kwargs):
+        captured.update(kwargs)
+        return torch.zeros_like(q)
+
+    monkeypatch.setattr(vllm_plugin, "triton_attention", fake_attention)
+
+    impl.forward(
+        layer=None,
+        query=q,
+        key=q,
+        value=q,
+        kv_cache=kv_cache,
+        attn_metadata=attn_metadata,
+        output=torch.empty_like(q),
+    )
+
+    assert phase in impl.sparse_kw["threshold_scale_factor"]
+    assert captured["skip_softmax_threshold"] == pytest.approx(expected_scale / seq_len)
+    assert "threshold_scale_factor" not in captured
+    assert "target_sparse_ratio" not in captured

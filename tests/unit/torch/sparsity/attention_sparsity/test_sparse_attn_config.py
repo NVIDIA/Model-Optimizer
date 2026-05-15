@@ -86,11 +86,10 @@ class TestLoadFromCheckpointMetadata:
         hf_config = types.SimpleNamespace(sparse_attention_config=meta)
         assert load_from_checkpoint_metadata(hf_config) is None
 
-    def test_maps_softmax_skip_to_preset(self):
-        """Test that softmax_skip resolves to SKIP_SOFTMAX_TRITON_DEFAULT."""
+    def test_maps_uncalibrated_softmax_skip_to_preset(self):
+        """Test that uncalibrated softmax_skip uses the static Triton preset."""
         meta = {
             "config_groups": {"group_0": {"sparse_algo": "softmax_skip"}},
-            "threshold_scale_factor": {"prefill": {"a": 7.93, "b": 8.61}},
             "producer": {"name": "modelopt", "version": "0.37.0"},
         }
         hf_config = types.SimpleNamespace(sparse_attention_config=meta)
@@ -99,6 +98,35 @@ class TestLoadFromCheckpointMetadata:
         cfg, preset_name = result
         assert preset_name == "SKIP_SOFTMAX_TRITON_DEFAULT"
         assert cfg is mtsa.SKIP_SOFTMAX_TRITON_DEFAULT
+
+    def test_maps_calibrated_softmax_skip_to_dynamic_config(self):
+        """Test that calibrated softmax_skip preserves checkpoint coefficients."""
+        threshold_scale_factor = {
+            "formula": "a * exp(b * target_sparsity)",
+            "prefill": {"a": 2.0, "b": 3.0},
+            "decode": {"a": 5.0, "b": 7.0},
+        }
+        meta = {
+            "config_groups": {"group_0": {"sparse_algo": "softmax_skip"}},
+            "threshold_scale_factor": threshold_scale_factor,
+            "target_sparse_ratio": {"prefill": 0.4, "decode": 0.6},
+            "producer": {"name": "modelopt", "version": "0.45.0"},
+        }
+        hf_config = types.SimpleNamespace(sparse_attention_config=meta)
+
+        result = load_from_checkpoint_metadata(hf_config)
+
+        assert result is not None
+        cfg, preset_name = result
+        assert preset_name == "CHECKPOINT_CALIBRATED_SOFTMAX_SKIP"
+        layer_cfg = match_sparse_config("model.layers.0.self_attn", cfg)
+        assert layer_cfg == {
+            "method": "triton_skip_softmax",
+            "threshold_scale_factor": threshold_scale_factor,
+            "target_sparse_ratio": {"prefill": 0.4, "decode": 0.6},
+            "backend": "triton",
+            "enable": True,
+        }
 
     def test_handles_non_dict_metadata(self):
         """Test that a non-dict sparse_attention_config returns None."""

@@ -379,6 +379,7 @@ def export_sparse_attention_config(model: nn.Module) -> dict[str, Any] | None:
     """
     # Collect sparse attention module info
     calibration_params = None
+    target_sparse_ratio = None
     target_classes: set[str] = set()
 
     for module in get_sparse_attention_modules(model):
@@ -391,6 +392,10 @@ def export_sparse_attention_config(model: nn.Module) -> dict[str, Any] | None:
         # Get calibration params from first module that has them
         if calibration_params is None:
             calibration_params = getattr(module._sparse_method_instance, "calibration_params", None)
+        if target_sparse_ratio is None:
+            target_sparse_ratio = getattr(
+                module._sparse_method_instance, "target_sparse_ratio", None
+            )
 
     # Return None if no calibration params found
     if calibration_params is None:
@@ -421,6 +426,8 @@ def export_sparse_attention_config(model: nn.Module) -> dict[str, Any] | None:
             "version": mo_version,
         },
     }
+    if target_sparse_ratio is not None:
+        export_config["target_sparse_ratio"] = target_sparse_ratio
 
     return export_config
 
