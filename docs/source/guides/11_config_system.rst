@@ -35,10 +35,6 @@ authoring feature:
 * **Persistent**: a resolved config can be serialized as plain YAML/JSON data,
   and the same plain data can be embedded in a PyTorch checkpoint and restored
   against the schema.
-* **Backward compatible**: schemas evolve over time. Loading older persisted
-  configs against newer schemas must remain deliberate and testable. ModelOpt
-  does not yet have a formal compatibility window, but config authors should
-  treat compatibility as a schema-design requirement.
 * **Composable YAML**: shared fragments such as numeric formats and list units
   can be defined once and referenced from multiple YAML files. This is optional
   authoring convenience, not a correctness requirement.
@@ -277,29 +273,6 @@ source snippets.
 allows config objects to participate in safe deserialization. Plain-data
 persistence remains the most portable form because it is easy to inspect, diff,
 and migrate.
-
-
-Schema evolution
-================
-
-Backward compatibility is a schema concern. When a persisted config outlives the
-code version that produced it, a newer schema must either accept it or reject it
-with a clear migration path.
-
-Use these rules when evolving config schemas:
-
-* Prefer additive fields with defaults over required fields with no default.
-* Keep validators tolerant of older spellings when a rename is in flight.
-* Normalize legacy forms in ``mode="before"`` validators, then store the
-  canonical form in ``model_dump()`` output.
-* Avoid changing the meaning of an existing key. Add a new key when semantics
-  change materially.
-* Add tests that load representative old plain-data configs against the new
-  schema.
-
-ModelOpt does not yet define a formal compatibility window for every config
-surface, so schema authors should document compatibility-sensitive changes in
-the owning feature area.
 
 
 Composable YAML
