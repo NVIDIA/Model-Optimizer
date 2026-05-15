@@ -113,6 +113,7 @@ QUANT_CFG_CHOICES: dict[str, dict[str, Any]] = {
     "fp8_pb_wo": mtq.FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG,
     "fp8_pc_pt": mtq.FP8_PER_CHANNEL_PER_TOKEN_CFG,
     "w4a8_nvfp4_fp8": mtq.W4A8_NVFP4_FP8_CFG,
+    "w4a16_nvfp4": mtq.W4A16_NVFP4_CFG,
     "w4a8_mxfp4_fp8": mtq.W4A8_MXFP4_FP8_CFG,
     "nvfp4_mlp_only": mtq.NVFP4_MLP_ONLY_CFG,
     "nvfp4_experts_only": mtq.NVFP4_EXPERTS_ONLY_CFG,
@@ -785,6 +786,12 @@ def export_quantized(
                     extra_state_dict=mtp_state_dict,
                 )
 
+                if args.qformat == "w4a16_nvfp4":
+                    warnings.warn(
+                        "TensorRT-LLM and SGLang do not support this format. "
+                        "vLLM deployment support is in progress."
+                    )
+
         # Restore default padding and export the tokenizer as well.
         if tokenizer is not None:
             tokenizer.padding_side = default_padding_side
@@ -1147,7 +1154,7 @@ def quantize_main(
             quant_cfg = copy.deepcopy(quant_cfg)
             force_weight_quantizers_static(quant_cfg["quant_cfg"])
 
-        if args.qformat in QUANT_CFG_CHOICES:
+        if quant_cfg:
             mono_quantize(
                 args,
                 quant_cfg,
