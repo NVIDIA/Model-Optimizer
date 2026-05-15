@@ -18,6 +18,7 @@
 # modelopt-schema: modelopt.torch.quantization.config.QuantizeConfig
 imports:
   base_disable_all: configs/ptq/units/base_disable_all
+  block_sparse_moe_nvfp4: configs/ptq/units/block_sparse_moe_nvfp4
   default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
   nvfp4: configs/numerics/nvfp4
 
@@ -36,10 +37,5 @@ quant_cfg:
   - quantizer_name: '*mlp*input_quantizer'
     cfg:
       $import: nvfp4
-  - quantizer_name: '*block_sparse_moe*weight_quantizer'
-    cfg:
-      $import: nvfp4
-  - quantizer_name: '*block_sparse_moe*input_quantizer'
-    cfg:
-      $import: nvfp4
+  - $import: block_sparse_moe_nvfp4
   - $import: default_disabled_quantizers

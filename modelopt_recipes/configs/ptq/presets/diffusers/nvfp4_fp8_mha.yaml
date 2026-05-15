@@ -18,6 +18,7 @@
 # modelopt-schema: modelopt.torch.quantization.config.QuantizeConfig
 imports:
   base_disable_all: configs/ptq/units/base_disable_all
+  attention_qkv_fp8: configs/ptq/units/attention_qkv_fp8
   fp8: configs/numerics/fp8
   nvfp4: configs/numerics/nvfp4
 
@@ -34,12 +35,7 @@ quant_cfg:
       $import: nvfp4
   - quantizer_name: '*output_quantizer'
     enable: false
-  - quantizer_name: '*[qkv]_bmm_quantizer'
-    cfg:
-      $import: fp8
-  - quantizer_name: '*softmax_quantizer'
-    cfg:
-      $import: fp8
+  - $import: attention_qkv_fp8
   - quantizer_name: '*bmm2_output_quantizer'
     cfg:
       $import: fp8
