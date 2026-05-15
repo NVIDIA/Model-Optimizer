@@ -35,12 +35,12 @@
 
 """Eagle model utils."""
 
+from tkinter.constants import NONE
 from typing import Any
 
 import torch
 from torch.utils.data import Dataset
 from transformers.trainer_pt_utils import LabelSmoother
-
 IGNORE_TOKEN_ID = LabelSmoother.ignore_index
 
 
@@ -78,6 +78,51 @@ def expand_mask(mask: torch.Tensor, dtype: torch.dtype, tgt_len: int | None = No
     return inverted_mask.masked_fill(inverted_mask.to(torch.bool), torch.finfo(dtype).min)
 
 
+def compute_assistant_mask_kimi(tokenizer, input_ids):
+    """Recover the assistant mask from already-tokenized Kimi chat IDs.
+
+    For every <|im_assistant|> token, locate the following <|im_middle|> and
+    matching <|im_end|>, and mark only the inner content span (exclusive of
+    both markers). This matches HF's generation-tag mask semantics: only the
+    assistant's actual reply tokens count, not role/separator markers.
+
+    An unmatched assistant span (interrupted by a new role marker, or a
+    trailing generation prompt at end of sequence) is marked from
+    <|im_middle|>+1 up to but not including the next role marker / EOS. If
+    <|im_middle|> is absent within the span, nothing is marked for it.
+    """
+    ids_list = input_ids.tolist() if hasattr(input_ids, "tolist") else list(input_ids)
+
+    role_to_id = {
+        role: tokenizer.convert_tokens_to_ids(role)
+        for role in ("<|im_user|>", "<|im_assistant|>", "<|im_system|>")
+    }
+    assistant_id = role_to_id["<|im_assistant|>"]
+    other_role_ids = {tid for r, tid in role_to_id.items() if r != "<|im_assistant|>"}
+    end_id = tokenizer.convert_tokens_to_ids("<|im_end|>")
+    middle_id = tokenizer.convert_tokens_to_ids("<|im_middle|>")
+
+    mask = [0] * len(ids_list)
+    i = 0
+    n = len(ids_list)
+    while i < n:
+        if ids_list[i] != assistant_id:
+            i += 1
+            continue
+        j = i + 1
+        m = -1
+        while j < n and ids_list[j] != end_id and ids_list[j] not in other_role_ids:
+            if m < 0 and ids_list[j] == middle_id:
+                m = j
+            j += 1
+        if m >= 0:
+            for k in range(m + 1, j):
+                mask[k] = 1
+        i = j + 1 if (j < n and ids_list[j] == end_id) else j
+
+    return torch.tensor(mask, dtype=torch.long)
+
+
 class OfflineSupervisedDataset(Dataset):
     """Offline dataset for supervised fine-tuning with pre-dumped hidden states.
 
@@ -105,34 +150,49 @@ class OfflineSupervisedDataset(Dataset):
         self,
         dumped_files,
         answer_only_loss: bool = False,
+        tokenizer = None,
     ):
         """Initialize with a list of .pt file paths."""
         super().__init__()
         self.dumped_files = dumped_files
         self.answer_only_loss = answer_only_loss
+        self.tokenizer = tokenizer
 
     def __len__(self):
         return len(self.dumped_files)
 
     def __getitem__(self, i) -> dict[str, torch.Tensor]:
-        offline_data = torch.load(self.dumped_files[i], weights_only=True)
+        try:
+            offline_data = torch.load(self.dumped_files[i], weights_only=True)
+        except Exception as e:
+            print(f"Error loading {self.dumped_files[i]}: {e}, trying to load previous file")
+            return self.__getitem__(i-1)
 
         labels = torch.full_like(offline_data["input_ids"], IGNORE_TOKEN_ID)
         labels[..., :-1] = offline_data["input_ids"][..., 1:]
 
         if self.answer_only_loss:
             if "loss_mask" not in offline_data:
-                raise ValueError(
-                    f"answer_only_loss=True requires a 'loss_mask' entry in the offline "
-                    f".pt file, but {self.dumped_files[i]} does not have one. Re-dump "
-                    f"with --answer-only-loss in compute_hidden_states_*.py."
-                )
-            loss_mask = offline_data["loss_mask"].to(offline_data["input_ids"].dtype)
+                loss_mask = compute_assistant_mask_kimi(self.tokenizer, offline_data["input_ids"])
+                ratio = loss_mask.float().mean().item()
+                if ratio < 0.3:
+                    # print(f"Drop sample id {i}, 1s ratio: {ratio:.4f}")
+                    return self.__getitem__(i-1)
+                # print(f"sample id {i}, input ids length: {len(offline_data['input_ids'])}, loss_mask length: {len(loss_mask)}, 1s ratio: {loss_mask.float().mean().item():.4f}")
+           
+                # loss_mask = torch.ones_like(offline_data["input_ids"])
+            #     raise ValueError(
+            #         f"answer_only_loss=True requires a 'loss_mask' entry in the offline "
+            #         f".pt file, but {self.dumped_files[i]} does not have one. Re-dump "
+            #         f"with --answer-only-loss in compute_hidden_states_*.py."
+            #     )
+            # loss_mask = offline_data["loss_mask"].to(offline_data["input_ids"].dtype)
         else:
             loss_mask = torch.ones_like(offline_data["input_ids"])
+        # loss_mask = torch.ones_like(offline_data["input_ids"])
 
         ret = {
-            "input_ids": offline_data["input_ids"],
+            "input_ids": offline_data["input_ids"].to(torch.long),
             "base_model_hidden_states": offline_data["hidden_states"],
             "aux_hidden_states": offline_data["aux_hidden_states"],
             "attention_mask": torch.ones_like(offline_data["input_ids"]),
@@ -149,14 +209,17 @@ class EagleOfflineDataCollator:
         """Initialize with the target sequence length for truncation/padding."""
         self.train_len = train_len
 
-    def _pad_or_truncate(self, x: torch.Tensor, length: int, dim: int = 0):
-        """Pad or truncate a tensor to length along a given dimension."""
+    def _pad_or_truncate(self, x: torch.Tensor, length: int, dim: int = 0, padding_token_id: int = 0):
+        """Pad or truncate a tensor to length along a given dimension.
+        For input_ids, fill the pad with token 163839.
+        """
         dim = dim % x.ndim  # support negative dimension
 
-        # allocate output tensor
+        # Determine appropriate padding token
+        # Only use 163839 for input_ids (handled in the caller)
         out_shape = list(x.shape)
         out_shape[dim] = length
-        out = x.new_zeros(out_shape)
+        out = x.new_full(out_shape, padding_token_id)
 
         # construct copy slice
         slc = [slice(None)] * x.ndim
@@ -168,9 +231,12 @@ class EagleOfflineDataCollator:
 
     def __call__(self, features: list[dict[str, Any]]) -> dict[str, Any]:
         """Collate a list of feature dicts into a single padded/truncated batch."""
+        # For input_ids, use 163839 as padding_token_id
         base_batch = {
-            k: torch.stack([self._pad_or_truncate(item[k], self.train_len) for item in features])
-            for k in ["input_ids", "attention_mask", "loss_mask", "labels"]
+            "input_ids": torch.stack([self._pad_or_truncate(item["input_ids"], self.train_len, padding_token_id=163839) for item in features]),
+            "attention_mask": torch.stack([self._pad_or_truncate(item["attention_mask"], self.train_len) for item in features]),
+            "loss_mask": torch.stack([self._pad_or_truncate(item["loss_mask"], self.train_len) for item in features]),
+            "labels": torch.stack([self._pad_or_truncate(item["labels"], self.train_len) for item in features]),
         }
 
         base_model_outputs = {

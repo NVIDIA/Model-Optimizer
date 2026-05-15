@@ -265,7 +265,7 @@ if __name__ == "__main__":
         type=str,
         required=False,
         default="EAGLE3",
-        choices=["EAGLE3", "EAGLE", "DRAFT_TARGET", "NGRAM", "MTP", "NONE"],
+        choices=["EAGLE3", "EAGLE", "DRAFT_TARGET", "NGRAM", "MTP", "DFLASH", "NONE"],
         help="Speculative algorithm to use",
     )
     parser.add_argument("--model_dir", type=str, required=True, help="Path to the model directory")

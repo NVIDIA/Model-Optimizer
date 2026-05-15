@@ -1,0 +1,7 @@
+engine_args:
+  mem_fraction_static: 0.9
+  speculative_num_draft_tokens: 8
+  speculative_dflash_draft_window_size: 4096
+  mamba_scheduler_strategy: extra_buffer
+sampling_kwargs:
+  temperature: 0

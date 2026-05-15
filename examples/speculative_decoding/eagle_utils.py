@@ -108,7 +108,7 @@ def make_speculative_data_module(
             raise ValueError("sample_size must be -1 (use all samples) or a positive integer")
         if data_args.sample_size > 0:
             dumped_files = dumped_files[: data_args.sample_size]
-        train_dataset = OfflineSupervisedDataset(dumped_files, answer_only_loss=answer_only_loss)
+        train_dataset = OfflineSupervisedDataset(dumped_files, answer_only_loss=answer_only_loss, tokenizer=tokenizer)
         data_collator = EagleOfflineDataCollator(train_len=train_len)
 
     return {
@@ -159,10 +159,14 @@ class EagleTrainerWithAccLog(Trainer):
             self.state.training_accs = []
         if not hasattr(self.state, "component_losses"):
             self.state.component_losses = {"eagle": [], "preservation": []}
+        if not hasattr(self.state, "training_stats"):
+            self.state.training_stats = []
         kwargs.pop("num_items_in_batch", None)
         loss, outputs = super().compute_loss(return_outputs=True, *args, **kwargs)
         if hasattr(outputs, "train_acc") and any(outputs.train_acc):
             self.state.training_accs.append(outputs.train_acc)
+        if getattr(outputs, "train_stats", None):
+            self.state.training_stats.append(outputs.train_stats)
         # Track per-component losses
         for key, attr in [
             ("eagle", "eagle_loss"),
@@ -261,6 +265,22 @@ class EagleTrainingPlot(TrainerCallback):
             print_rank_0(f"Step {state.global_step} Estimated Training AR: {est_ar:.4f}")
             logs["estimated_training_ar"] = est_ar
 
+        # Aggregate dflash debug stats over the log window.
+        if getattr(state, "training_stats", None):
+            keys = set()
+            for s in state.training_stats:
+                keys.update(s.keys())
+            for k in keys:
+                vals = [s[k] for s in state.training_stats if k in s]
+                if not vals:
+                    continue
+                if isinstance(vals[0], list):
+                    arr = np.array(vals)  # [N_steps, P]
+                    for j, m in enumerate(arr.mean(axis=0).tolist()):
+                        logs[f"train_stats/{k}_pos_{j}"] = float(m)
+                else:
+                    logs[f"train_stats/{k}"] = float(np.mean(vals))
+
         # log to wandb
         if wandb is not None and wandb.run is not None and is_master():
             if logs:
@@ -276,6 +296,8 @@ class EagleTrainingPlot(TrainerCallback):
         state.training_accs = []
         if hasattr(state, "component_losses"):
             state.component_losses = {"eagle": [], "preservation": []}
+        if hasattr(state, "training_stats"):
+            state.training_stats = []
         return control
 
     def on_step_end(self, args, state, control, **kwargs):

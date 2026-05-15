@@ -41,46 +41,67 @@ class SGLANGModel(Model):
             speculative_algorithm = "STANDALONE"
         elif speculative_algorithm == "NGRAM":
             speculative_algorithm = "LOOKAHEAD"
+        elif speculative_algorithm == "DFLASH":
+            pass  # SGLang native name, pass through
         elif speculative_algorithm == "NONE":
             speculative_algorithm = None
+
+        engine_kwargs = dict(
+            model_path=model_dir,
+            skip_tokenizer_init=True,
+            trust_remote_code=kwargs.get("trust_remote_code", False),
+            mem_fraction_static=kwargs.get("mem_fraction_static", 0.8),
+            disable_overlap_schedule=kwargs.get("disable_overlap_schedule", False),
+            tp_size=kwargs.get("tensor_parallel_size", 1),
+            ep_size=kwargs.get("moe_expert_parallel_size", 1),
+            torch_compile_max_bs=max_concurrent_requests,
+            max_running_requests=max_concurrent_requests,
+            attention_backend=kwargs.get("attention_backend"),
+            enable_torch_compile=kwargs.get("enable_torch_compile", False),
+            cuda_graph_max_bs=max_concurrent_requests,
+            disable_cuda_graph=False,
+        )
         if speculative_algorithm is not None:
             # https://github.com/sgl-project/sglang/pull/3582
-            self.model = sgl.Engine(
-                model_path=model_dir,
-                skip_tokenizer_init=True,
-                trust_remote_code=kwargs.get("trust_remote_code", False),
-                mem_fraction_static=0.8,
-                disable_overlap_schedule=kwargs.get("disable_overlap_schedule", False),
-                tp_size=kwargs.get("tensor_parallel_size", 1),
-                ep_size=kwargs.get("moe_expert_parallel_size", 1),
-                speculative_algorithm=speculative_algorithm,
-                speculative_num_steps=kwargs.get("speculative_num_steps", 3),
-                speculative_eagle_topk=kwargs.get("speculative_eagle_topk", 1),
-                speculative_num_draft_tokens=kwargs.get("speculative_num_draft_tokens", 4),
-                speculative_draft_model_path=kwargs.get("draft_model_dir"),
-                torch_compile_max_bs=max_concurrent_requests,
-                max_running_requests=max_concurrent_requests,
-                attention_backend=kwargs.get("attention_backend"),
-                enable_torch_compile=kwargs.get("enable_torch_compile", False),
-                cuda_graph_max_bs=max_concurrent_requests,
-                disable_cuda_graph=False,
-            )
-        else:
-            self.model = sgl.Engine(
-                model_path=model_dir,
-                skip_tokenizer_init=True,
-                trust_remote_code=kwargs.get("trust_remote_code", False),
-                mem_fraction_static=0.8,
-                disable_overlap_schedule=kwargs.get("disable_overlap_schedule", False),
-                tp_size=kwargs.get("tensor_parallel_size", 1),
-                ep_size=kwargs.get("moe_expert_parallel_size", 1),
-                torch_compile_max_bs=max_concurrent_requests,
-                max_running_requests=max_concurrent_requests,
-                attention_backend=kwargs.get("attention_backend"),
-                enable_torch_compile=kwargs.get("enable_torch_compile", False),
-                cuda_graph_max_bs=max_concurrent_requests,
-                disable_cuda_graph=False,
-            )
+            engine_kwargs["speculative_algorithm"] = speculative_algorithm
+            num_draft_tokens = kwargs.get("speculative_num_draft_tokens", 4)
+            engine_kwargs["speculative_num_draft_tokens"] = num_draft_tokens
+            engine_kwargs["speculative_draft_model_path"] = kwargs.get("draft_model_dir")
+            if speculative_algorithm == "DFLASH":
+                if "speculative_dflash_draft_window_size" in kwargs:
+                    engine_kwargs["speculative_dflash_draft_window_size"] = kwargs[
+                        "speculative_dflash_draft_window_size"
+                    ]
+                print(
+                    f"[specdec_bench] DFLASH ignores --draft_length / speculative_num_steps / "
+                    f"speculative_eagle_topk; effective draft block = "
+                    f"speculative_num_draft_tokens={num_draft_tokens}"
+                )
+            else:
+                engine_kwargs["speculative_num_steps"] = kwargs.get("speculative_num_steps", 3)
+                engine_kwargs["speculative_eagle_topk"] = kwargs.get("speculative_eagle_topk", 1)
+
+        # Forward any other kwargs (e.g. from runtime_params.engine_args) to
+        # sgl.Engine, letting yaml override the defaults set above. Skip only
+        # specdec_bench-internal routing keys that should never reach SGLang.
+        _internal_keys = frozenset({
+            "speculative_algorithm",
+            "draft_model_dir",
+            "speculative_num_steps",
+            "speculative_eagle_topk",
+            "speculative_num_draft_tokens",
+            "speculative_dflash_draft_window_size",
+            "tensor_parallel_size",
+            "moe_expert_parallel_size",
+            "tokenizer_path",
+            "use_draft_logits",
+        })
+        for _k, _v in kwargs.items():
+            if _k in _internal_keys:
+                continue
+            engine_kwargs[_k] = _v
+
+        self.model = sgl.Engine(**engine_kwargs)
 
         self.sampling_config = sampling_kwargs
 
