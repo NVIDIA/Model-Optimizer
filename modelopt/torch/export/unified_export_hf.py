@@ -17,7 +17,6 @@
 
 import collections.abc
 import json
-import os
 import re
 import tempfile
 import warnings
@@ -666,16 +665,6 @@ def _process_quantized_modules(
             # _QuantFusedExperts uses plural `gate_up_proj_weight_quantizers` (ModuleList),
             # which get_quantization_format's singular-weight_quantizer check misses. Handle
             # it explicitly before the format gate so fused-experts get split + quantized.
-            # Debug hatch (paired with MO_DEBUG_MAX_LAYERS in model_calib.layerwise_calibrate):
-            # skip _export_fused_experts for layers whose layerwise calibration was never run.
-            # Those layers' per-expert quantizers have no _amax — touching them triggers the
-            # uncalibrated-fallback warnings or, with corrupt storage, a CUDA illegal-memory
-            # error. With the calibrated layers only, every expert has a valid _amax.
-            _debug_max = int(os.environ.get("MO_DEBUG_MAX_LAYERS", "0") or "0")
-            if _debug_max > 0:
-                _m = re.search(r"\.layers\.(\d+)\.", name or "")
-                if _m and int(_m.group(1)) >= _debug_max:
-                    continue
             with fsdp2_aware_weight_update(model, sub_module, reshard=False):
                 _export_fused_experts(sub_module, dtype)
         elif get_quantization_format(sub_module) != QUANTIZATION_NONE:
