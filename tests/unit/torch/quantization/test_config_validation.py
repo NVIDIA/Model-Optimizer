@@ -186,11 +186,14 @@ class TestNormalizeQuantCfgList:
     def test_error_on_non_dict_non_list_cfg_enable_true(self):
         """Entry with cfg of invalid type (e.g. int) and enable=True is rejected.
 
-        Pydantic's field-type check fires before the QuantizerCfgEntry model validator,
-        so this surfaces as a type error rather than the 'non-empty dict' message —
-        either is acceptable here as long as the entry is rejected.
+        Two error paths are acceptable here, and the assertion accepts either:
+        pydantic's field-type check (``cfg`` must be a dict or list) fires first when
+        ``cfg`` is the wrong python type, while ``QuantizerCfgEntry``'s model validator
+        emits the "non-empty dict" message when ``cfg`` is the right type but empty.
+        Either way the message must implicate the ``cfg`` field, not just any
+        ``ValueError``.
         """
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match=r"(?s)cfg.*(non-empty|valid dictionary|valid list)"):
             normalize_quant_cfg_list(
                 [{"quantizer_name": "*weight_quantizer", "cfg": 42, "enable": True}]
             )
@@ -205,11 +208,12 @@ class TestNormalizeQuantCfgList:
     def test_error_on_cfg_list_with_non_dict_element_enable_true(self):
         """Entry with cfg=[42] and enable=True is rejected.
 
-        Pydantic's field-type check fires before the QuantizerCfgEntry model validator,
-        so the message may report a type error instead of 'non-empty dict' — either is
-        acceptable, as long as the entry is rejected.
+        Same dual-path acceptance as :meth:`test_error_on_non_dict_non_list_cfg_enable_true`:
+        pydantic may report a list-element type error, or the model validator may report
+        "non-empty dict"; the assertion accepts either as long as the message names the
+        ``cfg`` field.
         """
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match=r"(?s)cfg.*(non-empty|valid dictionary|valid list)"):
             normalize_quant_cfg_list(
                 [{"quantizer_name": "*weight_quantizer", "cfg": [42], "enable": True}]
             )
