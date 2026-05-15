@@ -176,11 +176,12 @@ class QuantizerCfgEntry(ModeloptBaseConfig):
         description="If provided, only quantizers whose parent module matches this PyTorch class "
         "name (e.g. ``'nn.Linear'``) are affected.",
     )
-    cfg: dict[str, Any] | list[dict[str, Any]] | None = ModeloptField(
+    cfg: "QuantizerAttributeConfig | list[QuantizerAttributeConfig] | None" = ModeloptField(
         default=None,
         title="Quantizer attribute config.",
-        description="A ``QuantizerAttributeConfig``-shaped dict, or a list of such dicts for "
-        "sequential quantizers. ``None`` leaves the existing attribute config untouched.",
+        description="A :class:`QuantizerAttributeConfig` (or a mapping that validates as one), "
+        "or a list of such for sequential quantizers.  ``None`` leaves the existing attribute "
+        "config untouched.",
     )
     enable: bool = ModeloptField(
         default=True,
@@ -190,29 +191,42 @@ class QuantizerCfgEntry(ModeloptBaseConfig):
 
     @model_validator(mode="before")
     @classmethod
-    def _drop_empty_cfg_when_disabled(cls, values):
-        """Treat ``enable=False`` with an empty ``cfg`` as a pure disable.
+    def _normalize_cfg_shape(cls, values):
+        """Pre-validation shape rules for ``cfg``.
 
-        Downstream, any non-``None`` ``cfg`` is applied as a full quantizer-attribute
-        replacement.  An entry like ``{cfg: {}, enable: False}`` would therefore reset
-        the quantizer's attributes back to schema defaults — and if a later rule
-        re-enables the quantizer, it would come back with defaults rather than the
-        config it originally carried.  Normalise an empty ``cfg`` (empty dict, empty
-        list, or a list of empty dicts) to ``None`` so a disable-only entry behaves
-        like one.
+        Runs against the raw input mapping, before pydantic coerces ``cfg`` into a
+        :class:`QuantizerAttributeConfig` (which would fill in schema defaults and erase the
+        distinction between "user typed nothing" and "user typed `{}`").  Two rules:
+
+        1. ``enable=False`` with an empty ``cfg`` — empty dict, empty list, or list of empty
+           dicts — is normalized to ``cfg=None``.  Downstream applies any non-``None`` ``cfg``
+           as a full quantizer-attribute replacement, so without this an entry like
+           ``{cfg: {}, enable: False}`` would reset attributes to schema defaults and a later
+           re-enable would bring the quantizer back with defaults instead of its original config.
+
+        2. ``enable=True`` (explicit or implicit) with an empty ``cfg`` — same shapes — is
+           rejected.  Pydantic would otherwise coerce ``{}`` into ``QuantizerAttributeConfig()``
+           with all defaults, silently turning a likely typo (``cfg: {}``) into "quantize with
+           schema defaults."  Callers who really want defaults should drop ``cfg`` entirely and
+           rely on ``enable=True``; an empty ``cfg`` always indicates missing input.
         """
         if not isinstance(values, dict):
             return values
-        if values.get("enable") is False:
-            cfg = values.get("cfg")
-            cfg_is_empty = (isinstance(cfg, dict) and len(cfg) == 0) or (
-                isinstance(cfg, list)
-                and (
-                    len(cfg) == 0 or all(isinstance(item, dict) and len(item) == 0 for item in cfg)
-                )
-            )
-            if cfg_is_empty:
+        cfg = values.get("cfg")
+        cfg_is_empty = (isinstance(cfg, dict) and len(cfg) == 0) or (
+            isinstance(cfg, list)
+            and (len(cfg) == 0 or all(isinstance(item, dict) and len(item) == 0 for item in cfg))
+        )
+        if cfg_is_empty:
+            if values.get("enable") is False:
                 values = {**values, "cfg": None}
+            else:
+                raise ValueError(
+                    f"QuantizerCfgEntry 'cfg' must specify at least one quantizer attribute; "
+                    f"got an empty mapping/list for quantizer "
+                    f"{values.get('quantizer_name')!r}.  To keep existing attributes, drop "
+                    f"'cfg' and rely on 'enable=True'; to disable, set 'enable=False'."
+                )
         return values
 
     @model_validator(mode="after")
@@ -225,23 +239,6 @@ class QuantizerCfgEntry(ModeloptBaseConfig):
                 f"'quantizer_name'={self.quantizer_name!r} has no effect (implicit enable=True "
                 "is not allowed; set it explicitly)."
             )
-
-        if self.enable and self.cfg is not None:
-            if isinstance(self.cfg, dict):
-                is_invalid = len(self.cfg) == 0
-            elif isinstance(self.cfg, list):
-                is_invalid = len(self.cfg) == 0 or any(
-                    not isinstance(item, dict) or len(item) == 0 for item in self.cfg
-                )
-            else:
-                is_invalid = True
-            if is_invalid:
-                raise ValueError(
-                    f"QuantizerCfgEntry 'cfg' must be a non-empty dict or a non-empty list of "
-                    f"non-empty dicts when enabling quantizer {self.quantizer_name!r}, got "
-                    f"{type(self.cfg).__name__}: {self.cfg!r}. Either provide quantizer "
-                    "attributes in 'cfg' or remove 'cfg' and set 'enable' explicitly."
-                )
         return self
 
 
@@ -1177,27 +1174,6 @@ class QuantizeConfig(ModeloptBaseConfig):
         else with a clear ``ValueError`` before pydantic's field-type check would see it.
         """
         return normalize_quant_cfg_list(v)
-
-    @field_validator("quant_cfg", mode="after")
-    @classmethod
-    def validate_quant_cfg_entries(cls, v: QuantizeQuantCfgType) -> QuantizeQuantCfgType:
-        """Validate each entry's ``cfg`` against :class:`QuantizerAttributeConfig`.
-
-        Runs after the ``mode="before"`` normalizer and pydantic's field-type check, so
-        every element here is already a :class:`QuantizerCfgEntry`.  This second pass
-        surfaces attribute-level errors (e.g. invalid ``axis`` / ``block_sizes``) that the
-        per-entry ``QuantizerCfgEntry`` validator doesn't inspect.
-        """
-        qac_fields = set(QuantizerAttributeConfig.model_fields.keys())
-        for entry in v:
-            cfg = entry.cfg
-            if cfg is None:
-                continue
-            cfgs: list[dict[str, Any]] = cfg if isinstance(cfg, list) else [cfg]
-            for c in cfgs:
-                if isinstance(c, dict) and qac_fields & set(c.keys()):
-                    QuantizerAttributeConfig.model_validate(c)
-        return v
 
 
 class CompressConfig(ModeloptBaseConfig):

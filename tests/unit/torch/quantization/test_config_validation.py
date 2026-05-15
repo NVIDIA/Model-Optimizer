@@ -81,7 +81,7 @@ class TestNormalizeQuantCfgList:
         result = normalize_quant_cfg_list(raw)
         assert len(result) == 1
         assert result[0]["quantizer_name"] == "*weight_quantizer"
-        assert result[0]["cfg"] == {"num_bits": 8, "axis": 0}
+        assert result[0]["cfg"].model_dump(exclude_unset=True) == {"num_bits": 8, "axis": 0}
         assert result[0]["enable"] is True  # defaulted
 
     def test_new_format_enable_false(self):
@@ -103,7 +103,7 @@ class TestNormalizeQuantCfgList:
         raw = [{"*weight_quantizer": {"num_bits": 8, "axis": 0}}]
         result = normalize_quant_cfg_list(raw)
         assert result[0]["quantizer_name"] == "*weight_quantizer"
-        assert result[0]["cfg"] == {"num_bits": 8, "axis": 0}
+        assert result[0]["cfg"].model_dump(exclude_unset=True) == {"num_bits": 8, "axis": 0}
         assert result[0]["enable"] is True  # defaulted
 
     def test_legacy_single_key_dict_with_enable(self):
@@ -166,19 +166,19 @@ class TestNormalizeQuantCfgList:
 
     def test_error_on_empty_cfg_dict_implicit_enable(self):
         """Entry with cfg={} and implicit enable=True is rejected."""
-        with pytest.raises(ValueError, match="non-empty dict"):
+        with pytest.raises(ValueError, match=r"at least one quantizer attribute"):
             normalize_quant_cfg_list([{"quantizer_name": "*weight_quantizer", "cfg": {}}])
 
     def test_error_on_empty_cfg_dict_explicit_enable_true(self):
         """Entry with cfg={} and explicit enable=True is rejected."""
-        with pytest.raises(ValueError, match="non-empty dict"):
+        with pytest.raises(ValueError, match=r"at least one quantizer attribute"):
             normalize_quant_cfg_list(
                 [{"quantizer_name": "*weight_quantizer", "cfg": {}, "enable": True}]
             )
 
     def test_error_on_empty_cfg_list_enable_true(self):
         """Entry with cfg=[] and enable=True is rejected."""
-        with pytest.raises(ValueError, match="non-empty dict"):
+        with pytest.raises(ValueError, match=r"at least one quantizer attribute"):
             normalize_quant_cfg_list(
                 [{"quantizer_name": "*weight_quantizer", "cfg": [], "enable": True}]
             )
@@ -200,7 +200,7 @@ class TestNormalizeQuantCfgList:
 
     def test_error_on_cfg_list_with_empty_dict_enable_true(self):
         """Entry with cfg=[{}] and enable=True is rejected (empty dict element)."""
-        with pytest.raises(ValueError, match="non-empty dict"):
+        with pytest.raises(ValueError, match=r"at least one quantizer attribute"):
             normalize_quant_cfg_list(
                 [{"quantizer_name": "*weight_quantizer", "cfg": [{}], "enable": True}]
             )
@@ -260,7 +260,7 @@ class TestNormalizeQuantCfgList:
             ]
         )
         assert result[0]["enable"] is False
-        assert result[0]["cfg"] == {"num_bits": 4}
+        assert result[0]["cfg"].model_dump(exclude_unset=True) == {"num_bits": 4}
 
     def test_new_format_with_list_cfg(self):
         """cfg can be a list of dicts for SequentialQuantizer."""
@@ -275,7 +275,7 @@ class TestNormalizeQuantCfgList:
         ]
         result = normalize_quant_cfg_list(raw)
         assert len(result) == 1
-        assert result[0]["cfg"] == raw[0]["cfg"]
+        assert [c.model_dump(exclude_unset=True) for c in result[0]["cfg"]] == raw[0]["cfg"]
         assert result[0]["enable"] is True
 
     def test_legacy_flat_dict_conversion(self):
@@ -287,7 +287,7 @@ class TestNormalizeQuantCfgList:
         assert result[0]["enable"] is False
         assert result[0]["cfg"] is None
         assert result[1]["quantizer_name"] == "*weight_quantizer"
-        assert result[1]["cfg"] == {"num_bits": 8, "axis": 0}
+        assert result[1]["cfg"].model_dump(exclude_unset=True) == {"num_bits": 8, "axis": 0}
         assert result[1]["enable"] is True
 
     def test_legacy_enable_only_produces_cfg_none(self):
@@ -318,7 +318,7 @@ class TestNormalizeQuantCfgList:
         raw = [{"default": {"num_bits": 8, "axis": None}}]
         result = normalize_quant_cfg_list(raw)
         assert result[0]["quantizer_name"] == "*"
-        assert result[0]["cfg"] == {"num_bits": 8, "axis": None}
+        assert result[0]["cfg"].model_dump(exclude_unset=True) == {"num_bits": 8, "axis": None}
         assert result[0]["enable"] is True
 
     def test_legacy_flat_dict_with_default_key(self):
@@ -353,7 +353,7 @@ class TestNormalizeQuantCfgList:
         assert len(result) == 1
         assert result[0]["parent_class"] == "nn.Linear"
         assert result[0]["quantizer_name"] == "*weight_quantizer"
-        assert result[0]["cfg"] == {"num_bits": 4, "axis": 0}
+        assert result[0]["cfg"].model_dump(exclude_unset=True) == {"num_bits": 4, "axis": 0}
         assert result[0]["enable"] is True
 
     def test_legacy_list_valued_cfg(self):
@@ -387,7 +387,7 @@ class TestFindQuantCfgEntry:
             ]
         )
         result = find_quant_cfg_entry_by_path(entries, "*weight_quantizer")
-        assert result["cfg"] == {"num_bits": 4}
+        assert result["cfg"].model_dump(exclude_unset=True) == {"num_bits": 4}
 
     def test_exact_match_only(self):
         """Does not do fnmatch — only exact string equality on quantizer_name."""
@@ -444,7 +444,7 @@ class TestMatchQuantizerCfg:
             [{"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8}}]
         )
         matched, enable = _match_quantizer_cfg(quant_cfg, "weight_quantizer")
-        assert matched == {"num_bits": 8}
+        assert matched.model_dump(exclude_unset=True) == {"num_bits": 8}
         assert enable is True
 
     def test_star_matches_any_bare_name(self):
@@ -464,7 +464,7 @@ class TestMatchQuantizerCfg:
             [{"quantizer_name": "*mlp*weight_quantizer", "cfg": {"num_bits": 4}}]
         )
         matched, enable = _match_quantizer_cfg(quant_cfg, "weight_quantizer")
-        assert matched == {"num_bits": 4}
+        assert matched.model_dump(exclude_unset=True) == {"num_bits": 4}
 
     def test_path_scoped_pattern_does_not_match_different_suffix(self):
         """'*mlp*weight_quantizer' does NOT match bare 'input_quantizer'."""
@@ -488,7 +488,7 @@ class TestMatchQuantizerCfg:
             ]
         )
         matched, _ = _match_quantizer_cfg(quant_cfg, "weight_quantizer")
-        assert matched == {"num_bits": 4}
+        assert matched.model_dump(exclude_unset=True) == {"num_bits": 4}
 
     def test_no_match_returns_none(self):
         """No matching entry returns (None, None)."""

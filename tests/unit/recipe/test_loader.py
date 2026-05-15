@@ -317,7 +317,7 @@ def test_import_resolves_cfg_reference(tmp_path):
     )
     recipe = load_recipe(recipe_file)
     entry = recipe.quantize["quant_cfg"][0]
-    assert entry["cfg"] == {"num_bits": (4, 3), "axis": None}
+    assert entry["cfg"].model_dump(exclude_unset=True) == {"num_bits": (4, 3), "axis": None}
 
 
 def test_import_same_name_used_twice(tmp_path):
@@ -390,7 +390,10 @@ def test_import_inline_cfg_not_affected(tmp_path):
         f"        axis: 0\n"
     )
     recipe = load_recipe(recipe_file)
-    assert recipe.quantize["quant_cfg"][1]["cfg"] == {"num_bits": 8, "axis": 0}
+    assert recipe.quantize["quant_cfg"][1]["cfg"].model_dump(exclude_unset=True) == {
+        "num_bits": 8,
+        "axis": 0,
+    }
 
 
 def test_import_unknown_reference_raises(tmp_path):
@@ -619,7 +622,7 @@ def test_import_cfg_extend(tmp_path):
     )
     recipe = load_recipe(recipe_file)
     cfg = recipe.quantize["quant_cfg"][0]["cfg"]
-    assert cfg == {"num_bits": (4, 3), "axis": 0}
+    assert cfg.model_dump(exclude_unset=True) == {"num_bits": (4, 3), "axis": 0}
 
 
 def test_import_cfg_inline_overrides_import(tmp_path):
@@ -682,6 +685,7 @@ def test_import_in_multiple_dict_values(tmp_path):
     )
     data = load_config(config_file)
     entry = data["quant_cfg"][0]
+    # load_config has no schema here — data is a raw dict tree, so entry["cfg"] is a dict.
     assert entry["cfg"] == {"num_bits": (4, 3)}
     assert entry["my_field"] == {"fake_quant": False}
 
@@ -706,7 +710,7 @@ def test_import_cfg_multi_import(tmp_path):
     )
     recipe = load_recipe(recipe_file)
     cfg = recipe.quantize["quant_cfg"][0]["cfg"]
-    assert cfg == {"num_bits": (4, 3), "axis": 0}
+    assert cfg.model_dump(exclude_unset=True) == {"num_bits": (4, 3), "axis": 0}
 
 
 def test_import_cfg_multi_import_later_overrides_earlier(tmp_path):
@@ -755,7 +759,11 @@ def test_import_cfg_multi_import_with_extend(tmp_path):
     )
     recipe = load_recipe(recipe_file)
     cfg = recipe.quantize["quant_cfg"][0]["cfg"]
-    assert cfg == {"num_bits": (4, 3), "fake_quant": False, "axis": 0}
+    assert cfg.model_dump(exclude_unset=True) == {
+        "num_bits": (4, 3),
+        "fake_quant": False,
+        "axis": 0,
+    }
 
 
 def test_import_dir_format(tmp_path):
@@ -772,7 +780,10 @@ def test_import_dir_format(tmp_path):
         "      $import: fp8\n"
     )
     recipe = load_recipe(tmp_path)
-    assert recipe.quantize["quant_cfg"][0]["cfg"] == {"num_bits": (4, 3), "axis": None}
+    assert recipe.quantize["quant_cfg"][0]["cfg"].model_dump(exclude_unset=True) == {
+        "num_bits": (4, 3),
+        "axis": None,
+    }
 
 
 def test_import_dir_format_metadata_imports_do_not_apply_to_quantize(tmp_path):
@@ -826,7 +837,9 @@ def test_import_multi_document_list_snippet(tmp_path):
     recipe = load_recipe(recipe_file)
     assert len(recipe.quantize["quant_cfg"]) == 1
     assert recipe.quantize["quant_cfg"][0]["quantizer_name"] == "*[kv]_bmm_quantizer"
-    assert recipe.quantize["quant_cfg"][0]["cfg"] == {"num_bits": (4, 3)}
+    assert recipe.quantize["quant_cfg"][0]["cfg"].model_dump(exclude_unset=True) == {
+        "num_bits": (4, 3)
+    }
 
 
 def test_import_builtin_kv_fp8_snippet():
@@ -938,7 +951,7 @@ def test_import_mixed_tree(tmp_path):
     )
     data = load_config(config_file)
     # Dict import inside list entry
-    assert data["quant_cfg"][0]["cfg"] == {"num_bits": (4, 3)}
+    assert data["quant_cfg"][0]["cfg"].model_dump(exclude_unset=True) == {"num_bits": (4, 3)}
     # List splice — entries are normalized by QuantizeConfig.quant_cfg's validator,
     # which fills in defaults for missing ``enable`` / ``cfg`` keys.  Entries are now
     # QuantizerCfgEntry pydantic instances, so compare via model_dump.
@@ -986,7 +999,7 @@ def test_import_recursive(tmp_path):
     )
     recipe = load_recipe(recipe_file)
     cfg = recipe.quantize["quant_cfg"][0]["cfg"]
-    assert cfg == {"num_bits": (4, 3)}
+    assert cfg.model_dump(exclude_unset=True) == {"num_bits": (4, 3)}
 
 
 def test_import_circular_raises(tmp_path):
@@ -1086,9 +1099,14 @@ def test_import_cross_file_same_name_no_conflict(tmp_path):
     )
     recipe = load_recipe(recipe_file)
     # Parent's "fmt" resolves to fp8 (e4m3), not child's nvfp4.
-    assert recipe.quantize["quant_cfg"][0]["cfg"] == {"num_bits": (4, 3)}
+    assert recipe.quantize["quant_cfg"][0]["cfg"].model_dump(exclude_unset=True) == {
+        "num_bits": (4, 3)
+    }
     # Child's "fmt" resolves to nvfp4 (e2m1), not parent's fp8.
-    assert recipe.quantize["quant_cfg"][1]["cfg"] == {"num_bits": (2, 1), "axis": 0}
+    assert recipe.quantize["quant_cfg"][1]["cfg"].model_dump(exclude_unset=True) == {
+        "num_bits": (2, 1),
+        "axis": 0,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1179,13 +1197,12 @@ def test_modelopt_schema_comment_validates_after_import_resolution(tmp_path):
         f"    $import: fp8\n"
     )
     data = load_config(config_file)
-    # data is a list of QuantizerCfgEntry pydantic instances, not raw dicts.
+    # data is a list of QuantizerCfgEntry pydantic instances, not raw dicts.  Dump with
+    # exclude_unset=True so the inner QuantizerAttributeConfig stays sparse (cascades).
     assert len(data) == 1
-    assert data[0].model_dump() == {
+    assert data[0].model_dump(exclude_unset=True) == {
         "quantizer_name": "*weight_quantizer",
-        "parent_class": None,
         "cfg": {"num_bits": (4, 3)},
-        "enable": True,
     }
 
 
@@ -1291,12 +1308,12 @@ def test_load_config_list_valued_yaml(tmp_path):
     data = load_config(cfg_file)
     assert isinstance(data, list)
     assert len(data) == 2
-    # Entries are QuantizerCfgEntry pydantic instances after schema validation.
-    assert data[0].model_dump() == {
+    # Entries are QuantizerCfgEntry pydantic instances after schema validation; dump
+    # with exclude_unset=True so the inner QuantizerAttributeConfig stays in sparse
+    # form (pydantic cascades exclude_unset to nested models).
+    assert data[0].model_dump(exclude_unset=True) == {
         "quantizer_name": "*weight_quantizer",
-        "parent_class": None,
         "cfg": {"num_bits": 8},
-        "enable": True,
     }
 
 
