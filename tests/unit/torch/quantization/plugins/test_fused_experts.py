@@ -633,20 +633,15 @@ class TestFusedExpertsCalibration:
 
         self._cleanup_registry(expert_type)
 
-    def test_bootstrap_populates_dead_expert_quantizers(self):
-        """`_bootstrap_uncalibrated_weight_quantizers` fills `_amax` on experts the
-        forward pass never routed to.
+    def test_max_calibrate_populates_dead_static_nvfp4_expert_quantizers(self):
+        """max calibration fills static NVFP4 ``_amax`` on experts the forward never routed to.
 
         Regression for the dead-expert MSE skip: with partial routing during max
         calibration, never-routed experts' weight quantizers stay with
-        ``_amax=None``; bootstrap must run the calibrator on the per-expert weight
-        slice (via ``iter_weights_for_calibration``) to populate them so MSE
-        doesn't skip them.
+        ``_amax=None`` unless static NVFP4 finalization bootstraps them from the
+        per-expert weight slice.
         """
         import modelopt.torch.quantization as mtq
-        from modelopt.torch.quantization.model_calib import (
-            _bootstrap_uncalibrated_weight_quantizers,
-        )
 
         model = _TinyMoEModel()
         expert_type = type(model.moe.experts)
@@ -657,11 +652,17 @@ class TestFusedExpertsCalibration:
                 {"quantizer_name": "*", "enable": False},
                 {
                     "quantizer_name": "*gate_up_proj_weight_quantizer",
-                    "cfg": {"num_bits": 8, "axis": 0},
+                    "cfg": {
+                        "num_bits": (2, 1),
+                        "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
+                    },
                 },
                 {
                     "quantizer_name": "*down_proj_weight_quantizer",
-                    "cfg": {"num_bits": 8, "axis": 0},
+                    "cfg": {
+                        "num_bits": (2, 1),
+                        "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
+                    },
                 },
             ],
             "algorithm": "max",
@@ -688,41 +689,25 @@ class TestFusedExpertsCalibration:
 
         experts = model.moe.experts
 
-        # Pre-bootstrap: dead experts have no/zero _amax.
-        for idx in dead:
-            gu_q = experts.gate_up_proj_weight_quantizers[idx]
-            d_q = experts.down_proj_weight_quantizers[idx]
-            assert getattr(gu_q, "_amax", None) is None or torch.all(gu_q._amax == 0), (
-                f"Dead expert {idx} gate_up_proj should be uncalibrated pre-bootstrap"
-            )
-            assert getattr(d_q, "_amax", None) is None or torch.all(d_q._amax == 0), (
-                f"Dead expert {idx} down_proj should be uncalibrated pre-bootstrap"
-            )
-
-        n_bootstrapped = _bootstrap_uncalibrated_weight_quantizers(model)
-        assert n_bootstrapped >= 2 * len(dead), (
-            f"Expected ≥{2 * len(dead)} bootstrapped (gate_up + down per dead expert), "
-            f"got {n_bootstrapped}"
-        )
-
-        # Post-bootstrap: every expert has populated _amax matching max(|weight|).
+        # Static NVFP4 finalization in max_calibrate bootstraps every expert.
         for idx in range(NUM_EXPERTS):
             gu_q = experts.gate_up_proj_weight_quantizers[idx]
             d_q = experts.down_proj_weight_quantizers[idx]
             assert gu_q._amax is not None and not torch.all(gu_q._amax == 0), (
-                f"Expert {idx} gate_up_proj _amax not populated after bootstrap"
+                f"Expert {idx} gate_up_proj _amax not populated after max_calibrate"
             )
             assert d_q._amax is not None and not torch.all(d_q._amax == 0), (
-                f"Expert {idx} down_proj _amax not populated after bootstrap"
+                f"Expert {idx} down_proj _amax not populated after max_calibrate"
             )
 
-        # For dead experts, bootstrap reads max(|weight|). Sanity-check it matches
-        # the actual weight tensor's per-row max (axis=0 reduces over hidden_dim).
+        # For dead experts, bootstrap reads blockwise max(|weight|). Sanity-check it
+        # matches the actual weight tensor's per-block max over hidden_dim.
         for idx in dead:
-            expected = experts.gate_up_proj.data[idx].abs().amax(dim=1)
+            expected = experts.gate_up_proj.data[idx].reshape(2 * INTERMEDIATE_DIM, 2, 16)
+            expected = expected.abs().amax(dim=2).flatten()
             got = experts.gate_up_proj_weight_quantizers[idx]._amax.flatten()
             assert torch.allclose(got, expected, atol=1e-4), (
-                f"Expert {idx} bootstrap amax should equal per-row max(|weight|); "
+                f"Expert {idx} amax should equal blockwise max(|weight|); "
                 f"max diff {(got - expected).abs().max().item()}"
             )
 
