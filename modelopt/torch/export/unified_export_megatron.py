@@ -64,6 +64,7 @@ with import_plugin("transformers", verbose=False):
 has_mcore = False
 with import_plugin("megatron"):
     from megatron.core.models.gpt import GPTModel
+    from megatron.core.models.hybrid.hybrid_model import HybridModel
     from megatron.core.models.mamba import MambaModel
     from megatron.core.models.multimodal.llava_model import LLaVAModel
     from megatron.core.parallel_state import (
@@ -114,7 +115,7 @@ class GPTModelExporter:
         moe_router_dtype: str | None = None,
     ):
         """Create a GPTModel exporter instance."""
-        if not isinstance(model, (GPTModel, MambaModel, LLaVAModel)):
+        if not isinstance(model, (GPTModel, HybridModel, MambaModel, LLaVAModel)):
             raise ValueError("Input to GPTModelExport must be a megatron.core.models.GPTModel!")
 
         self._state_dict = OrderedDict()
