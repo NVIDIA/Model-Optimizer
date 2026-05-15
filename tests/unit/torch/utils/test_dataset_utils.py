@@ -13,11 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
 from unittest.mock import Mock, patch
 
 import pytest
 import torch
+from huggingface_hub import get_token
 from torch.utils.data import DataLoader
 
 from modelopt.torch.utils.dataset_utils import (
@@ -692,28 +692,52 @@ class TestHfTinyDataset:
         assert sum(b["input_ids"].shape[0] for b in batches) == 5
 
 
-@pytest.mark.parametrize(
-    "dataset_key",
-    [
-        "nemotron-sft-instruction-following-chat-v2",
-        "nemotron-science-v1",
-        "nemotron-competitive-programming-v1",
-        "nemotron-sft-agentic-v2",
-        "nemotron-math-v2",
-        "nemotron-sft-swe-v2",
-        "nemotron-sft-multilingual-v1",
-    ],
-)
+_NEW_NEMOTRON_KEYS = [
+    "nemotron-sft-instruction-following-chat-v2",
+    "nemotron-science-v1",
+    "nemotron-competitive-programming-v1",
+    "nemotron-sft-agentic-v2",
+    "nemotron-math-v2",
+    "nemotron-sft-swe-v2",
+    "nemotron-sft-multilingual-v1",
+]
+
+
+@pytest.mark.parametrize("dataset_key", _NEW_NEMOTRON_KEYS)
+def test_new_nemotron_registry_shape(dataset_key):
+    """Always-on shape check on the 7 newly registered nvidia/Nemotron-* entries.
+
+    Complements the gated smoke test below — catches typos in dataset paths or
+    split names even when the runner has no HF credentials.
+    """
+    from modelopt.torch.utils.dataset_utils import SUPPORTED_DATASET_CONFIG
+
+    assert dataset_key in SUPPORTED_DATASET_CONFIG
+    entry = SUPPORTED_DATASET_CONFIG[dataset_key]
+    config = entry["config"]
+    assert config["path"].startswith("nvidia/Nemotron-")
+    splits = config["split"]
+    assert isinstance(splits, list) and splits
+    assert all(isinstance(s, str) and s for s in splits)
+    assert len(set(splits)) == len(splits)
+    assert callable(entry["preprocess"])
+    assert entry["chat_key"] == "messages"
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("dataset_key", _NEW_NEMOTRON_KEYS)
 def test_get_dataset_samples_new_nemotron(dataset_key):
     """Smoke-test the 7 newly registered nvidia/Nemotron-* calibration datasets.
 
-    Skipped when ``HF_TOKEN`` is unset because these datasets live behind the HF Hub
-    and the CI runner may not have credentials.
+    Skipped when no HF token is available because these datasets live behind the HF Hub.
+    ``huggingface_hub.get_token()`` covers both the ``HF_TOKEN`` env var and tokens
+    cached by ``hf auth login``.
     """
     pytest.importorskip("datasets")
-    pytest.importorskip("huggingface_hub")
-    if not os.environ.get("HF_TOKEN"):
-        pytest.skip("HF_TOKEN not set; skipping nvidia/Nemotron-* dataset smoke test")
+    if not get_token():
+        pytest.skip(
+            "No HF token (env HF_TOKEN or `hf auth login`); skipping gated Nemotron smoke test"
+        )
 
     samples = get_dataset_samples(dataset_key, num_samples=2)
 

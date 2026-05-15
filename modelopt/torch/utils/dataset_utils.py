@@ -32,6 +32,11 @@ from tqdm import tqdm
 if TYPE_CHECKING:
     from transformers import PreTrainedTokenizerBase
 
+
+def _join_messages_content(sample: dict) -> str:
+    return "\n".join(turn["content"] for turn in sample["messages"])
+
+
 # Use dict to store the config for each dataset.
 # If we want to export more options to user like target languages, we need more standardized approach like dataclass.
 SUPPORTED_DATASET_CONFIG: dict[str, Any] = {
@@ -61,7 +66,7 @@ SUPPORTED_DATASET_CONFIG: dict[str, Any] = {
             "path": "nvidia/Nemotron-Post-Training-Dataset-v2",
             "split": ["stem", "chat", "math", "code"],
         },
-        "preprocess": lambda sample: "\n".join(turn["content"] for turn in sample["messages"]),
+        "preprocess": _join_messages_content,
         "chat_key": "messages",
     },
     "nemotron-post-training-dataset-v1": {
@@ -69,7 +74,7 @@ SUPPORTED_DATASET_CONFIG: dict[str, Any] = {
             "path": "nvidia/Nemotron-Post-Training-Dataset-v1",
             "split": ["stem", "chat", "math", "code", "tool_calling"],
         },
-        "preprocess": lambda sample: "\n".join(turn["content"] for turn in sample["messages"]),
+        "preprocess": _join_messages_content,
         "chat_key": "messages",
     },
     "nemotron-sft-instruction-following-chat-v2": {
@@ -78,7 +83,7 @@ SUPPORTED_DATASET_CONFIG: dict[str, Any] = {
             "path": "nvidia/Nemotron-SFT-Instruction-Following-Chat-v2",
             "split": ["reasoning_off"],
         },
-        "preprocess": lambda sample: "\n".join(turn["content"] for turn in sample["messages"]),
+        "preprocess": _join_messages_content,
         "chat_key": "messages",
     },
     "nemotron-science-v1": {
@@ -86,7 +91,7 @@ SUPPORTED_DATASET_CONFIG: dict[str, Any] = {
             "path": "nvidia/Nemotron-Science-v1",
             "split": ["MCQ", "RQA"],
         },
-        "preprocess": lambda sample: "\n".join(turn["content"] for turn in sample["messages"]),
+        "preprocess": _join_messages_content,
         "chat_key": "messages",
     },
     "nemotron-competitive-programming-v1": {
@@ -100,7 +105,7 @@ SUPPORTED_DATASET_CONFIG: dict[str, Any] = {
                 "competitive_coding_python_part01",
             ],
         },
-        "preprocess": lambda sample: "\n".join(turn["content"] for turn in sample["messages"]),
+        "preprocess": _join_messages_content,
         "chat_key": "messages",
     },
     "nemotron-sft-agentic-v2": {
@@ -109,7 +114,7 @@ SUPPORTED_DATASET_CONFIG: dict[str, Any] = {
             "path": "nvidia/Nemotron-SFT-Agentic-v2",
             "split": ["interactive_agent", "tool_calling"],
         },
-        "preprocess": lambda sample: "\n".join(turn["content"] for turn in sample["messages"]),
+        "preprocess": _join_messages_content,
         "chat_key": "messages",
     },
     "nemotron-math-v2": {
@@ -117,7 +122,7 @@ SUPPORTED_DATASET_CONFIG: dict[str, Any] = {
             "path": "nvidia/Nemotron-Math-v2",
             "split": ["high_part00", "high_part01", "high_part02", "medium", "low"],
         },
-        "preprocess": lambda sample: "\n".join(turn["content"] for turn in sample["messages"]),
+        "preprocess": _join_messages_content,
         "chat_key": "messages",
     },
     "nemotron-sft-swe-v2": {
@@ -126,19 +131,34 @@ SUPPORTED_DATASET_CONFIG: dict[str, Any] = {
             "path": "nvidia/Nemotron-SFT-SWE-v2",
             "split": ["agentless"],
         },
-        "preprocess": lambda sample: "\n".join(turn["content"] for turn in sample["messages"]),
+        "preprocess": _join_messages_content,
         "chat_key": "messages",
     },
     "nemotron-sft-multilingual-v1": {
         "config": {
             "path": "nvidia/Nemotron-SFT-Multilingual-v1",
             "split": [
-                "code_de", "code_es", "code_fr", "code_it", "code_ja", "code_zh",
-                "math_de", "math_es", "math_fr", "math_it", "math_ja", "math_zh",
-                "stem_de", "stem_es", "stem_fr", "stem_it", "stem_ja", "stem_zh",
+                "code_de",
+                "code_es",
+                "code_fr",
+                "code_it",
+                "code_ja",
+                "code_zh",
+                "math_de",
+                "math_es",
+                "math_fr",
+                "math_it",
+                "math_ja",
+                "math_zh",
+                "stem_de",
+                "stem_es",
+                "stem_fr",
+                "stem_it",
+                "stem_ja",
+                "stem_zh",
             ],
         },
-        "preprocess": lambda sample: "\n".join(turn["content"] for turn in sample["messages"]),
+        "preprocess": _join_messages_content,
         "chat_key": "messages",
     },
     "magpie": {
