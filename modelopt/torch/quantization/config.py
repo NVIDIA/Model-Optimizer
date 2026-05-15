@@ -1223,13 +1223,24 @@ class _QuantizeExportConfig(ModeloptBaseConfig):
     """An empty config."""
 
 
-_base_disable_all: list[QuantizerCfgEntry] = [load_config("configs/ptq/units/base_disable_all")]
+# Shared snippet constants are dumped back to plain dicts before being spliced into
+# the public quant config constants below.  ``load_config`` returns validated
+# ``QuantizerCfgEntry`` instances for schema-tagged files, but the public constants
+# (``INT4_AWQ_CFG``, ``NVFP4_DEFAULT_CFG``, etc.) have always been raw dict/list trees;
+# splatting schema instances into them would surprise callers that serialise the
+# constants or do ``isinstance(entry, dict)`` checks.  ``exclude_unset=True`` keeps the
+# sparse YAML shape (only the explicitly set fields) so the dumped dicts are
+# byte-identical to what authors wrote in the YAML snippets.
+_base_disable_all: list[dict[str, Any]] = [
+    load_config("configs/ptq/units/base_disable_all").model_dump(exclude_unset=True)
+]
 
-_default_disabled_quantizer_cfg: list[QuantizerCfgEntry] = load_config(
-    "configs/ptq/units/default_disabled_quantizers"
-)
+_default_disabled_quantizer_cfg: list[dict[str, Any]] = [
+    entry.model_dump(exclude_unset=True)
+    for entry in load_config("configs/ptq/units/default_disabled_quantizers")
+]
 
-_mamba_moe_disabled_quantizer_cfg: list[QuantizerCfgEntry | dict[str, Any]] = [
+_mamba_moe_disabled_quantizer_cfg: list[dict[str, Any]] = [
     {"quantizer_name": "*fc1_latent_proj*", "enable": False},  # Skip Latent MOE
     {"quantizer_name": "*fc2_latent_proj*", "enable": False},  # Skip Latent MOE
     {"quantizer_name": "*q_proj*", "enable": False},  # Skip QKV Linear (HF naming)
@@ -1558,7 +1569,7 @@ def _nvfp4_selective_quant_cfg(
     algorithm: str | dict = "max",
 ) -> dict:
     """Build an NVFP4 config that quantizes only the specified layer patterns."""
-    quant_cfg: list[QuantizerCfgEntry | dict[str, Any]] = []
+    quant_cfg: list[dict[str, Any]] = []
     quant_cfg.extend(_base_disable_all)
     for pattern in layer_patterns:
         # Deep-copy the quantizer dict so each config constant gets its own instance.
