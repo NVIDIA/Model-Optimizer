@@ -36,8 +36,8 @@ from ..utils import (
     get_ttt_msk_func,
     temporary_set_config_value,
 )
+from .hf_spec_mixin import HFSpecDecMixin
 from .modeling_eagle import EagleBaseModelOutput, EagleModule
-from .modeling_fakebase import _BASE_MODEL_PATHS, _EMBED_TOKENS_PATHS, _LM_HEAD_PATHS
 
 __all__ = ["HFARValidation", "HFEagleModel", "default_eagle_aux_layer_ids"]
 
@@ -55,80 +55,14 @@ def default_eagle_aux_layer_ids(num_layers: int) -> list[int]:
 
 
 @EagleDMRegistry.register({PreTrainedModel: "hf.PreTrainedModel"})
-class HFEagleModel(EagleModel):
+class HFEagleModel(HFSpecDecMixin, EagleModel):
     """Eagle Model Class for huggingface models."""
 
-    @property
-    def _base_model(self):
-        return self.get_submodule(self.base_model_path)
-
-    @property
-    def _base_model_embeddings(self):
-        return self.get_submodule(self.base_model_embeddings_path)
-
-    @property
-    def _base_model_lm_head(self):
-        return self.get_submodule(self.base_model_lm_head_path)
-
-    @property
-    def _base_llm_config(self):
-        """Return the llm config for the base model, from LLM or VLM."""
-        return (
-            getattr(self.config, "text_config", None)
-            or getattr(self.config, "llm_config", None)
-            or self.config
-        )
-
-    def _nvtx_range(self, name):
-        """Optionally create an NVTX range for the given name when config.eagle_enable_nvtx is set."""
-        if not self.eagle_enable_nvtx:
-            return contextlib.nullcontext()
-        try:
-            import torch.cuda.nvtx as nvtx
-
-            return nvtx.range(name)
-        except Exception as e:
-            print(f"Failed to create NVTX range {name}: {e}")
-            return contextlib.nullcontext()
-
-    def _find_base_model_parts(self):
-        """Find model parts from different models and set base_{part}_path attributes."""
-        base_model_parts_mapping = {
-            "base_model_path": _BASE_MODEL_PATHS,
-            "base_model_embeddings_path": _EMBED_TOKENS_PATHS,
-            "base_model_lm_head_path": _LM_HEAD_PATHS,
-        }
-
-        for name, paths in base_model_parts_mapping.items():
-            found_submodule = False
-            for path in paths:
-                try:
-                    submodule = self.get_submodule(path)
-                    assert isinstance(submodule, torch.nn.Module)
-                    print(f"Found {name} at {path}")
-                    found_submodule = True
-                    setattr(self, name, path)
-                    break
-                except Exception:
-                    continue
-            if not found_submodule:
-                raise ValueError(f"Part {name} not found in model")
-
-    def _activate_torch_compile(self):
-        import torch._dynamo
-
-        torch._dynamo.config.suppress_errors = True  # Allow fallback to eager mode
-
-        compile_targets = [
-            ("_prepare_eagle_inputs", {}),
-            ("_eagle_forward", {"mode": "max-autotune"}),
-            ("_eagle_loss", {"fullgraph": True}),
-        ]
-        for name, kwargs in compile_targets:
-            try:
-                setattr(self, name, torch.compile(getattr(self, name), dynamic=False, **kwargs))
-            except Exception:  # noqa: PERF203
-                print(f"Disabling torch.compile for {name} due to compilation error.")
+    _compile_targets = [
+        ("_prepare_eagle_inputs", {}),
+        ("_eagle_forward", {"mode": "max-autotune"}),
+        ("_eagle_loss", {"fullgraph": True}),
+    ]
 
     def get_dummy_inputs(self) -> dict:
         """Construct dummy inputs for export forward pass."""
@@ -290,6 +224,9 @@ class HFEagleModel(EagleModel):
         if self.eagle_config._attn_implementation is None:
             self.eagle_config._attn_implementation = "sdpa"
 
+        # Mixin interface attribute
+        self._enable_nvtx = self.eagle_enable_nvtx
+
         # Set default aux_hidden_state layers
         if (
             self.eagle_config.use_aux_hidden_state
@@ -307,8 +244,6 @@ class HFEagleModel(EagleModel):
             decoder_cls,
         )
 
-        # find base model, lm head, and embeddings paths
-        self._find_base_model_parts()
         self.eagle_module.to(self._base_model.dtype).to(self._get_eagle_device())
 
         # EAGLE-3 auxiliary hidden_states

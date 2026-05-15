@@ -61,13 +61,13 @@ from transformers.utils import ModelOutput
 
 from ..dflash.conversion import DFlashDMRegistry
 from ..dflash.dflash_model import DFlashModel
+from .hf_spec_mixin import HFSpecDecMixin
 from .modeling_dflash import (  # noqa: F401
     DFlashAttention,
     DFlashBaseModelOutput,
     DFlashModule,
     build_target_layer_ids,
 )
-from .modeling_fakebase import _BASE_MODEL_PATHS, _EMBED_TOKENS_PATHS, _LM_HEAD_PATHS
 
 logger = logging.getLogger(__name__)
 
@@ -75,49 +75,8 @@ __all__ = ["HFDFlashModel"]
 
 
 @DFlashDMRegistry.register({PreTrainedModel: "hf.PreTrainedModel"})
-class HFDFlashModel(DFlashModel):
+class HFDFlashModel(HFSpecDecMixin, DFlashModel):
     """DFlash Model for HuggingFace transformers."""
-
-    @property
-    def _base_model(self):
-        return self.get_submodule(self.base_model_path)
-
-    @property
-    def _base_model_embeddings(self):
-        return self.get_submodule(self.base_model_embeddings_path)
-
-    @property
-    def _base_model_lm_head(self):
-        return self.get_submodule(self.base_model_lm_head_path)
-
-    @property
-    def _base_llm_config(self):
-        return (
-            getattr(self.config, "text_config", None)
-            or getattr(self.config, "llm_config", None)
-            or self.config
-        )
-
-    def _find_base_model_parts(self):
-        """Locate base model submodules (backbone, embeddings, lm_head) by probing known paths.
-
-        Reuses the shared path constants from modeling_fakebase (same as EAGLE).
-        """
-        for name, paths in {
-            "base_model_path": _BASE_MODEL_PATHS,
-            "base_model_embeddings_path": _EMBED_TOKENS_PATHS,
-            "base_model_lm_head_path": _LM_HEAD_PATHS,
-        }.items():
-            for path in paths:
-                try:
-                    submodule = self.get_submodule(path)
-                    assert isinstance(submodule, torch.nn.Module)
-                    setattr(self, name, path)
-                    break
-                except Exception:
-                    continue
-            else:
-                raise ValueError(f"Part {name} not found in model")
 
     def modify(self, config):
         """Initialize DFlash draft module."""
@@ -178,8 +137,6 @@ class HFDFlashModel(DFlashModel):
             for param in self.parameters():
                 param.requires_grad = False
 
-        self._find_base_model_parts()
-
         self.dflash_module = DFlashModule(self.dflash_config)
         # Match base model dtype/device. Skip if base is on meta (during from_pretrained
         # restore — the model will be moved to the correct device after weight loading).
@@ -202,6 +159,14 @@ class HFDFlashModel(DFlashModel):
         from modelopt.torch.export.plugins.hf_spec_export import DFlashExporter
 
         return DFlashExporter(self)
+
+    def get_dummy_inputs(self) -> dict:
+        """Not yet implemented for DFlash."""
+        raise NotImplementedError(
+            "HFDFlashModel.get_dummy_inputs() is not yet implemented. "
+            "Required by unified HF quantization export (modelopt.torch.export.unified_export_hf). "
+            "Implement to enable quantization-export of DFlash speculative decoding models."
+        )
 
     def _sample_anchor_positions(self, seq_len, loss_mask, device):
         """Randomly sample anchor positions per sample.
