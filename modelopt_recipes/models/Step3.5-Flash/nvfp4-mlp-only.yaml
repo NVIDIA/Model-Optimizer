@@ -15,6 +15,10 @@
 
 # Model-specific PTQ recipe for Step3.5-Flash NVFP4 MLP/MoE quantization with FP8 KV cache.
 
+imports:
+  fp8: configs/numerics/fp8
+  nvfp4: configs/numerics/nvfp4
+
 metadata:
   recipe_type: ptq
   description: >-
@@ -27,35 +31,19 @@ quantize:
       enable: false
     - quantizer_name: '*moe*weight_quantizer'
       cfg:
-        block_sizes:
-          -1: 16
-          type: dynamic
-          scale_bits: e4m3
-        num_bits: e2m1
+        $import: nvfp4
     - quantizer_name: '*moe*input_quantizer'
       cfg:
-        block_sizes:
-          -1: 16
-          type: dynamic
-          scale_bits: e4m3
-        num_bits: e2m1
+        $import: nvfp4
     - quantizer_name: '*mlp*weight_quantizer'
       cfg:
-        block_sizes:
-          -1: 16
-          type: dynamic
-          scale_bits: e4m3
-        num_bits: e2m1
+        $import: nvfp4
     - quantizer_name: '*mlp*input_quantizer'
       cfg:
-        block_sizes:
-          -1: 16
-          type: dynamic
-          scale_bits: e4m3
-        num_bits: e2m1
+        $import: nvfp4
     - quantizer_name: '*[kv]_bmm_quantizer'
       cfg:
-        num_bits: e4m3
+        $import: fp8
     - quantizer_name: '*share_expert*'
       enable: false
     - quantizer_name: '*moe.gate.*'

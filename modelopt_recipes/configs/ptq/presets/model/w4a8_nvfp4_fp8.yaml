@@ -20,6 +20,7 @@ imports:
   base_disable_all: configs/ptq/units/base_disable_all
   default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
   nvfp4_bs32: configs/numerics/nvfp4_bs32
+  fp8: configs/numerics/fp8
 
 algorithm: max
 quant_cfg:
@@ -29,5 +30,5 @@ quant_cfg:
       $import: nvfp4_bs32
   - quantizer_name: '*input_quantizer'
     cfg:
-      num_bits: e4m3
+      $import: fp8
   - $import: default_disabled_quantizers

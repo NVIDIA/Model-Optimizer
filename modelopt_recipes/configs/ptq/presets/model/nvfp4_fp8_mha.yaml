@@ -19,6 +19,7 @@
 imports:
   base_disable_all: configs/ptq/units/base_disable_all
   nvfp4: configs/numerics/nvfp4
+  fp8: configs/numerics/fp8
 
 algorithm: max
 quant_cfg:
@@ -33,16 +34,16 @@ quant_cfg:
     enable: false
   - quantizer_name: '*q_bmm_quantizer'
     cfg:
-      num_bits: e4m3
+      $import: fp8
   - quantizer_name: '*k_bmm_quantizer'
     cfg:
-      num_bits: e4m3
+      $import: fp8
   - quantizer_name: '*v_bmm_quantizer'
     cfg:
-      num_bits: e4m3
+      $import: fp8
   - quantizer_name: '*softmax_quantizer'
     cfg:
-      num_bits: e4m3
+      $import: fp8
   - quantizer_name: 'transformer_blocks*bmm2_output_quantizer'
     cfg:
-      num_bits: e4m3
+      $import: fp8

@@ -19,17 +19,18 @@
 imports:
   base_disable_all: configs/ptq/units/base_disable_all
   default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
+  fp8: configs/numerics/fp8
 
 algorithm: max
 quant_cfg:
   - $import: base_disable_all
   - quantizer_name: '*weight_quantizer'
     cfg:
-      num_bits: e4m3
+      $import: fp8
       axis: 0
   - quantizer_name: '*input_quantizer'
     cfg:
-      num_bits: e4m3
+      $import: fp8
       type: dynamic
       block_sizes:
         -1:

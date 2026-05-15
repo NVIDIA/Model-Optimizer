@@ -18,12 +18,12 @@
 # modelopt-schema: modelopt.torch.quantization.config.QuantizerCfgListConfig
 imports:
   kv_fp8: configs/ptq/units/kv_fp8
+  fp8: configs/numerics/fp8
 ---
   - $import: kv_fp8
   - quantizer_name: '*[kv]_bmm_quantizer'
     cfg:
-      num_bits: e4m3
-      axis:
+      $import: fp8
       bias:
         -2:
         -4:

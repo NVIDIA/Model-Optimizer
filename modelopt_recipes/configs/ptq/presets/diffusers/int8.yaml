@@ -19,6 +19,7 @@
 imports:
   base_disable_all: configs/ptq/units/base_disable_all
   int8_per_channel: configs/numerics/int8_per_channel
+  int8: configs/numerics/int8
 
 algorithm: max
 quant_cfg:
@@ -28,7 +29,6 @@ quant_cfg:
       $import: int8_per_channel
   - quantizer_name: '*input_quantizer'
     cfg:
-      num_bits: 8
-      axis:
+      $import: int8
   - quantizer_name: '*output_quantizer'
     enable: false

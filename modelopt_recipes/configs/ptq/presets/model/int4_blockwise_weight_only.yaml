@@ -19,15 +19,14 @@
 imports:
   base_disable_all: configs/ptq/units/base_disable_all
   default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
+  int4_per_block: configs/numerics/int4_per_block
 
 algorithm: max
 quant_cfg:
   - $import: base_disable_all
   - quantizer_name: '*weight_quantizer'
     cfg:
-      num_bits: 4
-      block_sizes:
-        -1: 128
+      $import: int4_per_block
   - quantizer_name: '*input_quantizer'
     enable: false
   - $import: default_disabled_quantizers
