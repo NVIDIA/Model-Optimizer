@@ -46,7 +46,8 @@ class TestNVFP4ScaleClamping:
             "FP8 scale underflow clamping likely regressed."
         )
         assert (per_block_scale_f32 >= _FP8_E4M3FN_MIN).all(), (
-            "Per-block scales below FP8 minimum subnormal found after cast."
+            "Per-block scales with zero values found after FP8 cast "
+            "(below the FP8 E4M3FN subnormal minimum — clamp would have prevented this)."
         )
 
     def test_normal_weights_unaffected_by_clamp(self):
@@ -88,10 +89,7 @@ class TestNVFP4ScaleClamping:
         assert (out > 0).all(), f"FP8 cast produced zero scales: {out.tolist()}"
 
     def test_static_path_no_nan_when_block_amax_zero(self):
-        """Static path: when a block's amax is 0 (all-zero weights), the `[==0]=1.0` safety net
-        and a small global_amax push the pre-cast value above 448. Without the max clamp,
-        fp8_e4m3fn would cast it to NaN — regression for the export-time NaN reported on this PR.
-        """
+        """Static path: zero-amax block + small global_amax must clamp to 448, not cast to NaN."""
         block_size = 16
         # global_amax small enough that 1.0 * 448 / (global_amax/6) >> 448.
         global_amax = torch.tensor(0.01)
