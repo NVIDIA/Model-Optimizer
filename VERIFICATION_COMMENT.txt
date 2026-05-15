@@ -1,0 +1,11 @@
+Verification Summary for OMNIML-4750 (MiniMax-M2.7-DFlash)
+
+File examined: tools/launcher/examples/MiniMax/MiniMax-M2.7-DFlash/hf_offline_eagle3.yaml
+
+Task_0 verification:
+- script: common/tensorrt_llm/query.sh (matches expected)
+- args: --model <<global_vars.hf_model>> resolves to /hf-local/MiniMax/MiniMax-M2.7-DFlash (consistent with global_vars)
+- slurm_config.container: nvcr.io/nvidia/tensorrt-llm/release:1.2.0 (matches the version used in other established families like Qwen3-8B, considered current TRT-LLM release)
+- data path: --data /hf-local/modelopt/Speculative-Decoding-Prompt-Samples (same pattern used in Qwen examples, assumed to exist on cluster)
+
+All checks pass. No PR needed. Task_0 is correctly configured for MiniMax-M2.7-DFlash.
