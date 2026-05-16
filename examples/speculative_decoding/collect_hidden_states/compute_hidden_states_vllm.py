@@ -85,6 +85,17 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Set trust_remote_code for Huggingface models and tokenizers",
     )
+    parser.add_argument(
+        "--gpu-memory-util",
+        type=float,
+        default=None,
+        help="Override vLLM's default gpu_memory_utilization. Lower this on shared GPUs.",
+    )
+    parser.add_argument(
+        "--enforce-eager",
+        action="store_true",
+        help="Disable CUDA graph capture in vLLM. Faster startup, lower throughput.",
+    )
     add_aux_layers_args(parser)
     add_answer_only_loss_args(parser)
     return parser.parse_args()
@@ -188,6 +199,11 @@ def main(args: argparse.Namespace) -> None:
         return
 
     with tempfile.TemporaryDirectory() as tmpdir:
+        llm_kwargs = {}
+        if args.gpu_memory_util is not None:
+            llm_kwargs["gpu_memory_utilization"] = args.gpu_memory_util
+        if args.enforce_eager:
+            llm_kwargs["enforce_eager"] = True
         llm = LLM(
             model=args.model,
             speculative_config={
@@ -208,6 +224,7 @@ def main(args: argparse.Namespace) -> None:
             },
             tensor_parallel_size=args.tp,
             trust_remote_code=args.trust_remote_code,
+            **llm_kwargs,
         )
 
         sampling_params = SamplingParams(max_tokens=1)
