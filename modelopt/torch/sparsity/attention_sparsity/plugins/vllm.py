@@ -28,6 +28,7 @@ live in ``plugins/sparse_attn_config.py`` and are unit-testable without vLLM.
 """
 
 import math
+import warnings
 
 import torch
 from vllm.v1.attention.backends.flash_attn import (
@@ -57,7 +58,7 @@ def _resolve_skip_softmax_calibration(
     """Convert exported calibration params into the scalar threshold kernel API."""
     threshold_scale_factor = sparse_kw.pop("threshold_scale_factor", None)
     sparse_target_ratio = sparse_kw.pop("target_sparse_ratio", None)
-    if threshold_scale_factor is None or sparse_kw.get("skip_softmax_raw_threshold") is not None:
+    if threshold_scale_factor is None:
         return
 
     phase = "prefill" if is_prefill else "decode"
@@ -78,7 +79,17 @@ def _resolve_skip_softmax_calibration(
     scale_factor = a * math.exp(b * target)
     # The current Triton kernel accepts one scalar threshold per launch. Use
     # the max KV length in the scheduled batch; shorter sequences are denser.
-    sparse_kw["skip_softmax_threshold"] = scale_factor / seq_len
+    threshold = scale_factor / seq_len
+    if threshold >= 1.0:
+        warnings.warn(
+            "Disabling calibrated skip-softmax for this vLLM launch because "
+            f"the derived threshold is outside the valid lambda range: "
+            f"phase={phase}, seq_len={seq_len}, scale_factor={scale_factor:.6g}, "
+            f"target_sparse_ratio={target:.6g}, threshold={threshold:.6g}.",
+            stacklevel=2,
+        )
+        return
+    sparse_kw["skip_softmax_threshold"] = threshold
 
 
 class ModelOptSparseAttentionImpl(FlashAttentionImpl):
@@ -117,24 +128,6 @@ class ModelOptSparseAttentionImpl(FlashAttentionImpl):
         b_seq_len = cu_seqlens_q[1 : batch + 1] - cu_seqlens_q[:batch]
 
         is_prefill = attn_metadata.max_query_len > 1
-        if is_prefill:
-            # The kernel takes one global causal-mode flag. In prefill mode that
-            # is only correct when every sequence is pure self-attention, i.e.
-            # per-sequence query length equals total KV length.
-            mismatched_lengths = b_seq_len != seq_lens
-            if torch.any(mismatched_lengths).item():
-                has_full_prefill = torch.any(~mismatched_lengths).item()
-                has_decode_like = torch.any((b_seq_len == 1) & (seq_lens > 1)).item()
-                if has_full_prefill and has_decode_like:
-                    raise NotImplementedError(
-                        "Mixed prefill/decode batches are not supported by "
-                        "ModelOptSparseAttentionImpl."
-                    )
-                raise NotImplementedError(
-                    "Chunked prefill is not supported by ModelOptSparseAttentionImpl. "
-                    "Run vLLM without chunked prefill "
-                    "(e.g. --max-num-batched-tokens >= max_model_len)."
-                )
 
         # Unpack paged KV cache: [2, num_blocks, page_size, num_kv_heads, head_dim]
         key_cache, value_cache = kv_cache.unbind(0)

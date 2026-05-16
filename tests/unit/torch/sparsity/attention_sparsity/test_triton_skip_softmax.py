@@ -30,16 +30,12 @@ class TestInit:
     def test_default_config(self):
         m = TritonSkipSoftmaxMethod()
         assert m.skip_softmax_threshold == 0.1
-        assert m.skip_softmax_raw_threshold is None
         assert m._threshold_trials is None
         assert m._measure_sparsity is False
 
     def test_custom_config(self):
-        m = TritonSkipSoftmaxMethod(
-            {"skip_softmax_threshold": 0.05, "skip_softmax_raw_threshold": -3.0}
-        )
+        m = TritonSkipSoftmaxMethod({"skip_softmax_threshold": 0.05})
         assert m.skip_softmax_threshold == 0.05
-        assert m.skip_softmax_raw_threshold == -3.0
 
     def test_name(self):
         assert TritonSkipSoftmaxMethod().name == "triton_skip_softmax"

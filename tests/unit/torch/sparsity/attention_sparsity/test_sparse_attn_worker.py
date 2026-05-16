@@ -70,8 +70,8 @@ def test_clone_sparse_impl_rejects_non_none_sinks():
 @pytest.mark.parametrize(
     ("max_query_len", "seq_len", "phase", "expected_scale"),
     [
-        (8, 8, "prefill", 2.0 * math.exp(3.0 * 0.4)),
-        (1, 16, "decode", 5.0 * math.exp(7.0 * 0.6)),
+        (128, 128, "prefill", 2.0 * math.exp(3.0 * 0.4)),
+        (1, 256, "decode", 0.1 * math.exp(1.0 * 0.6)),
     ],
 )
 def test_forward_resolves_calibrated_skip_softmax_threshold(
@@ -83,7 +83,7 @@ def test_forward_resolves_calibrated_skip_softmax_threshold(
         "threshold_scale_factor": {
             "formula": "a * exp(b * target_sparsity)",
             "prefill": {"a": 2.0, "b": 3.0},
-            "decode": {"a": 5.0, "b": 7.0},
+            "decode": {"a": 0.1, "b": 1.0},
         },
         "target_sparse_ratio": {"prefill": 0.4, "decode": 0.6},
     }
@@ -123,3 +123,67 @@ def test_forward_resolves_calibrated_skip_softmax_threshold(
     assert captured["skip_softmax_threshold"] == pytest.approx(expected_scale / seq_len)
     assert "threshold_scale_factor" not in captured
     assert "target_sparse_ratio" not in captured
+
+
+def test_resolve_calibrated_skip_softmax_warns_and_disables_for_large_threshold():
+    """A derived lambda >= 1 is invalid and disables calibrated skip-softmax."""
+    sparse_kw = {
+        "threshold_scale_factor": {
+            "formula": "a * exp(b * target_sparsity)",
+            "decode": {"a": 925.492, "b": 0.0},
+        },
+        "target_sparse_ratio": {"decode": 0.5},
+    }
+
+    with pytest.warns(UserWarning, match="outside the valid lambda range"):
+        vllm_plugin._resolve_skip_softmax_calibration(
+            sparse_kw,
+            is_prefill=False,
+            max_seq_len=256,
+        )
+
+    assert "skip_softmax_threshold" not in sparse_kw
+    assert "threshold_scale_factor" not in sparse_kw
+    assert "target_sparse_ratio" not in sparse_kw
+
+
+def test_forward_allows_chunked_prefill_metadata(monkeypatch):
+    """vLLM V1 can pass suffix-Q/chunked-prefill metadata; the kernel handles it."""
+    impl = _clone_sparse_impl(_make_old_impl())
+    q_len = 4
+    kv_len = 10
+    q = torch.zeros(q_len, impl.num_heads, impl.head_size, dtype=torch.float16)
+    kv_cache = torch.zeros(2, 1, 16, impl.num_kv_heads, impl.head_size, dtype=torch.float16)
+    attn_metadata = type(
+        "AttnMetadata",
+        (),
+        {
+            "num_actual_tokens": q_len,
+            "max_query_len": q_len,
+            "max_seq_len": kv_len,
+            "query_start_loc": torch.tensor([0, q_len], dtype=torch.int32),
+            "seq_lens": torch.tensor([kv_len], dtype=torch.int32),
+            "block_table": torch.zeros(1, 1, dtype=torch.int32),
+        },
+    )()
+    captured = {}
+
+    def fake_attention(q, **kwargs):
+        captured.update(kwargs)
+        return torch.zeros_like(q)
+
+    monkeypatch.setattr(vllm_plugin, "triton_attention", fake_attention)
+
+    impl.forward(
+        layer=None,
+        query=q,
+        key=q,
+        value=q,
+        kv_cache=kv_cache,
+        attn_metadata=attn_metadata,
+        output=torch.empty_like(q),
+    )
+
+    assert captured["is_causal"] is True
+    torch.testing.assert_close(captured["b_seq_len"], torch.tensor([q_len], dtype=torch.int32))
+    torch.testing.assert_close(captured["b_seq_len_k"], torch.tensor([kv_len], dtype=torch.int32))

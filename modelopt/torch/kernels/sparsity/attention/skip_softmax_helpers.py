@@ -189,8 +189,8 @@ def _is_dense_region(
     seq_len_q,
     seq_len_kv,
     BLOCK_M: tl.constexpr,
-    NUM_SINK_TOKENS: tl.constexpr,
-    DENSE_WINDOW_SIZE: tl.constexpr,
+    DENSE_SINK_TOKENS: tl.constexpr,
+    DENSE_RECENT_TOKENS: tl.constexpr,
 ):
     """Check if a KV tile falls in a dense region (sink tokens or local window).
 
@@ -200,9 +200,9 @@ def _is_dense_region(
     Returns:
         True if the tile should be kept dense (skip N:M sparsification).
     """
-    is_sink = kv_start < NUM_SINK_TOKENS
+    is_sink = kv_start < DENSE_SINK_TOKENS
     causal_offset = seq_len_kv - seq_len_q
     q_abs_pos = tile_q * BLOCK_M + causal_offset
     token_distance = q_abs_pos - kv_start
-    is_local = (token_distance >= 0) and (token_distance < DENSE_WINDOW_SIZE)
+    is_local = (token_distance >= 0) and (token_distance < DENSE_RECENT_TOKENS)
     return is_sink or is_local

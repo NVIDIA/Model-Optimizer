@@ -296,12 +296,12 @@ print(f"TOTAL={out._sparsity_total}")
         # No skip-softmax active => counters should not be attached
         assert not hasattr(out, "_sparsity_total")
 
-    def test_raw_threshold_path(self):
-        """Raw threshold is passed directly to the kernel without conversion."""
+    def test_tiny_threshold_path(self):
+        """A tiny lambda threshold keeps output close to dense."""
         q, k, v = make_qkv(256, 4, 4, 64, dtype=torch.float16)
         locs, lens = make_varlen_meta([256])
         scale = 1.0 / (64**0.5)
-        out_raw = attention(
+        out_skip = attention(
             q,
             k,
             v,
@@ -310,12 +310,11 @@ print(f"TOTAL={out._sparsity_total}")
             256,
             softmax_scale=scale,
             is_causal=False,
-            skip_softmax_raw_threshold=-20.0,
+            skip_softmax_threshold=2**-20,
         )
-        # With a very negative raw threshold, almost no tiles are skipped
-        # Output should be close to dense
+        # A near-zero threshold skips very few tiles, so output stays close to dense.
         out_dense = attention(q, k, v, locs, lens, 256, softmax_scale=scale, is_causal=False)
-        torch.testing.assert_close(out_raw, out_dense, rtol=1e-2, atol=1e-2)
+        torch.testing.assert_close(out_skip, out_dense, rtol=1e-2, atol=1e-2)
 
 
 @pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="Need CUDA + triton")

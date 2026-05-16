@@ -34,6 +34,13 @@ ALGO_TO_PRESET = {
 }
 
 DEFAULT_TARGET_SPARSE_RATIO = {"prefill": 0.5, "decode": 0.5}
+SPARSE_SOFTMAX_ALGOS = {"sparse_softmax", "triton_sparse_softmax"}
+SPARSE_SOFTMAX_DEFAULTS = {
+    "sparsity_n": 2,
+    "sparsity_m": 4,
+    "dense_sink_tokens": 0,
+    "dense_recent_tokens": 64,
+}
 
 
 def _normalize_target_sparse_ratio(value) -> dict[str, float]:
@@ -60,6 +67,34 @@ def _has_calibrated_threshold_scale_factor(value) -> bool:
     return False
 
 
+def _has_sparse_softmax_algo(algos: set[str | None]) -> bool:
+    """Return True if checkpoint metadata requests N:M sparse softmax."""
+    return bool(algos & SPARSE_SOFTMAX_ALGOS)
+
+
+def _sparse_softmax_params(sparse_meta: dict, config_groups: dict) -> dict:
+    """Resolve N:M sparse-softmax params from checkpoint metadata."""
+    params = SPARSE_SOFTMAX_DEFAULTS.copy()
+    exported_params = sparse_meta.get("sparse_softmax")
+    if isinstance(exported_params, dict):
+        params.update(
+            {key: exported_params[key] for key in SPARSE_SOFTMAX_DEFAULTS if key in exported_params}
+        )
+        return params
+
+    for group in config_groups.values():
+        if not isinstance(group, dict) or group.get("sparse_algo") not in SPARSE_SOFTMAX_ALGOS:
+            continue
+        params.update({key: group[key] for key in SPARSE_SOFTMAX_DEFAULTS if key in group})
+        return params
+    return params
+
+
+def _add_sparse_softmax_params(layer_cfg: dict, sparse_meta: dict, config_groups: dict) -> None:
+    """Add N:M sparse-softmax params to a vLLM layer config."""
+    layer_cfg.update(_sparse_softmax_params(sparse_meta, config_groups))
+
+
 def _build_calibrated_softmax_skip_config(sparse_meta: dict) -> dict:
     """Build a vLLM Triton sparse config from exported calibration metadata."""
     return {
@@ -73,6 +108,22 @@ def _build_calibrated_softmax_skip_config(sparse_meta: dict) -> dict:
                 "backend": "triton",
                 "enable": True,
             },
+            "default": {"enable": False},
+        },
+    }
+
+
+def _build_sparse_softmax_config(sparse_meta: dict, config_groups: dict) -> dict:
+    """Build a vLLM Triton N:M sparse-softmax config from exported metadata."""
+    layer_cfg = {
+        "method": "triton_sparse_softmax",
+        "backend": "triton",
+        "enable": True,
+    }
+    _add_sparse_softmax_params(layer_cfg, sparse_meta, config_groups)
+    return {
+        "sparse_cfg": {
+            "*attn*": layer_cfg,
             "default": {"enable": False},
         },
     }
@@ -123,9 +174,14 @@ def load_from_checkpoint_metadata(hf_config) -> tuple[dict, str] | None:
     if "softmax_skip" in algos and _has_calibrated_threshold_scale_factor(
         sparse_meta.get("threshold_scale_factor")
     ):
-        return _build_calibrated_softmax_skip_config(
-            sparse_meta
-        ), "CHECKPOINT_CALIBRATED_SOFTMAX_SKIP"
+        cfg = _build_calibrated_softmax_skip_config(sparse_meta)
+        if _has_sparse_softmax_algo(algos):
+            layer_cfg = cfg["sparse_cfg"]["*attn*"]
+            _add_sparse_softmax_params(layer_cfg, sparse_meta, config_groups)
+            return cfg, "CHECKPOINT_CALIBRATED_SOFTMAX_SKIP_SPARSE_SOFTMAX"
+        return cfg, "CHECKPOINT_CALIBRATED_SOFTMAX_SKIP"
+    if _has_sparse_softmax_algo(algos):
+        return _build_sparse_softmax_config(sparse_meta, config_groups), "CHECKPOINT_SPARSE_SOFTMAX"
     for algo, preset_name in ALGO_TO_PRESET.items():
         if algo in algos:
             preset = getattr(mtsa, preset_name, None)

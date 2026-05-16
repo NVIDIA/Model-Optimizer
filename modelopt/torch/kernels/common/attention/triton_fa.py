@@ -189,9 +189,12 @@ def _apply_mask(
 ):
     """Apply causal mask and padding mask to a score tile."""
     if IS_CAUSAL:
+        # In chunked prefill or prefix-cache hits, Q is the latest suffix of KV
+        # rather than starting at KV position 0.
+        q_to_k_offset = seq_len_kv - seq_len_q
         scores += tl.where(
             (kv_start + kv_pos[None, :] < seq_len_kv)
-            & (q_pos[:, None] >= (kv_start + kv_pos[None, :])),
+            & (q_pos[:, None] + q_to_k_offset >= (kv_start + kv_pos[None, :])),
             0,
             float("-inf"),
         )
@@ -236,8 +239,8 @@ def _attn_fwd(
     STORE_LSE: tl.constexpr,  # Whether to save LSE for backward pass
     SPARSITY_N: tl.constexpr = 0,  # N:M sparsity — keep top-N of every M elements (0 = disabled)
     SPARSITY_M: tl.constexpr = 4,  # N:M sparsity — group size (4 or 8)
-    NUM_SINK_TOKENS: tl.constexpr = 0,  # KV positions before this are kept dense (attention sinks)
-    DENSE_WINDOW_SIZE: tl.constexpr = 64,  # Tokens near diagonal kept dense (absolute, BLOCK_N-independent)
+    DENSE_SINK_TOKENS: tl.constexpr = 0,  # Leading KV tokens kept dense (attention sinks)
+    DENSE_RECENT_TOKENS: tl.constexpr = 64,  # Recent KV tokens kept dense (BLOCK_N-independent)
     APPLY_SKIP_SOFTMAX: tl.constexpr = False,  # Skip KV tiles with negligible scores
     SKIP_THRESHOLD_LOG2: tl.constexpr = 0.0,  # log2(lambda) in the kernel's scaled log2 score space
     Sparsity_total=None,  # Optional int64 scalar for counting total tiles (atomic)
@@ -293,8 +296,13 @@ def _attn_fwd(
     row_sum = tl.zeros([BLOCK_M], dtype=tl.float32)  # Running sum of exp(scores)
     acc = tl.zeros([BLOCK_M, BLOCK_D], dtype=tl.float32)  # Running weighted sum of V
 
-    # Causal bound: Q position i only attends to KV positions 0..i
-    kv_bound = seq_len_kv if not IS_CAUSAL else tl.minimum((tile_q + 1) * BLOCK_M, seq_len_kv)
+    # Causal bound: chunked/prefix prefill Q tiles are suffixes of the KV span.
+    causal_offset = seq_len_kv - seq_len_q
+    kv_bound = (
+        seq_len_kv
+        if not IS_CAUSAL
+        else tl.minimum(causal_offset + (tile_q + 1) * BLOCK_M, seq_len_kv)
+    )
 
     # --- Main loop: iterate over KV tiles ---
     for kv_start in range(0, kv_bound, BLOCK_N):
@@ -340,8 +348,8 @@ def _attn_fwd(
                 seq_len_q,
                 seq_len_kv,
                 BLOCK_M,
-                NUM_SINK_TOKENS,
-                DENSE_WINDOW_SIZE,
+                DENSE_SINK_TOKENS,
+                DENSE_RECENT_TOKENS,
             ):
                 scores = _apply_sparse_nm_to_qk_tile(
                     scores, BLOCK_M, BLOCK_N, SPARSITY_N, SPARSITY_M
@@ -500,8 +508,8 @@ def _attn_bwd_dq(
     HEAD_DIM: tl.constexpr,
     SPARSITY_N: tl.constexpr = 0,
     SPARSITY_M: tl.constexpr = 4,
-    NUM_SINK_TOKENS: tl.constexpr = 0,
-    DENSE_WINDOW_SIZE: tl.constexpr = 64,
+    DENSE_SINK_TOKENS: tl.constexpr = 0,
+    DENSE_RECENT_TOKENS: tl.constexpr = 64,
     APPLY_SKIP_SOFTMAX: tl.constexpr = False,
     SKIP_THRESHOLD_LOG2: tl.constexpr = 0.0,
 ):
@@ -546,7 +554,12 @@ def _attn_bwd_dq(
     row_delta = tl.load(Delta + row_ptrs, mask=q_mask, other=0.0)
 
     dq = tl.zeros([BLOCK_M, BLOCK_D], dtype=tl.float32)
-    kv_bound = seq_len_kv if not IS_CAUSAL else tl.minimum((tile_q + 1) * BLOCK_M, seq_len_kv)
+    causal_offset = seq_len_kv - seq_len_q
+    kv_bound = (
+        seq_len_kv
+        if not IS_CAUSAL
+        else tl.minimum(causal_offset + (tile_q + 1) * BLOCK_M, seq_len_kv)
+    )
 
     # --- Loop over KV tiles: recompute S, then compute dQ contribution ---
     for kv_start in range(0, kv_bound, BLOCK_N):
@@ -578,8 +591,8 @@ def _attn_bwd_dq(
                 seq_len_q,
                 seq_len_kv,
                 BLOCK_M,
-                NUM_SINK_TOKENS,
-                DENSE_WINDOW_SIZE,
+                DENSE_SINK_TOKENS,
+                DENSE_RECENT_TOKENS,
             ):
                 scores = _apply_sparse_nm_to_qk_tile(
                     scores, BLOCK_M, BLOCK_N, SPARSITY_N, SPARSITY_M
@@ -646,8 +659,8 @@ def _attn_bwd_dkdv(
     HEAD_DIM: tl.constexpr,
     SPARSITY_N: tl.constexpr = 0,
     SPARSITY_M: tl.constexpr = 4,
-    NUM_SINK_TOKENS: tl.constexpr = 0,
-    DENSE_WINDOW_SIZE: tl.constexpr = 64,
+    DENSE_SINK_TOKENS: tl.constexpr = 0,
+    DENSE_RECENT_TOKENS: tl.constexpr = 64,
     APPLY_SKIP_SOFTMAX: tl.constexpr = False,
     SKIP_THRESHOLD_LOG2: tl.constexpr = 0.0,
 ):
@@ -694,9 +707,9 @@ def _attn_bwd_dkdv(
     dv = tl.zeros([BLOCK_N, BLOCK_D], dtype=tl.float32)
 
     n_q_tiles = (seq_len_q + BLOCK_M - 1) // BLOCK_M
-    # Causal: Q position i attends to KV 0..i, so this KV tile (at kv_start)
-    # only receives gradients from Q tiles where q_pos >= kv_start. Skip earlier ones.
-    first_q_tile = kv_start // BLOCK_M if IS_CAUSAL else 0
+    # Causal with chunked/prefix prefill: Q positions are offset into KV space.
+    causal_offset = seq_len_kv - seq_len_q
+    first_q_tile = tl.maximum((kv_start - causal_offset) // BLOCK_M, 0) if IS_CAUSAL else 0
     q_pos_base = tl.arange(0, BLOCK_M)
 
     for qi in range(first_q_tile, n_q_tiles):
@@ -732,8 +745,8 @@ def _attn_bwd_dkdv(
                     seq_len_q,
                     seq_len_kv,
                     BLOCK_M,
-                    NUM_SINK_TOKENS,
-                    DENSE_WINDOW_SIZE,
+                    DENSE_SINK_TOKENS,
+                    DENSE_RECENT_TOKENS,
                 ):
                     scores = _apply_sparse_nm_to_qk_tile(
                         scores, BLOCK_M, BLOCK_N, SPARSITY_N, SPARSITY_M
@@ -784,10 +797,9 @@ class _Attention(torch.autograd.Function):
         max_input_len_k,
         sparsity_n,
         sparsity_m,
-        num_sink_tokens,
-        dense_window_size,
+        dense_sink_tokens,
+        dense_recent_tokens,
         skip_softmax_threshold,
-        skip_softmax_raw_threshold,
         measure_sparsity,
         k_cache,
         v_cache,
@@ -829,14 +841,8 @@ class _Attention(torch.autograd.Function):
         # Triton tiles must be powers of 2; pad head dim
         BLOCK_D = triton.next_power_of_2(HEAD_DIM)
 
-        # Skip-softmax threshold in the kernel's scaled log2 score space.
-        # Two modes:
-        #   1. raw_threshold: passed directly as skip_threshold_log2 (for testing)
-        #   2. lambda threshold: converted via log2(lambda)
-        if skip_softmax_raw_threshold is not None:
-            apply_skip = True
-            skip_threshold_log2 = skip_softmax_raw_threshold
-        elif skip_softmax_threshold is not None and skip_softmax_threshold > 0.0:
+        # Convert the public lambda threshold to the kernel's log2 score space.
+        if skip_softmax_threshold is not None and skip_softmax_threshold > 0.0:
             apply_skip = True
             # scores already include sm_scale and LOG2E, so the lambda cutoff is
             # just converted from natural-log probability space to log2 space.
@@ -879,7 +885,7 @@ class _Attention(torch.autograd.Function):
             lse.stride(0),
             lse.stride(1),
         )
-        fwd_meta = {
+        fwd_kwargs = {
             "N_CTX": max_input_len,
             "kv_group_num": kv_group_num,
             "BLOCK_D": BLOCK_D,
@@ -888,8 +894,8 @@ class _Attention(torch.autograd.Function):
             "STORE_LSE": True,
             "SPARSITY_N": sparsity_n,
             "SPARSITY_M": sparsity_m,
-            "NUM_SINK_TOKENS": num_sink_tokens,
-            "DENSE_WINDOW_SIZE": dense_window_size,
+            "DENSE_SINK_TOKENS": dense_sink_tokens,
+            "DENSE_RECENT_TOKENS": dense_recent_tokens,
             "APPLY_SKIP_SOFTMAX": apply_skip,
             "SKIP_THRESHOLD_LOG2": skip_threshold_log2,
             "Sparsity_total": sparsity_total,
@@ -918,7 +924,7 @@ class _Attention(torch.autograd.Function):
             # autotune candidate trials. Use one stable config for measurement.
             _attn_fwd.fn[grid](
                 *fwd_args,
-                **fwd_meta,
+                **fwd_kwargs,
                 BLOCK_M=_MEASURE_BLOCK_M,
                 BLOCK_N=_MEASURE_BLOCK_N,
                 num_warps=_MEASURE_NUM_WARPS,
@@ -927,7 +933,7 @@ class _Attention(torch.autograd.Function):
         else:
             _attn_fwd[grid](
                 *fwd_args,
-                **fwd_meta,
+                **fwd_kwargs,
                 # BLOCK_M, BLOCK_N, num_warps, num_stages chosen by autotune
             )
 
@@ -949,8 +955,8 @@ class _Attention(torch.autograd.Function):
         ctx.batch = batch
         ctx.sparsity_n = sparsity_n
         ctx.sparsity_m = sparsity_m
-        ctx.num_sink_tokens = num_sink_tokens
-        ctx.dense_window_size = dense_window_size
+        ctx.dense_sink_tokens = dense_sink_tokens
+        ctx.dense_recent_tokens = dense_recent_tokens
         ctx.apply_skip = apply_skip
         ctx.skip_threshold_log2 = skip_threshold_log2
         return o
@@ -1029,8 +1035,8 @@ class _Attention(torch.autograd.Function):
             HEAD_DIM=HEAD_DIM,
             SPARSITY_N=ctx.sparsity_n,
             SPARSITY_M=ctx.sparsity_m,
-            NUM_SINK_TOKENS=ctx.num_sink_tokens,
-            DENSE_WINDOW_SIZE=ctx.dense_window_size,
+            DENSE_SINK_TOKENS=ctx.dense_sink_tokens,
+            DENSE_RECENT_TOKENS=ctx.dense_recent_tokens,
             APPLY_SKIP_SOFTMAX=ctx.apply_skip,
             SKIP_THRESHOLD_LOG2=ctx.skip_threshold_log2,
             num_warps=num_warps,
@@ -1054,8 +1060,8 @@ class _Attention(torch.autograd.Function):
             HEAD_DIM=HEAD_DIM,
             SPARSITY_N=ctx.sparsity_n,
             SPARSITY_M=ctx.sparsity_m,
-            NUM_SINK_TOKENS=ctx.num_sink_tokens,
-            DENSE_WINDOW_SIZE=ctx.dense_window_size,
+            DENSE_SINK_TOKENS=ctx.dense_sink_tokens,
+            DENSE_RECENT_TOKENS=ctx.dense_recent_tokens,
             APPLY_SKIP_SOFTMAX=ctx.apply_skip,
             SKIP_THRESHOLD_LOG2=ctx.skip_threshold_log2,
             num_warps=num_warps,
@@ -1076,10 +1082,9 @@ class _Attention(torch.autograd.Function):
             None,  # max_input_len_k
             None,  # sparsity_n
             None,  # sparsity_m
-            None,  # num_sink_tokens
-            None,  # dense_window_size
+            None,  # dense_sink_tokens
+            None,  # dense_recent_tokens
             None,  # skip_softmax_threshold
-            None,  # skip_softmax_raw_threshold
             None,  # measure_sparsity
             None,  # k_cache
             None,  # v_cache
@@ -1103,10 +1108,9 @@ def attention(
     *,
     sparsity_n: int = 0,
     sparsity_m: int = 4,
-    num_sink_tokens: int = 0,
-    dense_window_size: int = 64,
+    dense_sink_tokens: int = 0,
+    dense_recent_tokens: int = 64,
     skip_softmax_threshold: float | None = None,
-    skip_softmax_raw_threshold: float | None = None,
     measure_sparsity: bool = False,
     k_cache: torch.Tensor | None = None,
     v_cache: torch.Tensor | None = None,
@@ -1132,22 +1136,15 @@ def attention(
             ``sparsity_n=2, sparsity_m=4`` for 2:4 sparsity;
             ``sparsity_n=4, sparsity_m=8`` for 4:8 sparsity.
         sparsity_m: N:M sparsity — group size (4 or 8).
-        num_sink_tokens: KV positions before this token index are kept dense
-            (attention sinks). Absolute token count, BLOCK_N-independent.
-        dense_window_size: Tokens near the query diagonal kept dense (local
-            attention window). Absolute token count, BLOCK_N-independent.
-            Default 64 tokens.
+        dense_sink_tokens: Leading KV tokens excluded from N:M sparsity and kept dense.
+            Absolute token count, BLOCK_N-independent.
+        dense_recent_tokens: Recent KV tokens excluded from N:M sparsity and kept dense.
+            Absolute token count, BLOCK_N-independent. Default 64 tokens.
         skip_softmax_threshold: BLASST threshold lambda
             (https://arxiv.org/pdf/2512.12087). Skip KV tiles where
             ``exp(tile_max - running_max) < lambda``, meaning the tile's
             softmax contribution is negligible. Tiles are skipped entirely
             (no softmax, V load, or BMM2). Set to ``None`` or ``0`` to disable.
-        skip_softmax_raw_threshold: Raw ``skip_threshold_log2`` value passed
-            directly to the kernel without conversion. The kernel skips tiles
-            where ``tile_row_max < row_max + raw_threshold``. Typical values
-            are negative (e.g., ``-5.0`` means tiles must be within 5 units of
-            the running max in the kernel's scaled score space). Takes
-            precedence over ``skip_softmax_threshold`` when both are set.
         measure_sparsity: When True and skip-softmax is active, count total
             and skipped tiles via atomic counters. The counts are stored as
             ``_sparsity_total`` and ``_sparsity_skipped`` attributes on the
@@ -1185,10 +1182,9 @@ def attention(
         max_input_len_k,
         sparsity_n,
         sparsity_m,
-        num_sink_tokens,
-        dense_window_size,
+        dense_sink_tokens,
+        dense_recent_tokens,
         skip_softmax_threshold,
-        skip_softmax_raw_threshold,
         measure_sparsity,
         k_cache,
         v_cache,

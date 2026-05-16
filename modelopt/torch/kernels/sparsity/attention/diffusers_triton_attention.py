@@ -53,7 +53,6 @@ def set_triton_skip_softmax_config(
     calibration_mode: bool = False,
     threshold_trials: list[float] | None = None,
     scale_factor: float | None = None,
-    raw_threshold: float | None = None,
     measure_sparsity: bool = False,
 ) -> None:
     """Set thread-local skip-softmax config for the next Triton attention call.
@@ -67,8 +66,6 @@ def set_triton_skip_softmax_config(
         scale_factor: Calibrated scale factor for dynamic threshold computation.
             When set, the actual threshold is computed as ``scale_factor / seq_k``
             at attention call time, adapting to the actual sequence length.
-        raw_threshold: Raw ``skip_threshold_log2`` value passed directly to the
-            kernel without conversion. Takes precedence over other thresholds.
         measure_sparsity: If True, count total and skipped tiles during
             inference via atomic counters in the forward kernel.
     """
@@ -76,7 +73,6 @@ def set_triton_skip_softmax_config(
     _thread_local.calibration_mode = calibration_mode
     _thread_local.threshold_trials = threshold_trials
     _thread_local.scale_factor = scale_factor
-    _thread_local.raw_threshold = raw_threshold
     _thread_local.measure_sparsity = measure_sparsity
     # Accumulated counters across all attention calls in one forward pass
     _thread_local.calibration_counters = None
@@ -92,7 +88,6 @@ def clear_triton_skip_softmax_config() -> None:
     _thread_local.calibration_mode = False
     _thread_local.threshold_trials = None
     _thread_local.scale_factor = None
-    _thread_local.raw_threshold = None
     _thread_local.measure_sparsity = False
     _thread_local.calibration_counters = None
     _thread_local.calibration_seq_k = None
@@ -186,20 +181,15 @@ def _diffusers_triton_attention(
 
             return o.view(batch, seq_q, num_heads_q, head_dim)
 
-    # --- Inference mode: skip-softmax with raw, dynamic, or static threshold ---
-    raw_thresh = getattr(_thread_local, "raw_threshold", None)
-    if raw_thresh is not None:
-        # Raw threshold: passed directly to kernel as skip_threshold_log2
-        kw["skip_softmax_raw_threshold"] = raw_thresh
+    # --- Inference mode: skip-softmax with dynamic or static threshold ---
+    scale_factor = getattr(_thread_local, "scale_factor", None)
+    if scale_factor is not None and scale_factor > 0.0:
+        # Dynamic threshold: adapt to actual sequence length.
+        kw["skip_softmax_threshold"] = scale_factor / seq_k
     else:
-        scale_factor = getattr(_thread_local, "scale_factor", None)
-        if scale_factor is not None and scale_factor > 0.0:
-            # Dynamic threshold: adapt to actual sequence length
-            kw["skip_softmax_threshold"] = scale_factor / seq_k
-        else:
-            threshold = getattr(_thread_local, "skip_threshold", None)
-            if threshold is not None and threshold > 0.0:
-                kw["skip_softmax_threshold"] = threshold
+        threshold = getattr(_thread_local, "skip_threshold", None)
+        if threshold is not None and threshold > 0.0:
+            kw["skip_softmax_threshold"] = threshold
 
     from modelopt.torch.kernels.common.attention import attention
 

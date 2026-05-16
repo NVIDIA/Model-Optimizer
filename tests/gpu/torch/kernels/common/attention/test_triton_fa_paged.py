@@ -86,6 +86,30 @@ def _scatter_to_paged_cache(k, v, b_start_loc, b_seq_len, num_kv_heads, head_dim
     return k_cache, v_cache, block_table
 
 
+def _suffix_causal_reference(q, k, v, q_lens, kv_lens, num_heads, num_kv_heads, scale):
+    """Reference for chunked prefill where Q is the latest suffix of KV."""
+    out = torch.empty_like(q)
+    q_start = 0
+    kv_start = 0
+    head_repeat = num_heads // num_kv_heads
+    for q_len, kv_len in zip(q_lens, kv_lens):
+        q_b = q[q_start : q_start + q_len].float()
+        k_b = k[kv_start : kv_start + kv_len].float().repeat_interleave(head_repeat, dim=1)
+        v_b = v[kv_start : kv_start + kv_len].float().repeat_interleave(head_repeat, dim=1)
+
+        scores = torch.einsum("qhd,khd->hqk", q_b, k_b) * scale
+        prefix_len = kv_len - q_len
+        q_pos = torch.arange(q_len, device=q.device) + prefix_len
+        kv_pos = torch.arange(kv_len, device=q.device)
+        scores = scores.masked_fill(kv_pos[None, :] > q_pos[:, None], float("-inf"))
+        probs = torch.softmax(scores, dim=-1)
+        ref = torch.einsum("hqk,khd->qhd", probs, v_b)
+        out[q_start : q_start + q_len] = ref.to(q.dtype)
+        q_start += q_len
+        kv_start += kv_len
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Paged KV cache tests
 # ---------------------------------------------------------------------------
@@ -334,3 +358,43 @@ class TestPagedKV:
 
         assert out.shape == q_flat.shape
         assert not torch.isnan(out).any(), "NaN in paged decode output"
+
+    def test_paged_chunked_prefill_matches_suffix_causal_reference(self):
+        """Paged causal mode offsets suffix Q positions into the longer KV span."""
+        q_lens = [7, 13]
+        kv_lens = [31, 48]
+        num_heads, num_kv_heads, head_dim = 4, 2, 64
+        page_size = 16
+        scale = 1.0 / (head_dim**0.5)
+
+        torch.manual_seed(44)
+        q = torch.randn(sum(q_lens), num_heads, head_dim, device="cuda", dtype=torch.float16)
+        k = torch.randn(sum(kv_lens), num_kv_heads, head_dim, device="cuda", dtype=torch.float16)
+        v = torch.randn(sum(kv_lens), num_kv_heads, head_dim, device="cuda", dtype=torch.float16)
+
+        locs_q, lens_q = make_varlen_meta(q_lens)
+        locs_k, lens_k = make_varlen_meta(kv_lens)
+        k_cache, v_cache, block_table = _scatter_to_paged_cache(
+            k, v, locs_k, lens_k, num_kv_heads, head_dim, page_size
+        )
+
+        out = attention(
+            q,
+            k,
+            v,
+            locs_q,
+            lens_q,
+            max(q_lens),
+            is_causal=True,
+            softmax_scale=scale,
+            b_start_loc_k=locs_k,
+            b_seq_len_k=lens_k,
+            max_input_len_k=max(kv_lens),
+            k_cache=k_cache,
+            v_cache=v_cache,
+            block_table=block_table,
+            page_size=page_size,
+        )
+        ref = _suffix_causal_reference(q, k, v, q_lens, kv_lens, num_heads, num_kv_heads, scale)
+
+        torch.testing.assert_close(out, ref, rtol=1e-2, atol=1e-2)

@@ -15,8 +15,6 @@
 
 """GPU tests for skip-softmax (BLASST) on the Triton flash attention kernel."""
 
-import math
-
 import pytest
 import torch
 from conftest import make_varlen_meta
@@ -58,48 +56,6 @@ class TestSkipSoftmax:
             q, k, v, locs, lens, 256, softmax_scale=scale, skip_softmax_threshold=0.0
         )
         assert torch.equal(out_none, out_zero)
-
-    def test_lambda_threshold_matches_raw_log2_threshold(self):
-        """Public lambda threshold should convert directly to raw log2 kernel space."""
-        batch, seq_len, num_heads, head_dim = 1, 256, 1, 64
-        total = batch * seq_len
-        scale = 1.0 / math.sqrt(head_dim)
-        qk_scale = scale * math.log2(math.e)
-        threshold = 0.1
-
-        q = torch.zeros(total, num_heads, head_dim, device="cuda", dtype=torch.float16)
-        k = torch.zeros_like(q)
-        v = torch.zeros_like(q)
-        q[:, :, 0] = 1.0
-        k[128:, :, 0] = -1.0 / qk_scale
-        v[128:] = 1.0
-        locs = torch.zeros(batch, device="cuda", dtype=torch.int32)
-        lens = torch.full((batch,), seq_len, device="cuda", dtype=torch.int32)
-
-        out_lambda = attention(
-            q,
-            k,
-            v,
-            locs,
-            lens,
-            seq_len,
-            is_causal=False,
-            softmax_scale=scale,
-            skip_softmax_threshold=threshold,
-        )
-        out_raw = attention(
-            q,
-            k,
-            v,
-            locs,
-            lens,
-            seq_len,
-            is_causal=False,
-            softmax_scale=scale,
-            skip_softmax_raw_threshold=math.log2(threshold),
-        )
-
-        assert torch.equal(out_lambda, out_raw)
 
     def test_small_threshold_close_to_dense(self):
         """A small threshold (1e-3) should produce output very close to dense."""

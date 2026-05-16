@@ -153,8 +153,8 @@ class TestModelOptSparseAttentionImpl:
 
         torch.testing.assert_close(out_paged, out_ref, rtol=1e-2, atol=1e-2)
 
-    def test_chunked_prefill_raises(self):
-        """Test that chunked prefill (max_query_len < max_seq_len) is rejected."""
+    def test_chunked_prefill_is_forwarded_to_kernel(self):
+        """Chunked prefill metadata is handled by the suffix-aware causal mask."""
         impl = _make_impl(num_heads=2, head_dim=64, num_kv_heads=2)
         attn_metadata = SimpleNamespace(
             num_actual_tokens=4,
@@ -166,19 +166,20 @@ class TestModelOptSparseAttentionImpl:
         )
         q = torch.zeros(4, 2, 64, device="cuda", dtype=torch.float16)
         kv_cache = torch.zeros(2, 1, 16, 2, 64, device="cuda", dtype=torch.float16)
-        with pytest.raises(NotImplementedError, match="Chunked prefill"):
-            impl.forward(
-                layer=None,
-                query=q,
-                key=q,
-                value=q,
-                kv_cache=kv_cache,
-                attn_metadata=attn_metadata,
-                output=torch.empty_like(q),
-            )
+        out = impl.forward(
+            layer=None,
+            query=q,
+            key=q,
+            value=q,
+            kv_cache=kv_cache,
+            attn_metadata=attn_metadata,
+            output=torch.empty_like(q),
+        )
 
-    def test_mixed_prefill_decode_raises(self):
-        """Mixed prefill/decode cannot use one global causal-mask mode."""
+        assert torch.isfinite(out).all()
+
+    def test_mixed_prefill_decode_is_forwarded_to_kernel(self):
+        """Mixed prefill/decode batches are valid with suffix-aware causal masking."""
         prefill_len = 64
         decode_q_len = 1
         total_q = prefill_len + decode_q_len
@@ -210,16 +211,17 @@ class TestModelOptSparseAttentionImpl:
         )
 
         impl = _make_impl(num_heads, head_dim, num_kv_heads)
-        with pytest.raises(NotImplementedError, match="Mixed prefill/decode"):
-            impl.forward(
-                layer=None,
-                query=q,
-                key=q,
-                value=q,
-                kv_cache=kv_cache,
-                attn_metadata=attn_metadata,
-                output=torch.empty_like(q),
-            )
+        out = impl.forward(
+            layer=None,
+            query=q,
+            key=q,
+            value=q,
+            kv_cache=kv_cache,
+            attn_metadata=attn_metadata,
+            output=torch.empty_like(q),
+        )
+
+        assert torch.isfinite(out).all()
 
     def test_profiling_run_returns_zeros(self):
         """attn_metadata=None (vLLM profiling pass) must zero-fill output and return."""

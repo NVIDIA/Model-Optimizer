@@ -128,6 +128,72 @@ class TestLoadFromCheckpointMetadata:
             "enable": True,
         }
 
+    def test_maps_sparse_softmax_to_dynamic_config(self):
+        """Test that checkpoint N:M sparse-softmax metadata restores layer params."""
+        meta = {
+            "config_groups": {"group_0": {"sparse_algo": "sparse_softmax"}},
+            "sparse_softmax": {
+                "sparsity_n": 2,
+                "sparsity_m": 4,
+                "dense_sink_tokens": 4,
+                "dense_recent_tokens": 128,
+            },
+            "producer": {"name": "modelopt", "version": "0.45.0"},
+        }
+        hf_config = types.SimpleNamespace(sparse_attention_config=meta)
+
+        result = load_from_checkpoint_metadata(hf_config)
+
+        assert result is not None
+        cfg, preset_name = result
+        assert preset_name == "CHECKPOINT_SPARSE_SOFTMAX"
+        layer_cfg = match_sparse_config("model.layers.0.self_attn", cfg)
+        assert layer_cfg == {
+            "method": "triton_sparse_softmax",
+            "sparsity_n": 2,
+            "sparsity_m": 4,
+            "dense_sink_tokens": 4,
+            "dense_recent_tokens": 128,
+            "backend": "triton",
+            "enable": True,
+        }
+
+    def test_maps_calibrated_softmax_skip_with_sparse_softmax_overlay(self):
+        """Test that vLLM restores combined skip-softmax plus N:M sparse-softmax."""
+        threshold_scale_factor = {
+            "formula": "a * exp(b * target_sparsity)",
+            "prefill": {"a": 2.0, "b": 3.0},
+        }
+        meta = {
+            "config_groups": {
+                "group_0": {"sparse_algo": "softmax_skip"},
+                "group_1": {"sparse_algo": "sparse_softmax"},
+            },
+            "threshold_scale_factor": threshold_scale_factor,
+            "target_sparse_ratio": {"prefill": 0.4, "decode": 0.6},
+            "sparse_softmax": {"sparsity_n": 2, "sparsity_m": 4},
+            "producer": {"name": "modelopt", "version": "0.45.0"},
+        }
+        hf_config = types.SimpleNamespace(sparse_attention_config=meta)
+
+        result = load_from_checkpoint_metadata(hf_config)
+
+        assert result is not None
+        cfg, preset_name = result
+        assert preset_name == "CHECKPOINT_CALIBRATED_SOFTMAX_SKIP_SPARSE_SOFTMAX"
+        layer_cfg = match_sparse_config("model.layers.0.self_attn", cfg)
+        assert layer_cfg == {
+            "method": "triton_skip_softmax",
+            "threshold_scale_factor": threshold_scale_factor,
+            "target_sparse_ratio": {"prefill": 0.4, "decode": 0.6},
+            "sparsity_n": 2,
+            "sparsity_m": 4,
+            "dense_sink_tokens": 0,
+            "dense_recent_tokens": 64,
+            "backend": "triton",
+            "enable": True,
+        }
+
     def test_handles_non_dict_metadata(self):
         """Test that a non-dict sparse_attention_config returns None."""
         hf_config = types.SimpleNamespace(sparse_attention_config="not a dict")
