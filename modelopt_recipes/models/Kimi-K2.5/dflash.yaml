@@ -1,0 +1,26 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Per-model DFlash offline training recipe for Kimi-K2.5.
+
+imports:
+  dflash_default: configs/speculative_decoding/dflash/default
+  dflash_training_default: configs/speculative_decoding/dflash/training_default
+
+model:
+  model_name_or_path: moonshotai/Kimi-K2.5
+  trust_remote_code: true
+  use_fake_base_for_offline: true
+
+data:
+  offline_data_path: <path to offline data>
+
+training:
+  $import: dflash_training_default
+  output_dir: ckpts/kimi-k25-dflash
+
+dflash:
+  $import: dflash_default
+  # If unset, main.py falls back to tokenizer.mask_token_id; DFlashConfig
+  # raises if neither this field nor the tokenizer provides one.
+  # dflash_mask_token_id:
