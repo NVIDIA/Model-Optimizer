@@ -202,10 +202,8 @@ def create_vlm_calibration_loop(full_model, calib_dataloader):
 
 
 def build_quant_cfg(
-    qformat,
     quant_cfg,
     awq_block_size,
-    model_type,
     moe_calib_experts_ratio: float | None = None,
 ) -> dict[str, Any]:
     quant_cfg = copy.deepcopy(quant_cfg)
@@ -222,10 +220,6 @@ def build_quant_cfg(
         if awq_block_size:
             weight_quantizer["block_sizes"][-1] = awq_block_size
 
-        # Coarser optimal scale search seems to resolve the overflow in TRT-LLM for some models
-        if qformat == "w4a8_awq" and model_type in ["gemma", "mpt"]:
-            quant_cfg["algorithm"] = {"method": "awq_lite", "alpha_step": 1}
-
     if moe_calib_experts_ratio:
         assert 0 < moe_calib_experts_ratio <= 1, "moe_calib_experts_ratio must be between 0 and 1"
         if isinstance(quant_cfg["algorithm"], str):
@@ -239,17 +233,6 @@ def build_quant_cfg(
             warnings.warn(
                 f"Quantization algorithm: {quant_cfg['algorithm']} does not support setting moe_calib_experts_ratio"
             )
-
-    # Gemma 7B has accuracy regression using alpha 1. We set 0.5 instead.
-    if model_type == "gemma" and "int8_sq" in qformat:
-        quant_cfg["algorithm"] = {"method": "smoothquant", "alpha": 0.5}
-
-    if model_type == "phi4mm":
-        # Only quantize the language model
-        quant_cfg["quant_cfg"].append({"quantizer_name": "*speech*", "enable": False})
-        quant_cfg["quant_cfg"].append({"quantizer_name": "*audio*", "enable": False})
-        quant_cfg["quant_cfg"].append({"quantizer_name": "*image*", "enable": False})
-        quant_cfg["quant_cfg"].append({"quantizer_name": "*vision*", "enable": False})
 
     return quant_cfg
 
