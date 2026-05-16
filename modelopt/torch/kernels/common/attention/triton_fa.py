@@ -79,6 +79,11 @@ _FWD_CONFIGS = [
 if "PYTEST_VERSION" in __import__("os").environ:
     _FWD_CONFIGS = [triton.Config({"BLOCK_M": 128, "BLOCK_N": 64}, num_stages=1, num_warps=4)]
 
+_MEASURE_BLOCK_M = 128
+_MEASURE_BLOCK_N = 64
+_MEASURE_NUM_STAGES = 1
+_MEASURE_NUM_WARPS = 4
+
 
 # ---------------------------------------------------------------------------
 # Paged KV cache helpers
@@ -852,11 +857,7 @@ class _Attention(torch.autograd.Function):
             sparsity_total = None
             sparsity_skipped = None
 
-        # Grid: (batch, q_heads, q_tiles). Uses a function because BLOCK_M is autotuned.
-        def grid(META):
-            return (batch, num_q_heads, triton.cdiv(max_input_len, META["BLOCK_M"]))
-
-        _attn_fwd[grid](
+        fwd_args = (
             q,
             k,
             v,
@@ -877,35 +878,58 @@ class _Attention(torch.autograd.Function):
             o.stride(1),
             lse.stride(0),
             lse.stride(1),
-            N_CTX=max_input_len,
-            kv_group_num=kv_group_num,
-            BLOCK_D=BLOCK_D,
-            IS_CAUSAL=is_causal,
-            HEAD_DIM=HEAD_DIM,
-            STORE_LSE=True,
-            SPARSITY_N=sparsity_n,
-            SPARSITY_M=sparsity_m,
-            NUM_SINK_TOKENS=num_sink_tokens,
-            DENSE_WINDOW_SIZE=dense_window_size,
-            APPLY_SKIP_SOFTMAX=apply_skip,
-            SKIP_THRESHOLD_LOG2=skip_threshold_log2,
-            Sparsity_total=sparsity_total,
-            Sparsity_skipped=sparsity_skipped,
-            MEASURE_SPARSITY=do_measure,
-            IS_PAGED=is_paged,
-            K_cache=k_cache,
-            V_cache=v_cache,
-            Block_table=block_table,
-            stride_kc_block=k_cache.stride(0) if is_paged else 0,
-            stride_kc_pos=k_cache.stride(1) if is_paged else 0,
-            stride_kc_head=k_cache.stride(2) if is_paged else 0,
-            stride_vc_block=v_cache.stride(0) if is_paged else 0,
-            stride_vc_pos=v_cache.stride(1) if is_paged else 0,
-            stride_vc_head=v_cache.stride(2) if is_paged else 0,
-            PAGE_SIZE=page_size,
-            max_blocks_per_seq=block_table.shape[1] if is_paged else 0,
-            # BLOCK_M, BLOCK_N, num_warps, num_stages chosen by autotune
         )
+        fwd_meta = {
+            "N_CTX": max_input_len,
+            "kv_group_num": kv_group_num,
+            "BLOCK_D": BLOCK_D,
+            "IS_CAUSAL": is_causal,
+            "HEAD_DIM": HEAD_DIM,
+            "STORE_LSE": True,
+            "SPARSITY_N": sparsity_n,
+            "SPARSITY_M": sparsity_m,
+            "NUM_SINK_TOKENS": num_sink_tokens,
+            "DENSE_WINDOW_SIZE": dense_window_size,
+            "APPLY_SKIP_SOFTMAX": apply_skip,
+            "SKIP_THRESHOLD_LOG2": skip_threshold_log2,
+            "Sparsity_total": sparsity_total,
+            "Sparsity_skipped": sparsity_skipped,
+            "MEASURE_SPARSITY": do_measure,
+            "IS_PAGED": is_paged,
+            "K_cache": k_cache,
+            "V_cache": v_cache,
+            "Block_table": block_table,
+            "stride_kc_block": k_cache.stride(0) if is_paged else 0,
+            "stride_kc_pos": k_cache.stride(1) if is_paged else 0,
+            "stride_kc_head": k_cache.stride(2) if is_paged else 0,
+            "stride_vc_block": v_cache.stride(0) if is_paged else 0,
+            "stride_vc_pos": v_cache.stride(1) if is_paged else 0,
+            "stride_vc_head": v_cache.stride(2) if is_paged else 0,
+            "PAGE_SIZE": page_size,
+            "max_blocks_per_seq": block_table.shape[1] if is_paged else 0,
+        }
+
+        # Grid: (batch, q_heads, q_tiles). Uses a function because BLOCK_M is autotuned.
+        def grid(META):
+            return (batch, num_q_heads, triton.cdiv(max_input_len, META["BLOCK_M"]))
+
+        if do_measure:
+            # Runtime counters mutate global tensors, so do not run them through
+            # autotune candidate trials. Use one stable config for measurement.
+            _attn_fwd.fn[grid](
+                *fwd_args,
+                **fwd_meta,
+                BLOCK_M=_MEASURE_BLOCK_M,
+                BLOCK_N=_MEASURE_BLOCK_N,
+                num_warps=_MEASURE_NUM_WARPS,
+                num_stages=_MEASURE_NUM_STAGES,
+            )
+        else:
+            _attn_fwd[grid](
+                *fwd_args,
+                **fwd_meta,
+                # BLOCK_M, BLOCK_N, num_warps, num_stages chosen by autotune
+            )
 
         # Store sparsity counters on the output tensor for retrieval by callers
         if do_measure:
