@@ -254,12 +254,17 @@ class HFEagleModel(EagleModel):
         return -loss.sum(dim=-1).mean() * self.eagle_base_lora_preservation_loss_weight
 
     @staticmethod
-    def load_draft_vocab_cache(model, d2t_path: str) -> None:
-        """Load the draft vocab cache from the given path."""
-        if d2t_path is None or model.eagle_config.draft_vocab_size >= model.eagle_config.vocab_size:
+    def load_draft_vocab_cache(model, d2t_path: str | None) -> None:
+        """Load the draft-to-target token-id mapping; required iff the draft vocab is compressed."""
+        if model.eagle_config.draft_vocab_size >= model.eagle_config.vocab_size:
             return
-        if not os.path.isfile(d2t_path):
-            raise FileNotFoundError(f"Draft vocab cache provided but not found: {d2t_path}")
+        if d2t_path is None or not os.path.isfile(d2t_path):
+            raise FileNotFoundError(
+                f"Draft vocab cache is required when draft_vocab_size "
+                f"({model.eagle_config.draft_vocab_size}) < vocab_size "
+                f"({model.eagle_config.vocab_size}); got d2t_path={d2t_path!r}. "
+                f"Set data.draft_vocab_cache in the recipe YAML."
+            )
         d2t = model.eagle_module.d2t
         loaded = torch.load(d2t_path, map_location=d2t.device, weights_only=True)
         if loaded.shape != d2t.shape or loaded.dtype != d2t.dtype:
