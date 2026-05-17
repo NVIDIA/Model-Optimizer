@@ -127,6 +127,31 @@ torchrun --nproc_per_node 1 prune_minitron.py --help
 > uneven PP by setting `--num_layers_in_first_pipeline_stage` and `--num_layers_in_last_pipeline_stage`.
 > E.g. for Qwen3-8B with 36 layers and 8 GPUs, you can set both to 3 to get 3-5-5-5-5-5-5-3 layers per GPU.
 
+### Pruning Vision-Language Models
+
+Pass a Vision-Language Model (e.g. `Qwen/Qwen3-VL-8B-Instruct`) directly to
+`--hf_model_name_or_path`. The script auto-detects the VLM, extracts the inner language
+tower to a temporary causal-LM checkpoint on rank 0, runs the regular `mcore_minitron`
+pipeline on it, and reinserts the pruned LM back into the original VLM container at
+`--output_hf_path`. The vision encoder, projector and `lm_head` are preserved bit-for-bit.
+
+```bash
+torchrun --nproc_per_node 1 prune_minitron.py \
+    --pp_size 1 \
+    --hf_model_name_or_path Qwen/Qwen3-VL-8B-Instruct \
+    --prune_export_config '{"num_layers": 34, "num_attention_heads": 32, "ffn_hidden_size": 10752}' \
+    --output_hf_path /tmp/Qwen3-VL-8B-pruned-34-32-10752 \
+    --trust_remote_code
+```
+
+> [!IMPORTANT]
+> `hidden_size` must remain constant when pruning a VLM — the vision projector outputs
+> features in the original embed dimension and changing it would silently break the
+> multimodal alignment. Prune depth (`num_layers`), attention heads
+> (`num_attention_heads`), KV groups (`num_query_groups`) and FFN width
+> (`ffn_hidden_size`) only. The script raises `ValueError` if you try to change
+> `hidden_size`.
+
 ## Distillation
 
 This section shows how to distill a student model from a teacher model in the Megatron-Bridge framework.
@@ -228,6 +253,36 @@ For more details, see the [Megatron-Bridge conversion README](https://github.com
 ### Distillation Results
 
 See [examples/pruning/](../pruning/README.md#tutorials--results) for distillation experiment results covering Minitron and Puzzletron pruning algorithms.
+
+### Distilling Vision-Language Models
+
+Pass a Vision-Language Model directly to `--student_hf_path` and/or `--teacher_hf_path`.
+The script auto-detects each input, extracts its language tower to a temporary causal-LM
+checkpoint on rank 0, runs the regular text-only distillation pipeline, and (if
+`--hf_export_path` is set) reinserts the distilled student LM back into the original
+student VLM container — preserving the vision encoder, projector and `lm_head`.
+
+Typical use case: distill a pruned VLM student against the original VLM teacher to recover
+multimodal performance after `prune_minitron.py` has already shrunk the language tower.
+
+```bash
+torchrun --nproc_per_node 8 distill.py \
+    --tp_size 8 \
+    --student_hf_path /tmp/Qwen3-VL-8B-pruned-34-32-10752 \
+    --teacher_hf_path Qwen/Qwen3-VL-8B-Instruct \
+    --data_paths 1.0 tokenized_qwen3/data1_text_document \
+    --seq_length 8192 --mbs 1 --gbs 768 --train_iters 2000 \
+    --output_dir /output/qwen3vl_distill \
+    --hf_export_path /tmp/Qwen3-VL-8B-pruned-distilled \
+    --student_hf_model Qwen/Qwen3-VL-8B-Instruct \
+    --trust_remote_code
+```
+
+> [!IMPORTANT]
+> Distillation is text-only — visual tokens are not part of the loss. The vision encoder
+> and projector are not loaded into Megatron-Core at all; they are copied verbatim from
+> the original VLM at reinsertion time. Use the pruned VLM as the student so the language
+> tower shapes match, and the unpruned VLM as the teacher.
 
 ## Post-Training Quantization
 

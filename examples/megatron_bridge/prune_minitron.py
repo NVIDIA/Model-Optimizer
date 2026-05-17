@@ -482,10 +482,97 @@ def main(args: argparse.Namespace):
     print_rank_0("Done!")
 
 
+def _maybe_wrap_for_vlm(args: argparse.Namespace) -> dict | None:
+    """If ``args.hf_model_name_or_path`` is a VLM, extract its language tower to a temp dir.
+
+    Rewrites ``args.hf_model_name_or_path`` and ``args.output_hf_path`` so the rest of the
+    pipeline operates on a plain causal LM. The returned context dict is consumed by
+    :func:`_maybe_reinsert_after_vlm_prune` after :func:`main` returns. Returns ``None`` if
+    the input is not a VLM, in which case the script behaves exactly as before.
+
+    Megatron-Core has no VLM provider, so this wrapper lets the existing mcore pruning
+    pipeline operate on the LM tower of a VLM while the surrounding container is preserved.
+    Extraction and reinsertion happen on rank 0 only; other ranks wait on a barrier.
+    """
+    import shutil
+
+    from modelopt.torch.utils.plugins.vlm import (
+        extract_text_tower_to_hf_causal_lm,
+        is_vlm_checkpoint,
+    )
+
+    if args.output_hf_path is None:
+        return None  # Megatron-only output: VLM reinsertion is HF-only.
+    if not is_vlm_checkpoint(args.hf_model_name_or_path, trust_remote_code=args.trust_remote_code):
+        return None
+
+    final_vlm_path = args.output_hf_path
+    original_vlm_path = args.hf_model_name_or_path
+    tmp_lm_in = f"{final_vlm_path}_vlm_extracted_lm"
+    tmp_lm_out = f"{final_vlm_path}_vlm_pruned_lm"
+
+    if dist.rank() == 0:
+        print_rank_0(
+            f"Detected VLM input ({original_vlm_path}); extracting language tower to "
+            f"{tmp_lm_in} before running mcore_minitron pruning."
+        )
+        shutil.rmtree(tmp_lm_in, ignore_errors=True)
+        extract_text_tower_to_hf_causal_lm(
+            original_vlm_path, tmp_lm_in, trust_remote_code=args.trust_remote_code
+        )
+    if torch.distributed.is_initialized():
+        torch.distributed.barrier()
+
+    args.hf_model_name_or_path = tmp_lm_in
+    args.output_hf_path = tmp_lm_out
+    if args.prune_intermediate_ckpt and args.prune_intermediate_ckpt.startswith(final_vlm_path):
+        # Repoint the scores cache so it lives next to the (temporary) causal LM output.
+        args.prune_intermediate_ckpt = args.prune_intermediate_ckpt.replace(
+            final_vlm_path, tmp_lm_out, 1
+        )
+
+    return {
+        "original_vlm_path": original_vlm_path,
+        "final_vlm_path": final_vlm_path,
+        "tmp_lm_in": tmp_lm_in,
+        "tmp_lm_out": tmp_lm_out,
+    }
+
+
+def _maybe_reinsert_after_vlm_prune(
+    ctx: dict | None, trust_remote_code: bool
+) -> None:
+    """Reinsert the pruned causal LM into the VLM container and clean up temp dirs."""
+    if ctx is None:
+        return
+
+    import shutil
+
+    from modelopt.torch.utils.plugins.vlm import reinsert_pruned_lm_into_vlm
+
+    if dist.rank() == 0:
+        print_rank_0(
+            f"Reinserting pruned LM from {ctx['tmp_lm_out']} into VLM container; "
+            f"writing final VLM to {ctx['final_vlm_path']}."
+        )
+        reinsert_pruned_lm_into_vlm(
+            pruned_causal_lm_path=ctx["tmp_lm_out"],
+            original_vlm_path=ctx["original_vlm_path"],
+            output_dir=ctx["final_vlm_path"],
+            trust_remote_code=trust_remote_code,
+        )
+        shutil.rmtree(ctx["tmp_lm_in"], ignore_errors=True)
+        shutil.rmtree(ctx["tmp_lm_out"], ignore_errors=True)
+    if torch.distributed.is_initialized():
+        torch.distributed.barrier()
+
+
 if __name__ == "__main__":
     dist.setup()
     args = get_args()
+    vlm_ctx = _maybe_wrap_for_vlm(args)
     try:
         main(args)
+        _maybe_reinsert_after_vlm_prune(vlm_ctx, trust_remote_code=args.trust_remote_code)
     finally:
         dist.cleanup()

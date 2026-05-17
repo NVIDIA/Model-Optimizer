@@ -344,10 +344,141 @@ def main(args: argparse.Namespace):
                 args.student_hf_path, trust_remote_code=args.trust_remote_code
             ).save_pretrained(args.hf_export_path)
 
+            # If we extracted the student LM from a VLM up front, reinsert the distilled LM
+            # back into the original VLM container now. The HF export wrote a plain causal
+            # LM at args.hf_export_path; ``_vlm_ctx["final_export_path"]`` is where the
+            # caller originally asked the assembled VLM to land.
+            _maybe_reinsert_distilled_lm_into_vlm(
+                getattr(args, "_vlm_ctx", None), trust_remote_code=args.trust_remote_code
+            )
+
+
+def _maybe_wrap_for_vlm(args: argparse.Namespace) -> dict | None:
+    """If student or teacher is a VLM, extract its language tower to a temp HF causal-LM dir.
+
+    Rewrites ``args.student_hf_path`` (and ``args.teacher_hf_path``) so the rest of the
+    pipeline operates on plain causal LMs. If ``args.hf_export_path`` is set and the
+    student is a VLM, repoints it to a temp dir so the HF export writes a causal LM that
+    we can later splice back into the original VLM container. Stashes the context on
+    ``args._vlm_ctx`` for the reinsertion step at the end of :func:`main`. Returns the
+    same context (or ``None`` if neither input is a VLM) for caller inspection.
+
+    Extraction happens on rank 0 only; other ranks wait on a barrier so the temp dirs are
+    visible by the time ``main`` starts loading from them.
+    """
+    import shutil
+
+    from modelopt.torch.utils.plugins.vlm import (
+        extract_text_tower_to_hf_causal_lm,
+        is_vlm_checkpoint,
+    )
+
+    student_is_vlm = is_vlm_checkpoint(
+        args.student_hf_path, trust_remote_code=args.trust_remote_code
+    )
+    teacher_is_vlm = is_vlm_checkpoint(
+        args.teacher_hf_path, trust_remote_code=args.trust_remote_code
+    )
+    if not student_is_vlm and not teacher_is_vlm:
+        args._vlm_ctx = None
+        return None
+
+    output_root = args.hf_export_path or args.output_dir
+    tmp_student_lm = f"{output_root}_vlm_student_lm"
+    tmp_teacher_lm = f"{output_root}_vlm_teacher_lm" if teacher_is_vlm else None
+    final_export_path = args.hf_export_path
+    tmp_export_lm = f"{output_root}_vlm_distilled_lm" if (student_is_vlm and final_export_path) else None
+    original_student_vlm_path = args.student_hf_path if student_is_vlm else None
+    student_hf_model = args.student_hf_model
+
+    if dist.rank() == 0:
+        if student_is_vlm:
+            print_rank_0(
+                f"Detected VLM student ({args.student_hf_path}); extracting language tower to "
+                f"{tmp_student_lm}."
+            )
+            shutil.rmtree(tmp_student_lm, ignore_errors=True)
+            extract_text_tower_to_hf_causal_lm(
+                args.student_hf_path,
+                tmp_student_lm,
+                trust_remote_code=args.trust_remote_code,
+            )
+        if teacher_is_vlm:
+            print_rank_0(
+                f"Detected VLM teacher ({args.teacher_hf_path}); extracting language tower to "
+                f"{tmp_teacher_lm}."
+            )
+            shutil.rmtree(tmp_teacher_lm, ignore_errors=True)
+            extract_text_tower_to_hf_causal_lm(
+                args.teacher_hf_path,
+                tmp_teacher_lm,
+                trust_remote_code=args.trust_remote_code,
+            )
+    if torch.distributed.is_initialized():
+        torch.distributed.barrier()
+
+    if student_is_vlm:
+        args.student_hf_path = tmp_student_lm
+        # ``student_hf_model`` is the architecture template AutoBridge uses for the HF
+        # export. After extraction it's a plain causal LM, so repoint the template too.
+        if args.student_hf_model is None or args.student_hf_model == original_student_vlm_path:
+            args.student_hf_model = tmp_student_lm
+        if tmp_export_lm is not None:
+            args.hf_export_path = tmp_export_lm
+    if teacher_is_vlm:
+        args.teacher_hf_path = tmp_teacher_lm
+
+    ctx = {
+        "student_is_vlm": student_is_vlm,
+        "teacher_is_vlm": teacher_is_vlm,
+        "original_student_vlm_path": original_student_vlm_path,
+        "final_export_path": final_export_path,
+        "tmp_student_lm": tmp_student_lm,
+        "tmp_teacher_lm": tmp_teacher_lm,
+        "tmp_export_lm": tmp_export_lm,
+        "original_student_hf_model": student_hf_model,
+    }
+    args._vlm_ctx = ctx
+    return ctx
+
+
+def _maybe_reinsert_distilled_lm_into_vlm(
+    ctx: dict | None, trust_remote_code: bool
+) -> None:
+    """Splice the distilled student LM back into the original student VLM container.
+
+    Rank-0-only; the surrounding rank gating lives in :func:`main`. Cleans up the
+    extraction / reinsertion temp dirs after the assembled VLM is saved.
+    """
+    if ctx is None or not ctx.get("student_is_vlm"):
+        return
+    if not ctx.get("final_export_path") or not ctx.get("tmp_export_lm"):
+        return
+
+    import shutil
+
+    from modelopt.torch.utils.plugins.vlm import reinsert_pruned_lm_into_vlm
+
+    print_rank_0(
+        f"Reinserting distilled LM from {ctx['tmp_export_lm']} into VLM container; "
+        f"writing final VLM to {ctx['final_export_path']}."
+    )
+    reinsert_pruned_lm_into_vlm(
+        pruned_causal_lm_path=ctx["tmp_export_lm"],
+        original_vlm_path=ctx["original_student_vlm_path"],
+        output_dir=ctx["final_export_path"],
+        trust_remote_code=trust_remote_code,
+    )
+    shutil.rmtree(ctx["tmp_student_lm"], ignore_errors=True)
+    if ctx.get("tmp_teacher_lm"):
+        shutil.rmtree(ctx["tmp_teacher_lm"], ignore_errors=True)
+    shutil.rmtree(ctx["tmp_export_lm"], ignore_errors=True)
+
 
 if __name__ == "__main__":
     dist.setup()
     args = get_args()
+    _maybe_wrap_for_vlm(args)
     try:
         main(args)
     finally:
