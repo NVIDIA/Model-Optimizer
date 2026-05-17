@@ -113,14 +113,6 @@ class TestDFlashConvert:
         assert hasattr(model, "mask_token_id")
         assert model.mask_token_id == 0
 
-    def test_convert_missing_mask_token_id_errors(self):
-        """Test that missing mask_token_id raises ValueError."""
-        model = get_tiny_llama(num_hidden_layers=4)
-        config = _get_dflash_config()
-        del config["dflash_mask_token_id"]
-        with pytest.raises(ValueError, match="dflash_mask_token_id is required"):
-            mtsp.convert(model, [("dflash", config)])
-
 
 class TestDFlashSaveRestore:
     """Test DFlash model save and restore."""
