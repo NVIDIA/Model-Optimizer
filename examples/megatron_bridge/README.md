@@ -145,12 +145,25 @@ torchrun --nproc_per_node 1 prune_minitron.py \
 ```
 
 > [!IMPORTANT]
-> `hidden_size` must remain constant when pruning a VLM — the vision projector outputs
-> features in the original embed dimension and changing it would silently break the
-> multimodal alignment. Prune depth (`num_layers`), attention heads
-> (`num_attention_heads`), KV groups (`num_query_groups`) and FFN width
-> (`ffn_hidden_size`) only. The script raises `ValueError` if you try to change
-> `hidden_size`.
+> The vision projector outputs features in the LM's original `hidden_size`; shrinking it
+> would silently break multimodal alignment and require retraining the projector. With
+> manual `--prune_export_config`, simply leave `hidden_size` out of the target. With NAS
+> targets (`--prune_target_params`, `--prune_target_memory_mb`, …) the searcher can pick
+> a smaller `hidden_size`, so pass `--hparams_to_skip hidden_size` to keep it fixed:
+>
+> ```bash
+> torchrun --nproc_per_node 1 prune_minitron.py \
+>     --pp_size 1 \
+>     --hf_model_name_or_path Qwen/Qwen3-VL-8B-Instruct \
+>     --prune_target_params 6e9 \
+>     --hparams_to_skip hidden_size \
+>     --output_hf_path /tmp/Qwen3-VL-8B-pruned-NAS-6B \
+>     --trust_remote_code
+> ```
+>
+> Reinsertion enforces the invariant with a clear `ValueError` if it's violated — so if
+> you intentionally want to shrink `hidden_size`, plan on retraining the vision projector
+> separately.
 
 ## Distillation
 

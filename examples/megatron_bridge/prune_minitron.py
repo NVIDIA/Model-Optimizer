@@ -531,6 +531,13 @@ def _maybe_wrap_for_vlm(args: argparse.Namespace) -> dict | None:
             final_vlm_path, tmp_lm_out, 1
         )
 
+    # NOTE: NAS targets like --prune_target_params will explore `hidden_size` unless
+    # `--hparams_to_skip hidden_size` is set, and shrinking hidden_size makes the existing
+    # vision projector unusable. We intentionally do NOT force-skip it here — that choice
+    # belongs to the user, who may want a smaller hidden_size paired with projector
+    # retraining. The hidden_size invariant in reinsert_pruned_lm_into_vlm raises a clear
+    # ValueError at reinsertion time if NAS picked a hidden_size the projector can't match.
+
     return {
         "original_vlm_path": original_vlm_path,
         "final_vlm_path": final_vlm_path,
