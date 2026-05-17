@@ -21,7 +21,7 @@ def run_vllm_latency_benchmark(model_path: Path, runtime_config: RuntimeConfig):
         "--output-len",
         str(runtime_config.generation_seq_len),
         "--batch-size",
-        str(runtime_config.batch_size),
+        "1", #str(runtime_config.batch_size),
         "--output-json",
         str(output_json_path),
         "--max-model-len",
@@ -37,6 +37,8 @@ def run_vllm_latency_benchmark(model_path: Path, runtime_config: RuntimeConfig):
         "--tensor-parallel-size",
         "1",
         "--pipeline-parallel-size",
+        "1",
+        "--optimization-level",
         "1",
     ]
     os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"

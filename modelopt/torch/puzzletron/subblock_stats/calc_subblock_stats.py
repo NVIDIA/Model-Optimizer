@@ -24,6 +24,7 @@ import warnings
 from functools import partial
 from itertools import product
 from pathlib import Path
+from pdb import run
 from typing import Iterable, Type, TypeVar
 
 import pandas as pd
@@ -33,6 +34,13 @@ from omegaconf import DictConfig, ListConfig, OmegaConf
 from tqdm import tqdm
 from transformers import PretrainedConfig
 
+from modelopt.torch.nas.subblock_stats.calc_subblock_params_and_memory import (
+    calc_subblock_active_params,
+    calculate_non_block_memory,
+    calculate_non_block_params,
+    calculate_subblock_memory,
+    calculate_subblock_params,
+)
 from modelopt.torch.utils import json_dump
 
 from ..anymodel.model_descriptor import ModelDescriptor, ModelDescriptorFactory
@@ -41,13 +49,6 @@ from ..replacement_library.replacement_utils import parse_layer_replacement
 from ..tools.checkpoint_utils import load_model_config
 from ..tools.logger import mprint
 from ..utils.parsing import format_global_config
-from modelopt.torch.nas.subblock_stats.calc_subblock_params_and_memory import (
-    calc_subblock_active_params,
-    calculate_non_block_memory,
-    calculate_non_block_params,
-    calculate_subblock_memory,
-    calculate_subblock_params,
-)
 
 __all__ = [
     "calculate_subblock_stats",
@@ -124,18 +125,20 @@ def calculate_subblock_stats(
             "synth_dataset_num_requests", 200
         )
         runtime_stats_config = calc_subblock_stats_config.get("runtime_stats", {})
+        runtime_stats_config["batch_size"] = batch_size
 
         runtime_by_subblock_dict, non_block_runtime_ms = calc_runtime_for_subblocks(
-            subblock_configs_nolayerindex,
-            runtime_stats_config,
-            vocab_size,
-            n_embd,
-            n_head,
-            master_puzzle_dir,
-            teacher_dir,
-            synth_dataset_num_requests,
-            prefill_seq_len,
-            generation_seq_len,
+            subblock_config_set=subblock_configs_nolayerindex,
+            runtime_stats_config=runtime_stats_config,
+            vocab_size=vocab_size,
+            hidden_size=n_embd,
+            num_attention_heads=n_head,
+            num_key_value_heads=8,
+            master_puzzle_dir=master_puzzle_dir,
+            tokenizer_path=teacher_dir,
+            synth_dataset_num_requests=synth_dataset_num_requests,
+            prefill_seq_len=prefill_seq_len,
+            generation_seq_len=generation_seq_len,
         )
 
     sorted_subblock_config = sorted(
@@ -486,5 +489,3 @@ def _dataclass_from_dict(
     if pd.isna(d):
         return None
     raise ValueError(f"_dataclass_from_dict: unrecognized {type(d)=} {d=}")
-
-

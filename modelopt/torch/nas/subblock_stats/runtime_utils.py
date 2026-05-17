@@ -16,6 +16,7 @@ class RuntimeConfig:
     vocab_size: int
     hidden_size: int
     num_attention_heads: int
+    num_key_value_heads: int
     master_puzzle_dir: str
     tokenizer_path: str
     synth_dataset_num_requests: int
