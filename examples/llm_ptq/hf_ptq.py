@@ -531,9 +531,10 @@ def load_model(args: argparse.Namespace):
             language_model = full_model
         else:
             if args.dataset is None:
-                args.dataset = ["cnn_dailymail", "nemotron-post-training-dataset-v2"]
+                args.dataset = ["default"]
                 warnings.warn(
-                    "No dataset specified. Defaulting to cnn_dailymail and nemotron-post-training-dataset-v2."
+                    "No dataset specified. Defaulting to the 'default' combo "
+                    "(cnn_dailymail + nemotron-post-training-dataset-v2)."
                 )
             # Adjust calib_size to match dataset length by extending or truncating as needed
             args.calib_size = (args.calib_size + [args.calib_size[-1]] * len(args.dataset))[
@@ -1238,7 +1239,7 @@ def parse_args() -> argparse.Namespace:
             "This argument will be parsed and converted as a list of ints."
         ),
         type=str,
-        default="512",
+        default="1024",
     )
     parser.add_argument(
         "--calib_seq",

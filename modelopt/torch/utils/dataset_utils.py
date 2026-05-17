@@ -195,6 +195,22 @@ SUPPORTED_DATASET_CONFIG: dict[str, Any] = {
     },
 }
 
+# Named groups of registered datasets, expanded in ``get_dataset_dataloader``.
+# Useful when callers want a single ``--dataset`` token that fans out to several
+# entries; per-dataset ``num_samples`` is split evenly across the members.
+DATASET_COMBOS: dict[str, list[str]] = {
+    "default": ["cnn_dailymail", "nemotron-post-training-dataset-v2"],
+    "nemotron-sft-mix": [
+        "nemotron-sft-instruction-following-chat-v2",
+        "nemotron-science-v1",
+        "nemotron-competitive-programming-v1",
+        "nemotron-sft-agentic-v2",
+        "nemotron-math-v2",
+        "nemotron-sft-swe-v2",
+        "nemotron-sft-multilingual-v1",
+    ],
+}
+
 __all__ = [
     "create_forward_loop",
     "download_hf_dataset_as_jsonl",
@@ -560,6 +576,20 @@ def get_dataset_dataloader(
         "dataset_name and num_samples must be the same length"
     )
 
+    expanded_names: list[str] = []
+    expanded_num_samples: list[int] = []
+    for ds_name, n in zip(dataset_name, num_samples):
+        if ds_name in DATASET_COMBOS:
+            members = DATASET_COMBOS[ds_name]
+            base, remainder = divmod(n, len(members))
+            for i, member in enumerate(members):
+                expanded_names.append(member)
+                expanded_num_samples.append(base + (1 if i < remainder else 0))
+        else:
+            expanded_names.append(ds_name)
+            expanded_num_samples.append(n)
+    dataset_name, num_samples = expanded_names, expanded_num_samples
+
     all_samples = []
     for ds_name, num_sample in zip(dataset_name, num_samples):
         samples = get_dataset_samples(
@@ -617,7 +647,7 @@ def get_supported_datasets() -> list[str]:
 
             print("Supported datasets:", get_supported_datasets())
     """
-    return list(SUPPORTED_DATASET_CONFIG.keys())
+    return list(SUPPORTED_DATASET_CONFIG.keys()) + list(DATASET_COMBOS.keys())
 
 
 @contextmanager
