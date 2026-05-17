@@ -522,6 +522,23 @@ def _unpack_compressed_linear_weights(model, ckpt_path=None):
         module.__dict__.pop("weight", None)
 
 
+def _normalize_tied_weights_keys(model):
+    """Coerce ``_tied_weights_keys`` to the dict format expected by transformers>=5.5.
+
+    Some remote modeling files (e.g. nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16)
+    still declare ``_tied_weights_keys = ["lm_head.weight"]`` (legacy list form).
+    ``_get_tied_weight_keys`` in transformers 5.5+ calls ``.keys()`` on it and
+    crashes. When ``tie_word_embeddings`` is False the declaration is stale and
+    we can drop it; otherwise we map each key to itself to preserve regex
+    behavior in ``remove_tied_weights_from_state_dict``.
+    """
+    tie_word_embeddings = getattr(getattr(model, "config", None), "tie_word_embeddings", True)
+    for module in model.modules():
+        tied = getattr(module, "_tied_weights_keys", None)
+        if isinstance(tied, list):
+            module._tied_weights_keys = {} if not tie_word_embeddings else {k: k for k in tied}
+
+
 def get_model(
     ckpt_path,
     device="cuda",
@@ -622,8 +639,16 @@ def get_model(
         else:
             architecture = hf_config.architectures[0]
 
-            if not hasattr(transformers, architecture) or "Deepseek" in architecture:
-                if not hasattr(transformers, architecture):
+            architecture_missing = not hasattr(transformers, architecture)
+            # When trust_remote_code is set and the repo ships its own auto_map,
+            # honor it instead of the built-in transformers class — the bundled
+            # modeling may not match the on-disk checkpoint (e.g. NemotronH where
+            # transformers>=5.5 introduces a packed-3D-experts layout that the
+            # repo's modeling does not use).
+            prefer_remote_code = trust_remote_code and getattr(hf_config, "auto_map", None)
+
+            if architecture_missing or "Deepseek" in architecture or prefer_remote_code:
+                if architecture_missing:
                     warnings.warn(
                         f"Architecture {architecture} not found in transformers: {transformers.__version__}. "
                         "Falling back to AutoModelForCausalLM (or AutoModel for non-causal architectures)."
@@ -677,6 +702,7 @@ def get_model(
                 **model_kwargs,
             )
     model.eval()
+    _normalize_tied_weights_keys(model)
     if has_pack_quantized_config(hf_config):
         _unpack_compressed_linear_weights(model, ckpt_path)
 
