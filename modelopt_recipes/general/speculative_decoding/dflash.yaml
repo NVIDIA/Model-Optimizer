@@ -1,4 +1,9 @@
-# Base config for DFlash training. Override fields via OmegaConf dotlist on the CLI.
+# Base config for DFlash training. A full modelopt recipe; override fields via
+# OmegaConf dotlist on the CLI (e.g. `model.model_name_or_path=...`).
+
+metadata:
+  recipe_type: speculative_dflash
+  description: DFlash training recipe (model/data/training/dflash bundled).
 
 # maps to ModelArguments (main.py)
 model:
@@ -18,7 +23,6 @@ data:
 # maps to TrainingArguments (main.py)
 training:
   # --- commonly modified ---
-  mode: dflash
   output_dir:
   num_train_epochs: 10
   per_device_train_batch_size: 1

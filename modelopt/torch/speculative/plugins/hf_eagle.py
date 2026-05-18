@@ -17,6 +17,7 @@
 
 import contextlib
 import copy
+import os
 from typing import Any
 
 import torch
@@ -24,6 +25,8 @@ from torch.nn.attention.flex_attention import BlockMask, create_block_mask
 from transformers import Cache, DynamicCache, PreTrainedModel
 from transformers.models.llama.modeling_llama import LlamaDecoderLayer
 from transformers.utils import ModelOutput
+
+from modelopt.torch.utils import print_rank_0
 
 from ...export.plugins.hf_spec_export import EagleExporter, SpeculativeDecodingExporter
 from ..eagle.conversion import EagleDMRegistry
@@ -88,7 +91,7 @@ class HFEagleModel(EagleModel):
 
             return nvtx.range(name)
         except Exception as e:
-            print(f"Failed to create NVTX range {name}: {e}")
+            print_rank_0(f"Failed to create NVTX range {name}: {e}")
             return contextlib.nullcontext()
 
     def _find_base_model_parts(self):
@@ -105,7 +108,7 @@ class HFEagleModel(EagleModel):
                 try:
                     submodule = self.get_submodule(path)
                     assert isinstance(submodule, torch.nn.Module)
-                    print(f"Found {name} at {path}")
+                    print_rank_0(f"Found {name} at {path}")
                     found_submodule = True
                     setattr(self, name, path)
                     break
@@ -128,7 +131,7 @@ class HFEagleModel(EagleModel):
             try:
                 setattr(self, name, torch.compile(getattr(self, name), dynamic=False, **kwargs))
             except Exception:  # noqa: PERF203
-                print(f"Disabling torch.compile for {name} due to compilation error.")
+                print_rank_0(f"Disabling torch.compile for {name} due to compilation error.")
 
     def get_dummy_inputs(self) -> dict:
         """Construct dummy inputs for export forward pass."""
@@ -249,6 +252,29 @@ class HFEagleModel(EagleModel):
             lora_logits
         )
         return -loss.sum(dim=-1).mean() * self.eagle_base_lora_preservation_loss_weight
+
+    @staticmethod
+    def load_draft_vocab_cache(model, d2t_path: str | None) -> None:
+        """Load the draft-to-target token-id mapping; required iff the draft vocab is compressed."""
+        if model.eagle_config.draft_vocab_size >= model.eagle_config.vocab_size:
+            return
+        if d2t_path is None or not os.path.isfile(d2t_path):
+            raise FileNotFoundError(
+                f"Draft vocab cache is required when draft_vocab_size "
+                f"({model.eagle_config.draft_vocab_size}) < vocab_size "
+                f"({model.eagle_config.vocab_size}); got d2t_path={d2t_path!r}. "
+                f"Set data.draft_vocab_cache in the recipe YAML."
+            )
+        d2t = model.eagle_module.d2t
+        loaded = torch.load(d2t_path, map_location=d2t.device, weights_only=True)
+        if loaded.shape != d2t.shape or loaded.dtype != d2t.dtype:
+            raise ValueError(
+                f"Draft vocab cache mismatch at {d2t_path}: "
+                f"got shape={tuple(loaded.shape)} dtype={loaded.dtype}, "
+                f"expected shape={tuple(d2t.shape)} dtype={d2t.dtype}."
+            )
+        d2t.copy_(loaded)
+        print_rank_0(f"Loaded draft vocab cache from {d2t_path}.")
 
     def modify(
         self,
