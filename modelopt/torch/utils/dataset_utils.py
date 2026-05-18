@@ -578,6 +578,20 @@ def get_dataset_dataloader(
         "dataset_name and num_samples must be the same length"
     )
 
+    # Reject inputs that include both a combo and one of its member datasets
+    # (e.g. ``["cnn_dailymail", "default"]``), since the combo would sample the
+    # plain entry a second time with a smaller per-member quota.
+    plain_inputs = {n for n in dataset_name if n not in DATASET_COMBOS}
+    for ds_name in dataset_name:
+        if ds_name in DATASET_COMBOS:
+            overlap = plain_inputs & set(DATASET_COMBOS[ds_name])
+            if overlap:
+                raise ValueError(
+                    f"--dataset includes both combo '{ds_name}' and its "
+                    f"member(s) {sorted(overlap)}; remove one to avoid "
+                    "double-sampling."
+                )
+
     expanded_names: list[str] = []
     expanded_num_samples: list[int] = []
     for ds_name, n in zip(dataset_name, num_samples):
