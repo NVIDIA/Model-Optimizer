@@ -135,6 +135,14 @@ def gpu_trtllm(session):
     session.run("python", "-m", "pytest", "tests/gpu_trtllm", *_cov_args())
 
 
+# Container: docker.io/vllm/vllm-openai (the published image ships vLLM + CUDA + torch).
+# Pin must stay in sync with examples/vllm_serve/Dockerfile.
+@nox.session(venv_backend="none")
+def gpu_vllm_fakequant(session):
+    session.run("python", "-m", "pip", "install", "-e", ".[hf,dev-test]")
+    session.run("python", "-m", "pytest", "tests/gpu_vllm_fakequant", *_cov_args())
+
+
 # Container: nvcr.io/nvidia/pytorch:26.01-py3 or later
 @nox.session(venv_backend="none")
 def regression(session):
