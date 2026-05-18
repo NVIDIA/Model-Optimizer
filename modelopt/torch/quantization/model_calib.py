@@ -578,14 +578,11 @@ def mse_calibrate(
                 weight_quantizer._calibrator = cal
                 _run_and_load_max_stats(weight_quantizer, lambda q: q(weight))
                 if hasattr(cal, "reset"):
-                    _wait_for_cuda_amax(weight_quantizer.amax)
+                    _wait_for_cuda_amax(weight_quantizer.amax) # TODO: Verify if this is needed and if not, remove
                     cal.reset()
 
                 pbar.update(1)
     pbar.close()
-
-    # TODO: Sync amax across distributed processes
-
 
 @torch.no_grad()
 def local_hessian_calibrate(
