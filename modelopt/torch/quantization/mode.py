@@ -16,7 +16,7 @@
 """This module contains the mode descriptor for the quantization mode."""
 
 from abc import abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 
 from modelopt.torch.opt.config import ModeloptBaseConfig
 from modelopt.torch.opt.conversion import ModelLikeModule
@@ -374,7 +374,9 @@ def get_modelike_from_algo_cfg(algo_cfg: QuantizeAlgoCfgType) -> ModeConfigList:
         return [get_modelike_from_algo_cfg(c)[0] for c in algo_cfg]
     if algo_cfg is None or isinstance(algo_cfg, str):
         algo_name, algo_cfg = algo_cfg, {}
-    elif isinstance(algo_cfg, dict):
+    elif isinstance(algo_cfg, Mapping):
+        # Normalize any mapping (incl. ModeloptBaseConfig instances) to a plain dict.
+        algo_cfg = dict(algo_cfg)
         algo_name = algo_cfg["method"]
     else:
         raise ValueError(f"Invalid config type: {type(algo_cfg)}")

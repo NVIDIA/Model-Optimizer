@@ -32,7 +32,7 @@ from pydantic import ValidationError
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.calib import MaxCalibrator
-from modelopt.torch.quantization.config import QuantizerAttributeConfig
+from modelopt.torch.quantization.config import MaxCalibConfig, QuantizerAttributeConfig
 from modelopt.torch.quantization.conversion import set_quantizer_attributes_full
 from modelopt.torch.quantization.nn.modules.tensor_quantizer import (
     SequentialQuantizer,
@@ -165,6 +165,18 @@ def test_inplace_backward_compatibility():
             model(batch)
 
     mtq.quantize(model, mtq.INT8_DEFAULT_CFG, forward_loop=forward_loop)
+
+
+def test_quantize_accepts_algo_config_instance_end_to_end():
+    """Regression test for GitHub issue #201.
+
+    A ``QuantizeAlgorithmConfig`` instance set as ``config["algorithm"]`` must not
+    raise ``ValueError`` through the full quantize/calibrate flow.
+    """
+    quant_config = copy.deepcopy(mtq.INT8_DEFAULT_CFG)
+    quant_config["algorithm"] = MaxCalibConfig(distributed_sync=False)
+    model = SimpleLinear()
+    quantize_model_and_forward(model, quant_config, [model.get_input() for _ in range(2)])
 
 
 def test_custom_calib_config():
