@@ -1385,6 +1385,10 @@ W4A8_NVFP4_FP8_CFG: QuantizeConfig = load_config(
     "configs/ptq/presets/model/w4a8_nvfp4_fp8",
     schema_type=QuantizeConfig,
 )
+W4A16_NVFP4_CFG: QuantizeConfig = load_config(
+    "configs/ptq/presets/model/w4a16_nvfp4",
+    schema_type=QuantizeConfig,
+)
 MXFP4_MLP_WEIGHT_ONLY_CFG: QuantizeConfig = load_config(
     "configs/ptq/presets/model/mxfp4_mlp_weight_only",
     schema_type=QuantizeConfig,
