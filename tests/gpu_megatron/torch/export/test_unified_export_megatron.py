@@ -183,11 +183,12 @@ def _test_unified_export_megatron(
         export_dir=str(tmp_export_dir),
     )
 
-    if quant_config and model_type != "qwen3vl":
+    if quant_config:
         _verify_model_quant_config(tmp_export_dir, quant_config, kv_cache_quant_cfg)
 
     if model_type == "qwen3vl" and rank == 0:
         _merge_vision_weights(Path(model_dir), tmp_export_dir)
+        # sanity check that the vision encoder weights were merged
         keys = []
         for sf in sorted(tmp_export_dir.glob("*.safetensors")):
             with safe_open(str(sf), framework="pt", device="cpu") as f:
@@ -198,6 +199,7 @@ def _test_unified_export_megatron(
         assert any(k.startswith("model.visual.") for k in keys), (
             "vision encoder keys missing from combined export"
         )
+        # try to load the model and run a forward pass
         vl_model = Qwen3VLForConditionalGeneration.from_pretrained(
             tmp_export_dir, torch_dtype=torch.bfloat16
         ).cuda()
