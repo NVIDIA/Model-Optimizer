@@ -18,12 +18,14 @@ End-to-end optimization of [NVIDIA-Nemotron-3-Nano-30B-A3B-BF16](https://hugging
 | Model | MMLU | MMLU Pro | GPQA Diamond | LiveCodeBench v6 | AIME 2025 | IFBench | SciCode (Subtask) | Average |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | Pruned 22B/A3.0B (no distillation) | 53.4 | 47.1 | 33.5 | 27.4 | 15.5 | 37.2 | 11.4 | 32.2 |
-| Distill @ 2.5B tokens (100 iters) | 68.6 | 73.6 | 62.5 | 57.5 | 79.1 | 58.0 | 21.6 | 60.1 |
-| Distill @  20B tokens (800 iters) | 70.8 | 74.6 | 65.3 | 61.0 | 79.8 | 63.5 | 21.2 | 62.3 |
-| Distill @  40B tokens (1600 iters) | 71.6 | 75.7 | 64.5 | 61.6 | 76.8 | 67.2 | 27.0 | 63.5 |
-| Distill @  60B tokens (2400 iters) | 71.5 | 76.0 | 67.5 | 63.0 | 77.5 | 68.0 | 28.5 | 64.6 |
-| Distill @  80B tokens (3200 iters) | 71.7 | 76.5 | 68.4 | 64.2 | 80.2 | 66.1 | 27.0 | 64.9 |
-| Distill @ 100B tokens (4000 iters) | 71.8 | 76.6 | 68.4 | 64.5 | 81.0 | 68.5 | 26.8 | 65.4 |
+| Distill @ 2.5B tokens (100 iters at 8K Seq Length) | 68.6 | 73.6 | 62.5 | 57.5 | 79.1 | 58.0 | 21.6 | 60.1 |
+| Distill @  20B tokens (800 iters at 8K Seq Length) | 70.8 | 74.6 | 65.3 | 61.0 | 79.8 | 63.5 | 21.2 | 62.3 |
+| Distill @  40B tokens (1600 iters at 8K Seq Length) | 71.6 | 75.7 | 64.5 | 61.6 | 76.8 | 67.2 | 27.0 | 63.5 |
+| Distill @  60B tokens (2400 iters at 8K Seq Length) | 71.5 | 76.0 | 67.5 | 63.0 | 77.5 | 68.0 | 28.5 | 64.6 |
+| Distill @  80B tokens (3200 iters at 8K Seq Length) | 71.7 | 76.5 | 68.4 | 64.2 | 80.2 | 66.1 | 27.0 | 64.9 |
+| Distill @ 100B tokens (4000 iters at 8K Seq Length) | 71.8 | 76.6 | 68.4 | 64.5 | 81.0 | 68.5 | 26.8 | 65.4 |
+| Distill @ 105B tokens (+200 iters at 32K Seq Length) | 71.9 | 76.8 | 69.7 | 65.6 | 87.3 | 69.7 | 25.5 | 66.6 |
+| Distill @ 125B tokens (+1000 iters at 32K Seq Length) | 71.9 | 76.7 | 70.4 | 65.7 | 88.0 | 68.8 | 28.2 | 67.1 |
 | NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 (official, 31.6B/A3.6B) | 73.5 | 78.0 | 70.3 | 67.9 | 87.1 | 68.9 | 33.6 | 68.5 |
 
 > [!NOTE]
