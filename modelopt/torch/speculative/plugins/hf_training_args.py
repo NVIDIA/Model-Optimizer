@@ -55,6 +55,10 @@ class DataArguments(BaseModel):
     vlm_img_dir: str | None = None
     vlm_processor: str | None = None
     sample_size: int = -1
+    streaming_server_url: str | None = None
+    streaming_model_name: str | None = None
+    streaming_max_seq_len: int = 2048
+    streaming_prefetch: int = 64
 
     @field_validator("sample_size")
     @classmethod

@@ -74,7 +74,28 @@ def make_speculative_data_module(
             chat_template = f.read()
         print_rank_0(f"Loaded chat template from {template_path}")
 
-    if data_args.offline_data_path is None:
+    streaming_url = getattr(data_args, "streaming_server_url", None)
+    if streaming_url is not None:
+        # Streaming: trainer is a client of a running vllm serve
+        print_rank_0(f"Streaming hidden states from {streaming_url}")
+        from collect_hidden_states.streaming_dataset import StreamingHiddenStatesDataset
+
+        ds = load_dataset("json", data_files=data_args.data_path, split="train")
+        if data_args.sample_size > 0:
+            ds = ds.select(range(data_args.sample_size))
+        entries = list(ds)
+        train_dataset = StreamingHiddenStatesDataset(
+            entries=entries,
+            tokenizer=tokenizer,
+            server_url=streaming_url,
+            model=data_args.streaming_model_name,
+            max_seq_len=data_args.streaming_max_seq_len,
+            answer_only_loss=answer_only_loss,
+            prefetch=data_args.streaming_prefetch,
+        )
+        data_collator = EagleOfflineDataCollator(train_len=train_len)
+
+    elif data_args.offline_data_path is None:
         train_dataset = ShardedDataset("json", data_files=data_args.data_path)
 
         if not data_args.vlm_processor:

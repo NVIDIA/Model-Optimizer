@@ -174,7 +174,10 @@ def train():
 
     checkpoint = training_args.resume_from_checkpoint or last_checkpoint
 
-    use_offline_training = recipe.data.offline_data_path is not None
+    use_offline_training = (
+        recipe.data.offline_data_path is not None
+        or recipe.data.streaming_server_url is not None
+    )
 
     if checkpoint:
         with patch_transformers5_params_loading():
