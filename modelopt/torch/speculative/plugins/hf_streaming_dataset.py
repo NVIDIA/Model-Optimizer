@@ -18,8 +18,8 @@
 Design notes:
 - One epoch only. Spinning a fresh producer thread per __iter__ would re-issue
   every request, which is wasteful; if you want multi-epoch, pre-dump instead.
-- Pre-tokenizes the entire (sliced) conversation list at __init__ so we can
-  expose __len__ to HF Trainer. For very large jsonls, slice beforehand.
+- Lazy: tokenization and HTTP fetch happen during iteration. Memory and startup
+  time stay O(prefetch), so this scales to large jsonls without pre-slicing.
 - IterableDataset, not Map: random __getitem__(i) would defeat the point of
   letting vLLM batch many in-flight requests.
 - Strict requirement: dataloader_num_workers=0. Multiple workers would each
@@ -33,7 +33,6 @@ import contextlib
 import os
 import queue
 import threading
-from typing import Any
 
 import httpx
 import torch
@@ -44,6 +43,18 @@ from transformers.trainer_pt_utils import LabelSmoother
 IGNORE_TOKEN_ID = LabelSmoother.ignore_index
 
 _SENTINEL = object()
+
+
+def estimate_conversation_chars(entry: dict) -> int:
+    """Sum the character count across all messages in an entry.
+
+    Cheap proxy for tokenized length when paired with a chars-per-token ratio. Returns
+    0 for entries with no recognized messages list, so callers can filter them out too.
+    """
+    convs = entry.get("messages") or entry.get("conversations") or []
+    if not isinstance(convs, list):
+        return 0
+    return sum(len(m.get("content", "") or "") for m in convs if isinstance(m, dict))
 
 
 def _tokenize_with_loss_mask(
@@ -90,51 +101,30 @@ class StreamingHiddenStatesDataset(IterableDataset):
         tokenizer,
         server_url: str,
         model: str,
-        max_seq_len: int = 2048,
-        min_seq_len: int = 10,
         answer_only_loss: bool = False,
         prefetch: int = 64,
         request_timeout: float = 600.0,
     ):
-        """Eagerly tokenize ``entries`` and filter by length; HTTP fetches happen lazily during iteration."""
+        """Hold a reference to ``entries``; tokenize and fetch lazily during iteration.
+
+        Length filtering is the caller's responsibility — apply a cheap char-count
+        pre-filter (see :func:`estimate_conversation_chars`) on ``entries`` before
+        constructing the dataset. Anything that slips through and exceeds vllm's
+        ``max_model_len`` will be rejected by the server and skipped silently.
+        """
+        if not entries:
+            raise ValueError("entries is empty")
+        self.entries = entries
+        self.tokenizer = tokenizer
         self.server_url = server_url.rstrip("/")
         self.model = model
+        self.answer_only_loss = answer_only_loss
         self.prefetch = prefetch
         self.request_timeout = request_timeout
-
-        # Eagerly tokenize + filter so we can give HF Trainer a __len__.
-        self.samples: list[dict[str, Any]] = []
-        skipped, invalid = 0, 0
-        for entry in entries:
-            cid = entry.get("conversation_id") or entry.get("uuid")
-            if cid is None:
-                invalid += 1
-                continue
-            convs = entry.get("messages") or entry.get("conversations")
-            if not convs or not isinstance(convs, list):
-                invalid += 1
-                continue
-            input_ids, loss_mask = _tokenize_with_loss_mask(tokenizer, convs, answer_only_loss)
-            n = input_ids.shape[-1]
-            if not (min_seq_len <= n <= max_seq_len):
-                skipped += 1
-                continue
-            self.samples.append(
-                {
-                    "cid": str(cid),
-                    "token_ids": input_ids.squeeze(0).tolist(),
-                    "loss_mask": loss_mask,
-                }
-            )
-        print(
-            f"[StreamingHiddenStatesDataset] kept {len(self.samples)} "
-            f"(skipped {skipped} by length, {invalid} invalid)"
-        )
-        if not self.samples:
-            raise ValueError("No samples remain after filtering")
+        print(f"[StreamingHiddenStatesDataset] {len(entries)} entries")
 
     def __len__(self) -> int:
-        return len(self.samples)
+        return len(self.entries)
 
     def __iter__(self):
         # Fresh producer per __iter__ call so re-iteration (which shouldn't
@@ -173,28 +163,68 @@ class StreamingHiddenStatesDataset(IterableDataset):
                     q.get_nowait()
 
     async def _produce(self, q: queue.Queue, stop: threading.Event):
-        sem = asyncio.Semaphore(self.prefetch)
+        """Stream entries through a sliding window of at most ``prefetch`` in-flight tasks."""
         timeout = httpx.Timeout(self.request_timeout, connect=10.0)
         async with httpx.AsyncClient(timeout=timeout) as client:
-
-            async def one(sample):
-                async with sem:
-                    if stop.is_set():
-                        return
-                    try:
-                        result = await self._fetch(client, sample)
-                    except Exception as e:
-                        print(f"[streaming] error for {sample['cid']}: {e!r}")
-                        return
-                    if result is None:
-                        return
-                    # Blocking put → backpressure when trainer is slow
-                    await asyncio.to_thread(q.put, result)
-
+            pending: set[asyncio.Task] = set()
+            entries_iter = iter(self.entries)
+            exhausted = False
             try:
-                await asyncio.gather(*[one(s) for s in self.samples], return_exceptions=False)
+                while not stop.is_set():
+                    while len(pending) < self.prefetch and not exhausted:
+                        try:
+                            entry = next(entries_iter)
+                        except StopIteration:
+                            exhausted = True
+                            break
+                        pending.add(asyncio.create_task(self._process(client, entry, q, stop)))
+                    if not pending:
+                        break
+                    _, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
             finally:
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    await asyncio.gather(*pending, return_exceptions=True)
                 q.put(_SENTINEL)
+
+    async def _process(
+        self,
+        client: httpx.AsyncClient,
+        entry: dict,
+        q: queue.Queue,
+        stop: threading.Event,
+    ) -> None:
+        """Tokenize -> POST -> load safetensors -> enqueue. Malformed or vllm-rejected samples are skipped."""
+        if stop.is_set():
+            return
+        sample = await asyncio.to_thread(self._tokenize_entry, entry)
+        if sample is None:
+            return
+        try:
+            result = await self._fetch(client, sample)
+        except Exception as e:
+            print(f"[streaming] error for {sample['cid']}: {e!r}")
+            return
+        if result is None:
+            return
+        # Blocking put -> backpressure when trainer is slow.
+        await asyncio.to_thread(q.put, result)
+
+    def _tokenize_entry(self, entry: dict) -> dict | None:
+        """Tokenize a single entry. Returns None for entries missing ``cid`` or ``messages``."""
+        cid = entry.get("conversation_id") or entry.get("uuid")
+        convs = entry.get("messages") or entry.get("conversations")
+        if cid is None or not convs or not isinstance(convs, list):
+            return None
+        input_ids, loss_mask = _tokenize_with_loss_mask(
+            self.tokenizer, convs, self.answer_only_loss
+        )
+        return {
+            "cid": str(cid),
+            "token_ids": input_ids.squeeze(0).tolist(),
+            "loss_mask": loss_mask,
+        }
 
     async def _fetch(self, client: httpx.AsyncClient, sample: dict) -> dict | None:
         r = await client.post(
@@ -213,9 +243,9 @@ class StreamingHiddenStatesDataset(IterableDataset):
         if path is None:
             print(f"[streaming] no hidden_states_path for {sample['cid']}")
             return None
-        return await asyncio.to_thread(self._load_and_format, path, sample)
+        return await asyncio.to_thread(self._load_and_format, path, sample["loss_mask"])
 
-    def _load_and_format(self, path: str, sample: dict) -> dict:
+    def _load_and_format(self, path: str, loss_mask: torch.Tensor) -> dict:
         with safe_open(path, framework="pt") as f:
             token_ids_tensor = f.get_tensor("token_ids")
             hidden_states_tensor = f.get_tensor("hidden_states")  # [seq, n_layers, hidden]
@@ -226,7 +256,6 @@ class StreamingHiddenStatesDataset(IterableDataset):
         )
 
         n = token_ids_tensor.shape[0]
-        loss_mask = sample["loss_mask"]
         if loss_mask.shape[0] > n:
             loss_mask = loss_mask[:n]
         elif loss_mask.shape[0] < n:

@@ -80,18 +80,25 @@ def make_speculative_data_module(
         print_rank_0(f"Streaming hidden states from {data_args.streaming_server_url}")
         from modelopt.torch.speculative.plugins.hf_streaming_dataset import (
             StreamingHiddenStatesDataset,
+            estimate_conversation_chars,
         )
 
         ds = load_dataset("json", data_files=data_args.data_path, split="train")
         if data_args.sample_size > 0:
             ds = ds.select(range(data_args.sample_size))
-        entries = list(ds)
+        # Cheap char-based pre-filter to skip obviously-too-long conversations before
+        # tokenization. ~4 chars/token is a typical mid for English-dominant mixed text;
+        # anything that slips through and exceeds vllm's max_model_len is rejected
+        # server-side and skipped silently.
+        char_budget = data_args.streaming_max_seq_len * 4
+        n_before = len(ds)
+        ds = ds.filter(lambda e: estimate_conversation_chars(e) <= char_budget)
+        print_rank_0(f"Pre-filtered {n_before} -> {len(ds)} entries by char budget ({char_budget})")
         train_dataset = StreamingHiddenStatesDataset(
-            entries=entries,
+            entries=ds,
             tokenizer=tokenizer,
             server_url=data_args.streaming_server_url,
             model=data_args.streaming_model_name,
-            max_seq_len=data_args.streaming_max_seq_len,
             answer_only_loss=answer_only_loss,
             prefetch=data_args.streaming_prefetch,
         )
