@@ -78,7 +78,9 @@ def make_speculative_data_module(
     if streaming_url is not None:
         # Streaming: trainer is a client of a running vllm serve
         print_rank_0(f"Streaming hidden states from {streaming_url}")
-        from collect_hidden_states.streaming_dataset import StreamingHiddenStatesDataset
+        from modelopt.torch.speculative.plugins.hf_streaming_dataset import (
+            StreamingHiddenStatesDataset,
+        )
 
         ds = load_dataset("json", data_files=data_args.data_path, split="train")
         if data_args.sample_size > 0:
