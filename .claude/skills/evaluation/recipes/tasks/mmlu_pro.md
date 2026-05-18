@@ -2,7 +2,7 @@
 
 ## Task Details
 
-- Task: `ns_mmlu_pro`
+- Task: `nemo_skills.ns_mmlu_pro`
 - Harness: NeMo Skills, chat
 - Primary metric: `symbolic_correct`
 - Run time: Short
@@ -15,7 +15,7 @@
 Use this inside the top-level `evaluation.tasks` list:
 
 ```yaml
-- name: ns_mmlu_pro
+- name: nemo_skills.ns_mmlu_pro
   nemo_evaluator_config:
     config:
       params:

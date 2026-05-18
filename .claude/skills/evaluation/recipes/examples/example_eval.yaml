@@ -63,7 +63,7 @@ evaluation:
         api_key_name: DUMMY_API_KEY
   tasks:
   # Knowledge (chat endpoint, short)
-    - name: ns_mmlu_pro
+    - name: nemo_skills.ns_mmlu_pro
       nemo_evaluator_config:
         config:
           params:
