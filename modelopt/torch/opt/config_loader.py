@@ -33,11 +33,13 @@ except ImportError:  # Python < 3.11
 import re
 import sys
 from pathlib import Path
-from typing import Any, Union, get_args, get_origin, get_type_hints
+from typing import Any, TypeVar, Union, get_args, get_origin, get_type_hints, overload
 
 import yaml
 from pydantic import TypeAdapter
 from typing_extensions import NotRequired, Required, is_typeddict
+
+from modelopt.torch.opt.config import ModeloptBaseConfig
 
 
 @dataclass
@@ -592,29 +594,74 @@ def _find_import_marker(obj: Any, context: str = "root") -> tuple[Any, str] | No
     return None
 
 
+_SchemaT = TypeVar("_SchemaT", bound=ModeloptBaseConfig)
+
+
+@overload
+def load_config(
+    config_path: str | Path | Traversable,
+    *,
+    schema_type: type[_SchemaT],
+) -> _SchemaT: ...
+
+
+@overload
+def load_config(
+    config_path: str | Path | Traversable,
+    *,
+    schema_type: type[list[_SchemaT]],
+) -> list[_SchemaT]: ...
+
+
+@overload
+def load_config(
+    config_path: str | Path | Traversable,
+    *,
+    schema_type: None = None,
+) -> Any: ...
+
+
 def load_config(
     config_path: str | Path | Traversable,
     *,
     schema_type: Any | None = None,
-) -> dict[str, Any] | list[Any]:
+) -> Any:
     """Load a YAML config and resolve all ``$import`` references.
 
     This is the primary config loading entry point.  It loads the YAML file,
-    resolves any ``imports`` / ``$import`` directives, and returns the final
-    config dict or list.
+    resolves any ``imports`` / ``$import`` directives, and returns either a
+    validated instance of the schema (when one is known) or the raw resolved
+    payload.
 
-    ``schema_type`` supplies a typing context for import resolution when the
-    file itself has no ``modelopt-schema`` comment. It is intentionally not a
-    request to validate the top-level file. Top-level files are validated only
-    when they declare ``modelopt-schema``; imported snippets are stricter and
-    must always declare ``modelopt-schema``.
+    The effective schema is selected as follows:
+
+    1. If ``schema_type`` is provided, it is used.
+    2. Otherwise, the schema declared by the file's ``# modelopt-schema:``
+       comment (if any) is used.
+
+    When an effective schema is selected, the resolved payload is validated
+    and returned as an instance of that schema — e.g., a Pydantic model
+    instance for ``BaseModel`` schemas, or a validated dict / list for
+    ``TypedDict`` / ``list[TypedDict]`` schemas. If neither source supplies a
+    schema, the raw resolved dict or list is returned unchanged.
+
+    Imported snippets are stricter and must always declare ``modelopt-schema``;
+    they are validated during import resolution regardless of the top-level
+    selection above.
     """
     raw = _load_raw_config_with_schema(config_path)
     data = raw.data
     declared_schema_type = _schema_type(raw.schema) if raw.schema else None
-    resolver_schema_type = declared_schema_type or schema_type
+    effective_schema_type = schema_type if schema_type is not None else declared_schema_type
 
     if isinstance(data, (_ListSnippet, dict)):
-        data = _resolve_imports(data, schema_type=resolver_schema_type)
-    _validate_modelopt_schema(raw.schema, data, raw.path, schema_type=declared_schema_type)
-    return data
+        data = _resolve_imports(data, schema_type=effective_schema_type)
+    if effective_schema_type is None:
+        return data
+    try:
+        return TypeAdapter(effective_schema_type).validate_python(data)
+    except Exception as exc:
+        raise ValueError(
+            f"Config file {raw.path} does not match modelopt-schema "
+            f"{_schema_label(effective_schema_type, raw.schema)!r}: {exc}"
+        ) from exc
