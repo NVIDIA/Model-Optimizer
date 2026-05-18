@@ -1208,32 +1208,16 @@ def _load_quantizer_attribute_dict(config_path: str) -> dict[str, Any]:
     raise TypeError(f"{config_path} must declare QuantizerAttributeConfig.")
 
 
-def _quantizer_cfg_entry_to_dict(entry: QuantizerCfgEntry | Mapping[str, Any]) -> dict[str, Any]:
-    """Dump a typed quant_cfg entry back to the public legacy dict shape."""
-    if isinstance(entry, QuantizerCfgEntry):
-        return entry.model_dump(exclude_unset=True)
-    if isinstance(entry, Mapping):
-        return dict(entry)
-    raise TypeError(f"Expected QuantizerCfgEntry or mapping, got {type(entry).__name__}.")
+def _load_quantize_config_dict(config_path: str) -> dict[str, Any]:
+    """Load a schema-backed QuantizeConfig YAML as a public legacy-shape dict."""
+    return load_config(config_path, schema_type=QuantizeConfig).model_dump(exclude_unset=True)
 
 
 def _load_quantizer_cfg_dict_list(config_path: str) -> list[dict[str, Any]]:
     """Load a QuantizerCfgEntry or QuantizerCfgListConfig snippet as public dict entries."""
     config = load_config(config_path)
-    if isinstance(config, QuantizerCfgEntry):
-        return [_quantizer_cfg_entry_to_dict(config)]
-    if isinstance(config, list):
-        entries = []
-        for entry in config:
-            if not isinstance(entry, (QuantizerCfgEntry, Mapping)):
-                raise TypeError(
-                    f"Expected QuantizerCfgEntry or mapping, got {type(entry).__name__}."
-                )
-            entries.append(_quantizer_cfg_entry_to_dict(entry))
-        return entries
-    if isinstance(config, Mapping):
-        return [_quantizer_cfg_entry_to_dict(config)]
-    raise TypeError(f"{config_path} must declare QuantizerCfgEntry or QuantizerCfgListConfig.")
+    entries = config if isinstance(config, list) else [config]
+    return [e.model_dump(exclude_unset=True) for e in entries]
 
 
 _base_disable_all: list[dict[str, Any]] = _load_quantizer_cfg_dict_list(
@@ -1252,162 +1236,102 @@ _nvfp4_cfg: dict[str, Any] = _load_quantizer_attribute_dict("configs/numerics/nv
 
 _nvfp4_cfg_bs32: dict[str, Any] = _load_quantizer_attribute_dict("configs/numerics/nvfp4_bs32")
 
-INT8_DEFAULT_CFG: QuantizeConfig = load_config(
-    "configs/ptq/presets/model/int8",
-    schema_type=QuantizeConfig,
+INT8_DEFAULT_CFG: dict[str, Any] = _load_quantize_config_dict("configs/ptq/presets/model/int8")
+INT8_SMOOTHQUANT_CFG: dict[str, Any] = _load_quantize_config_dict(
+    "configs/ptq/presets/model/int8_smoothquant"
 )
-INT8_SMOOTHQUANT_CFG: QuantizeConfig = load_config(
-    "configs/ptq/presets/model/int8_smoothquant",
-    schema_type=QuantizeConfig,
+INT8_WEIGHT_ONLY_CFG: dict[str, Any] = _load_quantize_config_dict(
+    "configs/ptq/presets/model/int8_weight_only"
 )
-INT8_WEIGHT_ONLY_CFG: QuantizeConfig = load_config(
-    "configs/ptq/presets/model/int8_weight_only",
-    schema_type=QuantizeConfig,
+FP8_DEFAULT_CFG: dict[str, Any] = _load_quantize_config_dict("configs/ptq/presets/model/fp8")
+MAMBA_MOE_FP8_AGGRESSIVE_CFG: dict[str, Any] = _load_quantize_config_dict(
+    "configs/ptq/presets/model/mamba_moe_fp8_aggressive"
 )
-FP8_DEFAULT_CFG: QuantizeConfig = load_config(
-    "configs/ptq/presets/model/fp8",
-    schema_type=QuantizeConfig,
+MAMBA_MOE_FP8_CONSERVATIVE_CFG: dict[str, Any] = _load_quantize_config_dict(
+    "configs/ptq/presets/model/mamba_moe_fp8_conservative"
 )
-MAMBA_MOE_FP8_AGGRESSIVE_CFG: QuantizeConfig = load_config(
-    "configs/ptq/presets/model/mamba_moe_fp8_aggressive",
-    schema_type=QuantizeConfig,
+FP8_PER_CHANNEL_PER_TOKEN_CFG: dict[str, Any] = _load_quantize_config_dict(
+    "configs/ptq/presets/model/fp8_per_channel_per_token"
 )
-MAMBA_MOE_FP8_CONSERVATIVE_CFG: QuantizeConfig = load_config(
-    "configs/ptq/presets/model/mamba_moe_fp8_conservative",
-    schema_type=QuantizeConfig,
+FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG: dict[str, Any] = _load_quantize_config_dict(
+    "configs/ptq/presets/model/fp8_2d_blockwise_weight_only"
 )
-FP8_PER_CHANNEL_PER_TOKEN_CFG: QuantizeConfig = load_config(
-    "configs/ptq/presets/model/fp8_per_channel_per_token",
-    schema_type=QuantizeConfig,
+INT4_BLOCKWISE_WEIGHT_ONLY_CFG: dict[str, Any] = _load_quantize_config_dict(
+    "configs/ptq/presets/model/int4_blockwise_weight_only"
 )
-FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG: QuantizeConfig = load_config(
-    "configs/ptq/presets/model/fp8_2d_blockwise_weight_only",
-    schema_type=QuantizeConfig,
+INT4_AWQ_CFG: dict[str, Any] = _load_quantize_config_dict("configs/ptq/presets/model/int4_awq")
+W4A8_AWQ_BETA_CFG: dict[str, Any] = _load_quantize_config_dict(
+    "configs/ptq/presets/model/w4a8_awq_beta"
 )
-INT4_BLOCKWISE_WEIGHT_ONLY_CFG: QuantizeConfig = load_config(
-    "configs/ptq/presets/model/int4_blockwise_weight_only",
-    schema_type=QuantizeConfig,
+MXFP8_DEFAULT_CFG: dict[str, Any] = _load_quantize_config_dict("configs/ptq/presets/model/mxfp8")
+MXFP6_DEFAULT_CFG: dict[str, Any] = _load_quantize_config_dict("configs/ptq/presets/model/mxfp6")
+MXFP4_DEFAULT_CFG: dict[str, Any] = _load_quantize_config_dict("configs/ptq/presets/model/mxfp4")
+W4A8_MXFP4_FP8_CFG: dict[str, Any] = _load_quantize_config_dict(
+    "configs/ptq/presets/model/w4a8_mxfp4_fp8"
 )
-INT4_AWQ_CFG: QuantizeConfig = load_config(
-    "configs/ptq/presets/model/int4_awq",
-    schema_type=QuantizeConfig,
-)
-W4A8_AWQ_BETA_CFG: QuantizeConfig = load_config(
-    "configs/ptq/presets/model/w4a8_awq_beta",
-    schema_type=QuantizeConfig,
-)
-MXFP8_DEFAULT_CFG: QuantizeConfig = load_config(
-    "configs/ptq/presets/model/mxfp8",
-    schema_type=QuantizeConfig,
-)
-MXFP6_DEFAULT_CFG: QuantizeConfig = load_config(
-    "configs/ptq/presets/model/mxfp6",
-    schema_type=QuantizeConfig,
-)
-MXFP4_DEFAULT_CFG: QuantizeConfig = load_config(
-    "configs/ptq/presets/model/mxfp4",
-    schema_type=QuantizeConfig,
-)
-W4A8_MXFP4_FP8_CFG: QuantizeConfig = load_config(
-    "configs/ptq/presets/model/w4a8_mxfp4_fp8",
-    schema_type=QuantizeConfig,
-)
-MXINT8_DEFAULT_CFG: QuantizeConfig = load_config(
-    "configs/ptq/presets/model/mxint8",
-    schema_type=QuantizeConfig,
-)
+MXINT8_DEFAULT_CFG: dict[str, Any] = _load_quantize_config_dict("configs/ptq/presets/model/mxint8")
 
 # KV-cache configs are designed to be merged with a primary quantization config (e.g.
 # FP8_DEFAULT_CFG) that already contains _base_disable_all.  They intentionally omit both
 # _base_disable_all and "algorithm" because these are provided by the primary config.
-FP8_KV_CFG: QuantizeConfig = load_config(
-    "configs/ptq/presets/kv/fp8",
-    schema_type=QuantizeConfig,
-)
-FP8_AFFINE_KV_CFG: QuantizeConfig = load_config(
-    "configs/ptq/presets/kv/fp8_affine",
-    schema_type=QuantizeConfig,
-)
+FP8_KV_CFG: dict[str, Any] = _load_quantize_config_dict("configs/ptq/presets/kv/fp8")
+FP8_AFFINE_KV_CFG: dict[str, Any] = _load_quantize_config_dict("configs/ptq/presets/kv/fp8_affine")
 
-NVFP4_DEFAULT_CFG: QuantizeConfig = load_config(
-    "configs/ptq/presets/model/nvfp4",
-    schema_type=QuantizeConfig,
+NVFP4_DEFAULT_CFG: dict[str, Any] = _load_quantize_config_dict("configs/ptq/presets/model/nvfp4")
+NVFP4_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG: dict[str, Any] = _load_quantize_config_dict(
+    "configs/ptq/presets/model/nvfp4_w4a4_weight_mse_fp8_sweep"
 )
-NVFP4_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG: QuantizeConfig = load_config(
-    "configs/ptq/presets/model/nvfp4_w4a4_weight_mse_fp8_sweep",
-    schema_type=QuantizeConfig,
+NVFP4_W4A4_WEIGHT_LOCAL_HESSIAN_CFG: dict[str, Any] = _load_quantize_config_dict(
+    "configs/ptq/presets/model/nvfp4_w4a4_weight_local_hessian"
 )
-NVFP4_W4A4_WEIGHT_LOCAL_HESSIAN_CFG: QuantizeConfig = load_config(
-    "configs/ptq/presets/model/nvfp4_w4a4_weight_local_hessian",
-    schema_type=QuantizeConfig,
+MAMBA_MOE_NVFP4_AGGRESSIVE_CFG: dict[str, Any] = _load_quantize_config_dict(
+    "configs/ptq/presets/model/mamba_moe_nvfp4_aggressive"
 )
-MAMBA_MOE_NVFP4_AGGRESSIVE_CFG: QuantizeConfig = load_config(
-    "configs/ptq/presets/model/mamba_moe_nvfp4_aggressive",
-    schema_type=QuantizeConfig,
+MAMBA_MOE_NVFP4_CONSERVATIVE_CFG: dict[str, Any] = _load_quantize_config_dict(
+    "configs/ptq/presets/model/mamba_moe_nvfp4_conservative"
 )
-MAMBA_MOE_NVFP4_CONSERVATIVE_CFG: QuantizeConfig = load_config(
-    "configs/ptq/presets/model/mamba_moe_nvfp4_conservative",
-    schema_type=QuantizeConfig,
+NVFP4_AWQ_LITE_CFG: dict[str, Any] = _load_quantize_config_dict(
+    "configs/ptq/presets/model/nvfp4_awq_lite"
 )
-NVFP4_AWQ_LITE_CFG: QuantizeConfig = load_config(
-    "configs/ptq/presets/model/nvfp4_awq_lite",
-    schema_type=QuantizeConfig,
+NVFP4_AWQ_CLIP_CFG: dict[str, Any] = _load_quantize_config_dict(
+    "configs/ptq/presets/model/nvfp4_awq_clip"
 )
-NVFP4_AWQ_CLIP_CFG: QuantizeConfig = load_config(
-    "configs/ptq/presets/model/nvfp4_awq_clip",
-    schema_type=QuantizeConfig,
+NVFP4_AWQ_FULL_CFG: dict[str, Any] = _load_quantize_config_dict(
+    "configs/ptq/presets/model/nvfp4_awq_full"
 )
-NVFP4_AWQ_FULL_CFG: QuantizeConfig = load_config(
-    "configs/ptq/presets/model/nvfp4_awq_full",
-    schema_type=QuantizeConfig,
+NVFP4_AFFINE_KV_CFG: dict[str, Any] = _load_quantize_config_dict(
+    "configs/ptq/presets/kv/nvfp4_affine"
 )
-NVFP4_AFFINE_KV_CFG: QuantizeConfig = load_config(
-    "configs/ptq/presets/kv/nvfp4_affine",
-    schema_type=QuantizeConfig,
+NVFP4_KV_CFG: dict[str, Any] = _load_quantize_config_dict("configs/ptq/presets/kv/nvfp4")
+NVFP4_FP8_MHA_CONFIG: dict[str, Any] = _load_quantize_config_dict(
+    "configs/ptq/presets/model/nvfp4_fp8_mha"
 )
-NVFP4_KV_CFG: QuantizeConfig = load_config(
-    "configs/ptq/presets/kv/nvfp4",
-    schema_type=QuantizeConfig,
+NVFP4_KV_ROTATE_CFG: dict[str, Any] = _load_quantize_config_dict(
+    "configs/ptq/presets/kv/nvfp4_rotate"
 )
-NVFP4_FP8_MHA_CONFIG: QuantizeConfig = load_config(
-    "configs/ptq/presets/model/nvfp4_fp8_mha",
-    schema_type=QuantizeConfig,
+NVFP4_SVDQUANT_DEFAULT_CFG: dict[str, Any] = _load_quantize_config_dict(
+    "configs/ptq/presets/model/nvfp4_svdquant"
 )
-NVFP4_KV_ROTATE_CFG: QuantizeConfig = load_config(
-    "configs/ptq/presets/kv/nvfp4_rotate",
-    schema_type=QuantizeConfig,
+W4A8_NVFP4_FP8_CFG: dict[str, Any] = _load_quantize_config_dict(
+    "configs/ptq/presets/model/w4a8_nvfp4_fp8"
 )
-NVFP4_SVDQUANT_DEFAULT_CFG: QuantizeConfig = load_config(
-    "configs/ptq/presets/model/nvfp4_svdquant",
-    schema_type=QuantizeConfig,
+W4A16_NVFP4_CFG: dict[str, Any] = _load_quantize_config_dict(
+    "configs/ptq/presets/model/w4a16_nvfp4"
 )
-W4A8_NVFP4_FP8_CFG: QuantizeConfig = load_config(
-    "configs/ptq/presets/model/w4a8_nvfp4_fp8",
-    schema_type=QuantizeConfig,
+MXFP4_MLP_WEIGHT_ONLY_CFG: dict[str, Any] = _load_quantize_config_dict(
+    "configs/ptq/presets/model/mxfp4_mlp_weight_only"
 )
-W4A16_NVFP4_CFG: QuantizeConfig = load_config(
-    "configs/ptq/presets/model/w4a16_nvfp4",
-    schema_type=QuantizeConfig,
+NVFP4_MLP_WEIGHT_ONLY_CFG: dict[str, Any] = _load_quantize_config_dict(
+    "configs/ptq/presets/model/nvfp4_mlp_weight_only"
 )
-MXFP4_MLP_WEIGHT_ONLY_CFG: QuantizeConfig = load_config(
-    "configs/ptq/presets/model/mxfp4_mlp_weight_only",
-    schema_type=QuantizeConfig,
+NVFP4_EXPERTS_ONLY_CFG: dict[str, Any] = _load_quantize_config_dict(
+    "configs/ptq/presets/model/nvfp4_experts_only"
 )
-NVFP4_MLP_WEIGHT_ONLY_CFG: QuantizeConfig = load_config(
-    "configs/ptq/presets/model/nvfp4_mlp_weight_only",
-    schema_type=QuantizeConfig,
+NVFP4_MLP_ONLY_CFG: dict[str, Any] = _load_quantize_config_dict(
+    "configs/ptq/presets/model/nvfp4_mlp_only"
 )
-NVFP4_EXPERTS_ONLY_CFG: QuantizeConfig = load_config(
-    "configs/ptq/presets/model/nvfp4_experts_only",
-    schema_type=QuantizeConfig,
-)
-NVFP4_MLP_ONLY_CFG: QuantizeConfig = load_config(
-    "configs/ptq/presets/model/nvfp4_mlp_only",
-    schema_type=QuantizeConfig,
-)
-NVFP4_OMLP_ONLY_CFG: QuantizeConfig = load_config(
-    "configs/ptq/presets/model/nvfp4_omlp_only",
-    schema_type=QuantizeConfig,
+NVFP4_OMLP_ONLY_CFG: dict[str, Any] = _load_quantize_config_dict(
+    "configs/ptq/presets/model/nvfp4_omlp_only"
 )
 
 # DO NOT ADD NEW CONFIGS HERE. If you want to add a new general recipe, add it to
