@@ -45,7 +45,7 @@ def _with_language_model_prefix(
         prefix = m.target_name_or_prefix
         if prefix.startswith("model."):
             prefix = "model.language_model." + prefix[len("model.") :]
-        result[key] = type(m)(target_name_or_prefix=prefix, func_kwargs=m.func_kwargs)
+        result[key] = type(m)(target_name_or_prefix=prefix, func_kwargs=dict(m.func_kwargs))
     return result
 
 

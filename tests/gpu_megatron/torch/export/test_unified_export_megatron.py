@@ -30,7 +30,6 @@ from _test_utils.torch.transformers_models import (
 )
 from safetensors import safe_open
 from safetensors.torch import save_file
-from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLForConditionalGeneration
 
 import modelopt.torch.quantization as mtq
 import modelopt.torch.speculative as mtsp
@@ -182,6 +181,8 @@ def _test_unified_export_megatron(
     if quant_config:
         _verify_model_quant_config(tmp_export_dir, quant_config, kv_cache_quant_cfg)
 
+    if model_type == "qwen3vl":
+        torch.distributed.barrier()
     if model_type == "qwen3vl" and rank == 0:
         _merge_vision_weights(Path(model_dir), tmp_export_dir)
         # sanity check that the vision encoder weights were merged
@@ -196,6 +197,8 @@ def _test_unified_export_megatron(
             "vision encoder keys missing from combined export"
         )
         # try to load the model and run a forward pass
+        from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLForConditionalGeneration
+
         vl_model = Qwen3VLForConditionalGeneration.from_pretrained(
             tmp_export_dir, torch_dtype=torch.bfloat16
         ).cuda()
@@ -218,6 +221,7 @@ def _test_unified_export_megatron(
         ("llama", None, "FP8_DEFAULT_CFG", "FP8_KV_CFG"),
         ("llama", "eagle", None, None),
         ("llama", "medusa", None, None),
+        ("qwen3vl", None, None, None),
         ("qwen3vl", None, "FP8_DEFAULT_CFG", None),
     ],
 )
