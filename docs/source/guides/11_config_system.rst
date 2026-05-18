@@ -72,11 +72,12 @@ The base class adds ModelOpt-specific behavior on top of Pydantic:
   config objects can be used wherever dict-style access is expected:
   ``cfg["field"]`` / ``cfg["field"] = value``, ``cfg.get("field")``,
   ``key in cfg``, ``len(cfg)``, ``iter(cfg)``, ``cfg.keys()``, ``cfg.values()``,
-  ``cfg.items()``, ``cfg.update({...})``, plus the ``MutableMapping`` mixins
-  ``pop``, ``setdefault``, and ``popitem``. Keys use aliases when defined.
-  ``cfg["unknown"] = ...`` raises ``KeyError`` rather than silently adding a
-  new key; ``del cfg["field"]`` raises ``TypeError`` because schema fields are
-  not removable.
+  ``cfg.items()``, ``cfg.update({...})``, and ``cfg.setdefault("field", ...)``
+  all work. Keys use aliases when defined. Schema fields are not removable, so
+  ``del cfg["field"]`` raises ``TypeError`` and the ``MutableMapping`` mixins
+  that delete (``pop(existing_key)``, ``popitem``, ``clear``) inherit that
+  failure mode. ``cfg["unknown"] = ...`` raises ``KeyError`` rather than
+  silently adding a new key.
 * ``__init_subclass__`` registers each config subclass with PyTorch safe
   globals so config objects can be deserialized by ``torch.load`` with
   ``weights_only=True``.
@@ -212,8 +213,9 @@ on recipes.
 
 The loader is not a general templating engine. It only understands YAML data,
 ``imports``, ``$import``, schema comments, and the ``eXmY`` numeric shorthand.
-Application-specific CLI or environment overrides should be applied by the
-caller before final schema validation.
+``load_config()`` itself does not apply CLI or environment overrides;
+higher-level wrappers may add them on top (for example, ``load_recipe()``
+accepts an ``overrides=`` dotlist that is merged before final validation).
 
 
 Self-contained YAML
@@ -515,22 +517,31 @@ The config system is shared infrastructure. Current consumers include:
   more type-specific config sections.
 
 Recipes do not define separate config semantics. ``load_recipe()`` is a
-consumer-specific wrapper that uses ``load_config()`` to resolve YAML, supplies
-schema context for each recipe section, and returns a validated
-``ModelOptRecipeBase`` subclass instance. Both ``metadata`` and ``quantize``
-sections are required:
+consumer-specific wrapper that uses ``load_config()`` to resolve YAML, dispatches
+on ``metadata.recipe_type`` to select the right recipe schema (PTQ today, plus
+Eagle / DFlash / Medusa speculative-decoding variants), and returns a validated
+``ModelOptRecipeBase`` subclass instance. The required body section depends on
+the recipe type (``quantize`` for PTQ, ``eagle`` / ``dflash`` / ``medusa`` for
+the speculative-decoding variants); ``metadata`` is required for all types.
 
-* A **file recipe** is a single YAML file that declares
-  ``# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe`` and is loaded
-  with ``schema_type=ModelOptPTQRecipe``; both ``metadata`` and ``quantize``
-  sections live in the same file. ``load_config()`` returns a fully validated
-  ``ModelOptPTQRecipe`` instance directly.
-* A **directory recipe** is a directory containing ``metadata.yaml`` /
-  ``metadata.yml`` and ``quantize.yaml`` / ``quantize.yml``. Each file is
+* A **file recipe** is a single YAML file with ``metadata`` and the
+  algorithm-specific body section. ``load_recipe()`` peeks at
+  ``metadata.recipe_type``, picks the matching recipe schema, and calls
+  ``load_config(file, schema_type=schema)`` so list-typed ``$import`` resolution
+  knows the element types. The returned object is a validated recipe instance
+  (for example a ``ModelOptPTQRecipe``).
+* A **directory recipe** is a directory containing ``metadata.yml`` /
+  ``metadata.yaml`` and ``quantize.yml`` / ``quantize.yaml``. Each file is
   loaded with its own schema (``RecipeMetadataConfig`` and ``QuantizeConfig``,
-  both ``ModeloptBaseConfig`` subclasses), and the recipe is assembled as
-  ``ModelOptPTQRecipe(metadata=..., quantize=...)`` from the validated
-  sections.
+  both ``ModeloptBaseConfig`` subclasses), and the recipe is assembled from the
+  validated sections. The directory form is currently PTQ-only;
+  speculative-decoding recipes use the single-file form.
+
+``load_recipe()`` also accepts an optional ``overrides`` argument: a list of
+``key.path=value`` dotlist strings applied on top of the resolved YAML before
+final Pydantic validation. Values are parsed with ``yaml.safe_load`` so
+``foo.bar=true`` becomes a ``bool`` and ``axis=[0,1]`` becomes a ``list``. The
+merge uses OmegaConf and is supported only for single-file recipes.
 
 The general contract remains the same: YAML authoring data resolves to plain
 Python data, Python schemas validate the result, and validated configs are
