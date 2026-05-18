@@ -79,7 +79,8 @@ def make_speculative_data_module(
         # Trainer is an HTTP client of a running vllm serve; samples stream in lazily.
         print_rank_0(f"Streaming hidden states from {data_args.streaming_server_url}")
         from modelopt.torch.speculative.plugins.hf_streaming_dataset import (
-            StreamingHiddenStatesDataset,
+            EagleVllmStreamingHiddenStatesConfig,
+            EagleVllmStreamingHiddenStatesDataset,
             estimate_conversation_chars,
         )
 
@@ -94,13 +95,16 @@ def make_speculative_data_module(
         n_before = len(ds)
         ds = ds.filter(lambda e: estimate_conversation_chars(e) <= char_budget)
         print_rank_0(f"Pre-filtered {n_before} -> {len(ds)} entries by char budget ({char_budget})")
-        train_dataset = StreamingHiddenStatesDataset(
-            entries=ds,
-            tokenizer=tokenizer,
+        streaming_cfg = EagleVllmStreamingHiddenStatesConfig(
             server_url=data_args.streaming_server_url,
             model=data_args.streaming_model_name,
             answer_only_loss=answer_only_loss,
             prefetch=data_args.streaming_prefetch,
+        )
+        train_dataset = EagleVllmStreamingHiddenStatesDataset(
+            entries=ds,
+            tokenizer=tokenizer,
+            config=streaming_cfg,
         )
         data_collator = EagleOfflineDataCollator(train_len=train_len)
 

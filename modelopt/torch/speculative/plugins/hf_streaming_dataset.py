@@ -13,16 +13,30 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Streaming dataset that fetches per-sample hidden states from a running ``vllm serve`` over HTTP.
+"""Streaming datasets that fetch per-sample hidden states from a running inference server.
+
+The base class :class:`StreamingHiddenStatesDataset` owns all the backend-/algorithm-
+agnostic plumbing: threading, queue, tokenization, the bounded sliding-window
+producer, loss_mask alignment, and HTTP-client lifecycle. Concrete subclasses
+specialize along two axes:
+
+- **Backend** (how to talk to the server, how to decode the response): override
+  :meth:`_fetch`.
+- **Algorithm** (how to shape the per-sample dict for the trainer): override
+  :meth:`_format`.
+
+:class:`EagleVllmStreamingHiddenStatesDataset` is currently the only concrete
+combination (Eagle algorithm × vLLM backend); future combinations (e.g.
+Eagle × TRT-LLM, distillation × vLLM) live as sibling subclasses.
 
 Design notes:
-- One epoch only. Spinning a fresh producer thread per __iter__ would re-issue
+- One epoch only. Spinning a fresh producer thread per ``__iter__`` would re-issue
   every request, which is wasteful; if you want multi-epoch, pre-dump instead.
 - Lazy: tokenization and HTTP fetch happen during iteration. Memory and startup
   time stay O(prefetch), so this scales to large jsonls without pre-slicing.
-- IterableDataset, not Map: random __getitem__(i) would defeat the point of
-  letting vLLM batch many in-flight requests.
-- Strict requirement: dataloader_num_workers=0. Multiple workers would each
+- IterableDataset, not Map: random ``__getitem__(i)`` would defeat the point of
+  letting the backend batch many in-flight requests.
+- Strict requirement: ``dataloader_num_workers=0``. Multiple workers would each
   spawn their own asyncio thread and hammer the server with duplicate work.
 """
 
@@ -33,12 +47,17 @@ import contextlib
 import os
 import queue
 import threading
+from typing import TYPE_CHECKING
 
 import httpx
 import torch
+from pydantic import BaseModel, ConfigDict, field_validator
 from safetensors import safe_open
 from torch.utils.data import IterableDataset
 from transformers.trainer_pt_utils import LabelSmoother
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 IGNORE_TOKEN_ID = LabelSmoother.ignore_index
 
@@ -92,36 +111,48 @@ def _tokenize_with_loss_mask(
     return input_ids, loss_mask
 
 
+class StreamingHiddenStatesConfig(BaseModel):
+    """Static tuning knobs for :class:`StreamingHiddenStatesDataset`.
+
+    Bundles the rarely-changing settings (loss masking, concurrency, HTTP timeout)
+    so the dataset ctor takes only ``entries`` + ``tokenizer`` + this config.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    answer_only_loss: bool = False
+    prefetch: int = 64
+    request_timeout: float = 600.0
+
+
 class StreamingHiddenStatesDataset(IterableDataset):
-    """IterableDataset that pulls per-sample hidden states from a running ``vllm serve``."""
+    """Base class: stream per-sample hidden states from a running inference server.
+
+    Backend- and algorithm-agnostic; subclasses implement :meth:`_fetch` (backend) and
+    :meth:`_format` (algorithm).
+    """
+
+    config_cls: type[StreamingHiddenStatesConfig] = StreamingHiddenStatesConfig
 
     def __init__(
         self,
         entries: list[dict],
         tokenizer,
-        server_url: str,
-        model: str,
-        answer_only_loss: bool = False,
-        prefetch: int = 64,
-        request_timeout: float = 600.0,
+        config: StreamingHiddenStatesConfig | None = None,
     ):
         """Hold a reference to ``entries``; tokenize and fetch lazily during iteration.
 
         Length filtering is the caller's responsibility — apply a cheap char-count
         pre-filter (see :func:`estimate_conversation_chars`) on ``entries`` before
-        constructing the dataset. Anything that slips through and exceeds vllm's
-        ``max_model_len`` will be rejected by the server and skipped silently.
+        constructing the dataset. Anything that slips through and gets rejected by
+        the server is skipped silently.
         """
         if not entries:
             raise ValueError("entries is empty")
         self.entries = entries
         self.tokenizer = tokenizer
-        self.server_url = server_url.rstrip("/")
-        self.model = model
-        self.answer_only_loss = answer_only_loss
-        self.prefetch = prefetch
-        self.request_timeout = request_timeout
-        print(f"[StreamingHiddenStatesDataset] {len(entries)} entries")
+        self.config = config if config is not None else self.config_cls()
+        print(f"[{type(self).__name__}] {len(entries)} entries")
 
     def __len__(self) -> int:
         return len(self.entries)
@@ -129,7 +160,7 @@ class StreamingHiddenStatesDataset(IterableDataset):
     def __iter__(self):
         # Fresh producer per __iter__ call so re-iteration (which shouldn't
         # happen in 1-epoch streaming) at least doesn't deadlock.
-        q: queue.Queue = queue.Queue(maxsize=self.prefetch)
+        q: queue.Queue = queue.Queue(maxsize=self.config.prefetch)
         stop = threading.Event()
 
         def run():
@@ -153,8 +184,10 @@ class StreamingHiddenStatesDataset(IterableDataset):
                 try:
                     yield item["data"]
                 finally:
-                    with contextlib.suppress(OSError):
-                        os.unlink(item["path"])
+                    cleanup = item.get("cleanup")
+                    if cleanup is not None:
+                        with contextlib.suppress(Exception):
+                            cleanup()
         finally:
             stop.set()
             # Drain any leftover items so producer can exit
@@ -164,14 +197,14 @@ class StreamingHiddenStatesDataset(IterableDataset):
 
     async def _produce(self, q: queue.Queue, stop: threading.Event):
         """Stream entries through a sliding window of at most ``prefetch`` in-flight tasks."""
-        timeout = httpx.Timeout(self.request_timeout, connect=10.0)
+        timeout = httpx.Timeout(self.config.request_timeout, connect=10.0)
         async with httpx.AsyncClient(timeout=timeout) as client:
             pending: set[asyncio.Task] = set()
             entries_iter = iter(self.entries)
             exhausted = False
             try:
                 while not stop.is_set():
-                    while len(pending) < self.prefetch and not exhausted:
+                    while len(pending) < self.config.prefetch and not exhausted:
                         try:
                             entry = next(entries_iter)
                         except StopIteration:
@@ -195,21 +228,23 @@ class StreamingHiddenStatesDataset(IterableDataset):
         q: queue.Queue,
         stop: threading.Event,
     ) -> None:
-        """Tokenize -> POST -> load safetensors -> enqueue. Malformed or vllm-rejected samples are skipped."""
+        """Tokenize -> backend fetch -> align -> format -> enqueue. Errors are logged and skipped."""
         if stop.is_set():
             return
         sample = await asyncio.to_thread(self._tokenize_entry, entry)
         if sample is None:
             return
         try:
-            result = await self._fetch(client, sample)
+            fetched = await self._fetch(client, sample)
         except Exception as e:
             print(f"[streaming] error for {sample['cid']}: {e!r}")
             return
-        if result is None:
+        if fetched is None:
             return
+        token_ids, hidden_states, loss_mask, cleanup = fetched
+        data = self._format(token_ids, hidden_states, loss_mask)
         # Blocking put -> backpressure when trainer is slow.
-        await asyncio.to_thread(q.put, result)
+        await asyncio.to_thread(q.put, {"data": data, "cleanup": cleanup})
 
     def _tokenize_entry(self, entry: dict) -> dict | None:
         """Tokenize a single entry. Returns None for entries missing ``cid`` or ``messages``."""
@@ -218,7 +253,7 @@ class StreamingHiddenStatesDataset(IterableDataset):
         if cid is None or not convs or not isinstance(convs, list):
             return None
         input_ids, loss_mask = _tokenize_with_loss_mask(
-            self.tokenizer, convs, self.answer_only_loss
+            self.tokenizer, convs, self.config.answer_only_loss
         )
         return {
             "cid": str(cid),
@@ -226,11 +261,88 @@ class StreamingHiddenStatesDataset(IterableDataset):
             "loss_mask": loss_mask,
         }
 
-    async def _fetch(self, client: httpx.AsyncClient, sample: dict) -> dict | None:
+    async def _fetch(
+        self,
+        client: httpx.AsyncClient,
+        sample: dict,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, Callable[[], None] | None] | None:
+        """Backend hook: send the request and decode hidden states.
+
+        Override in subclass.
+
+        Returns:
+            ``(token_ids, hidden_states, loss_mask, cleanup)`` where ``token_ids`` is
+            the tokens the server actually saw, ``hidden_states`` is shaped
+            ``(seq, n_captured_layers, hidden)``, ``loss_mask`` is aligned to
+            ``token_ids`` (the backend is responsible for reconciling any mismatch
+            between ``sample["loss_mask"]`` and the server's token count), and
+            ``cleanup`` is an optional callable invoked after the consumer is done
+            with this sample (e.g. to unlink a scratch file). Return ``None`` to
+            skip the sample.
+        """
+        raise NotImplementedError("Subclasses must implement _fetch")
+
+    def _format(
+        self,
+        token_ids: torch.Tensor,
+        hidden_states: torch.Tensor,
+        loss_mask: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        """Algorithm hook: shape one sample's tensors into the dict the trainer expects.
+
+        Override in subclass.
+
+        Args:
+            token_ids: ``LongTensor`` of shape ``(seq,)`` — what the server actually tokenized.
+            hidden_states: tensor of shape ``(seq, n_captured_layers, hidden)``.
+            loss_mask: ``LongTensor`` of shape ``(seq,)``, aligned to ``token_ids``.
+        """
+        raise NotImplementedError("Subclasses must implement _format")
+
+
+class EagleVllmStreamingHiddenStatesConfig(StreamingHiddenStatesConfig):
+    """Adds vLLM endpoint info on top of :class:`StreamingHiddenStatesConfig`."""
+
+    server_url: str
+    model: str
+
+    @field_validator("server_url")
+    @classmethod
+    def _strip_trailing_slash(cls, v: str) -> str:
+        return v.rstrip("/")
+
+
+class EagleVllmStreamingHiddenStatesDataset(StreamingHiddenStatesDataset):
+    """Eagle (algorithm) × vLLM (backend).
+
+    Talks to a ``vllm serve`` instance configured with the
+    ``ExampleHiddenStatesConnector`` KV-transfer connector (the server dumps captured
+    layers to a per-request safetensors file under ``shared_storage_path`` and
+    returns the path via ``kv_transfer_params.hidden_states_path``). Expects vLLM
+    to capture ``aux_layers + [final_layer]`` along ``hidden_states.shape[1]``.
+    """
+
+    config_cls = EagleVllmStreamingHiddenStatesConfig
+
+    def __init__(
+        self,
+        entries: list[dict],
+        tokenizer,
+        config: EagleVllmStreamingHiddenStatesConfig,
+    ):
+        """Same as the base; ``config`` must include ``server_url`` and ``model``."""
+        super().__init__(entries=entries, tokenizer=tokenizer, config=config)
+        self.config: EagleVllmStreamingHiddenStatesConfig = config
+
+    async def _fetch(
+        self,
+        client: httpx.AsyncClient,
+        sample: dict,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, Callable[[], None] | None] | None:
         r = await client.post(
-            f"{self.server_url}/v1/completions",
+            f"{self.config.server_url}/v1/completions",
             json={
-                "model": self.model,
+                "model": self.config.model,
                 "prompt": sample["token_ids"],
                 "max_tokens": 1,
                 "temperature": 0,
@@ -238,42 +350,58 @@ class StreamingHiddenStatesDataset(IterableDataset):
         )
         r.raise_for_status()
         body = r.json()
-        kvt = body.get("kv_transfer_params") or {}
-        path = kvt.get("hidden_states_path")
+        path = (body.get("kv_transfer_params") or {}).get("hidden_states_path")
         if path is None:
             print(f"[streaming] no hidden_states_path for {sample['cid']}")
             return None
-        return await asyncio.to_thread(self._load_and_format, path, sample["loss_mask"])
+        token_ids, hidden_states, cleanup = await asyncio.to_thread(self._load_safetensors, path)
+        # vLLM may capture a different number of positions than we tokenized (e.g. the
+        # decode step from ``max_tokens=1``, or BOS handling edge cases). Realign here.
+        loss_mask = self._align_loss_mask(sample["loss_mask"], token_ids.shape[0])
+        return token_ids, hidden_states, loss_mask, cleanup
 
-    def _load_and_format(self, path: str, loss_mask: torch.Tensor) -> dict:
+    @staticmethod
+    def _load_safetensors(
+        path: str,
+    ) -> tuple[torch.Tensor, torch.Tensor, Callable[[], None]]:
         with safe_open(path, framework="pt") as f:
-            token_ids_tensor = f.get_tensor("token_ids")
-            hidden_states_tensor = f.get_tensor("hidden_states")  # [seq, n_layers, hidden]
+            token_ids = f.get_tensor("token_ids")
+            hidden_states = f.get_tensor("hidden_states")  # [seq, n_layers, hidden]
 
-        output_hidden_states = hidden_states_tensor[:, -1, :]
-        aux_hidden_states = hidden_states_tensor[:, :-1, :].reshape(
-            hidden_states_tensor.shape[0], -1
-        )
+        def cleanup():
+            with contextlib.suppress(OSError):
+                os.unlink(path)
 
-        n = token_ids_tensor.shape[0]
+        return token_ids, hidden_states, cleanup
+
+    @staticmethod
+    def _align_loss_mask(loss_mask: torch.Tensor, n: int) -> torch.Tensor:
+        """Trim or right-pad ``loss_mask`` to length ``n`` to match what vLLM tokenized to."""
         if loss_mask.shape[0] > n:
-            loss_mask = loss_mask[:n]
-        elif loss_mask.shape[0] < n:
+            return loss_mask[:n]
+        if loss_mask.shape[0] < n:
             pad = torch.ones(n - loss_mask.shape[0], dtype=loss_mask.dtype)
-            loss_mask = torch.cat([loss_mask, pad], dim=0)
+            return torch.cat([loss_mask, pad], dim=0)
+        return loss_mask
 
-        input_ids = token_ids_tensor.to(torch.int64)
+    def _format(
+        self,
+        token_ids: torch.Tensor,
+        hidden_states: torch.Tensor,
+        loss_mask: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        base_model_hidden_states = hidden_states[:, -1, :]
+        aux_hidden_states = hidden_states[:, :-1, :].reshape(hidden_states.shape[0], -1)
+
+        input_ids = token_ids.to(torch.int64)
         labels = torch.full_like(input_ids, IGNORE_TOKEN_ID)
         labels[..., :-1] = input_ids[..., 1:]
 
         return {
-            "path": path,
-            "data": {
-                "input_ids": input_ids,
-                "base_model_hidden_states": output_hidden_states,
-                "aux_hidden_states": aux_hidden_states,
-                "attention_mask": torch.ones_like(input_ids),
-                "loss_mask": loss_mask,
-                "labels": labels,
-            },
+            "input_ids": input_ids,
+            "base_model_hidden_states": base_model_hidden_states,
+            "aux_hidden_states": aux_hidden_states,
+            "attention_mask": torch.ones_like(input_ids),
+            "loss_mask": loss_mask,
+            "labels": labels,
         }
