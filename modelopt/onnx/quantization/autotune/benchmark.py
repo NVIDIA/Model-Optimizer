@@ -553,7 +553,7 @@ class TrtExecBenchmark(Benchmark):
                     latency_pattern = _STD_PATTERN
             if result.returncode != 0:
                 self.logger.error(
-                    f"Failed to run trtexec_safe or trtexec with '--safe'\n {result.stdout}"
+                    f"Failed to run trtexec_safe or trtexec with '--safe'\n{result.stdout}\n{result.stderr}"
                 )
                 return float("inf")
             if not (match := re.search(latency_pattern, result.stdout, re.IGNORECASE)):
