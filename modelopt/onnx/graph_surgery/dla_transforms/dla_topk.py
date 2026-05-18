@@ -44,7 +44,7 @@ Conditions for the rewrite:
 * ``k`` tensor is a scalar initializer.
 * Indices output feeds exactly one ``Cast`` → one ``Reshape`` → one ``Tile`` → one ``Cast``
   → one ``GatherElements`` chain.
-* ``GatherElements`` axis == 2 (the canonical DLA form).
+* ``GatherElements`` axis == 1 (the canonical DLA form).
 * Tile repeats: all 1 except ``repeats[gather_axis + 1]`` which equals the tiled dim size.
 * Input ``x`` has shape ``[1, 1, 1, N]`` (first three dims equal 1, last > 1).
 """

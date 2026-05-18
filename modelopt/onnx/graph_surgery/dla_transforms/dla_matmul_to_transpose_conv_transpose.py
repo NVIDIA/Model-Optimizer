@@ -74,7 +74,13 @@ def _apply_matmul_to_transpose_conv_transpose(model):
     fallback_batch: dict[int, tuple[list, list]] = {}
 
     def update_initializers(graph, name, trans_b=False, is_const_dq_init=False):
-        """Reshape weight initializer to a 4-D Conv kernel in-place.
+        """Reshape weight initializer to a 4-D Conv kernel.
+
+        If the initializer is shared by other consumers besides the current
+        rewrite, a clone (new initializer + cloned DQ if applicable) is
+        created so other consumers keep the original layout; this MatMul/Gemm
+        gets rewired to the clone. When the initializer has a single consumer
+        it's rewritten in place as before.
 
         Maps:
           2D [C,K] → [K,C,1,1]  (or [C,K,1,1] when transB)
@@ -141,13 +147,37 @@ def _apply_matmul_to_transpose_conv_transpose(model):
                     init_arr = np.transpose(init_arr, (1, 2, 3, 0))
                     shape = (c, k, m, n)
 
+            reshaped_arr = np.reshape(init_arr, shape)
+            if len(cache.get_consumers(name)) > 1:
+                clone_idx = len(replacements_batch)
+                new_init_name = f"{name}_conv4d_{clone_idx}"
+                new_init_proto = numpy_helper.from_array(reshaped_arr, new_init_name)
+                add_unique_initializers(graph, unique_initializer, [new_init_proto])
+                if dq_node is not None:
+                    new_dq_out = f"{dq_node.output[0]}_conv4d_{clone_idx}"
+                    dq_clone = helper.make_node(
+                        "DequantizeLinear",
+                        inputs=[new_init_name, *list(dq_node.input[1:])],
+                        outputs=[new_dq_out],
+                        name=f"{dq_node.name or name}_conv4d_{clone_idx}",
+                    )
+                    dq_clone.attribute.extend(dq_node.attribute)
+                    if axis is not None:
+                        for attr in dq_clone.attribute:
+                            if attr.name == "axis":
+                                attr.i = axis
+                    nodes_to_add.append(dq_clone)
+                    node.input[1] = new_dq_out
+                else:
+                    node.input[1] = new_init_name
+                return
+
             if dq_node is not None:
                 for attr in dq_node.attribute:
                     if attr.name == "axis":
                         attr.i = axis
                         dq_node.name = f"{dq_node.name}_axis_updated"
 
-            reshaped_arr = np.reshape(init_arr, shape)
             initializer.CopyFrom(numpy_helper.from_array(reshaped_arr, initializer.name))
 
     # ── Separate eligible and ineligible nodes in one pass ───────────────────
@@ -156,6 +186,17 @@ def _apply_matmul_to_transpose_conv_transpose(model):
     for node in graph.node:
         if node.op_type not in ("MatMul", "Gemm"):
             continue
+        if node.op_type == "Gemm":
+            alpha = next((float(attr.f) for attr in node.attribute if attr.name == "alpha"), 1.0)
+            beta = next((float(attr.f) for attr in node.attribute if attr.name == "beta"), 1.0)
+            if alpha != 1.0 or beta != 1.0:
+                logger.debug(
+                    "Gemm %r: non-default alpha=%s or beta=%s; skipping DLA matmul rewrite.",
+                    node.name,
+                    alpha,
+                    beta,
+                )
+                continue
         if check_to_apply_transpose(node, model, tensor_name_dim_map):
             eligible_nodes.append(node)
         else:
@@ -185,16 +226,65 @@ def _apply_matmul_to_transpose_conv_transpose(model):
             dq_src = is_const_dq_input(initializer_names, inp, graph)
             init_name = dq_src if dq_src else (inp if inp in initializer_names else None)
             if init_name is not None:
-                # Static weight: expand initializer dims in-place with 1-padding
+                # Static weight: expand initializer dims with 1-padding. Clone
+                # rather than mutate when shared with other consumers so they
+                # keep the original layout.
+                arr = None
+                init_proto = None
                 for init in graph.initializer:
                     if init.name == init_name:
+                        init_proto = init
                         arr = numpy_helper.to_array(init)
-                        if arr.ndim < 4:
-                            new_shape = pad4d(list(arr.shape))
-                            init.CopyFrom(
-                                numpy_helper.from_array(arr.reshape(new_shape), init.name)
-                            )
                         break
+                if arr is None or init_proto is None or arr.ndim >= 4:
+                    continue
+                new_shape = pad4d(list(arr.shape))
+                axis_delta = len(new_shape) - arr.ndim
+                new_arr = arr.reshape(new_shape)
+                is_shared = len(cache.get_consumers(init_name)) > 1
+                if is_shared:
+                    new_init_name = f"{init_name}_mm4d_{cnt_fb}"
+                    new_init_proto = numpy_helper.from_array(new_arr, new_init_name)
+                    add_unique_initializers(graph, unique_initializer, [new_init_proto])
+                    if dq_src is not None:
+                        dq_node = next(
+                            (
+                                n
+                                for n in graph.node
+                                if n.op_type == "DequantizeLinear"
+                                and n.input
+                                and n.input[0] == init_name
+                                and n.output[0] == inp
+                            ),
+                            None,
+                        )
+                        if dq_node is not None:
+                            new_dq_out = f"{inp}_mm4d_{cnt_fb}"
+                            dq_clone = helper.make_node(
+                                "DequantizeLinear",
+                                inputs=[new_init_name, *list(dq_node.input[1:])],
+                                outputs=[new_dq_out],
+                                name=f"{dq_node.name or init_name}_mm4d_{cnt_fb}",
+                            )
+                            dq_clone.attribute.extend(dq_node.attribute)
+                            for attr in dq_clone.attribute:
+                                if attr.name == "axis" and attr.i >= 0:
+                                    attr.i += axis_delta
+                            pre.append(dq_clone)
+                            node.input[inp_idx] = new_dq_out
+                        else:
+                            node.input[inp_idx] = new_init_name
+                    else:
+                        node.input[inp_idx] = new_init_name
+                else:
+                    init_proto.CopyFrom(numpy_helper.from_array(new_arr, init_proto.name))
+                    if dq_src is not None:
+                        for dq_node, _ in cache.get_consumers(init_name):
+                            if dq_node.op_type != "DequantizeLinear":
+                                continue
+                            for attr in dq_node.attribute:
+                                if attr.name == "axis" and attr.i >= 0:
+                                    attr.i += axis_delta
             else:
                 # Dynamic input: Unsqueeze to 4D
                 axes = list(range(4 - rank))

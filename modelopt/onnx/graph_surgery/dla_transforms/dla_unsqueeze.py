@@ -18,11 +18,7 @@
 import onnx
 from onnx import TensorProto, helper
 
-from ._common import (
-    GraphCache,
-    insert_nodes_at_position,
-    run_onnx_file_transform,
-)
+from ._common import GraphCache, insert_nodes_at_position, run_onnx_file_transform
 
 
 def _apply_unsqueeze(model):
@@ -32,6 +28,11 @@ def _apply_unsqueeze(model):
     for node in cache.nodes_by_op("Unsqueeze"):
         data_dtype = cache.get_dtype(node.input[0])
         if data_dtype in (TensorProto.INT32, TensorProto.INT64):
+            node_input_pair = cache.get_consumers(node.output[0])
+            if not node_input_pair:
+                # No consumers to rewire (e.g. Unsqueeze output is a graph output);
+                # skip to avoid an IndexError below.
+                continue
             cast_output_name = f"{node.output[0]}_float32"
             cast_node = helper.make_node(
                 "Cast",
@@ -40,7 +41,6 @@ def _apply_unsqueeze(model):
                 to=TensorProto.FLOAT,
                 name=f"{node.output[0]}_cast_to_float32",
             )
-            node_input_pair = cache.get_consumers(node.output[0])
             for consumer, idx in node_input_pair:
                 consumer.input[idx] = cast_output_name
             nodes_to_add_at_pos.append(([cast_node], node_input_pair[0][0]))

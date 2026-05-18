@@ -48,8 +48,17 @@ def _tensor_from_constant_node(node: onnx.NodeProto) -> onnx.TensorProto:
             arr = np.asarray(list(attr.ints), dtype=np.int64)
             return numpy_helper.from_array(arr, name=out_name)
         if attr.name == "sparse_value":
-            arr = numpy_helper.to_array(attr.sparse_tensor)
-            return numpy_helper.from_array(arr, name=out_name)
+            sparse = attr.sparse_tensor
+            values = numpy_helper.to_array(sparse.values)
+            indices = numpy_helper.to_array(sparse.indices).astype(np.int64)
+            dense = np.zeros(tuple(sparse.dims), dtype=values.dtype)
+            if indices.ndim == 1:
+                # Flat indices into the dense tensor.
+                dense.reshape(-1)[indices] = values
+            else:
+                # Per-axis indices: shape [NNZ, rank].
+                dense[tuple(indices.T)] = values
+            return numpy_helper.from_array(dense, name=out_name)
 
     attr_names = [a.name for a in node.attribute]
     raise ValueError(
@@ -74,7 +83,7 @@ def _constants_to_initializers_from_model(
             continue
         try:
             init = _tensor_from_constant_node(node)
-        except ValueError as exc:
+        except (ValueError, TypeError, AttributeError) as exc:
             if verbose:
                 logger.warning("%s", exc)
             continue

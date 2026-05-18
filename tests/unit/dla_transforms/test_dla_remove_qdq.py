@@ -13,9 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-#
 # Unit tests for :mod:`modelopt.onnx.graph_surgery.dla_transforms.dla_remove_qdq`.
 
 """ORT CPU parity tests for ``remove_qdq`` / ``_remove_qdq_from_model``.

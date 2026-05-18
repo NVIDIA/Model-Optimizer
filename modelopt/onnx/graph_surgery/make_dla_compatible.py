@@ -75,7 +75,7 @@ import time
 import onnx
 
 from ..logging_config import logger
-from .dla_transforms._common import infer_shapes
+from .dla_transforms._common import infer_shapes, save_model
 from .dla_transforms.dla_5d_reshape_to_4d import _apply_5d_reshape_to_4d
 from .dla_transforms.dla_cast_to_fp32 import _apply_cast_to_fp32
 from .dla_transforms.dla_constants_to_initializers import transform_constants_to_initializers
@@ -121,21 +121,21 @@ def _transform_make_dla_compatible(
     """
     t0 = time.perf_counter()
 
-    # ── Pre-pipeline: initial shape inference ────────────────────────────────
+    # -- Pre-pipeline: initial shape inference ----------------------------------------------------
     model = infer_shapes(model)
 
-    # ── Stage 1: Early preprocessing ─────────────────────────────────────────
+    # -- Stage 1: Early preprocessing -------------------------------------------------------------
     transform_remove_qdq(model)
     model = transform_constants_to_initializers(model)
     model = _apply_cast_to_fp32(model)
     model = _apply_remove_deqlin(model)
 
-    # ── Stage 2: Specialised pre-4D transforms ────────────────────────────────
+    # -- Stage 2: Specialised pre-4D transforms ---------------------------------------------------
     model = _apply_5d_reshape_to_4d(model)
     model = infer_shapes(model)
     model = _apply_matmul_to_transpose_conv_transpose(model)
 
-    # ── Stage 3: Op-specific DLA compatibility transforms ─────────────────────
+    # -- Stage 3: Op-specific DLA compatibility transforms -----------------------------------------
     model = infer_shapes(model)
     model = _apply_fix_instancenorm_channel_mismatch(model)
     model = _apply_where(model)
@@ -144,27 +144,26 @@ def _transform_make_dla_compatible(
     model = _apply_topk(model)
     model = _apply_handle_qdq(model)
 
-    # ── Stage 4: Main 4-D conversion ─────────────────────────────────────────
+    # -- Stage 4: Main 4-D conversion -------------------------------------------------------------
     model = _apply_convert_ops_to_4d(model)
 
-    # ── Stage 5: Decompose LSTM + Final graph cleanup ────────────────────────
+    # -- Stage 5: Decompose LSTM + Final graph cleanup ---------------------------------------------
     model = infer_shapes(model)
     model = _apply_decompose_lstm(model)
     model = _apply_graph_cleanup(model)
 
-    # ── Stage 6: Post-cleanup int-tensor cast ─────────────────────────────────
+    # -- Stage 6: Post-cleanup int-tensor cast -----------------------------------------------------
     model = infer_shapes(model)
     model = _apply_unsqueeze(model)
 
-    # ── Post-pipeline: final shape inference + ONNX validity check ───────────
+    # -- Post-pipeline: final shape inference + ONNX validity check ---------------------------------
     model = infer_shapes(model)
 
     try:
         onnx.checker.check_model(model)
     except onnx.checker.ValidationError as exc:
-        logger.warning(
-            "[DLA pipeline] ONNX check reported issues (model may still be usable): %s", exc
-        )
+        logger.error("[DLA pipeline] ONNX validation failed: %s", exc)
+        raise
     except Exception as exc:
         logger.debug(
             "[DLA pipeline] ONNX in-memory check skipped (model may be too large): %s", exc
@@ -177,7 +176,10 @@ def _transform_make_dla_compatible(
 
 def dla_make_dla_compatible(
     model_path: str,
+    output_path: str | None = None,
     *,
+    use_external_data: bool = True,
+    external_data_name: str | None = None,
     verbose: bool = True,
 ) -> onnx.ModelProto:
     """Transform an ONNX model to be compatible with the NVIDIA DLA accelerator.
@@ -190,10 +192,14 @@ def dla_make_dla_compatible(
     The transformation is lossless for numerics: every graph rewrite preserves
     the mathematical equivalence of the original model.
 
-    Model saving is handled by :func:`run_graph_surgery` in the registry layer.
-
     Args:
         model_path: Path to the input ONNX model.
+        output_path: Optional path to save the transformed model. If omitted,
+            the transformed model is returned without writing to disk.
+        use_external_data: Whether to save weights as external data when
+            ``output_path`` is provided.
+        external_data_name: External data filename when ``output_path`` is
+            provided (default: ``<output_basename>_data``).
         verbose: When ``True`` (default), progress messages are emitted via
             the module logger at each pipeline stage.
 
@@ -204,9 +210,8 @@ def dla_make_dla_compatible(
         RuntimeError: If ORT symbolic shape inference fails at any pipeline step.
 
     Example:
-        >>> from modelopt.onnx.graph_surgery import run_graph_surgery
-        >>> model = run_graph_surgery(
-        ...     "make-dla-compatible",
+        >>> from modelopt.onnx.graph_surgery import make_dla_compatible
+        >>> model = make_dla_compatible(
         ...     model_path="model.onnx",
         ...     output_path="model_dla.onnx",
         ... )
@@ -216,5 +221,14 @@ def dla_make_dla_compatible(
     model = onnx.load(model_path, load_external_data=True)
 
     model = _transform_make_dla_compatible(model, verbose=verbose)
+
+    if output_path is not None:
+        save_model(
+            model,
+            output_path,
+            use_external_data=use_external_data,
+            external_data_name=external_data_name,
+            verbose=verbose,
+        )
 
     return model

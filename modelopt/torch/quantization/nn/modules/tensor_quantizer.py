@@ -514,6 +514,16 @@ class TensorQuantizer(nn.Module):
             and self.block_sizes.get("scale_bits", None) == (8, 0)
         )
 
+    @property
+    def is_nvfp4_static(self):
+        """True for E2M1 weights + E4M3 per-block scales in static layout (format-only check)."""
+        return (
+            self.is_static_block_quant
+            and self._num_bits == (2, 1)
+            and self._block_sizes is not None
+            and self._block_sizes.get("scale_bits") == (4, 3)
+        )
+
     def is_mxfp(self, bits):
         """Check if is MXFP4/MXFP6/MXFP8."""
         if bits == 4:

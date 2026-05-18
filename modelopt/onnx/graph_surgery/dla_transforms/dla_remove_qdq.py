@@ -196,7 +196,6 @@ def _remove_qdq_from_model(
                         for j, input_name in enumerate(consumer.input):
                             if input_name == qdq_node_pair_input:
                                 consumer.input[j] = graph_output.name
-                                break
                 break
             qdq_node_pair_output = qdq_node_pair_input
             num_connected += 1

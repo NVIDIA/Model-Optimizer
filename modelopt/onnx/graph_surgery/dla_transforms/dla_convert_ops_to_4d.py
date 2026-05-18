@@ -245,31 +245,35 @@ def _handle_transpose(node, graph, shape_map, init_names, unique_init, inits_to_
     cnt_ref[0] += 1
 
     # ── Adjust perm ──────────────────────────────────────────────────────────
-    perm_updated = False
-    for attr in node.attribute:
-        if attr.name == "perm":
-            perm = list(attr.ints)
-            if rank == 2:
-                new_perm = [0, 1, perm[0] + 2, perm[1] + 2]
-            elif rank == 3:
-                new_perm = [0, perm[0] + 1, perm[1] + 1, perm[2] + 1]
-            elif rank == 5:
-                # General algorithm: find leftmost unary dim in the OUTPUT shape,
-                # drop that permutation entry, shift remaining values.
-                current_shape = [orig_shape[i] for i in perm]
-                idx_to_remove = len(current_shape) - current_shape[::-1].index(1) - 1
-                removed_orig_dim = perm[idx_to_remove]
-                new_perm_raw = [p for i, p in enumerate(perm) if i != idx_to_remove]
-                new_perm = [p if p < removed_orig_dim else p - 1 for p in new_perm_raw]
-            else:
-                return None  # unsupported rank
-            del attr.ints[:]
-            attr.ints.extend(int(x) for x in new_perm)
-            perm_updated = True
-            break
-
-    if not perm_updated:
-        return None
+    # ONNX semantics: omitted ``perm`` reverses the input axes (i.e. the
+    # default perm for a rank-R input is [R-1, R-2, ..., 0]). Materialise that
+    # default into the node attribute so we can apply the same rank-specific
+    # shift logic instead of bailing out and leaving default-form Transpose
+    # nodes non-4D.
+    perm_attr = next((a for a in node.attribute if a.name == "perm"), None)
+    if perm_attr is not None:
+        perm = list(perm_attr.ints)
+    else:
+        perm = list(range(rank - 1, -1, -1))
+        perm_attr = node.attribute.add()
+        perm_attr.name = "perm"
+        perm_attr.type = onnx.AttributeProto.INTS
+    if rank == 2:
+        new_perm = [0, 1, perm[0] + 2, perm[1] + 2]
+    elif rank == 3:
+        new_perm = [0, perm[0] + 1, perm[1] + 1, perm[2] + 1]
+    elif rank == 5:
+        # General algorithm: find leftmost unary dim in the OUTPUT shape,
+        # drop that permutation entry, shift remaining values.
+        current_shape = [orig_shape[i] for i in perm]
+        idx_to_remove = len(current_shape) - current_shape[::-1].index(1) - 1
+        removed_orig_dim = perm[idx_to_remove]
+        new_perm_raw = [p for i, p in enumerate(perm) if i != idx_to_remove]
+        new_perm = [p if p < removed_orig_dim else p - 1 for p in new_perm_raw]
+    else:
+        return None  # unsupported rank
+    del perm_attr.ints[:]
+    perm_attr.ints.extend(int(x) for x in new_perm)
 
     if rank == 5:
         # 5D collapse: squeeze the unary input dim → 4D Transpose → unsqueeze output back to 5D.
@@ -986,13 +990,16 @@ def _handle_tile(node, graph, shape_map, init_names, unique_init, inits_to_add, 
 
     pre: list = []
 
-    # ── Update repeats initializer (input[1]) if 3D ───────────────────────────
+    # ── Update repeats initializer (input[1]) for any rank < 4 ───────────────
+    # ``Tile.repeats`` length must equal the input rank. After we promote the
+    # data input to 4D below, repeats must also be 4-long; left-pad with 1s.
     if len(node.input) > 1 and node.input[1] and node.input[1] in init_names:
         for init in graph.initializer:
             if init.name == node.input[1]:
                 arr = numpy_helper.to_array(init)
-                if len(arr) == 3:
-                    new_arr = np.concatenate([[1], arr]).astype(arr.dtype)
+                if arr.ndim == 1 and len(arr) < 4:
+                    pad = 4 - len(arr)
+                    new_arr = np.concatenate([np.ones(pad, dtype=arr.dtype), arr]).astype(arr.dtype)
                     init.CopyFrom(numpy_helper.from_array(new_arr, init.name))
                 break
 

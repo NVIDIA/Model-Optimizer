@@ -121,7 +121,9 @@ def _apply_fix_instancenorm_channel_mismatch(model: onnx.ModelProto) -> onnx.Mod
             name=f"{pfx}_4d_{cnt}",
         )
         new_instrnorm.attribute.extend(node.attribute)
-        add_value_info(graph, instrnorm_out, onnx.TensorProto.FLOAT, [n, c, d, 1])
+        # InstanceNormalization preserves its input dtype; record the same
+        # dtype on the rewritten value_info so FP16 graphs aren't misreported.
+        add_value_info(graph, instrnorm_out, in_dtype, [n, c, d, 1])
 
         # 3. Post-Reshape: [N,C,D,1] → [1,N,C,D]  (move spatial dim to batch position)
         post_shape_init = numpy_helper.from_array(
@@ -136,7 +138,7 @@ def _apply_fix_instancenorm_channel_mismatch(model: onnx.ModelProto) -> onnx.Mod
             outputs=[post_out],
             name=f"{pfx}_post_reshape_{cnt}",
         )
-        add_value_info(graph, post_out, onnx.TensorProto.FLOAT, [1, n, c, d])
+        add_value_info(graph, post_out, in_dtype, [1, n, c, d])
 
         # 4. Squeeze axis=0: [1,N,C,D] → [N,C,D]  (restore original rank)
         squeeze_axes_init = numpy_helper.from_array(

@@ -100,7 +100,8 @@ def _promote_lstm_input_to_rank4(
             init_arr, name=initializer.name + f"_lstm4d_{lstm_node.name}_{input_index}"
         )
         add_unique_initializers(graph, unique_initializer, [new_init])
-        graph.initializer.remove(initializer)
+        if len(cache.get_consumers(initializer.name)) <= 1:
+            graph.initializer.remove(initializer)
         deq_node.input[0] = new_init.name
         return
 
@@ -114,8 +115,7 @@ def _promote_lstm_input_to_rank4(
             new_arr, name=initializer.name + f"_lstm4d_{lstm_node.name}_{input_index}"
         )
         add_unique_initializers(graph, unique_initializer, [new_init])
-        refs = sum(1 for n in graph.node for inp in n.input if inp == tensor_name)
-        if refs <= 1:
+        if len(cache.get_consumers(tensor_name)) <= 1:
             graph.initializer.remove(initializer)
         lstm_node.input[input_index] = new_init.name
         return
@@ -331,7 +331,8 @@ def _apply_decompose_lstm(model):
             init_arr = np.transpose(init_arr, axes=perm)
             new_init = numpy_helper.from_array(init_arr, name=initializer.name + "_transposed")
             add_unique_initializers(graph, unique_initializer, [new_init])
-            graph.initializer.remove(initializer)
+            if len(cache.get_consumers(initializer.name)) <= 1:
+                graph.initializer.remove(initializer)
             deq_node.input[0] = new_init.name
             return tensor_name
         elif tensor_name in init_list:
@@ -345,7 +346,8 @@ def _apply_decompose_lstm(model):
             init_arr = np.transpose(init_arr, axes=perm)
             new_init = numpy_helper.from_array(init_arr, name=initializer.name + "_transposed")
             add_unique_initializers(graph, unique_initializer, [new_init])
-            graph.initializer.remove(initializer)
+            if len(cache.get_consumers(tensor_name)) <= 1:
+                graph.initializer.remove(initializer)
             return new_init.name
         else:
             transpose_node = helper.make_node(

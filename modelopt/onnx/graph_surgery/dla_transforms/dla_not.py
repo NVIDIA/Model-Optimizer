@@ -64,18 +64,42 @@ def _apply_not(model: onnx.ModelProto) -> onnx.ModelProto:
             continue
 
         # ── Redirect Cast: to=BOOL → to=FLOAT ────────────────────────────────
-        for attr in producer_node.attribute:
-            if attr.name == "to":
-                attr.i = TensorProto.FLOAT
+        # If the Cast output fans out to other consumers, mutating its ``to``
+        # in place would silently change their dtype too. Clone the Cast for
+        # this Not's path in that case and leave the original alone.
+        cast_consumers = cache.get_consumers(producer_node.output[0])
+        cast_clone: onnx.NodeProto | None = None
+        if len(cast_consumers) > 1:
+            clone_id = node.name or f"node_{node.output[0]}"
+            clone_out = f"{producer_node.output[0]}_float_for_{clone_id}"
+            cast_clone = helper.make_node(
+                "Cast",
+                inputs=[producer_node.input[0]],
+                outputs=[clone_out],
+                name=f"{producer_node.name or producer_node.output[0]}_float_for_{clone_id}",
+                to=TensorProto.FLOAT,
+            )
+            node.input[0] = clone_out
+            in_shape = cache.get_shape(producer_node.input[0])
+            if in_shape is not None:
+                add_value_info(graph, clone_out, TensorProto.FLOAT, in_shape)
+            producer_node = cast_clone
+        else:
+            for attr in producer_node.attribute:
+                if attr.name == "to":
+                    attr.i = TensorProto.FLOAT
 
-        cast_out_vi = get_tensor_value_info_by_name(model, producer_node.output[0])
-        if cast_out_vi is not None:
-            cast_out_vi.type.tensor_type.elem_type = TensorProto.FLOAT
+            cast_out_vi = get_tensor_value_info_by_name(model, producer_node.output[0])
+            if cast_out_vi is not None:
+                cast_out_vi.type.tensor_type.elem_type = TensorProto.FLOAT
 
         # ── Unique initializer names scoped to this Not node ──────────────────
-        min_name = f"{node.name}_clip_min"
-        max_name = f"{node.name}_clip_max"
-        one_name = f"{node.name}_one"
+        # ``node.name`` is optional in ONNX; fall back to the (always-unique) output
+        # tensor name so anonymous Not nodes still get unique tensor/node names.
+        node_id = node.name or f"node_{node.output[0]}"
+        min_name = f"{node_id}_clip_min"
+        max_name = f"{node_id}_clip_max"
+        one_name = f"{node_id}_one"
 
         add_unique_initializers(
             graph,
@@ -87,12 +111,12 @@ def _apply_not(model: onnx.ModelProto) -> onnx.ModelProto:
             ],
         )
 
-        clip_out = f"{node.name}_clipped"
+        clip_out = f"{node_id}_clipped"
         clip_node = helper.make_node(
             "Clip",
             inputs=[producer_node.output[0], min_name, max_name],
             outputs=[clip_out],
-            name=f"{node.name}_clip",
+            name=f"{node_id}_clip",
         )
         clip_shape = cache.get_shape(producer_node.output[0])
         if clip_shape is not None:
@@ -107,10 +131,11 @@ def _apply_not(model: onnx.ModelProto) -> onnx.ModelProto:
             "Sub",
             inputs=[one_name, clip_out],
             outputs=list(node.output),
-            name=f"{node.name}_sub",
+            name=f"{node_id}_sub",
         )
 
-        replacements[node_idx[id(node)]] = ([node], [clip_node, sub_node])
+        new_nodes = [cast_clone, clip_node, sub_node] if cast_clone else [clip_node, sub_node]
+        replacements[node_idx[id(node)]] = ([node], new_nodes)
         cnt += 1
         logger.debug("Not %r: replaced with Cast(FLOAT) → Clip → Sub.", node.name)
 

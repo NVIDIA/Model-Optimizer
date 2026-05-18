@@ -61,6 +61,12 @@ def _parse_middleware_strict(
                 f"expected middleware (Clip / Q→DQ) or terminal in {sorted(stop_op_types)}"
             )
             raise ValueError(msg)
+        if len(cands) != 1:
+            msg = (
+                f"{path_context}: expected a single first-input consumer for tensor {cur!r}, "
+                f"got {[n.name for n in cands]}"
+            )
+            raise ValueError(msg)
         n = cands[0]
         if n.op_type in stop_op_types:
             return middle, n

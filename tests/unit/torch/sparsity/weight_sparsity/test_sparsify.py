@@ -84,10 +84,12 @@ def test_save_restore_whole(model: BaseExampleModel, specs):
 
 @pytest.mark.skipif(transformers is None, reason="transformers is not installed.")
 def test_specify_forward_loop():
+    from _test_utils.torch.transformers_models import get_tiny_qwen3
+
     # setup
-    model = copy.deepcopy(benchmarks["GPTJModel"])
+    model = get_tiny_qwen3()
     model.eval()
-    args = model.get_args()
+    args = (model.dummy_inputs["input_ids"],)
     searcher = MagnitudeSearcher()
 
     # test different configs for forward loop

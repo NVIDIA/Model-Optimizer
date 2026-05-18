@@ -495,6 +495,8 @@ General PTQ recipes are model-agnostic and apply to any supported architecture:
      - NVFP4 for MLP layers only, FP8 KV cache
    * - ``general/ptq/nvfp4_experts_only-kv_fp8``
      - NVFP4 for MoE expert layers only, FP8 KV cache
+   * - ``general/ptq/nvfp4_experts_only-kv_fp8_layerwise``
+     - NVFP4 for MoE expert layers only, FP8 KV cache, layerwise calibration
    * - ``general/ptq/nvfp4_omlp_only-kv_fp8``
      - NVFP4 for output projection + MLP layers, FP8 KV cache
 
@@ -657,6 +659,7 @@ The ``modelopt_recipes/`` package is organized as follows:
    |       +-- nvfp4_default-kv_nvfp4_cast.yaml
    |       +-- nvfp4_mlp_only-kv_fp8.yaml
    |       +-- nvfp4_experts_only-kv_fp8.yaml
+   |       +-- nvfp4_experts_only-kv_fp8_layerwise.yaml
    |       +-- nvfp4_omlp_only-kv_fp8.yaml
    +-- models/                     # Model-specific recipes
    |   +-- Step3.5-Flash/

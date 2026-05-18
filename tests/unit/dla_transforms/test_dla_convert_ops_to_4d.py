@@ -167,6 +167,8 @@ def _assert_match(ref: dict, got: dict) -> None:
             cos = _cosine_similarity(a, b)
             assert cos >= 1.0 - 1e-5, f"{name}: cosine {cos:.8f}"
             np.testing.assert_allclose(a, b, rtol=1e-4, atol=1e-4, err_msg=name)
+        else:
+            np.testing.assert_array_equal(a, b, err_msg=name)
 
 
 def _assert_values_match(ref: dict, got: dict) -> None:
@@ -179,6 +181,8 @@ def _assert_values_match(ref: dict, got: dict) -> None:
             cos = _cosine_similarity(a, b)
             assert cos >= 1.0 - 1e-5, f"{name}: cosine {cos:.8f}"
             np.testing.assert_allclose(a, b, rtol=1e-4, atol=1e-4, err_msg=name)
+        else:
+            np.testing.assert_array_equal(a, b, err_msg=name)
 
 
 def _save(base, tr, tag):
