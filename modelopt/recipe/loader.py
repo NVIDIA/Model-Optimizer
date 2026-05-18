@@ -29,9 +29,6 @@ from modelopt.torch.quantization.config import QuantizeConfig
 
 from .config import (
     RECIPE_TYPE_TO_CLASS,
-    ModelOptDFlashRecipe,
-    ModelOptEagleRecipe,
-    ModelOptMedusaRecipe,
     ModelOptPTQRecipe,
     ModelOptRecipeBase,
     RecipeMetadataConfig,
@@ -39,6 +36,16 @@ from .config import (
 )
 
 __all__ = ["load_config", "load_recipe"]
+
+# Each recipe type's mandatory top-level body section.  Checked at the loader level (on the
+# raw YAML, before pydantic fills in defaults) so the user sees a clear "PTQ recipe file X
+# must contain 'quantize'" instead of pydantic's generic missing-field error.
+_REQUIRED_SECTION_PER_RECIPE_TYPE: dict[RecipeType, str] = {
+    RecipeType.PTQ: "quantize",
+    RecipeType.SPECULATIVE_EAGLE: "eagle",
+    RecipeType.SPECULATIVE_DFLASH: "dflash",
+    RecipeType.SPECULATIVE_MEDUSA: "medusa",
+}
 
 
 def _resolve_recipe_path(recipe_path: str | Path | Traversable) -> Path | Traversable:
@@ -148,63 +155,48 @@ def _load_recipe_from_file(
     plus the algorithm-specific section (``quantize`` / ``eagle`` / ``dflash`` / ``medusa``).
     """
     rtype = _peek_recipe_type(recipe_file)
-    schema_type = RECIPE_TYPE_TO_CLASS.get(rtype) if rtype is not None else None
-    data = load_config(recipe_file, schema_type=schema_type)
-    if not isinstance(data, dict):
-        raise ValueError(
-            f"Recipe file {recipe_file} must be a YAML mapping, got {type(data).__name__}."
-        )
-    if overrides:
-        data = _apply_dotlist(data, overrides)
-
-    metadata = data.get("metadata", {})
-    if not isinstance(metadata, dict):
-        raise ValueError(
-            f"Recipe file {recipe_file} field 'metadata' must be a mapping, "
-            f"got {type(metadata).__name__}."
-        )
-    recipe_type = metadata.get("recipe_type")
-    if recipe_type is None:
+    if rtype is None:
         raise ValueError(f"Recipe file {recipe_file} must contain a 'metadata.recipe_type' field.")
+    schema_class = RECIPE_TYPE_TO_CLASS.get(rtype)
+    if schema_class is None:
+        raise ValueError(f"Unsupported recipe type: {rtype!r}")
 
-    if recipe_type == RecipeType.PTQ:
-        if "quantize" not in data:
-            raise ValueError(f"PTQ recipe file {recipe_file} must contain 'quantize'.")
-        return ModelOptPTQRecipe(
-            metadata=metadata,
-            quantize=data["quantize"],
+    # Pre-flight check on the *raw* YAML so the user sees a clear loader-level error
+    # rather than a generic pydantic missing-field error.  Speculative recipes' body
+    # sections have field-level defaults, so this check is what keeps their loader
+    # semantics consistent with PTQ.
+    required_section = _REQUIRED_SECTION_PER_RECIPE_TYPE.get(rtype)
+    if required_section is not None:
+        import yaml
+
+        raw = yaml.safe_load(recipe_file.read_text()) or {}
+        if not isinstance(raw, dict) or required_section not in raw:
+            kind = (
+                rtype.value.split("_", 1)[-1].upper() if "_" in rtype.value else rtype.value.upper()
+            )
+            raise ValueError(f"{kind} recipe file {recipe_file} must contain {required_section!r}.")
+
+    # Passing ``schema_type=schema_class`` to ``load_config`` enables typed-list
+    # ``$import`` resolution (e.g. ``$import: disable_all`` spliced into
+    # ``quantize.quant_cfg`` needs to know the list's element schema is
+    # :class:`QuantizerCfgEntry`).  The return value is already a validated schema
+    # instance.
+    if overrides:
+        # Overrides have to be applied before pydantic validation.  Round-trip through
+        # ``model_dump()`` so $imports are resolved and the dict has the resolved shape;
+        # then splice the dotlist values and re-validate.
+        recipe = load_config(recipe_file, schema_type=schema_class)
+        data = recipe.model_dump()
+        data = _apply_dotlist(data, overrides)
+        return schema_class.model_validate(data)
+
+    recipe = load_config(recipe_file, schema_type=schema_class)
+    if not isinstance(recipe, schema_class):
+        raise ValueError(
+            f"Recipe file {recipe_file} must produce a {schema_class.__name__}, "
+            f"got {type(recipe).__name__}."
         )
-    if recipe_type == RecipeType.SPECULATIVE_EAGLE:
-        if "eagle" not in data:
-            raise ValueError(f"EAGLE recipe file {recipe_file} must contain 'eagle'.")
-        return ModelOptEagleRecipe(
-            metadata=metadata,
-            model=data.get("model") or {},
-            data=data.get("data") or {},
-            training=data.get("training") or {},
-            eagle=data["eagle"],
-        )
-    if recipe_type == RecipeType.SPECULATIVE_DFLASH:
-        if "dflash" not in data:
-            raise ValueError(f"DFlash recipe file {recipe_file} must contain 'dflash'.")
-        return ModelOptDFlashRecipe(
-            metadata=metadata,
-            model=data.get("model") or {},
-            data=data.get("data") or {},
-            training=data.get("training") or {},
-            dflash=data["dflash"],
-        )
-    if recipe_type == RecipeType.SPECULATIVE_MEDUSA:
-        if "medusa" not in data:
-            raise ValueError(f"Medusa recipe file {recipe_file} must contain 'medusa'.")
-        return ModelOptMedusaRecipe(
-            metadata=metadata,
-            model=data.get("model") or {},
-            data=data.get("data") or {},
-            training=data.get("training") or {},
-            medusa=data["medusa"],
-        )
-    raise ValueError(f"Unsupported recipe type: {recipe_type!r}")
+    return recipe
 
 
 def _find_recipe_section_file(
@@ -229,25 +221,10 @@ def _load_recipe_from_dir(recipe_dir: Path | Traversable) -> ModelOptRecipeBase:
     quantize.
     """
     metadata_file = _find_recipe_section_file(recipe_dir, "metadata")
-
     metadata = load_config(metadata_file, schema_type=RecipeMetadataConfig)
-    if not isinstance(metadata, dict):
-        raise ValueError(
-            f"Metadata file {metadata_file} must be a YAML mapping, got {type(metadata).__name__}."
-        )
-    recipe_type = metadata.get("recipe_type")
-    if recipe_type is None:
-        raise ValueError(f"Metadata file {metadata_file} must contain a 'recipe_type' field.")
 
-    if recipe_type == RecipeType.PTQ:
+    if metadata.recipe_type == RecipeType.PTQ:
         quantize_file = _find_recipe_section_file(recipe_dir, "quantize")
-        quantize_data = load_config(quantize_file, schema_type=QuantizeConfig)
-        if not isinstance(quantize_data, dict):
-            raise ValueError(
-                f"{quantize_file} must be a YAML mapping, got {type(quantize_data).__name__}."
-            )
-        return ModelOptPTQRecipe(
-            metadata=metadata,
-            quantize=quantize_data,
-        )
-    raise ValueError(f"Unsupported recipe type: {recipe_type!r}")
+        quantize_cfg = load_config(quantize_file, schema_type=QuantizeConfig)
+        return ModelOptPTQRecipe(metadata=metadata, quantize=quantize_cfg)
+    raise ValueError(f"Unsupported recipe type: {metadata.recipe_type!r}")
