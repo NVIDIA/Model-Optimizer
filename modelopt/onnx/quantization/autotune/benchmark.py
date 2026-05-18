@@ -272,8 +272,9 @@ def _parse_remote_autotuning_url(url: str) -> _RemoteAutotuningConfig:
 
     Raises:
         ValueError: If the scheme is not ``ssh://``; if user or host are
-            missing; or if required query parameters are missing or
-            duplicated. Duplicate keys are rejected explicitly because
+            missing or start with ``-`` (argv-smuggling guard, see
+            CVE-2017-1000117); or if required query parameters are missing
+            or duplicated. Duplicate keys are rejected explicitly because
             silently collapsing them would produce empty remote paths
             downstream.
     """
@@ -284,6 +285,19 @@ def _parse_remote_autotuning_url(url: str) -> _RemoteAutotuningConfig:
         raise ValueError("Unable to parse remote user from --remoteAutoTuningConfig")
     if parsed.hostname is None:
         raise ValueError("Unable to parse remote IP from --remoteAutoTuningConfig")
+    # Reject argv-smuggling attempts: a username or host that starts with ``-``
+    # would be reinterpreted as a flag by ssh/scp when we build
+    # ``f"{user}@{host}:..."`` (CVE-2017-1000117 class). ``urlparse`` itself
+    # does not filter these — e.g. ``ssh://-oProxyCommand=evil@host`` parses
+    # cleanly into ``username='-oProxyCommand=evil'``.
+    if parsed.username.startswith("-"):
+        raise ValueError(
+            "Remote user in --remoteAutoTuningConfig must not start with '-' (argv-smuggling guard)"
+        )
+    if parsed.hostname.startswith("-"):
+        raise ValueError(
+            "Remote host in --remoteAutoTuningConfig must not start with '-' (argv-smuggling guard)"
+        )
 
     parsed_query = parse_qs(parsed.query)
     duplicates = sorted(k for k, v in parsed_query.items() if len(v) > 1)

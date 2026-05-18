@@ -238,6 +238,51 @@ def test_parse_remote_autotuning_url_validation_errors(url, match):
         bm._parse_remote_autotuning_url(url)
 
 
+# --- _parse_remote_autotuning_url argv-smuggling guards (CVE-2017-1000117 class) ---
+
+
+@pytest.mark.parametrize(
+    "evil_user",
+    [
+        "-oProxyCommand=evil",  # specific known argv-smuggling payload
+        "-l",  # single dash + letter (short flag for ssh)
+        "--debug",  # long flag form
+    ],
+)
+def test_parse_remote_autotuning_url_rejects_user_starting_with_dash(evil_user):
+    """A username beginning with ``-`` would be reinterpreted as an ssh/scp flag.
+
+    Without this guard, ``ssh://-oProxyCommand=evil@host/...`` would expand to
+    ``scp -oProxyCommand=evil@host:...`` and execute the attacker's command.
+    """
+    url = (
+        f"ssh://{evil_user}@10.0.0.5?"
+        "remote_exec_path=/opt/trt/bin/trtexec&remote_lib_path=/opt/trt/lib"
+    )
+    with pytest.raises(ValueError, match="Remote user.*must not start with '-'"):
+        bm._parse_remote_autotuning_url(url)
+
+
+def test_parse_remote_autotuning_url_rejects_host_starting_with_dash():
+    """A hostname beginning with ``-`` is the same argv-smuggling vector via the host position."""
+    # urlparse lowercases hostnames, so capitalization doesn't matter here.
+    url = (
+        "ssh://alice@-oproxycommand?"
+        "remote_exec_path=/opt/trt/bin/trtexec&remote_lib_path=/opt/trt/lib"
+    )
+    with pytest.raises(ValueError, match="Remote host.*must not start with '-'"):
+        bm._parse_remote_autotuning_url(url)
+
+
+def test_parse_remote_autotuning_url_accepts_normal_user_and_host():
+    """Regression guard: usernames and hosts not starting with ``-`` are still accepted."""
+    cfg = bm._parse_remote_autotuning_url(
+        "ssh://alice@10.0.0.5?remote_exec_path=/opt/trt/bin/trtexec&remote_lib_path=/opt/trt/lib"
+    )
+    assert cfg.user == "alice"
+    assert cfg.ip == "10.0.0.5"
+
+
 # --- _ensure_remote_autotuning_flags ---
 
 
