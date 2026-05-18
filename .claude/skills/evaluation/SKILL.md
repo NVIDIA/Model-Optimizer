@@ -58,7 +58,8 @@ If the user already has a config file (e.g., "run this config", "evaluate with m
 
 **Shortcut: use task references.** For named benchmarks, read the matching
 `recipes/tasks/<name>.md` before creating or editing the config. Available:
-mmlu_pro, gpqa, aime2025, livecodebench, ifbench, scicode, aa_lcr, hle_aa.
+mmlu_pro, mmmu_pro, gpqa, aime2025, livecodebench, ifbench, scicode,
+aa_lcr, hle_aa_v2, tau2_bench_telecom.
 
 1. Read the task reference(s) the user wants.
 2. Use `recipes/examples/example_eval.yaml` as the base config template

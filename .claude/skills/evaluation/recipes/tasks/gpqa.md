@@ -7,6 +7,8 @@
 - Primary metric: `pass@1[avg-of-16] symbolic_correct`
 - Run time: Short
 - Samples: 16
+- Requires: None
+- Reference: https://docs.nvidia.com/nemo/evaluator/latest/evaluation/benchmarks/catalog/all/harnesses/nemo_skills.html
 
 ## Params
 

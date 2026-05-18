@@ -1,5 +1,17 @@
 # SciCode
 
+## Task Details
+
+- Task: `ns_scicode`
+- Harness: NeMo Skills, chat
+- Primary metric: `pass@1[avg-of-3] subtask_accuracy`
+- Run time: Long
+- Repeats: 3
+- Requires: None
+- Reference: https://docs.nvidia.com/nemo/evaluator/latest/evaluation/benchmarks/catalog/all/harnesses/nemo_skills.html
+
+## Params
+
 SciCode is a NeMo Skills code/reasoning benchmark with multi-step prompts and a
 code-execution sandbox. Check this reference before creating or modifying NEL
 configs for SciCode; the benchmark has deployment, parallelism, and score

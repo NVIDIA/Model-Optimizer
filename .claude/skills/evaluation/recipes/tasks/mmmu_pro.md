@@ -1,35 +1,37 @@
-# MMLU-Pro
+# MMMU-Pro
 
 ## Task Details
 
-- Task: `nemo_skills.ns_mmlu_pro`
-- Harness: NeMo Skills, chat
+- Task: `ns_mmmu_pro`
+- Harness: NeMo Skills, multimodal chat
 - Primary metric: `pass@1 symbolic_correct`
-- Run time: Short
+- Run time: Medium
 - Repeats: 1
-- Requires: None
+- Requires: `HF_TOKEN`
 - Reference: https://docs.nvidia.com/nemo/evaluator/latest/evaluation/benchmarks/catalog/all/harnesses/nemo_skills.html
 
 ## Params
+
+MMMU-Pro is a multimodal task. Use a multimodal-capable endpoint.
 
 ## YAML Fragment
 
 Use this inside the top-level `evaluation.tasks` list:
 
 ```yaml
-- name: nemo_skills.ns_mmlu_pro
+- name: ns_mmmu_pro
+  container: nvcr.io/nvidia/eval-factory/nemo-skills:26.03
   nemo_evaluator_config:
     config:
       params:
         extra:
           num_repeats: 1
-          args: ++prompt_config=eval/aai/mcq-10choices-boxed ++inference.tokens_to_generate=null
-    target:
-      api_endpoint:
-        adapter_config:
-          params_to_remove:
-            - max_new_tokens
-            - max_completion_tokens
 ```
 
 ## Score Extraction
+
+MMMU-Pro accuracy comes from:
+
+```text
+results.groups."mmmu-pro".metrics.pass@1.scores.symbolic_correct.value
+```
