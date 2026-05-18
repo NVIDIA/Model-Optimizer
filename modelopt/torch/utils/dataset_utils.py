@@ -213,6 +213,26 @@ DATASET_COMBOS: dict[str, list[str]] = {
     ],
 }
 
+
+def _validate_dataset_combos() -> None:
+    """Validate DATASET_COMBOS at import time: fail loud on typos / collisions."""
+    overlap = set(DATASET_COMBOS) & set(SUPPORTED_DATASET_CONFIG)
+    if overlap:
+        raise ValueError(
+            f"DATASET_COMBOS keys collide with SUPPORTED_DATASET_CONFIG: {sorted(overlap)}"
+        )
+    for combo_name, members in DATASET_COMBOS.items():
+        if not members:
+            raise ValueError(f"DATASET_COMBOS['{combo_name}'] must contain at least one dataset.")
+        unknown = [m for m in members if m not in SUPPORTED_DATASET_CONFIG]
+        if unknown:
+            raise ValueError(
+                f"DATASET_COMBOS['{combo_name}'] references unknown datasets: {unknown}"
+            )
+
+
+_validate_dataset_combos()
+
 __all__ = [
     "create_forward_loop",
     "download_hf_dataset_as_jsonl",
@@ -367,6 +387,13 @@ def get_dataset_samples(
     Returns:
         Samples: The list of samples.
     """
+    if dataset_name in DATASET_COMBOS:
+        raise ValueError(
+            f"'{dataset_name}' is a DATASET_COMBOS entry, not a single dataset. "
+            "Use ``get_dataset_dataloader`` to expand combos, or pass one of "
+            f"its members: {DATASET_COMBOS[dataset_name]}"
+        )
+
     # Local JSONL: load via HF's ``json`` builder and route through the same
     # auto-preprocess path as unregistered HF datasets so chat / prompt / text
     # columns are handled consistently with a downloaded HF dataset.  Never
