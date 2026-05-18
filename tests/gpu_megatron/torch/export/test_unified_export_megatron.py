@@ -28,9 +28,9 @@ from _test_utils.torch.transformers_models import (
     create_tiny_nemotron_dir,
     create_tiny_qwen3vl_dir,
 )
-from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLForConditionalGeneration
 from safetensors import safe_open
 from safetensors.torch import save_file
+from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLForConditionalGeneration
 
 import modelopt.torch.quantization as mtq
 import modelopt.torch.speculative as mtsp
@@ -94,7 +94,13 @@ def _merge_vision_weights(src_dir: Path, dst_dir: Path) -> None:
 
 
 def _test_unified_export_megatron(
-    tmp_path, model_type, extra_module, quant_config, kv_cache_quant_cfg, rank, size,
+    tmp_path,
+    model_type,
+    extra_module,
+    quant_config,
+    kv_cache_quant_cfg,
+    rank,
+    size,
     model_dir=None,
 ):
     if model_type == "qwen3vl":
@@ -107,18 +113,8 @@ def _test_unified_export_megatron(
         ffn_hidden_size = text_cfg.intermediate_size
         max_sequence_length = text_cfg.max_position_embeddings
         vocab_size = text_cfg.vocab_size
-        extra_kwargs = dict(kv_channels=text_cfg.head_dim, qk_layernorm=True)
-    elif model_type == "llama":
-        config = transformers.AutoConfig.from_pretrained(model_dir)
-        num_layers = config.num_hidden_layers
-        hidden_size = config.hidden_size
-        num_attention_heads = config.num_attention_heads
-        num_query_groups = config.num_key_value_heads
-        ffn_hidden_size = config.intermediate_size
-        max_sequence_length = config.max_position_embeddings
-        vocab_size = config.vocab_size
-        extra_kwargs = {}
-    elif model_type == "nemotron":
+        extra_kwargs = {"kv_channels": text_cfg.head_dim, "qk_layernorm": True}
+    elif model_type in {"llama", "nemotron"}:
         config = transformers.AutoConfig.from_pretrained(model_dir)
         num_layers = config.num_hidden_layers
         hidden_size = config.hidden_size
@@ -255,7 +251,11 @@ def _test_unified_import_megatron(model_dir, rank, size, model_type="llama"):
 
     if model_type == "qwen3vl":
         cfg = config.text_config
-        extra_kwargs = dict(kv_channels=cfg.head_dim, transformer_impl="modelopt", qk_layernorm=True)
+        extra_kwargs = {
+            "kv_channels": cfg.head_dim,
+            "transformer_impl": "modelopt",
+            "qk_layernorm": True,
+        }
     else:
         cfg = config
         extra_kwargs = {}
@@ -444,5 +444,3 @@ def test_mtp_state_dict_index_file(tmp_path):
     assert "mtp.0.hnorm.weight" in mtp_state_dict
     assert torch.allclose(mtp_state_dict["mtp.0.hnorm.weight"], torch.full((32,), 3.0))
     assert "mtp*" in exporter.exclude_modules
-
-
