@@ -183,29 +183,31 @@ def _test_unified_export_megatron(
 
     if model_type == "qwen3vl":
         torch.distributed.barrier()
-    if model_type == "qwen3vl" and rank == 0:
-        _merge_vision_weights(Path(model_dir), tmp_export_dir)
-        # sanity check that the vision encoder weights were merged
-        keys = []
-        for sf in sorted(tmp_export_dir.glob("*.safetensors")):
-            with safe_open(str(sf), framework="pt", device="cpu") as f:
-                keys.extend(f.keys())
-        assert any(k.startswith("model.language_model.") for k in keys), (
-            "language model keys missing from combined export"
-        )
-        assert any(k.startswith("model.visual.") for k in keys), (
-            "vision encoder keys missing from combined export"
-        )
-        # try to load the model and run a forward pass
-        from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLForConditionalGeneration
+        if rank == 0:
+            _merge_vision_weights(Path(model_dir), tmp_export_dir)
+            # sanity check that the vision encoder weights were merged
+            keys = []
+            for sf in sorted(tmp_export_dir.glob("*.safetensors")):
+                with safe_open(str(sf), framework="pt", device="cpu") as f:
+                    keys.extend(f.keys())
+            assert any(k.startswith("model.language_model.") for k in keys), (
+                "language model keys missing from combined export"
+            )
+            assert any(k.startswith("model.visual.") for k in keys), (
+                "vision encoder keys missing from combined export"
+            )
+            # try to load the model and run a forward pass
+            from transformers.models.qwen3_vl.modeling_qwen3_vl import (
+                Qwen3VLForConditionalGeneration,
+            )
 
-        vl_model = Qwen3VLForConditionalGeneration.from_pretrained(
-            tmp_export_dir, torch_dtype=torch.bfloat16
-        ).cuda()
-        input_ids = torch.zeros(1, 4, dtype=torch.long).cuda()
-        with torch.no_grad():
-            out = vl_model(input_ids=input_ids)
-        assert out.logits.shape[-1] == vl_model.config.text_config.vocab_size
+            vl_model = Qwen3VLForConditionalGeneration.from_pretrained(
+                tmp_export_dir, torch_dtype=torch.bfloat16
+            ).cuda()
+            input_ids = torch.zeros(1, 4, dtype=torch.long).cuda()
+            with torch.no_grad():
+                out = vl_model(input_ids=input_ids)
+            assert out.logits.shape[-1] == vl_model.config.text_config.vocab_size
 
 
 @pytest.mark.parametrize(

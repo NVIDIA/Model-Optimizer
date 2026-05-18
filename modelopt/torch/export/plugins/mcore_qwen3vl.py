@@ -24,8 +24,15 @@ prefix that starts with ``model.``.
 Note: the visual encoder (``model.visual.*``) is intentionally excluded — this
 mapping covers only the language-model decoder used for quantization and export.
 
+Note: ``Qwen3VLMoeForConditionalGeneration`` is **not** supported here.  The MoE
+variant stores expert weights as 3-D tensors (``mlp.experts.gate_up_proj``,
+``mlp.experts.down_proj``) that require a dedicated fused-expert mapping and
+cannot reuse the dense Qwen3 rules.
+
 Reference: https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct/blob/main/model.safetensors.index.json
 """
+
+import copy
 
 from .mcore_custom import CustomModuleMapping
 from .mcore_qwen import qwen3_causal_lm_export, qwen3_causal_lm_import
@@ -45,7 +52,9 @@ def _with_language_model_prefix(
         prefix = m.target_name_or_prefix
         if prefix.startswith("model."):
             prefix = "model.language_model." + prefix[len("model.") :]
-        result[key] = type(m)(target_name_or_prefix=prefix, func_kwargs=dict(m.func_kwargs))
+        result[key] = type(m)(
+            target_name_or_prefix=prefix, func_kwargs=copy.deepcopy(m.func_kwargs)
+        )
     return result
 
 
