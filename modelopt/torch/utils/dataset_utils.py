@@ -109,10 +109,12 @@ SUPPORTED_DATASET_CONFIG: dict[str, Any] = {
         "chat_key": "messages",
     },
     "nemotron-sft-agentic-v2": {
-        # Skips ``search`` split: heterogeneous messages schema fails streaming cast.
+        # Only ``search`` streams cleanly: ``interactive_agent`` has a heterogeneous
+        # tools schema (string vs list) that breaks pyarrow JSON inference, and
+        # ``tool_calling`` contains at least one malformed JSON row in a later shard.
         "config": {
             "path": "nvidia/Nemotron-SFT-Agentic-v2",
-            "split": ["interactive_agent", "tool_calling"],
+            "split": ["search"],
         },
         "preprocess": _join_messages_content,
         "chat_key": "messages",
