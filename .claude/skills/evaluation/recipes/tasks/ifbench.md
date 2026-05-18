@@ -7,6 +7,8 @@
 - Primary metric: `pass@1[avg-of-8] prompt_loose_accuracy`
 - Run time: Super short
 - Repeats: 8
+- Requires: None
+- Reference: https://docs.nvidia.com/nemo/evaluator/latest/evaluation/benchmarks/catalog/all/harnesses/nemo_skills.html
 
 ## Params
 
