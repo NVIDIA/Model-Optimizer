@@ -152,10 +152,8 @@ def train():
     training_args = HfTrainingArguments(**recipe.training.model_dump())
     init_distributed_env(training_args)
 
-    if not recipe.data.data_path and not recipe.data.offline_data_path:
-        raise ValueError(
-            "Either data.data_path or data.offline_data_path must be set in the config."
-        )
+    if recipe.data.mode in ("online", "streaming") and not recipe.data.data_path:
+        raise ValueError(f"data.mode={recipe.data.mode!r} requires data.data_path.")
     if training_args.cp_size > 1:
         patch_ring_attention_for_ttt()
         # Specific patch to accelerate 1.12.0. Removable after move to 1.13.0
@@ -174,10 +172,7 @@ def train():
 
     checkpoint = training_args.resume_from_checkpoint or last_checkpoint
 
-    use_offline_training = (
-        recipe.data.offline_data_path is not None
-        or recipe.data.streaming_server_url is not None
-    )
+    use_offline_training = recipe.data.mode != "online"
 
     if checkpoint:
         with patch_transformers5_params_loading():

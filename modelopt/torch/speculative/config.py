@@ -139,8 +139,9 @@ class EagleConfig(ModeloptBaseConfig):
     eagle_offline: bool = ModeloptField(
         default=False,
         description=(
-            "Whether to use detached Eagle. Derived by ModelOptEagleRecipe from "
-            "data.offline_data_path; not user-configurable."
+            "Whether the Eagle module consumes pre-computed hidden states (offline or streaming) "
+            "instead of running the base model in-process. Derived by ModelOptEagleRecipe from "
+            "``data.mode``; not user-configurable."
         ),
     )
 

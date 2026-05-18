@@ -29,7 +29,9 @@ The module is pure Pydantic schema with no runtime dependencies on ``transformer
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 
 class ModelArguments(BaseModel):
@@ -47,6 +49,7 @@ class DataArguments(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    mode: Literal["online", "offline", "streaming"] = "online"
     data_path: str | None = None
     offline_data_path: str | None = None
     lazy_preprocess: bool = True
@@ -66,6 +69,25 @@ class DataArguments(BaseModel):
         if v == 0 or v < -1:
             raise ValueError("sample_size must be -1 (use all samples) or a positive integer")
         return v
+
+    @model_validator(mode="after")
+    def _check_mode_requirements(self) -> DataArguments:
+        # Backward-compat: if ``mode`` is left at its default ("online") but a mode-specific
+        # field is set, promote to the corresponding mode. Explicit ``mode`` always wins.
+        if self.mode == "online":
+            if self.offline_data_path is not None:
+                self.mode = "offline"
+            elif self.streaming_server_url is not None:
+                self.mode = "streaming"
+        if self.mode == "offline" and not self.offline_data_path:
+            raise ValueError("data.mode='offline' requires data.offline_data_path")
+        if self.mode == "streaming" and not (
+            self.streaming_server_url and self.streaming_model_name
+        ):
+            raise ValueError(
+                "data.mode='streaming' requires data.streaming_server_url and data.streaming_model_name"
+            )
+        return self
 
 
 class TrainingArguments(BaseModel):
