@@ -99,42 +99,35 @@ def test_full_run_creates_checkpoints(monkeypatch, tmp_path):
         assert os.path.isfile(os.path.join(layer_dir, "weights.pt"))
         assert os.path.isfile(os.path.join(layer_dir, "quantizer_state.pt"))
         assert os.path.isfile(os.path.join(layer_dir, "output_meta.pt"))
-    # Pruning trace with n_layers=3:
-    #   after layer 0: cutoff = -2, no prune
-    #   after layer 1: cutoff = -1, no prune
-    #   after layer 2: cutoff =  0, delete layer_0000/next_inputs.pt
-    # Final layer never has a next_inputs.pt of its own.
-    assert not os.path.isfile(os.path.join(ckpt_dir, "layer_0000", "next_inputs.pt"))
-    assert os.path.isfile(os.path.join(ckpt_dir, "layer_0001", "next_inputs.pt"))
-    assert not os.path.isfile(os.path.join(ckpt_dir, "layer_0002", "next_inputs.pt"))
+        # next_inputs.pt now lives at the top level, not per-layer.
+        assert not os.path.isfile(os.path.join(layer_dir, "next_inputs.pt"))
+    # The top-level next_inputs.pt is left from the second-to-last layer's save
+    # (the final layer doesn't write one). It's harmless when the run is complete.
+    assert os.path.isfile(os.path.join(ckpt_dir, "next_inputs.pt"))
+    # No orphan .tmp from the atomic rename.
+    assert not os.path.isfile(os.path.join(ckpt_dir, "next_inputs.pt.tmp"))
 
 
-def test_only_last_two_next_inputs_kept(monkeypatch, tmp_path):
-    """After a multi-layer run, only the most recent ``next_inputs.pt`` is
-    retained; older layer dirs keep weights/qstate/meta but have their
-    ``next_inputs.pt`` pruned."""
+def test_single_next_inputs_at_top_level(monkeypatch, tmp_path):
+    """After a multi-layer run, exactly one ``next_inputs.pt`` exists at the
+    checkpoint root, and no per-layer ``next_inputs.pt`` files are written."""
     _register_test_discoverer(monkeypatch)
     n_layers = 5
     ckpt_dir = str(tmp_path / "ckpt")
     model, forward_loop = _make_model_and_forward(n_layers=n_layers)
     layerwise_calibrate(model, forward_loop, _dummy_calib_func, checkpoint_dir=ckpt_dir)
 
-    # Pruning trace for n_layers=5:
-    #   after layer 0: cutoff = -2, no prune
-    #   after layer 1: cutoff = -1, no prune
-    #   after layer 2: cutoff =  0, delete layer_0000/next_inputs.pt
-    #   after layer 3: cutoff =  1, delete layer_0001/next_inputs.pt
-    #   after layer 4: cutoff =  2, delete layer_0002/next_inputs.pt
-    # Layer 3 retains its next_inputs.pt (the resume point for layer 4);
-    # layer 4 is the final layer and never has one.
-    for i in range(3):
+    # No per-layer next_inputs.pt.
+    for i in range(n_layers):
         assert not os.path.isfile(os.path.join(ckpt_dir, f"layer_{i:04d}", "next_inputs.pt")), (
-            f"layer_{i:04d}/next_inputs.pt should have been pruned"
+            f"layer_{i:04d}/next_inputs.pt should not exist with top-level layout"
         )
-    assert os.path.isfile(os.path.join(ckpt_dir, "layer_0003", "next_inputs.pt"))
-    assert not os.path.isfile(os.path.join(ckpt_dir, "layer_0004", "next_inputs.pt"))
 
-    # Static per-layer files survive pruning.
+    # Exactly one top-level next_inputs.pt (no .tmp leftover).
+    assert os.path.isfile(os.path.join(ckpt_dir, "next_inputs.pt"))
+    assert not os.path.isfile(os.path.join(ckpt_dir, "next_inputs.pt.tmp"))
+
+    # Per-layer durable files retained for every layer.
     for i in range(n_layers):
         for fname in ("weights.pt", "quantizer_state.pt", "output_meta.pt"):
             assert os.path.isfile(os.path.join(ckpt_dir, f"layer_{i:04d}", fname)), (
@@ -178,13 +171,13 @@ def test_resume_matches_full_run(monkeypatch, tmp_path):
             checkpoint_dir=resume_dir,
         )
 
-    # Mid-crash invariant: manifest at layer 0; its next_inputs.pt is intact
-    # (cutoff = -2, no prune has happened yet).
+    # Mid-crash invariant: manifest at layer 0; the top-level next_inputs.pt
+    # holds the inputs for layer 1 (committed during layer 0's save).
     with open(os.path.join(resume_dir, "manifest.json")) as f:
         manifest = json.load(f)
     assert manifest["last_completed_layer"] == 0
     assert manifest["num_layers"] == 3
-    assert os.path.isfile(os.path.join(resume_dir, "layer_0000", "next_inputs.pt"))
+    assert os.path.isfile(os.path.join(resume_dir, "next_inputs.pt"))
 
     # Resume on a fresh model in the same checkpoint dir.
     resumed_model, forward_loop = _make_model_and_forward(n_layers=3)
