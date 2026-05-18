@@ -499,12 +499,7 @@ def _save_layer(
     next_inputs: list | None,
     num_layers: int,
 ) -> None:
-    """Save a single layer checkpoint and commit the manifest.
-
-    Writes per-layer artifacts into ``layer_KKKK/``, then atomically replaces
-    the top-level ``next_inputs.pt`` via a ``.tmp`` + ``os.replace`` rename,
-    and finally writes the manifest as the commit point.
-    """
+    """Save a single layer checkpoint and commit the manifest atomically."""
     d = _layer_dir(checkpoint_dir, idx)
     if os.path.isdir(d):
         shutil.rmtree(d)
@@ -661,7 +656,15 @@ class _CheckpointState:
         layers: nn.ModuleList,
         next_layer_inputs: list | None = None,
     ) -> None:
-        """Snapshot layer state and write checkpoint to disk in one step."""
+        """Snapshot layer state and write checkpoint to disk in one step.
+
+        Args:
+            layer_idx: Index of the layer just calibrated.
+            layer: The layer module (weights may be on GPU or managed by accelerate/FSDP2).
+            model: The full model (needed for ``enable_weight_access_and_writeback``).
+            layers: The decoder layer list (to read ``output_meta``).
+            next_layer_inputs: Inputs for the next layer (``None`` for the final layer).
+        """
         from modelopt.torch.quantization.conversion import quantizer_state
         from modelopt.torch.quantization.utils.core_utils import enable_weight_access_and_writeback
 
