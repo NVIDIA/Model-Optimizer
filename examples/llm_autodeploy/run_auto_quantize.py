@@ -15,17 +15,17 @@
 
 import argparse
 from collections import defaultdict
+from typing import Any
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
-from modelopt.torch.quantization.config import QuantizeConfig
 from modelopt.torch.utils import create_forward_loop
 from modelopt.torch.utils.dataset_utils import get_dataset_dataloader
 
-SUPPORT_QUANT_FORMAT: dict[str, QuantizeConfig] = {
+SUPPORT_QUANT_FORMAT: dict[str, dict[str, Any]] = {
     "fp8": mtq.FP8_DEFAULT_CFG,
     "nvfp4": mtq.NVFP4_DEFAULT_CFG,
 }
