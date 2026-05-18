@@ -86,6 +86,13 @@ def _write_quantizer_cfg_list(path, body: str):
     path.write_text(QUANTIZER_CFG_LIST_SCHEMA + body)
 
 
+def _cfg_to_dict(cfg):
+    """Dump a QuantizerAttributeConfig (or list of them) to plain dicts for comparison."""
+    if isinstance(cfg, list):
+        return [item.model_dump(exclude_unset=True) for item in cfg]
+    return cfg.model_dump(exclude_unset=True)
+
+
 # ---------------------------------------------------------------------------
 # Directory-format YAML fixtures
 # ---------------------------------------------------------------------------

@@ -21,17 +21,10 @@ imports:
   block_sparse_moe_nvfp4: configs/ptq/units/block_sparse_moe_nvfp4
   experts_nvfp4: configs/ptq/units/experts_nvfp4
   default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
-  nvfp4: configs/numerics/nvfp4
 
 algorithm: max
 quant_cfg:
   - $import: base_disable_all
-  - quantizer_name: '*mlp.experts*weight_quantizer'
-    cfg:
-      $import: nvfp4
-  - quantizer_name: '*mlp.experts*input_quantizer'
-    cfg:
-      $import: nvfp4
   - $import: block_sparse_moe_nvfp4
   - $import: experts_nvfp4
   - $import: default_disabled_quantizers
