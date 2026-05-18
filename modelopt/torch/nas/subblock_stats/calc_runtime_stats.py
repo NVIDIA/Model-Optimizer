@@ -40,7 +40,7 @@ from modelopt.torch.puzzletron.block_config import (
 def _make_standard_block_config(hidden_size: int, num_key_value_heads: int) -> BlockConfig:
     return BlockConfig(
         attention=AttentionConfig(no_op=False, num_key_value_heads=num_key_value_heads),
-        ffn=FFNConfig(no_op=False, intermediate_size=hidden_size, moe=None),
+        ffn=FFNConfig(no_op=False, intermediate_size=256, moe=None),
         parallel_blocks=None,
     )
 
@@ -90,15 +90,8 @@ def create_benchmark_model(
 
 def calc_model_runtime(model: LlamaForCausalLM, runtime_config: RuntimeConfig) -> float:
     """Measure total runtime of a model via vLLM latency benchmark."""
-    with tempfile.TemporaryDirectory(delete=False) as model_tmpdir:  # delete=True after debugging
-        print(f"|||| Saving model to {model_tmpdir}")
-        save_model(
-            model,
-            Path(runtime_config.tokenizer_path),
-            Path(model_tmpdir),
-            num_hidden_layers=runtime_config.repeat_block_n_times + 1,
-        )
-        print(f"|||| Running vLLM latency benchmark on {model_tmpdir}")
+    with tempfile.TemporaryDirectory() as model_tmpdir:
+        save_model(model, Path(runtime_config.tokenizer_path), Path(model_tmpdir))
         model_total_runtime_ms = run_vllm_latency_benchmark(Path(model_tmpdir), runtime_config)
     return model_total_runtime_ms
 
@@ -212,35 +205,18 @@ def calc_runtime_for_subblocks(
         sorted(subblock_config_set),
         desc=(f"Computing runtime for {len(subblock_config_set)} subblocks\n"),
     ):
-        print("|||| Calculating baseline runtime")
-        # runtime_config_baseline = replace(runtime_config, repeat_block_n_times=0)
         baseline_runtime_ms = calc_base_runtime(runtime_config, subblock_config)
-        print(f"|||| {baseline_runtime_ms=}")
-
-        if isinstance(subblock_config, AttentionConfig):
-            num_key_value_heads = subblock_config.num_key_value_heads
-            desc = f"AttentionConfig(num_key_value_heads={num_key_value_heads})"
-        elif isinstance(subblock_config, FFNConfig):
-            intermediate_size = subblock_config.intermediate_size
-            desc = f"FFNConfig(intermediate_size={intermediate_size})"
-        else:
-            raise ValueError(f"Unsupported subblock type: {type(subblock_config)}")
-        print(f"Computing runtime for subblock: {desc} {subblock_config.no_op=}")
 
         if subblock_config.no_op:
             total_runtime_ms = 0.0
         else:
-            print("|||| Calculating subblock runtime")
             subblock_total_runtime_ms = calc_subblock_runtime(runtime_config, subblock_config)
-            print(f"|||| {subblock_total_runtime_ms=}")
             total_runtime_ms = (
                 subblock_total_runtime_ms - baseline_runtime_ms
             ) / repeat_block_n_times
 
         runtime_by_subblock_dict[subblock_config] = total_runtime_ms
 
-    print("|||| Calculating no-block runtime")
     no_block_runtime_ms = calc_no_block_runtime(runtime_config)
-    print(f"|||| {no_block_runtime_ms=}")
 
     return runtime_by_subblock_dict, no_block_runtime_ms

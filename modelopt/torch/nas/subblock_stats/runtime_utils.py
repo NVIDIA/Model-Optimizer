@@ -28,18 +28,16 @@ class RuntimeConfig:
     num_warmup_iters: int
 
 
-def save_model(
-    model: LlamaForCausalLM, tokenizer_path: Path, output_path: Path, num_hidden_layers: int
-) -> None:
+def save_model(model: LlamaForCausalLM, tokenizer_path: Path, output_path: Path) -> None:
     """Save model weights as AnyModel and copy the tokenizer to ``output_path``."""
     model.to(dtype=torch.bfloat16).save_pretrained(output_path)
-    save_model_as_anymodel(model, output_path, LlamaModelDescriptor, num_hidden_layers)
+    save_model_as_anymodel(model, output_path, LlamaModelDescriptor)
 
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
     tokenizer.save_pretrained(output_path)
 
 
-def save_model_as_anymodel(model, output_dir: Path, descriptor, num_hidden_layers: int):
+def save_model_as_anymodel(model, output_dir: Path, descriptor):
     """Save a model checkpoint in AnyModel subblock-safetensors format."""
     # Save standard model checkpoint (as safetensors, HF format)
     model.save_pretrained(output_dir, safe_serialization=True)
@@ -49,7 +47,7 @@ def save_model_as_anymodel(model, output_dir: Path, descriptor, num_hidden_layer
         input_dir=output_dir,
         output_dir=output_dir,
         descriptor=descriptor,
-        num_hidden_layers=num_hidden_layers,
+        num_hidden_layers=model.config.num_hidden_layers,
     )
     # Load the model config.json, update "architectures" to ["AnyModel"], and write back to disk.
 
