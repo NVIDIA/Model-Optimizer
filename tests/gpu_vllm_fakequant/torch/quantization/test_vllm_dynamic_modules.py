@@ -58,15 +58,11 @@ pytest.importorskip("transformers")
 
 import vllm.model_executor.layers.fused_moe.layer as vllm_fused_moe_layer
 import vllm.model_executor.layers.linear as vllm_linear
-from _test_utils.torch.transformers_models import (
-    create_tiny_llama_dir,
-    create_tiny_qwen3_moe_dir,
-)
+from _test_utils.torch.transformers_models import create_tiny_llama_dir, create_tiny_qwen3_moe_dir
 from vllm import LLM
 from vllm.distributed import cleanup_dist_env_and_memory
 
 from modelopt.torch.quantization.plugins.vllm import VllmMLAAttention
-
 
 # Sizes picked so vLLM accepts the head_size (must be supported by the chosen
 # attention backend). head_size=64 with num_heads=2 is broadly supported.
@@ -135,33 +131,42 @@ def _quantize_and_summarize(self):
     quantizers_without_amax: list[str] = []
     enabled_quantizer_count = 0
 
+    def _missing(mod, name, slots):
+        return (
+            f"{name}.{q}" for q in slots if not isinstance(getattr(mod, q, None), TensorQuantizer)
+        )
+
     for name, mod in model.named_modules():
         if isinstance(mod, vp._VLLMParallelLinear):
             kind = type(mod).__name__
             parallel_linear_counts[kind] = parallel_linear_counts.get(kind, 0) + 1
-            for q in ("input_quantizer", "weight_quantizer", "output_quantizer"):
-                if not isinstance(getattr(mod, q, None), TensorQuantizer):
-                    missing_quantizers.append(f"{name}.{q}")
+            missing_quantizers.extend(
+                _missing(mod, name, ("input_quantizer", "weight_quantizer", "output_quantizer"))
+            )
         elif isinstance(mod, vp._QuantFusedMoEBase):
             moe_count += 1
-            for q in (
-                "w13_input_quantizer",
-                "w2_input_quantizer",
-                "w13_weight_quantizer",
-                "w2_weight_quantizer",
-            ):
-                if not isinstance(getattr(mod, q, None), TensorQuantizer):
-                    missing_quantizers.append(f"{name}.{q}")
+            missing_quantizers.extend(
+                _missing(
+                    mod,
+                    name,
+                    (
+                        "w13_input_quantizer",
+                        "w2_input_quantizer",
+                        "w13_weight_quantizer",
+                        "w2_weight_quantizer",
+                    ),
+                )
+            )
         elif vp.VllmMLAAttention is not None and isinstance(mod, vp.VllmMLAAttention):
             mla_count += 1
-            for q in ("q_bmm_quantizer", "kv_c_bmm_quantizer", "k_pe_bmm_quantizer"):
-                if not isinstance(getattr(mod, q, None), TensorQuantizer):
-                    missing_quantizers.append(f"{name}.{q}")
+            missing_quantizers.extend(
+                _missing(mod, name, ("q_bmm_quantizer", "kv_c_bmm_quantizer", "k_pe_bmm_quantizer"))
+            )
         elif isinstance(mod, vp._ATTENTION_TYPES):
             attention_count += 1
-            for q in ("q_bmm_quantizer", "k_bmm_quantizer", "v_bmm_quantizer"):
-                if not isinstance(getattr(mod, q, None), TensorQuantizer):
-                    missing_quantizers.append(f"{name}.{q}")
+            missing_quantizers.extend(
+                _missing(mod, name, ("q_bmm_quantizer", "k_bmm_quantizer", "v_bmm_quantizer"))
+            )
 
         # Static-amax invariant: after calibration, every enabled quantizer
         # must own an ``_amax`` buffer. Missing ``_amax`` means the quantizer
@@ -386,7 +391,9 @@ def test_registry_registration(vllm_cls):
     assert vllm_cls in QuantModuleRegistry
 
 
-@pytest.mark.skipif(VllmMLAAttention is None, reason="MLAAttention not present in this vLLM version")
+@pytest.mark.skipif(
+    VllmMLAAttention is None, reason="MLAAttention not present in this vLLM version"
+)
 def test_registry_has_mla_attention():
     from modelopt.torch.quantization.nn import QuantModuleRegistry
 
