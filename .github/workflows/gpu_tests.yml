@@ -53,7 +53,7 @@ jobs:
           - example: gpu_vllm_fakequant
             timeout: 30
             # Keep in sync with examples/vllm_serve/Dockerfile.
-            container_image: docker.io/vllm/vllm-openai:v0.10.2
+            container_image: docker.io/vllm/vllm-openai:v0.21.0
     runs-on: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && 'linux-amd64-gpu-rtxpro6000-latest-1' || 'linux-amd64-gpu-rtxpro6000-latest-2' }}
     timeout-minutes: ${{ matrix.timeout }}
     container:
@@ -73,7 +73,7 @@ jobs:
           COVERAGE_PROCESS_START: ${{ github.workspace }}/pyproject.toml
           COVERAGE_FILE: ${{ github.workspace }}/.coverage
         run: |
-          python -m pip install nox && nox -s ${{ matrix.example }}
+          python3 -m pip install nox && nox -s ${{ matrix.example }}
       - name: Upload GPU coverage to Codecov
         uses: codecov/codecov-action@v5
         with:

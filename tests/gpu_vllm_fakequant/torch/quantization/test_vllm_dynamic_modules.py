@@ -347,14 +347,9 @@ def _try_make_tiny_deepseek_v3_dir(tmp_path):
 def tiny_deepseek_llm(cuda_required, tmp_path_factory):
     tmp = tmp_path_factory.mktemp("tiny_deepseek")
     model_dir = _try_make_tiny_deepseek_v3_dir(tmp)
-    try:
-        llm = _boot_llm(model_dir)
-    except Exception as exc:  # pragma: no cover - env-dependent
-        pytest.skip(f"vLLM could not load tiny DeepseekV3: {exc!r}")
-    try:
-        yield llm
-    finally:
-        _shutdown_llm(llm)
+    llm = _boot_llm(model_dir)
+    yield llm
+    _shutdown_llm(llm)
 
 
 def test_tiny_deepseek_mla_quantize_via_vllm(tiny_deepseek_llm):
