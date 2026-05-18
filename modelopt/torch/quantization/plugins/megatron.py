@@ -18,6 +18,7 @@
 import logging
 import types
 import warnings
+from contextlib import contextmanager
 from typing import Any
 
 import megatron.core.parallel_state as mcore_parallel
@@ -775,3 +776,33 @@ if HAS_TE:
             # Affine KVCache Quant bias vector.
             state_dict = self.state_dict(prefix="", keep_vars=True)
             return make_sharded_tensors_for_checkpoint(state_dict, prefix, {}, sharded_offsets)
+
+
+def _is_supported_megatron_model(model: torch.nn.Module) -> bool:
+    return isinstance(model, MegatronModule)
+
+
+@contextmanager
+def _megatron_grad_ckpt_context(model: torch.nn.Module):
+    # Megatron configures activation recompute at model build time via TransformerConfig,
+    # so there is no runtime flag to flip here.
+    yield
+
+
+def _is_param_grad_enabled_for_megatron(pname: str, model: torch.nn.Module) -> bool:
+    return "embed" in pname
+
+
+def _register_auto_quantize_support() -> None:
+    # Local import breaks the circular path where algorithms imports model_calib,
+    # which imports _check_static_block_tp_supported from this plugin.
+    from ..algorithms import AutoQuantizeGradientSearcher
+
+    AutoQuantizeGradientSearcher.register_custom_support(
+        _is_supported_megatron_model,
+        _megatron_grad_ckpt_context,
+        _is_param_grad_enabled_for_megatron,
+    )
+
+
+_register_auto_quantize_support()
