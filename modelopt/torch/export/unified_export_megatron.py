@@ -68,6 +68,7 @@ with import_plugin("megatron"):
     from megatron.core.models.mamba import MambaModel
     from megatron.core.models.multimodal.llava_model import LLaVAModel
     from megatron.core.parallel_state import (
+        get_expert_model_parallel_rank,
         get_pipeline_model_parallel_rank,
         get_pipeline_model_parallel_world_size,
         get_tensor_model_parallel_rank,
@@ -257,10 +258,11 @@ class GPTModelExporter:
 
         # We use the 1st PP rank to handle VLM because vision_models
         # and vision_proj only exist in the first stage.
-        is_first_stage_main_rank = pp_rank == 0 and tp_rank == 0
+        ep_rank = get_expert_model_parallel_rank()
+        is_first_stage_main_rank = pp_rank == 0 and tp_rank == 0 and ep_rank == 0
         # We use the last PP rank to write the config because
         # medusa_heads and eagle_module only exist in the last stage.
-        is_last_stage_main_rank = pp_rank == pp_size - 1 and tp_rank == 0
+        is_last_stage_main_rank = pp_rank == pp_size - 1 and tp_rank == 0 and ep_rank == 0
 
         # Main export process
         layer_state_dicts = self.layer_state_dicts
@@ -345,9 +347,12 @@ class GPTModelExporter:
         if is_last_stage_main_rank and self._hf_config is not None:
             copy_hf_ckpt_remote_code(pretrained_model_name_or_path, save_directory)
 
+        # Barrier after config copy to ensure config.json is fully written.
+        torch.distributed.barrier()
+
         # Newer versions of VLLM expect config.json with hf_quant_config
         config_json_file = save_directory + "/config.json"
-        if self._hf_quant_config and os.path.exists(config_json_file):
+        if is_last_stage_main_rank and self._hf_quant_config and os.path.exists(config_json_file):
             converted_quant_config = convert_hf_quant_config_format(self._hf_quant_config)
             with open(config_json_file) as f:
                 config_dict = json.load(f)
