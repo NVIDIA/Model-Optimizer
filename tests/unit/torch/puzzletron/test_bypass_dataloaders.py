@@ -191,6 +191,7 @@ class _NoChatTemplateTokenizer:
 
     def __init__(self):
         self.seen_texts = None
+        self.vocab = {}  # Required by ConstantLengthDataset.get_fim_token_ids.
 
     def __call__(self, texts, truncation=False):
         self.seen_texts = texts
