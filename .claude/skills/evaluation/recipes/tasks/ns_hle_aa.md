@@ -1,14 +1,14 @@
-# HLE AA v2
+# HLE AA
 
 ## Task Details
 
-- Task: `hle_aa_v2`
-- Harness: HLE, chat
+- Task: `ns_hle_aa`
+- Harness: nemo-skills, chat
 - Primary metric: `pass@1 judge_correct`
 - Run time: Long
 - Repeats: 1
 - Requires: `HF_TOKEN`, `JUDGE_API_KEY`
-- Reference: https://docs.nvidia.com/nemo/evaluator/latest/evaluation/benchmarks/catalog/all/harnesses/hle.html
+- Reference: https://docs.nvidia.com/nemo/evaluator/nightly/evaluation/benchmarks/catalog/all/harnesses/nemo_skills.html
 
 ## Params
 
@@ -20,16 +20,24 @@ v2. HLE is judge-scored and requires judge credentials.
 Use this inside the top-level `evaluation.tasks` list:
 
 ```yaml
-- name: hle_aa_v2
-  container: nvcr.io/nvidia/eval-factory/hle:26.03
+- name: ns_hle_aa
+  container: nvcr.io/nvidia/eval-factory/nemo-skills:26.03
   env_vars:
     HF_TOKEN: host:HF_TOKEN
     JUDGE_API_KEY: host:JUDGE_API_KEY
+  nemo_evaluator_config:
+    config:
+      params:
+        extra:
+          judge:
+            model_id: <hle_aa_judge_model_id>
+            url: <openai_compatible_judge_chat_completions_url>
+            api_key: JUDGE_API_KEY
 ```
 
 ## Score Extraction
 
-HLE AA v2 accuracy comes from:
+HLE AA accuracy comes from:
 
 ```text
 results.groups.hle.metrics.pass@1.scores.judge_correct.value
