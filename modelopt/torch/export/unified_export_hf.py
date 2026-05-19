@@ -52,13 +52,10 @@ except ImportError:
 from torch.distributed.fsdp import FSDPModule
 
 from modelopt.torch.quantization import set_quantizer_by_cfg_context
-from modelopt.torch.quantization.nn import (
-    NVFP4StaticQuantizer,
-    SequentialQuantizer,
-    TensorQuantizer,
-)
+from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
 from modelopt.torch.quantization.qtensor import MXFP8QTensor, NVFP4QTensor
 from modelopt.torch.quantization.utils import fsdp2_aware_weight_update, quantizer_attr_names
+from modelopt.torch.utils.dataset_utils import _disable_use_cache
 
 try:
     from modelopt.torch.sparsity.attention_sparsity.conversion import export_sparse_attention_config
@@ -86,8 +83,10 @@ from .model_config import (
     QUANTIZATION_NVFP4_SVDQUANT,
     QUANTIZATION_W4A8_AWQ,
     QUANTIZATION_W4A8_NVFP4_FP8,
+    QUANTIZATION_W4A16_NVFP4,
 )
 from .model_utils import get_language_model_from_vl, is_multimodal_model
+from .moe_utils import _export_fused_experts
 from .plugins import SpeculativeDecodingExporter, has_spec_opt
 from .quant_utils import (
     fuse_prequant_layernorm,
@@ -216,11 +215,14 @@ def collect_shared_input_modules(
     if not handles:
         return input_to_linear, output_to_layernorm
 
-    # Run dummy forward pass to collect modules sharing same input
+    # Run dummy forward pass to collect modules sharing same input.
+    # `_disable_use_cache` keeps the probe forward working on configs that don't
+    # set `use_cache` (e.g., stepfun-ai/Step-3.5-Flash's Step3p5Config).
     try:
         with (
             torch.no_grad(),
             set_quantizer_by_cfg_context(model, [{"quantizer_name": "*", "enable": False}]),
+            _disable_use_cache(model),
         ):
             dummy_forward_fn()
     finally:
@@ -520,6 +522,7 @@ def _export_quantized_weight(
         QUANTIZATION_NVFP4_AWQ,
         QUANTIZATION_NVFP4_SVDQUANT,
         QUANTIZATION_NVFP4,
+        QUANTIZATION_W4A16_NVFP4,
         QUANTIZATION_W4A8_AWQ,
         QUANTIZATION_W4A8_NVFP4_FP8,
     ]:
@@ -538,16 +541,18 @@ def _export_quantized_weight(
         expert_type in type(sub_module).__name__
         for expert_type in ["Llama4TextExperts", "GptOssExperts"]
     )
-    if is_bmm_expert_weight and isinstance(weight_quantizer, NVFP4StaticQuantizer):
-        raise ValueError(
-            "NVFP4StaticQuantizer with BMM-style expert weights (e.g. Llama4TextExperts, "
-            "GptOssExperts) is not yet supported."
-        )
+    # NVFP4StaticQuantizer + BMM-style experts: route through the static-aware
+    # ``_from_quantizer`` helper so the pinned per-block ``_amax`` (e.g. set by
+    # the MXFP4->NVFP4 cast to ``6 * 2^k_j``) is used to derive the FP8
+    # per-block scale. The plain ``get_weights_scaling_factor`` would ignore
+    # ``_amax`` and recompute per-block max from the BF16 weight, which
+    # rebuckets nibbles and loses bit-exactness when ``max_nibble < 6``.
 
     if quantization_format in [
         QUANTIZATION_NVFP4,
         QUANTIZATION_NVFP4_AWQ,
         QUANTIZATION_NVFP4_SVDQUANT,
+        QUANTIZATION_W4A16_NVFP4,
     ]:
         # Transpose weight from (num_experts, input_dim, output_dim) to (num_experts, output_dim, input_dim)
         # for NVFP4 quantization functions that expect input_dim as the last dimension for block quantization
@@ -555,11 +560,18 @@ def _export_quantized_weight(
             weight, is_bmm_expert_weight=is_bmm_expert_weight
         )
 
-        weight_scale = NVFP4QTensor.get_weights_scaling_factor(
-            weight,
-            block_size=block_size,
-            weights_scaling_factor_2=weight_scale_2,
-        )[0]
+        if NVFP4QTensor._is_static_quantizer(weight_quantizer):
+            weight_scale = NVFP4QTensor.get_weights_scaling_factor_from_quantizer(
+                weight_quantizer,
+                weight,
+                weight_scale_2,
+            )[0]
+        else:
+            weight_scale = NVFP4QTensor.get_weights_scaling_factor(
+                weight,
+                block_size=block_size,
+                weights_scaling_factor_2=weight_scale_2,
+            )[0]
 
         quantized_weight = to_quantized_weight(
             weight.to(dtype),
@@ -642,11 +654,20 @@ def _process_quantized_modules(
         if is_modelopt_qlora and (hasattr(sub_module, "base_layer")):
             continue
 
+        # Preprocessing: restore unpacked weight so the export path can read
+        # the live quantizer state. Falls through to the export branches below.
         if hasattr(sub_module, "weight_packed") or (
             "QuantFP8Linear" in type(sub_module).__name__ and sub_module.weight.element_size() <= 1
         ):
             sub_module.unpack_weight()
-        if get_quantization_format(sub_module) != QUANTIZATION_NONE:
+
+        if hasattr(sub_module, "gate_up_proj_weight_quantizers"):
+            # _QuantFusedExperts uses plural `gate_up_proj_weight_quantizers` (ModuleList),
+            # which get_quantization_format's singular-weight_quantizer check misses. Handle
+            # it explicitly before the format gate so fused-experts get split + quantized.
+            with fsdp2_aware_weight_update(model, sub_module, reshard=False):
+                _export_fused_experts(sub_module, dtype)
+        elif get_quantization_format(sub_module) != QUANTIZATION_NONE:
             # Skip QuantMoELinear - it's handled separately in _reconstruct_fused_moe_linear
             if type(sub_module).__name__ == "QuantMoELinear":
                 continue
@@ -677,13 +698,6 @@ def _process_quantized_modules(
                 with fsdp2_aware_weight_update(model, sub_module, reshard=False):
                     for weight_name in ["gate_up_proj", "down_proj"]:
                         _export_quantized_weight(sub_module, dtype, weight_name)
-            elif hasattr(sub_module, "gate_up_proj_weight_quantizers"):
-                # Generic fused MoE experts (_QuantFusedExperts) with per-expert
-                # quantizer ModuleLists. Split into per-expert modules and export.
-                from modelopt.torch.export.moe_utils import _export_fused_experts
-
-                with fsdp2_aware_weight_update(model, sub_module, reshard=False):
-                    _export_fused_experts(sub_module, dtype)
 
 
 def _export_transformers_checkpoint(
@@ -1123,6 +1137,19 @@ def _unpatch_revert_weight_conversion(patches: list[tuple[Any, Any]]) -> None:
         mod.revert_weight_conversion = original
 
 
+def _sanitize_generation_config_for_save(model: torch.nn.Module) -> None:
+    """Force ``do_sample=True`` when generation_config has ``top_k``/``top_p`` set.
+
+    Newer transformers reject ``do_sample=False`` mixed with sampling attrs in
+    ``save_pretrained``'s strict validate.
+    """
+    gc = getattr(model, "generation_config", None)
+    if gc is None:
+        return
+    if getattr(gc, "top_k", None) is not None or getattr(gc, "top_p", None) is not None:
+        gc.do_sample = True
+
+
 def export_speculative_decoding(
     model: torch.nn.Module,
     dtype: torch.dtype | None = None,
@@ -1186,12 +1213,25 @@ def export_hf_checkpoint(
     try:
         post_state_dict, hf_quant_config = _export_transformers_checkpoint(model, dtype)
 
-        if hf_quant_config is not None:
+        # Only treat the export as quantized when at least one quant_algo field is set.
+        # get_quant_config always returns a dict (even for sparsity-only or unmodified models),
+        # so emitting hf_quant_config.json unconditionally produces a file with
+        # "quant_algo": null that downstream loaders (e.g. TensorRT-LLM) reject as a
+        # malformed pre-quantized checkpoint.
+        quantization_details = (hf_quant_config or {}).get("quantization", {})
+        is_quantized_export = (
+            quantization_details.get("quant_algo") is not None
+            or quantization_details.get("kv_cache_quant_algo") is not None
+        )
+
+        if is_quantized_export:
             # Save hf_quant_config.json for backward compatibility
             with open(f"{export_dir}/hf_quant_config.json", "w") as file:
                 json.dump(hf_quant_config, file, indent=4)
 
             hf_quant_config = convert_hf_quant_config_format(hf_quant_config)
+        else:
+            hf_quant_config = None
 
         # Remove hf_quantizer from model so post_state_dict can be exported.
         if getattr(model, "hf_quantizer", None) is not None:
@@ -1203,6 +1243,8 @@ def export_hf_checkpoint(
         # We must patch both the source module and the importing module since
         # modeling_utils does `from core_model_loading import revert_weight_conversion`.
         _patches = _patch_revert_weight_conversion()
+
+        _sanitize_generation_config_for_save(model)
 
         try:
             model.save_pretrained(

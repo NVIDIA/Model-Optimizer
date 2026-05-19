@@ -94,7 +94,7 @@ class QuantizeModeDescriptor(ModeDescriptor):
     @property
     def next_prohibited_modes(self) -> set[str] | None:
         """Modes that should not be applied after this mode."""
-        return {"sparsity", "autonas", "fastnas", "gradnas"}
+        return {"sparsity", "autonas", "fastnas"}
 
     @property
     def export_mode(self) -> str | None:

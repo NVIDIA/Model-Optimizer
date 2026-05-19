@@ -514,6 +514,16 @@ class TensorQuantizer(nn.Module):
             and self.block_sizes.get("scale_bits", None) == (8, 0)
         )
 
+    @property
+    def is_nvfp4_static(self):
+        """True for E2M1 weights + E4M3 per-block scales in static layout (format-only check)."""
+        return (
+            self.is_static_block_quant
+            and self._num_bits == (2, 1)
+            and self._block_sizes is not None
+            and self._block_sizes.get("scale_bits") == (4, 3)
+        )
+
     def is_mxfp(self, bits):
         """Check if is MXFP4/MXFP6/MXFP8."""
         if bits == 4:
@@ -1112,7 +1122,7 @@ class TensorQuantizer(nn.Module):
 
         return outputs
 
-    def _short_amax(self, fmt=".4f"):
+    def _short_amax(self, fmt=".2e"):
         """Short description of amax.
 
         Returns:
@@ -1130,7 +1140,7 @@ class TensorQuantizer(nn.Module):
             return "meta"
         return self._short_tensor(self._amax, fmt)
 
-    def _short_tensor(self, tensor: torch.Tensor, fmt=".4f"):
+    def _short_tensor(self, tensor: torch.Tensor, fmt=".2e"):
         """Short description of tensor."""
         if tensor.numel() == 1:
             return f"{tensor.item():{fmt}}"

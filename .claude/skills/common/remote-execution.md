@@ -28,6 +28,16 @@ clusters:
 default_cluster: my-cluster
 ```
 
+### Staging checkpoints from your workstation
+
+Workstation filesystems (`/home/scratch.*`, local NFS) are **not** mounted on the cluster. If a checkpoint was produced on your workstation, copy it to the cluster's own storage before submitting any job that references it — NEL and SLURM do NOT sync checkpoints automatically.
+
+```bash
+rsync -av /path/to/local/checkpoint <cluster-login>:<cluster-workspace>/checkpoints/
+```
+
+Use the `workspace` path from your cluster config as the destination. Compute nodes on a given cluster share the same storage as its login node, so once staged, the path works everywhere on that cluster.
+
 See `.claude/clusters.yaml.example` for a fully annotated example with multiple cluster types.
 
 ---

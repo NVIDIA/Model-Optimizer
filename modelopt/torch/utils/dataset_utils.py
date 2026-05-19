@@ -18,7 +18,8 @@
 import copy
 import json
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from warnings import warn
@@ -30,6 +31,11 @@ from tqdm import tqdm
 
 if TYPE_CHECKING:
     from transformers import PreTrainedTokenizerBase
+
+
+def _join_messages_content(sample: dict) -> str:
+    return "\n".join(turn["content"] for turn in sample["messages"])
+
 
 # Use dict to store the config for each dataset.
 # If we want to export more options to user like target languages, we need more standardized approach like dataclass.
@@ -60,7 +66,7 @@ SUPPORTED_DATASET_CONFIG: dict[str, Any] = {
             "path": "nvidia/Nemotron-Post-Training-Dataset-v2",
             "split": ["stem", "chat", "math", "code"],
         },
-        "preprocess": lambda sample: "\n".join(turn["content"] for turn in sample["messages"]),
+        "preprocess": _join_messages_content,
         "chat_key": "messages",
     },
     "nemotron-post-training-dataset-v1": {
@@ -68,7 +74,91 @@ SUPPORTED_DATASET_CONFIG: dict[str, Any] = {
             "path": "nvidia/Nemotron-Post-Training-Dataset-v1",
             "split": ["stem", "chat", "math", "code", "tool_calling"],
         },
-        "preprocess": lambda sample: "\n".join(turn["content"] for turn in sample["messages"]),
+        "preprocess": _join_messages_content,
+        "chat_key": "messages",
+    },
+    "nemotron-sft-instruction-following-chat-v2": {
+        # Skips ``reasoning_on`` split: heterogeneous messages schema fails streaming cast.
+        "config": {
+            "path": "nvidia/Nemotron-SFT-Instruction-Following-Chat-v2",
+            "split": ["reasoning_off"],
+        },
+        "preprocess": _join_messages_content,
+        "chat_key": "messages",
+    },
+    "nemotron-science-v1": {
+        "config": {
+            "path": "nvidia/Nemotron-Science-v1",
+            "split": ["MCQ", "RQA"],
+        },
+        "preprocess": _join_messages_content,
+        "chat_key": "messages",
+    },
+    "nemotron-competitive-programming-v1": {
+        # Skips ``infinibyte_part0[0|1]``: heterogeneous schema fails streaming cast.
+        "config": {
+            "path": "nvidia/Nemotron-Competitive-Programming-v1",
+            "split": [
+                "competitive_coding_cpp_part00",
+                "competitive_coding_cpp_part01",
+                "competitive_coding_python_part00",
+                "competitive_coding_python_part01",
+            ],
+        },
+        "preprocess": _join_messages_content,
+        "chat_key": "messages",
+    },
+    "nemotron-sft-agentic-v2": {
+        # Skips ``search`` split: heterogeneous messages schema fails streaming cast.
+        "config": {
+            "path": "nvidia/Nemotron-SFT-Agentic-v2",
+            "split": ["interactive_agent", "tool_calling"],
+        },
+        "preprocess": _join_messages_content,
+        "chat_key": "messages",
+    },
+    "nemotron-math-v2": {
+        "config": {
+            "path": "nvidia/Nemotron-Math-v2",
+            "split": ["high_part00", "high_part01", "high_part02", "medium", "low"],
+        },
+        "preprocess": _join_messages_content,
+        "chat_key": "messages",
+    },
+    "nemotron-sft-swe-v2": {
+        # Skips ``openhands_swe`` split: heterogeneous schema fails streaming cast.
+        "config": {
+            "path": "nvidia/Nemotron-SFT-SWE-v2",
+            "split": ["agentless"],
+        },
+        "preprocess": _join_messages_content,
+        "chat_key": "messages",
+    },
+    "nemotron-sft-multilingual-v1": {
+        "config": {
+            "path": "nvidia/Nemotron-SFT-Multilingual-v1",
+            "split": [
+                "code_de",
+                "code_es",
+                "code_fr",
+                "code_it",
+                "code_ja",
+                "code_zh",
+                "math_de",
+                "math_es",
+                "math_fr",
+                "math_it",
+                "math_ja",
+                "math_zh",
+                "stem_de",
+                "stem_es",
+                "stem_fr",
+                "stem_it",
+                "stem_ja",
+                "stem_zh",
+            ],
+        },
+        "preprocess": _join_messages_content,
         "chat_key": "messages",
     },
     "magpie": {
@@ -177,7 +267,11 @@ def _auto_preprocess_sample(
         ValueError: If the tokenizer is missing/incompatible for chat-format datasets,
             or if no recognized column is found.
     """
-    chat_key = next((k for k in ("messages", "conversations") if sample.get(k)), None)
+
+    def _has_non_null_value(key: str) -> bool:
+        return sample.get(key) is not None
+
+    chat_key = next((k for k in ("messages", "conversations") if _has_non_null_value(k)), None)
     if chat_key is not None:
         if tokenizer is None or not hasattr(tokenizer, "apply_chat_template"):
             raise ValueError(
@@ -186,21 +280,23 @@ def _auto_preprocess_sample(
             )
         kwargs: dict[str, Any] = {}
         tools = sample.get("tools")
-        if tools:
+        if tools is not None:
             kwargs["tools"] = tools
         return tokenizer.apply_chat_template(sample[chat_key], tokenize=False, **kwargs)
 
-    if "prompt" in sample:
+    if _has_non_null_value("prompt"):
         parts = [sample["prompt"]]
-        parts.extend(sample[k] for k in ("completion", "response", "output") if sample.get(k))
+        parts.extend(
+            sample[k] for k in ("completion", "response", "output") if _has_non_null_value(k)
+        )
         return "\n".join(parts)
 
-    if "text" in sample:
+    if _has_non_null_value("text"):
         return sample["text"]
 
-    if "input" in sample:
+    if _has_non_null_value("input"):
         parts = [sample["input"]]
-        if sample.get("output"):
+        if _has_non_null_value("output"):
             parts.append(sample["output"])
         return "\n".join(parts)
 
@@ -230,6 +326,15 @@ def get_dataset_samples(
             or a path to a ``.jsonl`` file.  For local directory paths, the
             predefined config from ``SUPPORTED_DATASET_CONFIG`` is matched if the base folder name
             matches a registered key (e.g. ``/hf-local/abisee/cnn_dailymail`` matches ``cnn_dailymail`` key).
+            For ``.jsonl`` paths, the file is first loaded via HuggingFace's ``json``
+            builder and routed through the same auto-preprocess path as unregistered HF
+            datasets so chat / prompt / text columns are handled consistently with live
+            HF datasets.  If that path fails on JSON parsing or PyArrow schema
+            unification, it falls back to a line-by-line reader that extracts the
+            legacy ``text`` field for backward compatibility.  The fallback is also
+            used when the optional ``datasets`` package isn't installed, preserving
+            legacy plain-``.jsonl`` workflows in base installations.  Local JSONL
+            files only expose the ``train`` split; passing any other ``split`` raises.
         num_samples: Number of samples to load from the dataset.
         apply_chat_template: Whether to apply the chat template to the samples
             (if supported by the dataset).  For unregistered datasets with a
@@ -244,25 +349,53 @@ def get_dataset_samples(
     Returns:
         Samples: The list of samples.
     """
-    # Local JSONL file path support (each line is a JSON object with a `text` field).
-    if dataset_name.endswith(".jsonl"):
-        return get_jsonl_text_samples(dataset_name, num_samples, key="text")
+    # Local JSONL: load via HF's ``json`` builder and route through the same
+    # auto-preprocess path as unregistered HF datasets so chat / prompt / text
+    # columns are handled consistently with a downloaded HF dataset.  Never
+    # matches ``SUPPORTED_DATASET_CONFIG``.
+    is_jsonl = dataset_name.endswith(".jsonl") and os.path.isfile(dataset_name)
+    requested_splits = _normalize_splits(split) if split is not None else None
+    if requested_splits is not None and not requested_splits:
+        raise ValueError("``split`` must contain at least one split name.")
 
-    from datasets import load_dataset
+    # HF's file-based builders only expose ``train`` for the ``data_files`` form
+    # we use, so any other split is a caller error.  Surface it up front rather
+    # than letting ``load_dataset`` fail and silently dropping into the
+    # text-field fallback (which would ignore the requested split).
+    if is_jsonl and requested_splits is not None:
+        invalid = [s for s in requested_splits if s != "train"]
+        if invalid:
+            raise ValueError(
+                f"Local JSONL files only expose the 'train' split, got {invalid}. "
+                "Either omit ``split`` or pass ``split='train'``."
+            )
+
+    # Lazy ``datasets`` import: legacy ``.jsonl`` workflows historically didn't
+    # require the optional ``datasets`` extra, so keep them working with just
+    # the stdlib reader when the package isn't installed.
+    try:
+        from datasets import load_dataset
+    except ImportError:
+        if is_jsonl:
+            return get_jsonl_text_samples(dataset_name, num_samples, key="text")
+        raise
 
     local_dataset_path = None
     if os.path.exists(dataset_name):  # Local path
         local_dataset_path = dataset_name
-        dataset_name = os.path.basename(os.path.normpath(local_dataset_path))
+        if not is_jsonl:
+            # Directory paths may match a registered key via their basename
+            # (e.g. /hf-local/abisee/cnn_dailymail -> cnn_dailymail).
+            dataset_name = os.path.basename(os.path.normpath(local_dataset_path))
 
-    is_registered = dataset_name in SUPPORTED_DATASET_CONFIG
+    is_registered = not is_jsonl and dataset_name in SUPPORTED_DATASET_CONFIG
 
     if is_registered:
         dataset_config = SUPPORTED_DATASET_CONFIG[dataset_name]
         config = dataset_config["config"].copy()
         if local_dataset_path:
             config["path"] = local_dataset_path
-        splits = _normalize_splits(split) if split is not None else config.pop("split", [None])
+        splits = requested_splits if requested_splits is not None else config.pop("split", [None])
         if split is not None:
             config.pop("split", None)
 
@@ -279,7 +412,7 @@ def get_dataset_samples(
             if apply_chat_template and "chat_key" in dataset_config:
                 kwargs: dict[str, Any] = {}
                 tools = sample.get("tools")
-                if tools:
+                if tools is not None:
                     kwargs["tools"] = tools
                 return tokenizer.apply_chat_template(  # type: ignore[union-attr]
                     sample[dataset_config["chat_key"]], tokenize=False, **kwargs
@@ -291,29 +424,77 @@ def get_dataset_samples(
             f"Dataset '{dataset_name}' is not in SUPPORTED_DATASET_CONFIG. "
             "Auto-detecting format from column names."
         )
-        config = {"path": local_dataset_path or dataset_name}
-        splits = _normalize_splits(split) if split is not None else ["train"]
+        if is_jsonl:
+            config = {"path": "json", "data_files": local_dataset_path}
+        else:
+            config = {"path": local_dataset_path or dataset_name}
+        # HF's file-based builders (incl. ``json``) label a string/list ``data_files``
+        # as the ``train`` split unconditionally — the filename on disk is ignored.
+        # Named splits require a dict ``data_files={"train": ..., "test": ...}``,
+        # which we don't expose here.
+        splits = requested_splits if requested_splits is not None else ["train"]
 
         def _preprocess(sample: dict) -> str:
             return _auto_preprocess_sample(sample, dataset_name, tokenizer)
 
+    if not splits:
+        raise ValueError("``split`` must contain at least one split name.")
+
+    # Narrow the legacy fallback to JSON-parsing / Arrow schema failures.  Any
+    # other error (split-not-found, IO, OOM, ...) should surface to the caller
+    # rather than be hidden by the text-field reader.  Imported lazily because
+    # the exact module paths vary across versions; an empty tuple is a valid
+    # ``except`` target that catches nothing if neither is importable.
+    fallback_types: tuple[type[BaseException], ...] = ()
+    try:
+        from datasets.exceptions import DatasetGenerationError
+
+        fallback_types += (DatasetGenerationError,)
+    except ImportError:
+        pass
+    try:
+        from pyarrow.lib import ArrowInvalid
+
+        fallback_types += (ArrowInvalid,)
+    except ImportError:
+        pass
+
     # load_dataset does not support a list of splits while streaming, so load each separately.
     print(f"Loading dataset with {config=} and {splits=}")
-    dataset_splits = [load_dataset(streaming=True, **config, split=s) for s in splits]
+    try:
+        dataset_splits = [load_dataset(streaming=True, **config, split=s) for s in splits]
 
-    num_per_split = [num_samples // len(dataset_splits)] * len(dataset_splits)
-    num_per_split[-1] += num_samples - sum(num_per_split)
+        num_per_split = [num_samples // len(dataset_splits)] * len(dataset_splits)
+        num_per_split[-1] += num_samples - sum(num_per_split)
 
-    samples: list[str] = []
-    for dataset, n in zip(dataset_splits, num_per_split):
-        for i, sample in enumerate(dataset):
-            if i >= n:
-                break
-            text = _preprocess(sample)
-            if text:
-                samples.append(text)
+        samples: list[str] = []
+        for dataset, n in zip(dataset_splits, num_per_split):
+            for i, sample in enumerate(dataset):
+                if i >= n:
+                    break
+                text = _preprocess(sample)
+                if text:
+                    samples.append(text)
 
-    return samples
+        return samples
+    except fallback_types as e:
+        # Backward-compat fallback: legacy callers passed JSONL files whose only usable
+        # field is ``text``.  If the HF ``json`` builder fails on schema inference or
+        # JSON parsing, fall back to a line-by-line reader that pulls ``text`` directly.
+        if not is_jsonl:
+            raise
+        assert local_dataset_path is not None  # is_jsonl implies the path exists
+        try:
+            fallback_samples = get_jsonl_text_samples(local_dataset_path, num_samples, key="text")
+        except Exception:
+            # Fallback can't help either — surface the original HF error.
+            raise e from None
+        safe_name = Path(local_dataset_path).name
+        warn(
+            f"Failed to load JSONL file '{safe_name}' via the HF 'json' builder "
+            f"({type(e).__name__}); fell back to legacy text-field reader."
+        )
+        return fallback_samples
 
 
 class _CustomDataset(torch.utils.data.Dataset):
@@ -344,8 +525,10 @@ def get_dataset_dataloader(
     """Get a dataloader with the dataset name and tokenizer of the target model.
 
     Args:
-        dataset_name: Name of the dataset to load, or a path to a ``.jsonl`` file.
-            If a ``.jsonl`` file is provided, each line must be a JSON object with a ``text`` field.
+        dataset_name: Name of the dataset to load, a path to a ``.jsonl`` file, or a list
+            mixing the two. Each entry is loaded via :func:`get_dataset_samples` and the
+            resulting samples are concatenated before tokenization. ``num_samples`` may be
+            an ``int`` (applied to a single source) or a list aligned with ``dataset_name``.
         tokenizer: Instance of HuggingFace tokenizer.
         batch_size: Batch size of the returned dataloader.
         num_samples: Number of samples from the dataset.
@@ -437,6 +620,36 @@ def get_supported_datasets() -> list[str]:
     return list(SUPPORTED_DATASET_CONFIG.keys())
 
 
+@contextmanager
+def _disable_use_cache(model: torch.nn.Module) -> Iterator[None]:
+    """Set ``model.config.use_cache = False`` for the duration of the block.
+
+    KV caching is unwanted during calibration / memory-probe forward passes:
+    it wastes memory, and for hybrid Mamba/attention models (e.g., NemotronH)
+    the cache state is mutated in-place and breaks correctness. Setting
+    ``use_cache`` unconditionally (rather than only when it was already
+    present) also sidesteps configs that never assign the attribute at all
+    — e.g., ``Step3p5Config`` from stepfun-ai/Step-3.5-Flash — where forward
+    code that reads ``self.config.use_cache`` would otherwise raise
+    ``AttributeError``. The prior value is restored on exit if one existed.
+    """
+    config = getattr(model, "config", None)
+    if config is None:
+        yield
+        return
+    had_attr = hasattr(config, "use_cache")
+    prev = config.use_cache if had_attr else None
+    config.use_cache = False
+    try:
+        yield
+    finally:
+        if had_attr:
+            config.use_cache = prev
+        else:
+            with suppress(AttributeError):
+                delattr(config, "use_cache")
+
+
 def get_max_batch_size(
     model: torch.nn.Module,
     max_sample_length: int = 512,
@@ -467,42 +680,49 @@ def get_max_batch_size(
             torch.ones([1, max_sample_length], dtype=torch.int32, device=model.device) * 100
         )
 
-    # Calculate single batch inference with dummy input.
-    with torch.set_grad_enabled(enable_grad):
-        infer_method(sample_input_single_batch)
-    free_mem_after, max_allocated_after = _get_free_gpu_mem()
-
-    mem_diff_per_data_batch = (
-        max(
-            (free_mem_before - free_mem_after),
-            (max_allocated_after - max_allocated_before),
-        )
-        * sample_memory_usage_ratio
-    )
-    if mem_diff_per_data_batch <= 0:
-        print(
-            "Warning: No measurable memory usage found for a single batch. "
-            "Falling back to batch_size=1."
-        )
-        target_data_batch = 1
-    else:
-        target_data_batch = max(int(free_mem_before / mem_diff_per_data_batch), 1)
-    target_input = sample_input_single_batch.expand(
-        [
-            target_data_batch if index == 0 else dim
-            for index, dim in enumerate(sample_input_single_batch.shape)
-        ]
-    )
-
-    # For some models on multi GPU, we observe the memory per batch is not a constant.
-    # So we just test the target batch size and make sure we do not go OOM.
-    while target_data_batch > 1:
+    with _disable_use_cache(model):
+        # Calculate single batch inference with dummy input.
         with torch.set_grad_enabled(enable_grad):
-            try:
-                infer_method(target_input)
-                break
-            except torch.cuda.OutOfMemoryError:
-                target_data_batch = target_data_batch // 2
+            infer_method(sample_input_single_batch)
+        free_mem_after, max_allocated_after = _get_free_gpu_mem()
+
+        mem_diff_per_data_batch = (
+            max(
+                (free_mem_before - free_mem_after),
+                (max_allocated_after - max_allocated_before),
+            )
+            * sample_memory_usage_ratio
+        )
+        if mem_diff_per_data_batch <= 0:  # pragma: no cover - GPU memory probe edge case
+            print(  # pragma: no cover
+                "Warning: No measurable memory usage found for a single batch. "
+                "Falling back to batch_size=1."
+            )
+            target_data_batch = 1  # pragma: no cover
+        else:
+            target_data_batch = max(int(free_mem_before / mem_diff_per_data_batch), 1)
+
+        def _expand_to(batch: int) -> torch.Tensor:
+            return sample_input_single_batch.expand(
+                [
+                    batch if index == 0 else dim
+                    for index, dim in enumerate(sample_input_single_batch.shape)
+                ]
+            )
+
+        target_input = _expand_to(target_data_batch)
+
+        # For some models on multi GPU, we observe the memory per batch is not a constant.
+        # So we just test the target batch size and make sure we do not go OOM.
+        while target_data_batch > 1:
+            with torch.set_grad_enabled(enable_grad):
+                try:
+                    infer_method(target_input)
+                    break
+                except torch.cuda.OutOfMemoryError:  # pragma: no cover - GPU OOM retry path
+                    target_data_batch = target_data_batch // 2  # pragma: no cover
+                    target_input = _expand_to(target_data_batch)  # pragma: no cover
+                    torch.cuda.empty_cache()  # pragma: no cover
 
     # Regulate the data batch target to be 1, 2, 4, 8, 12, ..., capped at 64
     if target_data_batch < 2:
@@ -601,28 +821,16 @@ def _forward_loop(
         dataloader: DataLoader containing the batched input data
         allowed_non_tensor_keys: Set of key names whose values may be non-tensor types
     """
-    # Disable KV caching during calibration — it is unnecessary overhead and causes
-    # correctness issues with hybrid Mamba/attention models whose cache state is mutated
-    # in-place (e.g., NemotronH).
-    config = getattr(model, "config", None)
-    prev_use_cache = getattr(config, "use_cache", None)
-    if config is not None and prev_use_cache is not None:
-        config.use_cache = False
+    with _disable_use_cache(model), torch.no_grad():
+        is_enc_dec = model_type_is_enc_dec(model)
+        infer_method = model.generate if is_enc_dec else model.forward
+        max_working_batch_size = None  # Initialize max working batch size as None
 
-    try:
-        with torch.no_grad():
-            is_enc_dec = model_type_is_enc_dec(model)
-            infer_method = model.generate if is_enc_dec else model.forward
-            max_working_batch_size = None  # Initialize max working batch size as None
-
-            for _, data in enumerate(tqdm(dataloader)):
-                # Process batch and update max working batch size
-                max_working_batch_size = _process_batch(
-                    data, infer_method, max_working_batch_size, allowed_non_tensor_keys
-                )
-    finally:
-        if config is not None and prev_use_cache is not None:
-            config.use_cache = prev_use_cache
+        for _, data in enumerate(tqdm(dataloader)):
+            # Process batch and update max working batch size
+            max_working_batch_size = _process_batch(
+                data, infer_method, max_working_batch_size, allowed_non_tensor_keys
+            )
 
 
 def create_forward_loop(

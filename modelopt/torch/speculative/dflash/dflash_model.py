@@ -27,6 +27,7 @@ class DFlashModel(DynamicModule):
 
     def modify(self, config):
         """Base DFlash Model modify function. Child class should implement the details."""
+        self.dflash_offline = config.dflash_offline
         self.dflash_block_size = config.dflash_block_size
         self.dflash_freeze_base_model = config.dflash_freeze_base_model
         self.dflash_loss_decay_factor = config.dflash_loss_decay_factor

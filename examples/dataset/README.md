@@ -5,7 +5,7 @@
 | **Section** | **Description** | **Link** |
 | :------------: | :------------: | :------------: |
 | Building Chat Datasets | Scripts to build conversation datasets from Nemotron and other HuggingFace sources | \[[Link](#building-chat-datasets)\] |
-| Tokenizing for Megatron Frameworks | Convert JSONL or HF datasets to Megatron binary format for distillation and pre-training | \[[Link](#tokenizing-for-megatron-frameworks)\] |
+| Tokenizing for Megatron Frameworks | Convert JSONL or HF datasets to Megatron binary format for distillation and pre-training | \[[Link](MEGATRON_DATA_PREP.md)\] |
 
 </div>
 
@@ -140,85 +140,7 @@ In `generate` mode, assistant turns are stripped so the row ends with a user tur
 
 ## Tokenizing for Megatron Frameworks
 
-The distillation and pre-training scripts in Megatron-Bridge or Megatron-LM expect data pre-tokenized in Megatron's binary indexed format (`.bin` / `.idx`).
-Use the `megatron_preprocess_data` utility to tokenize any JSONL or Hugging Face dataset.
-The tokenization scripts below prints the list of output prefixes (e.g. `tokenized_qwen3/data1_text`) that you can use for the `data_paths` argument (with relative weights on different files) in Megatron training scripts.
-
-**Important Notes:**
-
-- For Pretraining / raw-text data (`text` key) — use `--append_eod` so Megatron can tell where documents end when concatenating them into long sequences.
-- For Post-training chat data (`messages` key) — omit `--append_eod`; the chat template already appends EOS at the end of each conversation.
-- Set `--max_sequence_length 256_000` to avoid rare OOM errors if some text is very long.
-
-### From JSONL files
-
-```bash
-python -m modelopt.torch.utils.plugins.megatron_preprocess_data \
-    --jsonl_paths /path/to/data1.jsonl /path/to/data2.jsonl ... \
-    --json_keys text \
-    --tokenizer Qwen/Qwen3-0.6B \
-    --output_dir tokenized_qwen3 \
-    --workers 32 \
-    --append_eod
-```
-
-```bash
-python -m modelopt.torch.utils.plugins.megatron_preprocess_data \
-    --jsonl_paths /path/to/sft_data.jsonl \
-    --json_keys messages \
-    --tokenizer Qwen/Qwen3-0.6B \
-    --output_dir tokenized_qwen3 \
-    --workers 32
-```
-
-Instead of `--jsonl_paths`, pass `--input_dir /path/to/dir` to tokenize all JSONL files in a directory (`.jsonl` and `.jsonl.gz` are both supported).
-
-### From Hugging Face Hub
-
-To tokenize a dataset directly from Hugging Face Hub:
-
-```bash
-python -m modelopt.torch.utils.plugins.megatron_preprocess_data \
-    --hf_dataset nvidia/Nemotron-Pretraining-SFT-v1 \
-    --hf_name Nemotron-SFT-Code \
-    --hf_split train \
-    --hf_max_samples_per_split 10_000_000 \
-    --json_keys text \
-    --tokenizer Qwen/Qwen3-0.6B \
-    --output_dir tokenized_qwen3 \
-    --workers 32 \
-    --append_eod
-```
-
-Omit `--hf_name` to process all subsets, `--hf_split` for all splits, or `--hf_max_samples_per_split` for all samples.
-To quickly test, use [nvidia/Nemotron-Pretraining-Dataset-sample](https://huggingface.co/datasets/nvidia/Nemotron-Pretraining-Dataset-sample).
-
-For **very large datasets** (tens of millions of documents), add `--hf_streaming --hf_max_samples_per_split <num_samples>` to avoid downloading the full dataset — only the rows actually consumed are fetched.
-
-> **Performance note:** Non-streaming mode downloads all Parquet shards once and caches them as Arrow files on disk.
-> Re-runs read from cache and are much faster.
-> Streaming re-downloads on every run with no cache, so it is slower for full-dataset processing.
-
-### Nemotron Post-Training v3 (`reasoning_content`)
-
-v3 datasets include a `reasoning_content` field in assistant messages (chain-of-thought separate from
-the final answer). Use `--reasoning_content` to control how it is handled:
-
-| Value | Behaviour |
-| --- | --- |
-| `strip` (default) | Field is discarded before `apply_chat_template`. Safe for any tokenizer. |
-| `inline` | Wrapped as `<think>…</think>` and prepended to `content`. Preserves reasoning in a tokenizer-agnostic way. |
-| `native` | Passed unchanged. Requires the tokenizer's chat template to handle the field (e.g. Qwen3). |
-
-```bash
-python -m modelopt.torch.utils.plugins.megatron_preprocess_data \
-    --hf_dataset nvidia/Nemotron-Post-Training-Dataset-v3 \
-    --json_keys messages \
-    --tokenizer Qwen/Qwen3-0.6B \
-    --output_dir tokenized_qwen3 \
-    --workers 32 \
-    --reasoning_content inline
-```
+See **[MEGATRON_DATA_PREP.md](MEGATRON_DATA_PREP.md)** for full documentation: general usage with JSONL and Hugging Face Hub datasets, handling of Nemotron Post-Training v3 `reasoning_content` fields, and ready-to-run tokenization commands for all Nemotron Pre/Post-Training datasets.
 
 ## Synthetic Test Dataset
 

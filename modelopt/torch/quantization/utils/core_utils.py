@@ -202,27 +202,57 @@ def reduce_sum(input, axis=None, keepdims=True):
     return output
 
 
-def weight_attr_names(module: nn.Module) -> "Generator[str, None, None]":
-    """Get the weight param attribute names in a converted module, non-recursive.
+def representative_weight_quantizer(module: nn.Module, weight_name: str = "weight"):
+    """Return the representative weight quantizer for ``weight_name`` on ``module``.
 
-    We consider the following two cases for each weight param attribute:
-    - The standard weight attribute (e.g. nn.Linear).
-    - The custom `weight_attr_name`. (e.g. Llama4TextExperts has weight attributes `gate_up_proj` and `down_proj`)
+    Handles two layouts:
+
+    - singular ``<name>_weight_quantizer`` — standard ``nn.Linear`` / ``_QuantLinear``.
+    - plural ``<name>_weight_quantizers`` (``nn.ModuleList``) — fused-experts modules
+      (``_QuantFusedExperts``) hold one ``TensorQuantizer`` per expert. Per-expert
+      formats are identical, so the first element is representative.
+
+    Returns ``None`` if no matching quantizer is found.
     """
     from ..nn import SequentialQuantizer, TensorQuantizer
 
-    # the standard weight and quantizer case
-    weight = getattr(module, "weight", None)
-    weight_quantizer = getattr(module, "weight_quantizer", None)
-    if weight is not None and isinstance(weight_quantizer, (TensorQuantizer, SequentialQuantizer)):
-        yield "weight"
+    singular = quantizer_attr_names(weight_name).weight_quantizer
+    q = getattr(module, singular, None)
+    if isinstance(q, (TensorQuantizer, SequentialQuantizer)):
+        return q
 
-    # other weight and quantizer case
+    plural = getattr(module, singular + "s", None)
+    if isinstance(plural, nn.ModuleList) and len(plural) > 0:
+        first = plural[0]
+        if isinstance(first, (TensorQuantizer, SequentialQuantizer)):
+            return first
+    return None
+
+
+def weight_attr_names(module: nn.Module) -> "Generator[str, None, None]":
+    """Get the weight param attribute names in a converted module, non-recursive.
+
+    Covers three layouts:
+
+    - standard ``nn.Linear``: ``weight`` + ``weight_quantizer``.
+    - custom per-weight quantizer (e.g. ``Llama4TextExperts`` with ``gate_up_proj`` +
+      ``gate_up_proj_weight_quantizer``).
+    - fused-experts ``nn.ModuleList`` quantizers (``_QuantFusedExperts`` with
+      ``gate_up_proj`` + ``gate_up_proj_weight_quantizers`` plural list).
+    """
+    # standard: "weight" + "weight_quantizer" (singular) or "weight_quantizers" (plural)
+    if getattr(module, "weight", None) is not None:
+        if representative_weight_quantizer(module, "weight") is not None:
+            yield "weight"
+
+    # per-parameter custom attr names
     for name, _ in module.named_parameters(recurse=False):
+        if name == "weight":
+            continue
         weight = getattr(module, name, None)
-        weight_quantizer = getattr(module, f"{name}_weight_quantizer", None)
-        if isinstance(weight, nn.Parameter) and isinstance(
-            weight_quantizer, (TensorQuantizer, SequentialQuantizer)
+        if (
+            isinstance(weight, nn.Parameter)
+            and representative_weight_quantizer(module, name) is not None
         ):
             yield name
 
@@ -927,13 +957,7 @@ def promote_nvfp4_static_quantizers(model: nn.Module) -> int:
     for _name, module in list(model.named_modules()):
         if isinstance(module, TensorQuantizer) and not module._disabled:
             if module._calibrator is not None and not module._dynamic and hasattr(module, "_amax"):
-                is_nvfp4_static = (
-                    module.is_static_block_quant
-                    and module._num_bits == (2, 1)
-                    and module._block_sizes is not None
-                    and module._block_sizes.get("scale_bits") == (4, 3)
-                )
-                if is_nvfp4_static:
+                if module.is_nvfp4_static:
                     initial_amax = module._amax.clone().detach()
                     global_amax = reduce_amax(initial_amax, axis=None)
                     NVFP4StaticQuantizer.from_tensor_quantizer(module, global_amax=global_amax)

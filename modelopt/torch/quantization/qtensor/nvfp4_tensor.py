@@ -28,6 +28,22 @@ e2m1_values = torch.tensor([0, 0.5, 1, 1.5, 2, 3, 4, 6, 0, -0.5, -1, -1.5, -2, -
 __all__ = ["NVFP4QTensor"]
 
 
+def _cast_per_block_scale_to_fp8(
+    per_block_scale: torch.Tensor,
+    per_block_scale_max: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Clamp to FP8 E4M3FN range [2**-9, 448] and cast — avoids underflow→0 / overflow→NaN.
+
+    When ``per_block_scale_max`` is provided, first rescales as
+    ``per_block_scale.float() * 448 / per_block_scale_max`` — the static-export
+    path needs this because the ``[==0]=1.0`` safety net combined with a small
+    ``global_amax`` can drive the rescaled value above 448 (see PR #1397).
+    """
+    if per_block_scale_max is not None:
+        per_block_scale = per_block_scale.float() * 448.0 / per_block_scale_max
+    return per_block_scale.clamp(min=2**-9, max=448.0).to(torch.float8_e4m3fn)
+
+
 class NVFP4QTensor(BaseQuantizedTensor):
     """Implements the INT4 quantization on tensors for more efficient storage or computation.
 
@@ -122,11 +138,8 @@ class NVFP4QTensor(BaseQuantizedTensor):
             expected_shape = (*weight.shape[:-1], num_blocks_per_row)
             per_block_scale = per_block_scale.view(expected_shape)
 
-            # Quantize scales to FP8
             if not keep_high_precision:
-                per_block_scale = (per_block_scale * 448.0 / per_block_scale_max).to(
-                    torch.float8_e4m3fn
-                )
+                per_block_scale = _cast_per_block_scale_to_fp8(per_block_scale, per_block_scale_max)
             return per_block_scale, weights_scaling_factor_2
         else:
             # Dynamic path: compute from weight tensor
@@ -165,9 +178,8 @@ class NVFP4QTensor(BaseQuantizedTensor):
         )
         # Set all zero values in scale to 1.0
         per_block_scale[per_block_scale == 0] = 1.0
-        # Convert to torch.float8_e4m3fn
         if not keep_high_precision:
-            per_block_scale = per_block_scale.to(torch.float8_e4m3fn)
+            per_block_scale = _cast_per_block_scale_to_fp8(per_block_scale)
         return per_block_scale, weights_scaling_factor_2
 
     @classmethod

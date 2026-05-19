@@ -42,6 +42,7 @@ from modelopt.torch.quantization.utils import (
     QuantizerAttrNames,
     quantizer_attr_names,
     reduce_block_amax,
+    representative_weight_quantizer,
     weight_attr_names,
 )
 from modelopt.torch.utils import clear_cuda_cache
@@ -68,6 +69,7 @@ from .model_config import (
     QUANTIZATION_W4A8_AWQ,
     QUANTIZATION_W4A8_MXFP4_FP8,
     QUANTIZATION_W4A8_NVFP4_FP8,
+    QUANTIZATION_W4A16_NVFP4,
 )
 
 logger = logging.getLogger(__name__)
@@ -358,6 +360,7 @@ def get_weight_scaling_factor(module: nn.Module, weight_name: str = "weight") ->
         QUANTIZATION_NVFP4,
         QUANTIZATION_NVFP4_AWQ,
         QUANTIZATION_NVFP4_SVDQUANT,
+        QUANTIZATION_W4A16_NVFP4,
         QUANTIZATION_W4A8_NVFP4_FP8,
     ]:
         # Calibrate weight quantizer if amax is not set
@@ -402,6 +405,7 @@ def get_weight_scaling_factor_2(module: nn.Module, weight_name: str = "weight") 
         QUANTIZATION_NVFP4,
         QUANTIZATION_NVFP4_AWQ,
         QUANTIZATION_NVFP4_SVDQUANT,
+        QUANTIZATION_W4A16_NVFP4,
         QUANTIZATION_W4A8_NVFP4_FP8,
     ]:
         # Calibrate weight quantizer if amax is not set
@@ -546,7 +550,7 @@ def _compute_kv_cache_dtype(
 
 def get_weight_block_size(module: nn.Module, weight_name: str = "weight") -> int:
     """Returns the weight block size."""
-    weight_quantizer = getattr(module, quantizer_attr_names(weight_name).weight_quantizer, None)
+    weight_quantizer = representative_weight_quantizer(module, weight_name)
 
     if weight_quantizer is None:
         return 0
@@ -572,7 +576,11 @@ def get_quantization_format(module) -> str | None:
     """
 
     def _get_quantization_from_layer(layer, quantizer_attr_names: QuantizerAttrNames):
-        weight_quantizer = getattr(layer, quantizer_attr_names.weight_quantizer, None)
+        # Singular form first, plural ModuleList fallback (fused-experts).
+        # Strip the "_weight_quantizer" suffix to recover the weight attr name.
+        weight_attr = quantizer_attr_names.weight_quantizer
+        weight_name = weight_attr[: -len("_weight_quantizer")].rstrip("_") or "weight"
+        weight_quantizer = representative_weight_quantizer(layer, weight_name)
         input_quantizer = getattr(layer, quantizer_attr_names.input_quantizer, None)
 
         if weight_quantizer is None or not weight_quantizer.is_enabled:
@@ -636,6 +644,9 @@ def get_quantization_format(module) -> str | None:
                 return QUANTIZATION_NVFP4_AWQ
             if getattr(layer, "fused_with_prequant", False):
                 return QUANTIZATION_NVFP4_AWQ
+            if input_quantizer is None or not input_quantizer.is_enabled:
+                if scale_bits == (4, 3):
+                    return QUANTIZATION_W4A16_NVFP4
             assert input_quantizer is not None, (
                 f"input_quantizer is None for {quantizer_attr_names}"
             )
@@ -801,6 +812,11 @@ def process_layer_quant_config(layer_config_dict):
         elif v in ["nvfp4", "nvfp4_static"]:
             layer_config = {
                 "quant_algo": "NVFP4",
+                "group_size": block_size_value,
+            }
+        elif v == "w4a16_nvfp4":
+            layer_config = {
+                "quant_algo": "W4A16_NVFP4",
                 "group_size": block_size_value,
             }
         elif v == "nvfp4_awq":
@@ -980,6 +996,7 @@ def to_quantized_weight(
     if quantization in [
         QUANTIZATION_NVFP4,
         QUANTIZATION_NVFP4_AWQ,
+        QUANTIZATION_W4A16_NVFP4,
         QUANTIZATION_W4A8_NVFP4_FP8,
         QUANTIZATION_NVFP4_SVDQUANT,
     ]:

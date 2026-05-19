@@ -181,6 +181,8 @@ class LanguageDataCollator:
     def _post_process_chat_template(self):
         # [WAR]: For DeepSeek-V3/R1 tokenizer, we modify the chat_template such that the <think>
         # tokens are preserved for supervised learning.
+        if self.tokenizer.chat_template is None:
+            return
         self.tokenizer.chat_template = self.tokenizer.chat_template.replace(
             REMOVE_THINK_CHAT_TEMPLATE, ""
         )

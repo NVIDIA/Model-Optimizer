@@ -86,7 +86,6 @@ You can also directly use NVIDIA container images, which have Model Optimizer pr
 - `nvcr.io/nvidia/pytorch:<version>-py3`
 - `nvcr.io/nvidia/nemo:<version>`
 - `nvcr.io/nvidia/tensorrt-llm/release:<version>`
-- `nvcr.io/nvidia/tensorrt:<version>-py3`
 
 Before pulling and using the container images, please review their respective license terms.
 Make sure to upgrade Model Optimizer to the latest version as described above.
@@ -137,10 +136,23 @@ more fine-grained control on installed dependencies or for alternative docker im
 | Distillation | [View Support Matrix](./examples/llm_distill/README.md#support-matrix) |
 | Speculative Decoding | [View Support Matrix](./examples/speculative_decoding/README.md#support-matrix) |
 
+## Deprecation Policy
+
+Model Optimizer follows a structured approach to managing deprecated features:
+
+- **Communication:** Deprecation notices are documented in the [Changelog](https://nvidia.github.io/Model-Optimizer/reference/0_changelog.html). Deprecated items include source code statements indicating deprecation timing, with runtime warnings issued upon use.
+- **Migration Period:** Since Model Optimizer is still pre-1.0, we provide a 1-release (~1-month) migration period after deprecation. During this window, deprecated features continue functioning while issuing warnings.
+- **Scope:** The policy addresses both complete deprecations (entire APIs removed) and partial ones (specific parameters removed while methods remain).
+- **Removal:** Following the migration period, deprecated elements are removed in alignment with semantic versioning standards, potentially including breaking changes in minor version updates while Model Optimizer remains in 0.x.
+
 ## Contributing
 
 Model Optimizer is now open source! We welcome any feedback, feature requests and PRs.
 Please read our [Contributing](./CONTRIBUTING.md) guidelines for details on how to contribute to this project.
+
+## AI Agents
+
+For AI-assisted development setup, see the [agent tooling notes](./.agents/TOOLING.md).
 
 ### Top Contributors
 

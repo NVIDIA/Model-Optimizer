@@ -86,7 +86,7 @@ jobs:
     uses: ./.github/workflows/_example_tests_runner.yml
     secrets: inherit
     with:
-      docker_image: "nvcr.io/nvidia/nemo:26.02"
+      docker_image: "nvcr.io/nvidia/nemo:26.04"
       example: megatron_bridge
       timeout_minutes: 30
       pip_install_extras: "[hf,puzzletron,dev-test]"

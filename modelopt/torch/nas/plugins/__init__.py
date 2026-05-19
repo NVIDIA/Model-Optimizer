@@ -21,9 +21,4 @@ from .torch import *
 
 with import_plugin("megatron"):
     from .megatron import *
-
-with import_plugin("transformer engine"):
-    from .transformer_engine import *
-
-with import_plugin("transformers"):
-    from .transformers import *
+    from .megatron_model_stats import *

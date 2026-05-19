@@ -64,6 +64,22 @@ If you need to use any other EP for calibration, you can uninstall the existing 
 
 By default, ModelOpt-Windows utilizes the `cupy-cuda12x <https://cupy.dev//>`_ tool for GPU acceleration during the INT4 ONNX quantization process. This is compatible with CUDA 12.x.
 
+If you are using CUDA 13.x, update CUDA-dependent packages manually:
+
+For official ONNX Runtime guidance, see `Nightly builds for CUDA 13.x <https://onnxruntime.ai/docs/install/#nightly-for-cuda-13x>`_.
+
+1. Uninstall ``cupy-cuda12x`` and install ``cupy-cuda13x``.
+2. Uninstall ``onnxruntime-genai-cuda`` and ``onnxruntime-gpu``.
+3. Install ONNX Runtime CUDA 13 nightly and the pre-release ``onnxruntime-genai-cuda`` package.
+
+.. code-block:: bash
+
+    pip uninstall -y cupy-cuda12x onnxruntime-genai-cuda onnxruntime-gpu
+    pip install cupy-cuda13x
+    pip install coloredlogs flatbuffers numpy packaging protobuf sympy
+    pip install --pre --index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ort-cuda-13-nightly/pypi/simple/ onnxruntime-gpu
+    pip install --pre onnxruntime-genai-cuda
+
 **6. Verify Installation**
 
 Ensure the following steps are verified:

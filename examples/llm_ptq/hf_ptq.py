@@ -24,6 +24,8 @@ from typing import Any
 import numpy as np
 import torch
 from accelerate.hooks import remove_hook_from_module
+from cast_mxfp4_to_nvfp4 import apply_to_model as apply_cast_mxfp4_to_nvfp4
+from cast_mxfp4_to_nvfp4 import force_weight_quantizers_static
 from example_utils import (
     build_quant_cfg,
     copy_custom_model_files,
@@ -111,6 +113,7 @@ QUANT_CFG_CHOICES: dict[str, dict[str, Any]] = {
     "fp8_pb_wo": mtq.FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG,
     "fp8_pc_pt": mtq.FP8_PER_CHANNEL_PER_TOKEN_CFG,
     "w4a8_nvfp4_fp8": mtq.W4A8_NVFP4_FP8_CFG,
+    "w4a16_nvfp4": mtq.W4A16_NVFP4_CFG,
     "w4a8_mxfp4_fp8": mtq.W4A8_MXFP4_FP8_CFG,
     "nvfp4_mlp_only": mtq.NVFP4_MLP_ONLY_CFG,
     "nvfp4_experts_only": mtq.NVFP4_EXPERTS_ONLY_CFG,
@@ -292,6 +295,7 @@ def auto_quantize(
     auto_quantize_method="gradient",
     auto_quantize_score_size=128,
     auto_quantize_checkpoint=None,
+    full_model: torch.nn.Module | None = None,
 ):
     """Auto search quantization of multiple formats."""
 
@@ -330,19 +334,49 @@ def auto_quantize(
         for qformat in qformat_list
     ), "One or more quantization formats provided are not supported for unified checkpoint export"
 
-    def loss_func(output, data):
-        # For transformers AutoModelForCausalLM models, the outputs are wrapped in `CausalLMOutputWithPast`
-        # which contains the loss attribute.
-        return output.loss
+    # When language_model is a base text model without lm_head (e.g. Gemma4TextModel),
+    # use full_model's lm_head to compute logits/loss from hidden states.
+    is_base_model = (
+        full_model is not None
+        and language_model is not full_model
+        and not hasattr(language_model, "lm_head")
+        and hasattr(full_model, "lm_head")
+    )
+
+    if is_base_model:
+        assert full_model is not None
+        lm_head = full_model.lm_head
+
+        def loss_func(output, data):
+            logits = lm_head(output.last_hidden_state)
+            labels = data["labels"]
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+            return torch.nn.functional.cross_entropy(
+                shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1)
+            )
+
+    else:
+
+        def loss_func(output, data):
+            return output.loss
 
     if auto_quantize_method == "gradient":
-        # For gradient-based method, return full output with loss
+
         def forward_step(model, batch):
-            return model(**batch)
+            inputs = {k: v for k, v in batch.items() if k != "labels"} if is_base_model else batch
+            return model(**inputs)
+
     elif auto_quantize_method == "kl_div":
-        # For KL divergence method, return only logits
+
         def forward_step(model, batch):
-            return model(**batch).logits
+            inputs = {k: v for k, v in batch.items() if k != "labels"} if is_base_model else batch
+            output = model(**inputs)
+            if is_base_model:
+                assert full_model is not None
+                return full_model.lm_head(output.last_hidden_state)
+            return output.logits
+
     else:
         raise ValueError(
             f"Invalid auto_quantize_method: {auto_quantize_method}. Must be 'gradient' or 'kl_div'"
@@ -465,8 +499,8 @@ def load_model(args: argparse.Namespace):
             model_type,
             trust_remote_code=args.trust_remote_code,
         )
-    elif is_nemotron_vl_model and args.calib_with_images:
-        # For Nemotron VL image calibration, we need an AutoProcessor to build multimodal inputs.
+    elif args.calib_with_images:
+        # For VLM image calibration, we need an AutoProcessor to build multimodal inputs.
         processor = AutoProcessor.from_pretrained(
             args.pyt_ckpt_path,
             trust_remote_code=args.trust_remote_code,
@@ -752,6 +786,12 @@ def export_quantized(
                     extra_state_dict=mtp_state_dict,
                 )
 
+                if args.qformat == "w4a16_nvfp4":
+                    warnings.warn(
+                        "TensorRT-LLM and SGLang do not support this format. "
+                        "vLLM deployment support is in progress."
+                    )
+
         # Restore default padding and export the tokenizer as well.
         if tokenizer is not None:
             tokenizer.padding_side = default_padding_side
@@ -955,6 +995,25 @@ def quantize_main(
     default_pad_token,
     device: torch.device,
 ):
+    # Load the recipe up front so we can detect layerwise calibration before batch-size probing.
+    recipe = None
+    if args.recipe is not None and not args.auto_quantize_bits:
+        print(f"Use recipe {args.recipe} for quantization")
+        recipe = load_recipe(args.recipe)
+        if not isinstance(recipe, ModelOptPTQRecipe):
+            raise TypeError(
+                f"Expected PTQ recipe, but got {type(recipe).__name__} from {args.recipe}"
+            )
+
+    def _is_layerwise(obj):
+        if isinstance(obj, ModelOptPTQRecipe):
+            return _is_layerwise(obj.quantize.algorithm)
+        if isinstance(obj, list):
+            return any(_is_layerwise(a) for a in obj)
+        return bool(getattr(obj, "layerwise", False))
+
+    is_layerwise = _is_layerwise(recipe)
+
     if args.batch_size == 0:
         # For VL models with image-text calibration, skip automatic batch size detection
         # since get_max_batch_size can't handle multimodal inputs
@@ -967,6 +1026,11 @@ def quantize_main(
             print(
                 "Offline speculative decoding calibration enabled. Using default batch_size=1 for calibration."
             )
+            args.batch_size = 1
+        # Layerwise calibration processes one layer at a time; auto batch-size probing runs a
+        # full-model forward which defeats the point and can OOM on very large models.
+        elif is_layerwise:
+            print("Layerwise calibration enabled. Using default batch_size=1 for calibration.")
             args.batch_size = 1
         else:
             # Calibration/sparsification will actually take much more memory than regular inference
@@ -1022,17 +1086,16 @@ def quantize_main(
             args,
             language_model,
             calib_dataloader,
+            auto_quantize_method=args.auto_quantize_method,
+            auto_quantize_score_size=args.auto_quantize_score_size,
+            auto_quantize_checkpoint=args.auto_quantize_checkpoint,
+            full_model=full_model,
         )
 
     else:
         # mono quantization
 
-        if args.recipe is not None:
-            print(f"Use recipe {args.recipe} for quantization")
-            recipe = load_recipe(args.recipe)
-            assert isinstance(recipe, ModelOptPTQRecipe), (
-                f"Expected PTQ recipe, but got {type(recipe).__name__} from {args.recipe}"
-            )
+        if recipe is not None:
             quant_cfg = recipe.quantize.model_dump()
 
         else:
@@ -1087,7 +1150,11 @@ def quantize_main(
                 f"Auto-resolved layerwise_checkpoint_dir: {quant_cfg['algorithm']['layerwise_checkpoint_dir']}"
             )
 
-        if args.qformat in QUANT_CFG_CHOICES:
+        if args.cast_mxfp4_to_nvfp4:
+            quant_cfg = copy.deepcopy(quant_cfg)
+            force_weight_quantizers_static(quant_cfg["quant_cfg"])
+
+        if quant_cfg:
             mono_quantize(
                 args,
                 quant_cfg,
@@ -1101,6 +1168,14 @@ def quantize_main(
         else:
             assert model_type != "dbrx", f"Does not support export {model_type} without quantizaton"
             print(f"qformat: {args.qformat}. No quantization applied, export {device} model")
+
+    # If asked, run the closed-form MXFP4 -> NVFP4 cast: read the source MXFP4
+    # *_scales tensors and pin each NVFP4 weight quantizer's scale_2 to 2^m.
+    # Runs after calibration (max_calibrate has already promoted weight quantizers
+    # to NVFP4StaticQuantizer with a data-derived ``_global_amax``); we just
+    # override that scalar with the closed-form value before export.
+    if args.cast_mxfp4_to_nvfp4:
+        apply_cast_mxfp4_to_nvfp4(language_model, args.pyt_ckpt_path)
 
     post_quantize(
         args,
@@ -1133,8 +1208,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--recipe",
         help=(
-            "PTQ recipe YAML file or name without suffix (e.g. general/ptq/nvfp4_default-fp8_cast_kv, "
-            "general/ptq/nvfp4_default-fp8_kv, general/ptq/nvfp4_default-nvfp4_cast_kv). "
+            "PTQ recipe YAML file or name without suffix (e.g. general/ptq/fp8_default-kv_fp8_cast, "
+            "general/ptq/nvfp4_default-kv_fp8_cast, general/ptq/nvfp4_default-kv_nvfp4_cast). "
             "When set, --kv_cache_qformat is ignored; the recipe fully determines KV cache config."
         ),
         default=None,
@@ -1343,6 +1418,18 @@ def parse_args() -> argparse.Namespace:
         help="Export as vLLM fake-quant checkpoint (produces vllm_fq_modelopt_state.pth "
         "for use with vllm_serve_fakequant.py).",
     )
+    parser.add_argument(
+        "--cast_mxfp4_to_nvfp4",
+        action="store_true",
+        default=False,
+        help=(
+            "After calibration, override NVFP4 weight quantizers' global_amax with "
+            "the closed-form value derived from the source MXFP4 *_scales. "
+            "Per-block _amax is computed from the loaded BF16 weights (data-derived). "
+            "Use when --pyt_ckpt_path points at an MXFP4 HF checkpoint (e.g. "
+            "openai/gpt-oss-20b) and the target qformat is NVFP4-family."
+        ),
+    )
 
     args = parser.parse_args()
     if args.moe_calib_experts_ratio is not None and not (0.0 < args.moe_calib_experts_ratio <= 1.0):
@@ -1414,5 +1501,18 @@ if __name__ == "__main__":
         raise ValueError(
             "--specdec_offline_dataset expects a single --calib value, not a comma-separated list."
         )
+
+    if args.cast_mxfp4_to_nvfp4:
+        qformats = [q.strip() for q in args.qformat.split(",")]
+        if not all("nvfp4" in q for q in qformats):
+            raise ValueError(
+                "--cast_mxfp4_to_nvfp4 requires NVFP4-family --qformat values "
+                f"(got {args.qformat!r}). Use e.g. --qformat nvfp4 or nvfp4_mlp_only."
+            )
+        if args.auto_quantize_bits is not None:
+            raise ValueError(
+                "--cast_mxfp4_to_nvfp4 is not supported with --auto_quantize_bits "
+                "(multi-format auto-quantize)."
+            )
 
     main(args)
