@@ -43,6 +43,10 @@ deepseek_causal_lm_export: dict[str, CustomModuleMapping] = {
     "linear_kv_up_proj": NameRemapping("model.layers.{}.self_attn.kv_b_proj."),
     "linear_proj": NameRemapping("model.layers.{}.self_attn.o_proj."),
     "pre_mlp_layernorm": NameRemapping("model.layers.{}.post_attention_layernorm."),
+    # Fused TE spec (mirrors the import side). MLA has no linear_qkv so
+    # fused_input_layernorm is inert today; fused_pre_mlp_layernorm reaches dense layers.
+    "fused_input_layernorm": NameRemapping("model.layers.{}.input_layernorm.weight"),
+    "fused_pre_mlp_layernorm": NameRemapping("model.layers.{}.post_attention_layernorm.weight"),
     # MLP for dense layers
     "linear_fc1": GatedMLPSlicing("model.layers.{}.mlp."),
     "linear_fc2": NameRemapping("model.layers.{}.mlp.down_proj."),
@@ -88,6 +92,11 @@ deepseek_causal_lm_import = {
     "output_layer": NameRemapping("lm_head.", COL_TP),
     # Per-layer
     "input_layernorm": NameRemapping("model.layers.{}.input_layernorm.", REPLICATE),
+    # Fused TE spec (TELayerNormColumnParallelLinear) — see mcore_qwen.py for rationale.
+    # MLA has no linear_qkv so fused_input_layernorm is inert for DeepSeek today; included
+    # for parity in case a future spec fuses the layernorm into a Q/KV projection.
+    "fused_input_layernorm": NameRemapping("model.layers.{}.input_layernorm.weight"),
+    "fused_pre_mlp_layernorm": NameRemapping("model.layers.{}.post_attention_layernorm.weight"),
     "linear_q_proj": NameRemapping("model.layers.{}.self_attn.q_proj.", COL_TP),
     "linear_q_down_proj": NameRemapping("model.layers.{}.self_attn.q_a_proj.", REPLICATE),
     "linear_q_layernorm": NameRemapping("model.layers.{}.self_attn.q_a_layernorm.", REPLICATE),
