@@ -121,10 +121,7 @@ class Quantizer:
                 base_cfg = mtq.INT8_SMOOTHQUANT_CFG
             else:
                 base_cfg = INT8_DEFAULT_CONFIG
-            apply_int8_percentile_calibrator = (
-                self.config.collect_method != CollectMethod.DEFAULT
-                and self.config.algo != QuantAlgo.SMOOTHQUANT
-            )
+            apply_int8_percentile_calibrator = self.config.collect_method != CollectMethod.DEFAULT
         elif self.config.format == QuantFormat.FP8:
             base_cfg = FP8_DEFAULT_CONFIG
         elif self.config.format == QuantFormat.FP4:
