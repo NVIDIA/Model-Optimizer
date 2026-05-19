@@ -23,7 +23,7 @@ jobs:
       contains(github.event.comment.body, '/claude review') &&
       contains(fromJson('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association)
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     permissions:
       contents: read
       pull-requests: write
@@ -80,13 +80,18 @@ jobs:
             BASE REF: origin/${{ steps.pr-info.outputs.base_ref }}
 
             Mandatory workflow — never skip or reorder:
-            1. Read the PR diff first (gh pr diff).
-            2. Read AGENTS.md, .agents/developer-guidelines.md,
-               and CONTRIBUTING.md for project conventions, coding principles, and architecture.
-            3. For changed files under `modelopt/torch/<sub-package>/`, read the sub-package's
+            1. Read prior Claude activity on the PR so you don't duplicate already-raised
+               comments and can track which prior issues are now resolved:
+               `gh pr view $PR_NUMBER --repo $REPO --json comments,reviews`
+               Treat prior findings as context, not a ceiling — if you spot a genuinely new
+               issue this round, flag it.
+            2. Read the PR diff (gh pr diff).
+            3. Read AGENTS.md and CONTRIBUTING.md (including the Coding standards section)
+               for project conventions, coding principles, and architecture.
+            4. For changed files under `modelopt/torch/<sub-package>/`, read the sub-package's
                `__init__.py` plus any `mode.py` / `config.py` to understand mode registration
                and config schema.
-            4. Only then perform the review using that context.
+            5. Only then perform the review using that context.
 
             You are performing a deep code review on a **NVIDIA Model Optimizer (ModelOpt)** PR.
             ModelOpt is NVIDIA's open-source library for model optimization (quantization, pruning,
@@ -117,6 +122,20 @@ jobs:
             compatibility, and catching algorithm-level correctness bugs.
 
             ## Review Procedure
+
+            **Aim for one pass.** Surface meaningful issues in this review so the author gets
+            one consolidated set of fixes. Prioritize breadth across the diff over deep dives
+            on any single file.
+
+            **Cover each changed file across categories.** For each non-trivial changed file,
+            consider the categories below (Algorithm Correctness, Mode/State, Export, Backward
+            Compatibility, Performance) before moving on.
+
+            **Trace public symbols across files.** For new or modified public symbols
+            (functions, arguments, config fields, exported names), grep call sites in
+            `modelopt/`, `tests/`, and `examples/` before commenting. Many bugs here only
+            surface where the symbol meets its caller — mode registration, export paths,
+            restore logic.
 
             1. Get PR metadata: `gh pr view $PR_NUMBER --repo $REPO --json title,body,baseRefName,headRefName,files,additions,deletions,changedFiles,author`
             2. Get the full diff: `gh pr diff $PR_NUMBER --repo $REPO`
@@ -182,6 +201,10 @@ jobs:
             - Memory regressions: double-allocating weights, holding tensors past their lifetime.
 
             ## Suggestions (Nice to Have)
+
+            SUGGESTIONs document non-blocking improvements and never block approval (see
+            Completion below). Raise them when genuinely useful; skip nits that aren't.
+
             - Stale, imprecise, or misleading comments/docstrings — a wrong docstring is worse
               than none.
             - Missing shape/dtype assertions at module/parallelism boundaries where they would
@@ -208,5 +231,10 @@ jobs:
             - Highlight the most impactful findings
             - Overall assessment of the PR's risk level
 
-            If no significant issues are found, approve the PR:
-            gh pr review $PR_NUMBER --repo $REPO --approve --body "Claude review passed — no significant issues found. LGTM"
+            **Approval decision — use exact counts from your findings (no other thresholds):**
+
+            - `0 CRITICAL AND 0 IMPORTANT` → **approve**, regardless of SUGGESTION count.
+              SUGGESTIONs never block approval.
+              `gh pr review $PR_NUMBER --repo $REPO --approve --body "Claude review passed — no blocking issues found. LGTM"`
+            - `≥1 CRITICAL OR ≥1 IMPORTANT` → **request changes**, summarizing the blocking issues.
+              `gh pr review $PR_NUMBER --repo $REPO --request-changes --body "<summary of blocking issues>"`
