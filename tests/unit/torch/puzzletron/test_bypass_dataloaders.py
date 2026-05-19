@@ -128,6 +128,8 @@ def test_load_from_disk_fn_delegates_to_datasets(monkeypatch):
         return "sentinel"
 
     monkeypatch.setattr(datasets, "load_from_disk", fake_load_from_disk)
+    # content_field is part of the shared LoadDatasetFn protocol, but load_from_disk
+    # restores the dataset schema as saved and does not accept that argument.
     out = load_from_disk_fn("/some/path", content_field="conversation", keep_in_memory=True)
     assert out == "sentinel"
     assert captured == {"path": "/some/path", "keep_in_memory": True}
@@ -189,7 +191,6 @@ class _NoChatTemplateTokenizer:
 
     def __init__(self):
         self.seen_texts = None
-        self.vocab = {}
 
     def __call__(self, texts, truncation=False):
         self.seen_texts = texts
