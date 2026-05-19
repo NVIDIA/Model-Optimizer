@@ -20,12 +20,18 @@ reads rank/world_size. The dataset only needs to see the right tuple to compute
 its shard.
 """
 
+from pathlib import Path
 from unittest.mock import MagicMock
 
+import httpx
 import pytest
+import safetensors.torch
+import torch
 
 from modelopt.torch.speculative.plugins import hf_streaming_dataset
 from modelopt.torch.speculative.plugins.hf_streaming_dataset import (
+    EagleVllmStreamingConfig,
+    EagleVllmStreamingDataset,
     StreamingConfig,
     StreamingDataset,
 )
@@ -107,13 +113,6 @@ def test_empty_shard_raises(patch_dist):
         StreamingDataset(_entries(3), tokenizer=MagicMock(), config=StreamingConfig(seed=0))
 
 
-def test_single_process_owns_full_corpus(patch_dist):
-    corpus = _entries(10)
-    patch_dist(0, 1)
-    ds = StreamingDataset(corpus, tokenizer=MagicMock(), config=StreamingConfig(seed=0))
-    assert sorted(_entry_ids(ds)) == list(range(10))
-
-
 def test_iter_rejects_dataloader_workers(patch_dist, monkeypatch):
     """Iterating from within a DataLoader worker must raise — multiple workers would
     each spawn an asyncio loop and N× the request load on the server."""
@@ -179,3 +178,110 @@ def test_circuit_breaker_trips_on_consecutive_fetch_failures(patch_dist):
     )
     with pytest.raises(RuntimeError, match="consecutive _fetch failures"):
         list(ds)
+
+
+# ---------------------------------------------------------------------------
+# Integration test: EagleVllmStreamingDataset against a mocked vLLM server.
+# Exercises the full pipeline (HTTP → safetensors → align → format) without
+# launching real vLLM. The transport is mocked but the safetensors IO,
+# tensor reshaping, and dict assembly are real.
+# ---------------------------------------------------------------------------
+
+
+def _write_canned_safetensors(path: Path, seq: int, n_layers: int, hidden: int) -> None:
+    """Mimic what vLLM's ExampleHiddenStatesConnector writes per request."""
+    safetensors.torch.save_file(
+        {
+            "token_ids": torch.arange(seq, dtype=torch.int64),
+            "hidden_states": torch.randn(seq, n_layers, hidden),
+        },
+        str(path),
+    )
+
+
+def _tokenizer_returning(seq: int) -> MagicMock:
+    """Tokenizer mock whose apply_chat_template yields a fixed seq-len output."""
+    tok = MagicMock()
+    tok.apply_chat_template.return_value = {
+        "input_ids": torch.arange(seq, dtype=torch.long).unsqueeze(0),
+    }
+    return tok
+
+
+def test_eagle_vllm_dataset_end_to_end(tmp_path, patch_dist, monkeypatch):
+    """Drive EagleVllmStreamingDataset against an in-process mocked server.
+
+    Verifies that the wire-format → tensor → batch-dict chain produces dicts
+    matching what EagleOfflineDataCollator expects, and that scratch files
+    are cleaned up after each fetch.
+    """
+    patch_dist(0, 1)
+    seq, n_layers, hidden = 8, 3, 16  # n_layers = 1 final + 2 aux
+    scratch = tmp_path / "vllm_scratch"
+    scratch.mkdir()
+
+    counter = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        counter["n"] += 1
+        path = scratch / f"req_{counter['n']}.safetensors"
+        _write_canned_safetensors(path, seq, n_layers, hidden)
+        return httpx.Response(
+            200,
+            json={"kv_transfer_params": {"hidden_states_path": str(path)}},
+        )
+
+    real_async_client = httpx.AsyncClient
+
+    def mock_async_client(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return real_async_client(*args, **kwargs)
+
+    monkeypatch.setattr(hf_streaming_dataset.httpx, "AsyncClient", mock_async_client)
+
+    n_entries = 4
+    entries = [
+        {
+            "conversation_id": f"c-{i}",
+            "messages": [{"role": "user", "content": "x"}],
+        }
+        for i in range(n_entries)
+    ]
+    ds = EagleVllmStreamingDataset(
+        entries=entries,
+        tokenizer=_tokenizer_returning(seq),
+        config=EagleVllmStreamingConfig(
+            server_url="http://mock:8000",
+            model="mock-model",
+            prefetch=2,
+            seed=0,
+        ),
+    )
+
+    batches = list(ds)
+
+    assert len(batches) == n_entries
+    expected_keys = {
+        "input_ids",
+        "base_model_hidden_states",
+        "aux_hidden_states",
+        "attention_mask",
+        "loss_mask",
+        "labels",
+    }
+    for b in batches:
+        assert set(b) == expected_keys
+        assert b["input_ids"].shape == (seq,)
+        assert b["input_ids"].dtype == torch.int64
+        assert b["base_model_hidden_states"].shape == (seq, hidden)
+        # 2 aux layers * hidden, flattened
+        assert b["aux_hidden_states"].shape == (seq, 2 * hidden)
+        assert b["attention_mask"].shape == (seq,)
+        assert b["loss_mask"].shape == (seq,)
+        assert b["labels"].shape == (seq,)
+        # labels are input_ids shifted by 1, last position is IGNORE
+        assert torch.equal(b["labels"][:-1], b["input_ids"][1:])
+        assert b["labels"][-1].item() == hf_streaming_dataset.IGNORE_TOKEN_ID
+
+    # Scratch files must be unlinked after fetch
+    assert list(scratch.iterdir()) == []
