@@ -136,16 +136,14 @@ def _process_single_layer(
         _mixins = pruning_mixin if isinstance(pruning_mixin, list) else [pruning_mixin]
         merged_keys_to_remove = {}
         parent_layer_updates = {}
-        new_layer_updates = {}
         current_parent_state_dict = ChainMap(parent_layer_updates, parent_state_dict)
-        current_new_state_dict = ChainMap(new_layer_updates, new_state_dict)
         current_keys = _PerLayerKeysView(keys)
         for _mixin in _mixins:
             mixin_keys_to_remove = {}
             _layer_out = _mixin.prune_single_layer(
                 layer_idx=layer_idx,
                 parent_state_dict=current_parent_state_dict,
-                new_state_dict=current_new_state_dict,
+                new_state_dict=new_state_dict,
                 original_config=original_config,
                 new_config=new_config,
                 gqa_init_mode=gqa_init_mode,
@@ -161,7 +159,6 @@ def _process_single_layer(
             )
             layer_out_state_dict.update(_layer_out)
             parent_layer_updates.update(_layer_out)
-            new_layer_updates.update(_layer_out)
             merged_keys_to_remove.update(current_keys.removed_items())
             merged_keys_to_remove.update(mixin_keys_to_remove)
         return layer_out_state_dict, merged_keys_to_remove

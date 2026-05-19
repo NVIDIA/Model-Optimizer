@@ -15,11 +15,18 @@
 
 import pytest
 
-from modelopt.torch.puzzletron.tools.hydra_utils import warmup_steps
+from modelopt.torch.puzzletron.tools.hydra_utils import _warmup_steps_resolver, warmup_steps
 
 
 def test_warmup_steps_casts_inputs_before_computing():
     assert warmup_steps("100", "10", "2", "5", "0.5") == 1
+
+
+def test_warmup_steps_preserves_legacy_defaults():
+    assert warmup_steps("1000", "10", "2") == 2
+    assert _warmup_steps_resolver("1000", "10", "2") == 2
+    assert _warmup_steps_resolver("1000", "10", "2", "0.5") == 25
+    assert _warmup_steps_resolver("1000", "10", "2", "5", "0.5") == 5
 
 
 @pytest.mark.parametrize(

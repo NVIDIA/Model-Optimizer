@@ -27,6 +27,7 @@ import pytest
 import torch
 from datasets import Dataset, DatasetDict
 
+import modelopt.torch.puzzletron.utils.data.dataset as dataset_module
 import modelopt.torch.puzzletron.utils.data.dataloaders as dl
 from modelopt.torch.puzzletron.utils.data.dataloaders import (
     Printer,
@@ -202,12 +203,25 @@ class _ConversationDataset:
         yield {
             "text": [
                 {"role": "user", "content": {"text": "hello"}},
+                {"role": "assistant", "content": "world"},
+            ]
+        }
+
+
+class _StructuredContentDataset:
+    column_names = ("text",)
+
+    def __iter__(self):
+        yield {
+            "text": [
+                {"role": "user", "content": "hello"},
                 {"role": "assistant", "content": {"value": 3}},
             ]
         }
 
 
-def test_constant_length_dataset_no_chat_template_normalizes_message_content():
+def test_constant_length_dataset_no_chat_template_adds_role_tags_and_warns_once(monkeypatch):
+    monkeypatch.setattr(dataset_module, "_CHAT_TEMPLATE_FALLBACK_WARNING_EMITTED", False)
     tokenizer = _NoChatTemplateTokenizer()
     dataset = ConstantLengthDataset(
         tokenizer,
@@ -222,12 +236,32 @@ def test_constant_length_dataset_no_chat_template_normalizes_message_content():
         label_shift=False,
     )
 
-    realized = list(dataset)
+    with pytest.warns(UserWarning, match="no chat_template"):
+        realized = list(dataset)
 
-    assert tokenizer.seen_texts == ["hello\n{'value': 3}"]
+    assert tokenizer.seen_texts == ["user: hello\nassistant: world"]
     assert len(realized) == 1
     assert torch.equal(realized[0]["input_ids"], torch.tensor([0, 1]))
     assert torch.equal(realized[0]["targets"], torch.tensor([0, 1]))
+
+
+def test_constant_length_dataset_no_chat_template_rejects_unknown_structured_content(monkeypatch):
+    monkeypatch.setattr(dataset_module, "_CHAT_TEMPLATE_FALLBACK_WARNING_EMITTED", False)
+    dataset = ConstantLengthDataset(
+        _NoChatTemplateTokenizer(),
+        _StructuredContentDataset(),
+        infinite=False,
+        seq_length=2,
+        num_of_sequences=1,
+        chars_per_token=100,
+        content_field="text",
+        fim_rate=0.0,
+        fim_spm_rate=0.0,
+        label_shift=False,
+    )
+
+    with pytest.raises(ValueError, match="Unsupported structured message content"):
+        list(dataset)
 
 
 # ---------------------------------------------------------------------------

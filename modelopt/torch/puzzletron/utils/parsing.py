@@ -408,13 +408,15 @@ def format_stitched_losses(
         # first log chunk we saw. Per-block training-progress signal — answers "is
         # bypass distillation actually reducing this block's loss?" and stays
         # apples-to-apples even when blocks have very different intrinsic loss scales.
-        if initial_values_dict and block_name in initial_values_dict:
+        if not initial_values_dict or block_name not in initial_values_dict:
+            # No baseline supplied (callers may omit initial_values_dict).
+            change_display = "  --"
+        elif not math.isfinite(loss_value) or not math.isfinite(initial_values_dict[block_name]):
+            change_display = "non-finite"
+        else:
             initial_value = initial_values_dict[block_name]
-            if not math.isfinite(loss_value) or not math.isfinite(initial_value):
-                change_display = "non-finite"
-            else:
-                delta = loss_value - initial_value
-            if math.isfinite(loss_value) and math.isfinite(initial_value) and abs(delta) > 1e-8:
+            delta = loss_value - initial_value
+            if abs(delta) > 1e-8:
                 pct = (delta / initial_value * 100.0) if initial_value != 0.0 else 0.0
                 # Clamp percentage display to keep the cell within the 18-char column
                 # even on pathological divergence (e.g. a block whose loss 10x'd).
@@ -422,11 +424,8 @@ def format_stitched_losses(
                 arrow = "↓" if delta < 0 else "↑"
                 sign = "-" if delta < 0 else "+"
                 change_display = f"{arrow} {sign}{abs(delta):.1e} ({pct_clamped:+.0f}%)"
-            elif math.isfinite(loss_value) and math.isfinite(initial_value):
+            else:
                 change_display = "↔ 0.0e+00"
-        else:
-            # No baseline supplied (callers may omit initial_values_dict).
-            change_display = "  --"
 
         # Format the line
         block_display = block_name.replace("block_", "").zfill(2)

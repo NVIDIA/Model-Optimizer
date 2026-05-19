@@ -14,6 +14,7 @@
 # limitations under the License.
 # mypy: ignore-errors
 import functools
+import warnings
 from collections.abc import Sequence
 
 import numpy as np
@@ -33,14 +34,33 @@ FIM_TOKEN_CONNECTOR_STAR = "_"  # nosec B105
 FIM_TOKEN_CONNECTOR_SANTA = "-"  # nosec B105
 FIM_TOKEN_END_LIST = ["prefix>", "middle>", "suffix>", "pad>"]
 CODEGEN_FIM_TOKENS = ["<mask_1>", "<|endoftext|>", "<sep>"]
+_CHAT_TEMPLATE_FALLBACK_WARNING_EMITTED = False
 
 
 def _message_content_to_text(content) -> str:
     if isinstance(content, str):
         return content
-    if isinstance(content, dict) and "text" in content:
-        return str(content["text"])
+    if isinstance(content, dict):
+        if "text" in content:
+            return str(content["text"])
+        raise ValueError(
+            f"Unsupported structured message content without a text field: {content!r}"
+        )
     return str(content)
+
+
+def _format_messages_without_chat_template(messages) -> str:
+    global _CHAT_TEMPLATE_FALLBACK_WARNING_EMITTED
+    if not _CHAT_TEMPLATE_FALLBACK_WARNING_EMITTED:
+        warnings.warn(
+            "Tokenizer has no chat_template; formatting messages as role-tagged plain text.",
+            stacklevel=2,
+        )
+        _CHAT_TEMPLATE_FALLBACK_WARNING_EMITTED = True
+    return "\n".join(
+        f"{message['role']}: {_message_content_to_text(message['content'])}"
+        for message in messages
+    )
 
 
 class ConstantLengthDataset(IterableDataset):
@@ -141,11 +161,7 @@ class ConstantLengthDataset(IterableDataset):
                                         sample, tokenize=False
                                     )
                                 else:
-                                    # Base models have no chat template — concatenate message
-                                    # contents separated by newlines as plain text.
-                                    sample = "\n".join(
-                                        _message_content_to_text(m["content"]) for m in sample
-                                    )
+                                    sample = _format_messages_without_chat_template(sample)
                             else:
                                 sample = _message_content_to_text(sample[0]["content"])
                     else:

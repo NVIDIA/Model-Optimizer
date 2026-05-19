@@ -32,7 +32,7 @@ __all__ = [
 ]
 
 
-def warmup_steps(tokens: int, block: int, mbs: int, grad_accum: int, pct: float) -> int:
+def warmup_steps(tokens: int, block: int, mbs: int, grad_accum: int = 1, pct: float = 0.05) -> int:
     """
     Calculate warmup steps in optimizer-step units.
 
@@ -75,12 +75,19 @@ def warmup_steps(tokens: int, block: int, mbs: int, grad_accum: int, pct: float)
 
 
 def _warmup_steps_resolver(*args):
-    if len(args) != 5:
-        raise ValueError(
-            "warmup_steps resolver expects exactly 5 arguments: "
-            "(tokens, block, micro_batch_size, grad_accumulation_steps, warmup_ratio)"
-        )
-    return warmup_steps(*args)
+    if len(args) == 3:
+        return warmup_steps(*args)
+    if len(args) == 4:
+        tokens, block, mbs, pct = args
+        return warmup_steps(tokens, block, mbs, pct=pct)
+    if len(args) == 5:
+        return warmup_steps(*args)
+    raise ValueError(
+        "warmup_steps resolver expects 3, 4, or 5 arguments: "
+        "(tokens, block, micro_batch_size), "
+        "(tokens, block, micro_batch_size, warmup_ratio), or "
+        "(tokens, block, micro_batch_size, grad_accumulation_steps, warmup_ratio)"
+    )
 
 
 def register_hydra_resolvers():

@@ -414,7 +414,7 @@ def _init_attention_biases(
 
     # Some HF native configs (e.g. GptOssConfig) don't expose o_proj_bias / attention_bias as
     # top-level attributes the way puzzletron's DeciLM-style configs do. Fall back to probing
-    # the new state dict for the actual bias keys when the attribute is missing.
+    # the new state dict for the actual bias keys only when the attribute is omitted.
     # KVHeadsPruningMixIn only calls this helper after filtering to keys present in
     # new_state_dict, so the probe mirrors the caller's already-selected bias tensors.
     o_proj_bias = getattr(new_config, "o_proj_bias", None)
@@ -422,7 +422,7 @@ def _init_attention_biases(
         o_proj_bias = o_key in new_state_dict
     attention_bias = getattr(new_config, "attention_bias", None)
     if attention_bias is None:
-        attention_bias = q_key in new_state_dict
+        attention_bias = any(key in new_state_dict for key in (q_key, k_key, v_key))
 
     # If no biases
     if not (o_proj_bias or attention_bias):

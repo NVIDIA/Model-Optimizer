@@ -38,13 +38,28 @@ class _PopKeyMixin:
         return {"w": parent_state_dict["w"]}
 
 
-def _process_with_mixins(mixins, keys):
+class _ShrinkSourceMixin:
+    def prune_single_layer(self, parent_state_dict, **kwargs):
+        return {"w": parent_state_dict["w"][:2]}
+
+
+class _UseDestinationShapeMixin:
+    def prune_single_layer(self, parent_state_dict, new_state_dict, **kwargs):
+        return {"w": torch.zeros_like(new_state_dict["w"]) + parent_state_dict["w"].sum()}
+
+
+def _process_with_mixins(
+    mixins,
+    keys,
+    parent_state_dict=None,
+    new_state_dict=None,
+):
     return _process_single_layer(
         layer_idx=0,
         pruning_mixin=mixins,
         descriptor=None,
-        parent_state_dict={"w": torch.tensor([1.0])},
-        new_state_dict={"w": torch.tensor([0.0])},
+        parent_state_dict=parent_state_dict or {"w": torch.tensor([1.0])},
+        new_state_dict=new_state_dict or {"w": torch.tensor([0.0])},
         original_config=SimpleNamespace(),
         new_config=SimpleNamespace(),
         gqa_init_mode=None,
@@ -66,6 +81,18 @@ def test_pruning_mixins_compose_overlapping_outputs_sequentially():
 
     assert torch.equal(layer_state_dict["w"], torch.tensor([4.0]))
     assert keys_to_remove == {"w": "w"}
+
+
+def test_pruning_mixins_keep_final_destination_shape_for_later_mixins():
+    layer_state_dict, _ = _process_with_mixins(
+        [_ShrinkSourceMixin(), _UseDestinationShapeMixin()],
+        {"w": "w"},
+        parent_state_dict={"w": torch.ones(4)},
+        new_state_dict={"w": torch.zeros(3)},
+    )
+
+    assert layer_state_dict["w"].shape == torch.Size([3])
+    assert torch.equal(layer_state_dict["w"], torch.full((3,), 2.0))
 
 
 def test_pruning_mixin_key_mutation_is_tracked_without_mutating_shared_keys():
