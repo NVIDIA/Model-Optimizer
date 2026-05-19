@@ -201,7 +201,7 @@ SUPPORTED_DATASET_CONFIG: dict[str, Any] = {
 # Useful when callers want a single ``--dataset`` token that fans out to several
 # entries; per-dataset ``num_samples`` is split evenly across the members.
 DATASET_COMBOS: dict[str, list[str]] = {
-    "default": ["cnn_dailymail", "nemotron-post-training-dataset-v2"],
+    "cnn_nemotron_v2_mix": ["cnn_dailymail", "nemotron-post-training-dataset-v2"],
     "nemotron-post-training-v3": [
         "nemotron-sft-instruction-following-chat-v2",
         "nemotron-science-v1",
@@ -606,7 +606,7 @@ def get_dataset_dataloader(
     )
 
     # Reject inputs that include both a combo and one of its member datasets
-    # (e.g. ``["cnn_dailymail", "default"]``), since the combo would sample the
+    # (e.g. ``["cnn_dailymail", "cnn_nemotron_v2_mix"]``), since the combo would sample the
     # plain entry a second time with a smaller per-member quota.
     plain_inputs = {n for n in dataset_name if n not in DATASET_COMBOS}
     for ds_name in dataset_name:

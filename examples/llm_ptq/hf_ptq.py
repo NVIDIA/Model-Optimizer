@@ -531,9 +531,9 @@ def load_model(args: argparse.Namespace):
             language_model = full_model
         else:
             if args.dataset is None:
-                args.dataset = ["default"]
+                args.dataset = ["cnn_nemotron_v2_mix"]
                 warnings.warn(
-                    "No dataset specified. Defaulting to the 'default' combo "
+                    "No dataset specified. Defaulting to the 'cnn_nemotron_v2_mix' combo "
                     "(cnn_dailymail + nemotron-post-training-dataset-v2)."
                 )
             # Adjust calib_size to match dataset length by extending or truncating as needed

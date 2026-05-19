@@ -636,13 +636,13 @@ class TestDatasetCombosExpansion:
 
         calls = self._record_calls(monkeypatch)
         get_dataset_dataloader(
-            dataset_name="default",
+            dataset_name="cnn_nemotron_v2_mix",
             tokenizer=pad_tokenizer,
             num_samples=8,
             batch_size=1,
             max_sample_length=16,
         )
-        members = DATASET_COMBOS["default"]
+        members = DATASET_COMBOS["cnn_nemotron_v2_mix"]
         assert calls == [(members[0], 4), (members[1], 4)]
 
     def test_combo_remainder_distributed_to_earlier_members(self, monkeypatch, pad_tokenizer):
@@ -677,9 +677,9 @@ class TestDatasetCombosExpansion:
 
     def test_combo_overlapping_with_member_raises(self, monkeypatch, pad_tokenizer):
         self._record_calls(monkeypatch)
-        with pytest.raises(ValueError, match="combo 'default'"):
+        with pytest.raises(ValueError, match="combo 'cnn_nemotron_v2_mix'"):
             get_dataset_dataloader(
-                dataset_name=["cnn_dailymail", "default"],
+                dataset_name=["cnn_dailymail", "cnn_nemotron_v2_mix"],
                 tokenizer=pad_tokenizer,
                 num_samples=[2, 4],
                 batch_size=1,
@@ -690,7 +690,7 @@ class TestDatasetCombosExpansion:
         from modelopt.torch.utils.dataset_utils import get_dataset_samples
 
         with pytest.raises(ValueError, match="DATASET_COMBOS"):
-            get_dataset_samples("default", num_samples=1)
+            get_dataset_samples("cnn_nemotron_v2_mix", num_samples=1)
 
 
 # ---------------------------------------------------------------------------
