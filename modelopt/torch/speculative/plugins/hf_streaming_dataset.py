@@ -52,11 +52,12 @@ from typing import TYPE_CHECKING
 
 import httpx
 import torch
-import torch.distributed as dist
 from pydantic import BaseModel, ConfigDict, field_validator
 from safetensors import safe_open
 from torch.utils.data import IterableDataset, get_worker_info
 from transformers.trainer_pt_utils import LabelSmoother
+
+from modelopt.torch.utils import distributed as dist_utils
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -64,19 +65,6 @@ if TYPE_CHECKING:
 IGNORE_TOKEN_ID = LabelSmoother.ignore_index
 
 _SENTINEL = object()
-
-
-def _get_rank_world() -> tuple[int, int]:
-    """Return ``(rank, world_size)``, falling back to ``(0, 1)`` outside of ``torch.distributed``.
-
-    Single-process runs (tests, single-GPU smoke) hit the fallback and the dataset
-    behaves as if it owns the whole corpus. Under ``accelerate launch`` /
-    ``torchrun``, ``init_distributed_env`` is called before dataset construction,
-    so ``is_initialized()`` is True here.
-    """
-    if dist.is_available() and dist.is_initialized():
-        return dist.get_rank(), dist.get_world_size()
-    return 0, 1
 
 
 def estimate_conversation_chars(entry: dict) -> int:
@@ -177,7 +165,7 @@ class StreamingHiddenStatesDataset(IterableDataset):
         self.tokenizer = tokenizer
         self.config = config if config is not None else self.config_cls()
 
-        rank, world = _get_rank_world()
+        rank, world = dist_utils.rank(), dist_utils.size()
         indices = list(range(len(entries)))
         random.Random(self.config.seed).shuffle(indices)
         indices = indices[rank::world]
