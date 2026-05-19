@@ -211,8 +211,12 @@ class TensorQuantizer(nn.Module):
         """
 
         def _calibrator_setter(val):
-            if val in ["max", "histogram"]:
-                calib_cls = calib.MaxCalibrator if val == "max" else calib.HistogramCalibrator
+            if val in ["max", "histogram", "quantile"]:
+                calib_cls = {
+                    "max": calib.MaxCalibrator,
+                    "histogram": calib.HistogramCalibrator,
+                    "quantile": calib.QuantileCalibrator,
+                }[val]
                 args, kwargs = (self._num_bits, self._axis, self._unsigned), {}
             else:
                 calib_cls, args, kwargs = standardize_constructor_args(val)

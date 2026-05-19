@@ -37,7 +37,13 @@ from modelopt.torch.utils import print_rank_0
 from modelopt.torch.utils.distributed import DistributedProcessGroup, ParallelState
 from modelopt.torch.utils.network import bind_forward_method, unpatch_forward_method
 
-from .calib import MseCalibrator, NVFP4MSECalibrator, _Calibrator
+from .calib import (
+    MseCalibrator,
+    NVFP4MSECalibrator,
+    P2QuantileEstimator,
+    QuantileCalibrator,
+    _Calibrator,
+)
 from .conversion import create_and_replace_svdquant_linear_on_the_fly, set_quantizer_by_cfg_context
 from .nn import NVFP4StaticQuantizer, QuantModule, SequentialQuantizer, TensorQuantizer
 from .utils import (
@@ -61,6 +67,7 @@ __all__ = [
     "layerwise_calibrate",
     "local_hessian_calibrate",
     "max_calibrate",
+    "quantile_calibrate",
     "smoothquant",
     "svdquant",
 ]
@@ -412,6 +419,49 @@ def _mse_quant_func(x, amax, quantizer):
         delattr(quantizer, "_amax")
 
     return xq
+
+
+def quantile_calibrate(
+    model: nn.Module,
+    forward_loop: ForwardLoop | None = None,
+    quantiles: list[float] | None = None,
+    distributed_sync: bool = True,
+    sync_expert_weight_amax: bool = False,
+):
+    """Calibrate the model using streaming P^2 quantile estimation.
+
+    Applies ``quantiles`` to every :class:`QuantileCalibrator` instance on the
+    model (overwriting any defaults), then runs the standard collect → finish
+    → distributed-sync lifecycle from :func:`max_calibrate`. The actual P^2
+    statistics gathering happens inside each calibrator's ``collect`` during
+    ``forward_loop``.
+
+    Args:
+        model: Model to be calibrated.
+        forward_loop: Callable taking the model as argument and forwarding
+            calibration data through it.
+        quantiles: Probabilities in (0, 1) to track. ``None`` keeps each
+            calibrator's pre-existing levels (default ``[0.99, 0.999, 0.9999,
+            0.99999]``).
+        distributed_sync: Forwarded to :func:`max_calibrate`.
+        sync_expert_weight_amax: Forwarded to :func:`max_calibrate`.
+
+    See :class:`QuantileCalibConfig <modelopt.torch.quantization.config.QuantileCalibConfig>`
+    for the configuration object.
+    """
+    if quantiles is not None:
+        for module in model.modules():
+            cal = getattr(module, "_calibrator", None)
+            if isinstance(cal, QuantileCalibrator):
+                cal._quantile_probs = sorted({float(p) for p in quantiles})
+                cal._estimators = {p: P2QuantileEstimator(p) for p in cal._quantile_probs}
+
+    max_calibrate(
+        model,
+        forward_loop=forward_loop,
+        distributed_sync=distributed_sync,
+        sync_expert_weight_amax=sync_expert_weight_amax,
+    )
 
 
 @torch.no_grad()

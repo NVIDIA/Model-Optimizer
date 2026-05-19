@@ -41,6 +41,7 @@ from .config import (
     LocalHessianCalibConfig,
     MaxCalibConfig,
     MseCalibConfig,
+    QuantileCalibConfig,
     QuantizeAlgoCfgType,
     QuantizeAlgorithmConfig,
     QuantizeConfig,
@@ -64,6 +65,7 @@ from .model_calib import (
     local_hessian_calibrate,
     max_calibrate,
     mse_calibrate,
+    quantile_calibrate,
     smoothquant,
     svdquant,
 )
@@ -416,6 +418,18 @@ class MaxCalibrateModeDescriptor(BaseCalibrateModeDescriptor):
         return MaxCalibConfig
 
     _calib_func = max_calibrate
+
+
+@CalibrateModeRegistry.register_mode
+class QuantileCalibrateModeDescriptor(BaseCalibrateModeDescriptor):
+    """Mode for streaming P^2 quantile calibration."""
+
+    @property
+    def config_class(self) -> type[QuantizeAlgorithmConfig]:
+        """Specifies the config class for the mode."""
+        return QuantileCalibConfig
+
+    _calib_func = quantile_calibrate
 
 
 @CalibrateModeRegistry.register_mode

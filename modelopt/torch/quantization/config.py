@@ -501,7 +501,7 @@ class QuantizerAttributeConfig(ModeloptBaseConfig):
     def validate_calibrator(cls, v, info: ValidationInfo):
         """Validate calibrator."""
         if isinstance(v, str):
-            assert v in ["max", "histogram"]
+            assert v in ["max", "histogram", "quantile"]
         return v
 
     rotate: bool | RotateConfig = ModeloptField(
@@ -642,6 +642,45 @@ class MaxCalibConfig(QuantizeAlgorithmConfig):
             "local experts in SequentialMLP layers during calibration. This matches "
             "TEGroupedMLP behavior where all experts share a single weight quantizer. "
             "Only affects MoE models with SequentialMLP experts."
+        ),
+    )
+
+
+class QuantileCalibConfig(QuantizeAlgorithmConfig):
+    """Configuration for streaming P^2 quantile calibration.
+
+    Estimates per-tensor amax as the max over a configurable set of tracked
+    quantile levels (default: 99 / 99.9 / 99.99 / 99.999 percentiles of |x|).
+    Each level is tracked with a 5-marker P^2 estimator giving O(1) memory
+    per tracked level per quantizer. Intended for activation (input)
+    quantizers where outlier clipping is desirable.
+    """
+
+    method: Literal["quantile"] = ModeloptField("quantile")
+
+    quantiles: list[float] = ModeloptField(
+        default=[0.99, 0.999, 0.9999, 0.99999],
+        title="Quantile probabilities to track during calibration.",
+        description=(
+            "List of probabilities in (0, 1). One P^2 estimator is maintained per "
+            "probability. The final per-tensor amax is the max over the tracked "
+            "quantile estimates."
+        ),
+    )
+
+    distributed_sync: bool | None = ModeloptField(
+        default=True,
+        title="Whether to sync the amax across the distributed processes.",
+        description="If True, the amax will be synced across the distributed processes.",
+    )
+
+    sync_expert_weight_amax: bool = ModeloptField(
+        default=False,
+        title="Sync weight quantizer amax across MoE experts",
+        description=(
+            "If True, the weight quantizer amax values are synchronized (max) across "
+            "local experts in SequentialMLP layers during calibration. Mirrors the "
+            "MaxCalibConfig option."
         ),
     )
 
