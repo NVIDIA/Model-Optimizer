@@ -15,7 +15,7 @@
 
 """Streaming datasets that fetch per-sample hidden states from a running inference server.
 
-The base class :class:`StreamingHiddenStatesDataset` owns all the backend-/algorithm-
+The base class :class:`StreamingDataset` owns all the backend-/algorithm-
 agnostic plumbing: threading, queue, tokenization, the bounded sliding-window
 producer, loss_mask alignment, and HTTP-client lifecycle. Concrete subclasses
 specialize along two axes:
@@ -25,7 +25,7 @@ specialize along two axes:
 - **Algorithm** (how to shape the per-sample dict for the trainer): override
   :meth:`_format`.
 
-:class:`EagleVllmStreamingHiddenStatesDataset` is currently the only concrete
+:class:`EagleVllmStreamingDataset` is currently the only concrete
 combination (Eagle algorithm × vLLM backend); future combinations (e.g.
 Eagle × TRT-LLM, distillation × vLLM) live as sibling subclasses.
 
@@ -111,8 +111,8 @@ def _tokenize_with_loss_mask(
     return input_ids, loss_mask
 
 
-class StreamingHiddenStatesConfig(BaseModel):
-    """Static tuning knobs for :class:`StreamingHiddenStatesDataset`.
+class StreamingConfig(BaseModel):
+    """Static tuning knobs for :class:`StreamingDataset`.
 
     Bundles the rarely-changing settings (loss masking, concurrency, HTTP timeout)
     so the dataset ctor takes only ``entries`` + ``tokenizer`` + this config.
@@ -129,7 +129,7 @@ class StreamingHiddenStatesConfig(BaseModel):
     seed: int = 0
 
 
-class StreamingHiddenStatesDataset(IterableDataset):
+class StreamingDataset(IterableDataset):
     """Base class: stream per-sample hidden states from a running inference server.
 
     Backend- and algorithm-agnostic; subclasses implement :meth:`_fetch` (backend) and
@@ -138,7 +138,7 @@ class StreamingHiddenStatesDataset(IterableDataset):
     and validated against the actual ``_fetch`` output on every sample.
     """
 
-    config_cls: type[StreamingHiddenStatesConfig] = StreamingHiddenStatesConfig
+    config_cls: type[StreamingConfig] = StreamingConfig
     # Algorithm subclasses set this to a TypedDict declaring the keys their _format
     # reads from the _fetch output. When set, base class validates _fetch's return
     # value carries all required keys (fail-loud on the first sample).
@@ -148,7 +148,7 @@ class StreamingHiddenStatesDataset(IterableDataset):
         self,
         entries: list[dict],
         tokenizer,
-        config: StreamingHiddenStatesConfig | None = None,
+        config: StreamingConfig | None = None,
     ):
         """Hold a per-rank slice of ``entries``; tokenize and fetch lazily during iteration.
 
@@ -347,8 +347,8 @@ class EagleFetchPayload(TypedDict):
     loss_mask: torch.Tensor
 
 
-class EagleVllmStreamingHiddenStatesConfig(StreamingHiddenStatesConfig):
-    """Adds vLLM endpoint info on top of :class:`StreamingHiddenStatesConfig`."""
+class EagleVllmStreamingConfig(StreamingConfig):
+    """Adds vLLM endpoint info on top of :class:`StreamingConfig`."""
 
     server_url: str
     model: str
@@ -359,7 +359,7 @@ class EagleVllmStreamingHiddenStatesConfig(StreamingHiddenStatesConfig):
         return v.rstrip("/")
 
 
-class EagleVllmStreamingHiddenStatesDataset(StreamingHiddenStatesDataset):
+class EagleVllmStreamingDataset(StreamingDataset):
     """Eagle (algorithm) × vLLM (backend).
 
     Talks to a ``vllm serve`` instance configured with the
@@ -369,18 +369,18 @@ class EagleVllmStreamingHiddenStatesDataset(StreamingHiddenStatesDataset):
     to capture ``aux_layers + [final_layer]`` along ``hidden_states.shape[1]``.
     """
 
-    config_cls = EagleVllmStreamingHiddenStatesConfig
+    config_cls = EagleVllmStreamingConfig
     fetch_payload_cls = EagleFetchPayload
 
     def __init__(
         self,
         entries: list[dict],
         tokenizer,
-        config: EagleVllmStreamingHiddenStatesConfig,
+        config: EagleVllmStreamingConfig,
     ):
         """Same as the base; ``config`` must include ``server_url`` and ``model``."""
         super().__init__(entries=entries, tokenizer=tokenizer, config=config)
-        self.config: EagleVllmStreamingHiddenStatesConfig = config
+        self.config: EagleVllmStreamingConfig = config
 
     async def _fetch(self, client: httpx.AsyncClient, sample: dict) -> EagleFetchPayload | None:
         r = await client.post(
