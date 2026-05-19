@@ -281,7 +281,8 @@ class GPTModelImporter:
         layer_norm_weight = module_state_dict.get("layer_norm_weight", None)
         if layer_norm_weight is not None:
             state_dict["layer_norm_weight"] = layer_norm_weight
-            state_dict["_extra_state"] = module_state_dict.get("_extra_state")
+            if "_extra_state" in module_state_dict:
+                state_dict["_extra_state"] = module_state_dict["_extra_state"]
 
         module.load_state_dict(state_dict)
 
@@ -445,8 +446,11 @@ class GPTModelImporter:
             state_dict["layer_norm_weight"] = layer_norm_weight
             # Preserve the TE metadata struct (FP8 amax history, recipe version, etc.) —
             # `load_state_dict(..., strict=True)` requires the key, but blanking it could
-            # zero out per-module FP8 bookkeeping on TE versions that populate it.
-            state_dict["_extra_state"] = module_state_dict.get("_extra_state")
+            # zero out per-module FP8 bookkeeping on TE versions that populate it. Only
+            # forward through when the source actually has it, to avoid adding an
+            # unexpected `_extra_state=None` to TE variants that don't.
+            if "_extra_state" in module_state_dict:
+                state_dict["_extra_state"] = module_state_dict["_extra_state"]
 
         module.load_state_dict(state_dict)
 
