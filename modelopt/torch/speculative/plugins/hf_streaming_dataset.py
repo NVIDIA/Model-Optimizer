@@ -48,7 +48,7 @@ import os
 import queue
 import random
 import threading
-from typing import TYPE_CHECKING
+from typing import TypedDict
 
 import httpx
 import torch
@@ -58,9 +58,6 @@ from torch.utils.data import IterableDataset, get_worker_info
 from transformers.trainer_pt_utils import LabelSmoother
 
 from modelopt.torch.utils import distributed as dist_utils
-
-if TYPE_CHECKING:
-    from collections.abc import Callable
 
 IGNORE_TOKEN_ID = LabelSmoother.ignore_index
 
@@ -136,10 +133,16 @@ class StreamingHiddenStatesDataset(IterableDataset):
     """Base class: stream per-sample hidden states from a running inference server.
 
     Backend- and algorithm-agnostic; subclasses implement :meth:`_fetch` (backend) and
-    :meth:`_format` (algorithm).
+    :meth:`_format` (algorithm). The dict shape exchanged between them is the
+    algorithm-level contract, declared as a ``TypedDict`` in :attr:`fetch_payload_cls`
+    and validated against the actual ``_fetch`` output on every sample.
     """
 
     config_cls: type[StreamingHiddenStatesConfig] = StreamingHiddenStatesConfig
+    # Algorithm subclasses set this to a TypedDict declaring the keys their _format
+    # reads from the _fetch output. When set, base class validates _fetch's return
+    # value carries all required keys (fail-loud on the first sample).
+    fetch_payload_cls: type | None = None
 
     def __init__(
         self,
@@ -215,13 +218,7 @@ class StreamingHiddenStatesDataset(IterableDataset):
                     break
                 if isinstance(item, Exception):
                     raise item
-                try:
-                    yield item["data"]
-                finally:
-                    cleanup = item.get("cleanup")
-                    if cleanup is not None:
-                        with contextlib.suppress(Exception):
-                            cleanup()
+                yield item
         finally:
             stop.set()
             # Drain any leftover items so producer can exit
@@ -275,10 +272,20 @@ class StreamingHiddenStatesDataset(IterableDataset):
             return
         if fetched is None:
             return
-        token_ids, hidden_states, loss_mask, cleanup = fetched
-        data = self._format(token_ids, hidden_states, loss_mask)
+        if self.fetch_payload_cls is not None:
+            # ``__required_keys__`` is a TypedDict runtime attribute mypy doesn't
+            # track on ``type``; the assignment site guarantees it's a TypedDict.
+            required: frozenset[str] = self.fetch_payload_cls.__required_keys__  # type: ignore[attr-defined]
+            missing = required - set(fetched)
+            if missing:
+                raise RuntimeError(
+                    f"{type(self).__name__}._fetch missing required keys {missing}; "
+                    f"{self.fetch_payload_cls.__name__} requires "
+                    f"{set(required)}, got {set(fetched)}"
+                )
+        data = self._format(fetched)
         # Blocking put -> backpressure when trainer is slow.
-        await asyncio.to_thread(q.put, {"data": data, "cleanup": cleanup})
+        await asyncio.to_thread(q.put, data)
 
     def _tokenize_entry(self, entry: dict) -> dict | None:
         """Tokenize a single entry. Returns None for entries missing ``cid`` or ``messages``."""
@@ -295,43 +302,49 @@ class StreamingHiddenStatesDataset(IterableDataset):
             "loss_mask": loss_mask,
         }
 
-    async def _fetch(
-        self,
-        client: httpx.AsyncClient,
-        sample: dict,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, Callable[[], None] | None] | None:
-        """Backend hook: send the request and decode hidden states.
+    async def _fetch(self, client: httpx.AsyncClient, sample: dict) -> dict | None:
+        """Backend hook: send the request and decode the server's response into a dict.
 
         Override in subclass.
 
         Returns:
-            ``(token_ids, hidden_states, loss_mask, cleanup)`` where ``token_ids`` is
-            the tokens the server actually saw, ``hidden_states`` is shaped
-            ``(seq, n_captured_layers, hidden)``, ``loss_mask`` is aligned to
-            ``token_ids`` (the backend is responsible for reconciling any mismatch
-            between ``sample["loss_mask"]`` and the server's token count), and
-            ``cleanup`` is an optional callable invoked after the consumer is done
-            with this sample (e.g. to unlink a scratch file). Return ``None`` to
-            skip the sample.
+            A dict whose required keys are declared by :attr:`fetch_payload_cls`
+            (the algorithm-level contract). Any scratch resources (per-request
+            files, mmap'd buffers) should be released before returning. Return
+            ``None`` to skip the sample.
+
+        Note:
+            If a future backend needs to return zero-copy mmap views (tensor
+            lifetime tied to the scratch file), reintroduce a deferred-cleanup
+            hook here: extend the return value with an optional ``cleanup``
+            callable, have ``_process`` enqueue ``{"data": ..., "cleanup": ...}``,
+            and run ``cleanup()`` in ``__iter__``'s ``finally`` after the consumer
+            yields. The current eager-cleanup contract was chosen because every
+            backend so far materializes a real copy in ``_fetch``.
         """
         raise NotImplementedError("Subclasses must implement _fetch")
 
-    def _format(
-        self,
-        token_ids: torch.Tensor,
-        hidden_states: torch.Tensor,
-        loss_mask: torch.Tensor,
-    ) -> dict[str, torch.Tensor]:
-        """Algorithm hook: shape one sample's tensors into the dict the trainer expects.
+    def _format(self, fetched: dict) -> dict[str, torch.Tensor]:
+        """Algorithm hook: shape the fetched dict into the trainer's expected dict.
 
-        Override in subclass.
-
-        Args:
-            token_ids: ``LongTensor`` of shape ``(seq,)`` — what the server actually tokenized.
-            hidden_states: tensor of shape ``(seq, n_captured_layers, hidden)``.
-            loss_mask: ``LongTensor`` of shape ``(seq,)``, aligned to ``token_ids``.
+        Override in subclass. The keys ``fetched`` is guaranteed to carry are
+        declared in :attr:`fetch_payload_cls`.
         """
         raise NotImplementedError("Subclasses must implement _format")
+
+
+class EagleFetchPayload(TypedDict):
+    """The dict shape every Eagle backend must produce in :meth:`_fetch`.
+
+    Fields:
+        token_ids:     ``LongTensor`` of shape ``(seq,)`` — what the server tokenized.
+        hidden_states: tensor of shape ``(seq, n_captured_layers, hidden)``.
+        loss_mask:     ``LongTensor`` of shape ``(seq,)``, aligned to ``token_ids``.
+    """
+
+    token_ids: torch.Tensor
+    hidden_states: torch.Tensor
+    loss_mask: torch.Tensor
 
 
 class EagleVllmStreamingHiddenStatesConfig(StreamingHiddenStatesConfig):
@@ -357,6 +370,7 @@ class EagleVllmStreamingHiddenStatesDataset(StreamingHiddenStatesDataset):
     """
 
     config_cls = EagleVllmStreamingHiddenStatesConfig
+    fetch_payload_cls = EagleFetchPayload
 
     def __init__(
         self,
@@ -368,11 +382,7 @@ class EagleVllmStreamingHiddenStatesDataset(StreamingHiddenStatesDataset):
         super().__init__(entries=entries, tokenizer=tokenizer, config=config)
         self.config: EagleVllmStreamingHiddenStatesConfig = config
 
-    async def _fetch(
-        self,
-        client: httpx.AsyncClient,
-        sample: dict,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, Callable[[], None] | None] | None:
+    async def _fetch(self, client: httpx.AsyncClient, sample: dict) -> EagleFetchPayload | None:
         r = await client.post(
             f"{self.config.server_url}/v1/completions",
             json={
@@ -388,25 +398,30 @@ class EagleVllmStreamingHiddenStatesDataset(StreamingHiddenStatesDataset):
         if path is None:
             print(f"[streaming] no hidden_states_path for {sample['cid']}")
             return None
-        token_ids, hidden_states, cleanup = await asyncio.to_thread(self._load_safetensors, path)
+        token_ids, hidden_states = await asyncio.to_thread(self._load_safetensors, path)
         # vLLM may capture a different number of positions than we tokenized (e.g. the
         # decode step from ``max_tokens=1``, or BOS handling edge cases). Realign here.
         loss_mask = self._align_loss_mask(sample["loss_mask"], token_ids.shape[0])
-        return token_ids, hidden_states, loss_mask, cleanup
+        return {
+            "token_ids": token_ids,
+            "hidden_states": hidden_states,
+            "loss_mask": loss_mask,
+        }
 
     @staticmethod
-    def _load_safetensors(
-        path: str,
-    ) -> tuple[torch.Tensor, torch.Tensor, Callable[[], None]]:
+    def _load_safetensors(path: str) -> tuple[torch.Tensor, torch.Tensor]:
+        """Read tensors into CPU memory then unlink the scratch file.
+
+        ``safe_open(..., framework="pt").get_tensor`` materializes an independent
+        torch Tensor (not a view into the mmap'd file), so it is safe to unlink
+        right after the ``with`` block exits.
+        """
         with safe_open(path, framework="pt") as f:
             token_ids = f.get_tensor("token_ids")
             hidden_states = f.get_tensor("hidden_states")  # [seq, n_layers, hidden]
-
-        def cleanup():
-            with contextlib.suppress(OSError):
-                os.unlink(path)
-
-        return token_ids, hidden_states, cleanup
+        with contextlib.suppress(OSError):
+            os.unlink(path)
+        return token_ids, hidden_states
 
     @staticmethod
     def _align_loss_mask(loss_mask: torch.Tensor, n: int) -> torch.Tensor:
@@ -418,12 +433,11 @@ class EagleVllmStreamingHiddenStatesDataset(StreamingHiddenStatesDataset):
             return torch.cat([loss_mask, pad], dim=0)
         return loss_mask
 
-    def _format(
-        self,
-        token_ids: torch.Tensor,
-        hidden_states: torch.Tensor,
-        loss_mask: torch.Tensor,
-    ) -> dict[str, torch.Tensor]:
+    def _format(self, fetched: EagleFetchPayload) -> dict[str, torch.Tensor]:
+        token_ids = fetched["token_ids"]
+        hidden_states = fetched["hidden_states"]
+        loss_mask = fetched["loss_mask"]
+
         base_model_hidden_states = hidden_states[:, -1, :]
         aux_hidden_states = hidden_states[:, :-1, :].reshape(hidden_states.shape[0], -1)
 
