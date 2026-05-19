@@ -34,13 +34,13 @@ import json
 import os
 from pathlib import Path
 
-from vllm.benchmarks.latency import main as vllm_latency_main
-
 from modelopt.torch.nas.subblock_stats.runtime_utils import RuntimeConfig
 
 
 def run_vllm_latency_benchmark(model_path: Path, runtime_config: RuntimeConfig):
     """Run ``vllm bench latency`` and return the average latency in milliseconds."""
+    from vllm.benchmarks.latency import main as vllm_latency_main
+
     output_json_path = model_path / "vllm_latency_benchmark.json"
 
     # Use vLLM latency benchmark as a library.

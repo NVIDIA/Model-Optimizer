@@ -37,7 +37,7 @@ from modelopt.torch.puzzletron.block_config import (
 )
 
 
-def _make_standard_block_config(hidden_size: int, num_key_value_heads: int) -> BlockConfig:
+def _make_standard_block_config(num_key_value_heads: int) -> BlockConfig:
     return BlockConfig(
         attention=AttentionConfig(no_op=False, num_key_value_heads=num_key_value_heads),
         ffn=FFNConfig(no_op=False, intermediate_size=256, moe=None),
@@ -56,7 +56,7 @@ def create_benchmark_model(
     repeat_block_n_times: int = 10,
 ) -> LlamaForCausalLM:
     """Build a small Llama model with repeated subblocks for latency benchmarking."""
-    block_configs = [_make_standard_block_config(hidden_size, num_key_value_heads)]
+    block_configs = [_make_standard_block_config(num_key_value_heads)]
 
     if block_config:
         block_configs.extend([block_config] * repeat_block_n_times)
@@ -136,17 +136,16 @@ def calc_subblock_runtime(
 @cache
 def calc_no_block_runtime(runtime_config: RuntimeConfig) -> float:
     """Estimate the overhead runtime (embedding + LM head) with no decoder blocks."""
-    runtime_config1 = replace(runtime_config, repeat_block_n_times=0)
-    runtime_config10 = replace(runtime_config, repeat_block_n_times=9)
+    runtime_cfg_ten_blocks = replace(runtime_config, repeat_block_n_times=9)
 
-    block_config = _make_standard_block_config(
-        runtime_config.hidden_size, runtime_config.num_key_value_heads
-    )
+    block_config = _make_standard_block_config(runtime_config.num_key_value_heads)
 
-    runtime_ms1 = calc_subblock_runtime(runtime_config1, None)
-    runtime_ms10 = calc_subblock_runtime(runtime_config10, block_config)
+    runtime_ms_one_block = calc_subblock_runtime(runtime_config, None)  # only one base block
+    runtime_ms_ten_blocks = calc_subblock_runtime(
+        runtime_cfg_ten_blocks, block_config
+    )  # one base block + 9 repeated blocks
 
-    no_block_runtime_ms = runtime_ms1 - (runtime_ms10 - runtime_ms1) / 9
+    no_block_runtime_ms = runtime_ms_one_block - (runtime_ms_ten_blocks - runtime_ms_one_block) / 9
 
     return no_block_runtime_ms
 
@@ -154,7 +153,7 @@ def calc_no_block_runtime(runtime_config: RuntimeConfig) -> float:
 @cache
 def calc_base_runtime(runtime_config: RuntimeConfig, subblock_config: SubblockConfig) -> float:
     """Calculate the base runtime of a model with no subblocks."""
-    base_runtime_ms = 0.0
+    base_runtime_ms = None
     if isinstance(subblock_config, AttentionConfig):
         base_runtime_ms = calc_subblock_runtime(runtime_config, None)
     elif isinstance(subblock_config, FFNConfig):
@@ -188,9 +187,7 @@ def calc_runtime_for_subblocks(
         hidden_size,
         num_attention_heads,
         num_key_value_heads,
-        master_puzzle_dir,
         tokenizer_path,
-        synth_dataset_num_requests,
         repeat_block_n_times,
         prefill_seq_len,
         generation_seq_len,
