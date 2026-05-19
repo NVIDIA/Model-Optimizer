@@ -24,7 +24,6 @@ import warnings
 from functools import partial
 from itertools import product
 from pathlib import Path
-from pdb import run
 from typing import Iterable, Type, TypeVar
 
 import pandas as pd
@@ -133,7 +132,7 @@ def calculate_subblock_stats(
             vocab_size=vocab_size,
             hidden_size=n_embd,
             num_attention_heads=n_head,
-            num_key_value_heads=8,
+            num_key_value_heads=model_config.num_key_value_heads,
             master_puzzle_dir=master_puzzle_dir,
             tokenizer_path=teacher_dir,
             synth_dataset_num_requests=synth_dataset_num_requests,

@@ -97,8 +97,6 @@ realize_model:
   shuffle_seed: 444
   dataset_path: ${dataset_path}
 
-nccl_timeout_minutes: ${timedelta_minutes:10}
-
 # This section redirects Hydra outputs
 hydra:
   run:
