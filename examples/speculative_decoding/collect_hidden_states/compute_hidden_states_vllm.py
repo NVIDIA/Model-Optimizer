@@ -110,10 +110,18 @@ def main(args: argparse.Namespace) -> None:
             continue
 
         tokenized = tokenizer.apply_chat_template(
-            conversations, return_tensors="pt", add_generation_template=False
+            conversations, return_tensors="pt", add_generation_prompt=False
         )
-        input_ids = tokenized["input_ids"] if isinstance(tokenized, dict) else tokenized
-        num_tokens = input_ids.shape[1]
+        # transformers 5.x: BatchEncoding may not inherit from dict; use .input_ids
+        if hasattr(tokenized, "input_ids"):
+            input_ids = tokenized.input_ids
+        elif hasattr(tokenized, "__getitem__") and "input_ids" in tokenized:
+            input_ids = tokenized["input_ids"]
+        else:
+            input_ids = tokenized
+        if not hasattr(input_ids, "shape"):
+            input_ids = torch.tensor(input_ids)
+        num_tokens = input_ids.shape[0] if input_ids.dim() == 1 else input_ids.shape[1]
         if num_tokens <= 10 or num_tokens > args.max_seq_len:
             num_skipped_too_long += 1
             continue
