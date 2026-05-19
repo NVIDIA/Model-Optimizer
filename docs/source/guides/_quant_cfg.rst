@@ -18,25 +18,32 @@ patterns for composing quantization configurations.
 Overview
 ========
 
-A quantization config is a Python dictionary with two top-level keys:
+A quantization config is a :class:`QuantizeConfig
+<modelopt.torch.quantization.config.QuantizeConfig>` Pydantic model with two
+top-level fields, typically authored as YAML or a Python ``dict``:
 
 .. code-block:: python
 
     config = {
-        "quant_cfg": [...],   # ordered list of QuantizerCfgEntry dicts
+        "quant_cfg": [...],   # ordered list of QuantizerCfgEntry entries
         "algorithm": "max",   # calibration algorithm
     }
 
 The ``quant_cfg`` value is an **ordered list** of :class:`QuantizerCfgEntry
-<modelopt.torch.quantization.config.QuantizerCfgEntry>` dicts. Each entry targets a set of
-quantizer modules in the model and specifies their configuration.
+<modelopt.torch.quantization.config.QuantizerCfgEntry>` entries. Each entry
+targets a set of quantizer modules in the model and specifies their
+configuration. Dict input is accepted and normalized to ``QuantizerCfgEntry``
+instances during validation; the result -- whether the input was YAML, dicts,
+or instances -- is always a list of validated ``QuantizerCfgEntry`` objects.
 
 ----------
 
 Entry Format
 ============
 
-Each entry in the list is a dictionary with the following fields:
+Each entry is a :class:`QuantizerCfgEntry
+<modelopt.torch.quantization.config.QuantizerCfgEntry>` with the following
+fields (authored as a YAML/dict mapping; validated into a Pydantic instance):
 
 .. list-table::
    :header-rows: 1
@@ -55,9 +62,11 @@ Each entry in the list is a dictionary with the following fields:
        (e.g. ``"nn.Linear"``). If omitted, all modules are targeted regardless of class.
    * - ``cfg``
      - No
-     - A dict of quantizer attributes as defined by :class:`QuantizerAttributeConfig
-       <modelopt.torch.quantization.config.QuantizerAttributeConfig>`, or a list of such dicts
-       for sequential quantization (see :ref:`sequential-quantizers`).
+     - Quantizer attributes typed as :class:`QuantizerAttributeConfig
+       <modelopt.torch.quantization.config.QuantizerAttributeConfig>`, or a
+       list of such for sequential quantization (see
+       :ref:`sequential-quantizers`). Authored as a mapping; validated into a
+       ``QuantizerAttributeConfig`` instance.
    * - ``enable``
      - No
      - ``True`` or ``False``. Toggles matched quantizers on or off, independently of ``cfg``.
