@@ -51,7 +51,7 @@ class RuntimeConfig:
 
 def save_model(model: LlamaForCausalLM, tokenizer_path: Path, output_path: Path) -> None:
     """Save model weights as AnyModel and copy the tokenizer to ``output_path``."""
-    model.to(dtype=torch.bfloat16).save_pretrained(output_path)
+    model = model.to(dtype=torch.bfloat16)
     save_model_as_anymodel(model, output_path, LlamaModelDescriptor)
 
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
