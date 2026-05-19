@@ -316,8 +316,13 @@ snippet payload after any imports have been expanded:
      type: dynamic
      scale_bits: e4m3
 
-The schema comment is metadata only; it is not returned as part of the loaded
-config, and validation does not expand Pydantic defaults into the snippet.
+The schema comment itself is not returned as part of the loaded config. The
+declared schema is the validation contract: after imports are resolved, the
+loader validates the payload against that schema and returns the result --
+a Pydantic model instance for ``BaseModel`` schemas (with defaults populated)
+or a validated ``dict``/``list`` for ``TypedDict`` schemas. The schema can
+also be supplied at the call site via ``load_config(path, schema_type=...)``,
+which takes precedence over an in-file comment when both are present.
 
 Top-level recipe files are validated by :func:`~modelopt.recipe.load_recipe`;
 they do not need ``modelopt-schema`` comments.  The comments are the contract
@@ -334,9 +339,10 @@ List imports are schema-driven.  When a typed list field such as
 ``quant_cfg: list[QuantizerCfgEntry]`` contains a bare import entry, the
 imported snippet must declare its own ``modelopt-schema``:
 
-* If the snippet schema is the same list type, e.g. ``QuantizerCfgListConfig``,
-  the imported entries are spliced into the containing list.
-* If the snippet schema is the element type, e.g. ``QuantizerCfgEntry``, the
+* If the snippet schema matches the containing list type
+  (``QuantizerCfgListConfig``, i.e. ``list[QuantizerCfgEntry]``), the imported
+  entries are spliced into the containing list.
+* If the snippet schema matches the element type (``QuantizerCfgEntry``), the
   imported entry is appended as a single list item.
 * If the containing list or imported snippet has no schema, or the snippet
   schema is neither the list type nor the element type, loading raises
@@ -413,9 +419,11 @@ PTQ recipes contain a ``quantize`` mapping with:
      - Description
    * - ``quant_cfg``
      - Yes
-     - An ordered list of :class:`~modelopt.torch.quantization.config.QuantizerCfgEntry`
-       dicts.  See :ref:`quant-cfg` for the full specification of entries, ordering
-       semantics, and atomicity rules.
+     - An ordered list of
+       :class:`~modelopt.torch.quantization.config.QuantizerCfgEntry` entries.
+       In YAML each entry is authored as a mapping; after loading they are
+       validated Pydantic instances.  See :ref:`quant-cfg` for the full
+       specification of entries, ordering semantics, and atomicity rules.
    * - ``algorithm``
      - No
      - The calibration algorithm: ``"max"`` (default), ``"mse"``, ``"smoothquant"``,
@@ -691,13 +699,15 @@ Recipe data model
 Recipes are validated at load time using Pydantic models:
 
 :class:`~modelopt.recipe.config.ModelOptRecipeBase`
-   Base class for all recipe types.  Contains ``metadata`` as a
-   :class:`~modelopt.recipe.config.RecipeMetadataConfig` mapping, with
-   ``recipe_type`` and ``description`` convenience properties.
+   Base class for all recipe types.  Contains a required ``metadata`` field
+   typed as :class:`~modelopt.recipe.config.RecipeMetadataConfig` -- a
+   :class:`~modelopt.torch.opt.config.ModeloptBaseConfig` subclass exposing
+   ``recipe_type`` and ``description`` as Pydantic fields.
 
 :class:`~modelopt.recipe.config.ModelOptPTQRecipe`
-   PTQ-specific recipe.  Adds the ``quantize`` field (a dict with ``quant_cfg`` and
-   ``algorithm``).
+   PTQ-specific recipe.  Adds a required ``quantize`` field typed as
+   :class:`~modelopt.torch.quantization.config.QuantizeConfig` (also a
+   ``ModeloptBaseConfig`` subclass, containing ``quant_cfg`` and ``algorithm``).
 
 :class:`~modelopt.recipe.config.RecipeType`
    Enum of supported recipe types.
