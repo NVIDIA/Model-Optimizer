@@ -15,10 +15,12 @@
 
 """Calibration utilities."""
 
+import inspect
 import math
 import time
 import warnings
 from collections.abc import Callable
+from contextlib import contextmanager
 from functools import partial
 from typing import TypeAlias
 
@@ -74,6 +76,31 @@ def _is_calibrated_nvfp4_static(q) -> bool:
         and q.is_nvfp4_static
         and getattr(q, "_amax", None) is not None
     )
+
+
+def _calib_func_accepts_target_module_names(calib_func: Callable) -> bool:
+    """Return whether a calibration function supports target-module filtering."""
+    try:
+        return "target_module_names" in inspect.signature(calib_func).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+def _collect_non_decoder_quantized_linear_names(
+    model: nn.Module, transformer_layers: nn.ModuleList
+) -> set[str]:
+    """Collect enabled quantized linears outside the decoder layers."""
+    decoder_module_ids = {
+        id(module) for layer in transformer_layers for module in layer.modules()
+    }
+    return {
+        name
+        for name, module in model.named_modules()
+        if name
+        and id(module) not in decoder_module_ids
+        and is_quantized_linear(module)
+        and module.weight_quantizer.is_enabled
+    }
 
 
 def _collect_grouped_linears(model: nn.Module) -> list[list[nn.Module]]:
@@ -875,6 +902,91 @@ def finish_stats_collection(model: nn.Module, method: str | None = None, **kwarg
 
         module.enable_quant()
         module.disable_calib()
+
+
+def _iter_target_quantizers(model: nn.Module, target_module_names: set[str]):
+    """Yield TensorQuantizers under the named target modules, without duplicates."""
+    seen: set[int] = set()
+    for name, module in model.named_modules():
+        if name not in target_module_names:
+            continue
+        for child in module.modules():
+            if isinstance(child, TensorQuantizer) and id(child) not in seen:
+                seen.add(id(child))
+                yield child
+
+
+@torch.no_grad()
+def _targeted_max_calibrate(
+    model: nn.Module, forward_loop: ForwardLoop, target_module_names: set[str]
+):
+    """Run max calibration only on quantizers under ``target_module_names``.
+
+    Non-target quantizers stay enabled, so a final GPTQ pass over modules such as
+    ``lm_head`` observes activations produced by already-quantized decoder layers.
+    """
+    target_quantizers = list(_iter_target_quantizers(model, target_module_names))
+    disabled_without_calibrator: list[TensorQuantizer] = []
+
+    for module in target_quantizers:
+        if module._disabled:
+            continue
+        if module._use_constant_amax:
+            module.disable_quant()
+        elif module._calibrator is not None:
+            module.disable_quant()
+            module.enable_calib()
+        else:
+            module.disable()
+            disabled_without_calibrator.append(module)
+
+    try:
+        forward_loop(model)
+    finally:
+        for module in disabled_without_calibrator:
+            module.enable()
+
+        for module in target_quantizers:
+            if module._disabled:
+                continue
+
+            if module._use_constant_amax:
+                module.enable_quant()
+                continue
+
+            cal = getattr(module, "_calibrator", None)
+            if cal and not getattr(module, "_dynamic", False) and cal.compute_amax() is not None:
+                module.load_calib_amax()
+
+            if module.bias_calibrator is not None and module.bias_type == "static":
+                module.load_calib_bias()
+
+            module.enable_quant()
+            module.disable_calib()
+
+
+@contextmanager
+def _disable_target_weight_quantizers(model: nn.Module, target_module_names: set[str]):
+    """Disable only target weight quantizers while preserving upstream quantization."""
+    states: list[tuple[TensorQuantizer, bool]] = []
+    for name, module in model.named_modules():
+        if name not in target_module_names or not is_quantized_linear(module):
+            continue
+        weight_quantizer = module.weight_quantizer
+        quantizers = (
+            list(weight_quantizer)
+            if isinstance(weight_quantizer, SequentialQuantizer)
+            else [weight_quantizer]
+        )
+        for quantizer in quantizers:
+            states.append((quantizer, quantizer._disabled))
+            quantizer.disable()
+
+    try:
+        yield
+    finally:
+        for quantizer, was_disabled in states:
+            quantizer._disabled = was_disabled
 
 
 @torch.no_grad()
@@ -1811,6 +1923,22 @@ def layerwise_calibrate(
     if ckpt:
         ckpt.full_restore(transformer_layers, model)
 
+    if _calib_func_accepts_target_module_names(calib_func):
+        target_module_names = _collect_non_decoder_quantized_linear_names(
+            model, transformer_layers
+        )
+        if target_module_names:
+            print_rank_0(
+                "Layerwise calibration: Calibrating "
+                f"{len(target_module_names)} quantized linear module(s) outside decoder layers"
+            )
+            calib_func(
+                model,
+                forward_loop,
+                target_module_names=target_module_names,
+                **calib_kwargs,
+            )
+
     print_rank_0("Layerwise calibration completed")
 
 
@@ -1821,6 +1949,7 @@ def gptq(
     perc_damp: float = 0.01,
     block_size: int = 128,
     fused: bool = False,
+    target_module_names: set[str] | list[str] | tuple[str, ...] | None = None,
 ):
     """GPTQ quantization.
 
@@ -1847,17 +1976,25 @@ def gptq(
         perc_damp: Percentage of avg Hessian diagonal for damping (default: 0.01).
         block_size: Block size for GPTQ weight update.
         fused: If True, use fused Triton kernel for NVFP4 static quantization.
+        target_module_names: Optional module-name set limiting GPTQ updates to
+            specific quantized linear modules. Non-target quantizers stay active
+            during calibration and Hessian collection.
     """
     total_start = time.time()
+    target_module_names = set(target_module_names) if target_module_names is not None else None
 
     # TODO: Add support for other scale setting strateiges like weight-mse or local-hessian
-    max_calibrate(model, forward_loop=forward_loop)
+    if target_module_names is None:
+        max_calibrate(model, forward_loop=forward_loop)
+    else:
+        _targeted_max_calibrate(model, forward_loop, target_module_names)
     promote_nvfp4_static_quantizers(model)
 
     quantized_layers = [
         (n, m)
         for n, m in model.named_modules()
         if is_quantized_linear(m) and m.weight_quantizer.is_enabled
+        and (target_module_names is None or n in target_module_names)
     ]
     if not quantized_layers:
         print_rank_0("No quantized linear layers found, skipping GPTQ")
@@ -1877,9 +2014,14 @@ def gptq(
 
     print_rank_0(f"Computing Hessians for {len(gptq_handles)} linear layers...")
 
-    with set_quantizer_by_cfg_context(
-        model, [{"quantizer_name": "*weight_quantizer", "enable": False}]
-    ):
+    disable_weight_quant_context = (
+        set_quantizer_by_cfg_context(
+            model, [{"quantizer_name": "*weight_quantizer", "enable": False}]
+        )
+        if target_module_names is None
+        else _disable_target_weight_quantizers(model, target_module_names)
+    )
+    with disable_weight_quant_context:
         forward_loop(model)
 
     for handle in gptq_handles.values():

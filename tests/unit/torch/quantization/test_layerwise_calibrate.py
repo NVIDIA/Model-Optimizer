@@ -23,7 +23,7 @@ import torch
 import torch.nn as nn
 
 import modelopt.torch.quantization as mtq
-from modelopt.torch.quantization.model_calib import layerwise_calibrate
+from modelopt.torch.quantization.model_calib import gptq, layerwise_calibrate
 from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector, _SkipLayer
 
@@ -62,6 +62,18 @@ class _SimpleTransformerModel(nn.Module):
         return x
 
 
+class _SimpleTransformerWithHead(_SimpleTransformerModel):
+    """Transformer with an output head outside the decoder layers."""
+
+    def __init__(self, n_layers=3, dim=16):
+        super().__init__(n_layers=n_layers, dim=dim)
+        self.lm_head = nn.Linear(dim, 32, bias=False)
+
+    def forward(self, x, **kwargs):
+        x = super().forward(x, **kwargs)
+        return self.lm_head(x)
+
+
 class _FlatMLP(nn.Module):
     """No decoder-layer structure -- should be rejected by layerwise_calibrate."""
 
@@ -93,6 +105,17 @@ def _make_model_and_data(n_layers=3, dim=16, n_batches=2, batch_size=4):
     model = _SimpleTransformerModel(n_layers=n_layers, dim=dim)
     tokens = [torch.randint(0, 32, (batch_size, 8)) for _ in range(n_batches)]
     return model, tokens
+
+
+def _basic_int8_config(algorithm="max") -> dict:
+    return {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": None}},
+            {"quantizer_name": "*input_quantizer", "cfg": {"num_bits": 8, "axis": None}},
+        ],
+        "algorithm": algorithm,
+    }
 
 
 # LayerActivationCollector tests
@@ -240,6 +263,85 @@ def test_layerwise_calib_empty_forward_loop_raises(monkeypatch):
             forward_loop=lambda m: None,
             calib_func=lambda *a, **kw: None,
         )
+
+
+def test_layerwise_calib_targets_quantized_linears_outside_decoder_layers(monkeypatch):
+    """Target-aware algorithms get a final pass for lm_head-like modules."""
+    _register_test_discoverer(monkeypatch)
+    torch.manual_seed(0)
+    model = _SimpleTransformerWithHead(n_layers=2, dim=16)
+    data = [torch.randint(0, 32, (2, 8)) for _ in range(2)]
+    mtq.quantize(model, _basic_int8_config(algorithm=None))
+    calls: list[set[str] | None] = []
+
+    def forward_loop(m):
+        for batch in data:
+            m(batch)
+
+    def target_aware_stub(m, forward_loop, target_module_names=None, **kwargs):
+        calls.append(set(target_module_names) if target_module_names is not None else None)
+
+    layerwise_calibrate(model, forward_loop=forward_loop, calib_func=target_aware_stub)
+
+    assert calls[:-1] == [None, None]
+    assert calls[-1] == {"lm_head"}
+
+
+def test_gptq_target_module_names_preserves_upstream_weight_quantizers(monkeypatch):
+    """The final targeted GPTQ pass should disable only target weights during Hessian capture."""
+    _register_test_discoverer(monkeypatch)
+    torch.manual_seed(0)
+    model = _SimpleTransformerWithHead(n_layers=1, dim=16)
+    data = [torch.randint(0, 32, (2, 8))]
+
+    def calib_forward_loop(m):
+        for batch in data:
+            m(batch)
+
+    mtq.quantize(model, _basic_int8_config(), calib_forward_loop)
+
+    created_handles: list[str] = []
+
+    class _FakeGPTQHelper:
+        def __init__(self, module, name, offload_to_cpu=True, fused=False):
+            self.module = module
+            self.name = name
+            created_handles.append(name)
+
+        def setup(self):
+            pass
+
+        def cleanup(self):
+            pass
+
+        def update_weights(self, block_size, perc_damp):
+            pass
+
+        def free(self):
+            pass
+
+    monkeypatch.setattr("modelopt.torch.quantization.model_calib.GPTQHelper", _FakeGPTQHelper)
+
+    forward_states = []
+    call_count = 0
+
+    def gptq_forward_loop(m):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 2:
+            forward_states.append(
+                (
+                    m.layers[0].attn.weight_quantizer.is_enabled,
+                    m.lm_head.weight_quantizer.is_enabled,
+                )
+            )
+        for batch in data:
+            m(batch)
+
+    gptq(model, gptq_forward_loop, target_module_names={"lm_head"})
+
+    assert created_handles == ["lm_head"]
+    assert forward_states == [(True, False)]
 
 
 # ---------------------------------------------------------------------------

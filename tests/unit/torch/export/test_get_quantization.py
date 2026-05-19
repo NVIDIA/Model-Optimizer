@@ -29,8 +29,13 @@ from modelopt.torch.export.model_config import (
     QUANTIZATION_NVFP4,
     QUANTIZATION_W4A8_AWQ,
 )
-from modelopt.torch.export.quant_utils import get_quant_config
+from modelopt.torch.export.quant_utils import (
+    get_quant_config,
+    get_weight_scaling_factor,
+    get_weight_scaling_factor_2,
+)
 from modelopt.torch.quantization.nn import NVFP4StaticQuantizer
+from modelopt.torch.quantization.utils import reduce_block_amax
 
 
 @pytest.mark.parametrize(
@@ -60,3 +65,40 @@ def test_nvfp4_static_quantizer_export():
     quant_config = get_quant_config(model)
     assert quant_config["quantization"]["quant_algo"] == "NVFP4"
     assert quant_config["quantization"]["group_size"] == 16
+
+
+def test_unpromoted_nvfp4_static_quantizer_exports_scalar_global_scale():
+    """Export should promote static NVFP4 quantizers that layerwise calibration did not touch."""
+    model = ToyModel(dims=[32, 8], bias=False)
+    static_nvfp4_config = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {
+                "quantizer_name": "*.weight_quantizer",
+                "cfg": {
+                    "num_bits": (2, 1),
+                    "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
+                    "axis": None,
+                },
+                "enable": True,
+            },
+        ],
+        "algorithm": None,
+    }
+
+    mtq.quantize(model, static_nvfp4_config)
+    linear = model.linears
+    weight_quantizer = linear.weight_quantizer
+    per_block_amax = reduce_block_amax(linear.weight, block_sizes={-1: 16}).flatten()
+    weight_quantizer.register_buffer("_amax", per_block_amax)
+
+    assert weight_quantizer.is_nvfp4_static
+    assert not isinstance(weight_quantizer, NVFP4StaticQuantizer)
+
+    weight_scale_2 = get_weight_scaling_factor_2(linear)
+    weight_scale = get_weight_scaling_factor(linear)
+
+    assert isinstance(linear.weight_quantizer, NVFP4StaticQuantizer)
+    assert weight_scale_2.shape == torch.Size([])
+    assert torch.allclose(weight_scale_2, per_block_amax.max() / (6.0 * 448.0))
+    assert weight_scale.shape == (8, 2)

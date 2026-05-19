@@ -242,7 +242,7 @@ def get_scaling_factor(quantizer: TensorQuantizer) -> torch.Tensor:
 
 
 def _get_nvfp4_block_size(
-    weight_quantizer: NVFP4StaticQuantizer, weight: torch.Tensor, module_name: str = ""
+    weight_quantizer: TensorQuantizer, weight: torch.Tensor, module_name: str = ""
 ) -> int:
     """Return block size for NVFP4 from quantizer's block_sizes; raise if missing."""
     prefix = f"NVFP4StaticQuantizer{f' for {module_name}' if module_name else ''}"
@@ -287,7 +287,10 @@ def _ensure_weight_quantizer_calibrated(
         weight: The weight tensor to use for calibration
         module_name: Optional module name for better warning messages
     """
-    if isinstance(weight_quantizer, NVFP4StaticQuantizer):
+    if isinstance(weight_quantizer, NVFP4StaticQuantizer) or weight_quantizer.is_nvfp4_static:
+        if not isinstance(weight_quantizer, NVFP4StaticQuantizer):
+            NVFP4StaticQuantizer.from_tensor_quantizer(weight_quantizer)
+
         need_per_block = not hasattr(weight_quantizer, "_amax") or weight_quantizer._amax is None
         need_global = (
             not hasattr(weight_quantizer, "_global_amax") or weight_quantizer.global_amax is None
@@ -297,10 +300,15 @@ def _ensure_weight_quantizer_calibrated(
         block_size = _get_nvfp4_block_size(weight_quantizer, weight, module_name)
         warn(
             f"NVFP4StaticQuantizer{f' for {module_name}' if module_name else ''} was not fully calibrated. "
-            f"Computing per-block amax and global_amax from weights. This may occur if: "
-            f"some experts were not activated during calibration (expected for MoE models), try increasing --calib_size"
+            f"Computing missing per-block amax/global_amax from weights or existing amax. "
+            f"This may occur if: some experts were not activated during calibration "
+            f"(expected for MoE models), try increasing --calib_size"
         )
-        per_block_amax = reduce_block_amax(weight, block_sizes={-1: block_size})
+        per_block_amax = (
+            reduce_block_amax(weight, block_sizes={-1: block_size})
+            if need_per_block
+            else weight_quantizer._amax
+        )
         if need_per_block:
             _set_amax_from_tensor(weight_quantizer, per_block_amax.to(weight.device))
         if need_global:
