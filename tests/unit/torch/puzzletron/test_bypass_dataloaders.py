@@ -27,8 +27,8 @@ import pytest
 import torch
 from datasets import Dataset, DatasetDict
 
-import modelopt.torch.puzzletron.utils.data.dataset as dataset_module
 import modelopt.torch.puzzletron.utils.data.dataloaders as dl
+import modelopt.torch.puzzletron.utils.data.dataset as dataset_module
 from modelopt.torch.puzzletron.utils.data.dataloaders import (
     Printer,
     collate_fn_with_none_support,
@@ -220,6 +220,13 @@ class _StructuredContentDataset:
         }
 
 
+class _EmptyConversationDataset:
+    column_names = ("text",)
+
+    def __iter__(self):
+        yield {"text": []}
+
+
 def test_constant_length_dataset_no_chat_template_adds_role_tags_and_warns_once(monkeypatch):
     monkeypatch.setattr(dataset_module, "_CHAT_TEMPLATE_FALLBACK_WARNING_EMITTED", False)
     tokenizer = _NoChatTemplateTokenizer()
@@ -262,6 +269,27 @@ def test_constant_length_dataset_no_chat_template_rejects_unknown_structured_con
 
     with pytest.raises(ValueError, match="Unsupported structured message content"):
         list(dataset)
+
+
+def test_constant_length_dataset_handles_empty_message_list():
+    tokenizer = _NoChatTemplateTokenizer()
+    dataset = ConstantLengthDataset(
+        tokenizer,
+        _EmptyConversationDataset(),
+        infinite=False,
+        seq_length=2,
+        num_of_sequences=1,
+        chars_per_token=100,
+        content_field="text",
+        fim_rate=0.0,
+        fim_spm_rate=0.0,
+        label_shift=False,
+    )
+
+    realized = list(dataset)
+
+    assert tokenizer.seen_texts == [""]
+    assert len(realized) == 1
 
 
 # ---------------------------------------------------------------------------

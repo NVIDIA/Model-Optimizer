@@ -58,8 +58,7 @@ def _format_messages_without_chat_template(messages) -> str:
         )
         _CHAT_TEMPLATE_FALLBACK_WARNING_EMITTED = True
     return "\n".join(
-        f"{message['role']}: {_message_content_to_text(message['content'])}"
-        for message in messages
+        f"{message['role']}: {_message_content_to_text(message['content'])}" for message in messages
     )
 
 
@@ -150,20 +149,21 @@ class ConstantLengthDataset(IterableDataset):
                         continue
                     if not self.is_dataset_already_tokenized:
                         sample = sample[self.content_field]
-                        if (
-                            isinstance(sample, list)
-                            and isinstance(sample[0], dict)
-                            and {"content", "role"}.issubset(sample[0])
-                        ):
-                            if len(sample) > 1:
-                                if getattr(self.tokenizer, "chat_template", None) is not None:
-                                    sample = self.tokenizer.apply_chat_template(
-                                        sample, tokenize=False
-                                    )
+                        if isinstance(sample, list):
+                            if len(sample) == 0:
+                                sample = ""
+                            elif isinstance(sample[0], dict) and {"content", "role"}.issubset(
+                                sample[0]
+                            ):
+                                if len(sample) > 1:
+                                    if getattr(self.tokenizer, "chat_template", None) is not None:
+                                        sample = self.tokenizer.apply_chat_template(
+                                            sample, tokenize=False
+                                        )
+                                    else:
+                                        sample = _format_messages_without_chat_template(sample)
                                 else:
-                                    sample = _format_messages_without_chat_template(sample)
-                            else:
-                                sample = _message_content_to_text(sample[0]["content"])
+                                    sample = _message_content_to_text(sample[0]["content"])
                     else:
                         sample = sample[self.tokens_field]
                     sample = sample[: self.max_sample_length]
