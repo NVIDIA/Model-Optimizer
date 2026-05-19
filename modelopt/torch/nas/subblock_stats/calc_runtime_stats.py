@@ -194,7 +194,6 @@ def calc_runtime_for_subblocks(
         repeat_block_n_times,
         prefill_seq_len,
         generation_seq_len,
-        runtime_stats_config.get("batch_size", 1),
         runtime_stats_config.get("num_iters", 30),
         runtime_stats_config.get("num_warmup_iters", 10),
     )

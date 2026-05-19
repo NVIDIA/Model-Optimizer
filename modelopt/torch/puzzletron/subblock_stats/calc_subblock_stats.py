@@ -124,7 +124,6 @@ def calculate_subblock_stats(
             "synth_dataset_num_requests", 200
         )
         runtime_stats_config = calc_subblock_stats_config.get("runtime_stats", {})
-        runtime_stats_config["batch_size"] = batch_size
 
         runtime_by_subblock_dict, non_block_runtime_ms = calc_runtime_for_subblocks(
             subblock_config_set=subblock_configs_nolayerindex,
