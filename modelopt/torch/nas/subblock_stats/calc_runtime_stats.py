@@ -134,23 +134,6 @@ def calc_subblock_runtime(
 
 
 @cache
-def calc_no_block_runtime(runtime_config: RuntimeConfig) -> float:
-    """Estimate the overhead runtime (embedding + LM head) with no decoder blocks."""
-    runtime_cfg_ten_blocks = replace(runtime_config, repeat_block_n_times=9)
-
-    block_config = _make_standard_block_config(runtime_config.num_key_value_heads)
-
-    runtime_ms_one_block = calc_subblock_runtime(runtime_config, None)  # only one base block
-    runtime_ms_ten_blocks = calc_subblock_runtime(
-        runtime_cfg_ten_blocks, block_config
-    )  # one base block + 9 repeated blocks
-
-    no_block_runtime_ms = runtime_ms_one_block - (runtime_ms_ten_blocks - runtime_ms_one_block) / 9
-
-    return no_block_runtime_ms
-
-
-@cache
 def calc_base_runtime(runtime_config: RuntimeConfig, subblock_config: SubblockConfig) -> float:
     """Calculate the base runtime of a model with no subblocks."""
     base_runtime_ms = None
@@ -167,6 +150,23 @@ def calc_base_runtime(runtime_config: RuntimeConfig, subblock_config: SubblockCo
     return base_runtime_ms
 
 
+@cache
+def calc_no_block_runtime(runtime_config: RuntimeConfig) -> float:
+    """Estimate the overhead runtime (embedding + LM head) with no decoder blocks."""
+    runtime_cfg_ten_blocks = replace(runtime_config, repeat_block_n_times=9)
+
+    block_config = _make_standard_block_config(runtime_config.num_key_value_heads)
+
+    runtime_ms_one_block = calc_subblock_runtime(runtime_config, None)  # only one base block
+    runtime_ms_ten_blocks = calc_subblock_runtime(
+        runtime_cfg_ten_blocks, block_config
+    )  # one base block + 9 repeated blocks
+
+    no_block_runtime_ms = runtime_ms_one_block - (runtime_ms_ten_blocks - runtime_ms_one_block) / 9
+
+    return no_block_runtime_ms
+
+
 def calc_runtime_for_subblocks(
     subblock_config_set: set[SubblockConfig],
     runtime_stats_config: DictConfig,
@@ -174,9 +174,7 @@ def calc_runtime_for_subblocks(
     hidden_size: int,
     num_attention_heads: int,
     num_key_value_heads: int,
-    master_puzzle_dir: str,
     tokenizer_path: str,
-    synth_dataset_num_requests: int,
     prefill_seq_len: int,
     generation_seq_len: int,
 ) -> tuple[dict[SubblockConfig, float], float]:

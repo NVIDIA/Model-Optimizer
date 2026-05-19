@@ -118,11 +118,6 @@ def calculate_subblock_stats(
             [subblock_config["subblock_config"] for subblock_config in subblock_configs]
         )
 
-        # dict[SubblockConfig, float], float
-        # TODO: Manage default values for calc_subblock_stats_config in one place, e.g. within a dataclass for hydra config.
-        synth_dataset_num_requests = calc_subblock_stats_config.get("runtime_stats", {}).get(
-            "synth_dataset_num_requests", 200
-        )
         runtime_stats_config = calc_subblock_stats_config.get("runtime_stats", {})
 
         runtime_by_subblock_dict, non_block_runtime_ms = calc_runtime_for_subblocks(
@@ -132,9 +127,7 @@ def calculate_subblock_stats(
             hidden_size=n_embd,
             num_attention_heads=n_head,
             num_key_value_heads=model_config.num_key_value_heads,
-            master_puzzle_dir=master_puzzle_dir,
             tokenizer_path=teacher_dir,
-            synth_dataset_num_requests=synth_dataset_num_requests,
             prefill_seq_len=prefill_seq_len,
             generation_seq_len=generation_seq_len,
         )
