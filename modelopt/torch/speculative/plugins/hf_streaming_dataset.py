@@ -127,6 +127,10 @@ class StreamingConfig(BaseModel):
     # by rank, so identical seeds across ranks are required for the partition to
     # be a true partition (no overlap, no gaps).
     seed: int = 0
+    # Circuit breaker: raise after this many consecutive _fetch failures (network
+    # errors, 5xx, malformed responses). High enough to absorb transient blips,
+    # low enough that a dead server doesn't silently drain the corpus.
+    fail_after_consecutive_skips: int = 16
 
 
 class StreamingDataset(IterableDataset):
@@ -199,13 +203,14 @@ class StreamingDataset(IterableDataset):
         # happen in 1-epoch streaming) at least doesn't deadlock.
         q: queue.Queue = queue.Queue(maxsize=self.config.prefetch)
         stop = threading.Event()
+        self._consecutive_skips = 0  # per-iter; tripped in _process, read in _produce
 
         def run():
             try:
                 asyncio.run(self._produce(q, stop))
             except Exception as e:
-                # Surface to consumer
-                q.put(e)
+                q.put(e)  # surface to consumer
+            finally:
                 q.put(_SENTINEL)
 
         thread = threading.Thread(target=run, daemon=True)
@@ -227,8 +232,14 @@ class StreamingDataset(IterableDataset):
                     q.get_nowait()
 
     async def _produce(self, q: queue.Queue, stop: threading.Event):
-        """Stream entries through a sliding window of at most ``prefetch`` in-flight tasks."""
+        """Stream entries through a sliding window of at most ``prefetch`` in-flight tasks.
+
+        Sentinel is enqueued by the caller (``__iter__.run``) after this returns,
+        so an exception raised here (e.g. circuit breaker) reaches the consumer
+        before the loop's terminating sentinel.
+        """
         timeout = httpx.Timeout(self.config.request_timeout, connect=10.0)
+        threshold = self.config.fail_after_consecutive_skips
         async with httpx.AsyncClient(timeout=timeout) as client:
             pending: set[asyncio.Task] = set()
             entries_iter = iter(self.entries)
@@ -245,12 +256,16 @@ class StreamingDataset(IterableDataset):
                     if not pending:
                         break
                     _, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+                    if self._consecutive_skips >= threshold:
+                        raise RuntimeError(
+                            f"{self._consecutive_skips} consecutive _fetch failures "
+                            f"in {type(self).__name__}; server likely down."
+                        )
             finally:
                 for task in pending:
                     task.cancel()
                 if pending:
                     await asyncio.gather(*pending, return_exceptions=True)
-                q.put(_SENTINEL)
 
     async def _process(
         self,
@@ -259,7 +274,12 @@ class StreamingDataset(IterableDataset):
         q: queue.Queue,
         stop: threading.Event,
     ) -> None:
-        """Tokenize -> backend fetch -> align -> format -> enqueue. Errors are logged and skipped."""
+        """Tokenize -> backend fetch -> align -> format -> enqueue.
+
+        Per-sample _fetch errors (and ``None`` returns) are logged and skipped,
+        bumping ``self._consecutive_skips`` for the producer's circuit breaker.
+        Successful enqueue resets the counter.
+        """
         if stop.is_set():
             return
         sample = await asyncio.to_thread(self._tokenize_entry, entry)
@@ -269,8 +289,10 @@ class StreamingDataset(IterableDataset):
             fetched = await self._fetch(client, sample)
         except Exception as e:
             print(f"[streaming] error for {sample['cid']}: {e!r}")
+            self._consecutive_skips += 1
             return
         if fetched is None:
+            self._consecutive_skips += 1
             return
         if self.fetch_payload_cls is not None:
             # ``__required_keys__`` is a TypedDict runtime attribute mypy doesn't
@@ -286,6 +308,7 @@ class StreamingDataset(IterableDataset):
         data = self._format(fetched)
         # Blocking put -> backpressure when trainer is slow.
         await asyncio.to_thread(q.put, data)
+        self._consecutive_skips = 0
 
     def _tokenize_entry(self, entry: dict) -> dict | None:
         """Tokenize a single entry. Returns None for entries missing ``cid`` or ``messages``."""
