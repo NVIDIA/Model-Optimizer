@@ -4,6 +4,8 @@ reviews:
   profile: chill
   collapse_walkthrough: true
   poem: false
+  # Allow CodeRabbit to formally approve once its comments are resolved and pre-merge checks pass
+  request_changes_workflow: true
   path_instructions:
     - path: "modelopt/**/*.py"
       instructions: &security_instructions |

@@ -124,8 +124,7 @@ jobs:
             ## Review Procedure
 
             **Aim for one pass.** Surface meaningful issues in this review so the author gets
-            one consolidated set of fixes. Prioritize breadth across the diff over deep dives
-            on any single file.
+            one consolidated set of fixes.
 
             **Cover each changed file across categories.** For each non-trivial changed file,
             consider the categories below (Algorithm Correctness, Mode/State, Export, Backward
@@ -236,5 +235,6 @@ jobs:
             - `0 CRITICAL AND 0 IMPORTANT` → **approve**, regardless of SUGGESTION count.
               SUGGESTIONs never block approval.
               `gh pr review $PR_NUMBER --repo $REPO --approve --body "Claude review passed — no blocking issues found. LGTM"`
-            - `≥1 CRITICAL OR ≥1 IMPORTANT` → **request changes**, summarizing the blocking issues.
-              `gh pr review $PR_NUMBER --repo $REPO --request-changes --body "<summary of blocking issues>"`
+            - `≥1 CRITICAL OR ≥1 IMPORTANT` → **post a comment review** summarizing the
+              issues found.
+              `gh pr review $PR_NUMBER --repo $REPO --comment --body "<summary of issues found>"`
