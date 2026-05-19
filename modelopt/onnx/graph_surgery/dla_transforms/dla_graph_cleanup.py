@@ -422,7 +422,9 @@ def _remove_reshape_chains(model: onnx.ModelProto, cache: GraphCache) -> onnx.Mo
 
     batch_replace_nodes(graph, pass1_batch)
 
-    # Rebuild index after Pass 1 mutations
+    # Rebuild cache/index after Pass 1 mutations so Pass 2 sees the updated
+    # topology, consumers, and shape metadata.
+    cache.rebuild()
     node_idx = {id(n): i for i, n in enumerate(graph.node)}
     pass2_batch: dict[int, tuple[list, list]] = {}
 

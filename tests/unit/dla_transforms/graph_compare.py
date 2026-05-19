@@ -28,13 +28,20 @@ Usage in tests::
 
 from __future__ import annotations
 
-from collections import deque
+from collections import Counter, deque
 
 import onnx
+from onnx import numpy_helper
 
 # ---------------------------------------------------------------------------
 # Node fingerprint: a name-independent description of a single node
 # ---------------------------------------------------------------------------
+
+
+def _tensor_signature(tensor: onnx.TensorProto) -> tuple:
+    """Return a hashable tensor payload signature (dtype + shape + raw bytes)."""
+    arr = numpy_helper.to_array(tensor)
+    return (tensor.data_type, tuple(arr.shape), arr.tobytes())
 
 
 def _attr_signature(attr: onnx.AttributeProto) -> tuple:
@@ -49,7 +56,9 @@ def _attr_signature(attr: onnx.AttributeProto) -> tuple:
         return (attr.name, "FLOATS", tuple(round(f, 6) for f in attr.floats))
     if attr.type == onnx.AttributeProto.STRING:
         return (attr.name, "STRING", attr.s)
-    # For tensors and other complex types, just record the type
+    if attr.type == onnx.AttributeProto.TENSOR:
+        return (attr.name, "TENSOR", _tensor_signature(attr.t))
+    # For other complex types, just record the type
     return (attr.name, str(attr.type))
 
 
@@ -150,6 +159,16 @@ def graphs_structurally_equal(
     # 3. Compare node count
     if len(graph1.node) != len(graph2.node):
         diffs.append(f"Node count: {len(graph1.node)} vs {len(graph2.node)}")
+
+    # Compare initializer payloads name-independently. Most graph surgeries emit
+    # shape/axis/repeats tensors as initializers, so their contents are part of
+    # the graph semantics even when generated names differ.
+    init1 = Counter(_tensor_signature(init) for init in graph1.initializer)
+    init2 = Counter(_tensor_signature(init) for init in graph2.initializer)
+    if init1 != init2:
+        missing = list((init2 - init1).elements())[:5]
+        extra = list((init1 - init2).elements())[:5]
+        diffs.append(f"Initializer payloads differ; missing={missing}, extra={extra}")
 
     # 4. Compare op-type histogram
     ops1 = {}

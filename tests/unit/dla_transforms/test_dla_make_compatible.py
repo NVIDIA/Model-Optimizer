@@ -162,8 +162,7 @@ def test_matmul_add_softmax_2d():
             [_vi("Y", TensorProto.FLOAT, [1, 32])],
             initializer=[
                 numpy_helper.from_array(w_conv, "Wc"),
-                numpy_helper.from_array(b, "B"),
-                numpy_helper.from_array(b, "B2"),
+                numpy_helper.from_array(b.reshape(1, 1, 1, 32), "B2"),
                 numpy_helper.from_array(np.array([0, 1], dtype=np.int64), "ua"),
                 numpy_helper.from_array(np.array([0, 1], dtype=np.int64), "sa"),
             ],
@@ -414,8 +413,8 @@ def test_encoder_block_2d():
                 numpy_helper.from_array(np.zeros(h, dtype=np.float32), "lb"),
                 numpy_helper.from_array(w1c, "W1c"),
                 numpy_helper.from_array(w2c, "W2c"),
-                numpy_helper.from_array(np.zeros(h, dtype=np.float32), "B1"),
-                numpy_helper.from_array(np.zeros(h, dtype=np.float32), "B2"),
+                numpy_helper.from_array(np.zeros((1, 1, 1, h), dtype=np.float32), "B1"),
+                numpy_helper.from_array(np.zeros((1, 1, 1, h), dtype=np.float32), "B2"),
                 numpy_helper.from_array(np.array([0, 1], dtype=np.int64), "ua"),
                 numpy_helper.from_array(np.array([0, 1], dtype=np.int64), "sa"),
             ],
@@ -476,7 +475,7 @@ def test_concat_flatten_softmax_3d():
             initializer=[
                 numpy_helper.from_array(np.array([0], dtype=np.int64), "ua"),
                 numpy_helper.from_array(np.array([0], dtype=np.int64), "ub"),
-                numpy_helper.from_array(np.array([1, 1, 2, 30], dtype=np.int64), "rs"),
+                numpy_helper.from_array(np.array([1, 1, 2, -1], dtype=np.int64), "rs"),
                 numpy_helper.from_array(np.array([0, 1], dtype=np.int64), "sa"),
             ],
         ),
@@ -731,7 +730,10 @@ def test_matmul_dynamic_then_5d_reshape_qdq_reduce():
                 numpy_helper.from_array(np.array(zp), "qz"),
                 numpy_helper.from_array(np.array(scale), "ds"),
                 numpy_helper.from_array(np.array(zp), "dz"),
-                numpy_helper.from_array(np.array([-1], dtype=np.int64), "rax"),
+                *[
+                    numpy_helper.from_array(np.array([-3], dtype=np.int64), f"rax{i}")
+                    for i in range(num_branches)
+                ],
                 numpy_helper.from_array(np.array(scale), "qs2"),
                 numpy_helper.from_array(np.array(zp), "qz2"),
                 numpy_helper.from_array(np.array(scale), "ds2"),

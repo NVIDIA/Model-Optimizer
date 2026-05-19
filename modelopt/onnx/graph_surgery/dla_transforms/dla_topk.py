@@ -154,7 +154,7 @@ def _apply_topk(model: onnx.ModelProto) -> onnx.ModelProto:
         # ── Validate input shape ──────────────────────────────────────────────
         input_shape = cache.get_shape(x_tensor)
         if input_shape is None or len(input_shape) != 2:
-            raise ValueError(f"[dla_topk] TopK {node.name!r}: expected 2D input, got {input_shape}")
+            continue
         if not (int(np.prod(input_shape[:1])) == 1 and input_shape[1] > 1):
             continue  # only [1,N] layout
 

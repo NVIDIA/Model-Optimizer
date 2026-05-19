@@ -27,8 +27,6 @@ Each test:
   4. Runs ORT on the transformed model.
   5. Asserts cosine similarity ≥ 1-1e-5 and allclose(rtol=1e-4, atol=1e-4).
 
-Models saved to ``scratch_space/convert_ops_to_4d_test_models/`` for inspection.
-
 Coverage
 --------
 Reshape (2D→4D, 3D→4D)
@@ -67,7 +65,6 @@ from onnx import TensorProto, helper, numpy_helper
 pytest.importorskip("onnxruntime", reason="onnxruntime required for ORT parity checks")
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
-_SAVED_MODELS_DIR = _REPO_ROOT / "scratch_space" / "convert_ops_to_4d_test_models"
 _OPSET_VERSION = 17
 _MAX_IR_VERSION_FOR_ORT = 9
 
@@ -185,22 +182,6 @@ def _assert_values_match(ref: dict, got: dict) -> None:
             np.testing.assert_array_equal(a, b, err_msg=name)
 
 
-def _save(base, tr, tag):
-    _SAVED_MODELS_DIR.mkdir(parents=True, exist_ok=True)
-    onnx.save(base, str(_SAVED_MODELS_DIR / f"{tag}_base.onnx"))
-    try:
-        from onnxruntime.tools.symbolic_shape_infer import (
-            SymbolicShapeInference,  # type: ignore[import-untyped]
-        )
-
-        tr2 = SymbolicShapeInference.infer_shapes(
-            copy.deepcopy(tr), auto_merge_symbolic_dims=True
-        ) or copy.deepcopy(tr)
-    except Exception:
-        tr2 = copy.deepcopy(tr)
-    onnx.save(tr2, str(_SAVED_MODELS_DIR / f"{tag}_transformed.onnx"))
-
-
 def _apply_and_run(model, feeds):
     ref = _run_ort(model, feeds)
     tr = copy.deepcopy(model)
@@ -228,7 +209,6 @@ def test_reshape_2d_to_4d():
     )
     feeds = {"X": _RNG.standard_normal((8, 16)).astype(np.float32)}
     ref, got, tr = _apply_and_run(model, feeds)
-    _save(model, tr, "reshape_2d")
     _assert_match(ref, got)
 
 
@@ -244,7 +224,6 @@ def test_reshape_3d_to_4d():
     )
     feeds = {"X": _RNG.standard_normal((3, 8, 16)).astype(np.float32)}
     ref, got, tr = _apply_and_run(model, feeds)
-    _save(model, tr, "reshape_3d")
     _assert_match(ref, got)
 
 
@@ -261,7 +240,6 @@ def test_transpose_2d():
     )
     feeds = {"X": _RNG.standard_normal((8, 16)).astype(np.float32)}
     ref, got, tr = _apply_and_run(model, feeds)
-    _save(model, tr, "transpose_2d")
     _assert_match(ref, got)
     # Verify perm was adjusted
     tr_node = next(
@@ -283,7 +261,6 @@ def test_transpose_3d():
     )
     feeds = {"X": _RNG.standard_normal((3, 8, 16)).astype(np.float32)}
     ref, got, tr = _apply_and_run(model, feeds)
-    _save(model, tr, "transpose_3d")
     _assert_match(ref, got)
 
 
@@ -304,7 +281,6 @@ def test_slice_2d():
     )
     feeds = {"X": _RNG.standard_normal((8, 16)).astype(np.float32)}
     ref, got, tr = _apply_and_run(model, feeds)
-    _save(model, tr, "slice_2d")
     _assert_match(ref, got)
 
 
@@ -321,7 +297,6 @@ def test_argmax_2d_keepdims0():
     )
     feeds = {"X": _RNG.standard_normal((8, 16)).astype(np.float32)}
     ref, got, tr = _apply_and_run(model, feeds)
-    _save(model, tr, "argmax_2d_kd0")
     _assert_match(ref, got)
     # keepdims must be forced to 1 on the transformed node
     am_node = next(n for n in tr.graph.node if n.op_type == "ArgMax")
@@ -343,7 +318,6 @@ def test_argmax_3d_keepdims1():
     )
     feeds = {"X": _RNG.standard_normal((3, 8, 16)).astype(np.float32)}
     ref, got, tr = _apply_and_run(model, feeds)
-    _save(model, tr, "argmax_3d_kd1")
     _assert_match(ref, got)
     # keepdims must remain 1 on the transformed node
     am_node = next(n for n in tr.graph.node if n.op_type == "ArgMax")
@@ -366,7 +340,6 @@ def test_reducesum_2d_keepdims0():
     )
     feeds = {"X": _RNG.standard_normal((8, 16)).astype(np.float32)}
     ref, got, tr = _apply_and_run(model, feeds)
-    _save(model, tr, "reducesum_2d_kd0")
     _assert_match(ref, got)
     # keepdims must be forced to 1 on the transformed node
     rd_node = next(n for n in tr.graph.node if n.op_type == "ReduceSum")
@@ -390,7 +363,6 @@ def test_reducesum_3d_keepdims1():
     )
     feeds = {"X": _RNG.standard_normal((3, 8, 16)).astype(np.float32)}
     ref, got, tr = _apply_and_run(model, feeds)
-    _save(model, tr, "reducesum_3d_kd1")
     _assert_match(ref, got)
     # keepdims must remain 1 on the transformed node
     rd_node = next(n for n in tr.graph.node if n.op_type == "ReduceSum")
@@ -410,7 +382,6 @@ def test_reducesum_4d_keepdims0():
     )
     feeds = {"X": _RNG.standard_normal((1, 8, 1, 16)).astype(np.float32)}
     ref, got, tr = _apply_and_run(model, feeds)
-    _save(model, tr, "reducesum_4d_kd0")
     _assert_match(ref, got)
     # keepdims must be forced to 1 even for 4D input
     rd_node = next(n for n in tr.graph.node if n.op_type == "ReduceSum")
@@ -432,7 +403,6 @@ def test_argmax_4d_keepdims0():
     )
     feeds = {"X": _RNG.standard_normal((1, 8, 1, 16)).astype(np.float32)}
     ref, got, tr = _apply_and_run(model, feeds)
-    _save(model, tr, "argmax_4d_kd0")
     _assert_match(ref, got)
     # keepdims must be forced to 1 even for 4D input
     am_node = next(n for n in tr.graph.node if n.op_type == "ArgMax")
@@ -460,7 +430,6 @@ def test_gather_2d_data():
     )
     feeds = {"X": _RNG.standard_normal((8, 16)).astype(np.float32)}
     ref, got, tr = _apply_and_run(model, feeds)
-    _save(model, tr, "gather_2d")
     _assert_match(ref, got)
     assert any(n.op_type == "Squeeze" for n in tr.graph.node), "Squeeze must restore output shape"
 
@@ -483,7 +452,6 @@ def test_gather_3d_axis1_scalar_index():
     )
     feeds = {"X": _RNG.standard_normal((1900, 1, 2)).astype(np.float32)}
     ref, got, tr = _apply_and_run(model, feeds)
-    _save(model, tr, "gather_3d_ax1_scalar")
 
     # Output shape must be [1900,2] — not [1,2] or [1900,1,2]
     assert got["Y"].shape == (1900, 2), f"Expected (1900,2), got {got['Y'].shape}"
@@ -510,7 +478,6 @@ def test_gatherelements_2d():
     )
     feeds = {"X": _RNG.standard_normal((4, 8)).astype(np.float32)}
     ref, got, tr = _apply_and_run(model, feeds)
-    _save(model, tr, "gatherelements_2d")
     _assert_match(ref, got)
     assert any(n.op_type == "Squeeze" for n in tr.graph.node), "Squeeze must restore output shape"
 
@@ -530,7 +497,6 @@ def test_expand_3d():
     )
     feeds = {"X": _RNG.standard_normal((3, 1, 16)).astype(np.float32)}
     ref, got, tr = _apply_and_run(model, feeds)
-    _save(model, tr, "expand_3d")
     _assert_match(ref, got)
 
 
@@ -549,7 +515,6 @@ def test_tile_3d():
     )
     feeds = {"X": _RNG.standard_normal((3, 8, 16)).astype(np.float32)}
     ref, got, tr = _apply_and_run(model, feeds)
-    _save(model, tr, "tile_3d")
     _assert_match(ref, got)
 
 
@@ -566,7 +531,6 @@ def test_lpnorm_2d():
     )
     feeds = {"X": _RNG.standard_normal((8, 16)).astype(np.float32)}
     ref, got, tr = _apply_and_run(model, feeds)
-    _save(model, tr, "lpnorm_2d")
     _assert_match(ref, got)
 
 
@@ -583,7 +547,6 @@ def test_softmax_2d():
     )
     feeds = {"X": _RNG.standard_normal((8, 16)).astype(np.float32)}
     ref, got, tr = _apply_and_run(model, feeds)
-    _save(model, tr, "softmax_2d")
     _assert_match(ref, got)
     # Verify axis update
     sm_node = next(n for n in tr.graph.node if n.op_type == "Softmax")
@@ -604,7 +567,6 @@ def test_logsoftmax_3d():
     )
     feeds = {"X": _RNG.standard_normal((3, 8, 16)).astype(np.float32)}
     ref, got, tr = _apply_and_run(model, feeds)
-    _save(model, tr, "logsoftmax_3d")
     _assert_match(ref, got)
 
 
@@ -624,7 +586,6 @@ def test_concat_2d():
         "B": _RNG.standard_normal((8, 16)).astype(np.float32),
     }
     ref, got, tr = _apply_and_run(model, feeds)
-    _save(model, tr, "concat_2d")
     _assert_match(ref, got)
 
 
@@ -643,7 +604,6 @@ def test_split_3d():
     )
     feeds = {"X": _RNG.standard_normal((3, 8, 16)).astype(np.float32)}
     ref, got, tr = _apply_and_run(model, feeds)
-    _save(model, tr, "split_3d")
     _assert_match(ref, got)
 
 
@@ -664,7 +624,6 @@ def test_instancenorm_3d():
     )
     feeds = {"X": _RNG.standard_normal((n, c, d)).astype(np.float32)}
     ref, got, tr = _apply_and_run(model, feeds)
-    _save(model, tr, "instancenorm_3d")
     _assert_match(ref, got)
     # Verify Unsqueeze and Squeeze for trailing dim were added
     assert any(n.op_type == "Unsqueeze" for n in tr.graph.node), "Unsqueeze expected"
@@ -684,7 +643,6 @@ def test_generic_relu_2d():
     )
     feeds = {"X": _RNG.standard_normal((8, 16)).astype(np.float32)}
     ref, got, tr = _apply_and_run(model, feeds)
-    _save(model, tr, "relu_2d")
     _assert_match(ref, got)
     assert any(n.op_type == "Unsqueeze" for n in tr.graph.node), "Unsqueeze expected"
     assert any(n.op_type == "Squeeze" for n in tr.graph.node), "Squeeze expected"
@@ -703,7 +661,6 @@ def test_4d_input_no_change():
     )
     feeds = {"X": _RNG.standard_normal((1, 3, 8, 16)).astype(np.float32)}
     ref, got, tr = _apply_and_run(model, feeds)
-    _save(model, tr, "softmax_4d_noop")
     _assert_match(ref, got)
     assert not any(n.op_type in ("Unsqueeze", "Squeeze") for n in tr.graph.node), (
         "No Unsqueeze/Squeeze should be added for 4D input"
@@ -728,7 +685,6 @@ def test_matmul_skipped():
     )
     feeds = {"X": _RNG.standard_normal((8, 16)).astype(np.float32)}
     ref, got, tr = _apply_and_run(model, feeds)
-    _save(model, tr, "matmul_skipped")
     _assert_match(ref, got)
     mm_nodes = [n for n in tr.graph.node if n.op_type == "MatMul"]
     assert len(mm_nodes) == 1, "MatMul must remain unchanged"
@@ -762,7 +718,6 @@ def test_transpose_5d_collapse():
     )
     feeds = {"X": _RNG.standard_normal(input_shape).astype(np.float32)}
     ref, got, tr = _apply_and_run(model, feeds)
-    _save(model, tr, "transpose_5d")
     _assert_match(ref, got)
 
     tr_nodes = list(tr.graph.node)
@@ -816,7 +771,6 @@ def test_graph_output_split_single_internal_consumer():
     tr = _apply_convert_ops_to_4d(tr)
     _clamp_ir(tr)
     got = _run_ort(tr, feeds)
-    _save(model, tr, "graph_out_split_single")
 
     # Y must still be a graph output
     go_names = {o.name for o in tr.graph.output}
@@ -861,7 +815,6 @@ def test_graph_output_only_no_split():
     tr = _apply_convert_ops_to_4d(tr)
     _clamp_ir(tr)
     got = _run_ort(tr, feeds)
-    _save(model, tr, "graph_out_only_no_split")
 
     sq_y = [n for n in tr.graph.node if n.op_type == "Squeeze" and n.output[0] == "Y"]
     assert len(sq_y) == 1, "Exactly one Squeeze → Y when Y has no internal consumers"
@@ -901,7 +854,6 @@ def test_graph_output_split_multiple_internal_consumers():
     tr = _apply_convert_ops_to_4d(tr)
     _clamp_ir(tr)
     got = _run_ort(tr, feeds)
-    _save(model, tr, "graph_out_split_multi_consumers")
 
     # Y must remain a graph output; Y_sq for internal nodes
     go_names = {o.name for o in tr.graph.output}
@@ -940,7 +892,6 @@ def test_layernorm_3d_data_input_promoted():
     tr = _apply_convert_ops_to_4d(tr)
     _clamp_ir(tr)
     got = _run_ort(tr, feeds)
-    _save(model, tr, "layernorm_3d")
 
     ln_node = next(n for n in tr.graph.node if n.op_type == "LayerNormalization")
 
@@ -990,7 +941,6 @@ def test_layernorm_2d_data_input_promoted():
     tr = _apply_convert_ops_to_4d(tr)
     _clamp_ir(tr)
     got = _run_ort(tr, feeds)
-    _save(model, tr, "layernorm_2d")
 
     ln_node = next(n for n in tr.graph.node if n.op_type == "LayerNormalization")
 
@@ -1033,7 +983,6 @@ def test_flatten_3d_axis2():
     )
     feeds = {"X": _RNG.standard_normal((1, 3, 4)).astype(np.float32)}
     ref, got, tr = _apply_and_run(model, feeds)
-    _save(model, tr, "flatten_3d_ax2")
 
     assert got["Y"].shape == (3, 4), f"Expected (3,4), got {got['Y'].shape}"
     _assert_flatten_chain(tr, expect_unsqueeze=True)
@@ -1050,7 +999,6 @@ def test_flatten_2d_axis0():
     )
     feeds = {"X": _RNG.standard_normal((8, 16)).astype(np.float32)}
     ref, got, tr = _apply_and_run(model, feeds)
-    _save(model, tr, "flatten_2d_ax0")
 
     assert got["Y"].shape == (1, 128), f"Expected (1,128), got {got['Y'].shape}"
     _assert_flatten_chain(tr, expect_unsqueeze=True)
@@ -1067,7 +1015,6 @@ def test_flatten_2d_axis1():
     )
     feeds = {"X": _RNG.standard_normal((8, 16)).astype(np.float32)}
     ref, got, tr = _apply_and_run(model, feeds)
-    _save(model, tr, "flatten_2d_ax1")
 
     assert got["Y"].shape == (8, 16), f"Expected (8,16), got {got['Y'].shape}"
     _assert_flatten_chain(tr, expect_unsqueeze=True)
@@ -1084,7 +1031,6 @@ def test_flatten_3d_axis1():
     )
     feeds = {"X": _RNG.standard_normal((3, 8, 16)).astype(np.float32)}
     ref, got, tr = _apply_and_run(model, feeds)
-    _save(model, tr, "flatten_3d_ax1")
 
     assert got["Y"].shape == (3, 128), f"Expected (3,128), got {got['Y'].shape}"
     _assert_flatten_chain(tr, expect_unsqueeze=True)
@@ -1101,7 +1047,6 @@ def test_flatten_3d_neg_axis():
     )
     feeds = {"X": _RNG.standard_normal((3, 8, 16)).astype(np.float32)}
     ref, got, tr = _apply_and_run(model, feeds)
-    _save(model, tr, "flatten_3d_neg_ax")
 
     assert got["Y"].shape == (24, 16), f"Expected (24,16), got {got['Y'].shape}"
     _assert_flatten_chain(tr, expect_unsqueeze=True)
@@ -1118,7 +1063,6 @@ def test_flatten_4d_axis1_no_unsqueeze():
     )
     feeds = {"X": _RNG.standard_normal((1, 3, 8, 16)).astype(np.float32)}
     ref, got, tr = _apply_and_run(model, feeds)
-    _save(model, tr, "flatten_4d_ax1")
 
     assert got["Y"].shape == (1, 384), f"Expected (1,384), got {got['Y'].shape}"
     _assert_flatten_chain(tr, expect_unsqueeze=False)
