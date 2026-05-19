@@ -343,6 +343,10 @@ def main(args: argparse.Namespace):
             AutoConfig.from_pretrained(
                 args.student_hf_path, trust_remote_code=args.trust_remote_code
             ).save_pretrained(args.hf_export_path)
+            # Repair tokenizer_config.json if the save chain emitted special tokens
+            # under the wrong key (transformers v5 quirk that breaks vLLM on reload).
+            from modelopt.torch.utils.plugins.vlm import _normalize_tokenizer_special_tokens
+            _normalize_tokenizer_special_tokens(args.hf_export_path)
 
             # If we extracted the student LM from a VLM up front, reinsert the distilled LM
             # back into the original VLM container now. The HF export wrote a plain causal

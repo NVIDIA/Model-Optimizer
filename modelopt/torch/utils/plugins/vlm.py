@@ -169,6 +169,35 @@ def is_vlm_checkpoint(path: str, trust_remote_code: bool = False) -> bool:
     return any("ConditionalGeneration" in a or "ImageTextToText" in a for a in archs)
 
 
+def _normalize_tokenizer_special_tokens(output_dir: str) -> None:
+    """Repair `tokenizer_config.json` if special tokens were written under the wrong key.
+
+    Some save paths in transformers v5 (and/or custom VLM tokenizers) produce a
+    `tokenizer_config.json` with `extra_special_tokens` as a *list* rather than the
+    canonical `additional_special_tokens` list. Reloading that file crashes in
+    `_set_model_specific_special_tokens` (`'list' object has no attribute 'keys'`),
+    which breaks both `AutoTokenizer.from_pretrained` and `vllm serve`. Rename the key
+    in place if we detect the broken shape; no-op otherwise.
+    """
+    import json
+    import os
+
+    path = os.path.join(output_dir, "tokenizer_config.json")
+    if not os.path.exists(path):
+        return
+    try:
+        with open(path) as f:
+            cfg = json.load(f)
+    except Exception:
+        return
+    bad = cfg.get("extra_special_tokens")
+    if isinstance(bad, list):
+        cfg["additional_special_tokens"] = bad
+        cfg.pop("extra_special_tokens", None)
+        with open(path, "w") as f:
+            json.dump(cfg, f, indent=2)
+
+
 def extract_text_tower_to_hf_causal_lm(
     vlm_path: str,
     output_dir: str,
@@ -227,6 +256,7 @@ def extract_text_tower_to_hf_causal_lm(
         tokenizer.save_pretrained(output_dir)
     except Exception:
         pass  # downstream load_mbridge_model_from_hf will fall back to vlm_path's tokenizer
+    _normalize_tokenizer_special_tokens(output_dir)
 
     return {
         "original_vlm_path": vlm_path,
@@ -315,3 +345,9 @@ def reinsert_pruned_lm_into_vlm(
         processor.save_pretrained(output_dir)
     except Exception:
         pass
+
+    # Some save paths in transformers v5 write the special-tokens list under the wrong
+    # key (`extra_special_tokens` as a list instead of `additional_special_tokens`),
+    # which then crashes vLLM / transformers on reload with `AttributeError: 'list'
+    # object has no attribute 'keys'`. Normalise here so the assembled VLM is reload-safe.
+    _normalize_tokenizer_special_tokens(output_dir)
