@@ -55,6 +55,7 @@ import torch
 from pydantic import BaseModel, ConfigDict, field_validator
 from safetensors import safe_open
 from torch.utils.data import IterableDataset, get_worker_info
+from transformers import TrainerCallback
 from transformers.trainer_pt_utils import LabelSmoother
 
 from modelopt.torch.utils import distributed as dist_utils
@@ -147,6 +148,9 @@ class StreamingDataset(IterableDataset):
     # reads from the _fetch output. When set, base class validates _fetch's return
     # value carries all required keys (fail-loud on the first sample).
     fetch_payload_cls: type | None = None
+    # One-shot offset honored at the start of the next ``__iter__``. Set via
+    # :meth:`set_resume_position` (typically by :class:`StreamingResumeCallback`).
+    _resume_skip: int = 0
 
     def __init__(
         self,
@@ -190,6 +194,15 @@ class StreamingDataset(IterableDataset):
     def __len__(self) -> int:
         return len(self.entries)
 
+    def set_resume_position(self, skip: int) -> None:
+        """Drop the first ``skip`` entries on the next ``__iter__`` without fetching.
+
+        One-shot; cleared once iteration starts. Used by
+        :class:`StreamingResumeCallback` on HF Trainer checkpoint resume so the
+        server is not re-queried for already-consumed samples.
+        """
+        self._resume_skip = skip
+
     def __iter__(self):
         # IterableDataset with DataLoader workers > 0 would spawn one asyncio loop
         # per worker, each issuing the full request set — silent Nx duplication
@@ -204,10 +217,13 @@ class StreamingDataset(IterableDataset):
         q: queue.Queue = queue.Queue(maxsize=self.config.prefetch)
         stop = threading.Event()
         self._consecutive_skips = 0  # per-iter; tripped in _process, read in _produce
+        skip = self._resume_skip
+        self._resume_skip = 0  # one-shot
+        entries = self.entries[skip:] if skip else self.entries
 
         def run():
             try:
-                asyncio.run(self._produce(q, stop))
+                asyncio.run(self._produce(q, stop, entries))
             except Exception as e:
                 q.put(e)  # surface to consumer
             finally:
@@ -231,8 +247,8 @@ class StreamingDataset(IterableDataset):
                 while True:
                     q.get_nowait()
 
-    async def _produce(self, q: queue.Queue, stop: threading.Event):
-        """Stream entries through a sliding window of at most ``prefetch`` in-flight tasks.
+    async def _produce(self, q: queue.Queue, stop: threading.Event, entries):
+        """Stream ``entries`` through a sliding window of at most ``prefetch`` in-flight tasks.
 
         Sentinel is enqueued by the caller (``__iter__.run``) after this returns,
         so an exception raised here (e.g. circuit breaker) reaches the consumer
@@ -242,7 +258,7 @@ class StreamingDataset(IterableDataset):
         threshold = self.config.fail_after_consecutive_skips
         async with httpx.AsyncClient(timeout=timeout) as client:
             pending: set[asyncio.Task] = set()
-            entries_iter = iter(self.entries)
+            entries_iter = iter(entries)
             exhausted = False
             try:
                 while not stop.is_set():
@@ -476,3 +492,36 @@ class EagleVllmStreamingDataset(StreamingDataset):
             "loss_mask": loss_mask,
             "labels": labels,
         }
+
+
+class StreamingResumeCallback(TrainerCallback):
+    """Wire HF Trainer's checkpoint resume into :class:`StreamingDataset`.
+
+    On train begin, if ``state.global_step > 0`` (resuming from a checkpoint),
+    tell the dataset to fast-forward past samples already consumed in the prior
+    run so the server is not re-queried for them.
+
+    Per-rank skip = ``global_step * per_device_train_batch_size * gradient_accumulation_steps``.
+
+    Requires ``training_args.ignore_data_skip=True`` (else HF Trainer would also
+    skip, doubling the offset — ``main.py`` sets this for streaming mode).
+    Resume only round-trips correctly when ``world_size`` and ``config.seed``
+    match the original run.
+    """
+
+    def on_train_begin(self, args, state, control, train_dataloader=None, **kwargs):
+        """Push per-rank skip count into the dataset if resuming mid-training."""
+        if state.global_step <= 0 or train_dataloader is None:
+            return
+        ds = train_dataloader.dataset
+        if not hasattr(ds, "set_resume_position"):
+            return
+        consumed = (
+            state.global_step * args.per_device_train_batch_size * args.gradient_accumulation_steps
+        )
+        ds.set_resume_position(consumed)
+        if dist_utils.is_master():
+            print(
+                f"[StreamingResumeCallback] resuming at global_step={state.global_step}; "
+                f"skipping {consumed} entries per rank"
+            )
