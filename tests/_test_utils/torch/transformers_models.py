@@ -32,9 +32,11 @@ from transformers import (
     PreTrainedModel,
     Qwen3Config,
     Qwen3MoeConfig,
+    Qwen3VLConfig,
     T5Config,
     T5ForConditionalGeneration,
 )
+from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLForConditionalGeneration
 
 import modelopt.torch.opt as mto
 
@@ -123,12 +125,6 @@ def create_tiny_qwen3_moe_dir(
 
 ##### Qwen3-VL #####
 def get_tiny_qwen3vl(**config_kwargs) -> PreTrainedModel:
-    # Lazy imports — Qwen3VL classes live under transformers.models.qwen3_vl which
-    # may not exist in older transformers builds, and this module is imported by
-    # every test that uses transformers_models.py.
-    from transformers import Qwen3VLConfig
-    from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLForConditionalGeneration
-
     set_seed(SEED)
 
     # Defaults: hidden_size=num_attention_heads*head_dim (e.g. 4*8=32).
