@@ -16,12 +16,12 @@
 """CPU unit tests for DFlash offline training support."""
 
 from copy import deepcopy
-from types import SimpleNamespace
 
 from _test_utils.torch.transformers_models import get_tiny_llama
 
 import modelopt.torch.speculative as mtsp
-from modelopt.torch.speculative.config import DFLASH_DEFAULT_CFG, DFlashConfig
+from modelopt.recipe.config import ModelOptDFlashRecipe
+from modelopt.torch.speculative.config import DFLASH_DEFAULT_CFG
 
 NUM_BASE_LAYERS = 4
 NUM_DRAFT_LAYERS = 2
@@ -73,22 +73,14 @@ def test_convert_offline_target_layer_ids_from_orig():
     assert all(0 <= lid < num_orig for lid in model.target_layer_ids)
 
 
-def test_dflash_config_derives_offline_from_data_args():
-    """DFlashConfig._derive_dflash_offline flips the flag when data_args.offline_data_path is set."""
-    data = {"dflash_mask_token_id": 0}
+def test_dflash_recipe_derives_offline_from_data():
+    """ModelOptDFlashRecipe._derive_dflash_offline flips dflash_offline based on data.offline_data_path."""
+    dflash_section = {"dflash_mask_token_id": 0}
 
     # offline_data_path set → offline=True
-    cfg = DFlashConfig.model_validate(
-        data, context={"data_args": SimpleNamespace(offline_data_path="/fake/path")}
-    )
-    assert cfg.dflash_offline is True
+    recipe = ModelOptDFlashRecipe(data={"offline_data_path": "/fake/path"}, dflash=dflash_section)
+    assert recipe.dflash.dflash_offline is True
 
-    # offline_data_path=None → offline=False
-    cfg = DFlashConfig.model_validate(
-        data, context={"data_args": SimpleNamespace(offline_data_path=None)}
-    )
-    assert cfg.dflash_offline is False
-
-    # No data_args in context → default (False)
-    cfg = DFlashConfig.model_validate(data)
-    assert cfg.dflash_offline is False
+    # offline_data_path absent → offline=False
+    recipe = ModelOptDFlashRecipe(dflash=dflash_section)
+    assert recipe.dflash.dflash_offline is False
