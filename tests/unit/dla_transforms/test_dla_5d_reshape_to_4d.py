@@ -253,14 +253,10 @@ class TestDla5dReshapeTo4dReduce:
             # axis is stored as input[1] (opset 18 style) — find its initializer value
             axes_name = rn.input[1] if len(rn.input) > 1 else None
             assert axes_name, f"ReduceMin {rn.name!r} must have axes as input[1]"
-            axes_init = next(
-                (i for i in rewritten.graph.initializer if i.name == axes_name), None
-            )
+            axes_init = next((i for i in rewritten.graph.initializer if i.name == axes_name), None)
             assert axes_init is not None, f"axes initializer {axes_name!r} not found"
             axis_val = int(numpy_helper.to_array(axes_init).flat[0])
-            assert axis_val < 0, (
-                f"ReduceMin {rn.name!r}: expected negative axis, got {axis_val}"
-            )
+            assert axis_val < 0, f"ReduceMin {rn.name!r}: expected negative axis, got {axis_val}"
 
     def test_reduce_axis_zero_raises(self):
         orig = _make_reduce_axis0_model()

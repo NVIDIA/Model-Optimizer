@@ -235,6 +235,7 @@ def _apply_topk(model: onnx.ModelProto) -> onnx.ModelProto:
     logger.debug("topk: rewrote %d TopK chain(s).", cnt)
     return model
 
+
 def dla_topk(
     model_path: str,
     output_path: str,
