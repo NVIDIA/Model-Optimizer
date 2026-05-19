@@ -134,8 +134,6 @@ class Quantizer:
 
         # Build a fresh config dict so runtime overrides never mutate the global constants.
         base_cfg = copy.deepcopy(base_cfg)
-        if hasattr(base_cfg, "model_dump"):
-            base_cfg = base_cfg.model_dump(exclude_unset=True)
 
         if apply_int8_percentile_calibrator:
             reset_set_int8_config(
