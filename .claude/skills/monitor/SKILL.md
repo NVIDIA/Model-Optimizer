@@ -64,23 +64,46 @@ Whether triggered by monitor output or by the user asking "check status":
 
 ## How to Check Each Job Type
 
+Each check method has its **own** status vocabulary. A watcher that mixes them
+(e.g. uses SLURM's `COMPLETED` terminal-state regex against `nel status` output)
+will silently never fire terminal transitions. Always match against the
+vocabulary of the source you're polling.
+
 ### NEL jobs (`type: nel`)
 
-- **Check:** `nel status <id>`
-- **On completion:** `nel info <id>` to fetch results
-- **On failure:** `nel info <id> --logs` then inspect server/client/SLURM logs via SSH
+- **Check:** `nel status <id>` — second pipe-delimited column carries the state with a Unicode prefix (e.g. `▶ RUNNING`, `✓ SUCCESS`).
+- **States** (from `nemo_evaluator_launcher.executors.base.ExecutionState` + the CLI status formatter):
+
+  | State (uppercase, as printed) | Terminal? | Indicator |
+  | --- | --- | --- |
+  | `PENDING` | no | `⧗` |
+  | `RUNNING` | no | `▶` |
+  | `SUCCESS` | **yes** | `✓` |
+  | `FAILED` | **yes** | `✗` |
+  | `KILLED` | **yes** | `✗` |
+  | `ERROR` | **yes** | `✗` (synthetic, CLI error path) |
+  | `NOT FOUND` | **yes** | `?` (synthetic, CLI: invocation id unknown) |
+
+  Watcher terminal regex: `^(SUCCESS|FAILED|KILLED|ERROR|NOT FOUND)$`.
+  Strip the Unicode indicator (`▶✓✗⧗?`) and surrounding whitespace before
+  matching.
+- **On completion:** `nel info <id>` to fetch results.
+- **On failure:** `nel info <id> --logs` then inspect server/client/SLURM logs via SSH.
 
 ### Launcher jobs (`type: launcher`)
 
-- **Check:** Tail the launcher's background output file for key events
-- **Key events:** experiment ID, SLURM job ID, container import, calibration progress, export path, final status
-- **On failure:** Look for `Traceback`, `Error`, or `FAILED` in the output
+- **Check:** Tail the launcher's background output file for key events.
+- **Key events:** experiment ID, SLURM job ID, container import, calibration progress, export path, final status.
+- **On failure:** Look for `Traceback`, `Error`, or `FAILED` in the output.
 
 ### Raw SLURM jobs (`type: slurm`)
 
 - **Check:** `ssh <host> "sacct -j <id> --format=JobID%12,JobName%25,State%12,Elapsed%10 -n"` and filter out `extern`, `batch`, and step rows like `.<step>`. Use `sacct` for the termination check; `squeue` can lag in `COMPLETING` after `sacct` reports a terminal state.
-- **On completion:** `ssh <host> "sacct -j <id> --format=State,ExitCode,Elapsed -n"`
-- **On failure:** Check the job's output log file
+- **States (terminal):** `COMPLETED`, `FAILED`, `CANCELLED` (also appears as `CANCELLED by <uid>`), `TIMEOUT`, `NODE_FAIL`, `OUT_OF_MEMORY`, `PREEMPTED`, `BOOT_FAIL`, `DEADLINE`.
+- **States (non-terminal):** `PENDING`, `RUNNING`, `CONFIGURING`, `COMPLETING`, `RESIZING`, `SUSPENDED`, `REQUEUED`.
+  Watcher terminal regex: `^(COMPLETED|FAILED|CANCELLED( by .*)?|TIMEOUT|NODE_FAIL|OUT_OF_MEMORY|PREEMPTED|BOOT_FAIL|DEADLINE)$`.
+- **On completion:** `ssh <host> "sacct -j <id> --format=State,ExitCode,Elapsed -n"`.
+- **On failure:** Check the job's output log file.
 
 ---
 
