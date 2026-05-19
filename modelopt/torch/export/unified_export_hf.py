@@ -55,6 +55,7 @@ from modelopt.torch.quantization import set_quantizer_by_cfg_context
 from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
 from modelopt.torch.quantization.qtensor import MXFP8QTensor, NVFP4QTensor
 from modelopt.torch.quantization.utils import fsdp2_aware_weight_update, quantizer_attr_names
+from modelopt.torch.utils.dataset_utils import _disable_use_cache
 
 try:
     from modelopt.torch.sparsity.attention_sparsity.conversion import export_sparse_attention_config
@@ -82,6 +83,7 @@ from .model_config import (
     QUANTIZATION_NVFP4_SVDQUANT,
     QUANTIZATION_W4A8_AWQ,
     QUANTIZATION_W4A8_NVFP4_FP8,
+    QUANTIZATION_W4A16_NVFP4,
 )
 from .model_utils import get_language_model_from_vl, is_multimodal_model
 from .moe_utils import _export_fused_experts
@@ -213,11 +215,14 @@ def collect_shared_input_modules(
     if not handles:
         return input_to_linear, output_to_layernorm
 
-    # Run dummy forward pass to collect modules sharing same input
+    # Run dummy forward pass to collect modules sharing same input.
+    # `_disable_use_cache` keeps the probe forward working on configs that don't
+    # set `use_cache` (e.g., stepfun-ai/Step-3.5-Flash's Step3p5Config).
     try:
         with (
             torch.no_grad(),
             set_quantizer_by_cfg_context(model, [{"quantizer_name": "*", "enable": False}]),
+            _disable_use_cache(model),
         ):
             dummy_forward_fn()
     finally:
@@ -517,6 +522,7 @@ def _export_quantized_weight(
         QUANTIZATION_NVFP4_AWQ,
         QUANTIZATION_NVFP4_SVDQUANT,
         QUANTIZATION_NVFP4,
+        QUANTIZATION_W4A16_NVFP4,
         QUANTIZATION_W4A8_AWQ,
         QUANTIZATION_W4A8_NVFP4_FP8,
     ]:
@@ -546,6 +552,7 @@ def _export_quantized_weight(
         QUANTIZATION_NVFP4,
         QUANTIZATION_NVFP4_AWQ,
         QUANTIZATION_NVFP4_SVDQUANT,
+        QUANTIZATION_W4A16_NVFP4,
     ]:
         # Transpose weight from (num_experts, input_dim, output_dim) to (num_experts, output_dim, input_dim)
         # for NVFP4 quantization functions that expect input_dim as the last dimension for block quantization
@@ -1130,6 +1137,19 @@ def _unpatch_revert_weight_conversion(patches: list[tuple[Any, Any]]) -> None:
         mod.revert_weight_conversion = original
 
 
+def _sanitize_generation_config_for_save(model: torch.nn.Module) -> None:
+    """Force ``do_sample=True`` when generation_config has ``top_k``/``top_p`` set.
+
+    Newer transformers reject ``do_sample=False`` mixed with sampling attrs in
+    ``save_pretrained``'s strict validate.
+    """
+    gc = getattr(model, "generation_config", None)
+    if gc is None:
+        return
+    if getattr(gc, "top_k", None) is not None or getattr(gc, "top_p", None) is not None:
+        gc.do_sample = True
+
+
 def export_speculative_decoding(
     model: torch.nn.Module,
     dtype: torch.dtype | None = None,
@@ -1193,12 +1213,25 @@ def export_hf_checkpoint(
     try:
         post_state_dict, hf_quant_config = _export_transformers_checkpoint(model, dtype)
 
-        if hf_quant_config is not None:
+        # Only treat the export as quantized when at least one quant_algo field is set.
+        # get_quant_config always returns a dict (even for sparsity-only or unmodified models),
+        # so emitting hf_quant_config.json unconditionally produces a file with
+        # "quant_algo": null that downstream loaders (e.g. TensorRT-LLM) reject as a
+        # malformed pre-quantized checkpoint.
+        quantization_details = (hf_quant_config or {}).get("quantization", {})
+        is_quantized_export = (
+            quantization_details.get("quant_algo") is not None
+            or quantization_details.get("kv_cache_quant_algo") is not None
+        )
+
+        if is_quantized_export:
             # Save hf_quant_config.json for backward compatibility
             with open(f"{export_dir}/hf_quant_config.json", "w") as file:
                 json.dump(hf_quant_config, file, indent=4)
 
             hf_quant_config = convert_hf_quant_config_format(hf_quant_config)
+        else:
+            hf_quant_config = None
 
         # Remove hf_quantizer from model so post_state_dict can be exported.
         if getattr(model, "hf_quantizer", None) is not None:
@@ -1210,6 +1243,8 @@ def export_hf_checkpoint(
         # We must patch both the source module and the importing module since
         # modeling_utils does `from core_model_loading import revert_weight_conversion`.
         _patches = _patch_revert_weight_conversion()
+
+        _sanitize_generation_config_for_save(model)
 
         try:
             model.save_pretrained(

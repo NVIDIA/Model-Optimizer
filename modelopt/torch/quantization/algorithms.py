@@ -40,7 +40,7 @@ from modelopt.torch.utils.distributed import DistributedProcessGroup, ParallelSt
 
 from . import config as mtq_config
 from . import model_calib
-from .config import QuantizeConfig, QuantizerAttributeConfig
+from .config import QuantizeConfig, QuantizerAttributeConfig, QuantizerCfgEntry
 from .conversion import set_quantizer_by_cfg
 from .nn import QuantLinearConvBase, QuantModule, SequentialQuantizer, TensorQuantizer
 from .utils import is_quantized_linear
@@ -129,7 +129,9 @@ class QuantRecipe(CustomHPType):
         # Disable KV Cache quantization
         # Currently KV Cache quantization is enabled for some quantization formats and disabled for others
         # This breaks the monotonicity of the quantization formats in terms of weight compression Vs accuracy
-        self.config.quant_cfg.append({"quantizer_name": "*output_quantizer", "enable": False})
+        self.config.quant_cfg.append(
+            QuantizerCfgEntry(quantizer_name="*output_quantizer", enable=False)
+        )
 
         self.compression = estimate_quant_compression(self.config)
 
@@ -1094,10 +1096,8 @@ class AutoQuantizeGradientSearcher(_AutoQuantizeBaseSearcher):
         return best_recipes, is_satisfied
 
 
-# TODO: Enable torch compile for this function
-# Currently modelopt.onnx is breaking this
+@torch.compile(dynamic=True)
 def _get_log_softmax_dist(logits: torch.Tensor, tp_group) -> torch.Tensor:
-    # TODO: test this
     dtype = logits.dtype
     max_logits = torch.amax(logits, dim=-1, keepdim=True)
     torch.distributed.all_reduce(max_logits, op=torch.distributed.ReduceOp.MAX, group=tp_group)

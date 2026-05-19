@@ -61,6 +61,8 @@ venv/
 
 # Ignore claude local settings
 .claude/settings.local.json
+CLAUDE.local.md
+AGENTS.override.md
 
 # Ignore SonarQube analysis
 .sonar/

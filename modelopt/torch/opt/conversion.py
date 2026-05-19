@@ -513,6 +513,47 @@ def save(model: nn.Module, f: str | os.PathLike | BinaryIO, **kwargs) -> None:
     torch.save(ckpt_dict, f, **kwargs)
 
 
+def _validate_modelopt_state(state: Any) -> None:
+    """Validate that ``state`` has the expected modelopt state dict schema.
+
+    Raises ``TypeError`` or ``ValueError`` with a descriptive message if the
+    object is not a valid modelopt state dictionary.
+    """
+    if not isinstance(state, dict):
+        raise TypeError(
+            f"Invalid modelopt state file: expected a dict, got {type(state).__name__}."
+        )
+
+    # Detect a full checkpoint (from ``mto.save()``) passed by mistake.
+    if "modelopt_state" in state and "modelopt_state_dict" not in state:
+        raise ValueError(
+            "Invalid modelopt state file: the file appears to be a full "
+            "checkpoint saved via ``mto.save()`` (contains 'modelopt_state' "
+            "and 'model_state_dict' keys). Use ``mto.restore()`` to load a "
+            "full checkpoint, or pass only the inner modelopt state dict."
+        )
+
+    required_keys = ("modelopt_state_dict", "modelopt_version")
+    missing = [k for k in required_keys if k not in state]
+    if missing:
+        raise ValueError(
+            "Invalid modelopt state file: missing required key(s) "
+            f"{missing}. Expected keys: {list(required_keys)}."
+        )
+
+    if not isinstance(state["modelopt_state_dict"], list):
+        raise TypeError(
+            "Invalid modelopt state file: 'modelopt_state_dict' must be a "
+            f"list, got {type(state['modelopt_state_dict']).__name__}."
+        )
+
+    if not isinstance(state["modelopt_version"], str):
+        raise TypeError(
+            "Invalid modelopt state file: 'modelopt_version' must be a str, "
+            f"got {type(state['modelopt_version']).__name__}."
+        )
+
+
 def load_modelopt_state(modelopt_state_path: str | os.PathLike, **kwargs) -> dict[str, Any]:
     """Load the modelopt state from a file.
 
@@ -522,9 +563,15 @@ def load_modelopt_state(modelopt_state_path: str | os.PathLike, **kwargs) -> dic
 
     Returns:
         A modelopt state dictionary describing the modifications to the model.
+
+    Raises:
+        TypeError: If the loaded object is not a dict or has fields of the wrong type.
+        ValueError: If the loaded dict is missing required modelopt state keys.
     """
     kwargs.setdefault("map_location", "cpu")
-    return safe_load(modelopt_state_path, **kwargs)
+    state = safe_load(modelopt_state_path, **kwargs)
+    _validate_modelopt_state(state)
+    return state
 
 
 def restore_from_modelopt_state(
