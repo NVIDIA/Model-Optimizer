@@ -956,7 +956,11 @@ class AutoQuantizeGradientSearcher(_AutoQuantizeBaseSearcher):
             return output
 
         def backward_hook(module, grad_input, grad_output):
-            for hparam, output_diff_dict in module.output_diff_dict.items():
+            output_diff_dict_by_hparam = getattr(module, "output_diff_dict", None)
+            if output_diff_dict_by_hparam is None:
+                return
+
+            for hparam, output_diff_dict in output_diff_dict_by_hparam.items():
                 for recipe, output_diff in output_diff_dict.items():
                     if hparam._importance_dict[recipe][module] is None:
                         hparam._importance_dict[recipe][module] = _get_auto_quantize_score(
@@ -964,8 +968,11 @@ class AutoQuantizeGradientSearcher(_AutoQuantizeBaseSearcher):
                         )
                     else:
                         _add_auto_quantize_score(
-                            grad_output[0], output_diff, hparam._importance_dict[recipe][module]
+                            grad_output[0],
+                            output_diff,
+                            hparam._importance_dict[recipe][module],
                         )
+            module.output_diff_dict = None
 
         def setup_params_for_score_estimation(name, param, params_metadata, enable_grad=True):
             # Let us delete the gradient as soon as they are computed to save memory

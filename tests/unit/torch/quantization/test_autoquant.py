@@ -233,6 +233,30 @@ def test_auto_quantize_disabled_layers_no_poison():
     assert QuantRecipe(mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG) in hparam.choices
 
 
+def test_auto_quantize_gradient_clears_output_diffs_after_backward():
+    model = SimpleLinear()
+
+    def forward_backward_step(model, batch):
+        model(batch).sum().backward()
+        leaked_modules = [
+            name
+            for name, module in model.named_modules()
+            if getattr(module, "output_diff_dict", None) is not None
+        ]
+        assert leaked_modules == []
+
+    mtq.auto_quantize(
+        model,
+        constraints={"effective_bits": 11.0},
+        quantization_formats=[mtq.INT8_SMOOTHQUANT_CFG],
+        data_loader=[model.get_input()],
+        forward_step=lambda model, batch: model(batch),
+        forward_backward_step=forward_backward_step,
+        num_calib_steps=1,
+        num_score_steps=1,
+    )
+
+
 INT4INT8_AWQ_CFG = {
     "quant_cfg": [
         {"quantizer_name": "*", "enable": False},
