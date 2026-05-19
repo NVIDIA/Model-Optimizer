@@ -35,6 +35,29 @@ pip uninstall -y torchvision 2>/dev/null || true
 pip install "speculators<0.5.0" --no-deps 2>/dev/null || true
 pip install datasets 2>/dev/null || true
 
+# Pydantic 2.13 compatibility: speculators.ReloadableBaseModel.reload_schema() calls
+# model_rebuild(force=True) without a types_namespace. In pydantic 2.13+, inherited
+# torch.dtype annotations from transformers.PretrainedConfig cannot be resolved in
+# subclass modules that don't import torch. Fix by injecting torch into the namespace.
+python3 -c "
+import site, os
+for d in site.getsitepackages():
+    path = os.path.join(d, 'speculators', 'utils', 'pydantic_utils.py')
+    if not os.path.exists(path):
+        continue
+    with open(path) as f:
+        c = f.read()
+    old = 'cls.model_rebuild(force=True)'
+    new = 'import torch as _torch; cls.model_rebuild(force=True, _types_namespace={\"torch\": _torch})'
+    if old in c and new not in c:
+        with open(path, 'w') as f:
+            f.write(c.replace(old, new))
+        print('Patched pydantic_utils.py: model_rebuild now passes torch namespace')
+    else:
+        print('pydantic_utils.py already patched or pattern not found')
+    break
+" 2>/dev/null || true
+
 if [ -z ${SLURM_ARRAY_TASK_ID} ]; then
     TASK_ID=0
 else
