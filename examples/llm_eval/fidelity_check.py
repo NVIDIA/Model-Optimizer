@@ -26,11 +26,23 @@ drift (a ~24% answer-flip rate has been observed at <1% accuracy delta). Forward
 KL on top-k correlates ~0.98 with downstream flip rate while costing only one
 forward pass per model on a shared prompt set.
 
-Usage (two vLLM servers already running):
-    python examples/llm_eval/fidelity_check.py \\
-        --base-url http://localhost:8000/v1 --base-model meta-llama/Llama-3-8B \\
-        --quant-url http://localhost:8001/v1 --quant-model llama-3-8b-nvfp4 \\
-        --dataset cnn_dailymail --num-prompts 128 --max-new-tokens 128
+Modes
+-----
+``full`` (default): both base and quant servers up concurrently, end-to-end.
+
+The remaining modes split the same 3-call protocol into persistable phases so the
+two models do not need to be alive at the same time (useful when a single model
+fills the node):
+
+* ``collect-base``: launch base, generate teacher sequence (call 1) and re-score
+  via ``echo+max_tokens=0`` (call 2). Dump per-position top-k logprobs to JSONL.
+* ``collect-quant``: launch quant, replay each saved ``prompt + gen_text`` via
+  ``echo+max_tokens=0`` (call 3). Dump per-position top-k logprobs to JSONL.
+* ``compare``: pure-CPU. Load two JSONL files, align position-by-position, compute
+  the same KL/EAR/mismatch/ΔNLL numbers as ``full`` mode.
+
+Both ``collect-quant`` and ``collect-base``'s call-2 use the identical prefill+echo
+code path on the server, so the methodology invariant holds across the split.
 """
 
 from __future__ import annotations
@@ -105,6 +117,84 @@ def _coerce_topk(entry: Any) -> dict[str, float] | None:
     raise TypeError(f"Unrecognized top_logprobs entry type: {type(entry).__name__}")
 
 
+def _generate_teacher(
+    client: OpenAI, model: str, prompt: str, max_new_tokens: int
+) -> tuple[str, int]:
+    """Call 1: greedy generate the teacher continuation. Returns (gen_text, prompt_token_count)."""
+    resp = client.completions.create(
+        model=model,
+        prompt=prompt,
+        max_tokens=max_new_tokens,
+        temperature=0.0,
+        logprobs=1,
+        echo=False,
+    )
+    return resp.choices[0].text, int(resp.usage.prompt_tokens)
+
+
+def _echo_logprobs(
+    client: OpenAI, model: str, full_text: str, top_k: int
+) -> tuple[list[str] | None, list[dict[str, float] | None] | None]:
+    """Calls 2 and 3: re-score the full sequence via echo and return per-position top-k.
+
+    Both base and quant go through this identical entry point, so their logprobs
+    come from the same vLLM code path (prefill kernel).
+
+    SGLang rejects ``max_tokens=0`` (vLLM accepts it). We send ``max_tokens=1`` and
+    drop the trailing generated position — the prefix positions we care about all
+    come from the prefill kernel either way.
+    """
+    resp = client.completions.create(
+        model=model,
+        prompt=full_text,
+        max_tokens=1,
+        temperature=0.0,
+        logprobs=top_k,
+        echo=True,
+    )
+    lp_obj = resp.choices[0].logprobs
+    if lp_obj is None:
+        return None, None
+    tokens = list(lp_obj.tokens)
+    topk = [_coerce_topk(t) for t in lp_obj.top_logprobs]
+    # Drop the extra generated position so per-position alignment matches the prefix length.
+    full_text_len_tokens = int(resp.usage.prompt_tokens)
+    if len(tokens) > full_text_len_tokens:
+        tokens = tokens[:full_text_len_tokens]
+        topk = topk[:full_text_len_tokens]
+    return tokens, topk
+
+
+def _score(
+    base_tokens: list[str],
+    base_topk: list[dict[str, float] | None],
+    quant_tokens: list[str],
+    quant_topk: list[dict[str, float] | None],
+    prompt_token_count: int,
+) -> dict[str, Any]:
+    """Pairwise per-position scoring. Returns either {per_position, ...} or {skipped, reason}."""
+    if len(base_tokens) != len(quant_tokens):
+        return {
+            "skipped": True,
+            "reason": f"token length mismatch (base={len(base_tokens)}, quant={len(quant_tokens)}): "
+            "base and quant must share a tokenizer",
+        }
+    per_position: list[dict[str, Any]] = []
+    for i in range(1, len(base_tokens)):  # position 0 has no preceding context
+        base_lp = base_topk[i]
+        quant_lp = quant_topk[i]
+        if base_lp is None or quant_lp is None:
+            continue
+        m = _position_metrics(base_lp, quant_lp, base_tokens[i])
+        m["phase"] = "prefill" if i < prompt_token_count else "generation"
+        per_position.append(m)
+    return {
+        "per_position": per_position,
+        "prompt_tokens": prompt_token_count,
+        "total_tokens": len(base_tokens),
+    }
+
+
 def evaluate_prompt(
     prompt: str,
     base_client: OpenAI,
@@ -118,76 +208,57 @@ def evaluate_prompt(
     decode-kernel logprobs against quant's prefill-kernel logprobs and gave a
     non-zero KL noise floor (~0.03) even when comparing a model to itself.
     """
-    # 1. Generate from base to obtain the teacher-forced token sequence.  We
-    #    discard the logprobs from this call to avoid mixing decode-kernel and
-    #    prefill-kernel outputs in the comparison.
-    base_gen_resp = base_client.completions.create(
-        model=args.base_model,
-        prompt=prompt,
-        max_tokens=args.max_new_tokens,
-        temperature=0.0,
-        logprobs=1,
-        echo=False,
+    gen_text, prompt_token_count = _generate_teacher(
+        base_client, args.base_model, prompt, args.max_new_tokens
     )
-    full_text = prompt + base_gen_resp.choices[0].text
-    prompt_token_count = int(base_gen_resp.usage.prompt_tokens)
-
-    # 2. Re-evaluate base on the FULL sequence via echo+max_tokens=0 — same
-    #    code path that quant will use, so self-comparison is exactly zero.
-    base_resp = base_client.completions.create(
-        model=args.base_model,
-        prompt=full_text,
-        max_tokens=0,
-        temperature=0.0,
-        logprobs=args.top_k,
-        echo=True,
-    )
-    base_choice = base_resp.choices[0]
-    base_lp_obj = base_choice.logprobs
-    if base_lp_obj is None:
+    full_text = prompt + gen_text
+    base_tokens, base_topk = _echo_logprobs(base_client, args.base_model, full_text, args.top_k)
+    if base_tokens is None or base_topk is None:
         return {"skipped": True, "reason": "base server did not return logprobs"}
-
-    base_tokens: list[str] = list(base_lp_obj.tokens)
-    base_top: list[Any] = list(base_lp_obj.top_logprobs)
-
-    # 3. Evaluate quant on the same sequence with the same call shape.
-    quant_resp = quant_client.completions.create(
-        model=args.quant_model,
-        prompt=full_text,
-        max_tokens=0,
-        temperature=0.0,
-        logprobs=args.top_k,
-        echo=True,
-    )
-    quant_choice = quant_resp.choices[0]
-    quant_lp_obj = quant_choice.logprobs
-    if quant_lp_obj is None:
+    quant_tokens, quant_topk = _echo_logprobs(quant_client, args.quant_model, full_text, args.top_k)
+    if quant_tokens is None or quant_topk is None:
         return {"skipped": True, "reason": "quant server did not return logprobs"}
+    return _score(base_tokens, base_topk, quant_tokens, quant_topk, prompt_token_count)
 
-    quant_tokens: list[str] = list(quant_lp_obj.tokens)
-    quant_top: list[Any] = list(quant_lp_obj.top_logprobs)
 
-    if len(base_tokens) != len(quant_tokens):
-        return {
-            "skipped": True,
-            "reason": f"token length mismatch (base={len(base_tokens)}, quant={len(quant_tokens)}): "
-            "base and quant must share a tokenizer",
-        }
-
-    per_position: list[dict[str, Any]] = []
-    for i in range(1, len(base_tokens)):  # position 0 has no preceding context
-        base_lp = _coerce_topk(base_top[i])
-        quant_lp = _coerce_topk(quant_top[i])
-        if base_lp is None or quant_lp is None:
-            continue
-        m = _position_metrics(base_lp, quant_lp, base_tokens[i])
-        m["phase"] = "prefill" if i < prompt_token_count else "generation"
-        per_position.append(m)
-
+def _collect_base_one(
+    idx: int, prompt: str, client: OpenAI, model: str, max_new_tokens: int, top_k: int
+) -> dict[str, Any]:
+    """For ``collect-base``: generate teacher + re-score, return JSONL-ready record."""
+    gen_text, prompt_token_count = _generate_teacher(client, model, prompt, max_new_tokens)
+    full_text = prompt + gen_text
+    tokens, topk = _echo_logprobs(client, model, full_text, top_k)
+    if tokens is None:
+        return {"prompt_idx": idx, "skipped": True, "reason": "no logprobs"}
     return {
-        "per_position": per_position,
-        "prompt_tokens": prompt_token_count,
-        "total_tokens": len(base_tokens),
+        "prompt_idx": idx,
+        "prompt": prompt,
+        "gen_text": gen_text,
+        "prompt_token_count": prompt_token_count,
+        "tokens": tokens,
+        "top_logprobs": topk,
+    }
+
+
+def _collect_quant_one(
+    teacher_rec: dict[str, Any], client: OpenAI, model: str, top_k: int
+) -> dict[str, Any]:
+    """For ``collect-quant``: replay teacher's ``prompt + gen_text`` through echo, return record."""
+    if teacher_rec.get("skipped"):
+        return {
+            "prompt_idx": teacher_rec.get("prompt_idx"),
+            "skipped": True,
+            "reason": "teacher skipped",
+        }
+    full_text = teacher_rec["prompt"] + teacher_rec["gen_text"]
+    tokens, topk = _echo_logprobs(client, model, full_text, top_k)
+    if tokens is None:
+        return {"prompt_idx": teacher_rec["prompt_idx"], "skipped": True, "reason": "no logprobs"}
+    return {
+        "prompt_idx": teacher_rec["prompt_idx"],
+        "prompt_token_count": teacher_rec["prompt_token_count"],
+        "tokens": tokens,
+        "top_logprobs": topk,
     }
 
 
@@ -221,22 +292,240 @@ def _print_phase(phase: str, block: dict[str, Any]) -> None:
         )
 
 
+def _build_report(
+    results: list[dict[str, Any]], config: dict[str, Any], skipped: list[str]
+) -> dict[str, Any]:
+    prefill_pool = [p for r in results for p in r["per_position"] if p["phase"] == "prefill"]
+    gen_pool = [p for r in results for p in r["per_position"] if p["phase"] == "generation"]
+    overall_pool = [p for r in results for p in r["per_position"]]
+    metrics = ("kl", "ear", "mismatch", "delta_nll")
+    phase_blocks: dict[str, dict[str, Any]] = {
+        "prefill": {m: _aggregate(prefill_pool, m) for m in metrics},
+        "generation": {m: _aggregate(gen_pool, m) for m in metrics},
+        "overall": {m: _aggregate(overall_pool, m) for m in metrics},
+    }
+    return {
+        "config": config,
+        **phase_blocks,
+        "skipped_count": len(skipped),
+        "skipped_examples": skipped[:10],
+    }
+
+
+def _print_report(report: dict[str, Any], n_used: int, n_skipped: int) -> None:
+    print("\n=== Fidelity report ===")
+    print(f"prompts used: {n_used}  skipped: {n_skipped}")
+    for phase in ("prefill", "generation", "overall"):
+        if phase in report:
+            _print_phase(phase, report[phase])
+
+
+def _run_full(args: argparse.Namespace) -> None:
+    base_client = OpenAI(base_url=args.base_url, api_key=args.api_key)
+    quant_client = OpenAI(base_url=args.quant_url, api_key=args.api_key)
+    prompts = get_dataset_samples(args.dataset, args.num_prompts)
+    prompts = [p[: args.max_prompt_chars] for p in prompts if p]
+    print(
+        f"[config] base={args.base_model} @ {args.base_url}\n"
+        f"         quant={args.quant_model} @ {args.quant_url}\n"
+        f"         dataset={args.dataset} n_prompts={len(prompts)} "
+        f"max_new_tokens={args.max_new_tokens} top_k={args.top_k}"
+    )
+    results: list[dict[str, Any]] = []
+    skipped: list[str] = []
+    with ThreadPoolExecutor(max_workers=args.concurrency) as pool:
+        futures = {
+            pool.submit(evaluate_prompt, p, base_client, quant_client, args): i
+            for i, p in enumerate(prompts)
+        }
+        for done, fut in enumerate(as_completed(futures), start=1):
+            try:
+                r = fut.result()
+            except Exception as e:
+                skipped.append(f"prompt {futures[fut]}: {type(e).__name__}: {e}")
+                continue
+            if r.get("skipped"):
+                skipped.append(f"prompt {futures[fut]}: {r['reason']}")
+                continue
+            results.append(r)
+            if done % 8 == 0 or done == len(prompts):
+                print(f"[{done}/{len(prompts)}] prompts scored")
+    if not results:
+        raise RuntimeError(
+            "All prompts failed. First few skip reasons:\n  " + "\n  ".join(skipped[:5])
+        )
+    config = {
+        "mode": "full",
+        "base_model": args.base_model,
+        "quant_model": args.quant_model,
+        "dataset": args.dataset,
+        "num_prompts": args.num_prompts,
+        "n_prompts_used": len(results),
+        "max_new_tokens": args.max_new_tokens,
+        "top_k": args.top_k,
+        "max_prompt_chars": args.max_prompt_chars,
+    }
+    report = _build_report(results, config, skipped)
+    with open(args.output, "w") as f:
+        json.dump(report, f, indent=2)
+    _print_report(report, len(results), len(skipped))
+    print(f"\nFull report written to: {args.output}")
+
+
+def _run_collect_base(args: argparse.Namespace) -> None:
+    client = OpenAI(base_url=args.base_url, api_key=args.api_key)
+    prompts = get_dataset_samples(args.dataset, args.num_prompts)
+    prompts = [p[: args.max_prompt_chars] for p in prompts if p]
+    print(
+        f"[collect-base] model={args.base_model} @ {args.base_url}\n"
+        f"               dataset={args.dataset} n_prompts={len(prompts)} "
+        f"max_new_tokens={args.max_new_tokens} top_k={args.top_k}\n"
+        f"               concurrency={args.concurrency} output={args.output_collect}"
+    )
+    records: dict[int, dict[str, Any]] = {}
+    skipped: list[str] = []
+    with ThreadPoolExecutor(max_workers=args.concurrency) as pool:
+        futures = {
+            pool.submit(
+                _collect_base_one,
+                i,
+                p,
+                client,
+                args.base_model,
+                args.max_new_tokens,
+                args.top_k,
+            ): i
+            for i, p in enumerate(prompts)
+        }
+        for done, fut in enumerate(as_completed(futures), start=1):
+            try:
+                r = fut.result()
+            except Exception as e:
+                skipped.append(f"prompt {futures[fut]}: {type(e).__name__}: {e}")
+                continue
+            records[r["prompt_idx"]] = r
+            if done % 8 == 0 or done == len(prompts):
+                print(f"[{done}/{len(prompts)}] prompts collected")
+    # Write in deterministic prompt_idx order — makes downstream alignment robust.
+    with open(args.output_collect, "w") as f:
+        for i in range(len(prompts)):
+            if i in records:
+                f.write(json.dumps(records[i]) + "\n")
+    print(
+        f"\n[collect-base] wrote {len(records)} records to {args.output_collect}; "
+        f"skipped: {len(skipped)}"
+    )
+    if skipped:
+        print("  first few skips:")
+        for s in skipped[:5]:
+            print(f"    {s}")
+
+
+def _read_jsonl(path: str) -> list[dict[str, Any]]:
+    out = []
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                out.append(json.loads(line))
+    return out
+
+
+def _run_collect_quant(args: argparse.Namespace) -> None:
+    client = OpenAI(base_url=args.quant_url, api_key=args.api_key)
+    teacher = _read_jsonl(args.teacher_jsonl)
+    print(
+        f"[collect-quant] model={args.quant_model} @ {args.quant_url}\n"
+        f"                teacher={args.teacher_jsonl} n={len(teacher)} top_k={args.top_k}\n"
+        f"                concurrency={args.concurrency} output={args.output_collect}"
+    )
+    records: dict[int, dict[str, Any]] = {}
+    skipped: list[str] = []
+    with ThreadPoolExecutor(max_workers=args.concurrency) as pool:
+        futures = {
+            pool.submit(_collect_quant_one, rec, client, args.quant_model, args.top_k): i
+            for i, rec in enumerate(teacher)
+        }
+        for done, fut in enumerate(as_completed(futures), start=1):
+            try:
+                r = fut.result()
+            except Exception as e:
+                skipped.append(f"prompt {futures[fut]}: {type(e).__name__}: {e}")
+                continue
+            records[r["prompt_idx"]] = r
+            if done % 8 == 0 or done == len(teacher):
+                print(f"[{done}/{len(teacher)}] prompts scored")
+    with open(args.output_collect, "w") as f:
+        for rec in teacher:
+            i = rec["prompt_idx"]
+            if i in records:
+                f.write(json.dumps(records[i]) + "\n")
+    print(
+        f"\n[collect-quant] wrote {len(records)} records to {args.output_collect}; "
+        f"skipped: {len(skipped)}"
+    )
+    if skipped:
+        print("  first few skips:")
+        for s in skipped[:5]:
+            print(f"    {s}")
+
+
+def _run_compare(args: argparse.Namespace) -> None:
+    base = {r["prompt_idx"]: r for r in _read_jsonl(args.base_jsonl) if not r.get("skipped")}
+    quant = {r["prompt_idx"]: r for r in _read_jsonl(args.quant_jsonl) if not r.get("skipped")}
+    shared = sorted(set(base) & set(quant))
+    print(
+        f"[compare] base={args.base_jsonl} ({len(base)} records)\n"
+        f"          quant={args.quant_jsonl} ({len(quant)} records)\n"
+        f"          shared={len(shared)}"
+    )
+    results: list[dict[str, Any]] = []
+    skipped: list[str] = []
+    for idx in shared:
+        b = base[idx]
+        q = quant[idx]
+        # Restore from JSON: top_logprobs is list[dict|None] already (None survives round-trip).
+        r = _score(
+            b["tokens"], b["top_logprobs"], q["tokens"], q["top_logprobs"], b["prompt_token_count"]
+        )
+        if r.get("skipped"):
+            skipped.append(f"prompt {idx}: {r['reason']}")
+            continue
+        results.append(r)
+    if not results:
+        raise RuntimeError(
+            "All prompts failed compare. First few skip reasons:\n  " + "\n  ".join(skipped[:5])
+        )
+    config = {
+        "mode": "compare",
+        "base_jsonl": args.base_jsonl,
+        "quant_jsonl": args.quant_jsonl,
+        "n_shared": len(shared),
+        "n_prompts_used": len(results),
+    }
+    report = _build_report(results, config, skipped)
+    with open(args.output, "w") as f:
+        json.dump(report, f, indent=2)
+    _print_report(report, len(results), len(skipped))
+    print(f"\nFull report written to: {args.output}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Teacher-forced KL / EAR / mismatch / ΔNLL between base and quantized LLMs."
     )
     parser.add_argument(
-        "--base-url", required=True, help="vLLM OpenAI-compatible base URL for the base model"
+        "--mode",
+        choices=("full", "collect-base", "collect-quant", "compare"),
+        default="full",
+        help="Run mode. 'full' needs both servers up; the others split the protocol across runs.",
     )
-    parser.add_argument(
-        "--base-model", required=True, help="Model name as registered on the base server"
-    )
-    parser.add_argument(
-        "--quant-url", required=True, help="vLLM OpenAI-compatible base URL for the quantized model"
-    )
-    parser.add_argument(
-        "--quant-model", required=True, help="Model name as registered on the quant server"
-    )
+    # Server / model identity (used by full + collect-*; arguments are optional per mode).
+    parser.add_argument("--base-url", help="vLLM URL for the base model")
+    parser.add_argument("--base-model", help="Served model name on the base server")
+    parser.add_argument("--quant-url", help="vLLM URL for the quantized model")
+    parser.add_argument("--quant-model", help="Served model name on the quant server")
+    # Dataset / sampling (used by full + collect-base).
     parser.add_argument(
         "--dataset",
         default="cnn_dailymail",
@@ -258,7 +547,28 @@ def main() -> None:
         help="Truncate each prompt to this many characters so prefill stays affordable.",
     )
     parser.add_argument("--concurrency", type=int, default=8)
-    parser.add_argument("--output", default="fidelity_report.json")
+    # I/O.
+    parser.add_argument(
+        "--output",
+        default="fidelity_report.json",
+        help="Output JSON report path (used by 'full' and 'compare').",
+    )
+    parser.add_argument(
+        "--output-collect",
+        help="Output JSONL path (used by 'collect-base' and 'collect-quant').",
+    )
+    parser.add_argument(
+        "--teacher-jsonl",
+        help="Input JSONL produced by 'collect-base' (used by 'collect-quant').",
+    )
+    parser.add_argument(
+        "--base-jsonl",
+        help="Base JSONL for 'compare' (typically a 'collect-base' output).",
+    )
+    parser.add_argument(
+        "--quant-jsonl",
+        help="Quant JSONL for 'compare' (typically a 'collect-quant' output).",
+    )
     parser.add_argument(
         "--api-key",
         default="EMPTY",
@@ -273,78 +583,42 @@ def main() -> None:
             file=sys.stderr,
         )
 
-    base_client = OpenAI(base_url=args.base_url, api_key=args.api_key)
-    quant_client = OpenAI(base_url=args.quant_url, api_key=args.api_key)
-
-    prompts = get_dataset_samples(args.dataset, args.num_prompts)
-    prompts = [p[: args.max_prompt_chars] for p in prompts if p]
-
-    print(
-        f"[config] base={args.base_model} @ {args.base_url}\n"
-        f"         quant={args.quant_model} @ {args.quant_url}\n"
-        f"         dataset={args.dataset} n_prompts={len(prompts)} "
-        f"max_new_tokens={args.max_new_tokens} top_k={args.top_k}"
-    )
-
-    results: list[dict[str, Any]] = []
-    skipped: list[str] = []
-    with ThreadPoolExecutor(max_workers=args.concurrency) as pool:
-        futures = {
-            pool.submit(evaluate_prompt, p, base_client, quant_client, args): i
-            for i, p in enumerate(prompts)
-        }
-        for done, fut in enumerate(as_completed(futures), start=1):
-            try:
-                r = fut.result()
-            except Exception as e:
-                skipped.append(f"prompt {futures[fut]}: {type(e).__name__}: {e}")
-                continue
-            if r.get("skipped"):
-                skipped.append(f"prompt {futures[fut]}: {r['reason']}")
-                continue
-            results.append(r)
-            if done % 8 == 0 or done == len(prompts):
-                print(f"[{done}/{len(prompts)}] prompts scored")
-
-    if not results:
-        raise RuntimeError(
-            "All prompts failed. First few skip reasons:\n  " + "\n  ".join(skipped[:5])
-        )
-
-    prefill_pool = [p for r in results for p in r["per_position"] if p["phase"] == "prefill"]
-    gen_pool = [p for r in results for p in r["per_position"] if p["phase"] == "generation"]
-    overall_pool = [p for r in results for p in r["per_position"]]
-
-    metrics = ("kl", "ear", "mismatch", "delta_nll")
-    phase_blocks: dict[str, dict[str, Any]] = {
-        "prefill": {m: _aggregate(prefill_pool, m) for m in metrics},
-        "generation": {m: _aggregate(gen_pool, m) for m in metrics},
-        "overall": {m: _aggregate(overall_pool, m) for m in metrics},
-    }
-    report: dict[str, Any] = {
-        "config": {
-            "base_model": args.base_model,
-            "quant_model": args.quant_model,
-            "dataset": args.dataset,
-            "num_prompts": args.num_prompts,
-            "n_prompts_used": len(results),
-            "max_new_tokens": args.max_new_tokens,
-            "top_k": args.top_k,
-            "max_prompt_chars": args.max_prompt_chars,
-        },
-        **phase_blocks,
-        "skipped_count": len(skipped),
-        "skipped_examples": skipped[:10],
-    }
-
-    with open(args.output, "w") as f:
-        json.dump(report, f, indent=2)
-
-    print("\n=== Fidelity report ===")
-    print(f"prompts used: {len(results)}  skipped: {len(skipped)}")
-    for phase, block in phase_blocks.items():
-        _print_phase(phase, block)
-    print(f"\nFull report written to: {args.output}")
+    if args.mode == "full":
+        missing = [
+            n
+            for n in ("base_url", "base_model", "quant_url", "quant_model")
+            if not getattr(args, n)
+        ]
+        if missing:
+            parser.error(
+                f"--mode full requires: {', '.join('--' + m.replace('_', '-') for m in missing)}"
+            )
+        _run_full(args)
+    elif args.mode == "collect-base":
+        missing = [n for n in ("base_url", "base_model", "output_collect") if not getattr(args, n)]
+        if missing:
+            parser.error(
+                f"--mode collect-base requires: {', '.join('--' + m.replace('_', '-') for m in missing)}"
+            )
+        _run_collect_base(args)
+    elif args.mode == "collect-quant":
+        missing = [
+            n
+            for n in ("quant_url", "quant_model", "teacher_jsonl", "output_collect")
+            if not getattr(args, n)
+        ]
+        if missing:
+            parser.error(
+                f"--mode collect-quant requires: {', '.join('--' + m.replace('_', '-') for m in missing)}"
+            )
+        _run_collect_quant(args)
+    elif args.mode == "compare":
+        missing = [n for n in ("base_jsonl", "quant_jsonl") if not getattr(args, n)]
+        if missing:
+            parser.error(
+                f"--mode compare requires: {', '.join('--' + m.replace('_', '-') for m in missing)}"
+            )
+        _run_compare(args)
 
 
 if __name__ == "__main__":
