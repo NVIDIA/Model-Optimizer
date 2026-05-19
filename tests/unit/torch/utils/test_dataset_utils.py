@@ -650,13 +650,13 @@ class TestDatasetCombosExpansion:
 
         calls = self._record_calls(monkeypatch)
         get_dataset_dataloader(
-            dataset_name="nemotron-sft-mix",
+            dataset_name="nemotron-post-training-v3",
             tokenizer=pad_tokenizer,
             num_samples=10,
             batch_size=1,
             max_sample_length=16,
         )
-        members = DATASET_COMBOS["nemotron-sft-mix"]
+        members = DATASET_COMBOS["nemotron-post-training-v3"]
         # 10 / 7 = 1 base, remainder 3 -> first 3 get +1
         expected_counts = [2, 2, 2, 1, 1, 1, 1]
         assert calls == list(zip(members, expected_counts))
@@ -666,13 +666,13 @@ class TestDatasetCombosExpansion:
 
         calls = self._record_calls(monkeypatch)
         get_dataset_dataloader(
-            dataset_name=["cnn_dailymail", "nemotron-sft-mix"],
+            dataset_name=["cnn_dailymail", "nemotron-post-training-v3"],
             tokenizer=pad_tokenizer,
             num_samples=[3, 7],
             batch_size=1,
             max_sample_length=16,
         )
-        members = DATASET_COMBOS["nemotron-sft-mix"]
+        members = DATASET_COMBOS["nemotron-post-training-v3"]
         assert calls == [("cnn_dailymail", 3)] + [(m, 1) for m in members]
 
     def test_combo_overlapping_with_member_raises(self, monkeypatch, pad_tokenizer):

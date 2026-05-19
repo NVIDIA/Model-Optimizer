@@ -202,7 +202,7 @@ SUPPORTED_DATASET_CONFIG: dict[str, Any] = {
 # entries; per-dataset ``num_samples`` is split evenly across the members.
 DATASET_COMBOS: dict[str, list[str]] = {
     "default": ["cnn_dailymail", "nemotron-post-training-dataset-v2"],
-    "nemotron-sft-mix": [
+    "nemotron-post-training-v3": [
         "nemotron-sft-instruction-following-chat-v2",
         "nemotron-science-v1",
         "nemotron-competitive-programming-v1",
