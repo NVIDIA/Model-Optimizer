@@ -6,5 +6,5 @@ solutions_to_validate: []
 skip_validation: false
 save_models: false
 bigger_is_better: false
-sort_solutions_by: null
+sort_solutions_by:
 calculate_full_score_ablations: false
