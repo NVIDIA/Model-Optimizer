@@ -46,14 +46,16 @@ import asyncio
 import contextlib
 import os
 import queue
+import random
 import threading
 from typing import TYPE_CHECKING
 
 import httpx
 import torch
+import torch.distributed as dist
 from pydantic import BaseModel, ConfigDict, field_validator
 from safetensors import safe_open
-from torch.utils.data import IterableDataset
+from torch.utils.data import IterableDataset, get_worker_info
 from transformers.trainer_pt_utils import LabelSmoother
 
 if TYPE_CHECKING:
@@ -62,6 +64,19 @@ if TYPE_CHECKING:
 IGNORE_TOKEN_ID = LabelSmoother.ignore_index
 
 _SENTINEL = object()
+
+
+def _get_rank_world() -> tuple[int, int]:
+    """Return ``(rank, world_size)``, falling back to ``(0, 1)`` outside of ``torch.distributed``.
+
+    Single-process runs (tests, single-GPU smoke) hit the fallback and the dataset
+    behaves as if it owns the whole corpus. Under ``accelerate launch`` /
+    ``torchrun``, ``init_distributed_env`` is called before dataset construction,
+    so ``is_initialized()`` is True here.
+    """
+    if dist.is_available() and dist.is_initialized():
+        return dist.get_rank(), dist.get_world_size()
+    return 0, 1
 
 
 def estimate_conversation_chars(entry: dict) -> int:
@@ -123,6 +138,10 @@ class StreamingHiddenStatesConfig(BaseModel):
     answer_only_loss: bool = False
     prefetch: int = 64
     request_timeout: float = 600.0
+    # Same value on every rank — the dataset shuffles with this seed, then stripes
+    # by rank, so identical seeds across ranks are required for the partition to
+    # be a true partition (no overlap, no gaps).
+    seed: int = 0
 
 
 class StreamingHiddenStatesDataset(IterableDataset):
@@ -140,24 +159,51 @@ class StreamingHiddenStatesDataset(IterableDataset):
         tokenizer,
         config: StreamingHiddenStatesConfig | None = None,
     ):
-        """Hold a reference to ``entries``; tokenize and fetch lazily during iteration.
+        """Hold a per-rank slice of ``entries``; tokenize and fetch lazily during iteration.
 
         Length filtering is the caller's responsibility — apply a cheap char-count
         pre-filter (see :func:`estimate_conversation_chars`) on ``entries`` before
         constructing the dataset. Anything that slips through and gets rejected by
         the server is skipped silently.
+
+        DDP sharding: ``entries`` is the *full* corpus on every rank. We shuffle with
+        ``config.seed`` (identical on all ranks) and then take ``[rank::world_size]``,
+        so the union across ranks is the shuffled corpus, no overlap. ``__len__``
+        returns the per-rank length, matching PyTorch's ``IterableDataset`` convention
+        (HF Trainer / DataLoader does not multiply by world_size).
         """
         if not entries:
             raise ValueError("entries is empty")
-        self.entries = entries
         self.tokenizer = tokenizer
         self.config = config if config is not None else self.config_cls()
-        print(f"[{type(self).__name__}] {len(entries)} entries")
+
+        rank, world = _get_rank_world()
+        indices = list(range(len(entries)))
+        random.Random(self.config.seed).shuffle(indices)
+        indices = indices[rank::world]
+        if not indices:
+            raise ValueError(
+                f"rank {rank}/{world} got 0 entries after sharding "
+                f"(corpus has {len(entries)}); need len(entries) >= world_size"
+            )
+        self.entries = [entries[i] for i in indices]
+        print(
+            f"[{type(self).__name__}] rank {rank}/{world}: "
+            f"{len(self.entries)}/{len(entries)} entries"
+        )
 
     def __len__(self) -> int:
         return len(self.entries)
 
     def __iter__(self):
+        # IterableDataset with DataLoader workers > 0 would spawn one asyncio loop
+        # per worker, each issuing the full request set — silent Nx duplication
+        # against the server. Fail loud instead.
+        if get_worker_info() is not None:
+            raise RuntimeError(
+                f"{type(self).__name__} requires dataloader_num_workers=0; "
+                "multiple workers would each spawn an asyncio loop and duplicate requests."
+            )
         # Fresh producer per __iter__ call so re-iteration (which shouldn't
         # happen in 1-epoch streaming) at least doesn't deadlock.
         q: queue.Queue = queue.Queue(maxsize=self.config.prefetch)

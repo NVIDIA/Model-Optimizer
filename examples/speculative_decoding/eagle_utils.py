@@ -59,6 +59,7 @@ def make_speculative_data_module(
     train_len=None,
     answer_only_loss=False,
     shift_labels=True,
+    seed: int = 0,
 ) -> dict:
     """Create data module for speculative decoding training.
 
@@ -100,6 +101,7 @@ def make_speculative_data_module(
             model=data_args.streaming_model_name,
             answer_only_loss=answer_only_loss,
             prefetch=data_args.streaming_prefetch,
+            seed=seed,
         )
         train_dataset = EagleVllmStreamingHiddenStatesDataset(
             entries=ds,

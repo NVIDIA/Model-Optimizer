@@ -247,6 +247,7 @@ def train():
         train_len=training_args.training_seq_len,
         answer_only_loss=training_args.answer_only_loss,
         shift_labels=not is_dflash,
+        seed=training_args.seed,
     )
 
     callbacks = [EagleTrainingPlot(training_args.ar_validate_steps, training_args.estimate_ar)]
