@@ -34,6 +34,26 @@ source ${SCRIPT_DIR}/../service_utils.sh
 pip install "speculators<0.5.0" --no-deps 2>/dev/null || true
 pip install datasets 2>/dev/null || true
 
+# vLLM API compatibility: speculators 0.4.0.1 uses Request(eos_token_id=...) which
+# was removed in newer vLLM. Patch to remove the unsupported kwarg.
+python3 -c "
+import site, os
+for d in site.getsitepackages():
+    path = os.path.join(d, 'speculators', 'data_generation', 'vllm_hidden_states_generator.py')
+    if not os.path.exists(path):
+        continue
+    with open(path) as f:
+        c = f.read()
+    old = '                eos_token_id=self.tokenizer.eos_token_id,\n'
+    if old in c:
+        with open(path, 'w') as f:
+            f.write(c.replace(old, ''))
+        print('Patched vllm_hidden_states_generator.py: removed eos_token_id from Request()')
+    else:
+        print('vllm_hidden_states_generator.py: eos_token_id already removed or not found')
+    break
+" 2>/dev/null || true
+
 # Pydantic 2.13 compatibility: speculators.ReloadableBaseModel.reload_schema() calls
 # model_rebuild(force=True) without a types_namespace. In pydantic 2.13+, inherited
 # torch.dtype annotations from transformers.PretrainedConfig cannot be resolved in
