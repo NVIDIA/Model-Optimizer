@@ -38,10 +38,10 @@ The script handles: GPU detection, quantization flag auto-detection (FP8 vs FP4)
 
 ### 0. Check workspace (multi-user / Slack bot)
 
-If `MODELOPT_WORKSPACE_ROOT` is set, read `skills/common/workspace-management.md`. Before creating a new workspace, check for existing ones — especially if deploying a checkpoint from a prior PTQ run:
+If `MODELOPT_WORKSPACE_ROOT` is set, read `skills/common/workspace-management.md`. Before creating a new workspace, check the current session for existing model workspaces — especially if deploying a checkpoint from a prior PTQ run:
 
 ```bash
-ls "$MODELOPT_WORKSPACE_ROOT/" 2>/dev/null
+ls "$MODELOPT_WORKSPACE_ROOT/<session_id>/" 2>/dev/null
 ```
 
 If the user says "deploy the model I just quantized" or references a previous PTQ, find the matching workspace and `cd` into it. The checkpoint should be in that workspace's output directory.
@@ -190,7 +190,7 @@ If a cluster config exists (`~/.config/modelopt/clusters.yaml` or `.claude/clust
    If the checkpoint path is a remote/absolute path (e.g., from a prior PTQ run on the cluster), skip sync — it's already there. Verify with `remote_run "ls <checkpoint_path>/config.json"`. Only sync if the checkpoint is local:
 
    ```bash
-   remote_sync_to <local_checkpoint_path> checkpoints/
+   remote_sync_to <local_checkpoint_path> <session_id>/<model>/checkpoints/
    ```
 
 3. **Deploy based on remote environment:**

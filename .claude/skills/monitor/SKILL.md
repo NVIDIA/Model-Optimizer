@@ -10,13 +10,31 @@ Monitor jobs submitted to SLURM clusters — PTQ quantization, NEL evaluation, m
 ## When to use
 
 1. **Auto-monitor** — another skill (PTQ, evaluation, deployment) just submitted a job. Register the job and set up monitoring immediately.
-2. **User-initiated** — user asks about a job status, possibly in a new conversation. Check the registry, identify the job, and report.
+2. **User-initiated** — user asks about a job status. Check the current session registry first; if the job is not registered there, use the discovery steps below.
 
 ---
 
 ## Job Registry
 
-All active jobs are tracked in `.claude/active_jobs.json`. This file is the single source of truth for what's being monitored.
+Active jobs are tracked in per-session registries under `.claude/agents/`.
+This avoids multiple agents clobbering one shared registry when they run at
+the same time.
+
+Use the current agent session id as `<session_id>`:
+
+- Claude Code: `$CLAUDE_CODE_SESSION_ID`, or the `session_id` field from hook input
+- Codex: `$CODEX_THREAD_ID`
+- If no session id is available, create a stable id for the current terminal session and reuse it for every job registered by that agent
+
+Registry layout:
+
+```text
+.claude/agents/
+  <session_id>/
+    active_jobs.json
+```
+
+Each session's `active_jobs.json` is a JSON array:
 
 ```json
 [
@@ -27,7 +45,11 @@ All active jobs are tracked in `.claude/active_jobs.json`. This file is the sing
     "user": "<ssh_user>",
     "submitted": "YYYY-MM-DD HH:MM",
     "description": "<what this job does>",
-    "last_status": "<last known status>"
+    "last_status": "<last known status>",
+    "owner": {
+      "agent": "claude-code|codex|manual",
+      "session_id": "<session_id>"
+    }
   }
 ]
 ```
@@ -40,8 +62,8 @@ All active jobs are tracked in `.claude/active_jobs.json`. This file is the sing
 
 Every time a job is submitted (by any skill or manually):
 
-1. **Add an entry** to `.claude/active_jobs.json`. Create the file if it doesn't exist.
-2. **Start a durable monitor** (if one isn't already watching the registry) that polls all registered jobs until they reach terminal status. Prefer the Claude Code `Monitor` tool when it is available: write a small watcher that reads the registry on each poll, checks every job with the appropriate method below, prints state-change events, updates `last_status`, removes terminal jobs, and exits when the registry is empty.
+1. **Add an entry** to `.claude/agents/<session_id>/active_jobs.json`. Create the session directory and file if they don't exist.
+2. **Start a durable monitor** (if one isn't already watching the registry) that polls this session's registered jobs until they reach terminal status. Prefer the Claude Code `Monitor` tool when it is available: write a small watcher that reads `.claude/agents/<session_id>/active_jobs.json`, checks every job with the appropriate method below, prints state-change events, updates `last_status`, removes terminal jobs from the session registry, and exits when no active jobs remain for this session.
 
 The monitor should terminate naturally when every registered job has reached a terminal state. If the `Monitor` tool is not available in the current harness, run an equivalent background process that implements the same loop and lets the agent resume/restart when the process exits.
 
@@ -53,12 +75,12 @@ Always do both steps. Don't try to predict job duration.
 
 Whether triggered by monitor output or by the user asking "check status":
 
-1. **Read the registry** from `.claude/active_jobs.json`
+1. **Read the registry** from `.claude/agents/<session_id>/active_jobs.json`
 2. **Check each job** using the appropriate method (see below)
 3. **Report only state changes** — compare against `last_status` in registry
-4. **Update `last_status`** in the registry
+4. **Update `last_status`** in the session registry
 5. **Remove completed jobs** — any job in a terminal state (COMPLETED, FAILED, CANCELLED, KILLED, TIMEOUT, NODE_FAIL, OUT_OF_MEMORY, PREEMPTED, BOOT_FAIL, DEADLINE)
-6. **If registry is empty** — let the monitor exit
+6. **If no active jobs remain** — let the monitor exit
 
 ---
 
@@ -111,7 +133,7 @@ vocabulary of the source you're polling.
 
 When the user asks about a job without specifying an ID, check in order:
 
-1. `.claude/active_jobs.json` — most reliable, has context
+1. `.claude/agents/<current_session_id>/active_jobs.json` — current agent's jobs
 2. `nel ls runs --since 1d` — recent NEL runs
 3. `ssh <host> "squeue -u <user>"` — active SLURM jobs
 4. `ls -lt tools/launcher/experiments/cicd/ | head -10` — recent launcher experiments
