@@ -20,4 +20,5 @@ of subblocks (e.g., Attention, FFN) within transformer architectures.
 Primary API:
     - calc_runtime_for_subblocks: Empirically measures runtime for candidate subblock configurations
 """
+
 from .calc_runtime_stats import calc_runtime_for_subblocks
