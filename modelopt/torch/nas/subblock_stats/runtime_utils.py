@@ -12,6 +12,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Utilities for runtime benchmarking and model saving in ModelOpt NAS.
+
+This module provides classes and utility functions used for empirical runtime
+estimation of Transformer subblocks and for saving models and tokenizers in
+formats suitable for benchmarking (e.g., vLLM latency benchmark) or the
+AnyModel subblock-safetensors format. It defines the configuration dataclass
+used to parameterize runtime benchmarks, as well as model checkpointing helpers
+to ensure compatibility with downstream evaluation pipelines.
+"""
 
 import json
 from dataclasses import dataclass

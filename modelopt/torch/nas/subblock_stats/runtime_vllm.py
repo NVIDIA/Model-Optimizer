@@ -12,6 +12,22 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""vLLM Runtime Benchmark Integration for ModelOpt NAS Subblocks.
+
+This module provides the integration logic to empirically benchmark subblock
+runtime statistics within transformer architectures using the vLLM latency
+benchmark. It defines helper functions and utilities to invoke the vLLM
+latency benchmark programmatically (as a library) and collect runtime
+statistics, given a prepared model directory and a benchmarking configuration.
+
+Usage:
+    - Call `run_vllm_latency_benchmark` with a model path and a
+      `RuntimeConfig` instance to run a latency benchmark and
+      return the average latency for the configuration (in milliseconds).
+
+This is used internally by ModelOpt NAS to benchmark different subblock
+configurations for search and scoring, enabling data-driven NAS for latency-optimized architectures.
+"""
 
 import argparse
 import json
