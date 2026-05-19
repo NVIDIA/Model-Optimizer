@@ -23,19 +23,15 @@ output graph.
 from __future__ import annotations
 
 import copy
-import sys
-from pathlib import Path
 
 import numpy as np
 import pytest
 from onnx import TensorProto, helper, numpy_helper
+from unit.dla_transforms.graph_compare import assert_graphs_structurally_equal
 
 pytest.importorskip("onnxruntime", reason="onnxruntime required")
 
 from modelopt.onnx.graph_surgery.make_dla_compatible import _transform_make_dla_compatible
-
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from graph_compare import assert_graphs_structurally_equal
 
 _OPSET = 17
 _MAX_IR = 9

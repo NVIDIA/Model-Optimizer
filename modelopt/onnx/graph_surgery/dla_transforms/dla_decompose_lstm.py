@@ -791,6 +791,13 @@ def _apply_decompose_lstm(model):
             direction = "forward"
 
         shape_info_map = create_shape_info_map(node)
+        if direction not in ("forward", "reverse", "bidirectional"):
+            raise ValueError(f"Invalid direction: {direction}")
+        if direction == "bidirectional" and int(shape_info_map["d"]) != 2:
+            raise ValueError(
+                f"LSTM {node.name!r}: direction is bidirectional but num_directions (from W) is "
+                f"{shape_info_map['d']!r}; expected 2."
+            )
         transposed_inputs = transpose_inputs(
             graph, node, unique_initializer, shape_info_map, nodes_to_add
         )
@@ -907,14 +914,6 @@ def _apply_decompose_lstm(model):
             y_reverse = h_t_concat_node.output[0]
             y_h_reverse = h_t_list[-1]
             y_c_reverse = c_t_list[-1]
-        if direction not in ("forward", "reverse", "bidirectional"):
-            raise ValueError(f"Invalid direction: {direction}")
-        if direction == "bidirectional" and int(shape_info_map["d"]) != 2:
-            raise ValueError(
-                f"LSTM {node.name!r}: direction is bidirectional but num_directions (from W) is "
-                f"{shape_info_map['d']!r}; expected 2."
-            )
-
         y_before_transpose = None
         y_h_before_transpose = None
         y_c_before_transpose = None

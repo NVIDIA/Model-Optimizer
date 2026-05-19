@@ -73,7 +73,9 @@ def _apply_matmul_to_transpose_conv_transpose(model):
     replacements_batch: dict[int, tuple[list, list]] = {}
     fallback_batch: dict[int, tuple[list, list]] = {}
 
-    def update_initializers(graph, name, trans_b=False, is_const_dq_init=False):
+    def update_initializers(
+        graph, name, current_node, nodes_to_add, trans_b=False, is_const_dq_init=False
+    ):
         """Reshape weight initializer to a 4-D Conv kernel.
 
         If the initializer is shared by other consumers besides the current
@@ -167,9 +169,9 @@ def _apply_matmul_to_transpose_conv_transpose(model):
                             if attr.name == "axis":
                                 attr.i = axis
                     nodes_to_add.append(dq_clone)
-                    node.input[1] = new_dq_out
+                    current_node.input[1] = new_dq_out
                 else:
-                    node.input[1] = new_init_name
+                    current_node.input[1] = new_init_name
                 return
 
             if dq_node is not None:
@@ -347,7 +349,8 @@ def _apply_matmul_to_transpose_conv_transpose(model):
 
         # ── Activation rank ───────────────────────────────────────────────────
         input_shape = cache.get_shape(node.input[0])
-        assert input_shape is not None, f"Shape unknown for {node.input[0]!r}"
+        if input_shape is None:
+            raise ValueError(f"Shape unknown for activation tensor {node.input[0]!r}")
         orig_rank = len(input_shape)
 
         # ── Step 1: Unsqueeze activation to 4D ───────────────────────────────
@@ -396,7 +399,7 @@ def _apply_matmul_to_transpose_conv_transpose(model):
 
         if init_name is not None:
             # Static weight: reshape initializer to 4-D conv kernel format
-            update_initializers(graph, init_name, trans_b, is_const_dq)
+            update_initializers(graph, init_name, node, nodes_to_add, trans_b, is_const_dq)
             conv_input1 = node.input[1]  # tensor name unchanged; dims updated
         else:
             # Dynamic weight: add a Transpose node before Conv

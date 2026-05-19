@@ -59,6 +59,8 @@ from ...logging_config import logger
 from ._common import GraphCache, insert_nodes_at_position, run_onnx_file_transform, set_node_attr_i
 from ._dla_graph_helpers import update_tensor_shape_by_name
 
+_set_attr_i = set_node_attr_i
+
 
 def _apply_topk(model: onnx.ModelProto) -> onnx.ModelProto:
     """Detect and rewrite the TopK→Cast→Reshape→Tile→Cast→GatherElements chain."""
@@ -232,10 +234,6 @@ def _apply_topk(model: onnx.ModelProto) -> onnx.ModelProto:
 
     logger.debug("topk: rewrote %d TopK chain(s).", cnt)
     return model
-
-
-_set_attr_i = set_node_attr_i
-
 
 def dla_topk(
     model_path: str,

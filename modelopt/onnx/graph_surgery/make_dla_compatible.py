@@ -164,8 +164,8 @@ def _transform_make_dla_compatible(
     except onnx.checker.ValidationError as exc:
         logger.error("[DLA pipeline] ONNX validation failed: %s", exc)
         raise
-    except Exception as exc:
-        logger.debug(
+    except (MemoryError, OSError) as exc:
+        logger.warning(
             "[DLA pipeline] ONNX in-memory check skipped (model may be too large): %s", exc
         )
 

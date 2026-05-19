@@ -31,7 +31,6 @@ from __future__ import annotations
 from collections import deque
 
 import onnx
-from onnx import numpy_helper
 
 # ---------------------------------------------------------------------------
 # Node fingerprint: a name-independent description of a single node
@@ -106,23 +105,6 @@ def _canonical_order(graph: onnx.GraphProto) -> list[onnx.NodeProto]:
     order.extend(node for node in graph.node if id(node) not in visited)
 
     return order
-
-
-# ---------------------------------------------------------------------------
-# Initializer comparison
-# ---------------------------------------------------------------------------
-
-
-def _init_fingerprint(init: onnx.TensorProto) -> tuple:
-    """Return a hashable fingerprint for an initializer (shape + dtype + data hash)."""
-    arr = numpy_helper.to_array(init)
-    data_hash = hash(arr.tobytes())
-    return (tuple(init.dims), init.data_type, data_hash)
-
-
-def _build_init_fingerprints(graph: onnx.GraphProto) -> dict[str, tuple]:
-    """Map init name → fingerprint for all initializers."""
-    return {init.name: _init_fingerprint(init) for init in graph.initializer}
 
 
 # ---------------------------------------------------------------------------
