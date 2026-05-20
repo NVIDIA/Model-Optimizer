@@ -1,0 +1,16 @@
+# KV cache merge does not overwrite explicit algorithm
+_test:
+  description: "KV cache preserves explicit algorithm override"
+
+  validate:
+    expect_success: true
+
+  resolve:
+    check_algorithm: awq_lite
+
+version: "1.0"
+quantization:
+  preset: fp8
+  algorithm: awq_lite
+  kv_cache:
+    format: fp8

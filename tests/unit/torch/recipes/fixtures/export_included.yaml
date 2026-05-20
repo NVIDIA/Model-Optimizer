@@ -1,0 +1,22 @@
+# Export section resolved and included
+_test:
+  description: "Export section resolves to result dict"
+
+  validate:
+    expect_success: true
+
+  resolve:
+    check_has_key: export
+    check_config:
+      export:
+        format: hf
+        output_dir: ./my_output
+        tensor_parallel: 4
+
+version: "1.0"
+quantization:
+  preset: fp8
+export:
+  format: hf
+  output_dir: ./my_output
+  tensor_parallel: 4
