@@ -515,30 +515,16 @@ class TestLocalJsonlLoading:
 # ---------------------------------------------------------------------------
 
 
-class _FakeTokenizer:
-    """Minimal callable tokenizer that mimics the HF tokenizer surface used by the dataloader.
-
-    Tokenizes by character ordinal and left-pads to the longest sample (capped at max_length).
-    Avoids a hard dependency on ``transformers`` in the test environment.
-    """
-
-    padding_side = "left"
-    pad_token_id = 0
-
-    def __call__(self, texts, return_tensors=None, padding=True, truncation=True, max_length=16):
-        ids = [[ord(c) % 100 + 1 for c in t][:max_length] for t in texts]
-        n = max(len(x) for x in ids)
-        input_ids = [[self.pad_token_id] * (n - len(x)) + x for x in ids]
-        attention = [[0] * (n - len(x)) + [1] * len(x) for x in ids]
-        return {
-            "input_ids": torch.tensor(input_ids, dtype=torch.long),
-            "attention_mask": torch.tensor(attention, dtype=torch.long),
-        }
-
-
 @pytest.fixture
 def pad_tokenizer():
-    return _FakeTokenizer()
+    """Real tiny HF tokenizer (vocab=128) shared with other test modules.
+
+    Skips the test if ``transformers`` isn't installed.
+    """
+    pytest.importorskip("transformers")
+    from _test_utils.torch.transformers_models import get_tiny_tokenizer
+
+    return get_tiny_tokenizer()
 
 
 class TestGetDatasetDataloaderBlending:

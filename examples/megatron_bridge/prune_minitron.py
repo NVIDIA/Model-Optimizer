@@ -53,10 +53,8 @@ import modelopt.torch.opt as mto
 import modelopt.torch.prune as mtp
 import modelopt.torch.utils.distributed as dist
 from modelopt.torch.utils import get_supported_datasets, print_rank_0, warn_rank_0
-from modelopt.torch.utils.plugins.mbridge import (
-    get_hf_mbridge_calibration_loop,
-    load_mbridge_model_from_hf,
-)
+from modelopt.torch.utils.plugins.mbridge import load_mbridge_model_from_hf
+from modelopt.torch.utils.plugins.megatron_calibration import get_megatron_calibration_forward_loop
 from modelopt.torch.utils.plugins.megatron_mmlu import megatron_mmlu
 
 
@@ -104,11 +102,7 @@ def get_args() -> argparse.Namespace:
         "--calib_num_samples", type=int, default=1024, help="Number of samples for calibration"
     )
     # TODO: Add support for pre-training dataset (pre-tokenized)
-    # TODO: only allow mbs>1 for pretraining dataset
-    parser.add_argument(
-        "--calib_mbs", type=int, default=1, choices=[1], help="Calibration micro-batch size"
-    )
-    parser.add_argument("--calib_gbs", type=int, default=1, help="Calibration global batch size")
+    parser.add_argument("--calib_batch_size", type=int, default=1, help="Calibration batch size")
     parser.add_argument("--seq_length", type=int, default=4096)
     # Pruning parameters
     parser.add_argument(
@@ -164,8 +158,8 @@ def get_args() -> argparse.Namespace:
         default=None,
         help=(
             "Batch size used only for KV-cache sizing in --prune_target_memory_mb. "
-            "Defaults to --calib_mbs when not set. "
-            "Use this to target an inference batch size that differs from the calibration micro-batch size."
+            "Defaults to --calib_batch_size when not set. "
+            "Use this to target an inference batch size that differs from the calibration batch size."
         ),
     )
 
@@ -296,16 +290,12 @@ def main(args: argparse.Namespace):
         init_model_parallel=True,
         moe_grouped_gemm=False,
     )
-    forward_loop = get_hf_mbridge_calibration_loop(
-        model=model,
-        provider=provider,
-        tokenizer=tokenizer,
-        hf_model_name_or_path=args.hf_model_name_or_path,
-        trust_remote_code=args.trust_remote_code,
+    forward_loop = get_megatron_calibration_forward_loop(
+        tokenizer,
         dataset_name=args.calib_dataset_name,
         num_samples=args.calib_num_samples,
-        micro_batch_size=args.calib_mbs,
-        global_batch_size=args.calib_gbs,
+        seq_length=args.seq_length,
+        batch_size=args.calib_batch_size,
     )
 
     pruning_config = {
@@ -385,7 +375,9 @@ def main(args: argparse.Namespace):
         pruning_config["top_k"] = args.top_k
         # memory_mb constraint requires batch_size and seq_length
         pruning_config["batch_size"] = (
-            args.inference_batch_size if args.inference_batch_size is not None else args.calib_mbs
+            args.inference_batch_size
+            if args.inference_batch_size is not None
+            else args.calib_batch_size
         )
         pruning_config["seq_length"] = args.seq_length
     print_rank_0(f"Pruning constraints: {pruning_constraints}")

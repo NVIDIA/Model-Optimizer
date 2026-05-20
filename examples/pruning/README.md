@@ -50,9 +50,9 @@ Please see example snippets of both modes for Minitron pruning on Megatron-Bridg
 ```python
 import torch
 import modelopt.torch.prune as mtp
-from modelopt.torch.utils.plugins.mbridge import (
-    get_hf_mbridge_calibration_loop,
-    load_mbridge_model_from_hf,
+from modelopt.torch.utils.plugins.mbridge import load_mbridge_model_from_hf
+from modelopt.torch.utils.plugins.megatron_calibration import (
+    get_megatron_calibration_forward_loop,
 )
 
 # Import the Megatron-Bridge Qwen3-8B model from Hugging Face checkpoint
@@ -67,13 +67,11 @@ bridge, provider, model, unwrapped_model, tokenizer = load_mbridge_model_from_hf
 )
 
 # Set up the forward loop to run on 1024 train samples
-forward_loop = get_hf_mbridge_calibration_loop(
-    model=model,
-    provider=provider,
-    tokenizer=tokenizer,
-    hf_model_name_or_path="Qwen/Qwen3-8B",
+forward_loop = get_megatron_calibration_forward_loop(
+    tokenizer,
     dataset_name="nemotron-post-training-dataset-v2",
     num_samples=1024,
+    seq_length=4096,
 )
 
 # Run pruning on the unwrapped model
