@@ -15,17 +15,23 @@
 
 """Shared calibration forward-loop builder for Megatron-Core models.
 
-Drives a logits-free prefill pass through the model over a calibration dataset,
-producing the ``forward_loop`` callable that ``mtq.quantize`` / ``mtp.prune`` /
-``mtq.calibrate`` expect.
+Drives a prefill pass through the model over a calibration dataset, producing the
+``forward_loop`` callable that ``mtq.quantize`` / ``mtp.prune`` / ``mtq.calibrate``
+expect.
 
 Picks the best primitives from each existing path:
 - ``get_dataset_dataloader`` for dataset surface (HF registry + JSONL auto-detection,
   multi-source blending, one-sample-per-row with batch-padding)
 - Per-row trim + EOS-at-row-end before forward, matching MBridge's
   ``GPTSFTDataset(add_eos=True)`` semantics.
-- ``megatron_prefill(skip_return_logits=True)`` for the forward primitive (no
-  logits compute, just activation flow for hooks)
+- ``megatron_prefill(skip_return_logits=True)`` for the forward primitive — skips
+  returning logits / loss compute compared to the legacy training-step path; the LM
+  head still runs and activation hooks still fire on every layer.
+
+Context parallelism: this loop targets CP=1. Splitting a calibration sequence across
+CP ranks doesn't help (calibration sequences are short and we want the same activations
+on every rank), and ``megatron_prefill`` builds its causal mask / position_ids over the
+local tensor length, which would silently produce wrong activations under CP>1.
 """
 
 import copy
@@ -33,7 +39,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 import torch
-from megatron.core.utils import get_batch_on_this_cp_rank
+from megatron.core import parallel_state as mpu
 from tqdm import tqdm
 
 from modelopt.torch.utils import distributed as dist
@@ -127,6 +133,16 @@ def get_megatron_calibration_forward_loop(
     seq_len = sorted_ids.shape[-1]
 
     def _forward_loop(model: torch.nn.Module) -> None:
+        # ``megatron_prefill`` builds its causal mask + position_ids over the local input
+        # tensor length, so splitting a calibration sequence across CP ranks would silently
+        # produce wrong activations. Calibration sequences are short enough that CP doesn't
+        # help anyway — fail loud rather than ship broken statistics.
+        cp_size = mpu.get_context_parallel_world_size()
+        if cp_size != 1:
+            raise RuntimeError(
+                f"get_megatron_calibration_forward_loop requires CP=1, got "
+                f"context_parallel_world_size={cp_size}. Run calibration without CP."
+            )
         n = sorted_ids.shape[0]
         for start in tqdm(range(0, n, batch_size), disable=not dist.is_master()):
             ids = sorted_ids[start : start + batch_size]
@@ -151,15 +167,11 @@ def get_megatron_calibration_forward_loop(
                         # an explicit end-of-document marker that hooks see during prune
                         # importance scoring.
                         row[0, -1] = eos_id
-                    sample = get_batch_on_this_cp_rank(
-                        {"input_ids": row, "attention_mask": torch.ones_like(row)}
-                    )
-                    megatron_prefill(model, sample["input_ids"], skip_return_logits=True)
+                    megatron_prefill(model, row, skip_return_logits=True)
             else:
                 if eos_id is not None:
                     ids = ids.clone()
                     ids[:, -1] = eos_id
-                sample = get_batch_on_this_cp_rank({"input_ids": ids, "attention_mask": mask})
-                megatron_prefill(model, sample["input_ids"], skip_return_logits=True)
+                megatron_prefill(model, ids, skip_return_logits=True)
 
     return _forward_loop
