@@ -4,7 +4,7 @@
 
 - Task: `aa_lcr`
 - Harness: AA-LCR, chat
-- Primary metric: `pass@1 judge_correct`
+- Primary metric: `accuracy.accuracy`
 - Run time: Long
 - Samples: 3
 - Requires: `HF_TOKEN`, `JUDGE_API_KEY`
@@ -45,5 +45,28 @@ Use this inside the top-level `evaluation.tasks` list:
 AA-LCR accuracy comes from:
 
 ```text
-results.groups.aa_lcr.metrics.pass@1.scores.judge_correct.value
+results.groups.aa_lcr.metrics.accuracy.scores.accuracy.value
+results.groups.aa_lcr.metrics.accuracy.scores.accuracy.stats.stderr
+```
+
+```python
+import yaml
+
+
+def extract_aa_lcr_score(path):
+    data = yaml.safe_load(open(path))
+    scores = data["results"]["groups"]["aa_lcr"]["metrics"]["accuracy"]["scores"]
+    entry = scores["accuracy"]
+    accuracy = entry["value"] * 100
+    stderr = entry.get("stats", {}).get("stderr")
+    stderr_pp = stderr * 100 if stderr is not None else None
+
+    return {
+        "group": "aa_lcr",
+        "metric": "accuracy",
+        "score_key": "accuracy",
+        "accuracy": accuracy,
+        "stderr": stderr_pp,
+    }
+
 ```

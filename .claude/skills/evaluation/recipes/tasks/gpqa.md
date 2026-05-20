@@ -51,7 +51,6 @@ repeat count is unknown, use the highest available `avg-of-N`.
 
 ```python
 import re
-import sys
 import yaml
 
 
@@ -92,9 +91,4 @@ def extract_gpqa_score(path, repeats=None):
         "stderr": stderr,
     }
 
-
-if __name__ == "__main__":
-    path = sys.argv[1]
-    repeats = int(sys.argv[2]) if len(sys.argv) > 2 else None
-    print(extract_gpqa_score(path, repeats))
 ```
