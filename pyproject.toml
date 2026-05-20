@@ -131,6 +131,9 @@ dev = ["nvidia-modelopt[all,dev-docs,dev-lint,dev-test]"]
 [project.urls]
 Homepage = "https://github.com/NVIDIA/Model-Optimizer"
 
+[project.scripts]
+nv-modelopt = "modelopt.cli.nv_modelopt:main"
+
 [tool.setuptools.packages.find]
 include = ["modelopt*"]
 
