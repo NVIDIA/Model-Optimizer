@@ -51,7 +51,6 @@ class TestThreadLocalContext:
             calibration_mode=False,
             threshold_trials=[0.01, 0.1],
             scale_factor=2.0,
-            raw_threshold=-5.0,
         )
         active, threshold, scale_factor = ltx_mod._get_ltx_triton_context()
         assert active is True
