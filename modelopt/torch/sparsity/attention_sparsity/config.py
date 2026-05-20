@@ -693,7 +693,25 @@ SKIP_SOFTMAX_TRITON_DEFAULT = {
     "sparse_cfg": {
         "*attn*": {
             "method": "triton_skip_softmax",
-            "skip_softmax_threshold": 0.1,
+            "skip_softmax_threshold": 0.001,
+            "backend": "triton",
+            "enable": True,
+        },
+        "default": {"enable": False},
+    },
+}
+
+
+# 2:4 sparsity combined with skip-softmax tile skipping (Triton kernel)
+SPARSE_SOFTMAX_SKIP_DEFAULT = {
+    "sparse_cfg": {
+        "*attn*": {
+            "method": "triton_sparse_softmax",
+            "sparsity_n": 2,
+            "sparsity_m": 4,
+            "num_sink_tokens": 0,
+            "dense_window_size": 64,
+            "skip_softmax_threshold": 0.001,
             "backend": "triton",
             "enable": True,
         },
@@ -707,6 +725,7 @@ __all__ = [
     "SKIP_SOFTMAX_DEFAULT",
     "SKIP_SOFTMAX_TRITON_DEFAULT",
     "SPARSE_SOFTMAX_DEFAULT",
+    "SPARSE_SOFTMAX_SKIP_DEFAULT",
     "VSA_DEFAULT",
     "CalibrationConfig",
     "FlashSkipSoftmaxConfig",

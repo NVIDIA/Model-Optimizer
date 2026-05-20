@@ -285,3 +285,215 @@ class TestSkipSoftmaxHFIntegration:
         assert not torch.isinf(logits_skip).any(), "Inf in skip-softmax logits"
         # On short sequences (64 tokens), no tiles are skipped — output should match dense
         torch.testing.assert_close(logits_skip, logits_dense, rtol=1e-3, atol=1e-3)
+
+
+@pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="Need CUDA + triton")
+class TestSkipSoftmaxScaleFactor:
+    """Scale-factor mode: effective threshold = scale_factor / seq_k per sequence."""
+
+    def _make_inputs(self, batch=2, seq_len=256, num_heads=4, num_kv_heads=2, head_dim=64):
+        total = batch * seq_len
+        torch.manual_seed(77)
+        q = torch.randn(total, num_heads, head_dim, device="cuda", dtype=torch.float16)
+        k = torch.randn(total, num_kv_heads, head_dim, device="cuda", dtype=torch.float16)
+        v = torch.randn(total, num_kv_heads, head_dim, device="cuda", dtype=torch.float16)
+        locs, lens = make_varlen_meta([seq_len] * batch)
+        return q, k, v, locs, lens
+
+    def test_disabled_matches_dense(self):
+        """scale_prefill/decode=None produces bit-identical output to dense."""
+        q, k, v, locs, lens = self._make_inputs()
+        scale = 1.0 / (64**0.5)
+        out_none = attention(q, k, v, locs, lens, 256, softmax_scale=scale)
+        out_scale_none = attention(
+            q,
+            k,
+            v,
+            locs,
+            lens,
+            256,
+            softmax_scale=scale,
+            skip_softmax_threshold_scale_prefill=None,
+            skip_softmax_threshold_scale_decode=None,
+        )
+        assert torch.equal(out_none, out_scale_none)
+
+    def test_equivalent_to_fixed_when_seqlen_uniform(self):
+        """With uniform seq_k, scale-factor mode == fixed mode when threshold = scale / seq_k."""
+        seq_len = 512
+        q, k, v, locs, lens = self._make_inputs(batch=2, seq_len=seq_len)
+        scale = 1.0 / (64**0.5)
+        scale_factor = 5.0
+        fixed_threshold = scale_factor / seq_len
+
+        out_fixed = attention(
+            q,
+            k,
+            v,
+            locs,
+            lens,
+            seq_len,
+            softmax_scale=scale,
+            skip_softmax_threshold=fixed_threshold,
+        )
+        out_scale = attention(
+            q,
+            k,
+            v,
+            locs,
+            lens,
+            seq_len,
+            softmax_scale=scale,
+            skip_softmax_threshold_scale_prefill=scale_factor,
+        )
+        # Same algorithm path; should match to fp16 precision.
+        torch.testing.assert_close(out_scale, out_fixed, rtol=1e-3, atol=1e-3)
+
+    def test_decode_phase_uses_decode_scale(self):
+        """In decode (max_input_len==1), only the decode scale factor is applied."""
+        batch = 2
+        seq_lens_k = [128, 128]  # uniform so fixed/scale equivalence holds
+        num_heads, num_kv_heads, head_dim = 4, 2, 64
+        scale = 1.0 / (head_dim**0.5)
+        scale_factor_decode = 5.0
+        fixed_threshold = scale_factor_decode / seq_lens_k[0]
+
+        torch.manual_seed(42)
+        q_flat = torch.randn(batch, num_heads, head_dim, device="cuda", dtype=torch.float16)
+        total_kv = sum(seq_lens_k)
+        k_flat = torch.randn(total_kv, num_kv_heads, head_dim, device="cuda", dtype=torch.float16)
+        v_flat = torch.randn(total_kv, num_kv_heads, head_dim, device="cuda", dtype=torch.float16)
+
+        b_start_loc_q = torch.arange(batch, device="cuda", dtype=torch.int32)
+        b_seq_len_q = torch.ones(batch, device="cuda", dtype=torch.int32)
+        cumsum = [0]
+        for sl in seq_lens_k:
+            cumsum.append(cumsum[-1] + sl)
+        b_start_loc_k = torch.tensor(cumsum[:-1], device="cuda", dtype=torch.int32)
+        b_seq_len_k = torch.tensor(seq_lens_k, device="cuda", dtype=torch.int32)
+
+        common = dict(
+            b_start_loc_k=b_start_loc_k,
+            b_seq_len_k=b_seq_len_k,
+            max_input_len_k=max(seq_lens_k),
+            is_causal=False,
+            softmax_scale=scale,
+        )
+
+        out_fixed = attention(
+            q_flat, k_flat, v_flat, b_start_loc_q, b_seq_len_q, 1,
+            skip_softmax_threshold=fixed_threshold, **common,
+        )
+        # Decode scale should fire because max_input_len == 1.
+        out_decode = attention(
+            q_flat, k_flat, v_flat, b_start_loc_q, b_seq_len_q, 1,
+            skip_softmax_threshold_scale_decode=scale_factor_decode, **common,
+        )
+        torch.testing.assert_close(out_decode, out_fixed, rtol=1e-3, atol=1e-3)
+
+        # Prefill scale alone should be a no-op (decode phase ignores prefill scale).
+        out_prefill_only = attention(
+            q_flat, k_flat, v_flat, b_start_loc_q, b_seq_len_q, 1,
+            skip_softmax_threshold_scale_prefill=scale_factor_decode, **common,
+        )
+        out_dense = attention(
+            q_flat, k_flat, v_flat, b_start_loc_q, b_seq_len_q, 1, **common,
+        )
+        assert torch.equal(out_prefill_only, out_dense)
+
+    def test_prefill_phase_uses_prefill_scale(self):
+        """In prefill (max_input_len>1), only the prefill scale factor is applied."""
+        seq_len = 256
+        q, k, v, locs, lens = self._make_inputs(batch=1, seq_len=seq_len)
+        scale = 1.0 / (64**0.5)
+
+        # Decode scale alone should be inactive in prefill — output equals dense.
+        out_dense = attention(q, k, v, locs, lens, seq_len, softmax_scale=scale)
+        out_decode_only = attention(
+            q, k, v, locs, lens, seq_len,
+            softmax_scale=scale,
+            skip_softmax_threshold_scale_decode=5.0,
+        )
+        assert torch.equal(out_decode_only, out_dense)
+
+    def test_mutual_exclusivity(self):
+        """Setting both fixed threshold and a scale factor raises an error."""
+        q, k, v, locs, lens = self._make_inputs()
+        scale = 1.0 / (64**0.5)
+        with pytest.raises(AssertionError, match="mutually exclusive"):
+            attention(
+                q, k, v, locs, lens, 256,
+                softmax_scale=scale,
+                skip_softmax_threshold=1e-3,
+                skip_softmax_threshold_scale_prefill=5.0,
+            )
+
+    def test_matches_pytorch_calibrated_reference(self):
+        """Triton scale-factor mode matches the FlashSkipSoftmax calibrated path."""
+        from modelopt.torch.sparsity.attention_sparsity.methods.flash_skip_softmax import (
+            FlashSkipSoftmax,
+        )
+
+        batch, seq_len = 1, 256
+        num_heads, num_kv_heads, head_dim = 4, 4, 64  # MHA for simplicity
+        scale = 1.0 / (head_dim**0.5)
+        scale_factor = 5.0  # corresponds to fixed threshold ≈ 5/256 ≈ 0.0195
+
+        torch.manual_seed(123)
+        q_4d = torch.randn(batch, num_heads, seq_len, head_dim, device="cuda", dtype=torch.float32)
+        k_4d = torch.randn(
+            batch, num_kv_heads, seq_len, head_dim, device="cuda", dtype=torch.float32
+        )
+        v_4d = torch.randn(
+            batch, num_kv_heads, seq_len, head_dim, device="cuda", dtype=torch.float32
+        )
+
+        scores = torch.matmul(q_4d, k_4d.transpose(-2, -1)) * scale
+        causal_mask = torch.triu(torch.ones(seq_len, seq_len, device="cuda"), diagonal=1).bool()
+        scores = scores.masked_fill(causal_mask[None, None, :, :], float("-inf"))
+
+        # PyTorch reference: drive the calibrated dynamic-threshold path.
+        # FlashSkipSoftmax expects scale_factor = a * exp(b * target_sparsity); we
+        # bypass that decomposition by setting b=0 so scale_factor = a.
+        method = FlashSkipSoftmax(
+            method_config={
+                "thresholds": {"prefill": [1.0]},  # unused when calibration_params is set
+                "br": 128,
+                "bc": 128,
+                "backend": "pytorch",
+                "is_causal": True,
+            }
+        )
+        method.calibration_params = {
+            "prefill": {"a": scale_factor, "b": 0.0},
+            "decode": {"a": scale_factor, "b": 0.0},
+        }
+        method.target_sparse_ratio = {"prefill": 0.0, "decode": 0.0}
+
+        sparse_mask, _ = method.calculate_sparsity(scores)
+        if sparse_mask is not None:
+            scores = scores.masked_fill(~sparse_mask, float("-inf"))
+        p = torch.softmax(scores, dim=-1)
+        ref_out = torch.matmul(p, v_4d)
+
+        total = batch * seq_len
+        q_flat = q_4d.permute(0, 2, 1, 3).reshape(total, num_heads, head_dim).contiguous()
+        k_flat = k_4d.permute(0, 2, 1, 3).reshape(total, num_kv_heads, head_dim).contiguous()
+        v_flat = v_4d.permute(0, 2, 1, 3).reshape(total, num_kv_heads, head_dim).contiguous()
+        locs = torch.arange(batch, device="cuda", dtype=torch.int32) * seq_len
+        lens = torch.full((batch,), seq_len, device="cuda", dtype=torch.int32)
+
+        triton_out = attention(
+            q_flat,
+            k_flat,
+            v_flat,
+            locs,
+            lens,
+            seq_len,
+            is_causal=True,
+            softmax_scale=scale,
+            skip_softmax_threshold_scale_prefill=scale_factor,
+        )
+        triton_out_4d = triton_out.view(batch, seq_len, num_heads, head_dim).permute(0, 2, 1, 3)
+
+        torch.testing.assert_close(triton_out_4d, ref_out, rtol=5e-3, atol=5e-3)

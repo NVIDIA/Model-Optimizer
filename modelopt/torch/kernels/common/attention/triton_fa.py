@@ -81,6 +81,95 @@ if "PYTEST_VERSION" in __import__("os").environ:
 
 
 # ---------------------------------------------------------------------------
+# Paged KV cache helpers
+# ---------------------------------------------------------------------------
+@triton.jit
+def _load_paged_k_tile(
+    K_cache,  # [num_blocks, page_size, num_kv_heads, head_dim]
+    Block_table,  # [batch, max_blocks_per_seq]
+    batch_idx,
+    kv_head_idx,
+    kv_start,
+    kv_pos,  # [BLOCK_N] relative positions
+    dim_pos,  # [BLOCK_D]
+    seq_len_kv,
+    stride_kc_block,
+    stride_kc_pos,
+    stride_kc_head,
+    PAGE_SIZE: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    max_blocks_per_seq,
+):
+    """Load K^T tile [BLOCK_D, BLOCK_N] from paged KV cache."""
+    d_mask = dim_pos < HEAD_DIM
+    kv_abs = kv_start + kv_pos  # absolute token positions
+    kv_valid = kv_abs < seq_len_kv
+
+    # Translate token positions -> (page_id, offset_in_page)
+    page_local = kv_abs // PAGE_SIZE
+    offset_in_page = kv_abs % PAGE_SIZE
+    page_global = tl.load(
+        Block_table + batch_idx * max_blocks_per_seq + page_local,
+        mask=kv_valid,
+        other=0,
+    )
+
+    # Load K values: K_cache[page_global, offset_in_page, kv_head_idx, dim]
+    # K^T layout [BLOCK_D, BLOCK_N] for Q @ K^T matmul
+    k_ptrs = (
+        page_global[None, :] * stride_kc_block
+        + offset_in_page[None, :] * stride_kc_pos
+        + kv_head_idx * stride_kc_head
+        + dim_pos[:, None]
+    )
+    return tl.load(K_cache + k_ptrs, mask=kv_valid[None, :] & d_mask[:, None], other=0.0)
+
+
+@triton.jit
+def _load_paged_v_tile(
+    V_cache,  # [num_blocks, page_size, num_kv_heads, head_dim]
+    Block_table,  # [batch, max_blocks_per_seq]
+    batch_idx,
+    kv_head_idx,
+    kv_start,
+    kv_pos,  # [BLOCK_N] relative positions
+    dim_pos,  # [BLOCK_D]
+    seq_len_kv,
+    stride_vc_block,
+    stride_vc_pos,
+    stride_vc_head,
+    PAGE_SIZE: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    max_blocks_per_seq,
+):
+    """Load V tile [BLOCK_N, BLOCK_D] from paged KV cache."""
+    d_mask = dim_pos < HEAD_DIM
+    kv_abs = kv_start + kv_pos
+    kv_valid = kv_abs < seq_len_kv
+
+    page_local = kv_abs // PAGE_SIZE
+    offset_in_page = kv_abs % PAGE_SIZE
+    page_global = tl.load(
+        Block_table + batch_idx * max_blocks_per_seq + page_local,
+        mask=kv_valid,
+        other=0,
+    )
+
+    # V layout [BLOCK_N, BLOCK_D]
+    v_ptrs = (
+        page_global[:, None] * stride_vc_block
+        + offset_in_page[:, None] * stride_vc_pos
+        + kv_head_idx * stride_vc_head
+        + dim_pos[None, :]
+    )
+    return tl.load(V_cache + v_ptrs, mask=kv_valid[:, None] & d_mask[None, :], other=0.0)
+
+
+# ---------------------------------------------------------------------------
 # Masking helper
 # ---------------------------------------------------------------------------
 @triton.jit
@@ -116,6 +205,7 @@ def _attn_fwd(
     K,  # [total_kv, num_kv_heads, head_dim] key tensor
     V,  # [total_kv, num_kv_heads, head_dim] value tensor
     qk_scale,  # softmax_scale * log2(e)
+    sm_scale,  # softmax_scale (1/sqrt(head_dim) by default); used by scale-factor skip-softmax
     b_start_loc,  # [batch] start offset of each Q sequence
     b_seq_len,  # [batch] length of each Q sequence
     b_start_loc_k,  # [batch] start offset of each KV sequence
@@ -145,10 +235,24 @@ def _attn_fwd(
     NUM_SINK_TOKENS: tl.constexpr = 0,  # KV positions before this are kept dense (attention sinks)
     DENSE_WINDOW_SIZE: tl.constexpr = 64,  # Tokens near diagonal kept dense (absolute, BLOCK_N-independent)
     APPLY_SKIP_SOFTMAX: tl.constexpr = False,  # Skip KV tiles with negligible scores
-    SKIP_THRESHOLD_LOG2: tl.constexpr = 0.0,  # log2(lambda) * sm_scale, pre-scaled for comparison on scaled scores
+    SKIP_THRESHOLD_LOG2: tl.constexpr = 0.0,  # Fixed mode: log2(lambda) * sm_scale, pre-scaled for scaled scores
+    USE_SKIP_SCALE_FACTOR: tl.constexpr = False,  # Scale-factor mode: threshold = scale_factor / seq_k per sequence
+    SKIP_THRESHOLD_SCALE_LOG2: tl.constexpr = 0.0,  # Scale-factor mode: log2(scale_factor) * sm_scale
     Sparsity_total=None,  # Optional int64 scalar for counting total tiles (atomic)
     Sparsity_skipped=None,  # Optional int64 scalar for counting skipped tiles (atomic)
     MEASURE_SPARSITY: tl.constexpr = False,  # When True, count total/skipped tiles via atomic adds
+    IS_PAGED: tl.constexpr = False,  # Whether K/V are in paged cache
+    K_cache=None,  # [num_blocks, page_size, num_kv_heads, head_dim] paged K
+    V_cache=None,  # [num_blocks, page_size, num_kv_heads, head_dim] paged V
+    Block_table=None,  # [batch, max_blocks_per_seq] page table
+    stride_kc_block=0,
+    stride_kc_pos=0,
+    stride_kc_head=0,
+    stride_vc_block=0,
+    stride_vc_pos=0,
+    stride_vc_head=0,
+    PAGE_SIZE: tl.constexpr = 16,
+    max_blocks_per_seq=0,
 ):
     # --- Grid: (batch, num_q_heads, num_q_tiles) ---
     # Example: batch=2, num_q_heads=32, seq_len=256, BLOCK_M=128
@@ -167,6 +271,19 @@ def _attn_fwd(
 
     if tile_q * BLOCK_M >= seq_len_q:
         return  # This Q tile is past the sequence end
+
+    # --- Per-program effective skip-softmax threshold (pre-scaled log2 space) ---
+    # Two modes share the same comparison: tile_row_max < (row_max + skip_threshold_log2).
+    # - Fixed mode: threshold = lambda (constant). Pre-computed in Python.
+    # - Scale-factor mode: threshold = scale_factor / seq_k_per_sequence. Subtract
+    #     log2(seq_k) * sm_scale from the pre-computed log2(scale_factor) * sm_scale.
+    if APPLY_SKIP_SOFTMAX:
+        if USE_SKIP_SCALE_FACTOR:
+            skip_threshold_log2 = SKIP_THRESHOLD_SCALE_LOG2 - tl.log2(
+                seq_len_kv.to(tl.float32)
+            ) * sm_scale
+        else:
+            skip_threshold_log2 = SKIP_THRESHOLD_LOG2
 
     # --- Tile position indices ---
     q_pos = tile_q * BLOCK_M + tl.arange(0, BLOCK_M)  # Absolute Q token positions
@@ -195,12 +312,32 @@ def _attn_fwd(
         kv_start = tl.multiple_of(kv_start, BLOCK_N)  # Compiler hint for alignment
 
         # Load K^T [BLOCK_D, BLOCK_N] (transposed layout for Q @ K^T matmul)
-        k_offs = (kv_offset + kv_start + kv_pos[None, :]) * stride_kbs + dim_pos[:, None]
-        k = tl.load(
-            k_base + k_offs,
-            mask=((kv_start + kv_pos[None, :]) < seq_len_kv) & d_mask[:, None],
-            other=0.0,
-        )
+        if IS_PAGED:
+            k = _load_paged_k_tile(
+                K_cache,
+                Block_table,
+                batch_idx,
+                kv_head_idx,
+                kv_start,
+                kv_pos,
+                dim_pos,
+                seq_len_kv,
+                stride_kc_block,
+                stride_kc_pos,
+                stride_kc_head,
+                PAGE_SIZE,
+                BLOCK_N,
+                BLOCK_D,
+                HEAD_DIM,
+                max_blocks_per_seq,
+            )
+        else:
+            k_offs = (kv_offset + kv_start + kv_pos[None, :]) * stride_kbs + dim_pos[:, None]
+            k = tl.load(
+                k_base + k_offs,
+                mask=((kv_start + kv_pos[None, :]) < seq_len_kv) & d_mask[:, None],
+                other=0.0,
+            )
 
         # scores = Q @ K^T * scale  [BLOCK_M, BLOCK_N]
         scores = tl.dot(q, k) * qk_scale
@@ -229,7 +366,7 @@ def _attn_fwd(
             skip_tile = _skip_softmax_decision(
                 scores,
                 row_max,
-                SKIP_THRESHOLD_LOG2,
+                skip_threshold_log2,
                 Sparsity_total,
                 Sparsity_skipped,
                 MEASURE_SPARSITY,
@@ -245,12 +382,32 @@ def _attn_fwd(
             acc = acc * correction[:, None]
 
             # Load V and accumulate
-            v_offs = (kv_offset + kv_start + kv_pos[:, None]) * stride_vbs + dim_pos[None, :]
-            v = tl.load(
-                v_base + v_offs,
-                mask=((kv_start + kv_pos[:, None]) < seq_len_kv) & d_mask[None, :],
-                other=0.0,
-            )
+            if IS_PAGED:
+                v = _load_paged_v_tile(
+                    V_cache,
+                    Block_table,
+                    batch_idx,
+                    kv_head_idx,
+                    kv_start,
+                    kv_pos,
+                    dim_pos,
+                    seq_len_kv,
+                    stride_vc_block,
+                    stride_vc_pos,
+                    stride_vc_head,
+                    PAGE_SIZE,
+                    BLOCK_N,
+                    BLOCK_D,
+                    HEAD_DIM,
+                    max_blocks_per_seq,
+                )
+            else:
+                v_offs = (kv_offset + kv_start + kv_pos[:, None]) * stride_vbs + dim_pos[None, :]
+                v = tl.load(
+                    v_base + v_offs,
+                    mask=((kv_start + kv_pos[:, None]) < seq_len_kv) & d_mask[None, :],
+                    other=0.0,
+                )
             acc = tl.dot(p.to(v.dtype), v, acc)
             row_max = m_new
         # else: tile skipped — no softmax, no V load, no BMM2 for this tile
@@ -358,6 +515,8 @@ def _attn_bwd_dq(
     DENSE_WINDOW_SIZE: tl.constexpr = 64,
     APPLY_SKIP_SOFTMAX: tl.constexpr = False,
     SKIP_THRESHOLD_LOG2: tl.constexpr = 0.0,
+    USE_SKIP_SCALE_FACTOR: tl.constexpr = False,
+    SKIP_THRESHOLD_SCALE_LOG2: tl.constexpr = 0.0,
 ):
     """Phase 3 of backward: compute dQ for one Q tile, looping over KV tiles.
 
@@ -401,6 +560,15 @@ def _attn_bwd_dq(
 
     dq = tl.zeros([BLOCK_M, BLOCK_D], dtype=tl.float32)
     kv_bound = seq_len_kv if not IS_CAUSAL else tl.minimum((tile_q + 1) * BLOCK_M, seq_len_kv)
+
+    # Per-program effective skip-softmax threshold (see forward kernel for derivation).
+    if APPLY_SKIP_SOFTMAX:
+        if USE_SKIP_SCALE_FACTOR:
+            skip_threshold_log2 = SKIP_THRESHOLD_SCALE_LOG2 - tl.log2(
+                seq_len_kv.to(tl.float32)
+            ) * sm_scale
+        else:
+            skip_threshold_log2 = SKIP_THRESHOLD_LOG2
 
     # --- Loop over KV tiles: recompute S, then compute dQ contribution ---
     for kv_start in range(0, kv_bound, BLOCK_N):
@@ -448,7 +616,7 @@ def _attn_bwd_dq(
         # max, so this conservatively zeros out at least what forward skipped.
         if APPLY_SKIP_SOFTMAX:
             tile_row_max = tl.max(scores, 1)
-            can_skip = tile_row_max < (lse + SKIP_THRESHOLD_LOG2)
+            can_skip = tile_row_max < (lse + skip_threshold_log2)
             p = tl.where(can_skip[:, None], 0.0, p)
 
         # dP = dO @ V^T, dS = P * (dP - delta), dQ += dS @ K
@@ -504,6 +672,8 @@ def _attn_bwd_dkdv(
     DENSE_WINDOW_SIZE: tl.constexpr = 64,
     APPLY_SKIP_SOFTMAX: tl.constexpr = False,
     SKIP_THRESHOLD_LOG2: tl.constexpr = 0.0,
+    USE_SKIP_SCALE_FACTOR: tl.constexpr = False,
+    SKIP_THRESHOLD_SCALE_LOG2: tl.constexpr = 0.0,
 ):
     """Phase 2 of backward: compute dK, dV for one KV tile.
 
@@ -546,6 +716,15 @@ def _attn_bwd_dkdv(
     # --- Accumulate dK, dV across all Q tiles ---
     dk = tl.zeros([BLOCK_N, BLOCK_D], dtype=tl.float32)
     dv = tl.zeros([BLOCK_N, BLOCK_D], dtype=tl.float32)
+
+    # Per-program effective skip-softmax threshold (see forward kernel for derivation).
+    if APPLY_SKIP_SOFTMAX:
+        if USE_SKIP_SCALE_FACTOR:
+            skip_threshold_log2 = SKIP_THRESHOLD_SCALE_LOG2 - tl.log2(
+                seq_len_kv.to(tl.float32)
+            ) * sm_scale
+        else:
+            skip_threshold_log2 = SKIP_THRESHOLD_LOG2
 
     n_q_tiles = (seq_len_q + BLOCK_M - 1) // BLOCK_M
     # Causal: Q position i attends to KV 0..i, so this KV tile (at kv_start)
@@ -602,7 +781,7 @@ def _attn_bwd_dkdv(
             # max, so this conservatively zeros out at least what forward skipped.
             if APPLY_SKIP_SOFTMAX:
                 tile_row_max = tl.max(scores, 1)
-                can_skip = tile_row_max < (lse + SKIP_THRESHOLD_LOG2)
+                can_skip = tile_row_max < (lse + skip_threshold_log2)
                 p = tl.where(can_skip[:, None], 0.0, p)
 
             # dV += P^T @ dO
@@ -643,12 +822,20 @@ class _Attention(torch.autograd.Function):
         skip_softmax_threshold,
         skip_softmax_raw_threshold,
         measure_sparsity,
+        skip_softmax_threshold_scale_prefill,
+        skip_softmax_threshold_scale_decode,
+        k_cache,
+        v_cache,
+        block_table,
+        page_size,
     ):
         HEAD_DIM = q.shape[2]
         num_q_heads = q.shape[1]
         num_kv_heads = k.shape[1]
         kv_group_num = num_q_heads // num_kv_heads
         batch = b_seq_len.shape[0]
+
+        is_paged = k_cache is not None
 
         # Prefill: Q/K/V are the same packed tensor, reuse Q offsets for K/V.
         # Decode: K/V is a separate KV cache tensor, caller must pass explicit metadata.
@@ -657,29 +844,67 @@ class _Attention(torch.autograd.Function):
             b_start_loc_k = b_start_loc
             max_input_len_k = max_input_len
 
+        # Paged mode: b_start_loc_k may be None (KV is in paged cache, not contiguous).
+        # Provide a dummy tensor so Triton can compile the tl.load (it won't be used).
+        if b_start_loc_k is None:
+            b_start_loc_k = torch.zeros_like(b_start_loc)
+
         # Pre-multiply scale by log2(e) so the kernel can use exp2()
         # exp(score * sm_scale) = exp2(score * sm_scale * log2(e))
         qk_scale = sm_scale * LOG2E
         # Triton tiles must be powers of 2; pad head dim
         BLOCK_D = triton.next_power_of_2(HEAD_DIM)
 
-        # Skip-softmax threshold in scaled log2 space for the kernel.
-        # Two modes:
-        #   1. raw_threshold: passed directly as skip_threshold_log2 (for testing)
-        #   2. lambda threshold: converted via log2(lambda) * sm_scale
-        if skip_softmax_raw_threshold is not None:
-            apply_skip = True
+        # Skip-softmax: convert threshold to scaled log2 space for the kernel.
+        # The BLASST reference (https://arxiv.org/pdf/2512.12087) checks
+        # ln(lambda) on unscaled scores. Our kernel works in log2-scaled space
+        # (scores pre-multiplied by qk_scale = sm_scale * LOG2E), so we
+        # pre-scale: threshold_scaled = log2(lambda) * sm_scale.
+        #
+        # Three modes (mutually exclusive, listed by precedence):
+        #   - Raw: skip_softmax_raw_threshold passed directly as the kernel's
+        #     ``skip_threshold_log2`` (for testing).
+        #   - Fixed: skip_softmax_threshold = lambda (a constant).
+        #   - Scale-factor: per-phase scale_factor; effective threshold is
+        #     scale_factor / seq_k_per_sequence, computed inside the kernel.
+        #     Phase is inferred here from max_input_len (decode iff == 1),
+        #     matching the FlashSkipSoftmax PyTorch convention.
+        raw_mode = skip_softmax_raw_threshold is not None
+        fixed_mode = skip_softmax_threshold is not None and skip_softmax_threshold > 0.0
+        scale_prefill_set = (
+            skip_softmax_threshold_scale_prefill is not None
+            and skip_softmax_threshold_scale_prefill > 0.0
+        )
+        scale_decode_set = (
+            skip_softmax_threshold_scale_decode is not None
+            and skip_softmax_threshold_scale_decode > 0.0
+        )
+        assert not (fixed_mode and (scale_prefill_set or scale_decode_set)), (
+            "skip_softmax_threshold (fixed mode) is mutually exclusive with "
+            "skip_softmax_threshold_scale_{prefill,decode} (scale-factor mode)."
+        )
+
+        is_decode = max_input_len == 1
+        active_scale = (
+            skip_softmax_threshold_scale_decode if is_decode
+            else skip_softmax_threshold_scale_prefill
+        )
+        use_scale_factor = active_scale is not None and active_scale > 0.0
+        apply_skip = raw_mode or fixed_mode or use_scale_factor
+
+        if raw_mode:
             skip_threshold_log2 = skip_softmax_raw_threshold
-        elif skip_softmax_threshold is not None and skip_softmax_threshold > 0.0:
-            apply_skip = True
-            # The BLASST reference (https://arxiv.org/pdf/2512.12087) checks
-            # ln(lambda) on unscaled scores. Our kernel works in log2-scaled space
-            # (scores pre-multiplied by qk_scale = sm_scale * LOG2E), so we
-            # pre-scale: threshold_scaled = log2(lambda) * sm_scale.
+            skip_threshold_scale_log2 = 0.0
+        elif fixed_mode:
             skip_threshold_log2 = math.log2(skip_softmax_threshold) * sm_scale
+            skip_threshold_scale_log2 = 0.0
+        elif use_scale_factor:
+            skip_threshold_log2 = 0.0
+            skip_threshold_scale_log2 = math.log2(active_scale) * sm_scale
         else:
             apply_skip = False
             skip_threshold_log2 = 0.0
+            skip_threshold_scale_log2 = 0.0
 
         o = torch.empty_like(q)
         lse = torch.empty(q.shape[0], num_q_heads, device=q.device, dtype=torch.float32)
@@ -702,6 +927,7 @@ class _Attention(torch.autograd.Function):
             k,
             v,
             qk_scale,
+            sm_scale,
             b_start_loc,
             b_seq_len,
             b_start_loc_k,
@@ -730,9 +956,23 @@ class _Attention(torch.autograd.Function):
             DENSE_WINDOW_SIZE=dense_window_size,
             APPLY_SKIP_SOFTMAX=apply_skip,
             SKIP_THRESHOLD_LOG2=skip_threshold_log2,
+            USE_SKIP_SCALE_FACTOR=use_scale_factor,
+            SKIP_THRESHOLD_SCALE_LOG2=skip_threshold_scale_log2,
             Sparsity_total=sparsity_total,
             Sparsity_skipped=sparsity_skipped,
             MEASURE_SPARSITY=do_measure,
+            IS_PAGED=is_paged,
+            K_cache=k_cache,
+            V_cache=v_cache,
+            Block_table=block_table,
+            stride_kc_block=k_cache.stride(0) if is_paged else 0,
+            stride_kc_pos=k_cache.stride(1) if is_paged else 0,
+            stride_kc_head=k_cache.stride(2) if is_paged else 0,
+            stride_vc_block=v_cache.stride(0) if is_paged else 0,
+            stride_vc_pos=v_cache.stride(1) if is_paged else 0,
+            stride_vc_head=v_cache.stride(2) if is_paged else 0,
+            PAGE_SIZE=page_size,
+            max_blocks_per_seq=block_table.shape[1] if is_paged else 0,
             # BLOCK_M, BLOCK_N, num_warps, num_stages chosen by autotune
         )
 
@@ -758,6 +998,8 @@ class _Attention(torch.autograd.Function):
         ctx.dense_window_size = dense_window_size
         ctx.apply_skip = apply_skip
         ctx.skip_threshold_log2 = skip_threshold_log2
+        ctx.use_skip_scale_factor = use_scale_factor
+        ctx.skip_threshold_scale_log2 = skip_threshold_scale_log2
         return o
 
     @staticmethod
@@ -838,6 +1080,8 @@ class _Attention(torch.autograd.Function):
             DENSE_WINDOW_SIZE=ctx.dense_window_size,
             APPLY_SKIP_SOFTMAX=ctx.apply_skip,
             SKIP_THRESHOLD_LOG2=ctx.skip_threshold_log2,
+            USE_SKIP_SCALE_FACTOR=ctx.use_skip_scale_factor,
+            SKIP_THRESHOLD_SCALE_LOG2=ctx.skip_threshold_scale_log2,
             num_warps=num_warps,
             num_stages=1,
         )
@@ -863,6 +1107,8 @@ class _Attention(torch.autograd.Function):
             DENSE_WINDOW_SIZE=ctx.dense_window_size,
             APPLY_SKIP_SOFTMAX=ctx.apply_skip,
             SKIP_THRESHOLD_LOG2=ctx.skip_threshold_log2,
+            USE_SKIP_SCALE_FACTOR=ctx.use_skip_scale_factor,
+            SKIP_THRESHOLD_SCALE_LOG2=ctx.skip_threshold_scale_log2,
             num_warps=num_warps,
             num_stages=1,
         )
@@ -871,21 +1117,27 @@ class _Attention(torch.autograd.Function):
             dq,
             dk,
             dv,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
+            None,  # b_start_loc
+            None,  # b_seq_len
+            None,  # max_input_len
+            None,  # is_causal
+            None,  # sm_scale
+            None,  # b_start_loc_k
+            None,  # b_seq_len_k
+            None,  # max_input_len_k
+            None,  # sparsity_n
+            None,  # sparsity_m
+            None,  # num_sink_tokens
+            None,  # dense_window_size
+            None,  # skip_softmax_threshold
+            None,  # skip_softmax_raw_threshold
+            None,  # measure_sparsity
+            None,  # skip_softmax_threshold_scale_prefill
+            None,  # skip_softmax_threshold_scale_decode
+            None,  # k_cache
+            None,  # v_cache
+            None,  # block_table
+            None,  # page_size
         )
 
 
@@ -909,8 +1161,14 @@ def attention(
     skip_softmax_threshold: float | None = None,
     skip_softmax_raw_threshold: float | None = None,
     measure_sparsity: bool = False,
+    skip_softmax_threshold_scale_prefill: float | None = None,
+    skip_softmax_threshold_scale_decode: float | None = None,
+    k_cache: torch.Tensor | None = None,
+    v_cache: torch.Tensor | None = None,
+    block_table: torch.Tensor | None = None,
+    page_size: int = 16,
 ) -> torch.Tensor:
-    """Variable-length flash attention with GQA, autograd, and optional N:M sparse softmax and skip-softmax.
+    """Variable-length flash attention with GQA, autograd, optional sparsity, and paged KV.
 
     Args:
         q: [total_q_tokens, num_q_heads, head_dim]
@@ -933,7 +1191,7 @@ def attention(
             (attention sinks). Absolute token count, BLOCK_N-independent.
         dense_window_size: Tokens near the query diagonal kept dense (local
             attention window). Absolute token count, BLOCK_N-independent.
-            Default 64 (one reference block).
+            Default 64 tokens.
         skip_softmax_threshold: BLASST threshold lambda
             (https://arxiv.org/pdf/2512.12087). Skip KV tiles where
             ``exp(tile_max - running_max) < lambda``, meaning the tile's
@@ -950,6 +1208,23 @@ def attention(
             and skipped tiles via atomic counters. The counts are stored as
             ``_sparsity_total`` and ``_sparsity_skipped`` attributes on the
             returned output tensor.
+        skip_softmax_threshold_scale_prefill: Scale-factor mode (prefill).
+            When set, the effective skip threshold is computed per sequence
+            as ``scale_factor / seq_k`` (matches the FlashSkipSoftmax PyTorch
+            calibrated path: ``a * exp(b * target_sparsity) / seqlen``). Used
+            only when ``max_input_len > 1``. Mutually exclusive with
+            ``skip_softmax_threshold``.
+        skip_softmax_threshold_scale_decode: Scale-factor mode (decode).
+            Same semantics as ``skip_softmax_threshold_scale_prefill`` but
+            applied when ``max_input_len == 1`` (decode). Mutually exclusive
+            with ``skip_softmax_threshold``.
+        k_cache: Paged K cache [num_blocks, page_size, num_kv_heads, head_dim].
+            When provided, K/V are read from paged cache via block_table
+            instead of from contiguous k/v tensors.
+        v_cache: Paged V cache [num_blocks, page_size, num_kv_heads, head_dim].
+        block_table: Page table [batch, max_blocks_per_seq] mapping sequence
+            block indices to global page IDs.
+        page_size: Number of tokens per page in the KV cache.
 
     Returns:
         Output tensor [total_q_tokens, num_q_heads, head_dim].
@@ -975,7 +1250,152 @@ def attention(
         skip_softmax_threshold,
         skip_softmax_raw_threshold,
         measure_sparsity,
+        skip_softmax_threshold_scale_prefill,
+        skip_softmax_threshold_scale_decode,
+        k_cache,
+        v_cache,
+        block_table,
+        page_size,
     )
 
 
-__all__ = ["LOG2E", "_apply_mask", "attention"]
+def attention_with_lse(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    b_start_loc: torch.Tensor,
+    b_seq_len: torch.Tensor,
+    max_input_len: int,
+    is_causal: bool = True,
+    softmax_scale: float | None = None,
+    b_start_loc_k: torch.Tensor | None = None,
+    b_seq_len_k: torch.Tensor | None = None,
+    max_input_len_k: int | None = None,
+    *,
+    sparsity_n: int = 0,
+    sparsity_m: int = 4,
+    num_sink_tokens: int = 0,
+    dense_window_size: int = 64,
+    skip_softmax_threshold: float | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Variable-length flash attention returning both output and LSE.
+
+    Same interface as :func:`attention` but returns ``(output, lse)`` where
+    *lse* is the log-sum-exp in **natural-log** space with shape
+    ``[total_q_tokens, num_q_heads]``.  Intended for inference workloads that
+    need LSE for attention-state merging (e.g. MLA chunked prefill).
+
+    This function does **not** support paged KV cache or autograd — use the
+    contiguous Q/K/V path only.
+
+    Args:
+        q: [total_q_tokens, num_q_heads, head_dim]
+        k: [total_kv_tokens, num_kv_heads, head_dim]
+        v: [total_kv_tokens, num_kv_heads, head_dim]
+        b_start_loc: [batch] start offset of each Q sequence in the flat tensor.
+        b_seq_len: [batch] length of each Q sequence.
+        max_input_len: Maximum Q sequence length (for grid sizing).
+        is_causal: Whether to apply causal masking.
+        softmax_scale: Scale factor (default: 1/sqrt(head_dim)).
+        b_start_loc_k: [batch] start offset for K/V (None = same as Q).
+        b_seq_len_k: [batch] length for K/V (None = same as Q).
+        max_input_len_k: Maximum K/V sequence length (None = same as Q).
+        sparsity_n: N:M sparsity — keep top-N of every M attention scores.
+        sparsity_m: N:M sparsity — group size (4 or 8).
+        num_sink_tokens: KV positions before this index are kept dense.
+        dense_window_size: Tokens near the query diagonal kept dense.
+        skip_softmax_threshold: BLASST threshold lambda.
+
+    Returns:
+        (output, lse):
+            output: [total_q_tokens, num_q_heads, head_dim]
+            lse: [total_q_tokens, num_q_heads] in natural-log space
+    """
+    sm_scale = 1.0 / (q.shape[2] ** 0.5) if softmax_scale is None else softmax_scale
+
+    HEAD_DIM = q.shape[2]
+    num_q_heads = q.shape[1]
+    num_kv_heads = k.shape[1]
+    kv_group_num = num_q_heads // num_kv_heads
+    batch = b_seq_len.shape[0]
+
+    if b_seq_len_k is None:
+        b_seq_len_k = b_seq_len
+        b_start_loc_k = b_start_loc
+
+    if b_start_loc_k is None:
+        b_start_loc_k = torch.zeros_like(b_start_loc)
+
+    qk_scale = sm_scale * LOG2E
+    BLOCK_D = triton.next_power_of_2(HEAD_DIM)
+
+    apply_skip = skip_softmax_threshold is not None and skip_softmax_threshold > 0.0
+    if apply_skip:
+        assert skip_softmax_threshold is not None
+        skip_threshold_log2 = math.log2(skip_softmax_threshold) * sm_scale
+    else:
+        skip_threshold_log2 = 0.0
+
+    o = torch.empty_like(q)
+    lse = torch.empty(q.shape[0], num_q_heads, device=q.device, dtype=torch.float32)
+
+    def grid(META):
+        return (batch, num_q_heads, triton.cdiv(max_input_len, META["BLOCK_M"]))
+
+    _attn_fwd[grid](
+        q,
+        k,
+        v,
+        qk_scale,
+        sm_scale,
+        b_start_loc,
+        b_seq_len,
+        b_start_loc_k,
+        b_seq_len_k,
+        o,
+        lse,
+        q.stride(0),
+        q.stride(1),
+        k.stride(0),
+        k.stride(1),
+        v.stride(0),
+        v.stride(1),
+        o.stride(0),
+        o.stride(1),
+        lse.stride(0),
+        lse.stride(1),
+        N_CTX=max_input_len,
+        kv_group_num=kv_group_num,
+        BLOCK_D=BLOCK_D,
+        IS_CAUSAL=is_causal,
+        HEAD_DIM=HEAD_DIM,
+        STORE_LSE=True,
+        SPARSITY_N=sparsity_n,
+        SPARSITY_M=sparsity_m,
+        NUM_SINK_TOKENS=num_sink_tokens,
+        DENSE_WINDOW_SIZE=dense_window_size,
+        APPLY_SKIP_SOFTMAX=apply_skip,
+        SKIP_THRESHOLD_LOG2=skip_threshold_log2,
+        IS_PAGED=False,
+        K_cache=None,
+        V_cache=None,
+        Block_table=None,
+        stride_kc_block=0,
+        stride_kc_pos=0,
+        stride_kc_head=0,
+        stride_vc_block=0,
+        stride_vc_pos=0,
+        stride_vc_head=0,
+        PAGE_SIZE=16,
+        max_blocks_per_seq=0,
+    )
+
+    # Convert LSE from log2 space to natural-log space.
+    # Kernel stores: row_max + log2(row_sum) where row_max is in log2-scaled space.
+    # Standard LSE = stored_lse * ln(2).
+    lse.mul_(math.log(2))
+
+    return o, lse
+
+
+__all__ = ["LOG2E", "_apply_mask", "attention", "attention_with_lse"]
