@@ -7,7 +7,7 @@
 #
 # Includes:
 #   - MMLU-Pro (knowledge, completions)
-#   - GPQA Diamond (reasoning, chat, 5 repeats)
+#   - GPQA Diamond (reasoning, chat, 32 repeats)
 #   - LiveCodeBench v6 (code, chat, 3 repeats)
 #   - IFBench (instruction following, chat, 8 repeats)
 #
@@ -77,14 +77,14 @@ evaluation:
                 - max_new_tokens
                 - max_completion_tokens
 
-  # Reasoning (chat endpoint, 5 repeats, short)
+  # Reasoning (chat endpoint, 32 repeats, short)
     - name: ns_gpqa
       nemo_evaluator_config:
         config:
           params:
             extra:
               args: ++prompt_config=eval/aai/mcq-4choices
-              num_repeats: 5
+              num_repeats: 32
         target:
           api_endpoint:
             adapter_config:
