@@ -17,6 +17,8 @@ Changelog
 
 - Deprecated GradNAS pruning algorithm as it is not actively maintained and supports very limited and old models. It is recommended to use Minitron or Puzzletron pruning for LLM models. Also deprecates related ``examples/chained_optimizations`` directory.
 
+- Model-specific PTQ ``quant_cfg`` adjustments previously hardcoded in ``examples/llm_ptq/`` (``build_quant_cfg`` / ``mono_quantize``) for gemma, mpt, phi4mm, and Nemotron VL are now opt-in **model-specific recipes** under ``modelopt_recipes/huggingface/<model_type>/ptq/``. Any adjustment specific to a model type or instance must live in that model's recipe; the bare ``--qformat`` path produces only the generic numerics. Pass ``--recipe huggingface/<model_type>/ptq/<recipe>`` to apply the model's recipe. Covers gemma/mpt ``w4a8_awq`` (``awq_lite`` ``alpha_step=1``), gemma ``int8_sq`` (SmoothQuant ``alpha=0.5``), phi4mm speech/audio/image/vision exclusions, and Nemotron VL vision-branch exclusions. All shipped recipes also enable FP8 KV-cache cast. MTP dynamic layer exclusion and ``is_nemotron_vl`` detection remain in Python.
+
 **New Features**
 
 - Add composable ``$import`` system for recipe YAML configs, enabling reusable config snippets referenced via ``{$import: name}`` markers. All built-in PTQ recipes converted to use imports with shared snippets under ``modelopt_recipes/configs/`` (numeric formats, quant_cfg building blocks, presets). See :ref:`composable-imports`.
