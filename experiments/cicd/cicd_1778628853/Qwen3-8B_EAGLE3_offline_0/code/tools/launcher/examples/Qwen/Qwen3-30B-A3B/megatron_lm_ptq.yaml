@@ -1,0 +1,53 @@
+# Qwen3-30B-A3B PTQ quantization (8 GPUs, MoE model).
+#
+# 2-step pipeline: NVFP4 then FP8, each followed by MMLU evaluation.
+# MMLU uses EP for expert parallelism.
+#
+# Usage:
+#   uv run launch.py --yaml examples/Qwen/Qwen3-30B-A3B/megatron_lm_ptq.yaml --yes
+
+job_name: Qwen3-30B-A3B_PTQ
+pipeline:
+  skip: false
+  allow_to_fail: false
+  note:
+
+  task_0:
+    _target_: common.megatron_lm.quantize.task.MegatronLMQuantizeTask
+    config:
+      model: Qwen/Qwen3-30B-A3B
+      quant_cfg: NVFP4_DEFAULT_CFG
+      tp: 1
+      pp: 1
+      ep: 8
+      etp: 1
+      calib_dataset: abisee/cnn_dailymail
+      calib_size: 32
+      mmlu_dataset: cais/mmlu
+      mmlu_lower_bound: 0.75
+      hf_local: /hf-local/
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 8
+      gpus_per_node: 8
+
+  task_1:
+    _target_: common.megatron_lm.quantize.task.MegatronLMQuantizeTask
+    config:
+      model: Qwen/Qwen3-30B-A3B
+      quant_cfg: FP8_DEFAULT_CFG
+      tp: 1
+      pp: 1
+      ep: 8
+      etp: 1
+      calib_dataset: abisee/cnn_dailymail
+      calib_size: 32
+      mmlu_dataset: cais/mmlu
+      mmlu_lower_bound: 0.75
+      hf_local: /hf-local/
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 8
+      gpus_per_node: 8
