@@ -72,22 +72,34 @@ class VLLMModel(Model):
         elif kwargs.get("speculative_algorithm") == "NONE":
             specdec = None
 
+        if specdec is not None and kwargs.get("parallel_drafting"):
+            specdec["parallel_drafting"] = True
+
+        if specdec is not None and kwargs.get("draft_sample_method"):
+            specdec["draft_sample_method"] = kwargs.get("draft_sample_method")
+
         if specdec is None:
             num_speculative_tokens = 1
         else:
             num_speculative_tokens = specdec.get("num_speculative_tokens", 3)
+
+        forward_kwargs = {}
+        # Forward a few select kwargs direct to the engine
+        forward_arg_names = ["max_model_len", "max_num_batched_tokens", "gpu_memory_utilization",
+        "enable_chunked_prefill", "quantization", "tensor_parallel_size", "trust_remote_code",
+        "async_scheduling", "enforce_eager"]
+        for arg_name in forward_arg_names:
+            if kwargs.get(arg_name) is not None:
+                forward_kwargs[arg_name] = kwargs.get(arg_name)
         engine_args = AsyncEngineArgs(
             model=model_dir,
             tokenizer=kwargs.get("tokenizer_path"),
-            trust_remote_code=kwargs.get("trust_remote_code", False),
-            tensor_parallel_size=kwargs.get("tensor_parallel_size", 1),
             enable_expert_parallel=kwargs.get("moe_expert_parallel_size", 1) > 1,
             enable_prefix_caching=kwargs.get("prefix_cache", False),
             speculative_config=specdec,
-            max_num_seqs=max_concurrent_requests * num_speculative_tokens,
+            max_num_seqs=kwargs.get("max_num_seqs") or (max_concurrent_requests * num_speculative_tokens),
             skip_tokenizer_init=False,
-            async_scheduling=kwargs.get("async_scheduling", True),
-            enforce_eager=False,
+            **forward_kwargs
         )
         self.model = AsyncLLM.from_engine_args(engine_args)
         self.sampling_kwargs = sampling_kwargs
