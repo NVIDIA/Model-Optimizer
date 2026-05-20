@@ -16,11 +16,9 @@ puzzle_dir: /workspace/puzzle_dir
 calc_subblock_stats:
   runtime_stats:
     enabled: true
-    synth_dataset_num_requests: 32
     backend: vllm
     num_warmup_iters: 2
     num_iters: 10
-    batch_size: 1
 
 # MIP memory constraint (in MiB)
 mip:

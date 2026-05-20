@@ -16,61 +16,72 @@
 
 This module provides the integration logic to empirically benchmark subblock
 runtime statistics within transformer architectures using the vLLM latency
-benchmark. It defines helper functions and utilities to invoke the vLLM
-latency benchmark programmatically (as a library) and collect runtime
-statistics, given a prepared model directory and a benchmarking configuration.
+benchmark. Each invocation is launched in a dedicated subprocess so that GPU
+memory and CUDA state are fully reclaimed when the subprocess exits, allowing
+many sequential benchmarks to run in a single Python session without leaking.
 
 Usage:
     - Call `run_vllm_latency_benchmark` with a model path and a
       `RuntimeConfig` instance to run a latency benchmark and
       return the average latency for the configuration (in milliseconds).
-
-This is used internally by ModelOpt NAS to benchmark different subblock
-configurations for search and scoring, enabling data-driven NAS for latency-optimized architectures.
 """
 
-import argparse
 import json
-import os
+import subprocess
 from pathlib import Path
 
 from modelopt.torch.nas.subblock_stats.runtime_utils import RuntimeConfig
 
 
-def run_vllm_latency_benchmark(model_path: Path, runtime_config: RuntimeConfig):
-    """Run ``vllm bench latency`` and return the average latency in milliseconds."""
-    from vllm.benchmarks.latency import main as vllm_latency_main
+def run_vllm_latency_benchmark(model_path: Path, runtime_config: RuntimeConfig) -> float:
+    """Run ``vllm bench latency`` in a fresh subprocess and return avg latency in ms.
 
+    Spawning a subprocess per call gives OS-level isolation: GPU memory, CUDA
+    context, and vLLM engine state are fully released on subprocess exit, so
+    many calls in one parent process do not accumulate.
+    """
     output_json_path = model_path / "vllm_latency_benchmark.json"
+    max_model_len = runtime_config.prefill_seq_len + runtime_config.generation_seq_len
 
-    # Use vLLM latency benchmark as a library.
+    cmd = [
+        "vllm",
+        "bench",
+        "latency",
+        "--model",
+        str(model_path),
+        "--input-len",
+        str(runtime_config.prefill_seq_len),
+        "--output-len",
+        str(runtime_config.generation_seq_len),
+        "--batch-size",
+        "1",
+        "--output-json",
+        str(output_json_path),
+        "--max-model-len",
+        str(max_model_len),
+        "--num-iters-warmup",
+        str(runtime_config.num_warmup_iters),
+        "--num-iters",
+        str(runtime_config.num_iters),
+        "--max-num-seqs",
+        "1",
+        "--tensor-parallel-size",
+        "1",
+        "--pipeline-parallel-size",
+        "1",
+        "--distributed-executor-backend",
+        "external_launcher",
+        # vLLM defaults to 0.9; keep the per-run budget modest so the parent
+        # process always has headroom for the next benchmark.
+        "--gpu-memory-utilization",
+        "0.3",
+        # Required for accurate per-block runtime stats.
+        "--optimization-level",
+        "0",
+    ]
 
-    # Create a mock argparse.Namespace similar to what is parsed by vllm.benchmarks.latency.main
-    args_ns = argparse.Namespace()
-
-    # Populate the Namespace with all required attributes
-    args_ns.model = str(model_path)
-    args_ns.input_len = runtime_config.prefill_seq_len
-    args_ns.output_len = runtime_config.generation_seq_len
-    args_ns.batch_size = 1
-    args_ns.output_json = str(output_json_path)
-    args_ns.max_model_len = runtime_config.prefill_seq_len + runtime_config.generation_seq_len
-    args_ns.num_iters_warmup = runtime_config.num_warmup_iters
-    args_ns.num_iters = runtime_config.num_iters
-    args_ns.max_num_seqs = 1
-    args_ns.distributed_executor_backend = (
-        "external_launcher"  # Running vLLM with torchrun so need to indicate that.
-    )
-    args_ns.tensor_parallel_size = 1
-    args_ns.pipeline_parallel_size = 1
-    args_ns.optimization_level = 0  # This is required to make the stats accurate.
-    args_ns.n = 1
-    args_ns.disable_detokenize = False
-
-    os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
-    vllm_latency_main(args_ns)
+    subprocess.run(cmd, check=True)
 
     with open(output_json_path) as f:
         vllm_results = json.load(f)
-    print(vllm_results)
-    return vllm_results["avg_latency"] * 1000  # convert to milliseconds
+    return vllm_results["avg_latency"] * 1000  # seconds -> milliseconds
