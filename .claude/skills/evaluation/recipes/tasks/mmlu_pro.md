@@ -33,3 +33,32 @@ Use this inside the top-level `evaluation.tasks` list:
 ```
 
 ## Score Extraction
+
+```text
+results.groups.mmlu_pro.metrics.pass@1.scores.symbolic_correct.value
+```
+
+`num_repeats: 1` is the standard setting, so `results.yml` does not include
+an across-run stderr. The score is computed over a single pass of the
+dataset (`stats.count` equals `num_problems`).
+
+```python
+import yaml
+
+
+def extract_mmlu_pro_score(path):
+    data = yaml.safe_load(open(path))
+    scores = data["results"]["groups"]["mmlu_pro"]["metrics"]["pass@1"]["scores"]
+    entry = scores["symbolic_correct"]
+    accuracy = entry["value"]
+    n = entry.get("stats", {}).get("count")
+
+    return {
+        "group": "mmlu_pro",
+        "metric": "pass@1",
+        "score_key": "symbolic_correct",
+        "accuracy": accuracy,
+        "stderr": None,
+        "n": n,
+    }
+```

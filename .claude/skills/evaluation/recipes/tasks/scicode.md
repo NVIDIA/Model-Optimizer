@@ -86,7 +86,6 @@ The helper below also supports GPQA's matching layout, where accuracy comes from
 
 ```python
 import re
-import sys
 import yaml
 
 
@@ -143,9 +142,4 @@ def extract_score(path, group="scicode"):
         "stderr": stderr,
     }
 
-
-if __name__ == "__main__":
-    path = sys.argv[1]
-    group = sys.argv[2] if len(sys.argv) > 2 else "scicode"
-    print(extract_score(path, group))
 ```
