@@ -293,13 +293,10 @@ class QuantRecipeHparam(Hparam):
                 total_score += importance.cpu().item()
                 continue
 
-            if parallel_state.expert_model_parallel_group.is_initialized():
-                # TODO: Support expert model parallelism for score estimation
-                warnings.warn("AutoQuantize does not support expert model parallelism yet.")
             importance = importance.cpu()
             importance = DistributedProcessGroup.get_dist_syncd_obj(
                 importance,
-                [parallel_state.tensor_parallel_group, parallel_state.data_parallel_group],
+                [parallel_state.tensor_parallel_group, parallel_state.data_parallel_group, parallel_state.expert_model_parallel_group],
                 sum,
             )
             total_score += importance.item()
@@ -320,13 +317,9 @@ class QuantRecipeHparam(Hparam):
                 cost += weight_size * recipe.compression
                 continue
 
-            if parallel_state.expert_model_parallel_group.is_initialized():
-                # TODO: Support expert model parallelism
-                warnings.warn("AutoQuantize does not support expert model parallelism yet.")
-
             weight_size = DistributedProcessGroup.get_dist_syncd_obj(
                 weight_size,
-                [parallel_state.tensor_parallel_group],
+                [parallel_state.tensor_parallel_group, parallel_state.expert_model_parallel_group],
                 sum,
             )
 
@@ -364,6 +357,8 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         # gate_proj, up_proj, down_proj for Qwen3 like MoE models
         r"^(.*?\.mlp\.experts)\.\d+\.(gate_proj|up_proj|down_proj)$",
         r"^(.*?\.mixer\.experts)\.\d+\.(up_proj|down_proj)$",  # NemotronH MoE experts
+        # NemotronH MoE experts in MCore naming (linear_fc1=gate+up fused, linear_fc2=down)
+        r"^(.*?\.mlp\.experts\.local_experts)\.\d+\.(linear_fc1|linear_fc2)$",
         r"^(.*?)\.(gate_proj|up_proj)$",  # gate_proj, up_proj for llama like models
         r"^(.*?)\.(\d+\.(w1|w2|w3))$",  # mixtral experts
         r"^(.*?)\.((w1_linear|w2_linear|w3_linear)\.\d+)$",  # dbrx experts
