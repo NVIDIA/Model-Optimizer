@@ -8,7 +8,7 @@
 - Run time: Long
 - Samples: 3
 - Requires: `HF_TOKEN`, `JUDGE_API_KEY`
-- Reference: https://docs.nvidia.com/nemo/evaluator/latest/evaluation/benchmarks/catalog/all/harnesses/AA-LCR.html
+- Reference: <https://docs.nvidia.com/nemo/evaluator/latest/evaluation/benchmarks/catalog/all/harnesses/AA-LCR.html>
 
 ## Params
 
