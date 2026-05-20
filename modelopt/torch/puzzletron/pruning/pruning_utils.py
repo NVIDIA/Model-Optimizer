@@ -67,24 +67,8 @@ class HiddenSizeInitMode(Enum):
     CopyAsIs = "CopyAsIs"
 
 
-def _lm_attrs(config):
-    """Return the language-model sub-config for VL configs, else the config itself.
-
-    VL configs nest language-model fields like ``num_attention_heads``, ``head_dim``,
-    and ``hidden_size`` under a sub-config. The attribute name varies by family —
-    ``text_config`` (Qwen3-VL, Llava, Idefics), ``language_config`` (Llama-4 and a
-    handful of others), and ``llm_config`` (InternVL and friends) are all common.
-    Probe each before falling back to the raw config.
-    """
-    for attr in ("text_config", "language_config", "llm_config"):
-        sub = getattr(config, attr, None)
-        if sub is not None:
-            return sub
-    return config
-
-
-def _lm_head_dim(config) -> int:
-    lm_config = _lm_attrs(config)
+def _lm_head_dim(config, descriptor: Type[ModelDescriptor]) -> int:
+    lm_config = descriptor.get_language_model_config(config)
     head_dim = getattr(lm_config, "head_dim", None)
     if head_dim is not None:
         return head_dim
@@ -239,6 +223,7 @@ def _init_attention_weights(
     layer_idx,
     new_state_dict,
     new_config,
+    descriptor,
     original_state_dict,
     q_key,
     k_key,
@@ -249,8 +234,8 @@ def _init_attention_weights(
     head_size,
     mlp_init_config,
 ):
-    new_lm = _lm_attrs(new_config)
-    orig_lm = _lm_attrs(original_config)
+    new_lm = descriptor.get_language_model_config(new_config)
+    orig_lm = descriptor.get_language_model_config(original_config)
     assert new_lm.num_attention_heads == orig_lm.num_attention_heads, (
         f"({new_lm.num_attention_heads=}) != ({orig_lm.num_attention_heads=})"
     )
@@ -390,6 +375,7 @@ def _init_attention_biases(
     layer_idx,
     new_state_dict,
     new_config,
+    descriptor,
     original_state_dict,
     q_key,
     k_key,
@@ -400,8 +386,8 @@ def _init_attention_biases(
     head_size,
     mlp_init_config,
 ):
-    new_lm = _lm_attrs(new_config)
-    orig_lm = _lm_attrs(original_config)
+    new_lm = descriptor.get_language_model_config(new_config)
+    orig_lm = descriptor.get_language_model_config(original_config)
     assert new_lm.num_attention_heads == orig_lm.num_attention_heads, (
         f"({new_lm.num_attention_heads=}) != ({orig_lm.num_attention_heads=})"
     )

@@ -18,13 +18,31 @@ from types import SimpleNamespace
 from modelopt.torch.puzzletron.pruning.pruning_utils import _lm_head_dim
 
 
-def test_lm_head_dim_uses_explicit_nested_head_dim():
+class DecoderConfigDescriptor:
+    @staticmethod
+    def get_language_model_config(config):
+        return config.decoder_config
+
+
+class IdentityDescriptor:
+    @staticmethod
+    def get_language_model_config(config):
+        return config
+
+
+def test_lm_head_dim_uses_descriptor_selected_config():
     cfg = SimpleNamespace(
-        text_config=SimpleNamespace(head_dim=96, hidden_size=3072, num_attention_heads=32)
+        decoder_config=SimpleNamespace(head_dim=96, hidden_size=3072, num_attention_heads=32),
+        text_config=SimpleNamespace(head_dim=48, hidden_size=1536, num_attention_heads=32),
     )
-    assert _lm_head_dim(cfg) == 96
+    assert _lm_head_dim(cfg, DecoderConfigDescriptor) == 96
 
 
 def test_lm_head_dim_falls_back_to_hidden_size_over_heads():
-    cfg = SimpleNamespace(text_config=SimpleNamespace(hidden_size=3072, num_attention_heads=32))
-    assert _lm_head_dim(cfg) == 96
+    cfg = SimpleNamespace(decoder_config=SimpleNamespace(hidden_size=3072, num_attention_heads=32))
+    assert _lm_head_dim(cfg, DecoderConfigDescriptor) == 96
+
+
+def test_lm_head_dim_uses_default_lm_config():
+    cfg = SimpleNamespace(head_dim=96, hidden_size=3072, num_attention_heads=32)
+    assert _lm_head_dim(cfg, IdentityDescriptor) == 96
