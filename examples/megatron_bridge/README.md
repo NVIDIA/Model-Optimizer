@@ -102,7 +102,7 @@ torchrun --nproc_per_node 2 prune_minitron.py \
     --hf_model_name_or_path Qwen/Qwen3-8B \
     --prune_target_memory_mb 12288 \
     --seq_length 4096 \
-    --calib_mbs 1 \
+    --calib_batch_size 1 \
     --output_hf_path /tmp/Qwen3-8B-Pruned-12GB
 ```
 

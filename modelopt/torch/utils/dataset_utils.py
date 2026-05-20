@@ -563,7 +563,7 @@ def get_dataset_dataloader(
     batch_size: int = 1,
     num_samples: int | list[int] = 512,
     max_sample_length: int = 512,
-    device: torch.device | None = None,
+    device: torch.device | str | None = None,
     include_labels: bool = False,
     apply_chat_template: bool = False,
 ) -> DataLoader:

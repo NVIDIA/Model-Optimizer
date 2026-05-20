@@ -90,6 +90,18 @@ class SandboxTask:
     yaml_file: str = None
     skip: bool = False
 
+    def materialize_from_config(self):
+        """Hook for typed-task subclasses to derive script/args/environment from a typed config.
+
+        SandboxPipeline.__post_init__ calls this on every task after Fiddle has finished
+        building all task fields. Subclasses (e.g. MegatronLMQuantizeTask) override this to
+        expand a high-level `config` field into the plain SandboxTask fields. The reason
+        the work doesn't live in __post_init__ is that under nemo_run/Fiddle, dataclass
+        __post_init__ runs before nested fields like `config` are populated, so any state
+        derived from `config` would be computed against None and lost. Calling explicitly
+        from the pipeline guarantees we run after the build is complete.
+        """
+
 
 @dataclass
 class SandboxTask0(SandboxTask):
@@ -184,6 +196,11 @@ class SandboxPipeline:
                     create_task_from_yaml(yaml_file=yf, factory_lookup=lookup)
                     for yf in self.task_configs
                 ]
+
+        # Expand typed-task configs into plain script/args/environment fields. Must run
+        # before global_vars resolution so interpolation also covers values produced here.
+        for task in self.tasks:
+            task.materialize_from_config()
 
         if self.global_vars is not None:
             global_vars_dict = {

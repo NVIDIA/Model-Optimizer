@@ -22,6 +22,8 @@ We mock run.SSHTunnel and run.SlurmExecutor to verify the arguments passed.
 
 from unittest.mock import MagicMock, patch
 
+from core import build_slurm_executor
+
 
 class TestBuildSlurmExecutor:
     """Tests for build_slurm_executor mount construction and executor params."""
@@ -29,8 +31,6 @@ class TestBuildSlurmExecutor:
     @patch("core.run.SlurmExecutor")
     @patch("core.run.SSHTunnel")
     def test_scratch_and_modelopt_mounts(self, mock_tunnel, mock_executor):
-        from core import build_slurm_executor
-
         mock_tunnel.return_value = MagicMock()
 
         slurm_config = MagicMock(
@@ -74,8 +74,6 @@ class TestBuildSlurmExecutor:
     @patch("core.run.SlurmExecutor")
     @patch("core.run.SSHTunnel")
     def test_scratch_path_uses_experiment_title(self, mock_tunnel, mock_executor):
-        from core import build_slurm_executor
-
         mock_tunnel.return_value = MagicMock()
 
         slurm_config = MagicMock(
@@ -111,8 +109,6 @@ class TestBuildSlurmExecutor:
     @patch("core.run.SlurmExecutor")
     @patch("core.run.SSHTunnel")
     def test_tunnel_created_with_correct_params(self, mock_tunnel, mock_executor):
-        from core import build_slurm_executor
-
         mock_tunnel.return_value = MagicMock()
 
         slurm_config = MagicMock(
@@ -151,8 +147,6 @@ class TestBuildSlurmExecutor:
     @patch("core.run.SlurmExecutor")
     @patch("core.run.SSHTunnel")
     def test_executor_params(self, mock_tunnel, mock_executor):
-        from core import build_slurm_executor
-
         mock_tunnel.return_value = MagicMock()
 
         slurm_config = MagicMock(
@@ -198,8 +192,6 @@ class TestBuildSlurmExecutor:
     @patch("core.run.SlurmExecutor")
     @patch("core.run.SSHTunnel")
     def test_none_container_mounts_handled(self, mock_tunnel, mock_executor):
-        from core import build_slurm_executor
-
         mock_tunnel.return_value = MagicMock()
 
         slurm_config = MagicMock(
