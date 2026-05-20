@@ -152,23 +152,94 @@ the layer named ``lm_head``,  you can create a custom config and quantize your m
 
 import copy
 import warnings
-from typing import Any, Literal, cast
+from collections.abc import Mapping, Sequence
+from typing import Any, Literal
 
 from pydantic import AliasChoices, ValidationInfo, field_validator, model_validator
-from typing_extensions import Required, TypedDict
 
 from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
 from modelopt.torch.opt.config_loader import load_config
 from modelopt.torch.utils.network import ConstructorLike
 
 
-class QuantizerCfgEntry(TypedDict, total=False):
+class QuantizerCfgEntry(ModeloptBaseConfig):
     """A single entry in a ``quant_cfg`` list."""
 
-    quantizer_name: Required[str]  # matched against quantizer module names
-    parent_class: str | None  # optional; filters by pytorch module class name (e.g. "nn.Linear")
-    cfg: dict[str, Any] | list[dict[str, Any]] | None  # quantizer attribute config(s)
-    enable: bool | None  # toggles matched quantizers on/off; independent of cfg
+    quantizer_name: str = ModeloptField(
+        default=...,
+        title="Quantizer name pattern.",
+        description="Glob pattern matched against quantizer module names.",
+    )
+    parent_class: str | None = ModeloptField(
+        default=None,
+        title="Optional parent-class filter.",
+        description="If provided, only quantizers whose parent module matches this PyTorch class "
+        "name (e.g. ``'nn.Linear'``) are affected.",
+    )
+    cfg: "QuantizerAttributeConfig | list[QuantizerAttributeConfig] | None" = ModeloptField(
+        default=None,
+        title="Quantizer attribute config.",
+        description="A :class:`QuantizerAttributeConfig` (or a mapping that validates as one), "
+        "or a list of such for sequential quantizers.  ``None`` leaves the existing attribute "
+        "config untouched.",
+    )
+    enable: bool = ModeloptField(
+        default=True,
+        title="Enable the quantizer.",
+        description="Toggle matched quantizers on/off; independent of ``cfg``.",
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_cfg_shape(cls, values):
+        """Pre-validation shape rules for ``cfg``.
+
+        Runs against the raw input mapping, before pydantic coerces ``cfg`` into a
+        :class:`QuantizerAttributeConfig` (which would fill in schema defaults and erase the
+        distinction between "user typed nothing" and "user typed `{}`").  Two rules:
+
+        1. ``enable=False`` with an empty ``cfg`` — empty dict, empty list, or list of empty
+           dicts — is normalized to ``cfg=None``.  Downstream applies any non-``None`` ``cfg``
+           as a full quantizer-attribute replacement, so without this an entry like
+           ``{cfg: {}, enable: False}`` would reset attributes to schema defaults and a later
+           re-enable would bring the quantizer back with defaults instead of its original config.
+
+        2. ``enable=True`` (explicit or implicit) with an empty ``cfg`` — same shapes — is
+           rejected.  Pydantic would otherwise coerce ``{}`` into ``QuantizerAttributeConfig()``
+           with all defaults, silently turning a likely typo (``cfg: {}``) into "quantize with
+           schema defaults."  Callers who really want defaults should drop ``cfg`` entirely and
+           rely on ``enable=True``; an empty ``cfg`` always indicates missing input.
+        """
+        if not isinstance(values, dict):
+            return values
+        cfg = values.get("cfg")
+        cfg_is_empty = (isinstance(cfg, dict) and len(cfg) == 0) or (
+            isinstance(cfg, list)
+            and (len(cfg) == 0 or all(isinstance(item, dict) and len(item) == 0 for item in cfg))
+        )
+        if cfg_is_empty:
+            if values.get("enable") is False:
+                values = {**values, "cfg": None}
+            else:
+                raise ValueError(
+                    f"QuantizerCfgEntry 'cfg' must specify at least one quantizer attribute; "
+                    f"got an empty mapping/list for quantizer "
+                    f"{values.get('quantizer_name')!r}.  To keep existing attributes, drop "
+                    f"'cfg' and rely on 'enable=True'; to disable, set 'enable=False'."
+                )
+        return values
+
+    @model_validator(mode="after")
+    def _validate_instruction(self):
+        """Reject entries that carry no instruction beyond the path selector."""
+        fields_set = self.model_fields_set
+        if "cfg" not in fields_set and "enable" not in fields_set:
+            raise ValueError(
+                f"QuantizerCfgEntry must specify 'cfg', 'enable', or both. An entry with only "
+                f"'quantizer_name'={self.quantizer_name!r} has no effect (implicit enable=True "
+                "is not allowed; set it explicitly)."
+            )
+        return self
 
 
 def find_quant_cfg_entry_by_path(
@@ -197,7 +268,7 @@ def find_quant_cfg_entry_by_path(
     """
     result = None
     for entry in quant_cfg_list:
-        if isinstance(entry, dict) and entry.get("quantizer_name") == quantizer_name:
+        if entry.get("quantizer_name") == quantizer_name:
             result = entry
     if result is None:
         raise KeyError(f"No quant_cfg entry with quantizer_name={quantizer_name!r}")
@@ -930,13 +1001,28 @@ class GPTQCalibConfig(QuantizeAlgorithmConfig):
 QuantizeQuantCfgType = list[QuantizerCfgEntry]
 QuantizerCfgListConfig = QuantizeQuantCfgType
 
+# Pre-normalization input shape: either a sequence of already-validated
+# :class:`QuantizerCfgEntry` instances, or a sequence of raw mappings (any of the legacy /
+# new dict forms).  Splitting the union into two ``Sequence[...]`` arms — rather than
+# ``Sequence[QuantizerCfgEntry | Mapping[str, Any]]`` — keeps each arm covariant in its
+# element type, so callers can pass ``list[QuantizerCfgEntry]`` or ``list[dict]`` without
+# tripping invariance.
+RawQuantizeQuantCfgType = Sequence[QuantizerCfgEntry] | Sequence[Mapping[str, Any]]
+
+# Legacy flat-dict input shape (``{"*": ..., "*weight_quantizer": ...}``).  Accepted by
+# ``normalize_quant_cfg_list`` for backward compatibility but emits a DeprecationWarning;
+# new code should use a list of :class:`QuantizerCfgEntry`-shaped entries instead.
+DeprecatedQuantCfgType = Mapping[str, Any]
+
 _QuantizeAlgoCfgType = str | dict | QuantizeAlgorithmConfig | None
 
 QuantizeAlgoCfgType = _QuantizeAlgoCfgType | list[_QuantizeAlgoCfgType] | None
 
 
-def normalize_quant_cfg_list(v: dict | list) -> list[QuantizerCfgEntry]:
-    """Normalize a raw quant_cfg into a list of :class:`QuantizerCfgEntry` dicts.
+def normalize_quant_cfg_list(
+    v: RawQuantizeQuantCfgType | DeprecatedQuantCfgType,
+) -> list[QuantizerCfgEntry]:
+    """Normalize a raw quant_cfg into a list of :class:`QuantizerCfgEntry` instances.
 
     Supports the following input forms:
 
@@ -951,35 +1037,19 @@ def normalize_quant_cfg_list(v: dict | list) -> list[QuantizerCfgEntry]:
     - Legacy ``nn.*``-scoped format: ``{"nn.<Class>": {"<quantizer_name>": <cfg>}}`` — converted
       to a new-format entry with ``parent_class`` set.
 
-    **Validation** — an entry is rejected if it carries no instruction, i.e. it specifies neither
-    ``cfg`` nor ``enable``.  Concretely, the following are invalid:
-
-    - An empty entry ``{}``.
-    - An entry with only ``quantizer_name`` and no other keys — the only effect would be an
-      implicit ``enable=True``, which must be stated explicitly.
-    - An entry with ``enable=True`` (explicit or implicit) whose ``cfg`` is not a non-empty
-      ``dict`` or ``list`` — e.g. ``{"quantizer_name": "*", "cfg": {}}`` or
-      ``{"quantizer_name": "*", "cfg": 42}``.  An enabled quantizer must have a valid
-      configuration.
-
-    **Normalization** — after conversion and validation every entry is put into canonical form:
-
-    - ``enable`` is set to ``True`` if not explicitly specified.
-    - ``cfg`` is set to ``None`` if not present in the entry.
-
-    Every returned entry is therefore guaranteed to have the keys ``quantizer_name``, ``enable``,
-    and ``cfg`` (plus optionally ``parent_class``).
+    Each normalized dict is then constructed into a :class:`QuantizerCfgEntry`, whose own
+    validator enforces that every entry specifies ``cfg``, ``enable``, or both, and that any
+    ``cfg`` for an enabled quantizer is a non-empty dict or non-empty list of non-empty dicts.
 
     Args:
         v: A list of raw quant_cfg entries in any supported format, or a legacy flat dict.
 
     Returns:
-        A list of :class:`QuantizerCfgEntry` dicts in canonical normalized form.
+        A list of validated :class:`QuantizerCfgEntry` instances.
 
     Raises:
-        ValueError: If any entry has only ``quantizer_name`` with neither ``cfg`` nor ``enable``,
-            if ``enable=True`` with an empty or non-dict/list ``cfg``, or if the entry format
-            is not recognized.
+        ValueError: If any entry's shape is not recognized, or if it fails
+            :class:`QuantizerCfgEntry` validation (missing instruction or invalid ``cfg``).
     """
 
     def _warn_legacy():
@@ -993,26 +1063,33 @@ def normalize_quant_cfg_list(v: dict | list) -> list[QuantizerCfgEntry]:
         )
 
     # Legacy flat-dict format: {"*": {...}, "*weight_quantizer": {...}} → list of single-key dicts.
-    if isinstance(v, dict):
+    if isinstance(v, Mapping):
         _warn_legacy()
         v = [{k: val} for k, val in v.items()]
+    elif not isinstance(v, Sequence) or isinstance(v, (str, bytes)):
+        raise ValueError(
+            f"quant_cfg must be a sequence of entries (or a legacy flat mapping), got "
+            f"{type(v).__name__}: {v!r}."
+        )
 
-    def _dict_to_entry(key: str, value) -> list[QuantizerCfgEntry]:
-        """Convert a single legacy key-value pair to one or more QuantizerCfgEntry dicts."""
+    def _dict_to_entry(key: str, value) -> list[dict[str, Any]]:
+        """Convert a single legacy key-value pair to one or more entry dicts."""
         # Legacy "default" key was a catch-all applied as "*" in the old conversion code.
         if key == "default":
             key = "*"
 
         if isinstance(key, str) and key.startswith("nn."):
-            if not isinstance(value, dict):
-                raise ValueError(f"For 'nn.*' scoped format, value must be a dict, got {value!r}")
+            if not isinstance(value, Mapping):
+                raise ValueError(
+                    f"For 'nn.*' scoped format, value must be a mapping, got {value!r}"
+                )
             # Support multi-key nn.*-scoped dicts by emitting one entry per sub-key.
-            entries: list[QuantizerCfgEntry] = []
+            entries: list[dict[str, Any]] = []
             for q_path, sub_cfg in value.items():
                 sub_cfg = dict(sub_cfg)
                 enable = sub_cfg.pop("enable", None)
                 cfg = sub_cfg or None
-                entry: QuantizerCfgEntry = {
+                entry: dict[str, Any] = {
                     "parent_class": key,
                     "quantizer_name": q_path,
                     "cfg": cfg,
@@ -1022,7 +1099,7 @@ def normalize_quant_cfg_list(v: dict | list) -> list[QuantizerCfgEntry]:
                 entries.append(entry)
             return entries
         else:
-            if isinstance(value, dict):
+            if isinstance(value, Mapping):
                 cfg = {k: val for k, val in value.items() if k != "enable"} or None
                 enable = value.get("enable")
             else:
@@ -1036,15 +1113,21 @@ def normalize_quant_cfg_list(v: dict | list) -> list[QuantizerCfgEntry]:
     result: list[QuantizerCfgEntry] = []
     _warned_legacy = False
     for raw in v:
-        if isinstance(raw, dict) and "quantizer_name" in raw:
-            entries = [dict(raw)]  # copy to avoid mutating caller's data
-        elif isinstance(raw, dict) and len(raw) == 1:
+        # Already-validated QuantizerCfgEntry instances (e.g. produced by load_config on a
+        # snippet schematized with `# modelopt-schema: QuantizerCfgEntry`, then spread into
+        # a quant_cfg list) are passed through unchanged.
+        if isinstance(raw, QuantizerCfgEntry):
+            result.append(raw)
+            continue
+        if isinstance(raw, Mapping) and "quantizer_name" in raw:
+            entries: list[dict[str, Any]] = [dict(raw)]  # copy to avoid mutating caller's data
+        elif isinstance(raw, Mapping) and len(raw) == 1:
             key, val = next(iter(raw.items()))
             entries = [dict(e) for e in _dict_to_entry(key, val)]
             if not _warned_legacy:
                 _warn_legacy()
                 _warned_legacy = True
-        elif isinstance(raw, dict) and len(raw) > 1 and any(k.startswith("nn.") for k in raw):
+        elif isinstance(raw, Mapping) and len(raw) > 1 and any(k.startswith("nn.") for k in raw):
             # Legacy flat dict with nn.*-scoped keys mixed with other keys — expand all pairs.
             entries = []
             for k, val in raw.items():
@@ -1055,42 +1138,10 @@ def normalize_quant_cfg_list(v: dict | list) -> list[QuantizerCfgEntry]:
         else:
             raise ValueError(f"Invalid quant_cfg entry: {raw!r}.")
 
-        for entry in entries:
-            # Validate: must carry at least one instruction beyond the path selector.
-            if "cfg" not in entry and "enable" not in entry:
-                raise ValueError(
-                    f"Invalid quant_cfg entry: {raw!r} — each entry must specify 'cfg', 'enable', "
-                    "or both. An entry with only 'quantizer_name' has no effect (implicit "
-                    "enable=True is not allowed; set it explicitly)."
-                )
-
-            # Validate: when cfg is present and enable=True, cfg must be a non-empty
-            # dict or list.  An empty cfg would attempt to create a
-            # QuantizerAttributeConfig with no actual configuration.
-            cfg = entry.get("cfg")
-            enable = entry.get("enable", True)
-            if enable and cfg is not None:
-                if isinstance(cfg, dict):
-                    is_invalid = len(cfg) == 0
-                elif isinstance(cfg, list):
-                    is_invalid = len(cfg) == 0 or any(
-                        not isinstance(item, dict) or len(item) == 0 for item in cfg
-                    )
-                else:
-                    is_invalid = True
-                if is_invalid:
-                    raise ValueError(
-                        f"Invalid quant_cfg entry: {raw!r} — 'cfg' must be a non-empty dict "
-                        f"or a non-empty list of non-empty dicts when enabling a quantizer "
-                        f"(got {type(cfg).__name__}: {cfg!r}). Either provide quantizer "
-                        "attributes in 'cfg' or remove 'cfg' and set 'enable' explicitly."
-                    )
-
-            # Normalize: make enable and cfg always explicit.
-            entry.setdefault("enable", True)
-            entry.setdefault("cfg", None)
-
-            result.append(cast("QuantizerCfgEntry", entry))
+        # Constructing each QuantizerCfgEntry runs its model_validator, which enforces the
+        # at-least-one-of('cfg', 'enable') and cfg-shape constraints. Defaults for absent
+        # 'cfg' / 'enable' are filled by the pydantic field defaults.
+        result.extend(QuantizerCfgEntry(**entry) for entry in entries)
     return result
 
 
@@ -1112,26 +1163,17 @@ class QuantizeConfig(ModeloptBaseConfig):
 
     @field_validator("quant_cfg", mode="before")
     @classmethod
-    def normalize_quant_cfg(cls, v):
-        """Normalize quant_cfg entries: convert dict and tuple forms to QuantizerCfgEntry dicts."""
-        if not isinstance(v, (list, dict)):
-            return v
-        return normalize_quant_cfg_list(v)
+    def normalize_quant_cfg(
+        cls, v: RawQuantizeQuantCfgType | DeprecatedQuantCfgType
+    ) -> QuantizeQuantCfgType:
+        """Normalize raw quant_cfg input into a ``list[QuantizerCfgEntry]``.
 
-    @field_validator("quant_cfg", mode="after")
-    @classmethod
-    def validate_quant_cfg_entries(cls, v):
-        """Validate quantizer attribute configs to surface errors (e.g. invalid axis/block_sizes)."""
-        qac_fields = set(QuantizerAttributeConfig.model_fields.keys())
-        for entry in v:
-            cfg = entry.get("cfg")
-            if cfg is None:
-                continue
-            cfgs = cfg if isinstance(cfg, list) else [cfg]
-            for c in cfgs:
-                if isinstance(c, dict) and qac_fields & set(c.keys()):
-                    QuantizerAttributeConfig.model_validate(c)
-        return v
+        Delegates to :func:`normalize_quant_cfg_list`, which accepts every supported input
+        shape (new-format list, legacy single-key-dict list, legacy flat dict, and lists
+        containing already-validated ``QuantizerCfgEntry`` instances) and rejects anything
+        else with a clear ``ValueError`` before pydantic's field-type check would see it.
+        """
+        return normalize_quant_cfg_list(v)
 
 
 class CompressConfig(ModeloptBaseConfig):
@@ -1157,15 +1199,24 @@ class _QuantizeExportConfig(ModeloptBaseConfig):
     """An empty config."""
 
 
-_base_disable_all: list[QuantizerCfgEntry] = [
-    cast("QuantizerCfgEntry", load_config("configs/ptq/units/base_disable_all"))
+# Shared snippet constants are dumped back to plain dicts before being spliced into
+# the public quant config constants below.  ``load_config`` returns validated
+# ``QuantizerCfgEntry`` instances for schema-tagged files, but the public constants
+# (``INT4_AWQ_CFG``, ``NVFP4_DEFAULT_CFG``, etc.) have always been raw dict/list trees;
+# splatting schema instances into them would surprise callers that serialise the
+# constants or do ``isinstance(entry, dict)`` checks.  ``exclude_unset=True`` keeps the
+# sparse YAML shape (only the explicitly set fields) so the dumped dicts are
+# byte-identical to what authors wrote in the YAML snippets.
+_base_disable_all: list[dict[str, Any]] = [
+    load_config("configs/ptq/units/base_disable_all").model_dump(exclude_unset=True)
 ]
 
-_default_disabled_quantizer_cfg: list[QuantizerCfgEntry] = load_config(
-    "configs/ptq/units/default_disabled_quantizers"
-)
+_default_disabled_quantizer_cfg: list[dict[str, Any]] = [
+    entry.model_dump(exclude_unset=True)
+    for entry in load_config("configs/ptq/units/default_disabled_quantizers")
+]
 
-_mamba_moe_disabled_quantizer_cfg: list[QuantizerCfgEntry] = [
+_mamba_moe_disabled_quantizer_cfg: list[dict[str, Any]] = [
     {"quantizer_name": "*fc1_latent_proj*", "enable": False},  # Skip Latent MOE
     {"quantizer_name": "*fc2_latent_proj*", "enable": False},  # Skip Latent MOE
     {"quantizer_name": "*q_proj*", "enable": False},  # Skip QKV Linear (HF naming)
@@ -1212,7 +1263,9 @@ INT8_WEIGHT_ONLY_CFG = {
     "algorithm": "max",
 }
 
-FP8_DEFAULT_CFG: dict[str, Any] = load_config("configs/ptq/presets/model/fp8")
+FP8_DEFAULT_CFG: dict[str, Any] = load_config("configs/ptq/presets/model/fp8").model_dump(
+    exclude_unset=True
+)
 
 MAMBA_MOE_FP8_AGGRESSIVE_CFG = {
     "quant_cfg": [
@@ -1457,7 +1510,9 @@ MXINT8_DEFAULT_CFG = {
 # KV-cache configs are designed to be merged with a primary quantization config (e.g.
 # FP8_DEFAULT_CFG) that already contains _base_disable_all.  They intentionally omit both
 # _base_disable_all and "algorithm" because these are provided by the primary config.
-FP8_KV_CFG: dict[str, Any] = load_config("configs/ptq/presets/kv/fp8")
+FP8_KV_CFG: dict[str, Any] = load_config("configs/ptq/presets/kv/fp8").model_dump(
+    exclude_unset=True
+)
 
 FP8_AFFINE_KV_CFG = {
     "quant_cfg": [
@@ -1490,7 +1545,7 @@ def _nvfp4_selective_quant_cfg(
     algorithm: str | dict = "max",
 ) -> dict:
     """Build an NVFP4 config that quantizes only the specified layer patterns."""
-    quant_cfg: list[QuantizerCfgEntry] = []
+    quant_cfg: list[dict[str, Any]] = []
     quant_cfg.extend(_base_disable_all)
     for pattern in layer_patterns:
         # Deep-copy the quantizer dict so each config constant gets its own instance.
@@ -1684,6 +1739,7 @@ W4A8_NVFP4_FP8_CFG = {
     ],
     "algorithm": "max",
 }
+W4A16_NVFP4_CFG = _nvfp4_selective_quant_cfg(["*"], weight_only=True)
 
 MXFP4_MLP_WEIGHT_ONLY_CFG = {
     "quant_cfg": [
@@ -1740,6 +1796,7 @@ choices: set[str] = {
     "NVFP4_FP8_MHA_CONFIG",
     "NVFP4_KV_CFG",
     "NVFP4_KV_ROTATE_CFG",
+    "W4A16_NVFP4_CFG",
     "W4A8_NVFP4_FP8_CFG",
     "NVFP4_SVDQUANT_DEFAULT_CFG",
     "W4A8_AWQ_BETA_CFG",
@@ -1757,7 +1814,7 @@ choices: set[str] = {
 }
 
 
-def need_calibration(config):
+def need_calibration(config: QuantizeConfig | Mapping[str, Any]) -> bool:
     """Check if calibration is needed for the given config."""
     if config["algorithm"] is not None and config["algorithm"] != "max":
         return True
@@ -1765,8 +1822,8 @@ def need_calibration(config):
     def _not_dynamic(cfg):
         return cfg.get("enable", True) and cfg.get("type", "") != "dynamic"
 
-    quant_cfg: list = config.get("quant_cfg") or []
-    quant_cfg = normalize_quant_cfg_list(quant_cfg)
+    raw_quant_cfg: RawQuantizeQuantCfgType | DeprecatedQuantCfgType = config.get("quant_cfg") or []
+    quant_cfg: list[QuantizerCfgEntry] = normalize_quant_cfg_list(raw_quant_cfg)
     for entry in quant_cfg:
         name = entry["quantizer_name"]
         raw_cfg = entry.get("cfg")

@@ -113,6 +113,7 @@ QUANT_CFG_CHOICES: dict[str, dict[str, Any]] = {
     "fp8_pb_wo": mtq.FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG,
     "fp8_pc_pt": mtq.FP8_PER_CHANNEL_PER_TOKEN_CFG,
     "w4a8_nvfp4_fp8": mtq.W4A8_NVFP4_FP8_CFG,
+    "w4a16_nvfp4": mtq.W4A16_NVFP4_CFG,
     "w4a8_mxfp4_fp8": mtq.W4A8_MXFP4_FP8_CFG,
     "nvfp4_mlp_only": mtq.NVFP4_MLP_ONLY_CFG,
     "nvfp4_experts_only": mtq.NVFP4_EXPERTS_ONLY_CFG,
@@ -530,9 +531,10 @@ def load_model(args: argparse.Namespace):
             language_model = full_model
         else:
             if args.dataset is None:
-                args.dataset = ["cnn_dailymail", "nemotron-post-training-dataset-v2"]
+                args.dataset = ["cnn_nemotron_v2_mix"]
                 warnings.warn(
-                    "No dataset specified. Defaulting to cnn_dailymail and nemotron-post-training-dataset-v2."
+                    "No dataset specified. Defaulting to the 'cnn_nemotron_v2_mix' combo "
+                    "(cnn_dailymail + nemotron-post-training-dataset-v2)."
                 )
             # Adjust calib_size to match dataset length by extending or truncating as needed
             args.calib_size = (args.calib_size + [args.calib_size[-1]] * len(args.dataset))[
@@ -784,6 +786,12 @@ def export_quantized(
                     export_dir=export_path,
                     extra_state_dict=mtp_state_dict,
                 )
+
+                if args.qformat == "w4a16_nvfp4":
+                    warnings.warn(
+                        "TensorRT-LLM and SGLang do not support this format. "
+                        "vLLM deployment support is in progress."
+                    )
 
         # Restore default padding and export the tokenizer as well.
         if tokenizer is not None:
@@ -1147,7 +1155,7 @@ def quantize_main(
             quant_cfg = copy.deepcopy(quant_cfg)
             force_weight_quantizers_static(quant_cfg["quant_cfg"])
 
-        if args.qformat in QUANT_CFG_CHOICES:
+        if quant_cfg:
             mono_quantize(
                 args,
                 quant_cfg,
@@ -1231,7 +1239,7 @@ def parse_args() -> argparse.Namespace:
             "This argument will be parsed and converted as a list of ints."
         ),
         type=str,
-        default="512",
+        default="1024",
     )
     parser.add_argument(
         "--calib_seq",

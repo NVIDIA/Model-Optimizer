@@ -1132,7 +1132,7 @@ class TensorQuantizer(nn.Module):
 
         return outputs
 
-    def _short_amax(self, fmt=".4f"):
+    def _short_amax(self, fmt=".2e"):
         """Short description of amax.
 
         Returns:
@@ -1150,7 +1150,7 @@ class TensorQuantizer(nn.Module):
             return "meta"
         return self._short_tensor(self._amax, fmt)
 
-    def _short_tensor(self, tensor: torch.Tensor, fmt=".4f"):
+    def _short_tensor(self, tensor: torch.Tensor, fmt=".2e"):
         """Short description of tensor."""
         if tensor.numel() == 1:
             return f"{tensor.item():{fmt}}"

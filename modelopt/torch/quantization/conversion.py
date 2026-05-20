@@ -31,8 +31,8 @@ from modelopt.torch.utils import get_unwrapped_name
 
 from .config import (
     QuantizeConfig,
-    QuantizeQuantCfgType,
     QuantizerAttributeConfig,
+    RawQuantizeQuantCfgType,
     _QuantizeExportConfig,
     normalize_quant_cfg_list,
 )
@@ -218,7 +218,7 @@ def _replace_quant_module(model: nn.Module, version=None, registry=QuantModuleRe
         _replace_quant_module(getattr(model, name), version=version, registry=registry)
 
 
-def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: QuantizeQuantCfgType):
+def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: RawQuantizeQuantCfgType):
     """Apply a quantization config list to the quantizers in ``quant_model``.
 
     ``quant_cfg`` is an **ordered list** of :class:`QuantizerCfgEntry <.config.QuantizerCfgEntry>`
@@ -480,7 +480,7 @@ def set_quantizer_attributes_partial(
 
 
 @contextmanager
-def set_quantizer_by_cfg_context(quant_model: nn.Module, quant_cfg: QuantizeQuantCfgType):
+def set_quantizer_by_cfg_context(quant_model: nn.Module, quant_cfg: RawQuantizeQuantCfgType):
     """Context manager that temporarily applies a quantization config and restores the original state on exit.
 
     Calls :func:`set_quantizer_by_cfg` on entry and reverts every

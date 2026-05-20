@@ -283,11 +283,6 @@ def megatron_replace_quant_module_hook(model: torch.nn.Module):
 
     def _register_extra_state_callbacks(model: torch.nn.Module):
         for name, module in model.named_modules():
-            if name.endswith("output_layer"):
-                # output_layer is not quantized,
-                # hence we don't need to register extra state callbacks for it
-                continue
-
             if type(module) in QuantModuleRegistry:
                 # This module will be replaced as a QuantModule
                 register_modelopt_extra_state_callbacks(
@@ -377,8 +372,13 @@ class _MegatronParallelLinear(_ParallelLinear):
         #    output_layer.input_quantizer._amax but TP-only does not. This lead to
         #    state_dict mismatch.
         if prefix.endswith("output_layer."):
-            # assert not any("_quantizer" in k for k in self.state_dict()), "quantized output_layer"
-            return super().sharded_state_dict(prefix, sharded_offsets, metadata)
+            try:
+                from megatron.training import get_args as _mlm_get_args
+                _untied = bool(getattr(_mlm_get_args(), "untie_embeddings_and_output_weights", False))
+            except Exception:
+                _untied = False
+            if not _untied:
+                return super().sharded_state_dict(prefix, sharded_offsets, metadata)
 
         quantizer_state_dict = {}
         for k, v in self.state_dict(prefix="", keep_vars=True).items():
