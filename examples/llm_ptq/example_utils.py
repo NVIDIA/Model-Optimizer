@@ -862,7 +862,13 @@ def resolve_checkpoint_dir(quant_cfg: dict, model_path: str) -> dict:
     else:
         name = Path(name).name
 
-    config_hash = hashlib.sha256(json.dumps(quant_cfg, default=str).encode()).hexdigest()[:8]
+    # Hash only the algorithm dict (scalar fields, fully JSON-serializable and deterministic).
+    alg_for_hash = {
+        k: v
+        for k, v in sorted(algorithm.items())
+        if k != "layerwise_checkpoint_dir" and isinstance(v, (str, int, float, bool, type(None)))
+    }
+    config_hash = hashlib.sha256(json.dumps(alg_for_hash, sort_keys=True).encode()).hexdigest()[:8]
 
     quant_cfg = copy.deepcopy(quant_cfg)
     quant_cfg["algorithm"]["layerwise_checkpoint_dir"] = os.path.join(
