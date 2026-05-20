@@ -44,7 +44,7 @@ quantize:
       enable: true
       cfg: &fp8_cfg
         num_bits: e4m3
-        axis: null
+        axis:
     - quantizer_name: '*self_attn*input_quantizer'
       enable: true
       cfg: *fp8_cfg
@@ -76,7 +76,7 @@ quantize:
       enable: true
       cfg:
         num_bits: e4m3
-        axis: null
+        axis:
         use_constant_amax: true
 
     # Explicitly keep non-reference targets unquantized.
