@@ -31,6 +31,7 @@ Changelog
 **Bug Fixes**
 
 - Fix Megatron-Core HF importer to load fused ``TELayerNormColumnParallelLinear.layer_norm_weight`` from HF for GPT-family models (Qwen3 etc.) under ``--export-default-te-spec``. Importer now prefers per-context keys ``fused_input_layernorm`` / ``fused_pre_mlp_layernorm`` (fallback ``fused_norm`` for Nemotron-H backward compatibility); ``mcore_qwen.py`` provides the new rules. Without this fix, post-prune MMLU sat at chance.
+- Fix ``QuantizeAlgorithmConfig`` instances being rejected with ``ValueError`` when passed as the ``algorithm`` in a quantization config (e.g. ``cfg["algorithm"] = mtq.MaxCalibConfig(...)``). Such instances are now accepted, consistent with the ``algorithm`` field's type annotation.
 
 0.44 (2026-05-14)
 ^^^^^^^^^^^^^^^^^
