@@ -24,6 +24,14 @@ Coverage:
 """
 
 import yaml
+from core import (
+    GlobalVariables,
+    SandboxPipeline,
+    SandboxTask,
+    SandboxTask0,
+    SandboxTask1,
+    register_factory,
+)
 
 
 class TestYamlFormatParsing:
@@ -81,7 +89,6 @@ skip: false
 
     def test_task_configs_format(self, tmp_yaml):
         """task_configs lists YAML files that are resolved into tasks."""
-        from core import SandboxPipeline, register_factory
 
         def local_factory(nodes=1):
             return {"nodes": nodes}
@@ -108,8 +115,6 @@ slurm_config:
 
     def test_environment_list_of_dicts(self):
         """Environment as list-of-single-key-dicts (nemo-run format)."""
-        from core import SandboxTask
-
         task = SandboxTask(
             script="test.sh",
             environment=[{"A": "1"}, {"B": "2"}, {"C": "3"}],
@@ -119,8 +124,6 @@ slurm_config:
 
     def test_global_vars_across_multiple_tasks(self, tmp_yaml):
         """Global vars resolve in both task_0 and task_1."""
-        from core import GlobalVariables, SandboxPipeline, SandboxTask0, SandboxTask1
-
         t0 = SandboxTask0(
             script="quantize.sh",
             args=["--model", "<<global_vars.hf_model>>"],
