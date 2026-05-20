@@ -214,6 +214,53 @@ class TestSparseNM:
             f"Sink tokens should reduce error: no_sink={err_no_sink:.6f}, with_sink={err_with_sink:.6f}"
         )
 
+    def test_sparse_nm_with_skip_softmax(self):
+        """N:M sparse softmax and skip-softmax can run in the same prefill launch."""
+        batch, seq_len = 1, 4096
+        num_kv_heads, head_dim = 4, 64
+        total = batch * seq_len
+        scale = 1.0 / (head_dim**0.5)
+
+        torch.manual_seed(123)
+        k = torch.randn(total, num_kv_heads, head_dim, device="cuda", dtype=torch.float16)
+        v = torch.randn(total, num_kv_heads, head_dim, device="cuda", dtype=torch.float16)
+        q = k.clone()
+        locs, lens = make_varlen_meta([seq_len] * batch)
+
+        out = attention(
+            q,
+            k,
+            v,
+            locs,
+            lens,
+            seq_len,
+            is_causal=False,
+            softmax_scale=scale,
+            sparsity_n=2,
+            sparsity_m=4,
+            skip_softmax_threshold=0.99,
+            measure_sparsity=True,
+        )
+
+        assert out.shape == q.shape
+        assert not torch.isnan(out).any()
+        assert not torch.isinf(out).any()
+        assert out._sparsity_total > 0
+        assert out._sparsity_skipped > 0
+
+        out_skip_only = attention(
+            q,
+            k,
+            v,
+            locs,
+            lens,
+            seq_len,
+            is_causal=False,
+            softmax_scale=scale,
+            skip_softmax_threshold=0.99,
+        )
+        assert not torch.allclose(out, out_skip_only, atol=1e-3, rtol=1e-3)
+
     # NOTE: N:M sparse attention is for prefill only, not decode.
 
 

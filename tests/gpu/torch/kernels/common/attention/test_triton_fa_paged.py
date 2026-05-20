@@ -359,6 +359,109 @@ class TestPagedKV:
         assert out.shape == q_flat.shape
         assert not torch.isnan(out).any(), "NaN in paged decode output"
 
+    def test_paged_decode_ignores_sparse_nm(self):
+        """N:M sparse softmax is prefill-only; paged decode remains dense."""
+        batch = 2
+        seq_lens_k = [64, 128]
+        num_heads, num_kv_heads, head_dim = 4, 2, 64
+        page_size = 16
+        scale = 1.0 / (head_dim**0.5)
+        total_kv = sum(seq_lens_k)
+
+        torch.manual_seed(34)
+        q_flat = torch.randn(batch, num_heads, head_dim, device="cuda", dtype=torch.float16)
+        k_flat = torch.randn(total_kv, num_kv_heads, head_dim, device="cuda", dtype=torch.float16)
+        v_flat = torch.randn(total_kv, num_kv_heads, head_dim, device="cuda", dtype=torch.float16)
+
+        b_start_loc_q = torch.arange(batch, device="cuda", dtype=torch.int32)
+        b_seq_len_q = torch.ones(batch, device="cuda", dtype=torch.int32)
+        cumsum = [0]
+        for sl in seq_lens_k:
+            cumsum.append(cumsum[-1] + sl)
+        b_start_loc_k = torch.tensor(cumsum[:-1], device="cuda", dtype=torch.int32)
+        b_seq_len_k = torch.tensor(seq_lens_k, device="cuda", dtype=torch.int32)
+        k_cache, v_cache, block_table = _scatter_to_paged_cache(
+            k_flat, v_flat, b_start_loc_k, b_seq_len_k, num_kv_heads, head_dim, page_size
+        )
+
+        common_kwargs = {
+            "is_causal": False,
+            "softmax_scale": scale,
+            "b_start_loc_k": b_start_loc_k,
+            "b_seq_len_k": b_seq_len_k,
+            "max_input_len_k": max(seq_lens_k),
+            "k_cache": k_cache,
+            "v_cache": v_cache,
+            "block_table": block_table,
+            "page_size": page_size,
+        }
+        out_dense = attention(
+            q_flat, k_flat, v_flat, b_start_loc_q, b_seq_len_q, 1, **common_kwargs
+        )
+        out_sparse = attention(
+            q_flat,
+            k_flat,
+            v_flat,
+            b_start_loc_q,
+            b_seq_len_q,
+            1,
+            **common_kwargs,
+            sparsity_n=2,
+            sparsity_m=4,
+            dense_recent_tokens=64,
+        )
+
+        torch.testing.assert_close(out_sparse, out_dense, rtol=1e-2, atol=1e-2)
+
+    def test_paged_mixed_prefill_decode_sparse_nm_keeps_decode_dense(self):
+        """Decode rows stay dense even when batched with sparse prefill rows."""
+        q_lens = [64, 1]
+        kv_lens = [64, 128]
+        num_heads, num_kv_heads, head_dim = 4, 2, 64
+        page_size = 16
+        scale = 1.0 / (head_dim**0.5)
+
+        torch.manual_seed(35)
+        q = torch.randn(sum(q_lens), num_heads, head_dim, device="cuda", dtype=torch.float16)
+        k = torch.randn(sum(kv_lens), num_kv_heads, head_dim, device="cuda", dtype=torch.float16)
+        v = torch.randn(sum(kv_lens), num_kv_heads, head_dim, device="cuda", dtype=torch.float16)
+
+        locs_q, lens_q = make_varlen_meta(q_lens)
+        locs_k, lens_k = make_varlen_meta(kv_lens)
+        k_cache, v_cache, block_table = _scatter_to_paged_cache(
+            k, v, locs_k, lens_k, num_kv_heads, head_dim, page_size
+        )
+
+        common_kwargs = {
+            "is_causal": True,
+            "softmax_scale": scale,
+            "b_start_loc_k": locs_k,
+            "b_seq_len_k": lens_k,
+            "max_input_len_k": max(kv_lens),
+            "k_cache": k_cache,
+            "v_cache": v_cache,
+            "block_table": block_table,
+            "page_size": page_size,
+        }
+        out_dense = attention(q, k, v, locs_q, lens_q, max(q_lens), **common_kwargs)
+        out_sparse = attention(
+            q,
+            k,
+            v,
+            locs_q,
+            lens_q,
+            max(q_lens),
+            **common_kwargs,
+            sparsity_n=2,
+            sparsity_m=4,
+            dense_recent_tokens=64,
+        )
+
+        decode_start = q_lens[0]
+        torch.testing.assert_close(
+            out_sparse[decode_start:], out_dense[decode_start:], rtol=1e-2, atol=1e-2
+        )
+
     def test_paged_chunked_prefill_matches_suffix_causal_reference(self):
         """Paged causal mode offsets suffix Q positions into the longer KV span."""
         q_lens = [7, 13]

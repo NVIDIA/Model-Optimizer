@@ -16,6 +16,7 @@
 """Unit tests for sparse attention vLLM worker compatibility helpers."""
 
 import math
+from contextlib import nullcontext
 
 import pytest
 import torch
@@ -27,6 +28,7 @@ from vllm.v1.attention.backends.flash_attn import FlashAttentionImpl
 from modelopt.torch.sparsity.attention_sparsity.plugins import vllm as vllm_plugin
 from modelopt.torch.sparsity.attention_sparsity.plugins.vllm import (
     ModelOptSparseAttentionImpl,
+    _build_sparse_kw,
     _clone_sparse_impl,
 )
 
@@ -67,17 +69,144 @@ def test_clone_sparse_impl_rejects_non_none_sinks():
         _clone_sparse_impl(old_impl)
 
 
+def test_forward_delegates_cascade_metadata_to_vllm(monkeypatch):
+    """Cascade/prefix-cache metadata should use vLLM's native implementation."""
+    impl = _clone_sparse_impl(_make_old_impl())
+    q = torch.zeros(1, impl.num_heads, impl.head_size, dtype=torch.float16)
+    kv_cache = torch.zeros(2, 1, 16, impl.num_kv_heads, impl.head_size, dtype=torch.float16)
+    output = torch.empty_like(q)
+    attn_metadata = type("AttnMetadata", (), {"use_cascade": True})()
+    called = {}
+
+    def fake_forward(
+        self,
+        layer,
+        query,
+        key,
+        value,
+        kv_cache_arg,
+        attn_metadata_arg,
+        output_arg=None,
+        output_scale=None,
+        output_block_scale=None,
+    ):
+        called["self"] = self
+        called["kv_cache"] = kv_cache_arg
+        called["attn_metadata"] = attn_metadata_arg
+        output_arg.fill_(3)
+        return output_arg
+
+    monkeypatch.setattr(FlashAttentionImpl, "forward", fake_forward)
+
+    result = impl.forward(
+        layer=None,
+        query=q,
+        key=q,
+        value=q,
+        kv_cache=kv_cache,
+        attn_metadata=attn_metadata,
+        output=output,
+    )
+
+    assert result is output
+    assert called == {
+        "self": impl,
+        "kv_cache": kv_cache,
+        "attn_metadata": attn_metadata,
+    }
+    assert torch.all(result == 3)
+
+
 @pytest.mark.parametrize(
-    ("max_query_len", "seq_len", "phase", "expected_scale"),
+    ("sparse_kw", "max_query_len", "max_seq_len"),
     [
-        (128, 128, "prefill", 2.0 * math.exp(3.0 * 0.4)),
-        (1, 256, "decode", 0.1 * math.exp(1.0 * 0.6)),
+        ({"skip_softmax_threshold": 0.001}, 1, 128),
+        (
+            {
+                "threshold_scale_factor": {
+                    "formula": "a * exp(b * target_sparsity)",
+                    "prefill": {"a": 10.0, "b": 0.0},
+                },
+                "target_sparse_ratio": {"prefill": 0.5},
+            },
+            4,
+            4,
+        ),
     ],
 )
-def test_forward_resolves_calibrated_skip_softmax_threshold(
-    monkeypatch, max_query_len, seq_len, phase, expected_scale
+def test_forward_delegates_launches_without_effective_sparse_work(
+    monkeypatch, sparse_kw, max_query_len, max_seq_len
 ):
+    """When no validated sparse path is active, use vLLM FlashAttention."""
+    impl = _clone_sparse_impl(_make_old_impl())
+    impl.sparse_kw = sparse_kw
+    q = torch.zeros(max_query_len, impl.num_heads, impl.head_size, dtype=torch.float16)
+    kv_cache = torch.zeros(
+        2, 1, max_seq_len, impl.num_kv_heads, impl.head_size, dtype=torch.float16
+    )
+    output = torch.empty_like(q)
+    attn_metadata = type(
+        "AttnMetadata",
+        (),
+        {
+            "num_actual_tokens": max_query_len,
+            "max_query_len": max_query_len,
+            "max_seq_len": max_seq_len,
+            "query_start_loc": torch.tensor([0, max_query_len], dtype=torch.int32),
+            "seq_lens": torch.tensor([max_seq_len], dtype=torch.int32),
+            "block_table": torch.zeros(1, 1, dtype=torch.int32),
+        },
+    )()
+    called = {}
+
+    def fake_attention(*args, **kwargs):
+        raise AssertionError("ModelOpt Triton kernel should not be called")
+
+    def fake_forward(
+        self,
+        layer,
+        query,
+        key,
+        value,
+        kv_cache_arg,
+        attn_metadata_arg,
+        output_arg=None,
+        output_scale=None,
+        output_block_scale=None,
+    ):
+        called["attn_metadata"] = attn_metadata_arg
+        output_arg.fill_(5)
+        return output_arg
+
+    monkeypatch.setattr(vllm_plugin, "triton_attention", fake_attention)
+    monkeypatch.setattr(FlashAttentionImpl, "forward", fake_forward)
+
+    maybe_warns = (
+        pytest.warns(UserWarning, match="outside the valid lambda range")
+        if "threshold_scale_factor" in sparse_kw
+        else nullcontext()
+    )
+    with maybe_warns:
+        result = impl.forward(
+            layer=None,
+            query=q,
+            key=q,
+            value=q,
+            kv_cache=kv_cache,
+            attn_metadata=attn_metadata,
+            output=output,
+        )
+
+    assert called["attn_metadata"] is attn_metadata
+    assert result is output
+    assert torch.all(result == 5)
+
+
+def test_forward_resolves_calibrated_skip_softmax_threshold(monkeypatch):
     """Forward should convert checkpoint calibration params to kernel threshold."""
+    max_query_len = 128
+    seq_len = 128
+    expected_scale = 2.0 * math.exp(3.0 * 0.4)
     impl = _clone_sparse_impl(_make_old_impl())
     impl.sparse_kw = {
         "threshold_scale_factor": {
@@ -119,10 +248,28 @@ def test_forward_resolves_calibrated_skip_softmax_threshold(
         output=torch.empty_like(q),
     )
 
-    assert phase in impl.sparse_kw["threshold_scale_factor"]
     assert captured["skip_softmax_threshold"] == pytest.approx(expected_scale / seq_len)
     assert "threshold_scale_factor" not in captured
     assert "target_sparse_ratio" not in captured
+
+
+def test_resolve_calibrated_skip_softmax_threshold_for_decode():
+    """Calibration conversion is phase-aware even when decode later delegates."""
+    sparse_kw = {
+        "threshold_scale_factor": {
+            "formula": "a * exp(b * target_sparsity)",
+            "decode": {"a": 0.1, "b": 1.0},
+        },
+        "target_sparse_ratio": {"decode": 0.6},
+    }
+
+    vllm_plugin._resolve_skip_softmax_calibration(
+        sparse_kw,
+        is_prefill=False,
+        max_seq_len=256,
+    )
+
+    assert sparse_kw == {"skip_softmax_threshold": pytest.approx(0.1 * math.exp(1.0 * 0.6) / 256)}
 
 
 def test_resolve_calibrated_skip_softmax_warns_and_disables_for_large_threshold():
@@ -147,9 +294,91 @@ def test_resolve_calibrated_skip_softmax_warns_and_disables_for_large_threshold(
     assert "target_sparse_ratio" not in sparse_kw
 
 
+def test_build_sparse_kw_restores_checkpoint_sparse_metadata():
+    """Checkpoint metadata is converted into ModelOpt Triton kwargs."""
+    layer_cfg = {
+        "sparsity_n": 2,
+        "sparsity_m": 4,
+        "dense_sink_tokens": 3,
+        "dense_recent_tokens": 64,
+        "threshold_scale_factor": {"prefill": {"a": 1.0, "b": 2.0}},
+        "target_sparse_ratio": {"prefill": 0.5},
+    }
+
+    assert _build_sparse_kw(layer_cfg) == {
+        "sparsity_n": 2,
+        "sparsity_m": 4,
+        "dense_sink_tokens": 3,
+        "dense_recent_tokens": 64,
+        "threshold_scale_factor": {"prefill": {"a": 1.0, "b": 2.0}},
+        "target_sparse_ratio": {"prefill": 0.5},
+    }
+
+
+def test_forward_delegates_sparse_nm_only_decode_to_vllm(monkeypatch):
+    """N:M sparse softmax is prefill-only, so N:M-only decode uses vLLM."""
+    impl = _clone_sparse_impl(_make_old_impl())
+    impl.sparse_kw = {
+        "sparsity_n": 2,
+        "sparsity_m": 4,
+        "dense_sink_tokens": 4,
+        "dense_recent_tokens": 128,
+    }
+    q = torch.zeros(1, impl.num_heads, impl.head_size, dtype=torch.float16)
+    kv_cache = torch.zeros(2, 1, 16, impl.num_kv_heads, impl.head_size, dtype=torch.float16)
+    attn_metadata = type(
+        "AttnMetadata",
+        (),
+        {
+            "num_actual_tokens": 1,
+            "max_query_len": 1,
+            "max_seq_len": 16,
+            "query_start_loc": torch.tensor([0, 1], dtype=torch.int32),
+            "seq_lens": torch.tensor([16], dtype=torch.int32),
+            "block_table": torch.zeros(1, 1, dtype=torch.int32),
+        },
+    )()
+
+    def fake_attention(q, **kwargs):
+        raise AssertionError("N:M-only decode should not call ModelOpt Triton")
+
+    def fake_forward(
+        self,
+        layer,
+        query,
+        key,
+        value,
+        kv_cache_arg,
+        attn_metadata_arg,
+        output_arg=None,
+        output_scale=None,
+        output_block_scale=None,
+    ):
+        output_arg.fill_(7)
+        return output_arg
+
+    monkeypatch.setattr(vllm_plugin, "triton_attention", fake_attention)
+    monkeypatch.setattr(FlashAttentionImpl, "forward", fake_forward)
+
+    output = torch.empty_like(q)
+    result = impl.forward(
+        layer=None,
+        query=q,
+        key=q,
+        value=q,
+        kv_cache=kv_cache,
+        attn_metadata=attn_metadata,
+        output=output,
+    )
+
+    assert result is output
+    assert torch.all(result == 7)
+
+
 def test_forward_allows_chunked_prefill_metadata(monkeypatch):
     """vLLM V1 can pass suffix-Q/chunked-prefill metadata; the kernel handles it."""
     impl = _clone_sparse_impl(_make_old_impl())
+    impl.sparse_kw = {"sparsity_n": 2, "sparsity_m": 4}
     q_len = 4
     kv_len = 10
     q = torch.zeros(q_len, impl.num_heads, impl.head_size, dtype=torch.float16)

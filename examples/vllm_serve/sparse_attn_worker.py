@@ -17,7 +17,9 @@
 
 ``SparseAttnWorker``: Replaces ``FlashAttentionImpl`` with
 ``ModelOptSparseAttentionImpl`` on each Attention module after model loading.
-The sparse impl uses the ModelOpt Triton kernel for both prefill and decode.
+The sparse impl uses the ModelOpt Triton kernel for sparse prefill launches.
+Decode-only launches and launches without active sparse work delegate back to
+vLLM FlashAttention.
 
 Configuration flows exclusively through the loaded checkpoint's
 ``sparse_attention_config`` block (written by ModelOpt's HF export). If the
@@ -49,7 +51,10 @@ from modelopt.torch.sparsity.attention_sparsity.plugins.sparse_attn_config impor
     load_from_checkpoint_metadata,
     match_sparse_config,
 )
-from modelopt.torch.sparsity.attention_sparsity.plugins.vllm import _clone_sparse_impl
+from modelopt.torch.sparsity.attention_sparsity.plugins.vllm import (
+    _build_sparse_kw,
+    _clone_sparse_impl,
+)
 
 
 def _replace_attention_impl(worker):
@@ -84,21 +89,11 @@ def _replace_attention_impl(worker):
         if layer_cfg is None or not layer_cfg.get("enable", True):
             continue
 
-        sparse_kw = {}
-        sparsity_n = layer_cfg.get("sparsity_n", 0)
-        if sparsity_n > 0:
-            sparse_kw["sparsity_n"] = sparsity_n
-            sparse_kw["sparsity_m"] = layer_cfg.get("sparsity_m", 4)
-            sparse_kw["dense_sink_tokens"] = layer_cfg.get("dense_sink_tokens", 0)
-            sparse_kw["dense_recent_tokens"] = layer_cfg.get("dense_recent_tokens", 64)
-        threshold = layer_cfg.get("skip_softmax_threshold")
-        if threshold is not None:
-            sparse_kw["skip_softmax_threshold"] = threshold
-        threshold_scale_factor = layer_cfg.get("threshold_scale_factor")
-        if threshold_scale_factor is not None:
-            sparse_kw["threshold_scale_factor"] = threshold_scale_factor
-            sparse_kw["target_sparse_ratio"] = layer_cfg.get("target_sparse_ratio")
-
+        sparse_kw = _build_sparse_kw(layer_cfg)
+        if not sparse_kw:
+            # Keep vLLM's original impl when the exported layer config does not
+            # enable any sparse feature.
+            continue
         new_impl = _clone_sparse_impl(module.impl)
         new_impl.sparse_kw = sparse_kw
         module.impl = new_impl

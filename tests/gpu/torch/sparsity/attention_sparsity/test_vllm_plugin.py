@@ -33,11 +33,20 @@ import torch
 
 pytest.importorskip("vllm")
 
+from vllm.v1.attention.backends.flash_attn import FlashAttentionImpl
+
 from modelopt.torch.kernels.common.attention import IS_AVAILABLE as TRITON_KERNEL_AVAILABLE
 from modelopt.torch.sparsity.attention_sparsity.plugins.vllm import ModelOptSparseAttentionImpl
 
 if TRITON_KERNEL_AVAILABLE:
     from modelopt.torch.kernels.common.attention import attention as triton_attention
+
+_ACTIVE_PREFILL_SPARSE_KW = {
+    "sparsity_n": 2,
+    "sparsity_m": 4,
+    "dense_sink_tokens": 0,
+    "dense_recent_tokens": 0,
+}
 
 
 def _make_paged_cache(k, v, b_start_loc, b_seq_len, num_kv_heads, head_dim, page_size):
@@ -123,6 +132,7 @@ class TestModelOptSparseAttentionImpl:
             b_seq_len,
             seq_len,
             softmax_scale=1.0 / (head_dim**0.5),
+            **_ACTIVE_PREFILL_SPARSE_KW,
         )
 
         # Build paged kv_cache shaped [2, num_blocks, page_size, num_kv_heads, head_dim].
@@ -140,6 +150,7 @@ class TestModelOptSparseAttentionImpl:
         )
 
         impl = _make_impl(num_heads, head_dim, num_kv_heads)
+        impl.sparse_kw = _ACTIVE_PREFILL_SPARSE_KW
         output = torch.empty_like(q)
         out_paged = impl.forward(
             layer=None,
@@ -156,6 +167,7 @@ class TestModelOptSparseAttentionImpl:
     def test_chunked_prefill_is_forwarded_to_kernel(self):
         """Chunked prefill metadata is handled by the suffix-aware causal mask."""
         impl = _make_impl(num_heads=2, head_dim=64, num_kv_heads=2)
+        impl.sparse_kw = _ACTIVE_PREFILL_SPARSE_KW
         attn_metadata = SimpleNamespace(
             num_actual_tokens=4,
             max_query_len=4,  # chunk length
@@ -211,6 +223,7 @@ class TestModelOptSparseAttentionImpl:
         )
 
         impl = _make_impl(num_heads, head_dim, num_kv_heads)
+        impl.sparse_kw = _ACTIVE_PREFILL_SPARSE_KW
         out = impl.forward(
             layer=None,
             query=q,
@@ -222,6 +235,74 @@ class TestModelOptSparseAttentionImpl:
         )
 
         assert torch.isfinite(out).all()
+
+    def test_decode_delegates_to_vllm(self, monkeypatch):
+        """Decode-only sparse work is not routed through the ModelOpt paged kernel."""
+        batch = 2
+        q_len = 1
+        kv_lens = torch.tensor([17, 33], device="cuda", dtype=torch.int32)
+        total_q = batch * q_len
+        num_heads, num_kv_heads, head_dim = 4, 2, 64
+        page_size = 16
+        dtype = torch.float16
+
+        torch.manual_seed(2)
+        q = torch.randn(total_q, num_heads, head_dim, device="cuda", dtype=dtype)
+        k = torch.randn(
+            int(kv_lens.sum().item()), num_kv_heads, head_dim, device="cuda", dtype=dtype
+        )
+        v = torch.randn_like(k)
+
+        query_start_loc = torch.tensor([0, 1, 2], device="cuda", dtype=torch.int32)
+        kv_start_loc = torch.tensor([0, int(kv_lens[0].item())], device="cuda", dtype=torch.int32)
+
+        kv_cache, block_table = _make_paged_cache(
+            k, v, kv_start_loc, kv_lens, num_kv_heads, head_dim, page_size
+        )
+        attn_metadata = SimpleNamespace(
+            num_actual_tokens=total_q,
+            max_query_len=q_len,
+            max_seq_len=int(kv_lens.max().item()),
+            query_start_loc=query_start_loc,
+            seq_lens=kv_lens,
+            block_table=block_table,
+        )
+
+        impl = _make_impl(num_heads, head_dim, num_kv_heads)
+        impl.sparse_kw = _ACTIVE_PREFILL_SPARSE_KW
+        output = torch.empty_like(q)
+        called = {}
+
+        def fake_forward(
+            self,
+            layer,
+            query,
+            key,
+            value,
+            kv_cache_arg,
+            attn_metadata_arg,
+            output_arg=None,
+            output_scale=None,
+            output_block_scale=None,
+        ):
+            called["attn_metadata"] = attn_metadata_arg
+            output_arg.fill_(9)
+            return output_arg
+
+        monkeypatch.setattr(FlashAttentionImpl, "forward", fake_forward)
+
+        result = impl.forward(
+            layer=None,
+            query=q,
+            key=q,
+            value=q,
+            kv_cache=kv_cache,
+            attn_metadata=attn_metadata,
+            output=output,
+        )
+        assert called["attn_metadata"] is attn_metadata
+        assert result is output
+        assert torch.all(result == 9)
 
     def test_profiling_run_returns_zeros(self):
         """attn_metadata=None (vLLM profiling pass) must zero-fill output and return."""
@@ -255,7 +336,14 @@ class TestModelOptSparseAttentionImpl:
         query_start_loc = torch.tensor([0, seq_len], device="cuda", dtype=torch.int32)
 
         out_ref = triton_attention(
-            q, k, v, b_start_loc, b_seq_len, seq_len, softmax_scale=1.0 / (head_dim**0.5)
+            q,
+            k,
+            v,
+            b_start_loc,
+            b_seq_len,
+            seq_len,
+            softmax_scale=1.0 / (head_dim**0.5),
+            **_ACTIVE_PREFILL_SPARSE_KW,
         )
 
         kv_cache, block_table = _make_paged_cache(
@@ -274,6 +362,7 @@ class TestModelOptSparseAttentionImpl:
         )
 
         impl = _make_impl(num_heads, head_dim, num_kv_heads)
+        impl.sparse_kw = _ACTIVE_PREFILL_SPARSE_KW
         output = torch.empty_like(q)
         out_paged = impl.forward(
             layer=None,

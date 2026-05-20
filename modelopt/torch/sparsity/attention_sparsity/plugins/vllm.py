@@ -21,7 +21,7 @@ with paged KV cache support. Integration approach:
 - No module replacement — the Attention module stays intact with all its state
 - Only ``impl`` is swapped from FlashAttentionImpl to ModelOptSparseAttentionImpl
 - KV cache update is handled by vLLM (inherited ``do_kv_cache_update``)
-- Only ``forward()`` is overridden to call our Triton kernel for both prefill and decode
+- ``forward()`` calls ModelOpt Triton only when a validated sparse path is active
 
 Vllm-free config helpers (``match_sparse_config`` / ``load_from_checkpoint_metadata``)
 live in ``plugins/sparse_attn_config.py`` and are unit-testable without vLLM.
@@ -92,14 +92,60 @@ def _resolve_skip_softmax_calibration(
     sparse_kw["skip_softmax_threshold"] = threshold
 
 
+def _build_sparse_kw(layer_cfg: dict) -> dict:
+    """Convert one checkpoint layer config into kernel kwargs."""
+    sparse_kw = {}
+    sparsity_n = layer_cfg.get("sparsity_n", 0)
+    if sparsity_n > 0:
+        sparse_kw["sparsity_n"] = sparsity_n
+        sparse_kw["sparsity_m"] = layer_cfg.get("sparsity_m", 4)
+        sparse_kw["dense_sink_tokens"] = layer_cfg.get("dense_sink_tokens", 0)
+        sparse_kw["dense_recent_tokens"] = layer_cfg.get("dense_recent_tokens", 64)
+
+    threshold = layer_cfg.get("skip_softmax_threshold")
+    if threshold is not None:
+        sparse_kw["skip_softmax_threshold"] = threshold
+    threshold_scale_factor = layer_cfg.get("threshold_scale_factor")
+    if threshold_scale_factor is not None:
+        sparse_kw["threshold_scale_factor"] = threshold_scale_factor
+        sparse_kw["target_sparse_ratio"] = layer_cfg.get("target_sparse_ratio")
+
+    return sparse_kw
+
+
 class ModelOptSparseAttentionImpl(FlashAttentionImpl):
     """Attention implementation that uses the ModelOpt Triton kernel.
 
     Inherits from FlashAttentionImpl to reuse:
     - __init__ (all configuration)
     - do_kv_cache_update (KV cache writing)
-    Only overrides forward() to replace the attention computation.
+    Only overrides forward() to replace sparse prefill attention computation.
     """
+
+    def _forward_vllm_flash_attn(
+        self,
+        layer: torch.nn.Module,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata: FlashAttentionMetadata,
+        output: torch.Tensor | None,
+        output_scale: torch.Tensor | None,
+        output_block_scale: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """Delegate a launch back to vLLM's native FlashAttention impl."""
+        return super().forward(
+            layer,
+            query,
+            key,
+            value,
+            kv_cache,
+            attn_metadata,
+            output,
+            output_scale,
+            output_block_scale,
+        )
 
     def forward(
         self,
@@ -120,6 +166,22 @@ class ModelOptSparseAttentionImpl(FlashAttentionImpl):
             # Profiling run
             return output.fill_(0)
 
+        if getattr(attn_metadata, "use_cascade", False):
+            # vLLM cascade metadata splits the request into shared-prefix and
+            # suffix pieces. The ModelOpt paged kernel consumes plain per-request
+            # KV lengths, so delegate cascade launches back to vLLM's impl.
+            return self._forward_vllm_flash_attn(
+                layer,
+                query,
+                key,
+                value,
+                kv_cache,
+                attn_metadata,
+                output,
+                output_scale,
+                output_block_scale,
+            )
+
         num_actual_tokens = attn_metadata.num_actual_tokens
         cu_seqlens_q = attn_metadata.query_start_loc
         seq_lens = attn_metadata.seq_lens
@@ -127,7 +189,10 @@ class ModelOptSparseAttentionImpl(FlashAttentionImpl):
         b_start_loc = cu_seqlens_q[:batch]
         b_seq_len = cu_seqlens_q[1 : batch + 1] - cu_seqlens_q[:batch]
 
-        is_prefill = attn_metadata.max_query_len > 1
+        # Standard decode schedules one query token per request. Chunked
+        # prefill and mixed prefill/decode launches use the prefill path.
+        is_decode_only = attn_metadata.max_query_len <= 1
+        is_causal = getattr(attn_metadata, "causal", not is_decode_only)
 
         # Unpack paged KV cache: [2, num_blocks, page_size, num_kv_heads, head_dim]
         key_cache, value_cache = kv_cache.unbind(0)
@@ -137,9 +202,44 @@ class ModelOptSparseAttentionImpl(FlashAttentionImpl):
         sparse_kw = dict(getattr(self, "sparse_kw", {}))
         _resolve_skip_softmax_calibration(
             sparse_kw,
-            is_prefill=is_prefill,
+            is_prefill=not is_decode_only,
             max_seq_len=attn_metadata.max_seq_len,
         )
+        if is_decode_only:
+            # N:M sparse softmax is prefill-only.
+            for name in ("sparsity_n", "sparsity_m", "dense_sink_tokens", "dense_recent_tokens"):
+                sparse_kw.pop(name, None)
+            if set(sparse_kw) <= {"skip_softmax_threshold"}:
+                # The current ModelOpt paged kernel is only validated for
+                # sparse prefill in vLLM. Decode-only skip-softmax would route
+                # through the dense Triton path for every non-skipped tile, so
+                # keep decode on vLLM FlashAttention until that path is covered.
+                return self._forward_vllm_flash_attn(
+                    layer,
+                    query,
+                    key,
+                    value,
+                    kv_cache,
+                    attn_metadata,
+                    output,
+                    output_scale,
+                    output_block_scale,
+                )
+        if not sparse_kw:
+            # Dynamic calibration can disable sparse work for a launch, e.g.
+            # short-prefill thresholds outside the valid lambda range. Avoid
+            # swapping in the ModelOpt dense kernel when no sparse feature is active.
+            return self._forward_vllm_flash_attn(
+                layer,
+                query,
+                key,
+                value,
+                kv_cache,
+                attn_metadata,
+                output,
+                output_scale,
+                output_block_scale,
+            )
 
         # Prepare metadata for our kernel
         q = query[:num_actual_tokens].contiguous()
@@ -160,7 +260,7 @@ class ModelOptSparseAttentionImpl(FlashAttentionImpl):
             b_start_loc=b_start_loc,
             b_seq_len=b_seq_len,
             max_input_len=attn_metadata.max_query_len,
-            is_causal=is_prefill,  # causal for prefill, non-causal for decode
+            is_causal=is_causal,
             softmax_scale=self.scale,
             # KV metadata
             b_start_loc_k=None,  # paged mode: KV offsets not needed
@@ -198,7 +298,7 @@ class ModelOptSparseAttentionBackend(FlashAttentionBackend):
 def _clone_sparse_impl(old_impl):
     """Create a sparse impl while preserving vLLM's initialized runtime state."""
     if getattr(old_impl, "sinks", None) is not None:
-        # vLLM passes sinks to FlashAttention as s_aux; our Triton path does support sinks yet.
+        # vLLM passes sinks to FlashAttention as s_aux; our Triton path does not support sinks yet.
         raise NotImplementedError(
             "ModelOptSparseAttentionImpl does not support vLLM FlashAttention sinks yet."
         )
