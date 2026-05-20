@@ -93,22 +93,29 @@ vocabulary of the source you're polling.
 
 ### NEL jobs (`type: nel`)
 
-- **Check:** `nel status <id>` — second pipe-delimited column carries the state with a Unicode prefix (e.g. `▶ RUNNING`, `✓ SUCCESS`).
-- **States** (from `nemo_evaluator_launcher.executors.base.ExecutionState` + the CLI status formatter):
+- **Check:** `nel status <id>`.
 
-  | State (uppercase, as printed) | Terminal? | Indicator |
-  | --- | --- | --- |
-  | `PENDING` | no | `⧗` |
-  | `RUNNING` | no | `▶` |
-  | `SUCCESS` | **yes** | `✓` |
-  | `FAILED` | **yes** | `✗` |
-  | `KILLED` | **yes** | `✗` |
-  | `ERROR` | **yes** | `✗` (synthetic, CLI error path) |
-  | `NOT FOUND` | **yes** | `?` (synthetic, CLI: invocation id unknown) |
+```bash
+extract_nel_state() {
+  local jid="$1" nel_bin="${NEL:-nel}" output state_col
+  output=$("$nel_bin" status "$jid" 2>&1)
+  state_col=$(echo "$output" \
+    | awk -F'|' -v prefix="$jid." 'index($1, prefix) == 1 { print $2; exit }')
+  [ -z "$state_col" ] && state_col="$output"
+  echo "$state_col" \
+    | LC_ALL=C tr '[:lower:]' '[:upper:]' \
+    | awk 'match($0, /(PENDING|RUNNING|SUCCESS|FAILED|KILLED|ERROR|NOT[[:space:]]+FOUND)/) { print substr($0, RSTART, RLENGTH); exit }' \
+    | sed 's/[[:space:]][[:space:]]*/ /g'
+}
 
-  Watcher terminal regex: `^(SUCCESS|FAILED|KILLED|ERROR|NOT FOUND)$`.
-  Strip the Unicode indicator (`▶✓✗⧗?`) and surrounding whitespace before
-  matching.
+is_nel_terminal() {
+  case "$(extract_nel_state "$1")" in
+    SUCCESS|FAILED|KILLED|ERROR|"NOT FOUND") return 0 ;;
+    *) return 1 ;;
+  esac
+}
+```
+
 - **On completion:** `nel info <id>` to fetch results.
 - **On failure:** `nel info <id> --logs` then inspect server/client/SLURM logs via SSH.
 
@@ -120,10 +127,25 @@ vocabulary of the source you're polling.
 
 ### Raw SLURM jobs (`type: slurm`)
 
-- **Check:** `ssh <host> "sacct -j <id> --format=JobID%12,JobName%25,State%12,Elapsed%10 -n"` and filter out `extern`, `batch`, and step rows like `.<step>`. Use `sacct` for the termination check; `squeue` can lag in `COMPLETING` after `sacct` reports a terminal state.
-- **States (terminal):** `COMPLETED`, `FAILED`, `CANCELLED` (also appears as `CANCELLED by <uid>`), `TIMEOUT`, `NODE_FAIL`, `OUT_OF_MEMORY`, `PREEMPTED`, `BOOT_FAIL`, `DEADLINE`.
-- **States (non-terminal):** `PENDING`, `RUNNING`, `CONFIGURING`, `COMPLETING`, `RESIZING`, `SUSPENDED`, `REQUEUED`.
-  Watcher terminal regex: `^(COMPLETED|FAILED|CANCELLED( by .*)?|TIMEOUT|NODE_FAIL|OUT_OF_MEMORY|PREEMPTED|BOOT_FAIL|DEADLINE)$`.
+- **Check:** `sacct`; use `sacct` for the termination check because `squeue`
+  can lag in `COMPLETING` after `sacct` reports a terminal state.
+
+```bash
+extract_slurm_state() {
+  local jid="$1" host="$2"
+  ssh "$host" "sacct -j $jid -X --format=State --noheader -P 2>/dev/null | head -1" \
+    | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' \
+    | sed 's/^CANCELLED by .*/CANCELLED/'
+}
+
+is_slurm_terminal() {
+  case "$(extract_slurm_state "$1" "$2")" in
+    COMPLETED|FAILED|CANCELLED|TIMEOUT|NODE_FAIL|OUT_OF_MEMORY|PREEMPTED|BOOT_FAIL|DEADLINE) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+```
+
 - **On completion:** `ssh <host> "sacct -j <id> --format=State,ExitCode,Elapsed -n"`.
 - **On failure:** Check the job's output log file.
 
