@@ -132,4 +132,4 @@ def _is_supported_model(model: nn.Module) -> bool:
 
 
 # Register plugins
-CUSTOM_MODEL_PLUGINS.append(register_sparse_attention_on_the_fly)
+CUSTOM_MODEL_PLUGINS.add(register_sparse_attention_on_the_fly)

@@ -13,10 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for skip-softmax sparse attention on Wan 2.2 (examples/diffusers/sparsity/).
+"""Tests for sparse attention on Wan 2.2 (examples/diffusers/sparsity/).
 
 Uses a tiny Wan 2.2 model (dual transformer, 2 layers, hidden_dim=24) created
-from scratch. Tests run the wan22_skip_softmax.py example script in baseline,
+from scratch. Tests run the wan22_sparse_attn.py example script in baseline,
 triton-baseline, and raw-threshold modes.
 """
 
@@ -55,7 +55,7 @@ def test_wan22_baseline(tiny_wan22_path, tmp_path):
     """Dense baseline — no sparsity, default diffusers attention backend."""
     cmd = [
         "python",
-        "wan22_skip_softmax.py",
+        "wan22_sparse_attn.py",
         "--model-path",
         tiny_wan22_path,
         "--baseline",
@@ -72,7 +72,7 @@ def test_wan22_triton_baseline(tiny_wan22_path, tmp_path):
     """Triton kernel without skip-softmax (threshold=0, apples-to-apples)."""
     cmd = [
         "python",
-        "wan22_skip_softmax.py",
+        "wan22_sparse_attn.py",
         "--model-path",
         tiny_wan22_path,
         "--triton-baseline",
@@ -89,7 +89,7 @@ def test_wan22_raw_threshold(tiny_wan22_path, tmp_path):
     """Skip-softmax with a fixed raw threshold — no calibration needed."""
     cmd = [
         "python",
-        "wan22_skip_softmax.py",
+        "wan22_sparse_attn.py",
         "--model-path",
         tiny_wan22_path,
         "--raw-threshold",
