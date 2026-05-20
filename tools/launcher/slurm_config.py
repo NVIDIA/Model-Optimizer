@@ -15,8 +15,11 @@
 
 """Slurm configuration and factory for the ModelOpt Launcher."""
 
+# ruff: noqa: UP045
+
 import os
 from dataclasses import dataclass
+from typing import Optional
 
 import nemo_run as run
 
@@ -29,16 +32,16 @@ class SlurmConfig:
     No internal cluster defaults are embedded here.
     """
 
-    host: str | None = None
+    host: Optional[str] = None
     port: int = 22
-    account: str | None = None
+    account: Optional[str] = None
     partition: str = "batch"
-    qos: str | None = None
-    container: str | None = None
+    qos: Optional[str] = None
+    container: Optional[str] = None
     modelopt_install_path: str = "/usr/local/lib/python3.12/dist-packages/modelopt"
-    container_mounts: list[str] | None = None
-    srun_args: list[str] | None = None
-    array: str | None = None
+    container_mounts: Optional[list[str]] = None
+    srun_args: Optional[list[str]] = None
+    array: Optional[str] = None
     nodes: int = 1
     ntasks_per_node: int = 1
     gpus_per_node: int = 1
@@ -52,7 +55,7 @@ def slurm_factory(
     host: str = os.environ.get("SLURM_HOST", ""),
     account: str = os.environ.get("SLURM_ACCOUNT", ""),
     partition: str = os.environ.get("SLURM_PARTITION", "batch"),
-    qos: str | None = os.environ.get("SLURM_QOS"),
+    qos: Optional[str] = os.environ.get("SLURM_QOS"),
     nodes: int = 1,
     ntasks_per_node: int = 1,
     gpus_per_node: int = 1,
@@ -62,7 +65,7 @@ def slurm_factory(
         "{}:/hf-local".format(os.environ.get("SLURM_HF_LOCAL", "/hf-local")),
     ],
     srun_args: list[str] = ["--no-container-mount-home"],
-    array: str | None = None,
+    array: Optional[str] = None,
     time: str = "04:00:00",
 ) -> SlurmConfig:
     """Generic Slurm factory — configure via environment variables or CLI overrides."""
