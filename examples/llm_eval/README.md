@@ -183,6 +183,64 @@ Similarly, we support running simple evals against a local running OpenAI API co
 bash run_simple_eval.sh <custom defined model name> <comma separated eval names> <max output tokens> <local model server port>
 ```
 
+## Quantization Fidelity Health Check
+
+`fidelity_check.py` is a fast pre-screen for "is this quantized checkpoint behaviorally close to its base?" — meant to run **before** the heavy NeMo Evaluator / LM-Eval suites. It compares the next-token distribution of base and quant under teacher forcing, so it isolates pure quantization-induced drift instead of letting free-generation divergence compound.
+
+Metrics reported (split by prefill vs generation phase):
+
+- **Forward KL** on the top-k support — correlates very tightly with downstream answer-flip rate.
+- **EAR** (Expected Acceptance Rate) — `Σ min(P, Q)`, directly readable as the probability that base and quant emit the same token under optimal coupling.
+- **Top-1 mismatch rate** — how often `argmax` disagrees.
+- **ΔNLL** — cheap perplexity proxy on the teacher-forced sequence.
+
+Rule-of-thumb interpretation for early candidate ranking (same model family / tokenizer / template):
+
+| Metric | strong | acceptable | needs review | high risk |
+|---|---:|---:|---:|---:|
+| mean forward KL | <0.002 | 0.002–0.007 | 0.007–0.01 | >0.01 |
+| EAR | >0.99 | 0.97–0.99 | 0.95–0.97 | <0.95 |
+| top-1 mismatch | <1% | 1–3% | 3–5% | >5% |
+
+These are heuristic bands for ranking candidates, not absolute thresholds — exact numbers depend on top-k and the prompt mix.
+
+### Prerequisites
+
+Two vLLM servers running (one for base, one for quant). Both must be started with `--max-logprobs >= top_k` (default top-k is 16):
+
+```bash
+# Terminal A — base
+CUDA_VISIBLE_DEVICES=0 vllm serve meta-llama/Llama-3-8B \
+    --port 8000 --max-logprobs 20
+
+# Terminal B — quant
+CUDA_VISIBLE_DEVICES=1 vllm serve /ckpts/llama-3-8b-nvfp4 \
+    --port 8001 --max-logprobs 20 --quantization modelopt
+```
+
+### Usage
+
+```bash
+bash run_fidelity_check.sh \
+    meta-llama/Llama-3-8B 8000 \
+    /ckpts/llama-3-8b-nvfp4 8001 \
+    cnn_dailymail 128 128
+```
+
+Positional args: `<base_model> <base_port> <quant_model> <quant_port> [dataset] [num_prompts] [max_new_tokens]`.
+
+`dataset` accepts any name registered in `modelopt.torch.utils.dataset_utils.SUPPORTED_DATASET_CONFIG` (e.g. `cnn_dailymail`, `pile`, `nemotron-post-training-dataset-v2`), an HF dataset path, or a local `.jsonl` file.
+
+Output is a JSON report with mean + 95% bootstrap CI for each metric in each phase. A typical 128-prompt × 128-token run finishes in a few minutes on a single GPU per server.
+
+### Caveats
+
+- Base and quant must share the **same tokenizer**; the script aborts the prompt if token counts diverge.
+- Uses raw `completions` (no chat template). For instruct models served in chat mode, pre-format prompts in your dataset to match the template, or extend the script.
+- Single-turn only; doesn't exercise multi-turn or long-context behavior.
+- **Concurrency adds a small KL noise floor** (~0.005 at `--concurrency 4`) because vLLM batches concurrent requests with non-deterministic kernel reductions. For canonical numbers prefer `--concurrency 1` at the cost of throughput. A base-vs-base run will return exactly 0 KL only at `--concurrency 1`.
+- The script issues **3 API calls per prompt** (generate, base-echo, quant-echo) so base and quant logprobs go through the identical prefill+echo path; this is what makes the self-comparison numerically exact.
+
 ## Customize quantization method for evaluation
 
 An example of customized quantization config is shown in `quantization_utils.py`. It allows users to test accuracy of a custom method without the need of modifying the whole deployment framework, e.g., TensorRT-LLM, vLLM, SGLang, etc. Users can disable quantization of specific layers to debug the cause of accuracy drop, or explore a promising new quantization method.
