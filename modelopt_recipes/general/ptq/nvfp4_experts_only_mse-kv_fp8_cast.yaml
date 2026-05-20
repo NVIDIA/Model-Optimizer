@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Composed PTQ recipe for expert-only NVFP4 quantization with MSE weight calibration and FP8 KV-cache cast mode.
+
 imports:
   base_disable_all: configs/ptq/units/base_disable_all
   default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
@@ -22,7 +24,9 @@ imports:
 
 metadata:
   recipe_type: ptq
-  description: NVFP4 static weight (MSE FP8-scale sweep) and dynamic activation for expert layers only (W4A4), FP8 KV cache with constant amax.
+  description: >-
+    Applies static NVFP4 weight scales from MSE FP8-scale sweep and dynamic NVFP4 inputs to expert
+    layers only, plus FP8 KV-cache cast mode.
 quantize:
   algorithm:
     method: mse
