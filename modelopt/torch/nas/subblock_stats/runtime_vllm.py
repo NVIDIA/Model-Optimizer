@@ -27,7 +27,7 @@ Usage:
 """
 
 import json
-import subprocess
+import subprocess  # nosec B404
 from pathlib import Path
 
 from modelopt.torch.nas.subblock_stats.runtime_utils import RuntimeConfig
@@ -80,7 +80,8 @@ def run_vllm_latency_benchmark(model_path: Path, runtime_config: RuntimeConfig) 
         "0",
     ]
 
-    subprocess.run(cmd, check=True)
+    # cmd is a fixed list of strings (no shell, no untrusted input).
+    subprocess.run(cmd, text=True, check=True, capture_output=True)  # nosec B603
 
     with open(output_json_path) as f:
         vllm_results = json.load(f)
