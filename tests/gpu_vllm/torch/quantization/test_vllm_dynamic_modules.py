@@ -33,17 +33,12 @@ uses in production, so it covers the registry walk, the
 modules before conversion), and ``create_parallel_state`` against a fully
 initialized vLLM distributed environment.
 
-We do **not** initialize vLLM's distributed environment ourselves — ``LLM()``
-does that internally. Conftest does not provide a ``vllm_dist_init`` fixture
-for these tests.
-
 Architectures covered:
 
 - **TinyLlama** → ``QKVParallelLinear``, ``RowParallelLinear``,
   ``MergedColumnParallelLinear``, and ``Attention``.
 - **TinyQwen3MoE** → adds ``FusedMoE``.
-- **TinyDeepseekV3** (if available in the installed transformers) → adds
-  ``MLAAttention``.
+- **TinyDeepseekV3** → adds ``MLAAttention``.
 """
 
 from __future__ import annotations
@@ -51,18 +46,25 @@ from __future__ import annotations
 import gc
 
 import pytest
-import torch
-
-pytest.importorskip("vllm")
-pytest.importorskip("transformers")
-
 import vllm.model_executor.layers.fused_moe.layer as vllm_fused_moe_layer
 import vllm.model_executor.layers.linear as vllm_linear
-from _test_utils.torch.transformers_models import create_tiny_llama_dir, create_tiny_qwen3_moe_dir
+from _test_utils.torch.transformers_models import (
+    create_tiny_deepseek_v3_dir,
+    create_tiny_llama_dir,
+    create_tiny_qwen3_moe_dir,
+)
 from vllm import LLM
 from vllm.distributed import cleanup_dist_env_and_memory
 
-from modelopt.torch.quantization.plugins.vllm import VllmMLAAttention
+import modelopt.torch.quantization as mtq
+from modelopt.torch.quantization.nn import QuantModuleRegistry, TensorQuantizer
+from modelopt.torch.quantization.plugins.vllm import (
+    _ATTENTION_TYPES,
+    VllmMLAAttention,
+    _QuantFusedMoEBase,
+    _VLLMParallelLinear,
+    disable_compilation,
+)
 
 # Sizes picked so vLLM accepts the head_size (must be supported by the chosen
 # attention backend). head_size=64 with num_heads=2 is broadly supported.
@@ -108,10 +110,6 @@ def _quantize_and_summarize(self):
     Returns a small JSON-able summary so the parent process can assert without
     shipping tensors back.
     """
-    import modelopt.torch.quantization as mtq
-    import modelopt.torch.quantization.plugins.vllm as vp
-    from modelopt.torch.quantization.nn import TensorQuantizer
-
     model = self.get_model()
 
     def _forward_loop(_model):
@@ -120,7 +118,7 @@ def _quantize_and_summarize(self):
         # quantizer once, which is all the ``"max"`` calibrator needs.
         self.model_runner._dummy_run(1)
 
-    with vp.disable_compilation(model):
+    with disable_compilation(model):
         mtq.quantize(model, mtq.NVFP4_DEFAULT_CFG, forward_loop=_forward_loop)
 
     parallel_linear_counts: dict[str, int] = {}
@@ -131,23 +129,25 @@ def _quantize_and_summarize(self):
     quantizers_without_amax: list[str] = []
     enabled_quantizer_count = 0
 
-    def _missing(mod, name, slots):
+    def _missing(module, name, slots):
         return (
-            f"{name}.{q}" for q in slots if not isinstance(getattr(mod, q, None), TensorQuantizer)
+            f"{name}.{slot}"
+            for slot in slots
+            if not isinstance(getattr(module, slot, None), TensorQuantizer)
         )
 
-    for name, mod in model.named_modules():
-        if isinstance(mod, vp._VLLMParallelLinear):
-            kind = type(mod).__name__
+    for name, module in model.named_modules():
+        if isinstance(module, _VLLMParallelLinear):
+            kind = type(module).__name__
             parallel_linear_counts[kind] = parallel_linear_counts.get(kind, 0) + 1
             missing_quantizers.extend(
-                _missing(mod, name, ("input_quantizer", "weight_quantizer", "output_quantizer"))
+                _missing(module, name, ("input_quantizer", "weight_quantizer", "output_quantizer"))
             )
-        elif isinstance(mod, vp._QuantFusedMoEBase):
+        elif isinstance(module, _QuantFusedMoEBase):
             moe_count += 1
             missing_quantizers.extend(
                 _missing(
-                    mod,
+                    module,
                     name,
                     (
                         "w13_input_quantizer",
@@ -157,15 +157,17 @@ def _quantize_and_summarize(self):
                     ),
                 )
             )
-        elif vp.VllmMLAAttention is not None and isinstance(mod, vp.VllmMLAAttention):
+        elif VllmMLAAttention is not None and isinstance(module, VllmMLAAttention):
             mla_count += 1
             missing_quantizers.extend(
-                _missing(mod, name, ("q_bmm_quantizer", "kv_c_bmm_quantizer", "k_pe_bmm_quantizer"))
+                _missing(
+                    module, name, ("q_bmm_quantizer", "kv_c_bmm_quantizer", "k_pe_bmm_quantizer")
+                )
             )
-        elif isinstance(mod, vp._ATTENTION_TYPES):
+        elif isinstance(module, _ATTENTION_TYPES):
             attention_count += 1
             missing_quantizers.extend(
-                _missing(mod, name, ("q_bmm_quantizer", "k_bmm_quantizer", "v_bmm_quantizer"))
+                _missing(module, name, ("q_bmm_quantizer", "k_bmm_quantizer", "v_bmm_quantizer"))
             )
 
         # Static-amax invariant: after calibration, every enabled quantizer
@@ -175,9 +177,9 @@ def _quantize_and_summarize(self):
         # ``kv_b_proj`` is exempt: vLLM's MLA decode path absorbs the linear
         # (reads ``kv_b_proj.weight`` directly, never calls its forward), so
         # neither quantizer sees data via ``_dummy_run``. Tracked separately.
-        if isinstance(mod, TensorQuantizer) and mod.is_enabled:
+        if isinstance(module, TensorQuantizer) and module.is_enabled:
             enabled_quantizer_count += 1
-            if not hasattr(mod, "_amax") and "kv_b_proj" not in name:
+            if not hasattr(module, "_amax") and "kv_b_proj" not in name:
                 quantizers_without_amax.append(name)
 
     return {
@@ -191,7 +193,16 @@ def _quantize_and_summarize(self):
     }
 
 
-def _boot_llm(model_dir):
+def _boot_llm(model_dir, **extra):
+    """Construct a vLLM engine on a tiny model.
+
+    ``**extra`` overrides defaults — used by MoE-flavored fixtures to enable
+    expert parallelism so vLLM selects an MoE backend whose kernel dispatch
+    still flows through ``vllm.model_executor.layers.fused_moe.fused_moe``'s
+    module-level entries (the seam the modelopt vLLM plugin patches to run
+    calibration through the ``w13/w2`` quantizers). Without EP, vLLM ≥ 0.21
+    picks ``MoEPrepareAndFinalizeNoDPEPModular`` which bypasses those entries.
+    """
     return LLM(
         model=str(model_dir),
         enforce_eager=True,
@@ -200,6 +211,7 @@ def _boot_llm(model_dir):
         max_num_seqs=1,
         dtype="bfloat16",
         skip_tokenizer_init=True,
+        **extra,
     )
 
 
@@ -210,7 +222,7 @@ def _shutdown_llm(llm):
 
 
 @pytest.fixture(scope="module")
-def tiny_llama_llm(cuda_required, tmp_path_factory):
+def tiny_llama_llm(tmp_path_factory):
     tmp = tmp_path_factory.mktemp("tiny_llama")
     model_dir = create_tiny_llama_dir(tmp, **_LLAMA_OVERRIDES)
     llm = _boot_llm(model_dir)
@@ -221,10 +233,21 @@ def tiny_llama_llm(cuda_required, tmp_path_factory):
 
 
 @pytest.fixture(scope="module")
-def tiny_qwen3_moe_llm(cuda_required, tmp_path_factory):
+def tiny_qwen3_moe_llm(tmp_path_factory):
     tmp = tmp_path_factory.mktemp("tiny_qwen3_moe")
     model_dir = create_tiny_qwen3_moe_dir(tmp, **_QWEN3_MOE_OVERRIDES)
-    llm = _boot_llm(model_dir)
+    llm = _boot_llm(model_dir, enable_expert_parallel=True)
+    try:
+        yield llm
+    finally:
+        _shutdown_llm(llm)
+
+
+@pytest.fixture(scope="module")
+def tiny_deepseek_llm(tmp_path_factory):
+    tmp = tmp_path_factory.mktemp("tiny_deepseek")
+    model_dir = create_tiny_deepseek_v3_dir(tmp)
+    llm = _boot_llm(model_dir, enable_expert_parallel=True)
     try:
         yield llm
     finally:
@@ -244,7 +267,7 @@ def _assert_quantizer_amax_is_static(summary):
     assert summary["quantizers_without_amax"] == [], summary["quantizers_without_amax"]
 
 
-def test_tiny_llama_quantize_via_vllm(tiny_llama_llm):
+def test_tiny_llama_quantize(tiny_llama_llm):
     """A tiny Llama loaded into vLLM has its parallel linears + Attention layers
     upgraded by ``mtq.replace_quant_module``.
 
@@ -259,11 +282,14 @@ def test_tiny_llama_quantize_via_vllm(tiny_llama_llm):
 
     assert summary["missing_quantizers"] == [], summary["missing_quantizers"]
 
-    pl = summary["parallel_linear_counts"]
+    parallel_linear_counts = summary["parallel_linear_counts"]
     # Each decoder layer contributes one of each. With num_hidden_layers=2:
-    assert pl.get("QuantQKVParallelLinear", 0) >= 2, pl
-    assert pl.get("QuantRowParallelLinear", 0) >= 4, pl  # o_proj + down_proj per layer
-    assert pl.get("QuantMergedColumnParallelLinear", 0) >= 2, pl
+    assert parallel_linear_counts.get("QuantQKVParallelLinear", 0) >= 2, parallel_linear_counts
+    # o_proj + down_proj per layer
+    assert parallel_linear_counts.get("QuantRowParallelLinear", 0) >= 4, parallel_linear_counts
+    assert parallel_linear_counts.get("QuantMergedColumnParallelLinear", 0) >= 2, (
+        parallel_linear_counts
+    )
 
     # Llama uses the base Attention type — one per decoder layer.
     assert summary["attention_count"] >= 2, summary
@@ -281,9 +307,9 @@ def test_tiny_qwen3_moe_quantize_via_vllm(tiny_qwen3_moe_llm):
 
     assert summary["missing_quantizers"] == [], summary["missing_quantizers"]
 
-    pl = summary["parallel_linear_counts"]
-    assert pl.get("QuantQKVParallelLinear", 0) >= 2, pl
-    assert pl.get("QuantRowParallelLinear", 0) >= 2, pl
+    parallel_linear_counts = summary["parallel_linear_counts"]
+    assert parallel_linear_counts.get("QuantQKVParallelLinear", 0) >= 2, parallel_linear_counts
+    assert parallel_linear_counts.get("QuantRowParallelLinear", 0) >= 2, parallel_linear_counts
 
     # decoder_sparse_step=1 → every layer is MoE. With 2 layers we expect ≥2 FusedMoE.
     assert summary["moe_count"] >= 2, summary
@@ -292,67 +318,7 @@ def test_tiny_qwen3_moe_quantize_via_vllm(tiny_qwen3_moe_llm):
     _assert_quantizer_amax_is_static(summary)
 
 
-def _try_make_tiny_deepseek_v3_dir(tmp_path):
-    """Save a tiny DeepseekV3 model to ``tmp_path`` and return the path.
-
-    Skips the test if either transformers or vLLM doesn't ship a usable DeepSeek
-    V3 architecture in this environment. The HF config field names here mirror
-    the upstream config — small dims keep ``vllm.LLM`` startup cheap.
-    """
-    try:
-        from transformers import AutoModelForCausalLM, DeepseekV3Config
-    except ImportError:
-        pytest.skip("transformers in this environment does not ship DeepseekV3Config")
-
-    if VllmMLAAttention is None:
-        pytest.skip("vLLM in this environment does not expose MLAAttention")
-
-    cfg = DeepseekV3Config(
-        vocab_size=128,
-        hidden_size=128,
-        intermediate_size=256,
-        moe_intermediate_size=64,
-        num_hidden_layers=2,
-        num_attention_heads=2,
-        num_key_value_heads=2,
-        n_routed_experts=4,
-        num_experts_per_tok=2,
-        n_shared_experts=1,
-        first_k_dense_replace=0,
-        kv_lora_rank=16,
-        q_lora_rank=32,
-        qk_rope_head_dim=16,
-        qk_nope_head_dim=16,
-        v_head_dim=16,
-        max_position_embeddings=128,
-        # HF's ``DeepseekV3`` module unconditionally registers an
-        # ``e_score_correction_bias`` buffer, but vLLM only allocates the matching
-        # parameter slot when ``config.topk_method == "noaux_tc"`` (see
-        # ``deepseek_v2.py:273``). HF's ``DeepseekV3Config`` doesn't declare
-        # ``topk_method``, so we stamp it explicitly to keep both sides in sync;
-        # otherwise loading fails with ``KeyError: ...gate.e_score_correction_bias``.
-        topk_method="noaux_tc",
-        dtype=torch.bfloat16,
-    )
-    # Some transformers versions drop unknown kwargs silently — set as attribute
-    # post-construction to survive ``save_pretrained``/``from_pretrained`` roundtrip.
-    cfg.topk_method = "noaux_tc"
-    model = AutoModelForCausalLM.from_config(cfg)
-    out = tmp_path / "tiny_deepseek_v3"
-    model.save_pretrained(out)
-    return out
-
-
-@pytest.fixture(scope="module")
-def tiny_deepseek_llm(cuda_required, tmp_path_factory):
-    tmp = tmp_path_factory.mktemp("tiny_deepseek")
-    model_dir = _try_make_tiny_deepseek_v3_dir(tmp)
-    llm = _boot_llm(model_dir)
-    yield llm
-    _shutdown_llm(llm)
-
-
-def test_tiny_deepseek_mla_quantize_via_vllm(tiny_deepseek_llm):
+def test_tiny_deepseek_mla_quantize(tiny_deepseek_llm):
     """Tiny DeepSeek-V3 covers MLAAttention (and again FusedMoE)."""
     summaries = tiny_deepseek_llm.collective_rpc(_quantize_and_summarize)
     summary = summaries[0]
@@ -381,15 +347,9 @@ def test_registry_registration(vllm_cls):
     Pure registry check — no GPU / engine boot — so it runs even when the
     heavier fixtures are skipped.
     """
-    from modelopt.torch.quantization.nn import QuantModuleRegistry
-
     assert vllm_cls in QuantModuleRegistry
 
 
-@pytest.mark.skipif(
-    VllmMLAAttention is None, reason="MLAAttention not present in this vLLM version"
-)
 def test_registry_has_mla_attention():
-    from modelopt.torch.quantization.nn import QuantModuleRegistry
-
+    assert VllmMLAAttention is not None
     assert VllmMLAAttention in QuantModuleRegistry
