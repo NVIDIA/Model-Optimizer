@@ -1733,7 +1733,15 @@ def layerwise_calibrate(
     If ``checkpoint_dir`` is passed (via ``calib_kwargs``), per-layer checkpoints
     are saved after each layer completes. On restart, calibration resumes from
     the last completed layer.
+
+    Experimental: API and checkpoint format may change; no backward-compatibility guarantee.
     """
+    warnings.warn(
+        "layerwise_calibrate is experimental; backward compatibility is not guaranteed.",
+        UserWarning,
+        stacklevel=2,
+    )
+
     checkpoint_dir = calib_kwargs.pop("checkpoint_dir", None)
 
     if forward_loop is None:
