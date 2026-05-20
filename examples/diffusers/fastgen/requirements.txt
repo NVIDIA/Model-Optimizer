@@ -1,0 +1,12 @@
+# Runtime requirements for the DMD2 Wan 2.2 5B AutoModel example.
+# Torch + diffusers are already pulled in via Model-Optimizer's ``[all]`` extras.
+# The one thing that's NOT shipped with Model-Optimizer is nemo_automodel.
+
+# NeMo AutoModel (parent recipe, dataloader, FSDP2 wrapping).
+# The diffusion extras install diffusers + accelerate with matching pins.
+nemo_automodel[diffusion]
+
+# Optional but recommended for the smoke logs.
+wandb
+tqdm
+pyyaml

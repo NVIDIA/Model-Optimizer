@@ -1,0 +1,121 @@
+# DMD2 Wan 2.2 5B — AutoModel-driven training recipe (Phase 1: no CFG, no GAN).
+#
+# Layout:
+#   - ``model`` / ``fsdp`` / ``step_scheduler`` / ``optim`` / ``lr_scheduler`` /
+#     ``data`` / ``checkpoint`` / ``wandb`` — consumed by AutoModel's
+#     ``TrainDiffusionRecipe`` unchanged.
+#   - ``dmd2`` (new) — the fastgen DMD2 knobs. ``recipe_path`` points at the built-in
+#     fastgen config; any flat keys under ``dmd2:`` override matching DMDConfig fields
+#     via Pydantic ``model_copy(update=...)``.
+
+seed: 42
+
+wandb:
+  project: fastgen-dmd2-wan22-5b
+  mode: online
+  name: phase1_smoke
+
+dist_env:
+  backend: nccl
+  timeout_minutes: 60
+
+model:
+  # Wan 2.2 TI2V 5B from Wan-AI. Loaded via diffusers' AutoPipeline under the hood; the
+  # transformer class is ``WanTransformer3DModel``, which AutoModel already has a
+  # parallelisation strategy for.
+  pretrained_model_name_or_path: Wan-AI/Wan2.2-TI2V-5B-Diffusers
+  mode: finetune
+
+step_scheduler:
+  global_batch_size: 8
+  local_batch_size: 1
+  ckpt_every_steps: 100
+  num_epochs: 1
+  log_every: 1
+  # Hard cap the Phase 1 smoke at 100 optimizer steps. Flip to null for full runs.
+  max_steps: 100
+
+# ─── DMD2-specific block ────────────────────────────────────────────────────────────
+dmd2:
+  # Point at the built-in fastgen recipe (mirrors FastGen's Wan 2.2 5B config exactly):
+  #   pred_type=flow, num_train_timesteps=1000, student_sample_steps=2,
+  #   student_update_freq=5, fake_score_pred_type=x0, gan_loss_weight_gen=0.03,
+  #   gan_use_same_t_noise=true, guidance_scale=5.0, EMA on (full_tensor, fp32, decay 0.9999),
+  #   sample_t_cfg shifted(5.0) with t_list=[0.999, 0.833, 0.0].
+  recipe_path: general/distillation/dmd2_wan22_5b
+
+  # Phase 1 overrides of the built-in recipe:
+  # * GAN disabled — no discriminator shipped in Phase 1.
+  # * CFG disabled — no negative-prompt embedding precompute yet; guidance_scale=null
+  #   short-circuits the negative-conditioning branch inside compute_student_loss.
+  gan_loss_weight_gen: 0.0
+  guidance_scale: null
+
+  # Phase-1-only knobs (NOT on DMDConfig — consumed directly by the recipe):
+  # Matches FastGen's ``fake_score_optimizer.lr = 1e-5`` for Wan 2.2 5B.
+  fake_score_lr: 1.0e-5
+
+# Student LR + optimizer — matches FastGen's ``net_optimizer.lr = 1e-5``.
+optim:
+  learning_rate: 1.0e-5
+  optimizer:
+    weight_decay: 0.01
+    betas: [0.9, 0.999]
+
+# Constant LR for the smoke — flip to cosine/linear once the loop is validated.
+lr_scheduler:
+  lr_decay_style: constant
+  lr_warmup_steps: 0
+  min_lr: 1.0e-5
+
+# FSDP2 config. Matches the 8×H100 topology we smoke on; scale ``dp_size`` up for
+# multi-node runs or down for a 2-GPU debug run.
+fsdp:
+  tp_size: 1
+  cp_size: 1
+  pp_size: 1
+  dp_replicate_size: 1
+  dp_size: 8
+  activation_checkpointing: true
+
+# Mock data by default — the debug target is the DMD2 loop, not the data pipeline.
+# Swap ``_target_`` to ``build_video_multiresolution_dataloader`` once a real
+# preprocessed ``.meta`` cache is available (Phase 2 validation).
+data:
+  dataloader:
+    _target_: nemo_automodel.components.datasets.diffusion.build_mock_dataloader
+    # Phase 1 default: SHRUNKEN temporal + spatial, full channel count. Each
+    # forward stays cheap but we keep ``num_channels=48`` because Wan 2.2's patch
+    # embedding is a ``Conv3d(in_channels=48, ...)`` tied to the VAE latent dim —
+    # shrinking it trips ``expected input to have 48 channels`` during forward.
+    # Full Wan 2.2 5B latent is [48, 21, 44, 80] (720p); OOMs on 80 GiB H100
+    # even at 8-way FSDP2 (see experiments.md Smoke #6). Bump temporal/spatial
+    # back up once memory footprint is understood.
+    num_channels: 48
+    num_frame_latents: 4
+    spatial_h: 16
+    spatial_w: 16
+    text_seq_len: 512
+    text_embed_dim: 4096
+    length: 256
+    num_workers: 0
+    shuffle: true
+  # Real data path — uncomment + edit cache_dir once a preprocessed cache exists.
+  # dataloader:
+  #   _target_: nemo_automodel.components.datasets.diffusion.build_video_multiresolution_dataloader
+  #   cache_dir: PATH_TO_YOUR_PREPROCESSED_META_CACHE
+  #   model_type: wan
+  #   base_resolution: [1280, 704]
+  #   dynamic_batch_size: false
+  #   shuffle: true
+  #   drop_last: false
+  #   num_workers: 2
+
+checkpoint:
+  enabled: true
+  checkpoint_dir: /tmp/dmd2-wan22-5b-phase1
+  model_save_format: torch_save
+  save_consolidated: false
+  diffusers_compatible: false
+  # Set to ``LATEST`` or ``epoch_0_step_100`` (etc.) to resume. Null = start fresh.
+  restore_from: null

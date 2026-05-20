@@ -1,0 +1,65 @@
+# DMD2 distillation recipe for Wan 2.2 5B.
+#
+# Maps to :class:`modelopt.torch.fastgen.DMDConfig`. Load with::
+#
+#     from modelopt.torch.fastgen import load_dmd_config
+#     cfg = load_dmd_config("general/distillation/dmd2_wan22_5b")
+#
+# Values ported from:
+#   FastGen/fastgen/configs/methods/config_dmd2.py
+#   FastGen/fastgen/configs/experiments/WanT2V/config_dmd2_wan22_5b.py
+
+# Network prediction parameterization. Wan 2.2 is rectified-flow (the transformer
+# outputs v = eps - x_0); under RF, "flow" and "v" are equivalent.
+pred_type: flow
+
+# Wan 2.2 uses the diffusers convention timestep ∈ [0, 1000]. The pipeline
+# scales the RF t ∈ [0, 1] by this factor before calling the transformer.
+# Set to null if your model wrapper does the rescaling internally.
+num_train_timesteps: 1000
+
+# Classifier-free guidance strength applied to the teacher during the student update.
+# Set to null to disable CFG (skips the negative-conditioning teacher forward).
+guidance_scale: 5.0
+
+# Multi-step student: run 2 denoising steps at inference. student_sample_steps == 1
+# falls back to single-step distillation with input = sigma(max_t) * noise.
+student_sample_steps: 2
+student_sample_type: ode
+
+# Alternation: one student step for every N fake-score / discriminator steps.
+student_update_freq: 5
+
+# Fake score trains in x0 space while the main student/teacher operate in flow space.
+fake_score_pred_type: x0
+
+# GAN generator weight. Set > 0 to activate the discriminator branch; requires a
+# discriminator module to be passed to DMDPipeline.
+gan_loss_weight_gen: 0.03
+
+# Share t/eps between real and fake samples in the discriminator update (FastGen
+# default for Wan 2.2 5B).
+gan_use_same_t_noise: true
+
+# R1 regularization — disabled by default on the 5B recipe. When enabled use
+# gan_r1_reg_weight in the 100-1000 range.
+gan_r1_reg_weight: 0.0
+gan_r1_reg_alpha: 0.1
+
+sample_t_cfg:
+  # Rectified-flow shifted time distribution with the 5x shift used for Wan 2.2.
+  time_dist_type: shifted
+  min_t: 0.001
+  max_t: 0.999
+  shift: 5.0
+  # Multi-step student trajectory (must end at 0.0). Picked during training by
+  # sampling a random intermediate rung.
+  t_list: [0.999, 0.833, 0.0]
+
+# Student EMA. Omit this block to disable EMA tracking entirely.
+ema:
+  decay: 0.9999
+  type: constant
+  start_iter: 0
+  fsdp2: true
+  mode: full_tensor
