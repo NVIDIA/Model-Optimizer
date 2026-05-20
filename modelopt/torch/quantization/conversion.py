@@ -203,16 +203,29 @@ def replace_quant_module(model: nn.Module, version=None, registry=QuantModuleReg
     print(f"Inserted {replaced_modules} quantizers")
 
 
-def _replace_quant_module(model: nn.Module, version=None, registry=QuantModuleRegistry):
+def _replace_quant_module(model: nn.Module, version=None, registry=QuantModuleRegistry, _path: str = ""):
     """Helper function of replace_quant_module."""
     for name, child in model.named_children():
+        child_path = f"{_path}.{name}" if _path else name
         if type(child) in registry:
             # REPLACE on the parent (model), not on child
-            quantized = registry.convert(child)
+            try:
+                quantized = registry.convert(child)
+            except AttributeError as e:
+                # Print the offending module path so we can diagnose registry mismatches
+                print(
+                    f"[modelopt][replace_quant_module] FAILED at path={child_path!r} "
+                    f"type={type(child).__module__}.{type(child).__name__} "
+                    f"err={e}",
+                    flush=True,
+                )
+                raise
             setattr(model, name, quantized)
 
         # now recurse into whichever module is now at `model.name`
-        _replace_quant_module(getattr(model, name), version=version, registry=registry)
+        _replace_quant_module(
+            getattr(model, name), version=version, registry=registry, _path=child_path
+        )
 
 
 def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: QuantizeQuantCfgType):

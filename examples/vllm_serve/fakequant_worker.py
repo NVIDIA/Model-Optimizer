@@ -39,16 +39,73 @@ from modelopt.torch.quantization.plugins.vllm import (
 from modelopt.torch.utils import safe_load
 from modelopt.torch.utils.dataset_utils import get_dataset_dataloader
 
+def _parse_dataset_env(value: str) -> str | list[str]:
+    # Comma-separated → list (mix calibration, matches hf_ptq.py:502).
+    if "," in value:
+        return [v.strip() for v in value.split(",") if v.strip()]
+    return value
+
+
 quant_config: dict[str, Any] = {
-    "dataset": os.environ.get("QUANT_DATASET", "cnn_dailymail"),
+    "dataset": _parse_dataset_env(os.environ.get("QUANT_DATASET", "cnn_dailymail")),
     "calib_size": int(os.environ.get("QUANT_CALIB_SIZE", 512)),
+    "max_sample_length": int(os.environ.get("QUANT_MAX_SAMPLE_LEN", 512)),
     "quant_cfg": os.environ.get("QUANT_CFG", None),
     "kv_quant_cfg": os.environ.get("KV_QUANT_CFG", None),
     "quant_file_path": os.environ.get("QUANT_FILE_PATH", None),
     "modelopt_state_path": os.environ.get("MODELOPT_STATE_PATH", None),
     "calib_batch_size": int(os.environ.get("CALIB_BATCH_SIZE", 1)),
     "recipe_path": os.environ.get("RECIPE_PATH", None),
+    # Where to dump per-rank vllm-calibrated quantizer state for later HF export
+    "vllm_state_dir": os.environ.get("MODELOPT_VLLM_STATE_DIR", None),
+    "vllm_state_tag": os.environ.get("MODELOPT_VLLM_STATE_TAG", "vllm_calib"),
 }
+
+
+def _save_vllm_calibrated_state(model: torch.nn.Module) -> None:
+    """Dump per-rank modelopt state + quantizer state dict for later HF export.
+
+    Each rank writes its own file under MODELOPT_VLLM_STATE_DIR; the export
+    script reads all rank files and merges TP-sharded amax / pre_quant_scale
+    values across ranks to build the canonical HF state.
+
+    No-op if MODELOPT_VLLM_STATE_DIR is unset.
+    """
+    state_dir = quant_config.get("vllm_state_dir")
+    if not state_dir:
+        return
+
+    import modelopt.torch.opt as _mto
+    from modelopt.torch.utils import safe_save as _safe_save
+
+    rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+    world_size = torch.distributed.get_world_size() if torch.distributed.is_initialized() else 1
+    tag = quant_config.get("vllm_state_tag", "vllm_calib")
+
+    os.makedirs(state_dir, exist_ok=True)
+
+    modelopt_state = _mto.modelopt_state(model)
+    quantizer_state_dict = mtq.utils.get_quantizer_state_dict(model)
+
+    out = {
+        "modelopt_state": modelopt_state,
+        "quantizer_state_dict": quantizer_state_dict,
+        "rank": rank,
+        "world_size": world_size,
+        "quant_config_summary": {
+            "qformat": quant_config.get("quant_cfg"),
+            "dataset": quant_config.get("dataset"),
+            "calib_size": quant_config.get("calib_size"),
+            "max_sample_length": quant_config.get("max_sample_length"),
+        },
+    }
+
+    out_path = os.path.join(state_dir, f"{tag}-rank{rank:02d}-of{world_size:02d}.pth")
+    _safe_save(out, out_path)
+    print(
+        f"[vllm-calib] rank{rank}/{world_size}: saved quantizer state -> {out_path}",
+        flush=True,
+    )
 
 
 def _fakequant_run_prolog_worker(self) -> None:
@@ -113,11 +170,21 @@ def _fakequant_run_prolog_worker(self) -> None:
             print("Will load quant, so only do a single sample calibration")
             quant_config["calib_size"] = 1
 
+        # When dataset is a list (mix calibration), num_samples must be a
+        # parallel list. Mirror hf_ptq.py:506-507's extension convention:
+        # a single calib_size applies per-dataset (e.g. 512 with two datasets
+        # → 512 samples from each, 1024 total).
+        ds = quant_config["dataset"]
+        n_samples = quant_config["calib_size"]
+        if isinstance(ds, list) and isinstance(n_samples, int):
+            n_samples = [n_samples] * len(ds)
+
         calib_dataloader = get_dataset_dataloader(
-            dataset_name=quant_config["dataset"],
+            dataset_name=ds,
             tokenizer=tokenizer,
             batch_size=quant_config["calib_batch_size"],
-            num_samples=quant_config["calib_size"],
+            num_samples=n_samples,
+            max_sample_length=quant_config["max_sample_length"],
             device=self.device,
         )
 
@@ -141,6 +208,11 @@ def _fakequant_run_prolog_worker(self) -> None:
 
     if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
         mtq.print_quant_summary(model)
+
+    # Dump per-rank quantizer state BEFORE fold_weight (folding is irreversible
+    # for export — once amax is folded into weights we can't reconstruct the
+    # state needed by the unified-HF export path).
+    _save_vllm_calibrated_state(model)
 
     mtq.fold_weight(model)
     for name, module in model.named_modules():

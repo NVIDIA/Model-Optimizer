@@ -17,6 +17,7 @@
 
 import contextvars
 import importlib
+import os
 from collections.abc import Callable
 from contextlib import contextmanager
 from functools import partial
@@ -99,6 +100,49 @@ _FUSED_MOE_KERNEL_CANDIDATES = (
 _FUSED_MOE_KERNEL_FUNCS = tuple(
     n for n in _FUSED_MOE_KERNEL_CANDIDATES if hasattr(vllm_fused_moe_package, n)
 )
+
+
+_FORCE_TRITON_MOE = os.environ.get("MODELOPT_FORCE_TRITON_MOE", "0").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+
+
+def _force_triton_moe_dispatch() -> None:
+    """Force vLLM's compressed-tensors WNA16 MoE dispatcher onto the Triton (non-Marlin) path.
+
+    Marlin's fused MoE kernel runs gate→silu→up→down as a single CUDA kernel; the
+    intermediate activation entering ``down_proj`` (= w2 input) never materialises as
+    a Python tensor, so a wrapper at the FusedMoE module level can only observe the
+    block input (w13_input). Switching to ``CompressedTensorsWNA16MoEMethod`` (Triton)
+    splits the expert forward into two ``dispatch_fused_moe_kernel`` calls with the
+    intermediate tensor in between — exactly where the existing modelopt kernel
+    monkey-patch can intercept w2_input.
+
+    Patched at the import site in ``compressed_tensors_moe.compressed_tensors_moe``
+    so other Marlin support checks (dense Linear layers) are unaffected.
+    """
+    try:
+        from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa: E501
+            compressed_tensors_moe as _ct_moe_dispatcher,
+        )
+    except ImportError:
+        return
+
+    if not hasattr(_ct_moe_dispatcher, "check_moe_marlin_supports_layer"):
+        return
+
+    _ct_moe_dispatcher.check_moe_marlin_supports_layer = lambda *_a, **_kw: False
+    print(
+        "[modelopt] MODELOPT_FORCE_TRITON_MOE=1: forced compressed-tensors MoE dispatch "
+        "to CompressedTensorsWNA16MoEMethod (Triton). w2 input observable for calibration.",
+        flush=True,
+    )
+
+
+if _FORCE_TRITON_MOE:
+    _force_triton_moe_dispatch()
 
 _moe_fakequant_active: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "moe_fakequant_active", default=False
@@ -347,9 +391,44 @@ class _QuantFusedMoEBase(QuantModule):
         self.w2_output_quantizer = TensorQuantizer(QuantLinearConvBase.default_quant_desc_output)
         self.w13_output_quantizer.disable()
         self.w2_output_quantizer.disable()
-        assert type(self.quant_method) is vllm_fused_moe_layer.UnquantizedFusedMoEMethod, (
-            f"quant_method is {type(self.quant_method)}"
+        # The original assertion required UnquantizedFusedMoEMethod. We now also
+        # accept compressed-tensors INT4 sources (e.g.
+        # CompressedTensorsWNA16MarlinMoEMethod) so a model that ships pack-
+        # quantized routed experts can be re-calibrated via vLLM runtime.
+        # When the source is compressed, the layer carries ``w13_weight_packed``
+        # (int32) instead of ``w13_weight``, and dispatches to the Marlin / TRT-LLM
+        # MoE kernel directly from ``quant_method.apply``. Modelopt cannot
+        # monkey-patch ``invoke_fused_moe_kernel`` to intercept those paths, so we
+        # take a different approach in ``forward`` and ``fold_weight``: collect
+        # input amax via the input-quantizer call BEFORE handing off to the
+        # original Marlin kernel, and skip weight folding (export-side handles
+        # that path from the source packed weights).
+        self._compressed_source = type(self.quant_method) is not (
+            vllm_fused_moe_layer.UnquantizedFusedMoEMethod
         )
+        # When the dispatcher has been forced onto the Triton (non-Marlin) WNA16 path
+        # (MODELOPT_FORCE_TRITON_MOE=1), the per-expert forward goes through two
+        # ``dispatch_fused_moe_kernel`` calls with the intermediate activation
+        # exposed in between, so the kernel monkey-patch CAN intercept both w13
+        # and w2 inputs. For Marlin (or any single-kernel fused path) the
+        # intermediate is hidden and only w13_input is observable.
+        qm_name = type(self.quant_method).__name__
+        self._compressed_source_triton = (
+            self._compressed_source and qm_name == "CompressedTensorsWNA16MoEMethod"
+        )
+        if self._compressed_source:
+            print(
+                f"[modelopt] vLLM FusedMoE wrapped with compressed source "
+                f"quant_method={qm_name}; "
+                f"w2_input observable={self._compressed_source_triton}",
+                flush=True,
+            )
+            # Source weights are already INT4-packed; never fake-quant them
+            # during the calibration forward. Disable up-front (mirror of
+            # what fold_weight does post-calibration) so the kernel-patch
+            # path doesn't try to wrap ``weight_packed`` as a BF16 tensor.
+            self.w13_weight_quantizer.disable()
+            self.w2_weight_quantizer.disable()
         self.parallel_state = create_parallel_state()
 
     def invoke_fused_moe_quantized(
@@ -381,10 +460,26 @@ class _QuantFusedMoEBase(QuantModule):
         original_kernel: Callable,
         **kwargs,
     ):
-        if B is self.w13_weight:
+        # Compressed-tensors source layers carry ``w13_weight_packed`` / ``w2_weight_packed``
+        # (INT4 packed as int32 / uint8) instead of the unquantized ``w13_weight`` / ``w2_weight``.
+        # Match either, so the same dispatch identifies the first vs. second expert GEMM.
+        w13_w = getattr(self, "w13_weight", None)
+        w13_w_packed = getattr(self, "w13_weight_packed", None)
+        w2_w = getattr(self, "w2_weight", None)
+        w2_w_packed = getattr(self, "w2_weight_packed", None)
+        is_w13 = (w13_w is not None and B is w13_w) or (
+            w13_w_packed is not None and B is w13_w_packed
+        )
+        is_w2 = (w2_w is not None and B is w2_w) or (
+            w2_w_packed is not None and B is w2_w_packed
+        )
+        if is_w13:
             # First layer of expert
             A = self.w13_input_quantizer(A)  # noqa: N806
-            if self.w13_weight_quantizer.is_enabled:  # pragma: no cover
+            # Compressed source: weights are INT4-packed (no ``self.w13_weight`` attr); skip
+            # the fake-quant-wrap branch unconditionally. ``mtq.quantize`` re-enables weight
+            # quantizers from the wildcard config regardless of ``_setup``-time disables.
+            if self.w13_weight_quantizer.is_enabled and not self._compressed_source:  # pragma: no cover
                 # Same pattern as FakeQuantMethod.apply: wrap as nn.Parameter if needed, swap
                 # w13_weight, call kernel, restore (tensor cannot stay assigned to nn.Parameter slot).
                 original_weight = self.w13_weight
@@ -405,9 +500,9 @@ class _QuantFusedMoEBase(QuantModule):
                 original_kernel(A, B, C, *args, **kwargs)
             if self.w13_output_quantizer.is_enabled:
                 C[:] = self.w13_output_quantizer(C)
-        elif B is self.w2_weight:
+        elif is_w2:
             A = self.w2_input_quantizer(A)  # noqa: N806
-            if self.w2_weight_quantizer.is_enabled:  # pragma: no cover
+            if self.w2_weight_quantizer.is_enabled and not self._compressed_source:  # pragma: no cover
                 original_weight = self.w2_weight
                 quantized_tensor = self.w2_weight_quantizer(original_weight)
                 try:
@@ -430,6 +525,14 @@ class _QuantFusedMoEBase(QuantModule):
             raise ValueError("Cannot determine first or second layer of expert")
 
     def forward(self, hidden_states: torch.Tensor, router_logits: torch.Tensor):
+        if self._compressed_source and not self._compressed_source_triton:
+            # Marlin (or any single-kernel fused) compressed source: the kernel
+            # hides the post-activation intermediate, so we can only collect
+            # amax for the activation entering the MoE block. ``w2_input_quantizer``
+            # is left empty along this path.
+            if self.w13_input_quantizer.is_enabled:
+                hidden_states = self.w13_input_quantizer(hidden_states)
+            return super().forward(hidden_states, router_logits)
         # This is again due to the bad coding of vLLM
         # fused_moe submodule is overwritten by the fused_moe function
         # so we need to import the fused_moe module explicitly
@@ -461,6 +564,18 @@ class _QuantFusedMoEBase(QuantModule):
 
     @torch.no_grad()
     def fold_weight(self, keep_attrs: bool = False):
+        if self._compressed_source:
+            # Compressed-tensors source: the layer has ``w13_weight_packed``
+            # (int32) instead of ``w13_weight``, so the per-expert in-place fold
+            # below would AttributeError. Skip the actual fold; the unified-HF
+            # export path materializes the dequantized weight from the source
+            # packed format and applies the calibrated quantization there.
+            # We still disable the weight quantizers so the post-fold check in
+            # fakequant_worker passes (a still-enabled weight quantizer would
+            # double-quantize activations on subsequent forwards).
+            self.w13_weight_quantizer.disable()
+            self.w2_weight_quantizer.disable()
+            return
         # the MoE weights can be super large, it consumes too much memory, so we need to fold the weight one by one
         for i in range(self.w13_weight.shape[0]):
             self.w13_weight[i].copy_(

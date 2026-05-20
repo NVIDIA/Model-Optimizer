@@ -438,7 +438,10 @@ class DynamicModule(nn.Module):
 
         # various sanity checks
         if not hasattr(self, name):
-            raise AttributeError(f"{name} is not a valid attribute.")
+            raise AttributeError(
+                f"{name} is not a valid attribute on "
+                f"{type(self).__module__}.{type(self).__name__}."
+            )
         elif name in manager.attr_keys():
             raise KeyError(f"Cannot use the reserved name {name} to assign a dynamic attribute!")
         elif name in manager.hp_keys():

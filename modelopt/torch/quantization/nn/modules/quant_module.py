@@ -245,7 +245,13 @@ class QuantLinearConvBase(QuantInputBase):
             "weight_quantizer", TensorQuantizer(self.default_quant_desc_weight)
         )
         self._register_temp_attribute("_enable_weight_quantization", False)
-        self._register_dynamic_attribute("weight", self._get_quantized_weight)
+        # Compressed-tensors source modules (e.g. CompressedLinear with INT4
+        # packed routed-expert weights) do not expose ``.weight`` — the actual
+        # weight lives in ``.weight_packed`` and is decompressed on the fly.
+        # Skip the dynamic-weight registration for those; weight fake-quant
+        # is handled by the source's own forward (e.g. _QuantCompressedLinear).
+        if hasattr(self, "weight"):
+            self._register_dynamic_attribute("weight", self._get_quantized_weight)
 
 
 class _LegacyQuantInputBaseMixin:
