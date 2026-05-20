@@ -343,6 +343,33 @@ See [Megatron-Bridge distillation](../megatron_bridge/README.md#distillation) fo
 
 For distillation results on Puzzletron-compressed models, see [examples/pruning/puzzletron/](../pruning/puzzletron/README.md).
 
+## Runtime-Based Latency Optimization
+
+By default, subblock statistics use the `trt_torch` backend with theoretical memory proxies. You can instead enable **runtime stats** to measure actual inference latency via vLLM, which unlocks latency-based MIP constraints:
+
+```yaml
+calc_subblock_stats:
+  runtime_stats:
+    enabled: true
+    synth_dataset_num_requests: 32
+    backend: vllm
+    num_warmup_iters: 2
+    num_iters: 10
+    batch_size: 1
+
+mip:
+  human_constraints:
+    target_latency: 20  # seconds
+```
+
+Because vLLM startup adds substantial overhead during stats collection, extend the distributed process group timeout accordingly:
+
+```yaml
+dist_timeout_minutes: 60  # default is 10 if omitted
+```
+
+This field is supported in any Puzzletron YAML config and overrides the default 10-minute distributed timeout.
+
 ## Advanced Usage
 
 Modify `llama-3_1-8B_pruneffn_memory.yaml` file for advanced compression scenarios.
