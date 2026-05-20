@@ -16,6 +16,8 @@
 
 set -e  # Exit immediately if any command fails
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 usage() {
     echo "Usage: $0 --amax_path <path> --fp4_output_path <path> --fp8_hf_path <path> [--world_size <n>]"
     exit 1
@@ -84,7 +86,7 @@ cp -r $FP8_HF_PATH/assets $FP4_PATH/ || true
 
 # Run the quantization command
 echo "Running quantization..."
-python quantize_to_nvfp4.py \
+python "$SCRIPT_DIR/quantize_to_nvfp4.py" \
     --amax_path "$AMAX_PATH" \
     --fp4_path "$FP4_PATH" \
     --fp8_hf_path "$FP8_HF_PATH" \
