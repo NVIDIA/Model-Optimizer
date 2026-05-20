@@ -243,6 +243,10 @@ To use remote autotuning during Q/DQ placement optimization, run with ``trtexec`
 * Valid remote autotuning configuration
 * ``--use_trtexec`` must be set (benchmarking uses ``trtexec`` instead of the TensorRT Python API)
 * ``--safe --skipInference`` must be enabled via ``--trtexec_benchmark_args``
+* ssh and scp must be available on the local machine
+* sshpass must be available on the local machine if using password authentication
+* Only once instance of remote auto tuning can be run at a time since the remote timing server and latency measurement processes share the GPU but do not coordinate execution; thus latency measurements would not be accurate if multiple instances are run concurrently.
+* useCudaGraph will be added for latency measurement to improve accuracy.
 
 Replace ``<remote autotuning config>`` with an actual remote autotuning configuration string (see ``trtexec --help`` for more details). Other TensorRT benchmark options (e.g. ``--timing_cache``, ``--warmup_runs``, ``--timing_runs``, ``--plugin_libraries``) are also available; run ``--help`` for details.
 
