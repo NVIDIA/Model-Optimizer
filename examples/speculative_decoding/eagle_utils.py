@@ -59,6 +59,7 @@ def make_speculative_data_module(
     train_len=None,
     answer_only_loss=False,
     shift_labels=True,
+    seed: int = 0,
 ) -> dict:
     """Create data module for speculative decoding training.
 
@@ -74,7 +75,42 @@ def make_speculative_data_module(
             chat_template = f.read()
         print_rank_0(f"Loaded chat template from {template_path}")
 
-    if data_args.offline_data_path is None:
+    mode = getattr(data_args, "mode", "online")
+    if mode == "streaming":
+        # Trainer is an HTTP client of a running vllm serve; samples stream in lazily.
+        print_rank_0(f"Streaming hidden states from {data_args.streaming_server_url}")
+        from modelopt.torch.speculative.plugins.hf_streaming_dataset import (
+            EagleVllmStreamingConfig,
+            EagleVllmStreamingDataset,
+            estimate_conversation_chars,
+        )
+
+        ds = load_dataset("json", data_files=data_args.data_path, split="train")
+        if data_args.sample_size > 0:
+            ds = ds.select(range(data_args.sample_size))
+        # Cheap char-based pre-filter to skip obviously-too-long conversations before
+        # tokenization. ~4 chars/token is a typical mid for English-dominant mixed text;
+        # anything that slips through and exceeds vllm's max_model_len is rejected
+        # server-side and skipped silently.
+        char_budget = data_args.streaming_max_seq_len * 4
+        n_before = len(ds)
+        ds = ds.filter(lambda e: estimate_conversation_chars(e) <= char_budget)
+        print_rank_0(f"Pre-filtered {n_before} -> {len(ds)} entries by char budget ({char_budget})")
+        streaming_cfg = EagleVllmStreamingConfig(
+            server_url=data_args.streaming_server_url,
+            model=data_args.streaming_model_name,
+            answer_only_loss=answer_only_loss,
+            prefetch=data_args.streaming_prefetch,
+            seed=seed,
+        )
+        train_dataset = EagleVllmStreamingDataset(
+            entries=ds,
+            tokenizer=tokenizer,
+            config=streaming_cfg,
+        )
+        data_collator = EagleOfflineDataCollator(train_len=train_len)
+
+    elif mode == "online":
         train_dataset = ShardedDataset("json", data_files=data_args.data_path)
 
         if not data_args.vlm_processor:
