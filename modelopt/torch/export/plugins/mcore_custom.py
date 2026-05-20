@@ -305,6 +305,14 @@ def save_safetensors_by_layer_index(
         meta_filename = filename + ".json"
         ckpt_filename = filename + ".safetensors"
 
+        # Keep safetensors-first ordering so late layer_state_dict updates are captured
+        # in the layer .safetensors shard and reflected in its per-layer metadata JSON.
+        save_file(
+            layer_state_dict,
+            save_directory + "/" + ckpt_filename,
+            metadata={"format": "pt"},
+        )
+
         weight_map = {}
         layer_total_size = 0
         for key, val in layer_state_dict.items():
@@ -318,7 +326,6 @@ def save_safetensors_by_layer_index(
                 f,
                 indent=4,
             )
-        save_file(layer_state_dict, save_directory + "/" + ckpt_filename, metadata={"format": "pt"})
 
     # [TODO]: this global barrier needs to be replaced with something safer
     torch.distributed.barrier()
