@@ -59,6 +59,7 @@ from diffusers import AutoencoderKLWan, WanPipeline
 from diffusers.utils import export_to_video
 
 import modelopt.torch.sparsity.attention_sparsity as mtsa
+from modelopt.torch.export import export_hf_checkpoint
 from modelopt.torch.sparsity.attention_sparsity.sparse_attention import SparseAttentionModule
 
 DEFAULT_MODEL_PATH = os.environ.get("WAN22_MODEL_PATH", "Wan-AI/Wan2.2-TI2V-5B-Diffusers")
@@ -190,14 +191,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--calib-frames",
         type=int,
-        default=151,
-        help="Number of frames for calibration",
+        default=None,
+        help="Number of frames for calibration (default: same as --num-frames).",
     )
     parser.add_argument(
         "--calib-size",
         type=int,
         default=4,
         help="Number of calibration prompts from OpenVid-1M dataset",
+    )
+
+    # Export options
+    parser.add_argument(
+        "--export-dir",
+        type=str,
+        default=None,
+        help="Export sparsified model as a HuggingFace checkpoint to this directory. "
+        "The sparse_attention_config (calibration params, disabled layers, etc.) "
+        "is written into each component's config.json.",
     )
     return parser.parse_args()
 
@@ -412,11 +423,14 @@ def main() -> None:
             if args.calibrate:
                 print("Warning: --calibrate is ignored when --raw-threshold is set")
         elif args.calibrate:
+            calib_frames = (
+                args.calib_frames if args.calib_frames is not None else args.num_frames
+            )
             forward_loop = build_calibration_forward_loop(
                 pipe,
                 calib_size=args.calib_size,
                 num_steps=args.calib_steps,
-                num_frames=args.calib_frames,
+                num_frames=calib_frames,
                 height=args.height,
                 width=args.width,
                 seed=args.seed,
@@ -441,6 +455,11 @@ def main() -> None:
         gc.collect()
         torch.cuda.empty_cache()
         print("Cleared CUDA cache after calibration")
+
+    # ---- Export (optional) ----
+    if args.export_dir and not args.baseline:
+        print(f"Exporting sparsified checkpoint to {args.export_dir}...")
+        export_hf_checkpoint(pipe, export_dir=args.export_dir)
 
     # ---- Generate (optional) ----
     if args.prompt:
