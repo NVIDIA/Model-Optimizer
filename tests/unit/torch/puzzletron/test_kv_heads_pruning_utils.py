@@ -29,7 +29,6 @@ from modelopt.torch.puzzletron.pruning.pruning_utils import (
 )
 from modelopt.torch.puzzletron.tools.bypassed_training.child_init import _process_single_layer
 
-
 ATTN_PREFIX = "model.layers.0.self_attn"
 QKVO_NAMES = ["q_proj", "k_proj", "v_proj", "o_proj"]
 
