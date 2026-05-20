@@ -405,6 +405,7 @@ def test_get_scaling_factor(
                 "exclude_modules": ["linears.0", "linears.2"],
                 "kv_cache_quant_algo": None,
                 "quant_algo": "FP8",
+                "scale_fmt": "ue8m0",
             },
         ),
         (
@@ -416,6 +417,7 @@ def test_get_scaling_factor(
                 "kv_cache_quant_algo": None,
                 "pre_quant_scale": True,
                 "quant_algo": "W4A8_AWQ",
+                "scale_fmt": "ue8m0",
             },
         ),
         (
@@ -425,6 +427,7 @@ def test_get_scaling_factor(
                 "group_size": 16,
                 "kv_cache_quant_algo": None,
                 "quant_algo": "NVFP4",
+                "scale_fmt": "ue8m0",
             },
         ),
         (
@@ -436,6 +439,7 @@ def test_get_scaling_factor(
                 "pre_quant_scale": True,
                 "kv_cache_quant_algo": None,
                 "quant_algo": "NVFP4_AWQ",
+                "scale_fmt": "ue8m0",
             },
         ),
         (
@@ -447,6 +451,7 @@ def test_get_scaling_factor(
                 "kv_cache_quant_algo": None,
                 "pre_quant_scale": True,
                 "quant_algo": "W4A16_AWQ",
+                "scale_fmt": "ue8m0",
             },
         ),
         (
@@ -455,6 +460,7 @@ def test_get_scaling_factor(
                 "exclude_modules": ["linears.0", "linears.2"],
                 "quant_algo": "FP8",
                 "kv_cache_quant_algo": "FP8",
+                "scale_fmt": "ue8m0",
             },
         ),
         (
@@ -463,6 +469,7 @@ def test_get_scaling_factor(
                 "exclude_modules": ["linears.0", "linears.2"],
                 "quant_algo": "FP8",
                 "kv_cache_quant_algo": "INT8",
+                "scale_fmt": "ue8m0",
             },
         ),
     ],
