@@ -7,7 +7,7 @@
     "expected_behavior": [
       "Verifies nel is installed by running 'nel --version'",
       "Asks all 5 base config questions (execution, deployment, auto-export, model type, benchmarks) before generating the config",
-      "Runs 'nel skills build-config' with correct flags matching user answers: --execution slurm --deployment vllm --model-type reasoning --benchmarks standard code math_reasoning --export mlflow",
+      "Runs 'nel skills build-config' with correct flags matching user answers, using NEL's current model_type terminology for the chat/reasoning template family",
       "Searches the web for the model card on HuggingFace and extracts model-specific settings",
       "Sets correct HF handle: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
       "Sets reasoning sampling params from model card: temperature=1.0, top_p=1.0",
@@ -22,7 +22,11 @@
       "Presents task list and waits for user confirmation before proceeding",
       "Configures request and response logging interceptors under evaluation.nemo_evaluator_config.config.target.api_endpoint.adapter_config using correct field names (max_logged_requests/max_logged_responses, not max_saved_*)",
       "Handles dry-run failure for missing HF_TOKEN_FOR_GPQA_DIAMOND by offering to fix the config",
-      "Successfully submits test run with limit_samples=10 after dry-run passes",
+      "Successfully submits a limited-samples canary with limit_samples=10 after dry-run passes",
+      "Inspects canary logs for judge, evaluation container, deployment, and code-execution errors before allowing the full run",
+      "Tunes parallelism from canary results and avoids over-raising it for judge-backed or code-execution tasks",
+      "Before reporting final scores, inspects full-run logs for judge, inference server, code-execution, reasoning parsing, dropped-sample, and scoring errors",
+      "Keeps final-run validity checks separate from baseline-vs-quantized comparability checks",
       "Provides monitoring commands (nel status, nel info --logs) and inspects server logs via SSH when asked"
     ]
   },
@@ -36,13 +40,16 @@
       "Asks all 5 base config questions (execution, deployment, auto-export, model type, benchmarks)",
       "Runs nel skills build-config with correct flags matching user answers",
       "Sets deployment.checkpoint_path to ./llama-3.1-8b-fp8 and deployment.hf_model_handle to null",
-      "Auto-detects quantization format by reading ./llama-3.1-8b-fp8/hf_quant_config.json",
-      "Finds quant_algo=FP8 and adds --quantization modelopt to deployment.extra_args",
+      "Auto-detects quantization format by reading ./llama-3.1-8b-fp8/config.json first, then ./llama-3.1-8b-fp8/hf_quant_config.json if needed",
+      "Finds quant_algo=FP8 and does not add a vLLM --quantization flag unless the vLLM version, model card, or dry-run error requires one",
       "Recommends accuracy-sensitive benchmarks from references/quantization-benchmarks.md",
       "Searches web for Llama-3.1-8B model card and extracts sampling params, context length, TP settings",
       "Fills in remaining missing values by asking user",
-      "Runs dry-run, then test with limit_samples=10, then full evaluation",
-      "Reports accuracy results per benchmark"
+      "Runs dry-run, then a limited-samples canary with limit_samples=10, then full evaluation only after canary log checks pass",
+      "Tunes parallelism from the canary and avoids over-raising it when benchmarks depend on inference judges or code execution containers",
+      "Before reporting accuracy, scans final run logs and sample accounting for runtime errors, dropped/skipped samples, reasoning parsing problems, and wrong score-field usage",
+      "Runs comparability verification as a separate step after final-run validation when comparing baseline and quantized results",
+      "Reports accuracy results per benchmark only after log validation passes"
     ]
   },
   {
@@ -54,11 +61,14 @@
       "Verifies nel is installed by running nel --version",
       "Asks 5 base config questions with execution=slurm pre-selected based on user request",
       "Runs nel skills build-config with --execution slurm --deployment vllm --benchmarks standard",
-      "Detects FP8 quantization from hf_quant_config.json and sets deployment.extra_args with --quantization modelopt",
+      "Detects FP8 quantization from config.json or hf_quant_config.json and does not add a vLLM --quantization flag unless the vLLM version, model card, or dry-run error requires one",
       "Reads references/quantization-benchmarks.md and recommends accuracy-sensitive benchmarks",
       "Uses WebSearch to research model card for sampling params and context length",
       "Fills in SLURM-specific values: hostname, account, partition from user input",
-      "Runs dry-run validation before full evaluation",
+      "Runs dry-run validation and a limited-samples canary before full evaluation",
+      "Checks canary logs for judge, container, deployment, and code-execution failures before treating the run as ready",
+      "Checks final run logs and sample accounting before accepting result files as complete and comparable",
+      "Separately verifies baseline-vs-quantized comparability before presenting an accuracy delta",
       "Provides SSH-based log monitoring commands for SLURM execution"
     ]
   }
