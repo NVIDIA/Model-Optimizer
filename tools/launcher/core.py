@@ -142,6 +142,7 @@ class GlobalVariables:
     hf_model: str = None
     hf_data: str = None
     hf_local: str = None
+    draft_model: str = None
 
 
 @dataclass
@@ -272,7 +273,8 @@ def build_slurm_executor(
         array=slurm_config.array,
         time=slurm_config.time,
         mem="0",
-        retries=0,
+        retries=slurm_config.retries,
+        additional_parameters={**(slurm_config.additional_parameters or {}), **({"requeue": True} if getattr(slurm_config, "requeue", False) else {})},
         packager=packager,
         srun_args=slurm_config.srun_args,
     )
