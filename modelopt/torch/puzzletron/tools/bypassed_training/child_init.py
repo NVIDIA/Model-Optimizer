@@ -22,6 +22,8 @@ import json
 import os
 import re
 import time
+from collections import ChainMap
+from collections.abc import Iterator, MutableMapping
 from copy import deepcopy
 from functools import partial
 from pathlib import Path
@@ -50,6 +52,49 @@ __all__ = ["create_child_state_dict", "update_model_config"]
 IgnoreFn = Callable[[str], bool]
 
 default_ignore_fn: IgnoreFn = lambda _: False
+
+
+class _PerLayerKeysView(MutableMapping[str, str]):
+    def __init__(self, base: dict[str, str]) -> None:
+        self._base = base
+        self._overrides: dict[str, str] = {}
+        self._removed: dict[str, str] = {}
+
+    def __getitem__(self, key: str) -> str:
+        if key in self._removed:
+            raise KeyError(key)
+        if key in self._overrides:
+            return self._overrides[key]
+        return self._base[key]
+
+    def __setitem__(self, key: str, value: str) -> None:
+        self._removed.pop(key, None)
+        self._overrides[key] = value
+
+    def __delitem__(self, key: str) -> None:
+        if key in self._removed:
+            raise KeyError(key)
+        if key in self._overrides:
+            self._removed[key] = self._overrides.pop(key)
+        elif key in self._base:
+            self._removed[key] = self._base[key]
+        else:
+            raise KeyError(key)
+
+    def __iter__(self) -> Iterator[str]:
+        yield from self._overrides.keys()
+        for key in self._base:
+            if key not in self._overrides and key not in self._removed:
+                yield key
+
+    def __len__(self) -> int:
+        return sum(1 for _ in self)
+
+    def __contains__(self, key: object) -> bool:
+        return key not in self._removed and (key in self._overrides or key in self._base)
+
+    def removed_items(self) -> dict[str, str]:
+        return dict(self._removed)
 
 
 class Printer:
@@ -83,27 +128,43 @@ def _process_single_layer(
     keys_to_remove = {}
     layer_out_state_dict = {}
 
-    # Delegate to pruning_mixin if available
+    # Delegate to pruning_mixin if available (supports a single mixin or a list of mixins).
+    # Mixins run sequentially. Each mixin sees the state dict produced by earlier mixins,
+    # which lets independent pruning methods compose on the same tensor (for example one
+    # pruning FFN channels and another pruning hidden-size dimensions).
     if pruning_mixin is not None:
-        _layer_out = pruning_mixin.prune_single_layer(
-            layer_idx=layer_idx,
-            parent_state_dict=parent_state_dict,
-            new_state_dict=new_state_dict,
-            original_config=original_config,
-            new_config=new_config,
-            gqa_init_mode=gqa_init_mode,
-            mlp_init_mode=mlp_init_mode,
-            mlp_init_config=mlp_init_config,
-            linear_init_mode=linear_init_mode,
-            ignored_keys=ignored_keys,
-            keys=keys,
-            is_original_mha=is_original_mha,
-            head_size=head_size,
-            hidden_size=hidden_size,
-            keys_to_remove=keys_to_remove,
-        )
-        layer_out_state_dict.update(_layer_out)
-        return layer_out_state_dict, keys_to_remove
+        _mixins = pruning_mixin if isinstance(pruning_mixin, list) else [pruning_mixin]
+        merged_keys_to_remove = {}
+        parent_layer_updates = {}
+        new_layer_updates = {}
+        current_parent_state_dict = ChainMap(parent_layer_updates, parent_state_dict)
+        current_new_state_dict = ChainMap(new_layer_updates, new_state_dict)
+        current_keys = _PerLayerKeysView(keys)
+        for _mixin in _mixins:
+            mixin_keys_to_remove = {}
+            _layer_out = _mixin.prune_single_layer(
+                layer_idx=layer_idx,
+                parent_state_dict=current_parent_state_dict,
+                new_state_dict=current_new_state_dict,
+                original_config=original_config,
+                new_config=new_config,
+                gqa_init_mode=gqa_init_mode,
+                mlp_init_mode=mlp_init_mode,
+                mlp_init_config=mlp_init_config,
+                linear_init_mode=linear_init_mode,
+                ignored_keys=ignored_keys,
+                keys=current_keys,
+                is_original_mha=is_original_mha,
+                head_size=head_size,
+                hidden_size=hidden_size,
+                keys_to_remove=mixin_keys_to_remove,
+            )
+            layer_out_state_dict.update(_layer_out)
+            parent_layer_updates.update(_layer_out)
+            new_layer_updates.update(_layer_out)
+            merged_keys_to_remove.update(current_keys.removed_items())
+            merged_keys_to_remove.update(mixin_keys_to_remove)
+        return layer_out_state_dict, merged_keys_to_remove
 
     # Legacy inline processing (fallback when no pruning_mixin)
 
@@ -791,7 +852,10 @@ def update_model_config(
 
     def override(item, item_overrides):
         if item_overrides is None:
-            return item_overrides
+            # Hydra/OmegaConf ``null`` means "leave this field unchanged" in
+            # model_config_overrides. This lets compact overrides update only one
+            # sibling field without clearing the rest of the dataclass.
+            return item
         if dataclasses.is_dataclass(item):
             assert isinstance(item_overrides, dict)
             return dataclass_override(item, item_overrides)
