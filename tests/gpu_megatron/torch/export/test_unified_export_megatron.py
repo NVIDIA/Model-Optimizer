@@ -23,7 +23,11 @@ import torch
 import transformers
 from _test_utils.torch.megatron.models import get_mcore_gpt_model
 from _test_utils.torch.megatron.utils import get_forward
-from _test_utils.torch.transformers_models import create_tiny_llama_dir, get_tiny_tokenizer
+from _test_utils.torch.transformers_models import (
+    create_tiny_llama_dir,
+    create_tiny_nemotron_dir,
+    create_tiny_qwen3vl_dir,
+)
 from safetensors import safe_open
 from safetensors.torch import save_file
 
@@ -71,21 +75,57 @@ def _verify_model_quant_config(
             assert quant_config_dict["kv_cache_quant_algo"] == KV_CACHE_FP8
 
 
+def _merge_vision_weights(src_dir: Path, dst_dir: Path) -> None:
+    """Copy model.visual.* tensors from src safetensors into dst_dir.
+
+    The mcore export only writes language-model weights.  To produce a complete
+    Qwen3-VL checkpoint the vision-encoder weights must be merged from the
+    original pretrained checkpoint.
+    """
+    vision_tensors = {}
+    for sf in sorted(src_dir.glob("*.safetensors")):
+        with safe_open(str(sf), framework="pt", device="cpu") as f:
+            for key in f.keys():  # noqa: SIM118
+                if key.startswith("model.visual."):
+                    vision_tensors[key] = f.get_tensor(key)
+    if vision_tensors:
+        save_file(vision_tensors, str(dst_dir / "model-vision.safetensors"))
+
+
 def _test_unified_export_megatron(
-    tmp_path, model_type, arch, extra_module, quant_config, kv_cache_quant_cfg, rank, size
+    tmp_path,
+    model_type,
+    extra_module,
+    quant_config,
+    kv_cache_quant_cfg,
+    rank,
+    size,
+    model_dir=None,
 ):
-    tokenizer = get_tiny_tokenizer()
-    tokenizer.save_pretrained(tmp_path)
+    if model_type == "qwen3vl":
+        config = transformers.AutoConfig.from_pretrained(model_dir)
+        text_cfg = config.text_config
+        num_layers = text_cfg.num_hidden_layers
+        hidden_size = text_cfg.hidden_size
+        num_attention_heads = text_cfg.num_attention_heads
+        num_query_groups = text_cfg.num_key_value_heads
+        ffn_hidden_size = text_cfg.intermediate_size
+        max_sequence_length = text_cfg.max_position_embeddings
+        vocab_size = text_cfg.vocab_size
+        extra_kwargs = {"kv_channels": text_cfg.head_dim, "qk_layernorm": True}
+    elif model_type in {"llama", "nemotron"}:
+        config = transformers.AutoConfig.from_pretrained(model_dir)
+        num_layers = config.num_hidden_layers
+        hidden_size = config.hidden_size
+        num_attention_heads = config.num_attention_heads
+        num_query_groups = config.num_key_value_heads
+        ffn_hidden_size = config.intermediate_size
+        max_sequence_length = config.max_position_embeddings
+        vocab_size = config.vocab_size
+        extra_kwargs = {}
+    else:
+        raise ValueError(f"Unsupported model_type: {model_type}")
 
-    num_layers = 2
-    hidden_size = 64
-    num_attention_heads = 8
-    num_query_groups = size
-    ffn_hidden_size = 128
-    max_sequence_length = 32
-    vocab_size = tokenizer.vocab_size
-
-    arch = "NemotronForCausalLM" if model_type == "nemotron" else "LlamaForCausalLM"
     activation_func = "squared_relu" if model_type == "nemotron" else "swiglu"
     normalization = "LayerNorm" if model_type == "nemotron" else "RMSNorm"
 
@@ -103,6 +143,7 @@ def _test_unified_export_megatron(
         activation_func=activation_func,
         normalization=normalization,
         transformer_impl="modelopt",
+        **extra_kwargs,
     ).cuda()
 
     if quant_config:
@@ -127,26 +168,12 @@ def _test_unified_export_megatron(
         model = mtsp.convert(model, [("eagle", config)])
         assert isinstance(model, _DynamicEagleGPTModel)
 
-    pretrained_config = {
-        "architectures": [arch],
-        "attention_bias": False,
-        "hidden_size": hidden_size,
-        "intermediate_size": ffn_hidden_size,
-        "max_position_embeddings": max_sequence_length,
-        "model_type": "llama",
-        "num_attention_heads": num_attention_heads,
-        "num_hidden_layers": num_layers,
-        "num_key_value_heads": num_query_groups,
-        "torch_dtype": "bfloat16",
-    }
-
-    with open(tmp_path / "config.json", "w") as f:
-        json.dump(pretrained_config, f)
+    hf_config_dir = model_dir
 
     tmp_export_dir = tmp_path / "export"
     export_mcore_gpt_to_hf(
         model,
-        tmp_path if arch is not None else None,
+        hf_config_dir,
         dtype=torch.bfloat16,
         export_dir=str(tmp_export_dir),
     )
@@ -154,74 +181,125 @@ def _test_unified_export_megatron(
     if quant_config:
         _verify_model_quant_config(tmp_export_dir, quant_config, kv_cache_quant_cfg)
 
+    if model_type == "qwen3vl":
+        torch.distributed.barrier()
+        if rank == 0:
+            _merge_vision_weights(Path(model_dir), tmp_export_dir)
+            # sanity check that the vision encoder weights were merged
+            keys = []
+            for sf in sorted(tmp_export_dir.glob("*.safetensors")):
+                with safe_open(str(sf), framework="pt", device="cpu") as f:
+                    keys.extend(f.keys())
+            assert any(k.startswith("model.language_model.") for k in keys), (
+                "language model keys missing from combined export"
+            )
+            assert any(k.startswith("model.visual.") for k in keys), (
+                "vision encoder keys missing from combined export"
+            )
+            # try to load the model and run a forward pass
+            from transformers.models.qwen3_vl.modeling_qwen3_vl import (
+                Qwen3VLForConditionalGeneration,
+            )
+
+            vl_model = Qwen3VLForConditionalGeneration.from_pretrained(
+                tmp_export_dir, torch_dtype=torch.bfloat16
+            ).cuda()
+            input_ids = torch.zeros(1, 4, dtype=torch.long).cuda()
+            with torch.no_grad():
+                out = vl_model(input_ids=input_ids)
+            assert out.logits.shape[-1] == vl_model.config.text_config.vocab_size
+
 
 @pytest.mark.parametrize(
-    ("model_type", "arch", "extra_module", "quant_config", "kv_cache_quant_cfg"),
+    ("model_type", "extra_module", "quant_config", "kv_cache_quant_cfg"),
     [
-        ("nemotron", "NemotronForCausalLM", None, None, None),
-        ("nemotron", "NemotronForCausalLM", None, "NVFP4_DEFAULT_CFG", None),
-        ("nemotron", "NemotronForCausalLM", None, "NVFP4_DEFAULT_CFG", "FP8_KV_CFG"),
-        ("nemotron", "NemotronForCausalLM", "eagle", None, None),
-        ("nemotron", "NemotronForCausalLM", "medusa", None, None),
-        ("llama", "LlamaForCausalLM", None, None, None),
-        ("llama", "LlamaForCausalLM", None, "FP8_DEFAULT_CFG", None),
-        ("llama", "LlamaForCausalLM", None, "FP8_DEFAULT_CFG", "FP8_KV_CFG"),
-        ("llama", "LlamaForCausalLM", "eagle", None, None),
-        ("llama", "LlamaForCausalLM", "medusa", None, None),
+        ("nemotron", None, None, None),
+        ("nemotron", None, "NVFP4_DEFAULT_CFG", None),
+        ("nemotron", None, "NVFP4_DEFAULT_CFG", "FP8_KV_CFG"),
+        ("nemotron", "eagle", None, None),
+        ("nemotron", "medusa", None, None),
+        ("llama", None, None, None),
+        ("llama", None, "FP8_DEFAULT_CFG", None),
+        ("llama", None, "FP8_DEFAULT_CFG", "FP8_KV_CFG"),
+        ("llama", "eagle", None, None),
+        ("llama", "medusa", None, None),
+        ("qwen3vl", None, None, None),
+        ("qwen3vl", None, "FP8_DEFAULT_CFG", None),
     ],
 )
 def test_unified_export_megatron(
-    dist_workers_size_1, tmp_path, model_type, arch, extra_module, quant_config, kv_cache_quant_cfg
+    dist_workers_size_1, tmp_path, model_type, extra_module, quant_config, kv_cache_quant_cfg
 ):
+    if model_type == "llama":
+        model_dir = create_tiny_llama_dir(tmp_path)
+    elif model_type == "qwen3vl":
+        model_dir = create_tiny_qwen3vl_dir(tmp_path)
+    elif model_type == "nemotron":
+        model_dir = create_tiny_nemotron_dir(tmp_path)
+    else:
+        raise ValueError(f"Unsupported model_type: {model_type}")
     # TODO: Fix TP>1 failures
     dist_workers_size_1.run(
         partial(
             _test_unified_export_megatron,
             tmp_path,
             model_type,
-            arch,
             extra_module,
             quant_config,
             kv_cache_quant_cfg,
+            model_dir=model_dir,
         ),
     )
 
 
-def _test_unified_import_megatron(tiny_llama_dir, rank, size):
-    config = transformers.AutoConfig.from_pretrained(tiny_llama_dir)
+def _test_unified_import_megatron(model_dir, rank, size, model_type="llama"):
+    config = transformers.AutoConfig.from_pretrained(model_dir)
 
-    num_layers = config.num_hidden_layers
-    hidden_size = config.hidden_size
-    num_attention_heads = config.num_attention_heads
-    num_query_groups = config.num_key_value_heads
-    ffn_hidden_size = config.intermediate_size
-    max_sequence_length = config.max_position_embeddings
-    vocab_size = config.vocab_size
-    activation_func = "swiglu"
-    normalization = "RMSNorm"
+    if model_type == "qwen3vl":
+        cfg = config.text_config
+        extra_kwargs = {
+            "kv_channels": cfg.head_dim,
+            "transformer_impl": "modelopt",
+            "qk_layernorm": True,
+        }
+    else:
+        cfg = config
+        extra_kwargs = {}
 
     model = get_mcore_gpt_model(
         tensor_model_parallel_size=size,
         pipeline_model_parallel_size=1,
         initialize_megatron=True,
-        num_layers=num_layers,
-        hidden_size=hidden_size,
-        num_attention_heads=num_attention_heads,
-        num_query_groups=num_query_groups,
-        ffn_hidden_size=ffn_hidden_size,
-        max_sequence_length=max_sequence_length,
-        vocab_size=vocab_size,
-        activation_func=activation_func,
-        normalization=normalization,
+        num_layers=cfg.num_hidden_layers,
+        hidden_size=cfg.hidden_size,
+        num_attention_heads=cfg.num_attention_heads,
+        num_query_groups=cfg.num_key_value_heads,
+        ffn_hidden_size=cfg.intermediate_size,
+        max_sequence_length=cfg.max_position_embeddings,
+        vocab_size=cfg.vocab_size,
+        activation_func="swiglu",
+        normalization="RMSNorm",
+        **extra_kwargs,
     ).cuda()
 
-    import_mcore_gpt_from_hf(model, tiny_llama_dir)
+    import_mcore_gpt_from_hf(model, model_dir)
 
 
-def test_unified_import_megatron(dist_workers, tmp_path):
+@pytest.mark.parametrize("model_type", ["llama", "qwen3vl"])
+def test_unified_import_megatron(dist_workers, tmp_path, model_type):
     num_gpus = torch.cuda.device_count()
-    tiny_llama_dir = create_tiny_llama_dir(tmp_path, num_key_value_heads=num_gpus)
-    dist_workers.run(partial(_test_unified_import_megatron, tiny_llama_dir))
+    if model_type == "llama":
+        model_dir = create_tiny_llama_dir(tmp_path, num_key_value_heads=num_gpus)
+    elif model_type == "qwen3vl":
+        model_dir = create_tiny_qwen3vl_dir(
+            tmp_path,
+            num_attention_heads=num_gpus,
+            num_key_value_heads=num_gpus,
+            hidden_size=num_gpus * 8,  # head_dim=8
+        )
+    else:
+        raise ValueError(f"Unsupported model_type: {model_type}")
+    dist_workers.run(partial(_test_unified_import_megatron, model_dir, model_type=model_type))
 
 
 def _test_qkv_slicing_gqa_tp2(tmp_path, rank, size):
