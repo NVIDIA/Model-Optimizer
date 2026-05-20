@@ -154,6 +154,34 @@ def get_args():
     parser.add_argument("--min_lr", type=float, default=1e-5, help="Minimum learning rate")
     parser.add_argument("--lr_warmup_iters", type=int, default=50, help="Number of LR warmup steps")
     parser.add_argument(
+        "--recompute_granularity",
+        type=str,
+        default=None,
+        choices=[None, "selective", "full"],
+        help="Activation recomputation: None (off), 'selective' (attn only), 'full' (whole layers)",
+    )
+    parser.add_argument(
+        "--recompute_method",
+        type=str,
+        default=None,
+        choices=[None, "uniform", "block"],
+        help="Activation recomputation method (only used when --recompute_granularity=full)",
+    )
+    parser.add_argument(
+        "--recompute_num_layers",
+        type=int,
+        default=None,
+        help="Number of layers per recomputation chunk (only used when --recompute_granularity=full)",
+    )
+    parser.add_argument(
+        "--recompute_modules",
+        type=str,
+        nargs="+",
+        default=None,
+        help="Modules to recompute with --recompute_granularity=selective. Defaults to ['core_attn']. "
+        "Allowed: core_attn, mlp, moe, moe_act, layernorm, mla_up_proj, shared_experts.",
+    )
+    parser.add_argument(
         "--eval_interval", type=int, default=100, help="Validate + checkpoint every <N> steps"
     )
     parser.add_argument(
@@ -219,6 +247,12 @@ def main(args: argparse.Namespace):
         provider.expert_model_parallel_size = args.ep_size
         provider.expert_tensor_parallel_size = args.etp_size
         provider.seq_length = args.seq_length
+        if args.recompute_granularity is not None:
+            provider.recompute_granularity = args.recompute_granularity
+            provider.recompute_method = args.recompute_method
+            provider.recompute_num_layers = args.recompute_num_layers
+            if args.recompute_modules is not None:
+                provider.recompute_modules = args.recompute_modules
         return provider
 
     # TODO: Support megatron-ckpt as an alternative to HF checkpoints (e.g. /path/to/ckpt/iter_0000000)
