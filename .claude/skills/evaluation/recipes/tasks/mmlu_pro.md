@@ -8,7 +8,7 @@
 - Run time: Short
 - Repeats: 1
 - Requires: None
-- Reference: https://docs.nvidia.com/nemo/evaluator/latest/evaluation/benchmarks/catalog/all/harnesses/nemo_skills.html
+- Reference: <https://docs.nvidia.com/nemo/evaluator/latest/evaluation/benchmarks/catalog/all/harnesses/nemo_skills.html>
 
 ## Params
 

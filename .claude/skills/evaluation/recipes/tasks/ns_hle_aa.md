@@ -8,7 +8,7 @@
 - Run time: Long
 - Repeats: 1
 - Requires: `HF_TOKEN`, `JUDGE_API_KEY`
-- Reference: https://docs.nvidia.com/nemo/evaluator/nightly/evaluation/benchmarks/catalog/all/harnesses/nemo_skills.html
+- Reference: <https://docs.nvidia.com/nemo/evaluator/nightly/evaluation/benchmarks/catalog/all/harnesses/nemo_skills.html>
 
 ## Params
 

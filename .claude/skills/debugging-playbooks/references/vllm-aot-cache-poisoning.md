@@ -14,7 +14,7 @@ are zeroed out via `--limit-mm-per-prompt`.
 vLLM startup crashes during `profile_run` / `_dummy_run` / CUDA-graph capture
 with:
 
-```
+```text
 AttributeError: 'NoneType' object has no attribute 'size'
 ```
 
@@ -25,7 +25,7 @@ no MLP, no quantized linear. The compiled function is loaded from disk and
 crashes in dynamo's prologue, before any decoder layer runs. The log line
 just above the traceback is the smoking gun:
 
-```
+```text
 INFO ... [decorators.py:...] Directly load AOT compilation from path
   /vllm-cache/torch_compile_cache/torch_aot_compile/<hash>/rank_*/model
 ```
