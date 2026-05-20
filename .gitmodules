@@ -1,3 +1,6 @@
 [submodule "tools/launcher/modules/Megatron-LM"]
 	path = tools/launcher/modules/Megatron-LM
 	url = https://github.com/NVIDIA/Megatron-LM.git
+[submodule "tools/launcher/modules/Megatron-Bridge"]
+	path = tools/launcher/modules/Megatron-Bridge
+	url = https://github.com/NVIDIA-NeMo/Megatron-Bridge.git
