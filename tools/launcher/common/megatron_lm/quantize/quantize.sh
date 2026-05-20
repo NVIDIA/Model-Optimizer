@@ -21,6 +21,24 @@ source ${SCRIPT_DIR}/../../service_utils.sh
 util_install_extra_dep
 
 trap 'error_handler $0 $LINENO' ERR # ERROR HANDLER
+
+# Workaround: test if nvidia-resiliency-ext async checkpoint is compatible with
+# the container's PyTorch. If not, disable it so Megatron-LM falls back to mcore.
+python3 -c "
+from nvidia_resiliency_ext.checkpointing.async_ckpt.filesystem_async import FileSystemWriterAsync
+import tempfile, os
+d = tempfile.mkdtemp()
+try:
+    FileSystemWriterAsync(d, overwrite=True)
+finally:
+    os.rmdir(d)
+" 2>/dev/null || {
+    echo "WARNING: nvidia-resiliency-ext incompatible with container PyTorch, disabling"
+    NVRX_PATH=$(python3 -c "import nvidia_resiliency_ext; import os; print(os.path.dirname(nvidia_resiliency_ext.__file__))" 2>/dev/null)
+    if [ -n "$NVRX_PATH" ]; then
+        mv "$NVRX_PATH" "${NVRX_PATH}._disabled" 2>/dev/null || true
+    fi
+}
 ###################################################################################################
 
 if [[ -z ${HF_MODEL_CKPT} ]]; then
