@@ -78,6 +78,13 @@ repos:
         files: ^\.agents/skills/
         pass_filenames: false
 
+      - id: check-launcher-yaml
+        name: validate launcher YAML references to recipes and templates
+        entry: python tools/precommit/check_launcher_yaml.py
+        language: system
+        files: ^(tools/launcher/examples/.*\.yaml|modelopt_recipes/.*\.yaml|tools/precommit/check_launcher_yaml\.py)$
+        pass_filenames: false
+
   # Instructions to change license file if ever needed:
   # https://github.com/Lucas-C/pre-commit-hooks#removing-old-license-and-replacing-it-with-a-new-one
   - repo: https://github.com/Lucas-C/pre-commit-hooks
