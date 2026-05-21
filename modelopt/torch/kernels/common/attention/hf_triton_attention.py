@@ -112,8 +112,8 @@ def triton_attention_forward(
     if method is not None and not is_decode and getattr(module, "_apply_sparse_nm", False):
         kw["sparsity_n"] = method.sparsity_n
         kw["sparsity_m"] = method.sparsity_m
-        kw["num_sink_tokens"] = method.num_sink_tokens
-        kw["dense_window_size"] = method.dense_window_size
+        kw["dense_sink_tokens"] = method.dense_sink_tokens
+        kw["dense_recent_tokens"] = method.dense_recent_tokens
 
     # Skip-softmax: applies to both prefill and decode
     if method is not None and getattr(module, "_apply_skip_softmax", False):
