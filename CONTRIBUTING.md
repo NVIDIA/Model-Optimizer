@@ -146,6 +146,7 @@ We use [pytest](https://docs.pytest.org/) for all tests. For any new features / 
 - `tests/gpu`: Fast GPU-based unit tests for the core ModelOpt library. In most cases, they should not take more than a few seconds to run.
 - `tests/gpu_megatron`: Fast GPU-based unit tests for the core ModelOpt library for Megatron-Core features. In most cases, they should not take more than a few seconds to run.
 - `tests/gpu_trtllm`: Fast GPU-based unit tests for the core ModelOpt library for TensorRT-LLM features. In most cases, they should not take more than a few seconds to run.
+- `tests/gpu_vllm`: Fast GPU-based unit tests for the core ModelOpt library for vLLM features. In most cases, they should not take more than a few seconds to run.
 - `tests/examples`: Integration tests for ModelOpt examples. They should not take more than a few minutes to run. Please refer to [example test README](./tests/examples/README.md) for more details.
 
 For lightweight focused local validation, run `pytest` directly on the relevant test path. For example:
