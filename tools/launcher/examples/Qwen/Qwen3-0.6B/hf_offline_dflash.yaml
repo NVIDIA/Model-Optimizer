@@ -1,0 +1,75 @@
+# DFlash offline speculative decoding training for Qwen3-0.6B.
+#
+# 2-step pipeline mirroring hf_online_dflash.yaml but trains from pre-dumped
+# hidden states instead of streaming the base model forward at training time.
+#
+#   task_0: Dump hidden states from Qwen3-0.6B over the packaged synthetic
+#           dataset. compute_hidden_states_hf.py captures aux-layer activations
+#           per conversation; the wrapper auto-tags missing conversation_id
+#           fields so the packaged dataset flows in without preprocessing.
+#   task_1: Train DFlash with data.offline_data_path pointing at the dump.
+#           Triggers DFlashConfig._derive_dflash_offline, which deletes base-
+#           model layers post-convert to save memory.
+#
+# Lightweight single-GPU regression. No external data dependencies.
+#
+# Reference: "DFlash: Block Diffusion for Flash Speculative Decoding" (arXiv:2602.06036)
+#
+# Usage:
+#   uv run launch.py --yaml examples/Qwen/Qwen3-0.6B/hf_offline_dflash.yaml --yes
+#   uv run launch.py --yaml examples/Qwen/Qwen3-0.6B/hf_offline_dflash.yaml hf_local=/mnt/hf-local --yes
+
+job_name: Qwen3-0.6B_DFlash_offline_regression
+pipeline:
+  global_vars:
+    hf_model: /hf-local/Qwen/Qwen3-0.6B
+    hidden_states_dir: /scratchspace/dflash_qwen3_0.6b_hidden_states
+
+  # Step 1: Dump base-model hidden states over the synthetic dataset.
+  task_0:
+    script: common/specdec/dump_hidden_states_hf.sh
+    args:
+      - --model <<global_vars.hf_model>>
+      - --input-data modules/Model-Optimizer/examples/dataset/synthetic_conversations_1k.jsonl
+      - --output-dir <<global_vars.hidden_states_dir>>
+      - --aux-layers dflash
+      - --answer-only-loss
+      - --chat-template examples/Qwen/Qwen3-0.6B/chat_template_train.jinja
+      - --debug-max-num-conversations 200
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 1
+
+  # Step 2: Train DFlash on the dumped hidden states. Mirrors hf_online_dflash.yaml's
+  # task_0 args except data.data_path is replaced with data.offline_data_path.
+  task_1:
+    script: common/specdec/dflash_online_training.sh
+    args:
+      - --config modules/Model-Optimizer/modelopt_recipes/general/speculative_decoding/dflash.yaml
+      - model.model_name_or_path=<<global_vars.hf_model>>
+      - data.offline_data_path=<<global_vars.hidden_states_dir>>
+      - data.chat_template=examples/Qwen/Qwen3-0.6B/chat_template_train.jinja
+      - training.output_dir=/scratchspace/dflash_qwen3_0.6b_offline
+      # Two epochs over the 200-conversation dump gives enough steps for
+      # logging_steps=50 (batch=2 → ~100 steps/epoch → 4 log entries).
+      - training.num_train_epochs=2
+      - training.training_seq_len=512
+      - training.per_device_train_batch_size=2
+      - training.save_steps=500
+      - training.logging_steps=50
+      - training.disable_tqdm=true
+      - training.answer_only_loss=true
+      - dflash.dflash_block_size=8
+      - dflash.dflash_mask_token_id=151669
+      - dflash.dflash_use_torch_compile=False
+      - dflash.dflash_architecture_config.num_hidden_layers=2
+    environment:
+      - MAX_FINAL_LOSS: "5.0"
+      - MIN_FINAL_ACC: "0.10"
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 1
