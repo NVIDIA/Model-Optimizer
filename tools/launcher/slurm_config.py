@@ -15,6 +15,7 @@
 
 """Slurm configuration and factory for the ModelOpt Launcher."""
 
+# nemo_run's CLI parser cannot introspect PEP 604 optional annotations here.
 # ruff: noqa: UP045
 
 import os
