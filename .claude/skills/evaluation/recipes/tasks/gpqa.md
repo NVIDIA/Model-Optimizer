@@ -18,7 +18,7 @@ Use this inside the top-level `evaluation.tasks` list:
       params:
         extra:
           args: ++prompt_config=eval/aai/mcq-4choices
-          n_samples: 32
+          num_repeats: 32
     target:
       api_endpoint:
         adapter_config:
