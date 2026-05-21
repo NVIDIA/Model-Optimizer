@@ -159,12 +159,20 @@ def main():
             upload_run_dir(s3, local_run_dir, bucket, s3_key)
             uploaded += 1
         except ValueError as exc:
+            # Raised by upload_run_dir when the destination already exists.
             if args.skip_existing:
                 print(f"  Skipped: {exc}")
                 skipped += 1
             else:
                 print(f"  Error: {exc}")
                 errors += 1
+        except Exception as exc:  # noqa: BLE001 - any boto3/IO failure should not abort the sweep
+            # ClientError (auth, throttling, network), OSError on a single file,
+            # etc. Keep going so the other runs in a sweep still upload, and
+            # report a per-run summary at the end. Sweep-level non-zero exit
+            # still flags the overall run as failed.
+            print(f"  Error: {type(exc).__name__}: {exc}")
+            errors += 1
 
     print(f"\nDone: {uploaded} uploaded, {skipped} skipped, {errors} failed.")
     if errors:

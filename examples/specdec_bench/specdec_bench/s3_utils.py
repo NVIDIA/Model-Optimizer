@@ -15,7 +15,6 @@
 
 """S3 upload utilities for specdec_bench results."""
 
-import os
 from pathlib import Path
 
 S3_DEFAULT_ENDPOINT = "https://pdx.s8k.io"
@@ -74,35 +73,3 @@ def upload_run_dir(s3, local_dir: Path, bucket: str, s3_prefix: str) -> None:
             f"S3 destination already exists: s3://{bucket}/{s3_prefix} — refusing to overwrite"
         )
     _upload_files(s3, local_dir, bucket, s3_prefix)
-
-
-def upload_directory(s3, local_dir: Path, bucket: str, s3_prefix: str) -> None:
-    """Upload a sweep output directory (local_dir/run_name/...) to S3.
-
-    Each run subdirectory is checked independently so a partial re-upload
-    of a sweep fails loudly on the first clash rather than silently skipping.
-    """
-    s3_prefix = s3_prefix.rstrip("/")
-    run_dirs = sorted(d for d in local_dir.iterdir() if d.is_dir())
-    if not run_dirs:
-        raise ValueError(f"No subdirectories found in {local_dir}")
-    for run_dir in run_dirs:
-        run_key = f"{s3_prefix}/{run_dir.name}"
-        print(f"  {run_dir.name} → s3://{bucket}/{run_key}")
-        if s3_prefix_exists(s3, bucket, run_key):
-            raise ValueError(
-                f"S3 destination already exists: s3://{bucket}/{run_key} — refusing to overwrite"
-            )
-    # All clear — upload everything
-    for run_dir in run_dirs:
-        _upload_files(s3, run_dir, bucket, f"{s3_prefix}/{run_dir.name}")
-
-
-def s3_credentials_from_args_or_env(args) -> tuple[str, str, str]:
-    """Resolve S3 credentials: CLI args > env vars > built-in defaults."""
-    endpoint = str(
-        getattr(args, "s3_endpoint", None) or os.environ.get("S3_ENDPOINT", S3_DEFAULT_ENDPOINT)
-    )
-    key_id = str(getattr(args, "s3_key_id", None) or os.environ.get("S3_KEY_ID", S3_DEFAULT_KEY_ID))
-    secret = str(getattr(args, "s3_secret", None) or os.environ.get("S3_SECRET", S3_DEFAULT_SECRET))
-    return endpoint, key_id, secret

@@ -34,15 +34,21 @@ pipeline:
     environment:
       - HF_MODEL_CKPT: <<global_vars.hf_model>>
       - HF_LOCAL: /hf-local
-      # Provenance env vars consumed by dump_env() in examples/specdec_bench/run.py.
-      # These are static here for demonstration; a launcher auto-injection
-      # (planned for Phase-2 in OMNIML-4788) will compute them at launch time
-      # so the YAML stays SHA-free.
-      - SPECDEC_BENCH_SHA: "62d1686570448e8c4c057592f45c23a5965ec206"
-      - MODELOPT_SHA: "58633f0a6021a0ca9f250ca53e2090d2ebfea182"
-      - MODELOPT_VERSION: "0.45.0dev-108-g58633f0a60"
-      - NMM_SANDBOX_SHA: "079b41847544cf142e25820197294eea94ad216e"
-      - CONTAINER_IMAGE: "vllm/vllm-openai:qwen3_5-cu130"
+      # dump_env() in examples/specdec_bench/run.py reads provenance from these
+      # env vars when present; they are intentionally NOT set here. Hardcoded
+      # SHAs in a committed YAML would stale-lie about the build that's
+      # actually running. Set them in the harness (planned for Phase 2 in
+      # OMNIML-4788, where slurm.py / launch.py will compute and inject them
+      # at launch time):
+      #
+      #   SPECDEC_BENCH_SHA  = git rev-parse HEAD:examples/specdec_bench
+      #   MODELOPT_SHA       = git -C modules/Model-Optimizer rev-parse HEAD
+      #   MODELOPT_VERSION   = modelopt.__version__ (or git describe --tags)
+      #   NMM_SANDBOX_SHA    = git -C nmm-sandbox rev-parse HEAD
+      #   CONTAINER_IMAGE    = slurm_config.container (the image:tag below)
+      #
+      # When run standalone (without the harness), dump_env falls back to
+      # git rev-parse / module imports on the host filesystem.
     slurm_config:
       _factory_: "slurm_factory"
       nodes: 1

@@ -30,9 +30,16 @@ trap 'exit_handler' EXIT
 # Required env: HF_MODEL_CKPT
 # Optional env: HF_DRAFT_MODEL_CKPT (consumed by --draft_model_dir if the YAML passes it)
 
-if ! pip install -r modules/Model-Optimizer/examples/specdec_bench/requirements_speed.txt; then
-    report_result "FAIL: specdec_bench: pip install requirements_speed.txt failed"
-    exit 1
+# Skip the install when the deps are already present (warm container or
+# previous task in the pipeline). Saves a few minutes per task and avoids
+# silently drifting versions if upstream wheels move between launches.
+if ! pip show boto3 >/dev/null 2>&1 || \
+   ! pip show datasets >/dev/null 2>&1 || \
+   ! pip show seaborn >/dev/null 2>&1; then
+    if ! pip install -r modules/Model-Optimizer/examples/specdec_bench/requirements_speed.txt; then
+        report_result "FAIL: specdec_bench: pip install requirements_speed.txt failed"
+        exit 1
+    fi
 fi
 
 if ! python3 modules/Model-Optimizer/examples/specdec_bench/run.py \

@@ -133,12 +133,25 @@ def _git_sha(path):
     return None
 
 
+def _shard_files_from_index(index_path):
+    """Return the set of shard filenames referenced by a safetensors index JSON."""
+    try:
+        with open(index_path) as f:
+            wm = json.load(f).get("weight_map", {}) or {}
+        return set(wm.values())
+    except Exception:
+        return set()
+
+
 def _checkpoint_provenance(model_dir):
     """Cheap reproducibility fingerprint for a HuggingFace checkpoint directory.
 
-    Returns {path, size_bytes, index_sha256} where index_sha256 hashes the
-    safetensors index file (changes whenever any shard's contents change).
-    Falls back to hashing config.json for non-sharded checkpoints.
+    Returns {path, size_bytes, index_sha256, index_source}:
+      - index_sha256 hashes model.safetensors.index.json (or config.json fallback)
+        so it changes whenever the shard set or model config changes.
+      - size_bytes sums only the index-listed shards + config.json. For a
+        sharded 70B+ checkpoint this avoids a full rglob walk over hundreds
+        of tokenizer/cache files. Falls back to rglob when no index exists.
     """
     if model_dir is None:
         return None
@@ -146,7 +159,6 @@ def _checkpoint_provenance(model_dir):
         p = Path(model_dir)
         if not p.is_dir():
             return {"path": str(model_dir)}
-        size_bytes = sum(f.stat().st_size for f in p.rglob("*") if f.is_file())
         hash_target = None
         for name in ("model.safetensors.index.json", "config.json"):
             candidate = p / name
@@ -160,6 +172,19 @@ def _checkpoint_provenance(model_dir):
                 for chunk in iter(lambda: f.read(65536), b""):
                     h.update(chunk)
             index_sha256 = h.hexdigest()
+        # Size: shards listed in the safetensors index + the index/config file
+        # itself. Avoids walking the entire model directory (which can be huge
+        # for sharded multi-100B checkpoints).
+        size_bytes = 0
+        if hash_target is not None and hash_target.name == "model.safetensors.index.json":
+            for shard_name in _shard_files_from_index(hash_target):
+                shard_path = p / shard_name
+                if shard_path.is_file():
+                    size_bytes += shard_path.stat().st_size
+            size_bytes += hash_target.stat().st_size
+        else:
+            # No shard index — fall back to summing every file under the dir.
+            size_bytes = sum(f.stat().st_size for f in p.rglob("*") if f.is_file())
         return {
             "path": str(model_dir),
             "size_bytes": size_bytes,
@@ -177,11 +202,58 @@ def _is_sensitive_key(key):
     return any(s in klow for s in _SENSITIVE_SUBSTRINGS)
 
 
+def _redact_value(value):
+    """Recursively redact secrets in nested dict/list values.
+
+    The top-level `_redact_config` walks one level of keys, but engine configs
+    (serving_config from VLLMModel/SGLANGModel) and user-supplied runtime_params
+    are nested arbitrarily — fields like `hf_token`, `tokenizer_revision`, or
+    `aws_secret_access_key` need to be redacted at any depth.
+    """
+    if isinstance(value, dict):
+        return {
+            k: ("***REDACTED***" if _is_sensitive_key(k) else _redact_value(v))
+            for k, v in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_value(v) for v in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_value(v) for v in value)
+    return value
+
+
 def _redact_config(config):
-    return {
-        key: ("***REDACTED***" if _is_sensitive_key(key) else value)
-        for key, value in config.items()
-    }
+    return _redact_value(config)
+
+
+def _redact_argv(argv):
+    """Mask values that follow a sensitive flag name (e.g. --hf_token VALUE).
+
+    Conservative: only masks when the previous element looks like a flag whose
+    bare name (sans leading dashes) trips _is_sensitive_key. Also handles the
+    --flag=VALUE form.
+    """
+    redacted = []
+    prev_is_sensitive = False
+    for tok in argv:
+        s = str(tok)
+        if prev_is_sensitive:
+            redacted.append("***REDACTED***")
+            prev_is_sensitive = False
+            continue
+        if s.startswith("--"):
+            name, sep, val = s[2:].partition("=")
+            if _is_sensitive_key(name):
+                if sep:
+                    redacted.append(f"--{name}=***REDACTED***")
+                    prev_is_sensitive = False
+                else:
+                    redacted.append(s)
+                    prev_is_sensitive = True
+                continue
+        redacted.append(s)
+        prev_is_sensitive = False
+    return redacted
 
 
 def dump_env(args, save_dir, overrides=None):
@@ -197,7 +269,7 @@ def dump_env(args, save_dir, overrides=None):
     config["engine_version"] = _get_engine_version(config.get("engine"))
     config["gpu"] = _get_gpu_name()
     config["python_version"] = sys.version
-    config["argv"] = sys.argv[:]
+    config["argv"] = _redact_argv(sys.argv[:])
 
     # Provenance for reproducibility / apple-to-orange guarding.
     # Each *_sha and modelopt_version prefers an env var set by the harness
@@ -213,6 +285,10 @@ def dump_env(args, save_dir, overrides=None):
     config["modelopt_version"] = (
         os.environ.get("MODELOPT_VERSION") or _get_modelopt_version()
     )
+    # Fallback assumes the in-tree layout examples/specdec_bench/specdec_bench/.
+    # parents[2] reaches the modelopt repo root in that case. When vendored
+    # elsewhere this would `git rev-parse` an unrelated repo; rely on the env
+    # var path instead for non-in-tree deployments.
     config["modelopt_sha"] = (
         os.environ.get("MODELOPT_SHA") or _git_sha(specdec_bench_dir.parents[2])
     )
