@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# W8A8 FP8: FP8 E4M3 weight and activation quantizers.
+# QuantizerCfgList snippet that enables per-tensor FP8 E4M3 on weight and input quantizers.
 
 # modelopt-schema: modelopt.torch.quantization.config.QuantizerCfgListConfig
 imports:

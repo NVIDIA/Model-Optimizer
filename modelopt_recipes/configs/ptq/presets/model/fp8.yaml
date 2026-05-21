@@ -13,8 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# FP8 per-tensor weight and activation (W8A8), max calibration.
-# Equivalent to the hardcoded FP8_DEFAULT_CFG in config.py.
+# QuantizeConfig preset for W8A8 FP8 E4M3 with per-tensor weights and inputs.
 
 # modelopt-schema: modelopt.torch.quantization.config.QuantizeConfig
 imports:

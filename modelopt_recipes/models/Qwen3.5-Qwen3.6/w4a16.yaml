@@ -1,0 +1,122 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+metadata:
+  recipe_type: ptq
+  description: >
+    W4A16 PTQ recipe for Qwen3.5/Qwen3.6 models: W4A16 NVFP4 for dense MLP,
+    routed MoE, shared-expert MLP projections, and lm_head; FP8 for
+    self-attention and the large linear-attention projections; FP8 KV cache
+    with constant amax (fp8_cast behavior).
+
+quantize:
+  algorithm:
+    method: max
+    layerwise: false
+
+  quant_cfg:
+    - quantizer_name: '*'
+      enable: false
+
+    # W4A16 NVFP4 MLP projection targets. Matching the gate/up/down projection
+    # names covers dense MLPs, shared experts, and fused MoE expert quantizers
+    # such as gate_up_proj_weight_quantizers.N/down_proj_weight_quantizers.N.
+    - quantizer_name: '*mlp*gate_proj*weight_quantizer*'
+      enable: true
+      cfg: &nvfp4_cfg
+        block_sizes:
+          -1: 16
+          type: dynamic
+          scale_bits: e4m3
+        num_bits: e2m1
+    - quantizer_name: '*mlp*up_proj*weight_quantizer*'
+      enable: true
+      cfg: *nvfp4_cfg
+    - quantizer_name: '*mlp*down_proj*weight_quantizer*'
+      enable: true
+      cfg: *nvfp4_cfg
+    - quantizer_name: '*lm_head*weight_quantizer'
+      enable: true
+      cfg: *nvfp4_cfg
+
+    # FP8 self-attention projections.
+    - quantizer_name: '*self_attn*weight_quantizer'
+      enable: true
+      cfg: &fp8_cfg
+        num_bits: e4m3
+        axis:
+    - quantizer_name: '*self_attn*input_quantizer'
+      enable: true
+      cfg: *fp8_cfg
+
+    # FP8 large linear-attention projections. Keep in_proj_a, in_proj_b, and
+    # conv1d disabled to match the reference checkpoint policy.
+    - quantizer_name: '*linear_attn.in_proj_qkv*weight_quantizer'
+      enable: true
+      cfg: *fp8_cfg
+    - quantizer_name: '*linear_attn.in_proj_qkv*input_quantizer'
+      enable: true
+      cfg: *fp8_cfg
+    - quantizer_name: '*linear_attn.in_proj_z*weight_quantizer'
+      enable: true
+      cfg: *fp8_cfg
+    - quantizer_name: '*linear_attn.in_proj_z*input_quantizer'
+      enable: true
+      cfg: *fp8_cfg
+    - quantizer_name: '*linear_attn.out_proj*weight_quantizer'
+      enable: true
+      cfg: *fp8_cfg
+    - quantizer_name: '*linear_attn.out_proj*input_quantizer'
+      enable: true
+      cfg: *fp8_cfg
+
+    # FP8 KV cache with constant amax. This matches fp8_cast behavior and
+    # avoids exporting per-layer KV scale tensors.
+    - quantizer_name: '*[kv]_bmm_quantizer'
+      enable: true
+      cfg:
+        num_bits: e4m3
+        axis:
+        use_constant_amax: true
+
+    # Explicitly keep non-reference targets unquantized.
+    - quantizer_name: '*linear_attn.conv1d*'
+      enable: false
+    - quantizer_name: '*linear_attn.in_proj_a*'
+      enable: false
+    - quantizer_name: '*linear_attn.in_proj_b*'
+      enable: false
+    - quantizer_name: '*mlp.gate.*'
+      enable: false
+    - quantizer_name: '*mlp.shared_expert_gate.*'
+      enable: false
+    - quantizer_name: '*router*'
+      enable: false
+    - quantizer_name: '*block_sparse_moe.gate*'
+      enable: false
+    - quantizer_name: '*mixer.conv1d*'
+      enable: false
+    - quantizer_name: '*output_layer*'
+      enable: false
+    - quantizer_name: '*proj_out.*'
+      enable: false
+    - quantizer_name: 'output.*'
+      enable: false
+    - quantizer_name: '*visual*'
+      enable: false
+    - quantizer_name: '*vision_tower*'
+      enable: false
+    - quantizer_name: '*mtp*'
+      enable: false
+    - parent_class: 'nn.BatchNorm1d'
+      quantizer_name: '*'
+      enable: false
+    - parent_class: 'nn.BatchNorm2d'
+      quantizer_name: '*'
+      enable: false
+    - parent_class: 'nn.BatchNorm3d'
+      quantizer_name: '*'
+      enable: false
+    - parent_class: 'nn.LeakyReLU'
+      quantizer_name: '*'
+      enable: false

@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Standard quantizer exclusions: layers that should not be quantized.
+# QuantizerCfgList snippet for standard module patterns that should remain unquantized.
 
 # modelopt-schema: modelopt.torch.quantization.config.QuantizerCfgListConfig
   - quantizer_name: '*block_sparse_moe.gate*'

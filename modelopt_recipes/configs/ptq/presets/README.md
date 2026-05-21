@@ -1,8 +1,8 @@
 # PTQ Preset Configs
 
 This directory holds preset quantization configurations that serve as the
-YAML source of truth for the hardcoded `*_CFG` dicts in
-`modelopt.torch.quantization.config` (e.g., `FP8_DEFAULT_CFG`,
+YAML source of truth for the `*_CFG` `QuantizeConfig` constants exposed
+from `modelopt.torch.quantization.config` (e.g., `FP8_DEFAULT_CFG`,
 `FP8_KV_CFG`).
 
 Presets compose from the reusable snippets in `configs/numerics/` and
@@ -25,6 +25,10 @@ own imports have been resolved.
   be merged on top of a `model/` preset via `$import` to produce a
   complete config. Example: `kv/fp8.yaml` (the YAML source of
   `FP8_KV_CFG`).
+- **`diffusers/`** — Diffusers-specific full quantization presets. These
+  files are complete configs used by the Diffusers examples, including
+  attention and softmax quantizer choices that differ from the generic
+  `model/` presets.
 
 **Note:** The main purpose of these presets is to support the existing
 `hf_ptq.py` script's `--qformat` / `--kv_cache_qformat` flags and other

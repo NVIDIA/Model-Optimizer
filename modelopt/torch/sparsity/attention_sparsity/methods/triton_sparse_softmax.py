@@ -32,8 +32,8 @@ class TritonSparseSoftmaxMethod(SparseAttentionMethod):
     Config params:
         sparsity_n: Keep top-N of every M attention scores (0 to disable).
         sparsity_m: Group size (4 or 8).
-        num_sink_tokens: KV positions before this index kept dense (attention sinks).
-        dense_window_size: Tokens near diagonal kept dense (absolute token count).
+        dense_sink_tokens: Leading KV tokens excluded from N:M sparsity and kept dense.
+        dense_recent_tokens: Recent KV tokens excluded from N:M sparsity and kept dense.
     """
 
     def __init__(self, method_config=None):
@@ -42,8 +42,8 @@ class TritonSparseSoftmaxMethod(SparseAttentionMethod):
         method_config = method_config or {}
         self.sparsity_n = method_config.get("sparsity_n", 2)
         self.sparsity_m = method_config.get("sparsity_m", 4)
-        self.num_sink_tokens = method_config.get("num_sink_tokens", 0)
-        self.dense_window_size = method_config.get("dense_window_size", 64)
+        self.dense_sink_tokens = method_config.get("dense_sink_tokens", 0)
+        self.dense_recent_tokens = method_config.get("dense_recent_tokens", 64)
 
     @property
     def name(self) -> str:

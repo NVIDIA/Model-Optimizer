@@ -58,7 +58,7 @@ model = mtsa.sparsify(model, config=SKIP_SOFTMAX_CALIB)
 
 ### N:M Sparse Softmax (SPARSE_SOFTMAX_DEFAULT)
 
-Applies N:M structured sparsity to attention scores using the Triton backend. For every M consecutive key positions, keeps only the top-N scores and sets the rest to -inf. Supports M=4 (N=1,2,3) and M=8 (N=1..7). Attention sinks and a local dense window can be configured to preserve important positions.
+Applies N:M structured sparsity to attention scores using the Triton backend. For every M consecutive key positions, keeps only the top-N scores and sets the rest to -inf. Supports M=4 (N=1,2,3) and M=8 (N=1..7). Attention sinks and a local recent-token window can be configured to preserve important positions.
 
 ```python
 from modelopt.torch.sparsity.attention_sparsity.config import SPARSE_SOFTMAX_DEFAULT
@@ -81,8 +81,8 @@ sparse_cfg = {
             "method": "triton_sparse_softmax",
             "sparsity_n": 2,            # Keep top-2 of every 4
             "sparsity_m": 4,            # Group size
-            "num_sink_tokens": 4,       # Keep first 4 tokens dense (attention sinks)
-            "dense_window_size": 128,   # Keep tokens within distance 128 dense
+            "dense_sink_tokens": 4,       # Exclude first 4 tokens from N:M and keep dense
+            "dense_recent_tokens": 128,   # Exclude recent 128 tokens from N:M and keep dense
             "backend": "triton",
             "enable": True,
         },
@@ -125,7 +125,7 @@ Apply sparse attention with a fixed threshold:
 ```bash
 python hf_sa.py \
     --pyt_ckpt_path Qwen/Qwen3-8B \
-    --sparse_attn skip_softmax
+    --sparse_attn sparse_softmax
 ```
 
 ### With RULER Calibration
@@ -144,15 +144,19 @@ The calibration process:
 2. Collects attention statistics during forward passes
 3. Determines optimal threshold scale factor for target sparsity ratio
 
+Set the target sparsity ratio in the selected sparse attention config, or override
+both prefill and decode targets from the example script with `--target_sparse_ratio`.
+
 ### Command Line Arguments
 
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `--pyt_ckpt_path` | Required | HuggingFace model path or name |
-| `--sparse_attn` | `skip_softmax` | Configuration: `skip_softmax`, `skip_softmax_calib`, or `sparse_softmax` |
-| `--backend` | `pytorch` | Backend: `pytorch` (skip-softmax) or `triton` (N:M sparse softmax) |
+| `--sparse_attn` | `skip_softmax_calib` | Configuration: `skip_softmax_calib`, `sparse_softmax`, or `skip_softmax_calib_sparse24` |
+| `--backend` | selected config | Backend: `pytorch` (skip-softmax) or `triton` (N:M sparse softmax) |
 | `--seq_len` | `2048` | Maximum sequence length for input prompts |
 | `--export_dir` | `None` | Directory to export the sparsified model |
+| `--target_sparse_ratio` | selected config | Target sparsity ratio for skip-softmax calibration |
 
 ## Output Comparison
 
@@ -175,7 +179,27 @@ python hf_sa.py \
     --export_dir ./exported_sparse_model
 ```
 
-The exported model can be loaded and used with standard HuggingFace APIs.
+Export a 2:4 sparse-softmax checkpoint for vLLM restore:
+
+```bash
+python hf_sa.py \
+    --pyt_ckpt_path Qwen/Qwen3-8B \
+    --sparse_attn sparse_softmax \
+    --export_dir ./exported_sparse24_model
+```
+
+Export calibrated skip-softmax plus 2:4 sparse-softmax metadata for combined vLLM restore:
+
+```bash
+python hf_sa.py \
+    --pyt_ckpt_path Qwen/Qwen3-8B \
+    --sparse_attn skip_softmax_calib_sparse24 \
+    --export_dir ./exported_skip_sparse24_model
+```
+
+The exported checkpoint writes `sparse_attention_config` into `config.json`. For combined
+export, the skip-softmax calibration and 2:4 sparse-softmax metadata are defined in the
+selected config rather than CLI overrides.
 
 ## Custom Configuration
 
@@ -198,6 +222,11 @@ custom_config = {
             "bc": 128,          # Flash Attention block columns
             "backend": "pytorch",
             "collect_stats": True,
+            "sparsity_n": 2,              # Export top-2 of every 4 for vLLM restore
+            "sparsity_m": 4,
+            "dense_sink_tokens": 0,
+            "dense_recent_tokens": 64,
+            "export_sparse_softmax": True,
             "enable": True,
         },
         "default": {"enable": False},

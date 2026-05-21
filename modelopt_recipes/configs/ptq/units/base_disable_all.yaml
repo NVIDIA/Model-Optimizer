@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Disable all quantizers by default (deny-all-then-configure pattern).
+# QuantizerCfgList snippet that disables every quantizer before selective re-enabling.
 
 # modelopt-schema: modelopt.torch.quantization.config.QuantizerCfgEntry
 quantizer_name: '*'
