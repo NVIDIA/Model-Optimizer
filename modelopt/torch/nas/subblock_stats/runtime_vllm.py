@@ -33,7 +33,7 @@ from pathlib import Path
 from modelopt.torch.nas.subblock_stats.runtime_utils import RuntimeConfig
 
 
-def run_vllm_latency_benchmark(model_path: Path, runtime_config: RuntimeConfig) -> float:
+def run_vllm_latency_benchmark(model_path: Path, runtime_config: RuntimeConfig) -> float | None:
     """Run ``vllm bench latency`` in a fresh subprocess and return avg latency in ms.
 
     Spawning a subprocess per call gives OS-level isolation: GPU memory, CUDA
@@ -77,8 +77,23 @@ def run_vllm_latency_benchmark(model_path: Path, runtime_config: RuntimeConfig) 
     ]
 
     # cmd is a fixed list of strings (no shell, no untrusted input).
-    subprocess.run(cmd, text=True, check=True, capture_output=True)  # nosec B603
+    vllm_results = None
+    try:
+        subprocess.run(
+            cmd,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=1800,  # 30 minutes
+        )  # nosec B603
+    except subprocess.TimeoutExpired as exc:
+        raise TimeoutError("vLLM latency benchmark timed out") from exc
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(exc.stderr or exc.stdout or "vLLM latency benchmark failed") from exc
 
-    with open(output_json_path) as f:
-        vllm_results = json.load(f)
-    return vllm_results["avg_latency"] * 1000  # seconds -> milliseconds
+    if output_json_path.exists():
+        with open(output_json_path) as f:
+            vllm_results = json.load(f)
+            vllm_results = vllm_results["avg_latency"] * 1000  # seconds -> milliseconds
+
+    return vllm_results
