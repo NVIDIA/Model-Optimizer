@@ -71,10 +71,6 @@ def run_vllm_latency_benchmark(model_path: Path, runtime_config: RuntimeConfig) 
         "1",
         "--distributed-executor-backend",
         "external_launcher",
-        # vLLM defaults to 0.9; keep the per-run budget modest so the parent
-        # process always has headroom for the next benchmark.
-        "--gpu-memory-utilization",
-        "0.3",
         # Required for accurate per-block runtime stats.
         "--optimization-level",
         "0",

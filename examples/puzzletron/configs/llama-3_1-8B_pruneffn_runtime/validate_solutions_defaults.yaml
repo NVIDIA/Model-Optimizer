@@ -2,7 +2,7 @@ defaults:
   - /validate_model_defaults
   - _self_
 
-solutions_to_validate: []
+solutions_to_validate:
 skip_validation: false
 save_models: false
 bigger_is_better: false
