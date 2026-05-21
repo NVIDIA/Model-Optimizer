@@ -129,9 +129,23 @@ _QFORMAT_ALIASES: dict[str, str] = {
 # Sentinel value for ``--kv_cache_qformat`` meaning "no KV cache quantization".
 _KV_NONE = "none"
 
-# KV presets that pin ``use_constant_amax`` (no data-driven calibration needed).
-# Used to short-circuit the calibration pass for these formats.
-_KV_CAST_FORMATS = frozenset({"fp8_cast", "nvfp4_cast"})
+
+def _kv_cfg_uses_constant_amax(kv_quant_cfg: list[dict[str, Any]]) -> bool:
+    """Return True if this KV cfg pins ``use_constant_amax`` on the bmm quantizer.
+
+    Cast-style KV presets (e.g. ``fp8_cast`` / ``nvfp4_cast``) set
+    ``use_constant_amax: true`` on the ``*[kv]_bmm_quantizer`` entry; that flag
+    means there is no data-driven calibration to run, so callers should skip
+    the KV-only calibration pass. Detect the property from the YAML contents
+    rather than from the preset name so new cast-style presets work
+    automatically.
+    """
+    for entry in kv_quant_cfg:
+        if entry.get("quantizer_name") != "*[kv]_bmm_quantizer":
+            continue
+        cfg = entry.get("cfg") or {}
+        return bool(cfg.get("use_constant_amax"))
+    return False
 
 
 class _PresetCfgChoices(Mapping[str, dict[str, Any]]):
@@ -211,22 +225,34 @@ assert _KV_NONE not in KV_QUANT_CFG_CHOICES, (
 _AUTO_QUANTIZE_QFORMATS: frozenset[str] = frozenset(
     {
         "fp8",
-        "int8_sq",
-        "int8_wo",
+        "int8_smoothquant",
+        "int8_weight_only",
         "int4_awq",
         "nvfp4",
-        "nvfp4_awq",
-        "nvfp4_mse",
-        "w4a8_awq",
-        "fp8_pb_wo",
+        "nvfp4_awq_lite",
+        "nvfp4_w4a4_weight_mse_fp8_sweep",
+        "w4a8_awq_beta",
+        "fp8_2d_blockwise_weight_only",
         "w4a8_mxfp4_fp8",
         "nvfp4_mlp_only",
         "nvfp4_experts_only",
         "nvfp4_omlp_only",
-        "nvfp4_local_hessian",
+        "nvfp4_w4a4_weight_local_hessian",
         "mxfp8",
     }
 )
+
+
+def _canonical_qformat(name: str) -> str:
+    """Resolve a user-provided qformat token to its canonical preset basename.
+
+    Lets membership checks (e.g. against :data:`_AUTO_QUANTIZE_QFORMATS`) accept
+    either the short alias (``int8_sq``) or the canonical YAML basename
+    (``int8_smoothquant``). Unknown tokens pass through unchanged so the existing
+    error paths still fire.
+    """
+    return _QFORMAT_ALIASES.get(name, name)
+
 
 mto.enable_huggingface_checkpointing()
 
@@ -402,10 +428,12 @@ def auto_quantize(
 
     qformat_list = args.qformat.split(",")
     assert qformat_list, "No quantization formats provided"
-    # Check if all provided quantization formats are supported
-    assert all(qformat in _AUTO_QUANTIZE_QFORMATS for qformat in qformat_list), (
-        "One or more quantization formats provided are not supported for unified checkpoint export"
-    )
+    # Check if all provided quantization formats are supported. Canonicalize first so
+    # callers may pass either the short alias (``int8_sq``) or the canonical YAML
+    # basename (``int8_smoothquant``).
+    assert all(
+        _canonical_qformat(qformat) in _AUTO_QUANTIZE_QFORMATS for qformat in qformat_list
+    ), "One or more quantization formats provided are not supported for unified checkpoint export"
 
     # When language_model is a base text model without lm_head (e.g. Gemma4TextModel),
     # use full_model's lm_head to compute logits/loss from hidden states.
@@ -499,7 +527,7 @@ def auto_quantize(
         ]  # keep other quantizers from auto_quantize
 
         mtq.set_quantizer_by_cfg(language_model, quant_cfg=kv_cache_quant_cfg)
-        if args.kv_cache_qformat not in _KV_CAST_FORMATS:
+        if not _kv_cfg_uses_constant_amax(kv_cache_quant_cfg):
             # Calibrate only the KV cache quantizers; disable all others.
             with mtq.set_quantizer_by_cfg_context(
                 language_model,
