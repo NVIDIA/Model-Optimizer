@@ -1114,8 +1114,10 @@ def quantize_main(
                     getattr(mtq, KV_QUANT_CFG_CHOICES[args.kv_cache_qformat])["quant_cfg"],
                 )
 
-        # Exclude MTP layers from quantization if detected (e.g., GLM-4.7's layer 92)
-        # These layers are typically speculative decoding layers that should be exported as-is
+        # Exclude MTP layers from quantization if detected (e.g., GLM-4.7's layer 92).
+        # These layers are typically speculative decoding layers that should be exported as-is.
+        # Complementary to recipe `*mtp*` wildcards (name-match); this catches MTP layers
+        # identified by index.
         mtp_layer_prefixes = getattr(full_model, "_mtp_layer_prefixes", None)
         if mtp_layer_prefixes:
             quant_cfg = copy.deepcopy(quant_cfg)

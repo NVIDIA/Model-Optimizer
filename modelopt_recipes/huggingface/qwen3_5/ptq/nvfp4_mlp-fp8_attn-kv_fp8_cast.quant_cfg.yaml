@@ -49,8 +49,9 @@ imports:
   - quantizer_name: '*self_attn*input_quantizer'
     cfg: {$import: fp8}
 
-  # FP8 large linear-attention projections. in_proj_a / in_proj_b / conv1d
-  # remain disabled to match the reference checkpoint policy.
+  # FP8 large linear-attention projections. in_proj_a and in_proj_b are
+  # re-disabled explicitly below; conv1d stays disabled via base_disable_all
+  # (no rule re-enables it).
   - quantizer_name: '*linear_attn.in_proj_qkv*weight_quantizer'
     cfg: {$import: fp8}
   - quantizer_name: '*linear_attn.in_proj_qkv*input_quantizer'
@@ -81,6 +82,8 @@ imports:
     enable: false
   - quantizer_name: '*vision_tower*'
     enable: false
+  # Name-match for "mtp"; complementary runtime path in hf_ptq.py catches
+  # MTP layers identified by index instead.
   - quantizer_name: '*mtp*'
     enable: false
 
