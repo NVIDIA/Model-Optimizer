@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import warnings
 from enum import Enum
-from typing import Literal
+from typing import ClassVar, Literal
 
 from pydantic import Field, field_validator, model_validator
 
@@ -109,12 +109,40 @@ class ModelOptPTQRecipe(ModelOptRecipeBase):
 class AutoQuantizeKVCache(ModeloptBaseConfig):
     """KV-cache configuration for an AutoQuantize recipe (optional)."""
 
+    # Mirrors the keys of KV_QUANT_CFG_CHOICES in examples/llm_ptq/hf_ptq.py.
+    # Kept inline (rather than imported) so the recipe schema stays free of
+    # example-script dependencies. Update both sides if new KV variants land.
+    # ClassVar annotation tells Pydantic this is a class-level constant, not a
+    # private model attribute (which is the default for leading-underscore names).
+    _SUPPORTED_QFORMATS: ClassVar[frozenset[str]] = frozenset(
+        {
+            "none",
+            "fp8_cast",
+            "fp8",
+            "fp8_affine",
+            "nvfp4_cast",
+            "nvfp4",
+            "nvfp4_affine",
+            "nvfp4_rotate",
+        }
+    )
+
     qformat: str | None = ModeloptField(
         default=None,
         title="KV cache quantization format",
         description="One of the entries in KV_QUANT_CFG_CHOICES, or 'none' to disable. "
         "If omitted, the runtime --kv_cache_qformat CLI flag is used.",
     )
+
+    @field_validator("qformat")
+    @classmethod
+    def _validate_qformat(cls, v: str | None) -> str | None:
+        if v is not None and v not in cls._SUPPORTED_QFORMATS:
+            raise ValueError(
+                f"Unsupported kv_cache.qformat: {v!r}. "
+                f"Expected one of {sorted(cls._SUPPORTED_QFORMATS)} or None."
+            )
+        return v
 
 
 class AutoQuantizeConstraints(ModeloptBaseConfig):

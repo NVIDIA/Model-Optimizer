@@ -1068,7 +1068,7 @@ def quantize_main(
     # All auto_quantize() knobs are resolved here before calling the helper.
     # Helper is a leaf orchestrator — it does not know whether inputs came from
     # CLI args or a recipe.
-    if isinstance(recipe, ModelOptAutoQuantizeRecipe) or args.auto_quantize_bits:
+    if isinstance(recipe, ModelOptAutoQuantizeRecipe) or args.auto_quantize_bits is not None:
         default_disabled_layers = [
             entry["quantizer_name"]
             for entry in _default_disabled_quantizer_cfg

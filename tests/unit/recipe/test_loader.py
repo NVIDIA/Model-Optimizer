@@ -20,6 +20,7 @@ from importlib.resources import files
 
 import pytest
 
+import modelopt.torch.quantization as mtq
 from modelopt.recipe.config import (
     ModelOptAutoQuantizeRecipe,
     ModelOptDFlashRecipe,
@@ -285,8 +286,6 @@ def test_load_recipe_autoquantize_defaults():
 
 def test_load_recipe_autoquantize_candidates_match_presets():
     """Built-in AutoQuantize recipe's $imported candidates equal mtq.X_DEFAULT_CFG dicts."""
-    import modelopt.torch.quantization as mtq
-
     recipe = load_recipe("general/auto_quantize/nvfp4_fp8_at_4p8bits-kv_fp8_cast")
     candidates = recipe.auto_quantize.candidate_formats
     assert candidates[0].model_dump(exclude_unset=True) == mtq.NVFP4_DEFAULT_CFG
@@ -332,6 +331,14 @@ def test_load_recipe_autoquantize_kv_cache_optional(tmp_path):
     recipe_file.write_text(_AQ_MINIMAL_BODY)
     recipe = load_recipe(recipe_file)
     assert recipe.auto_quantize.kv_cache is None
+
+
+def test_load_recipe_autoquantize_invalid_kv_qformat_raises(tmp_path):
+    """An unknown kv_cache.qformat is rejected at recipe-load time, not later."""
+    bad = tmp_path / "bad.yml"
+    bad.write_text(_AQ_MINIMAL_BODY + "  kv_cache:\n    qformat: not_a_real_format\n")
+    with pytest.raises(ValueError, match="kv_cache.qformat"):
+        load_recipe(bad)
 
 
 # ---------------------------------------------------------------------------
