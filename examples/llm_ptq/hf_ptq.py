@@ -310,7 +310,7 @@ def auto_quantize(
     constraints: dict,
     quantization_formats: list[dict],
     disabled_layers: list[str],
-    kv_cache_qformat: str,
+    kv_cache_quant_cfg: dict | None,
 ):
     """Pure orchestrator: build forward_step/loss_func, call mtq.auto_quantize,
     run KV cache post-step. All knobs are explicit keyword-only args; the
@@ -396,25 +396,24 @@ def auto_quantize(
     )
 
     calibrate_loop = create_forward_loop(dataloader=calib_dataloader)
-    enable_quant_kv_cache = kv_cache_qformat != "none"
-    print(f"{'Enable' if enable_quant_kv_cache else 'Disable'} KV cache quantization")
-    if enable_quant_kv_cache:
-        kv_cache_quant_cfg = copy.deepcopy(
-            getattr(mtq, KV_QUANT_CFG_CHOICES[kv_cache_qformat])["quant_cfg"]
-        )
-        kv_cache_quant_cfg = [
-            e for e in kv_cache_quant_cfg if e["quantizer_name"] != "*"
+    print(f"{'Enable' if kv_cache_quant_cfg is not None else 'Disable'} KV cache quantization")
+    if kv_cache_quant_cfg is not None:
+        kv_entries = [
+            e for e in copy.deepcopy(kv_cache_quant_cfg["quant_cfg"]) if e["quantizer_name"] != "*"
         ]  # keep other quantizers from auto_quantize
 
-        if kv_cache_qformat in _KV_CAST_FORMATS:
-            _set_kv_cache_constant_amax(kv_cache_quant_cfg)
-
-        mtq.set_quantizer_by_cfg(language_model, quant_cfg=kv_cache_quant_cfg)
-        if kv_cache_qformat not in _KV_CAST_FORMATS:
+        mtq.set_quantizer_by_cfg(language_model, quant_cfg=kv_entries)
+        # Calibrate only when at least one KV entry doesn't pin amax via use_constant_amax.
+        # Cast-variant presets (kv_fp8_cast, kv_nvfp4_cast) bake this in; data-driven
+        # variants (kv_fp8, kv_nvfp4, etc.) need a calibration pass.
+        needs_calibration = not all(
+            (e.get("cfg") or {}).get("use_constant_amax") is True for e in kv_entries
+        )
+        if needs_calibration:
             # Calibrate only the KV cache quantizers; disable all others.
             with mtq.set_quantizer_by_cfg_context(
                 language_model,
-                [{"quantizer_name": "*", "enable": False}, *kv_cache_quant_cfg],
+                [{"quantizer_name": "*", "enable": False}, *kv_entries],
             ):
                 mtq.calibrate(language_model, algorithm="max", forward_loop=calibrate_loop)
     return language_model
@@ -1075,6 +1074,19 @@ def quantize_main(
             if "parent_class" not in entry
         ]
 
+        # Resolve --kv_cache_qformat to a full QuantizeConfig dict (or None). Used as the
+        # CLI fallback when a recipe is silent on KV cache, and as the sole source for the
+        # CLI autoquant branch. Cast variants get use_constant_amax injected at this layer
+        # so the helper can stay format-agnostic (it just checks use_constant_amax to
+        # decide whether to calibrate).
+        def _cli_kv_cache_quant_cfg():
+            if args.kv_cache_qformat == "none":
+                return None
+            cfg = copy.deepcopy(getattr(mtq, KV_QUANT_CFG_CHOICES[args.kv_cache_qformat]))
+            if args.kv_cache_qformat in _KV_CAST_FORMATS:
+                _set_kv_cache_constant_amax(cfg["quant_cfg"])
+            return cfg
+
         if isinstance(recipe, ModelOptAutoQuantizeRecipe):
             aq = recipe.auto_quantize
 
@@ -1101,14 +1113,14 @@ def quantize_main(
                 full_model=full_model,
                 auto_quantize_method=aq.method,
                 auto_quantize_score_size=aq.num_score_steps,
-                auto_quantize_checkpoint=aq.score_checkpoint,
+                auto_quantize_checkpoint=args.auto_quantize_checkpoint,
                 constraints=aq.constraints.model_dump(exclude_none=True),
                 quantization_formats=[_candidate_for_mtq(fmt) for fmt in aq.candidate_formats],
                 disabled_layers=aq.disabled_layers or default_disabled_layers,
-                kv_cache_qformat=(
-                    aq.kv_cache.qformat
-                    if (aq.kv_cache and aq.kv_cache.qformat)
-                    else args.kv_cache_qformat
+                kv_cache_quant_cfg=(
+                    aq.kv_cache.model_dump()
+                    if aq.kv_cache is not None
+                    else _cli_kv_cache_quant_cfg()
                 ),
             )
         else:
@@ -1148,7 +1160,7 @@ def quantize_main(
                 constraints={"effective_bits": args.auto_quantize_bits},
                 quantization_formats=[QUANT_CFG_CHOICES[fmt] for fmt in qformat_list],
                 disabled_layers=default_disabled_layers,
-                kv_cache_qformat=args.kv_cache_qformat,
+                kv_cache_quant_cfg=_cli_kv_cache_quant_cfg(),
             )
 
     else:

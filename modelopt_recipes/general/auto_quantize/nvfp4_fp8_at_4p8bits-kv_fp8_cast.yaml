@@ -19,6 +19,7 @@
 imports:
   nvfp4: configs/ptq/presets/model/nvfp4
   fp8: configs/ptq/presets/model/fp8
+  kv_fp8_cast: configs/ptq/units/kv_fp8_cast
 
 metadata:
   recipe_type: auto_quantize
@@ -33,7 +34,8 @@ auto_quantize:
     - $import: fp8
 
   kv_cache:
-    qformat: fp8_cast
+    quant_cfg:
+      - $import: kv_fp8_cast
 
   method: gradient
   num_score_steps: 128

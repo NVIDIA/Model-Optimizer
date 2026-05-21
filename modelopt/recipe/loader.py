@@ -42,6 +42,7 @@ __all__ = ["load_config", "load_recipe"]
 # must contain 'quantize'" instead of pydantic's generic missing-field error.
 _REQUIRED_SECTION_PER_RECIPE_TYPE: dict[RecipeType, str] = {
     RecipeType.PTQ: "quantize",
+    RecipeType.AUTO_QUANTIZE: "auto_quantize",
     RecipeType.SPECULATIVE_EAGLE: "eagle",
     RecipeType.SPECULATIVE_DFLASH: "dflash",
     RecipeType.SPECULATIVE_MEDUSA: "medusa",
@@ -171,8 +172,12 @@ def _load_recipe_from_file(
 
         raw = yaml.safe_load(recipe_file.read_text()) or {}
         if not isinstance(raw, dict) or required_section not in raw:
+            # Speculative recipes use the family suffix ("EAGLE" not "SPECULATIVE_EAGLE");
+            # every other multi-word recipe type uses the full value ("AUTO_QUANTIZE", not "QUANTIZE").
             kind = (
-                rtype.value.split("_", 1)[-1].upper() if "_" in rtype.value else rtype.value.upper()
+                rtype.value.removeprefix("speculative_").upper()
+                if rtype.value.startswith("speculative_")
+                else rtype.value.upper()
             )
             raise ValueError(f"{kind} recipe file {recipe_file} must contain {required_section!r}.")
 

@@ -272,7 +272,10 @@ def test_load_recipe_autoquantize_builtin():
     aq = recipe.auto_quantize
     assert aq.constraints.effective_bits == 4.8
     assert len(aq.candidate_formats) == 2
-    assert aq.kv_cache is not None and aq.kv_cache.qformat == "fp8_cast"
+    # kv_cache is a full QuantizeConfig now (not a hardcoded qformat string).
+    assert aq.kv_cache is not None
+    assert aq.kv_cache.algorithm == "max"
+    assert len(aq.kv_cache.quant_cfg) >= 1
 
 
 def test_load_recipe_autoquantize_defaults():
@@ -281,7 +284,6 @@ def test_load_recipe_autoquantize_defaults():
     aq = recipe.auto_quantize
     assert aq.method == "gradient"
     assert aq.num_score_steps == 128
-    assert aq.score_checkpoint is None
 
 
 def test_load_recipe_autoquantize_candidates_match_presets():
@@ -293,10 +295,13 @@ def test_load_recipe_autoquantize_candidates_match_presets():
 
 
 def test_load_recipe_autoquantize_missing_section_raises(tmp_path):
-    """An AutoQuantize recipe missing the ``auto_quantize`` section is rejected."""
+    """An AutoQuantize recipe missing the ``auto_quantize`` section is rejected
+    with the clean loader-level error (not the generic pydantic missing-field one)."""
     bad = tmp_path / "bad.yml"
     bad.write_text("metadata:\n  recipe_type: auto_quantize\n")
-    with pytest.raises(ValueError, match="auto_quantize"):
+    with pytest.raises(
+        ValueError, match=r"AUTO_QUANTIZE recipe file .* must contain 'auto_quantize'"
+    ):
         load_recipe(bad)
 
 
@@ -331,14 +336,6 @@ def test_load_recipe_autoquantize_kv_cache_optional(tmp_path):
     recipe_file.write_text(_AQ_MINIMAL_BODY)
     recipe = load_recipe(recipe_file)
     assert recipe.auto_quantize.kv_cache is None
-
-
-def test_load_recipe_autoquantize_invalid_kv_qformat_raises(tmp_path):
-    """An unknown kv_cache.qformat is rejected at recipe-load time, not later."""
-    bad = tmp_path / "bad.yml"
-    bad.write_text(_AQ_MINIMAL_BODY + "  kv_cache:\n    qformat: not_a_real_format\n")
-    with pytest.raises(ValueError, match="kv_cache.qformat"):
-        load_recipe(bad)
 
 
 # ---------------------------------------------------------------------------

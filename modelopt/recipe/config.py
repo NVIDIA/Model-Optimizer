@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import warnings
 from enum import Enum
-from typing import ClassVar, Literal
+from typing import Literal
 
 from pydantic import Field, field_validator, model_validator
 
@@ -106,45 +106,6 @@ class ModelOptPTQRecipe(ModelOptRecipeBase):
     )
 
 
-class AutoQuantizeKVCache(ModeloptBaseConfig):
-    """KV-cache configuration for an AutoQuantize recipe (optional)."""
-
-    # Mirrors the keys of KV_QUANT_CFG_CHOICES in examples/llm_ptq/hf_ptq.py.
-    # Kept inline (rather than imported) so the recipe schema stays free of
-    # example-script dependencies. Update both sides if new KV variants land.
-    # ClassVar annotation tells Pydantic this is a class-level constant, not a
-    # private model attribute (which is the default for leading-underscore names).
-    _SUPPORTED_QFORMATS: ClassVar[frozenset[str]] = frozenset(
-        {
-            "none",
-            "fp8_cast",
-            "fp8",
-            "fp8_affine",
-            "nvfp4_cast",
-            "nvfp4",
-            "nvfp4_affine",
-            "nvfp4_rotate",
-        }
-    )
-
-    qformat: str | None = ModeloptField(
-        default=None,
-        title="KV cache quantization format",
-        description="One of the entries in KV_QUANT_CFG_CHOICES, or 'none' to disable. "
-        "If omitted, the runtime --kv_cache_qformat CLI flag is used.",
-    )
-
-    @field_validator("qformat")
-    @classmethod
-    def _validate_qformat(cls, v: str | None) -> str | None:
-        if v is not None and v not in cls._SUPPORTED_QFORMATS:
-            raise ValueError(
-                f"Unsupported kv_cache.qformat: {v!r}. "
-                f"Expected one of {sorted(cls._SUPPORTED_QFORMATS)} or None."
-            )
-        return v
-
-
 class AutoQuantizeConstraints(ModeloptBaseConfig):
     """Constraints passed to ``mtq.auto_quantize`` (matches its dict shape).
 
@@ -201,16 +162,13 @@ class AutoQuantizeConfig(ModeloptBaseConfig):
         description="Glob patterns; matching layers are excluded from the search.",
     )
 
-    score_checkpoint: str | None = ModeloptField(
+    kv_cache: QuantizeConfig | None = ModeloptField(
         default=None,
-        title="Search-state checkpoint path",
-        description="Path to save/restore search state for resume or cheap re-solve.",
-    )
-
-    kv_cache: AutoQuantizeKVCache | None = ModeloptField(
-        default=None,
-        title="KV cache override",
-        description="Optional KV cache config. If omitted, --kv_cache_qformat CLI flag is used.",
+        title="KV cache QuantizeConfig (optional)",
+        description="Optional full QuantizeConfig applied as a uniform post-step after the "
+        "LP search. Typically uses ``$import: configs/ptq/units/kv_*`` for a built-in KV "
+        "preset, or inlines a custom config. If omitted, the runtime --kv_cache_qformat "
+        "CLI flag is used as a fallback.",
     )
 
     @field_validator("candidate_formats")
