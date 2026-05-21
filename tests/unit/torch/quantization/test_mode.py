@@ -19,11 +19,12 @@ import pytest
 
 from modelopt.torch.opt.config import ModeloptField
 from modelopt.torch.opt.mode import _ModeRegistryCls
-from modelopt.torch.quantization.config import QuantizeAlgorithmConfig
+from modelopt.torch.quantization.config import MaxCalibConfig, QuantizeAlgorithmConfig
 from modelopt.torch.quantization.mode import (
     BaseCalibrateModeDescriptor,
     CalibrateModeRegistry,
     QuantizeModeRegistry,
+    get_modelike_from_algo_cfg,
 )
 
 
@@ -60,3 +61,19 @@ def test_calibrate_mode_registry_with_custom_mode():
         @CalibrateModeRegistry.register_mode
         class TestIncorrectCalibrateModeDescriptor:
             pass
+
+
+def test_get_modelike_from_algo_cfg_accepts_quantize_algorithm_config():
+    """Regression test for #201: ``QuantizeAlgorithmConfig`` instances must be accepted."""
+    cfg_obj = MaxCalibConfig(method="max", distributed_sync=False)
+    cfg_dict = cfg_obj.model_dump()
+
+    from_obj = get_modelike_from_algo_cfg(cfg_obj)
+    from_dict = get_modelike_from_algo_cfg(cfg_dict)
+
+    assert from_obj == from_dict
+    assert from_obj[0][1] == cfg_dict
+
+    # List handling should also accept ``QuantizeAlgorithmConfig`` instances.
+    from_list = get_modelike_from_algo_cfg([cfg_obj])
+    assert from_list == from_obj
