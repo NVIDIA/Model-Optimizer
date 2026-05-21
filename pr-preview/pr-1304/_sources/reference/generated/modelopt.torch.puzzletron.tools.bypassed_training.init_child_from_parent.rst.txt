@@ -1,0 +1,6 @@
+modelopt.torch.puzzletron.tools.bypassed\_training.init\_child\_from\_parent
+============================================================================
+
+.. currentmodule:: modelopt.torch.puzzletron.tools.bypassed_training
+
+.. autofunction:: init_child_from_parent

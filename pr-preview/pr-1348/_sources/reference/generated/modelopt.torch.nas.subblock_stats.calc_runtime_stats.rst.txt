@@ -1,0 +1,55 @@
+calc\_runtime\_stats
+====================
+
+.. List the submodules
+
+
+
+
+
+.. Autodoc anything defined in the module itself
+
+   TODO: WE DON'T USE THIS OPTION RIGHT NOW BUT WE CAN REACTIVATE IF WANTED
+   We use :ignore-module-all: so sphinx does not document the same module twice, even if it is reimported
+   For reimports that should be documented somewhere other than where they are defined, the re-imports
+   __module__ should be manually overridden -- i.e. in the ``__init__.py`` which contains ``from xxx import YYY``,
+   add in ``YYY.__module__ = __name__``.
+
+.. automodule:: modelopt.torch.nas.subblock_stats.calc_runtime_stats
+   :members:
+   :undoc-members:
+
+   .. Also show members without docstrings. Only members from __all__ are considered as per conf.py
+   .. Ideally we should add docstrings for these members.
+
+
+   .. Overview table of available classes in the module
+   
+   
+   .. rubric:: Classes
+
+   .. autosummary::
+      :nosignatures:
+   
+      RuntimeConfig
+   
+   
+
+
+   .. Overview table of available functions in the module
+   
+   
+   .. rubric:: Functions
+
+   .. autosummary::
+      :nosignatures:
+   
+      calc_no_block_runtime
+      calc_runtime_for_subblocks
+      calc_subblock_runtime
+      create_benchmark_model
+      run_vllm_latency_benchmark
+      save_model
+      save_model_as_anymodel
+   
+   

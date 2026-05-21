@@ -1,0 +1,498 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>utils &mdash; Model Optimizer 0.0.1.dev1+g881967daf</title>
+      <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="../../_static/copybutton.css?v=76b2166b" />
+      <link rel="stylesheet" type="text/css" href="../../_static/tabs.css?v=4c969af8" />
+      <link rel="stylesheet" type="text/css" href="../../_static/togglebutton.css?v=9c3e77be" />
+      <link rel="stylesheet" type="text/css" href="../../_static/autodoc_pydantic.css" />
+      <link rel="stylesheet" type="text/css" href="../../_static/custom.css?v=7a224f4b" />
+
+  
+      <script src="../../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../../_static/documentation_options.js?v=5929fcd5"></script>
+      <script src="../../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="../../_static/clipboard.min.js?v=a7894cd8"></script>
+      <script src="../../_static/copybutton.js?v=20d3d275"></script>
+      <script src="../../_static/tabs.js?v=3ee01567"></script>
+      <script>let toggleHintShow = 'Click to show';</script>
+      <script>let toggleHintHide = 'Click to hide';</script>
+      <script>let toggleOpenOnPrint = 'true';</script>
+      <script src="../../_static/togglebutton.js?v=b8b12719"></script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+    <script src="../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" />
+    <link rel="next" title="opt" href="modelopt.torch.opt.html" />
+    <link rel="prev" title="traced_hp" href="modelopt.torch.nas.traced_hp.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../../index.html" class="icon icon-home">
+            Model Optimizer
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../getting_started/1_overview.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../getting_started/2_installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch to ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - Windows</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_qat" rel="noopener noreferrer" target="_blank">Quick Start: QAT</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning" rel="noopener noreferrer" target="_blank">Quick Start: Pruning</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_distill" rel="noopener noreferrer" target="_blank">Quick Start: Distillation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/speculative_decoding" rel="noopener noreferrer" target="_blank">Quick Start: Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_sparsity" rel="noopener noreferrer" target="_blank">Quick Start: Sparsity</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Guides</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/0_support_matrix.html">Support Matrix</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/1_quantization.html">Quantization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/2_save_load.html">Saving &amp; Restoring</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/3_pruning.html">Pruning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/4_distillation.html">Distillation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/5_speculative_decoding.html">Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/6_sparsity.html">Sparsity</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/7_nas.html">NAS</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/8_autocast.html">AutoCast (ONNX)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/9_autotune.html">Autotune (ONNX)</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Deployment</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/1_tensorrt_llm.html">TensorRT-LLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/2_onnxruntime.html">Onnxruntime</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/3_unified_hf.html">Unified HuggingFace Checkpoint</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Examples</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../examples/0_all_examples.html">All GitHub Examples</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Reference</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="../0_changelog.html">NVIDIA Model Optimizer Changelog</a></li>
+<li class="toctree-l1 current"><a class="reference internal" href="../1_modelopt_api.html">modelopt API</a><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="modelopt.deploy.html">deploy</a></li>
+<li class="toctree-l2"><a class="reference internal" href="modelopt.onnx.html">onnx</a></li>
+<li class="toctree-l2 current"><a class="reference internal" href="modelopt.torch.html">torch</a><ul class="current">
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.distill.html">distill</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.export.html">export</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.kernels.html">kernels</a></li>
+<li class="toctree-l3 current"><a class="reference internal" href="modelopt.torch.nas.html">nas</a><ul class="current">
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.nas.algorithms.html">algorithms</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.nas.autonas.html">autonas</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.nas.conversion.html">conversion</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.nas.hparams.html">hparams</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.nas.modules.html">modules</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.nas.patch.html">patch</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.nas.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.nas.registry.html">registry</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.nas.search_space.html">search_space</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.nas.traced_hp.html">traced_hp</a></li>
+<li class="toctree-l4 current"><a class="current reference internal" href="#">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.opt.html">opt</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.peft.html">peft</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.prune.html">prune</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.quantization.html">quantization</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.sparsity.html">sparsity</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.speculative.html">speculative</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.trace.html">trace</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.utils.html">utils</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Support</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../support/1_contact.html">Contact us</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../support/2_faqs.html">FAQs</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../index.html">Model Optimizer</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content style-external-links">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="../1_modelopt_api.html">modelopt API</a></li>
+          <li class="breadcrumb-item"><a href="modelopt.torch.html">torch</a></li>
+          <li class="breadcrumb-item"><a href="modelopt.torch.nas.html">nas</a></li>
+      <li class="breadcrumb-item active">utils</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../../_sources/reference/generated/modelopt.torch.nas.utils.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="utils">
+<h1>utils<a class="headerlink" href="#utils" title="Link to this heading"></a></h1>
+<p id="module-modelopt.torch.nas.utils">Utility functions for prune-related and search-space related tasks.</p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>Generally, methods in the <a class="reference internal" href="modelopt.torch.nas.html#module-modelopt.torch.nas" title="modelopt.torch.nas"><code class="xref py py-meth docutils literal notranslate"><span class="pre">modelopt.torch.nas</span></code></a> module should use these utility
+functions directly instead of accessing the <code class="docutils literal notranslate"><span class="pre">SearchSpace</span></code> class. This is to ensure that
+potentially required pre- and post-processing operations are performed correctly.</p>
+</div>
+<p class="rubric">Classes</p>
+<table class="autosummary longtable docutils align-default">
+<tbody>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.nas.utils.enable_modelopt_patches" title="modelopt.torch.nas.utils.enable_modelopt_patches"><code class="xref py py-obj docutils literal notranslate"><span class="pre">enable_modelopt_patches</span></code></a></p></td>
+<td><p>Context manager to enable <code class="docutils literal notranslate"><span class="pre">modelopt</span></code> patches such as those for autonas/fastnas.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.nas.utils.no_modelopt_patches" title="modelopt.torch.nas.utils.no_modelopt_patches"><code class="xref py py-obj docutils literal notranslate"><span class="pre">no_modelopt_patches</span></code></a></p></td>
+<td><p>Context manager to disable <code class="docutils literal notranslate"><span class="pre">modelopt</span></code> patches to the model.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.nas.utils.set_modelopt_patches_enabled" title="modelopt.torch.nas.utils.set_modelopt_patches_enabled"><code class="xref py py-obj docutils literal notranslate"><span class="pre">set_modelopt_patches_enabled</span></code></a></p></td>
+<td><p>Context manager that sets patches to on or off.</p></td>
+</tr>
+</tbody>
+</table>
+<p class="rubric">Functions</p>
+<table class="autosummary longtable docutils align-default">
+<tbody>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.nas.utils.inference_flops" title="modelopt.torch.nas.utils.inference_flops"><code class="xref py py-obj docutils literal notranslate"><span class="pre">inference_flops</span></code></a></p></td>
+<td><p>Get the inference FLOPs of a PyTorch model.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.nas.utils.print_search_space_summary" title="modelopt.torch.nas.utils.print_search_space_summary"><code class="xref py py-obj docutils literal notranslate"><span class="pre">print_search_space_summary</span></code></a></p></td>
+<td><p>Print the search space summary.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.nas.utils.get_subnet_config" title="modelopt.torch.nas.utils.get_subnet_config"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_subnet_config</span></code></a></p></td>
+<td><p>Return the config dict of all hyperparameters.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.nas.utils.sample" title="modelopt.torch.nas.utils.sample"><code class="xref py py-obj docutils literal notranslate"><span class="pre">sample</span></code></a></p></td>
+<td><p>Sample searchable hparams using the provided sample_func and return resulting config.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.nas.utils.select" title="modelopt.torch.nas.utils.select"><code class="xref py py-obj docutils literal notranslate"><span class="pre">select</span></code></a></p></td>
+<td><p>Select the sub-net according to the provided config dict.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.nas.utils.is_modelopt_patches_enabled" title="modelopt.torch.nas.utils.is_modelopt_patches_enabled"><code class="xref py py-obj docutils literal notranslate"><span class="pre">is_modelopt_patches_enabled</span></code></a></p></td>
+<td><p>Check if modelopt patches for model are enabled.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.nas.utils.replace_forward" title="modelopt.torch.nas.utils.replace_forward"><code class="xref py py-obj docutils literal notranslate"><span class="pre">replace_forward</span></code></a></p></td>
+<td><p>Context manager to temporarily replace the forward method of the underlying type of a model.</p></td>
+</tr>
+</tbody>
+</table>
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.nas.utils.enable_modelopt_patches">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">enable_modelopt_patches</span></span><a class="headerlink" href="#modelopt.torch.nas.utils.enable_modelopt_patches" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">_DecoratorContextManager</span></code></p>
+<p>Context manager to enable <code class="docutils literal notranslate"><span class="pre">modelopt</span></code> patches such as those for autonas/fastnas.</p>
+<p>It can also be used as a decorator (make sure to instantiate with parenthesis).</p>
+<p>For example:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">modelopt_model</span><span class="o">.</span><span class="n">train</span><span class="p">()</span>
+<span class="n">modelopt_model</span><span class="p">(</span><span class="n">inputs</span><span class="p">)</span>  <span class="c1"># architecture changes</span>
+
+<span class="k">with</span> <span class="n">mtn</span><span class="o">.</span><span class="n">no_modelopt</span><span class="p">():</span>
+    <span class="k">with</span> <span class="n">mtn</span><span class="o">.</span><span class="n">enable_modelopt</span><span class="p">():</span>
+        <span class="n">modelopt_model</span><span class="p">(</span><span class="n">inputs</span><span class="p">)</span>  <span class="c1"># architecture changes</span>
+
+
+<span class="nd">@mtn</span><span class="o">.</span><span class="n">enable_modelopt</span><span class="p">()</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">forward</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="n">inputs</span><span class="p">):</span>
+    <span class="k">return</span> <span class="n">model</span><span class="p">(</span><span class="n">inputs</span><span class="p">)</span>
+
+
+<span class="k">with</span> <span class="n">mtn</span><span class="o">.</span><span class="n">no_modelopt</span><span class="p">():</span>
+    <span class="n">forward</span><span class="p">(</span><span class="n">modelopt_model</span><span class="p">,</span> <span class="n">inputs</span><span class="p">)</span>  <span class="c1"># architecture changes because of decorator on forward</span>
+</pre></div>
+</div>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.nas.utils.enable_modelopt_patches.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.nas.utils.enable_modelopt_patches.__init__" title="Link to this definition"></a></dt>
+<dd><p>Constructor.</p>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.nas.utils.get_subnet_config">
+<span class="sig-name descname"><span class="pre">get_subnet_config</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">configurable</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.nas.utils.get_subnet_config" title="Link to this definition"></a></dt>
+<dd><p>Return the config dict of all hyperparameters.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>model</strong> (<em>Module</em>) – A model that contains DynamicModule(s).</p></li>
+<li><p><strong>configurable</strong> (<em>bool</em><em> | </em><em>None</em>) – None -&gt; all hps, True -&gt; configurable hps without duplicates</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>A dict of <code class="docutils literal notranslate"><span class="pre">(parameter_name,</span> <span class="pre">choice)</span></code> that specifies an active subnet.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>dict</em>[<em>str</em>, <em>Any</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.nas.utils.inference_flops">
+<span class="sig-name descname"><span class="pre">inference_flops</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">network</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">dummy_input</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">data_shape</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">unit</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1000000.0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">return_str</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.nas.utils.inference_flops" title="Link to this definition"></a></dt>
+<dd><p>Get the inference FLOPs of a PyTorch model.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>network</strong> (<em>Module</em>) – The PyTorch model.</p></li>
+<li><p><strong>args</strong> – The dummy input as defined in
+<a class="reference internal" href="modelopt.torch.nas.conversion.html#modelopt.torch.nas.conversion.convert" title="modelopt.torch.nas.conversion.convert"><code class="xref py py-meth docutils literal notranslate"><span class="pre">mtn.convert()</span></code></a>.</p></li>
+<li><p><strong>data_shape</strong> (<em>tuple</em><em>[</em><em>Any</em><em>, </em><em>...</em><em>] </em><em>| </em><em>None</em>) – The shape of the dummy input if the dummy input is a single tensor. If provided,
+<code class="docutils literal notranslate"><span class="pre">args</span></code> must be <code class="docutils literal notranslate"><span class="pre">None</span></code>.</p></li>
+<li><p><strong>unit</strong> (<em>float</em>) – The unit to return the number of parameters in. Default is 1e6 (million).</p></li>
+<li><p><strong>return_str</strong> (<em>bool</em>) – Whether to return the number of FLOPs as a string.</p></li>
+<li><p><strong>dummy_input</strong> (<em>Any</em><em> | </em><em>tuple</em><em>[</em><em>Any</em><em>, </em><em>...</em><em>] </em><em>| </em><em>None</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>The number of inference FLOPs in the given unit as either string or float.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>float</em> | <em>str</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.nas.utils.is_modelopt_patches_enabled">
+<span class="sig-name descname"><span class="pre">is_modelopt_patches_enabled</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.nas.utils.is_modelopt_patches_enabled" title="Link to this definition"></a></dt>
+<dd><p>Check if modelopt patches for model are enabled.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>bool</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.nas.utils.no_modelopt_patches">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">no_modelopt_patches</span></span><a class="headerlink" href="#modelopt.torch.nas.utils.no_modelopt_patches" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">_DecoratorContextManager</span></code></p>
+<p>Context manager to disable <code class="docutils literal notranslate"><span class="pre">modelopt</span></code> patches to the model.</p>
+<p>Disabling <code class="docutils literal notranslate"><span class="pre">modelopt</span></code> patches is useful when you want to use the model’s original behavior
+For example, you can use this to perform a forward pass without NAS operations.</p>
+<p>It can also be used as a decorator (make sure to instantiate with parenthesis).</p>
+<p>For example:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">modelopt_model</span><span class="o">.</span><span class="n">train</span><span class="p">()</span>
+<span class="n">modelopt_model</span><span class="p">(</span><span class="n">inputs</span><span class="p">)</span>  <span class="c1"># architecture changes</span>
+
+<span class="k">with</span> <span class="n">mtn</span><span class="o">.</span><span class="n">no_modelopt</span><span class="p">():</span>
+    <span class="n">modelopt_model</span><span class="p">(</span><span class="n">inputs</span><span class="p">)</span>  <span class="c1"># architecture does not change</span>
+
+
+<span class="nd">@mtn</span><span class="o">.</span><span class="n">no_modelopt</span><span class="p">()</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">forward</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="n">inputs</span><span class="p">):</span>
+    <span class="k">return</span> <span class="n">model</span><span class="p">(</span><span class="n">inputs</span><span class="p">)</span>
+
+
+<span class="n">forward</span><span class="p">(</span><span class="n">modelopt_model</span><span class="p">,</span> <span class="n">inputs</span><span class="p">)</span>  <span class="c1"># architecture does not change</span>
+</pre></div>
+</div>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.nas.utils.no_modelopt_patches.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.nas.utils.no_modelopt_patches.__init__" title="Link to this definition"></a></dt>
+<dd><p>Constructor.</p>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.nas.utils.print_search_space_summary">
+<span class="sig-name descname"><span class="pre">print_search_space_summary</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">skipped_hparams</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">['kernel_size']</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.nas.utils.print_search_space_summary" title="Link to this definition"></a></dt>
+<dd><p>Print the search space summary.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>model</strong> (<em>Module</em>) – A model that contains DynamicModule(s).</p></li>
+<li><p><strong>skipped_hparams</strong> (<em>list</em><em>[</em><em>str</em><em>]</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.nas.utils.replace_forward">
+<span class="sig-name descname"><span class="pre">replace_forward</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">new_forward</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.nas.utils.replace_forward" title="Link to this definition"></a></dt>
+<dd><p>Context manager to temporarily replace the forward method of the underlying type of a model.</p>
+<p>The original forward function is temporarily accessible via <code class="docutils literal notranslate"><span class="pre">model.forward_original</span></code>.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>model</strong> (<em>Module</em>) – The model whose type’s forward method is to be temporarily replaced.</p></li>
+<li><p><strong>new_forward</strong> (<em>Callable</em>) – The new forward method. The forward method should either be a bound method to
+the model instance or take the model (<code class="docutils literal notranslate"><span class="pre">self</span></code>) as the first argument.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>Iterator</em>[<em>None</em>]</p>
+</dd>
+</dl>
+<p>For example:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">fake_forward</span> <span class="o">=</span> <span class="k">lambda</span> <span class="n">_</span><span class="p">:</span> <span class="kc">None</span>
+
+<span class="k">with</span> <span class="n">replace_forward</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="n">fake_forward</span><span class="p">):</span>
+    <span class="n">out</span> <span class="o">=</span> <span class="n">model</span><span class="p">(</span><span class="n">inputs</span><span class="p">)</span>  <span class="c1"># this output is None</span>
+
+<span class="n">out_original</span> <span class="o">=</span> <span class="n">model</span><span class="p">(</span><span class="n">inputs</span><span class="p">)</span>  <span class="c1"># this output is the original output</span>
+</pre></div>
+</div>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.nas.utils.sample">
+<span class="sig-name descname"><span class="pre">sample</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">sample_func=&lt;function</span> <span class="pre">choice&gt;</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.nas.utils.sample" title="Link to this definition"></a></dt>
+<dd><p>Sample searchable hparams using the provided sample_func and return resulting config.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>model</strong> (<em>Module</em>) – A searchable model that contains one or more DynamicModule(s).</p></li>
+<li><p><strong>sample_func</strong> (<em>Callable</em><em>[</em><em>[</em><em>Sequence</em><em>[</em><em>T</em><em>]</em><em>]</em><em>, </em><em>T</em><em>] </em><em>| </em><em>dict</em><em>[</em><em>str</em><em>, </em><em>Callable</em><em>[</em><em>[</em><em>Sequence</em><em>[</em><em>T</em><em>]</em><em>]</em><em>, </em><em>T</em><em>]</em><em>]</em>) – A sampling function for hyperparameters. Default: random sampling.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>A dict of <code class="docutils literal notranslate"><span class="pre">(parameter_name,</span> <span class="pre">choice)</span></code> that specifies an active subnet.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>dict</em>[<em>str</em>, <em>Any</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.nas.utils.select">
+<span class="sig-name descname"><span class="pre">select</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">config</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">strict</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.nas.utils.select" title="Link to this definition"></a></dt>
+<dd><p>Select the sub-net according to the provided config dict.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>model</strong> (<em>Module</em>) – A model that contains DynamicModule(s).</p></li>
+<li><p><strong>config</strong> (<em>dict</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>]</em>) – Config of the target subnet as returned by
+<code class="xref py py-meth docutils literal notranslate"><span class="pre">mtn.config()</span></code>
+and <a class="reference internal" href="modelopt.torch.nas.algorithms.html#modelopt.torch.nas.algorithms.search" title="modelopt.torch.nas.algorithms.search"><code class="xref py py-meth docutils literal notranslate"><span class="pre">mtn.search()</span></code></a>.</p></li>
+<li><p><strong>strict</strong> (<em>bool</em>) – Raise an error when the config does not contain all necessary keys.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.nas.utils.set_modelopt_patches_enabled">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">set_modelopt_patches_enabled</span></span><a class="headerlink" href="#modelopt.torch.nas.utils.set_modelopt_patches_enabled" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">_DecoratorContextManager</span></code></p>
+<p>Context manager that sets patches to on or off.</p>
+<p>It can be used as context manager or as a function. If used as function,  operations
+are disabled globally (thread local).</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>enabled</strong> – whether to enable (<code class="docutils literal notranslate"><span class="pre">True</span></code>) or disable (<code class="docutils literal notranslate"><span class="pre">False</span></code>) patched methods.</p>
+</dd>
+</dl>
+<p>For example:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">modelopt_model</span><span class="o">.</span><span class="n">train</span><span class="p">()</span>
+<span class="n">modelopt_model</span><span class="p">(</span><span class="n">inputs</span><span class="p">)</span>  <span class="c1"># architecture changes</span>
+
+<span class="n">mtn</span><span class="o">.</span><span class="n">set_modelopt_enabled</span><span class="p">(</span><span class="kc">False</span><span class="p">)</span>
+<span class="n">modelopt_model</span><span class="p">(</span><span class="n">inputs</span><span class="p">)</span>  <span class="c1"># architecture does not change</span>
+
+<span class="k">with</span> <span class="n">mtn</span><span class="o">.</span><span class="n">set_modelopt_enabled</span><span class="p">(</span><span class="kc">True</span><span class="p">):</span>
+    <span class="n">modelopt_model</span><span class="p">(</span><span class="n">inputs</span><span class="p">)</span>  <span class="c1"># architecture changes</span>
+
+<span class="n">modelopt_model</span><span class="p">(</span><span class="n">inputs</span><span class="p">)</span>  <span class="c1"># architecture does not change</span>
+</pre></div>
+</div>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.nas.utils.set_modelopt_patches_enabled.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">enabled</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.nas.utils.set_modelopt_patches_enabled.__init__" title="Link to this definition"></a></dt>
+<dd><p>Constructor.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>enabled</strong> (<em>bool</em>)</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.nas.utils.set_modelopt_patches_enabled.clone">
+<span class="sig-name descname"><span class="pre">clone</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.nas.utils.set_modelopt_patches_enabled.clone" title="Link to this definition"></a></dt>
+<dd><p>Clone the context manager.</p>
+</dd></dl>
+
+</dd></dl>
+
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="modelopt.torch.nas.traced_hp.html" class="btn btn-neutral float-left" title="traced_hp" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="modelopt.torch.opt.html" class="btn btn-neutral float-right" title="opt" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2023-2025, NVIDIA Corporation.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

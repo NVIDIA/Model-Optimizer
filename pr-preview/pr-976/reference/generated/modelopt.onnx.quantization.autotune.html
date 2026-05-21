@@ -1,0 +1,1882 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>autotune &mdash; Model Optimizer 0.0.1.dev1+gffdad9b8c</title>
+      <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="../../_static/copybutton.css?v=76b2166b" />
+      <link rel="stylesheet" type="text/css" href="../../_static/tabs.css?v=4c969af8" />
+      <link rel="stylesheet" type="text/css" href="../../_static/togglebutton.css?v=9c3e77be" />
+      <link rel="stylesheet" type="text/css" href="../../_static/autodoc_pydantic.css" />
+      <link rel="stylesheet" type="text/css" href="../../_static/custom.css?v=7a224f4b" />
+
+  
+      <script src="../../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../../_static/documentation_options.js?v=5929fcd5"></script>
+      <script src="../../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="../../_static/clipboard.min.js?v=a7894cd8"></script>
+      <script src="../../_static/copybutton.js?v=20d3d275"></script>
+      <script src="../../_static/tabs.js?v=3ee01567"></script>
+      <script>let toggleHintShow = 'Click to show';</script>
+      <script>let toggleHintHide = 'Click to hide';</script>
+      <script>let toggleOpenOnPrint = 'true';</script>
+      <script src="../../_static/togglebutton.js?v=b8b12719"></script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+    <script src="../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" />
+    <link rel="next" title="calib_utils" href="modelopt.onnx.quantization.calib_utils.html" />
+    <link rel="prev" title="quantization" href="modelopt.onnx.quantization.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../../index.html" class="icon icon-home">
+            Model Optimizer
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../getting_started/1_overview.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../getting_started/2_installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch to ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - Windows</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_qat" rel="noopener noreferrer" target="_blank">Quick Start: QAT</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning" rel="noopener noreferrer" target="_blank">Quick Start: Pruning</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_distill" rel="noopener noreferrer" target="_blank">Quick Start: Distillation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/speculative_decoding" rel="noopener noreferrer" target="_blank">Quick Start: Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_sparsity" rel="noopener noreferrer" target="_blank">Quick Start: Sparsity</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Guides</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/0_support_matrix.html">Support Matrix</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/1_quantization.html">Quantization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/2_save_load.html">Saving &amp; Restoring</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/3_pruning.html">Pruning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/4_distillation.html">Distillation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/5_speculative_decoding.html">Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/6_sparsity.html">Sparsity</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/7_nas.html">NAS</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/8_autocast.html">AutoCast (ONNX)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/9_autotune.html">Autotune (ONNX)</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Deployment</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/1_tensorrt_llm.html">TensorRT-LLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/2_onnxruntime.html">Onnxruntime</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/3_unified_hf.html">Unified HuggingFace Checkpoint</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Examples</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../examples/0_all_examples.html">All GitHub Examples</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Reference</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="../0_changelog.html">NVIDIA Model Optimizer Changelog</a></li>
+<li class="toctree-l1 current"><a class="reference internal" href="../1_modelopt_api.html">modelopt API</a><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="modelopt.deploy.html">deploy</a></li>
+<li class="toctree-l2 current"><a class="reference internal" href="modelopt.onnx.html">onnx</a><ul class="current">
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.autocast.html">autocast</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.export.html">export</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.graph_surgery.html">graph_surgery</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.llm_export_utils.html">llm_export_utils</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.logging_config.html">logging_config</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.op_types.html">op_types</a></li>
+<li class="toctree-l3 current"><a class="reference internal" href="modelopt.onnx.quantization.html">quantization</a><ul class="current">
+<li class="toctree-l4 current"><a class="current reference internal" href="#">autotune</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.calib_utils.html">calib_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.extensions.html">extensions</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.fp8.html">fp8</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.graph_utils.html">graph_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.gs_patching.html">gs_patching</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.int4.html">int4</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.int8.html">int8</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.operators.html">operators</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.ort_patching.html">ort_patching</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.ort_utils.html">ort_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.partitioning.html">partitioning</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.qdq_utils.html">qdq_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.quant_utils.html">quant_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.quantize.html">modelopt.onnx.quantization.quantize</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.trt_utils.html">trt_utils</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="modelopt.torch.html">torch</a></li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Support</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../support/1_contact.html">Contact us</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../support/2_faqs.html">FAQs</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../index.html">Model Optimizer</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content style-external-links">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="../1_modelopt_api.html">modelopt API</a></li>
+          <li class="breadcrumb-item"><a href="modelopt.onnx.html">onnx</a></li>
+          <li class="breadcrumb-item"><a href="modelopt.onnx.quantization.html">quantization</a></li>
+      <li class="breadcrumb-item active">autotune</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../../_sources/reference/generated/modelopt.onnx.quantization.autotune.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="autotune">
+<h1>autotune<a class="headerlink" href="#autotune" title="Link to this heading"></a></h1>
+<p id="module-modelopt.onnx.quantization.autotune">Pattern-Based Q/DQ Autotuning for ONNX Models.</p>
+<p>This package provides automated optimization of Quantize/Dequantize (Q/DQ) node placement
+in ONNX computation graphs to minimize TensorRT inference latency. It uses pattern-based
+region analysis to efficiently explore and optimize Q/DQ insertion strategies.</p>
+<p class="rubric">Classes</p>
+<table class="autosummary longtable docutils align-default">
+<tbody>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.quantization.autotune.ChildRegionInputInsertionPoint" title="modelopt.onnx.quantization.autotune.ChildRegionInputInsertionPoint"><code class="xref py py-obj docutils literal notranslate"><span class="pre">ChildRegionInputInsertionPoint</span></code></a></p></td>
+<td><p>Pattern-relative Q/DQ insertion point at a child region's input boundary (frozen/hashable).</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.quantization.autotune.ChildRegionOutputInsertionPoint" title="modelopt.onnx.quantization.autotune.ChildRegionOutputInsertionPoint"><code class="xref py py-obj docutils literal notranslate"><span class="pre">ChildRegionOutputInsertionPoint</span></code></a></p></td>
+<td><p>Pattern-relative Q/DQ insertion point at a child region or node output (frozen/hashable).</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.quantization.autotune.CombinedRegionSearch" title="modelopt.onnx.quantization.autotune.CombinedRegionSearch"><code class="xref py py-obj docutils literal notranslate"><span class="pre">CombinedRegionSearch</span></code></a></p></td>
+<td><p>Two-phase region search combining bottom-up partitioning with top-down refinement.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.quantization.autotune.Config" title="modelopt.onnx.quantization.autotune.Config"><code class="xref py py-obj docutils literal notranslate"><span class="pre">Config</span></code></a></p></td>
+<td><p>Configuration parameters for QDQ autotuning.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.quantization.autotune.InsertionScheme" title="modelopt.onnx.quantization.autotune.InsertionScheme"><code class="xref py py-obj docutils literal notranslate"><span class="pre">InsertionScheme</span></code></a></p></td>
+<td><p>Complete Q/DQ insertion specification for a region pattern.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.quantization.autotune.NodeInputInsertionPoint" title="modelopt.onnx.quantization.autotune.NodeInputInsertionPoint"><code class="xref py py-obj docutils literal notranslate"><span class="pre">NodeInputInsertionPoint</span></code></a></p></td>
+<td><p>Pattern-relative Q/DQ insertion point at a node's input (frozen/hashable).</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.quantization.autotune.PatternCache" title="modelopt.onnx.quantization.autotune.PatternCache"><code class="xref py py-obj docutils literal notranslate"><span class="pre">PatternCache</span></code></a></p></td>
+<td><p>Pattern cache containing best-performing schemes for patterns with automatic eviction.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.quantization.autotune.PatternSchemes" title="modelopt.onnx.quantization.autotune.PatternSchemes"><code class="xref py py-obj docutils literal notranslate"><span class="pre">PatternSchemes</span></code></a></p></td>
+<td><p>Collection of Q/DQ insertion schemes for a single pattern.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.quantization.autotune.QDQAutotuner" title="modelopt.onnx.quantization.autotune.QDQAutotuner"><code class="xref py py-obj docutils literal notranslate"><span class="pre">QDQAutotuner</span></code></a></p></td>
+<td><p>Q/DQ autotuner with automatic region discovery around compute-intensive ops.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.quantization.autotune.Region" title="modelopt.onnx.quantization.autotune.Region"><code class="xref py py-obj docutils literal notranslate"><span class="pre">Region</span></code></a></p></td>
+<td><p>A subgraph region in an ONNX graph, used as the unit for Q/DQ insertion.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.quantization.autotune.RegionPattern" title="modelopt.onnx.quantization.autotune.RegionPattern"><code class="xref py py-obj docutils literal notranslate"><span class="pre">RegionPattern</span></code></a></p></td>
+<td><p>Represents a structural pattern of a region.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.quantization.autotune.RegionType" title="modelopt.onnx.quantization.autotune.RegionType"><code class="xref py py-obj docutils literal notranslate"><span class="pre">RegionType</span></code></a></p></td>
+<td><p>Region type enumeration for hierarchical graph structure.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.quantization.autotune.ResolvedInsertionPoint" title="modelopt.onnx.quantization.autotune.ResolvedInsertionPoint"><code class="xref py py-obj docutils literal notranslate"><span class="pre">ResolvedInsertionPoint</span></code></a></p></td>
+<td><p>Resolved Q/DQ insertion point with actual tensor name and optional node context.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.quantization.autotune.StoreWithExplicitFlag" title="modelopt.onnx.quantization.autotune.StoreWithExplicitFlag"><code class="xref py py-obj docutils literal notranslate"><span class="pre">StoreWithExplicitFlag</span></code></a></p></td>
+<td><p>Store the value and set an 'explicit' flag on the namespace so mode presets do not override.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.quantization.autotune.TensorRTPyBenchmark" title="modelopt.onnx.quantization.autotune.TensorRTPyBenchmark"><code class="xref py py-obj docutils literal notranslate"><span class="pre">TensorRTPyBenchmark</span></code></a></p></td>
+<td><p>TensorRT benchmark using Python API with plugin support.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.quantization.autotune.TrtExecBenchmark" title="modelopt.onnx.quantization.autotune.TrtExecBenchmark"><code class="xref py py-obj docutils literal notranslate"><span class="pre">TrtExecBenchmark</span></code></a></p></td>
+<td><p>TensorRT benchmark using trtexec command-line tool.</p></td>
+</tr>
+</tbody>
+</table>
+<p class="rubric">Functions</p>
+<table class="autosummary longtable docutils align-default">
+<tbody>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.quantization.autotune.get_node_filter_list" title="modelopt.onnx.quantization.autotune.get_node_filter_list"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_node_filter_list</span></code></a></p></td>
+<td><p>Extract node filter list from node filters path.</p></td>
+</tr>
+</tbody>
+</table>
+<dl class="py exception">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.AutotunerError">
+<em class="property"><span class="pre">exception</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">AutotunerError</span></span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.AutotunerError" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">Exception</span></code></p>
+<p>Base exception for autotuner-related errors.</p>
+</dd></dl>
+
+<dl class="py exception">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.AutotunerNotInitializedError">
+<em class="property"><span class="pre">exception</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">AutotunerNotInitializedError</span></span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.AutotunerNotInitializedError" title="Link to this definition"></a></dt>
+<dd><p>Bases: <a class="reference internal" href="#modelopt.onnx.quantization.autotune.AutotunerError" title="modelopt.onnx.quantization.autotune.common.AutotunerError"><code class="xref py py-class docutils literal notranslate"><span class="pre">AutotunerError</span></code></a></p>
+<p>Exception raised when autotuner is used without initialization.</p>
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.ChildRegionInputInsertionPoint">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">ChildRegionInputInsertionPoint</span></span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.ChildRegionInputInsertionPoint" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">InsertionPoint</span></code></p>
+<p>Pattern-relative Q/DQ insertion point at a child region’s input boundary (frozen/hashable).</p>
+<p>Specifies where to insert Q/DQ pairs at the input boundaries of child regions
+within COMPOSITE regions. This allows parent regions to control quantization
+at child boundaries, potentially overriding or complementing child region
+optimizations.</p>
+<p>Only applies to COMPOSITE regions; LEAF regions have no children.</p>
+<p>This class is immutable (frozen) to allow safe use in sets and as dict keys.</p>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.ChildRegionInputInsertionPoint.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">region_index</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">input_index</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.ChildRegionInputInsertionPoint.__init__" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>region_index</strong> (<em>int</em>)</p></li>
+<li><p><strong>input_index</strong> (<em>int</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.ChildRegionInputInsertionPoint.collect_from_region">
+<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">collect_from_region</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">region</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">graph</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.ChildRegionInputInsertionPoint.collect_from_region" title="Link to this definition"></a></dt>
+<dd><p>Collect all valid child region input insertion points from a region.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>region</strong> (<a class="reference internal" href="#modelopt.onnx.quantization.autotune.Region" title="modelopt.onnx.quantization.autotune.Region"><em>Region</em></a>)</p></li>
+<li><p><strong>graph</strong> (<em>Graph</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>list</em>[<a class="reference internal" href="#modelopt.onnx.quantization.autotune.ChildRegionInputInsertionPoint" title="modelopt.onnx.quantization.autotune.ChildRegionInputInsertionPoint"><em>ChildRegionInputInsertionPoint</em></a>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.ChildRegionInputInsertionPoint.from_dict">
+<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">from_dict</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">data</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.ChildRegionInputInsertionPoint.from_dict" title="Link to this definition"></a></dt>
+<dd><p>Create from dictionary.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>data</strong> (<em>dict</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>]</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference internal" href="#modelopt.onnx.quantization.autotune.ChildRegionInputInsertionPoint" title="modelopt.onnx.quantization.autotune.insertion_points.ChildRegionInputInsertionPoint"><em>ChildRegionInputInsertionPoint</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.ChildRegionInputInsertionPoint.input_index">
+<span class="sig-name descname"><span class="pre">input_index</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></em><a class="headerlink" href="#modelopt.onnx.quantization.autotune.ChildRegionInputInsertionPoint.input_index" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.ChildRegionInputInsertionPoint.region_index">
+<span class="sig-name descname"><span class="pre">region_index</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></em><a class="headerlink" href="#modelopt.onnx.quantization.autotune.ChildRegionInputInsertionPoint.region_index" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.ChildRegionInputInsertionPoint.resolve">
+<span class="sig-name descname"><span class="pre">resolve</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">region</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">graph</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.ChildRegionInputInsertionPoint.resolve" title="Link to this definition"></a></dt>
+<dd><p>Resolve a child region input insertion point to actual tensor names.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>region</strong> (<a class="reference internal" href="#modelopt.onnx.quantization.autotune.Region" title="modelopt.onnx.quantization.autotune.Region"><em>Region</em></a>)</p></li>
+<li><p><strong>graph</strong> (<em>Graph</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>set</em>[<a class="reference internal" href="#modelopt.onnx.quantization.autotune.ResolvedInsertionPoint" title="modelopt.onnx.quantization.autotune.insertion_points.ResolvedInsertionPoint"><em>ResolvedInsertionPoint</em></a>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.ChildRegionInputInsertionPoint.to_dict">
+<span class="sig-name descname"><span class="pre">to_dict</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.ChildRegionInputInsertionPoint.to_dict" title="Link to this definition"></a></dt>
+<dd><p>Convert to dictionary for serialization.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>dict</em>[<em>str</em>, <em>Any</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.ChildRegionOutputInsertionPoint">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">ChildRegionOutputInsertionPoint</span></span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.ChildRegionOutputInsertionPoint" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">InsertionPoint</span></code></p>
+<p>Pattern-relative Q/DQ insertion point at a child region or node output (frozen/hashable).</p>
+<p>Specifies where to insert Q/DQ pairs at output boundaries. This can be either:
+1. Output from a child region (in COMPOSITE regions)
+2. Output from a node within the region</p>
+<p>This class is immutable (frozen) to allow safe use in sets and as dict keys.</p>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.ChildRegionOutputInsertionPoint.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">region_index</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">node_index</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">output_index</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.ChildRegionOutputInsertionPoint.__init__" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>region_index</strong> (<em>int</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>node_index</strong> (<em>int</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>output_index</strong> (<em>int</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.ChildRegionOutputInsertionPoint.collect_from_region">
+<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">collect_from_region</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">region</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">graph</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.ChildRegionOutputInsertionPoint.collect_from_region" title="Link to this definition"></a></dt>
+<dd><p>Collect all valid region output insertion points from a region.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>region</strong> (<a class="reference internal" href="#modelopt.onnx.quantization.autotune.Region" title="modelopt.onnx.quantization.autotune.Region"><em>Region</em></a>)</p></li>
+<li><p><strong>graph</strong> (<em>Graph</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>list</em>[<a class="reference internal" href="#modelopt.onnx.quantization.autotune.ChildRegionOutputInsertionPoint" title="modelopt.onnx.quantization.autotune.ChildRegionOutputInsertionPoint"><em>ChildRegionOutputInsertionPoint</em></a>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.ChildRegionOutputInsertionPoint.from_dict">
+<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">from_dict</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">data</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.ChildRegionOutputInsertionPoint.from_dict" title="Link to this definition"></a></dt>
+<dd><p>Create from dictionary.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>data</strong> (<em>dict</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>]</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference internal" href="#modelopt.onnx.quantization.autotune.ChildRegionOutputInsertionPoint" title="modelopt.onnx.quantization.autotune.insertion_points.ChildRegionOutputInsertionPoint"><em>ChildRegionOutputInsertionPoint</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.ChildRegionOutputInsertionPoint.node_index">
+<span class="sig-name descname"><span class="pre">node_index</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#modelopt.onnx.quantization.autotune.ChildRegionOutputInsertionPoint.node_index" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.ChildRegionOutputInsertionPoint.output_index">
+<span class="sig-name descname"><span class="pre">output_index</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></em><a class="headerlink" href="#modelopt.onnx.quantization.autotune.ChildRegionOutputInsertionPoint.output_index" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.ChildRegionOutputInsertionPoint.region_index">
+<span class="sig-name descname"><span class="pre">region_index</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#modelopt.onnx.quantization.autotune.ChildRegionOutputInsertionPoint.region_index" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.ChildRegionOutputInsertionPoint.resolve">
+<span class="sig-name descname"><span class="pre">resolve</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">region</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">graph</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.ChildRegionOutputInsertionPoint.resolve" title="Link to this definition"></a></dt>
+<dd><p>Resolve a region output insertion point to actual tensor names.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>region</strong> (<a class="reference internal" href="#modelopt.onnx.quantization.autotune.Region" title="modelopt.onnx.quantization.autotune.Region"><em>Region</em></a>)</p></li>
+<li><p><strong>graph</strong> (<em>Graph</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>set</em>[<a class="reference internal" href="#modelopt.onnx.quantization.autotune.ResolvedInsertionPoint" title="modelopt.onnx.quantization.autotune.insertion_points.ResolvedInsertionPoint"><em>ResolvedInsertionPoint</em></a>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.ChildRegionOutputInsertionPoint.to_dict">
+<span class="sig-name descname"><span class="pre">to_dict</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.ChildRegionOutputInsertionPoint.to_dict" title="Link to this definition"></a></dt>
+<dd><p>Convert to dictionary for serialization.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>dict</em>[<em>str</em>, <em>Any</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.CombinedRegionSearch">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">CombinedRegionSearch</span></span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.CombinedRegionSearch" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">RegionSearchBase</span></code></p>
+<p>Two-phase region search combining bottom-up partitioning with top-down refinement.</p>
+<p>This class implements a sophisticated region discovery algorithm that combines two
+complementary strategies to create well-formed, hierarchical regions from an ONNX
+computation graph.</p>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.CombinedRegionSearch.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">graph</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">maximum_sequence_region_size</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">10</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">minimum_topdown_search_size</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">10</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.CombinedRegionSearch.__init__" title="Link to this definition"></a></dt>
+<dd><p>Initialize CombinedRegionSearch for a given ONNX graph.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>graph</strong> (<em>Graph</em>)</p></li>
+<li><p><strong>maximum_sequence_region_size</strong> (<em>int</em>)</p></li>
+<li><p><strong>minimum_topdown_search_size</strong> (<em>int</em>)</p></li>
+</ul>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.CombinedRegionSearch.search_regions">
+<span class="sig-name descname"><span class="pre">search_regions</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.CombinedRegionSearch.search_regions" title="Link to this definition"></a></dt>
+<dd><p>Execute two-phase region search to partition the graph into hierarchical regions.</p>
+<ol class="arabic simple">
+<li><p>Bottom-up partitioning</p></li>
+<li><p>Top-down refinement</p></li>
+</ol>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>None</strong></p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>List of hierarchical regions created from the graph</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>list</em>[<a class="reference internal" href="#modelopt.onnx.quantization.autotune.Region" title="modelopt.onnx.quantization.autotune.common.Region"><em>Region</em></a>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.Config">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">Config</span></span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.Config" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<p>Configuration parameters for QDQ autotuning.</p>
+<p>Controls the autotuning process including performance requirements, quantization
+parameters, region building, scheme generation, and finetuning behavior.</p>
+<p>Attributes are documented below as a list to avoid duplicate index entries with
+autodoc-generated attribute docs. Key fields:</p>
+<ul class="simple">
+<li><p>verbose: Enable detailed logging of autotuning progress (default: False).</p></li>
+<li><p>performance_threshold: Minimum speedup ratio to accept a scheme;
+1.0 = no improvement required, 1.02 = 2% improvement (default: 1.02).</p></li>
+<li><p>default_q_scale: Default scale for Q/DQ nodes; typical range 0.01-0.1 (default: 0.1).</p></li>
+<li><p>default_q_zero_point: Zero-point for Q/DQ; 0 for int8, 128 for uint8 (default: 0).</p></li>
+<li><p>default_quant_type: Quantization type; “int8” (default) or “fp8”.</p></li>
+<li><p>default_dq_dtype: Dtype for DequantizeLinear output; “float32” (default) or “float16”.</p></li>
+<li><p>maximum_sequence_region_size: Max nodes in a sequence region (default: 10).</p></li>
+<li><p>minimum_topdown_search_size: Min nodes to trigger top-down search (default: 10).</p></li>
+<li><p>top_percent_to_mutate: Top fraction of schemes used as mutation seeds (default: 0.1).</p></li>
+<li><p>minimum_schemes_to_mutate: Min schemes to keep as mutation seeds (default: 10).</p></li>
+<li><p>maximum_mutations: Max mutations per scheme during generation (default: 3).</p></li>
+<li><p>maximum_generation_attempts: Max attempts to generate a unique scheme (default: 100).</p></li>
+<li><p>pattern_cache_minimum_distance: Min edit distance between cached schemes (default: 4).</p></li>
+<li><p>pattern_cache_max_entries_per_pattern: Max schemes per pattern in cache (default: 32).</p></li>
+</ul>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.Config.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">verbose</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">performance_threshold</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1.02</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">default_q_scale</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0.1</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">default_q_zero_point</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">default_quant_type</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'int8'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">default_dq_dtype</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'float32'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">maximum_sequence_region_size</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">10</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">minimum_topdown_search_size</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">10</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">top_percent_to_mutate</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0.1</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">minimum_schemes_to_mutate</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">10</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">maximum_mutations</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">3</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">maximum_generation_attempts</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">100</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">pattern_cache_minimum_distance</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">4</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">pattern_cache_max_entries_per_pattern</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">32</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.Config.__init__" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>verbose</strong> (<em>bool</em>)</p></li>
+<li><p><strong>performance_threshold</strong> (<em>float</em>)</p></li>
+<li><p><strong>default_q_scale</strong> (<em>float</em>)</p></li>
+<li><p><strong>default_q_zero_point</strong> (<em>int</em>)</p></li>
+<li><p><strong>default_quant_type</strong> (<em>str</em>)</p></li>
+<li><p><strong>default_dq_dtype</strong> (<em>str</em>)</p></li>
+<li><p><strong>maximum_sequence_region_size</strong> (<em>int</em>)</p></li>
+<li><p><strong>minimum_topdown_search_size</strong> (<em>int</em>)</p></li>
+<li><p><strong>top_percent_to_mutate</strong> (<em>float</em>)</p></li>
+<li><p><strong>minimum_schemes_to_mutate</strong> (<em>int</em>)</p></li>
+<li><p><strong>maximum_mutations</strong> (<em>int</em>)</p></li>
+<li><p><strong>maximum_generation_attempts</strong> (<em>int</em>)</p></li>
+<li><p><strong>pattern_cache_minimum_distance</strong> (<em>int</em>)</p></li>
+<li><p><strong>pattern_cache_max_entries_per_pattern</strong> (<em>int</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.Config.default_dq_dtype">
+<span class="sig-name descname"><span class="pre">default_dq_dtype</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'float32'</span></em><a class="headerlink" href="#modelopt.onnx.quantization.autotune.Config.default_dq_dtype" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.Config.default_q_scale">
+<span class="sig-name descname"><span class="pre">default_q_scale</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">float</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">0.1</span></em><a class="headerlink" href="#modelopt.onnx.quantization.autotune.Config.default_q_scale" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.Config.default_q_zero_point">
+<span class="sig-name descname"><span class="pre">default_q_zero_point</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">0</span></em><a class="headerlink" href="#modelopt.onnx.quantization.autotune.Config.default_q_zero_point" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.Config.default_quant_type">
+<span class="sig-name descname"><span class="pre">default_quant_type</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'int8'</span></em><a class="headerlink" href="#modelopt.onnx.quantization.autotune.Config.default_quant_type" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.Config.maximum_generation_attempts">
+<span class="sig-name descname"><span class="pre">maximum_generation_attempts</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">100</span></em><a class="headerlink" href="#modelopt.onnx.quantization.autotune.Config.maximum_generation_attempts" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.Config.maximum_mutations">
+<span class="sig-name descname"><span class="pre">maximum_mutations</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">3</span></em><a class="headerlink" href="#modelopt.onnx.quantization.autotune.Config.maximum_mutations" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.Config.maximum_sequence_region_size">
+<span class="sig-name descname"><span class="pre">maximum_sequence_region_size</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">10</span></em><a class="headerlink" href="#modelopt.onnx.quantization.autotune.Config.maximum_sequence_region_size" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.Config.minimum_schemes_to_mutate">
+<span class="sig-name descname"><span class="pre">minimum_schemes_to_mutate</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">10</span></em><a class="headerlink" href="#modelopt.onnx.quantization.autotune.Config.minimum_schemes_to_mutate" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.Config.minimum_topdown_search_size">
+<span class="sig-name descname"><span class="pre">minimum_topdown_search_size</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">10</span></em><a class="headerlink" href="#modelopt.onnx.quantization.autotune.Config.minimum_topdown_search_size" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.Config.pattern_cache_max_entries_per_pattern">
+<span class="sig-name descname"><span class="pre">pattern_cache_max_entries_per_pattern</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">32</span></em><a class="headerlink" href="#modelopt.onnx.quantization.autotune.Config.pattern_cache_max_entries_per_pattern" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.Config.pattern_cache_minimum_distance">
+<span class="sig-name descname"><span class="pre">pattern_cache_minimum_distance</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">4</span></em><a class="headerlink" href="#modelopt.onnx.quantization.autotune.Config.pattern_cache_minimum_distance" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.Config.performance_threshold">
+<span class="sig-name descname"><span class="pre">performance_threshold</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">float</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">1.02</span></em><a class="headerlink" href="#modelopt.onnx.quantization.autotune.Config.performance_threshold" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.Config.top_percent_to_mutate">
+<span class="sig-name descname"><span class="pre">top_percent_to_mutate</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">float</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">0.1</span></em><a class="headerlink" href="#modelopt.onnx.quantization.autotune.Config.top_percent_to_mutate" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.Config.verbose">
+<span class="sig-name descname"><span class="pre">verbose</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">False</span></em><a class="headerlink" href="#modelopt.onnx.quantization.autotune.Config.verbose" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.InsertionScheme">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">InsertionScheme</span></span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.InsertionScheme" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<p>Complete Q/DQ insertion specification for a region pattern.</p>
+<p>An InsertionScheme defines a complete Q/DQ configuration for a pattern,
+combining both node-level and region-level insertion points. The scheme
+is applied to all regions matching the pattern.</p>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.InsertionScheme.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">node_inputs=&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">child_region_inputs=&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">region_outputs=&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">latency_ms=inf</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">error=False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">profile_timestamp=None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.InsertionScheme.__init__" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>node_inputs</strong> (<em>list</em><em>[</em><a class="reference internal" href="#modelopt.onnx.quantization.autotune.NodeInputInsertionPoint" title="modelopt.onnx.quantization.autotune.insertion_points.NodeInputInsertionPoint"><em>NodeInputInsertionPoint</em></a><em>]</em>)</p></li>
+<li><p><strong>child_region_inputs</strong> (<em>list</em><em>[</em><a class="reference internal" href="#modelopt.onnx.quantization.autotune.ChildRegionInputInsertionPoint" title="modelopt.onnx.quantization.autotune.insertion_points.ChildRegionInputInsertionPoint"><em>ChildRegionInputInsertionPoint</em></a><em>]</em>)</p></li>
+<li><p><strong>region_outputs</strong> (<em>list</em><em>[</em><a class="reference internal" href="#modelopt.onnx.quantization.autotune.ChildRegionOutputInsertionPoint" title="modelopt.onnx.quantization.autotune.insertion_points.ChildRegionOutputInsertionPoint"><em>ChildRegionOutputInsertionPoint</em></a><em>]</em>)</p></li>
+<li><p><strong>latency_ms</strong> (<em>float</em>)</p></li>
+<li><p><strong>error</strong> (<em>bool</em>)</p></li>
+<li><p><strong>profile_timestamp</strong> (<em>str</em><em> | </em><em>None</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.InsertionScheme.child_region_inputs">
+<span class="sig-name descname"><span class="pre">child_region_inputs</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">list</span><span class="p"><span class="pre">[</span></span><a class="reference internal" href="#modelopt.onnx.quantization.autotune.ChildRegionInputInsertionPoint" title="modelopt.onnx.quantization.autotune.insertion_points.ChildRegionInputInsertionPoint"><span class="pre">ChildRegionInputInsertionPoint</span></a><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#modelopt.onnx.quantization.autotune.InsertionScheme.child_region_inputs" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.InsertionScheme.distance">
+<span class="sig-name descname"><span class="pre">distance</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">other</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.InsertionScheme.distance" title="Link to this definition"></a></dt>
+<dd><p>Compute edit distance between this scheme and another scheme.</p>
+<p>The edit distance is the minimum number of add/remove operations needed
+to transform this scheme into the other scheme. This is computed as the
+symmetric difference between the insertion point sets.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>other</strong> (<a class="reference internal" href="#modelopt.onnx.quantization.autotune.InsertionScheme" title="modelopt.onnx.quantization.autotune.common.InsertionScheme"><em>InsertionScheme</em></a>) – InsertionScheme to compare against</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>Total edit distance (number of add + remove operations)</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>int</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.InsertionScheme.error">
+<span class="sig-name descname"><span class="pre">error</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">False</span></em><a class="headerlink" href="#modelopt.onnx.quantization.autotune.InsertionScheme.error" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.InsertionScheme.from_dict">
+<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">from_dict</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">data</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.InsertionScheme.from_dict" title="Link to this definition"></a></dt>
+<dd><p>Create InsertionScheme from serialized dictionary.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>data</strong> (<em>dict</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>]</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference internal" href="#modelopt.onnx.quantization.autotune.InsertionScheme" title="modelopt.onnx.quantization.autotune.common.InsertionScheme"><em>InsertionScheme</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.InsertionScheme.hash">
+<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">hash</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><a class="headerlink" href="#modelopt.onnx.quantization.autotune.InsertionScheme.hash" title="Link to this definition"></a></dt>
+<dd><p>Compute deterministic hash for scheme identity.</p>
+<p>The hash uniquely identifies this scheme configuration based on its
+insertion points. Two schemes with identical insertion points produce
+the same hash, regardless of their measured latencies.</p>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.InsertionScheme.is_empty">
+<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">is_empty</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></em><a class="headerlink" href="#modelopt.onnx.quantization.autotune.InsertionScheme.is_empty" title="Link to this definition"></a></dt>
+<dd><p>Check if this is a baseline scheme with no Q/DQ insertions.</p>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.InsertionScheme.is_profiled">
+<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">is_profiled</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></em><a class="headerlink" href="#modelopt.onnx.quantization.autotune.InsertionScheme.is_profiled" title="Link to this definition"></a></dt>
+<dd><p>Check if this scheme has been profiled (measured).</p>
+<p>A scheme is considered profiled if it has been measured (has non-infinite latency)
+or has encountered an error during measurement.</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.InsertionScheme.latency_ms">
+<span class="sig-name descname"><span class="pre">latency_ms</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">float</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">inf</span></em><a class="headerlink" href="#modelopt.onnx.quantization.autotune.InsertionScheme.latency_ms" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.InsertionScheme.node_inputs">
+<span class="sig-name descname"><span class="pre">node_inputs</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">list</span><span class="p"><span class="pre">[</span></span><a class="reference internal" href="#modelopt.onnx.quantization.autotune.NodeInputInsertionPoint" title="modelopt.onnx.quantization.autotune.insertion_points.NodeInputInsertionPoint"><span class="pre">NodeInputInsertionPoint</span></a><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#modelopt.onnx.quantization.autotune.InsertionScheme.node_inputs" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.InsertionScheme.profile_timestamp">
+<span class="sig-name descname"><span class="pre">profile_timestamp</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#modelopt.onnx.quantization.autotune.InsertionScheme.profile_timestamp" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.InsertionScheme.region_outputs">
+<span class="sig-name descname"><span class="pre">region_outputs</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">list</span><span class="p"><span class="pre">[</span></span><a class="reference internal" href="#modelopt.onnx.quantization.autotune.ChildRegionOutputInsertionPoint" title="modelopt.onnx.quantization.autotune.insertion_points.ChildRegionOutputInsertionPoint"><span class="pre">ChildRegionOutputInsertionPoint</span></a><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#modelopt.onnx.quantization.autotune.InsertionScheme.region_outputs" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.InsertionScheme.to_dict">
+<span class="sig-name descname"><span class="pre">to_dict</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.InsertionScheme.to_dict" title="Link to this definition"></a></dt>
+<dd><p>Convert to dictionary for serialization.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>dict</em>[<em>str</em>, <em>Any</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py exception">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.InvalidSchemeError">
+<em class="property"><span class="pre">exception</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">InvalidSchemeError</span></span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.InvalidSchemeError" title="Link to this definition"></a></dt>
+<dd><p>Bases: <a class="reference internal" href="#modelopt.onnx.quantization.autotune.AutotunerError" title="modelopt.onnx.quantization.autotune.common.AutotunerError"><code class="xref py py-class docutils literal notranslate"><span class="pre">AutotunerError</span></code></a></p>
+<p>Exception raised when an invalid scheme is referenced.</p>
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.NodeInputInsertionPoint">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">NodeInputInsertionPoint</span></span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.NodeInputInsertionPoint" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">InsertionPoint</span></code></p>
+<p>Pattern-relative Q/DQ insertion point at a node’s input (frozen/hashable).</p>
+<p>Specifies where to insert a Q/DQ pair within a region pattern using
+pattern-relative indices rather than absolute node IDs. This enables
+insertion scheme reuse across all regions matching the same pattern.</p>
+<p>This class is immutable (frozen) to allow safe use in sets and as dict keys.</p>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.NodeInputInsertionPoint.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">node_index</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">input_index</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.NodeInputInsertionPoint.__init__" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>node_index</strong> (<em>int</em>)</p></li>
+<li><p><strong>input_index</strong> (<em>int</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.NodeInputInsertionPoint.collect_from_region">
+<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">collect_from_region</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">region</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">graph</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.NodeInputInsertionPoint.collect_from_region" title="Link to this definition"></a></dt>
+<dd><p>Collect all valid node input insertion points from a region.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>region</strong> (<a class="reference internal" href="#modelopt.onnx.quantization.autotune.Region" title="modelopt.onnx.quantization.autotune.Region"><em>Region</em></a>)</p></li>
+<li><p><strong>graph</strong> (<em>Graph</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>list</em>[<a class="reference internal" href="#modelopt.onnx.quantization.autotune.NodeInputInsertionPoint" title="modelopt.onnx.quantization.autotune.NodeInputInsertionPoint"><em>NodeInputInsertionPoint</em></a>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.NodeInputInsertionPoint.from_dict">
+<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">from_dict</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">data</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.NodeInputInsertionPoint.from_dict" title="Link to this definition"></a></dt>
+<dd><p>Create from dictionary.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>data</strong> (<em>dict</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>]</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference internal" href="#modelopt.onnx.quantization.autotune.NodeInputInsertionPoint" title="modelopt.onnx.quantization.autotune.insertion_points.NodeInputInsertionPoint"><em>NodeInputInsertionPoint</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.NodeInputInsertionPoint.input_index">
+<span class="sig-name descname"><span class="pre">input_index</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></em><a class="headerlink" href="#modelopt.onnx.quantization.autotune.NodeInputInsertionPoint.input_index" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.NodeInputInsertionPoint.node_index">
+<span class="sig-name descname"><span class="pre">node_index</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></em><a class="headerlink" href="#modelopt.onnx.quantization.autotune.NodeInputInsertionPoint.node_index" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.NodeInputInsertionPoint.resolve">
+<span class="sig-name descname"><span class="pre">resolve</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">region</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">graph</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.NodeInputInsertionPoint.resolve" title="Link to this definition"></a></dt>
+<dd><p>Resolve a node input insertion point to actual tensor names for a matching region.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>region</strong> (<a class="reference internal" href="#modelopt.onnx.quantization.autotune.Region" title="modelopt.onnx.quantization.autotune.Region"><em>Region</em></a>)</p></li>
+<li><p><strong>graph</strong> (<em>Graph</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>set</em>[<a class="reference internal" href="#modelopt.onnx.quantization.autotune.ResolvedInsertionPoint" title="modelopt.onnx.quantization.autotune.insertion_points.ResolvedInsertionPoint"><em>ResolvedInsertionPoint</em></a>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.NodeInputInsertionPoint.to_dict">
+<span class="sig-name descname"><span class="pre">to_dict</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.NodeInputInsertionPoint.to_dict" title="Link to this definition"></a></dt>
+<dd><p>Convert to dictionary for serialization.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>dict</em>[<em>str</em>, <em>Any</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.PatternCache">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">PatternCache</span></span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.PatternCache" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<p>Pattern cache containing best-performing schemes for patterns with automatic eviction.</p>
+<p>Stores a collection of PatternSchemes that can be used as seeds for autotuning.
+Each PatternSchemes contains high-performing insertion schemes for a specific
+pattern signature. The cache automatically evicts non-performant schemes based on:
+- Error status (schemes with errors are evicted)
+- Duplicate schemes (only better-performing duplicate is kept)
+- Similarity (similar schemes where only better-performing one is kept)
+- Count limit (only top N best schemes are kept per pattern)</p>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.PatternCache.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">pattern_schemes=&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">minimum_distance=4</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">max_entries_per_pattern=32</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.PatternCache.__init__" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>pattern_schemes</strong> (<em>list</em><em>[</em><a class="reference internal" href="#modelopt.onnx.quantization.autotune.PatternSchemes" title="modelopt.onnx.quantization.autotune.common.PatternSchemes"><em>PatternSchemes</em></a><em>]</em>)</p></li>
+<li><p><strong>minimum_distance</strong> (<em>int</em>)</p></li>
+<li><p><strong>max_entries_per_pattern</strong> (<em>int</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.PatternCache.add_pattern_from_region">
+<span class="sig-name descname"><span class="pre">add_pattern_from_region</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">region</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">graph</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">quantized_tensors</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.PatternCache.add_pattern_from_region" title="Link to this definition"></a></dt>
+<dd><p>Build and add a pattern cache entry from a region in a quantized model.</p>
+<p>Analyzes a region from an already-quantized model to extract its Q/DQ
+insertion scheme. This allows capturing known-good quantization strategies
+from existing models and using them as seeds for autotuning.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>region</strong> (<a class="reference internal" href="#modelopt.onnx.quantization.autotune.Region" title="modelopt.onnx.quantization.autotune.common.Region"><em>Region</em></a>) – Region from the quantized model to analyze</p></li>
+<li><p><strong>graph</strong> (<em>Graph</em>) – ONNX graph containing the region</p></li>
+<li><p><strong>quantized_tensors</strong> (<em>set</em><em>[</em><em>str</em><em>]</em>) – Set of tensor names that have Q/DQ nodes</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+<p class="rubric">Example</p>
+<div class="doctest highlight-default notranslate"><div class="highlight"><pre><span></span><span class="gp">&gt;&gt;&gt; </span><span class="n">cache</span> <span class="o">=</span> <span class="n">PatternCache</span><span class="p">()</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="k">for</span> <span class="n">region</span> <span class="ow">in</span> <span class="n">all_regions</span><span class="p">:</span>
+<span class="gp">... </span>    <span class="n">cache</span><span class="o">.</span><span class="n">add_pattern_from_region</span><span class="p">(</span><span class="n">region</span><span class="p">,</span> <span class="n">graph</span><span class="p">,</span> <span class="n">quantized_tensors</span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">cache</span><span class="o">.</span><span class="n">save</span><span class="p">(</span><span class="s2">&quot;learned_patterns.yaml&quot;</span><span class="p">)</span>
+</pre></div>
+</div>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.PatternCache.add_pattern_schemes">
+<span class="sig-name descname"><span class="pre">add_pattern_schemes</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">pattern_schemes</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.PatternCache.add_pattern_schemes" title="Link to this definition"></a></dt>
+<dd><p>Add PatternSchemes to pattern cache with automatic eviction of non-performant entries.</p>
+<p>Merges new schemes with existing schemes for the same pattern, automatically
+evicting schemes that are non-performant based on multiple criteria.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>pattern_schemes</strong> (<a class="reference internal" href="#modelopt.onnx.quantization.autotune.PatternSchemes" title="modelopt.onnx.quantization.autotune.common.PatternSchemes"><em>PatternSchemes</em></a>) – PatternSchemes to add to the cache</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.PatternCache.from_dict">
+<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">from_dict</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">data</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.PatternCache.from_dict" title="Link to this definition"></a></dt>
+<dd><p>Create PatternCache from serialized dictionary.</p>
+<p>Note: RegionPattern objects are not restored (they’re runtime objects).
+Only pattern signatures and scheme data are loaded.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>data</strong> (<em>dict</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>]</em>) – Dictionary containing pattern cache data</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>Reconstructed PatternCache instance</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference internal" href="#modelopt.onnx.quantization.autotune.PatternCache" title="modelopt.onnx.quantization.autotune.common.PatternCache"><em>PatternCache</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.PatternCache.get_pattern_schemes">
+<span class="sig-name descname"><span class="pre">get_pattern_schemes</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">pattern_signature</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.PatternCache.get_pattern_schemes" title="Link to this definition"></a></dt>
+<dd><p>Get PatternSchemes for a specific pattern signature.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>pattern_signature</strong> (<em>str</em>) – Pattern signature to lookup</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>PatternSchemes if found, None otherwise</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference internal" href="#modelopt.onnx.quantization.autotune.PatternSchemes" title="modelopt.onnx.quantization.autotune.common.PatternSchemes"><em>PatternSchemes</em></a> | <em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.PatternCache.has_pattern">
+<span class="sig-name descname"><span class="pre">has_pattern</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">pattern_signature</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.PatternCache.has_pattern" title="Link to this definition"></a></dt>
+<dd><p>Check if pattern cache contains a specific pattern.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>pattern_signature</strong> (<em>str</em>) – Pattern signature to check</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>True if pattern exists in pattern cache</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>bool</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.PatternCache.load">
+<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">load</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">input_path</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.PatternCache.load" title="Link to this definition"></a></dt>
+<dd><p>Load pattern cache from a YAML file.</p>
+<p>Reads a previously saved pattern cache file and reconstructs all pattern
+schemes. The loaded pattern cache can be used to seed autotuning with
+known-good insertion schemes.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>input_path</strong> (<em>str</em>) – File path to the YAML pattern cache file to load</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>PatternCache instance with all pattern schemes loaded</p>
+</dd>
+<dt class="field-odd">Raises<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>FileNotFoundError</strong> – If the input_path doesn’t exist</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference internal" href="#modelopt.onnx.quantization.autotune.PatternCache" title="modelopt.onnx.quantization.autotune.common.PatternCache"><em>PatternCache</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.PatternCache.max_entries_per_pattern">
+<span class="sig-name descname"><span class="pre">max_entries_per_pattern</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">32</span></em><a class="headerlink" href="#modelopt.onnx.quantization.autotune.PatternCache.max_entries_per_pattern" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.PatternCache.merge">
+<span class="sig-name descname"><span class="pre">merge</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">other</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">prefer_existing</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.PatternCache.merge" title="Link to this definition"></a></dt>
+<dd><p>Merge another PatternCache into this one.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>other</strong> (<a class="reference internal" href="#modelopt.onnx.quantization.autotune.PatternCache" title="modelopt.onnx.quantization.autotune.common.PatternCache"><em>PatternCache</em></a>) – PatternCache to merge</p></li>
+<li><p><strong>prefer_existing</strong> (<em>bool</em>) – If True, keep existing patterns when there’s a conflict.
+If False, overwrite with other’s patterns.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.PatternCache.minimum_distance">
+<span class="sig-name descname"><span class="pre">minimum_distance</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">4</span></em><a class="headerlink" href="#modelopt.onnx.quantization.autotune.PatternCache.minimum_distance" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.PatternCache.num_patterns">
+<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">num_patterns</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></em><a class="headerlink" href="#modelopt.onnx.quantization.autotune.PatternCache.num_patterns" title="Link to this definition"></a></dt>
+<dd><p>Get number of patterns in pattern cache.</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.PatternCache.pattern_schemes">
+<span class="sig-name descname"><span class="pre">pattern_schemes</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">list</span><span class="p"><span class="pre">[</span></span><a class="reference internal" href="#modelopt.onnx.quantization.autotune.PatternSchemes" title="modelopt.onnx.quantization.autotune.common.PatternSchemes"><span class="pre">PatternSchemes</span></a><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#modelopt.onnx.quantization.autotune.PatternCache.pattern_schemes" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.PatternCache.save">
+<span class="sig-name descname"><span class="pre">save</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">output_path</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.PatternCache.save" title="Link to this definition"></a></dt>
+<dd><p>Save pattern cache to a YAML file.</p>
+<p>Serializes all pattern schemes and their insertion points to a YAML file
+that can be loaded later for seeded autotuning. The format matches the
+autotuner state file format for consistency.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>output_path</strong> (<em>str</em>) – File path where the YAML pattern cache file will be written</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.PatternCache.to_dict">
+<span class="sig-name descname"><span class="pre">to_dict</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.PatternCache.to_dict" title="Link to this definition"></a></dt>
+<dd><p>Convert to dictionary for serialization.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>Dictionary with ‘minimum_distance’, ‘max_entries_per_pattern’, and ‘pattern_schemes’ keys</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>dict</em>[<em>str</em>, <em>Any</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.PatternCache.total_schemes">
+<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">total_schemes</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></em><a class="headerlink" href="#modelopt.onnx.quantization.autotune.PatternCache.total_schemes" title="Link to this definition"></a></dt>
+<dd><p>Get total number of schemes across all patterns.</p>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.PatternSchemes">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">PatternSchemes</span></span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.PatternSchemes" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<p>Collection of Q/DQ insertion schemes for a single pattern.</p>
+<p>Manages multiple InsertionScheme candidates for a region pattern, tracking
+their performance and identifying the best-performing configuration. This
+enables pattern-based optimization where all regions with the same structure
+use the same Q/DQ insertion strategy.</p>
+<p><strong>Workflow:</strong>
+1. Pattern is identified from region structure
+2. Multiple schemes are generated and tested
+3. Each scheme is measured (latency_ms)
+4. Best scheme is selected (lowest latency)
+5. Best scheme is applied to all matching regions</p>
+<p><strong>Best Scheme Selection:</strong>
+- Automatically identifies scheme with lowest latency
+- Excludes schemes with errors (error=True)
+- Schemes with latency_ms = inf are considered unmeasured
+- best_scheme property provides easy access to optimal configuration</p>
+<dl class="simple">
+<dt><strong>Attributes:</strong></dt><dd><p>pattern: RegionPattern defining the structural signature
+schemes: List of InsertionScheme candidates with measurements</p>
+</dd>
+</dl>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.PatternSchemes.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">pattern=None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">schemes=&lt;factory&gt;</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.PatternSchemes.__init__" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>pattern</strong> (<a class="reference internal" href="#modelopt.onnx.quantization.autotune.RegionPattern" title="modelopt.onnx.quantization.autotune.RegionPattern"><em>RegionPattern</em></a><em> | </em><em>None</em>)</p></li>
+<li><p><strong>schemes</strong> (<em>list</em><em>[</em><a class="reference internal" href="#modelopt.onnx.quantization.autotune.InsertionScheme" title="modelopt.onnx.quantization.autotune.common.InsertionScheme"><em>InsertionScheme</em></a><em>]</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.PatternSchemes.best_scheme">
+<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">best_scheme</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference internal" href="#modelopt.onnx.quantization.autotune.InsertionScheme" title="modelopt.onnx.quantization.autotune.common.InsertionScheme"><span class="pre">InsertionScheme</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#modelopt.onnx.quantization.autotune.PatternSchemes.best_scheme" title="Link to this definition"></a></dt>
+<dd><p>Get the best performing scheme (lowest latency).</p>
+<p>Scans all schemes to find the one with minimum latency_ms,
+excluding schemes with errors.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>InsertionScheme with lowest latency (excluding error schemes),
+or None if no valid schemes exist</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.PatternSchemes.from_dict">
+<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">from_dict</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">data</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">pattern</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.PatternSchemes.from_dict" title="Link to this definition"></a></dt>
+<dd><p>Create PatternSchemes from serialized dictionary.</p>
+<p>Reconstructs the pattern schemes collection from saved data. The
+RegionPattern object must be provided separately since it’s not
+serialized (it’s a runtime object computed from the graph).</p>
+<p>If no pattern is provided, creates a minimal RegionPattern from the
+saved signature and size for signature matching purposes.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>data</strong> (<em>dict</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>]</em>) – Dictionary containing ‘pattern_signature’, ‘pattern_size’,
+and ‘schemes’ keys</p></li>
+<li><p><strong>pattern</strong> (<a class="reference internal" href="#modelopt.onnx.quantization.autotune.RegionPattern" title="modelopt.onnx.quantization.autotune.RegionPattern"><em>RegionPattern</em></a><em> | </em><em>None</em>) – RegionPattern object to associate (must match signature).
+If None, creates minimal pattern from saved data.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>Reconstructed PatternSchemes instance</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference internal" href="#modelopt.onnx.quantization.autotune.PatternSchemes" title="modelopt.onnx.quantization.autotune.PatternSchemes"><em>PatternSchemes</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.PatternSchemes.num_schemes">
+<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">num_schemes</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></em><a class="headerlink" href="#modelopt.onnx.quantization.autotune.PatternSchemes.num_schemes" title="Link to this definition"></a></dt>
+<dd><p>Get total number of schemes.</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.PatternSchemes.pattern">
+<span class="sig-name descname"><span class="pre">pattern</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference internal" href="#modelopt.onnx.quantization.autotune.RegionPattern" title="modelopt.onnx.quantization.autotune.RegionPattern"><span class="pre">RegionPattern</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#modelopt.onnx.quantization.autotune.PatternSchemes.pattern" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.PatternSchemes.pattern_signature">
+<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">pattern_signature</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><a class="headerlink" href="#modelopt.onnx.quantization.autotune.PatternSchemes.pattern_signature" title="Link to this definition"></a></dt>
+<dd><p>Get the pattern signature string.</p>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.PatternSchemes.pattern_size">
+<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">pattern_size</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></em><a class="headerlink" href="#modelopt.onnx.quantization.autotune.PatternSchemes.pattern_size" title="Link to this definition"></a></dt>
+<dd><p>Get the pattern size (total node count).</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.PatternSchemes.schemes">
+<span class="sig-name descname"><span class="pre">schemes</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">list</span><span class="p"><span class="pre">[</span></span><a class="reference internal" href="#modelopt.onnx.quantization.autotune.InsertionScheme" title="modelopt.onnx.quantization.autotune.common.InsertionScheme"><span class="pre">InsertionScheme</span></a><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#modelopt.onnx.quantization.autotune.PatternSchemes.schemes" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.PatternSchemes.to_dict">
+<span class="sig-name descname"><span class="pre">to_dict</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.PatternSchemes.to_dict" title="Link to this definition"></a></dt>
+<dd><p>Convert to dictionary for serialization.</p>
+<p>Note: Excludes runtime objects like pattern (RegionPattern).
+Only serializes metadata and schemes.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>dict</em>[<em>str</em>, <em>Any</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.QDQAutotuner">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">QDQAutotuner</span></span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.QDQAutotuner" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">QDQAutotunerBase</span></code></p>
+<p>Q/DQ autotuner with automatic region discovery around compute-intensive ops.</p>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.QDQAutotuner.initialize">
+<span class="sig-name descname"><span class="pre">initialize</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">config</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">pattern_cache</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.QDQAutotuner.initialize" title="Link to this definition"></a></dt>
+<dd><p>Initialize autotuner and discover optimization regions automatically.</p>
+<p>Extends base class initialization by automatically searching for regions
+after configuration is set up. Regions are discovered using pattern-based
+search around compute-intensive operations.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>config</strong> (<a class="reference internal" href="#modelopt.onnx.quantization.autotune.Config" title="modelopt.onnx.quantization.autotune.common.Config"><em>Config</em></a><em> | </em><em>None</em>)</p></li>
+<li><p><strong>pattern_cache</strong> (<a class="reference internal" href="#modelopt.onnx.quantization.autotune.PatternCache" title="modelopt.onnx.quantization.autotune.common.PatternCache"><em>PatternCache</em></a><em> | </em><em>None</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.Region">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">Region</span></span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.Region" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<p>A subgraph region in an ONNX graph, used as the unit for Q/DQ insertion.</p>
+<p>Regions form a hierarchy: ROOT contains the entire graph, COMPOSITE regions
+contain child regions, and LEAF regions contain only nodes. Each region tracks
+its direct nodes, input/output tensors, and a pattern signature for matching
+regions with identical structure.</p>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.Region.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">region_id</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">level</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">region_type</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.Region.__init__" title="Link to this definition"></a></dt>
+<dd><p>Initialize a new region.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>region_id</strong> (<em>int</em>) – Unique identifier within the region hierarchy</p></li>
+<li><p><strong>level</strong> (<em>int</em>) – Hierarchical level (0 = leaf, higher = more composite)</p></li>
+<li><p><strong>region_type</strong> (<a class="reference internal" href="#modelopt.onnx.quantization.autotune.RegionType" title="modelopt.onnx.quantization.autotune.common.RegionType"><em>RegionType</em></a>) – Type classification (LEAF, COMPOSITE, or ROOT)</p></li>
+</ul>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.Region.add_child">
+<span class="sig-name descname"><span class="pre">add_child</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">child</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.Region.add_child" title="Link to this definition"></a></dt>
+<dd><p>Add a child sub-region.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>child</strong> (<a class="reference internal" href="#modelopt.onnx.quantization.autotune.Region" title="modelopt.onnx.quantization.autotune.common.Region"><em>Region</em></a>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.Region.contains_node">
+<span class="sig-name descname"><span class="pre">contains_node</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">node_index</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.Region.contains_node" title="Link to this definition"></a></dt>
+<dd><p>Check if region contains a specific node (direct only).</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>node_index</strong> (<em>int</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>bool</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.Region.contains_node_within_region_and_descendants">
+<span class="sig-name descname"><span class="pre">contains_node_within_region_and_descendants</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">node_index</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.Region.contains_node_within_region_and_descendants" title="Link to this definition"></a></dt>
+<dd><p>Check if region contains a node recursively.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>node_index</strong> (<em>int</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>bool</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.Region.get_children">
+<span class="sig-name descname"><span class="pre">get_children</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="o"><span class="pre">*</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">sort</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.Region.get_children" title="Link to this definition"></a></dt>
+<dd><p>Get all child regions. If sort is True, sort the children by level and size.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>sort</strong> (<em>bool</em>) – Whether to sort the children by level and size</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>List of child regions</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>list</em>[<a class="reference internal" href="#modelopt.onnx.quantization.autotune.Region" title="modelopt.onnx.quantization.autotune.common.Region"><em>Region</em></a>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.Region.get_nodes">
+<span class="sig-name descname"><span class="pre">get_nodes</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="o"><span class="pre">*</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">sort</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.Region.get_nodes" title="Link to this definition"></a></dt>
+<dd><p>Get direct node indices in this region only.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>sort</strong> (<em>bool</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>list</em>[<em>int</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.Region.get_region_nodes_and_descendants">
+<span class="sig-name descname"><span class="pre">get_region_nodes_and_descendants</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">_visited</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.Region.get_region_nodes_and_descendants" title="Link to this definition"></a></dt>
+<dd><p>Get all node indices recursively, including descendants.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>_visited</strong> (<em>set</em><em>[</em><em>int</em><em>] </em><em>| </em><em>None</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>set</em>[<em>int</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.Region.get_size_of_region_and_descendants">
+<span class="sig-name descname"><span class="pre">get_size_of_region_and_descendants</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">_visited</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.Region.get_size_of_region_and_descendants" title="Link to this definition"></a></dt>
+<dd><p>Get total node count recursively including all descendants.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>_visited</strong> (<em>set</em><em>[</em><em>int</em><em>] </em><em>| </em><em>None</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>int</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.Region.is_descendant_of">
+<span class="sig-name descname"><span class="pre">is_descendant_of</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">potential_ancestor</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.Region.is_descendant_of" title="Link to this definition"></a></dt>
+<dd><p>Check if this region is a descendant of potential_ancestor.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>potential_ancestor</strong> (<a class="reference internal" href="#modelopt.onnx.quantization.autotune.Region" title="modelopt.onnx.quantization.autotune.common.Region"><em>Region</em></a>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>bool</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.Region.merge">
+<span class="sig-name descname"><span class="pre">merge</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">other</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.Region.merge" title="Link to this definition"></a></dt>
+<dd><p>Merge another region into this one.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>other</strong> (<a class="reference internal" href="#modelopt.onnx.quantization.autotune.Region" title="modelopt.onnx.quantization.autotune.common.Region"><em>Region</em></a>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.Region.remove_child">
+<span class="sig-name descname"><span class="pre">remove_child</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">child</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.Region.remove_child" title="Link to this definition"></a></dt>
+<dd><p>Remove a child region from this region’s children list.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>child</strong> (<a class="reference internal" href="#modelopt.onnx.quantization.autotune.Region" title="modelopt.onnx.quantization.autotune.common.Region"><em>Region</em></a>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>bool</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.RegionPattern">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">RegionPattern</span></span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.RegionPattern" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<p>Represents a structural pattern of a region.</p>
+<p>The pattern captures the topology and operation types in a region,
+enabling pattern matching and region comparison. Patterns are hashable
+and can be used as dictionary keys for efficient grouping and lookup.</p>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.RegionPattern.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">signature</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">size</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.RegionPattern.__init__" title="Link to this definition"></a></dt>
+<dd><p>Initialize a region pattern.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>signature</strong> (<em>str</em>) – The structural signature of the region.</p></li>
+<li><p><strong>size</strong> (<em>int</em>) – The number of nodes in the region.</p></li>
+</ul>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.RegionPattern.format_tree">
+<span class="sig-name descname"><span class="pre">format_tree</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">region</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">graph</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">indent</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.RegionPattern.format_tree" title="Link to this definition"></a></dt>
+<dd><p>Format this pattern and region as a human-readable tree.</p>
+<p>Useful for debugging and visualization.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>region</strong> (<a class="reference internal" href="#modelopt.onnx.quantization.autotune.Region" title="modelopt.onnx.quantization.autotune.common.Region"><em>Region</em></a>) – The region associated with this pattern</p></li>
+<li><p><strong>graph</strong> (<em>Graph</em>) – The ONNX graph</p></li>
+<li><p><strong>indent</strong> (<em>int</em>) – Indentation level</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>Formatted string representation</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>str</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.RegionPattern.from_region">
+<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">from_region</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">region</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">graph</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.RegionPattern.from_region" title="Link to this definition"></a></dt>
+<dd><p>Compute a structural pattern for a region.</p>
+<p>The pattern captures:
+- Direct node operations in the region
+- Structure of sub-regions (recursively)
+- Handles symmetric operations consistently
+- Sorts sub-regions by size for determinism</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>region</strong> (<a class="reference internal" href="#modelopt.onnx.quantization.autotune.Region" title="modelopt.onnx.quantization.autotune.common.Region"><em>Region</em></a>) – The region to compute pattern for</p></li>
+<li><p><strong>graph</strong> (<em>Graph</em>) – The ONNX graph containing the nodes</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>RegionPattern object containing the signature and metadata</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference internal" href="#modelopt.onnx.quantization.autotune.RegionPattern" title="modelopt.onnx.quantization.autotune.region_pattern.RegionPattern"><em>RegionPattern</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.RegionPattern.get_full_insertion_scheme">
+<span class="sig-name descname"><span class="pre">get_full_insertion_scheme</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">region</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">graph</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.RegionPattern.get_full_insertion_scheme" title="Link to this definition"></a></dt>
+<dd><p>Collect all possible insertion points for quantization in a region.</p>
+<p>This method gathers all locations where Q/DQ  nodes could be inserted within a region’s
+computational graph. These insertion points are organized into three categories:
+- node_inputs: Inputs to individual nodes within the region
+- child_region_inputs: Inputs to child regions within composite regions
+- region_outputs: Outputs from the region or its child regions</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>region</strong> (<a class="reference internal" href="#modelopt.onnx.quantization.autotune.Region" title="modelopt.onnx.quantization.autotune.common.Region"><em>Region</em></a>) – The region to collect insertion points for</p></li>
+<li><p><strong>graph</strong> (<em>Graph</em>) – The ONNX graph containing the nodes</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>InsertionScheme object containing the insertion points</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference internal" href="#modelopt.onnx.quantization.autotune.InsertionScheme" title="modelopt.onnx.quantization.autotune.common.InsertionScheme"><em>InsertionScheme</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.RegionPattern.get_hash">
+<span class="sig-name descname"><span class="pre">get_hash</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.RegionPattern.get_hash" title="Link to this definition"></a></dt>
+<dd><p>Get a 128-bit cryptographic hash of the pattern signature.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>str</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.RegionPattern.get_short_signature">
+<span class="sig-name descname"><span class="pre">get_short_signature</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">max_length</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">80</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.RegionPattern.get_short_signature" title="Link to this definition"></a></dt>
+<dd><p>Get a truncated version of the signature for display purposes.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>max_length</strong> (<em>int</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>str</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.RegionPattern.is_composite">
+<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">is_composite</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></em><a class="headerlink" href="#modelopt.onnx.quantization.autotune.RegionPattern.is_composite" title="Link to this definition"></a></dt>
+<dd><p>Check if the pattern represents a composite region.</p>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.RegionPattern.is_empty">
+<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">is_empty</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></em><a class="headerlink" href="#modelopt.onnx.quantization.autotune.RegionPattern.is_empty" title="Link to this definition"></a></dt>
+<dd><p>Check if the pattern represents an empty region.</p>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.RegionPattern.is_leaf">
+<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">is_leaf</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></em><a class="headerlink" href="#modelopt.onnx.quantization.autotune.RegionPattern.is_leaf" title="Link to this definition"></a></dt>
+<dd><p>Check if the pattern represents a leaf region (no composite structure).</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.RegionPattern.matches">
+<span class="sig-name descname"><span class="pre">matches</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">other</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><a class="reference internal" href="#modelopt.onnx.quantization.autotune.RegionPattern" title="modelopt.onnx.quantization.autotune.region_pattern.RegionPattern"><span class="pre">RegionPattern</span></a></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">bool</span></span></span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.RegionPattern.matches" title="Link to this definition"></a></dt>
+<dt class="sig sig-object py">
+<span class="sig-name descname"><span class="pre">matches</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">other</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><a class="reference internal" href="#modelopt.onnx.quantization.autotune.Region" title="modelopt.onnx.quantization.autotune.common.Region"><span class="pre">Region</span></a></span></em>, <em class="sig-param"><span class="n"><span class="pre">graph</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">Graph</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">scheme</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">None</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">list</span><span class="p"><span class="pre">[</span></span><span class="pre">int</span><span class="p"><span class="pre">]</span></span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span></span></dt>
+<dt class="sig sig-object py">
+<span class="sig-name descname"><span class="pre">matches</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">other</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><a class="reference internal" href="#modelopt.onnx.quantization.autotune.Region" title="modelopt.onnx.quantization.autotune.common.Region"><span class="pre">Region</span></a></span></em>, <em class="sig-param"><span class="n"><span class="pre">graph</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">Graph</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">scheme</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><a class="reference internal" href="#modelopt.onnx.quantization.autotune.InsertionScheme" title="modelopt.onnx.quantization.autotune.common.InsertionScheme"><span class="pre">InsertionScheme</span></a></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">set</span><span class="p"><span class="pre">[</span></span><a class="reference internal" href="#modelopt.onnx.quantization.autotune.ResolvedInsertionPoint" title="modelopt.onnx.quantization.autotune.insertion_points.ResolvedInsertionPoint"><span class="pre">ResolvedInsertionPoint</span></a><span class="p"><span class="pre">]</span></span></span></span></dt>
+<dd><p>Check if this pattern matches another pattern or region.</p>
+<p>This method provides three distinct behaviors depending on the arguments:</p>
+<ol class="arabic simple">
+<li><p><strong>Pattern-to-pattern comparison</strong> (other is RegionPattern, scheme is None):
+Returns bool indicating structural equivalence.</p></li>
+<li><p><strong>Pattern-to-region matching</strong> (other is Region, scheme is None):
+Returns list of node IDs in pattern order if match succeeds, None otherwise.</p></li>
+<li><p><strong>Pattern-to-region with insertion scheme</strong> (other is Region, scheme provided):
+Returns set of resolved insertion points where Q/DQ should be inserted, considering:
+- NodeInputInsertionPoints from the scheme (node-level Q/DQ)
+- ChildRegionInputInsertionPoints from the scheme (child region input Q/DQ)
+- RegionOutputInsertionPoints from the scheme (region output Q/DQ)
+Returns empty set if pattern doesn’t match.</p></li>
+</ol>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>other</strong> – Either a RegionPattern or Region to compare with</p></li>
+<li><p><strong>graph</strong> – Required when other is a Region (for computing its pattern)</p></li>
+<li><p><strong>scheme</strong> – Optional InsertionScheme containing node_inputs,
+child_region_inputs, and region_outputs
+to resolve to tensor names</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p><ul class="simple">
+<li><p>True if other is RegionPattern and patterns match</p></li>
+<li><p>List of node IDs in pattern order if other is Region and scheme is None, None if no match</p></li>
+<li><p>Set of resolved insertion points for Q/DQ insertion if other is Region and scheme is provided</p></li>
+</ul>
+</p>
+</dd>
+<dt class="field-odd">Raises<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>ValueError</strong> – If other is Region but graph is not provided, or if scheme
+    is provided but other is not a Region</p></li>
+<li><p><strong>TypeError</strong> – If other is neither RegionPattern nor Region</p></li>
+</ul>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.RegionType">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">RegionType</span></span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.RegionType" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">Enum</span></code></p>
+<p>Region type enumeration for hierarchical graph structure.</p>
+<ul class="simple">
+<li><p>LEAF: Atomic region containing direct nodes with no child regions</p></li>
+<li><p>COMPOSITE: Hierarchical region containing child regions (and optionally direct nodes)</p></li>
+<li><p>ROOT: Top-level region encompassing the entire computation graph</p></li>
+</ul>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.RegionType.COMPOSITE">
+<span class="sig-name descname"><span class="pre">COMPOSITE</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'COMPOSITE'</span></em><a class="headerlink" href="#modelopt.onnx.quantization.autotune.RegionType.COMPOSITE" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.RegionType.LEAF">
+<span class="sig-name descname"><span class="pre">LEAF</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'LEAF'</span></em><a class="headerlink" href="#modelopt.onnx.quantization.autotune.RegionType.LEAF" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.RegionType.ROOT">
+<span class="sig-name descname"><span class="pre">ROOT</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'ROOT'</span></em><a class="headerlink" href="#modelopt.onnx.quantization.autotune.RegionType.ROOT" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.ResolvedInsertionPoint">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">ResolvedInsertionPoint</span></span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.ResolvedInsertionPoint" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<p>Resolved Q/DQ insertion point with actual tensor name and optional node context.</p>
+<p>After resolving pattern-relative insertion points, this class represents the
+actual location where Q/DQ pairs should be inserted in the graph. It contains the
+tensor name and the node index (if applicable) and input index (if applicable).</p>
+<p>This class is immutable (frozen) to allow safe use in sets and as dict keys.</p>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.ResolvedInsertionPoint.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">tensor_name</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">node_index</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">input_index</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.ResolvedInsertionPoint.__init__" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>tensor_name</strong> (<em>str</em>)</p></li>
+<li><p><strong>node_index</strong> (<em>int</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>input_index</strong> (<em>int</em><em> | </em><em>None</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.ResolvedInsertionPoint.from_dict">
+<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">from_dict</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">data</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.ResolvedInsertionPoint.from_dict" title="Link to this definition"></a></dt>
+<dd><p>Create from dictionary.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>data</strong> (<em>dict</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>]</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference internal" href="#modelopt.onnx.quantization.autotune.ResolvedInsertionPoint" title="modelopt.onnx.quantization.autotune.insertion_points.ResolvedInsertionPoint"><em>ResolvedInsertionPoint</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.ResolvedInsertionPoint.input_index">
+<span class="sig-name descname"><span class="pre">input_index</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#modelopt.onnx.quantization.autotune.ResolvedInsertionPoint.input_index" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.ResolvedInsertionPoint.node_index">
+<span class="sig-name descname"><span class="pre">node_index</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#modelopt.onnx.quantization.autotune.ResolvedInsertionPoint.node_index" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.ResolvedInsertionPoint.tensor_name">
+<span class="sig-name descname"><span class="pre">tensor_name</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><a class="headerlink" href="#modelopt.onnx.quantization.autotune.ResolvedInsertionPoint.tensor_name" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.ResolvedInsertionPoint.to_dict">
+<span class="sig-name descname"><span class="pre">to_dict</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.ResolvedInsertionPoint.to_dict" title="Link to this definition"></a></dt>
+<dd><p>Convert to dictionary for serialization.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>dict</em>[<em>str</em>, <em>Any</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.StoreWithExplicitFlag">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">StoreWithExplicitFlag</span></span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.StoreWithExplicitFlag" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">Action</span></code></p>
+<p>Store the value and set an ‘explicit’ flag on the namespace so mode presets do not override.</p>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.StoreWithExplicitFlag.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">explicit_attr</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">*</span></span><span class="n"><span class="pre">args</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">**</span></span><span class="n"><span class="pre">kwargs</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.StoreWithExplicitFlag.__init__" title="Link to this definition"></a></dt>
+<dd><p>Initialize explicit attribute flag.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>explicit_attr</strong> (<em>str</em>)</p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.TensorRTPyBenchmark">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">TensorRTPyBenchmark</span></span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.TensorRTPyBenchmark" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">Benchmark</span></code></p>
+<p>TensorRT benchmark using Python API with plugin support.</p>
+<p>This implementation directly uses the TensorRT Python API to build engines
+and measure inference latency. It provides more control than trtexec and
+can be faster for certain workflows as it avoids subprocess overhead.</p>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.TensorRTPyBenchmark.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">timing_cache_file</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">warmup_runs</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">5</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">timing_runs</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">20</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">plugin_libraries</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.TensorRTPyBenchmark.__init__" title="Link to this definition"></a></dt>
+<dd><p>Initialize the TensorRT Python API benchmark.</p>
+<p>Creates persistent TensorRT objects (Logger, Builder, Runtime) and
+loads the timing cache from disk if available. Optionally loads custom
+TensorRT plugin libraries for models with custom operations.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>timing_cache_file</strong> (<em>str</em><em> | </em><em>None</em>) – Path to TensorRT timing cache file. If None,
+defaults to ‘/tmp/trtexec_timing.cache’.</p></li>
+<li><p><strong>warmup_runs</strong> (<em>int</em>) – Number of warmup iterations before timing measurements.</p></li>
+<li><p><strong>timing_runs</strong> (<em>int</em>) – Number of iterations for latency measurement.</p></li>
+<li><p><strong>plugin_libraries</strong> (<em>list</em><em>[</em><em>str</em><em>] </em><em>| </em><em>None</em>) – List of paths to TensorRT plugin shared libraries (.so files).
+These plugins will be loaded and registered for use during
+engine building. If None, no custom plugins are loaded.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Raises<span class="colon">:</span></dt>
+<dd class="field-even"><ul class="simple">
+<li><p><strong>ImportError</strong> – If tensorrt is not installed or if torch is not built with CUDA support.</p></li>
+<li><p><strong>FileNotFoundError</strong> – If a specified plugin library file does not exist.</p></li>
+<li><p><strong>RuntimeError</strong> – If plugin library loading fails.</p></li>
+</ul>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.TensorRTPyBenchmark.run">
+<span class="sig-name descname"><span class="pre">run</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">path_or_bytes</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">log_file</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">flush_timing_cache</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.TensorRTPyBenchmark.run" title="Link to this definition"></a></dt>
+<dd><p>Run benchmark using TensorRT Python API.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>path_or_bytes</strong> (<em>str</em><em> | </em><em>bytes</em>) – Path to the ONNX model (str) or raw model data (bytes)</p></li>
+<li><p><strong>log_file</strong> (<em>str</em><em> | </em><em>None</em>) – Optional path to save benchmark logs</p></li>
+<li><p><strong>flush_timing_cache</strong> (<em>bool</em>) – If True, save the timing cache to disk after engine build.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>Measured median latency in milliseconds, or float(“inf”) on any error
+(e.g. build failure, deserialization failure, buffer/stream allocation failure).</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>float</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.TensorRTPyBenchmark.set_shapes">
+<span class="sig-name descname"><span class="pre">set_shapes</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">input_name</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">min_shape</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">opt_shape</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">max_shape</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.TensorRTPyBenchmark.set_shapes" title="Link to this definition"></a></dt>
+<dd><p>Set custom min/opt/max shapes for a dynamic input.</p>
+<p>This method allows you to specify custom shape ranges for dynamic inputs
+(inputs with -1 dimensions). If not specified, the benchmark will use
+default shapes (all -1 dimensions become 1).</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>input_name</strong> (<em>str</em>) – Name of the input tensor to configure.</p></li>
+<li><p><strong>min_shape</strong> (<em>list</em>) – Minimum shape for this input. List of integers.</p></li>
+<li><p><strong>opt_shape</strong> (<em>list</em>) – Optimal/default shape for this input. List of integers.</p></li>
+<li><p><strong>max_shape</strong> (<em>list</em>) – Maximum shape for this input. List of integers.</p></li>
+</ul>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.TrtExecBenchmark">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">TrtExecBenchmark</span></span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.TrtExecBenchmark" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">Benchmark</span></code></p>
+<p>TensorRT benchmark using trtexec command-line tool.</p>
+<p>This implementation uses the trtexec binary to build engines and measure
+inference latency. It is the most straightforward method and closely
+mirrors standard TensorRT workflows.</p>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.TrtExecBenchmark.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">timing_cache_file</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">warmup_runs</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">5</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">timing_runs</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">10</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">plugin_libraries</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">trtexec_path</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'trtexec'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">trtexec_args</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.TrtExecBenchmark.__init__" title="Link to this definition"></a></dt>
+<dd><p>Initialize the trtexec benchmark.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>timing_cache_file</strong> (<em>str</em><em> | </em><em>None</em>) – See <code class="xref py py-meth docutils literal notranslate"><span class="pre">Benchmark.__init__()</span></code>.</p></li>
+<li><p><strong>warmup_runs</strong> (<em>int</em>) – See <code class="xref py py-meth docutils literal notranslate"><span class="pre">Benchmark.__init__()</span></code>.</p></li>
+<li><p><strong>timing_runs</strong> (<em>int</em>) – See <code class="xref py py-meth docutils literal notranslate"><span class="pre">Benchmark.__init__()</span></code>.</p></li>
+<li><p><strong>plugin_libraries</strong> (<em>list</em><em>[</em><em>str</em><em>] </em><em>| </em><em>None</em>) – See <code class="xref py py-meth docutils literal notranslate"><span class="pre">Benchmark.__init__()</span></code>.</p></li>
+<li><p><strong>trtexec_path</strong> (<em>str</em>) – Path to trtexec binary. Defaults to ‘trtexec’ which
+looks for the binary in PATH.</p></li>
+<li><p><strong>trtexec_args</strong> (<em>list</em><em>[</em><em>str</em><em>] </em><em>| </em><em>None</em>) – Additional command-line arguments to pass to trtexec.
+These are appended after the standard arguments.
+Example: [’–fp16’, ‘–workspace=4096’, ‘–verbose’]</p></li>
+</ul>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.TrtExecBenchmark.run">
+<span class="sig-name descname"><span class="pre">run</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">path_or_bytes</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">log_file</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">flush_timing_cache</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.TrtExecBenchmark.run" title="Link to this definition"></a></dt>
+<dd><p>Run benchmark using trtexec.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>path_or_bytes</strong> (<em>str</em><em> | </em><em>bytes</em>) – Path to the ONNX model (str) or raw model data (bytes)</p></li>
+<li><p><strong>log_file</strong> (<em>str</em><em> | </em><em>None</em>) – Optional path to save trtexec logs</p></li>
+<li><p><strong>flush_timing_cache</strong> (<em>bool</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>Measured median latency in milliseconds</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>float</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.autotune.get_node_filter_list">
+<span class="sig-name descname"><span class="pre">get_node_filter_list</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">node_filter_list_path</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.autotune.get_node_filter_list" title="Link to this definition"></a></dt>
+<dd><p>Extract node filter list from node filters path.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>node_filter_list_path</strong> (<em>str</em>) – Path to a file containing wildcard patterns to filter ONNX nodes (one pattern per line).</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>Node filter list</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>list</em> | <em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="modelopt.onnx.quantization.html" class="btn btn-neutral float-left" title="quantization" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="modelopt.onnx.quantization.calib_utils.html" class="btn btn-neutral float-right" title="calib_utils" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2023-2025, NVIDIA Corporation.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

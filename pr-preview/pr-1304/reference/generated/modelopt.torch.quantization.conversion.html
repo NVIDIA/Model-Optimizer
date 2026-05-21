@@ -1,0 +1,461 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>conversion &mdash; Model Optimizer 0.0.1.dev1+gf3750320b</title>
+      <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="../../_static/copybutton.css?v=76b2166b" />
+      <link rel="stylesheet" type="text/css" href="../../_static/tabs.css?v=4c969af8" />
+      <link rel="stylesheet" type="text/css" href="../../_static/togglebutton.css?v=9c3e77be" />
+      <link rel="stylesheet" type="text/css" href="../../_static/autodoc_pydantic.css" />
+      <link rel="stylesheet" type="text/css" href="../../_static/custom.css?v=7a224f4b" />
+
+  
+      <script src="../../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../../_static/documentation_options.js?v=5929fcd5"></script>
+      <script src="../../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="../../_static/clipboard.min.js?v=a7894cd8"></script>
+      <script src="../../_static/copybutton.js?v=20d3d275"></script>
+      <script src="../../_static/tabs.js?v=3ee01567"></script>
+      <script>let toggleHintShow = 'Click to show';</script>
+      <script>let toggleHintHide = 'Click to hide';</script>
+      <script>let toggleOpenOnPrint = 'true';</script>
+      <script src="../../_static/togglebutton.js?v=b8b12719"></script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+    <script src="../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" />
+    <link rel="next" title="export_onnx" href="modelopt.torch.quantization.export_onnx.html" />
+    <link rel="prev" title="config" href="modelopt.torch.quantization.config.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../../index.html" class="icon icon-home">
+            Model Optimizer
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../getting_started/1_overview.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../getting_started/2_installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch to ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - Windows</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_qat" rel="noopener noreferrer" target="_blank">Quick Start: QAT</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning" rel="noopener noreferrer" target="_blank">Quick Start: Pruning</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_distill" rel="noopener noreferrer" target="_blank">Quick Start: Distillation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/speculative_decoding" rel="noopener noreferrer" target="_blank">Quick Start: Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_sparsity" rel="noopener noreferrer" target="_blank">Quick Start: Sparsity</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Guides</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/0_support_matrix.html">Support Matrix</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/10_recipes.html">Recipes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/1_quantization.html">Quantization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/2_save_load.html">Saving &amp; Restoring</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/3_pruning.html">Pruning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/4_distillation.html">Distillation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/5_speculative_decoding.html">Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/6_sparsity.html">Sparsity</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/7_nas.html">NAS</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/8_autocast.html">AutoCast (ONNX)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/9_autotune.html">Autotune (ONNX)</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Deployment</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/1_tensorrt_llm.html">TensorRT-LLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/2_onnxruntime.html">Onnxruntime</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/3_unified_hf.html">Unified HuggingFace Checkpoint</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Examples</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../examples/0_all_examples.html">All GitHub Examples</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Reference</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="../0_changelog.html">Changelog</a></li>
+<li class="toctree-l1 current"><a class="reference internal" href="../1_modelopt_api.html">modelopt API</a><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="modelopt.deploy.html">deploy</a></li>
+<li class="toctree-l2"><a class="reference internal" href="modelopt.onnx.html">onnx</a></li>
+<li class="toctree-l2 current"><a class="reference internal" href="modelopt.torch.html">torch</a><ul class="current">
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.distill.html">distill</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.export.html">export</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.kernels.html">kernels</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.nas.html">nas</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.opt.html">opt</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.peft.html">peft</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.prune.html">prune</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.puzzletron.html">puzzletron</a></li>
+<li class="toctree-l3 current"><a class="reference internal" href="modelopt.torch.quantization.html">quantization</a><ul class="current">
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.algorithms.html">algorithms</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.backends.html">backends</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.calib.html">calib</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.compress.html">modelopt.torch.quantization.compress</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.config.html">config</a></li>
+<li class="toctree-l4 current"><a class="current reference internal" href="#">conversion</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.export_onnx.html">export_onnx</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.extensions.html">extensions</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.mode.html">mode</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.model_calib.html">model_calib</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.model_quant.html">model_quant</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.nn.html">nn</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.qtensor.html">qtensor</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.tensor_quant.html">tensor_quant</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.triton.html">triton</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.sparsity.html">sparsity</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.speculative.html">speculative</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.trace.html">trace</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.utils.html">utils</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Support</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../support/1_contact.html">Contact us</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../support/2_faqs.html">FAQs</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../index.html">Model Optimizer</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content style-external-links">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="../1_modelopt_api.html">modelopt API</a></li>
+          <li class="breadcrumb-item"><a href="modelopt.torch.html">torch</a></li>
+          <li class="breadcrumb-item"><a href="modelopt.torch.quantization.html">quantization</a></li>
+      <li class="breadcrumb-item active">conversion</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../../_sources/reference/generated/modelopt.torch.quantization.conversion.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="conversion">
+<h1>conversion<a class="headerlink" href="#conversion" title="Link to this heading"></a></h1>
+<p id="module-modelopt.torch.quantization.conversion">Quantization conversion/restore utilities.</p>
+<p class="rubric">Functions</p>
+<table class="autosummary longtable docutils align-default">
+<tbody>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.quantization.conversion.register" title="modelopt.torch.quantization.conversion.register"><code class="xref py py-obj docutils literal notranslate"><span class="pre">register</span></code></a></p></td>
+<td><p>Register a quantized class for the given un-quantized original class.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.quantization.conversion.replace_quant_module" title="modelopt.torch.quantization.conversion.replace_quant_module"><code class="xref py py-obj docutils literal notranslate"><span class="pre">replace_quant_module</span></code></a></p></td>
+<td><p>Recursively replace the module with quantized module.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.quantization.conversion.set_quantizer_attribute" title="modelopt.torch.quantization.conversion.set_quantizer_attribute"><code class="xref py py-obj docutils literal notranslate"><span class="pre">set_quantizer_attribute</span></code></a></p></td>
+<td><p>Deprecated: use <a class="reference internal" href="#modelopt.torch.quantization.conversion.set_quantizer_attributes_partial" title="modelopt.torch.quantization.conversion.set_quantizer_attributes_partial"><code class="xref py py-func docutils literal notranslate"><span class="pre">set_quantizer_attributes_partial()</span></code></a> instead.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.quantization.conversion.set_quantizer_attributes_full" title="modelopt.torch.quantization.conversion.set_quantizer_attributes_full"><code class="xref py py-obj docutils literal notranslate"><span class="pre">set_quantizer_attributes_full</span></code></a></p></td>
+<td><p>Set quantizer attributes by wildcard or filter function, fully overwriting existing attributes.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.quantization.conversion.set_quantizer_attributes_partial" title="modelopt.torch.quantization.conversion.set_quantizer_attributes_partial"><code class="xref py py-obj docutils literal notranslate"><span class="pre">set_quantizer_attributes_partial</span></code></a></p></td>
+<td><p>Update a subset of quantizer attributes by wildcard or filter function, merging with existing attributes.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.quantization.conversion.set_quantizer_by_cfg" title="modelopt.torch.quantization.conversion.set_quantizer_by_cfg"><code class="xref py py-obj docutils literal notranslate"><span class="pre">set_quantizer_by_cfg</span></code></a></p></td>
+<td><p>Apply a quantization config list to the quantizers in <code class="docutils literal notranslate"><span class="pre">quant_model</span></code>.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.quantization.conversion.set_quantizer_by_cfg_context" title="modelopt.torch.quantization.conversion.set_quantizer_by_cfg_context"><code class="xref py py-obj docutils literal notranslate"><span class="pre">set_quantizer_by_cfg_context</span></code></a></p></td>
+<td><p>Context manager that temporarily applies a quantization config and restores the original state on exit.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.quantization.conversion.unregister" title="modelopt.torch.quantization.conversion.unregister"><code class="xref py py-obj docutils literal notranslate"><span class="pre">unregister</span></code></a></p></td>
+<td><p>Unregister the quantized class for the given un-quantized original class.</p></td>
+</tr>
+</tbody>
+</table>
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.conversion.register">
+<span class="sig-name descname"><span class="pre">register</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">original_cls</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">quantized_cls</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.quantization.conversion.register" title="Link to this definition"></a></dt>
+<dd><p>Register a quantized class for the given un-quantized original class.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>original_cls</strong> (<em>Module</em>) – The original un-quantized class.</p></li>
+<li><p><strong>quantized_cls</strong> (<em>Module</em>) – The quantized class. This class should have a <cite>_setup</cite> method which initializes
+various quantizers called in the forward. The forward function of the quantized class should call the
+quantizers at the correct location.</p></li>
+</ul>
+</dd>
+</dl>
+<p>Here is an example of defining a quantized class and registering it:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">modelopt.torch.quantization</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">mtq</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">modelopt.torch.quantization.nn</span><span class="w"> </span><span class="kn">import</span> <span class="n">TensorQuantizer</span>
+
+
+<span class="k">class</span><span class="w"> </span><span class="nc">QuantLayerNorm</span><span class="p">(</span><span class="n">nn</span><span class="o">.</span><span class="n">LayerNorm</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">normalized_shape</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="n">normalized_shape</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_setup</span><span class="p">()</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_setup</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="c1"># Method to setup the quantizers</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">input_quantizer</span> <span class="o">=</span> <span class="n">TensorQuantizer</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">weight_quantizer</span> <span class="o">=</span> <span class="n">TensorQuantizer</span><span class="p">()</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">forward</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="nb">input</span><span class="p">):</span>
+        <span class="nb">input</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">input_quantizer</span><span class="p">(</span><span class="nb">input</span><span class="p">)</span>
+        <span class="n">weight</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">weight_quantizer</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">weight</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">F</span><span class="o">.</span><span class="n">layer_norm</span><span class="p">(</span><span class="nb">input</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">normalized_shape</span><span class="p">,</span> <span class="n">weight</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">bias</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">eps</span><span class="p">)</span>
+
+
+<span class="c1"># Register the custom quantized module</span>
+<span class="n">mtq</span><span class="o">.</span><span class="n">register</span><span class="p">(</span><span class="n">original_cls</span><span class="o">=</span><span class="n">nn</span><span class="o">.</span><span class="n">LayerNorm</span><span class="p">,</span> <span class="n">quantized_cls</span><span class="o">=</span><span class="n">QuantLayerNorm</span><span class="p">)</span>
+</pre></div>
+</div>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.conversion.replace_quant_module">
+<span class="sig-name descname"><span class="pre">replace_quant_module</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">version=None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">registry=&lt;modelopt.torch.opt.dynamic._DMRegistryCls</span> <span class="pre">object&gt;</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.quantization.conversion.replace_quant_module" title="Link to this definition"></a></dt>
+<dd><p>Recursively replace the module with quantized module.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>model</strong> (<em>Module</em>)</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.conversion.set_quantizer_attribute">
+<span class="sig-name descname"><span class="pre">set_quantizer_attribute</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">quant_model</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">wildcard_or_filter_func</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">attribute</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">parent_class</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.quantization.conversion.set_quantizer_attribute" title="Link to this definition"></a></dt>
+<dd><p>Deprecated: use <a class="reference internal" href="#modelopt.torch.quantization.conversion.set_quantizer_attributes_partial" title="modelopt.torch.quantization.conversion.set_quantizer_attributes_partial"><code class="xref py py-func docutils literal notranslate"><span class="pre">set_quantizer_attributes_partial()</span></code></a> instead.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>quant_model</strong> (<em>Module</em>)</p></li>
+<li><p><strong>wildcard_or_filter_func</strong> (<em>str</em><em> | </em><em>Callable</em>)</p></li>
+<li><p><strong>attribute</strong> (<em>Any</em>)</p></li>
+<li><p><strong>parent_class</strong> (<em>type</em><em>[</em><em>Module</em><em>] </em><em>| </em><em>None</em>)</p></li>
+</ul>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.conversion.set_quantizer_attributes_full">
+<span class="sig-name descname"><span class="pre">set_quantizer_attributes_full</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">quant_model</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">wildcard_or_filter_func</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">attributes</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">parent_class</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.quantization.conversion.set_quantizer_attributes_full" title="Link to this definition"></a></dt>
+<dd><p>Set quantizer attributes by wildcard or filter function, fully overwriting existing attributes.</p>
+<p>Unlike <a class="reference internal" href="#modelopt.torch.quantization.conversion.set_quantizer_attributes_partial" title="modelopt.torch.quantization.conversion.set_quantizer_attributes_partial"><code class="xref py py-func docutils literal notranslate"><span class="pre">set_quantizer_attributes_partial()</span></code></a>, this function requires a complete
+<a class="reference internal" href="modelopt.torch.quantization.config.html#modelopt.torch.quantization.config.QuantizerAttributeConfig" title="modelopt.torch.quantization.config.QuantizerAttributeConfig"><code class="xref py py-class docutils literal notranslate"><span class="pre">QuantizerAttributeConfig</span></code></a> and <strong>replaces</strong> the
+matched quantizer’s attributes entirely rather than merging with existing ones.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>quant_model</strong> (<em>Module</em>) – A pytorch model.</p></li>
+<li><p><strong>wildcard_or_filter_func</strong> (<em>str</em><em> | </em><em>Callable</em>) – A wildcard string or a filter function. The wildcard string is
+matched against the quantizer module names. The quantizer modules are instances of
+<a class="reference internal" href="modelopt.torch.quantization.nn.modules.tensor_quantizer.html#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer" title="modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer"><code class="xref py py-class docutils literal notranslate"><span class="pre">TensorQuantizer</span></code></a>.
+The filter function takes a quantizer module name as input and returns <code class="docutils literal notranslate"><span class="pre">True</span></code> if the
+quantizer should be adjusted and <code class="docutils literal notranslate"><span class="pre">False</span></code> otherwise.</p></li>
+<li><p><strong>attributes</strong> (<a class="reference internal" href="modelopt.torch.quantization.config.html#modelopt.torch.quantization.config.QuantizerAttributeConfig" title="modelopt.torch.quantization.config.QuantizerAttributeConfig"><em>QuantizerAttributeConfig</em></a><em> | </em><em>list</em><em>[</em><a class="reference internal" href="modelopt.torch.quantization.config.html#modelopt.torch.quantization.config.QuantizerAttributeConfig" title="modelopt.torch.quantization.config.QuantizerAttributeConfig"><em>QuantizerAttributeConfig</em></a><em>]</em>) – A <a class="reference internal" href="modelopt.torch.quantization.config.html#modelopt.torch.quantization.config.QuantizerAttributeConfig" title="modelopt.torch.quantization.config.QuantizerAttributeConfig"><code class="xref py py-class docutils literal notranslate"><span class="pre">QuantizerAttributeConfig</span></code></a> (or a
+list of them) that <strong>fully replaces</strong> the matched quantizer’s current attributes. All
+fields of the config are applied — unspecified fields revert to their defaults.
+If <code class="docutils literal notranslate"><span class="pre">attributes</span></code> is a list, the matched
+<code class="xref py py-class docutils literal notranslate"><span class="pre">TensorQuantizer</span></code>
+modules will be replaced with
+<code class="xref py py-class docutils literal notranslate"><span class="pre">SequentialQuantizer</span></code>
+modules having one quantizer per attribute instance in the list.
+See
+<code class="xref py py-meth docutils literal notranslate"><span class="pre">set_from_attribute_config()</span></code>
+for details on supported attributes and their types.</p></li>
+<li><p><strong>parent_class</strong> (<em>type</em><em>[</em><em>Module</em><em>] </em><em>| </em><em>None</em>) – (Optional) Restrict matching to quantizers whose immediate parent module is
+an instance of this class. If <code class="docutils literal notranslate"><span class="pre">None</span></code>, all quantizers matching
+<code class="docutils literal notranslate"><span class="pre">wildcard_or_filter_func</span></code> are adjusted.</p></li>
+</ul>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.conversion.set_quantizer_attributes_partial">
+<span class="sig-name descname"><span class="pre">set_quantizer_attributes_partial</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">quant_model</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">wildcard_or_filter_func</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">partial_attributes</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">parent_class</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.quantization.conversion.set_quantizer_attributes_partial" title="Link to this definition"></a></dt>
+<dd><p>Update a subset of quantizer attributes by wildcard or filter function, merging with existing attributes.</p>
+<p>Unlike <a class="reference internal" href="#modelopt.torch.quantization.conversion.set_quantizer_attributes_full" title="modelopt.torch.quantization.conversion.set_quantizer_attributes_full"><code class="xref py py-func docutils literal notranslate"><span class="pre">set_quantizer_attributes_full()</span></code></a>, this function accepts an arbitrary subset of
+quantizer attributes as a plain <code class="docutils literal notranslate"><span class="pre">dict</span></code> and <strong>merges</strong> them into the matched quantizer’s
+current attributes, leaving unspecified attributes unchanged.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>quant_model</strong> (<em>Module</em>) – A pytorch model.</p></li>
+<li><p><strong>wildcard_or_filter_func</strong> (<em>str</em><em> | </em><em>Callable</em>) – A wildcard string or a filter function. The wildcard string is
+matched against the quantizer module names. The quantizer modules are instances of
+<a class="reference internal" href="modelopt.torch.quantization.nn.modules.tensor_quantizer.html#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer" title="modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer"><code class="xref py py-class docutils literal notranslate"><span class="pre">TensorQuantizer</span></code></a>.
+The filter function takes a quantizer module name as input and returns <code class="docutils literal notranslate"><span class="pre">True</span></code> if the
+quantizer should be adjusted and <code class="docutils literal notranslate"><span class="pre">False</span></code> otherwise.</p></li>
+<li><p><strong>partial_attributes</strong> (<em>dict</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>] </em><em>| </em><em>list</em><em>[</em><em>dict</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>]</em><em>]</em>) – A <code class="docutils literal notranslate"><span class="pre">dict</span></code> (or a list of <code class="docutils literal notranslate"><span class="pre">dict</span></code>) containing only the attributes to
+update. Keys must be valid fields of
+<a class="reference internal" href="modelopt.torch.quantization.config.html#modelopt.torch.quantization.config.QuantizerAttributeConfig" title="modelopt.torch.quantization.config.QuantizerAttributeConfig"><code class="xref py py-class docutils literal notranslate"><span class="pre">QuantizerAttributeConfig</span></code></a>. Only the
+specified keys are written; all other attributes on the quantizer remain unchanged.
+When a <code class="docutils literal notranslate"><span class="pre">dict</span></code> is passed and the matched module is a
+<code class="xref py py-class docutils literal notranslate"><span class="pre">SequentialQuantizer</span></code>,
+the dict is broadcast to every sub-quantizer.
+When a <code class="docutils literal notranslate"><span class="pre">list</span></code> is passed, the matched module must already be a
+<code class="xref py py-class docutils literal notranslate"><span class="pre">SequentialQuantizer</span></code> —
+unlike <a class="reference internal" href="#modelopt.torch.quantization.conversion.set_quantizer_attributes_full" title="modelopt.torch.quantization.conversion.set_quantizer_attributes_full"><code class="xref py py-func docutils literal notranslate"><span class="pre">set_quantizer_attributes_full()</span></code></a>, this function will <strong>not</strong> replace a
+<code class="xref py py-class docutils literal notranslate"><span class="pre">TensorQuantizer</span></code> with a
+<code class="docutils literal notranslate"><span class="pre">SequentialQuantizer</span></code>.
+See
+<code class="xref py py-meth docutils literal notranslate"><span class="pre">set_from_attribute_config()</span></code>
+for details on supported attributes and their types.</p></li>
+<li><p><strong>parent_class</strong> (<em>type</em><em>[</em><em>Module</em><em>] </em><em>| </em><em>None</em>) – (Optional) Restrict matching to quantizers whose immediate parent module is
+an instance of this class. If <code class="docutils literal notranslate"><span class="pre">None</span></code>, all quantizers matching
+<code class="docutils literal notranslate"><span class="pre">wildcard_or_filter_func</span></code> are adjusted.</p></li>
+</ul>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.conversion.set_quantizer_by_cfg">
+<span class="sig-name descname"><span class="pre">set_quantizer_by_cfg</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">quant_model</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">quant_cfg</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.quantization.conversion.set_quantizer_by_cfg" title="Link to this definition"></a></dt>
+<dd><p>Apply a quantization config list to the quantizers in <code class="docutils literal notranslate"><span class="pre">quant_model</span></code>.</p>
+<p><code class="docutils literal notranslate"><span class="pre">quant_cfg</span></code> is an <strong>ordered list</strong> of <a class="reference internal" href="modelopt.torch.quantization.config.html#modelopt.torch.quantization.config.QuantizerCfgEntry" title="modelopt.torch.quantization.config.QuantizerCfgEntry"><code class="xref py py-class docutils literal notranslate"><span class="pre">QuantizerCfgEntry</span></code></a>
+dicts. Each entry has the following fields:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">quantizer_name</span></code> <em>(required)</em>: wildcard matched against quantizer module names via
+<code class="xref py py-func docutils literal notranslate"><span class="pre">fnmatch()</span></code>.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">cfg</span></code> <em>(optional)</em>: a dict of <a class="reference internal" href="modelopt.torch.quantization.config.html#modelopt.torch.quantization.config.QuantizerAttributeConfig" title="modelopt.torch.quantization.config.QuantizerAttributeConfig"><code class="xref py py-class docutils literal notranslate"><span class="pre">QuantizerAttributeConfig</span></code></a>
+fields, or a list of such dicts for sequential quantization.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">enable</span></code> <em>(optional)</em>: <code class="docutils literal notranslate"><span class="pre">True</span></code> or <code class="docutils literal notranslate"><span class="pre">False</span></code> to toggle matched quantizers on or off.
+When omitted but <code class="docutils literal notranslate"><span class="pre">cfg</span></code> is present, defaults to <code class="docutils literal notranslate"><span class="pre">True</span></code>.  Every entry must specify at
+least one of <code class="docutils literal notranslate"><span class="pre">cfg</span></code> or <code class="docutils literal notranslate"><span class="pre">enable</span></code> — an entry with only <code class="docutils literal notranslate"><span class="pre">quantizer_name</span></code> is invalid.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">parent_class</span></code> <em>(optional)</em>: restricts matching to quantizers whose immediate parent
+module is of this PyTorch class name.</p></li>
+</ul>
+<p><strong>Ordering and atomicity:</strong> entries are applied in list order; later entries override earlier
+ones for any quantizer they match. Each entry with a <code class="docutils literal notranslate"><span class="pre">cfg</span></code> is a <strong>complete replacement</strong> —
+unspecified attributes revert to their defaults rather than inheriting from a prior entry.
+The typical pattern is to deny all first (<code class="docutils literal notranslate"><span class="pre">{&quot;quantizer_name&quot;:</span> <span class="pre">&quot;*&quot;,</span> <span class="pre">&quot;enable&quot;:</span> <span class="pre">False}</span></code>), then
+selectively enable and configure target quantizers in subsequent entries.</p>
+<p><strong>``enable`` and ``cfg`` are independent:</strong></p>
+<ul class="simple">
+<li><p>An entry with <code class="docutils literal notranslate"><span class="pre">cfg</span></code> (and optionally <code class="docutils literal notranslate"><span class="pre">enable</span></code>) fully replaces the matched quantizer’s
+attributes. If <code class="docutils literal notranslate"><span class="pre">enable</span></code> is omitted, the quantizer is implicitly enabled.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">{&quot;enable&quot;:</span> <span class="pre">False}</span></code> without <code class="docutils literal notranslate"><span class="pre">cfg</span></code> <strong>only</strong> toggles the matched quantizers off, leaving
+all other attributes unchanged.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">{&quot;enable&quot;:</span> <span class="pre">True}</span></code> without <code class="docutils literal notranslate"><span class="pre">cfg</span></code> <strong>only</strong> toggles the matched quantizers on, using
+whatever attributes they currently have (or their defaults if never configured).</p></li>
+</ul>
+<p>See <a class="reference internal" href="../../guides/_quant_cfg.html#quant-cfg"><span class="std std-ref">Quantization Configuration (quant_cfg)</span></a> for the full format reference and common patterns.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>quant_model</strong> (<em>Module</em>)</p></li>
+<li><p><strong>quant_cfg</strong> (<em>list</em><em>[</em><a class="reference internal" href="modelopt.torch.quantization.config.html#modelopt.torch.quantization.config.QuantizerCfgEntry" title="modelopt.torch.quantization.config.QuantizerCfgEntry"><em>QuantizerCfgEntry</em></a><em>]</em>)</p></li>
+</ul>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.conversion.set_quantizer_by_cfg_context">
+<span class="sig-name descname"><span class="pre">set_quantizer_by_cfg_context</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">quant_model</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">quant_cfg</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.quantization.conversion.set_quantizer_by_cfg_context" title="Link to this definition"></a></dt>
+<dd><p>Context manager that temporarily applies a quantization config and restores the original state on exit.</p>
+<p>Calls <a class="reference internal" href="#modelopt.torch.quantization.conversion.set_quantizer_by_cfg" title="modelopt.torch.quantization.conversion.set_quantizer_by_cfg"><code class="xref py py-func docutils literal notranslate"><span class="pre">set_quantizer_by_cfg()</span></code></a> on entry and reverts every
+<code class="xref py py-class docutils literal notranslate"><span class="pre">TensorQuantizer</span></code> in
+<code class="docutils literal notranslate"><span class="pre">quant_model</span></code> to its original attributes on exit.</p>
+<div class="admonition caution">
+<p class="admonition-title">Caution</p>
+<p>Changing stateful attributes such as <code class="docutils literal notranslate"><span class="pre">calibrator</span></code> inside this context may produce
+unexpected behavior because those objects are not deep-copied during save/restore.</p>
+</div>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>quant_model</strong> (<em>Module</em>) – A quantized PyTorch model whose quantizers will be temporarily reconfigured.</p></li>
+<li><p><strong>quant_cfg</strong> (<em>list</em><em>[</em><a class="reference internal" href="modelopt.torch.quantization.config.html#modelopt.torch.quantization.config.QuantizerCfgEntry" title="modelopt.torch.quantization.config.QuantizerCfgEntry"><em>QuantizerCfgEntry</em></a><em>]</em>) – A quantization config (or list of
+<a class="reference internal" href="modelopt.torch.quantization.config.html#modelopt.torch.quantization.config.QuantizerCfgEntry" title="modelopt.torch.quantization.config.QuantizerCfgEntry"><code class="xref py py-class docutils literal notranslate"><span class="pre">QuantizerCfgEntry</span></code></a> dicts) passed directly to
+<a class="reference internal" href="#modelopt.torch.quantization.conversion.set_quantizer_by_cfg" title="modelopt.torch.quantization.conversion.set_quantizer_by_cfg"><code class="xref py py-func docutils literal notranslate"><span class="pre">set_quantizer_by_cfg()</span></code></a>.  Sequential <code class="docutils literal notranslate"><span class="pre">cfg</span></code> lists are not allowed.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Yields<span class="colon">:</span></dt>
+<dd class="field-even"><p>None — the context body runs with the new quantizer attributes active.</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.conversion.unregister">
+<span class="sig-name descname"><span class="pre">unregister</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">original_cls</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.quantization.conversion.unregister" title="Link to this definition"></a></dt>
+<dd><p>Unregister the quantized class for the given un-quantized original class.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>original_cls</strong> (<em>Module</em>) – The original un-quantized class.</p>
+</dd>
+</dl>
+</dd></dl>
+
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="modelopt.torch.quantization.config.html" class="btn btn-neutral float-left" title="config" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="modelopt.torch.quantization.export_onnx.html" class="btn btn-neutral float-right" title="export_onnx" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2023-2025, NVIDIA Corporation.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

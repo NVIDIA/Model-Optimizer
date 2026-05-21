@@ -1,0 +1,340 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Saving &amp; Restoring &mdash; Model Optimizer 0.0.1.dev1+ga38e667b1</title>
+      <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
+      <link rel="stylesheet" type="text/css" href="../_static/tabs.css?v=4c969af8" />
+      <link rel="stylesheet" type="text/css" href="../_static/togglebutton.css?v=9c3e77be" />
+      <link rel="stylesheet" type="text/css" href="../_static/autodoc_pydantic.css" />
+      <link rel="stylesheet" type="text/css" href="../_static/custom.css?v=7a224f4b" />
+
+  
+      <script src="../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../_static/documentation_options.js?v=5929fcd5"></script>
+      <script src="../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
+      <script src="../_static/copybutton.js?v=20d3d275"></script>
+      <script src="../_static/tabs.js?v=3ee01567"></script>
+      <script>let toggleHintShow = 'Click to show';</script>
+      <script>let toggleHintHide = 'Click to hide';</script>
+      <script>let toggleOpenOnPrint = 'true';</script>
+      <script src="../_static/togglebutton.js?v=b8b12719"></script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+    <script src="../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+    <link rel="next" title="Pruning" href="3_pruning.html" />
+    <link rel="prev" title="ONNX Quantization - Windows" href="windows_guides/_ONNX_PTQ_guide.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../index.html" class="icon icon-home">
+            Model Optimizer
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../getting_started/1_overview.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../getting_started/2_installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch to ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - Windows</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_qat" rel="noopener noreferrer" target="_blank">Quick Start: QAT</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning" rel="noopener noreferrer" target="_blank">Quick Start: Pruning</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_distill" rel="noopener noreferrer" target="_blank">Quick Start: Distillation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/speculative_decoding" rel="noopener noreferrer" target="_blank">Quick Start: Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_sparsity" rel="noopener noreferrer" target="_blank">Quick Start: Sparsity</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Guides</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="0_support_matrix.html">Support Matrix</a></li>
+<li class="toctree-l1"><a class="reference internal" href="1_quantization.html">Quantization</a></li>
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Saving &amp; Restoring</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#saving-modelopt-models">Saving ModelOpt Models</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#saving-modelopt-state-model-weights-together">Saving ModelOpt state &amp; model weights together</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#saving-modelopt-state-and-model-weights-separately">Saving ModelOpt state and model weights separately</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#restoring-modelopt-models">Restoring ModelOpt Models</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#restoring-modelopt-state-model-weights-together">Restoring ModelOpt state &amp; model weights together</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#restoring-modelopt-state-and-model-weights-separately">Restoring ModelOpt state and model weights separately</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#modelopt-save-restore-using-huggingface-checkpointing-apis">ModelOpt Save/Restore Using Huggingface Checkpointing APIs</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="3_pruning.html">Pruning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="4_distillation.html">Distillation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="5_speculative_decoding.html">Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference internal" href="6_sparsity.html">Sparsity</a></li>
+<li class="toctree-l1"><a class="reference internal" href="7_nas.html">NAS</a></li>
+<li class="toctree-l1"><a class="reference internal" href="8_autocast.html">AutoCast (ONNX)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="9_autotune.html">Autotune (ONNX)</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Deployment</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../deployment/1_tensorrt_llm.html">TensorRT-LLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../deployment/2_onnxruntime.html">Onnxruntime</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../deployment/3_unified_hf.html">Unified HuggingFace Checkpoint</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Examples</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../examples/0_all_examples.html">All GitHub Examples</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Reference</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../reference/0_changelog.html">NVIDIA Model Optimizer Changelog</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../reference/1_modelopt_api.html">modelopt API</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Support</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../support/1_contact.html">Contact us</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../support/2_faqs.html">FAQs</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../index.html">Model Optimizer</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content style-external-links">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">Saving &amp; Restoring</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../_sources/guides/2_save_load.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="saving-restoring">
+<h1>Saving &amp; Restoring<a class="headerlink" href="#saving-restoring" title="Link to this heading"></a></h1>
+<p id="save-restore">ModelOpt optimization methods such as quantization, pruning&lt;sup&gt;1&lt;/sup&gt;, distillation&lt;sup&gt;1&lt;/sup&gt;, sparsity etc. modifies the original model
+architecture and weights.
+Hence it is important to save and restore the model architecture followed by the new weights to use the modified
+model for downstream tasks.</p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>&lt;sup&gt;1&lt;/sup&gt; Some pruning and distillation methods don’t need special handling for saving and restoring model optimizer states and can be saved and restored using their standard APIs.</p>
+</div>
+<p>This guide describes various options for saving and restoring the ModelOpt-modified models correctly.</p>
+<section id="saving-modelopt-models">
+<h2>Saving ModelOpt Models<a class="headerlink" href="#saving-modelopt-models" title="Link to this heading"></a></h2>
+<p>The modifications applied to the model are captured in the model’s ModelOpt state as given by
+<a class="reference internal" href="../reference/generated/modelopt.torch.opt.conversion.html#modelopt.torch.opt.conversion.modelopt_state" title="modelopt.torch.opt.conversion.modelopt_state"><code class="xref py py-meth docutils literal notranslate"><span class="pre">modelopt_state</span></code></a>. ModelOpt supports saving the architecture modifications
+together with model weights or separately.</p>
+<section id="saving-modelopt-state-model-weights-together">
+<span id="save-full"></span><h3>Saving ModelOpt state &amp; model weights together<a class="headerlink" href="#saving-modelopt-state-model-weights-together" title="Link to this heading"></a></h3>
+<p><a class="reference internal" href="../reference/generated/modelopt.torch.opt.conversion.html#modelopt.torch.opt.conversion.save" title="modelopt.torch.opt.conversion.save"><code class="xref py py-meth docutils literal notranslate"><span class="pre">mto.save</span></code></a> saves the ModelOpt state together with the
+new model weights (i.e, the Pytorch <a class="reference external" href="https://pytorch.org/docs/stable/generated/torch.nn.Module.html#torch.nn.Module.state_dict" rel="noopener noreferrer" target="_blank">state_dict</a>)
+which can be used later to restore the model correctly.</p>
+<p>Here is an example of how to save an ModelOpt-modified model:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">modelopt.torch.opt</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">mto</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">modelopt.torch.quantization</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">mtq</span>
+
+<span class="c1"># Initialize the original model and set the original weights</span>
+<span class="n">model</span> <span class="o">=</span> <span class="o">...</span>
+
+<span class="c1"># Apply ModelOpt modifications to the model. For example, quantization</span>
+<span class="n">model</span> <span class="o">=</span> <span class="n">mtq</span><span class="o">.</span><span class="n">quantize</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="n">config</span><span class="p">,</span> <span class="n">forward_loop</span><span class="p">)</span>
+
+<span class="c1"># Save the model weights and the `modelopt_state` to &#39;modelopt_model.pth&#39;</span>
+<span class="n">mto</span><span class="o">.</span><span class="n">save</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="s2">&quot;modelopt_model.pth&quot;</span><span class="p">)</span>
+</pre></div>
+</div>
+</section>
+<section id="saving-modelopt-state-and-model-weights-separately">
+<span id="save-just-states"></span><h3>Saving ModelOpt state and model weights separately<a class="headerlink" href="#saving-modelopt-state-and-model-weights-separately" title="Link to this heading"></a></h3>
+<p>If you want to save the model weights with your own custom method instead of saving it with ModelOpt <code class="xref py py-meth docutils literal notranslate"><span class="pre">mto.save()</span></code>,
+you should save the <code class="docutils literal notranslate"><span class="pre">modelopt_state</span></code> separately. This way you can correctly restore the model architecture later from
+the saved <code class="docutils literal notranslate"><span class="pre">modelopt_state</span></code> as shown in <a class="reference internal" href="#load-just-states"><span class="std std-ref">restoring ModelOpt state and model weights separately</span></a>.</p>
+<p>Here is an example of how to save the <code class="docutils literal notranslate"><span class="pre">modelopt_state</span></code> separately:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">torch</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">modelopt.torch.opt</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">mto</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">modelopt.torch.quantization</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">mtq</span>
+
+<span class="c1"># Initialize the original model and set the original weights</span>
+<span class="n">model</span> <span class="o">=</span> <span class="o">...</span>
+
+<span class="c1"># Apply ModelOpt modifications to the model. For example, quantization</span>
+<span class="n">model</span> <span class="o">=</span> <span class="n">mtq</span><span class="o">.</span><span class="n">quantize</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="n">config</span><span class="p">,</span> <span class="n">forward_loop</span><span class="p">)</span>
+
+<span class="c1"># Save the `modelopt_state` to &#39;modelopt_state.pth&#39;</span>
+<span class="n">torch</span><span class="o">.</span><span class="n">save</span><span class="p">(</span><span class="n">mto</span><span class="o">.</span><span class="n">modelopt_state</span><span class="p">(</span><span class="n">model</span><span class="p">),</span> <span class="s2">&quot;modelopt_state.pth&quot;</span><span class="p">)</span>
+
+<span class="c1"># Save the model weights separately with your method</span>
+<span class="n">custom_method_to_save_model_weights</span><span class="p">(</span><span class="n">model</span><span class="p">)</span>
+</pre></div>
+</div>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>Although the above examples shows ModelOpt modifications using quantization,
+the same workflow applies to other ModelOpt modifications such as pruning, sparsity, distillation, etc.
+and combinations thereof.</p>
+</div>
+</section>
+</section>
+<section id="restoring-modelopt-models">
+<h2>Restoring ModelOpt Models<a class="headerlink" href="#restoring-modelopt-models" title="Link to this heading"></a></h2>
+<section id="restoring-modelopt-state-model-weights-together">
+<h3>Restoring ModelOpt state &amp; model weights together<a class="headerlink" href="#restoring-modelopt-state-model-weights-together" title="Link to this heading"></a></h3>
+<p><a class="reference internal" href="../reference/generated/modelopt.torch.opt.conversion.html#modelopt.torch.opt.conversion.restore" title="modelopt.torch.opt.conversion.restore"><code class="xref py py-meth docutils literal notranslate"><span class="pre">mto.restore</span></code></a> restores the model’s <code class="xref py py-meth docutils literal notranslate"><span class="pre">modelopt_state()</span></code> and the model weights
+that were saved using <code class="xref py py-meth docutils literal notranslate"><span class="pre">mto.save()</span></code> as shown in <a class="reference internal" href="#save-full"><span class="std std-ref">saving a ModelOpt-modified model</span></a>.
+The restored model can be used for inference or further training and optimization.</p>
+<p>Here is an example of restoring a ModelOpt-modified model:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">modelopt.torch.opt</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">mto</span>
+
+<span class="c1"># Initialize the original model</span>
+<span class="n">model</span> <span class="o">=</span> <span class="o">...</span>
+
+<span class="c1"># Restore the model architecture and weights after applying ModelOpt modifications</span>
+<span class="n">mto</span><span class="o">.</span><span class="n">restore</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="s2">&quot;modelopt_model.pth&quot;</span><span class="p">)</span>
+
+<span class="c1"># Use the restored model for inference or further training / optimization</span>
+</pre></div>
+</div>
+</section>
+<section id="restoring-modelopt-state-and-model-weights-separately">
+<span id="load-just-states"></span><h3>Restoring ModelOpt state and model weights separately<a class="headerlink" href="#restoring-modelopt-state-and-model-weights-separately" title="Link to this heading"></a></h3>
+<p>Alternatively, if you saved the <code class="docutils literal notranslate"><span class="pre">modelopt_state</span></code> separately as shown in
+<a class="reference internal" href="#save-just-states"><span class="std std-ref">saving modelopt_state separately</span></a>,
+you can restore the ModelOpt-modified model architecture using the saved <code class="docutils literal notranslate"><span class="pre">modelopt_state</span></code>. The model weights after
+the ModelOpt modifications should be loaded separately after this step.</p>
+<p>Here is the example workflow of restoring the ModelOpt-modified model architecture using the saved
+<code class="docutils literal notranslate"><span class="pre">modelopt_state</span></code>:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">torch</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">modelopt.torch.opt</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">mto</span>
+
+<span class="c1"># Initialize the original model</span>
+<span class="n">model</span> <span class="o">=</span> <span class="o">...</span>
+
+<span class="c1"># Restore the model architecture using the saved `modelopt_state`</span>
+<span class="n">model</span> <span class="o">=</span> <span class="n">mto</span><span class="o">.</span><span class="n">restore_from_modelopt_state</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="n">modelopt_state_path</span><span class="o">=</span><span class="s2">&quot;modelopt_state.pth&quot;</span><span class="p">)</span>
+
+<span class="c1"># Load the model weights separately after restoring the model architecture</span>
+<span class="n">custom_method_to_load_model_weights</span><span class="p">(</span><span class="n">model</span><span class="p">)</span>
+</pre></div>
+</div>
+</section>
+</section>
+<section id="modelopt-save-restore-using-huggingface-checkpointing-apis">
+<h2>ModelOpt Save/Restore Using Huggingface Checkpointing APIs<a class="headerlink" href="#modelopt-save-restore-using-huggingface-checkpointing-apis" title="Link to this heading"></a></h2>
+<p>ModelOpt supports automatic save and restore of the modified models when using the
+<a class="reference external" href="https://huggingface.co/docs/transformers/main_classes/model#transformers.PreTrainedModel.save_pretrained" rel="noopener noreferrer" target="_blank">save_pretrained</a>
+and <a class="reference external" href="https://huggingface.co/docs/transformers/main_classes/model#transformers.PreTrainedModel.from_pretrained" rel="noopener noreferrer" target="_blank">from_pretrained</a>
+APIs from Huggingface libraries such as  <a class="reference external" href="https://huggingface.co/docs/transformers/main/en/index" rel="noopener noreferrer" target="_blank">transformers</a> and
+<a class="reference external" href="https://huggingface.co/docs/diffusers/index" rel="noopener noreferrer" target="_blank">diffusers</a>.</p>
+<p>To enable this feature, you need to call
+<a class="reference internal" href="../reference/generated/modelopt.torch.opt.plugins.huggingface.html#modelopt.torch.opt.plugins.huggingface.enable_huggingface_checkpointing" title="modelopt.torch.opt.plugins.huggingface.enable_huggingface_checkpointing"><code class="xref py py-meth docutils literal notranslate"><span class="pre">mto.enable_huggingface_checkpointing()</span></code></a>
+once in the program before loading/saving any HuggingFace models.</p>
+<p>Here is an example of how to enable ModelOpt save/restore with the Huggingface APIs:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">modelopt.torch.opt</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">mto</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">transformers</span><span class="w"> </span><span class="kn">import</span> <span class="n">AutoModelForCausalLM</span>
+
+<span class="o">...</span>
+
+<span class="c1"># Enable automatic ModelOpt save/restore with</span>
+<span class="c1"># Huggingface checkpointing APIs `save_pretrained` and `from_pretrained`</span>
+<span class="n">mto</span><span class="o">.</span><span class="n">enable_huggingface_checkpointing</span><span class="p">()</span>
+
+<span class="c1"># Load the original Huggingface model</span>
+<span class="n">model</span> <span class="o">=</span> <span class="n">AutoModelForCausalLM</span><span class="o">.</span><span class="n">from_pretrained</span><span class="p">(</span><span class="n">model_path</span><span class="p">)</span>
+
+<span class="c1"># Apply ModelOpt modifications to the model. For example, quantization</span>
+<span class="n">model</span> <span class="o">=</span> <span class="n">mtq</span><span class="o">.</span><span class="n">quantize</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="n">config</span><span class="p">,</span> <span class="n">forward_loop</span><span class="p">)</span>
+
+<span class="c1"># Save the ModelOpt-modified model architecture and weights using Huggingface APIs</span>
+<span class="n">model</span><span class="o">.</span><span class="n">save_pretrained</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;ModelOpt_</span><span class="si">{</span><span class="n">model_path</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+</pre></div>
+</div>
+<p>By default, the modelopt state is saved in the same directory as the model weights.
+You can disable this by setting the <code class="docutils literal notranslate"><span class="pre">save_modelopt_state</span></code> to <code class="docutils literal notranslate"><span class="pre">False</span></code> in the <code class="docutils literal notranslate"><span class="pre">save_pretrained</span></code> API, as shown below:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">model</span><span class="o">.</span><span class="n">save_pretrained</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;ModelOpt_</span><span class="si">{</span><span class="n">model_path</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span> <span class="n">save_modelopt_state</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
+</pre></div>
+</div>
+<p>The model saved as above can be restored using the Huggingface <code class="docutils literal notranslate"><span class="pre">from_pretrained</span></code> API.
+Do not forget to call <a class="reference internal" href="../reference/generated/modelopt.torch.opt.plugins.huggingface.html#modelopt.torch.opt.plugins.huggingface.enable_huggingface_checkpointing" title="modelopt.torch.opt.plugins.huggingface.enable_huggingface_checkpointing"><code class="xref py py-meth docutils literal notranslate"><span class="pre">mto.enable_huggingface_checkpointing()</span></code></a>
+before loading the model. This needs to be done only once in the program.</p>
+<p>See the example below:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">modelopt.torch.opt</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">mto</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">transformers</span><span class="w"> </span><span class="kn">import</span> <span class="n">AutoModelForCausalLM</span>
+
+<span class="o">...</span>
+
+<span class="c1"># Enable automatic ModelOpt save/restore with huggingface checkpointing APIs</span>
+<span class="c1"># This needs to be done only once in the program</span>
+<span class="n">mto</span><span class="o">.</span><span class="n">enable_huggingface_checkpointing</span><span class="p">()</span>
+
+<span class="c1"># Load the ModelOpt-modified model architecture and weights using Huggingface APIs</span>
+<span class="n">model</span> <span class="o">=</span> <span class="n">AutoModelForCausalLM</span><span class="o">.</span><span class="n">from_pretrained</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;ModelOpt_</span><span class="si">{</span><span class="n">model_path</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+</pre></div>
+</div>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="windows_guides/_ONNX_PTQ_guide.html" class="btn btn-neutral float-left" title="ONNX Quantization - Windows" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="3_pruning.html" class="btn btn-neutral float-right" title="Pruning" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2023-2025, NVIDIA Corporation.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>
