@@ -1,0 +1,22 @@
+# DFlash vLLM smoke test against random-weight draft checkpoint.
+# Generated for OMNIML-4736.
+
+job_name: Qwen3-8B_DFlash_smoke_random
+pipeline:
+  global_vars:
+    hf_model: /hf-local/Qwen/Qwen3-8B
+
+  task_0:
+    script: common/specdec/dflash_random_smoke.sh
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+      - DRAFT_CKPT_DIR: /scratchspace/dflash_random_b16
+      - SPEC_METHOD: "dflash"
+      - NUM_SPEC_TOKENS: "7"
+      - MIN_ACCEPTANCE_LENGTH: "1.0"
+    slurm_config:
+      _factory_: "slurm_factory"
+      container: "vllm/vllm-openai:nightly"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 1
