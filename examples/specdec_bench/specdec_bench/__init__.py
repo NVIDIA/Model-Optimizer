@@ -13,3 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Methodology version. Bump:
+#   - minor (0.X.0) when adding a new metric or strictly-additive provenance field
+#   - major (X.0.0) when changing how an existing metric is computed
+# The visualizer aggregates runs by major version to avoid apple-to-orange
+# comparisons across methodology changes.
+__version__ = "0.1.0"

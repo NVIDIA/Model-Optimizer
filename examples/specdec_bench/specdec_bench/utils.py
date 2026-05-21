@@ -13,9 +13,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import datetime
+import hashlib
 import json
+import os
+import subprocess
+import sys
+from pathlib import Path
 
 from transformers import AutoTokenizer
+
+from . import __version__ as specdec_bench_version
+
+_SENSITIVE_SUBSTRINGS = ("token", "key", "secret", "password")
 
 
 def get_tokenizer(path, trust_remote_code=False):
@@ -58,3 +68,142 @@ def postprocess_gptoss(text):
     if "<|channel|>" in final_message:
         final_message = final_message.split("<|channel|>")[0]
     return final_message
+
+
+def _get_engine_version(engine):
+    """Return the engine package's __version__, or None on failure."""
+    try:
+        if engine in ("TRTLLM", "AUTO_DEPLOY"):
+            import tensorrt_llm
+
+            return tensorrt_llm.__version__
+        elif engine == "VLLM":
+            import vllm
+
+            return vllm.__version__
+        elif engine == "SGLANG":
+            import sglang
+
+            return sglang.__version__
+    except Exception:
+        pass
+    return None
+
+
+def _get_gpu_name():
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            return torch.cuda.get_device_name(0)
+    except Exception:
+        pass
+    return None
+
+
+def _get_modelopt_version():
+    try:
+        import modelopt
+
+        return getattr(modelopt, "__version__", None)
+    except Exception:
+        return None
+
+
+def _git_sha(path):
+    """git rev-parse HEAD inside `path`. Returns None if not a repo or git missing."""
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=path,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if out.returncode == 0:
+            return out.stdout.strip()
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    return None
+
+
+def _checkpoint_provenance(model_dir):
+    """Cheap reproducibility fingerprint for a HuggingFace checkpoint directory.
+
+    Returns {path, size_bytes, index_sha256} where index_sha256 hashes the
+    safetensors index file (changes whenever any shard's contents change).
+    Falls back to hashing config.json for non-sharded checkpoints.
+    """
+    if model_dir is None:
+        return None
+    try:
+        p = Path(model_dir)
+        if not p.is_dir():
+            return {"path": str(model_dir)}
+        size_bytes = sum(f.stat().st_size for f in p.rglob("*") if f.is_file())
+        hash_target = None
+        for name in ("model.safetensors.index.json", "config.json"):
+            candidate = p / name
+            if candidate.is_file():
+                hash_target = candidate
+                break
+        index_sha256 = None
+        if hash_target is not None:
+            h = hashlib.sha256()
+            with open(hash_target, "rb") as f:
+                for chunk in iter(lambda: f.read(65536), b""):
+                    h.update(chunk)
+            index_sha256 = h.hexdigest()
+        return {
+            "path": str(model_dir),
+            "size_bytes": size_bytes,
+            "index_sha256": index_sha256,
+            "index_source": hash_target.name if hash_target is not None else None,
+        }
+    except Exception:
+        return {"path": str(model_dir)}
+
+
+def _redact_config(config):
+    return {
+        key: (
+            "***REDACTED***"
+            if any(part in key.lower() for part in _SENSITIVE_SUBSTRINGS)
+            else value
+        )
+        for key, value in config.items()
+    }
+
+
+def dump_env(args, save_dir, overrides=None):
+    """Write configuration.json to save_dir capturing run args, engine version, and provenance.
+
+    `overrides` is merged in last and is the channel for runtime-only fields
+    (e.g. the live engine's serving_config dict from runner.get_serving_config()).
+    """
+    config = _redact_config(vars(args).copy())
+    if overrides:
+        config.update(_redact_config(overrides))
+
+    config["engine_version"] = _get_engine_version(config.get("engine"))
+    config["gpu"] = _get_gpu_name()
+    config["python_version"] = sys.version
+    config["argv"] = sys.argv[:]
+
+    # Provenance for reproducibility / apple-to-orange guarding.
+    config["specdec_bench_version"] = specdec_bench_version
+    specdec_bench_dir = Path(__file__).resolve().parent
+    config["specdec_bench_sha"] = _git_sha(specdec_bench_dir)
+    config["modelopt_version"] = _get_modelopt_version()
+    config["modelopt_sha"] = _git_sha(specdec_bench_dir.parents[2])  # examples/specdec_bench/specdec_bench → modelopt root
+    # Harness-provided env vars (set by nmm-sandbox / launcher); null when standalone.
+    config["nmm_sandbox_sha"] = os.environ.get("NMM_SANDBOX_SHA") or None
+    config["container_image"] = os.environ.get("CONTAINER_IMAGE") or None
+    # Checkpoint fingerprint.
+    config["checkpoint"] = _checkpoint_provenance(getattr(args, "model_dir", None))
+    # UTC timestamp.
+    config["timestamp"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+    os.makedirs(save_dir, exist_ok=True)
+    with open(os.path.join(save_dir, "configuration.json"), "w") as f:
+        json.dump(config, f, indent=4, default=str)
