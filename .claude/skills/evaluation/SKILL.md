@@ -175,10 +175,6 @@ Combine all detected flags into a single `deployment.extra_args` override. The r
 
 When a quantized checkpoint is detected, read `references/quantization-benchmarks.md` for benchmark sensitivity rankings and recommended sets. Present recommendations to the user and ask which to include.
 
-**Baseline comparison preflight:**
-
-When a quantized checkpoint is detected, identify the matching baseline before launching the full quantized run. The baseline is usually the pre-quantization source model/checkpoint for this run, but it may itself be quantized (for example, an FP8 checkpoint used as the baseline for an NVFP4 checkpoint). First infer the baseline from the PTQ source model/checkpoint in the workspace or config used to create the quantized checkpoint. If it cannot be inferred, ask the user for the baseline model/checkpoint or an existing baseline invocation/run path. If no matching baseline exists, prepare a companion baseline config and launch it before or alongside the quantized config. The baseline config should match the quantized config's benchmark versions, task configs, serving args, token limits, dataset setup, credentials, cluster, and container as closely as possible; change only the model/checkpoint and adjust quantization-specific flags to match the baseline checkpoint. Do not treat the quantized score as release-ready until the baseline comparison exists.
-
 Read `references/model-card-research.md` for the full extraction checklist (sampling params, reasoning config, ARM64 compatibility, pre_cmd, etc.). Use WebSearch to research the model card, present findings, and ask the user to confirm.
 
 For reasoning-capable models, prefer reasoning mode for evaluation because it usually produces the highest task scores; configure the model-card-specific on/off control and any reasoning budget or effort setting. If the user wants lower variance/noise, lower latency/cost, or an apples-to-apples comparison against non-reasoning baselines, also consider a non-reasoning companion run.

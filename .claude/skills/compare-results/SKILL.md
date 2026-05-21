@@ -1,33 +1,42 @@
 ---
 name: compare-results
-description: Compare completed baseline and quantized evaluation results, verify apples-to-apples comparability, and report accuracy deltas. Use when the user asks to compare baseline vs quantized runs, explain an accuracy drop/regression, verify a quantization result, or compare completed NEL/MLflow evaluation outputs. Do NOT use for creating or launching new evaluation configs (use evaluation), live NEL status/debugging (use launching-evals), or generic MLflow browsing without a comparison goal (use accessing-mlflow).
+description: Establish baseline-vs-candidate evaluation plans, delegate missing evaluations, compare validated results, and decide quantization feasibility. Use when the user asks to compare baseline vs quantized runs, explain an accuracy drop/regression, verify whether a quantized checkpoint is acceptable, or compare NEL/MLflow evaluation outputs. Do NOT use for generic single-model evaluation without comparison intent (use evaluation), live NEL status/debugging (use launching-evals), or generic MLflow browsing without a comparison goal (use accessing-mlflow).
 license: Apache-2.0
 ---
 
 # Compare Results
 
-Use this after baseline and candidate evaluation runs have completed. The
-baseline is the reference checkpoint, and the candidate is the checkpoint whose
-accuracy change is being measured, typically a further quantized version of the
-baseline.
+Use this to plan and complete a baseline-vs-candidate comparison. The baseline
+is the reference checkpoint, and the candidate is the checkpoint whose accuracy
+change is being measured, typically a further quantized version of the baseline.
 
 ## Workflow
 
-1. Identify the baseline run, candidate run, task list, and result artifacts.
-   If the user provides MLflow runs or invocation IDs, use the accessing-mlflow
-   skill to fetch configs and artifacts. If a required run does not exist, use
-   the evaluation skill to create it.
-2. Confirm each run passed evaluation Step 9, "Verify completed evaluation run",
+1. Establish the candidate checkpoint/run and the matching baseline. Infer the
+   baseline from the PTQ source model/checkpoint in the workspace or config used
+   to create the candidate. If it cannot be inferred, ask the user for the
+   baseline checkpoint or an existing baseline invocation/run path.
+2. If a required baseline or candidate evaluation is missing, delegate to the
+   evaluation skill to create, run, and verify it. The companion evaluation
+   config should match benchmark versions, task configs, serving args, token
+   limits, dataset setup, credentials, cluster, and container as closely as
+   possible; change only the model/checkpoint and checkpoint-specific serving or
+   quantization flags.
+3. Fetch the baseline and candidate task list, configs, score artifacts, and
+   logs. If the user provides MLflow runs or invocation IDs, use the
+   accessing-mlflow skill to fetch configs and artifacts.
+4. Confirm each run passed evaluation Step 9, "Verify completed evaluation run",
    before comparing scores. If not, validate logs, server health,
    judge/code-execution status, sample accounting, and reasoning parsing before
    computing deltas.
-3. For each task, use the canonical score field from the matching
+5. For each task, use the canonical score field from the matching
    `.claude/skills/evaluation/recipes/tasks/<task>.md` Score Extraction
    section.
-4. Compute exact deltas outside the chat context when there are multiple tasks
+6. Compute exact deltas outside the chat context when there are multiple tasks
    or repeated runs.
-5. Report a comparability verdict before interpreting the delta as model
-   quality.
+7. Report comparability and quantized-feasibility verdicts before interpreting
+   the delta as model quality. If the user did not provide an acceptance
+   threshold, report feasibility as inconclusive instead of inventing one.
 
 ## Comparability Checklist
 
@@ -60,4 +69,5 @@ Include:
   available.
 - Comparability status for prompt/template, generation settings, sample counts,
   reasoning handling, judge/simulator setup, and score field.
-- Final verdict: comparable, not comparable, or inconclusive.
+- Comparability verdict: comparable, not comparable, or inconclusive.
+- Quantization feasibility verdict: acceptable, not acceptable, or inconclusive.
