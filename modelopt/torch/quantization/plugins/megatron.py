@@ -18,6 +18,7 @@
 import logging
 import types
 import warnings
+from contextlib import contextmanager
 from typing import Any
 
 import megatron.core.parallel_state as mcore_parallel
@@ -40,7 +41,8 @@ from modelopt.torch.opt.plugins.megatron import (
 )
 from modelopt.torch.utils.distributed import ParallelState
 
-from ..nn import QuantModule, QuantModuleRegistry, TensorQuantizer
+from ..conversion import maybe_promote_nvfp4_static_quantizer
+from ..nn import QuantModule, QuantModuleRegistry, SequentialQuantizer, TensorQuantizer
 from ..nn.modules.quant_linear import RealQuantLinear
 from ..qtensor import QTensorWrapper
 from ..utils import sync_moe_expert_amax
@@ -66,6 +68,35 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 __all__ = []
+
+
+def _check_static_block_tp_supported(model: torch.nn.Module) -> None:
+    """Raise under TP>1: static-block _amax is shard-local but sharded_state_dict treats it as replicated."""
+    offending = []
+    for name, module in model.named_modules():
+        if not isinstance(module, QuantModule):
+            continue
+        parallel_state = getattr(module, "parallel_state", None)
+        if parallel_state is None:
+            continue
+        tp_group = getattr(parallel_state, "tensor_parallel_group", None)
+        if tp_group is None or not tp_group.is_initialized() or tp_group.world_size() <= 1:
+            continue
+        weight_quantizer = getattr(module, "weight_quantizer", None)
+        if weight_quantizer is None:
+            continue
+        leaves = (
+            list(weight_quantizer)
+            if isinstance(weight_quantizer, SequentialQuantizer)
+            else [weight_quantizer]
+        )
+        if any(leaf.is_static_block_quant for leaf in leaves):
+            offending.append((name, tp_group.world_size()))
+    if offending:
+        raise NotImplementedError(
+            "Static-block NVFP4 weight quantization (e.g. MSE) is not supported with TP > 1. Please re-run with TP=1. "
+            f"Offending modules (showing first 5 of {len(offending)}): {offending[:5]}"
+        )
 
 
 def real_quant_module_get_extra_state(self) -> dict:
@@ -190,7 +221,9 @@ def quant_module_set_extra_state(self, state: Any):
     if quantizer_state is not None:
         for name, module in self.named_modules():
             if isinstance(module, TensorQuantizer):
-                module.set_from_modelopt_state(quantizer_state[name], properties_only=False)
+                quantizer_substate = quantizer_state[name]
+                maybe_promote_nvfp4_static_quantizer(module, quantizer_substate)
+                module.set_from_modelopt_state(quantizer_substate, properties_only=False)
         self.modelopt_post_restore()
 
     # Handle real_quantizer_state and q_tensor_state
@@ -250,11 +283,6 @@ def megatron_replace_quant_module_hook(model: torch.nn.Module):
 
     def _register_extra_state_callbacks(model: torch.nn.Module):
         for name, module in model.named_modules():
-            if name.endswith("output_layer"):
-                # output_layer is not quantized,
-                # hence we don't need to register extra state callbacks for it
-                continue
-
             if type(module) in QuantModuleRegistry:
                 # This module will be replaced as a QuantModule
                 register_modelopt_extra_state_callbacks(
@@ -344,8 +372,13 @@ class _MegatronParallelLinear(_ParallelLinear):
         #    output_layer.input_quantizer._amax but TP-only does not. This lead to
         #    state_dict mismatch.
         if prefix.endswith("output_layer."):
-            # assert not any("_quantizer" in k for k in self.state_dict()), "quantized output_layer"
-            return super().sharded_state_dict(prefix, sharded_offsets, metadata)
+            try:
+                from megatron.training import get_args as _mlm_get_args
+                _untied = bool(getattr(_mlm_get_args(), "untie_embeddings_and_output_weights", False))
+            except Exception:
+                _untied = False
+            if not _untied:
+                return super().sharded_state_dict(prefix, sharded_offsets, metadata)
 
         quantizer_state_dict = {}
         for k, v in self.state_dict(prefix="", keep_vars=True).items():
@@ -399,6 +432,9 @@ class _MegatronColumnParallelLinear(_MegatronParallelLinear):
         """
         shard_axis_dict = {}
         for k in state_dict:
+            # Static NVFP4 _global_amax is a replicated scalar; only per-block _amax shards.
+            if k.endswith("_global_amax"):
+                continue
             if "weight_quantizer." in k:
                 weight_quantizer_axis = self.get_submodule(k.rsplit(".", 1)[0]).axis
                 if weight_quantizer_axis is not None:
@@ -427,6 +463,9 @@ class _MegatronRowParallelLinear(_MegatronParallelLinear):
         """
         shard_axis_dict = {}
         for k in state_dict:
+            # Static NVFP4 _global_amax is a replicated scalar; only per-block _amax shards.
+            if k.endswith("_global_amax"):
+                continue
             if "weight_quantizer." in k:
                 weight_quantizer_axis = None
                 if isinstance(self.weight_quantizer, TensorQuantizer):
@@ -737,3 +776,33 @@ if HAS_TE:
             # Affine KVCache Quant bias vector.
             state_dict = self.state_dict(prefix="", keep_vars=True)
             return make_sharded_tensors_for_checkpoint(state_dict, prefix, {}, sharded_offsets)
+
+
+def _is_supported_megatron_model(model: torch.nn.Module) -> bool:
+    return isinstance(model, MegatronModule)
+
+
+@contextmanager
+def _megatron_grad_ckpt_context(model: torch.nn.Module):
+    # Megatron configures activation recompute at model build time via TransformerConfig,
+    # so there is no runtime flag to flip here.
+    yield
+
+
+def _is_param_grad_enabled_for_megatron(pname: str, model: torch.nn.Module) -> bool:
+    return "embed" in pname
+
+
+def _register_auto_quantize_support() -> None:
+    # Local import breaks the circular path where algorithms imports model_calib,
+    # which imports _check_static_block_tp_supported from this plugin.
+    from ..algorithms import AutoQuantizeGradientSearcher
+
+    AutoQuantizeGradientSearcher.register_custom_support(
+        _is_supported_megatron_model,
+        _megatron_grad_ckpt_context,
+        _is_param_grad_enabled_for_megatron,
+    )
+
+
+_register_auto_quantize_support()

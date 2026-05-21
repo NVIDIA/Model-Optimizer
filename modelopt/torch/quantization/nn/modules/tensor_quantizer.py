@@ -548,13 +548,23 @@ class TensorQuantizer(nn.Module):
             raise NotImplementedError()
 
     @property
+    def is_block_quant(self):
+        """Check if is block quantization (static or dynamic)."""
+        return self.block_sizes is not None
+
+    @property
     def is_static_block_quant(self):
         """Check if is static block quantization."""
         return (
-            self.block_sizes is not None
+            self.is_block_quant
             and self.block_sizes.get("type", None) != "dynamic"
             and self._fake_quant
         )
+
+    @property
+    def is_dynamic_block_quant(self):
+        """Check if is dynamic block quantization."""
+        return self.is_block_quant and self.block_sizes.get("type", None) == "dynamic"
 
     @property
     def rotate_is_enabled(self):

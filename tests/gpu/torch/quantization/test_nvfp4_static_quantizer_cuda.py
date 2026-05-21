@@ -138,6 +138,23 @@ class TestNVFP4StaticQuantizer:
 
         assert torch.allclose(output, expected)
 
+    def test_static_export_clamps_overflowing_fp8_block_scales(self, device):
+        """Static export should match fake quant clamping and never write NaN FP8 scales."""
+        cfg = QuantizerAttributeConfig(
+            num_bits=(2, 1),
+            block_sizes={-1: 16, "type": "static", "scale_bits": (4, 3)},
+        )
+        quantizer = NVFP4StaticQuantizer(quant_attribute_cfg=cfg).to(device)
+        quantizer.amax = torch.tensor([8.0], device=device)
+        quantizer.global_amax = torch.tensor(1.0, device=device)
+        weight = torch.ones(1, 16, device=device)
+
+        weight_scale, _ = NVFP4QTensor.get_weights_scaling_factor_from_quantizer(quantizer, weight)
+
+        assert weight_scale.dtype == torch.float8_e4m3fn
+        assert torch.isfinite(weight_scale.float()).all()
+        assert torch.equal(weight_scale.float(), torch.full_like(weight_scale.float(), 448.0))
+
 
 @pytest.mark.parametrize("device", ["cuda"])
 class TestNVFP4MSECalibrator:

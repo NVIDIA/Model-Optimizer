@@ -26,6 +26,7 @@ from _test_utils.torch.megatron.models import (
 from _test_utils.torch.megatron.utils import (
     compare_amax_sync_across_expert_parallel,
     copy_weights_from_grouped_to_non_grouped,
+    get_batch,
     get_forward,
     initialize_for_megatron,
     run_mcore_inference,
@@ -692,6 +693,45 @@ def test_te_grouped_vs_sequential_quantize(dist_workers_size_4, quant_cfg):
     dist_workers_size_4.run(
         partial(_test_te_grouped_vs_sequential_quantize_helper, 1, 2, quant_cfg)
     )
+
+
+def _test_auto_quantize_moe_ep_helper(rank, size):
+    initialize_for_megatron(
+        tensor_model_parallel_size=1,
+        expert_model_parallel_size=size,
+        seed=SEED,
+    )
+    model = _gpt_model_provider(
+        tp_size=1,
+        ep_size=size,
+        hidden_size=32,
+        num_moe_experts=4,
+        moe_grouped_gemm=False,
+        transformer_impl="modelopt",
+    )
+
+    def forward_step(model, batch):
+        input_ids, labels, position_ids, attention_mask, loss_mask = batch
+        return model.forward(
+            input_ids=input_ids,
+            position_ids=position_ids,
+            attention_mask=attention_mask,
+            labels=labels,
+            loss_mask=loss_mask,
+        )
+
+    auto_quantize_helper(
+        model,
+        data_loader=[get_batch(model, batch_size=2) for _ in range(2)],
+        forward_step=forward_step,
+        forward_backward_step=lambda m, b: forward_step(m, b).mean().backward(),
+        quantization_formats=[mtq.NVFP4_DEFAULT_CFG, mtq.FP8_DEFAULT_CFG],
+    )
+
+
+def test_auto_quantize_moe_ep(dist_workers_size_2):
+    """auto_quantize must sum score/cost across EP ranks and pick a consistent recipe."""
+    dist_workers_size_2.run(_test_auto_quantize_moe_ep_helper)
 
 
 @pytest.mark.parametrize("ep_size", [1, 2])

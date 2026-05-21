@@ -557,6 +557,22 @@ class _CustomDataset(torch.utils.data.Dataset):
         return len(next(iter(self.encodings.values())))
 
 
+def get_dataloader_from_dataset(
+    dataset,
+    batch_size: int = 1,
+    distributed: bool = False,
+    sampler_kwargs: dict | None = None,
+    shuffle: bool = False,
+) -> DataLoader:
+    """Wrap a pre-tokenized torch Dataset in a DataLoader, with optional DistributedSampler."""
+    if distributed:
+        from torch.utils.data.distributed import DistributedSampler
+
+        sampler = DistributedSampler(dataset, **(sampler_kwargs or {}))
+        return DataLoader(dataset, batch_size=batch_size, sampler=sampler)
+    return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
+
+
 def get_dataset_dataloader(
     dataset_name: str | list[str] = "cnn_dailymail",
     tokenizer: "PreTrainedTokenizerBase | None" = None,
