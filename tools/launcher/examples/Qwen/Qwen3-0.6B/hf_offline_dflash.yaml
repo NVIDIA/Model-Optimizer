@@ -33,7 +33,11 @@ pipeline:
     args:
       - --input-data modules/Model-Optimizer/examples/dataset/synthetic_conversations_1k.jsonl
       - --output-dir <<global_vars.hidden_states_dir>>
-      - --aux-layers dflash
+      # Explicit layer ids matching build_target_layer_ids(28, 2) for Qwen3-0.6B
+      # (28 hidden layers, 2-layer draft). The --aux-layers=dflash preset is
+      # hardcoded to 5 draft layers in common.py and would mis-shape against
+      # dflash_architecture_config.num_hidden_layers=2 below.
+      - --aux-layers 1,25
       - --answer-only-loss
       - --chat-template examples/Qwen/Qwen3-0.6B/chat_template_train.jinja
       - --debug-max-num-conversations 200
