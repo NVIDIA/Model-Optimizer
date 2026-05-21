@@ -2,12 +2,7 @@
 
 ## Task Details
 
-- Task: `ns_gpqa`
-- Harness: NeMo Skills, chat
-- Primary metric: `pass@1[avg-of-32] symbolic_correct`
 - Run time: Short
-- Samples: 32
-- Requires: None
 - Reference: <https://docs.nvidia.com/nemo/evaluator/latest/evaluation/benchmarks/catalog/all/harnesses/nemo_skills.html>
 
 ## Params

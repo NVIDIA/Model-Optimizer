@@ -2,12 +2,7 @@
 
 ## Task Details
 
-- Task: `nemo_skills.ns_mmlu_pro`
-- Harness: NeMo Skills, chat
-- Primary metric: `pass@1 symbolic_correct`
 - Run time: Short
-- Repeats: 1
-- Requires: None
 - Reference: <https://docs.nvidia.com/nemo/evaluator/latest/evaluation/benchmarks/catalog/all/harnesses/nemo_skills.html>
 
 ## Params

@@ -2,12 +2,7 @@
 
 ## Task Details
 
-- Task: `tau2_bench_telecom`
-- Harness: tau2_bench, chat
-- Primary metric: `pass_1`
 - Run time: Long
-- Samples: 3
-- Requires: `USER_API_KEY`
 - Reference: <https://docs.nvidia.com/nemo/evaluator/latest/evaluation/benchmarks/catalog/all/harnesses/tau2_bench.html#tau2-bench-tau2-bench-telecom>
 
 ## Params

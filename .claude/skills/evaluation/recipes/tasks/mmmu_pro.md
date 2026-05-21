@@ -2,12 +2,7 @@
 
 ## Task Details
 
-- Task: `ns_mmmu_pro`
-- Harness: NeMo Skills, multimodal chat
-- Primary metric: `pass@1 symbolic_correct`
 - Run time: Medium
-- Repeats: 1
-- Requires: `HF_TOKEN`
 - Reference: <https://docs.nvidia.com/nemo/evaluator/latest/evaluation/benchmarks/catalog/all/harnesses/nemo_skills.html>
 
 ## Params
