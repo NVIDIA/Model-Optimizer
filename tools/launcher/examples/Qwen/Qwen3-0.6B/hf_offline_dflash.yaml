@@ -3,15 +3,17 @@
 # 2-step pipeline mirroring hf_online_dflash.yaml but trains from pre-dumped
 # hidden states instead of streaming the base model forward at training time.
 #
-#   task_0: Dump hidden states from Qwen3-0.6B over the packaged synthetic
-#           dataset. compute_hidden_states_hf.py captures aux-layer activations
-#           per conversation; the wrapper auto-tags missing conversation_id
-#           fields so the packaged dataset flows in without preprocessing.
+#   task_0: Dump base-model hidden states via TRT-LLM
+#           (common/eagle3/dump_offline_data.sh, reused as-is — the script is
+#           algorithm-agnostic and just runs compute_hidden_states_trtllm.py
+#           with the args we pass through).
 #   task_1: Train DFlash with data.offline_data_path pointing at the dump.
 #           Triggers DFlashConfig._derive_dflash_offline, which deletes base-
 #           model layers post-convert to save memory.
 #
-# Lightweight single-GPU regression. No external data dependencies.
+# Lightweight single-GPU regression. No external data dependencies: uses the
+# packaged synthetic_conversations_1k.jsonl (conversation_id field is provided
+# at-source so compute_hidden_states_trtllm.py's assertion passes).
 #
 # Reference: "DFlash: Block Diffusion for Flash Speculative Decoding" (arXiv:2602.06036)
 #
@@ -25,22 +27,25 @@ pipeline:
     hf_model: /hf-local/Qwen/Qwen3-0.6B
     hidden_states_dir: /scratchspace/dflash_qwen3_0.6b_hidden_states
 
-  # Step 1: Dump base-model hidden states over the synthetic dataset.
+  # Step 1: Dump base-model hidden states via TRT-LLM (reuses the eagle dump script).
   task_0:
-    script: common/specdec/dump_hidden_states_hf.sh
+    script: common/eagle3/dump_offline_data.sh
     args:
-      - --model <<global_vars.hf_model>>
       - --input-data modules/Model-Optimizer/examples/dataset/synthetic_conversations_1k.jsonl
       - --output-dir <<global_vars.hidden_states_dir>>
       - --aux-layers dflash
       - --answer-only-loss
       - --chat-template examples/Qwen/Qwen3-0.6B/chat_template_train.jinja
       - --debug-max-num-conversations 200
+      - --tp 1
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.hf_model>>
     slurm_config:
       _factory_: "slurm_factory"
       nodes: 1
       ntasks_per_node: 1
       gpus_per_node: 1
+      container: nvcr.io/nvidia/tensorrt-llm/release:1.2.0
 
   # Step 2: Train DFlash on the dumped hidden states. Mirrors hf_online_dflash.yaml's
   # task_0 args except data.data_path is replaced with data.offline_data_path.
