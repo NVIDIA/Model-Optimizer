@@ -15,7 +15,16 @@
 
 # Methodology version. Bump:
 #   - minor (0.X.0) when adding a new metric or strictly-additive provenance field
-#   - major (X.0.0) when changing how an existing metric is computed
+#   - major (X.0.0) when changing how an existing metric is computed OR its
+#     on-disk field names (incompatible with prior consumers / visualizers)
 # The visualizer aggregates runs by major version to avoid apple-to-orange
 # comparisons across methodology changes.
-__version__ = "0.1.0"
+#
+# 1.0.0: rename Request_AR / Category_AR / Average_AR → *_AL across the
+#        SpecBench / AcceptanceRate / MTBench metric writers, AND add
+#        Joint_Acceptance_Rate to the AcceptanceRate metric. The renamed
+#        values were always acceptance LENGTH (mean tokens generated per
+#        inference step), not a rate, and the visualizer reads *_AL.
+#        Pre-1.0.0 runs in S3 have *_AR and no Joint_AR; they must be
+#        re-run or post-processed before comparing.
+__version__ = "1.0.0"

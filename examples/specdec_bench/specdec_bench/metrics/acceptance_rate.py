@@ -55,23 +55,31 @@ class AcceptanceRate(Metric):
             self.out["Conditional_Acceptance_Rate"][k] = running_len / sum_lengths / prev_ratio
             prev_ratio = running_len / sum_lengths
             running_len -= v
+        # Joint acceptance rate at step k = product of conditional acceptance
+        # rates at steps 1..k = probability that ≥k tokens are accepted in
+        # a row. The visualizer renders this as a separate panel.
+        self.out["Joint_Acceptance_Rate"] = {}
+        running_joint = 1.0
+        for k, cond_ar in self.out["Conditional_Acceptance_Rate"].items():
+            running_joint *= cond_ar
+            self.out["Joint_Acceptance_Rate"][k] = running_joint
 
     def process_final(self, text_outputs):
         all_ar = []
         lengths = {}
-        self.out["Request_AR"] = {}
+        self.out["Request_AL"] = {}
         self.prompt_ar = dict(sorted(self.prompt_ar.items(), key=lambda x: x[0]))
         for request_id, turns in self.prompt_ar.items():
-            self.out["Request_AR"][request_id] = {}
+            self.out["Request_AL"][request_id] = {}
             for turn_id, turn in turns.items():
                 ar = sum(turn) / len(turn)
-                self.out["Request_AR"][request_id][turn_id] = ar
+                self.out["Request_AL"][request_id][turn_id] = ar
                 all_ar.append(ar)
                 self._get_lengths(turn, lengths)
-                print(request_id, turn_id, self.out["Request_AR"][request_id][turn_id])
+                print(request_id, turn_id, self.out["Request_AL"][request_id][turn_id])
         average_ar = sum(all_ar) / len(all_ar)
         print("Average AR:", average_ar)
-        self.out["Average_AR"] = average_ar
+        self.out["Average_AL"] = average_ar
         self._process_lengths(lengths)
         self.write()
         self._format_write_output(text_outputs)
