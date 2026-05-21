@@ -330,10 +330,8 @@ def main(args):
     quant_cfg = QUANT_CFG_CHOICES[args.qformat]
 
     quant_cfg = build_quant_cfg(
-        args.qformat,
         quant_cfg,
         args.awq_block_size,
-        model_type,
     )
 
     enable_quant_kv_cache = args.kv_cache_qformat != "none"
