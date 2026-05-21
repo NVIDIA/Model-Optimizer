@@ -94,6 +94,7 @@ def run_vllm_latency_benchmark(model_path: Path, runtime_config: RuntimeConfig) 
     if output_json_path.exists():
         with open(output_json_path) as f:
             vllm_results = json.load(f)
-            vllm_results = vllm_results["avg_latency"] * 1000  # seconds -> milliseconds
+        if "avg_latency" in vllm_results:
+            return vllm_results["avg_latency"] * 1000  # seconds -> milliseconds
 
-    return vllm_results
+    raise RuntimeError(f"vLLM benchmark output not found at {output_json_path}")

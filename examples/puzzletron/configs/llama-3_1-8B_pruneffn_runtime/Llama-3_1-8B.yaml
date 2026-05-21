@@ -1,7 +1,7 @@
 defaults:
-  - pruning: ffn_pruning
-  - scoring: ../validate_solutions_defaults
-  - realize_model: ../validate_solutions_defaults
+  - ../llama-3_1-8B_pruneffn_memory/pruning/ffn_pruning@pruning
+  - ../llama-3_1-8B_pruneffn_memory/validate_solutions_defaults@scoring
+  - ../llama-3_1-8B_pruneffn_memory/validate_solutions_defaults@realize_model
   - bypass:
   - override hydra/hydra_logging: disabled
   - _self_
@@ -26,7 +26,7 @@ calc_subblock_stats:
   prefill_queue_size: 0
   allocate_prefill_query: false
   benchmark_iterations: # Set to a number (e.g., 1000) to enable runtime benchmarking
-  merge_with_existing_stats: true
+  merge_with_existing_stats: false
   subblock_stats_filename: "subblock_stats.json"
   moe_stats_filename: "moe_stats.json"
   runtime_stats:
@@ -42,7 +42,7 @@ scoring:
   teacher_dir: ${to_path:${teacher_dir}}
   output_dir: ${puzzle_dir}/single_sequence_replacement_solutions--validation
 
-  eval_samples: 8
+  eval_samples: 128
   micro_batch_size: 1
   seed: 42
   shuffle_seed: 444
@@ -76,6 +76,9 @@ mip:
     - stats.ffn_memory_mib
     - stats.ffn_num_params
     - stats.attention_num_params
+
+  human_constraints:
+    target_latency: 21
 
   mip_constraints:
   metric_overrides:

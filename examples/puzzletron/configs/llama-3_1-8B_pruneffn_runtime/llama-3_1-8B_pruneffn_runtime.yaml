@@ -16,14 +16,8 @@ puzzle_dir: /workspace/puzzle_dir
 calc_subblock_stats:
   runtime_stats:
     enabled: true
-    backend: vllm
     num_warmup_iters: 2
     num_iters: 10
-
-# MIP memory constraint (in MiB)
-mip:
-  human_constraints:
-    target_latency: 21
 
 # FFN intermediate sizes to search over (heterogeneous architecture)
 pruning:
