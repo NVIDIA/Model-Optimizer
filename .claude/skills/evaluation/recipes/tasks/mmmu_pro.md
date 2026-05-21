@@ -21,6 +21,12 @@ Use this inside the top-level `evaluation.tasks` list:
       params:
         extra:
           num_repeats: 1
+    target:
+      api_endpoint:
+        adapter_config:
+          params_to_remove:
+            - max_new_tokens
+            - max_completion_tokens
 ```
 
 ## Score Extraction

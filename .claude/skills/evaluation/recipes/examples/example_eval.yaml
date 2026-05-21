@@ -19,13 +19,16 @@
 #     -o execution.account=<slurm_account> \
 #     -o execution.output_dir=/path/to/output
 #
-# For quantized checkpoints, also add the quantization flag:
-#   -o 'deployment.extra_args=--max-model-len 32768 --trust-remote-code --quantization modelopt_fp4'
+# For quantized checkpoints, do not add a vLLM quantization flag by default.
+# Recent vLLM reads ModelOpt quantization metadata from the checkpoint. Only add
+# an explicit flag if the model card, vLLM version, or dry-run error requires it.
+#   -o 'deployment.extra_args=--max-model-len 32768 --trust-remote-code'
 #
 # Run a single task:
 #   nel run --config ... -t ns_gpqa
 #
-# Canary (2 samples): use this before a full run to validate logs and tune parallelism.
+# Canary (2 samples): use this before a full run to validate logs and tune
+# parallelism.
 #   nel run --config ... -o ++evaluation.nemo_evaluator_config.config.params.limit_samples=2
 defaults:
   - execution: slurm/default
