@@ -26,7 +26,7 @@
       "Inspects canary logs for judge, evaluation container, deployment, and code-execution errors before allowing the full run",
       "Tunes parallelism from canary results and avoids over-raising it for judge-backed or code-execution tasks",
       "Before reporting final scores, inspects full-run logs for judge, inference server, code-execution, reasoning parsing, dropped-sample, and scoring errors",
-      "Keeps final-run validity checks separate from baseline-vs-quantized comparability checks",
+      "Routes completed baseline-vs-quantized delta checks to the compare-results skill after final-run validation",
       "Provides monitoring commands (nel status, nel info --logs) and inspects server logs via SSH when asked"
     ]
   },
@@ -48,7 +48,7 @@
       "Runs dry-run, then a limited-samples canary with limit_samples=10, then full evaluation only after canary log checks pass",
       "Tunes parallelism from the canary and avoids over-raising it when benchmarks depend on inference judges or code execution containers",
       "Before reporting accuracy, scans final run logs and sample accounting for runtime errors, dropped/skipped samples, reasoning parsing problems, and wrong score-field usage",
-      "Runs comparability verification as a separate step after final-run validation when comparing baseline and quantized results",
+      "Routes baseline-vs-quantized comparability verification to the compare-results skill after final-run validation",
       "Reports accuracy results per benchmark only after log validation passes"
     ]
   },
@@ -68,7 +68,7 @@
       "Runs dry-run validation and a limited-samples canary before full evaluation",
       "Checks canary logs for judge, container, deployment, and code-execution failures before treating the run as ready",
       "Checks final run logs and sample accounting before accepting result files as complete and comparable",
-      "Separately verifies baseline-vs-quantized comparability before presenting an accuracy delta",
+      "Routes baseline-vs-quantized comparability verification to the compare-results skill before presenting an accuracy delta",
       "Provides SSH-based log monitoring commands for SLURM execution"
     ]
   }

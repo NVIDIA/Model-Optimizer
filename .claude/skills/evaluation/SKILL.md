@@ -1,6 +1,6 @@
 ---
 name: evaluation
-description: Evaluates accuracy of quantized or unquantized LLMs using NeMo Evaluator Launcher (NEL). Triggers on "evaluate model", "benchmark accuracy", "run MMLU", "evaluate quantized model", "accuracy drop", "run nel". Handles deployment, config generation, and evaluation execution. Not for quantizing models (use ptq) or deploying/serving models (use deployment).
+description: Evaluates accuracy of quantized or unquantized LLMs using NeMo Evaluator Launcher (NEL). Triggers on "evaluate model", "benchmark accuracy", "run MMLU", "evaluate quantized model", "run nel". Handles deployment, config generation, and evaluation execution. Not for quantizing models (use ptq), deploying/serving models (use deployment), or comparing completed baseline-vs-quantized results (use compare-results).
 license: Apache-2.0
 # Based on nel-assistant skill from NeMo Evaluator Launcher (commit f1fa073)
 # https://github.com/NVIDIA-NeMo/Evaluator/tree/f1fa073/packages/nemo-evaluator-launcher/.claude/skills/nel-assistant
@@ -47,7 +47,6 @@ Config Generation Progress:
   - [ ] Step 8.2: Limited-samples canary
   - [ ] Step 8.3: Full evaluation
 - [ ] Step 9: Verify completed evaluation run
-- [ ] Step 10: Verify baseline-vs-quantized comparability
 ```
 
 **Step 1: Check prerequisites**
@@ -375,17 +374,8 @@ For score harvesting, use the `Score Extraction` section from the matching task
 reference in `recipes/tasks/<task>.md`. Do not rely on ad hoc `results.yml`
 greps when a task reference defines the canonical score and stderr fields.
 
-**Step 10: Verify baseline-vs-quantized comparability**
-
-Before treating a baseline-vs-quantized delta as a model quality result, verify the validated runs are comparable:
-
-1. Confirm the prompt text and chat template/rendered messages match between the baseline and quantized evaluations.
-2. Confirm generation settings match, including temperature, top_p, top_k, max tokens, stop strings, reasoning mode/budget, and any task-specific overrides.
-3. Confirm reasoning-trace handling is consistent between runs.
-4. Confirm the number of evaluated/scored samples matches for each task and split.
-5. Confirm the same accuracy metric/score field is used for the baseline and quantized comparison.
-
-Report the comparability summary alongside the score: prompt/template status, generation-setting status, sample-count status, reasoning-handling status, and the exact score field used. If any item differs, either rerun with matched settings or label the result as not an apples-to-apples quantization comparison.
+For baseline-vs-quantized deltas, use the compare-results skill after run
+validation.
 
 **NEL-specific diagnostics** (for debugging failures):
 
@@ -429,5 +419,4 @@ Config Generation Progress:
   - [ ] Step 8.2: Limited-samples canary
   - [ ] Step 8.3: Full evaluation
 - [ ] Step 9: Verify completed evaluation run
-- [ ] Step 10: Verify baseline-vs-quantized comparability
 ```
