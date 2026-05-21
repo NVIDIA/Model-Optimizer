@@ -23,7 +23,7 @@
 # `huggingface/qwen3_5/ptq/nvfp4_mlp-fp8_attn-kv_fp8_cast.quant_cfg.yaml`.
 
 imports:
-  quant_cfg: huggingface/qwen3_5/ptq/nvfp4_mlp-fp8_attn-kv_fp8_cast.quant_cfg
+  shared_quant_cfg: huggingface/qwen3_5/ptq/nvfp4_mlp-fp8_attn-kv_fp8_cast.quant_cfg
 
 metadata:
   recipe_type: ptq
@@ -38,4 +38,4 @@ quantize:
     method: max
     layerwise: false
   quant_cfg:
-    - $import: quant_cfg
+    - $import: shared_quant_cfg
