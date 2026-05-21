@@ -28,7 +28,6 @@ Coverage:
 import os
 from dataclasses import dataclass
 
-from common.megatron_lm.quantize.task import MegatronLMQuantizeConfig, MegatronLMQuantizeTask
 from core import (
     _FACTORY_REGISTRY,
     GlobalVariables,
@@ -224,83 +223,3 @@ class TestReportVersions:
         captured = capsys.readouterr()
         assert "Version Report" in captured.out
         assert "unknown" in captured.out
-
-
-class TestMaterializeFromConfig:
-    """Regression coverage for typed-task config materialization.
-
-    The original bug: MegatronLMQuantizeTask derived `script`/`args`/`environment` in
-    __post_init__. Under nemo_run/Fiddle YAML loading, __post_init__ runs before nested
-    fields like `config` are populated, so the derivation produced None and never re-ran.
-    Result: every typed-config task in the launcher silently ran with an empty
-    QUANT_CFG env var and the downstream M-LM script defaulted to FP8_DEFAULT_CFG.
-
-    These tests exercise both call paths: direct Python construction (which never
-    triggered the bug) and the Fiddle-style "construct then assign" pattern (which did).
-    """
-
-    def _env_dict(self, task):
-        return {k: v for d in task.environment for k, v in d.items()}
-
-    def test_direct_construction_materializes_environment(self):
-        t0 = MegatronLMQuantizeTask(
-            config=MegatronLMQuantizeConfig(quant_cfg="NVFP4_DEFAULT_CFG", mmlu_lower_bound=0.68),
-        )
-        t1 = MegatronLMQuantizeTask(
-            config=MegatronLMQuantizeConfig(quant_cfg="FP8_DEFAULT_CFG", mmlu_lower_bound=0.76),
-        )
-        pipeline = SandboxPipeline(task_0=t0, task_1=t1)
-
-        env_0 = self._env_dict(pipeline.tasks[0])
-        env_1 = self._env_dict(pipeline.tasks[1])
-        assert env_0["QUANT_CFG"] == "NVFP4_DEFAULT_CFG"
-        assert env_0["MMLU_LOWER_BOUND"] == "0.68"
-        assert env_1["QUANT_CFG"] == "FP8_DEFAULT_CFG"
-        assert env_1["MMLU_LOWER_BOUND"] == "0.76"
-
-    def test_post_init_assignment_still_materializes(self):
-        """Simulates Fiddle's two-phase build: dataclass __init__ with defaults, then field assignment."""
-        t0 = MegatronLMQuantizeTask()
-        assert t0.environment is None  # __post_init__ ran with config=None — early-exited
-        t0.config = MegatronLMQuantizeConfig(quant_cfg="NVFP4_DEFAULT_CFG")
-
-        t1 = MegatronLMQuantizeTask()
-        t1.config = MegatronLMQuantizeConfig(quant_cfg="FP8_DEFAULT_CFG")
-
-        # SandboxPipeline.__post_init__ calls materialize_from_config() on every task,
-        # which is what makes the typed config take effect when Fiddle has populated
-        # `config` post-construction.
-        pipeline = SandboxPipeline(task_0=t0, task_1=t1)
-
-        env_0 = self._env_dict(pipeline.tasks[0])
-        env_1 = self._env_dict(pipeline.tasks[1])
-        assert env_0["QUANT_CFG"] == "NVFP4_DEFAULT_CFG"
-        assert env_1["QUANT_CFG"] == "FP8_DEFAULT_CFG"
-
-    def test_no_config_leaves_fields_untouched(self):
-        """A plain SandboxTask (no typed config) survives pipeline construction unchanged."""
-        t0 = SandboxTask0(script="x.sh", environment=[{"K": "v"}])
-        pipeline = SandboxPipeline(task_0=t0)
-        assert pipeline.tasks[0].script == "x.sh"
-        assert pipeline.tasks[0].environment == [{"K": "v"}]
-
-    def test_global_vars_resolve_inside_materialized_env(self):
-        """Global_vars interpolation runs after materialize_from_config.
-
-        Confirms that <<global_vars.X>> placed inside a typed-config field still gets
-        resolved on the materialized environment list.
-        """
-        t0 = MegatronLMQuantizeTask(
-            config=MegatronLMQuantizeConfig(
-                model="<<global_vars.hf_model>>",
-                quant_cfg="NVFP4_DEFAULT_CFG",
-                hf_local="",
-            ),
-        )
-        pipeline = SandboxPipeline(
-            task_0=t0,
-            global_vars=GlobalVariables(hf_model="Qwen/Qwen3-8B"),
-        )
-        env_0 = self._env_dict(pipeline.tasks[0])
-        assert env_0["MLM_MODEL_CFG"] == "Qwen/Qwen3-8B"
-        assert env_0["HF_MODEL_CKPT"] == "Qwen/Qwen3-8B"

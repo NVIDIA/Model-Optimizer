@@ -15,7 +15,21 @@
 
 """Megatron-LM PTQ quantization task with typed configuration.
 
-Example YAML (typed config):
+NOTE — currently NOT wired into SandboxPipeline:
+    Under nemo_run/Fiddle YAML loading, dataclass `__post_init__` runs *before*
+    nested fields like `config` are populated, so `self.config` is None at that
+    point and `materialize_from_config()` returns early. The previous fix —
+    a `materialize_from_config()` hook called explicitly by
+    `SandboxPipeline.__post_init__` after Fiddle finishes building — was
+    removed to keep `core.py` minimal. As a result, typed-config YAMLs of the
+    form `_target_: ...MegatronLMQuantizeTask` no longer materialize. Until
+    that hook is reinstated, use the raw `script`/`args`/`environment` form in
+    YAMLs (see `examples/Qwen/Qwen3-8B/megatron_lm_ptq.yaml`).
+
+    This module is intentionally retained as a reference for the eventual
+    re-enablement of typed task configs.
+
+Example YAML (typed config — currently disabled, see note above):
 
     task_0:
       _target_: common.megatron_lm.quantize.task.MegatronLMQuantizeTask
@@ -29,7 +43,7 @@ Example YAML (typed config):
         _factory_: "slurm_factory"
         nodes: 1
 
-Example YAML (raw SandboxTask — still works):
+Example YAML (raw SandboxTask — the supported form today):
 
     task_0:
       script: common/megatron_lm/quantize/quantize.sh
@@ -39,7 +53,7 @@ Example YAML (raw SandboxTask — still works):
       environment:
         - MLM_MODEL_CFG: Qwen/Qwen3-8B
         - QUANT_CFG: NVFP4_DEFAULT_CFG
-        - TP: 4
+        - TP: "4"
 """
 
 from dataclasses import dataclass
