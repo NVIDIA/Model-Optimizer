@@ -175,7 +175,9 @@ class _PresetCfgChoices(Mapping[str, dict[str, Any]]):
             self._cache[canon] = load_config(
                 f"{self._subdir}/{canon}", schema_type=QuantizeConfig
             ).model_dump(exclude_unset=True)
-        return self._cache[canon]
+        # Deepcopy on retrieval so callers can freely mutate the returned config
+        # (append per-model overrides, etc.) without poisoning the cached entry.
+        return copy.deepcopy(self._cache[canon])
 
     def __iter__(self) -> Iterator[str]:
         yield from sorted(self._presets | set(self._aliases))
@@ -189,8 +191,21 @@ QUANT_CFG_CHOICES: Mapping[str, dict[str, Any]] = _PresetCfgChoices(
 )
 KV_QUANT_CFG_CHOICES: Mapping[str, dict[str, Any]] = _PresetCfgChoices(_KV_QFORMAT_PRESET_DIR)
 
-# Formats supported by mtq.auto_quantize unified-checkpoint export. This is a
-# curated subset of QUANT_CFG_CHOICES — not all presets work with auto_quantize.
+# Guard against a future ``none.yaml`` (or alias) colliding with the disable sentinel:
+# argparse would silently allow both, but the runtime branch on ``!= _KV_NONE`` would
+# become ambiguous and the user couldn't reach the real preset.
+assert _KV_NONE not in KV_QUANT_CFG_CHOICES, (
+    f"_KV_NONE sentinel {_KV_NONE!r} collides with a KV preset; rename the preset."
+)
+
+# Formats supported by mtq.auto_quantize unified-checkpoint export.
+#
+# This stays hardcoded — and intentionally not derived from the preset directory —
+# because auto_quantize compatibility is a property of the export path (the unified
+# HF checkpoint writer, TRT-LLM consumer constraints, layer-wise mixing rules), not
+# of the YAML itself. A preset can exist and be valid for plain PTQ while not being
+# safe to mix into an auto_quantize search. Update this set when adding/removing a
+# format from auto_quantize support.
 _AUTO_QUANTIZE_QFORMATS: frozenset[str] = frozenset(
     {
         "fp8",
