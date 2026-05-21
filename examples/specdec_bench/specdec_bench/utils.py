@@ -26,6 +26,12 @@ from transformers import AutoTokenizer
 from . import __version__ as specdec_bench_version
 
 _SENSITIVE_SUBSTRINGS = ("token", "key", "secret", "password")
+# Keys whose names contain a sensitive substring but are NOT actually secrets.
+# Without this allowlist `tokenizer` redacts the model path because it contains
+# `token`, losing meaningful provenance.
+_SENSITIVE_KEY_ALLOWLIST = frozenset(
+    {"tokenizer", "tokenizer_path", "tokenizer_mode", "tokenizer_revision"}
+)
 
 
 def get_tokenizer(path, trust_remote_code=False):
@@ -164,13 +170,16 @@ def _checkpoint_provenance(model_dir):
         return {"path": str(model_dir)}
 
 
+def _is_sensitive_key(key):
+    klow = key.lower()
+    if klow in _SENSITIVE_KEY_ALLOWLIST:
+        return False
+    return any(s in klow for s in _SENSITIVE_SUBSTRINGS)
+
+
 def _redact_config(config):
     return {
-        key: (
-            "***REDACTED***"
-            if any(part in key.lower() for part in _SENSITIVE_SUBSTRINGS)
-            else value
-        )
+        key: ("***REDACTED***" if _is_sensitive_key(key) else value)
         for key, value in config.items()
     }
 
@@ -191,12 +200,22 @@ def dump_env(args, save_dir, overrides=None):
     config["argv"] = sys.argv[:]
 
     # Provenance for reproducibility / apple-to-orange guarding.
+    # Each *_sha and modelopt_version prefers an env var set by the harness
+    # (because git/.git is typically not present inside the runtime container),
+    # then falls back to runtime detection for standalone usage outside the
+    # harness. container_image and nmm_sandbox_sha are env-only — there is no
+    # reasonable in-process way to know them.
     config["specdec_bench_version"] = specdec_bench_version
     specdec_bench_dir = Path(__file__).resolve().parent
-    config["specdec_bench_sha"] = _git_sha(specdec_bench_dir)
-    config["modelopt_version"] = _get_modelopt_version()
-    config["modelopt_sha"] = _git_sha(specdec_bench_dir.parents[2])  # examples/specdec_bench/specdec_bench → modelopt root
-    # Harness-provided env vars (set by nmm-sandbox / launcher); null when standalone.
+    config["specdec_bench_sha"] = (
+        os.environ.get("SPECDEC_BENCH_SHA") or _git_sha(specdec_bench_dir)
+    )
+    config["modelopt_version"] = (
+        os.environ.get("MODELOPT_VERSION") or _get_modelopt_version()
+    )
+    config["modelopt_sha"] = (
+        os.environ.get("MODELOPT_SHA") or _git_sha(specdec_bench_dir.parents[2])
+    )
     config["nmm_sandbox_sha"] = os.environ.get("NMM_SANDBOX_SHA") or None
     config["container_image"] = os.environ.get("CONTAINER_IMAGE") or None
     # Checkpoint fingerprint.
