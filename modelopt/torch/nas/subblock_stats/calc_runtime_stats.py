@@ -99,7 +99,7 @@ def calc_model_runtime(model: LlamaForCausalLM, runtime_config: RuntimeConfig) -
 @cache
 def calc_subblock_runtime(
     runtime_config: RuntimeConfig,
-    subblock_config: SubblockConfig,
+    subblock_config: SubblockConfig | None,
 ) -> float:
     """Measure total runtime of a repeated subblock via vLLM latency benchmark."""
     block_config: BlockConfig | None = None
