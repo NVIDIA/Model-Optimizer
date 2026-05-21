@@ -371,8 +371,8 @@ For each completed invocation/run directory, whether baseline, quantized, or a s
 
 Report the run-validation summary before any score: log scan status, sample accounting, reasoning/answer parsing status, and any errors or warnings found. If any validation item fails, either rerun/fix it or label the result as incomplete or invalid.
 
-For score harvesting, use the `Score Extraction` Python snippet from the matching
-task reference in `recipes/tasks/<task>.md`. Do not rely on ad hoc `results.yml`
+For score harvesting, use the `Score Extraction` section from the matching task
+reference in `recipes/tasks/<task>.md`. Do not rely on ad hoc `results.yml`
 greps when a task reference defines the canonical score and stderr fields.
 
 **Step 10: Verify baseline-vs-quantized comparability**
