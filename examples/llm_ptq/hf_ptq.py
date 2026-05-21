@@ -96,6 +96,8 @@ RAND_SEED = 1234
 # --kv_cache_qformat CLI vocabularies. Each ``*.yaml`` file in these directories is
 # automatically discovered and exposed as a valid CLI value via _PresetCfgChoices,
 # so no code change in this script is required when a YAML is added or removed.
+# This is deliberate: every preset YAML is CLI-exposed, there is no separate
+# allow-list — the directory listing is the policy.
 #
 # That said, prefer NOT to add new YAMLs to these preset directories either. The
 # long-term direction is to retire --qformat / --kv_cache_qformat entirely in favour
