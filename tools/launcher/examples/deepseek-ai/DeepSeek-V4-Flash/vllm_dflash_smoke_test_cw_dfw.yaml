@@ -1,0 +1,79 @@
+# vLLM DFlash smoke test for deepseek-ai/DeepSeek-V4-Flash — CW-DFW H100 variant.
+#
+# 2-task pipeline:
+#   task_0  — creates a randomly-initialized DFlash draft checkpoint at /scratchspace/dflash_draft
+#             from the bundled config.json + dflash.py (4-layer Qwen3 scaffold based on z-lab's
+#             DFlash architecture reference). Requires only 1 GPU.
+#   task_1  — launches a vLLM server with DeepSeek-V4-Flash as the target model and the draft
+#             checkpoint created by task_0. Verifies the inference pipeline starts and generates
+#             tokens end-to-end ("The capital of France is" → " Paris.").
+#
+# NOTE: the draft model uses random weights — this smoke test validates the DFlash inference
+# stack (patching, KV cache allocation, speculative decoding loop), NOT acceptance rate or
+# generation quality. Replace draft_model with a properly trained checkpoint for production use.
+#
+# This container (deepseekv4-cu130) does not yet natively support deepseek_v4 as a DFlash
+# target. patch_vllm_dflash.py bridges the gap by patching vLLM at startup.
+#
+# Key config choices:
+#   block_size=256   — required: SWA layers use window_size=256 so the page constraint
+#                      max(sm_page_sizes) ≤ max(all_page_sizes) forces block_size ≥ 256
+#   gpu_memory_utilization=0.85 — leaves ~4 GB headroom per GPU for Triton JIT compilation
+#                                  of the DeepSeek compressor kernel on first inference
+#   enforce_eager              — disables CUDA graph capture; avoids NoneType tensor errors
+#                                in deepseek_v4_attention CUDA graph execution with DFlash patches
+#   max_num_batched_tokens=32768 — vLLM's default; required so spec-decoding token budget
+#                                   (max_num_batched_tokens minus per-request draft overhead)
+#                                   stays positive. Setting this too low (e.g. 4096) causes
+#                                   "max_num_scheduled_tokens is set to negative value" error.
+#
+# Reference: "DFlash: Block Diffusion for Flash Speculative Decoding" (arXiv:2502.06036)
+#
+# Usage (nmm-sandbox):
+#   uv run slurm.py --yaml modules/Model-Optimizer/tools/launcher/examples/deepseek-ai/DeepSeek-V4-Flash/vllm_dflash_smoke_test_cw_dfw.yaml --yes
+#
+# Usage (ModelOpt launcher):
+#   uv run launch.py --yaml examples/deepseek-ai/DeepSeek-V4-Flash/vllm_dflash_smoke_test_cw_dfw.yaml --yes
+
+job_name: DeepSeek-V4-Flash_DFlash_smoke_cw_dfw
+
+pipeline:
+  global_vars:
+    hf_model: /hf-local/deepseek-ai/DeepSeek-V4-Flash
+    draft_model: /scratchspace/dflash_draft
+
+  task_0:
+    script: examples/deepseek-ai/DeepSeek-V4-Flash/create_dflash_draft.sh
+    environment:
+      - OUT: "/scratchspace/dflash_draft"
+    slurm_config:
+      _factory_: "cw_dfw_slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 1
+      container: "vllm/vllm-openai:deepseekv4-cu130"
+
+  task_1:
+    script: common/specdec/vllm_smoke_test.sh
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+      - DRAFT_MODEL: <<global_vars.draft_model>>
+      - SPEC_METHOD: "dflash"
+      - NUM_SPEC_TOKENS: "15"
+      - TP_SIZE: "8"
+      - KV_CACHE_DTYPE: "fp8"
+      - BLOCK_SIZE: "256"
+      - TRUST_REMOTE_CODE: "1"
+      - VLLM_USE_DEEP_GEMM: "1"
+      - FORCE_AF_V2: "1"
+      - VLLM_EXTRA_ARGS: "--enforce-eager"
+      - GPU_MEM_UTIL: "0.80"
+      - MAX_BATCHED_TOKENS: "16384"
+      - COPY_MODEL_TO_TMPFS: "1"
+      - VLLM_PATCH_SCRIPT: "examples/deepseek-ai/DeepSeek-V4-Flash/patch_vllm_dflash.py"
+    slurm_config:
+      _factory_: "cw_dfw_slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 8
+      container: "vllm/vllm-openai:deepseekv4-cu130"

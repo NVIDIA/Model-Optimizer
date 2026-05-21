@@ -38,6 +38,9 @@ class SlurmConfig:
     container_mounts: list[str] = None
     srun_args: list[str] = None
     array: str = None
+    retries: int = 0
+    requeue: bool = False
+    additional_parameters: dict = None
     nodes: int = 1
     ntasks_per_node: int = 1
     gpus_per_node: int = 1
@@ -61,6 +64,8 @@ def slurm_factory(
     ],
     srun_args: list[str] = ["--no-container-mount-home"],
     array: str = None,  # noqa: RUF013
+    retries: int = 0,
+    requeue: bool = False,
     time: str = "04:00:00",
 ) -> SlurmConfig:
     """Generic Slurm factory — configure via environment variables or CLI overrides."""
@@ -76,5 +81,7 @@ def slurm_factory(
         container_mounts=container_mounts,
         srun_args=srun_args,
         array=array,
+        retries=retries,
+        requeue=requeue,
         time=time,
     )
