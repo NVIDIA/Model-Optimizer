@@ -945,9 +945,11 @@ def update_quant_cfg_with_kv_cache_quant(
 def promote_nvfp4_static_quantizers(model: nn.Module) -> int:
     """Convert eligible TensorQuantizers to NVFP4StaticQuantizer in-place.
 
-    After max calibration sets per-block amax values, NVFP4 static quantizers
-    need to be promoted so they use the two-level scaling path (global amax +
-    per-block amax) instead of the generic E4M3 path.
+    Promotion is purely a class swap based on the static-NVFP4 *format*; it does
+    not require ``_amax`` to be set. Quantizers without ``_amax`` (e.g. MoE
+    experts that received no calibration tokens) still get promoted so that any
+    later forward — once MSE or bootstrap populates ``_amax`` — dispatches via
+    the subclass's two-level scaling path instead of the parent's generic E4M3.
 
     Returns the number of quantizers converted.
     """
@@ -955,11 +957,14 @@ def promote_nvfp4_static_quantizers(model: nn.Module) -> int:
 
     converted = 0
     for _name, module in list(model.named_modules()):
-        if isinstance(module, TensorQuantizer) and not module._disabled:
-            if module._calibrator is not None and not module._dynamic and hasattr(module, "_amax"):
-                if module.is_nvfp4_static:
-                    initial_amax = module._amax.clone().detach()
-                    global_amax = reduce_amax(initial_amax, axis=None)
-                    NVFP4StaticQuantizer.from_tensor_quantizer(module, global_amax=global_amax)
-                    converted += 1
+        if not isinstance(module, TensorQuantizer) or module._disabled:
+            continue
+        if module._calibrator is None or module._dynamic:
+            continue
+        if not module.is_nvfp4_static or isinstance(module, NVFP4StaticQuantizer):
+            continue
+        amax = getattr(module, "_amax", None)
+        global_amax = reduce_amax(amax.detach(), axis=None) if amax is not None else None
+        NVFP4StaticQuantizer.from_tensor_quantizer(module, global_amax=global_amax)
+        converted += 1
     return converted

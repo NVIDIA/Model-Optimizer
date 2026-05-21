@@ -227,22 +227,20 @@ class LayerActivationCollector:
                     f"Layer {info.name} is in 'run' mode but has no cached inputs to replay."
                 )
                 real_args, real_kwargs = info.cached_inputs.popleft()
-                if (
-                    real_args
-                    and isinstance(real_args[0], torch.Tensor)
-                    and real_args[0].device.type == "cpu"
-                ):
-                    device = get_module_device(self)
-                    real_args = _move_to_device(real_args, device)
-                    real_kwargs = _move_to_device(real_kwargs, device)
+                # Captured inputs are stored on CPU (see "capture" branch); move
+                # back to the layer's device for replay. `_move_to_device` is a
+                # no-op for tensors already on `device`.
+                device = get_module_device(self)
+                real_args = _move_to_device(real_args, device)
+                real_kwargs = _move_to_device(real_kwargs, device)
                 output = self._original_forward(*real_args, **real_kwargs)
                 info.output_meta = LayerActivationCollector._extract_output_meta(output)
                 return output
 
             if info.mode == "capture":
                 # Offload captured inputs to CPU at append time. For early layers
-                # on a single GPU (e.g. layer 0–2 on GPU 0 with seq_device_map),
-                # accumulating thousands of batches' worth of (bs × seq × hidden)
+                # on a single GPU (e.g. layer 0-2 on GPU 0 with seq_device_map),
+                # accumulating thousands of batches' worth of (bs x seq x hidden)
                 # activations on-device saturates that GPU during the capture loop
                 # and OOMs before _set_layer_states gets a chance to move them.
                 # The "run" branch already handles CPU-resident inputs (see the
@@ -333,11 +331,8 @@ class LayerActivationCollector:
                     "was called for every preceding layer in order."
                 )
             prev.mode = "run"
-            cpu = torch.device("cpu")
-            prev.cached_inputs = deque(
-                (_move_to_device(args, cpu), _move_to_device(kwargs, cpu))
-                for args, kwargs in prev.collected_inputs
-            )
+            # Inputs are already CPU-resident at capture time (see _patched_forward).
+            prev.cached_inputs = deque(prev.collected_inputs)
             prev.collected_inputs = []
 
         cur = self._decoder_layers[layer_idx]._layerwise_calib
@@ -534,9 +529,6 @@ def _save_layer(
     torch.save(output_meta, os.path.join(d, "output_meta.pt"))
     if next_inputs is not None:
         torch.save(next_inputs, os.path.join(d, "next_inputs.pt"))
-    amax_state = {k: v for k, v in weights.items() if "_amax" in k}
-    if amax_state:
-        torch.save(amax_state, os.path.join(d, "quantizer_amaxes.pt"))
     _write_manifest(checkpoint_dir, idx, num_layers)
 
 
@@ -635,17 +627,8 @@ class _CheckpointState:
         # Keep on CPU — _patched_forward's run mode moves each entry to device on pop.
         return next_inputs
 
-    def full_restore(
-        self, layers: nn.ModuleList, model: nn.Module, restore_weights: bool = True
-    ) -> None:
-        """Restore weights and quantizer state for layers 0..K-1 after the calibration loop.
-
-        Args:
-            restore_weights: If False, skip reloading ``weights.pt`` and load only the
-                ``_amax`` values (from ``quantizer_amaxes.pt`` or filtered from ``weights.pt``).
-                Set to False for calibration algorithms (max, MSE) that never modify weights
-                to avoid re-reading gigabytes of unchanged expert weights from disk.
-        """
+    def full_restore(self, layers: nn.ModuleList, model: nn.Module) -> None:
+        """Restore weights and quantizer state for layers 0..K-1 after the calibration loop."""
         from modelopt.torch.quantization.config import QuantizeConfig
         from modelopt.torch.quantization.conversion import restore_quantizer_state
         from modelopt.torch.quantization.utils.core_utils import enable_weight_access_and_writeback
@@ -671,31 +654,13 @@ class _CheckpointState:
                     map_location="cpu",
                     weights_only=False,
                 )
+                weights = torch.load(
+                    os.path.join(d, "weights.pt"),
+                    map_location="cpu",
+                    weights_only=False,
+                )
                 restore_quantizer_state(layer, dummy_config, {"quantizer_state": qstate})
-                if restore_weights:
-                    weights = torch.load(
-                        os.path.join(d, "weights.pt"),
-                        map_location="cpu",
-                        weights_only=False,
-                    )
-                    layer.load_state_dict(weights, strict=False, assign=False)
-                else:
-                    # Load only _amax entries — skip gigabytes of unchanged expert weights.
-                    # Use map_location="cpu" to get fresh CPU tensors (no storage_offset).
-                    # _export_fused_experts moves _amax to the weight device on demand.
-                    amax_path = os.path.join(d, "quantizer_amaxes.pt")
-                    if os.path.exists(amax_path):
-                        amaxes = torch.load(amax_path, map_location="cpu", weights_only=False)
-                    else:
-                        # Legacy checkpoint: filter _amax entries from the full weights.pt.
-                        weights = torch.load(
-                            os.path.join(d, "weights.pt"),
-                            map_location="cpu",
-                            weights_only=False,
-                        )
-                        amaxes = {k: v for k, v in weights.items() if "_amax" in k}
-                    if amaxes:
-                        layer.load_state_dict(amaxes, strict=False, assign=True)
+                layer.load_state_dict(weights, strict=False, assign=False)
 
         print_rank_0(f"Checkpoint: restored {self.start_layer} previously calibrated layers")
 

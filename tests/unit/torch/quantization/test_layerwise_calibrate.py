@@ -25,7 +25,12 @@ import torch.nn as nn
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.model_calib import layerwise_calibrate
 from modelopt.torch.quantization.nn import TensorQuantizer
-from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector, _SkipLayer
+from modelopt.torch.quantization.utils.layerwise_calib import (
+    LayerActivationCollector,
+    _CheckpointState,
+    _SkipLayer,
+    detect_resume_point,
+)
 
 
 class _DecoderBlock(nn.Module):
@@ -719,3 +724,98 @@ def test_mtq_quantize_layerwise_raises_for_unsupported_algorithm():
             config,
             forward_loop=lambda m: m(torch.randint(0, 32, (2, 8))),
         )
+
+
+# Checkpoint resume + capture-time CPU offload
+
+
+def test_collected_inputs_are_cpu_at_capture(monkeypatch):
+    """Capture-time CPU offload: collected_inputs must be on CPU even if data starts elsewhere.
+
+    This is the OOM-prevention invariant — without it, accumulating thousands of
+    batches' worth of activations on the layer's compute device saturates GPU
+    memory before the run-mode transition gets a chance to move them.
+    """
+    _register_test_discoverer(monkeypatch)
+    model = _SimpleTwoLayerModel(dim=8)
+    collector = LayerActivationCollector(model)
+
+    def forward_loop(m):
+        m(torch.randn(2, 8))
+
+    collector._patch_all_layers()
+    try:
+        inputs = collector.get_input_activations(model.layers[0], forward_loop)
+    finally:
+        collector._unpatch_all_layers()
+
+    args, _ = inputs[0]
+    assert args[0].device.type == "cpu", "captured tensor must be CPU-resident"
+
+
+def test_detect_resume_point_returns_num_layers_when_complete(tmp_path):
+    """Completed checkpoint reports ``start = num_layers`` (not None)."""
+    ckpt_dir = str(tmp_path / "ckpt")
+    state = _CheckpointState(ckpt_dir, num_layers=3)
+    import os
+
+    os.makedirs(ckpt_dir, exist_ok=True)
+    from modelopt.torch.quantization.utils.layerwise_calib import _write_manifest
+
+    _write_manifest(ckpt_dir, last_completed_layer=2, num_layers=3)
+
+    result = detect_resume_point(ckpt_dir)
+    assert result is not None
+    start, _ = result
+    assert start == state.num_layers == 3
+
+
+def test_layerwise_calibrate_early_returns_on_completed_checkpoint(monkeypatch, tmp_path):
+    """Fully-completed checkpoint must short-circuit calibration: no forward_loop calls."""
+    _register_test_discoverer(monkeypatch)
+    torch.manual_seed(0)
+
+    # Set up a model and run one round of layerwise calibration to write a complete checkpoint.
+    model = _SimpleTransformerModel(n_layers=2, dim=16)
+    calib_data = [torch.randint(0, 32, (2, 8))]
+    ckpt_dir = str(tmp_path / "ckpt")
+
+    config = _int8_layerwise_config(
+        {"method": "max", "layerwise": True, "layerwise_checkpoint_dir": ckpt_dir}
+    )
+    mtq.quantize(model, config, forward_loop=lambda m: [m(b) for b in calib_data])
+
+    # Second invocation against the same dir should never call forward_loop again.
+    fresh = _SimpleTransformerModel(n_layers=2, dim=16)
+    config2 = _int8_layerwise_config(
+        {"method": "max", "layerwise": True, "layerwise_checkpoint_dir": ckpt_dir}
+    )
+
+    call_count = {"n": 0}
+
+    def counting_forward(m):
+        call_count["n"] += 1
+        m(calib_data[0])
+
+    mtq.quantize(fresh, config2, forward_loop=counting_forward)
+    assert call_count["n"] == 0, "completed checkpoint must skip the calibration forward loop"
+
+
+def test_layerwise_calibrate_resumes_from_partial_checkpoint(monkeypatch, tmp_path):
+    """Partial checkpoint runs only the remaining layers."""
+    _register_test_discoverer(monkeypatch)
+
+    # Hand-write a manifest claiming layer 0 of 2 is complete, but with a dummy
+    # layer_0000 directory that won't actually load. The test only checks that
+    # detect_resume_point returns start=1 (not None) — verifying the partial-resume
+    # branch and the "all done" branch are distinct.
+    import os
+
+    ckpt_dir = str(tmp_path / "ckpt")
+    os.makedirs(ckpt_dir, exist_ok=True)
+    from modelopt.torch.quantization.utils.layerwise_calib import _write_manifest
+
+    _write_manifest(ckpt_dir, last_completed_layer=0, num_layers=2)
+
+    result = detect_resume_point(ckpt_dir)
+    assert result == (1, {"last_completed_layer": 0, "num_layers": 2})

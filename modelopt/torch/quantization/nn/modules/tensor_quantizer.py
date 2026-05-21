@@ -824,31 +824,6 @@ class TensorQuantizer(nn.Module):
                 getattr(self, "_onnx_quantizer_type", None),
                 self._pass_through_bwd,
             )
-        elif (
-            self.block_sizes is not None
-            and self._num_bits == (2, 1)
-            and self.block_sizes.get("scale_bits") == (4, 3)
-        ):
-            # Static NVFP4: plain TensorQuantizer should have been promoted to
-            # NVFP4StaticQuantizer during MSE setup. For per-expert quantizers
-            # in fused MoEs, promotion is gated on `_amax` having been set during
-            # max_calibrate; experts not activated during max_calibrate stay
-            # plain. MSE later sets a per-block `_amax`, so by the time forward
-            # runs again the quantizer has a valid amax — dispatch to the static
-            # NVFP4 fake-quant path here.
-            if amax is not None:
-                outputs = static_blockwise_fp4_fake_quant(
-                    inputs,
-                    amax,
-                    None,  # global_amax — computed internally by the kernel
-                    True,
-                    inputs.dtype,
-                    self._pass_through_bwd,
-                )
-            else:
-                # No amax at all (truly uncalibrated): pass through unchanged so
-                # forward doesn't crash. Should not normally be reachable.
-                outputs = inputs
         elif isinstance(self._num_bits, tuple):
             # Float-point quantization, e.g., FP8
             E, M = self._num_bits  # noqa: N806
@@ -959,9 +934,7 @@ class TensorQuantizer(nn.Module):
 
         quant_axis = [i for i in range(len(quantize_axis)) if quantize_axis[i]]
 
-        slices = (
-            None if all(s is None for s in slices) else [s if s else slice(None) for s in slices]
-        )
+        slices = None if all(s is None for s in slices) else [s or slice(None) for s in slices]
 
         if all(p is None for p in paddings):
             paddings = None
@@ -970,7 +943,7 @@ class TensorQuantizer(nn.Module):
             for padding in paddings:
                 if not (new_paddings or padding):
                     continue
-                new_paddings.extend(padding if padding else (0, 0))
+                new_paddings.extend(padding or (0, 0))
             paddings = tuple(reversed(new_paddings))
 
         set_quant_params(quant_axis, reshape_size, paddings, slices)
