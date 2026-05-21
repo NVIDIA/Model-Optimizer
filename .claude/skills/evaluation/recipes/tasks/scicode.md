@@ -77,69 +77,16 @@ results.groups.scicode.metrics."pass@1[avg-of-N]".scores.subtask_accuracy.value
 For repeated runs, report stderr as:
 
 ```text
-subtask_accuracy_statistics_std_err_across_runs.value * 100 * num_problems / num_subtasks
+results.groups.scicode.metrics."pass@1[avg-of-N]".scores.subtask_accuracy_statistics_std_err_across_runs.value * 100 * num_problems / num_subtasks
 ```
 
-The helper below also supports GPQA's matching layout, where accuracy comes from
-`symbolic_correct.value` and stderr is
-`symbolic_correct_statistics_std_err_across_runs.value * 100`.
+Read `num_problems` and `num_subtasks` from the same scores object:
 
-```python
-import re
-import yaml
-
-
-TASKS = {
-    "scicode": {
-        "score_key": "subtask_accuracy",
-        "stderr_scale": "subtasks",
-    },
-    "gpqa": {
-        "score_key": "symbolic_correct",
-        "stderr_scale": "percent",
-    },
-}
-
-
-def avg_of(metric_name):
-    match = re.fullmatch(r"pass@1\[avg-of-(\d+)\]", metric_name)
-    return int(match.group(1)) if match else None
-
-
-def select_pass1_metric(metrics):
-    repeated = [name for name in metrics if avg_of(name) is not None]
-    if repeated:
-        return max(repeated, key=avg_of)
-    return "pass@1"
-
-
-def extract_score(path, group="scicode"):
-    spec = TASKS[group]
-    data = yaml.safe_load(open(path))
-    metrics = data["results"]["groups"][group]["metrics"]
-    metric_name = select_pass1_metric(metrics)
-    scores = metrics[metric_name]["scores"]
-
-    score_key = spec["score_key"]
-    accuracy = scores[score_key]["value"]
-
-    stderr_key = f"{score_key}_statistics_std_err_across_runs"
-    stderr_value = scores.get(stderr_key, {}).get("value")
-    stderr = None
-    if stderr_value is not None:
-        if spec["stderr_scale"] == "subtasks":
-            num_problems = scores["num_problems"]["value"]
-            num_subtasks = scores["num_subtasks"]["value"]
-            stderr = stderr_value * 100 * num_problems / num_subtasks
-        else:
-            stderr = stderr_value * 100
-
-    return {
-        "group": group,
-        "metric": metric_name,
-        "score_key": score_key,
-        "accuracy": accuracy,
-        "stderr": stderr,
-    }
-
+```text
+results.groups.scicode.metrics."pass@1[avg-of-N]".scores.num_problems.value
+results.groups.scicode.metrics."pass@1[avg-of-N]".scores.num_subtasks.value
 ```
+
+Prefer the `pass@1[avg-of-N]` metric matching the configured repeat count. If the
+repeat count is unknown, use the highest available `avg-of-N`; if no repeated
+metric exists, use `pass@1`.

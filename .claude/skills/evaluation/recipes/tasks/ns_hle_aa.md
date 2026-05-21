@@ -43,25 +43,15 @@ HLE AA accuracy comes from:
 results.groups.hle.metrics.pass@1.scores.judge_correct.value
 ```
 
-```python
-import yaml
+HLE also exposes symbolic extraction accuracy for sanity checks:
 
+```text
+results.groups.hle.metrics.pass@1.scores.symbolic_correct.value
+```
 
-def extract_ns_hle_aa_score(path):
-    data = yaml.safe_load(open(path))
-    scores = data["results"]["groups"]["hle"]["metrics"]["pass@1"]["scores"]
-    accuracy = scores["judge_correct"]["value"]
-    symbolic = scores.get("symbolic_correct", {}).get("value")
-    n = scores["judge_correct"].get("stats", {}).get("count")
+With `num_repeats: 1`, `results.yml` does not include an across-run stderr. The
+judged item count is:
 
-    return {
-        "group": "hle",
-        "metric": "pass@1",
-        "score_key": "judge_correct",
-        "accuracy": accuracy,
-        "symbolic_correct": symbolic,
-        "stderr": None,
-        "n": n,
-    }
-
+```text
+results.groups.hle.metrics.pass@1.scores.judge_correct.stats.count
 ```

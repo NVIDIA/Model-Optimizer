@@ -51,27 +51,13 @@ AA-LCR accuracy comes from:
 
 ```text
 results.groups.aa_lcr.metrics.accuracy.scores.accuracy.value
-results.groups.aa_lcr.metrics.accuracy.scores.accuracy.stats.stderr
 ```
 
-```python
-import yaml
+AA-LCR stores accuracy as a fraction. Report accuracy in percentage points by
+multiplying the value by 100.
 
+For stderr, use the same score entry's stats field and multiply by 100:
 
-def extract_aa_lcr_score(path):
-    data = yaml.safe_load(open(path))
-    scores = data["results"]["groups"]["aa_lcr"]["metrics"]["accuracy"]["scores"]
-    entry = scores["accuracy"]
-    accuracy = entry["value"] * 100
-    stderr = entry.get("stats", {}).get("stderr")
-    stderr_pp = stderr * 100 if stderr is not None else None
-
-    return {
-        "group": "aa_lcr",
-        "metric": "accuracy",
-        "score_key": "accuracy",
-        "accuracy": accuracy,
-        "stderr": stderr_pp,
-    }
-
+```text
+results.groups.aa_lcr.metrics.accuracy.scores.accuracy.stats.stderr * 100
 ```

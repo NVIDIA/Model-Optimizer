@@ -32,5 +32,3 @@ Use this inside the top-level `evaluation.tasks` list:
             - max_new_tokens
             - max_completion_tokens
 ```
-
-## Score Extraction
