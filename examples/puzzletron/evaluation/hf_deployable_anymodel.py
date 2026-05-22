@@ -100,7 +100,7 @@ class HuggingFaceLLMDeploy(ITritonDeployable):
                 "hf_model_id_path will be ignored and the HuggingFace model set with model parameter will be used."
             )
 
-        assert task in SUPPORTED_TASKS, "Task {} is not a support task.".format(task)
+        assert task in SUPPORTED_TASKS, f"Task {task} is not a support task."
 
         self.hf_model_id_path = hf_model_id_path
         self.hf_peft_model_id_path = hf_peft_model_id_path
@@ -163,7 +163,7 @@ class HuggingFaceLLMDeploy(ITritonDeployable):
             if self.hf_peft_model_id_path is not None:
                 self.model = PeftModel.from_pretrained(self.model, self.hf_peft_model_id_path)
         else:
-            raise ValueError("Task {} is not supported.".format(self.task))
+            raise ValueError(f"Task {self.task} is not supported.")
         num_gpus = torch.cuda.device_count()
         # If there is only one GPU, move the model to GPU. If you are using device_map as "auto" or "balanced",
         # the model will be moved to GPU automatically.
@@ -423,7 +423,7 @@ class HuggingFaceLLMDeploy(ITritonDeployable):
                 output_infer = {"sentences": cast_output(output, np.bytes_)}
 
         except Exception as error:
-            err_msg = "An error occurred: {}".format(str(error))
+            err_msg = f"An error occurred: {error!s}"
             output_infer["sentences"] = cast_output([err_msg], np.bytes_)
 
         return output_infer
@@ -638,7 +638,7 @@ class HuggingFaceLLMDeploy(ITritonDeployable):
                 output_infer.pop("input_lengths", None)
             return output_infer
         except Exception as error:
-            err_msg = "An error occurred: {}".format(str(error))
+            err_msg = f"An error occurred: {error!s}"
             return {"sentences": [err_msg]}
 
     def _infer_fn_ray(
