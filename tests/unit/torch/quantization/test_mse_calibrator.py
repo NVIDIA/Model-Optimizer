@@ -19,7 +19,10 @@ import torch
 
 from modelopt.torch.quantization import calib
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
-from modelopt.torch.quantization.nn import TensorQuantizer
+from modelopt.torch.quantization.model_calib import (
+    _promote_nvfp4_static_quantizers_with_global_amax_sync,
+)
+from modelopt.torch.quantization.nn import NVFP4StaticQuantizer, TensorQuantizer
 from modelopt.torch.quantization.utils import enable_fake_quant
 
 
@@ -551,32 +554,34 @@ class TestRegisterFP8SweepCalibrator:
         _QUANT_FUNCTIONAL_BACKENDS.clear()
         _QUANT_FUNCTIONAL_BACKENDS.update(self._orig_quant_backends)
 
-    def _quantize_and_calibrate(self, backend_name, fp8_scale_sweep=True):
+    def _quantize_and_calibrate(
+        self, backend_name, fp8_scale_sweep=True, apply_mse_nvfp_static_only=False
+    ):
         """Quantize a small Linear with the given backend and run mse_calibrate."""
         import modelopt.torch.quantization as mtq
         from modelopt.torch.quantization.model_calib import mse_calibrate
         from modelopt.torch.quantization.nn.modules.tensor_quantizer import register_quant_backend
 
         register_quant_backend(backend_name, lambda x, tq: x)
-        model = torch.nn.Linear(16, 8, bias=False)
-        inputs = torch.randn(1, 16)
+        model = torch.nn.Linear(8, 8, bias=False)
+        inputs = torch.randn(1, 8)
         config = {
             "quant_cfg": [
                 {"quantizer_name": "*", "enable": False},
                 {
                     "quantizer_name": "*weight_quantizer",
-                    "cfg": {
-                        "num_bits": (2, 1),
-                        "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
-                        "axis": None,
-                        "backend": backend_name,
-                    },
+                    "cfg": {"num_bits": 8, "axis": None, "backend": backend_name},
                 },
             ],
             "algorithm": "max",
         }
         mtq.quantize(model, config, forward_loop=lambda m: m(inputs))
-        mse_calibrate(model, lambda m: m(inputs), fp8_scale_sweep=fp8_scale_sweep)
+        mse_calibrate(
+            model,
+            lambda m: m(inputs),
+            fp8_scale_sweep=fp8_scale_sweep,
+            apply_mse_nvfp_static_only=apply_mse_nvfp_static_only,
+        )
         return model
 
     def test_register(self):
@@ -636,6 +641,25 @@ class TestRegisterFP8SweepCalibrator:
 
         assert len(factory_calls) == 0
 
+    def test_static_nvfp4_only_skips_registered_non_nvfp4_backend(self):
+        """Registry factory is not invoked for non-static-NVFP4 weights when requested."""
+        from modelopt.torch.quantization.model_calib import _register_fp8_sweep_calibrator
+
+        factory_calls: list = []
+
+        def my_factory(amax, axis, quant_func):
+            factory_calls.append(amax)
+            return calib.MseCalibrator(amax=amax, axis=axis, quant_func=quant_func)
+
+        _register_fp8_sweep_calibrator("_test_static_only_skip", my_factory)
+        self._quantize_and_calibrate(
+            "_test_static_only_skip",
+            fp8_scale_sweep=True,
+            apply_mse_nvfp_static_only=True,
+        )
+
+        assert len(factory_calls) == 0
+
     def test_unregistered_backend_uses_default_mse_calibrator(self):
         """A quantizer with an unregistered backend falls through to MseCalibrator."""
         from modelopt.torch.quantization.calib.mse import MseCalibrator
@@ -645,3 +669,38 @@ class TestRegisterFP8SweepCalibrator:
             if isinstance(module, TensorQuantizer) and module.is_enabled:
                 if getattr(module, "_calibrator", None) is not None:
                     assert isinstance(module._calibrator, MseCalibrator)
+
+
+class TestStaticNVFP4Promotion:
+    class _LinearLike(torch.nn.Module):
+        def __init__(self, amax):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.empty(1, 16))
+            cfg = QuantizerAttributeConfig(
+                num_bits=(2, 1),
+                block_sizes={-1: 16, "type": "static", "scale_bits": (4, 3)},
+                axis=None,
+            )
+            self.weight_quantizer = TensorQuantizer(quant_attribute_cfg=cfg, amax=amax)
+            self.input_quantizer = TensorQuantizer()
+            self.input_quantizer.disable()
+
+    def test_standalone_static_nvfp4_quantizer_is_promoted(self):
+        model = self._LinearLike(torch.tensor([1.0, 5.0]))
+
+        _promote_nvfp4_static_quantizers_with_global_amax_sync(model)
+
+        assert isinstance(model.weight_quantizer, NVFP4StaticQuantizer)
+        assert torch.equal(model.weight_quantizer.global_amax, torch.tensor(5.0))
+
+    def test_grouped_static_nvfp4_quantizers_share_global_amax(self):
+        model = torch.nn.Module()
+        model.q_proj = self._LinearLike(torch.tensor([1.0, 2.0]))
+        model.k_proj = self._LinearLike(torch.tensor([3.0, 4.0]))
+        model.v_proj = self._LinearLike(torch.tensor([5.0, 6.0]))
+
+        _promote_nvfp4_static_quantizers_with_global_amax_sync(model)
+
+        for child in (model.q_proj, model.k_proj, model.v_proj):
+            assert isinstance(child.weight_quantizer, NVFP4StaticQuantizer)
+            assert torch.equal(child.weight_quantizer.global_amax, torch.tensor(6.0))

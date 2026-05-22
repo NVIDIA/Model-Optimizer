@@ -25,7 +25,6 @@ import modelopt.torch.quantization as mtq
 from modelopt.torch.export.unified_export_hf import _export_quantized_weight
 from modelopt.torch.quantization.model_calib import gptq
 from modelopt.torch.quantization.qtensor.nvfp4_tensor import NVFP4QTensor
-from modelopt.torch.quantization.utils import promote_nvfp4_static_quantizers
 from modelopt.torch.quantization.utils.calib_utils import (
     compute_hessian_inverse,
     gptq_blockwise_update,
@@ -265,7 +264,6 @@ def _make_nvfp4_test_data(quant_block_size, out_features, dim):
     }
     inp = torch.randn(4, 32, dim, device="cuda")
     mtq.quantize(model, quant_cfg, forward_loop=lambda m: m(inp))
-    promote_nvfp4_static_quantizers(model)
 
     # Restore original weight (GPTQ operates on original weights)
     model.weight.data = weight.clone()

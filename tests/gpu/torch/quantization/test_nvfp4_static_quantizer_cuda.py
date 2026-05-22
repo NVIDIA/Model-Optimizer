@@ -65,6 +65,27 @@ class TestNVFP4StaticQuantizer:
         quantizer.global_amax = None
         assert quantizer.global_amax is None
 
+    def test_load_calib_amax_preserves_fp32_result_dtype(self, device):
+        """Loading NVFP4 MSE amax should not cast fp32 results into an existing lower
+        dtype buffer."""
+        cfg = QuantizerAttributeConfig(
+            num_bits=(2, 1),
+            block_sizes={-1: 16, "type": "static", "scale_bits": (4, 3)},
+        )
+        quantizer = NVFP4StaticQuantizer(quant_attribute_cfg=cfg).to(device)
+        quantizer.amax = torch.ones(4, device=device, dtype=torch.float16)
+        expected = torch.arange(1, 5, device=device, dtype=torch.float32)
+
+        class Calibrator:
+            def compute_amax(self):
+                return expected
+
+        quantizer._calibrator = Calibrator()
+        quantizer.load_calib_amax()
+
+        assert quantizer.amax.dtype == torch.float32
+        torch.testing.assert_close(quantizer.amax, expected)
+
     def test_export_fp8_scale_no_nan_for_zero_amax_block(self, device):
         """Regression: export must not emit fp8 NaN bytes for an all-zero block.
 
@@ -168,6 +189,15 @@ class TestNVFP4MSECalibrator:
         assert cal._losses_sum is None
         assert cal._amax is None
 
+    def test_compute_amax_before_collect_returns_none(self, device):
+        """Test that compute_amax returns None before a final amax is cached."""
+        num_blocks = 4
+        amax = torch.ones(num_blocks, device=device)
+        global_amax = torch.tensor(10.0, device=device)
+        cal = NVFP4MSECalibrator(amax=amax, global_amax=global_amax)
+
+        assert cal.compute_amax() is None
+
     def test_fp8_candidates_generation(self, device):
         """Test that 126 valid FP8 candidates are generated."""
         num_blocks = 4
@@ -182,13 +212,7 @@ class TestNVFP4MSECalibrator:
         assert torch.all(candidates > 0)
 
     def test_collect_and_compute_amax(self, device, monkeypatch):
-        """Test reference-path collect and compute_amax workflow.
-
-        Pinned to the reference 126-step sweep (``MODELOPT_NVFP4_TRITON_SWEEP=0``)
-        because this test inspects ``_losses_sum``, which only the reference path
-        populates; the Triton fast path produces ``_best_amax_fast`` directly and
-        is covered separately in ``test_nvfp4_fp8_sweep_kernel.py``.
-        """
+        """Test reference-path collect caches the final amax immediately."""
         monkeypatch.setenv("MODELOPT_NVFP4_TRITON_SWEEP", "0")
         num_blocks = 8
         block_size = 16
@@ -207,8 +231,8 @@ class TestNVFP4MSECalibrator:
         x = torch.randn(num_blocks, block_size, device=device)
         cal.collect(x)
 
-        assert cal._losses_sum is not None
-        assert len(cal._losses_sum) == 126
+        assert cal._best_amax_fast is not None
+        assert cal._losses_sum is None
 
         amax = cal.compute_amax()
 
@@ -217,13 +241,8 @@ class TestNVFP4MSECalibrator:
         assert torch.all(torch.isfinite(amax))
         assert torch.all(amax > 0)
 
-    def test_multiple_collections(self, device, monkeypatch):
-        """Test that multiple collections accumulate correctly.
-
-        Multi-collect is reference-path-only — the Triton fast path is one-shot
-        and refuses a second ``collect()`` until ``reset()``. Forcing the env var
-        keeps this exercising the accumulator.
-        """
+    def test_reference_path_reset_allows_recollect(self, device, monkeypatch):
+        """Test that reference fallback is one-shot until reset."""
         monkeypatch.setenv("MODELOPT_NVFP4_TRITON_SWEEP", "0")
         num_blocks = 4
         block_size = 16
@@ -243,13 +262,16 @@ class TestNVFP4MSECalibrator:
         x2 = torch.randn(num_blocks, block_size, device=device)
 
         cal.collect(x1)
-        losses_after_first = [loss.clone() for loss in cal._losses_sum]
+        first = cal.compute_amax().clone()
+        assert cal._best_amax_fast is not None
+        assert cal._losses_sum is None
 
-        cal.collect(x2)
-        losses_after_second = cal._losses_sum
+        with pytest.raises(RuntimeError, match="multi-collect"):
+            cal.collect(x2)
 
-        for loss1, loss2 in zip(losses_after_first, losses_after_second):
-            assert torch.all(loss2 >= loss1 - 1e-6)
+        cal.reset()
+        cal.collect(x1)
+        assert torch.equal(first, cal.compute_amax())
 
     def test_per_block_independent_optimization(self, device):
         """Test that each block is optimized independently.

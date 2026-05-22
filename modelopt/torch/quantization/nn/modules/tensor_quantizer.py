@@ -642,10 +642,12 @@ class TensorQuantizer(nn.Module):
                     err_msg
                     + " Passing 'strict=False' to `load_calib_amax()` will ignore the error."
                 )
-        if not hasattr(self, "_amax"):
-            self.register_buffer("_amax", calib_amax.clone().detach())
-        else:
-            self._amax.data.copy_(calib_amax.clone().detach())
+        if hasattr(self, "_amax"):
+            assert self._amax.shape == calib_amax.shape, (
+                "Changing shape when loading calibration amax is not allowed."
+            )
+        device = self._amax.device if hasattr(self, "_amax") else calib_amax.device
+        self._buffers["_amax"] = calib_amax.clone().detach().to(device=device)
 
     def load_calib_bias(self, *args, **kwargs):
         """Load affine bias for quantization."""
