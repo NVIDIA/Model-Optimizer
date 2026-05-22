@@ -1,19 +1,11 @@
 # DFlash offline speculative decoding training for Qwen3-0.6B.
 #
-# 2-step pipeline mirroring hf_online_dflash.yaml but trains from pre-dumped
-# hidden states instead of streaming the base model forward at training time.
+# Two-task pipeline: dump base-model hidden states once, then train DFlash on
+# the dump. Compare with hf_online_dflash.yaml, which streams the base model
+# forward at training time instead.
 #
-#   task_0: Dump base-model hidden states via TRT-LLM
-#           (common/eagle3/dump_offline_data.sh, reused as-is — the script is
-#           algorithm-agnostic and just runs compute_hidden_states_trtllm.py
-#           with the args we pass through).
-#   task_1: Train DFlash with data.offline_data_path pointing at the dump.
-#           Triggers DFlashConfig._derive_dflash_offline, which deletes base-
-#           model layers post-convert to save memory.
-#
-# Lightweight single-GPU regression. No external data dependencies: uses the
-# packaged synthetic_conversations_1k.jsonl (conversation_id field is provided
-# at-source so compute_hidden_states_trtllm.py's assertion passes).
+# Lightweight single-GPU regression. No external data dependencies — uses the
+# packaged synthetic_conversations_1k.jsonl.
 #
 # Reference: "DFlash: Block Diffusion for Flash Speculative Decoding" (arXiv:2602.06036)
 #
@@ -26,21 +18,17 @@ pipeline:
   global_vars:
     hf_model: /hf-local/Qwen/Qwen3-0.6B
 
-  # Step 1: Dump base-model hidden states via TRT-LLM (reuses the eagle dump script).
+  # Dump base-model hidden states via HuggingFace forward.
   task_0:
-    script: common/eagle3/dump_offline_data.sh
+    script: common/eagle3/dump_offline_data_hf.sh
     args:
       - --input-data modules/Model-Optimizer/examples/dataset/synthetic_conversations_1k.jsonl
       - --output-dir /scratchspace/dflash_qwen3_0.6b_hidden_states
-      # Explicit layer ids matching build_target_layer_ids(28, 2) for Qwen3-0.6B
-      # (28 hidden layers, 2-layer draft). The --aux-layers=dflash preset is
-      # hardcoded to 5 draft layers in common.py and would mis-shape against
-      # dflash_architecture_config.num_hidden_layers=2 below.
-      - --aux-layers 1,25
+      # Must match the draft model's num_hidden_layers (recipe default: 5).
+      - --aux-layers dflash
       - --answer-only-loss
       - --chat-template examples/Qwen/Qwen3-0.6B/chat_template_train.jinja
       - --debug-max-num-conversations 200
-      - --tp 1
     environment:
       - HF_MODEL_CKPT: <<global_vars.hf_model>>
     slurm_config:
@@ -48,10 +36,8 @@ pipeline:
       nodes: 1
       ntasks_per_node: 1
       gpus_per_node: 1
-      container: nvcr.io/nvidia/tensorrt-llm/release:1.2.0
 
-  # Step 2: Train DFlash on the dumped hidden states. Mirrors hf_online_dflash.yaml's
-  # task_0 args except data.data_path is replaced with data.offline_data_path.
+  # Train DFlash on the dumped hidden states.
   task_1:
     script: common/specdec/dflash_online_training.sh
     args:
@@ -60,22 +46,12 @@ pipeline:
       - data.offline_data_path=/scratchspace/dflash_qwen3_0.6b_hidden_states
       - data.chat_template=examples/Qwen/Qwen3-0.6B/chat_template_train.jinja
       - training.output_dir=/scratchspace/dflash_qwen3_0.6b_offline
-      # Two epochs over the 200-conversation dump gives enough steps for
-      # logging_steps=50 (batch=2 → ~100 steps/epoch → 4 log entries).
       - training.num_train_epochs=2
       - training.training_seq_len=512
-      - training.per_device_train_batch_size=2
-      - training.save_steps=500
       - training.logging_steps=50
-      - training.disable_tqdm=true
-      - training.answer_only_loss=true
-      - dflash.dflash_block_size=8
       - dflash.dflash_mask_token_id=151669
-      - dflash.dflash_use_torch_compile=False
-      - dflash.dflash_architecture_config.num_hidden_layers=2
     environment:
       - MAX_FINAL_LOSS: "5.0"
-      - MIN_FINAL_ACC: "0.10"
     slurm_config:
       _factory_: "slurm_factory"
       nodes: 1
