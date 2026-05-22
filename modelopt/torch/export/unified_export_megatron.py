@@ -312,7 +312,9 @@ class GPTModelExporter:
             try:
                 # When the source is a local directory, copy tokenizer files verbatim to
                 # preserve the pre-transformers-v5 PreTrainedTokenizer(Fast) format.
-                if os.path.isdir(self._hf_pretrained_model_name):
+                if self._hf_pretrained_model_name is not None and os.path.isdir(
+                    self._hf_pretrained_model_name
+                ):
                     copy_tokenizer_from_local_ckpt(self._hf_pretrained_model_name, save_directory)
                 else:
                     tokenizer = transformers.AutoTokenizer.from_pretrained(

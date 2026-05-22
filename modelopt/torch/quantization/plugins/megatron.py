@@ -45,8 +45,8 @@ from ..conversion import maybe_promote_nvfp4_static_quantizer
 from ..nn import QuantModule, QuantModuleRegistry, SequentialQuantizer, TensorQuantizer
 from ..nn.modules.quant_linear import RealQuantLinear
 from ..qtensor import QTensorWrapper
-from ..utils.layerwise_calib import LayerActivationCollector
 from ..utils import sync_moe_expert_amax
+from ..utils.layerwise_calib import LayerActivationCollector
 from .custom import CUSTOM_MODEL_PLUGINS, _ParallelLinear
 
 try:
@@ -375,7 +375,10 @@ class _MegatronParallelLinear(_ParallelLinear):
         if prefix.endswith("output_layer."):
             try:
                 from megatron.training import get_args as _mlm_get_args
-                _untied = bool(getattr(_mlm_get_args(), "untie_embeddings_and_output_weights", False))
+
+                _untied = bool(
+                    getattr(_mlm_get_args(), "untie_embeddings_and_output_weights", False)
+                )
             except Exception:
                 _untied = False
             if not _untied:
@@ -814,7 +817,7 @@ def get_mcore_decoder_layers(model: torch.nn.Module) -> torch.nn.ModuleList | No
     layers = None
     if hasattr(model, "decoder") and hasattr(model.decoder, "layers"):
         layers = model.decoder.layers
-    if hasattr(model, "output_layer"):
+    if hasattr(model, "output_layer") and layers:
         layers.append(model.output_layer)
     return layers
 

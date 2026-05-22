@@ -558,19 +558,14 @@ class TestRegisterFP8SweepCalibrator:
         from modelopt.torch.quantization.nn.modules.tensor_quantizer import register_quant_backend
 
         register_quant_backend(backend_name, lambda x, tq: x)
-        model = torch.nn.Linear(16, 8, bias=False)
-        inputs = torch.randn(1, 16)
+        model = torch.nn.Linear(8, 8, bias=False)
+        inputs = torch.randn(1, 8)
         config = {
             "quant_cfg": [
                 {"quantizer_name": "*", "enable": False},
                 {
                     "quantizer_name": "*weight_quantizer",
-                    "cfg": {
-                        "num_bits": (2, 1),
-                        "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
-                        "axis": None,
-                        "backend": backend_name,
-                    },
+                    "cfg": {"num_bits": 8, "axis": None, "backend": backend_name},
                 },
             ],
             "algorithm": "max",
