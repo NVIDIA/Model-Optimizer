@@ -35,7 +35,7 @@ from torch.distributed.checkpoint.state_dict import (
     get_model_state_dict,
     set_model_state_dict,
 )
-from torch.distributed.fsdp import CPUOffloadPolicy, OffloadPolicy, fully_shard
+from torch.distributed.fsdp import fully_shard
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
@@ -138,12 +138,6 @@ def parse_args():
             "(e.g. LlamaDecoderLayer). Auto-detected when omitted."
         ),
     )
-    parser.add_argument(
-        "--cpu_offload",
-        action="store_true",
-        help="Keep FSDP2 sharded params on CPU; gather to GPU per layer forward.",
-    )
-
     args = parser.parse_args()
 
     args.dataset = args.dataset.split(",") if args.dataset else None
@@ -181,16 +175,11 @@ def _resolve_decoder_layers(model: nn.Module, override_cls_name: str | None):
     return layers
 
 
-def fsdp2_wrap(
-    model: nn.Module,
-    override_cls_name: str | None = None,
-    cpu_offload: bool = False,
-) -> nn.Module:
+def fsdp2_wrap(model: nn.Module, override_cls_name: str | None = None) -> nn.Module:
     """Apply FSDP2 ``fully_shard`` to each decoder layer, then to the root module."""
-    offload_policy: OffloadPolicy = CPUOffloadPolicy() if cpu_offload else OffloadPolicy()
     for layer in _resolve_decoder_layers(model, override_cls_name):
-        fully_shard(layer, reshard_after_forward=True, offload_policy=offload_policy)
-    fully_shard(model, reshard_after_forward=True, offload_policy=offload_policy)
+        fully_shard(layer, reshard_after_forward=True)
+    fully_shard(model, reshard_after_forward=True)
     return model
 
 
@@ -200,7 +189,6 @@ def load_and_prepare_model(
     rank: int,
     trust_remote_code: bool = False,
     override_cls_name: str | None = None,
-    cpu_offload: bool = False,
 ) -> tuple[nn.Module, str, list[str]]:
     """Load model and shard it with FSDP2 using rank-0-only CPU realization.
 
@@ -234,25 +222,15 @@ def load_and_prepare_model(
     model_type = get_model_type(model)
     original_architectures = model.config.architectures
 
-    fsdp2_wrap(model, override_cls_name=override_cls_name, cpu_offload=cpu_offload)
+    fsdp2_wrap(model, override_cls_name=override_cls_name)
 
-    # For CPU offload: FSDP2 requires its managed params on CPU at lazy_init,
-    # so materialize the whole model on CPU. Otherwise materialize on GPU.
-    materialize_device = torch.device("cpu") if cpu_offload else device
-    model.to_empty(device=materialize_device)
+    model.to_empty(device=device)
 
     set_model_state_dict(
         model,
         cpu_state_dict,
         options=StateDictOptions(full_state_dict=True, broadcast_from_rank0=True),
     )
-
-    # With CPU offload, FSDP-managed params stay on CPU but buffers (e.g. MoE
-    # router corrections, RoPE caches) must live on GPU for layer forwards.
-    if cpu_offload:
-        for b in model.buffers():
-            b.data = b.data.to(device, non_blocking=True)
-        torch.cuda.synchronize()
 
     # Freeze every param so patch_fsdp_mp_dtypes' trainable-only check skips the
     # uniform-dtype assertion (e.g. Nemotron-H ships mixed bf16/fp32 weights).
@@ -408,7 +386,6 @@ def main(args):
         rank=rank,
         trust_remote_code=args.trust_remote_code,
         override_cls_name=args.fsdp_transformer_layer_cls_to_wrap,
-        cpu_offload=args.cpu_offload,
     )
 
     quant_cfg = QUANT_CFG_CHOICES[args.qformat]
