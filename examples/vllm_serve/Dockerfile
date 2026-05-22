@@ -28,12 +28,6 @@ RUN pip install flash-attn==2.7.4.post1 --no-build-isolation
 # Pre-compile CUDA extensions to avoid compilation time during runtime
 RUN python3 -c "import modelopt.torch.quantization.extensions as ext; ext.precompile()" || true
 
-# Install requirements from examples (excluding windows examples)
-RUN find Model-Optimizer/examples -name "requirements.txt" | grep -v "windows" | while read req_file; do \
-        echo "Installing from $req_file"; \
-        pip install -r "$req_file" || echo "Warning: Failed to install from $req_file"; \
-    done
-
 # Allow users to run without root
 RUN chmod -R 777 /workspace
 
