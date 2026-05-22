@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 from unittest.mock import Mock, patch
 
 import pytest
@@ -20,9 +21,13 @@ import torch
 from huggingface_hub import get_token
 from torch.utils.data import DataLoader
 
+from modelopt.torch.utils import dataset_utils
 from modelopt.torch.utils.dataset_utils import (
+    DATASET_COMBOS,
+    SUPPORTED_DATASET_CONFIG,
     _disable_use_cache,
     _forward_loop,
+    _pack_documents_into_rows,
     _process_batch,
     get_dataset_dataloader,
     get_dataset_samples,
@@ -314,7 +319,6 @@ def test_get_dataset_samples_with_unsupported_minipile_dataset(tmp_path, test_lo
 
 def _write_jsonl(path, rows):
     """Write a list of dicts to *path* as JSONL. Returns the path as ``str``."""
-    import json
 
     with open(path, "w", encoding="utf-8") as f:
         f.writelines(json.dumps(row) + "\n" for row in rows)
@@ -511,6 +515,63 @@ class TestLocalJsonlLoading:
 
 
 # ---------------------------------------------------------------------------
+# _pack_documents_into_rows — global-stream document packing
+# ---------------------------------------------------------------------------
+
+
+class _FakePackTokenizer:
+    """Tokenizer stub: encodes ``"N"`` → ``[50] * N`` so packed rows are inspectable.
+
+    EOS=99 and pad=0 are sentinel IDs distinct from doc tokens (=50).
+    """
+
+    eos_token_id = 99
+    pad_token_id = 0
+
+    def encode(self, s, add_special_tokens=False):
+        return [50] * int(s)
+
+
+def test_pack_documents_into_rows():
+    """Global-stream packing: all docs concatenated with EOS separators into one
+    token stream, then sliced into uniform-length rows. Non-final rows are fully
+    real (no pad); the final partial row (when the stream runs out) is padded.
+    """
+    tok = _FakePackTokenizer()
+    # Stream layout (cumulative position after each doc+EOS):
+    #   200 doc + EOS = 201  (positions 0-200)
+    #   100 doc + EOS = 302  (positions 201-301)
+    #    80 doc + EOS = 383  (positions 302-382)
+    #   300 doc + EOS = 684  (positions 383-683)
+    #   150 doc + EOS = 835  (positions 684-834)
+    # Sliced into seq=512 with num_rows=2:
+    #   Row 0 = stream[0:512]   — fully real
+    #   Row 1 = stream[512:835] + pad — partial (323 real, 189 pad)
+    ids, mask = _pack_documents_into_rows(
+        ["200", "100", "80", "300", "150"], tok, seq_length=512, num_rows=2
+    )
+
+    assert ids.shape == (2, 512) and mask.shape == (2, 512)
+    assert ids.dtype == torch.long and mask.dtype == torch.long
+
+    # Row 0: stream[0:512]. EOS at positions 200, 301, 382 (after docs 1-3).
+    # Doc 4 (300) starts at stream position 383 and runs through 682; row 0
+    # captures only its first 129 tokens (positions 383..511), all value 50.
+    assert (ids[0, :200] == 50).all() and ids[0, 200] == 99
+    assert (ids[0, 201:301] == 50).all() and ids[0, 301] == 99
+    assert (ids[0, 302:382] == 50).all() and ids[0, 382] == 99
+    assert (ids[0, 383:512] == 50).all()  # mid-doc-4 tail, no EOS in this slice
+    assert mask[0].sum() == 512  # row fully real, zero pad
+
+    # Row 1: stream[512:835] = 171 tokens (rest of doc 4) + EOS + 150 doc + EOS
+    # = 323 real tokens, rest padded.
+    assert (ids[1, :171] == 50).all() and ids[1, 171] == 99
+    assert (ids[1, 172:322] == 50).all() and ids[1, 322] == 99
+    assert (ids[1, 323:] == 0).all()
+    assert mask[1].sum() == 323
+
+
+# ---------------------------------------------------------------------------
 # get_dataset_dataloader — blending across multiple sources
 # ---------------------------------------------------------------------------
 
@@ -596,6 +657,45 @@ class TestGetDatasetDataloaderBlending:
             )
 
 
+def test_multi_source_pack_shuffles_to_avoid_dominance(monkeypatch, pad_tokenizer):
+    """With ``pack=True`` and 2+ sources, samples are shuffled so a long-doc source
+    can't silently exhaust the row budget and drop the other sources.
+
+    Without shuffle, source A's 8x-oversampled docs would all come first in
+    ``all_samples`` and (with sufficient row consumption per doc) fill every row.
+    With the deterministic shuffle, both sources appear within the first
+    ``total_rows`` worth of consumed samples.
+    """
+
+    def _fake(name, num_sample, **_kwargs):
+        # Each sample is a short string identifying its source; the tokenizer
+        # will encode each into a few tokens.
+        return [f"{name}_doc{i}" for i in range(num_sample)]
+
+    monkeypatch.setattr(dataset_utils, "get_dataset_samples", _fake)
+
+    loader = get_dataset_dataloader(
+        dataset_name=["src_a", "src_b"],
+        tokenizer=pad_tokenizer,
+        batch_size=4,
+        num_samples=[4, 4],
+        max_sample_length=64,
+        pack=True,
+    )
+    batches = list(loader)
+    # input_ids are present and shaped as (rows, seq_length)
+    all_ids = torch.cat([b["input_ids"] for b in batches], dim=0)
+    assert all_ids.shape[1] == 64
+    # Tokenize the source tags so we can check both sources appear in the packed rows
+    src_a_id = pad_tokenizer("src_a", add_special_tokens=False).input_ids[0]
+    src_b_id = pad_tokenizer("src_b", add_special_tokens=False).input_ids[0]
+    flat = all_ids.flatten().tolist()
+    assert src_a_id in flat, "source A tokens missing from packed rows"
+    assert src_b_id in flat, (
+        "source B tokens missing from packed rows — multi-source shuffle broken"
+    )
+
+
 class TestDatasetCombosExpansion:
     """Combo names in ``--dataset`` fan out to their registered members.
 
@@ -612,14 +712,10 @@ class TestDatasetCombosExpansion:
             calls.append((name, num_sample))
             return [f"{name}-{i}" for i in range(num_sample)]
 
-        from modelopt.torch.utils import dataset_utils
-
         monkeypatch.setattr(dataset_utils, "get_dataset_samples", _fake)
         return calls
 
     def test_combo_expands_evenly(self, monkeypatch, pad_tokenizer):
-        from modelopt.torch.utils.dataset_utils import DATASET_COMBOS
-
         calls = self._record_calls(monkeypatch)
         get_dataset_dataloader(
             dataset_name="cnn_nemotron_v2_mix",
@@ -632,8 +728,6 @@ class TestDatasetCombosExpansion:
         assert calls == [(members[0], 4), (members[1], 4)]
 
     def test_combo_remainder_distributed_to_earlier_members(self, monkeypatch, pad_tokenizer):
-        from modelopt.torch.utils.dataset_utils import DATASET_COMBOS
-
         calls = self._record_calls(monkeypatch)
         get_dataset_dataloader(
             dataset_name="nemotron-post-training-v3",
@@ -648,8 +742,6 @@ class TestDatasetCombosExpansion:
         assert calls == list(zip(members, expected_counts))
 
     def test_plain_and_combo_compose(self, monkeypatch, pad_tokenizer):
-        from modelopt.torch.utils.dataset_utils import DATASET_COMBOS
-
         calls = self._record_calls(monkeypatch)
         get_dataset_dataloader(
             dataset_name=["cnn_dailymail", "nemotron-post-training-v3"],
@@ -673,8 +765,6 @@ class TestDatasetCombosExpansion:
             )
 
     def test_get_dataset_samples_rejects_combo_name(self):
-        from modelopt.torch.utils.dataset_utils import get_dataset_samples
-
         with pytest.raises(ValueError, match="DATASET_COMBOS"):
             get_dataset_samples("cnn_nemotron_v2_mix", num_samples=1)
 
@@ -779,8 +869,6 @@ def test_new_nemotron_registry_shape(dataset_key):
     Complements the gated smoke test below — catches typos in dataset paths or
     split names even when the runner has no HF credentials.
     """
-    from modelopt.torch.utils.dataset_utils import SUPPORTED_DATASET_CONFIG
-
     assert dataset_key in SUPPORTED_DATASET_CONFIG
     entry = SUPPORTED_DATASET_CONFIG[dataset_key]
     config = entry["config"]

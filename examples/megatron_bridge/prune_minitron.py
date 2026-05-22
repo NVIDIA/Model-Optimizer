@@ -296,6 +296,8 @@ def main(args: argparse.Namespace):
         num_samples=args.calib_num_samples,
         seq_length=args.seq_length,
         batch_size=args.calib_batch_size,
+        # pack=True uses Megatron pretraining-style global-stream document packing
+        pack=True,
     )
 
     pruning_config = {

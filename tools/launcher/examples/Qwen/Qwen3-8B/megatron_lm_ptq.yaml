@@ -35,7 +35,7 @@ pipeline:
       - PP: "1"
       - EP: "1"
       - ETP: "1"
-      - MMLU_LOWER_BOUND: "0.68"
+      - MMLU_LOWER_BOUND: "0.71"
     slurm_config:
       _factory_: "slurm_factory"
       nodes: 1
@@ -56,7 +56,7 @@ pipeline:
       - PP: "1"
       - EP: "1"
       - ETP: "1"
-      - MMLU_LOWER_BOUND: "0.75"
+      - MMLU_LOWER_BOUND: "0.76"
     slurm_config:
       _factory_: "slurm_factory"
       nodes: 1
