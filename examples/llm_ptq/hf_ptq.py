@@ -631,22 +631,6 @@ def mono_quantize(
             "Consider reducing calib_size to reduce calibration time.\n####\n"
         )
 
-    # For Nemotron VL models, disable quantization of vision components
-    if is_nemotron_vl_model:
-        print("Disabling quantization for vision components in Nemotron VL model")
-        quant_cfg["quant_cfg"].append({"quantizer_name": "*vision*", "enable": False})
-        quant_cfg["quant_cfg"].append({"quantizer_name": "*image*", "enable": False})
-        # Also disable radio model components specifically (for Nemotron-Parse)
-        quant_cfg["quant_cfg"].append({"quantizer_name": "*radio*", "enable": False})
-        quant_cfg["quant_cfg"].append({"quantizer_name": "*visual*", "enable": False})
-        quant_cfg["quant_cfg"].append(
-            {"quantizer_name": "*encoder*", "enable": False}
-        )  # Disable encoder
-        quant_cfg["quant_cfg"].append(
-            {"quantizer_name": "*model_encoder*", "enable": False}
-        )  # Nemotron-Parse specific
-        print("Quantization will only be applied to the decoder (text generation) component")
-
     if not model_is_already_quantized or calibration_only:
         # quantize the model
 
@@ -1115,10 +1099,8 @@ def quantize_main(
             quant_cfg = QUANT_CFG_CHOICES[args.qformat]
 
             quant_cfg = build_quant_cfg(
-                args.qformat,
                 quant_cfg,
                 args.awq_block_size,
-                model_type,
                 args.moe_calib_experts_ratio,
             )
 
@@ -1132,8 +1114,10 @@ def quantize_main(
                     getattr(mtq, KV_QUANT_CFG_CHOICES[args.kv_cache_qformat])["quant_cfg"],
                 )
 
-        # Exclude MTP layers from quantization if detected (e.g., GLM-4.7's layer 92)
-        # These layers are typically speculative decoding layers that should be exported as-is
+        # Exclude MTP layers from quantization if detected (e.g., GLM-4.7's layer 92).
+        # These layers are typically speculative decoding layers that should be exported as-is.
+        # Complementary to recipe `*mtp*` wildcards (name-match); this catches MTP layers
+        # identified by index.
         mtp_layer_prefixes = getattr(full_model, "_mtp_layer_prefixes", None)
         if mtp_layer_prefixes:
             quant_cfg = copy.deepcopy(quant_cfg)
