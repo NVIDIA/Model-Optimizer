@@ -3,6 +3,23 @@
 This folder holds model-optimization recipes (e.g. PTQ recipes) whose
 behavior is tied to a **specific Hugging Face model architecture or model instance**.
 
+## Choosing a recipe
+
+Built-in recipes live in two places: `modelopt_recipes/huggingface/<model_type>/`
+for model-specific recipes and `modelopt_recipes/general/` for model-agnostic
+ones. When deciding which to use:
+
+1. **Look in `huggingface/<model_type>/` first** for the target model's
+   Hugging Face `model_type`, and inside it for a nested
+   `<specific_model>/` folder if the recipe is tuned for one released
+   checkpoint rather than every checkpoint of that `model_type`. The
+   presence of a folder here signals that there is a recommended recipe
+   for that `model_type` or model instance.
+2. **Fall back to `general/`** if no `<model_type>/` folder applies. The
+   general recipes are a good starting point for any model — and the
+   recommended starting point for a model architecture that does not yet
+   have a model-specific entry.
+
 ## Folder structure
 
 Recipes are categorized by the Hugging Face `model_type` string — the
