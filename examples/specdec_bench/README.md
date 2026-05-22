@@ -172,27 +172,6 @@ The tool handles two directory layouts and mirrors them into S3:
 `LOCAL_DIR`'s basename is preserved in the destination prefix, so re-uploads from the same
 source land in the same place.
 
-### Optional attestation fields
-
-`run.py` reads two environment variables when writing `configuration.json`; they're optional
-provenance hints that downstream consumers (dashboards, leaderboards) can use to attest a run:
-
-| Env var | Purpose |
-|---|---|
-| `JIRA_TICKET` | A tracking ID for the run (your tracker — JIRA key, GitHub issue, etc.) |
-| `HUGGINGFACE_MODEL_ID` | The public model id on the Hugging Face Hub, so the model used can be independently fetched |
-
-Set them in the same shell that launches `run.py`:
-
-```bash
-export JIRA_TICKET=MYTRACK-1234
-export HUGGINGFACE_MODEL_ID=meta-llama/Llama-3.3-70B-Instruct
-python3 run.py ...
-```
-
-Both fields appear in the run's `configuration.json` as `jira_ticket` and `huggingface_model_id`
-(or `null` when unset). They have no effect on the benchmark itself.
-
 ## Notes
 
 The goal of this benchmark is to provide an easy way to configure, run, and compare speculative implementations across frameworks in an apples-to-apples method.
