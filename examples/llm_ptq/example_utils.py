@@ -317,7 +317,7 @@ def get_processor(
 
 
 def get_inlined_mtp_prefixes(config: Any) -> list[str]:
-    """turn an HF config into the list of state-dict prefixes for inlined-MTP layers."""
+    """Turn an HF config into the list of state-dict prefixes for inlined-MTP layers."""
     # ``or 0``: some configs set num_nextn_predict_layers=None rather than omit it.
     num_nextn = int(getattr(config, "num_nextn_predict_layers", 0) or 0)
     if not num_nextn:
@@ -327,9 +327,10 @@ def get_inlined_mtp_prefixes(config: Any) -> list[str]:
 
 
 def _keys_to_prefixes(keys: Iterable[str]) -> set[str]:
-    """invert separate-file MTP keys into the prefixes the exporter needs for exclude_modules.
+    """Invert separate-file MTP keys into the prefixes the exporter needs for exclude_modules.
     ``"mtp.fc.weight"`` → ``{"mtp"}``; ``"mtp.layers.0.q_proj.weight"`` →
-    ``{"mtp", "mtp.layers.0"}``.
+    ``{"mtp", "mtp.layers.0"}``. Caller must filter out inlined keys; otherwise
+    ``"model.layers.78.eh_proj.weight"`` would emit ``"model"`` as a prefix.
     """
     prefixes: set[str] = set()
     for key in keys:
@@ -344,11 +345,11 @@ def _keys_to_prefixes(keys: Iterable[str]) -> set[str]:
 
 
 def _load_tensors_matching(
-    model_dir: Path, predicate: Callable[[str, str | None], bool]
+    model_dir: Path, predicate: Callable[[str], bool]
 ) -> dict[str, torch.Tensor]:
-    """Stream tensors satisfying ``predicate(key, shard_name)`` from every
-    safetensors source in ``model_dir`` (indexed shards + standalone files,
-    each opened at most once).
+    """Stream tensors satisfying ``predicate(key)`` from every safetensors
+    source in ``model_dir`` (indexed shards + standalone files, each opened
+    at most once).
     """
     tensors: dict[str, torch.Tensor] = {}
     seen_shards: set[str] = set()
@@ -359,7 +360,7 @@ def _load_tensors_matching(
             weight_map = json.load(f)["weight_map"]
         per_shard: dict[str, list[str]] = {}
         for key, shard_name in weight_map.items():
-            if predicate(key, shard_name):
+            if predicate(key):
                 per_shard.setdefault(shard_name, []).append(key)
         for shard_name, keys in per_shard.items():
             seen_shards.add(shard_name)
@@ -372,7 +373,7 @@ def _load_tensors_matching(
             continue
         with safe_open(str(shard), framework="pt", device="cpu") as f:
             for k in f.keys():  # noqa: SIM118 - safe_open is not iterable
-                if predicate(k, shard.name):
+                if predicate(k):
                     tensors[k] = f.get_tensor(k)
     return tensors
 
@@ -417,24 +418,23 @@ def load_mtp_weights(
     inlined_tuple = tuple(p + "." for p in inlined_prefixes)
 
     # Combined predicate covering both conventions in one pass.
-    def predicate(key: str, shard_name: str | None) -> bool:
-        if inlined_tuple and key.startswith(inlined_tuple):
-            return True
-        return "mtp" in key or (shard_name is not None and "mtp" in shard_name)
+    def predicate(key: str) -> bool:
+        return key.startswith(inlined_tuple) or "mtp" in key
 
     tensors = _load_tensors_matching(model_dir, predicate)
+    if not tensors:
+        return [], {}
 
     separate_keys = [k for k in tensors if not k.startswith(inlined_tuple)]
-    prefixes = inlined_prefixes | _keys_to_prefixes(separate_keys) if tensors else set()
+    prefixes = inlined_prefixes | _keys_to_prefixes(separate_keys)
 
     not_in_state_dict = _apply_to_model_state_dict(model, tensors)
 
-    if prefixes:
-        print(
-            f"✓ Detected {len(tensors)} MTP tensors under {sorted(prefixes)} "
-            f"(loaded into model: {len(tensors) - len(not_in_state_dict)}, "
-            f"orphaned: {len(not_in_state_dict)})"
-        )
+    print(
+        f"✓ Detected {len(tensors)} MTP tensors under {sorted(prefixes)} "
+        f"(loaded into model: {len(tensors) - len(not_in_state_dict)}, "
+        f"orphaned: {len(not_in_state_dict)})"
+    )
 
     return sorted(prefixes), not_in_state_dict
 
