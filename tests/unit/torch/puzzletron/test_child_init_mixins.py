@@ -130,9 +130,10 @@ def test_resolve_pruning_mixin_accepts_names_instances_and_lists():
 
     assert resolve_pruning_mixin("mapped", _DescriptorWithPruningMixins) is _MAPPED_MIXIN
     assert resolve_pruning_mixin(existing, _DescriptorWithPruningMixins) is existing
-    assert resolve_pruning_mixin(
-        ["mapped", existing], _DescriptorWithPruningMixins
-    ) == [_MAPPED_MIXIN, existing]
+    assert resolve_pruning_mixin(["mapped", existing], _DescriptorWithPruningMixins) == [
+        _MAPPED_MIXIN,
+        existing,
+    ]
 
 
 def test_resolve_pruning_mixin_reports_available_methods():

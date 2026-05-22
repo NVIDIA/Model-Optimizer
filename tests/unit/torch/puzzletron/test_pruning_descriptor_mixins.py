@@ -67,8 +67,7 @@ def test_nemotron_h_descriptor_exposes_expert_removal_and_kv_heads_mixins():
 
 def test_nemotron_h_v2_descriptor_exposes_ffn_and_kv_heads_mixins():
     module = import_module(
-        "modelopt.torch.puzzletron.anymodel.models.nemotron_h_v2."
-        "nemotron_h_v2_model_descriptor"
+        "modelopt.torch.puzzletron.anymodel.models.nemotron_h_v2.nemotron_h_v2_model_descriptor"
     )
 
     mixins = module.NemotronHV2ModelDescriptor.pruning_mixins()
