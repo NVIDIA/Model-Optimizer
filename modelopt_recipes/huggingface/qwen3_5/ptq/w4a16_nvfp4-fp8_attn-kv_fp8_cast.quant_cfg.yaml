@@ -14,10 +14,10 @@
 # limitations under the License.
 
 # Shared `quant_cfg` snippet for the Qwen3.5 family's
-# `nvfp4_mlp-fp8_attn-kv_fp8_cast` recipe. Imported by both
-# `huggingface/qwen3_5/ptq/nvfp4_mlp-fp8_attn-kv_fp8_cast.yaml` (dense
-# `qwen3_5`) and `huggingface/qwen3_5_moe/ptq/nvfp4_mlp-fp8_attn-kv_fp8_cast.yaml`
-# (MoE `qwen3_5_moe`); the two families share the hybrid linear-attention +
+# `w4a16_nvfp4-fp8_attn-kv_fp8_cast` recipe. Imported by both
+# `huggingface/qwen3_5/ptq/w4a16_nvfp4-fp8_attn-kv_fp8_cast.yaml` (dense `qwen3_5`)
+# and `huggingface/qwen3_5_moe/ptq/w4a16_nvfp4-fp8_attn-kv_fp8_cast.yaml` (MoE
+# `qwen3_5_moe`); the two families share the hybrid linear-attention +
 # softmax-attention architecture, so the wildcard rules apply identically.
 # MoE-only patterns inside `default_disabled_quantizers`
 # (`*block_sparse_moe.gate*`, `*mlp.shared_expert_gate.*`, `*router*`) are
