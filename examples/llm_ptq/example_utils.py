@@ -23,7 +23,7 @@ import os
 import shutil
 import sys
 import warnings
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
@@ -32,7 +32,6 @@ import transformers
 from accelerate import infer_auto_device_map, init_empty_weights
 from accelerate.utils import get_max_memory
 from safetensors import safe_open
-from safetensors.torch import load_file
 from transformers import (
     AutoConfig,
     AutoModel,
@@ -317,42 +316,6 @@ def get_processor(
             return None
 
 
-def _load_inlined_mtp_tensors(
-    model_path: Path, mtp_prefixes: Iterable[str]
-) -> dict[str, torch.Tensor]:
-    """Stream tensors whose keys start with any ``{prefix}.`` from on-disk shards.
-
-    Walks ``model.safetensors.index.json`` when present, else falls back to a
-    single ``model.safetensors`` file. Returns an empty dict if no matching
-    keys are found.
-    """
-    prefix_tuple = tuple(p + "." for p in mtp_prefixes)
-
-    def _matches(key: str) -> bool:
-        return key.startswith(prefix_tuple)
-
-    tensors: dict[str, torch.Tensor] = {}
-    index_file = model_path / "model.safetensors.index.json"
-    if index_file.exists():
-        weight_map = json.load(open(index_file))["weight_map"]
-        per_shard: dict[str, list[str]] = {}
-        for key, shard in weight_map.items():
-            if _matches(key):
-                per_shard.setdefault(shard, []).append(key)
-        for shard, keys in per_shard.items():
-            with safe_open(str(model_path / shard), framework="pt", device="cpu") as f:
-                for k in keys:
-                    tensors[k] = f.get_tensor(k)
-    else:
-        single = model_path / "model.safetensors"
-        if single.exists():
-            with safe_open(str(single), framework="pt", device="cpu") as f:
-                for k in f.keys():  # noqa: SIM118 - safe_open is not iterable
-                    if _matches(k):
-                        tensors[k] = f.get_tensor(k)
-    return tensors
-
-
 def get_inlined_mtp_prefixes(config: Any) -> list[str]:
     """Pure: HF config → state-dict-key prefixes for inlined MTP layers.
 
@@ -361,60 +324,77 @@ def get_inlined_mtp_prefixes(config: Any) -> list[str]:
     ``i in [num_hidden, num_hidden + num_nextn_predict_layers)``. Returns
     ``[]`` when the config does not declare any MTP layers.
     """
-    num_nextn = int(getattr(config, "num_nextn_predict_layers", 0))
+    # ``or 0`` guards against configs that set ``num_nextn_predict_layers``
+    # explicitly to ``None`` rather than omitting the field.
+    num_nextn = int(getattr(config, "num_nextn_predict_layers", 0) or 0)
     if not num_nextn:
         return []
     num_hidden = config.num_hidden_layers
     return [f"model.layers.{i}" for i in range(num_hidden, num_hidden + num_nextn)]
 
 
-def _scan_separate_file_mtp(
-    model_dir: Path,
-) -> tuple[set[str], dict[str, torch.Tensor]]:
-    """Disk → (prefixes, tensors) for the legacy ``mtp.*``-keyed convention.
+def _keys_to_prefixes(keys: Iterable[str]) -> set[str]:
+    """Pure: separate-file MTP keys → state-dict prefixes for ``exclude_modules``.
 
-    Walks ``model.safetensors.index.json`` for keys/values containing
-    ``"mtp"``, loads the matching tensors from their referenced shards, and
-    returns both the prefixes (e.g. ``"mtp"``, ``"mtp.layers.0"``) and the
-    raw tensors. Returns empty when no index file exists or no MTP keys
-    are present.
+    For each key, extracts:
+    - the top-level module prefix (e.g. ``"mtp"`` from ``"mtp.fc.weight"``)
+      so non-layer MTP weights like ``mtp.fc`` and ``mtp.norm`` are excluded.
+    - the specific layer prefix (e.g. ``"mtp.layers.0"`` from
+      ``"mtp.layers.0.q_proj.weight"``).
     """
-    index_file = model_dir / "model.safetensors.index.json"
-    if not index_file.exists():
-        return set(), {}
-
-    weight_map = json.load(open(index_file))["weight_map"]
-    mtp_weight_map: dict[str, list[str]] = {}
-    for k, v in weight_map.items():
-        if "mtp" in k or "mtp" in v:
-            mtp_weight_map.setdefault(v, []).append(k)
-    if not mtp_weight_map:
-        return set(), {}
-
     prefixes: set[str] = set()
-    for key in (k for keys in mtp_weight_map.values() for k in keys):
+    for key in keys:
         parts = key.split(".")
-        # Top-level MTP module prefix (e.g. "mtp" from "mtp.fc.weight") so
-        # non-layer MTP weights like mtp.fc, mtp.norm are also excluded.
         if parts:
             prefixes.add(parts[0])
-        # Specific layer prefixes like "mtp.layers.0".
         for i, part in enumerate(parts):
             if part == "layers" and i + 1 < len(parts) and parts[i + 1].isdigit():
                 prefixes.add(".".join(parts[: i + 2]))
                 break
+    return prefixes
 
+
+def _load_tensors_matching(
+    model_dir: Path, predicate: Callable[[str, str | None], bool]
+) -> dict[str, torch.Tensor]:
+    """Stream tensors satisfying ``predicate`` from every safetensors source
+    in ``model_dir`` via ``safe_open``.
+
+    Sources walked (each at most once):
+    1. Sharded layout: shards referenced by ``model.safetensors.index.json``.
+       The predicate sees ``(key, shard_filename)``.
+    2. Standalone files: any ``*.safetensors`` not referenced by the index
+       (including a standalone ``model.safetensors`` when no index exists and
+       legacy auxiliary files like ``mtp.safetensors``). The predicate sees
+       ``(key, file_name)``.
+
+    Returns an empty dict if no tensor matches.
+    """
     tensors: dict[str, torch.Tensor] = {}
-    for filename, mtp_keys in mtp_weight_map.items():
-        filepath = model_dir / filename
-        if not filepath.exists():
+    seen_shards: set[str] = set()
+
+    index_file = model_dir / "model.safetensors.index.json"
+    if index_file.exists():
+        with open(index_file) as f:
+            weight_map = json.load(f)["weight_map"]
+        per_shard: dict[str, list[str]] = {}
+        for key, shard_name in weight_map.items():
+            if predicate(key, shard_name):
+                per_shard.setdefault(shard_name, []).append(key)
+        for shard_name, keys in per_shard.items():
+            seen_shards.add(shard_name)
+            with safe_open(str(model_dir / shard_name), framework="pt", device="cpu") as f:
+                for k in keys:
+                    tensors[k] = f.get_tensor(k)
+
+    for shard in sorted(model_dir.glob("*.safetensors")):
+        if shard.name in seen_shards:
             continue
-        print(f"Loading {len(mtp_keys)} mtp weights from {filename}...")
-        loaded = load_file(str(filepath), device="cpu")
-        for k in mtp_keys:
-            if k in loaded:
-                tensors[k] = loaded[k]
-    return prefixes, tensors
+        with safe_open(str(shard), framework="pt", device="cpu") as f:
+            for k in f.keys():  # noqa: SIM118 - safe_open is not iterable
+                if predicate(k, shard.name):
+                    tensors[k] = f.get_tensor(k)
+    return tensors
 
 
 def _apply_to_model_state_dict(
@@ -464,25 +444,26 @@ def load_mtp_weights(
         layers were detected.
         Dictionary of MTP weights that have no slot in the model's state
         dict; ``export_hf_checkpoint`` merges these via ``extra_state_dict``.
-
-    See Also:
-        ``examples/llm_ptq/MTP_DETECTION.md`` for the design rationale and
-        planned migration path to a library-side detector registry.
     """
     model_dir = Path(model_path)
-    prefixes: set[str] = set()
-    tensors: dict[str, torch.Tensor] = {}
 
-    inlined_prefixes = get_inlined_mtp_prefixes(model.config)
-    if inlined_prefixes:
-        inlined_tensors = _load_inlined_mtp_tensors(model_dir, inlined_prefixes)
-        if inlined_tensors:
-            prefixes.update(inlined_prefixes)
-            tensors.update(inlined_tensors)
+    inlined_prefixes = set(get_inlined_mtp_prefixes(model.config))
+    inlined_tuple = tuple(p + "." for p in inlined_prefixes)
 
-    separate_prefixes, separate_tensors = _scan_separate_file_mtp(model_dir)
-    prefixes.update(separate_prefixes)
-    tensors.update(separate_tensors)
+    def predicate(key: str, shard_name: str | None) -> bool:
+        # Inlined: key prefix matches an MTP layer index from the config.
+        if inlined_tuple and key.startswith(inlined_tuple):
+            return True
+        # Separate-file legacy: ``"mtp"`` in the key or in the shard filename
+        # (e.g. ``mtp.safetensors`` referenced or sitting alongside the index).
+        return "mtp" in key or (shard_name is not None and "mtp" in shard_name)
+
+    tensors = _load_tensors_matching(model_dir, predicate)
+
+    # Anything we loaded that isn't covered by an inlined prefix came from the
+    # separate-file convention; derive its prefixes from the keys themselves.
+    separate_keys = [k for k in tensors if not k.startswith(inlined_tuple)]
+    prefixes = inlined_prefixes | _keys_to_prefixes(separate_keys) if tensors else set()
 
     not_in_state_dict = _apply_to_model_state_dict(model, tensors)
 
