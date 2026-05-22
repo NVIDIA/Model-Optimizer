@@ -895,7 +895,6 @@ def pad_nvfp4_weights(
         return ((a + b - 1) // b) * b
 
     nvfp4_layers = _find_nvfp4_layers(state_dict)
-    padded_count = 0
 
     for layer in sorted(nvfp4_layers):
         w_key = f"{layer}.weight"
@@ -914,7 +913,6 @@ def pad_nvfp4_weights(
         if pad_r > 0 or pad_c_w > 0 or pad_c_s > 0:
             state_dict[w_key] = torch.nn.functional.pad(weight, (0, pad_c_w, 0, pad_r))
             state_dict[s_key] = torch.nn.functional.pad(scale, (0, pad_c_s, 0, pad_r))
-            padded_count += 1
 
     return state_dict
 
