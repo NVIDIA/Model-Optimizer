@@ -42,16 +42,66 @@ import os
 import sys
 from pathlib import Path
 
-from specdec_bench.s3_utils import (
-    S3_DEFAULT_ENDPOINT,
-    S3_DEFAULT_KEY_ID,
-    S3_DEFAULT_SECRET,
-    make_s3_client,
-    parse_s3_path,
-    upload_run_dir,
-)
-
 _RUN_SENTINELS = ("configuration.json", "timing.json", "aa_timing.json", "acceptance_rate.json")
+
+
+# ── S3 helpers ────────────────────────────────────────────────────────────────
+# Inlined from a former specdec_bench/s3_utils.py so this stays a drop-in
+# single-file tool: a contributor can `wget upload_to_s3.py` and run it without
+# installing the specdec_bench package. Defaults are empty — endpoint, key id,
+# and secret are taken from --endpoint / --key-id / --secret (or the
+# corresponding S3_ENDPOINT / S3_KEY_ID / S3_SECRET env vars). No team-specific
+# infrastructure leaks into this public example.
+
+
+def parse_s3_path(path: str) -> tuple[str, str]:
+    """'s3://bucket/prefix' → (bucket, prefix).  prefix may be empty."""
+    without_scheme = path[5:]  # strip "s3://"
+    parts = without_scheme.split("/", 1)
+    bucket = parts[0]
+    prefix = parts[1].strip("/") if len(parts) > 1 else ""
+    return bucket, prefix
+
+
+def make_s3_client(endpoint: str, key_id: str, secret: str):
+    import boto3
+    from botocore.config import Config
+    return boto3.client(
+        "s3",
+        endpoint_url=endpoint or None,
+        aws_access_key_id=key_id,
+        aws_secret_access_key=secret,
+        region_name="us-east-1",
+        config=Config(s3={"addressing_style": "path"}),
+    )
+
+
+def s3_prefix_exists(s3, bucket: str, prefix: str) -> bool:
+    resp = s3.list_objects_v2(Bucket=bucket, Prefix=prefix.rstrip("/") + "/", MaxKeys=1)
+    return bool(resp.get("Contents"))
+
+
+def _upload_files(s3, local_dir: Path, bucket: str, s3_prefix: str) -> None:
+    for file_path in sorted(local_dir.rglob("*")):
+        if not file_path.is_file():
+            continue
+        rel = file_path.relative_to(local_dir).as_posix()
+        key = f"{s3_prefix}/{rel}"
+        s3.upload_file(str(file_path), bucket, key)
+        print(f"  Uploaded: s3://{bucket}/{key}")
+
+
+def upload_run_dir(s3, local_dir: Path, bucket: str, s3_prefix: str) -> None:
+    """Upload a single run directory to s3://bucket/s3_prefix/.
+
+    Raises ValueError if the destination prefix already has any objects.
+    """
+    s3_prefix = s3_prefix.rstrip("/")
+    if s3_prefix_exists(s3, bucket, s3_prefix):
+        raise ValueError(
+            f"S3 destination already exists: s3://{bucket}/{s3_prefix} — refusing to overwrite"
+        )
+    _upload_files(s3, local_dir, bucket, s3_prefix)
 
 
 def _is_run_dir(d: Path) -> bool:
@@ -102,18 +152,18 @@ def main():
     )
     parser.add_argument(
         "--endpoint",
-        default=os.environ.get("S3_ENDPOINT", S3_DEFAULT_ENDPOINT),
+        default=os.environ.get("S3_ENDPOINT", ""),
         help="S3 endpoint URL",
     )
     parser.add_argument(
         "--key-id",
-        default=os.environ.get("S3_KEY_ID", S3_DEFAULT_KEY_ID),
+        default=os.environ.get("S3_KEY_ID", ""),
         dest="key_id",
         help="S3 access key ID",
     )
     parser.add_argument(
         "--secret",
-        default=os.environ.get("S3_SECRET", S3_DEFAULT_SECRET),
+        default=os.environ.get("S3_SECRET", ""),
         help="S3 secret access key",
     )
     parser.add_argument(
