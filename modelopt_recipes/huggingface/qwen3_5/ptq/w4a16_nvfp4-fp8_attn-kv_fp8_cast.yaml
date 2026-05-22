@@ -1,0 +1,39 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# W4A16 (NVFP4 weights) MLP / FP8 attention / FP8 KV-cast PTQ recipe for
+# HuggingFace `qwen3_5` (dense) models. Covers Qwen3.5 and Qwen3.6 dense
+# releases, which share the `qwen3_5` model_type and hybrid linear-attention +
+# softmax-attention architecture. Shares its `quant_cfg` with the MoE
+# counterpart at `huggingface/qwen3_5_moe/ptq/w4a16_nvfp4-fp8_attn-kv_fp8_cast.yaml`;
+# the snippet lives under
+# `huggingface/qwen3_5/ptq/w4a16_nvfp4-fp8_attn-kv_fp8_cast.quant_cfg.yaml`.
+
+imports:
+  shared_quant_cfg: huggingface/qwen3_5/ptq/w4a16_nvfp4-fp8_attn-kv_fp8_cast.quant_cfg
+
+metadata:
+  recipe_type: ptq
+  description: >-
+    W4A16 (NVFP4 weights) MLP / FP8 attention / FP8 KV-cast PTQ recipe for
+    HuggingFace `qwen3_5` (dense) models: NVFP4 for MLP projection weights and
+    lm_head; FP8 for self-attention and the large linear-attention
+    projections; FP8 KV cache with constant amax.
+quantize:
+  algorithm:
+    method: max
+    layerwise: false
+  quant_cfg:
+    - $import: shared_quant_cfg
