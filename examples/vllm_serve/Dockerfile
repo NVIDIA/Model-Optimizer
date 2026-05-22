@@ -1,4 +1,4 @@
-FROM vllm/vllm-openai:v0.10.2
+FROM vllm/vllm-openai:v0.20.0
 
 # Set environment variables
 ENV PIP_NO_CACHE_DIR=off \
@@ -23,7 +23,7 @@ RUN cd Model-Optimizer && \
     pip install -e ".[all,dev-test]"
 
 # Llama4 requires this
-RUN pip install flash-attn==2.7.4.post1
+RUN pip install flash-attn==2.7.4.post1 --no-build-isolation
 
 # Pre-compile CUDA extensions to avoid compilation time during runtime
 RUN python3 -c "import modelopt.torch.quantization.extensions as ext; ext.precompile()" || true

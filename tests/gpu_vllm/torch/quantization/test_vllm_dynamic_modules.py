@@ -163,7 +163,9 @@ def _shutdown_llm(llm):
 @pytest.fixture(scope="module")
 def tiny_llama_llm(tmp_path_factory):
     tmp = tmp_path_factory.mktemp("tiny_llama")
-    model_dir = create_tiny_llama_dir(tmp)
+    # Helper default ``max_position_embeddings=32`` would clash with vLLM's
+    # ``max_model_len=64`` set in ``_boot_llm``.
+    model_dir = create_tiny_llama_dir(tmp, max_position_embeddings=64)
     llm = _boot_llm(model_dir)
     try:
         yield llm
