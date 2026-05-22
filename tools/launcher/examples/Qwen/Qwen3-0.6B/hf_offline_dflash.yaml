@@ -25,14 +25,13 @@ job_name: Qwen3-0.6B_DFlash_offline_regression
 pipeline:
   global_vars:
     hf_model: /hf-local/Qwen/Qwen3-0.6B
-    hidden_states_dir: /scratchspace/dflash_qwen3_0.6b_hidden_states
 
   # Step 1: Dump base-model hidden states via TRT-LLM (reuses the eagle dump script).
   task_0:
     script: common/eagle3/dump_offline_data.sh
     args:
       - --input-data modules/Model-Optimizer/examples/dataset/synthetic_conversations_1k.jsonl
-      - --output-dir <<global_vars.hidden_states_dir>>
+      - --output-dir /scratchspace/dflash_qwen3_0.6b_hidden_states
       # Explicit layer ids matching build_target_layer_ids(28, 2) for Qwen3-0.6B
       # (28 hidden layers, 2-layer draft). The --aux-layers=dflash preset is
       # hardcoded to 5 draft layers in common.py and would mis-shape against
@@ -58,7 +57,7 @@ pipeline:
     args:
       - --config modules/Model-Optimizer/modelopt_recipes/general/speculative_decoding/dflash.yaml
       - model.model_name_or_path=<<global_vars.hf_model>>
-      - data.offline_data_path=<<global_vars.hidden_states_dir>>
+      - data.offline_data_path=/scratchspace/dflash_qwen3_0.6b_hidden_states
       - data.chat_template=examples/Qwen/Qwen3-0.6B/chat_template_train.jinja
       - training.output_dir=/scratchspace/dflash_qwen3_0.6b_offline
       # Two epochs over the 200-conversation dump gives enough steps for
