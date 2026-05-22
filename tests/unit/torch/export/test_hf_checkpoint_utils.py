@@ -20,6 +20,8 @@ from unittest.mock import patch
 import pytest
 
 pytest.importorskip("huggingface_hub")
+hf_hub_errors = pytest.importorskip("huggingface_hub.errors")
+LocalEntryNotFoundError = hf_hub_errors.LocalEntryNotFoundError
 
 from modelopt.torch.export import copy_hf_ckpt_remote_code
 
@@ -59,15 +61,60 @@ def test_copy_hf_ckpt_remote_code_local_dir_no_py_files(tmp_path):
     assert list(dst_dir.iterdir()) == [], "no files should be copied"
 
 
-def test_copy_hf_ckpt_remote_code_hub_id(tmp_path):
-    """copy_hf_ckpt_remote_code delegates to snapshot_download for a Hub model ID."""
+def test_copy_hf_ckpt_remote_code_hub_id(tmp_path, monkeypatch):
+    """copy_hf_ckpt_remote_code copies .py files from the resolved Hub snapshot."""
     dst_dir = tmp_path / "dst"
+    snapshot_dir = tmp_path / "snapshot"
+    snapshot_dir.mkdir()
+    (snapshot_dir / "modeling_custom.py").write_text("# custom model")
+    (snapshot_dir / "not_python.txt").write_text("not python")
 
-    with patch("modelopt.torch.export.plugins.hf_checkpoint_utils.snapshot_download") as mock_sd:
+    monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+    with patch(
+        "modelopt.torch.export.plugins.hf_checkpoint_utils.snapshot_download",
+        return_value=str(snapshot_dir),
+    ) as mock_sd:
         copy_hf_ckpt_remote_code("nvidia/NVIDIA-Nemotron-Nano-12B-v2", dst_dir)
 
     mock_sd.assert_called_once_with(
         repo_id="nvidia/NVIDIA-Nemotron-Nano-12B-v2",
-        local_dir=str(dst_dir),
         allow_patterns=["*.py"],
+        local_files_only=False,
     )
+    assert (dst_dir / "modeling_custom.py").read_text() == "# custom model"
+    assert not (dst_dir / "not_python.txt").exists(), "non-.py files should not be copied"
+
+
+def test_copy_hf_ckpt_remote_code_hub_id_offline_uses_cache(tmp_path, monkeypatch):
+    """copy_hf_ckpt_remote_code resolves cached Hub snapshots when HF_HUB_OFFLINE is set."""
+    dst_dir = tmp_path / "dst"
+    snapshot_dir = tmp_path / "snapshot"
+    snapshot_dir.mkdir()
+    (snapshot_dir / "nemotron_reasoning_parser.py").write_text("# parser")
+
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    with patch(
+        "modelopt.torch.export.plugins.hf_checkpoint_utils.snapshot_download",
+        return_value=str(snapshot_dir),
+    ) as mock_sd:
+        copy_hf_ckpt_remote_code("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", dst_dir)
+
+    mock_sd.assert_called_once_with(
+        repo_id="nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+        allow_patterns=["*.py"],
+        local_files_only=True,
+    )
+    assert (dst_dir / "nemotron_reasoning_parser.py").read_text() == "# parser"
+
+
+def test_copy_hf_ckpt_remote_code_hub_id_offline_missing_cache_raises(tmp_path, monkeypatch):
+    """copy_hf_ckpt_remote_code raises a clear error when offline cache is missing."""
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    with (
+        patch(
+            "modelopt.torch.export.plugins.hf_checkpoint_utils.snapshot_download",
+            side_effect=LocalEntryNotFoundError("missing"),
+        ),
+        pytest.raises(RuntimeError, match="HF_HUB_OFFLINE"),
+    ):
+        copy_hf_ckpt_remote_code("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", tmp_path / "dst")

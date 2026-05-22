@@ -706,12 +706,12 @@ class MaxCalibConfig(QuantizeAlgorithmConfig):
 
     sync_expert_weight_amax: bool = ModeloptField(
         default=False,
-        title="Sync weight quantizer amax across MoE experts",
+        title="Share one weight amax across local experts in a SequentialMLP MoE layer.",
         description=(
-            "If True, the weight quantizer amax values are synchronized (max) across "
-            "local experts in SequentialMLP layers during calibration. This matches "
-            "TEGroupedMLP behavior where all experts share a single weight quantizer. "
-            "Only affects MoE models with SequentialMLP experts."
+            "If True, max-calibration synchronizes the weight quantizer amax across local "
+            "experts within each SequentialMLP layer, so all experts in that layer share "
+            "one effective weight amax. TEGroupedMLP already fuses experts into a single "
+            "GEMM with one weight quantizer, so this flag is irrelevant there."
         ),
     )
 

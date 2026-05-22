@@ -22,8 +22,20 @@ from pathlib import Path
 
 import torch
 from huggingface_hub import snapshot_download
+from huggingface_hub.errors import LocalEntryNotFoundError
 from safetensors.torch import safe_open
 from tqdm import tqdm
+
+_HF_HUB_OFFLINE_TRUE_VALUES = {"1", "ON", "YES", "TRUE"}
+
+
+def _is_hf_hub_offline() -> bool:
+    return os.environ.get("HF_HUB_OFFLINE", "").strip().upper() in _HF_HUB_OFFLINE_TRUE_VALUES
+
+
+def _copy_python_files(source_dir: Path, save_dir: Path) -> None:
+    for py_file in source_dir.glob("*.py"):
+        shutil.copy2(py_file, save_dir / py_file.name)
 
 
 def copy_hf_ckpt_remote_code(
@@ -36,7 +48,10 @@ def copy_hf_ckpt_remote_code(
     frameworks.
 
     If ``pretrained_model_path`` is a local directory, Python files are copied directly.
-    If it's a HF Hub model ID (e.g. ``nvidia/NVIDIA-Nemotron-Nano-12B-v2``), files are downloaded from the Hub.
+    If it's a HF Hub model ID (e.g. ``nvidia/NVIDIA-Nemotron-Nano-12B-v2``), the Hub
+    snapshot is resolved first and Python files are copied from that snapshot. When
+    ``HF_HUB_OFFLINE`` is set, the snapshot must already be available in the local
+    Hugging Face cache.
 
     Args:
         pretrained_model_path: Local path to the pretrained model or HuggingFace Hub model ID.
@@ -47,14 +62,28 @@ def copy_hf_ckpt_remote_code(
     save_dir.mkdir(parents=True, exist_ok=True)
 
     if hf_checkpoint_path.is_dir():
-        for py_file in hf_checkpoint_path.glob("*.py"):
-            shutil.copy2(py_file, save_dir / py_file.name)
+        _copy_python_files(hf_checkpoint_path, save_dir)
     else:
-        snapshot_download(
-            repo_id=str(pretrained_model_path),
-            local_dir=str(save_dir),
-            allow_patterns=["*.py"],
-        )
+        local_files_only = _is_hf_hub_offline()
+        try:
+            source_dir = Path(
+                snapshot_download(
+                    repo_id=str(pretrained_model_path),
+                    allow_patterns=["*.py"],
+                    local_files_only=local_files_only,
+                )
+            )
+        except LocalEntryNotFoundError as exc:
+            if local_files_only:
+                raise RuntimeError(
+                    f"Could not copy Python sidecar files for {pretrained_model_path!r} because "
+                    "HF_HUB_OFFLINE is enabled and the files are not available in the local "
+                    "Hugging Face cache. Populate the cache with the model's *.py files or pass "
+                    "a local pretrained model directory."
+                ) from exc
+            raise
+
+        _copy_python_files(source_dir, save_dir)
 
 
 def load_multimodal_components(
@@ -123,3 +152,34 @@ def load_multimodal_components(
 
     print(f"Successfully loaded {len(multimodal_state_dict)} multimodal tensors")
     return multimodal_state_dict
+
+
+_TOKENIZER_FILES = (
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "special_tokens_map.json",
+    "chat_template.jinja",
+    "added_tokens.json",
+    "tokenizer.model",
+    "vocab.json",
+    "merges.txt",
+)
+
+
+def copy_tokenizer_from_local_ckpt(src: str | os.PathLike, dst: str | os.PathLike):
+    """Copy tokenizer files verbatim from a local HF checkpoint dir.
+
+    Preserves the pre-transformers-v5 PreTrainedTokenizer(Fast) layout (full
+    ``added_tokens_decoder`` in ``tokenizer_config.json`` + ``special_tokens_map.json``).
+
+    Args:
+        src: Source HF checkpoint directory. Must be a local path.
+        dst: Destination directory; created if missing.
+    """
+    if not os.path.isdir(src):
+        raise ValueError(f"Invalid source path: {src}. It should be a directory.")
+    os.makedirs(dst, exist_ok=True)
+    for fn in _TOKENIZER_FILES:
+        p = os.path.join(src, fn)
+        if os.path.isfile(p):
+            shutil.copy2(p, dst)

@@ -24,7 +24,7 @@ import torch
 
 from modelopt.torch.utils.distributed import ParallelState
 
-from ..nn import QuantModule, SequentialQuantizer, TensorQuantizer
+from ..nn import NVFP4StaticQuantizer, QuantModule, SequentialQuantizer, TensorQuantizer
 from ..nn.modules.quant_linear import _QuantLinear
 from ..utils import multi_context, replace_function
 
@@ -126,7 +126,7 @@ class _ParallelLinear(_QuantFunctionalMixin, QuantModule):
 
         def _check_unsupported_states(quantizer: TensorQuantizer):
             for k in quantizer.state_dict():
-                if k not in ["_amax", "_pre_quant_scale"]:
+                if k not in ["_amax", "_pre_quant_scale", "_global_amax"]:
                     warnings.warn(
                         f"Restore of {k} for {prefix} is not supported. The restore of this layer might be "
                         f"incorrect. Please implement a custom restore for {k}."
@@ -137,6 +137,21 @@ class _ParallelLinear(_QuantFunctionalMixin, QuantModule):
             quantizer = quantizer[0] if isinstance(quantizer, SequentialQuantizer) else quantizer
             return hasattr(quantizer, name)
 
+        def _has_complete_static_nvfp4_weight_state(quantizer, weight):
+            quantizer = quantizer[0] if isinstance(quantizer, SequentialQuantizer) else quantizer
+            if not isinstance(quantizer, NVFP4StaticQuantizer):
+                return False
+            amax = getattr(quantizer, "_amax", None)
+            global_amax = getattr(quantizer, "global_amax", None)
+            if amax is None or global_amax is None:
+                return False
+            block_sizes = getattr(quantizer, "block_sizes", None)
+            block_size = block_sizes.get(-1) if isinstance(block_sizes, dict) else None
+            if block_size is None or weight.shape[-1] % block_size != 0:
+                return False
+            expected_blocks = weight.numel() // block_size
+            return amax.numel() == expected_blocks and global_amax.numel() == 1
+
         if self.weight is None:
             return
 
@@ -144,7 +159,10 @@ class _ParallelLinear(_QuantFunctionalMixin, QuantModule):
             _check_unsupported_states(
                 quantizer if isinstance(quantizer, TensorQuantizer) else quantizer[0]
             )
-        if _has_state(self.weight_quantizer, "_amax"):
+        # Skip max_calibrate when saved static NVFP4 state is intact; else MSE scales get overwritten.
+        if _has_state(
+            self.weight_quantizer, "_amax"
+        ) and not _has_complete_static_nvfp4_weight_state(self.weight_quantizer, self.weight):
             self.weight_quantizer.reset_amax()
             max_calibrate(self.weight_quantizer, lambda wq: wq(self.weight), distributed_sync=False)
         if _has_state(self.input_quantizer, "_pre_quant_scale"):
