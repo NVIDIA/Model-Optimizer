@@ -20,12 +20,14 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+import modelopt.torch.opt as mto
+import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization import tensor_quant
 from modelopt.torch.quantization import utils as quant_utils
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.conversion import set_quantizer_attributes_partial
 from modelopt.torch.quantization.nn import QuantModuleRegistry
-from modelopt.torch.quantization.nn.modules.quant_embedding import _UnsettableInputQuantizer
+from modelopt.torch.quantization.nn.modules.tensor_quantizer import HardDisabledTensorQuantizer
 
 VOCAB_SIZE = 16
 EMBED_DIM = 32
@@ -43,7 +45,7 @@ class TestQuantEmbedding:
         """Default state: input quant locked-disabled, output quant disabled, weight quant on;
         with weight quant also off the wrapper matches plain F.embedding."""
         qemb = _make_quant_embedding()
-        assert isinstance(qemb.input_quantizer, _UnsettableInputQuantizer)
+        assert isinstance(qemb.input_quantizer, HardDisabledTensorQuantizer)
         assert not qemb.input_quantizer.is_enabled
         assert not qemb.output_quantizer.is_enabled
         assert qemb.weight_quantizer.is_enabled
@@ -86,7 +88,7 @@ class TestQuantEmbedding:
     def test_input_quantizer_mutators_raise(self, method):
         """Each public enable/enable_quant/enable_calib API on input_quantizer raises."""
         qemb = _make_quant_embedding()
-        with pytest.raises(RuntimeError, match="nn.Embedding"):
+        with pytest.raises(RuntimeError, match="hard-disabled"):
             getattr(qemb.input_quantizer, method)()
 
     def test_wildcard_config_keeps_input_quantizer_disabled(self):
@@ -110,3 +112,69 @@ class TestQuantEmbedding:
 # Export-path tests for QuantEmbedding live in tests/gpu/torch/export/test_export_embedding.py
 # because _export_quantized_weight bottoms out in torch.cuda.empty_cache(), which raises on
 # CPU-only CI runners that have a CUDA-enabled torch build but no NVIDIA driver.
+
+
+class _EmbeddingForwardModel(nn.Module):
+    """Embedding + tiny Linear so the model has a normal float forward to assert against."""
+
+    def __init__(self):
+        """Build a single embedding and a small linear head."""
+        super().__init__()
+        self.embedding = nn.Embedding(VOCAB_SIZE, EMBED_DIM)
+        self.head = nn.Linear(EMBED_DIM, 4)
+
+    def forward(self, ids):
+        """Look up embeddings then project to a fixed 4-dim output."""
+        return self.head(self.embedding(ids))
+
+
+def _embedding_quant_cfg() -> dict:
+    """Per-tensor weight quant opt-in for the embedding, every other quantizer disabled."""
+    return {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {
+                "parent_class": "nn.Embedding",
+                "quantizer_name": "*weight_quantizer",
+                "cfg": {"num_bits": 8, "axis": None},
+            },
+        ],
+        "algorithm": "max",
+    }
+
+
+class TestQuantEmbeddingSaveRestore:
+    """Save → restore preserves the HardDisabledTensorQuantizer type and behavior."""
+
+    def test_save_restore_preserves_hard_disabled_input_quantizer(self):
+        """After modelopt save/restore the embedding's input_quantizer is still a
+        HardDisabledTensorQuantizer with locked-mutator semantics, not a plain
+        TensorQuantizer that happens to be `_disabled = True`."""
+        ids = torch.randint(0, VOCAB_SIZE, (2, 4))
+
+        model_quant = _EmbeddingForwardModel()
+        mtq.quantize(model_quant, _embedding_quant_cfg(), lambda m: m(ids))
+
+        # Sanity: the original module has the hard-disabled type.
+        assert isinstance(model_quant.embedding.input_quantizer, HardDisabledTensorQuantizer)
+
+        state_dict = mto.modelopt_state(model_quant)
+
+        model_restored = _EmbeddingForwardModel()
+        mto.restore_from_modelopt_state(model_restored, state_dict)
+        model_restored.load_state_dict(model_quant.state_dict())
+
+        # 1. Type is preserved.
+        assert isinstance(model_restored.embedding.input_quantizer, HardDisabledTensorQuantizer), (
+            "input_quantizer regressed to a non-HardDisabled type after restore — "
+            "the hard-disable guarantees (enable() raise, set_from_attribute_config "
+            "force-disable) would be lost."
+        )
+
+        # 2. Behavior is preserved: direct enable still raises after restore.
+        for method in ("enable", "enable_quant", "enable_calib"):
+            with pytest.raises(RuntimeError, match="hard-disabled"):
+                getattr(model_restored.embedding.input_quantizer, method)()
+
+        # 3. Forward output matches the original (weight quantization properties round-tripped).
+        assert torch.allclose(model_quant(ids), model_restored(ids))

@@ -23,53 +23,9 @@ import torch.nn as nn
 from ...tensor_quant import QUANT_DESC_8BIT_PER_TENSOR
 from ...utils import is_torch_export_mode
 from .quant_module import QuantModule, QuantModuleRegistry
-from .tensor_quantizer import SequentialQuantizer, TensorQuantizer
+from .tensor_quantizer import HardDisabledTensorQuantizer, SequentialQuantizer, TensorQuantizer
 
 __all__ = ["QuantEmbedding"]
-
-
-_INPUT_QUANTIZER_ERR = (
-    "Cannot configure input_quantizer on a quantized nn.Embedding: the input is integer "
-    "indices and cannot be fake-quantized. Configure weight_quantizer (and optionally "
-    "output_quantizer) instead."
-)
-
-
-class _UnsettableInputQuantizer(TensorQuantizer):
-    """TensorQuantizer slot for nn.Embedding.input — present but not enable-able.
-
-    Embedding inputs are integer indices that cannot be fake-quantized. The attribute
-    is kept so introspection code (export, calibration helpers) can find it.
-
-    Wildcard configs (e.g. the default ``QuantizeConfig`` ``"*"`` rule or
-    ``NVFP4_DEFAULT_CFG``'s ``*input_quantizer``) are accepted silently, then the
-    quantizer is force-disabled — wildcards don't really mean "enable embedding
-    input quant", they mean "enable input quant in general". Direct, explicit
-    attempts (calling ``enable``/``enable_quant``/``enable_calib``) raise loudly.
-    """
-
-    def enable(self):
-        """Disallowed for embedding inputs."""
-        raise RuntimeError(_INPUT_QUANTIZER_ERR)
-
-    def enable_quant(self):
-        """Disallowed for embedding inputs."""
-        raise RuntimeError(_INPUT_QUANTIZER_ERR)
-
-    def enable_calib(self):
-        """Disallowed for embedding inputs."""
-        raise RuntimeError(_INPUT_QUANTIZER_ERR)
-
-    def set_from_attribute_config(self, attribute_cfg):
-        """Apply the config like any quantizer, then force-disable us.
-
-        This absorbs wildcard configs from stock recipes without raising. The
-        quantizer's other attributes (``num_bits``, ``axis``, etc.) take on the
-        config values for introspection, but ``_disabled`` is forced back to
-        ``True`` so forward is always a no-op.
-        """
-        super().set_from_attribute_config(attribute_cfg)
-        self._disabled = True
 
 
 @QuantModuleRegistry.register({nn.Embedding: "nn.Embedding"})
@@ -79,21 +35,21 @@ class _QuantEmbedding(QuantModule):
     The literal input to ``nn.Embedding`` is integer indices, which cannot be
     fake-quantized. The ``input_quantizer`` attribute is kept (for symmetry with
     other quant modules and for introspection by export/calibration code) but is
-    permanently disabled — see ``_UnsettableInputQuantizer``. Only the embedding
+    a :class:`HardDisabledTensorQuantizer` — direct ``enable*()`` calls raise and
+    wildcard configs are silently absorbed-then-force-disabled. Only the embedding
     table (weight) and the lookup output (an activation feeding downstream layers)
     are quantizable.
 
     Quantizer roles:
         - ``weight_quantizer``: quantizes the embedding table (``self.weight``).
-        - ``input_quantizer``: permanently disabled placeholder — direct
-          ``enable*()`` calls raise; configs that target it are absorbed and the
-          quantizer is force-disabled.
+        - ``input_quantizer``: permanently disabled placeholder
+          (:class:`HardDisabledTensorQuantizer`).
         - ``output_quantizer``: optional activation quantizer for the lookup output,
           disabled by default.
     """
 
     weight_quantizer: TensorQuantizer | SequentialQuantizer
-    input_quantizer: _UnsettableInputQuantizer
+    input_quantizer: HardDisabledTensorQuantizer
     output_quantizer: TensorQuantizer
     _enable_weight_quantization: bool
     default_quant_desc_weight = QUANT_DESC_8BIT_PER_TENSOR
@@ -120,9 +76,9 @@ class _QuantEmbedding(QuantModule):
         self._register_temp_attribute(
             "weight_quantizer", TensorQuantizer(self.default_quant_desc_weight)
         )
-        # Build the input quantizer disabled. _UnsettableInputQuantizer's mutators raise,
+        # Build the input quantizer disabled. HardDisabledTensorQuantizer's mutators raise,
         # so we disable it once at construction via direct attribute assignment.
-        input_quantizer = _UnsettableInputQuantizer(self.default_quant_desc_input)
+        input_quantizer = HardDisabledTensorQuantizer(self.default_quant_desc_input)
         input_quantizer._disabled = True
         self._register_temp_attribute("input_quantizer", input_quantizer)
         self._register_temp_attribute(
@@ -135,10 +91,10 @@ class _QuantEmbedding(QuantModule):
     def forward(self, input, *args, **kwargs):
         """Quantize the embedding table, look up, then optionally quantize the output.
 
-        ``input_quantizer`` is intentionally never applied — embedding inputs are
-        integer indices. ``_UnsettableInputQuantizer.set_from_attribute_config``
-        keeps that quantizer disabled regardless of what configs target it, so we
-        rely on that invariant rather than a runtime check here.
+        ``input_quantizer`` is intentionally never invoked — embedding inputs are
+        integer indices. ``HardDisabledTensorQuantizer.set_from_attribute_config``
+        keeps that quantizer disabled regardless of what configs target it, so a
+        runtime check in this hot path is unnecessary.
         """
         if is_torch_export_mode():
             # quantize_weight()'s attribute write is not allowed under torch.export;
