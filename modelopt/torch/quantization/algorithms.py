@@ -49,9 +49,16 @@ from .utils import is_quantized_linear
 def estimate_quant_compression(quant_cfg: QuantizeConfig) -> float:
     """Estimate the compression ratio of a quantization configuration.
 
-    Right now, we find the minimum compression ratio across all quantizer attribute configs.
-    This is not perfect but is a good proxy for the overall compression ratio. We will improve
-    this in future releases.
+    If ``quant_cfg.effective_bits`` is set, returns ``effective_bits / 16`` directly. This
+    is the override path for formats whose true effective bits don't match the per-quantizer
+    ``num_bits`` heuristic — e.g., NVFP4 has 4 value bits + a per-16-element FP8 scale
+    (8/16 = 0.5 bits/element), so true effective bits = 4.5, not the heuristic's 4.0.
+
+    Otherwise, falls back to the heuristic: minimum compression ratio across all enabled
+    quantizer attribute configs (``num_bits / 16`` for ints, ``(E + M + 1) / 16`` for FP
+    tuples). This is a good proxy for the overall compression ratio of formats without
+    block-scale overhead, but under-counts block-quantized formats. We will improve this
+    in future releases.
 
     Args:
         quant_cfg: The quantization configuration to estimate compression for.
@@ -59,6 +66,8 @@ def estimate_quant_compression(quant_cfg: QuantizeConfig) -> float:
     Returns:
         float: The estimated compression ratio (0.0 to 1.0).
     """
+    if quant_cfg.effective_bits is not None:
+        return quant_cfg.effective_bits / 16.0
 
     def estimate_quant_compression_for_quantizer(quantizer_attr_cfg):
         if isinstance(quantizer_attr_cfg, list):

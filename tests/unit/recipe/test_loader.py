@@ -287,10 +287,15 @@ def test_load_recipe_autoquantize_defaults():
 
 
 def test_load_recipe_autoquantize_candidates_match_presets():
-    """Built-in AutoQuantize recipe's $imported candidates equal mtq.X_DEFAULT_CFG dicts."""
+    """Built-in AutoQuantize recipe's $imported candidates equal preset + inline override."""
     recipe = load_recipe("general/auto_quantize/nvfp4_fp8_at_4p8bits-kv_fp8_cast")
     candidates = recipe.auto_quantize.candidate_formats
-    assert candidates[0].model_dump(exclude_unset=True) == mtq.NVFP4_DEFAULT_CFG
+
+    # NVFP4 candidate = canonical preset + inline effective_bits override.
+    expected_nvfp4 = {**mtq.NVFP4_DEFAULT_CFG, "effective_bits": 4.5}
+    assert candidates[0].model_dump(exclude_unset=True) == expected_nvfp4
+
+    # FP8 candidate = canonical preset exactly (no override).
     assert candidates[1].model_dump(exclude_unset=True) == mtq.FP8_DEFAULT_CFG
 
 
@@ -336,6 +341,17 @@ def test_load_recipe_autoquantize_kv_cache_optional(tmp_path):
     recipe_file.write_text(_AQ_MINIMAL_BODY)
     recipe = load_recipe(recipe_file)
     assert recipe.auto_quantize.kv_cache is None
+
+
+def test_load_recipe_autoquantize_effective_bits_inline_override():
+    """Inline $import + sibling effective_bits merge applied per candidate."""
+    recipe = load_recipe("general/auto_quantize/nvfp4_fp8_at_4p8bits-kv_fp8_cast")
+    candidates = recipe.auto_quantize.candidate_formats
+
+    # NVFP4 candidate carries the override.
+    assert candidates[0].effective_bits == 4.5
+    # FP8 candidate has no override; heuristic still applies.
+    assert candidates[1].effective_bits is None
 
 
 # ---------------------------------------------------------------------------

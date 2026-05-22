@@ -30,7 +30,11 @@ auto_quantize:
     effective_bits: 4.8
 
   candidate_formats:
+    # NVFP4 true effective bits = 4 value bits + 8-bit FP8 scale per 16-element block
+    # = 4 + 0.5 = 4.5 bits/element. Override the heuristic's 4.0 so the LP cost is accurate.
     - $import: nvfp4
+      effective_bits: 4.5
+    # FP8 effective bits = 8 (heuristic is correct, per-tensor scale is negligible).
     - $import: fp8
 
   kv_cache:
