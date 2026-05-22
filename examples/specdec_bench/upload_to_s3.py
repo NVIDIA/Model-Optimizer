@@ -42,7 +42,7 @@ import os
 import sys
 from pathlib import Path
 
-_RUN_SENTINELS = ("configuration.json", "timing.json", "aa_timing.json", "acceptance_rate.json")
+_RUN_SENTINELS = ("configuration.json", "timing.json", "acceptance_rate.json")
 
 
 # ── S3 helpers ────────────────────────────────────────────────────────────────
