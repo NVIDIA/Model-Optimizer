@@ -345,30 +345,42 @@ For distillation results on Puzzletron-compressed models, see [examples/pruning/
 
 ## Runtime-Based Latency Optimization
 
-By default, subblock statistics use the `trt_torch` backend with theoretical memory proxies. You can instead enable **runtime stats** to measure actual inference latency via vLLM, which unlocks latency-based MIP constraints:
+You can enable **runtime stats** to measure actual inference latency via vLLM, which unlocks latency-based MIP constraints.
+
+A ready-to-run example config is included at [`configs/llama-3_1-8B_pruneffn_runtime/`](./configs/llama-3_1-8B_pruneffn_runtime/llama-3_1-8B_pruneffn_runtime.yaml). The following key fields enable and control execution of the runtime statistics in the `llama-3_1-8B_pruneffn_runtime.yaml` config file:
 
 ```yaml
 calc_subblock_stats:
   runtime_stats:
     enabled: true
-    synth_dataset_num_requests: 32
-    backend: vllm
     num_warmup_iters: 2
     num_iters: 10
-    batch_size: 1
-
-mip:
-  human_constraints:
-    target_latency: 20  # seconds
 ```
 
-Because vLLM startup adds substantial overhead during stats collection, extend the distributed process group timeout accordingly:
+The runtime constraint is specified in the `human_constraints` section of the config `Llama-3_1-8B.yaml`:
+```yaml
+human_constraints:
+  target_latency: 21
+```
+
+Run the pipeline against this config the same way as the memory-constrained variant:
+
+```bash
+torchrun --nproc_per_node 2 examples/puzzletron/main.py \
+   --config examples/puzzletron/configs/llama-3_1-8B_pruneffn_runtime/llama-3_1-8B_pruneffn_runtime.yaml 2>&1 | tee ./log.txt | grep "Puzzletron Progress"
+```
+
+The MIP solver will now search for a heterogeneous architecture whose measured end-to-end latency is at or below `target_latency`, instead of optimizing for a memory budget.
+
+Because vLLM startup adds substantial overhead during stats collection, extend the distributed process group timeout accordingly (already included in the example config):
 
 ```yaml
-dist_timeout_minutes: 60  # default is 10 if omitted
+nccl_timeout_minutes: 90  # default is 10 if omitted
 ```
 
 This field is supported in any Puzzletron YAML config and overrides the default 10-minute distributed timeout.
+
+Due to non-linear extension of the runtime stats of single subblocks to the total runtime of the model, the `target_latency` value should be set to a value that is slightly lower than the desired latency. For example, in our experiments, the `target_latency` value of 21 seconds resulted in a final model latency of 22.3 seconds.
 
 ## Advanced Usage
 
