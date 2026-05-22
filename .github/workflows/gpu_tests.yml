@@ -78,6 +78,9 @@ jobs:
         run: |
           python3 -m pip install nox && nox -s ${{ matrix.example }}
       - name: Upload GPU coverage to Codecov
+        # vLLM container has no ``git``, which codecov-action needs; gpu_vllm
+        # also runs without ``--cov`` so there's no coverage.xml to upload.
+        if: matrix.example != 'gpu_vllm'
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}

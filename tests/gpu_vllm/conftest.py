@@ -13,18 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Shared setup for vLLM tests.
-
-vLLM handles its own distributed init, current-vllm-config context, and
-parallel-state setup when ``LLM(...)`` is constructed, so this conftest only
-opts into ``VLLM_ALLOW_INSECURE_SERIALIZATION=1`` *before* importing vLLM so
-``LLM.collective_rpc(callable)`` can ship our worker callables over the engine
-IPC channel via pickle. Without this, the default msgpack encoder rejects raw
-functions and the call raises ``TypeError``. Only safe in a controlled test
-environment.
+"""Set ``VLLM_ALLOW_INSECURE_SERIALIZATION=1`` before vLLM is imported so
+``LLM.collective_rpc(callable)`` can pickle worker callables. pytest loads
+conftests before sibling test modules, so this beats the top-level
+``from vllm import LLM`` in ``test_*.py``.
 """
 
 import os
 
-# Must precede any ``import vllm``: the env is read at module-import time.
 os.environ.setdefault("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")

@@ -153,8 +153,14 @@ def get_tiny_deepseek_v3(**config_kwargs) -> PreTrainedModel:
     return AutoModelForCausalLM.from_config(cfg)
 
 
-def create_tiny_deepseek_v3_dir(tmp_path: Path | str, **config_kwargs) -> Path:
+def create_tiny_deepseek_v3_dir(
+    tmp_path: Path | str, with_tokenizer: bool = False, **config_kwargs
+) -> Path:
     deepseek_dir = Path(tmp_path) / "tiny_deepseek_v3"
+    if with_tokenizer:
+        tokenizer = get_tiny_tokenizer()
+        tokenizer.save_pretrained(deepseek_dir)
+        config_kwargs["vocab_size"] = tokenizer.vocab_size
     get_tiny_deepseek_v3(**config_kwargs).save_pretrained(deepseek_dir)
     return deepseek_dir
 
