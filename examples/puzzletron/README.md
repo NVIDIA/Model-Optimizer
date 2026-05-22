@@ -358,6 +358,7 @@ calc_subblock_stats:
 ```
 
 The runtime constraint is specified in the `human_constraints` section of the config `Llama-3_1-8B.yaml`:
+
 ```yaml
 human_constraints:
   target_latency: 21

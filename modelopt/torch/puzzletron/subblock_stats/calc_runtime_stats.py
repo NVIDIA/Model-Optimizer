@@ -25,8 +25,8 @@ from omegaconf import DictConfig
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, LlamaConfig, LlamaForCausalLM
 
-from modelopt.torch.nas.subblock_stats.runtime_utils import RuntimeConfig, save_model
-from modelopt.torch.nas.subblock_stats.runtime_vllm import run_vllm_latency_benchmark
+from modelopt.torch.puzzletron.subblock_stats.runtime_utils import RuntimeConfig, save_model
+from modelopt.torch.puzzletron.subblock_stats.runtime_vllm import run_vllm_latency_benchmark
 from modelopt.torch.puzzletron.anymodel.models.llama import LlamaModelDescriptor
 from modelopt.torch.puzzletron.anymodel.puzzformer import deci_x_patcher
 from modelopt.torch.puzzletron.block_config import (

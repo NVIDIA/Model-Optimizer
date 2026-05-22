@@ -20,29 +20,21 @@ constructs a small subblock set, runs the benchmark for each candidate, and
 checks the returned per-subblock runtime dict and no-block overhead.
 """
 
-from functools import partial
+import math
 from pathlib import Path
 
 import pytest
-from _test_utils.torch.distributed.utils import spawn_multiprocess_job
 from _test_utils.torch.transformers_models import get_tiny_tokenizer
+from omegaconf import OmegaConf
+
+from modelopt.torch.puzzletron.block_config import AttentionConfig, FFNConfig
+from modelopt.torch.puzzletron.subblock_stats.calc_runtime_stats import calc_runtime_for_subblocks
 
 pytest.importorskip("vllm", reason="vLLM is required for calc_runtime_for_subblocks")
 
 
 def test_calc_runtime_for_subblocks(tmp_path: Path):
     """End-to-end: a tiny subblock set yields a runtime dict + positive no-block overhead."""
-    spawn_multiprocess_job(size=1, job=partial(_run, tmp_path), backend="nccl")
-
-
-def _run(tmp_path: Path, rank: int, size: int):
-    import math
-
-    from omegaconf import OmegaConf
-
-    from modelopt.torch.nas.subblock_stats import calc_runtime_for_subblocks
-    from modelopt.torch.puzzletron.block_config import AttentionConfig, FFNConfig
-
     tokenizer = get_tiny_tokenizer()
     tokenizer_dir = tmp_path / "tokenizer"
     tokenizer.save_pretrained(str(tokenizer_dir))

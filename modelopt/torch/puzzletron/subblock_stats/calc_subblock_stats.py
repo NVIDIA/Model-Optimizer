@@ -33,7 +33,7 @@ from omegaconf import DictConfig, ListConfig, OmegaConf
 from tqdm import tqdm
 from transformers import PretrainedConfig
 
-from modelopt.torch.nas.subblock_stats.calc_subblock_params_and_memory import (
+from modelopt.torch.puzzletron.subblock_stats.calc_subblock_params_and_memory import (
     calc_subblock_active_params,
     calculate_non_block_memory,
     calculate_non_block_params,
@@ -90,7 +90,9 @@ def calculate_subblock_stats(
     moe_stats_file: str | Path | None = None,
 ) -> dict:
     if runtime_stats_enabled:
-        from modelopt.torch.nas.subblock_stats.calc_runtime_stats import calc_runtime_for_subblocks
+        from modelopt.torch.puzzletron.subblock_stats.calc_runtime_stats import (
+            calc_runtime_for_subblocks,
+        )
 
     gpu = None if not torch.cuda.is_available() else torch.cuda.get_device_name()
     subblock_stats = {
