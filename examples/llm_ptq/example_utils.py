@@ -23,6 +23,7 @@ import os
 import shutil
 import sys
 import warnings
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -316,16 +317,19 @@ def get_processor(
             return None
 
 
-def _load_inlined_mtp_tensors(model_path: Path, mtp_prefixes: set[str]) -> dict[str, torch.Tensor]:
+def _load_inlined_mtp_tensors(
+    model_path: Path, mtp_prefixes: Iterable[str]
+) -> dict[str, torch.Tensor]:
     """Stream tensors whose keys start with any ``{prefix}.`` from on-disk shards.
 
     Walks ``model.safetensors.index.json`` when present, else falls back to a
     single ``model.safetensors`` file. Returns an empty dict if no matching
     keys are found.
     """
+    prefix_tuple = tuple(p + "." for p in mtp_prefixes)
 
     def _matches(key: str) -> bool:
-        return any(key.startswith(p + ".") for p in mtp_prefixes)
+        return key.startswith(prefix_tuple)
 
     tensors: dict[str, torch.Tensor] = {}
     index_file = model_path / "model.safetensors.index.json"
@@ -343,11 +347,89 @@ def _load_inlined_mtp_tensors(model_path: Path, mtp_prefixes: set[str]) -> dict[
         single = model_path / "model.safetensors"
         if single.exists():
             with safe_open(str(single), framework="pt", device="cpu") as f:
-                # safe_open is not a dict; ``.keys()`` is the public listing API.
-                for k in f.keys():  # noqa: SIM118
+                for k in f.keys():  # noqa: SIM118 - safe_open is not iterable
                     if _matches(k):
                         tensors[k] = f.get_tensor(k)
     return tensors
+
+
+def get_inlined_mtp_prefixes(config: Any) -> list[str]:
+    """Pure: HF config → state-dict-key prefixes for inlined MTP layers.
+
+    Inlined-MTP convention (DeepSeek-V3, GLM-5.1 ``GlmMoeDsa``, GLM-4.7):
+    MTP tensors live under ``model.layers[i]`` for
+    ``i in [num_hidden, num_hidden + num_nextn_predict_layers)``. Returns
+    ``[]`` when the config does not declare any MTP layers.
+    """
+    num_nextn = int(getattr(config, "num_nextn_predict_layers", 0))
+    if not num_nextn:
+        return []
+    num_hidden = config.num_hidden_layers
+    return [f"model.layers.{i}" for i in range(num_hidden, num_hidden + num_nextn)]
+
+
+def _scan_separate_file_mtp(
+    model_dir: Path,
+) -> tuple[set[str], dict[str, torch.Tensor]]:
+    """Disk → (prefixes, tensors) for the legacy ``mtp.*``-keyed convention.
+
+    Walks ``model.safetensors.index.json`` for keys/values containing
+    ``"mtp"``, loads the matching tensors from their referenced shards, and
+    returns both the prefixes (e.g. ``"mtp"``, ``"mtp.layers.0"``) and the
+    raw tensors. Returns empty when no index file exists or no MTP keys
+    are present.
+    """
+    index_file = model_dir / "model.safetensors.index.json"
+    if not index_file.exists():
+        return set(), {}
+
+    weight_map = json.load(open(index_file))["weight_map"]
+    mtp_weight_map: dict[str, list[str]] = {}
+    for k, v in weight_map.items():
+        if "mtp" in k or "mtp" in v:
+            mtp_weight_map.setdefault(v, []).append(k)
+    if not mtp_weight_map:
+        return set(), {}
+
+    prefixes: set[str] = set()
+    for key in (k for keys in mtp_weight_map.values() for k in keys):
+        parts = key.split(".")
+        # Top-level MTP module prefix (e.g. "mtp" from "mtp.fc.weight") so
+        # non-layer MTP weights like mtp.fc, mtp.norm are also excluded.
+        if parts:
+            prefixes.add(parts[0])
+        # Specific layer prefixes like "mtp.layers.0".
+        for i, part in enumerate(parts):
+            if part == "layers" and i + 1 < len(parts) and parts[i + 1].isdigit():
+                prefixes.add(".".join(parts[: i + 2]))
+                break
+
+    tensors: dict[str, torch.Tensor] = {}
+    for filename, mtp_keys in mtp_weight_map.items():
+        filepath = model_dir / filename
+        if not filepath.exists():
+            continue
+        print(f"Loading {len(mtp_keys)} mtp weights from {filename}...")
+        loaded = load_file(str(filepath), device="cpu")
+        for k in mtp_keys:
+            if k in loaded:
+                tensors[k] = loaded[k]
+    return prefixes, tensors
+
+
+def _apply_to_model_state_dict(
+    model: torch.nn.Module, tensors: dict[str, torch.Tensor]
+) -> dict[str, torch.Tensor]:
+    """Split ``tensors`` by whether each key is in ``model.state_dict()``.
+    Load the matching keys into the model in-place; return the remainder
+    (orphans) so the exporter can route them through ``extra_state_dict``.
+    """
+    model_state = model.state_dict()
+    in_state_dict = {k: v for k, v in tensors.items() if k in model_state}
+    out_state_dict = {k: v for k, v in tensors.items() if k not in model_state}
+    if in_state_dict:
+        model.load_state_dict(in_state_dict, strict=False)
+    return out_state_dict
 
 
 def load_mtp_weights(
@@ -382,93 +464,36 @@ def load_mtp_weights(
         layers were detected.
         Dictionary of MTP weights that have no slot in the model's state
         dict; ``export_hf_checkpoint`` merges these via ``extra_state_dict``.
-    """
-    mtp_layer_prefixes: set[str] = set()
-    not_in_state_dict: dict[str, torch.Tensor] = {}
-    model_dir = Path(model_path)
-    model_state = model.state_dict()
 
-    # Inlined-MTP convention: keys ``model.layers.{i}.*`` for
-    # ``i in [num_hidden, num_hidden + num_nextn)``.
-    cfg = model.config
-    num_nextn = int(getattr(cfg, "num_nextn_predict_layers", 0))
-    num_hidden = cfg.num_hidden_layers
-    if num_nextn:
-        inlined_prefixes = {f"model.layers.{i}" for i in range(num_hidden, num_hidden + num_nextn)}
+    See Also:
+        ``examples/llm_ptq/MTP_DETECTION.md`` for the design rationale and
+        planned migration path to a library-side detector registry.
+    """
+    model_dir = Path(model_path)
+    prefixes: set[str] = set()
+    tensors: dict[str, torch.Tensor] = {}
+
+    inlined_prefixes = get_inlined_mtp_prefixes(model.config)
+    if inlined_prefixes:
         inlined_tensors = _load_inlined_mtp_tensors(model_dir, inlined_prefixes)
         if inlined_tensors:
-            mtp_layer_prefixes |= inlined_prefixes
-            in_state_dict = {k: v for k, v in inlined_tensors.items() if k in model_state}
-            not_in_state_dict |= {k: v for k, v in inlined_tensors.items() if k not in model_state}
-            if in_state_dict:
-                model.load_state_dict(in_state_dict, strict=False)
-            print(
-                f"✓ Detected {len(inlined_tensors)} inlined MTP tensors under "
-                f"{sorted(inlined_prefixes)} "
-                f"(loaded into model: {len(in_state_dict)}, orphaned: {len(not_in_state_dict)})"
-            )
+            prefixes.update(inlined_prefixes)
+            tensors.update(inlined_tensors)
 
-    index_file = model_dir / "model.safetensors.index.json"
+    separate_prefixes, separate_tensors = _scan_separate_file_mtp(model_dir)
+    prefixes.update(separate_prefixes)
+    tensors.update(separate_tensors)
 
-    if index_file.exists():
-        # Separate-file MTP detection via safetensors index.
-        index = json.load(open(index_file))
-        weight_map = index["weight_map"]
-        # Find all files in weight_map whose key or value contains "mtp"
-        mtp_weight_map: dict[str, list[str]] = {}
-        for k, v in weight_map.items():
-            if "mtp" in k or "mtp" in v:
-                mtp_weight_map.setdefault(v, []).append(k)
+    not_in_state_dict = _apply_to_model_state_dict(model, tensors)
 
-        if mtp_weight_map:
+    if prefixes:
+        print(
+            f"✓ Detected {len(tensors)} MTP tensors under {sorted(prefixes)} "
+            f"(loaded into model: {len(tensors) - len(not_in_state_dict)}, "
+            f"orphaned: {len(not_in_state_dict)})"
+        )
 
-            def _extract_layer_prefixes(keys):
-                prefixes = set()
-                for key in keys:
-                    parts = key.split(".")
-                    # Capture the top-level MTP module prefix (e.g., "mtp" from "mtp.fc.weight")
-                    # so that non-layer MTP weights like mtp.fc, mtp.norm are also excluded
-                    if parts:
-                        prefixes.add(parts[0])
-                    # Also capture specific layer prefixes (e.g., "mtp.layers.0")
-                    for i, part in enumerate(parts):
-                        if part == "layers" and i + 1 < len(parts) and parts[i + 1].isdigit():
-                            prefixes.add(".".join(parts[: i + 2]))
-                            break
-                return prefixes
-
-            mtp_keys_flat = [k for keys in mtp_weight_map.values() for k in keys]
-            mtp_layer_prefixes |= _extract_layer_prefixes(mtp_keys_flat)
-
-            # Load any weights missing from model.state_dict from the non-standard files.
-            total_loaded = 0
-            for filename, mtp_keys in mtp_weight_map.items():
-                filepath = model_dir / filename
-                if not filepath.exists():
-                    continue
-
-                print(f"Loading {len(mtp_keys)} mtp weights from {filename}...")
-                weights = load_file(str(filepath), device="cpu")
-                weights = {k: v for k, v in weights.items() if k in mtp_keys}
-                in_state_dict = {k: weights[k] for k in weights if k in model_state}
-                not_in_state_dict = not_in_state_dict | {
-                    k: weights[k] for k in weights if k not in model_state
-                }
-
-                if in_state_dict:
-                    model.load_state_dict(in_state_dict, strict=False)
-                    total_loaded += len(in_state_dict)
-
-            if total_loaded > 0:
-                print(
-                    f"✓ Successfully loaded {total_loaded} MTP weights, "
-                    f"{len(not_in_state_dict)} MTP weights not in model.state_dict"
-                )
-
-    if mtp_layer_prefixes:
-        print(f"✓ Detected MTP layers to exclude from quantization: {sorted(mtp_layer_prefixes)}")
-
-    return list(mtp_layer_prefixes), not_in_state_dict
+    return sorted(prefixes), not_in_state_dict
 
 
 def get_dtype(dtype):
