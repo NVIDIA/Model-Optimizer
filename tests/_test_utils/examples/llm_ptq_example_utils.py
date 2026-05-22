@@ -12,15 +12,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Importer for ``examples/llm_ptq/example_utils.py``.
-
-The module lives next to the example script (not inside the ``modelopt``
-package), so we add ``examples/llm_ptq/`` to ``sys.path`` once here and
-re-export the module. Tests then import it as::
-
-    from _test_utils.examples.llm_ptq_example_utils import example_utils
-
-instead of repeating ``sys.path`` manipulation in every test file.
+"""Re-export ``examples/llm_ptq/example_utils`` so tests can import it via
+``from _test_utils.examples.llm_ptq_example_utils import example_utils``
+without per-file ``sys.path`` shims.
 """
 
 import sys

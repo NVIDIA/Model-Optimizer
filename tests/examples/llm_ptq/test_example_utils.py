@@ -12,20 +12,22 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Unit tests for ``examples/llm_ptq/example_utils.py``."""
+"""End-to-end unit tests for ``examples/llm_ptq/example_utils.load_mtp_weights``.
 
+One test per supported on-disk MTP convention (inlined-orphaned, inlined-in-state-dict,
+separate-file-standalone, separate-file-indexed) plus a negative case.
+"""
+
+import json
 from types import SimpleNamespace
 
-import pytest
 import torch
 from _test_utils.examples.llm_ptq_example_utils import example_utils
 from safetensors.torch import save_file
 
 
 class _FakeModel:
-    """Minimal stand-in for an HF causal-LM. ``load_mtp_weights`` touches only
-    ``model.config``, ``model.state_dict()`` and ``model.load_state_dict()``.
-    """
+    """Stub exposing only the surface ``load_mtp_weights`` touches."""
 
     def __init__(self, config, state_dict_keys):
         self.config = config
@@ -40,40 +42,12 @@ class _FakeModel:
         self._sd.update(state_dict)
 
 
-@pytest.mark.parametrize(
-    ("num_nextn", "num_hidden", "expected"),
-    [
-        (0, 80, []),
-        (1, 78, ["model.layers.78"]),
-        (3, 80, ["model.layers.80", "model.layers.81", "model.layers.82"]),
-    ],
-)
-def test_get_inlined_mtp_prefixes_returns_expected_prefixes(num_nextn, num_hidden, expected):
-    """Pure config -> prefix list. Documents the inlined-MTP detection contract."""
-    cfg = SimpleNamespace(num_nextn_predict_layers=num_nextn, num_hidden_layers=num_hidden)
-    assert example_utils.get_inlined_mtp_prefixes(cfg) == expected
-
-
-def test_get_inlined_mtp_prefixes_missing_field_returns_empty():
-    """Configs without num_nextn_predict_layers (non-MTP architectures) yield []."""
-    cfg = SimpleNamespace(num_hidden_layers=32)
-    assert example_utils.get_inlined_mtp_prefixes(cfg) == []
-
-
-def test_get_inlined_mtp_prefixes_none_field_returns_empty():
-    """``num_nextn_predict_layers=None`` must not crash with ``int(None)``."""
-    cfg = SimpleNamespace(num_hidden_layers=32, num_nextn_predict_layers=None)
-    assert example_utils.get_inlined_mtp_prefixes(cfg) == []
-
-
 def _write_safetensors(path, tensors):
     save_file(tensors, str(path), metadata={"format": "pt"})
 
 
 def test_load_mtp_weights_inlined_orphaned(tmp_path):
-    """GLM-5.1 case: HF model class doesn't instantiate MTP, so inlined MTP
-    tensors at ``model.layers.{N}.*`` are returned as orphans for
-    ``extra_state_dict``."""
+    # GLM-5.1: HF builds only num_hidden decoders → MTP keys orphaned.
     main_keys = ["model.embed_tokens.weight", "model.layers.0.x.weight"]
     mtp_keys = ["model.layers.4.eh_proj.weight", "model.layers.4.enorm.weight"]
     _write_safetensors(
@@ -91,8 +65,7 @@ def test_load_mtp_weights_inlined_orphaned(tmp_path):
 
 
 def test_load_mtp_weights_inlined_in_state_dict(tmp_path):
-    """DeepSeek-V3 case: HF *does* instantiate the inlined layers, so the
-    matching keys are loaded into the model and the orphan dict is empty."""
+    # DeepSeek-V3 via trust_remote_code: MTP slots exist → keys loaded, no orphans.
     main_keys = ["model.embed_tokens.weight"]
     mtp_keys = ["model.layers.4.eh_proj.weight", "model.layers.4.enorm.weight"]
     _write_safetensors(
@@ -110,9 +83,7 @@ def test_load_mtp_weights_inlined_in_state_dict(tmp_path):
 
 
 def test_load_mtp_weights_separate_standalone_file(tmp_path):
-    """Legacy case: a standalone ``mtp.safetensors`` sits alongside the main
-    checkpoint with no shard index. The unified loader must still discover and
-    load the standalone file."""
+    # GLM-4.7: standalone mtp.safetensors with no shard index.
     _write_safetensors(
         tmp_path / "model.safetensors", {"model.embed_tokens.weight": torch.zeros(2, 2)}
     )
@@ -132,8 +103,40 @@ def test_load_mtp_weights_separate_standalone_file(tmp_path):
     assert set(orphans) == {"mtp.fc.weight", "mtp.layers.0.q_proj.weight"}
 
 
+def test_load_mtp_weights_separate_indexed_shard(tmp_path):
+    # Qwen3-Next: mtp.* keys in a dedicated indexed tail shard (filename has no "mtp").
+    main_shard = "model-00001-of-00002.safetensors"
+    mtp_shard = "model-00002-of-00002.safetensors"
+    _write_safetensors(tmp_path / main_shard, {"model.embed_tokens.weight": torch.zeros(2, 2)})
+    mtp_tensors = {
+        "mtp.fc.weight": torch.zeros(2, 2),
+        "mtp.norm.weight": torch.zeros(2),
+        "mtp.layers.0.input_layernorm.weight": torch.zeros(2),
+        "mtp.layers.0.self_attn.q_proj.weight": torch.zeros(2, 2),
+    }
+    _write_safetensors(tmp_path / mtp_shard, mtp_tensors)
+    (tmp_path / "model.safetensors.index.json").write_text(
+        json.dumps(
+            {
+                "weight_map": {
+                    "model.embed_tokens.weight": main_shard,
+                    **dict.fromkeys(mtp_tensors, mtp_shard),
+                }
+            }
+        )
+    )
+
+    cfg = SimpleNamespace(num_hidden_layers=4, num_nextn_predict_layers=0)
+    model = _FakeModel(cfg, state_dict_keys=["model.embed_tokens.weight"])
+    prefixes, orphans = example_utils.load_mtp_weights(model, str(tmp_path))
+
+    assert set(prefixes) == {"mtp", "mtp.layers.0"}
+    assert set(orphans) == set(mtp_tensors)
+
+
 def test_load_mtp_weights_no_mtp_returns_empty(tmp_path):
-    """Plain (non-MTP) checkpoint must return ``([], {})``."""
+    # Also pins the ``num_nextn_predict_layers=None`` regression: some configs
+    # set the field explicitly to None, which must not crash ``int(None)``.
     _write_safetensors(
         tmp_path / "model.safetensors",
         {
@@ -141,7 +144,7 @@ def test_load_mtp_weights_no_mtp_returns_empty(tmp_path):
             "model.layers.0.x.weight": torch.zeros(2, 2),
         },
     )
-    cfg = SimpleNamespace(num_hidden_layers=4, num_nextn_predict_layers=0)
+    cfg = SimpleNamespace(num_hidden_layers=4, num_nextn_predict_layers=None)
     model = _FakeModel(cfg, state_dict_keys=["model.embed_tokens.weight"])
     prefixes, orphans = example_utils.load_mtp_weights(model, str(tmp_path))
     assert prefixes == []

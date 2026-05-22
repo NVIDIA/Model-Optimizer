@@ -317,15 +317,8 @@ def get_processor(
 
 
 def get_inlined_mtp_prefixes(config: Any) -> list[str]:
-    """Pure: HF config → state-dict-key prefixes for inlined MTP layers.
-
-    Inlined-MTP convention (DeepSeek-V3, GLM-5.1 ``GlmMoeDsa``, GLM-4.7):
-    MTP tensors live under ``model.layers[i]`` for
-    ``i in [num_hidden, num_hidden + num_nextn_predict_layers)``. Returns
-    ``[]`` when the config does not declare any MTP layers.
-    """
-    # ``or 0`` guards against configs that set ``num_nextn_predict_layers``
-    # explicitly to ``None`` rather than omitting the field.
+    """turn an HF config into the list of state-dict prefixes for inlined-MTP layers."""
+    # ``or 0``: some configs set num_nextn_predict_layers=None rather than omit it.
     num_nextn = int(getattr(config, "num_nextn_predict_layers", 0) or 0)
     if not num_nextn:
         return []
@@ -334,13 +327,9 @@ def get_inlined_mtp_prefixes(config: Any) -> list[str]:
 
 
 def _keys_to_prefixes(keys: Iterable[str]) -> set[str]:
-    """Pure: separate-file MTP keys → state-dict prefixes for ``exclude_modules``.
-
-    For each key, extracts:
-    - the top-level module prefix (e.g. ``"mtp"`` from ``"mtp.fc.weight"``)
-      so non-layer MTP weights like ``mtp.fc`` and ``mtp.norm`` are excluded.
-    - the specific layer prefix (e.g. ``"mtp.layers.0"`` from
-      ``"mtp.layers.0.q_proj.weight"``).
+    """invert separate-file MTP keys into the prefixes the exporter needs for exclude_modules.
+    ``"mtp.fc.weight"`` → ``{"mtp"}``; ``"mtp.layers.0.q_proj.weight"`` →
+    ``{"mtp", "mtp.layers.0"}``.
     """
     prefixes: set[str] = set()
     for key in keys:
@@ -357,18 +346,9 @@ def _keys_to_prefixes(keys: Iterable[str]) -> set[str]:
 def _load_tensors_matching(
     model_dir: Path, predicate: Callable[[str, str | None], bool]
 ) -> dict[str, torch.Tensor]:
-    """Stream tensors satisfying ``predicate`` from every safetensors source
-    in ``model_dir`` via ``safe_open``.
-
-    Sources walked (each at most once):
-    1. Sharded layout: shards referenced by ``model.safetensors.index.json``.
-       The predicate sees ``(key, shard_filename)``.
-    2. Standalone files: any ``*.safetensors`` not referenced by the index
-       (including a standalone ``model.safetensors`` when no index exists and
-       legacy auxiliary files like ``mtp.safetensors``). The predicate sees
-       ``(key, file_name)``.
-
-    Returns an empty dict if no tensor matches.
+    """Stream tensors satisfying ``predicate(key, shard_name)`` from every
+    safetensors source in ``model_dir`` (indexed shards + standalone files,
+    each opened at most once).
     """
     tensors: dict[str, torch.Tensor] = {}
     seen_shards: set[str] = set()
@@ -400,9 +380,8 @@ def _load_tensors_matching(
 def _apply_to_model_state_dict(
     model: torch.nn.Module, tensors: dict[str, torch.Tensor]
 ) -> dict[str, torch.Tensor]:
-    """Split ``tensors`` by whether each key is in ``model.state_dict()``.
-    Load the matching keys into the model in-place; return the remainder
-    (orphans) so the exporter can route them through ``extra_state_dict``.
+    """Load tensors with a slot in ``model.state_dict()`` in-place; return the
+    rest as orphans for ``extra_state_dict``.
     """
     model_state = model.state_dict()
     in_state_dict = {k: v for k, v in tensors.items() if k in model_state}
@@ -415,53 +394,36 @@ def _apply_to_model_state_dict(
 def load_mtp_weights(
     model: torch.nn.Module, model_path: str
 ) -> tuple[list[str], dict[str, torch.Tensor]]:
-    """Load MTP weights from the model checkpoint.
+    """Detect and load MTP weights. Support matrix:
 
-    Detects MTP layers under two on-disk conventions:
+        Convention     Architectures             On-disk shape
+        -------------  ------------------------  -------------------------------
+        inlined        GLM-5.1 (``GlmMoeDsa``),  ``model.layers.{N}.*``
+                       DeepSeek-V3
+        separate-file  GLM-4.7                   standalone ``mtp.safetensors``
+        separate-file  Qwen3-Next                indexed ``mtp.*`` tail shard
 
-    1. Separate-file: weights live in a non-standard safetensors file (e.g.,
-       ``mtp.safetensors``) with keys prefixed by ``mtp``.
-    2. Inlined: weights live in the main shards under
-       ``model.layers[num_hidden : num_hidden + num_nextn_predict_layers]``
-       (DeepSeek-V3, GLM-5.1 ``GlmMoeDsa``, GLM-4.7).
+    Inlined ``N`` in ``[num_hidden, num_hidden + num_nextn_predict_layers)``;
+    may be orphaned at ``from_pretrained`` time if the HF class only builds
+    ``num_hidden`` decoders.
 
-    Whether the HF model class actually instantiates the MTP module varies:
-    DeepSeek-V3's modeling code adds the extra decoder layers, while
-    ``GlmMoeDsaModel`` in transformers >=5.7 builds only ``num_hidden`` layers
-    and leaves the inlined-MTP keys orphaned. To keep both paths correct, we
-    always read the tensors off disk here and split them: any key that maps
-    to a parameter in ``model.state_dict()`` is loaded into the model;
-    the remainder is returned as ``not_in_state_dict`` for the exporter to
-    merge in via ``extra_state_dict``.
-
-    Args:
-        model: The loaded model that may be missing weights
-        model_path: Path to the model directory
-
-    Returns:
-        List of layer prefixes that should be excluded from quantization
-        (e.g., ``"mtp.layers.0"`` or ``"model.layers.78"``). Empty if no MTP
-        layers were detected.
-        Dictionary of MTP weights that have no slot in the model's state
-        dict; ``export_hf_checkpoint`` merges these via ``extra_state_dict``.
+    Returns ``(prefixes, not_in_state_dict)``: ``prefixes`` populates
+    ``quantization_config.exclude_modules``; ``not_in_state_dict`` is fed to
+    ``export_hf_checkpoint(extra_state_dict=...)``.
     """
     model_dir = Path(model_path)
 
     inlined_prefixes = set(get_inlined_mtp_prefixes(model.config))
     inlined_tuple = tuple(p + "." for p in inlined_prefixes)
 
+    # Combined predicate covering both conventions in one pass.
     def predicate(key: str, shard_name: str | None) -> bool:
-        # Inlined: key prefix matches an MTP layer index from the config.
         if inlined_tuple and key.startswith(inlined_tuple):
             return True
-        # Separate-file legacy: ``"mtp"`` in the key or in the shard filename
-        # (e.g. ``mtp.safetensors`` referenced or sitting alongside the index).
         return "mtp" in key or (shard_name is not None and "mtp" in shard_name)
 
     tensors = _load_tensors_matching(model_dir, predicate)
 
-    # Anything we loaded that isn't covered by an inlined prefix came from the
-    # separate-file convention; derive its prefixes from the keys themselves.
     separate_keys = [k for k in tensors if not k.startswith(inlined_tuple)]
     prefixes = inlined_prefixes | _keys_to_prefixes(separate_keys) if tensors else set()
 
