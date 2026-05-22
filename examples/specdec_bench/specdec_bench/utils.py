@@ -299,6 +299,25 @@ def dump_env(args, save_dir, overrides=None):
     # UTC timestamp.
     config["timestamp"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
+    # Attestation fields used by the visualizer to distinguish JIRA-tracked
+    # official runs (must be on HuggingFace Hub) from community-contributed
+    # runs. The harness sets JIRA_TICKET only after verifying the checkpoint
+    # resolves on Hub; standalone runs leave both empty.
+    config["jira_ticket"] = os.environ.get("JIRA_TICKET") or None
+    config["huggingface_model_id"] = os.environ.get("HUGGINGFACE_MODEL_ID") or None
+
+    # Deterministic per-run UID. SHA-256 of the small set of inputs that
+    # together identify this run; same inputs → same UID, so accidental
+    # re-uploads of the same run dedupe in the visualizer.
+    uid_parts = "|".join([
+        str(config["timestamp"]),
+        str(getattr(args, "model_dir", "") or ""),
+        str(getattr(args, "speculative_algorithm", "") or ""),
+        str(getattr(args, "concurrency", "") or ""),
+        str(config.get("specdec_bench_sha") or ""),
+    ])
+    config["uid"] = hashlib.sha256(uid_parts.encode()).hexdigest()[:16]
+
     os.makedirs(save_dir, exist_ok=True)
     with open(os.path.join(save_dir, "configuration.json"), "w") as f:
         json.dump(config, f, indent=4, default=str)
