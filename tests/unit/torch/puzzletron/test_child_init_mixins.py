@@ -15,9 +15,16 @@
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 
-from modelopt.torch.puzzletron.tools.bypassed_training.child_init import _process_single_layer
+from modelopt.torch.puzzletron.block_config import AttentionConfig, BlockConfig, FFNConfig
+from modelopt.torch.puzzletron.pruning.pruning_mixin import LayerDescriptor, PruningMixIn
+from modelopt.torch.puzzletron.pruning.pruning_utils import resolve_pruning_mixin
+from modelopt.torch.puzzletron.tools.bypassed_training.child_init import (
+    _process_single_layer,
+    update_model_config,
+)
 
 
 class _AddOneMixin:
@@ -46,6 +53,20 @@ class _ShrinkSourceMixin:
 class _UseDestinationShapeMixin:
     def prune_single_layer(self, parent_state_dict, new_state_dict, **kwargs):
         return {"w": torch.zeros_like(new_state_dict["w"]) + parent_state_dict["w"].sum()}
+
+
+class _ConcretePruningMixIn(PruningMixIn):
+    def supported_hooks(self):
+        return []
+
+
+_MAPPED_MIXIN = _ConcretePruningMixIn(LayerDescriptor())
+
+
+class _DescriptorWithPruningMixins:
+    @staticmethod
+    def pruning_mixins():
+        return {"mapped": _MAPPED_MIXIN}
 
 
 def _process_with_mixins(
@@ -102,3 +123,45 @@ def test_pruning_mixin_key_mutation_is_tracked_without_mutating_shared_keys():
 
     assert keys_to_remove == {"w": "w"}
     assert shared_keys == {"w": "w"}
+
+
+def test_resolve_pruning_mixin_accepts_names_instances_and_lists():
+    existing = _ConcretePruningMixIn(LayerDescriptor())
+
+    assert resolve_pruning_mixin("mapped", _DescriptorWithPruningMixins) is _MAPPED_MIXIN
+    assert resolve_pruning_mixin(existing, _DescriptorWithPruningMixins) is existing
+    assert resolve_pruning_mixin(
+        ["mapped", existing], _DescriptorWithPruningMixins
+    ) == [_MAPPED_MIXIN, existing]
+
+
+def test_resolve_pruning_mixin_reports_available_methods():
+    with pytest.raises(ValueError, match="Available methods: \\['mapped'\\]"):
+        resolve_pruning_mixin("missing", _DescriptorWithPruningMixins)
+
+
+def test_update_model_config_treats_null_overrides_as_leave_unchanged():
+    config = SimpleNamespace(
+        num_hidden_layers=1,
+        block_configs=[
+            BlockConfig(
+                attention=AttentionConfig(num_key_value_heads=8),
+                ffn=FFNConfig(intermediate_size=32),
+            )
+        ],
+    )
+
+    updated = update_model_config(
+        config,
+        [
+            {
+                "attention": {"num_key_value_heads": 4},
+                "ffn": None,
+            }
+        ],
+    )
+
+    assert updated is not config
+    assert updated.block_configs[0].attention.num_key_value_heads == 4
+    assert updated.block_configs[0].ffn == config.block_configs[0].ffn
+    assert config.block_configs[0].attention.num_key_value_heads == 8

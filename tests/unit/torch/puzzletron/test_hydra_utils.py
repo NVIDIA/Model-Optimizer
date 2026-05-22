@@ -29,6 +29,16 @@ def test_warmup_steps_preserves_legacy_defaults():
     assert _warmup_steps_resolver("1000", "10", "2", "5", "0.5") == 5
 
 
+def test_warmup_steps_resolver_rejects_unknown_arity():
+    with pytest.raises(ValueError, match="expects 3, 4, or 5 arguments"):
+        _warmup_steps_resolver("1000", "10")
+
+
+def test_warmup_steps_rejects_non_castable_inputs():
+    with pytest.raises(ValueError, match="castable to int"):
+        warmup_steps("not-int", "10", "2")
+
+
 @pytest.mark.parametrize(
     ("kwargs", "message"),
     [
