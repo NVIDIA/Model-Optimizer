@@ -336,7 +336,19 @@ def _schema_equal(left: Any | None, right: Any | None) -> bool:
 def _list_element_schema(schema_type: Any | None) -> Any | None:
     """Return the element schema for a typed ``list[T]`` annotation."""
     schema_type = _unwrap_schema_type(schema_type)
-    if get_origin(schema_type) is not list:
+    origin = get_origin(schema_type)
+    if origin in (UnionType, Union):
+        element_schemas = []
+        for arg in get_args(schema_type):
+            if arg is NoneType:
+                continue
+            element_schema = _list_element_schema(arg)
+            if element_schema is None:
+                continue
+            if not any(_schema_equal(element_schema, seen) for seen in element_schemas):
+                element_schemas.append(element_schema)
+        return element_schemas[0] if len(element_schemas) == 1 else None
+    if origin is not list:
         return None
     args = get_args(schema_type)
     if len(args) != 1 or args[0] is Any:
@@ -508,6 +520,12 @@ def _resolve_imports(
             return list(imported.data)
 
         if _schema_equal(imported.schema_type, element_schema):
+            return [imported.data]
+
+        element_schema_unwrapped = _unwrap_schema_type(element_schema)
+        if isinstance(imported.data, dict) and (
+            element_schema_unwrapped is dict or get_origin(element_schema_unwrapped) is dict
+        ):
             return [imported.data]
 
         raise ValueError(

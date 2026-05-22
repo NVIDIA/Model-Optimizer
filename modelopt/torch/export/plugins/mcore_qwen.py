@@ -35,12 +35,17 @@ qwen3_causal_lm_import: dict[str, CustomModuleMapping] = {
     "output_layer": NameRemapping("lm_head.", COL_TP),
     # Attention
     "input_layernorm": NameRemapping("model.layers.{}.input_layernorm.", REPLICATE),
+    # Fused TE spec (TELayerNormColumnParallelLinear): the LayerNorm weight lives on
+    # linear_qkv.layer_norm_weight, loaded directly from the HF norm tensor (no `.weight` suffix
+    # appended since the value is a Parameter, not a sub-module).
+    "fused_input_layernorm": NameRemapping("model.layers.{}.input_layernorm.weight"),
     "linear_qkv": QKVMerging("model.layers.{}.self_attn.", COL_TP),
     "linear_proj": NameRemapping("model.layers.{}.self_attn.o_proj.", ROW_TP),
     "q_layernorm": NameRemapping("model.layers.{}.self_attn.q_norm.", REPLICATE),
     "k_layernorm": NameRemapping("model.layers.{}.self_attn.k_norm.", REPLICATE),
     # MLP
     "pre_mlp_layernorm": NameRemapping("model.layers.{}.post_attention_layernorm.", REPLICATE),
+    "fused_pre_mlp_layernorm": NameRemapping("model.layers.{}.post_attention_layernorm.weight"),
     "linear_fc1": GatedMLPMerging("model.layers.{}.mlp.", COL_TP),
     "linear_fc2": NameRemapping("model.layers.{}.mlp.down_proj.", ROW_TP),
     # MoE
@@ -56,12 +61,14 @@ qwen3_causal_lm_export: dict[str, CustomModuleMapping] = {
     "output_layer": NameRemapping("lm_head."),
     # Attention
     "input_layernorm": NameRemapping("model.layers.{}.input_layernorm."),
+    "fused_input_layernorm": NameRemapping("model.layers.{}.input_layernorm.weight"),
     "linear_qkv": QKVSlicing("model.layers.{}.self_attn."),
     "linear_proj": NameRemapping("model.layers.{}.self_attn.o_proj."),
     "q_layernorm": NameRemapping("model.layers.{}.self_attn.q_norm."),
     "k_layernorm": NameRemapping("model.layers.{}.self_attn.k_norm."),
     # MLP
     "pre_mlp_layernorm": NameRemapping("model.layers.{}.post_attention_layernorm."),
+    "fused_pre_mlp_layernorm": NameRemapping("model.layers.{}.post_attention_layernorm.weight"),
     "linear_fc1": GatedMLPSlicing("model.layers.{}.mlp."),
     "linear_fc2": NameRemapping("model.layers.{}.mlp.down_proj."),
     # MoE
@@ -76,10 +83,12 @@ qwen25_causal_lm_import: dict[str, CustomModuleMapping] = {
     "output_layer": NameRemapping("lm_head.", COL_TP),
     # Attention
     "input_layernorm": NameRemapping("model.layers.{}.input_layernorm.", REPLICATE),
+    "fused_input_layernorm": NameRemapping("model.layers.{}.input_layernorm.weight"),
     "linear_qkv": QKVMerging("model.layers.{}.self_attn.", COL_TP),
     "linear_proj": NameRemapping("model.layers.{}.self_attn.o_proj.", ROW_TP),
     # MLP
     "pre_mlp_layernorm": NameRemapping("model.layers.{}.post_attention_layernorm.", REPLICATE),
+    "fused_pre_mlp_layernorm": NameRemapping("model.layers.{}.post_attention_layernorm.weight"),
     "linear_fc1": GatedMLPMerging("model.layers.{}.mlp.", COL_TP),
     "linear_fc2": NameRemapping("model.layers.{}.mlp.down_proj.", ROW_TP),
 }
@@ -90,10 +99,12 @@ qwen25_causal_lm_export: dict[str, CustomModuleMapping] = {
     "output_layer": NameRemapping("lm_head."),
     # Attention
     "input_layernorm": NameRemapping("model.layers.{}.input_layernorm."),
+    "fused_input_layernorm": NameRemapping("model.layers.{}.input_layernorm.weight"),
     "linear_qkv": QKVSlicing("model.layers.{}.self_attn."),
     "linear_proj": NameRemapping("model.layers.{}.self_attn.o_proj."),
     # MLP
     "pre_mlp_layernorm": NameRemapping("model.layers.{}.post_attention_layernorm."),
+    "fused_pre_mlp_layernorm": NameRemapping("model.layers.{}.post_attention_layernorm.weight"),
     "linear_fc1": GatedMLPSlicing("model.layers.{}.mlp."),
     "linear_fc2": NameRemapping("model.layers.{}.mlp.down_proj."),
 }

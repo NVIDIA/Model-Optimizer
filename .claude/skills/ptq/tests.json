@@ -72,6 +72,19 @@
         "Applies manual dequantize_fp8_params for fused expert tensors",
         "Runs smoke test first, then full calibration"
       ]
+    },
+    {
+      "id": 6,
+      "prompt": "Quantize an FP8 source checkpoint with a partial NVFP4 recipe, then evaluate the quantized checkpoint",
+      "expected_output": "Agent treats post-PTQ checkpoint validation as a required gate before submitting any eval",
+      "files": [],
+      "expectations": [
+        "After PTQ completes, reads checkpoint-validation.md before creating or submitting eval jobs",
+        "Reports source safetensors size, output safetensors size, and output/source ratio",
+        "Reports layer precision counts, including NVFP4/FP8/intended quantized layers, BF16 or excluded layers, unexpected unquantized layers, and declaration mismatches",
+        "Checks metadata consistency against the source checkpoint and records any diffs",
+        "Stops before eval submission if the size ratio is >= 1.0 for a compression recipe, if intended layer coverage is missing, or if metadata changes unexpectedly"
+      ]
     }
   ]
 }

@@ -610,6 +610,89 @@ class TestGetDatasetDataloaderBlending:
             )
 
 
+class TestDatasetCombosExpansion:
+    """Combo names in ``--dataset`` fan out to their registered members.
+
+    The combo branch in ``get_dataset_dataloader`` is exercised by mocking
+    ``get_dataset_samples`` so we can assert the post-expansion (name, count)
+    sequence without hitting HF.
+    """
+
+    @staticmethod
+    def _record_calls(monkeypatch):
+        calls: list[tuple[str, int]] = []
+
+        def _fake(name, num_sample, **_kwargs):
+            calls.append((name, num_sample))
+            return [f"{name}-{i}" for i in range(num_sample)]
+
+        from modelopt.torch.utils import dataset_utils
+
+        monkeypatch.setattr(dataset_utils, "get_dataset_samples", _fake)
+        return calls
+
+    def test_combo_expands_evenly(self, monkeypatch, pad_tokenizer):
+        from modelopt.torch.utils.dataset_utils import DATASET_COMBOS
+
+        calls = self._record_calls(monkeypatch)
+        get_dataset_dataloader(
+            dataset_name="cnn_nemotron_v2_mix",
+            tokenizer=pad_tokenizer,
+            num_samples=8,
+            batch_size=1,
+            max_sample_length=16,
+        )
+        members = DATASET_COMBOS["cnn_nemotron_v2_mix"]
+        assert calls == [(members[0], 4), (members[1], 4)]
+
+    def test_combo_remainder_distributed_to_earlier_members(self, monkeypatch, pad_tokenizer):
+        from modelopt.torch.utils.dataset_utils import DATASET_COMBOS
+
+        calls = self._record_calls(monkeypatch)
+        get_dataset_dataloader(
+            dataset_name="nemotron-post-training-v3",
+            tokenizer=pad_tokenizer,
+            num_samples=10,
+            batch_size=1,
+            max_sample_length=16,
+        )
+        members = DATASET_COMBOS["nemotron-post-training-v3"]
+        # 10 / 7 = 1 base, remainder 3 -> first 3 get +1
+        expected_counts = [2, 2, 2, 1, 1, 1, 1]
+        assert calls == list(zip(members, expected_counts))
+
+    def test_plain_and_combo_compose(self, monkeypatch, pad_tokenizer):
+        from modelopt.torch.utils.dataset_utils import DATASET_COMBOS
+
+        calls = self._record_calls(monkeypatch)
+        get_dataset_dataloader(
+            dataset_name=["cnn_dailymail", "nemotron-post-training-v3"],
+            tokenizer=pad_tokenizer,
+            num_samples=[3, 7],
+            batch_size=1,
+            max_sample_length=16,
+        )
+        members = DATASET_COMBOS["nemotron-post-training-v3"]
+        assert calls == [("cnn_dailymail", 3)] + [(m, 1) for m in members]
+
+    def test_combo_overlapping_with_member_raises(self, monkeypatch, pad_tokenizer):
+        self._record_calls(monkeypatch)
+        with pytest.raises(ValueError, match="combo 'cnn_nemotron_v2_mix'"):
+            get_dataset_dataloader(
+                dataset_name=["cnn_dailymail", "cnn_nemotron_v2_mix"],
+                tokenizer=pad_tokenizer,
+                num_samples=[2, 4],
+                batch_size=1,
+                max_sample_length=16,
+            )
+
+    def test_get_dataset_samples_rejects_combo_name(self):
+        from modelopt.torch.utils.dataset_utils import get_dataset_samples
+
+        with pytest.raises(ValueError, match="DATASET_COMBOS"):
+            get_dataset_samples("cnn_nemotron_v2_mix", num_samples=1)
+
+
 # ---------------------------------------------------------------------------
 # Live HF dataset round-trips. ``hf-internal-testing/dataset_with_data_files``
 # is a 10-row x {train,test} fixture maintained by HF for their own CI — tiny

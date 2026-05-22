@@ -16,82 +16,21 @@
 import torch.nn as nn
 from calib.plugin_calib import PercentileCalibrator
 
-FP8_DEFAULT_CONFIG = {
-    "quant_cfg": [
-        {"quantizer_name": "*", "enable": False},
-        {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
-        {"quantizer_name": "*input_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
-        {"quantizer_name": "*output_quantizer", "enable": False},
-        {"quantizer_name": "*softmax_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
-    ],
-    "algorithm": "max",
-}
+from modelopt.torch.opt.config_loader import load_config
+from modelopt.torch.quantization.config import QuantizeConfig
 
-INT8_DEFAULT_CONFIG = {
-    "quant_cfg": [
-        {"quantizer_name": "*", "enable": False},
-        {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
-        {"quantizer_name": "*input_quantizer", "cfg": {"num_bits": 8, "axis": None}},
-        {"quantizer_name": "*output_quantizer", "enable": False},
-    ],
-    "algorithm": "max",
-}
-
-NVFP4_DEFAULT_CONFIG = {
-    "quant_cfg": [
-        {"quantizer_name": "*", "enable": False},
-        {
-            "quantizer_name": "*weight_quantizer",
-            "cfg": {
-                "num_bits": (2, 1),
-                "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
-                "axis": None,
-            },
-            "enable": True,
-        },
-        {
-            "quantizer_name": "*input_quantizer",
-            "cfg": {
-                "num_bits": (2, 1),
-                "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
-                "axis": None,
-            },
-            "enable": True,
-        },
-        {"quantizer_name": "*output_quantizer", "enable": False},
-        {"quantizer_name": "*softmax_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
-    ],
-    "algorithm": "max",
-}
-
-NVFP4_FP8_MHA_CONFIG = {
-    "quant_cfg": [
-        {"quantizer_name": "*", "enable": False},
-        {
-            "quantizer_name": "**weight_quantizer",
-            "cfg": {
-                "num_bits": (2, 1),
-                "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
-                "axis": None,
-            },
-            "enable": True,
-        },
-        {
-            "quantizer_name": "**input_quantizer",
-            "cfg": {
-                "num_bits": (2, 1),
-                "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
-                "axis": None,
-            },
-            "enable": True,
-        },
-        {"quantizer_name": "*output_quantizer", "enable": False},
-        {"quantizer_name": "*[qkv]_bmm_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
-        {"quantizer_name": "*softmax_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
-        {"quantizer_name": "*bmm2_output_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
-    ],
-    "algorithm": {"method": "svdquant", "lowrank": 32},
-}
+FP8_DEFAULT_CONFIG = load_config(
+    "configs/ptq/presets/diffusers/fp8", schema_type=QuantizeConfig
+).model_dump(exclude_unset=True)
+INT8_DEFAULT_CONFIG = load_config(
+    "configs/ptq/presets/diffusers/int8", schema_type=QuantizeConfig
+).model_dump(exclude_unset=True)
+NVFP4_DEFAULT_CONFIG = load_config(
+    "configs/ptq/presets/diffusers/nvfp4", schema_type=QuantizeConfig
+).model_dump(exclude_unset=True)
+NVFP4_FP8_MHA_CONFIG = load_config(
+    "configs/ptq/presets/diffusers/nvfp4_fp8_mha", schema_type=QuantizeConfig
+).model_dump(exclude_unset=True)
 
 
 def set_quant_config_attr(quant_config, trt_high_precision_dtype, quant_algo, **kwargs):

@@ -150,7 +150,9 @@ def megatron_prefill(
         )
         send_to_next_pipeline_rank(output.to(dtype=pp_dtype))
 
-    logits = output[:, :seq_length, :].detach() if pp_last else None
+    # .contiguous() is required because the slice is a view with the padded stride; the broadcast
+    # below asserts contiguity when SP pads seq_length up to a multiple of TP.
+    logits = output[:, :seq_length, :].detach().contiguous() if pp_last else None
 
     if model.config.bf16:
         logits_dtype = torch.bfloat16

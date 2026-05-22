@@ -29,6 +29,8 @@ cat ~/.config/modelopt/clusters.yaml 2>/dev/null || cat .claude/clusters.yaml 2>
 
 If a cluster config exists with content → **use the remote cluster** (do not fall back to local even if local GPUs are available — the cluster config indicates the user's preferred execution environment). Otherwise → **local execution**.
 
+If the cluster config contains multiple clusters and the user did not name the target cluster, ask which cluster to use before calling `remote_load_cluster`. Do not silently fall back to `default_cluster` in multi-cluster configs; different clusters can have different filesystems, GPU types, auth paths, and SSH setup.
+
 For remote, connect:
 
 ```bash
