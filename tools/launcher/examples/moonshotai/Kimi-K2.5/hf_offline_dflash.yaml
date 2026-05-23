@@ -1,6 +1,8 @@
 # DFlash offline data synthesis pipeline for Kimi-K2.5.
 #
 # task_0: Data synthesis — query vLLM server to generate prompt samples
+# task_1: TODO — dump base-model hidden states
+# task_2: TODO — train DFlash on the dump
 #
 # Usage:
 #   uv run slurm.py --yaml modules/Model-Optimizer/tools/launcher/examples/moonshotai/Kimi-K2.5/hf_offline_dflash.yaml --yes
