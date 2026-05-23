@@ -261,8 +261,8 @@ def get_parser() -> argparse.ArgumentParser:
     argparser.add_argument(
         "--passes",
         type=str,
-        choices=["concat_elimination"],
-        default=["concat_elimination"],
+        choices=["concat_elimination", "parallel_conv_fusion"],
+        default=["concat_elimination", "parallel_conv_fusion"],
         nargs="+",
         help=(
             "A space-separated list of optimization passes name, if set, appropriate pre/post-processing passes will "

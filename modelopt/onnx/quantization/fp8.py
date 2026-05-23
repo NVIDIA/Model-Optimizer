@@ -36,8 +36,10 @@ from modelopt.onnx.quantization.graph_utils import (
     find_nodes_from_matmul_to_exclude,
     find_nodes_to_exclude,
     get_concat_eliminated_tensors,
+    get_parallel_conv_fusion_tensors,
     get_tensor_producer_nodes,
     insert_fp8_mha_casts,
+    merge_qdq_tensor_groups,
     remove_output_initializers,
     remove_partial_input_qdq,
 )
@@ -177,7 +179,7 @@ def quantize(
     trt_extra_plugin_lib_paths: list[str] | None = None,
     high_precision_dtype: str = "fp16",
     mha_accumulation_dtype: str = "fp16",
-    passes: list[str] = ["concat_elimination"],
+    passes: list[str] = ["concat_elimination", "parallel_conv_fusion"],
     log_level: str = "INFO",
     calibrate_per_node: bool = False,
     custom_ops_to_quantize: list[str] = [],
@@ -275,11 +277,32 @@ def quantize(
     else:
         logger.debug(f"Selected nodes to quantize: {nodes_to_quantize}")
 
+        group_qdq_tensors = {}
         if passes and "concat_elimination" in passes:
-            group_qdq_tensors = get_concat_eliminated_tensors(onnx_model, nodes_to_quantize)
-            if group_qdq_tensors:
-                trt_guided_options["group_qdq_tensors"] = group_qdq_tensors
-                logger.debug(f"Grouping QDQ tensors for concat elimination: {group_qdq_tensors}")
+            concat_elimination_group_qdq_tensors = get_concat_eliminated_tensors(
+                onnx_model, nodes_to_quantize
+            )
+            merge_qdq_tensor_groups(group_qdq_tensors, concat_elimination_group_qdq_tensors)
+            if concat_elimination_group_qdq_tensors:
+                logger.debug(
+                    "Found %d tensor groups for concat elimination",
+                    len(concat_elimination_group_qdq_tensors),
+                )
+
+        if passes and "parallel_conv_fusion" in passes:
+            parallel_conv_fusion_group_qdq_tensors = get_parallel_conv_fusion_tensors(
+                onnx_model, nodes_to_quantize
+            )
+            merge_qdq_tensor_groups(group_qdq_tensors, parallel_conv_fusion_group_qdq_tensors)
+            if parallel_conv_fusion_group_qdq_tensors:
+                logger.debug(
+                    "Found %d tensor groups for parallel_conv_fusion",
+                    len(parallel_conv_fusion_group_qdq_tensors),
+                )
+
+        if group_qdq_tensors:
+            trt_guided_options["group_qdq_tensors"] = group_qdq_tensors
+            logger.debug(f"Found {len(group_qdq_tensors)} tensor groups share QDQ scale")
 
         # Add disable_int32_weight_adjustment flag to extra options
         trt_guided_options["QDQDisableWeightAdjustForInt32Bias"] = True

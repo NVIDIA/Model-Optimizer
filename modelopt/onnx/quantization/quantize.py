@@ -346,7 +346,7 @@ def quantize(
     dq_only: bool = False,
     block_size: int | None = None,
     use_zero_point: bool = False,
-    passes: list[str] = ["concat_elimination"],
+    passes: list[str] = ["concat_elimination", "parallel_conv_fusion"],
     simplify: bool = False,
     calibrate_per_node: bool = False,
     input_shapes_profile: Sequence[dict[str, str]] | None = None,
