@@ -90,7 +90,7 @@ class TestSkipSoftmax:
         scale = 1.0 / (head_dim**0.5)
         out_dense = attention(q, k, v, locs, lens, seq_len, softmax_scale=scale)
         out_skip = attention(
-            q, k, v, locs, lens, seq_len, softmax_scale=scale, skip_softmax_threshold=0.5
+            q, k, v, locs, lens, seq_len, softmax_scale=scale, skip_softmax_threshold=0.99
         )
         assert not torch.allclose(out_skip, out_dense, atol=1e-3)
 

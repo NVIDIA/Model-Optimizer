@@ -59,6 +59,10 @@ If a model-specific recipe exists, use `--recipe <path>` — it may contain tune
 
 Use `--qformat <name>` (e.g., `--qformat nvfp4`). Format definitions: `modelopt/torch/quantization/config.py`. General PTQ recipes in `modelopt_recipes/general/ptq/` correspond to the same formats — `--qformat` is the simpler way to use them.
 
+Before running PTQ, sanity-check the selected qformat/recipe against the model structure. Inspect the recipe's include/exclude patterns and summarize which layer groups will be quantized and approximately how many modules/layers match (attention projections, MLP projections, experts, etc.). If the match count is 0, or far smaller than expected for the model, stop and fix the recipe or ask the user before launching calibration.
+
+If the source checkpoint is already quantized and the requested recipe/config reduces quantization coverage, confirm that intent with the user before running. For example, if an FP8 checkpoint is used as input and the recipe excludes some layers so they would fall back to BF16 instead of staying quantized, call out the affected layer groups and ask whether that FP8-to-BF16 fallback is intended.
+
 > NVFP4 can be calibrated on Hopper but requires Blackwell for inference.
 
 ## Step 4 — Run PTQ
@@ -131,7 +135,15 @@ Report the path and size to the user.
 
 ### Post-quantization validation
 
-Validate the exported checkpoint's quantization pattern matches the recipe. Quantization config patterns can silently miss layers if the model uses non-standard naming (e.g., Gemma4 `experts.*` missed by `*mlp*` patterns) — this only surfaces later as deployment failures. Read `references/checkpoint-validation.md` for the validation script, expected patterns per recipe, and common pattern gaps.
+This is a required gate before any deployment or evaluation submission. Do not submit an eval, start a serving job, or hand off the checkpoint as ready until the gate has passed.
+
+Read `references/checkpoint-validation.md` and perform all three validation groups on the exact checkpoint path that will be deployed/evaluated:
+
+1. Check output size and estimated bits per weight against the baseline/source checkpoint.
+2. Check quantized-weight coverage against the requested qformat/recipe/config.
+3. Check metadata consistency against the baseline/source model.
+
+Report the gate result before moving on. The report must include source size, output size, output/source size ratio, layer precision counts (for example NVFP4, FP8, INT4, BF16/unquantized excluded, unexpected unquantized, declaration mismatches), and metadata diffs. If the output/source ratio is >= 1.0 for a compression recipe, if any intended layer group is missing quantization, or if metadata changed unexpectedly, stop and fix the checkpoint or ask the user before proceeding.
 
 **Next steps**: If the user wants to deploy or evaluate the quantized checkpoint, use the **deployment** or **evaluation** skill. The checkpoint workspace carries over. If the model required patches during PTQ (e.g., transformers upgrade), the same fixes will likely be needed at deployment and evaluation time.
 
@@ -160,7 +172,7 @@ Validate the exported checkpoint's quantization pattern matches the recipe. Quan
 | `references/launcher-guide.md` | Step 4B only (launcher path) |
 | `tools/launcher/CLAUDE.md` | Step 4B only, if you need more launcher detail |
 | `references/unsupported-models.md` | Step 4C only (unlisted model) |
-| `references/checkpoint-validation.md` | Step 5: validate quantization pattern matches recipe |
+| `references/checkpoint-validation.md` | Step 5: mandatory post-PTQ gate before deployment/evaluation |
 | `skills/common/remote-execution.md` | Step 4A/4C only, if target is remote |
 | `skills/common/slurm-setup.md` | Step 4A/4C only, if using SLURM manually (not launcher) |
 | `references/slurm-setup-ptq.md` | Step 4A/4C only, PTQ-specific SLURM (container, GPU sizing, FSDP2) |

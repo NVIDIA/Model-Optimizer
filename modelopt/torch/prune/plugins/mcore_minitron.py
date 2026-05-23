@@ -37,7 +37,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from megatron.core.extensions.transformer_engine import TELayerNormColumnParallelLinear
-from megatron.core.models.mamba.mamba_model import MambaModel
 from megatron.core.parallel_state import (
     get_pipeline_model_parallel_group,
     get_pipeline_model_parallel_rank,
@@ -56,6 +55,7 @@ from tqdm import tqdm
 
 from modelopt.torch.nas.conversion import NASModeRegistry
 from modelopt.torch.nas.plugins.megatron import (
+    HAS_HYBRID,
     HAS_MAMBA,
     SUPPORTED_MODELS,
     _DynamicMambaLayer,
@@ -171,6 +171,20 @@ def drop_mcore_language_model_layers(model: nn.Module, *, layers_to_drop: list[i
     model.decoder.layers = nn.ModuleList(kept_layers)
 
     model.config.num_layers = new_num_layers
+
+
+def _get_hybrid_pattern_key(model: nn.Module) -> str | None:
+    """Return the attribute name carrying the hybrid block pattern for hybrid models, else None.
+
+    Handles both ``MambaModel`` (which still uses ``hybrid_override_pattern``) and plain
+    ``HybridModel`` (the parent class introduced in modern Megatron-LM, which carries
+    ``hybrid_layer_pattern``). Detecting by attribute presence avoids fragile isinstance
+    checks against a class hierarchy that may shift across MCore versions.
+    """
+    for attr in ("hybrid_override_pattern", "hybrid_layer_pattern"):
+        if getattr(model, attr, None):
+            return attr
+    return None
 
 
 def _rprint(*renderables: Any) -> None:
@@ -366,14 +380,9 @@ class MCoreMinitronSearcher(BaseSearcher):
         # Prune homogeneously
         self._prune(export_config, prune_depth=True)
 
-        # TODO: Rename to hybrid_layer_pattern after MCore 0.17 and nemo:26.04 is released (for M-LM PR #3377)
-        # Update hybrid_override_pattern if pruning is done on a hybrid model
-        if isinstance(self.model, MambaModel):
-            hybrid_key = (
-                "hybrid_override_pattern"
-                if hasattr(self.model, "hybrid_override_pattern")
-                else "hybrid_layer_pattern"
-            )
+        # Update the hybrid block-type pattern if pruning a hybrid model.
+        hybrid_key = _get_hybrid_pattern_key(self.model)
+        if hybrid_key is not None:
             print_rank_0(f"Original {hybrid_key}: {getattr(self.model, hybrid_key)}")
             new_num_layers = self.model.config.num_layers
             assert self.sorted_layers is not None
@@ -683,14 +692,9 @@ class MCoreMinitronSearcher(BaseSearcher):
         model = self.model
         active_metric_keys = self.constraints.keys() & _METRIC_CONSTRAINTS
 
-        # Get hybrid layer pattern for MambaModel (None for pure GPT)
         hybrid_layer_pattern: str | None = None
-        if isinstance(model, MambaModel):
-            hybrid_key = (
-                "hybrid_override_pattern"
-                if hasattr(self.model, "hybrid_override_pattern")
-                else "hybrid_layer_pattern"
-            )
+        hybrid_key = _get_hybrid_pattern_key(model)
+        if hybrid_key is not None:
             hybrid_layer_pattern = getattr(model, hybrid_key)
 
         # If depth pruning on a hybrid model, filter the pattern to only the kept layers.
@@ -732,6 +736,14 @@ class MCoreMinitronSearcher(BaseSearcher):
         return metrics
 
 
+_HYBRID_DIVISORS = {
+    "hidden_size_divisor": 256,
+    "ffn_hidden_size_divisor": 512,
+    "mamba_head_dim_divisor": 8,
+    "num_moe_experts_divisor": 8,
+    "num_layers_divisor": 2,
+}
+
 MCoreMinitronConfig: type[ModeloptBaseConfig] = create_model(
     "MCoreMinitronConfig",
     **get_kwargs_for_create_model_with_rules(
@@ -743,19 +755,8 @@ MCoreMinitronConfig: type[ModeloptBaseConfig] = create_model(
                 "num_moe_experts_divisor": 8,
                 "num_layers_divisor": 2,
             },
-            **(
-                {
-                    "megatron.core.models.mamba.MambaModel": {
-                        "hidden_size_divisor": 256,
-                        "ffn_hidden_size_divisor": 512,
-                        "mamba_head_dim_divisor": 8,
-                        "num_moe_experts_divisor": 8,
-                        "num_layers_divisor": 2,
-                    }
-                }
-                if HAS_MAMBA
-                else {}
-            ),
+            **({"megatron.core.models.mamba.MambaModel": _HYBRID_DIVISORS} if HAS_MAMBA else {}),
+            **({"megatron.core.models.hybrid.HybridModel": _HYBRID_DIVISORS} if HAS_HYBRID else {}),
         },
         doc='Configuration for the ``"mcore_minitron"`` mode.',
     ),

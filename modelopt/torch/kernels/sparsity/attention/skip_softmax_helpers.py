@@ -156,8 +156,8 @@ def _skip_softmax_decision(
     < lambda ~= 0`` and the block's contribution to the output is negligible.
     The caller may then skip the softmax computation, V load, and BMM2.
 
-    The threshold is pre-scaled to log2 space by the Python wrapper so it can
-    be compared directly against the already-scaled scores.
+    The threshold is converted to the kernel's scaled log2 score space by the
+    Python wrapper so it can be compared directly against ``scores``.
 
     Returns:
         True when *all* Q rows in the tile satisfy the skip criterion.
@@ -189,8 +189,8 @@ def _is_dense_region(
     seq_len_q,
     seq_len_kv,
     BLOCK_M: tl.constexpr,
-    NUM_SINK_TOKENS: tl.constexpr,
-    DENSE_WINDOW_SIZE: tl.constexpr,
+    DENSE_SINK_TOKENS: tl.constexpr,
+    DENSE_RECENT_TOKENS: tl.constexpr,
 ):
     """Check if a KV tile falls in a dense region (sink tokens or local window).
 
@@ -200,9 +200,12 @@ def _is_dense_region(
     Returns:
         True if the tile should be kept dense (skip N:M sparsification).
     """
-    is_sink = kv_start < NUM_SINK_TOKENS
+    # N:M sparse softmax is a prefill optimization. Keep decode rows dense,
+    # including decode rows that are scheduled in a mixed prefill/decode launch.
+    is_decode = seq_len_q <= 1
+    is_sink = kv_start < DENSE_SINK_TOKENS
     causal_offset = seq_len_kv - seq_len_q
     q_abs_pos = tile_q * BLOCK_M + causal_offset
     token_distance = q_abs_pos - kv_start
-    is_local = (token_distance >= 0) and (token_distance < DENSE_WINDOW_SIZE)
-    return is_sink or is_local
+    is_local = (token_distance >= 0) and (token_distance < DENSE_RECENT_TOKENS)
+    return is_decode or is_sink or is_local
