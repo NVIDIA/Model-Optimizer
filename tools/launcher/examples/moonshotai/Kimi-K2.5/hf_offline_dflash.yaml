@@ -12,7 +12,7 @@ pipeline:
   note:
 
   global_vars:
-    hf_model: /hf-local/moonshotai/Kimi-K2.6
+    hf_model: /hf-local/nvidia/Kimi-K2.5-NVFP4/
 
   # Step 1: Data synthesis via vLLM server
   # Args before "--" go to vllm serve; args after "--" go to tools/query.py.
