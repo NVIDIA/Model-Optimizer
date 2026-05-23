@@ -18,15 +18,15 @@ End-to-end optimization of [NVIDIA-Nemotron-3-Nano-30B-A3B-BF16](https://hugging
 | Model | MMLU | MMLU Pro | GPQA Diamond | LiveCodeBench v6 | AIME 2025 | IFBench | SciCode (Subtask) | Average |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | Pruned 22B/A3.0B (no distillation) | 53.4 | 47.1 | 33.5 | 27.4 | 15.5 | 37.2 | 11.4 | 32.2 |
-| Distill @ 2.5B tokens (100 iters at 8K Seq Length) | 68.6 | 73.6 | 62.5 | 57.5 | 79.1 | 58.0 | 21.6 | 60.1 |
-| Distill @  20B tokens (800 iters at 8K Seq Length) | 70.8 | 74.6 | 65.3 | 61.0 | 79.8 | 63.5 | 21.2 | 62.3 |
-| Distill @  40B tokens (1600 iters at 8K Seq Length) | 71.6 | 75.7 | 64.5 | 61.6 | 76.8 | 67.2 | 27.0 | 63.5 |
-| Distill @  60B tokens (2400 iters at 8K Seq Length) | 71.5 | 76.0 | 67.5 | 63.0 | 77.5 | 68.0 | 28.5 | 64.6 |
-| Distill @  80B tokens (3200 iters at 8K Seq Length) | 71.7 | 76.5 | 68.4 | 64.2 | 80.2 | 66.1 | 27.0 | 64.9 |
-| Distill @ 100B tokens (4000 iters at 8K Seq Length) | 71.8 | 76.6 | 68.4 | 64.5 | 81.0 | 68.5 | 26.8 | 65.4 |
-| Distill @ 105B tokens (+200 iters at 32K Seq Length) | 71.9 | 76.8 | 69.7 | 65.6 | 87.3 | 69.7 | 25.5 | 66.6 |
-| Distill @ 125B tokens (+1000 iters at 32K Seq Length) | 71.9 | 76.7 | 70.4 | 65.7 | 88.0 | 68.8 | 28.2 | 67.1 |
+| Distill @ 2.5B tokens (100 iters at 8K Seq Length) | 68.7 | 73.3 | 63.7 | 55.3 | 77.6 | 58.9 | 26.7 | 60.6 |
+| Distill @ 20B tokens (800 iters at 8K Seq Length) | 70.8 | 74.8 | 66.0 | 62.3 | 79.6 | 66.1 | 26.0 | 63.7 |
+| Distill @ 40B tokens (1600 iters at 8K Seq Length) | 71.3 | 76.4 | 67.2 | 62.3 | 79.8 | 65.9 | — | — |
+| Distill @ 60B tokens (2400 iters at 8K Seq Length) | — | — | — | — | — | — | — | — |
+| Distill @ 80B tokens (3200 iters at 8K Seq Length) | — | — | — | — | — | — | — | — |
+| Distill @ 100B tokens (+800 iters at 32K Seq Length) | — | — | — | — | — | — | — | — |
 | NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 (official, 31.6B/A3.6B) | 73.5 | 78.0 | 70.3 | 67.9 | 87.1 | 68.9 | 33.6 | 68.5 |
+
+Distillation uses the **30% Pretraining (Code 5, General 20, MATH 5) + 70% Post-training v1/v3 (Math 27, Coding 20, Science 13, IF 5, Tool calling 5)** blend (see [Data Blend](#data-blend) below) with an **80B @ 8K + 20B @ 32K = 100B token** schedule. Blend ablations (vs. an earlier no-tool_calling blend) and long-context phase ablations are in [ABLATIONS.md](ABLATIONS.md).
 
 > [!NOTE]
 > Exact numbers may vary depending on deployment and evaluation setup. All models above (including the official model) were evaluated once with the same [evaluation setup](#4-evaluation) for fair comparison. These numbers may differ from those reported on the official [Nemotron-3-Nano-30B-A3B-BF16](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16) HuggingFace model card.
@@ -255,7 +255,7 @@ Pruned hybrid_layer_pattern:   MEMEM*EMEMEM*EMEMEM*EMEMEM*EMEMEM*EMEMEMEM*EMEMEM
 
 ### 3. Distillation
 
-Minimum hardware: **4 nodes × 8x H100 (32 GPUs)** — required by `TP=4 × EP=8`. On **96 nodes × 8x H100 (768 GPUs total)**, it takes ~900 H100 GPU-hours per 10B tokens (400 iters), i.e. ~70 min wall-clock per 10B tokens on 96 nodes. Full 100B token run (4k steps) takes ~9k H100 GPU-hours (~12 hours wall-clock).
+Minimum hardware: **4 nodes × 8x H100 (32 GPUs)** for the 8K phase — required by `TP=4 × EP=8`. The 32K long-context phase additionally requires context parallel to fit the longer sequence, doubling the minimum to **8 nodes × 8x H100 (64 GPUs)**. On **96 nodes × 8x H100 (768 GPUs total)**, it takes ~900 H100 GPU-hours per 10B tokens (400 iters), i.e. ~70 min wall-clock per 10B tokens on 96 nodes. Full schedule (80B @ 8K + 20B @ 32K = 100B tokens, 4k total steps) takes ~9k H100 GPU-hours (~12 hours wall-clock).
 
 <details>
 <summary>Distillation command (click to expand)</summary>
@@ -293,7 +293,9 @@ Non-default arguments:
 
 - `--seq_length 8192` (default: 4096)
 - `--gbs 3072` (default: 768) — matches the original Nemotron-3-Nano-30B training GBS from the paper, kept to preserve the training distribution
-- `--train_iters 4000` — ~100B tokens; can stop earlier and take intermediate checkpoints
+- `--train_iters 4000` — total iterations across both phases. The first 3200 iters (~80B tokens) run at 8K seq length with the args above. After iter 3200, **resume from the latest checkpoint** with `--seq_length 32768 --gbs 768 --cp_size 2 --recompute_granularity selective --recompute_modules mlp moe` for the remaining 800 iters (~20B tokens).
+  - The `seq_length × gbs` product is unchanged, so each iter still processes the same number of tokens.
+  - The `--cp_size 2` (context parallel) is needed to fit the longer sequence and doubles the minimum-hardware footprint to 8 nodes; the selective recompute on MLP/MoE further reduces activation memory. See [ABLATIONS.md — Effect of long context training](ABLATIONS.md#effect-of-long-context-training) for why this phase is worthwhile.
 - `--lr_warmup_iters 25` (default: 50)
 - `--eval_interval 200` (default: 100) — less frequent eval to save compute
 - `--eval_iters 8` (default: 32) - since GBS is 4× larger than default

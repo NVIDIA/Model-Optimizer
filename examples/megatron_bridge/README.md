@@ -35,15 +35,9 @@ docker run \
   --rm -it \
   -v ${MODELOPT_DIR}:/opt/Model-Optimizer \
   -v ${MODELOPT_DIR}/modelopt:/opt/venv/lib/python3.12/site-packages/modelopt \
+  -v ${MODELOPT_DIR}/modelopt_recipes:/opt/venv/lib/python3.12/site-packages/modelopt_recipes \
   -w /opt/Model-Optimizer/examples/megatron_bridge \
   ${DOCKER_IMAGE} bash
-```
-
-Once inside the container, you need to login with your HuggingFace token to download gated datasets / models.
-Note that the default dataset for pruning and quantization is [`nemotron-post-training-dataset-v2`](https://huggingface.co/datasets/nvidia/Nemotron-Post-Training-Dataset-v2), which is gated.
-
-```bash
-hf auth login --token <your token>
 ```
 
 > [!WARNING]
@@ -53,6 +47,13 @@ Also install additional dependencies from the [requirements.txt](./requirements.
 
 ```bash
 python -m pip install -r requirements.txt
+```
+
+You also need to login with your HuggingFace token to download gated datasets / models.
+Note that the default dataset for pruning and quantization is [`nemotron-post-training-dataset-v2`](https://huggingface.co/datasets/nvidia/Nemotron-Post-Training-Dataset-v2), which is gated.
+
+```bash
+hf auth login --token <your token>
 ```
 
 ## Pruning
