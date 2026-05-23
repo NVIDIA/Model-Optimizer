@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# FP8 E4M3 KV cache quantization.
+# QuantizerCfgList snippet that enables FP8 E4M3 KV-cache quantizers.
 #
 # This snippet uses multi-document YAML (separated by ---) because it is a
 # list-valued snippet that also needs to $import another snippet.  YAML only

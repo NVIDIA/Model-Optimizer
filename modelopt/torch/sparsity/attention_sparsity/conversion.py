@@ -31,6 +31,13 @@ from .plugins import register_custom_model_plugins_on_the_fly
 from .sparse_attention import SparseAttentionModule, SparseAttentionRegistry
 from .utils import get_named_sparse_attention_modules, get_sparse_attention_modules
 
+SPARSE_SOFTMAX_METADATA_KEYS = (
+    "sparsity_n",
+    "sparsity_m",
+    "dense_sink_tokens",
+    "dense_recent_tokens",
+)
+
 
 def _set_attn_implementation(model: nn.Module, config: SparseAttentionConfig) -> None:
     """Set the correct attn_implementation based on the sparse attention method/backend.
@@ -346,11 +353,29 @@ def update_sparse_attention_metadata(
     )
 
 
+def _get_sparse_softmax_export_config(module: SparseAttentionModule) -> dict[str, Any] | None:
+    """Return N:M sparse-softmax export metadata for one sparse attention module."""
+    method_config = getattr(module, "_method_config", {})
+    method_name = module._sparse_method_instance.name
+    should_export = method_name == "triton_sparse_softmax" or method_config.get(
+        "export_sparse_softmax", False
+    )
+    if not should_export:
+        return None
+
+    sparse_softmax_config = {
+        key: method_config[key] for key in SPARSE_SOFTMAX_METADATA_KEYS if key in method_config
+    }
+    if sparse_softmax_config.get("sparsity_n", 0) <= 0:
+        return None
+    return sparse_softmax_config
+
+
 def export_sparse_attention_config(model: nn.Module) -> dict[str, Any] | None:
     """Extract sparse attention config for export to config.json.
 
-    Extracts the calibration parameters (a, b) for the exponential threshold model
-    from the first sparse attention module that has calibrated thresholds.
+    Extracts calibrated skip-softmax parameters and N:M sparse-softmax metadata
+    from sparse attention modules.
 
     The exported config allows computing threshold at runtime:
         scale_factor = a * exp(b * target_sparsity)
@@ -361,7 +386,7 @@ def export_sparse_attention_config(model: nn.Module) -> dict[str, Any] | None:
 
     Returns:
         Dictionary with sparse attention config for HuggingFace config.json export.
-        Returns None if no calibrated sparse attention modules found.
+        Returns None if no exportable sparse attention metadata is found.
 
     Example output::
 
@@ -374,11 +399,19 @@ def export_sparse_attention_config(model: nn.Module) -> dict[str, Any] | None:
                 "prefill": {"a": 7.93, "b": 8.61},
                 "decode": {"a": 0.12, "b": 9.85},
             },
+            "sparse_softmax": {
+                "sparsity_n": 2,
+                "sparsity_m": 4,
+                "dense_sink_tokens": 0,
+                "dense_recent_tokens": 64,
+            },
             "producer": {"name": "modelopt", "version": "0.37.0"},
         }
     """
     # Collect sparse attention module info
     calibration_params = None
+    target_sparse_ratio = None
+    sparse_softmax_config = None
     target_classes: set[str] = set()
 
     for module in get_sparse_attention_modules(model):
@@ -391,36 +424,57 @@ def export_sparse_attention_config(model: nn.Module) -> dict[str, Any] | None:
         # Get calibration params from first module that has them
         if calibration_params is None:
             calibration_params = getattr(module._sparse_method_instance, "calibration_params", None)
+        if target_sparse_ratio is None:
+            target_sparse_ratio = getattr(
+                module._sparse_method_instance, "target_sparse_ratio", None
+            )
+        if sparse_softmax_config is None:
+            sparse_softmax_config = _get_sparse_softmax_export_config(module)
 
-    # Return None if no calibration params found
-    if calibration_params is None:
+    if calibration_params is None and sparse_softmax_config is None:
         return None
 
-    # Build threshold_scale_factor with model parameters
-    threshold_scale_factor: dict[str, Any] = {
-        "formula": "a * exp(b * target_sparsity)",
-    }
-    for phase in ["prefill", "decode"]:
-        if phase in calibration_params:
-            threshold_scale_factor[phase] = {
-                "a": calibration_params[phase]["a"],
-                "b": calibration_params[phase]["b"],
-            }
+    targets = sorted(target_classes) if target_classes else ["Attention"]
+    config_groups = {}
+    group_idx = 0
+    if calibration_params is not None:
+        config_groups[f"group_{group_idx}"] = {
+            "sparse_algo": "softmax_skip",
+            "targets": targets,
+        }
+        group_idx += 1
+    if sparse_softmax_config is not None:
+        config_groups[f"group_{group_idx}"] = {
+            "sparse_algo": "sparse_softmax",
+            "targets": targets,
+        }
 
     # Build the export config
     export_config: dict[str, Any] = {
-        "config_groups": {
-            "group_0": {
-                "sparse_algo": "softmax_skip",
-                "targets": sorted(target_classes) if target_classes else ["Attention"],
-            }
-        },
-        "threshold_scale_factor": threshold_scale_factor,
+        "config_groups": config_groups,
         "producer": {
             "name": "modelopt",
             "version": mo_version,
         },
     }
+
+    if calibration_params is not None:
+        # Build threshold_scale_factor with model parameters
+        threshold_scale_factor: dict[str, Any] = {
+            "formula": "a * exp(b * target_sparsity)",
+        }
+        for phase in ["prefill", "decode"]:
+            if phase in calibration_params:
+                threshold_scale_factor[phase] = {
+                    "a": calibration_params[phase]["a"],
+                    "b": calibration_params[phase]["b"],
+                }
+        export_config["threshold_scale_factor"] = threshold_scale_factor
+
+    if calibration_params is not None and target_sparse_ratio is not None:
+        export_config["target_sparse_ratio"] = target_sparse_ratio
+    if sparse_softmax_config is not None:
+        export_config["sparse_softmax"] = sparse_softmax_config
 
     return export_config
 

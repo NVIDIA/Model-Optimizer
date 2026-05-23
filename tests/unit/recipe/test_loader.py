@@ -16,6 +16,7 @@
 """Unit tests for modelopt.recipe.loader and modelopt.recipe.loader.load_config."""
 
 import re
+from importlib.resources import files
 
 import pytest
 
@@ -46,6 +47,10 @@ metadata:
 quantize: {}
 """
 
+CFG_RECIPE_MISSING_METADATA = """\
+quantize: {}
+"""
+
 CFG_RECIPE_MISSING_quantize = """\
 metadata:
   recipe_type: ptq
@@ -54,6 +59,7 @@ metadata:
 CFG_RECIPE_UNSUPPORTED_TYPE = """\
 metadata:
   recipe_type: unknown_type
+quantize: {}
 """
 
 QUANTIZER_ATTRIBUTE_SCHEMA = (
@@ -78,6 +84,13 @@ def _write_quantizer_cfg_entry(path, body: str):
 
 def _write_quantizer_cfg_list(path, body: str):
     path.write_text(QUANTIZER_CFG_LIST_SCHEMA + body)
+
+
+def _cfg_to_dict(cfg):
+    """Dump a QuantizerAttributeConfig (or list of them) to plain dicts for comparison."""
+    if isinstance(cfg, list):
+        return [item.model_dump(exclude_unset=True) for item in cfg]
+    return cfg.model_dump(exclude_unset=True)
 
 
 # ---------------------------------------------------------------------------
@@ -176,10 +189,18 @@ def test_load_recipe_missing_recipe_type_raises(tmp_path):
 
 
 def test_load_recipe_missing_quantize_raises(tmp_path):
-    """load_recipe raises ValueError when quantize is absent for a PTQ recipe."""
+    """A PTQ recipe missing the ``quantize`` section is rejected (no silent default)."""
     bad = tmp_path / "bad.yml"
     bad.write_text(CFG_RECIPE_MISSING_quantize)
     with pytest.raises(ValueError, match="quantize"):
+        load_recipe(bad)
+
+
+def test_load_recipe_missing_metadata_raises(tmp_path):
+    """A recipe missing the ``metadata`` section is rejected (no silent default)."""
+    bad = tmp_path / "bad.yml"
+    bad.write_text(CFG_RECIPE_MISSING_METADATA)
+    with pytest.raises(ValueError, match="metadata"):
         load_recipe(bad)
 
 
@@ -187,7 +208,8 @@ def test_load_recipe_unsupported_type_raises(tmp_path):
     """load_recipe raises ValueError for an unknown recipe_type."""
     bad = tmp_path / "bad.yml"
     bad.write_text(CFG_RECIPE_UNSUPPORTED_TYPE)
-    with pytest.raises(ValueError, match="Unsupported recipe type"):
+    # Schema-driven validation reports the failure via the metadata schema's enum check.
+    with pytest.raises(ValueError, match="recipe_type"):
         load_recipe(bad)
 
 
@@ -525,7 +547,7 @@ def test_import_resolves_cfg_reference(tmp_path):
     )
     recipe = load_recipe(recipe_file)
     entry = recipe.quantize["quant_cfg"][0]
-    assert entry["cfg"] == {"num_bits": (4, 3), "axis": None}
+    assert entry["cfg"].model_dump(exclude_unset=True) == {"num_bits": (4, 3), "axis": None}
 
 
 def test_import_same_name_used_twice(tmp_path):
@@ -598,7 +620,10 @@ def test_import_inline_cfg_not_affected(tmp_path):
         f"        axis: 0\n"
     )
     recipe = load_recipe(recipe_file)
-    assert recipe.quantize["quant_cfg"][1]["cfg"] == {"num_bits": 8, "axis": 0}
+    assert recipe.quantize["quant_cfg"][1]["cfg"].model_dump(exclude_unset=True) == {
+        "num_bits": 8,
+        "axis": 0,
+    }
 
 
 def test_import_unknown_reference_raises(tmp_path):
@@ -734,7 +759,15 @@ def test_import_entry_element_schema_appends(tmp_path):
         f"    - $import: disable_all\n"
     )
     recipe = load_recipe(recipe_file)
-    assert recipe.quantize["quant_cfg"] == [{"quantizer_name": "*", "cfg": None, "enable": False}]
+    # Entry was loaded against the QuantizerCfgEntry pydantic schema, so it is now a
+    # model instance — compare via model_dump for the dict-shape check.
+    assert len(recipe.quantize["quant_cfg"]) == 1
+    assert recipe.quantize["quant_cfg"][0].model_dump() == {
+        "quantizer_name": "*",
+        "parent_class": None,
+        "cfg": None,
+        "enable": False,
+    }
 
 
 def test_import_entry_wrong_schema_raises(tmp_path):
@@ -819,7 +852,7 @@ def test_import_cfg_extend(tmp_path):
     )
     recipe = load_recipe(recipe_file)
     cfg = recipe.quantize["quant_cfg"][0]["cfg"]
-    assert cfg == {"num_bits": (4, 3), "axis": 0}
+    assert cfg.model_dump(exclude_unset=True) == {"num_bits": (4, 3), "axis": 0}
 
 
 def test_import_cfg_inline_overrides_import(tmp_path):
@@ -882,6 +915,7 @@ def test_import_in_multiple_dict_values(tmp_path):
     )
     data = load_config(config_file)
     entry = data["quant_cfg"][0]
+    # load_config has no schema here — data is a raw dict tree, so entry["cfg"] is a dict.
     assert entry["cfg"] == {"num_bits": (4, 3)}
     assert entry["my_field"] == {"fake_quant": False}
 
@@ -906,7 +940,7 @@ def test_import_cfg_multi_import(tmp_path):
     )
     recipe = load_recipe(recipe_file)
     cfg = recipe.quantize["quant_cfg"][0]["cfg"]
-    assert cfg == {"num_bits": (4, 3), "axis": 0}
+    assert cfg.model_dump(exclude_unset=True) == {"num_bits": (4, 3), "axis": 0}
 
 
 def test_import_cfg_multi_import_later_overrides_earlier(tmp_path):
@@ -955,7 +989,11 @@ def test_import_cfg_multi_import_with_extend(tmp_path):
     )
     recipe = load_recipe(recipe_file)
     cfg = recipe.quantize["quant_cfg"][0]["cfg"]
-    assert cfg == {"num_bits": (4, 3), "fake_quant": False, "axis": 0}
+    assert cfg.model_dump(exclude_unset=True) == {
+        "num_bits": (4, 3),
+        "fake_quant": False,
+        "axis": 0,
+    }
 
 
 def test_import_dir_format(tmp_path):
@@ -972,7 +1010,10 @@ def test_import_dir_format(tmp_path):
         "      $import: fp8\n"
     )
     recipe = load_recipe(tmp_path)
-    assert recipe.quantize["quant_cfg"][0]["cfg"] == {"num_bits": (4, 3), "axis": None}
+    assert recipe.quantize["quant_cfg"][0]["cfg"].model_dump(exclude_unset=True) == {
+        "num_bits": (4, 3),
+        "axis": None,
+    }
 
 
 def test_import_dir_format_metadata_imports_do_not_apply_to_quantize(tmp_path):
@@ -1026,7 +1067,9 @@ def test_import_multi_document_list_snippet(tmp_path):
     recipe = load_recipe(recipe_file)
     assert len(recipe.quantize["quant_cfg"]) == 1
     assert recipe.quantize["quant_cfg"][0]["quantizer_name"] == "*[kv]_bmm_quantizer"
-    assert recipe.quantize["quant_cfg"][0]["cfg"] == {"num_bits": (4, 3)}
+    assert recipe.quantize["quant_cfg"][0]["cfg"].model_dump(exclude_unset=True) == {
+        "num_bits": (4, 3)
+    }
 
 
 def test_import_builtin_kv_fp8_snippet():
@@ -1075,7 +1118,8 @@ def test_import_list_splice_outside_typed_list_raises(tmp_path):
     """A bare $import in an untyped list is rejected."""
     _write_quantizer_cfg_list(
         tmp_path / "extra_tasks.yml",
-        "- quantizer_name: '*weight_quantizer'\n- quantizer_name: '*input_quantizer'\n",
+        "- quantizer_name: '*weight_quantizer'\n  enable: false\n"
+        "- quantizer_name: '*input_quantizer'\n  enable: false\n",
     )
     config_file = tmp_path / "config.yml"
     config_file.write_text(
@@ -1137,9 +1181,16 @@ def test_import_mixed_tree(tmp_path):
     )
     data = load_config(config_file)
     # Dict import inside list entry
-    assert data["quant_cfg"][0]["cfg"] == {"num_bits": (4, 3)}
-    # List splice
-    assert data["quant_cfg"][1] == {"quantizer_name": "*lm_head*", "enable": False}
+    assert data["quant_cfg"][0]["cfg"].model_dump(exclude_unset=True) == {"num_bits": (4, 3)}
+    # List splice — entries are normalized by QuantizeConfig.quant_cfg's validator,
+    # which fills in defaults for missing ``enable`` / ``cfg`` keys.  Entries are now
+    # QuantizerCfgEntry pydantic instances, so compare via model_dump.
+    assert data["quant_cfg"][1].model_dump() == {
+        "quantizer_name": "*lm_head*",
+        "parent_class": None,
+        "enable": False,
+        "cfg": None,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1178,7 +1229,7 @@ def test_import_recursive(tmp_path):
     )
     recipe = load_recipe(recipe_file)
     cfg = recipe.quantize["quant_cfg"][0]["cfg"]
-    assert cfg == {"num_bits": (4, 3)}
+    assert cfg.model_dump(exclude_unset=True) == {"num_bits": (4, 3)}
 
 
 def test_import_circular_raises(tmp_path):
@@ -1278,9 +1329,14 @@ def test_import_cross_file_same_name_no_conflict(tmp_path):
     )
     recipe = load_recipe(recipe_file)
     # Parent's "fmt" resolves to fp8 (e4m3), not child's nvfp4.
-    assert recipe.quantize["quant_cfg"][0]["cfg"] == {"num_bits": (4, 3)}
+    assert recipe.quantize["quant_cfg"][0]["cfg"].model_dump(exclude_unset=True) == {
+        "num_bits": (4, 3)
+    }
     # Child's "fmt" resolves to nvfp4 (e2m1), not parent's fp8.
-    assert recipe.quantize["quant_cfg"][1]["cfg"] == {"num_bits": (2, 1), "axis": 0}
+    assert recipe.quantize["quant_cfg"][1]["cfg"].model_dump(exclude_unset=True) == {
+        "num_bits": (2, 1),
+        "axis": 0,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1288,20 +1344,20 @@ def test_import_cross_file_same_name_no_conflict(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-_BUILTIN_CONFIG_SNIPPETS = [
-    "configs/numerics/fp8",
-    "configs/numerics/nvfp4",
-    "configs/numerics/nvfp4_static",
-    "configs/ptq/units/base_disable_all",
-    "configs/ptq/units/default_disabled_quantizers",
-    "configs/ptq/units/kv_fp8",
-    "configs/ptq/units/kv_fp8_cast",
-    "configs/ptq/units/kv_nvfp4_cast",
-    "configs/ptq/units/w4a4_nvfp4_nvfp4",
-    "configs/ptq/units/w8a8_fp8_fp8",
-    "configs/ptq/presets/kv/fp8",
-    "configs/ptq/presets/model/fp8",
-]
+def _iter_builtin_config_snippets(root):
+    """Yield built-in config YAML files that declare a modelopt schema."""
+    for child in sorted(root.iterdir(), key=lambda path: path.name):
+        if child.is_dir():
+            yield from _iter_builtin_config_snippets(child)
+        elif child.name.endswith((".yaml", ".yml")) and "modelopt-schema:" in child.read_text(
+            encoding="utf-8"
+        ):
+            yield child
+
+
+_BUILTIN_CONFIG_SNIPPETS = list(
+    _iter_builtin_config_snippets(files("modelopt_recipes").joinpath("configs"))
+)
 
 
 @pytest.mark.parametrize("config_path", _BUILTIN_CONFIG_SNIPPETS)
@@ -1311,8 +1367,10 @@ def test_builtin_config_snippets_with_modelopt_schema(config_path):
     assert data
 
 
-def test_modelopt_schema_comment_validates_without_changing_payload(tmp_path):
-    """modelopt-schema validates the resolved payload but load_config still returns a plain dict."""
+def test_modelopt_schema_comment_returns_instance(tmp_path):
+    """A ``modelopt-schema`` comment makes load_config return an instance of that schema."""
+    from modelopt.torch.quantization.config import QuantizerAttributeConfig
+
     config_file = tmp_path / "fp8.yaml"
     config_file.write_text(
         "# modelopt-schema: modelopt.torch.quantization.config.QuantizerAttributeConfig\n"
@@ -1320,7 +1378,9 @@ def test_modelopt_schema_comment_validates_without_changing_payload(tmp_path):
         "axis:\n"
     )
     data = load_config(config_file)
-    assert data == {"num_bits": (4, 3), "axis": None}
+    assert isinstance(data, QuantizerAttributeConfig)
+    assert data.num_bits == (4, 3)
+    assert data.axis is None
 
 
 def test_modelopt_schema_comment_validation_error(tmp_path):
@@ -1367,7 +1427,73 @@ def test_modelopt_schema_comment_validates_after_import_resolution(tmp_path):
         f"    $import: fp8\n"
     )
     data = load_config(config_file)
-    assert data == [{"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": (4, 3)}}]
+    # data is a list of QuantizerCfgEntry pydantic instances, not raw dicts.  Dump with
+    # exclude_unset=True so the inner QuantizerAttributeConfig stays sparse (cascades).
+    assert len(data) == 1
+    assert data[0].model_dump(exclude_unset=True) == {
+        "quantizer_name": "*weight_quantizer",
+        "cfg": {"num_bits": (4, 3)},
+    }
+
+
+def test_import_dict_snippet_imports_in_union_typed_list_field(tmp_path):
+    """A bare import can append into QuantizerCfgEntry.cfg's list branch."""
+    (tmp_path / "int4.yaml").write_text(
+        "# modelopt-schema: modelopt.torch.quantization.config.QuantizerAttributeConfig\n"
+        "num_bits: 4\n"
+        "block_sizes:\n"
+        "  -1: 128\n"
+        "  type: static\n"
+    )
+    (tmp_path / "fp8.yaml").write_text(
+        "# modelopt-schema: modelopt.torch.quantization.config.QuantizerAttributeConfig\n"
+        "num_bits: e4m3\n"
+    )
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        f"# modelopt-schema: modelopt.torch.quantization.config.QuantizeConfig\n"
+        f"imports:\n"
+        f"  int4: {tmp_path / 'int4.yaml'}\n"
+        f"  fp8: {tmp_path / 'fp8.yaml'}\n"
+        f"algorithm: awq_lite\n"
+        f"quant_cfg:\n"
+        f"  - quantizer_name: '*weight_quantizer'\n"
+        f"    cfg:\n"
+        f"      - $import: int4\n"
+        f"      - $import: fp8\n"
+    )
+
+    data = load_config(config_file)
+
+    assert _cfg_to_dict(data["quant_cfg"][0]["cfg"]) == [
+        {"num_bits": 4, "block_sizes": {-1: 128, "type": "static"}},
+        {"num_bits": (4, 3)},
+    ]
+
+
+def test_import_dict_snippet_in_union_typed_list_field_with_inline_item(tmp_path):
+    """A dict snippet can be imported as one item inside QuantizerCfgEntry.cfg list."""
+    _write_quantizer_attribute(
+        tmp_path / "int4.yaml",
+        "num_bits: 4\nblock_sizes:\n  -1: 128\n  type: static\n",
+    )
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        f"# modelopt-schema: modelopt.torch.quantization.config.QuantizeConfig\n"
+        f"imports:\n"
+        f"  int4: {tmp_path / 'int4.yaml'}\n"
+        f"algorithm: awq_lite\n"
+        f"quant_cfg:\n"
+        f"  - quantizer_name: '*weight_quantizer'\n"
+        f"    cfg:\n"
+        f"      - $import: int4\n"
+        f"      - num_bits: e4m3\n"
+    )
+    data = load_config(config_file)
+    assert _cfg_to_dict(data["quant_cfg"][0]["cfg"]) == [
+        {"num_bits": 4, "block_sizes": {-1: 128, "type": "static"}},
+        {"num_bits": (4, 3)},
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -1472,7 +1598,13 @@ def test_load_config_list_valued_yaml(tmp_path):
     data = load_config(cfg_file)
     assert isinstance(data, list)
     assert len(data) == 2
-    assert data[0] == {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8}}
+    # Entries are QuantizerCfgEntry pydantic instances after schema validation; dump
+    # with exclude_unset=True so the inner QuantizerAttributeConfig stays in sparse
+    # form (pydantic cascades exclude_unset to nested models).
+    assert data[0].model_dump(exclude_unset=True) == {
+        "quantizer_name": "*weight_quantizer",
+        "cfg": {"num_bits": 8},
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1484,7 +1616,8 @@ def test_import_dict_value_resolves_to_list_raises(tmp_path):
     """$import in dict value position raises when snippet is a list."""
     _write_quantizer_cfg_list(
         tmp_path / "entries.yml",
-        "- quantizer_name: '*weight_quantizer'\n- quantizer_name: '*input_quantizer'\n",
+        "- quantizer_name: '*weight_quantizer'\n  enable: false\n"
+        "- quantizer_name: '*input_quantizer'\n  enable: false\n",
     )
     config_file = tmp_path / "config.yml"
     config_file.write_text(
