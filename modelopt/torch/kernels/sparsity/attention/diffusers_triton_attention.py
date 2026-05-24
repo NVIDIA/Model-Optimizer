@@ -53,6 +53,7 @@ def set_triton_skip_softmax_config(
     calibration_mode: bool = False,
     threshold_trials: list[float] | None = None,
     scale_factor: float | None = None,
+    length_exponent: float = 1.0,
     measure_sparsity: bool = False,
 ) -> None:
     """Set thread-local skip-softmax config for the next Triton attention call.
@@ -64,8 +65,12 @@ def set_triton_skip_softmax_config(
         threshold_trials: List of thresholds to measure sparsity for
             (only used when calibration_mode=True).
         scale_factor: Calibrated scale factor for dynamic threshold computation.
-            When set, the actual threshold is computed as ``scale_factor / seq_k``
-            at attention call time, adapting to the actual sequence length.
+            When set, the actual threshold is computed as
+            ``1 - exp(-scale_factor / seq_k**length_exponent)`` at attention call
+            time, adapting to the actual sequence length.
+        length_exponent: The ``c`` exponent in the threshold envelope. Default 1.0
+            falls back to the legacy ``scale_factor / seq_k`` form (Taylor
+            expansion of the envelope for small ``scale_factor / seq_k``).
         measure_sparsity: If True, count total and skipped tiles during
             inference via atomic counters in the forward kernel.
     """
@@ -73,6 +78,7 @@ def set_triton_skip_softmax_config(
     _thread_local.calibration_mode = calibration_mode
     _thread_local.threshold_trials = threshold_trials
     _thread_local.scale_factor = scale_factor
+    _thread_local.length_exponent = float(length_exponent)
     _thread_local.measure_sparsity = measure_sparsity
     # Accumulated counters across all attention calls in one forward pass
     _thread_local.calibration_counters = None
@@ -184,8 +190,11 @@ def _diffusers_triton_attention(
     # --- Inference mode: skip-softmax with dynamic or static threshold ---
     scale_factor = getattr(_thread_local, "scale_factor", None)
     if scale_factor is not None and scale_factor > 0.0:
-        # Dynamic threshold: adapt to actual sequence length.
-        kw["skip_softmax_threshold"] = scale_factor / seq_k
+        # Dynamic threshold: t = 1 - exp(-scale_factor / L^c).
+        # Bounded in (0, 1); reduces to the legacy ``scale_factor / seq_k`` for
+        # small scale_factor / L^c (which is the dominant case at long ctx).
+        length_exponent = float(getattr(_thread_local, "length_exponent", 1.0))
+        kw["skip_softmax_threshold"] = 1.0 - math.exp(-scale_factor / (seq_k**length_exponent))
     else:
         threshold = getattr(_thread_local, "skip_threshold", None)
         if threshold is not None and threshold > 0.0:

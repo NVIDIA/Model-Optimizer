@@ -374,12 +374,12 @@ def _get_sparse_softmax_export_config(module: SparseAttentionModule) -> dict[str
 def export_sparse_attention_config(model: nn.Module) -> dict[str, Any] | None:
     """Extract sparse attention config for export to config.json.
 
-    Extracts calibrated skip-softmax parameters and N:M sparse-softmax metadata
-    from sparse attention modules.
+    Extracts calibrated skip-softmax parameters and N:M sparse-softmax
+    metadata from sparse attention modules.
 
-    The exported config allows computing threshold at runtime:
-        scale_factor = a * exp(b * target_sparsity)
-        threshold = scale_factor / seqlen
+    The exported config allows computing threshold at runtime as
+
+        threshold = 1 - exp(-a * (S / (1 - S))^b / L^c)
 
     Args:
         model: Model with sparse attention applied
@@ -395,9 +395,9 @@ def export_sparse_attention_config(model: nn.Module) -> dict[str, Any] | None:
                 "group_0": {"sparse_algo": "softmax_skip", "targets": ["LlamaAttention"]}
             },
             "threshold_scale_factor": {
-                "formula": "a * exp(b * target_sparsity)",
-                "prefill": {"a": 7.93, "b": 8.61},
-                "decode": {"a": 0.12, "b": 9.85},
+                "formula": "1 - exp(-a * (S/(1-S))^b / L^c)",
+                "prefill": {"a": 7.93, "b": 0.86, "c": 1.26},
+                "decode": {"a": 0.12, "b": 0.91, "c": 1.18},
             },
             "sparse_softmax": {
                 "sparsity_n": 2,
@@ -461,13 +461,15 @@ def export_sparse_attention_config(model: nn.Module) -> dict[str, Any] | None:
     if calibration_params is not None:
         # Build threshold_scale_factor with model parameters
         threshold_scale_factor: dict[str, Any] = {
-            "formula": "a * exp(b * target_sparsity)",
+            "formula": "1 - exp(-a * (S/(1-S))^b / L^c)",
         }
         for phase in ["prefill", "decode"]:
             if phase in calibration_params:
+                params = calibration_params[phase]
                 threshold_scale_factor[phase] = {
-                    "a": calibration_params[phase]["a"],
-                    "b": calibration_params[phase]["b"],
+                    "a": params["a"],
+                    "b": params["b"],
+                    "c": params.get("c", 1.0),
                 }
         export_config["threshold_scale_factor"] = threshold_scale_factor
 
@@ -537,15 +539,17 @@ def _format_threshold(info: dict) -> str:
     """Format threshold info for display."""
     t = info.get("type")
     if t == "dynamic_calibrated":
-        # Exponential model: threshold = a * exp(b * sparsity) / seqlen
+        # Dynamic threshold: t = 1 - exp(-a * (S/(1-S))^b / L^c)
         params = info.get("calibration_params", {})
         target = info.get("target_sparse_ratio", {})
         parts = []
         for phase in ["prefill", "decode"]:
             if phase in params:
-                a, b = params[phase]["a"], params[phase]["b"]
+                a = params[phase]["a"]
+                b = params[phase]["b"]
+                c = params[phase].get("c", 1.0)
                 s = target.get(phase, 0.5)
-                parts.append(f"{phase}: a={a:.4f}, b={b:.2f}, target={s:.0%}")
+                parts.append(f"{phase}: a={a:.4f}, b={b:.2f}, c={c:.2f}, target={s:.0%}")
         return f"calibrated({', '.join(parts)})"
     if t == "static":
         v = info.get("value")

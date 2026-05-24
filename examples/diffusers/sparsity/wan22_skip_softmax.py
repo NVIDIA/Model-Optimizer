@@ -23,12 +23,12 @@ generation model (text-to-video). Four modes are supported:
    (no skip-softmax, same kernel as sparse runs for apples-to-apples comparison).
 3. **Fixed skip-softmax threshold** — pass ``--skip-softmax-threshold`` to
    supply the BLASST lambda threshold. No calibration data is needed.
-4. **Calibrated threshold** — pass ``--calibrate`` to run exponential-model
-   calibration (``scale_factor = a * exp(b * target_sparsity)``).
+4. **Calibrated threshold** — pass ``--calibrate`` to run the dynamic threshold
+   calibration (``t = 1 - exp(-a * (S/(1-S))^b / L^c)``).
 
 During calibration, ``triton_skip_softmax`` with the Triton calibration kernel
 collects sparsity statistics across multiple threshold trials. The fitted
-exponential model then allows runtime control of the target sparsity ratio
+model then allows runtime control of the target sparsity ratio
 without recalibration.
 
 The Wan 2.2 5B model has 40 transformer blocks with self-attention (attn1)
@@ -217,8 +217,8 @@ def build_sparse_config(args: argparse.Namespace, num_blocks: int) -> dict:
     - **Fixed threshold**: ``--skip-softmax-threshold`` sets
       ``skip_softmax_threshold`` directly — no calibration needed.
     - **Calibrated**: ``--calibrate`` collects multi-threshold sparsity statistics
-      via the Triton calibration kernel, then fits an exponential model:
-      ``scale_factor = a * exp(b * sparsity)``.
+      via the Triton calibration kernel, then fits the dynamic threshold model:
+      ``t = 1 - exp(-a * (S/(1-S))^b / L^c)``.
     """
     attn_cfg: dict = {
         "method": "triton_skip_softmax",
@@ -251,7 +251,6 @@ def build_sparse_config(args: argparse.Namespace, num_blocks: int) -> dict:
         sparse_cfg["calibration"] = {
             "target_sparse_ratio": {"prefill": args.target_sparsity},
             "threshold_trials": DEFAULT_THRESHOLD_TRIALS,
-            "fit_logspace": True,
         }
 
     return config

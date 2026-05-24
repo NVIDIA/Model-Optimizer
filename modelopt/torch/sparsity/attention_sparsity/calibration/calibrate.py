@@ -300,7 +300,6 @@ def calibrate_sparse_attention(
 
         prefill_calibrator = DynamicThresholdCalibrator(
             threshold_trials=calib_config.threshold_trials,
-            fit_logspace=calib_config.fit_logspace,
         )
         prefill_result = prefill_calibrator.calibrate(model, prefill_forward_loop, phase="prefill")
 
@@ -323,7 +322,6 @@ def calibrate_sparse_attention(
 
         decode_calibrator = DynamicThresholdCalibrator(
             threshold_trials=calib_config.threshold_trials,
-            fit_logspace=calib_config.fit_logspace,
         )
         decode_result = decode_calibrator.calibrate(model, decode_forward_loop, phase="decode")
 
@@ -337,7 +335,7 @@ def calibrate_sparse_attention(
         warnings.warn("No calibration produced valid results")
         return {}
 
-    # Extract a, b, and observed sparsity range for each phase
+    # Extract a, b, c, and observed sparsity range for each phase
     calibration_params: dict[str, dict[str, float]] = {}
     for phase in ["prefill", "decode"]:
         if phase in calibration_results:
@@ -345,6 +343,7 @@ def calibrate_sparse_attention(
             params: dict[str, float] = {
                 "a": result["a"],
                 "b": result["b"],
+                "c": result.get("c", 1.0),
             }
             if "min_observed_sparsity" in result:
                 params["min_observed_sparsity"] = result["min_observed_sparsity"]
@@ -360,7 +359,10 @@ def calibrate_sparse_attention(
     for phase, params in calibration_params.items():
         result = calibration_results[phase]
         print(f"  {phase}:")
-        print(f"    Model: scale_factor = {params['a']:.6e} * exp({params['b']:.4f} * sparsity)")
+        print(
+            f"    Model: t = 1 - exp(-{params['a']:.4e} * (S/(1-S))^{params['b']:.3f}"
+            f" / L^{params['c']:.3f})"
+        )
         print(f"    R-squared: {result['r_squared']:.6f}")
 
     for module_name, module in sparse_modules:

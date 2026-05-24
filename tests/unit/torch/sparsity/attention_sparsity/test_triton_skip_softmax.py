@@ -15,7 +15,6 @@
 
 """Unit tests for TritonSkipSoftmaxMethod (no GPU required)."""
 
-import math
 import warnings
 
 import pytest
@@ -71,9 +70,19 @@ class TestGetScaleFactor:
 
     def test_calibrated_computation(self):
         m = TritonSkipSoftmaxMethod()
-        m.calibration_params = {"prefill": {"a": 2.0, "b": 3.0}}
+        # scale = a * (S / (1 - S))^b
+        m.calibration_params = {"prefill": {"a": 2.0, "b": 0.86, "c": 1.0}}
         m.target_sparse_ratio = {"prefill": 0.5}
-        expected = 2.0 * math.exp(3.0 * 0.5)
+        # At S=0.5, S/(1-S) = 1, so scale = a regardless of b.
+        expected = 2.0
+        assert m._get_scale_factor() == pytest.approx(expected)
+
+    def test_calibrated_with_target_below_half(self):
+        m = TritonSkipSoftmaxMethod()
+        m.calibration_params = {"prefill": {"a": 2.0, "b": 0.86, "c": 1.0}}
+        m.target_sparse_ratio = {"prefill": 0.3}
+        # scale = 2.0 * (0.3/0.7)^0.86
+        expected = 2.0 * (0.3 / 0.7) ** 0.86
         assert m._get_scale_factor() == pytest.approx(expected)
 
     def test_zero_a_returns_none(self):

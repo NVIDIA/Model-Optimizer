@@ -369,8 +369,8 @@ class TestExportSparseAttentionConfig:
         for module in model.modules():
             if isinstance(module, SparseAttentionModule):
                 module._sparse_method_instance.calibration_params = {
-                    "prefill": {"a": 3.14, "b": 7.5},
-                    "decode": {"a": 0.5, "b": 9.0},
+                    "prefill": {"a": 3.14, "b": 0.86, "c": 1.26},
+                    "decode": {"a": 0.5, "b": 0.91, "c": 1.18},
                 }
                 module._sparse_method_instance.target_sparse_ratio = {
                     "prefill": 0.4,
@@ -381,8 +381,9 @@ class TestExportSparseAttentionConfig:
         assert out is not None
         assert "config_groups" in out
         tsf = out["threshold_scale_factor"]
-        assert tsf["prefill"] == {"a": 3.14, "b": 7.5}
-        assert tsf["decode"] == {"a": 0.5, "b": 9.0}
+        assert tsf["prefill"] == {"a": 3.14, "b": 0.86, "c": 1.26}
+        assert tsf["decode"] == {"a": 0.5, "b": 0.91, "c": 1.18}
+        assert "1 - exp" in tsf["formula"]
         assert out["target_sparse_ratio"] == {"prefill": 0.4, "decode": 0.6}
         assert out["producer"]["name"] == "modelopt"
 
@@ -433,7 +434,7 @@ class TestExportSparseAttentionConfig:
         for module in model.modules():
             if isinstance(module, SparseAttentionModule):
                 module._sparse_method_instance.calibration_params = {
-                    "prefill": {"a": 3.14, "b": 7.5},
+                    "prefill": {"a": 3.14, "b": 0.86, "c": 1.26},
                 }
                 module._sparse_method_instance.target_sparse_ratio = {
                     "prefill": 0.4,
@@ -445,7 +446,11 @@ class TestExportSparseAttentionConfig:
         assert out is not None
         assert out["config_groups"]["group_0"]["sparse_algo"] == "softmax_skip"
         assert out["config_groups"]["group_1"]["sparse_algo"] == "sparse_softmax"
-        assert out["threshold_scale_factor"]["prefill"] == {"a": 3.14, "b": 7.5}
+        assert out["threshold_scale_factor"]["prefill"] == {
+            "a": 3.14,
+            "b": 0.86,
+            "c": 1.26,
+        }
         assert out["target_sparse_ratio"] == {"prefill": 0.4, "decode": 0.6}
         assert out["sparse_softmax"] == {
             "sparsity_n": 2,

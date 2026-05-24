@@ -146,13 +146,21 @@ class FlashSkipSoftmax(SparseAttentionMethod):
         )
 
         if use_calibration_params:
-            # Calibrated dynamic threshold: bypass thresholds list entirely
+            # Calibrated dynamic threshold:
+            #   t = 1 - exp(-a * (S/(1-S))^b / L^c)
+            # Bounded in (0, 1) for all S ∈ (0, 1) and L > 0.
             assert calibration_params is not None and target_sparse_ratio is not None
-            a = calibration_params[phase]["a"]
-            b = calibration_params[phase]["b"]
+            params = calibration_params[phase]
+            a = params["a"]
+            b = params["b"]
+            c = params.get("c", 1.0)
             target_sparsity = target_sparse_ratio.get(phase, 0.5)
-            scale_factor = a * np.exp(b * target_sparsity)
-            log_thresholds = [np.log(scale_factor / seq_k)]
+            # Clip S off the open boundaries so logit stays finite.
+            s_clipped = float(np.clip(target_sparsity, 1e-6, 1.0 - 1e-6))
+            scale = a * (s_clipped / (1.0 - s_clipped)) ** b
+            t = 1.0 - np.exp(-scale / (float(seq_k) ** c))
+            t = float(np.clip(t, 1e-15, 1.0 - 1e-15))
+            log_thresholds = [np.log(t)]
         else:
             log_thresholds = [np.log(t) for t in self.thresholds]
 
@@ -339,25 +347,30 @@ class FlashSkipSoftmax(SparseAttentionMethod):
         target_sparse_ratio = self.target_sparse_ratio
 
         if calibration_params is not None and target_sparse_ratio is not None:
-            # Per-phase calibrated dynamic threshold using Exponential model
+            # Per-phase calibrated dynamic threshold:
+            #   t = 1 - exp(-a * (S/(1-S))^b / L^c)
             example_lengths = [1024, 4096, 16384, 65536, 131072]
             phase_info = {}
             for phase, params in calibration_params.items():
-                a, b = params["a"], params["b"]
+                a = params["a"]
+                b = params["b"]
+                c = params.get("c", 1.0)
                 target_sparsity = target_sparse_ratio.get(phase, 0.5)
-                scale_factor = a * np.exp(b * target_sparsity)
+                s_clipped = float(np.clip(target_sparsity, 1e-6, 1.0 - 1e-6))
+                scale = a * (s_clipped / (1.0 - s_clipped)) ** b
                 phase_info[phase] = {
                     "a": a,
                     "b": b,
+                    "c": c,
                     "target_sparsity": target_sparsity,
-                    "scale_factor": scale_factor,
                     "example_thresholds": {
-                        length: scale_factor / length for length in example_lengths
+                        length: float(1.0 - np.exp(-scale / (length**c)))
+                        for length in example_lengths
                     },
                 }
             return {
                 "type": "dynamic_calibrated",
-                "formula": "threshold = a * exp(b * target_sparsity) / seqlen",
+                "formula": "threshold = 1 - exp(-a * (S/(1-S))^b / L^c)",
                 "calibration_params": calibration_params,
                 "target_sparse_ratio": target_sparse_ratio,
                 "phases": phase_info,

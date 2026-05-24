@@ -41,6 +41,7 @@ def set_ltx_triton_context(
     calibration_mode: bool = False,
     threshold_trials: list[float] | None = None,
     scale_factor: float | None = None,
+    length_exponent: float = 1.0,
     **kwargs,
 ) -> None:
     """Set thread-local Triton config for LTX-2 attention."""
@@ -49,6 +50,7 @@ def set_ltx_triton_context(
     _thread_local.calibration_mode = calibration_mode
     _thread_local.threshold_trials = threshold_trials
     _thread_local.scale_factor = scale_factor
+    _thread_local.length_exponent = float(length_exponent)
     if not calibration_mode:
         _thread_local.calibration_counters = None
     _thread_local.calibration_seq_k = None
@@ -61,16 +63,18 @@ def clear_ltx_triton_context() -> None:
     _thread_local.calibration_mode = False
     _thread_local.threshold_trials = None
     _thread_local.scale_factor = None
+    _thread_local.length_exponent = 1.0
     _thread_local.calibration_counters = None
     _thread_local.calibration_seq_k = None
 
 
-def _get_ltx_triton_context() -> tuple[bool, float | None, float | None]:
-    """Return (active, threshold, scale_factor)."""
+def _get_ltx_triton_context() -> tuple[bool, float | None, float | None, float]:
+    """Return (active, threshold, scale_factor, length_exponent)."""
     return (
         getattr(_thread_local, "active", False),
         getattr(_thread_local, "threshold", None),
         getattr(_thread_local, "scale_factor", None),
+        float(getattr(_thread_local, "length_exponent", 1.0)),
     )
 
 
@@ -145,7 +149,9 @@ def _ltx_triton_attention(
     # --- Inference mode: dynamic or static threshold ---
     scale_factor = getattr(_thread_local, "scale_factor", None)
     if scale_factor is not None and scale_factor > 0.0:
-        kw["skip_softmax_threshold"] = scale_factor / seq_k
+        # Dynamic threshold: t = 1 - exp(-scale_factor / L^c).
+        length_exponent = float(getattr(_thread_local, "length_exponent", 1.0))
+        kw["skip_softmax_threshold"] = 1.0 - math.exp(-scale_factor / (seq_k**length_exponent))
     elif threshold is not None and threshold > 0.0:
         kw["skip_softmax_threshold"] = threshold
 
@@ -163,7 +169,7 @@ class _TritonLTXAttentionWrapper:
         self._original_fn = original_fn
 
     def __call__(self, q, k, v, heads, mask=None):
-        active, threshold, _scale_factor = _get_ltx_triton_context()
+        active, threshold, _scale_factor, _length_exponent = _get_ltx_triton_context()
         if active:
             return _ltx_triton_attention(q, k, v, heads, mask, threshold)
         return self._original_fn(q, k, v, heads, mask)
