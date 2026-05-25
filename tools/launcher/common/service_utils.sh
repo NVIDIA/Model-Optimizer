@@ -53,11 +53,20 @@ function util_install_extra_dep {
         return 0
     fi
     if [[ "$mpi_local_rank" -eq 0 ]]; then
-        pip install diskcache
+        if ! pip install diskcache; then
+            report_result "FAIL: util_install_extra_dep: pip install diskcache failed"
+            exit 1
+        fi
         local _nvrx_dir
         _nvrx_dir="$(mktemp -d)/nvidia-resiliency-ext"
-        git clone --depth 1 https://github.com/NVIDIA/nvidia-resiliency-ext "${_nvrx_dir}" \
-            && pip install "${_nvrx_dir}"
+        if ! git clone --depth 1 https://github.com/NVIDIA/nvidia-resiliency-ext "${_nvrx_dir}"; then
+            report_result "FAIL: util_install_extra_dep: git clone nvidia-resiliency-ext failed"
+            exit 1
+        fi
+        if ! pip install "${_nvrx_dir}"; then
+            report_result "FAIL: util_install_extra_dep: pip install nvidia-resiliency-ext failed"
+            exit 1
+        fi
         touch "$_marker"
     else
         local _waited=0
@@ -65,6 +74,10 @@ function util_install_extra_dep {
             sleep 1
             _waited=$((_waited + 1))
         done
+        if [[ ! -f "$_marker" ]]; then
+            report_result "FAIL: util_install_extra_dep: timed out waiting for rank-0 install marker"
+            exit 1
+        fi
     fi
 }
 
