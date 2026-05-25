@@ -79,14 +79,14 @@ _TINY_PIPE_KWARGS = {
 }
 
 
-def _skip_softmax_cfg(raw_threshold=-5.0):
+def _skip_softmax_cfg(threshold=0.03125):
     """Sparse config targeting Wan 2.2 self-attention (attn1) only."""
     return {
         "sparse_cfg": {
             "*attn1*": {
                 "method": "triton_skip_softmax",
                 "backend": "triton",
-                "skip_softmax_raw_threshold": raw_threshold,
+                "skip_softmax_threshold": threshold,
                 "enable": True,
             },
             "default": {"enable": False},
@@ -138,13 +138,13 @@ class TestWan22PipelineE2E:
 
     def test_skip_softmax_pipeline_runs_e2e(self, tiny_wan22_pipe):
         """Sparsified pipeline runs end-to-end producing finite frames."""
-        _sparsify_both_transformers(tiny_wan22_pipe, _skip_softmax_cfg(raw_threshold=-5.0))
+        _sparsify_both_transformers(tiny_wan22_pipe, _skip_softmax_cfg(threshold=0.03125))
         output = _run_pipe(tiny_wan22_pipe)
         assert output.frames is not None
         assert len(output.frames[0]) > 0
 
     def test_tight_threshold_matches_dense_within_tolerance(self, tiny_wan22_pipe, tiny_wan22_path):
-        """raw_threshold=-50 (effectively dense) → output close to unsparsified run."""
+        """A near-zero threshold is effectively dense and close to unsparsified."""
         from diffusers import WanPipeline
 
         # Dense run: fresh pipe, no sparsification
@@ -152,8 +152,10 @@ class TestWan22PipelineE2E:
         dense_pipe.to("cuda")
         dense_frame0 = _run_pipe(dense_pipe).frames[0][0]
 
-        # Sparse run: same seed, raw_threshold=-50 (≈ no tiles skipped)
-        _sparsify_both_transformers(tiny_wan22_pipe, _skip_softmax_cfg(raw_threshold=-50.0))
+        # Sparse run: same seed, threshold=2**-50 (≈ no tiles skipped)
+        _sparsify_both_transformers(
+            tiny_wan22_pipe, _skip_softmax_cfg(threshold=8.881784197001252e-16)
+        )
         sparse_frame0 = _run_pipe(tiny_wan22_pipe).frames[0][0]
 
         # Both are PIL images — convert to tensor and compare
@@ -172,7 +174,7 @@ class TestWan22PipelineE2E:
             TritonSkipSoftmaxMethod,
         )
 
-        _sparsify_both_transformers(tiny_wan22_pipe, _skip_softmax_cfg(raw_threshold=-2.0))
+        _sparsify_both_transformers(tiny_wan22_pipe, _skip_softmax_cfg(threshold=0.25))
 
         # Enable measurement + reset counters on every sparse module
         for module in (tiny_wan22_pipe.transformer, tiny_wan22_pipe.transformer_2):

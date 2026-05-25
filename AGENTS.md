@@ -11,8 +11,9 @@ These instructions apply to AI-assisted work in this repository.
 ## Coding guidelines
 
 - **Coding guide:** Code development and review require reading and following
-  [.agents/developer-guidelines.md](.agents/developer-guidelines.md);
+  the [coding standards in CONTRIBUTING.md](CONTRIBUTING.md#-coding-standards);
   do not skip this step.
+- **Use relative paths** from the repo root in commands and file references.
 
 ## Iterative development
 

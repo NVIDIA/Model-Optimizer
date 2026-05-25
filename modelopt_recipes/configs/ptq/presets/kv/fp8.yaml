@@ -13,10 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# FP8 E4M3 KV cache quantization preset.
-# Equivalent to the hardcoded FP8_KV_CFG in config.py.
-# This is a partial config (no algorithm, no base_disable_all) — designed
-# to be merged with a primary model quantization config.
+# Partial QuantizeConfig that enables FP8 E4M3 KV-cache quantizers.
+# Merge this fragment with a primary model quantization preset.
 
 # modelopt-schema: modelopt.torch.quantization.config.QuantizeConfig
 imports:

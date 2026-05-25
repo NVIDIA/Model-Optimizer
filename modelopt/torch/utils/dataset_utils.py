@@ -32,6 +32,11 @@ from tqdm import tqdm
 if TYPE_CHECKING:
     from transformers import PreTrainedTokenizerBase
 
+
+def _join_messages_content(sample: dict) -> str:
+    return "\n".join(turn["content"] for turn in sample["messages"])
+
+
 # Use dict to store the config for each dataset.
 # If we want to export more options to user like target languages, we need more standardized approach like dataclass.
 SUPPORTED_DATASET_CONFIG: dict[str, Any] = {
@@ -61,7 +66,7 @@ SUPPORTED_DATASET_CONFIG: dict[str, Any] = {
             "path": "nvidia/Nemotron-Post-Training-Dataset-v2",
             "split": ["stem", "chat", "math", "code"],
         },
-        "preprocess": lambda sample: "\n".join(turn["content"] for turn in sample["messages"]),
+        "preprocess": _join_messages_content,
         "chat_key": "messages",
     },
     "nemotron-post-training-dataset-v1": {
@@ -69,7 +74,93 @@ SUPPORTED_DATASET_CONFIG: dict[str, Any] = {
             "path": "nvidia/Nemotron-Post-Training-Dataset-v1",
             "split": ["stem", "chat", "math", "code", "tool_calling"],
         },
-        "preprocess": lambda sample: "\n".join(turn["content"] for turn in sample["messages"]),
+        "preprocess": _join_messages_content,
+        "chat_key": "messages",
+    },
+    "nemotron-sft-instruction-following-chat-v2": {
+        # Skips ``reasoning_on`` split: heterogeneous messages schema fails streaming cast.
+        "config": {
+            "path": "nvidia/Nemotron-SFT-Instruction-Following-Chat-v2",
+            "split": ["reasoning_off"],
+        },
+        "preprocess": _join_messages_content,
+        "chat_key": "messages",
+    },
+    "nemotron-science-v1": {
+        "config": {
+            "path": "nvidia/Nemotron-Science-v1",
+            "split": ["MCQ", "RQA"],
+        },
+        "preprocess": _join_messages_content,
+        "chat_key": "messages",
+    },
+    "nemotron-competitive-programming-v1": {
+        # Skips ``infinibyte_part0[0|1]``: heterogeneous schema fails streaming cast.
+        "config": {
+            "path": "nvidia/Nemotron-Competitive-Programming-v1",
+            "split": [
+                "competitive_coding_cpp_part00",
+                "competitive_coding_cpp_part01",
+                "competitive_coding_python_part00",
+                "competitive_coding_python_part01",
+            ],
+        },
+        "preprocess": _join_messages_content,
+        "chat_key": "messages",
+    },
+    "nemotron-sft-agentic-v2": {
+        # Only ``search`` streams cleanly: ``interactive_agent`` has a heterogeneous
+        # tools schema (string vs list) that breaks pyarrow JSON inference, and
+        # ``tool_calling`` contains at least one malformed JSON row in a later shard.
+        "config": {
+            "path": "nvidia/Nemotron-SFT-Agentic-v2",
+            "split": ["search"],
+        },
+        "preprocess": _join_messages_content,
+        "chat_key": "messages",
+    },
+    "nemotron-math-v2": {
+        "config": {
+            "path": "nvidia/Nemotron-Math-v2",
+            "split": ["high_part00", "high_part01", "high_part02", "medium", "low"],
+        },
+        "preprocess": _join_messages_content,
+        "chat_key": "messages",
+    },
+    "nemotron-sft-swe-v2": {
+        # Skips ``openhands_swe`` split: heterogeneous schema fails streaming cast.
+        "config": {
+            "path": "nvidia/Nemotron-SFT-SWE-v2",
+            "split": ["agentless"],
+        },
+        "preprocess": _join_messages_content,
+        "chat_key": "messages",
+    },
+    "nemotron-sft-multilingual-v1": {
+        "config": {
+            "path": "nvidia/Nemotron-SFT-Multilingual-v1",
+            "split": [
+                "code_de",
+                "code_es",
+                "code_fr",
+                "code_it",
+                "code_ja",
+                "code_zh",
+                "math_de",
+                "math_es",
+                "math_fr",
+                "math_it",
+                "math_ja",
+                "math_zh",
+                "stem_de",
+                "stem_es",
+                "stem_fr",
+                "stem_it",
+                "stem_ja",
+                "stem_zh",
+            ],
+        },
+        "preprocess": _join_messages_content,
         "chat_key": "messages",
     },
     "magpie": {
@@ -105,6 +196,42 @@ SUPPORTED_DATASET_CONFIG: dict[str, Any] = {
         "preprocess": lambda sample: sample["text"],
     },
 }
+
+# Named groups of registered datasets, expanded in ``get_dataset_dataloader``.
+# Useful when callers want a single ``--dataset`` token that fans out to several
+# entries; per-dataset ``num_samples`` is split evenly across the members.
+DATASET_COMBOS: dict[str, list[str]] = {
+    "cnn_nemotron_v2_mix": ["cnn_dailymail", "nemotron-post-training-dataset-v2"],
+    "nemotron-post-training-v3": [
+        "nemotron-sft-instruction-following-chat-v2",
+        "nemotron-science-v1",
+        "nemotron-competitive-programming-v1",
+        "nemotron-sft-agentic-v2",
+        "nemotron-math-v2",
+        "nemotron-sft-swe-v2",
+        "nemotron-sft-multilingual-v1",
+    ],
+}
+
+
+def _validate_dataset_combos() -> None:
+    """Validate DATASET_COMBOS at import time: fail loud on typos / collisions."""
+    overlap = set(DATASET_COMBOS) & set(SUPPORTED_DATASET_CONFIG)
+    if overlap:
+        raise ValueError(
+            f"DATASET_COMBOS keys collide with SUPPORTED_DATASET_CONFIG: {sorted(overlap)}"
+        )
+    for combo_name, members in DATASET_COMBOS.items():
+        if not members:
+            raise ValueError(f"DATASET_COMBOS['{combo_name}'] must contain at least one dataset.")
+        unknown = [m for m in members if m not in SUPPORTED_DATASET_CONFIG]
+        if unknown:
+            raise ValueError(
+                f"DATASET_COMBOS['{combo_name}'] references unknown datasets: {unknown}"
+            )
+
+
+_validate_dataset_combos()
 
 __all__ = [
     "create_forward_loop",
@@ -260,6 +387,13 @@ def get_dataset_samples(
     Returns:
         Samples: The list of samples.
     """
+    if dataset_name in DATASET_COMBOS:
+        raise ValueError(
+            f"'{dataset_name}' is a DATASET_COMBOS entry, not a single dataset. "
+            "Use ``get_dataset_dataloader`` to expand combos, or pass one of "
+            f"its members: {DATASET_COMBOS[dataset_name]}"
+        )
+
     # Local JSONL: load via HF's ``json`` builder and route through the same
     # auto-preprocess path as unregistered HF datasets so chat / prompt / text
     # columns are handled consistently with a downloaded HF dataset.  Never
@@ -471,6 +605,34 @@ def get_dataset_dataloader(
         "dataset_name and num_samples must be the same length"
     )
 
+    # Reject inputs that include both a combo and one of its member datasets
+    # (e.g. ``["cnn_dailymail", "cnn_nemotron_v2_mix"]``), since the combo would sample the
+    # plain entry a second time with a smaller per-member quota.
+    plain_inputs = {n for n in dataset_name if n not in DATASET_COMBOS}
+    for ds_name in dataset_name:
+        if ds_name in DATASET_COMBOS:
+            overlap = plain_inputs & set(DATASET_COMBOS[ds_name])
+            if overlap:
+                raise ValueError(
+                    f"--dataset includes both combo '{ds_name}' and its "
+                    f"member(s) {sorted(overlap)}; remove one to avoid "
+                    "double-sampling."
+                )
+
+    expanded_names: list[str] = []
+    expanded_num_samples: list[int] = []
+    for ds_name, n in zip(dataset_name, num_samples):
+        if ds_name in DATASET_COMBOS:
+            members = DATASET_COMBOS[ds_name]
+            base, remainder = divmod(n, len(members))
+            for i, member in enumerate(members):
+                expanded_names.append(member)
+                expanded_num_samples.append(base + (1 if i < remainder else 0))
+        else:
+            expanded_names.append(ds_name)
+            expanded_num_samples.append(n)
+    dataset_name, num_samples = expanded_names, expanded_num_samples
+
     all_samples = []
     for ds_name, num_sample in zip(dataset_name, num_samples):
         samples = get_dataset_samples(
@@ -528,7 +690,7 @@ def get_supported_datasets() -> list[str]:
 
             print("Supported datasets:", get_supported_datasets())
     """
-    return list(SUPPORTED_DATASET_CONFIG.keys())
+    return list(SUPPORTED_DATASET_CONFIG.keys()) + list(DATASET_COMBOS.keys())
 
 
 @contextmanager
