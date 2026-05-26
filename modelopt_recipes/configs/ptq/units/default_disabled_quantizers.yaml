@@ -48,3 +48,6 @@
   - parent_class: 'nn.LeakyReLU'
     quantizer_name: '*'
     enable: false
+  - parent_class: 'nn.Embedding'
+    quantizer_name: '*'
+    enable: false
