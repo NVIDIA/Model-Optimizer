@@ -4,6 +4,9 @@
 
 All experiments prune Nemotron-Nano-9B-v2 → 7B and distill with teacher = Nemotron-Nano-9B-v2 (official). The final chosen blend (**30pre_70post_v1v3**) is in [README.md](README.md).
 
+> [!NOTE]
+> AIME and SciCode numbers in the tables below were collected with single-shot evaluation. The main [README.md](README.md) reports the same model at the 80B checkpoint using avg-of-N (matching the current `nemo_evaluator.yaml`), so absolute values for those two columns may differ by 1–2pp from the corresponding entries below. The qualitative trends (best blend, plateau points) hold either way.
+
 ---
 
 <details>

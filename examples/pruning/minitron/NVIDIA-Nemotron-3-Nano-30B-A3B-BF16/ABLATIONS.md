@@ -207,10 +207,10 @@ Evaluation after distillation (same blend, same training schedule):
 
 | Checkpoint | Candidate | MMLU | MMLU Pro | GPQA Diamond | LiveCodeBench v6 | AIME 2025 | IFBench | SciCode (Subtask) |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 2.5B tokens | 1st best | **68.6** | **73.6** | **62.5** | **57.5** | **79.1** | **58.0** | **21.6** |
-| 2.5B tokens | 2nd best | 68.1 | 72.6 | 60.0 | 48.1 | 63.0 | 50.7 | 14.9 |
-| 20B tokens | 1st best | 70.8 | 74.6 | **65.3** | **61.0** | **79.8** | **63.5** | **21.2** |
-| 20B tokens | 2nd best | **71.0** | 74.6 | 61.6 | 49.6 | 54.0 | 57.5 | 21.8 |
+| 2.5B tokens | 1st best | **68.6** | **73.6** | **62.5** | **57.5** | **79.1** | **58.3** | **22.6** |
+| 2.5B tokens | 2nd best | 68.1 | 72.6 | 60.0 | 48.1 | 63.0 | 50.7 | 15.2 |
+| 20B tokens | 1st best | 70.8 | 74.6 | **65.3** | **61.0** | **79.8** | **63.6** | **22.5** |
+| 20B tokens | 2nd best | **71.0** | 74.6 | 61.6 | 49.6 | 54.0 | 57.3 | 20.5 |
 
 **Observations:**
 
@@ -223,55 +223,58 @@ Evaluation after distillation (same blend, same training schedule):
 
 ### Effect of data blend (tool_calling)
 
-Two distillation data blends were tried on the same pruned 22B/A3.0B candidate with identical hyperparameters and an identical 100B-tokens @ 8K-seq-length schedule.
+Two distillation data blends were tried on the same pruned 22B/A3.0B candidate with identical hyperparameters during the 8K-seq-length phase.
 
-- **Old blend (no tool_calling):** 30% Pretraining (Code 5, General 20, MATH 5) + 70% Post-training v1/v3 (Math 30, Coding 20, Science 15, IF 5).
-- **New blend (used in [main README](README.md)):** adds 5% `Nemotron-Agentic-v1 / tool_calling`, reducing Math 30→27 and Science 15→13 to make room. Same pretraining split.
+- **Old blend (no tool_calling):** 30% Pretraining (Code 5, General 20, MATH 5) + 70% Post-training v1/v3 (Math 30, Coding 20, Science 15, IF 5). Schedule: 100B @ 8K then +25B @ 32K (125B total).
+- **New blend (used in [main README](README.md)):** adds 5% `Nemotron-Agentic-v1 / tool_calling`, reducing Math 30→27 and Science 15→13 to make room. Same pretraining split. Schedule: 80B @ 8K then +20B @ 32K (100B total).
+
+The blend comparison below is **capped at 80B tokens** — beyond that the two runs diverge in `seq_length` (new blend switches to 32K at 80B; old blend continues at 8K until 100B), so per-checkpoint deltas at higher token counts would conflate blend differences with long-context-phase differences.
 
 Old blend results (8K seq length only):
 
 | Tokens (iters at 8K) | MMLU | MMLU Pro | GPQA Diamond | LiveCodeBench v6 | AIME 2025 | IFBench | SciCode (Subtask) | Average |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 2.5B (100 iters)  | 68.6 | 73.6 | 62.5 | 57.5 | 79.1 | 58.0 | 21.6 | 60.1 |
-| 20B  (800 iters)  | 70.8 | 74.6 | 65.3 | 61.0 | 79.8 | 63.5 | 21.2 | 62.3 |
-| 40B  (1600 iters) | 71.6 | 75.7 | 64.5 | 61.6 | 76.8 | 67.2 | 27.0 | 63.5 |
-| 60B  (2400 iters) | 71.5 | 76.0 | 67.5 | 63.0 | 77.5 | 68.0 | 28.5 | 64.6 |
-| 80B  (3200 iters) | 71.7 | 76.5 | 68.4 | 64.2 | 80.2 | 66.1 | 27.0 | 64.9 |
-| 100B (4000 iters) | 71.8 | 76.6 | 68.4 | 64.5 | 81.0 | 68.5 | 26.8 | 65.4 |
+| 2.5B (100 iters)  | 68.6 | 73.6 | 62.5 | 57.5 | 79.1 | 58.3 | 22.6 | 60.3 |
+| 20B  (800 iters)  | 70.8 | 74.6 | 65.3 | 61.0 | 79.8 | 63.6 | 22.5 | 62.5 |
+| 40B  (1600 iters) | 71.6 | 75.6 | 64.5 | 61.6 | 76.8 | 67.4 | 28.3 | 63.7 |
+| 60B  (2400 iters) | 71.5 | 76.0 | 67.5 | 63.0 | 77.5 | 68.4 | 29.4 | 64.8 |
+| 80B  (3200 iters) | 71.7 | 76.5 | 68.4 | 64.2 | 80.2 | 66.5 | 28.7 | 65.2 |
 
-Per-benchmark difference at the checkpoints where both blends were evaluated (Δ = new − old):
+Per-benchmark difference (Δ = new − old), at matching iter counts during the 8K phase:
 
-| Benchmark | 2.5B Δ | 20B Δ | 40B Δ |
-| --- | --- | --- | --- |
-| MMLU | +0.1 | 0.0 | -0.3 |
-| MMLU Pro | -0.3 | +0.2 | +0.7 |
-| GPQA Diamond | **+1.2** | **+0.7** | **+2.7** |
-| LiveCodeBench v6 | -2.2 | +1.3 | +0.7 |
-| AIME 2025 | -1.5 | -0.2 | +3.0 |
-| IFBench | +0.9 | +2.6 | -1.3 |
-| SciCode | **+5.1** | **+4.8** | — |
+| Benchmark | 2.5B Δ | 20B Δ | 40B Δ | 60B Δ | 80B Δ |
+| --- | --- | --- | --- | --- | --- |
+| MMLU | +0.1 | 0.0 | -0.3 | +0.2 | 0.0 |
+| MMLU Pro | -0.3 | +0.2 | **+0.8** | +0.1 | 0.0 |
+| GPQA Diamond | **+1.2** | **+0.7** | **+2.7** | **+0.6** | **+0.7** |
+| LiveCodeBench v6 | -2.2 | **+1.3** | +0.7 | +0.6 | -0.3 |
+| AIME 2025 | -1.5 | -0.2 | **+3.0** | **+1.3** | +0.5 |
+| IFBench | **+0.8** | **+1.8** | -1.4 | -1.1 | 0.0 |
+| SciCode (Subtask) | **+2.5** | **+3.6** | -1.7 | -2.4 | +0.3 |
+| **Average** | +0.1 | **+1.1** | **+0.5** | -0.1 | +0.1 |
 
 **Summary — new blend is preferred:**
 
-- **SciCode** is the standout gain (+5.1 at 2.5B, +4.8 at 20B) — directly attributable to the 5% tool_calling allocation. Our evals run with `--enable-auto-tool-choice`, so the student needs explicit exposure to function-call schemas; SciCode is heavy on Python tool use.
-- **GPQA Diamond** improves consistently at all three checkpoints (+1.2 / +0.7 / +2.7) — also benefits from tool_calling exposure (calculator-tool use is common in GPQA).
-- **MMLU / MMLU Pro** are essentially neutral despite the Math/Science share decreasing — the upweighted General split and higher-quality math data hold knowledge metrics steady.
-- **AIME 2025 / LiveCodeBench v6** regress slightly at 2.5B but recover or exceed old blend by 40B — convergence is a bit slower on these but the endpoint is no worse.
-- **IFBench** is noisy across checkpoints — within single-eval-run variance.
+- **GPQA Diamond** is the most consistent winner — positive Δ at every single checkpoint (+1.2/+0.7/+2.7/+0.6/+0.7). The tool_calling allocation helps throughout training, not just at the end. Calculator-tool use is common in GPQA quantitative items.
+- **SciCode** trends positive early (+2.5/+3.6 at 2.5B/20B) but neutral-to-slightly-negative mid-training (-1.7/-2.4 at 40B/60B) and positive again at 80B (+0.3). Even averaged-of-8, SciCode has the largest residual checkpoint-to-checkpoint noise of any benchmark.
+- **AIME 2025** trends positive from 40B onward (+3.0/+1.3/+0.5). The early dip is consistent with the math share dropping from 30%→27%; the model catches up once enough tokens have been seen.
+- **IFBench** is small-positive early (+0.8/+1.8) then dips mid-training (-1.4/-1.1) before recovering to neutral at 80B (0.0). Net roughly flat over training.
+- **MMLU / MMLU Pro / LiveCodeBench v6** are essentially flat — the upweighted General pretraining split keeps knowledge metrics steady despite the math/science share decrease.
+- **Average** is non-negative at 4 of 5 checkpoints (+0.1/+1.1/+0.5/-0.1/+0.1). Net slightly positive overall, with most of the win coming from GPQA and AIME at later checkpoints.
 
 ### Effect of long context training
 
-After the 8K-seq-length phase of the old-blend run, training was continued with the same blend but with `seq_length` increased from 8192 to 32768. The longer-context phase is short (200–1000 additional iters) but disproportionately impactful.
+After the 8K-seq-length phase of the old-blend run, training was continued with the same blend but with `seq_length` increased from 8192 to 32768. The longer-context phase is short (200–1000 additional iters) but disproportionately impactful. Numbers below use the old-blend run because it has the longer LC sweep (1000 iters / +25B tokens). The new-blend run's shorter LC phase (+800 iters / +20B tokens, ending at 100B) is in the [main README](README.md) and shows the same qualitative finding (large AIME jump immediately at the start of the LC phase).
 
 | Tokens (additional iters at 32K) | MMLU | MMLU Pro | GPQA Diamond | LiveCodeBench v6 | AIME 2025 | IFBench | SciCode (Subtask) | Average |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 100B (end of 8K phase)    | 71.8 | 76.6 | 68.4 | 64.5 | 81.0 | 68.5 | 26.8 | 65.4 |
-| 105B (+200 iters at 32K)  | 71.9 | 76.8 | 69.7 | 65.6 | **87.3** | 69.7 | 25.5 | 66.6 |
-| 125B (+1000 iters at 32K) | 71.9 | 76.7 | 70.4 | 65.7 | **88.0** | 68.8 | 28.2 | 67.1 |
+| 100B (end of 8K phase)    | 71.8 | 76.6 | 68.4 | 64.5 | 81.0 | 68.4 | 28.0 | 65.5 |
+| 105B (+200 iters at 32K)  | 71.9 | 76.8 | 69.7 | 65.6 | **87.3** | 69.3 | 29.5 | 67.2 |
+| 125B (+1000 iters at 32K) | 71.9 | 76.7 | 70.5 | 65.7 | **88.0** | 68.5 | 27.6 | 67.0 |
 
 **Summary — high-leverage, low-cost addition:**
 
 - **AIME 2025** sees the largest jump: +6.3 points from 100B → 105B after only 200 additional iters at 32K. AIME chains-of-thought routinely exceed 8K tokens, so the 8K-trained student was being truncated mid-reasoning; allowing 32K immediately unlocks the latent capability.
-- **GPQA Diamond** (+2.0) and **LiveCodeBench v6** (+1.2) also benefit meaningfully — both produce long reasoning traces.
+- **GPQA Diamond** (+2.1) and **LiveCodeBench v6** (+1.2) also benefit meaningfully — both produce long reasoning traces.
 - **MMLU / MMLU Pro / IFBench** are flat — these benchmarks comfortably fit within 8K and gain nothing from longer context.
-- Overall Average lifts from 65.4 → 67.1 (+1.7) for 25% extra tokens, with gains concentrated in reasoning-heavy benchmarks. This motivates including a short 32K-seq-length phase at the end of the schedule.
+- Overall Average lifts from 65.5 → 67.2 (+1.7) after the first 200 iters at 32K. Going further to 1000 iters slightly regresses (67.0), so most of the LC benefit is captured early.

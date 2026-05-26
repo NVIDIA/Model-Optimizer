@@ -56,8 +56,6 @@ from modelopt.torch.utils import print_rank_0
 with contextlib.suppress(ModuleNotFoundError):
     import modelopt.torch.puzzletron.plugins.mbridge  # noqa: F401
 
-SEED = 1234
-
 
 def _patched_to_cfg_dict(self):
     """Patched DistillationProvider.to_cfg_dict method for heterogeneous teacher and student models.
@@ -117,6 +115,12 @@ def get_args():
     parser.add_argument("--etp_size", type=int, default=1, help="Expert tensor parallel size")
 
     # Dataset arguments
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=1234,
+        help="Random seed for data shuffling and RNG state",
+    )
     parser.add_argument(
         "--data_paths",
         nargs="+",
@@ -280,7 +284,7 @@ def main(args: argparse.Namespace):
     dataset_kwargs = {
         "seq_length": args.seq_length,
         "path_to_cache": args.data_path_to_cache,
-        "random_seed": SEED,
+        "random_seed": args.seed,
         "reset_attention_mask": False,
         "reset_position_ids": False,
         "eod_mask_loss": False,
@@ -342,7 +346,7 @@ def main(args: argparse.Namespace):
             async_save=True,
             fully_parallel_save=True,
         ),
-        rng=RNGConfig(seed=SEED),
+        rng=RNGConfig(seed=args.seed),
         mixed_precision="bf16_mixed",
     )
 

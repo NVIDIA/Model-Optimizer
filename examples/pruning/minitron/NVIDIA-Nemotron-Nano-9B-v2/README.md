@@ -1,5 +1,8 @@
 # Nemotron-Nano-9B-v2: Prune + Distill + Quantize + vLLM Deployment
 
+> [!TIP]
+> Checkout a more advanced and tutorial for a newer model [Nemotron-3-Nano-30B-A3B-BF16](../NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/README.md) which also covers long context training and tool calling.
+
 End-to-end optimization of [Nemotron-Nano-9B-v2](https://huggingface.co/nvidia/NVIDIA-Nemotron-Nano-9B-v2) demonstrating how ModelOpt techniques stack: Minitron structured pruning to 7B → Megatron-Bridge knowledge distillation to recover accuracy → FP8 quantization → vLLM deployment and throughput benchmarking. This document covers:
 
 1. **[Data Preparation](#1-data-preparation)** — tokenizing the training blend for distillation
@@ -17,22 +20,21 @@ End-to-end optimization of [Nemotron-Nano-9B-v2](https://huggingface.co/nvidia/N
 
 | Model | MMLU | MMLU Pro | GPQA Diamond | LiveCodeBench v6 | AIME 2025 | Math 500 | IFEval | SciCode (Subtask) | Average |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Pruned 7B (no distillation) | 67.8 | 11.9 | 17.7 | 1.4 | 0.3 | 6.0 | 41.8 | 0.1 | 18.4 |
-| Distill @ 2.5B tokens (400 iters) | 70.7 | 68.4 | 52.7 | 57.0 | 63.0 | 93.7 | 63.2 | 11.6 | 60.0 |
-| Distill @  20B tokens (3200 iters) | 71.3 | 71.7 | 54.8 | 62.0 | 69.1 | 95.2 | 63.8 | 20.9 | 63.6 |
-| Distill @  40B tokens (6400 iters) | 71.1 | 71.6 | 53.7 | 60.9 | 70.4 | 95.6 | 68.0 | 21.1 | 64.1 |
-| Distill @  60B tokens (9600 iters) | 72.1 | 72.1 | 54.9 | 61.6 | 70.3 | 95.4 | 64.7 | 24.1 | 64.4 |
-| Distill @  80B tokens (12800 iters) | 72.2 | 73.0 | 56.9 | 62.6 | 72.0 | 95.8 | 66.2 | 22.2 | 65.1 |
-| Nemotron-Nano-9B-v2 (official, pruned from 12B) | 74.7 | 74.9 | 56.1 | 64.4 | 73.2 | 95.9 | 65.8 | 21.9 | 65.9 |
-| Nemotron-Nano-12B-v2 (official) | 78.5 | 77.9 | 58.2 | 66.6 | 76.1 | 96.9 | 67.9 | 28.4 | 68.8 |
+| Pruned 7B (no distillation) | 67.8 | 11.9 | 17.7 | 1.4 | 0.4 | 6.0 | 41.8 | 0.1 | 18.4 |
+| Distill @ 2.5B tokens (400 iters) | 70.7 | 68.4 | 52.7 | 57.0 | 60.7 | 93.7 | 63.2 | 12.2 | 59.8 |
+| Distill @  20B tokens (3200 iters) | 71.3 | 71.7 | 54.8 | 62.0 | 68.1 | 95.2 | 63.8 | 21.2 | 63.5 |
+| Distill @  40B tokens (6400 iters) | 71.1 | 71.6 | 53.7 | 60.9 | 71.9 | 95.6 | 68.0 | 19.9 | 64.1 |
+| Distill @  60B tokens (9600 iters) | 72.1 | 72.1 | 54.9 | 61.6 | 71.9 | 95.4 | 64.7 | 22.8 | 64.4 |
+| Distill @  80B tokens (12800 iters) | 72.2 | 73.0 | 56.9 | 62.6 | 72.6 | 95.8 | 66.2 | 21.3 | 65.1 |
+| Nemotron-Nano-9B-v2 (official, pruned from 12B) | 74.7 | 74.9 | 56.1 | 64.4 | 73.7 | 95.9 | 65.8 | 23.1 | 66.1 |
+| Nemotron-Nano-12B-v2 (official) | 78.5 | 77.9 | 58.2 | 66.6 | 74.4 | 96.9 | 67.9 | 29.0 | 68.7 |
 
 **Key observations:**
 
 - **All benchmarks recover dramatically within the first checkpoint (2.5B tokens).** The pruned-only model is essentially non-functional, but a single distillation run recovers most capabilities.
-- **Math 500 and IFEval plateau quickly** — essentially saturated after 2.5B tokens, with minimal gains over the remaining training.
-- **MMLU also largely plateaus** after the first checkpoint.
-- **AIME, MMLU Pro, GPQA, and SciCode continue improving** throughout the full run and benefit meaningfully from longer training.
-- **The 7B model at 80B tokens closes most of the gap to the official 9B**, and actually exceeds it on GPQA, IFEval, and SciCode. The table below compares the 7B→9B gap against the 9B→12B gap — both are ~25% compression — showing that the second pruning round recovers more efficiently:
+- **Math 500, IFEval, MMLU, and SciCode plateau quickly** — essentially saturated after 2.5B–20B tokens, with minimal gains over the remaining training.
+- **AIME, MMLU Pro, and GPQA continue improving** throughout the full run and benefit meaningfully from longer training.
+- **The 7B model at 80B tokens closes most of the gap to the official 9B**, and actually exceeds it on GPQA and IFEval. The table below compares the 7B→9B gap against the 9B→12B gap — both are ~25% compression — showing that the second pruning round recovers more efficiently:
 
 | Benchmark | 7B (80B tokens) vs 9B | 9B (official) vs 12B |
 | --- | --- | --- |
@@ -40,11 +42,11 @@ End-to-end optimization of [Nemotron-Nano-9B-v2](https://huggingface.co/nvidia/N
 | MMLU Pro | −1.9 | −3.0 |
 | GPQA Diamond | **+0.8** | −2.1 |
 | LiveCodeBench v6 | −1.8 | −2.2 |
-| AIME 2025 | −1.2 | −2.9 |
+| AIME 2025 | −1.1 | −0.7 |
 | Math 500 | −0.1 | −1.0 |
 | IFEval | **+0.4** | −2.1 |
-| SciCode (Subtask) | **+0.3** | −6.5 |
-| Average | −0.8 | −2.9 |
+| SciCode (Subtask) | −1.8 | −5.9 |
+| Average | −1.0 | −2.6 |
 
 Distillation uses the **30% Pretraining (Code 5, General 20, MATH 5) + 70% Post-training v1/v3 (Math 30, Coding 20, Science 15, IF 5)** blend (see [Data Blend](#data-blend) below). Blend ablations are in [ABLATIONS.md](ABLATIONS.md).
 
@@ -241,7 +243,10 @@ Non-default arguments:
 
 For multi-node Slurm runs, see the [Megatron-Bridge README](../../../megatron_bridge/README.md#slurm-usage) for details.
 
-Distillation saves checkpoints in Megatron distributed format under `<output_dir>/checkpoints/iter_XXXXXXX`. You can convert any intermediate checkpoint to HuggingFace format using the Megatron-Bridge conversion script (see [Megatron Bridge README](../../../megatron_bridge/README.md) for full details):
+Distillation saves checkpoints in Megatron distributed format under `<output_dir>/checkpoints/iter_XXXXXXX`. You can convert any intermediate checkpoint to HuggingFace format using the Megatron-Bridge conversion script (see [Megatron Bridge README](../../../megatron_bridge/README.md) for full details).
+
+<details>
+<summary>Checkpoint conversion command (click to expand)</summary>
 
 ```bash
 python /opt/Megatron-Bridge/examples/conversion/convert_checkpoints.py export \
@@ -249,6 +254,8 @@ python /opt/Megatron-Bridge/examples/conversion/convert_checkpoints.py export \
     --megatron-path <output_dir>/checkpoints/iter_<iter_number> \
     --hf-path <output_dir>/checkpoints/hf_iter_<iter_number>
 ```
+
+</details>
 
 > [!NOTE]
 > This is pure SFT-style distillation — no RL or online reward signal is used. Adding an RL-based post-training step after distillation is a natural next step that could further improve some of these benchmarks.
@@ -292,16 +299,16 @@ nemo-evaluator-launcher run --config nemo_evaluator.yaml
 
 **Tasks and exact metric names reported in the results table:**
 
-| Benchmark | Library | Metric name |
-| --- | --- | --- |
-| MMLU | [lm-evaluation-harness](https://github.com/EleutherAI/lm-evaluation-harness) (5-shot) | `mmlu` |
-| MMLU Pro | NeMo Evaluator | `mmlu-pro_pass_at_1_symbolic_correct` |
-| GPQA Diamond | NeMo Evaluator | `gpqa_pass_at_1_symbolic_correct` |
-| LiveCodeBench v6 | NeMo Evaluator | `livecodebench_pass_at_1_accuracy` |
-| AIME 2025 | NeMo Evaluator | `aime25_pass_at_1_symbolic_correct` |
-| Math 500 | NeMo Evaluator | `AA_math_test_500_score_micro_avg_of_5` |
-| IFEval | NeMo Evaluator | `ifeval_pass_at_1_average_score` |
-| SciCode (Subtask) | NeMo Evaluator | `scicode_pass_at_1_subtask_accuracy` |
+| Benchmark | Library | num_repeats | Metric name |
+| --- | --- | --- | --- |
+| MMLU | [lm-evaluation-harness](https://github.com/EleutherAI/lm-evaluation-harness) (5-shot) | N/A | `mmlu` |
+| MMLU Pro | NeMo Evaluator | 1 | `mmlu-pro_pass_at_1_symbolic_correct` |
+| GPQA Diamond | NeMo Evaluator | 8 | `gpqa_pass_at_1_avg-of-8_symbolic_correct` |
+| LiveCodeBench v6 | NeMo Evaluator | 8 | `livecodebench_pass_at_1_avg-of-8_accuracy` |
+| AIME 2025 | NeMo Evaluator | 64 | `aime25_pass_at_1_avg-of-64_symbolic_correct` |
+| Math 500 | NeMo Evaluator | 5 | `AA_math_test_500_score_micro_avg_of_5` |
+| IFEval | NeMo Evaluator | 1 | `ifeval_pass_at_1_average_score` |
+| SciCode (Subtask) | NeMo Evaluator | 8 | `scicode_pass_at_1_avg-of-8_subtask_accuracy` |
 
 **Key vLLM settings:** Tool calling is not enabled in these evals.
 

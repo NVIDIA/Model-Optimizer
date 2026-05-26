@@ -17,16 +17,20 @@ End-to-end optimization of [NVIDIA-Nemotron-3-Nano-30B-A3B-BF16](https://hugging
 
 | Model | MMLU | MMLU Pro | GPQA Diamond | LiveCodeBench v6 | AIME 2025 | IFBench | SciCode (Subtask) | Average |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Pruned 22B/A3.0B (no distillation) | 53.4 | 47.1 | 33.5 | 27.4 | 15.5 | 37.2 | 11.4 | 32.2 |
-| Distill @ 2.5B tokens (100 iters at 8K Seq Length) | 68.7 | 73.3 | 63.7 | 55.3 | 77.6 | 58.9 | 26.7 | 60.6 |
-| Distill @ 20B tokens (800 iters at 8K Seq Length) | 70.8 | 74.8 | 66.0 | 62.3 | 79.6 | 66.1 | 26.0 | 63.7 |
-| Distill @ 40B tokens (1600 iters at 8K Seq Length) | 71.3 | 76.4 | 67.2 | 62.3 | 79.8 | 65.9 | — | — |
-| Distill @ 60B tokens (2400 iters at 8K Seq Length) | — | — | — | — | — | — | — | — |
-| Distill @ 80B tokens (3200 iters at 8K Seq Length) | — | — | — | — | — | — | — | — |
-| Distill @ 100B tokens (+800 iters at 32K Seq Length) | — | — | — | — | — | — | — | — |
-| NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 (official, 31.6B/A3.6B) | 73.5 | 78.0 | 70.3 | 67.9 | 87.1 | 68.9 | 33.6 | 68.5 |
+| Pruned 22B/A3.0B (no distillation) | 53.4 | 47.1 | 33.5 | 27.4 | 15.5 | 36.9 | 12.1 | 32.3 |
+| Distill @ 2.5B tokens (100 iters at 8K Seq Length) | 68.7 | 73.3 | 63.7 | 55.3 | 77.6 | 59.1 | 25.1 | 60.4 |
+| Distill @ 20B tokens (800 iters at 8K Seq Length) | 70.8 | 74.8 | 66.0 | 62.3 | 79.6 | 65.4 | 26.1 | 63.6 |
+| Distill @ 40B tokens (1600 iters at 8K Seq Length) | 71.3 | 76.4 | 67.2 | 62.3 | 79.8 | 66.0 | 26.6 | 64.2 |
+| Distill @ 60B tokens (2400 iters at 8K Seq Length) | 71.7 | 76.1 | 68.1 | 63.6 | 78.8 | 67.3 | 27.0 | 64.7 |
+| Distill @ 80B tokens (3200 iters at 8K Seq Length) | 71.7 | 76.5 | 69.1 | 63.9 | 80.7 | 66.5 | 29.0 | 65.3 |
+| Distill @ 82.5B tokens (+100 iters at 32K Seq Length) | 71.8 | 76.2 | 69.8 | 64.8 | 87.0 | 68.2 | 27.0 | 66.4 |
+| Distill @ 100B tokens (+800 iters at 32K Seq Length) | 71.9 | 76.6 | 69.6 | 66.1 | 87.3 | 68.9 | 28.4 | 67.0 |
+| NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 (official, 31.6B/A3.6B) | 73.5 | 78.0 | 70.3 | 67.9 | 87.1 | 69.1 | 31.8 | 68.2 |
 
-Distillation uses the **30% Pretraining (Code 5, General 20, MATH 5) + 70% Post-training v1/v3 (Math 27, Coding 20, Science 13, IF 5, Tool calling 5)** blend (see [Data Blend](#data-blend) below) with an **80B @ 8K + 20B @ 32K = 100B token** schedule. Blend ablations (vs. an earlier no-tool_calling blend) and long-context phase ablations are in [ABLATIONS.md](ABLATIONS.md).
+Distillation uses the **30% Pretraining (Code 5, General 20, MATH 5) + 70% Post-training v1/v3 (Math 27, Coding 20, Science 13, IF 5, Tool calling 5)** blend (see [Data Blend](#data-blend) below) with an **80B @ 8K + 20B @ 32K = 100B token** schedule. Blend ablations and long-context phase ablations are in [ABLATIONS.md](ABLATIONS.md).
+
+> [!TIP]
+> From the benchmark numbers above, the model is still learning at 100B tokens and that further training (or a higher-quality data blend) would continue to close the gap to the original 31.6B/A3.6B model.
 
 > [!NOTE]
 > Exact numbers may vary depending on deployment and evaluation setup. All models above (including the official model) were evaluated once with the same [evaluation setup](#4-evaluation) for fair comparison. These numbers may differ from those reported on the official [Nemotron-3-Nano-30B-A3B-BF16](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16) HuggingFace model card.
@@ -97,7 +101,7 @@ The optimal blend is 30% pretraining and 70% post-training data. Exact proportio
 - **Instruction following (5%)** saturates quickly so a small allocation is sufficient.
 - **Tool calling (5%)** uses `Nemotron-Agentic-v1 / tool_calling`. Our evals run with `--enable-auto-tool-choice`, so the student needs explicit exposure to function-call schemas; this helps SciCode (heavy Python tool use) and GPQA Diamond (which can benefit from calculator tools).
 
-This blend intentionally omits capabilities not targeted in this experiment (e.g. long context, multilingual, SWE). Depending on what benchmarks matter for your use case, you can substitute or add datasets from the [Nemotron Post-Training v3 collection](https://huggingface.co/collections/nvidia/nemotron-post-training-v3), for example:
+This blend intentionally omits capabilities not targeted in this experiment (e.g. multilingual, SWE). Depending on what benchmarks matter for your use case, you can substitute or add datasets from the [Nemotron Post-Training v3 collection](https://huggingface.co/collections/nvidia/nemotron-post-training-v3), for example:
 
 | Capability | Relevant datasets |
 | --- | --- |
@@ -255,10 +259,14 @@ Pruned hybrid_layer_pattern:   MEMEM*EMEMEM*EMEMEM*EMEMEM*EMEMEM*EMEMEMEM*EMEMEM
 
 ### 3. Distillation
 
-Minimum hardware: **4 nodes × 8x H100 (32 GPUs)** for the 8K phase — required by `TP=4 × EP=8`. The 32K long-context phase additionally requires context parallel to fit the longer sequence, doubling the minimum to **8 nodes × 8x H100 (64 GPUs)**. On **96 nodes × 8x H100 (768 GPUs total)**, it takes ~900 H100 GPU-hours per 10B tokens (400 iters), i.e. ~70 min wall-clock per 10B tokens on 96 nodes. Full schedule (80B @ 8K + 20B @ 32K = 100B tokens, 4k total steps) takes ~9k H100 GPU-hours (~12 hours wall-clock).
+Distillation is run in two phases: an 80B-token phase at 8K sequence length, followed by a 20B-token long-context phase at 32K sequence length. The two phases are launched as separate runs with an intermediate Megatron→HF checkpoint conversion, because the long-context phase changes `seq_length`, `gbs`, and `cp_size` — Megatron's checkpoint resume bookkeeping (sample counter is in absolute samples, iteration counter is in iter-units tied to `gbs`) does not handle a mid-run `gbs` change cleanly.
+
+Minimum hardware: **4 nodes × 8x H100 (32 GPUs)** for the 8K phase — required by `TP=4 × EP=8`. The 32K phase additionally requires context parallel to fit the longer sequence, doubling the minimum to **8 nodes × 8x H100 (64 GPUs)**. On **96 nodes × 8x H100 (768 GPUs total)**, it takes ~900 H100 GPU-hours per 10B tokens (400 iters), i.e. ~70 min wall-clock per 10B tokens on 96 nodes. Full schedule (80B @ 8K + 20B @ 32K = 100B tokens, 4k total steps) takes ~9k H100 GPU-hours (~12 hours wall-clock).
+
+#### 3a. Phase 1 — 80B tokens @ 8K seq length
 
 <details>
-<summary>Distillation command (click to expand)</summary>
+<summary>Phase 1 distillation command (click to expand)</summary>
 
 ```bash
 python -u /opt/Model-Optimizer/examples/megatron_bridge/distill.py \
@@ -266,22 +274,20 @@ python -u /opt/Model-Optimizer/examples/megatron_bridge/distill.py \
     --student_hf_path /path/to/Nemotron-3-Nano-30B-A3B-Pruned-A3.0B \
     --trust_remote_code \
     --tp_size 4 \
-    --pp_size 1 \
     --ep_size 8 \
-    --etp_size 1 \
     --data_paths "${DATA_BLEND}" \
     --data_path_to_cache /path/to/cache \
     --seq_length 8192 \
     --mbs 1 \
     --gbs 3072 \
-    --train_iters 4000 \
+    --train_iters 3200 \
     --lr 1e-4 \
     --min_lr 1e-5 \
     --lr_warmup_iters 25 \
     --eval_interval 200 \
     --eval_iters 8 \
     --log_interval 10 \
-    --output_dir /path/to/distill_output
+    --output_dir /path/to/distill_output_phase1_8k
 
 # Optional: Weights & Biases logging
 #     --wandb_project <wandb_project> \
@@ -293,26 +299,78 @@ Non-default arguments:
 
 - `--seq_length 8192` (default: 4096)
 - `--gbs 3072` (default: 768) — matches the original Nemotron-3-Nano-30B training GBS from the paper, kept to preserve the training distribution
-- `--train_iters 4000` — total iterations across both phases. The first 3200 iters (~80B tokens) run at 8K seq length with the args above. After iter 3200, **resume from the latest checkpoint** with `--seq_length 32768 --gbs 768 --cp_size 2 --recompute_granularity selective --recompute_modules mlp moe` for the remaining 800 iters (~20B tokens).
-  - The `seq_length × gbs` product is unchanged, so each iter still processes the same number of tokens.
-  - The `--cp_size 2` (context parallel) is needed to fit the longer sequence and doubles the minimum-hardware footprint to 8 nodes; the selective recompute on MLP/MoE further reduces activation memory. See [ABLATIONS.md — Effect of long context training](ABLATIONS.md#effect-of-long-context-training) for why this phase is worthwhile.
-- `--lr_warmup_iters 25` (default: 50)
+- `--train_iters 3200` — 80B tokens at GBS 3072 × seq_length 8192
+- `--lr 1e-4 --min_lr 1e-5 --lr_warmup_iters 25` — cosine fully decays over 3200 iters; the model is approaching saturation at 8K by this point (see [ABLATIONS.md — 8K trajectory](ABLATIONS.md#effect-of-data-blend-tool_calling)).
 - `--eval_interval 200` (default: 100) — less frequent eval to save compute
-- `--eval_iters 8` (default: 32) - since GBS is 4× larger than default
+- `--eval_iters 8` (default: 32) — since GBS is 4× larger than default
 
 All other arguments use defaults.
 </details>
 
-For multi-node Slurm runs, see the [Megatron-Bridge README](../../../megatron_bridge/README.md#slurm-usage) for details.
+#### 3b. Convert Phase 1 final checkpoint to HuggingFace format
 
-Distillation saves checkpoints in Megatron distributed format under `<output_dir>/checkpoints/iter_XXXXXXX`. You can convert any intermediate checkpoint to HuggingFace format using the Megatron-Bridge conversion script (see [Megatron Bridge README](../../../megatron_bridge/README.md) for full details):
+Phase 2 starts as a separate run from a fresh HuggingFace student checkpoint, so the final Phase 1 Megatron checkpoint must be exported to HF first using the Megatron-Bridge conversion script (see [Megatron-Bridge README](../../../megatron_bridge/README.md) for full details). You can also use this same script to convert any intermediate Phase 1 checkpoint to HF format for evaluation along the way.
+
+<details>
+<summary>Checkpoint conversion command (click to expand)</summary>
 
 ```bash
 python /opt/Megatron-Bridge/examples/conversion/convert_checkpoints.py export \
     --hf-model /path/to/Nemotron-3-Nano-30B-A3B-Pruned-A3.0B \
-    --megatron-path <output_dir>/checkpoints/iter_<iter_number> \
-    --hf-path <output_dir>/checkpoints/hf_iter_<iter_number>
+    --megatron-path /path/to/distill_output_phase1_8k/checkpoints/iter_0003200 \
+    --hf-path /path/to/distill_output_phase1_8k/checkpoints/hf_iter_0003200
 ```
+
+</details>
+
+#### 3c. Phase 2 — 20B tokens @ 32K seq length
+
+Phase 2 is a **fresh run** with the Phase 1 final checkpoint as the new student. It uses a different `--seed` so the data blend reshuffles (otherwise the model would see overlapping prefix of the same samples it already saw at 8K). The LR is bumped back up modestly to capture the rapid long-context adaptation observed in [ABLATIONS.md — Effect of long context training](ABLATIONS.md#effect-of-long-context-training).
+
+<details>
+<summary>Phase 2 distillation command (click to expand)</summary>
+
+```bash
+python -u /opt/Model-Optimizer/examples/megatron_bridge/distill.py \
+    --teacher_hf_path nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 \
+    --student_hf_path /path/to/distill_output_phase1_8k/checkpoints/hf_iter_0003200 \
+    --trust_remote_code \
+    --tp_size 4 \
+    --cp_size 2 \
+    --ep_size 8 \
+    --seed 5678 \
+    --data_paths "${DATA_BLEND}" \
+    --data_path_to_cache /path/to/cache \
+    --seq_length 32768 \
+    --mbs 1 \
+    --gbs 768 \
+    --train_iters 800 \
+    --lr 2e-5 \
+    --min_lr 1e-5 \
+    --lr_warmup_iters 10 \
+    --recompute_granularity selective \
+    --recompute_modules moe \
+    --eval_interval 200 \
+    --eval_iters 8 \
+    --log_interval 10 \
+    --output_dir /path/to/distill_output_phase2_32k
+```
+
+Changed arguments from Phase 1:
+
+- `--student_hf_path` — points at the HF export of the Phase 1 final checkpoint
+- `--seq_length 32768` — long-context phase
+- `--gbs 768` — `seq_length × gbs` product unchanged, so each iter still processes the same number of tokens
+- `--cp_size 2` — context parallel is needed to fit the longer sequence; doubles the minimum-hardware footprint to 8 nodes
+- `--train_iters 800` — 20B tokens at GBS 768 × seq_length 32768
+- `--lr 2e-5 --min_lr 1e-5 --lr_warmup_iters 10` — modest LR bump for the long-context adaptation (Phase 1 ended at fully-decayed LR 1e-5); the 10-iter warmup re-populates Adam moment estimates which restart from zero in a fresh run
+- `--recompute_granularity selective --recompute_modules moe` — selective MoE recompute further reduces activation memory at 32K. You may skip this if you have more memory.
+- `--seed 5678` — different from the Phase 1 seed (default 1234) so the data blend reshuffles
+- `--output_dir /path/to/distill_output_phase2_32k` — must be a **fresh directory** different from Phase 1's, so distill.py's resume mechanism (which auto-loads from `<output_dir>/checkpoints` if it exists) does not pull in stale state
+
+</details>
+
+For multi-node Slurm runs, see the [Megatron-Bridge README](../../../megatron_bridge/README.md#slurm-usage) for details.
 
 > [!NOTE]
 > This is pure SFT-style distillation — no RL or online reward signal is used. Adding an RL-based post-training step after distillation is a natural next step that could further improve some of these benchmarks.
@@ -356,15 +414,15 @@ nemo-evaluator-launcher run --config nemo_evaluator.yaml
 
 **Tasks and exact metric names reported in the results table:**
 
-| Benchmark | Library | Metric name |
-| --- | --- | --- |
-| MMLU | [lm-evaluation-harness](https://github.com/EleutherAI/lm-evaluation-harness) (5-shot) | `mmlu` |
-| MMLU Pro | NeMo Evaluator | `mmlu-pro_pass_at_1_symbolic_correct` |
-| GPQA Diamond | NeMo Evaluator | `gpqa_pass_at_1_symbolic_correct` |
-| LiveCodeBench v6 | NeMo Evaluator | `livecodebench_pass_at_1_accuracy` |
-| AIME 2025 | NeMo Evaluator | `aime25_pass_at_1_symbolic_correct` |
-| IFBench | NeMo Evaluator | `ifbench_pass_at_1_average_score` |
-| SciCode (Subtask) | NeMo Evaluator | `scicode_pass_at_1_subtask_accuracy` |
+| Benchmark | Library | num_repeats | Metric name |
+| --- | --- | --- | --- |
+| MMLU | [lm-evaluation-harness](https://github.com/EleutherAI/lm-evaluation-harness) (5-shot) | N/A | `mmlu` |
+| MMLU Pro | NeMo Evaluator | 1 | `mmlu-pro_pass_at_1_symbolic_correct` |
+| GPQA Diamond | NeMo Evaluator | 8 | `gpqa_pass_at_1_avg-of-8_symbolic_correct` |
+| LiveCodeBench v6 | NeMo Evaluator | 8 | `livecodebench_pass_at_1_avg-of-8_accuracy` |
+| AIME 2025 | NeMo Evaluator | 64 | `aime25_pass_at_1_avg-of-64_symbolic_correct` |
+| IFBench | NeMo Evaluator | 8 | `ifbench_pass_at_1_avg-of-8_average_score` |
+| SciCode (Subtask) | NeMo Evaluator | 8 | `scicode_pass_at_1_avg-of-8_subtask_accuracy` |
 
 **Key vLLM settings:** Tool calling is enabled via `--enable-auto-tool-choice --tool-call-parser qwen3_coder`.
 
