@@ -86,7 +86,6 @@ You can also directly use NVIDIA container images, which have Model Optimizer pr
 - `nvcr.io/nvidia/pytorch:<version>-py3`
 - `nvcr.io/nvidia/nemo:<version>`
 - `nvcr.io/nvidia/tensorrt-llm/release:<version>`
-- `nvcr.io/nvidia/tensorrt:<version>-py3`
 
 Before pulling and using the container images, please review their respective license terms.
 Make sure to upgrade Model Optimizer to the latest version as described above.

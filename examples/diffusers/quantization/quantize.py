@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import argparse
+import copy
 import logging
 import sys
 import time as time
@@ -114,19 +115,13 @@ class Quantizer:
         """
         self.logger.info(f"Building quantization config for {self.config.format.value}")
 
+        apply_int8_percentile_calibrator = False
         if self.config.format == QuantFormat.INT8:
             if self.config.algo == QuantAlgo.SMOOTHQUANT:
                 base_cfg = mtq.INT8_SMOOTHQUANT_CFG
             else:
                 base_cfg = INT8_DEFAULT_CONFIG
-            if self.config.collect_method != CollectMethod.DEFAULT:
-                reset_set_int8_config(
-                    base_cfg,
-                    self.config.percentile,
-                    n_steps,
-                    collect_method=self.config.collect_method.value,
-                    backbone=backbone,
-                )
+            apply_int8_percentile_calibrator = self.config.collect_method != CollectMethod.DEFAULT
         elif self.config.format == QuantFormat.FP8:
             base_cfg = FP8_DEFAULT_CONFIG
         elif self.config.format == QuantFormat.FP4:
@@ -137,7 +132,18 @@ class Quantizer:
         else:
             raise NotImplementedError(f"Unknown format {self.config.format}")
 
-        # Build a fresh config dict so we never mutate the global constants.
+        # Build a fresh config dict so runtime overrides never mutate the global constants.
+        base_cfg = copy.deepcopy(base_cfg)
+
+        if apply_int8_percentile_calibrator:
+            reset_set_int8_config(
+                base_cfg,
+                self.config.percentile,
+                n_steps,
+                collect_method=self.config.collect_method.value,
+                backbone=backbone,
+            )
+
         quant_cfg_list = list(base_cfg["quant_cfg"])
 
         if self.config.format == QuantFormat.FP4:
@@ -351,6 +357,28 @@ class ExportManager:
             if merged_path:
                 self.logger.info(f"Merging base safetensors from {merged_path} for LTX2 export")
                 kwargs["merged_base_safetensor_path"] = merged_path
+        if model_config:
+            for key in ("enable_swizzle_layout", "enable_layerwise_quant_metadata"):
+                val = model_config.extra_params.get(key)
+                if val is not None:
+                    normalized = str(val).strip().lower()
+                    if normalized in ("true", "1", "yes"):
+                        kwargs[key] = True
+                    elif normalized in ("false", "0", "no"):
+                        kwargs[key] = False
+                    else:
+                        raise ValueError(
+                            f"Invalid value for {key}: {val!r}. "
+                            "Expected true/false, 1/0, or yes/no."
+                        )
+            padding = model_config.extra_params.get("padding_strategy")
+            if padding is not None:
+                padding = str(padding).strip().lower()
+                if padding not in ("row", "row_col"):
+                    raise ValueError(
+                        f"Invalid padding_strategy: {padding!r}. Expected 'row' or 'row_col'."
+                    )
+                kwargs["padding_strategy"] = padding
         export_hf_checkpoint(pipe, export_dir=self.config.hf_ckpt_dir, **kwargs)
         self.logger.info("HuggingFace checkpoint export completed successfully")
 

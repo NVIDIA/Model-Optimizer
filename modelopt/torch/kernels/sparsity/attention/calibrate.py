@@ -261,9 +261,9 @@ def attention_calibrate(
 
     num_thresholds = len(threshold_trials)
 
-    # Convert thresholds to log2-scaled space: log2(lambda) * sm_scale
+    # Scores already include sm_scale and LOG2E; convert lambda to log2 space only.
     threshold_tensor = torch.tensor(
-        [math.log2(t) * sm_scale for t in threshold_trials],
+        [math.log2(t) for t in threshold_trials],
         dtype=torch.float32,
         device=q.device,
     )

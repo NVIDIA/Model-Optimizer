@@ -31,8 +31,8 @@ from modelopt.torch.utils import get_unwrapped_name
 
 from .config import (
     QuantizeConfig,
-    QuantizeQuantCfgType,
     QuantizerAttributeConfig,
+    RawQuantizeQuantCfgType,
     _QuantizeExportConfig,
     normalize_quant_cfg_list,
 )
@@ -215,7 +215,7 @@ def _replace_quant_module(model: nn.Module, version=None, registry=QuantModuleRe
         _replace_quant_module(getattr(model, name), version=version, registry=registry)
 
 
-def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: QuantizeQuantCfgType):
+def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: RawQuantizeQuantCfgType):
     """Apply a quantization config list to the quantizers in ``quant_model``.
 
     ``quant_cfg`` is an **ordered list** of :class:`QuantizerCfgEntry <.config.QuantizerCfgEntry>`
@@ -477,7 +477,7 @@ def set_quantizer_attributes_partial(
 
 
 @contextmanager
-def set_quantizer_by_cfg_context(quant_model: nn.Module, quant_cfg: QuantizeQuantCfgType):
+def set_quantizer_by_cfg_context(quant_model: nn.Module, quant_cfg: RawQuantizeQuantCfgType):
     """Context manager that temporarily applies a quantization config and restores the original state on exit.
 
     Calls :func:`set_quantizer_by_cfg` on entry and reverts every
@@ -522,36 +522,40 @@ def set_quantizer_by_cfg_context(quant_model: nn.Module, quant_cfg: QuantizeQuan
             original_types[name] = TensorQuantizer
 
     set_quantizer_by_cfg(quant_model, quant_cfg)
-    yield
-
-    # Restore original quantizer types and attributes. If set_quantizer_by_cfg downgraded a
-    # SequentialQuantizer to a TensorQuantizer (or vice-versa), we need to re-create the
-    # original module type before restoring attributes.
-    for name, module in list(quant_model.named_modules()):
-        if name not in original_attributes:
-            continue
-        orig_type = original_types[name]
-        if orig_type is SequentialQuantizer and not isinstance(module, SequentialQuantizer):
-            # Restore the SequentialQuantizer that was downgraded
-            saved = original_attributes[name]
-            parent_name, _, attr_name = name.rpartition(".")
-            parent_module = quant_model.get_submodule(parent_name) if parent_name else quant_model
-            module = SequentialQuantizer(*(TensorQuantizer() for _ in saved["sub_states"]))
-            setattr(parent_module, attr_name, module)
-            for tq, sub_state in zip(module, saved["sub_states"]):
-                tq.set_from_modelopt_state(sub_state, properties_only=True)
-        elif orig_type is TensorQuantizer and not isinstance(module, TensorQuantizer):
-            parent_name, _, attr_name = name.rpartition(".")
-            parent_module = quant_model.get_submodule(parent_name) if parent_name else quant_model
-            module = TensorQuantizer()
-            setattr(parent_module, attr_name, module)
-            module.set_from_modelopt_state(original_attributes[name], properties_only=True)
-        elif orig_type is TensorQuantizer:
-            module.set_from_modelopt_state(original_attributes[name], properties_only=True)
-        elif orig_type is SequentialQuantizer:
-            saved = original_attributes[name]
-            for tq, sub_state in zip(module, saved["sub_states"]):
-                tq.set_from_modelopt_state(sub_state, properties_only=True)
+    try:
+        yield
+    finally:
+        # Restore original quantizer types and attributes. If set_quantizer_by_cfg downgraded a
+        # SequentialQuantizer to a TensorQuantizer (or vice-versa), we need to re-create the
+        # original module type before restoring attributes.
+        for name, module in list(quant_model.named_modules()):
+            if name not in original_attributes:
+                continue
+            orig_type = original_types[name]
+            if orig_type is SequentialQuantizer and not isinstance(module, SequentialQuantizer):
+                saved = original_attributes[name]
+                parent_name, _, attr_name = name.rpartition(".")
+                parent_module = (
+                    quant_model.get_submodule(parent_name) if parent_name else quant_model
+                )
+                module = SequentialQuantizer(*(TensorQuantizer() for _ in saved["sub_states"]))
+                setattr(parent_module, attr_name, module)
+                for tq, sub_state in zip(module, saved["sub_states"]):
+                    tq.set_from_modelopt_state(sub_state, properties_only=True)
+            elif orig_type is TensorQuantizer and not isinstance(module, TensorQuantizer):
+                parent_name, _, attr_name = name.rpartition(".")
+                parent_module = (
+                    quant_model.get_submodule(parent_name) if parent_name else quant_model
+                )
+                module = TensorQuantizer()
+                setattr(parent_module, attr_name, module)
+                module.set_from_modelopt_state(original_attributes[name], properties_only=True)
+            elif orig_type is TensorQuantizer:
+                module.set_from_modelopt_state(original_attributes[name], properties_only=True)
+            elif orig_type is SequentialQuantizer:
+                saved = original_attributes[name]
+                for tq, sub_state in zip(module, saved["sub_states"]):
+                    tq.set_from_modelopt_state(sub_state, properties_only=True)
 
 
 def set_quantizer_attribute(
