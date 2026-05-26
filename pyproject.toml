@@ -15,7 +15,7 @@ fallback_version = "0.0.0"
 [project]
 name = "nvidia-modelopt"
 dynamic = ["version"]
-description = "Nvidia Model Optimizer: a unified model optimization and deployment toolkit."
+description = "Nvidia Model Optimizer: A unified library of SOTA model optimization techniques like quantization, pruning, Neural Architecture Search (NAS), distillation, speculative decoding, etc. It compresses deep learning models for downstream deployment frameworks like TensorRT-LLM, TensorRT, vLLM, etc. to optimize inference speed."
 readme = { text = "Checkout https://github.com/nvidia/Model-Optimizer for more information.", content-type = "text/markdown" }
 license = "Apache-2.0"
 license-files = ["LICENSE_HEADER"]
