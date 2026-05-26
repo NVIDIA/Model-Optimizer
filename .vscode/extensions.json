@@ -1,27 +1,38 @@
 {
-	// See https://go.microsoft.com/fwlink/?LinkId=827846 to learn about workspace recommendations.
-	// Extension identifier format: ${publisher}.${name}. Example: vscode.csharp
-	// List of extensions which should be recommended for users of this workspace.
+	// Installation:
+	// - In VS Code, open Extensions and search "@recommended" to install workspace recommendations.
+	// - From a shell, run "code --install-extension <extension-id>" for each item below.
+	// - In Cursor, use "cursor --install-extension <extension-id>" if the Cursor CLI is available.
+
+	// List of extensions recommended for this workspace.
 	"recommendations": [
-		"ms-vscode.cpptools",
-		"ms-azuretools.vscode-docker",
+		// Python development: pyproject.toml configures pytest and Ruff.
+		"ms-python.python",
+		"astral-sh.ty",
+		"charliermarsh.ruff",
+
+		// Project/config files: pyproject.toml, YAML recipes/workflows, and Markdown.
 		"tamasfe.even-better-toml",
+		"redhat.vscode-yaml",
+		"DavidAnson.vscode-markdownlint",
+
+		// Notebooks and native extensions used by examples and kernels.
+		"ms-toolsai.jupyter",
+		"ms-vscode.cpptools",
+
+		// Repo workflow helpers.
+		"ms-azuretools.vscode-docker",
 		"GitHub.copilot",
 		"GitLab.gitlab-workflow",
 		"eamodio.gitlens",
-		"VisualStudioExptTeam.vscodeintellicode",
-		"ms-toolsai.jupyter",
-		"ms-python.vscode-pylance",
-		"ms-python.python",
 		"ms-vscode-remote.remote-ssh",
 		"ms-vscode.remote-explorer",
-		"charliermarsh.ruff",
-		"redhat.vscode-yaml",
 	],
-	// List of extensions recommended by VS Code that should not be recommended for users of this workspace.
+	// List of extensions not recommended for this workspace.
 	"unwantedRecommendations": [
 		"ms-python.black-formatter",
 		"ms-python.mypy-type-checker",
+		"ms-python.vscode-pylance",
 		"ms-python.pylint",
 		"ms-python.flake8",
 	]
