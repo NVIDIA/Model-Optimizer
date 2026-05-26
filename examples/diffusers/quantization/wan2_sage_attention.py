@@ -538,6 +538,66 @@ def _frames_to_uint8(frames: list) -> np.ndarray:
     return np.stack(arrays, axis=0)
 
 
+def _compute_ssim(ref: np.ndarray, quant: np.ndarray) -> float:
+    """Mean SSIM across frames. Uses skimage if available, otherwise pure numpy."""
+    try:
+        from skimage.metrics import structural_similarity
+
+        ssim_vals = []
+        for i in range(ref.shape[0]):
+            s = structural_similarity(
+                ref[i].astype(np.uint8),
+                quant[i].astype(np.uint8),
+                channel_axis=-1,
+                data_range=255,
+            )
+            ssim_vals.append(s)
+        return float(np.mean(ssim_vals))
+    except ImportError:
+        # Fallback: simplified SSIM (Wang et al. 2004) without Gaussian weighting
+        C1 = (0.01 * 255) ** 2
+        C2 = (0.03 * 255) ** 2
+        ssim_vals = []
+        for i in range(ref.shape[0]):
+            r, q = ref[i], quant[i]
+            mu_r = r.mean(axis=(0, 1))
+            mu_q = q.mean(axis=(0, 1))
+            sig_r2 = ((r - mu_r) ** 2).mean(axis=(0, 1))
+            sig_q2 = ((q - mu_q) ** 2).mean(axis=(0, 1))
+            sig_rq = ((r - mu_r) * (q - mu_q)).mean(axis=(0, 1))
+            num = (2 * mu_r * mu_q + C1) * (2 * sig_rq + C2)
+            den = (mu_r**2 + mu_q**2 + C1) * (sig_r2 + sig_q2 + C2)
+            ssim_vals.append(float((num / den).mean()))
+        return float(np.mean(ssim_vals))
+
+
+def _compute_lpips(frames_ref: list, frames_quant: list) -> float | None:
+    """Mean LPIPS (AlexNet) across frames. Returns None if lpips not installed."""
+    try:
+        import lpips
+    except ImportError:
+        return None
+
+    loss_fn = lpips.LPIPS(net="alex", verbose=False)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    loss_fn = loss_fn.to(device)
+
+    ref_uint8 = _frames_to_uint8(frames_ref)  # (N, H, W, 3) uint8
+    quant_uint8 = _frames_to_uint8(frames_quant)
+
+    scores = []
+    with torch.no_grad():
+        for i in range(ref_uint8.shape[0]):
+            # LPIPS expects (1, 3, H, W) in [-1, 1]
+            r = torch.from_numpy(ref_uint8[i]).permute(2, 0, 1).unsqueeze(0).float() / 127.5 - 1.0
+            q = torch.from_numpy(quant_uint8[i]).permute(2, 0, 1).unsqueeze(0).float() / 127.5 - 1.0
+            scores.append(loss_fn(r.to(device), q.to(device)).item())
+
+    del loss_fn
+    torch.cuda.empty_cache()
+    return float(np.mean(scores))
+
+
 def compute_video_metrics(
     frames_ref: list,
     frames_quant: list,
@@ -545,10 +605,14 @@ def compute_video_metrics(
     """Compute frame-level accuracy metrics between two video frame sequences.
 
     Metrics:
+        lpips     Learned Perceptual Image Patch Similarity (AlexNet). Lower = better.
+                  <0.05: near-identical. 0.05-0.15: good. >0.2: noticeable.
+                  Standard metric for diffusion model evaluation (Zhang et al. 2018).
+                  Requires ``pip install lpips``; omitted if not installed.
         psnr      Peak Signal-to-Noise Ratio (dB). Higher = better.
-                  >40 dB: excellent (barely noticeable).
-                  30-40 dB: good.
-                  20-30 dB: noticeable but acceptable.
+                  >40 dB: excellent. 30-40 dB: good. <30 dB: noticeable.
+        ssim      Structural Similarity Index. Higher = better (max 1.0).
+                  >0.95: excellent. 0.90-0.95: good. <0.85: noticeable.
         mae_pct   Mean Absolute Error as % of max pixel value (255). Lower = better.
         cos_sim   Mean cosine similarity of flattened frames. Closer to 1 = better.
 
@@ -557,14 +621,14 @@ def compute_video_metrics(
         frames_quant: List of PIL images from the quantized run.
 
     Returns:
-        Dict with keys ``"psnr"``, ``"mae_pct"``, ``"cos_sim"``.
+        Dict with metric names as keys. ``"lpips"`` is absent if the package
+        is not installed.
     """
     ref = _frames_to_uint8(frames_ref).astype(np.float32)  # (N, H, W, 3)
     quant = _frames_to_uint8(frames_quant).astype(np.float32)
 
     # PSNR
     mse_per_frame = ((ref - quant) ** 2).mean(axis=(1, 2, 3))  # (N,)
-    # Avoid log(0) for identical frames
     psnr_per_frame = np.where(
         mse_per_frame < 1e-10,
         100.0,
@@ -572,10 +636,13 @@ def compute_video_metrics(
     )
     psnr = float(psnr_per_frame.mean())
 
+    # SSIM
+    ssim = _compute_ssim(ref, quant)
+
     # MAE as % of 255
     mae_pct = float(np.abs(ref - quant).mean() / 255.0 * 100.0)
 
-    # Cosine similarity: flatten each frame to a vector
+    # Cosine similarity
     ref_flat = ref.reshape(ref.shape[0], -1)
     quant_flat = quant.reshape(quant.shape[0], -1)
     dot = (ref_flat * quant_flat).sum(axis=1)
@@ -583,7 +650,14 @@ def compute_video_metrics(
     norm_quant = np.linalg.norm(quant_flat, axis=1)
     cos_sim = float((dot / (norm_ref * norm_quant + 1e-12)).mean())
 
-    return {"psnr": psnr, "mae_pct": mae_pct, "cos_sim": cos_sim}
+    result = {"psnr": psnr, "ssim": ssim, "mae_pct": mae_pct, "cos_sim": cos_sim}
+
+    # LPIPS (optional — needs lpips package)
+    lpips_val = _compute_lpips(frames_ref, frames_quant)
+    if lpips_val is not None:
+        result["lpips"] = lpips_val
+
+    return result
 
 
 def compute_clip_score(
@@ -646,7 +720,10 @@ def compute_clip_score(
 def print_metrics(metrics: dict[str, float], label: str = "") -> None:
     prefix = f"[{label}] " if label else ""
     print(f"\n{prefix}Accuracy vs baseline:")
+    if "lpips" in metrics:
+        print(f"  LPIPS:        {metrics['lpips']:.4f}     (<0.05 excellent, 0.05-0.15 good, >0.2 noticeable)")
     print(f"  PSNR:         {metrics['psnr']:.2f} dB  (>40 excellent, 30-40 good, <30 noticeable)")
+    print(f"  SSIM:         {metrics['ssim']:.4f}     (>0.95 excellent, 0.90-0.95 good, <0.85 noticeable)")
     print(f"  MAE:          {metrics['mae_pct']:.4f}%  of max pixel value")
     print(f"  Cosine sim:   {metrics['cos_sim']:.6f}  (1.0 = identical)")
 
@@ -884,20 +961,43 @@ def main() -> None:
 
         timing["baseline"], _ = run_inference(pipe, args, label="baseline")
 
+        # SDPA-patching kernels (can be swapped without reloading)
         for kernel in KERNEL_CHOICES:
             if kernel not in AVAILABLE_KERNELS:
                 print(f"\n[{kernel}] Skipped — not available")
                 continue
             if kernel in _TRITON_MODELOPT_KERNELS or kernel in (KERNEL_NVFP4, KERNEL_NVFP4_V3):
-                print(
-                    f"\n[{kernel}] Skipped in --benchmark (ModelOpt kernels modify the model "
-                    f"in-place; run separately with --kernel {kernel})"
-                )
-                continue
+                continue  # handled below
             enable_attention_kernel(kernel)
             timing[kernel], _ = run_inference(pipe, args, label=kernel)
             print_kernel_stats()
             disable_attention_kernel()
+
+        # ModelOpt in-place kernels (reload pipeline for each)
+        for kernel in KERNEL_CHOICES:
+            if kernel not in AVAILABLE_KERNELS:
+                continue
+            if kernel not in _TRITON_MODELOPT_KERNELS and kernel not in (KERNEL_NVFP4, KERNEL_NVFP4_V3):
+                continue
+            print(f"\n[{kernel}] Reloading pipeline for in-place kernel...")
+            del pipe
+            torch.cuda.empty_cache()
+            pipe = load_pipeline(args.model)
+            if kernel == KERNEL_NVFP4:
+                from modelopt.torch.quantization import apply_sage_attention
+
+                apply_sage_attention(pipe.transformer)
+            elif kernel == KERNEL_NVFP4_V3:
+                from modelopt.torch.quantization import apply_sage_attention_v3
+
+                apply_sage_attention_v3(pipe.transformer)
+            else:
+                apply_triton_sparse_kernel(
+                    pipe.transformer,
+                    kernel,
+                    skip_threshold=args.skip_threshold,
+                )
+            timing[kernel], _ = run_inference(pipe, args, label=kernel)
 
         t_base = timing["baseline"]
         print(f"\n{'=' * 55}")
@@ -905,9 +1005,6 @@ def main() -> None:
         print(f"  {'-' * 40}")
         print(f"  {'baseline (SDPA)':<20} {t_base:>7.1f}s   {'1.00x':>8}")
         for kernel in KERNEL_CHOICES:
-            if kernel in _TRITON_MODELOPT_KERNELS or kernel in (KERNEL_NVFP4, KERNEL_NVFP4_V3):
-                print(f"  {kernel:<20} {'N/A':>8}   {'N/A':>8}  (run separately)")
-                continue
             if kernel not in timing:
                 print(f"  {kernel:<20} {'N/A':>8}   {'N/A':>8}  (not available)")
                 continue
