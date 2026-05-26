@@ -30,6 +30,7 @@ docs/source/reference/generated
 
 # Environments
 .env
+.env-*
 .venv
 env/
 venv/

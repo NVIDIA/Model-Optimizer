@@ -15,7 +15,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Megatron-Bridge HF -> Megatron checkpoint import (CPU-capable).
+# Megatron-Bridge HF -> Megatron checkpoint import.
+# Assumes nvcr.io/nvidia/nemo:26.02+ container (megatron-bridge preinstalled at /opt/Megatron-Bridge).
 #
 # Required env: HF_MODEL_ID  (e.g. nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16)
 # Optional env:
@@ -23,12 +24,6 @@
 #   TORCH_DTYPE Model dtype for HF load (default: bfloat16).
 #
 # Writes MCore checkpoint to ${OUTPUT_DIR}/<basename(HF_MODEL_ID)>-MCore
-#
-# Runs:
-#   python examples/conversion/convert_checkpoints.py import \
-#       --hf-model $HF_MODEL_ID \
-#       --megatron-path $OUTPUT_DIR/<model>-MCore \
-#       --torch-dtype $TORCH_DTYPE
 
 set -e
 
@@ -37,29 +32,6 @@ if [[ -z "${HF_MODEL_ID}" ]]; then
     exit 1
 fi
 
-SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
-LAUNCHER_DIR="${SCRIPT_DIR}/../../.."
-BRIDGE_DIR="${LAUNCHER_DIR}/modules/Megatron-Bridge"
-MLM_DIR="${LAUNCHER_DIR}/modules/Megatron-LM"
-
-if ! python -c "import megatron.bridge" 2>/dev/null; then
-    echo "[INFO] Installing megatron-bridge from ${BRIDGE_DIR}"
-    unset PIP_CONSTRAINT
-    pip install -e "${BRIDGE_DIR}"
-fi
-
-if [[ -n "${EXTRA_PIP_DEPS}" ]]; then
-    echo "[INFO] Installing extra deps: ${EXTRA_PIP_DEPS}"
-    unset PIP_CONSTRAINT
-    read -r -a _deps <<< "${EXTRA_PIP_DEPS}"
-    # --no-build-isolation: mamba-ssm/causal-conv1d need torch visible at build time.
-    pip install --no-build-isolation "${_deps[@]}"
-fi
-
-# Megatron-Bridge needs newer megatron.core (incl. megatron.core.distributed.fsdp).
-# Prepend local Megatron-LM to PYTHONPATH so its sources shadow installed megatron-core.
-export PYTHONPATH="${MLM_DIR}:${PYTHONPATH}"
-
 OUTPUT_DIR="${OUTPUT_DIR:-$(pwd)}"
 MODEL_NAME="$(basename "${HF_MODEL_ID}")"
 MEGATRON_PATH="${OUTPUT_DIR}/${MODEL_NAME}-MCore"
@@ -67,8 +39,7 @@ TORCH_DTYPE="${TORCH_DTYPE:-bfloat16}"
 
 mkdir -p "${OUTPUT_DIR}"
 
-cd "${BRIDGE_DIR}"
-exec python examples/conversion/convert_checkpoints.py import \
+exec python /opt/Megatron-Bridge/examples/conversion/convert_checkpoints.py import \
     --hf-model "${HF_MODEL_ID}" \
     --megatron-path "${MEGATRON_PATH}" \
     --torch-dtype "${TORCH_DTYPE}"
