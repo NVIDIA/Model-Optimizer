@@ -176,10 +176,15 @@ def _resolve_decoder_layers(model: nn.Module, override_cls_name: str | None):
 
 
 def fsdp2_wrap(model: nn.Module, override_cls_name: str | None = None) -> nn.Module:
-    """Apply FSDP2 ``fully_shard`` to each decoder layer, then to the root module."""
+    """Apply FSDP2 ``fully_shard`` to each decoder layer only.
+
+    The root is intentionally not sharded so embed_tokens / lm_head stay as
+    plain replicated tensors. Sharding the root makes those weights DTensors,
+    which collides with modelopt's layerwise forward patching (mixed
+    plain-tensor / DTensor inputs at the embedding lookup).
+    """
     for layer in _resolve_decoder_layers(model, override_cls_name):
         fully_shard(layer, reshard_after_forward=True)
-    fully_shard(model, reshard_after_forward=True)
     return model
 
 
@@ -286,11 +291,15 @@ def create_fsdp2_calibration_loop(
     """Calibration loop that forwards through the FSDP-wrapped model."""
 
     def calibrate(unwrapped_model):
+        # Force use_cache=False so layerwise replays don't accumulate KV across batches.
+        if hasattr(model, "config") and hasattr(model.config, "use_cache"):
+            model.config.use_cache = False
         for batch in tqdm(dataloader, desc="Calibrating"):
             if isinstance(batch, dict):
                 batch = {
                     k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()
                 }
+                batch.setdefault("use_cache", False)
             # Use outer (FSDP-wrapped) model, not the unwrapped parameter passed by mtq.quantize.
             model(**batch)
 
