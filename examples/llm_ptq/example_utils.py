@@ -51,6 +51,106 @@ logger = logging.getLogger(__name__)
 SPECULATIVE_MODEL_LIST = ["Eagle", "Medusa"]
 
 
+# ---------------------------------------------------------------------------
+# FSDP2 helpers (opt-in via --use_fsdp2 in hf_ptq.py / multinode_ptq.py).
+# ---------------------------------------------------------------------------
+
+
+def setup_distributed_args(args):
+    """Populate ``args.rank`` / ``world_size`` / ``device`` / ``is_main``.
+
+    When ``--use_fsdp2`` is set, initializes the distributed process group and
+    pins this rank's CUDA device. When the flag is off, fills no-op values so
+    downstream helpers can use ``args.is_main`` and ``args.rank`` uniformly.
+    """
+    from modelopt.torch.utils import distributed as dist_utils
+
+    if getattr(args, "use_fsdp2", False):
+        dist_utils.setup()
+        args.rank = dist_utils.rank()
+        args.world_size = dist_utils.size()
+        args.device = torch.device(f"cuda:{dist_utils.local_rank()}")
+        args.is_main = args.rank == 0
+    else:
+        args.rank = 0
+        args.world_size = 1
+        args.device = None
+        args.is_main = True
+
+
+def cleanup_distributed(args):
+    """Tear down the distributed process group if FSDP2 set it up."""
+    from modelopt.torch.utils import distributed as dist_utils
+
+    if getattr(args, "use_fsdp2", False):
+        dist_utils.cleanup()
+
+
+def load_and_prepare_fsdp2_model(
+    ckpt_path: str,
+    device: torch.device,
+    rank: int,
+    trust_remote_code: bool = False,
+    mp_policy=None,
+):
+    """Load and FSDP2-shard a causal LM with rank-0-only CPU realization.
+
+    Rank 0 reads weights from disk on CPU via ``from_pretrained``; other ranks
+    build a structural skeleton on the ``meta`` device. ``fsdp2_shard`` then
+    slices each decoder layer, allocates per-rank GPU shard storage, broadcasts
+    rank-0's weights into the shards, and freezes params.
+
+    Memory: only rank 0 holds the full CPU copy. Each rank ends with
+    ``model_size / world_size`` of GPU shard storage.
+
+    v1 supports standard transformers families only (causal LMs that load
+    cleanly via ``AutoModelForCausalLM``). VILA / pack-quantized / speculative
+    are not validated under FSDP2 and should go through ``get_model``.
+    """
+    from modelopt.torch.utils.distributed import fsdp2_shard
+
+    hf_config = AutoConfig.from_pretrained(ckpt_path, trust_remote_code=trust_remote_code)
+    if rank == 0:
+        model = AutoModelForCausalLM.from_pretrained(
+            ckpt_path,
+            torch_dtype="auto",
+            trust_remote_code=trust_remote_code,
+            low_cpu_mem_usage=True,
+        )
+    else:
+        dtype = getattr(hf_config, "torch_dtype", None) or torch.bfloat16
+        with torch.device("meta"):
+            model = AutoModelForCausalLM.from_config(
+                hf_config, torch_dtype=dtype, trust_remote_code=trust_remote_code
+            )
+    model.eval()
+    # Disable HF KV cache; calibration is single-pass and (for layerwise) replays.
+    if hasattr(model, "config") and hasattr(model.config, "use_cache"):
+        model.config.use_cache = False
+    return fsdp2_shard(model, device, rank, mp_policy=mp_policy)
+
+
+def create_fsdp2_calibration_loop(model, dataloader, device):
+    """Calibration closure that forwards through the outer FSDP2-wrapped model.
+
+    Required because ``mtq.quantize`` unwraps the model before calling
+    ``forward_loop``; calling the unwrapped inner module skips FSDP2's pre/post
+    forward hooks and breaks the all-gather. The closure captures the outer
+    ``model`` and ignores the ``unwrapped_model`` argument.
+    """
+    from tqdm import tqdm
+
+    def calibrate(unwrapped_model):
+        for batch in tqdm(dataloader, desc="Calibrating"):
+            if isinstance(batch, dict):
+                batch = {
+                    k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()
+                }
+            model(**batch)
+
+    return calibrate
+
+
 def run_nemotron_vl_preview(
     full_model,
     tokenizer,

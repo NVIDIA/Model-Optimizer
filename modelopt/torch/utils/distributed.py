@@ -31,13 +31,17 @@ from torch.distributed.tensor import DTensor
 
 __all__ = [
     "DistributedProcessGroup",
+    "Fsdp2StateDictAdapter",
     "ParallelState",
     "backend",
     "barrier",
+    "fsdp2_shard",
+    "fsdp2_wrap",
     "is_available",
     "is_initialized",
     "is_master",
     "rank",
+    "shard_dataloader",
     "size",
 ]
 
@@ -214,6 +218,125 @@ def cleanup():
         with suppress(Exception):
             barrier()
         torch.distributed.destroy_process_group()
+
+
+# ---------------------------------------------------------------------------
+# FSDP2 helpers — used by examples/llm_ptq to run PTQ calibration under FSDP2.
+# ---------------------------------------------------------------------------
+
+
+def fsdp2_wrap(model, override_cls_name: str | None = None, mp_policy=None):
+    """Apply FSDP2 ``fully_shard`` to each decoder layer of ``model``.
+
+    Decoder layers are auto-detected via
+    ``modelopt.torch.quantization.utils.layerwise_calib.LayerActivationCollector.get_decoder_layers``.
+    Pass ``override_cls_name`` to force a specific transformer block class. Pass
+    ``mp_policy`` (a ``torch.distributed.fsdp.MixedPrecisionPolicy``) to control
+    compute / reduce dtype; default ``None`` means no upcast / downcast.
+
+    The root module is intentionally not sharded so embeddings / lm_head stay as
+    plain tensors (avoids DTensor / plain-tensor mismatches with modelopt's
+    layerwise forward patching).
+    """
+    from torch.distributed.fsdp import fully_shard
+
+    from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
+
+    if override_cls_name:
+        layers = [m for m in model.modules() if type(m).__name__ == override_cls_name]
+        if not layers:
+            raise RuntimeError(f"No modules of class {override_cls_name!r} found in model")
+    else:
+        layers = LayerActivationCollector.get_decoder_layers(model)
+        if layers is None:
+            raise RuntimeError(
+                "Could not auto-detect decoder layers; pass override_cls_name explicitly."
+            )
+    fsdp_kwargs: dict[str, Any] = {"reshard_after_forward": True}
+    if mp_policy is not None:
+        fsdp_kwargs["mp_policy"] = mp_policy
+    for layer in layers:
+        fully_shard(layer, **fsdp_kwargs)
+    return model
+
+
+def fsdp2_shard(model, device, rank, mp_policy=None):
+    """Shard a loaded model across the current process group.
+
+    Expects rank 0 to pass a real CPU model and other ranks to pass a meta
+    skeleton with matching structure. After this call every rank holds its
+    per-rank GPU shard, populated from rank 0's source.
+
+    Steps: stash ``_original_architectures`` (FSDP2 may mutate
+    ``model.config.architectures``); capture rank-0's state_dict; ``fsdp2_wrap``
+    per decoder layer; ``to_empty`` allocates per-rank GPU shard storage;
+    ``set_model_state_dict(broadcast_from_rank0=True)`` streams the data; freeze
+    params (needed by ``patch_fsdp_mp_dtypes``' trainable-only check).
+    """
+    from torch.distributed.checkpoint.state_dict import StateDictOptions, set_model_state_dict
+
+    model._original_architectures = list(model.config.architectures or [])
+    cpu_state_dict = model.state_dict() if rank == 0 else {}
+
+    fsdp2_wrap(model, mp_policy=mp_policy)
+    model.to_empty(device=device)
+    set_model_state_dict(
+        model,
+        cpu_state_dict,
+        options=StateDictOptions(full_state_dict=True, broadcast_from_rank0=True),
+    )
+    # TODO(temp workaround): FSDP2's _init_mp_dtypes asserts uniform dtype across
+    # trainable params. patch_fsdp_mp_dtypes narrows the check to trainable-only;
+    # freezing here makes trainable empty so mixed-dtype models (Nemotron-H, etc.)
+    # pass. PTQ doesn't need gradients anyway.
+    for p in model.parameters():
+        p.requires_grad_(False)
+    return model
+
+
+def shard_dataloader(loader, rank: int, world_size: int):
+    """Wrap a DataLoader with a DistributedSampler so each rank sees a unique shard.
+
+    Preserves the input loader's ``batch_size``, ``collate_fn``, ``num_workers``,
+    and ``pin_memory``.
+    """
+    from torch.utils.data import DataLoader
+    from torch.utils.data.distributed import DistributedSampler
+
+    sampler = DistributedSampler(
+        loader.dataset,
+        num_replicas=world_size,
+        rank=rank,
+        shuffle=False,
+        drop_last=False,
+    )
+    return DataLoader(
+        loader.dataset,
+        batch_size=loader.batch_size,
+        sampler=sampler,
+        collate_fn=loader.collate_fn,
+        num_workers=loader.num_workers,
+        pin_memory=loader.pin_memory,
+    )
+
+
+class Fsdp2StateDictAdapter:
+    """Adapter exposing ``.get_state_dict(model)`` for FSDP2-sharded models.
+
+    Satisfies the ``accelerator=`` kwarg of
+    ``modelopt.torch.export.unified_export_hf._export_transformers_checkpoint``.
+    Backed by ``get_model_state_dict`` which materializes a full unsharded state
+    dict on every rank (with CPU offload to bound peak GPU memory during gather).
+    """
+
+    def get_state_dict(self, model):
+        """Return the full unsharded state dict gathered from FSDP2 shards (CPU-offloaded)."""
+        from torch.distributed.checkpoint.state_dict import StateDictOptions, get_model_state_dict
+
+        return get_model_state_dict(
+            model,
+            options=StateDictOptions(full_state_dict=True, cpu_offload=True),
+        )
 
 
 class DistributedProcessGroup:
