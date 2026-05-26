@@ -511,8 +511,11 @@ General PTQ recipes are model-agnostic and apply to any supported architecture:
 Model-specific recipes
 ----------------------
 
-Model-specific recipes are tuned for a particular architecture and live under
-``models/<model_name>/``:
+Model-specific recipes are tuned for a particular Hugging Face ``model_type``
+(or a specific released model) and live under
+``huggingface/<model_type>/[<specific_model>/]<task>/``. See
+`modelopt_recipes/huggingface/README.md <https://github.com/NVIDIA/Model-Optimizer/blob/main/modelopt_recipes/huggingface/README.md>`_
+for the layout convention and recipe-lookup order.
 
 .. list-table::
    :header-rows: 1
@@ -520,7 +523,7 @@ Model-specific recipes are tuned for a particular architecture and live under
 
    * - Recipe path
      - Description
-   * - ``models/Step3.5-Flash/nvfp4-mlp-only``
+   * - ``huggingface/step3p5/Step3.5-Flash/ptq/nvfp4-mlp-only``
      - NVFP4 MLP-only for Step 3.5 Flash MoE model
 
 
@@ -669,9 +672,10 @@ The ``modelopt_recipes/`` package is organized as follows:
    |       +-- nvfp4_experts_only-kv_fp8.yaml
    |       +-- nvfp4_experts_only-kv_fp8_layerwise.yaml
    |       +-- nvfp4_omlp_only-kv_fp8.yaml
-   +-- models/                     # Model-specific recipes
-   |   +-- Step3.5-Flash/
-   |       +-- nvfp4-mlp-only.yaml
+   +-- huggingface/                # Model-specific recipes
+   |   +-- <model_type>/           # see modelopt_recipes/huggingface/README.md
+   |       +-- <task>/
+   |           +-- <recipe>.yaml
    +-- configs/                    # Reusable config snippets (imported via $import)
        +-- numerics/               # Numeric format definitions
        |   +-- fp8.yaml
