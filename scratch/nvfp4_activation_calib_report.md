@@ -311,12 +311,96 @@ Computed once on the full calibration pool of each dataset.
 `p99.999` reaches parity with amax in every case. Lower percentiles
 clip the inference-time outliers and lose 1–15 dB SNR.
 
-## Cross-dataset fixed-test comparison
+## Clean shared-test comparison (disjoint calib + test by construction)
 
-The per-dataset SNRs above are *not* directly comparable across datasets:
-both the calibration *and* the test tensor differ between rows. To
-isolate the calibration-policy effect, we run a controlled experiment
-(`_cross_dataset_amax_compare.py`):
+The per-dataset sweep tables above use a *different* test tensor for
+each combo — both calibration and test change between rows. To remove
+that confound entirely, we ran a separate capture
+(`capture_calib_and_test_split.py`) that produces explicitly-disjoint
+calibration and test pools, drawn from positions strictly after the
+calibration positions in each underlying member stream:
+
+- `cnn_nemotron_v2_mix` calib pool: 1024 sequences (positions 0..511 of
+  CNN/DailyMail train; positions 0..511 of Nemotron-Post-Training v2
+  stem/chat/math/code in round-robin).
+- `cnn_nemotron_v2_mix` test pool: 256 sequences (positions 512..639 of
+  each member — these never appear in the mix calibration).
+- `nemotron-post-training-v3` calib pool: 881 sequences (147 each from 6
+  of 7 members; Agentic-v2 dropped in streaming).
+- `nemotron-post-training-v3` test pool: 222 sequences (37 each from the
+  same 6 members, positions 147..183 — never in v3 calibration).
+
+The **shared test tensor** is the concatenation of *both* combos' test
+pools (256 + 222 = 478 sequences), first 1 048 576 elements reshaped
+to `(256, 4096)`. This is the test tensor for every MSE measurement
+in the table below. Both calibration combos are evaluated on the
+*same* held-out activations, drawn from sources neither calibration saw.
+
+### Shared-test results
+
+**Layer 0 MLP input** (test amax = 3.484, sig_pow = 2.105e-2):
+
+| combo | n_seqs | amax (mean ± std) | MSE | SNR (dB) |
+|---|---:|---:|---:|---:|
+| cnn_nemotron_v2_mix       |   256 | 4.271 ± 0.059 | 1.799e-4 | 20.681 |
+| cnn_nemotron_v2_mix       |   512 | 4.271 ± 0.059 | 1.799e-4 | 20.681 |
+| cnn_nemotron_v2_mix       | 1 024 | 4.313 ± 0.000 | 1.800e-4 | 20.680 |
+| nemotron-post-training-v3 |   256 | 4.156 ± 0.000 | 1.798e-4 | **20.683** |
+| nemotron-post-training-v3 |   512 | 4.156 ± 0.000 | 1.798e-4 | **20.683** |
+| **oracle**                | —     | (8.75 equiv.) | 1.792e-4 | 20.699 |
+
+**Layer 31 MLP input** (test amax = 43.5, sig_pow = 1.293):
+
+| combo | n_seqs | amax (mean ± std) | MSE | SNR (dB) |
+|---|---:|---:|---:|---:|
+| cnn_nemotron_v2_mix       |   256 | 49.67 ± 0.42 | 1.104e-2 | 20.689 |
+| cnn_nemotron_v2_mix       |   512 | 50.25 ± 0.00 | 1.102e-2 | **20.695** |
+| cnn_nemotron_v2_mix       | 1 024 | 50.25 ± 0.00 | 1.102e-2 | **20.695** |
+| nemotron-post-training-v3 |   256 | 52.67 ± 0.24 | 1.104e-2 | 20.687 |
+| nemotron-post-training-v3 |   512 | 53.00 ± 0.00 | 1.104e-2 | 20.686 |
+| **oracle**                | —     | (3877 equiv.) | 1.100e-2 | 20.703 |
+
+(N=1024 is skipped for v3 because the v3 calib pool is 881 sequences —
+Agentic-v2's streaming iterator emits no rows in our environment.)
+
+### Observations from the clean comparison
+
+1. **Combo-to-combo spread is 0.002 dB (layer 0) and 0.009 dB (layer 31)**
+   on a shared held-out test tensor. Both combos calibrate to an amax
+   within ~3% of each other (4.16 / 4.31 on layer 0; 50.25 / 53.0 on
+   layer 31) and the resulting MSE on disjoint test data is
+   indistinguishable.
+2. **Which combo "wins" depends on the layer.** v3 is fractionally
+   better on layer 0; mix is fractionally better on layer 31. Both
+   margins are well below seed noise — the two combos are
+   interchangeable for input_scale calibration purposes.
+3. **Default amax is within 0.008–0.018 dB of oracle on both layers**
+   on this clean test. Per-block scale rounding leaves the MSE
+   landscape extremely flat — the oracle's amax-equivalent for layer
+   31 is 3877 (88× larger than the test amax), and it only buys
+   0.008 dB.
+4. **Calibration size insensitivity confirmed.** Going from 256 → 1024
+   sequences moves SNR by ≤ 0.001 dB on layer 0 and ≤ 0.006 dB on
+   layer 31. The mix's layer-31 amax even converges fully at N=512
+   (std 0.00 across 3 seeds).
+5. **Percentile baselines remain uniformly worse**, with p99 / p99.9 /
+   p99.99 losing 1–13 dB by under-shooting inference-time outliers.
+
+This is the experiment that the original question deserves. The answer
+is unambiguous: on Qwen3.5-9B MLP inputs, with this realistic
+calibration data, **the choice between `cnn_nemotron_v2_mix` and
+`nemotron-post-training-v3` does not affect NVFP4 quantization
+quality.** Both calibrate to an amax close enough that the resulting
+input_scale lands in the flat region of the MSE landscape.
+
+## Legacy: per-dataset-test cross-dataset comparison (`_cross_dataset_amax_compare.py`)
+
+The earlier experiment (`_cross_dataset_amax_compare.py`) applied each
+combo's recorded amax to a single fixed test tensor — but that fixed
+test tensor was the v3 capture's own holdout, so v3-distributed. It
+gave the same qualitative answer (≤ 0.013 dB spread across combos)
+but the test data wasn't disjoint from the v3 calibration in the
+strict sense the shared-test capture above guarantees.
 
 1. Use **one** fixed test tensor — the v3 dataset's held-out 100
    sequences (first 1M elements reshaped to `(256, 4096)`).
@@ -374,11 +458,14 @@ realistic LLM-activation data does not exhibit.
 > 3. Does the choice of calibration dataset matter for quantization
 >    quality?
 
-**On the same test tensor, no.** `cnn_nemotron_v2_mix` and
-`nemotron-post-training-v3` produce input_scale values that differ by
-~5%, translating to MSE differences within 0.013 dB SNR on a shared
-test. Chat-only is in the same ballpark. The calibration dataset
-composition is not a sensitive knob on this model.
+**No, under a clean disjoint-calib/test design.** Both
+`cnn_nemotron_v2_mix` and `nemotron-post-training-v3`, evaluated on a
+shared test tensor drawn from data neither combo's calibration saw,
+yield MSE within **0.002 dB (layer 0)** and **0.009 dB (layer 31)** of
+each other. They calibrate to amax values within ~3%, and the
+resulting input_scale lands in a flat region of the MSE landscape on
+both layers. The calibration dataset composition is not a sensitive
+knob on this model.
 
 ## Synthesis
 
@@ -424,8 +511,14 @@ python scratch/capture_qwen35_mlp_activations.py \
     --n_seqs 2604 --max_tokens 512 --dataset nemotron-post-training-v3
 python scratch/nvfp4_real_activation_calib_mse.py
 
-# Cross-combo fixed-test comparison (uses current .pt files as the
-# shared test tensor; edit CALIB_AMAXES to plug in numbers from each run)
+# Clean disjoint-calib/test sweep (single capture for both combos,
+# strictly-disjoint held-out test set used for every measurement)
+python scratch/capture_calib_and_test_split.py \
+    --n_calib 1024 --n_test 256 --max_tokens 512
+python scratch/nvfp4_shared_test_sweep.py
+
+# Legacy: cross-combo fixed-test comparison using v3's own holdout
+# (preserves edit history; superseded by the shared-test sweep above)
 python scratch/_cross_dataset_amax_compare.py
 ```
 
@@ -451,7 +544,11 @@ Timings (RTX 6000 Ada):
 | `qwen35_9b_mlp_input_layer{0,31}.pt` | Captured bf16 activation tensors. Current state on disk: v3 combo. |
 | `nvfp4_real_activation_calib_mse.py` | Sequence-count sweep on the `.pt` captures. 3 seeds, percentile + oracle baselines. |
 | `nvfp4_real_activation_calib_results.json` | Raw curves for the real-data sweep (current = v3). |
-| `_cross_dataset_amax_compare.py` | Fixed-test comparison of the three combos. |
+| `_cross_dataset_amax_compare.py` | Legacy: cross-combo comparison using the v3 capture's own holdout as the shared test tensor. |
+| `capture_calib_and_test_split.py` | Clean disjoint-calib/test capture: 1024 calib seqs each for `cnn_nemotron_v2_mix` and `nemotron-post-training-v3`, plus 256 + 222 held-out test seqs from positions strictly after the calibration ranges. Single model load. |
+| `nvfp4_shared_test_sweep.py` | Apples-to-apples sweep over both combos using one shared test tensor (the concatenation of both combos' held-out pools). |
+| `nvfp4_shared_test_sweep_results.json` | Raw curves for the shared-test sweep. |
+| `qwen35_cnn_nemotron_v2_mix_{calib,test}_layer{0,31}.pt`, `qwen35_nemotron_post_training_v3_{calib,test}_layer{0,31}.pt` | Per-combo, per-split activation captures used by the shared-test sweep. |
 
 ## Limitations
 
