@@ -320,17 +320,17 @@ ModelOpt allows stacking multiple optimization techniques. Here we stack FP8 qua
 
 Similar to the official [Nemotron-Nano-9B-v2-FP8](https://huggingface.co/nvidia/NVIDIA-Nemotron-Nano-9B-v2-FP8) model, if you want to quantize the pruned 7B model to FP8, the Mamba and MLP layers are quantized to FP8, while all 4 attention layers and the Conv1d components within the Mamba layers are kept in BF16 to avoid accuracy degradation.
 
-This is done with the `mtq.MAMBA_MOE_FP8_AGGRESSIVE_CFG` config defined in [`modelopt/torch/quantization/config.py`](../../../../modelopt/torch/quantization/config.py). To apply this, you need to modify `QUANT_CFG_CHOICES["fp8"]` in [`examples/llm_ptq/hf_ptq.py`](../../../llm_ptq/hf_ptq.py) to use `mtq.MAMBA_MOE_FP8_AGGRESSIVE_CFG`. You may also consider using `mtq.MAMBA_MOE_FP8_CONSERVATIVE_CFG` for more conservative quantization.
+This is done with the `mtq.MAMBA_MOE_FP8_CONSERVATIVE_CFG` config defined in [`modelopt/torch/quantization/config.py`](../../../../modelopt/torch/quantization/config.py). To apply this, you need to modify `QUANT_CFG_CHOICES["fp8"]` in [`examples/llm_ptq/hf_ptq.py`](../../../llm_ptq/hf_ptq.py) to use `mtq.MAMBA_MOE_FP8_CONSERVATIVE_CFG`. For a faster model at the cost of a larger accuracy drop, you can use `mtq.MAMBA_MOE_FP8_AGGRESSIVE_CFG` instead.
 
 > [!NOTE]
-> You can also quantize to NVFP4 using `mtq.MAMBA_MOE_NVFP4_AGGRESSIVE_CFG` or `mtq.MAMBA_MOE_NVFP4_CONSERVATIVE_CFG`, which may require further distillation (QAD) to recover accuracy and Blackwell GPU for deployment.
+> You can also quantize to NVFP4 using `mtq.MAMBA_MOE_NVFP4_CONSERVATIVE_CFG` (default) or `mtq.MAMBA_MOE_NVFP4_AGGRESSIVE_CFG` (faster, more accuracy drop), which may require further distillation (QAD) to recover accuracy and Blackwell GPU for deployment.
 
 Calibrate and export the HF checkpoint from iteration 12800 to FP8 (takes 1-2 mins on 8x H100):
 
 ```bash
 python /opt/Model-Optimizer/examples/llm_ptq/hf_ptq.py \
     --pyt_ckpt_path <output_dir>/checkpoints/hf_iter_12800 \
-    --export_path <output_dir>/checkpoints/hf_iter_12800_fp8_aggressive \
+    --export_path <output_dir>/checkpoints/hf_iter_12800_fp8 \
     --qformat fp8 \
     --trust_remote_code
 ```

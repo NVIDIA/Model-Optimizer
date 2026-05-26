@@ -432,10 +432,58 @@ For more details on NeMo Evaluator, see the [GitHub repo](https://github.com/NVI
 
 ### 5. Quantization
 
-TODO
+ModelOpt allows stacking multiple optimization techniques. Here we stack FP8 quantization on top of the pruned and distilled model to get an even more optimized model. See [examples/llm_ptq/README.md](../../../llm_ptq/README.md) for the full PTQ documentation.
+
+Similar to the official [Nemotron-3-Nano-30B-A3B-FP8](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8) model, if you want to quantize the pruned 22B/A3.0B model to FP8, the Mamba, MoE, and MLP layers are quantized to FP8, while the attention layers and the Conv1d components within the Mamba layers are kept in BF16 to avoid accuracy degradation.
+
+This is done with the `mtq.MAMBA_MOE_FP8_CONSERVATIVE_CFG` config defined in [`modelopt/torch/quantization/config.py`](../../../../modelopt/torch/quantization/config.py). To apply this, you need to modify `QUANT_CFG_CHOICES["fp8"]` in [`examples/llm_ptq/hf_ptq.py`](../../../llm_ptq/hf_ptq.py) to use `mtq.MAMBA_MOE_FP8_CONSERVATIVE_CFG`. For a faster model at the cost of a larger accuracy drop, you can use `mtq.MAMBA_MOE_FP8_AGGRESSIVE_CFG` instead.
+
+> [!NOTE]
+> You can also quantize to NVFP4 using `mtq.MAMBA_MOE_NVFP4_CONSERVATIVE_CFG` (default) or `mtq.MAMBA_MOE_NVFP4_AGGRESSIVE_CFG` (faster, more accuracy drop), which may require further distillation (QAD) to recover accuracy and Blackwell GPU for deployment.
+
+Calibrate and export the Phase 2 final HF checkpoint to FP8 (takes a few minutes on 8x H100):
+
+```bash
+python /opt/Model-Optimizer/examples/llm_ptq/hf_ptq.py \
+    --pyt_ckpt_path /path/to/distill_output_phase2_32k/checkpoints/hf_iter_0000800 \
+    --export_path /path/to/distill_output_phase2_32k/checkpoints/hf_iter_0000800_fp8 \
+    --qformat fp8 \
+    --calib_size 1024 \
+    --trust_remote_code
+```
+
+> [!NOTE]
+> Copy the `nano_v3_reasoning_parser.py` file from the original checkpoint to the FP8 checkpoint for evaluation with tool-calling — `hf_ptq.py` does not propagate custom-code Python files.
+
+The quantized checkpoint is directly deployable with [vLLM](https://github.com/vllm-project/vllm), [TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM) and [SGLang](https://github.com/sgl-project/sglang).
+
+> [!TIP]
+> You can run the evaluation using the same `nemo_evaluator.yaml` file for the quantized checkpoint also!
 
 ---
 
 ### 6. vLLM Inference Benchmarking
 
-TODO
+Benchmark throughput using [vLLM](https://github.com/vllm-project/vllm) on a single H100 GPU. Run the command once for each HuggingFace checkpoint. vLLM automatically detects FP8 quantization from the embedded `quantization_config` in `config.json` and applies it with no extra flags needed.
+
+Results on a single H100 (ISL=32768, OSL=1024):
+
+```bash
+vllm bench throughput \
+    --model <checkpoint_path> \
+    --random-input-len 32768 \
+    --random-output-len 1024 \
+    --trust-remote-code \
+    --mamba_ssm_cache_dtype float32 \
+    --kv-cache-dtype fp8 \
+    --load-format safetensors
+```
+
+| Checkpoint | Model loading memory | Output tokens/s | Speedup vs Nemotron-3-Nano-30B-A3B BF16 |
+| --- | --- | --- | --- |
+| Nemotron-3-Nano-30B-A3B-BF16 (official, 31.6B/A3.6B) | 58.9 GiB | 1,006 | 1.00× |
+| Nemotron-3-Nano-30B-A3B-FP8 (official) | 31.4 GiB | 1,404 | 1.40× |
+| Nemotron-3-Nano-30B-A3B-Pruned-A3.0B (22B/A3.0B) | 41.5 GiB | 1,301 | 1.29× |
+| Nemotron-3-Nano-30B-A3B-Pruned-A3.0B-FP8 | 22.8 GiB | 1,653 | 1.64× |
+
+Pruning alone (BF16 → Pruned-A3.0B BF16) gives a **1.29×** throughput speedup with a 30% memory reduction (58.9 → 41.5 GiB), and FP8 quantization alone (BF16 → FP8) gives a **1.40×** speedup with a 47% memory reduction. Stacking both — pruning + FP8 — compounds to a **1.64×** throughput speedup and a **2.6× memory reduction** (58.9 → 22.8 GiB) relative to the original 30B BF16 model, while preserving most of the benchmark accuracy (see [Results](#results)). The NemotronH hybrid architecture (Mamba + Attention + MoE) moderates the FP8 gain relative to pure-transformer models, since Attention and Conv1d layers are not quantized.
