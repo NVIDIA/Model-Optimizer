@@ -296,7 +296,7 @@ def _ensure_weight_quantizer_calibrated(
             t = t.detach()
             if not torch.is_floating_point(t):
                 return False
-            return bool(torch.any(~torch.isfinite(t)).item() or torch.any(t < 0).item())
+            return bool((~torch.isfinite(t) | (t < 0)).any().item())
 
         need_per_block = (
             not hasattr(weight_quantizer, "_amax")
