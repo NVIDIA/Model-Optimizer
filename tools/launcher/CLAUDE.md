@@ -84,7 +84,11 @@ launch.py → imports core.py + slurm_config.py
 - `report_versions(base_dir)` — prints git commit/branch for launcher + submodules
 - `get_default_env(title)` — returns `(slurm_env, local_env)` dicts
 
-## Adding a New Model Config
+## Adding a New Megatron-LM PTQ Model Config
+
+Steps below apply to `examples/<Org>/<Model>/megatron_lm_ptq.yaml`. Other pipelines
+(HF PTQ, HF / offline / streaming EAGLE3, dflash) use different env vars — copy
+the closest sibling yaml in the same directory as a starting point.
 
 1. Create `examples/<Org>/<Model>/megatron_lm_ptq.yaml` following the format above
 2. Set `MLM_MODEL_CFG` to the HuggingFace repo ID
