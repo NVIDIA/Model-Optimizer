@@ -20,7 +20,7 @@ import re
 import sys
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, List, Type
+from typing import Dict, Iterable, List, Tuple, Type
 
 import torch.nn as nn
 
@@ -29,11 +29,16 @@ from ....pruning.ffn_intermediate_pruning_mixin import (
     FFNIntermediateLayerDescriptor,
     FFNIntermediatePruningMixIn,
 )
+from ....pruning.expert_removal_pruning_mixin import (
+    ExpertRemovalLayerDescriptor,
+    ExpertRemovalPruningMixIn,
+)
+
 from ....pruning.pruning_mixin import PruningMixIn
 from ...model_descriptor import ModelDescriptor, ModelDescriptorFactory
 from ...puzzformer.no_op import MatchingZeros, Same
 
-__all__ = ["NemotronHV2FFNIntermediateLayerDescriptor", "NemotronHV2ModelDescriptor"]
+__all__ = ["NemotronHV2FFNIntermediateLayerDescriptor", "NemotronHV2ExpertRemovalLayerDescriptor", "NemotronHV2ModelDescriptor"]
 
 
 def get_dynamic_modules(module_cls_str: str) -> List[Type[nn.Module]]:
@@ -61,6 +66,36 @@ def get_dynamic_modules(module_cls_str: str) -> List[Type[nn.Module]]:
 
     return matches
 
+
+@dataclass
+class NemotronHV2ExpertRemovalLayerDescriptor(ExpertRemovalLayerDescriptor):
+    target_name: str = "mixer.gate"
+    moe_prefix_name: str = "backbone.layers.{layer_idx}.mixer"
+    expert_prefix_name: str = "experts.{expert_idx}"
+    router_weights: List[str] = field(default_factory=lambda: ["gate.weight"])
+    router_biases: List[str] = field(default_factory=lambda: ["gate.e_score_correction_bias"])
+    expert_weights: List[str] = field(
+        default_factory=lambda: ["up_proj.weight", "down_proj.weight"]
+    )
+
+    def get_modules_names_to_hook(self, model) -> List[Tuple[int, str]]:
+        if self.target_name != "mixer":
+            return super().get_modules_names_to_hook(model)
+
+        # when target is `mixer` we'll target moe layers of class type: `NemotronHMOE`, as NemotronH models use auto-map we'll check for class name instead of class type.
+        target_class_name = "NemotronHMOE"
+
+        module_names_to_hook = []
+        for module_name, module in model.named_modules():
+            # restrict to attributes called "mixer" and with the desired class name
+            if (
+                module_name.endswith(self.target_name)
+                and module.__class__.__name__ == target_class_name
+            ):
+                module_names_to_hook.append(
+                    (self.block_idx_from_module_name(module_name), module_name)
+                )
+        return module_names_to_hook
 
 @dataclass
 class NemotronHV2FFNIntermediateLayerDescriptor(FFNIntermediateLayerDescriptor):
