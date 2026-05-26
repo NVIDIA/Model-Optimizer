@@ -9,6 +9,14 @@
     "rows": [
       {
         "combo": "cnn_nemotron_v2_mix",
+        "n_seqs": 128,
+        "amax_mean": 4.270833333333333,
+        "amax_std": 0.05892556509887896,
+        "mse_mean": 0.00017994006824058792,
+        "snr_db": 20.68072771083638
+      },
+      {
+        "combo": "cnn_nemotron_v2_mix",
         "n_seqs": 256,
         "amax_mean": 4.270833333333333,
         "amax_std": 0.05892556509887896,
@@ -24,12 +32,12 @@
         "snr_db": 20.68072771083638
       },
       {
-        "combo": "cnn_nemotron_v2_mix",
-        "n_seqs": 1024,
-        "amax_mean": 4.3125,
+        "combo": "nemotron-post-training-v3",
+        "n_seqs": 128,
+        "amax_mean": 4.15625,
         "amax_std": 0.0,
-        "mse_mean": 0.000179989670868963,
-        "snr_db": 20.67953069121911
+        "mse_mean": 0.0001798279699869454,
+        "snr_db": 20.68343410214358
       },
       {
         "combo": "nemotron-post-training-v3",
@@ -59,6 +67,14 @@
     "rows": [
       {
         "combo": "cnn_nemotron_v2_mix",
+        "n_seqs": 128,
+        "amax_mean": 49.166666666666664,
+        "amax_std": 0.7728015412913086,
+        "mse_mean": 0.011046340378622213,
+        "snr_db": 20.684823883828606
+      },
+      {
+        "combo": "cnn_nemotron_v2_mix",
         "n_seqs": 256,
         "amax_mean": 49.666666666666664,
         "amax_std": 0.42491829279939874,
@@ -74,12 +90,12 @@
         "snr_db": 20.695488319466126
       },
       {
-        "combo": "cnn_nemotron_v2_mix",
-        "n_seqs": 1024,
-        "amax_mean": 50.25,
-        "amax_std": 0.0,
-        "mse_mean": 0.011019248515367508,
-        "snr_db": 20.695488319466126
+        "combo": "nemotron-post-training-v3",
+        "n_seqs": 128,
+        "amax_mean": 52.666666666666664,
+        "amax_std": 0.23570226039551584,
+        "mse_mean": 0.01104199948410193,
+        "snr_db": 20.68653087183465
       },
       {
         "combo": "nemotron-post-training-v3",

@@ -338,51 +338,62 @@ in the table below. Both calibration combos are evaluated on the
 
 ### Shared-test results
 
+Sweep `n_seqs ∈ {128, 256, 512}` so the same sizes fit both pools (v3
+calibration pool is 881; mix is 1024). 3 seeds per sweep point.
+
 **Layer 0 MLP input** (test amax = 3.484, sig_pow = 2.105e-2):
 
 | combo | n_seqs | amax (mean ± std) | MSE | SNR (dB) |
 |---|---:|---:|---:|---:|
-| cnn_nemotron_v2_mix       |   256 | 4.271 ± 0.059 | 1.799e-4 | 20.681 |
-| cnn_nemotron_v2_mix       |   512 | 4.271 ± 0.059 | 1.799e-4 | 20.681 |
-| cnn_nemotron_v2_mix       | 1 024 | 4.313 ± 0.000 | 1.800e-4 | 20.680 |
-| nemotron-post-training-v3 |   256 | 4.156 ± 0.000 | 1.798e-4 | **20.683** |
-| nemotron-post-training-v3 |   512 | 4.156 ± 0.000 | 1.798e-4 | **20.683** |
-| **oracle**                | —     | (8.75 equiv.) | 1.792e-4 | 20.699 |
+| cnn_nemotron_v2_mix       | 128 | 4.271 ± 0.059 | 1.799e-4 | 20.681 |
+| cnn_nemotron_v2_mix       | 256 | 4.271 ± 0.059 | 1.799e-4 | 20.681 |
+| cnn_nemotron_v2_mix       | 512 | 4.271 ± 0.059 | 1.799e-4 | 20.681 |
+| nemotron-post-training-v3 | 128 | 4.156 ± 0.000 | 1.798e-4 | **20.683** |
+| nemotron-post-training-v3 | 256 | 4.156 ± 0.000 | 1.798e-4 | **20.683** |
+| nemotron-post-training-v3 | 512 | 4.156 ± 0.000 | 1.798e-4 | **20.683** |
+| **oracle**                | —   | (8.75 equiv.) | 1.792e-4 | 20.699 |
 
 **Layer 31 MLP input** (test amax = 43.5, sig_pow = 1.293):
 
 | combo | n_seqs | amax (mean ± std) | MSE | SNR (dB) |
 |---|---:|---:|---:|---:|
-| cnn_nemotron_v2_mix       |   256 | 49.67 ± 0.42 | 1.104e-2 | 20.689 |
-| cnn_nemotron_v2_mix       |   512 | 50.25 ± 0.00 | 1.102e-2 | **20.695** |
-| cnn_nemotron_v2_mix       | 1 024 | 50.25 ± 0.00 | 1.102e-2 | **20.695** |
-| nemotron-post-training-v3 |   256 | 52.67 ± 0.24 | 1.104e-2 | 20.687 |
-| nemotron-post-training-v3 |   512 | 53.00 ± 0.00 | 1.104e-2 | 20.686 |
-| **oracle**                | —     | (3877 equiv.) | 1.100e-2 | 20.703 |
+| cnn_nemotron_v2_mix       | 128 | 49.17 ± 0.77 | 1.105e-2 | 20.685 |
+| cnn_nemotron_v2_mix       | 256 | 49.67 ± 0.42 | 1.104e-2 | 20.689 |
+| cnn_nemotron_v2_mix       | 512 | 50.25 ± 0.00 | 1.102e-2 | **20.695** |
+| nemotron-post-training-v3 | 128 | 52.67 ± 0.24 | 1.104e-2 | 20.687 |
+| nemotron-post-training-v3 | 256 | 52.67 ± 0.24 | 1.104e-2 | 20.687 |
+| nemotron-post-training-v3 | 512 | 53.00 ± 0.00 | 1.104e-2 | 20.686 |
+| **oracle**                | —   | (3877 equiv.) | 1.100e-2 | 20.703 |
 
-(N=1024 is skipped for v3 because the v3 calib pool is 881 sequences —
-Agentic-v2's streaming iterator emits no rows in our environment.)
+### Percentile baselines on the shared test
+
+| layer | combo | p99 | p99.9 | p99.99 | p99.999 | amax @ N=512 | oracle |
+|---|---|---:|---:|---:|---:|---:|---:|
+| 0  | mix | 11.629 | 16.263 | 20.269 | 20.660 | **20.681** | 20.699 |
+| 0  | v3  | 11.552 | 15.971 | 20.044 | 20.660 | **20.683** | 20.699 |
+| 31 | mix |  7.288 | 10.921 | 19.928 | 20.692 | **20.695** | 20.703 |
+| 31 | v3  |  7.178 | 10.094 | 20.581 | 20.687 | **20.686** | 20.703 |
 
 ### Observations from the clean comparison
 
-1. **Combo-to-combo spread is 0.002 dB (layer 0) and 0.009 dB (layer 31)**
-   on a shared held-out test tensor. Both combos calibrate to an amax
-   within ~3% of each other (4.16 / 4.31 on layer 0; 50.25 / 53.0 on
+1. **Combo-to-combo spread on the shared test is 0.002 dB (layer 0) and
+   0.009 dB (layer 31)** at N=512. Both combos calibrate to an amax
+   within ~3% of each other (4.16 / 4.27 on layer 0; 50.25 / 53.0 on
    layer 31) and the resulting MSE on disjoint test data is
    indistinguishable.
 2. **Which combo "wins" depends on the layer.** v3 is fractionally
    better on layer 0; mix is fractionally better on layer 31. Both
    margins are well below seed noise — the two combos are
    interchangeable for input_scale calibration purposes.
-3. **Default amax is within 0.008–0.018 dB of oracle on both layers**
+3. **Default amax is within 0.017–0.018 dB of oracle on both layers**
    on this clean test. Per-block scale rounding leaves the MSE
    landscape extremely flat — the oracle's amax-equivalent for layer
-   31 is 3877 (88× larger than the test amax), and it only buys
-   0.008 dB.
-4. **Calibration size insensitivity confirmed.** Going from 256 → 1024
-   sequences moves SNR by ≤ 0.001 dB on layer 0 and ≤ 0.006 dB on
-   layer 31. The mix's layer-31 amax even converges fully at N=512
-   (std 0.00 across 3 seeds).
+   31 is 3877 (~90× larger than the test amax), and it only buys
+   0.017 dB.
+4. **Calibration size insensitivity confirmed.** Going from 128 → 512
+   sequences moves SNR by 0.000 dB on layer 0 and ≤ 0.010 dB on
+   layer 31. v3's amax converges at N=128 with std 0.000 — every
+   random 128-sample subset already pins the global max.
 5. **Percentile baselines remain uniformly worse**, with p99 / p99.9 /
    p99.99 losing 1–13 dB by under-shooting inference-time outliers.
 

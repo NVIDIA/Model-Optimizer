@@ -180,7 +180,9 @@ def main():
     if DEVICE.type == "cuda":
         print(f"gpu:    {torch.cuda.get_device_name(0)}\n")
 
-    n_seqs_list = [256, 512, 1024]
+    # Pool sizes after capture: mix=1024, v3=881 (Agentic-v2 dropped). Pick three
+    # sweep points that fit both.
+    n_seqs_list = [128, 256, 512]
     n_seeds = 3
     results = []
 
