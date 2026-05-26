@@ -502,7 +502,8 @@ class TrtExecBenchmark(Benchmark):
                 # need to push the model to the device and use trtexec_safe to run
                 scp_cmd = [
                     "scp",
-                    f"-P{self.remote_port}",
+                    "-P",
+                    str(self.remote_port),
                     self.engine_path,
                     f"{self.remote_user}@{self.remote_ip}:{shlex.quote(self.remote_engine_path)}",
                 ]
