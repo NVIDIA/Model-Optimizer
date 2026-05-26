@@ -29,7 +29,7 @@ Model Optimizer is also integrated with [NVIDIA Megatron-Bridge](https://github.
 - [2026/05/13] **Pruning & NAS News**
   - [**Puzzletron**](./examples/puzzletron): A new algorithm for heterogeneous pruning & NAS of LLM and VLM models.
   - [**End-to-end Minitron workflow**](./examples/pruning/minitron/NVIDIA-Nemotron-Nano-9B-v2): Pruning + distillation + quantization + evaluation + vLLM deployment for Nemotron-Nano-9B-v2 → pruned 7B, including data blend preparation and an ablation study.
-  - Latest customer stories:
+  - Latest customer stories on compression:
     - [Bielik.AI showcases an open European sovereign AI model at NVIDIA GTC](https://bielik.ai/en/nvidia-gtc-bielik-minitron-premiere/)
     - [Domyn-Large: The journey of a European sovereign AI model for regulated industries](https://www.domyn.com/blog/domyn-large-the-journey-of-a-european-sovereign-ai-model-for-regulated-industries)
 - [2026/03/11] Model Optimizer quantized Nemotron-3-Super checkpoints are available on Hugging Face for download: [FP8](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8), [NVFP4](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4). Learn more in the [Nemotron 3 Super release blog](https://blogs.nvidia.com/blog/nemotron-3-super-agentic-ai/). Check out how to quantize Nemotron 3 models for deployment acceleration [here](./examples/llm_ptq/README.md)
