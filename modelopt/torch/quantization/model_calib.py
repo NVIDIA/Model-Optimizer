@@ -527,18 +527,6 @@ def mse_calibrate(
                         global_amax=module.global_amax,
                         quant_func=partial(_mse_quant_func, quantizer=module),
                     )
-                    continue
-
-                # Default MSE calibrator (universal fallback for non-NVFP4 quantizers
-                # or NVFP4 quantizers when fp8_scale_sweep=False).
-                module._calibrator = MseCalibrator(
-                    amax=initial_amax,
-                    axis=module._calibrator._axis,
-                    step_size=step_size,
-                    start_multiplier=start_multiplier,
-                    stop_multiplier=stop_multiplier,
-                    quant_func=partial(_mse_quant_func, quantizer=module),
-                )
 
     # Step 3: calibrate weight quantizers via iter_weights_for_calibration.
     name_to_module = dict(model.named_modules())
