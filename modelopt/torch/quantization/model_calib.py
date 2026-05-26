@@ -488,27 +488,18 @@ def mse_calibrate(
     _sync_grouped_weight_global_amax(model)
 
     # Step 2: replace calibrators with MseCalibrator for enabled quantizers.
-    skipped_non_nvfp4: dict[str, int] = {}
     for name, module in list(model.named_modules()):
         if isinstance(module, TensorQuantizer) and not module._disabled:
             if module._calibrator is not None and not module._dynamic and hasattr(module, "_amax"):
-                bs = getattr(module, "block_sizes", None)
-                if not (
-                    getattr(module, "_num_bits", None) == (2, 1)
-                    and bs is not None
-                    and bs.get("scale_bits") == (4, 3)
-                ):
-                    fmt = f"num_bits={module._num_bits} block_sizes={bs}"
-                    skipped_non_nvfp4[fmt] = skipped_non_nvfp4.get(fmt, 0) + 1
-                    continue
                 initial_amax = module._amax.clone().detach()
-                is_nvfp4_static = module.is_nvfp4_static
 
                 # Promote standalone NVFP4-static quantizers; grouped siblings
                 # already promoted by _sync_grouped_weight_global_amax above.
-                if is_nvfp4_static and not isinstance(module, NVFP4StaticQuantizer):
+                if module.is_nvfp4_static and not isinstance(module, NVFP4StaticQuantizer):
                     global_amax = reduce_amax(initial_amax, axis=None)
                     NVFP4StaticQuantizer.from_tensor_quantizer(module, global_amax=global_amax)
+
+                is_nvfp4_static = isinstance(module, NVFP4StaticQuantizer)
 
                 if fp8_scale_sweep:
                     # Check if backend has a registered custom calibrator factory.
@@ -538,7 +529,8 @@ def mse_calibrate(
                     )
                     continue
 
-                # Create MSE calibrator with quant_func
+                # Default MSE calibrator (universal fallback for non-NVFP4 quantizers
+                # or NVFP4 quantizers when fp8_scale_sweep=False).
                 module._calibrator = MseCalibrator(
                     amax=initial_amax,
                     axis=module._calibrator._axis,
@@ -547,14 +539,6 @@ def mse_calibrate(
                     stop_multiplier=stop_multiplier,
                     quant_func=partial(_mse_quant_func, quantizer=module),
                 )
-
-    if skipped_non_nvfp4:
-        formats = ", ".join(f"{n}x [{fmt}]" for fmt, n in skipped_non_nvfp4.items())
-        warnings.warn(
-            f"MSE calibration only meaningful for NVFP4; skipped {sum(skipped_non_nvfp4.values())} "
-            f"non-NVFP4 quantizer(s) — keeping max-calibrated amax: {formats}",
-            stacklevel=2,
-        )
 
     # Step 3: calibrate weight quantizers via iter_weights_for_calibration.
     name_to_module = dict(model.named_modules())
