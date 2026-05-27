@@ -26,6 +26,9 @@ pipeline:
       - OUTPUT_DIR: /scratchspace/megatron-bridge
     slurm_config:
       _factory_: "slurm_factory"
+      # Megatron-Bridge is preinstalled in nemo:26.04 at /opt/Megatron-Bridge.
+      container: nvcr.io/nvidia/nemo:26.04
+      modelopt_install_path: /opt/venv/lib/python3.12/site-packages/modelopt
       partition: batch
       nodes: 1
       ntasks_per_node: 1
