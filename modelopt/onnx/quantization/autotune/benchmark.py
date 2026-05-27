@@ -503,6 +503,7 @@ class TrtExecBenchmark(Benchmark):
                     "scp",
                     "-P",
                     str(self.remote_port),
+                    "-oStrictHostKeyChecking=accept-new",
                     self.engine_path,
                     f"{self.remote_user}@{self.remote_ip}:{shlex.quote(self.remote_engine_path)}",
                 ]
