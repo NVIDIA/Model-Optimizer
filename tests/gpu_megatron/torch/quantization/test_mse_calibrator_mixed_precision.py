@@ -19,31 +19,22 @@ the NVFP4 forward path uses a fused Triton kernel."""
 import pytest
 import torch
 
+from modelopt.torch.quantization.calib import MseCalibrator
 from modelopt.torch.quantization.nn import NVFP4StaticQuantizer, TensorQuantizer
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="NVFP4 path requires CUDA")
-def test_mixed_nvfp4_fp8_only_nvfp4_promoted():
-    """Mixed NVFP4 + FP8: the NVFP4 layer is promoted to NVFP4StaticQuantizer; the
-    FP8 layer is left as a plain TensorQuantizer (max-calibrated amax preserved,
-    no MseCalibrator replacement)."""
-    import modelopt.torch.quantization as mtq
-    from modelopt.torch.quantization.model_calib import mse_calibrate
+class _TwoLayer(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.linear1 = torch.nn.Linear(16, 16, bias=False)
+        self.linear2 = torch.nn.Linear(16, 8, bias=False)
 
-    # block_size=16 forces linear1.in_features=16.
-    class _TwoLayer(torch.nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.linear1 = torch.nn.Linear(16, 16, bias=False)
-            self.linear2 = torch.nn.Linear(16, 8, bias=False)
+    def forward(self, x):
+        return self.linear2(self.linear1(x))
 
-        def forward(self, x):
-            return self.linear2(self.linear1(x))
 
-    device = torch.device("cuda")
-    model = _TwoLayer().to(device)
-    inputs = torch.randn(1, 16, device=device)
-    config = {
+def _mixed_nvfp4_fp8_config():
+    return {
         "quant_cfg": [
             {"quantizer_name": "*", "enable": False},
             {  # Layer 1 — NVFP4 static (eligible for NVFP4StaticQuantizer promotion).
@@ -54,21 +45,53 @@ def test_mixed_nvfp4_fp8_only_nvfp4_promoted():
                     "axis": None,
                 },
             },
-            {  # Layer 2 — FP8 per-tensor (not NVFP4; should be left alone).
+            {  # Layer 2 — FP8 per-tensor.
                 "quantizer_name": "*linear2.weight_quantizer",
                 "cfg": {"num_bits": (4, 3), "axis": None},
             },
         ],
         "algorithm": "max",
     }
-    mtq.quantize(model, config, forward_loop=lambda m: m(inputs))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="NVFP4 path requires CUDA")
+def test_mixed_nvfp4_fp8_sweep_true_skips_fp8():
+    """fp8_scale_sweep=True: NVFP4 layer is promoted to NVFP4StaticQuantizer; the
+    FP8 layer is left as a plain TensorQuantizer (no backend factory registered →
+    no MseCalibrator replacement, max-calibrated amax preserved)."""
+    import modelopt.torch.quantization as mtq
+    from modelopt.torch.quantization.model_calib import mse_calibrate
+
+    device = torch.device("cuda")
+    model = _TwoLayer().to(device)
+    inputs = torch.randn(1, 16, device=device)
+    mtq.quantize(model, _mixed_nvfp4_fp8_config(), forward_loop=lambda m: m(inputs))
     mse_calibrate(model, lambda m: m(inputs), fp8_scale_sweep=True)
 
-    # NVFP4 layer: promoted from TensorQuantizer to NVFP4StaticQuantizer.
     assert isinstance(model.linear1.weight_quantizer, NVFP4StaticQuantizer)
-    # FP8 layer: exact type TensorQuantizer — not a subclass, no MseCalibrator
-    # replacement, max-calibrated amax kept.
+    # FP8 layer: exact type TensorQuantizer, no MseCalibrator replacement.
     assert type(model.linear2.weight_quantizer) is TensorQuantizer
+    assert not isinstance(model.linear2.weight_quantizer._calibrator, MseCalibrator)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="NVFP4 path requires CUDA")
+def test_mixed_nvfp4_fp8_sweep_false_uses_mse_for_both():
+    """fp8_scale_sweep=False: both NVFP4 and FP8 layers get an MseCalibrator. NVFP4
+    layer is still promoted to NVFP4StaticQuantizer (promotion is independent of
+    the sweep flag)."""
+    import modelopt.torch.quantization as mtq
+    from modelopt.torch.quantization.model_calib import mse_calibrate
+
+    device = torch.device("cuda")
+    model = _TwoLayer().to(device)
+    inputs = torch.randn(1, 16, device=device)
+    mtq.quantize(model, _mixed_nvfp4_fp8_config(), forward_loop=lambda m: m(inputs))
+    mse_calibrate(model, lambda m: m(inputs), fp8_scale_sweep=False)
+
+    assert isinstance(model.linear1.weight_quantizer, NVFP4StaticQuantizer)
+    assert isinstance(model.linear1.weight_quantizer._calibrator, MseCalibrator)
+    assert type(model.linear2.weight_quantizer) is TensorQuantizer
+    assert isinstance(model.linear2.weight_quantizer._calibrator, MseCalibrator)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="NVFP4 path requires CUDA")

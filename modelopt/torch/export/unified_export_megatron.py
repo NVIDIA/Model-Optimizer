@@ -47,8 +47,7 @@ from .model_config import (
     QUANTIZATION_W4A16_NVFP4,
 )
 from .plugins.hf_checkpoint_utils import (
-    copy_hf_ckpt_remote_code,
-    copy_tokenizer_from_local_ckpt,
+    copy_non_safetensor_files_from_ckpt,
     load_multimodal_components,
 )
 from .plugins.mcore_common import all_mcore_hf_export_mapping
@@ -300,6 +299,14 @@ class GPTModelExporter:
         # We use the last PP rank and the 1st EP rank to write the config because
         # medusa_heads and eagle_module only exist in the last stage.
         if is_last_stage_main_rank:
+            # Baseline: pull every non-safetensors file from the source (tokenizer,
+            # remote_code *.py, README, etc.). modelopt-owned files (config.json,
+            # generation_config.json, hf_quant_config.json, preprocessor_config.json)
+            # are overwritten below.
+            if self._hf_pretrained_model_name is not None and os.path.isdir(
+                self._hf_pretrained_model_name
+            ):
+                copy_non_safetensor_files_from_ckpt(self._hf_pretrained_model_name, save_directory)
             self._hf_config.save_pretrained(save_directory)
             try:
                 generation_config = transformers.GenerationConfig.from_pretrained(
@@ -309,21 +316,19 @@ class GPTModelExporter:
                 generation_config.save_pretrained(save_directory)
             except OSError:
                 pass
-            try:
-                # When the source is a local directory, copy tokenizer files verbatim to
-                # preserve the pre-transformers-v5 PreTrainedTokenizer(Fast) format.
-                if self._hf_pretrained_model_name is not None and os.path.isdir(
-                    self._hf_pretrained_model_name
-                ):
-                    copy_tokenizer_from_local_ckpt(self._hf_pretrained_model_name, save_directory)
-                else:
+            # Fall back to AutoTokenizer for remote (non-local) sources where the
+            # bulk copy above is a no-op.
+            if self._hf_pretrained_model_name is None or not os.path.isdir(
+                self._hf_pretrained_model_name
+            ):
+                try:
                     tokenizer = transformers.AutoTokenizer.from_pretrained(
                         self._hf_pretrained_model_name,
                         trust_remote_code=self.trust_remote_code,
                     )
                     tokenizer.save_pretrained(save_directory)
-            except (OSError, TypeError, ValueError, ImportError):
-                pass
+                except (OSError, TypeError, ValueError, ImportError):
+                    pass
             try:
                 # Load and save preprocessor config from the original model
                 processor = AutoProcessor.from_pretrained(
@@ -378,9 +383,6 @@ class GPTModelExporter:
 
         # Barrier to ensure the export_dir has been created.
         torch.distributed.barrier()
-
-        if is_last_stage_main_rank and self._hf_config is not None:
-            copy_hf_ckpt_remote_code(pretrained_model_name_or_path, save_directory)
 
         # Newer versions of VLLM expect config.json with hf_quant_config
         config_json_file = save_directory + "/config.json"

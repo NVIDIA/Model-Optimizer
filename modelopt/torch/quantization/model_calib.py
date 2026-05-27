@@ -528,6 +528,17 @@ def mse_calibrate(
                         quant_func=partial(_mse_quant_func, quantizer=module),
                     )
 
+                if not fp8_scale_sweep:
+                    # Create MSE calibrator with quant_func
+                    module._calibrator = MseCalibrator(
+                        amax=initial_amax,
+                        axis=module._calibrator._axis,
+                        step_size=step_size,
+                        start_multiplier=start_multiplier,
+                        stop_multiplier=stop_multiplier,
+                        quant_func=partial(_mse_quant_func, quantizer=module),
+                    )
+
     # Step 3: calibrate weight quantizers via iter_weights_for_calibration.
     name_to_module = dict(model.named_modules())
     seen_modules: set[int] = set()

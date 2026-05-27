@@ -154,23 +154,13 @@ def load_multimodal_components(
     return multimodal_state_dict
 
 
-_TOKENIZER_FILES = (
-    "tokenizer.json",
-    "tokenizer_config.json",
-    "special_tokens_map.json",
-    "chat_template.jinja",
-    "added_tokens.json",
-    "tokenizer.model",
-    "vocab.json",
-    "merges.txt",
-)
+def copy_non_safetensor_files_from_ckpt(src: str | os.PathLike, dst: str | os.PathLike):
+    """Copy every non-safetensors file from a local HF checkpoint dir verbatim.
 
-
-def copy_tokenizer_from_local_ckpt(src: str | os.PathLike, dst: str | os.PathLike):
-    """Copy tokenizer files verbatim from a local HF checkpoint dir.
-
-    Preserves the pre-transformers-v5 PreTrainedTokenizer(Fast) layout (full
-    ``added_tokens_decoder`` in ``tokenizer_config.json`` + ``special_tokens_map.json``).
+    Use as a baseline so tokenizer files, remote_code ``*.py``, README, LICENSE, etc.
+    are preserved from the source. The caller is expected to overwrite the files
+    modelopt owns (``config.json``, ``generation_config.json``, ``hf_quant_config.json``,
+    ``preprocessor_config.json``) after this step.
 
     Args:
         src: Source HF checkpoint directory. Must be a local path.
@@ -179,7 +169,10 @@ def copy_tokenizer_from_local_ckpt(src: str | os.PathLike, dst: str | os.PathLik
     if not os.path.isdir(src):
         raise ValueError(f"Invalid source path: {src}. It should be a directory.")
     os.makedirs(dst, exist_ok=True)
-    for fn in _TOKENIZER_FILES:
-        p = os.path.join(src, fn)
-        if os.path.isfile(p):
-            shutil.copy2(p, dst)
+    for entry in os.listdir(src):
+        sp = os.path.join(src, entry)
+        if not os.path.isfile(sp):
+            continue
+        if entry.endswith(".safetensors") or entry == "model.safetensors.index.json":
+            continue
+        shutil.copy2(sp, dst)
