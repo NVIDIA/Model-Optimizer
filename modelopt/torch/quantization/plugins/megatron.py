@@ -285,7 +285,11 @@ def megatron_replace_quant_module_hook(model: torch.nn.Module):
     def _register_extra_state_callbacks(model: torch.nn.Module):
         for name, module in model.named_modules():
             if type(module) in QuantModuleRegistry:
-                # This module will be replaced as a QuantModule
+                # Skip output_layer w/o enabled weight_quantizer
+                if name.endswith("output_layer") and not getattr(
+                    getattr(module, "weight_quantizer", None), "is_enabled", False
+                ):
+                    continue
                 register_modelopt_extra_state_callbacks(
                     module,
                     quant_module_get_extra_state,
@@ -794,7 +798,7 @@ def _megatron_grad_ckpt_context(model: torch.nn.Module):
 
 
 def _is_param_grad_enabled_for_megatron(pname: str, model: torch.nn.Module) -> bool:
-    return "embed" in pname
+    return "weight" in pname
 
 
 def _register_auto_quantize_support() -> None:

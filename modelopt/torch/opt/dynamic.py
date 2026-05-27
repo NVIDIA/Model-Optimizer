@@ -1044,9 +1044,7 @@ class _DMRegistryCls:
         def decorator(dm_class: type[_DMRegistryCls.T]) -> type[_DMRegistryCls.T]:
             """Register dnn_class with appropriate nn_class."""
             for nn_cls_, key in cls_to_key.items():
-                # Skip duplicate registrations (multi-path modelopt imports).
-                if nn_cls_ in self._registry:
-                    continue
+                assert nn_cls_ not in self._registry, f"{nn_cls_} already registered!"
                 self._registry[nn_cls_] = dm_class
                 self._key_registry[nn_cls_] = key
             return dm_class

@@ -29,7 +29,7 @@ from safetensors.torch import save_file
 
 import modelopt.torch.quantization as mtq
 import modelopt.torch.speculative as mtsp
-from modelopt.torch.export import export_mcore_gpt_to_hf, import_mcore_gpt_from_hf
+from modelopt.torch.export import KV_CACHE_FP8, export_mcore_gpt_to_hf, import_mcore_gpt_from_hf
 from modelopt.torch.export.unified_export_megatron import GPTModelExporter
 from modelopt.torch.speculative.eagle.default_config import default_eagle_config
 from modelopt.torch.speculative.plugins.megatron_eagle import _DynamicEagleGPTModel
@@ -42,8 +42,15 @@ def _verify_model_quant_config(
     """Verify config.json and hf_quant_config.json"""
     config_dict = json.load(open(export_dir / "config.json"))
     hf_quant_config_dict = json.load(open(export_dir / "hf_quant_config.json"))
-    # Make sure config.json and hf_quant_config.json use the same serving config.
-    assert config_dict["quantization_config"] == hf_quant_config_dict
+    # Make sure config.json and hf_quant_config.json are consistent
+    assert (
+        config_dict["quantization_config"]["quant_algo"]
+        == hf_quant_config_dict["quantization"]["quant_algo"]
+    )
+    assert (
+        config_dict["quantization_config"]["ignore"]
+        == hf_quant_config_dict["quantization"]["exclude_modules"]
+    )
 
     # Verify config.json
     if kv_cache_quant_cfg:
@@ -51,17 +58,17 @@ def _verify_model_quant_config(
 
     # Verify hf_quant_config.json
     if quant_config:
-        quant_config_dict = hf_quant_config_dict
+        quant_config_dict = hf_quant_config_dict["quantization"]
         quant_type = quant_config_dict["quant_algo"]
         assert (
             quant_type in quant_config
         )  # quant config str is subset of quant config e.g. NVFP4 -> NVFP4_DEFAULT_CFG
-        assert len(quant_config_dict["ignore"]) > 1  # Dynamically added exclude modules
+        assert len(quant_config_dict["exclude_modules"]) > 1  # Dynamically added exclude modules
         if quant_type == "NVFP4":
-            assert quant_config_dict["config_groups"]["group_0"]["weights"]["group_size"] == 16
+            assert quant_config_dict["group_size"] == 16
 
         if kv_cache_quant_cfg:
-            assert quant_config_dict["kv_cache_scheme"]["num_bits"] == 8
+            assert quant_config_dict["kv_cache_quant_algo"] == KV_CACHE_FP8
 
 
 def _test_unified_export_megatron(

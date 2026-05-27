@@ -69,3 +69,97 @@ def test_mixed_nvfp4_fp8_only_nvfp4_promoted():
     # FP8 layer: exact type TensorQuantizer — not a subclass, no MseCalibrator
     # replacement, max-calibrated amax kept.
     assert type(model.linear2.weight_quantizer) is TensorQuantizer
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="NVFP4 path requires CUDA")
+def test_output_layer_nvfp4_promotion_and_forward():
+    """An attribute named `output_layer` with W4A16 NVFP4 config is promoted to
+    NVFP4StaticQuantizer and its forward dispatches cleanly through the static
+    blockwise FP4 kernel (regression for the lm_head crash that motivated the
+    NVFP4 promotion in mse_calibrate)."""
+    import modelopt.torch.quantization as mtq
+    from modelopt.torch.quantization.model_calib import mse_calibrate
+
+    class _WithOutputLayer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.decoder = torch.nn.Linear(16, 16, bias=False)
+            self.output_layer = torch.nn.Linear(16, 32, bias=False)
+
+        def forward(self, x):
+            return self.output_layer(self.decoder(x))
+
+    device = torch.device("cuda")
+    model = _WithOutputLayer().to(device)
+    inputs = torch.randn(1, 16, device=device)
+    nvfp4_cfg = {
+        "num_bits": (2, 1),
+        "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
+        "axis": None,
+    }
+    config = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {"quantizer_name": "*decoder.weight_quantizer", "cfg": nvfp4_cfg},
+            {"quantizer_name": "*output_layer.weight_quantizer", "cfg": nvfp4_cfg},
+        ],
+        "algorithm": "max",
+    }
+    mtq.quantize(model, config, forward_loop=lambda m: m(inputs))
+    mse_calibrate(model, lambda m: m(inputs), fp8_scale_sweep=True)
+
+    # Both layers (decoder + output_layer) must be promoted.
+    assert isinstance(model.decoder.weight_quantizer, NVFP4StaticQuantizer)
+    assert isinstance(model.output_layer.weight_quantizer, NVFP4StaticQuantizer)
+    # Forward must dispatch through static_blockwise_fp4_fake_quant without
+    # falling into the FP8-only scaled_e4m3 path. Pre-promotion this raised
+    # NotImplementedError("Only support E=4 & M=3 for now.").
+    with torch.no_grad():
+        out = model(inputs)
+    assert out.shape == (1, 32)
+    assert torch.isfinite(out).all()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="NVFP4 path requires CUDA")
+def test_output_layer_nvfp4_export_keys():
+    """A W4A16-quantized output_layer exports with CT-style weight + scale keys."""
+    import modelopt.torch.quantization as mtq
+    from modelopt.torch.export.quant_utils import get_weight_scaling_factor
+    from modelopt.torch.quantization.model_calib import mse_calibrate
+
+    class _OutputOnly(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.output_layer = torch.nn.Linear(16, 32, bias=False)
+
+        def forward(self, x):
+            return self.output_layer(x)
+
+    device = torch.device("cuda")
+    model = _OutputOnly().to(device)
+    inputs = torch.randn(1, 16, device=device)
+    config = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {
+                "quantizer_name": "*output_layer.weight_quantizer",
+                "cfg": {
+                    "num_bits": (2, 1),
+                    "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
+                    "axis": None,
+                },
+            },
+        ],
+        "algorithm": "max",
+    }
+    mtq.quantize(model, config, forward_loop=lambda m: m(inputs))
+    mse_calibrate(model, lambda m: m(inputs), fp8_scale_sweep=True)
+
+    # Export-time scale extraction must succeed for the promoted output_layer
+    # without raising RuntimeError on the per-block amax shape mismatch that
+    # broke the original (un-promoted) HF export.
+    scale = get_weight_scaling_factor(model.output_layer)
+    assert scale is not None
+    # Block dim should match weight.shape[-1] / 16.
+    expected_blocks = model.output_layer.weight.shape[-1] // 16
+    assert scale.shape[-1] == expected_blocks

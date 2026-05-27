@@ -124,6 +124,8 @@ def gpu(session):
 def gpu_megatron(session):
     # nemo:26.04 has transformers 5.x but system-wide installed trtllm 1.2.0 which does not support it causing import errors
     session.run("pip", "uninstall", "-y", "tensorrt_llm")
+    # Pre-installed nvidia-modelopt shadows the editable install
+    session.run("pip", "uninstall", "-y", "nvidia-modelopt")
     session.run("python", "-m", "pip", "install", "-e", ".[hf,dev-test]")
     session.run("python", "-m", "pytest", "tests/gpu_megatron", *_cov_args())
 
