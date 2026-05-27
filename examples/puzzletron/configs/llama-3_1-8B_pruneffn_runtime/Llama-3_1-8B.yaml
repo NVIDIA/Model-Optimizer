@@ -23,6 +23,8 @@ calc_subblock_stats:
   prefill_seq_len: 4096
   generation_seq_len: 4096
   num_active_tokens_override: # Optional override for sequence lengths
+  prefill_queue_size: 0
+  allocate_prefill_query: false
   benchmark_iterations: # Set to a number (e.g., 1000) to enable runtime benchmarking
   merge_with_existing_stats: false
   subblock_stats_filename: "subblock_stats.json"
@@ -38,7 +40,7 @@ scoring:
   teacher_dir: ${to_path:${teacher_dir}}
   output_dir: ${puzzle_dir}/single_sequence_replacement_solutions--validation
 
-  eval_samples: 8
+  eval_samples: 128
   micro_batch_size: 1
   seed: 42
   shuffle_seed: 444
