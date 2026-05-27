@@ -98,8 +98,7 @@ class TestDiscoverRuns:
         )
 
     def test_empty_prefix_no_leading_slash(self, tmp_path):
-        """cjluo's regression: empty s3_prefix_base must not produce keys with
-        a leading '/' (which would create unwanted /<key> entries in S3)."""
+        """Empty s3_prefix_base must not produce keys with a leading '/'."""
         run = _make_run_dir(tmp_path / "myrun")
         queue = upload_to_s3._discover_runs(run, "")
         assert queue == [(run, "myrun")]
@@ -121,3 +120,34 @@ class TestDiscoverRuns:
         queue = upload_to_s3._discover_runs(root, "results")
         assert len(queue) == 1
         assert queue[0][0].name == "a"
+
+
+class TestCheckProvenance:
+    def test_complete(self, tmp_path):
+        run = tmp_path / "r"
+        run.mkdir()
+        (run / "configuration.json").write_text('{"container_image": "vllm/vllm-openai:nightly"}')
+        assert upload_to_s3._check_provenance(run) == []
+
+    def test_missing_container_image(self, tmp_path):
+        run = tmp_path / "r"
+        run.mkdir()
+        (run / "configuration.json").write_text('{"container_image": null}')
+        assert upload_to_s3._check_provenance(run) == ["container_image"]
+
+    def test_no_configuration_json(self, tmp_path):
+        run = tmp_path / "r"
+        run.mkdir()
+        assert upload_to_s3._check_provenance(run) == list(upload_to_s3._REQUIRED_PROVENANCE_FIELDS)
+
+    def test_malformed_configuration_json(self, tmp_path):
+        run = tmp_path / "r"
+        run.mkdir()
+        (run / "configuration.json").write_text("{ not valid json")
+        assert upload_to_s3._check_provenance(run) == list(upload_to_s3._REQUIRED_PROVENANCE_FIELDS)
+
+    def test_empty_string_is_missing(self, tmp_path):
+        run = tmp_path / "r"
+        run.mkdir()
+        (run / "configuration.json").write_text('{"container_image": ""}')
+        assert upload_to_s3._check_provenance(run) == ["container_image"]

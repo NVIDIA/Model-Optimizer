@@ -303,17 +303,28 @@ def dump_env(args, save_dir, overrides=None):
     config["huggingface_model_id"] = os.environ.get("HUGGINGFACE_MODEL_ID") or None
 
     # Per-config UID. SHA-256 of the inputs that identify the *configuration*
-    # of this run (model, algorithm, concurrency, methodology SHA). Identical
-    # configs hash to the same uid so the visualizer can group repeats of the
-    # same experiment. The timestamp is intentionally excluded — it is stored
-    # separately in `config["timestamp"]` for ordering, but mixing it in here
-    # would make every run unique by construction and defeat the grouping.
+    # of this run. Identical configs hash to the same uid so the visualizer
+    # can group repeats of the same experiment. Includes anything that
+    # changes which numbers come out: target model, drafter, engine,
+    # algorithm, draft/output lengths, parallelism, concurrency, methodology
+    # SHA, and the runtime_params dict (sampling temperature, engine_args,
+    # chat_template_args). Timestamp is intentionally excluded — it lives in
+    # `config["timestamp"]` for ordering; mixing it here would make every
+    # run unique by construction. Read fields from `config` (redacted) so
+    # secret-only differences don't bump uid.
     uid_parts = "|".join(
         [
-            str(getattr(args, "model_dir", "") or ""),
-            str(getattr(args, "speculative_algorithm", "") or ""),
-            str(getattr(args, "concurrency", "") or ""),
+            str(config.get("model_dir") or ""),
+            str(config.get("draft_model_dir") or ""),
+            str(config.get("engine") or ""),
+            str(config.get("speculative_algorithm") or ""),
+            str(config.get("draft_length") or ""),
+            str(config.get("output_length") or ""),
+            str(config.get("concurrency") or ""),
+            str(config.get("tp_size") or ""),
+            str(config.get("ep_size") or ""),
             str(config.get("specdec_bench_sha") or ""),
+            json.dumps(config.get("runtime_params") or {}, sort_keys=True, default=str),
         ]
     )
     config["uid"] = hashlib.sha256(uid_parts.encode()).hexdigest()[:16]

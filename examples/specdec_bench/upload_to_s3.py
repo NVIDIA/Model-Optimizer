@@ -38,6 +38,7 @@ Usage examples:
 """
 
 import argparse
+import json
 import os
 import sys
 import traceback
@@ -45,14 +46,34 @@ from pathlib import Path
 
 _RUN_SENTINELS = ("configuration.json", "timing.json", "acceptance_rate.json")
 
+# Provenance fields that must be non-null for a run to count as strictly
+# reproducible from S3. `container_image` carries the torch / CUDA / NCCL
+# versions which dump_env can't otherwise see; without it the row in the
+# visualizer has no path back to the binary environment.
+_REQUIRED_PROVENANCE_FIELDS = ("container_image",)
+
+
+def _check_provenance(run_dir: Path) -> list[str]:
+    """Return a list of missing required provenance fields in run_dir/configuration.json.
+
+    Empty list means the run is acceptable for upload. A run with no
+    configuration.json at all is reported as missing every field.
+    """
+    cfg_path = run_dir / "configuration.json"
+    if not cfg_path.is_file():
+        return list(_REQUIRED_PROVENANCE_FIELDS)
+    try:
+        with open(cfg_path) as f:
+            cfg = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return list(_REQUIRED_PROVENANCE_FIELDS)
+    return [k for k in _REQUIRED_PROVENANCE_FIELDS if not cfg.get(k)]
+
 
 # ── S3 helpers ────────────────────────────────────────────────────────────────
-# Inlined from a former specdec_bench/s3_utils.py so this stays a drop-in
-# single-file tool: a contributor can `wget upload_to_s3.py` and run it without
-# installing the specdec_bench package. Defaults are empty — endpoint, key id,
-# and secret are taken from --endpoint / --key-id / --secret (or the
-# corresponding S3_ENDPOINT / S3_KEY_ID / S3_SECRET env vars). No team-specific
-# infrastructure leaks into this public example.
+# Endpoint, key id, and secret default to empty and are taken from --endpoint /
+# --key-id / --secret (or the corresponding S3_ENDPOINT / S3_KEY_ID / S3_SECRET
+# env vars).
 
 
 def parse_s3_path(path: str) -> tuple[str, str]:
@@ -178,6 +199,15 @@ def main():
         action="store_true",
         help="Print what would be uploaded without actually uploading",
     )
+    parser.add_argument(
+        "--allow-incomplete-provenance",
+        action="store_true",
+        help=(
+            "Allow uploading runs whose configuration.json is missing required "
+            "provenance fields (container_image). Without this flag, such runs "
+            "are rejected because they cannot be strictly reproduced from S3."
+        ),
+    )
     args = parser.parse_args()
 
     if not args.s3_dest.startswith("s3://"):
@@ -194,6 +224,24 @@ def main():
         sys.exit("No run directories found to upload.")
 
     print(f"Found {len(queue)} run(s) to upload → s3://{bucket}/")
+
+    # Reject runs missing required provenance fields unless explicitly allowed.
+    incomplete = [(d, _check_provenance(d)) for d, _ in queue]
+    incomplete = [(d, missing) for d, missing in incomplete if missing]
+    if incomplete:
+        for d, missing in incomplete:
+            print(f"  {d}: missing {missing}", file=sys.stderr)
+        if not args.allow_incomplete_provenance:
+            sys.exit(
+                f"Error: {len(incomplete)} run(s) are missing required provenance "
+                f"fields. Set CONTAINER_IMAGE before running, or pass "
+                f"--allow-incomplete-provenance to upload anyway."
+            )
+        print(
+            f"Warning: --allow-incomplete-provenance — uploading {len(incomplete)} "
+            f"run(s) with missing provenance.",
+            file=sys.stderr,
+        )
 
     if args.dry_run:
         for local_run_dir, s3_key in queue:
