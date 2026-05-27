@@ -26,6 +26,7 @@ It provides comprehensive TensorRT utilities including:
 - TensorRTPyBenchmark: Uses TensorRT Python API for direct engine profiling
 """
 
+import contextlib
 import ctypes
 import importlib.util
 import os
@@ -511,47 +512,77 @@ class TrtExecBenchmark(Benchmark):
                 result = subprocess.run(
                     scp_cmd, capture_output=True, text=True, timeout=self.network_timeout_seconds
                 )  # nosec B603
+
                 if result.returncode != 0:
                     self.logger.error(f"Failed to push engine to remote device: {result.stderr}")
                     return float("inf")
-                ld_path = f"LD_LIBRARY_PATH={shlex.quote(self.remote_lib_path)}:$LD_LIBRARY_PATH"
-                trt_path = f"{os.path.join(self.remote_bin_path, 'trtexec_safe')}"
-                trtexec_safe_cmd = [
-                    "ssh",
-                    "-p",
-                    f"{self.remote_port}",
-                    f"{self.remote_user}@{self.remote_ip}",
-                    f"{ld_path} {shlex.quote(trt_path)} --useCudaGraph "
-                    f"--loadEngine={shlex.quote(self.remote_engine_path)}",
-                ]
-                trtexec_safe_cmd = ssh_pass + trtexec_safe_cmd
-                result = subprocess.run(
-                    trtexec_safe_cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=self.network_timeout_seconds,
-                )  # nosec B603
-                latency_pattern = _SAFE_PATTERN
-                if result.returncode != 0:
-                    # fallback and try trtexec with "--safe" in case this is a safety proxy target
-                    trt_path = f"{os.path.join(self.remote_bin_path, 'trtexec')}"
+
+                @contextlib.contextmanager
+                def cleanup_remote_engine():
+                    try:
+                        yield
+                    finally:
+                        # Cleanup remote engine file after benchmarking to avoid disk filling up
+                        cleanup_cmd = [
+                            "ssh",
+                            "-p",
+                            str(self.remote_port),
+                            f"{self.remote_user}@{self.remote_ip}",
+                            f"rm -f {shlex.quote(self.remote_engine_path)}",
+                        ]
+                        cleanup_cmd = ssh_pass + cleanup_cmd
+                        try:
+                            subprocess.run(
+                                cleanup_cmd,
+                                capture_output=True,
+                                text=True,
+                                timeout=self.network_timeout_seconds,
+                            )  # nosec B603
+                        except Exception as e:
+                            self.logger.warning(f"Error during remote engine cleanup: {e}")
+
+                with cleanup_remote_engine():
+                    ld_path = (
+                        f"LD_LIBRARY_PATH={shlex.quote(self.remote_lib_path)}:$LD_LIBRARY_PATH"
+                    )
+                    trt_path = f"{os.path.join(self.remote_bin_path, 'trtexec_safe')}"
                     trtexec_safe_cmd = [
                         "ssh",
                         "-p",
                         f"{self.remote_port}",
                         f"{self.remote_user}@{self.remote_ip}",
-                        f"{ld_path} {shlex.quote(trt_path)} --safe --useCudaGraph "
+                        f"{ld_path} {shlex.quote(trt_path)} --useCudaGraph "
                         f"--loadEngine={shlex.quote(self.remote_engine_path)}",
                     ]
-                    trtexec_safe_cmd = ssh_pass + trtexec_safe_cmd
 
+                    trtexec_safe_cmd = ssh_pass + trtexec_safe_cmd
                     result = subprocess.run(
                         trtexec_safe_cmd,
                         capture_output=True,
                         text=True,
                         timeout=self.network_timeout_seconds,
                     )  # nosec B603
-                    latency_pattern = _STD_PATTERN
+                    latency_pattern = _SAFE_PATTERN
+                    if result.returncode != 0:
+                        # fallback and try trtexec with "--safe" in case this is a safety proxy target
+                        trt_path = f"{os.path.join(self.remote_bin_path, 'trtexec')}"
+                        trtexec_safe_cmd = [
+                            "ssh",
+                            "-p",
+                            f"{self.remote_port}",
+                            f"{self.remote_user}@{self.remote_ip}",
+                            f"{ld_path} {shlex.quote(trt_path)} --safe --useCudaGraph "
+                            f"--loadEngine={shlex.quote(self.remote_engine_path)}",
+                        ]
+                        trtexec_safe_cmd = ssh_pass + trtexec_safe_cmd
+
+                        result = subprocess.run(
+                            trtexec_safe_cmd,
+                            capture_output=True,
+                            text=True,
+                            timeout=self.network_timeout_seconds,
+                        )  # nosec B603
+                        latency_pattern = _STD_PATTERN
             if result.returncode != 0:
                 self.logger.error(
                     f"Failed to run trtexec_safe or trtexec with '--safe'\n{result.stdout}\n{result.stderr}"
