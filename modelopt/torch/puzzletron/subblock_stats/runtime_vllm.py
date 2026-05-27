@@ -30,7 +30,7 @@ import json
 import subprocess  # nosec B404
 from pathlib import Path
 
-from modelopt.torch.puzzletron.subblock_stats.runtime_utils import RuntimeConfig
+from .runtime_utils import RuntimeConfig
 
 
 def run_vllm_latency_benchmark(model_path: Path, runtime_config: RuntimeConfig) -> float | None:

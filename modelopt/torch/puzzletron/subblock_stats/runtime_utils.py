@@ -29,8 +29,8 @@ from pathlib import Path
 import torch
 from transformers import AutoTokenizer, LlamaForCausalLM
 
-from modelopt.torch.puzzletron.anymodel.converter import Converter
-from modelopt.torch.puzzletron.anymodel.models.llama import LlamaModelDescriptor
+from ..anymodel.converter import Converter
+from ..anymodel.models.llama import LlamaModelDescriptor
 
 
 @dataclass(frozen=True)

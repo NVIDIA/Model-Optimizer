@@ -23,14 +23,10 @@ calc_subblock_stats:
   prefill_seq_len: 4096
   generation_seq_len: 4096
   num_active_tokens_override: # Optional override for sequence lengths
-  prefill_queue_size: 0
-  allocate_prefill_query: false
   benchmark_iterations: # Set to a number (e.g., 1000) to enable runtime benchmarking
   merge_with_existing_stats: false
   subblock_stats_filename: "subblock_stats.json"
   moe_stats_filename: "moe_stats.json"
-  runtime_stats:
-    backend: trt_torch
 
 scoring:
   descriptor: ${descriptor}
@@ -62,8 +58,6 @@ mip:
   subblock_stats_args:
     - batch_size: 96
       weights_dtype: torch.bfloat16
-      activations_dtype: torch.bfloat16
-      kv_cache_dtype: torch.bfloat16
 
   report_additional_costs:
     - stats.memory_mib
@@ -78,7 +72,7 @@ mip:
     - stats.attention_num_params
 
   human_constraints:
-    target_latency: 21
+    target_latency_seconds: 21
 
   mip_constraints:
   metric_overrides:

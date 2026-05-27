@@ -25,23 +25,17 @@ from omegaconf import DictConfig
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, LlamaConfig, LlamaForCausalLM
 
-from modelopt.torch.puzzletron.subblock_stats.runtime_utils import RuntimeConfig, save_model
-from modelopt.torch.puzzletron.subblock_stats.runtime_vllm import run_vllm_latency_benchmark
-from modelopt.torch.puzzletron.anymodel.models.llama import LlamaModelDescriptor
-from modelopt.torch.puzzletron.anymodel.puzzformer import deci_x_patcher
-from modelopt.torch.puzzletron.block_config import (
-    AttentionConfig,
-    BlockConfig,
-    FFNConfig,
-    SubblockConfig,
-)
+from ..anymodel.models.llama import LlamaModelDescriptor
+from ..anymodel.puzzformer import deci_x_patcher
+from ..block_config import AttentionConfig, BlockConfig, FFNConfig, SubblockConfig
+from .runtime_utils import RuntimeConfig, save_model
+from .runtime_vllm import run_vllm_latency_benchmark
 
 
 def _make_standard_block_config(num_key_value_heads: int) -> BlockConfig:
     return BlockConfig(
         attention=AttentionConfig(no_op=False, num_key_value_heads=num_key_value_heads),
         ffn=FFNConfig(no_op=False, intermediate_size=256, moe=None),
-        parallel_blocks=None,
     )
 
 
