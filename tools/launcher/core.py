@@ -142,6 +142,7 @@ class GlobalVariables:
     hf_model: str = None
     hf_data: str = None
     hf_local: str = None
+    output_dir: str = None
 
 
 @dataclass

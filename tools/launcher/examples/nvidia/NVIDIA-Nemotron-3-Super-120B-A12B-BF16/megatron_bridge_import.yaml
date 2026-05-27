@@ -19,11 +19,16 @@ pipeline:
   allow_to_fail: false
   note: "HF -> MCore import via Megatron-Bridge (8xH100)"
 
+  global_vars:
+    # /cicd is the experiment_title mount = $SLURM_JOB_DIR/cicd on the host
+    # (persists across runs, unlike /scratchspace which is per-experiment).
+    output_dir: /cicd/megatron-bridge
+
   task_0:
     script: common/megatron_bridge/import/import.sh
     environment:
       - HF_MODEL_ID: nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16
-      - OUTPUT_DIR: /scratchspace/megatron-bridge
+      - OUTPUT_DIR: <<global_vars.output_dir>>
     slurm_config:
       _factory_: "slurm_factory"
       # Megatron-Bridge is preinstalled in nemo:26.04 at /opt/Megatron-Bridge.
