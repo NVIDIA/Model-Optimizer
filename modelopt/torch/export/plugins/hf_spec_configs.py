@@ -33,7 +33,7 @@ llama_eagle_template_config = {
     "tie_word_embeddings": False,
     "torch_dtype": None,
     "transformers_version": None,
-    "use_cache": None,
+    "use_cache": True,
     "vocab_size": None,
     "draft_vocab_size": None,
     "rope_scaling": None,
@@ -133,7 +133,7 @@ kimik2_eagle_template_config = {
     "transformers_version": None,
     "typical_p": None,
     "use_bfloat16": None,
-    "use_cache": None,
+    "use_cache": True,
     "v_head_dim": None,
     "vocab_size": None,
     "eagle_config": {

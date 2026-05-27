@@ -205,10 +205,32 @@ class FakeBaseModel(PreTrainedModel):
             source, [weight_map[lm_head_key], weight_map[embed_tokens_key]]
         )
 
-        lm_head_state = safetensors_load_file(lm_head_path, device="cpu")
-        embed_tokens_state = safetensors_load_file(embed_tokens_path, device="cpu")
+        def _load_with_consolidated_fallback(shard_path, key, role):
+            """Load ``key`` from ``shard_path``; on FileNotFoundError try consolidated.safetensors.
 
-        return lm_head_state[lm_head_key], embed_tokens_state[embed_tokens_key]
+            Mistral native checkpoints use ``tok_embeddings.weight`` (embed_tokens) and
+            ``output.weight`` (lm_head) in a monolithic ``consolidated.safetensors`` file,
+            so shards for these weights may be absent.
+            """
+            try:
+                return safetensors_load_file(shard_path, device="cpu")[key]
+            except FileNotFoundError:
+                _aliases = {
+                    "embed_tokens": ["tok_embeddings.weight"],
+                    "lm_head": ["output.weight"],
+                }
+                _consolidated = os.path.join(os.path.dirname(shard_path), "consolidated.safetensors")
+                if os.path.isfile(_consolidated):
+                    _state = safetensors_load_file(_consolidated, device="cpu")
+                    for _alias in _aliases.get(role, []):
+                        if _alias in _state:
+                            return _state[_alias]
+                raise
+
+        lm_head_w = _load_with_consolidated_fallback(lm_head_path, lm_head_key, "lm_head")
+        embed_tokens_w = _load_with_consolidated_fallback(embed_tokens_path, embed_tokens_key, "embed_tokens")
+
+        return lm_head_w, embed_tokens_w
 
     def forward(self, *args, **kwargs):
         """Not implemented: FakeBaseModel omits full model weights and cannot run inference."""
