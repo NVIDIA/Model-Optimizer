@@ -29,7 +29,7 @@ from packaging.version import Version
 
 from modelopt.torch.quantization.utils import replace_function
 
-from ..nn import QuantModuleRegistry
+from ..nn import QuantModuleRegistry, SequentialQuantizer
 from .custom import _ParallelLinear
 
 _TE_VERSION = Version(te.__version__)
@@ -148,12 +148,6 @@ class _QuantTEGroupedLinear(_ParallelLinear):
         if self._per_expert_weight_quantizer:
             for i in range(self.num_gemms):
                 self.add_module(f"weight_quantizer_{i}", copy.deepcopy(self.weight_quantizer))
-            # NOTE: base modelopt_post_restore only re-calibrates self.weight_quantizer.
-            # The per-expert weight_quantizer_{i} _amax buffers ride through state_dict
-            # unchanged, which works when TP/EP is identical between save and restore.
-            # If parallelism changes (per-channel _amax shape depends on the TP-sliced
-            # output dim), the loaded _amax won't match the new weight shape — needs a
-            # custom modelopt_post_restore that re-runs max_calibrate per expert.
 
     def modelopt_post_restore(self, prefix: str = ""):
         # GroupedMLP stores the weights as weight0, weight1, etc. To run post_restore in order to
@@ -164,6 +158,24 @@ class _QuantTEGroupedLinear(_ParallelLinear):
         super().modelopt_post_restore(prefix=prefix)
         # Remove self.weight after post_restore.
         delattr(self, "weight")
+
+        # Base post_restore only re-calibrates self.weight_quantizer; the per-expert
+        # weight_quantizer_{i} also need re-calibration so a TP/EP change between save
+        # and restore produces correctly shaped per-channel _amax. Mirror base behavior:
+        # only re-calibrate quantizers whose loaded state had _amax (skip unused ones).
+        if getattr(self, "_per_expert_weight_quantizer", False):
+            from modelopt.torch.quantization.model_calib import max_calibrate
+
+            for i in range(self.num_gemms):
+                weight_i = getattr(self, f"weight{i}", None)
+                if weight_i is None:
+                    continue
+                wq_i = self._get_weight_quantizer(i)
+                q = wq_i[0] if isinstance(wq_i, SequentialQuantizer) else wq_i
+                if not hasattr(q, "_amax"):
+                    continue
+                wq_i.reset_amax()
+                max_calibrate(wq_i, lambda wq, w=weight_i: wq(w), distributed_sync=False)
 
     def _get_weight_quantizer(self, gemm_idx: int):
         if getattr(self, "_per_expert_weight_quantizer", False):
