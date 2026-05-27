@@ -58,8 +58,7 @@ class TestRedactValue:
         assert out == {"hf_token": REDACTED, "model_dir": "/m"}
 
     def test_nested_secret_in_dict(self):
-        """Nested hf_token inside serving_config must be redacted — this is
-        cjluo's original IMPORTANT-Compatibility concern."""
+        """Nested hf_token inside serving_config must be redacted."""
         cfg = {
             "serving_config": {
                 "model_loader_extra_config": {"hf_token": "supersecret"},

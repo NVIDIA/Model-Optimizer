@@ -13,12 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Make `specdec_bench/` and `upload_to_s3.py` importable when pytest is invoked
-# from any directory (e.g. `pytest examples/specdec_bench/tests` from the repo
-# root, or `cd examples/specdec_bench && pytest tests`).
+# Make examples/specdec_bench/specdec_bench/ + upload_to_s3.py importable from
+# these tests. Anchored on the repo root via parents[3]:
+#   __file__ = <repo>/tests/examples/specdec_bench/conftest.py
+#   parents[3] = <repo>
 import sys
 from pathlib import Path
 
-_PKG_ROOT = Path(__file__).resolve().parent.parent
+_PKG_ROOT = Path(__file__).resolve().parents[3] / "examples" / "specdec_bench"
 if str(_PKG_ROOT) not in sys.path:
     sys.path.insert(0, str(_PKG_ROOT))

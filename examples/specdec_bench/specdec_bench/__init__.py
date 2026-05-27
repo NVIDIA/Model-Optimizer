@@ -13,18 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Methodology version. Bump:
-#   - minor (0.X.0) when adding a new metric or strictly-additive provenance field
-#   - major (X.0.0) when changing how an existing metric is computed OR its
-#     on-disk field names (incompatible with prior consumers / visualizers)
-# The visualizer aggregates runs by major version to avoid apple-to-orange
-# comparisons across methodology changes.
-#
-# 1.0.0: rename Request_AR / Category_AR / Average_AR → *_AL across the
-#        SpecBench / AcceptanceRate / MTBench metric writers, AND add
-#        Joint_Acceptance_Rate to the AcceptanceRate metric. The renamed
-#        values were always acceptance LENGTH (mean tokens generated per
-#        inference step), not a rate, and the visualizer reads *_AL.
-#        Pre-1.0.0 runs in S3 have *_AR and no Joint_AR; they must be
-#        re-run or post-processed before comparing.
-__version__ = "1.0.0"
+# Re-export modelopt's version so configuration.json's `specdec_bench_version`
+# tracks the parent package without a separate semver source of truth.
+# Breaking schema/methodology changes are recorded in commit messages and
+# fingerprinted by `specdec_bench_sha` in configuration.json.
+from modelopt import __version__

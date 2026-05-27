@@ -30,7 +30,6 @@ pipeline:
       - --aa_timing
       - --show_progress
       - --save_dir /scratchspace/specdec_bench_mtp
-      - --trust_remote_code
     environment:
       - HF_MODEL_CKPT: <<global_vars.hf_model>>
       - HF_LOCAL: /hf-local
