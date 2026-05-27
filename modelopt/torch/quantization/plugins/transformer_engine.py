@@ -16,9 +16,7 @@
 """Support quantization for Transformer Engine layers."""
 
 import copy
-import os
 import inspect
-import copy
 import os
 import warnings
 
@@ -150,6 +148,12 @@ class _QuantTEGroupedLinear(_ParallelLinear):
         if self._per_expert_weight_quantizer:
             for i in range(self.num_gemms):
                 self.add_module(f"weight_quantizer_{i}", copy.deepcopy(self.weight_quantizer))
+            # NOTE: base modelopt_post_restore only re-calibrates self.weight_quantizer.
+            # The per-expert weight_quantizer_{i} _amax buffers ride through state_dict
+            # unchanged, which works when TP/EP is identical between save and restore.
+            # If parallelism changes (per-channel _amax shape depends on the TP-sliced
+            # output dim), the loaded _amax won't match the new weight shape — needs a
+            # custom modelopt_post_restore that re-runs max_calibrate per expert.
 
     def modelopt_post_restore(self, prefix: str = ""):
         # GroupedMLP stores the weights as weight0, weight1, etc. To run post_restore in order to
