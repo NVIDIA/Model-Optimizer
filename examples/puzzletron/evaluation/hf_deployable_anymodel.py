@@ -60,14 +60,14 @@ class HuggingFaceLLMDeploy(ITritonDeployable):
     loading, inference, and deployment configurations.
 
     Args:
-        hf_model_id_path (Optional[str]): Path to the HuggingFace model or model identifier.
+        hf_model_id_path (str | None): Path to the HuggingFace model or model identifier.
             Can be a local path or a model ID from HuggingFace Hub.
-        hf_peft_model_id_path (Optional[str]): Path to the PEFT model or model identifier.
+        hf_peft_model_id_path (str | None): Path to the PEFT model or model identifier.
             Can be a local path or a model ID from HuggingFace Hub.
-        tokenizer_id_path (Optional[str]): Path to the tokenizer or tokenizer identifier.
+        tokenizer_id_path (str | None): Path to the tokenizer or tokenizer identifier.
             If None, will use the same path as hf_model_id_path.
-        model (Optional[AutoModel]): Pre-loaded HuggingFace model.
-        tokenizer (Optional[AutoTokenizer]): Pre-loaded HuggingFace tokenizer.
+        model (AutoModel | None): Pre-loaded HuggingFace model.
+        tokenizer (AutoTokenizer | None): Pre-loaded HuggingFace tokenizer.
         tokenizer_padding (bool): Whether to enable padding in tokenizer. Defaults to True.
         tokenizer_truncation (bool): Whether to enable truncation in tokenizer. Defaults to True.
         tokenizer_padding_side (str): Which side to pad on ('left' or 'right'). Defaults to 'left'.
@@ -100,7 +100,7 @@ class HuggingFaceLLMDeploy(ITritonDeployable):
                 "hf_model_id_path will be ignored and the HuggingFace model set with model parameter will be used."
             )
 
-        assert task in SUPPORTED_TASKS, "Task {} is not a support task.".format(task)
+        assert task in SUPPORTED_TASKS, f"Task {task} is not a support task."
 
         self.hf_model_id_path = hf_model_id_path
         self.hf_peft_model_id_path = hf_peft_model_id_path
@@ -163,7 +163,7 @@ class HuggingFaceLLMDeploy(ITritonDeployable):
             if self.hf_peft_model_id_path is not None:
                 self.model = PeftModel.from_pretrained(self.model, self.hf_peft_model_id_path)
         else:
-            raise ValueError("Task {} is not supported.".format(self.task))
+            raise ValueError(f"Task {self.task} is not supported.")
         num_gpus = torch.cuda.device_count()
         # If there is only one GPU, move the model to GPU. If you are using device_map as "auto" or "balanced",
         # the model will be moved to GPU automatically.
@@ -203,7 +203,7 @@ class HuggingFaceLLMDeploy(ITritonDeployable):
 
         Returns:
             If output logits and output scores are False:
-            List[str]: A list of generated texts, one for each input prompt.
+            list[str]: A list of generated texts, one for each input prompt.
             If output logits and output scores are True:
             Dict: A dictionary containing:
                 - sentences: List of generated texts
@@ -423,7 +423,7 @@ class HuggingFaceLLMDeploy(ITritonDeployable):
                 output_infer = {"sentences": cast_output(output, np.bytes_)}
 
         except Exception as error:
-            err_msg = "An error occurred: {}".format(str(error))
+            err_msg = f"An error occurred: {error!s}"
             output_infer["sentences"] = cast_output([err_msg], np.bytes_)
 
         return output_infer
@@ -452,7 +452,7 @@ class HuggingFaceLLMDeploy(ITritonDeployable):
             echo: Whether to include prompt token log probabilities
 
         Returns:
-            Tuple[Optional[List], Optional[List]]:
+            tuple[list | None, list | None]:
                 - log_probs_list: List of log probabilities for each sample (None if not computed)
                 - top_logprobs_list: List of top-k log probabilities for each sample (None if not computed)
         """
@@ -569,7 +569,7 @@ class HuggingFaceLLMDeploy(ITritonDeployable):
         """Perform inference using Ray with dictionary inputs and outputs.
 
         Args:
-            inputs (Dict[Any, Any]): Dictionary containing input parameters:
+            inputs (dict[Any, Any]): Dictionary containing input parameters:
                 - prompts: List of input prompts
                 - temperature: Sampling temperature (optional)
                 - top_k: Number of highest probability tokens to consider (optional)
@@ -580,7 +580,7 @@ class HuggingFaceLLMDeploy(ITritonDeployable):
                 - echo: Whether to echo the prompt in output (optional)
 
         Returns:
-            Dict[str, Any]: Dictionary containing:
+            dict[str, Any]: Dictionary containing:
                 - sentences: List of generated texts
                 - log_probs: Optional list of log probabilities if compute_logprob is True
                 - top_logprobs: Optional list of top log probabilities if n_top_logprobs > 0
@@ -638,7 +638,7 @@ class HuggingFaceLLMDeploy(ITritonDeployable):
                 output_infer.pop("input_lengths", None)
             return output_infer
         except Exception as error:
-            err_msg = "An error occurred: {}".format(str(error))
+            err_msg = f"An error occurred: {error!s}"
             return {"sentences": [err_msg]}
 
     def _infer_fn_ray(

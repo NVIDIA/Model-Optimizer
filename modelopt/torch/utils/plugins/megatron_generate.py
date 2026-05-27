@@ -34,12 +34,12 @@ __all__ = ["megatron_generate", "megatron_prefill"]
 def get_current_memory_info():
     """Get current memory usage."""
     remaining_mem, total_mem = torch.cuda.mem_get_info()
-    info = "rank {:3}/{:3}  memory remaining {:03}% ({:d}/{:d} MB) ".format(
-        torch.distributed.get_rank(),
-        torch.distributed.get_world_size(),
-        int(remaining_mem * 100 / total_mem),
-        remaining_mem // 1048576,
-        total_mem // 1048576,
+    rank = torch.distributed.get_rank()
+    world_size = torch.distributed.get_world_size()
+    remaining_pct = int(remaining_mem * 100 / total_mem)
+    info = (
+        f"rank {rank:3}/{world_size:3}  memory remaining "
+        f"{remaining_pct:03}% ({remaining_mem // 1048576:d}/{total_mem // 1048576:d} MB) "
     )
     return info
 

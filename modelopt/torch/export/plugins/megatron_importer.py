@@ -787,9 +787,7 @@ class GPTModelImporter:
 
             if self.verbose:
                 print(
-                    "{:3}/{:3} completes importing layer {:3}.".format(
-                        dist.get_rank(), dist.get_world_size(), layer_id
-                    ),
+                    f"{dist.get_rank():3}/{dist.get_world_size():3} completes importing layer {layer_id:3}.",
                     flush=True,
                 )
 

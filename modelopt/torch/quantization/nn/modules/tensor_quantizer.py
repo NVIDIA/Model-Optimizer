@@ -64,6 +64,7 @@ from ...utils import is_torch_export_mode
 from ..functional import normalized_hadamard_transform
 
 __all__ = [
+    "HardDisabledTensorQuantizer",
     "NVFP4StaticQuantizer",
     "SequentialQuantizer",
     "TensorQuantizer",
@@ -1315,6 +1316,50 @@ class TensorQuantizer(nn.Module):
             setattr(self, key, value)
         else:
             self.register_buffer(key, value)
+
+
+class HardDisabledTensorQuantizer(TensorQuantizer):
+    """TensorQuantizer slot that is structurally never enabled.
+
+    Used where a quantizer attribute must exist for introspection / wildcard-config absorption
+    but the surrounding ``QuantModule`` will never actually invoke it — e.g. ``nn.Embedding``,
+    whose input is integer indices and cannot be fake-quantized.
+
+    Wildcard configs (e.g. the default ``QuantizeConfig`` ``"*"`` rule or
+    ``NVFP4_DEFAULT_CFG``'s ``*input_quantizer``) are accepted silently, then the quantizer
+    is force-disabled — wildcards mean "enable this kind of quantizer in general," not
+    "enable this specific structurally-disabled slot." Direct, explicit attempts (calling
+    ``enable`` / ``enable_quant`` / ``enable_calib``) raise loudly so a misconfigured recipe
+    doesn't silently mislead the user.
+    """
+
+    _DISABLED_ERR = (
+        "This TensorQuantizer is hard-disabled by its parent QuantModule (e.g. the "
+        "input_quantizer slot on a quantized nn.Embedding, whose input is integer indices) "
+        "and cannot be enabled."
+    )
+
+    def enable(self):
+        """Disallowed for hard-disabled quantizers."""
+        raise RuntimeError(self._DISABLED_ERR)
+
+    def enable_quant(self):
+        """Disallowed for hard-disabled quantizers."""
+        raise RuntimeError(self._DISABLED_ERR)
+
+    def enable_calib(self):
+        """Disallowed for hard-disabled quantizers."""
+        raise RuntimeError(self._DISABLED_ERR)
+
+    def set_from_attribute_config(self, attribute_cfg):
+        """Apply the config like any quantizer, then force-disable.
+
+        This absorbs wildcard configs from stock recipes without raising. Other attributes
+        (``num_bits``, ``axis``, etc.) take on the config values for introspection, but
+        ``_disabled`` is forced back to ``True`` so forward is always a no-op.
+        """
+        super().set_from_attribute_config(attribute_cfg)
+        self._disabled = True
 
 
 class NVFP4StaticQuantizer(TensorQuantizer):
