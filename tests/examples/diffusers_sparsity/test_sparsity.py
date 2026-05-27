@@ -17,7 +17,7 @@
 
 Uses a tiny Wan 2.2 model (dual transformer, 2 layers, hidden_dim=24) created
 from scratch. Tests run the wan22_skip_softmax.py example script in baseline,
-triton-baseline, and raw-threshold modes.
+triton-baseline, and fixed-threshold modes.
 """
 
 import pytest
@@ -85,20 +85,20 @@ def test_wan22_triton_baseline(tiny_wan22_path, tmp_path):
     run_example_command(cmd, EXAMPLE_PATH)
 
 
-def test_wan22_raw_threshold(tiny_wan22_path, tmp_path):
-    """Skip-softmax with a fixed raw threshold — no calibration needed."""
+def test_wan22_skip_softmax_threshold(tiny_wan22_path, tmp_path):
+    """Skip-softmax with a fixed lambda threshold — no calibration needed."""
     cmd = [
         "python",
         "wan22_skip_softmax.py",
         "--model-path",
         tiny_wan22_path,
-        "--raw-threshold",
-        "-5.0",
+        "--skip-softmax-threshold",
+        "0.03125",
         "--report-avg-sparsity",
         "--prompt",
         "test",
         "--output",
-        str(tmp_path / "raw_threshold.mp4"),
+        str(tmp_path / "skip_softmax_threshold.mp4"),
         *_TINY_ARGS,
     ]
     run_example_command(cmd, EXAMPLE_PATH)

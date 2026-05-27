@@ -141,3 +141,45 @@ def test_set_quantizer_cxt():
         if "output_quantizer" in k:
             continue
         assert torch.allclose(v, state_dict[k])
+
+
+def test_set_quantizer_cxt_restores_on_exception():
+    """Quantizer properties must be fully restored when the context body raises.
+
+    Guards the try/finally in `set_quantizer_by_cfg_context`: regressing it
+    silently corrupts state for every caller (AWQ-lite, GPTQ Hessian, etc.)
+    when calibration / forward_loop bodies raise. The snapshot uses the same
+    `get_modelopt_state(properties_only=True)` API the context manager itself
+    uses for save/restore, so a regression in any tracked property is caught.
+    """
+    model = SimpleLinear()
+    model.eval()
+    mtq.quantize(model, mtq.INT8_DEFAULT_CFG, lambda m: m(model.get_input()))
+
+    pre_state = {
+        name: module.get_modelopt_state(properties_only=True)
+        for name, module in model.named_modules()
+        if isinstance(module, TensorQuantizer)
+    }
+    assert any(not s.get("_disabled", True) for s in pre_state.values()), (
+        "expected at least one enabled quantizer after quantize()"
+    )
+
+    class _BoomError(RuntimeError):
+        pass
+
+    with (
+        pytest.raises(_BoomError),
+        mtq.set_quantizer_by_cfg_context(model, [{"quantizer_name": "*", "enable": False}]),
+    ):
+        for module in model.modules():
+            if isinstance(module, TensorQuantizer):
+                assert not module.is_enabled
+        raise _BoomError("simulate calibration failure inside context body")
+
+    post_state = {
+        name: module.get_modelopt_state(properties_only=True)
+        for name, module in model.named_modules()
+        if isinstance(module, TensorQuantizer)
+    }
+    assert post_state == pre_state

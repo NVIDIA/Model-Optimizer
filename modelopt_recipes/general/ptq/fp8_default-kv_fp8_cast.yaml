@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Composed PTQ recipe for W8A8 FP8 E4M3 model quantization with FP8 KV-cache cast mode.
+
 imports:
   base_disable_all: configs/ptq/units/base_disable_all
   default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
@@ -22,8 +24,8 @@ imports:
 metadata:
   recipe_type: ptq
   description: >-
-    FP8 per-tensor weight and activation (W8A8), FP8 KV cache with constant amax
-    (skips KV calibration; amax hardcoded to FP8 E4M3 max 448.0), max calibration.
+    Composes W8A8 FP8 E4M3 model quantization with FP8 KV-cache cast mode using constant amax; uses
+    max calibration.
 quantize:
   algorithm: max
   quant_cfg:

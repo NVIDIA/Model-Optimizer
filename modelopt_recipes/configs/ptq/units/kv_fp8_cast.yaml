@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# FP8 E4M3 KV cache quantization with constant amax.
+# QuantizerCfgList snippet that enables FP8 E4M3 KV-cache quantizers with constant amax.
 
 # modelopt-schema: modelopt.torch.quantization.config.QuantizerCfgListConfig
 imports:

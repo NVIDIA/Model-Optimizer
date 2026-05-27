@@ -1,6 +1,6 @@
 ---
 name: evaluation
-description: Evaluates accuracy of quantized or unquantized LLMs using NeMo Evaluator Launcher (NEL). Triggers on "evaluate model", "benchmark accuracy", "run MMLU", "evaluate quantized model", "accuracy drop", "run nel". Handles deployment, config generation, and evaluation execution. Not for quantizing models (use ptq) or deploying/serving models (use deployment).
+description: Evaluates accuracy of quantized or unquantized LLMs using NeMo Evaluator Launcher (NEL). Triggers on "evaluate model", "benchmark accuracy", "run MMLU", "evaluate quantized model", "run nel". Handles deployment, config generation, and evaluation execution. Not for quantizing models (use ptq), deploying/serving models (use deployment), or comparing completed baseline-vs-quantized results (use compare-results).
 license: Apache-2.0
 # Based on nel-assistant skill from NeMo Evaluator Launcher (commit f1fa073)
 # https://github.com/NVIDIA-NeMo/Evaluator/tree/f1fa073/packages/nemo-evaluator-launcher/.claude/skills/nel-assistant
@@ -14,7 +14,7 @@ You're an expert in NeMo Evaluator Launcher! Guide the user through creating pro
 
 ### Workspace and Pipeline Integration
 
-If `MODELOPT_WORKSPACE_ROOT` is set, read `skills/common/workspace-management.md`. Check for existing workspaces — especially if evaluating a model from a prior PTQ or deployment step. Reuse the existing workspace so you have access to the quantized checkpoint and any code modifications.
+If `MODELOPT_WORKSPACE_ROOT` is set, read `skills/common/workspace-management.md`. Check for existing workspaces in the current session — especially if evaluating a model from a prior PTQ or deployment step. Reuse the existing workspace so you have access to the quantized checkpoint and any code modifications.
 
 This skill is often the final stage of the PTQ → Deploy → Eval pipeline. If the model required runtime patches during deployment (transformers upgrade, framework source fixes), carry those patches into the NEL config via `deployment.command`.
 
@@ -30,8 +30,12 @@ Config Generation Progress:
 - [ ] Step 5: Confirm tasks (iterative)
 - [ ] Step 6: Advanced - Multi-node (Data Parallel)
 - [ ] Step 7: Advanced - Interceptors
-- [ ] Step 7.5: Check container registry auth (SLURM only)
+- [ ] Step 7.5: Check container registry auth for private images (SLURM only)
 - [ ] Step 8: Run the evaluation
+  - [ ] Step 8.1: Dry-run / NEL CLI config validation
+  - [ ] Step 8.2: Limited-samples canary
+  - [ ] Step 8.3: Full evaluation
+- [ ] Step 9: Verify completed evaluation run
 ```
 
 **Step 1: Check prerequisites**
@@ -40,13 +44,16 @@ Test that `nel` is installed with `nel --version`. If not, instruct the user to 
 
 If the user already has a config file (e.g., "run this config", "evaluate with my-config.yaml"), skip to Step 8. Optionally review it for common issues (missing `???` values, quantization flags) before running.
 
-**Shortcut: use pre-built task snippets.** If the user asks for a specific benchmark (e.g., "run MMLU-Pro", "evaluate with AIME"), check `recipes/tasks/` (relative to this skill's directory) for a matching task snippet. Available: mmlu_pro, gpqa, aime2025, livecodebench, ifbench, scicode. Task snippets contain only the task-specific config (name, params, repeats) — not the full NEL config. To use them:
+**Shortcut: use task references.** For named benchmarks, read the matching
+`recipes/tasks/<name>.md` before creating or editing the config. Available:
+mmlu_pro, mmmu_pro, gpqa, aime2025, livecodebench, ifbench, scicode,
+aa_lcr, ns_hle_aa, tau2_bench_telecom.
 
-1. Read the task snippet(s) the user wants
+1. Read the task reference(s) the user wants.
 2. Use `recipes/examples/example_eval.yaml` as the base config template
-3. Replace the `tasks:` section with the selected snippet(s)
-4. Do Step 3 (auto-detect model settings from checkpoint) and Step 4 (fill in `???` values)
-5. Proceed to Step 7.5/8
+3. Copy the selected YAML fragment(s) into `evaluation.tasks`.
+4. Apply any notes from the reference.
+5. Do Step 3, Step 4, then Step 7.5/8.
 
 **Step 2: Build the base config file**
 
@@ -64,6 +71,8 @@ Prompt the user with "I'll ask you 5 questions to build the base config we'll ad
 - SGLang
 - NIM
 - TRT-LLM
+
+Prefer vLLM for NEL self-deployment unless the user explicitly asks for another runtime, the model card requires another runtime, or the evaluation targets an already-running endpoint (`deployment: none`).
 
 3. Auto-export:
 
@@ -112,24 +121,21 @@ Ask for model path. Determine type:
 
 **Auto-detect ModelOpt quantization format** (checkpoint paths only):
 
-Check for `hf_quant_config.json` in the checkpoint directory:
+Check `config.json` first for a `quantization_config` section with `quant_method: "modelopt"`. If absent, check the legacy/backward-compatible `hf_quant_config.json`:
 
 ```bash
+cat <checkpoint_path>/config.json 2>/dev/null
 cat <checkpoint_path>/hf_quant_config.json 2>/dev/null
 ```
 
-If found, read `quantization.quant_algo` and set the correct vLLM/SGLang quantization flag in `deployment.extra_args`:
+If ModelOpt quantization is detected, read the quantization algorithm from `quantization_config.quant_algo` or `quantization.quant_algo`.
 
-| `quant_algo` | Flag to add |
-|-------------|-------------|
-| `FP8` | `--quantization modelopt` |
-| `W4A8_AWQ` | `--quantization modelopt` |
-| `NVFP4`, `NVFP4_AWQ` | `--quantization modelopt_fp4` |
-| Other values | Try `--quantization modelopt`; consult vLLM/SGLang docs if unsure |
+- **vLLM:** Do not add a `--quantization` flag by default. Recent vLLM reads `quantization_config` / `hf_quant_config.json` and selects the ModelOpt backend automatically; adding a stale or mismatched flag can cause a config mismatch. Only add an explicit flag if the model card, vLLM version, or dry-run error requires it.
+- **SGLang:** Use SGLang-specific docs/model-card guidance. For offline ModelOpt checkpoints, recent SGLang can parse the config in many cases; if an explicit flag is required, common values are `--quantization modelopt_fp8` for FP8 and `--quantization modelopt_fp4` for NVFP4. Some exported ModelOpt flows document `--quantization modelopt`; verify against the installed SGLang version.
 
-If no `hf_quant_config.json`, also check `config.json` for a `quantization_config` section with `quant_method: "modelopt"`. If neither is found, the checkpoint is unquantized — no flag needed.
+If neither file contains a ModelOpt quantization config, treat the checkpoint as unquantized — no quantization flag needed.
 
-> **Note:** Some models require additional env vars for deployment (e.g., `VLLM_NVFP4_GEMM_BACKEND=marlin` for Nemotron Super). These are not in `hf_quant_config.json` — they are discovered during model card research below.
+> **Note:** Some models require additional env vars for deployment (e.g., `VLLM_NVFP4_GEMM_BACKEND=marlin` for Nemotron Super). These may not be in the quantization config files — they are discovered during model card research below.
 
 **Auto-detect deployment settings from checkpoint:**
 
@@ -160,6 +166,8 @@ When a quantized checkpoint is detected, read `references/quantization-benchmark
 
 Read `references/model-card-research.md` for the full extraction checklist (sampling params, reasoning config, ARM64 compatibility, pre_cmd, etc.). Use WebSearch to research the model card, present findings, and ask the user to confirm.
 
+For reasoning-capable models, prefer reasoning mode for evaluation because it usually produces the highest task scores; configure the model-card-specific on/off control and any reasoning budget or effort setting. If the user wants lower variance/noise, lower latency/cost, or an apples-to-apples comparison against non-reasoning baselines, also consider a non-reasoning companion run.
+
 **Step 4: Fill in remaining missing values**
 
 - Find all remaining `???` missing values in the config.
@@ -171,7 +179,10 @@ Read `references/model-card-research.md` for the full extraction checklist (samp
 Show tasks in the current config. Loop until the user confirms the task list is final:
 
 1. Tell the user: "Run `nel ls tasks` to see all available tasks".
-2. Ask if they want to add/remove tasks or add/remove/modify task-specific parameter overrides.
+2. If the task list includes a benchmark with a reference in `recipes/tasks/`,
+   read it before editing the config and prefer its YAML fragment unless the user
+   asks for different settings. Keep the reference repeat counts.
+3. Ask if they want to add/remove tasks or add/remove/modify task-specific parameter overrides.
    To add per-task `nemo_evaluator_config` as specified by the user, e.g.:
 
    ```yaml
@@ -185,8 +196,8 @@ Show tasks in the current config. Loop until the user confirms the task list is 
              ...
    ```
 
-3. Apply changes.
-4. Show updated list and ask: "Is the task list final, or do you want to make more changes?"
+4. Apply changes.
+5. Show updated list and ask: "Is the task list final, or do you want to make more changes?"
 
 **Known Issues**
 
@@ -215,7 +226,7 @@ If the user needs multi-node evaluation (model >120B, or more throughput), read 
 
 - The docs may show incorrect parameter names for logging. Use `max_logged_requests` and `max_logged_responses` (NOT `max_saved_*` or `max_*`).
 
-**Step 7.5: Check container registry authentication (SLURM only)**
+**Step 7.5: Check container registry authentication for private images (SLURM only)**
 
 NEL's default deployment images by framework:
 
@@ -226,28 +237,33 @@ NEL's default deployment images by framework:
 | TRT-LLM | `nvcr.io/nvidia/tensorrt-llm/release:...` | NGC |
 | Evaluation tasks | `nvcr.io/nvidia/eval-factory/*:26.03` | NGC |
 
-Before submitting, verify the cluster has credentials for the deployment image. See `skills/common/slurm-setup.md` section 6 for the full procedure.
+Before submitting, identify the exact deployment and evaluation-task images that will be pulled. If the images are public, skip the registry-authentication preflight; pyxis/enroot can pull public images without stored credentials. Do not require credentials just because the registry is DockerHub or NGC.
+
+Only verify cluster credentials when an image is private or access-restricted (private DockerHub repo, private NGC repo, internal registry, or user-provided image that is not known to be public). See `skills/common/slurm-setup.md` section 6 for the credential setup procedure.
 
 ```bash
 ssh <host> "grep -E '^\s*machine\s+' ~/.config/enroot/.credentials 2>/dev/null"
 ```
 
 **Decision flow (check before submitting):**
-1. Check if the cluster has credentials for the default DockerHub image (see command above)
-2. If DockerHub credentials exist → use the default image and submit
-3. If DockerHub credentials are missing but can be added → add them (see `slurm-setup.md` section 6), then submit
-4. If DockerHub credentials cannot be added → override `deployment.image` to the NGC alternative and submit:
+1. If the selected images are public → submit without an auth preflight
+2. If any selected image is private or access-restricted → check for credentials for that image's registry (see command above)
+3. If credentials exist → use the selected image and submit
+4. If credentials are missing but can be added → add them (see `slurm-setup.md` section 6), then submit
+5. If credentials cannot be added → switch to a public image when a compatible one exists, for example:
 
    ```yaml
    deployment:
      image: nvcr.io/nvidia/vllm:<YY.MM>-py3  # check https://catalog.ngc.nvidia.com/orgs/nvidia/containers/vllm for latest tag
    ```
 
-5. **Do not retry more than once** without fixing the auth issue
+6. **Do not retry more than once** after an auth failure without fixing credentials or switching images
 
 **Step 8: Run the evaluation**
 
-Print the following commands to the user. Propose to execute them in order to confirm the config works as expected before the full run.
+Use a gated `dry-run -> canary -> full-run` sequence. Run the commands directly
+when the user has asked you to launch evals; otherwise, ask before submitting jobs.
+Do not submit the full run until the dry-run and limited-samples canary both pass.
 
 **Important**: Export required environment variables based on your config. If any tokens or keys are missing, point the user to `recipes/env.example` — it lists all possible keys with notes on which tasks need them. Ask the user to copy it, fill in their keys, and source it:
 
@@ -265,54 +281,75 @@ export NEMO_EVALUATOR_TRUST_PRE_CMD=1
 export DUMMY_API_KEY=dummy
 ```
 
-1. **Dry-run** (validates config without running):
+**Step 8.1: Dry-run / NEL CLI config validation** (validates config without running):
 
-   ```bash
-   nel run --config <config_path> --dry-run
-   ```
+```bash
+nel run --config <config_path> --dry-run
+```
 
-2. **Test with limited samples** (quick validation run):
+Check the NEL output before launching anything. Fix unresolved `???` values,
+bad Hydra overrides, missing env var references, invalid mounts, image/container
+problems, sbatch issues, and obvious deployment argument errors before moving on.
 
-   ```bash
-   nel run --config <config_path> -o ++evaluation.nemo_evaluator_config.config.params.limit_samples=10
-   ```
+**Step 8.2: Limited-samples canary** (operational validation before production):
 
-3. **Re-run a single task** (useful for debugging or re-testing after config changes):
+```bash
+nel run --config <config_path> -o ++evaluation.nemo_evaluator_config.config.params.limit_samples=10
+```
 
-   ```bash
-   nel run --config <config_path> -t <task_name>
-   ```
+Use the canary to tune parallelism and catch runtime failures that the dry-run
+cannot catch: judge API auth/rate-limit errors, evaluation container failures,
+code-execution sandbox/container errors, vLLM health/OOM issues, bad request
+formatting, log path problems, and unexpectedly low evaluated-sample counts.
+Inspect logs before accepting the canary, not just result files:
 
-   Combine with `-o` for limited samples: `nel run --config <config_path> -t <task_name> -o ++evaluation.nemo_evaluator_config.config.params.limit_samples=10`
+```bash
+nel status <canary_invocation_id>
+nel info <canary_invocation_id> --logs
+ssh <user>@<host> "grep -i 'traceback\|exception\|error\|failed\|oom\|killed\|timeout\|unauthorized\|rate limit\|sandbox\|container\|judge\|parse\|scoring' <log_path>/*.log"
+```
 
-4. **Full evaluation** (production run):
+If the benchmark set mixes different dependency profiles, canary each risky
+class or task: LLM-judge tasks, code-execution tasks, and ordinary model-only
+tasks can fail for different reasons. For evals that depend on inference judges
+or code execution containers, start with conservative `parallelism` and raise it
+only after the canary logs show those dependencies are healthy. Do not over-raise
+parallelism just to saturate the model server; judge services and code containers
+often become the bottleneck or failure point first.
 
-   ```bash
-   nel run --config <config_path>
-   ```
+**Single-task rerun** (useful for canary debugging or re-testing after config changes):
 
-After the dry-run, check the output from `nel` for any problems with the config. If there are no problems, propose to first execute the test run with limited samples and then execute the full evaluation. If there are problems, resolve them before executing the full evaluation.
+```bash
+nel run --config <config_path> -t <task_name>
+```
+
+Combine with `-o` for limited samples: `nel run --config <config_path> -t <task_name> -o ++evaluation.nemo_evaluator_config.config.params.limit_samples=10`
+
+**Step 8.3: Full evaluation** (production run after the canary passes):
+
+```bash
+nel run --config <config_path>
+```
+
+Before the full run, remove the `limit_samples` override and keep only the
+parallelism/settings that the canary validated. If the canary fails, fix the
+config, credentials, image/container, judge setup, code-execution environment, or
+parallelism, then rerun the canary before launching the full evaluation.
 
 **Monitoring Progress**
 
-After job submission, register the job per the **monitor skill** for durable cross-session tracking. For one-off queries (live status, debugging a failed run, analyzing results) use the **launching-evals skill**; for querying past runs in MLflow use **accessing-mlflow**.
+After job submission, register the job per the **monitor skill** for durable
+cross-session tracking. For one-off queries (live status, debugging a failed
+run, analyzing results) use the **launching-evals skill**; for querying past
+runs in MLflow use **accessing-mlflow**. If a NEL job times out or resumes,
+read `references/run-validation.md` before treating the run as failed.
 
-**NEL-specific diagnostics** (for debugging failures):
+**Step 9: Verify completed evaluation run**
 
-```bash
-# Quick status check
-nel status <invocation_id>
-nel info <invocation_id>
-
-# Get log paths
-nel info <invocation_id> --logs
-
-# Inspect logs via SSH
-ssh <user>@<host> "tail -100 <log_path>/server-<slurm_job_id>-*.log"   # deployment errors
-ssh <user>@<host> "tail -100 <log_path>/client-<slurm_job_id>.log"     # evaluation errors
-ssh <user>@<host> "tail -100 <log_path>/slurm-<slurm_job_id>.log"      # scheduling/walltime
-ssh <user>@<host> "grep -i 'error\|failed' <log_path>/*.log"           # search all logs
-```
+Before pulling/reporting scores, validate the completed run itself. Read
+`references/run-validation.md` for NEL timeout/resume behavior, completed-run
+validation, diagnostics, score-harvesting guidance, and the handoff to
+`compare-results` for baseline-vs-candidate deltas.
 
 ---
 
@@ -333,6 +370,10 @@ Config Generation Progress:
 - [ ] Step 5: Confirm tasks (iterative)
 - [ ] Step 6: Advanced - Multi-node (Data Parallel)
 - [ ] Step 7: Advanced - Interceptors
-- [ ] Step 7.5: Check container registry auth (SLURM only)
+- [ ] Step 7.5: Check container registry auth for private images (SLURM only)
 - [ ] Step 8: Run the evaluation
+  - [ ] Step 8.1: Dry-run / NEL CLI config validation
+  - [ ] Step 8.2: Limited-samples canary
+  - [ ] Step 8.3: Full evaluation
+- [ ] Step 9: Verify completed evaluation run
 ```

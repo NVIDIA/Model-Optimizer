@@ -531,9 +531,10 @@ def load_model(args: argparse.Namespace):
             language_model = full_model
         else:
             if args.dataset is None:
-                args.dataset = ["cnn_dailymail", "nemotron-post-training-dataset-v2"]
+                args.dataset = ["cnn_nemotron_v2_mix"]
                 warnings.warn(
-                    "No dataset specified. Defaulting to cnn_dailymail and nemotron-post-training-dataset-v2."
+                    "No dataset specified. Defaulting to the 'cnn_nemotron_v2_mix' combo "
+                    "(cnn_dailymail + nemotron-post-training-dataset-v2)."
                 )
             # Adjust calib_size to match dataset length by extending or truncating as needed
             args.calib_size = (args.calib_size + [args.calib_size[-1]] * len(args.dataset))[
@@ -541,12 +542,17 @@ def load_model(args: argparse.Namespace):
             ]
 
             # We only quantize the language model for VLMs other than the type supported above.
-            extracted_lm, extracted_model_type = extract_and_prepare_language_model_from_vl(
-                full_model
-            )
-            if extracted_lm is not None:
-                language_model = extracted_lm
-                model_type = extracted_model_type
+            # Recipe mode is the exception: in Qwen3.5/3.6-MoE VLMs, lm_head sits
+            # on the outer CausalLM, not the inner language backbone. A recipe that targets
+            # lm_head must therefore quantize against the full model and explicitly keep visual
+            # and MTP siblings disabled.
+            if args.recipe is None:
+                extracted_lm, extracted_model_type = extract_and_prepare_language_model_from_vl(
+                    full_model
+                )
+                if extracted_lm is not None:
+                    language_model = extracted_lm
+                    model_type = extracted_model_type
 
         tokenizer = get_tokenizer(args.pyt_ckpt_path, trust_remote_code=args.trust_remote_code)
 
@@ -624,22 +630,6 @@ def mono_quantize(
             "\n####\nAWQ calibration could take longer than other calibration methods. "
             "Consider reducing calib_size to reduce calibration time.\n####\n"
         )
-
-    # For Nemotron VL models, disable quantization of vision components
-    if is_nemotron_vl_model:
-        print("Disabling quantization for vision components in Nemotron VL model")
-        quant_cfg["quant_cfg"].append({"quantizer_name": "*vision*", "enable": False})
-        quant_cfg["quant_cfg"].append({"quantizer_name": "*image*", "enable": False})
-        # Also disable radio model components specifically (for Nemotron-Parse)
-        quant_cfg["quant_cfg"].append({"quantizer_name": "*radio*", "enable": False})
-        quant_cfg["quant_cfg"].append({"quantizer_name": "*visual*", "enable": False})
-        quant_cfg["quant_cfg"].append(
-            {"quantizer_name": "*encoder*", "enable": False}
-        )  # Disable encoder
-        quant_cfg["quant_cfg"].append(
-            {"quantizer_name": "*model_encoder*", "enable": False}
-        )  # Nemotron-Parse specific
-        print("Quantization will only be applied to the decoder (text generation) component")
 
     if not model_is_already_quantized or calibration_only:
         # quantize the model
@@ -1109,10 +1099,8 @@ def quantize_main(
             quant_cfg = QUANT_CFG_CHOICES[args.qformat]
 
             quant_cfg = build_quant_cfg(
-                args.qformat,
                 quant_cfg,
                 args.awq_block_size,
-                model_type,
                 args.moe_calib_experts_ratio,
             )
 
@@ -1126,8 +1114,10 @@ def quantize_main(
                     getattr(mtq, KV_QUANT_CFG_CHOICES[args.kv_cache_qformat])["quant_cfg"],
                 )
 
-        # Exclude MTP layers from quantization if detected (e.g., GLM-4.7's layer 92)
-        # These layers are typically speculative decoding layers that should be exported as-is
+        # Exclude MTP layers from quantization if detected (e.g., GLM-4.7's layer 92).
+        # These layers are typically speculative decoding layers that should be exported as-is.
+        # Complementary to recipe `*mtp*` wildcards (name-match); this catches MTP layers
+        # identified by index.
         mtp_layer_prefixes = getattr(full_model, "_mtp_layer_prefixes", None)
         if mtp_layer_prefixes:
             quant_cfg = copy.deepcopy(quant_cfg)
@@ -1238,7 +1228,7 @@ def parse_args() -> argparse.Namespace:
             "This argument will be parsed and converted as a list of ints."
         ),
         type=str,
-        default="512",
+        default="1024",
     )
     parser.add_argument(
         "--calib_seq",

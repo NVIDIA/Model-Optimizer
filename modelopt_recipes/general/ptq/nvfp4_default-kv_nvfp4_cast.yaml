@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Composed PTQ recipe for dynamic NVFP4 W4A4 model quantization with NVFP4 KV-cache cast mode.
+
 imports:
   base_disable_all: configs/ptq/units/base_disable_all
   default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
@@ -22,10 +24,8 @@ imports:
 metadata:
   recipe_type: ptq
   description: >-
-    NVFP4 W4A4, NVFP4 KV cache with constant amax (skips KV calibration; amax
-    hardcoded to FP8 E4M3 max 448.0 — the deployment kernel upcasts NVFP4 KV
-    values to FP8 before attention, so the scale must land in the FP8 range),
-    max calibration.
+    Composes dynamic NVFP4 W4A4 model quantization with NVFP4 KV-cache cast mode using constant
+    amax; uses max calibration.
 quantize:
   algorithm: max
   quant_cfg:
