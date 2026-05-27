@@ -46,7 +46,7 @@ docker run \
 Also install additional dependencies from the [requirements.txt](./requirements.txt) file.
 
 ```bash
-python -m pip install -r requirements.txt
+python -m pip install -r /opt/Model-Optimizer/examples/megatron_bridge/requirements.txt
 ```
 
 You also need to login with your HuggingFace token to download gated datasets / models.
