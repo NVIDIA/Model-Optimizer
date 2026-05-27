@@ -13,9 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# FP8 E4M3 quantizer attributes (per-tensor; used for weight/activation/KV).
-# ``axis: null`` is explicit to match the hardcoded ``FP8_DEFAULT_CFG`` shape —
-# downstream code that keys on ``"axis" in cfg`` sees the same dict layout.
+# Per-tensor FP8 E4M3 quantizer attributes.
 
 # modelopt-schema: modelopt.torch.quantization.config.QuantizerAttributeConfig
 num_bits: e4m3

@@ -1,0 +1,30 @@
+[
+  {
+    "name": "baseline-vs-quantized-delta",
+    "skills": ["compare-results"],
+    "query": "Compare the baseline and quantized NEL runs and tell me the accuracy drop",
+    "files": [],
+    "expected_behavior": [
+      "Establishes the baseline and candidate before computing deltas",
+      "Identifies baseline and candidate run artifacts before computing deltas",
+      "Checks that both runs were validated before accepting scores",
+      "Uses task recipe Score Extraction sections for canonical score fields",
+      "Verifies prompt/template, generation settings, reasoning handling, sample counts, judge/simulator setup, and score field comparability",
+      "Computes exact per-task deltas outside the chat context when there are multiple tasks or repeated runs",
+      "Labels the result as not apples-to-apples if comparability checks fail",
+      "Reports quantization feasibility as inconclusive when no acceptance threshold is provided"
+    ]
+  },
+  {
+    "name": "missing-baseline",
+    "skills": ["compare-results", "evaluation"],
+    "query": "Is this quantized eval good enough if I only have the quantized run?",
+    "files": [],
+    "expected_behavior": [
+      "Does not treat a standalone quantized score as a release-ready delta",
+      "Establishes the matching baseline from the PTQ source model/checkpoint or asks the user for one",
+      "Delegates missing baseline or candidate evaluations to the evaluation skill",
+      "Explains that the baseline config must match task versions, serving args, dataset setup, credentials, cluster, and container except for the checkpoint/model"
+    ]
+  }
+]

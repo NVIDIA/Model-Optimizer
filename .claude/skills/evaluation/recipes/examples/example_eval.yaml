@@ -2,12 +2,12 @@
 #
 # A balanced set of benchmarks for validating quantized model quality.
 # Copy this file and customize for your needs.
-# Task snippets in recipes/tasks/ define per-task configs — the agent
-# composes them into a runnable config like this one.
+# Task references in recipes/tasks/ define benchmark requirements and YAML
+# fragments — the agent composes them into a runnable config like this one.
 #
 # Includes:
 #   - MMLU-Pro (knowledge, completions)
-#   - GPQA Diamond (reasoning, chat, 5 repeats)
+#   - GPQA Diamond (reasoning, chat, 32 repeats)
 #   - LiveCodeBench v6 (code, chat, 3 repeats)
 #   - IFBench (instruction following, chat, 8 repeats)
 #
@@ -19,13 +19,16 @@
 #     -o execution.account=<slurm_account> \
 #     -o execution.output_dir=/path/to/output
 #
-# For quantized checkpoints, also add the quantization flag:
-#   -o 'deployment.extra_args=--max-model-len 32768 --trust-remote-code --quantization modelopt_fp4'
+# For quantized checkpoints, do not add a vLLM quantization flag by default.
+# Recent vLLM reads ModelOpt quantization metadata from the checkpoint. Only add
+# an explicit flag if the model card, vLLM version, or dry-run error requires it.
+#   -o 'deployment.extra_args=--max-model-len 32768 --trust-remote-code'
 #
 # Run a single task:
 #   nel run --config ... -t ns_gpqa
 #
-# Smoke test (2 samples):
+# Canary (2 samples): use this before a full run to validate logs and tune
+# parallelism.
 #   nel run --config ... -o ++evaluation.nemo_evaluator_config.config.params.limit_samples=2
 defaults:
   - execution: slurm/default
@@ -63,7 +66,7 @@ evaluation:
         api_key_name: DUMMY_API_KEY
   tasks:
   # Knowledge (chat endpoint, short)
-    - name: ns_mmlu_pro
+    - name: nemo_skills.ns_mmlu_pro
       nemo_evaluator_config:
         config:
           params:
@@ -77,14 +80,14 @@ evaluation:
                 - max_new_tokens
                 - max_completion_tokens
 
-  # Reasoning (chat endpoint, 5 repeats, short)
+  # Reasoning (chat endpoint, 32 repeats, short)
     - name: ns_gpqa
       nemo_evaluator_config:
         config:
           params:
             extra:
               args: ++prompt_config=eval/aai/mcq-4choices
-              num_repeats: 5
+              num_repeats: 32
         target:
           api_endpoint:
             adapter_config:

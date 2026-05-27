@@ -111,8 +111,14 @@ def print_rank_0(*args, **kwargs):
 
 
 def warn_rank_0(message, *args, **kwargs):
-    """Issues a warning only on the master process."""
+    """Issues a warning only on the master process.
+
+    Auto-bumps ``stacklevel`` by 1 to skip this wrapper frame, so callers can pass the
+    same stacklevel they would to ``warnings.warn`` directly and the warning still
+    points at the user's call site.
+    """
     if dist.is_master():
+        kwargs["stacklevel"] = kwargs.get("stacklevel", 1) + 1
         warnings.warn(message, *args, **kwargs)
 
 
