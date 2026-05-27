@@ -47,6 +47,7 @@ from .model_config import (
     QUANTIZATION_W4A16_NVFP4,
 )
 from .plugins.hf_checkpoint_utils import (
+    copy_hf_ckpt_remote_code,
     copy_non_safetensor_files_from_ckpt,
     load_multimodal_components,
 )
@@ -299,14 +300,19 @@ class GPTModelExporter:
         # We use the last PP rank and the 1st EP rank to write the config because
         # medusa_heads and eagle_module only exist in the last stage.
         if is_last_stage_main_rank:
-            # Baseline: pull every non-safetensors file from the source (tokenizer,
-            # remote_code *.py, README, etc.). modelopt-owned files (config.json,
+            # Baseline: for a local source, copy every non-safetensors file
+            # (tokenizer, remote_code *.py, README, etc.); for a Hub-ID source,
+            # snapshot_download just the *.py sidecars (tokenizer comes via the
+            # AutoTokenizer fallback below). modelopt-owned files (config.json,
             # generation_config.json, hf_quant_config.json, preprocessor_config.json)
             # are overwritten below.
-            if self._hf_pretrained_model_name is not None and os.path.isdir(
-                self._hf_pretrained_model_name
-            ):
-                copy_non_safetensor_files_from_ckpt(self._hf_pretrained_model_name, save_directory)
+            if self._hf_pretrained_model_name is not None:
+                if os.path.isdir(self._hf_pretrained_model_name):
+                    copy_non_safetensor_files_from_ckpt(
+                        self._hf_pretrained_model_name, save_directory
+                    )
+                else:
+                    copy_hf_ckpt_remote_code(self._hf_pretrained_model_name, save_directory)
             self._hf_config.save_pretrained(save_directory)
             try:
                 generation_config = transformers.GenerationConfig.from_pretrained(
@@ -316,8 +322,7 @@ class GPTModelExporter:
                 generation_config.save_pretrained(save_directory)
             except OSError:
                 pass
-            # Fall back to AutoTokenizer for remote (non-local) sources where the
-            # bulk copy above is a no-op.
+            # Hub-ID / None source: fetch tokenizer files via AutoTokenizer.
             if self._hf_pretrained_model_name is None or not os.path.isdir(
                 self._hf_pretrained_model_name
             ):
