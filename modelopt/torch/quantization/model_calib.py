@@ -56,10 +56,10 @@ from .utils import (
 from .utils.calib_utils import _GPTQ_HELPER_REGISTRY, GPTQHelper
 
 try:
-    from .plugins.megatron import _check_static_block_tp_supported
+    from .plugins.megatron import _check_nvfp4_static_tp_supported
 except ImportError:
 
-    def _check_static_block_tp_supported(model: nn.Module) -> None:  # no-op without megatron
+    def _check_nvfp4_static_tp_supported(model: nn.Module) -> None:  # no-op without megatron
         return
 
 
@@ -297,8 +297,8 @@ def max_calibrate(
         if hasattr(module, "layer_sync_moe_local_experts_amax"):
             module.layer_sync_moe_local_experts_amax(sync_weight_amax=sync_expert_weight_amax)
 
-    # Fail fast on static-block under TP>1 (sharded_state_dict treats _amax as replicated).
-    _check_static_block_tp_supported(model)
+    # Fail fast on NVFP4 static-block with TP>1 (sharded_state_dict treats _amax as replicated).
+    _check_nvfp4_static_tp_supported(model)
 
     # Promote eligible static-block NVFP4 weight quantizers to NVFP4StaticQuantizer so
     # the static blockwise fake-quant path is used in forward and export picks up the

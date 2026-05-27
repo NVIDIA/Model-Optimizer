@@ -71,8 +71,11 @@ logger = logging.getLogger(__name__)
 __all__ = []
 
 
-def _check_static_block_tp_supported(model: torch.nn.Module) -> None:
-    """Raise under TP>1: static-block _amax is shard-local but sharded_state_dict treats it as replicated."""
+def _check_nvfp4_static_tp_supported(model: torch.nn.Module) -> None:
+    """Raise if using NVFP4-static weight quantization with TP>1.
+
+    Static-block _amax is shard-local but sharded_state_dict treats it as replicated.
+    """
     offending = []
     for name, module in model.named_modules():
         if not isinstance(module, QuantModule):
@@ -91,7 +94,7 @@ def _check_static_block_tp_supported(model: torch.nn.Module) -> None:
             if isinstance(weight_quantizer, SequentialQuantizer)
             else [weight_quantizer]
         )
-        if any(leaf.is_static_block_quant for leaf in leaves):
+        if any(leaf.is_nvfp4_static for leaf in leaves):
             offending.append((name, tp_group.world_size()))
     if offending:
         raise NotImplementedError(
@@ -369,11 +372,8 @@ class _MegatronParallelLinear(_ParallelLinear):
         # Ensure metadata has dp_cp_group to avoid None subscript errors
         metadata = ensure_metadata_has_dp_cp_group(metadata)
 
-        # [WAR]: although we disable output_layer quantization by default but it will
-        # still be picked up by mtq.quantize since it is a ColumnParallelLinear. We need
-        # to further ensure that its sharded state_dict has no scalars or amax since
-        # 1) MCore's vocabulary padding may change but we didn't support this feature
-        # 2) When embedding and output_layer are sharing weights, PP>1 will have
+        # Only allow output_layer quantization when embeddings and output_weights are untied
+        # When embedding and output_layer are sharing weights, PP>1 will have
         #    output_layer.input_quantizer._amax but TP-only does not. This lead to
         #    state_dict mismatch.
         if prefix.endswith("output_layer."):
@@ -383,7 +383,10 @@ class _MegatronParallelLinear(_ParallelLinear):
                 _untied = bool(
                     getattr(_mlm_get_args(), "untie_embeddings_and_output_weights", False)
                 )
-            except Exception:
+            except Exception as e:
+                logger.warning(
+                    f"Failed to get Megatron arg untie_embeddings_and_output_weights: {e}"
+                )
                 _untied = False
             if not _untied:
                 return super().sharded_state_dict(prefix, sharded_offsets, metadata)
@@ -801,9 +804,14 @@ def _is_param_grad_enabled_for_megatron(pname: str, model: torch.nn.Module) -> b
     return "weight" in pname
 
 
-def _register_auto_quantize_support() -> None:
-    # Local import breaks the circular path where algorithms imports model_calib,
-    # which imports _check_static_block_tp_supported from this plugin.
+_AUTOQUANT_SUPPORT_REGISTERED = False
+
+
+def register_megatron_autoquant_support() -> None:
+    """Register megatron AutoQuant hooks. Call from `auto_quantize` entry (lazy), not at module-load."""
+    global _AUTOQUANT_SUPPORT_REGISTERED
+    if _AUTOQUANT_SUPPORT_REGISTERED:
+        return
     from ..algorithms import AutoQuantizeGradientSearcher
 
     AutoQuantizeGradientSearcher.register_custom_support(
@@ -811,9 +819,7 @@ def _register_auto_quantize_support() -> None:
         _megatron_grad_ckpt_context,
         _is_param_grad_enabled_for_megatron,
     )
-
-
-_register_auto_quantize_support()
+    _AUTOQUANT_SUPPORT_REGISTERED = True
 
 
 # GPTQ layerwise calibration support
