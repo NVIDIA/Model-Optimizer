@@ -9,7 +9,7 @@ Produce a quantized checkpoint from a pretrained model. **Read `examples/llm_ptq
 
 ## Step 1 — Environment
 
-Read `skills/common/environment-setup.md` and `skills/common/workspace-management.md`. After completing them you should know:
+Read `../common/environment-setup.md` and `../common/workspace-management.md`. After completing them you should know:
 
 - ModelOpt source is available
 - Local or remote (+ cluster config if remote)
@@ -98,7 +98,7 @@ python examples/llm_ptq/hf_ptq.py \
 
 Run `--help` for all options.
 
-For remote: use `remote_run` from `remote_exec.sh` (see `skills/common/remote-execution.md`).
+For remote: use `remote_run` from `remote_exec.sh` (see `../common/remote-execution.md`).
 
 ### 4B — Launcher: supported model on SLURM or local Docker
 
@@ -118,7 +118,7 @@ The launcher blocks and tails logs until the job completes. If the launcher fail
 
 Follow `references/unsupported-models.md`. It walks through investigating the model, patching ModelOpt if needed, and running `hf_ptq.py`. Run manually (like 4A) for easier monitoring and debugging.
 
-For SLURM, see `skills/common/slurm-setup.md` and `references/slurm-setup-ptq.md`.
+For SLURM, see `../common/slurm-setup.md` and `references/slurm-setup-ptq.md`.
 
 ### Monitoring
 
@@ -161,20 +161,20 @@ Report the gate result before moving on. The report must include source size, ou
 - **Model-specific dependencies**: Models with `trust_remote_code` may import packages not in the container (e.g., `mamba-ssm` for hybrid Mamba models). See Step 2.5. Use `EXTRA_PIP_DEPS` env var with the launcher, or install manually before running `hf_ptq.py`
 - **Transformers version**: New models may need a newer version of transformers than what's installed. Check `config.json` for `transformers_version`. In containers, beware of `PIP_CONSTRAINT` blocking upgrades — see `references/slurm-setup-ptq.md` for workarounds
 - **Gated datasets**: Some calibration datasets require HF authentication. Ensure `HF_TOKEN` is set in the job environment, or use `--dataset cnn_dailymail` as a non-gated alternative
-- **NFS root_squash + Docker**: See `skills/common/slurm-setup.md` section 5
+- **NFS root_squash + Docker**: See `../common/slurm-setup.md` section 5
 
 ## References
 
 | Reference | When to read |
 | --- | --- |
-| `skills/common/environment-setup.md` | Step 1: always |
-| `skills/common/workspace-management.md` | Step 1: always |
+| `../common/environment-setup.md` | Step 1: always |
+| `../common/workspace-management.md` | Step 1: always |
 | `references/launcher-guide.md` | Step 4B only (launcher path) |
 | `tools/launcher/CLAUDE.md` | Step 4B only, if you need more launcher detail |
 | `references/unsupported-models.md` | Step 4C only (unlisted model) |
 | `references/checkpoint-validation.md` | Step 5: mandatory post-PTQ gate before deployment/evaluation |
-| `skills/common/remote-execution.md` | Step 4A/4C only, if target is remote |
-| `skills/common/slurm-setup.md` | Step 4A/4C only, if using SLURM manually (not launcher) |
+| `../common/remote-execution.md` | Step 4A/4C only, if target is remote |
+| `../common/slurm-setup.md` | Step 4A/4C only, if using SLURM manually (not launcher) |
 | `references/slurm-setup-ptq.md` | Step 4A/4C only, PTQ-specific SLURM (container, GPU sizing, FSDP2) |
 | `examples/llm_ptq/README.md` | Step 3: support matrix, CLI flags, accuracy |
 | `modelopt/torch/quantization/config.py` | Step 3: format definitions |
