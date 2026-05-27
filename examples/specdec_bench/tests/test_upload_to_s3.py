@@ -26,6 +26,7 @@ import pytest
 
 _PKG_ROOT = Path(__file__).resolve().parent.parent
 _SPEC = importlib.util.spec_from_file_location("_upload_to_s3", _PKG_ROOT / "upload_to_s3.py")
+assert _SPEC is not None and _SPEC.loader is not None, "could not locate upload_to_s3.py"
 upload_to_s3 = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(upload_to_s3)
 
