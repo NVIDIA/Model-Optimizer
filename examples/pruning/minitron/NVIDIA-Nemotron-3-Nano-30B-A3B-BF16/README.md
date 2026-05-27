@@ -24,7 +24,8 @@ End-to-end optimization of [NVIDIA-Nemotron-3-Nano-30B-A3B-BF16](https://hugging
 | Distill @ 60B tokens (2400 iters at 8K Seq Length) | 71.7 | 76.1 | 68.1 | 63.6 | 78.8 | 67.3 | 27.0 | 64.7 |
 | Distill @ 80B tokens (3200 iters at 8K Seq Length) | 71.7 | 76.5 | 69.1 | 63.9 | 80.7 | 66.5 | 29.0 | 65.3 |
 | Distill @ 82.5B tokens (+100 iters at 32K Seq Length) | 71.8 | 76.2 | 69.8 | 64.8 | 87.0 | 68.2 | 27.0 | 66.4 |
-| Distill @ 100B tokens (+800 iters at 32K Seq Length) | 71.9 | 76.6 | 69.6 | 66.1 | 87.3 | 68.9 | 28.4 | 67.0 |
+| Distill @ 100B tokens (+800 iters at 32K Seq Length) - **BF16** | 71.9 | 76.6 | 69.6 | 66.1 | 87.3 | 68.9 | 28.4 | 67.0 |
+| Distill @ 100B tokens + **FP8 Quantize** | 71.7 | 76.3 | 69.8 | 65.5 | 86.0 | 69.7 | 27.9 | 66.7 |
 | NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 (official, 31.6B/A3.6B) | 73.5 | 78.0 | 70.3 | 67.9 | 87.1 | 69.1 | 31.8 | 68.2 |
 
 Distillation uses the **30% Pretraining (Code 5, General 20, MATH 5) + 70% Post-training v1/v3 (Math 27, Coding 20, Science 13, IF 5, Tool calling 5)** blend (see [Data Blend](#data-blend) below) with an **80B @ 8K + 20B @ 32K = 100B token** schedule. Blend ablations and long-context phase ablations are in [ABLATIONS.md](ABLATIONS.md).
@@ -66,7 +67,7 @@ For this experiment: `TOKENIZER=nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16`, `OU
 | Nemotron-Science-v1 / RQA                             | 0.3B   | 2      | GPQA format diversity                          |
 | Nemotron-SFT-IF-Chat-v2 / reasoning_on                | 2B     | 3      | Instruction following (thinking on)            |
 | Nemotron-SFT-IF-Chat-v2 / reasoning_off               | 1B     | 2      | Instruction following (thinking off)           |
-| Nemotron-Agentic-v1 / tool_calling                    | 1B     | 5      | Tool-use scaffolding; helps SciCode / GPQA when eval runs with tool calling enabled |
+| Nemotron-Agentic-v1 / tool_calling                    | 1B     | 5      | Tool-use scaffolding; helps SciCode / GPQA     |
 
 <details>
 <summary>Data blend for distillation (click to expand)</summary>
@@ -459,6 +460,8 @@ The quantized checkpoint is directly deployable with [vLLM](https://github.com/v
 
 > [!TIP]
 > You can run the evaluation using the same `nemo_evaluator.yaml` file for the quantized checkpoint also!
+
+See FP8 vs BF16 results in the [Results](#results) section above.
 
 ---
 

@@ -234,8 +234,8 @@ Old blend results (8K seq length only):
 
 | Tokens (iters at 8K) | MMLU | MMLU Pro | GPQA Diamond | LiveCodeBench v6 | AIME 2025 | IFBench | SciCode (Subtask) | Average |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 2.5B (100 iters)  | 68.6 | 73.6 | 62.5 | 57.5 | 79.1 | 58.3 | 22.6 | 60.3 |
-| 20B  (800 iters)  | 70.8 | 74.6 | 65.3 | 61.0 | 79.8 | 63.6 | 22.5 | 62.5 |
+| 2.5B (100 iters) | 68.6 | 73.6 | 62.5 | 57.5 | 79.1 | 58.3 | 22.6 | 60.3 |
+| 20B  (800 iters) | 70.8 | 74.6 | 65.3 | 61.0 | 79.8 | 63.6 | 22.5 | 62.5 |
 | 40B  (1600 iters) | 71.6 | 75.6 | 64.5 | 61.6 | 76.8 | 67.4 | 28.3 | 63.7 |
 | 60B  (2400 iters) | 71.5 | 76.0 | 67.5 | 63.0 | 77.5 | 68.4 | 29.4 | 64.8 |
 | 80B  (3200 iters) | 71.7 | 76.5 | 68.4 | 64.2 | 80.2 | 66.5 | 28.7 | 65.2 |
@@ -268,8 +268,8 @@ After the 8K-seq-length phase of the old-blend run, training was continued with 
 
 | Tokens (additional iters at 32K) | MMLU | MMLU Pro | GPQA Diamond | LiveCodeBench v6 | AIME 2025 | IFBench | SciCode (Subtask) | Average |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 100B (end of 8K phase)    | 71.8 | 76.6 | 68.4 | 64.5 | 81.0 | 68.4 | 28.0 | 65.5 |
-| 105B (+200 iters at 32K)  | 71.9 | 76.8 | 69.7 | 65.6 | **87.3** | 69.3 | 29.5 | 67.2 |
+| 100B (end of 8K phase) | 71.8 | 76.6 | 68.4 | 64.5 | 81.0 | 68.4 | 28.0 | 65.5 |
+| 105B (+200 iters at 32K) | 71.9 | 76.8 | 69.7 | 65.6 | **87.3** | 69.3 | 29.5 | 67.2 |
 | 125B (+1000 iters at 32K) | 71.9 | 76.7 | 70.5 | 65.7 | **88.0** | 68.5 | 27.6 | 67.0 |
 
 **Summary — high-leverage, low-cost addition:**
