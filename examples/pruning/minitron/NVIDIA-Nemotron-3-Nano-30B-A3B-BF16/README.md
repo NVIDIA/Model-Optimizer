@@ -15,18 +15,18 @@ End-to-end optimization of [NVIDIA-Nemotron-3-Nano-30B-A3B-BF16](https://hugging
 
 ![Benchmark Recovery During Knowledge Distillation](figures/learning_curves.png)
 
-| Model | MMLU | MMLU Pro | GPQA Diamond | LiveCodeBench v6 | AIME 2025 | IFBench | SciCode (Subtask) | Average |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Pruned 22B/A3.0B (no distillation) | 53.4 | 47.1 | 33.5 | 27.4 | 15.5 | 36.9 | 12.1 | 32.3 |
-| Distill @ 2.5B tokens (100 iters at 8K Seq Length) | 68.7 | 73.3 | 63.7 | 55.3 | 77.6 | 59.1 | 25.1 | 60.4 |
-| Distill @ 20B tokens (800 iters at 8K Seq Length) | 70.8 | 74.8 | 66.0 | 62.3 | 79.6 | 65.4 | 26.1 | 63.6 |
-| Distill @ 40B tokens (1600 iters at 8K Seq Length) | 71.3 | 76.4 | 67.2 | 62.3 | 79.8 | 66.0 | 26.6 | 64.2 |
-| Distill @ 60B tokens (2400 iters at 8K Seq Length) | 71.7 | 76.1 | 68.1 | 63.6 | 78.8 | 67.3 | 27.0 | 64.7 |
-| Distill @ 80B tokens (3200 iters at 8K Seq Length) | 71.7 | 76.5 | 69.1 | 63.9 | 80.7 | 66.5 | 29.0 | 65.3 |
-| Distill @ 82.5B tokens (+100 iters at 32K Seq Length) | 71.8 | 76.2 | 69.8 | 64.8 | 87.0 | 68.2 | 27.0 | 66.4 |
-| Distill @ 100B tokens (+800 iters at 32K Seq Length) - **BF16** | 71.9 | 76.6 | 69.6 | 66.1 | 87.3 | 68.9 | 28.4 | 67.0 |
-| Distill @ 100B tokens + **FP8 Quantize** | 71.7 | 76.3 | 69.8 | 65.5 | 86.0 | 69.7 | 27.9 | 66.7 |
-| NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 (official, 31.6B/A3.6B) | 73.5 | 78.0 | 70.3 | 67.9 | 87.1 | 69.1 | 31.8 | 68.2 |
+| Model | MMLU Pro | GPQA Diamond | LiveCodeBench v6 | AIME 2025 | IFBench | SciCode (Subtask) | Average |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Pruned 22B/A3.0B (no distillation) | 47.1 | 33.5 | 27.4 | 15.5 | 36.9 | 12.1 | 28.8 |
+| Distill @ 2.5B tokens (100 iters at 8K Seq Length) | 73.3 | 63.7 | 55.3 | 77.6 | 59.1 | 25.1 | 59.0 |
+| Distill @ 20B tokens (800 iters at 8K Seq Length) | 74.8 | 66.0 | 62.3 | 79.6 | 65.4 | 26.1 | 62.4 |
+| Distill @ 40B tokens (1600 iters at 8K Seq Length) | 76.4 | 67.2 | 62.3 | 79.8 | 66.0 | 26.6 | 63.1 |
+| Distill @ 60B tokens (2400 iters at 8K Seq Length) | 76.1 | 68.1 | 63.6 | 78.8 | 67.3 | 27.0 | 63.5 |
+| Distill @ 80B tokens (3200 iters at 8K Seq Length) | 76.5 | 69.1 | 63.9 | 80.7 | 66.5 | 29.0 | 64.3 |
+| Distill @ 82.5B tokens (+100 iters at 32K Seq Length) | 76.2 | 69.8 | 64.8 | 87.0 | 68.2 | 27.0 | 65.5 |
+| Distill @ 100B tokens (+800 iters at 32K Seq Length) - **BF16** | 76.6 | 69.6 | 66.1 | 87.3 | 68.9 | 28.4 | 66.2 |
+| Distill @ 100B tokens + **FP8 Quantize** | 76.3 | 69.8 | 65.5 | 86.0 | 69.7 | 27.9 | 65.9 |
+| NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 (official, 31.6B/A3.6B) | 78.0 | 70.3 | 67.9 | 87.1 | 69.1 | 31.8 | 67.4 |
 
 Distillation uses the **30% Pretraining (Code 5, General 20, MATH 5) + 70% Post-training v1/v3 (Math 27, Coding 20, Science 13, IF 5, Tool calling 5)** blend (see [Data Blend](#data-blend) below) with an **80B @ 8K + 20B @ 32K = 100B token** schedule. Blend ablations and long-context phase ablations are in [ABLATIONS.md](ABLATIONS.md).
 
@@ -417,7 +417,6 @@ nemo-evaluator-launcher run --config nemo_evaluator.yaml
 
 | Benchmark | Library | num_repeats | Metric name |
 | --- | --- | --- | --- |
-| MMLU | [lm-evaluation-harness](https://github.com/EleutherAI/lm-evaluation-harness) (5-shot) | N/A | `mmlu` |
 | MMLU Pro | NeMo Evaluator | 1 | `mmlu-pro_pass_at_1_symbolic_correct` |
 | GPQA Diamond | NeMo Evaluator | 8 | `gpqa_pass_at_1_avg-of-8_symbolic_correct` |
 | LiveCodeBench v6 | NeMo Evaluator | 8 | `livecodebench_pass_at_1_avg-of-8_accuracy` |
