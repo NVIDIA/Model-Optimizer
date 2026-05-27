@@ -20,8 +20,6 @@ native_mpi_local_rank=$OMPI_COMM_WORLD_LOCAL_RANK
 # Works with Slurm launching with `--mpi=pmix`
 mpi_rank=${PMIX_RANK:-${native_mpi_rank:-${SLURM_PROCID:-0}}}
 mpi_local_rank=${PMIX_LOCAL_RANK:-${native_mpi_local_rank:-${SLURM_LOCALID:-0}}}
-mpi_rank=${PMIX_RANK:-${native_mpi_rank:-${SLURM_PROCID:-0}}}
-mpi_local_rank=${PMIX_LOCAL_RANK:-${native_mpi_local_rank:-${SLURM_LOCALID:-0}}}
 
 FAIL=0
 FAIL_EXIT=0
