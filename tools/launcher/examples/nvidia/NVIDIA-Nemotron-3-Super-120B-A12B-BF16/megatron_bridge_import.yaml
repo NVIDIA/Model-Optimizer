@@ -1,0 +1,41 @@
+# Megatron-Bridge import for nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16.
+#
+# Imports HF weights to a Megatron-LM checkpoint via AutoBridge.import_ckpt
+# (use_cpu_initialization=True). Uses a single 8xH100 Slurm node — Megatron-Bridge
+# requires at least 1 GPU for nccl init even with CPU-resident weights.
+#
+# Usage:
+#   export SLURM_HOST=<slurm-host>
+#   export SLURM_ACCOUNT=<your-team>
+#   export SLURM_PARTITION=<gpu-partition>   # default: batch
+#   export SLURM_JOB_DIR=/home/scratch.<user>/experiments
+#   export HF_TOKEN=<your-hf-token>          # gated model
+#   cd tools/launcher
+#   uv run launch.py --yaml examples/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16/megatron_bridge_import.yaml --yes
+
+job_name: Nemotron-3-Super-120B_bridge_import
+pipeline:
+  skip: false
+  allow_to_fail: false
+  note: "HF -> MCore import via Megatron-Bridge (8xH100)"
+
+  global_vars:
+    # /cicd is the experiment_title mount = $SLURM_JOB_DIR/cicd on the host
+    # (persists across runs, unlike /scratchspace which is per-experiment).
+    output_dir: /cicd/megatron-bridge
+
+  task_0:
+    script: common/megatron_bridge/import/import.sh
+    environment:
+      - HF_MODEL_ID: nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16
+      - OUTPUT_DIR: <<global_vars.output_dir>>
+    slurm_config:
+      _factory_: "slurm_factory"
+      # Megatron-Bridge is preinstalled in nemo:26.04 at /opt/Megatron-Bridge.
+      container: nvcr.io/nvidia/nemo:26.04
+      modelopt_install_path: /opt/venv/lib/python3.12/site-packages/modelopt
+      partition: batch
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 8
+      time: "04:00:00"
