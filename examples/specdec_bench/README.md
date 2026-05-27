@@ -64,7 +64,7 @@ python3 run.py \
 
 ### Running [SPEED-Bench](https://huggingface.co/datasets/nvidia/SPEED-Bench) on Llama 3.3 70B + Eagle 3
 
-1. Install the requirements file using `pip install -r requirements_speed.txt`
+1. Install the requirements file using `pip install -r requirements.txt`
 
 2. Prepare the data using the provided script:
 

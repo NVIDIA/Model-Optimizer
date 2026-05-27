@@ -36,8 +36,8 @@ trap 'exit_handler' EXIT
 if ! pip show boto3 >/dev/null 2>&1 || \
    ! pip show datasets >/dev/null 2>&1 || \
    ! pip show seaborn >/dev/null 2>&1; then
-    if ! pip install -r modules/Model-Optimizer/examples/specdec_bench/requirements_speed.txt; then
-        report_result "FAIL: specdec_bench: pip install requirements_speed.txt failed"
+    if ! pip install -r modules/Model-Optimizer/examples/specdec_bench/requirements.txt; then
+        report_result "FAIL: specdec_bench: pip install requirements.txt failed"
         exit 1
     fi
 fi
