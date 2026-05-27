@@ -63,9 +63,6 @@ def update_hessian(input, hessian, n_samples):
     input_flat = input.reshape(-1, input.shape[-1]).t().float()
     batch_size = input_flat.shape[1]
 
-    if batch_size == 0:  # in MOEs some experts receive no tokens
-        return hessian, n_samples
-
     # Incremental averaging: scale down old hessian
     hessian *= n_samples / (n_samples + batch_size)
     n_samples += batch_size

@@ -506,14 +506,6 @@ def auto_quantize(
                 "get_auto_quantize_config() to obtain a config for mtq.quantize()."
             )
 
-    # Lazy import: avoids module-load-time circular import via plugins/megatron → algorithms.
-    try:
-        from .plugins.megatron import register_megatron_autoquant_support
-
-        register_megatron_autoquant_support()
-    except ImportError:
-        pass
-
     # Select the appropriate searcher based on method
     if method == "gradient":
         searcher = AutoQuantizeGradientSearcher()

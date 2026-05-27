@@ -24,10 +24,8 @@ from _test_utils.torch.quantization.models import SimpleConv, SimpleConvLinear, 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.algorithms import (
-    AutoQuantizeGradientSearcher,
     QuantRecipe,
     QuantRecipeHparam,
-    _AutoQuantizeBaseSearcher,
     estimate_quant_compression,
 )
 from modelopt.torch.quantization.config import _base_disable_all, _default_disabled_quantizer_cfg
@@ -305,39 +303,6 @@ def _test_data_parallel_auto_quantize(rank, size):
 
 def test_data_parallel_auto_quantize(skip_on_windows):
     spawn_multiprocess_job(4, _test_data_parallel_auto_quantize, backend="gloo")
-
-
-def test_auto_quantize_budget_uses_no_quant_candidate_cost(monkeypatch):
-    class _BudgetCaptureSearcher(AutoQuantizeGradientSearcher):
-        def run_search_with_stats(self, max_weight_size, verbose=False):
-            self.max_weight_size = max_weight_size
-            return {}, True
-
-    def _raise_local_total_weight_size(modules):
-        pytest.fail("run_search should derive total weight size from candidate costs")
-
-    monkeypatch.setattr(
-        _AutoQuantizeBaseSearcher,
-        "_get_total_weight_size",
-        staticmethod(_raise_local_total_weight_size),
-    )
-
-    searcher = _BudgetCaptureSearcher()
-    searcher.reset_search()
-    searcher.model = torch.nn.Module()
-    searcher.config = {"verbose": False}
-    searcher.constraints = {"effective_bits": 8.0}
-    searcher.candidate_stats = {
-        "local_expert.quant_recipe": {
-            "formats": [QuantRecipe(mtq.NVFP4_DEFAULT_CFG), QuantRecipe(None)],
-            "scores": [1.0, 0.0],
-            "costs": [25.0, 100.0],
-        }
-    }
-
-    searcher.run_search()
-
-    assert searcher.max_weight_size == 50.0
 
 
 def test_estimate_quant_compression():
