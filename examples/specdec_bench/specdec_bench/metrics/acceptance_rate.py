@@ -78,7 +78,7 @@ class AcceptanceRate(Metric):
                 self._get_lengths(turn, lengths)
                 print(request_id, turn_id, self.out["Request_AL"][request_id][turn_id])
         average_ar = sum(all_ar) / len(all_ar)
-        print("Average AR:", average_ar)
+        print("Average AL:", average_ar)
         self.out["Average_AL"] = average_ar
         self._process_lengths(lengths)
         self.write()

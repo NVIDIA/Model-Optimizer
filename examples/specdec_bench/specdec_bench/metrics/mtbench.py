@@ -53,9 +53,9 @@ class MTBench(AcceptanceRate):
             if len(category) > 0:
                 category_ar = sum(category) / len(category)
                 self.out["Category_AL"][MTBENCH_TOPICS[i]] = category_ar
-                print(f"{MTBENCH_TOPICS[i]} Average AR: {category_ar}")
+                print(f"{MTBENCH_TOPICS[i]} Average AL: {category_ar}")
         average_ar = sum(self.out["Request_AL"].values()) / len(self.out["Request_AL"])
-        print("Average AR:", average_ar)
+        print("Average AL:", average_ar)
         self.out["Average_AL"] = average_ar
         self._process_lengths(lengths)
         self.write()

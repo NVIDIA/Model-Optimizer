@@ -40,6 +40,7 @@ Usage examples:
 import argparse
 import os
 import sys
+import traceback
 from pathlib import Path
 
 _RUN_SENTINELS = ("configuration.json", "timing.json", "acceptance_rate.json")
@@ -66,6 +67,7 @@ def parse_s3_path(path: str) -> tuple[str, str]:
 def make_s3_client(endpoint: str, key_id: str, secret: str):
     import boto3
     from botocore.config import Config
+
     return boto3.client(
         "s3",
         endpoint_url=endpoint or None,
@@ -216,12 +218,14 @@ def main():
             else:
                 print(f"  Error: {exc}")
                 errors += 1
-        except Exception as exc:  # noqa: BLE001 - any boto3/IO failure should not abort the sweep
+        except Exception as exc:
             # ClientError (auth, throttling, network), OSError on a single file,
             # etc. Keep going so the other runs in a sweep still upload, and
             # report a per-run summary at the end. Sweep-level non-zero exit
-            # still flags the overall run as failed.
+            # still flags the overall run as failed. Print the full traceback so
+            # boto3 ClientError details are recoverable from the log.
             print(f"  Error: {type(exc).__name__}: {exc}")
+            traceback.print_exc(file=sys.stderr)
             errors += 1
 
     print(f"\nDone: {uploaded} uploaded, {skipped} skipped, {errors} failed.")

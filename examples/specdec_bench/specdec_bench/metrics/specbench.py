@@ -93,7 +93,7 @@ class SpecBench(AcceptanceRate):
             header_style="bold magenta",
         )
         table.add_column("Category", style="cyan", no_wrap=True)
-        table.add_column("Average AR", justify="right", style="green")
+        table.add_column("Average AL", justify="right", style="green")
 
         # Add category rows
         for category_name, category_ar in sorted(self.out["Category_AL"].items()):

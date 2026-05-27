@@ -242,7 +242,7 @@ def _redact_argv(argv):
             prev_is_sensitive = False
             continue
         if s.startswith("--"):
-            name, sep, val = s[2:].partition("=")
+            name, sep, _val = s[2:].partition("=")
             if _is_sensitive_key(name):
                 if sep:
                     redacted.append(f"--{name}=***REDACTED***")
@@ -279,18 +279,14 @@ def dump_env(args, save_dir, overrides=None):
     # reasonable in-process way to know them.
     config["specdec_bench_version"] = specdec_bench_version
     specdec_bench_dir = Path(__file__).resolve().parent
-    config["specdec_bench_sha"] = (
-        os.environ.get("SPECDEC_BENCH_SHA") or _git_sha(specdec_bench_dir)
-    )
-    config["modelopt_version"] = (
-        os.environ.get("MODELOPT_VERSION") or _get_modelopt_version()
-    )
+    config["specdec_bench_sha"] = os.environ.get("SPECDEC_BENCH_SHA") or _git_sha(specdec_bench_dir)
+    config["modelopt_version"] = os.environ.get("MODELOPT_VERSION") or _get_modelopt_version()
     # Fallback assumes the in-tree layout examples/specdec_bench/specdec_bench/.
     # parents[2] reaches the modelopt repo root in that case. When vendored
     # elsewhere this would `git rev-parse` an unrelated repo; rely on the env
     # var path instead for non-in-tree deployments.
-    config["modelopt_sha"] = (
-        os.environ.get("MODELOPT_SHA") or _git_sha(specdec_bench_dir.parents[2])
+    config["modelopt_sha"] = os.environ.get("MODELOPT_SHA") or _git_sha(
+        specdec_bench_dir.parents[2]
     )
     config["nmm_sandbox_sha"] = os.environ.get("NMM_SANDBOX_SHA") or None
     config["container_image"] = os.environ.get("CONTAINER_IMAGE") or None
@@ -306,16 +302,20 @@ def dump_env(args, save_dir, overrides=None):
     config["jira_ticket"] = os.environ.get("JIRA_TICKET") or None
     config["huggingface_model_id"] = os.environ.get("HUGGINGFACE_MODEL_ID") or None
 
-    # Deterministic per-run UID. SHA-256 of the small set of inputs that
-    # together identify this run; same inputs → same UID, so accidental
-    # re-uploads of the same run dedupe in the visualizer.
-    uid_parts = "|".join([
-        str(config["timestamp"]),
-        str(getattr(args, "model_dir", "") or ""),
-        str(getattr(args, "speculative_algorithm", "") or ""),
-        str(getattr(args, "concurrency", "") or ""),
-        str(config.get("specdec_bench_sha") or ""),
-    ])
+    # Per-config UID. SHA-256 of the inputs that identify the *configuration*
+    # of this run (model, algorithm, concurrency, methodology SHA). Identical
+    # configs hash to the same uid so the visualizer can group repeats of the
+    # same experiment. The timestamp is intentionally excluded — it is stored
+    # separately in `config["timestamp"]` for ordering, but mixing it in here
+    # would make every run unique by construction and defeat the grouping.
+    uid_parts = "|".join(
+        [
+            str(getattr(args, "model_dir", "") or ""),
+            str(getattr(args, "speculative_algorithm", "") or ""),
+            str(getattr(args, "concurrency", "") or ""),
+            str(config.get("specdec_bench_sha") or ""),
+        ]
+    )
     config["uid"] = hashlib.sha256(uid_parts.encode()).hexdigest()[:16]
 
     os.makedirs(save_dir, exist_ok=True)
