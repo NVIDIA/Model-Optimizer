@@ -70,6 +70,7 @@ pipeline:
     args:
       - --config modules/Model-Optimizer/modelopt_recipes/general/speculative_decoding/eagle3.yaml
       - model.model_name_or_path=<<global_vars.hf_model>>
+      - model.trust_remote_code=true
       - data.offline_data_path=/scratchspace/offline_hidden_states
       - training.output_dir=/scratchspace/eagle3
       - training.training_seq_len=4096
