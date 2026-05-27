@@ -400,7 +400,6 @@ class TrtExecBenchmark(Benchmark):
         self.remote_engine_path: str = "trtexec_benchmark_model.trt"
         self.remote_bin_path: str = "trtexec"
         self.remote_lib_path: str = ""
-        self.remote_options: dict[str, str] = {}
 
         remote_value = _extract_remote_config_value(self.trtexec_args, log=self.logger)
         if remote_value is not None:
@@ -412,7 +411,6 @@ class TrtExecBenchmark(Benchmark):
             self.remote_password = config.password
             self.remote_ip = config.ip
             self.remote_port = config.port
-            self.remote_options = config.options
             self.remote_bin_path = config.bin_path
             self.remote_lib_path = config.lib_path
             try:
