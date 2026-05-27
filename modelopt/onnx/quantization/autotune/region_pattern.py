@@ -16,7 +16,7 @@
 """Region pattern signature generator for grouping structurally similar regions."""
 
 import hashlib
-from typing import Union, overload
+from typing import overload
 
 import onnx_graphsurgeon as gs
 
@@ -123,7 +123,7 @@ class RegionPattern:
 
     def matches(
         self,
-        other: Union["RegionPattern", Region],
+        other: "RegionPattern | Region",
         graph: gs.Graph | None = None,
         scheme: InsertionScheme | None = None,
     ) -> bool | list[int] | set[ResolvedInsertionPoint] | None:
