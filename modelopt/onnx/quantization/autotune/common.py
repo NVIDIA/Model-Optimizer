@@ -18,7 +18,7 @@
 import hashlib
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 import onnx_graphsurgeon as gs
 import yaml
@@ -351,7 +351,7 @@ class PatternSchemes:
         schemes: List of InsertionScheme candidates with measurements
     """
 
-    pattern: Optional["RegionPattern"] = None  # Structural pattern signature
+    pattern: "RegionPattern | None" = None  # Structural pattern signature
     schemes: list[InsertionScheme] = field(default_factory=list)  # Candidate schemes
 
     @property
@@ -405,7 +405,7 @@ class PatternSchemes:
 
     @classmethod
     def from_dict(
-        cls, data: dict[str, Any], pattern: Optional["RegionPattern"] = None
+        cls, data: dict[str, Any], pattern: "RegionPattern | None" = None
     ) -> "PatternSchemes":
         """Create PatternSchemes from serialized dictionary.
 

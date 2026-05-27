@@ -126,7 +126,7 @@ def test_llama_eagle3(tiny_llama_path,
                       num_gpus):
     """Test Eagle3 training with a tiny llama model, using different cp_size values."""
     if cp_size == 2 and num_gpus < 2:
-        pytest.skip("cp_size=2 requires at least 2 GPUs, but only {} found.".format(num_gpus))
+        pytest.skip(f"cp_size=2 requires at least 2 GPUs, but only {num_gpus} found.")
     if cp_size == 2 and not Version(torch.__version__) >= Version("2.10.0"):
         pytest.skip("cp_size=2 requires torch 2.10.0")
 
