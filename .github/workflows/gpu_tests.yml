@@ -51,6 +51,9 @@ jobs:
     timeout-minutes: ${{ matrix.timeout }}
     container:
       image: nvcr.io/nvidia/${{ matrix.container_image }}
+      credentials:
+        username: $oauthtoken
+        password: ${{ secrets.NGC_API_KEY }}
       env:
         GIT_DEPTH: 1000 # For correct version
         PIP_CONSTRAINT: "" # Disable pip constraint for upgrading packages
