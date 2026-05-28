@@ -690,7 +690,7 @@ def test_remote_run_scp_then_ssh_trtexec_safe(remote_bench, tmp_path):
     assert "trtexec_safe" in remote_cmd_str
     assert "--loadEngine=" in remote_cmd_str
     print(cleanup_cmd)
-    assert "rm -f trtexec_benchmark_model.trt" in cleanup_cmd
+    assert f"rm -f {remote_bench.remote_engine_path}" in cleanup_cmd
 
 
 def test_remote_run_uses_sshpass_when_password_set(remote_bench, tmp_path):
@@ -705,7 +705,7 @@ def test_remote_run_uses_sshpass_when_password_set(remote_bench, tmp_path):
     _, scp_cmd, ssh_cmd, cleanup_cmd = (c.args[0] for c in run_mock.call_args_list)
     assert scp_cmd[:3] == ["sshpass", "-p", "s3cret"]
     assert ssh_cmd[:3] == ["sshpass", "-p", "s3cret"]
-    assert "rm -f trtexec_benchmark_model.trt" in cleanup_cmd
+    assert f"rm -f {remote_bench.remote_engine_path}" in cleanup_cmd
 
 
 def test_remote_run_scp_failure_returns_inf(remote_bench, tmp_path):
