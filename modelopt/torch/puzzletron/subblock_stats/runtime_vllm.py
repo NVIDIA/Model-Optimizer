@@ -33,7 +33,7 @@ from pathlib import Path
 from .runtime_utils import RuntimeConfig
 
 
-def run_vllm_latency_benchmark(model_path: Path, runtime_config: RuntimeConfig) -> float | None:
+def run_vllm_latency_benchmark(model_path: Path, runtime_config: RuntimeConfig) -> float:
     """Run ``vllm bench latency`` in a fresh subprocess and return avg latency in ms.
 
     Spawning a subprocess per call gives OS-level isolation: GPU memory, CUDA
@@ -77,7 +77,6 @@ def run_vllm_latency_benchmark(model_path: Path, runtime_config: RuntimeConfig) 
     ]
 
     # cmd is a fixed list of strings (no shell, no untrusted input).
-    vllm_results = None
     try:
         subprocess.run(
             cmd,
