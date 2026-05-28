@@ -708,7 +708,17 @@ def is_model_on_gpu(model) -> bool:
 
 
 def is_enc_dec(model_type) -> bool:
-    """Return if the model is a encoder-decoder model."""
+    """Return if the model is a encoder-decoder model.
+
+    NOTE: this controls how hf_ptq.py decodes `.generate()` results in the
+    preview step (whether to slice off the prompt prefix). T5/BART/Whisper
+    return only new tokens, so the whole tensor is decoded. AR LMs (and
+    diffusion_gemma4) return prompt+new concatenated, so the prompt prefix
+    is sliced off before decoding. Even though diffusion_gemma4 *is*
+    structurally encoder-decoder, its `.generate()` returns prompt+canvas
+    (see `DiffusionGemma4GenerationOutput.sequences`), so it belongs with
+    the AR-style decode behavior — i.e. NOT listed here.
+    """
     return model_type in ["t5", "bart", "whisper"]
 
 

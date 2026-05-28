@@ -930,6 +930,14 @@ def post_quantize(
             raise ValueError("The processor or tokenizer must be set")
 
     def output_decode(generated_ids, input_shape):
+        # Some models return a ModelOutput dataclass from `.generate()` instead
+        # of a bare tensor (e.g. DiffusionGemma4 returns
+        # `DiffusionGemma4GenerationOutput(sequences=..., past_key_values=...)`).
+        # Unwrap to the token tensor here so downstream slicing/decoding works
+        # uniformly.
+        if hasattr(generated_ids, "sequences"):
+            generated_ids = generated_ids.sequences
+
         if is_enc_dec(model_type):
             if processor is not None and isinstance(processor, WhisperProcessor):
                 return processor.tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]

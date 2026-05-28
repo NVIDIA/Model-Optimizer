@@ -981,7 +981,13 @@ def create_forward_loop(
 
 
 def model_type_is_enc_dec(model):
-    enc_dec_model_list = ["t5", "bart", "whisper"]
+    # Substring match against `model.__class__.__name__.lower()`, so list
+    # entries must match how the class name appears once lowercased (no
+    # underscores). "diffusiongemma4" matches DiffusionGemma4ModelForBlockDiffusion
+    # (block-diffusion text model with an encoder + iterative decoder),
+    # so calibration uses `model.generate` and exercises the full
+    # denoising loop instead of a single decoder forward.
+    enc_dec_model_list = ["t5", "bart", "whisper", "diffusiongemma4"]
     return any(model_name in model.__class__.__name__.lower() for model_name in enc_dec_model_list)
 
 
