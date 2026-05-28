@@ -399,18 +399,26 @@ def is_pow2(n):
 
 
 def _get_fsdp2_mesh(module: nn.Module):
-    """Get the mesh info of the model."""
+    """Get the mesh info of the model.
+
+    Prefers ``post_forward_mesh_info`` (set when ``reshard_after_forward=True``);
+    falls back to ``mesh_info`` if it's None (observed under some PyTorch FSDP2
+    configurations: eval mode + all-frozen params at the time ``persistent
+    _materialization`` queries the state — the mesh itself is still valid).
+    """
     try:
         from torch.distributed._composable_state import _get_module_state
     except ImportError:
         return None
 
     fsdp_state = _get_module_state(module)
-    if (
-        fsdp_state._fsdp_param_group
-        and fsdp_state._fsdp_param_group.post_forward_mesh_info is not None
-    ):
-        return fsdp_state._fsdp_param_group.post_forward_mesh_info.mesh
+    pg = getattr(fsdp_state, "_fsdp_param_group", None)
+    if pg is None:
+        return None
+    info = pg.post_forward_mesh_info or pg.mesh_info
+    if info is None:
+        return None
+    return info.mesh
 
 
 def _get_module_name(module: nn.Module, root_model: nn.Module, name_to_module: dict | None = None):

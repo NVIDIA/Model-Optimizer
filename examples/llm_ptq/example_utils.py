@@ -52,7 +52,7 @@ SPECULATIVE_MODEL_LIST = ["Eagle", "Medusa"]
 
 
 # ---------------------------------------------------------------------------
-# FSDP2 helpers (opt-in via --use_fsdp2 in hf_ptq.py / multinode_ptq.py).
+# FSDP2 helpers (opt-in via --use_fsdp2 in hf_ptq.py).
 # ---------------------------------------------------------------------------
 
 
@@ -86,48 +86,98 @@ def cleanup_distributed(args):
         dist_utils.cleanup()
 
 
+def validate_fsdp2_supported(args, config):
+    """Raise NotImplementedError if the model config is not FSDP2-supported in v1.
+
+    Called after ``AutoConfig.from_pretrained`` (cheap) and before any heavy
+    loading work, so unsupported configurations fail fast with a clear message
+    instead of crashing later inside a DTensor traceback.
+    """
+    issues = []
+    if "vila" in args.pyt_ckpt_path.lower():
+        issues.append("VILA (custom builder + non-standard layer layout)")
+    if is_nemotron_vl(config) or _is_multimodal_config(config):
+        issues.append("multimodal / VL models (decoder layers not auto-detectable)")
+    if getattr(config, "quantization_config", None) is not None:
+        issues.append("pack-quantized / compressed-tensors checkpoints")
+    if getattr(args, "specdec_offline_dataset", None) is not None:
+        issues.append("speculative decoding (--specdec_offline_dataset)")
+    if getattr(args, "low_memory_mode", False):
+        issues.append("--low_memory_mode (redundant with FSDP2)")
+    if issues:
+        raise NotImplementedError(
+            "--use_fsdp2 does not support:\n  - "
+            + "\n  - ".join(issues)
+            + "\nRemove --use_fsdp2 or use a standard causal-LM checkpoint."
+        )
+
+
 def load_and_prepare_fsdp2_model(
     ckpt_path: str,
     device: torch.device,
     rank: int,
+    args=None,
     trust_remote_code: bool = False,
     mp_policy=None,
 ):
-    """Load and FSDP2-shard a causal LM with rank-0-only CPU realization.
+    """Load and FSDP2-shard a causal LM (accelerate-style rank-0-only CPU load).
 
-    Rank 0 reads weights from disk on CPU via ``from_pretrained``; other ranks
-    build a structural skeleton on the ``meta`` device. ``fsdp2_shard`` then
-    slices each decoder layer, allocates per-rank GPU shard storage, broadcasts
-    rank-0's weights into the shards, and freezes params.
+    Replicates ``accelerate.init_empty_weights(include_buffers=False)`` +
+    ``load_checkpoint_in_model`` manually:
 
-    Memory: only rank 0 holds the full CPU copy. Each rank ends with
-    ``model_size / world_size`` of GPU shard storage.
+    - Rank 0: ``from_pretrained`` on CPU; capture ``src_state_dict``.
+    - Other ranks: ``from_config`` under ``init_params_on_meta`` → params on
+      meta (~0 CPU), buffers computed on CPU from config (RoPE inv_freq etc.).
+    - ``fsdp2_shard`` wraps decoder layers (root stays unsharded), materializes
+      meta→GPU, broadcasts state_dict from rank 0, re-ties weights, freezes.
+
+    Memory: rank 0 holds the full BF16 model in CPU during the broadcast
+    (~model_size bytes); other ranks pay ~0 CPU. Each rank ends with
+    ``model_size / world_size`` GPU shard storage plus replicated
+    ``embed_tokens`` + ``lm_head`` (~few-GiB total).
 
     v1 supports standard transformers families only (causal LMs that load
-    cleanly via ``AutoModelForCausalLM``). VILA / pack-quantized / speculative
-    are not validated under FSDP2 and should go through ``get_model``.
+    cleanly via ``AutoModelForCausalLM``). VILA / pack-quantized /
+    speculative / VL go through ``get_model`` and don't get FSDP2.
     """
-    from modelopt.torch.utils.distributed import fsdp2_shard
+    from modelopt.torch.utils.distributed import fsdp2_shard, init_params_on_meta
 
     hf_config = AutoConfig.from_pretrained(ckpt_path, trust_remote_code=trust_remote_code)
+    if args is not None:
+        validate_fsdp2_supported(args, hf_config)
+
+    dtype = getattr(hf_config, "torch_dtype", None) or torch.bfloat16
+
     if rank == 0:
-        model = AutoModelForCausalLM.from_pretrained(
+        src_model = AutoModelForCausalLM.from_pretrained(
             ckpt_path,
             torch_dtype="auto",
             trust_remote_code=trust_remote_code,
             low_cpu_mem_usage=True,
         )
+        src_model.eval()
+        src_state_dict = src_model.state_dict()
     else:
-        dtype = getattr(hf_config, "torch_dtype", None) or torch.bfloat16
-        with torch.device("meta"):
-            model = AutoModelForCausalLM.from_config(
-                hf_config, torch_dtype=dtype, trust_remote_code=trust_remote_code
-            )
+        src_model = None
+        src_state_dict = {}
+
+    with init_params_on_meta():
+        model = AutoModelForCausalLM.from_config(
+            hf_config, torch_dtype=dtype, trust_remote_code=trust_remote_code
+        )
     model.eval()
-    # Disable HF KV cache; calibration is single-pass and (for layerwise) replays.
     if hasattr(model, "config") and hasattr(model.config, "use_cache"):
         model.config.use_cache = False
-    return fsdp2_shard(model, device, rank, mp_policy=mp_policy)
+
+    sharded = fsdp2_shard(
+        model,
+        device,
+        rank,
+        src_state_dict=src_state_dict,
+        mp_policy=mp_policy,
+    )
+    del src_model, src_state_dict
+    return sharded
 
 
 def create_fsdp2_calibration_loop(model, dataloader, device):
@@ -664,9 +714,11 @@ def get_model(
 
     # Note: Forcibly converting the model precision between bf16 and fp16 may introduce accuracy drop
     model_kwargs = config_kwargs.copy()
-    # Don't set torch_dtype for VILA models as they handle it explicitly in their builder
+    # Don't set torch_dtype for VILA models as they handle it explicitly in their builder.
+    # Use the legacy ``torch_dtype`` kwarg name — newer transformers forwards the ``dtype``
+    # kwarg through to the model class ``__init__``, which custom modeling code may reject.
     if "vila" not in ckpt_path.lower():
-        model_kwargs.setdefault("dtype", "auto")
+        model_kwargs.setdefault("torch_dtype", "auto")
 
     if "vila" in ckpt_path.lower():
         hf_vila = AutoModel.from_pretrained(
@@ -717,7 +769,7 @@ def get_model(
                     ckpt_path,
                     device_map="auto",
                     trust_remote_code=trust_remote_code,
-                    dtype="auto",
+                    torch_dtype="auto",
                 )
         else:
             architecture = hf_config.architectures[0]
@@ -749,7 +801,10 @@ def get_model(
                 model_kwargs2 = model_kwargs.copy()
                 if auto_model_module not in [AutoModelForCausalLM, AutoModel]:
                     model_kwargs2.pop("trust_remote_code", None)
-                model_kwargs2["dtype"] = torch_dtype
+                # Use the legacy ``torch_dtype`` kwarg; some custom modeling classes
+                # reject the newer ``dtype`` name when it's forwarded via **kwargs.
+                model_kwargs2["torch_dtype"] = torch_dtype
+                model_kwargs2.pop("dtype", None)
                 model_kwargs2.pop("max_memory", None)
                 model = from_config(hf_config, **model_kwargs2)
 

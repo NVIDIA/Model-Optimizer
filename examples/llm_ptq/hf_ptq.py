@@ -110,6 +110,13 @@ def _set_kv_cache_constant_amax(quant_cfg: list) -> None:
         break
 
 
+def _nvfp4_max_cfg(*, layerwise: bool) -> dict[str, Any]:
+    """NVFP4 quant config with explicit max calibration and a layerwise toggle."""
+    cfg = copy.deepcopy(mtq.NVFP4_DEFAULT_CFG)
+    cfg["algorithm"] = {"method": "max", "layerwise": layerwise}
+    return cfg
+
+
 QUANT_CFG_CHOICES: dict[str, dict[str, Any]] = {
     "int8": mtq.INT8_DEFAULT_CFG,
     "int8_sq": mtq.INT8_SMOOTHQUANT_CFG,
@@ -118,6 +125,8 @@ QUANT_CFG_CHOICES: dict[str, dict[str, Any]] = {
     "int4_awq": mtq.INT4_AWQ_CFG,
     "w4a8_awq": mtq.W4A8_AWQ_BETA_CFG,
     "nvfp4": mtq.NVFP4_DEFAULT_CFG,
+    "nvfp4_max": _nvfp4_max_cfg(layerwise=False),
+    "nvfp4_max_layerwise": _nvfp4_max_cfg(layerwise=True),
     "nvfp4_awq": mtq.NVFP4_AWQ_LITE_CFG,
     "nvfp4_mse": mtq.NVFP4_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG,
     "fp8_pb_wo": mtq.FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG,
@@ -453,6 +462,7 @@ def load_model(args: argparse.Namespace):
             ckpt_path=args.pyt_ckpt_path,
             device=args.device,
             rank=args.rank,
+            args=args,
             trust_remote_code=args.trust_remote_code,
         )
     elif args.specdec_offline_dataset is not None or not args.low_memory_mode:
@@ -911,6 +921,10 @@ def pre_quantize(
     # Generate preview before quantization
     if args.skip_generate:
         generated_ids_before_ptq = None
+    elif args.use_fsdp2:
+        # FSDP2 generation is slow cross-node (~seconds/token); 5 tokens is
+        # enough to sanity-check coherence.
+        generated_ids_before_ptq = full_model.generate(preview_input_ids, max_new_tokens=5)
     elif model_type == "deepseek":
         # DeepSeek generation may go OOM, so we skip it
         generated_ids_before_ptq = None
@@ -987,7 +1001,11 @@ def post_quantize(
         pass
     elif model_type != "llama4" and not is_nemotron_vl_model:
         # Our fake quantizer may not be fully compatible with torch.compile.
-        generated_ids_after_ptq = full_model.generate(preview_input_ids, max_new_tokens=100)
+        # FSDP2 cross-node generation is slow, so cap at 5 tokens for preview.
+        max_new_tokens = 5 if args.use_fsdp2 else 100
+        generated_ids_after_ptq = full_model.generate(
+            preview_input_ids, max_new_tokens=max_new_tokens
+        )
     elif is_nemotron_vl_model and tokenizer is not None:
         generated_ids_after_ptq = run_nemotron_vl_preview(
             full_model,
@@ -1416,8 +1434,8 @@ def parse_args() -> argparse.Namespace:
             "Run calibration under PyTorch FSDP2 (requires launching with torchrun). "
             "Takes precedence over --use_seq_device_map. "
             "v1 limitations: standard causal-LM only (no VILA / pack-quantized / speculative / "
-            "auto-quantize / sparsity / VLM); per-rank load memory ceiling is roughly model_size "
-            "(use multinode_ptq.py for models that don't fit on every rank)."
+            "auto-quantize / sparsity / VLM). Rank 0 holds the full model in CPU briefly "
+            "during the broadcast step; other ranks pay ~0 CPU."
         ),
     )
     parser.add_argument(
