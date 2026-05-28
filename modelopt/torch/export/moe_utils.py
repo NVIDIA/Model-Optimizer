@@ -42,12 +42,37 @@ def _export_fused_experts(module: nn.Module, dtype: torch.dtype) -> None:
            {E}.gate_proj.weight, {E}.gate_proj.weight_scale, ...
            {E}.up_proj.weight, {E}.up_proj.weight_scale, ...
            {E}.down_proj.weight, {E}.down_proj.weight_scale, ...
+
+    Tied-experts deduplication
+    --------------------------
+    Some models (e.g. block-diffusion encoder-decoder LLMs whose encoder
+    and decoder transformer stacks share weights via HF
+    ``_tied_weights_keys``) have multiple fused-expert modules that
+    point at the *same* underlying 3-D ``gate_up_proj`` / ``down_proj``
+    parameters. The unpacking loop ordinarily creates fresh per-expert
+    tensors per call — destroying that identity and producing a
+    duplicate set of weights on disk.
+
+    To preserve the dedup opportunity, after unpacking we check the
+    source parameters' ``data_ptr()`` against a function-local cache.
+    On a cache hit, we *alias* the bit-identical per-expert buffers
+    (``weight``, ``weight_scale``, ``weight_scale_2``) to the prior
+    module's tensors so they share storage. The downstream
+    ``postprocess_state_dict`` ``data_ptr()``-based dedup then drops
+    the duplicates automatically. ``input_scale`` is left per-side —
+    encoder/decoder activation distributions legitimately diverge and
+    each side has been calibrated with its own amax. This is purely
+    additive: cache miss falls through to the unchanged unpacking path.
     """
     from modelopt.torch.export.unified_export_hf import _export_quantized_weight
     from modelopt.torch.quantization.plugins.huggingface import _get_fused_expert_intermediate_dim
 
     n = module.num_experts
     expert_dim = _get_fused_expert_intermediate_dim(module)
+
+    # Capture source tensor identities BEFORE unpacking (the source
+    # attrs are deleted at the end of this function).
+    _source_key = (module.gate_up_proj.data_ptr(), module.down_proj.data_ptr())
 
     # 1. Shared input quantizers — one per projection type, shared across all experts.
     gate_up_input_q = module.gate_up_proj_input_quantizer
@@ -177,6 +202,45 @@ def _export_fused_experts(module: nn.Module, dtype: torch.dtype) -> None:
     ):
         if hasattr(module, attr):
             delattr(module, attr)
+
+    # 5. Tied-experts dedup: if this module's source params have been seen
+    # before, alias the bit-identical per-expert buffers (weight,
+    # weight_scale, weight_scale_2) to the previously-unpacked module.
+    # input_scale is left per-side so encoder/decoder calibration stays
+    # accurate where their activation distributions diverge.
+    _cache = _export_fused_experts.__dict__.setdefault("_tied_unpacked_cache", {})
+    _prior = _cache.get(_source_key)
+    if _prior is not None and _prior is not module:
+        for _idx in range(n):
+            _cur_expert = getattr(module, str(_idx), None)
+            _prior_expert = getattr(_prior, str(_idx), None)
+            if _cur_expert is None or _prior_expert is None:
+                continue
+            for _proj_name in ("gate_proj", "up_proj", "down_proj"):
+                _cur_proj = getattr(_cur_expert, _proj_name, None)
+                _prior_proj = getattr(_prior_expert, _proj_name, None)
+                if _cur_proj is None or _prior_proj is None:
+                    continue
+                # Alias the weight (Parameter) so both sides reference the
+                # same nn.Parameter → same data_ptr() → existing dedup
+                # in postprocess_state_dict will drop the duplicate.
+                if hasattr(_prior_proj, "weight"):
+                    _cur_proj.weight = _prior_proj.weight
+                # Alias the bit-identical scale buffers. Re-register to
+                # ensure data_ptr() matches the prior side's tensor.
+                for _attr in ("weight_scale", "weight_scale_2"):
+                    if not hasattr(_prior_proj, _attr):
+                        continue
+                    if _attr in _cur_proj._buffers:
+                        del _cur_proj._buffers[_attr]
+                    elif hasattr(_cur_proj, _attr):
+                        delattr(_cur_proj, _attr)
+                    _cur_proj.register_buffer(_attr, getattr(_prior_proj, _attr))
+                # input_scale intentionally NOT aliased — per-side amaxes
+                # are legitimately different (encoder vs decoder activation
+                # distributions diverge, sometimes >10x — see Q2 analysis).
+    else:
+        _cache[_source_key] = module
 
 
 def save_expert_token_count_table(model: nn.Module, output_dir: str | Path | None = None):
