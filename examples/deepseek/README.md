@@ -171,5 +171,6 @@ python deepseek_v4/quantize_to_nvfp4.py \
     --output_ckpt ${HF_NVFP4_PATH}
 ```
 
-The output includes an updated `model.safetensors.index.json` and
-`hf_quant_config.json` describing the mixed NVFP4 expert layers.
+The output includes an updated `model.safetensors.index.json`, a `config.json`
+with `quantization_config.moe_quant_algo = "NVFP4"`, and `hf_quant_config.json`
+describing the mixed NVFP4 expert layers.

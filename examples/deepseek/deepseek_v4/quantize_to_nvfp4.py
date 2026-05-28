@@ -32,10 +32,12 @@ Outputs:
         <path>.input_scale     per-tensor activation scale (FP32 scalar)
 
   * An updated ``model.safetensors.index.json`` reflecting dropped/added keys.
+  * ``config.json`` keeps the source FP8 quantization metadata and adds
+    ``"moe_quant_algo": "NVFP4"`` for DeepSeek-V4 loaders.
   * An ``hf_quant_config.json`` manifest listing the NVFP4-quantized layers.
-  * Ancillary files (``config.json``, ``tokenizer.json``, ``LICENSE``,
-    ``encoding/``, ``inference/``, ...) are **hard-linked** from the source
-    — no duplication.
+  * Ancillary files (``tokenizer.json``, ``LICENSE``, ``encoding/``,
+    ``inference/``, ...) are linked from the source when possible, with a
+    copy fallback across filesystems.
 
 Uncalibrated-expert handling: some routed experts receive zero tokens during
 calibration (common in V4's first ``n_hash_layers`` with deterministic
@@ -61,9 +63,11 @@ relative to shard I/O):
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import os
 import re
+import shutil
 from collections import defaultdict
 from pathlib import Path
 
@@ -277,20 +281,30 @@ def convert_shard(
 # Top-level names never hard-linked from source (rewritten or excluded).
 _SKIP_TOP_LEVEL = {
     "model.safetensors.index.json",  # rewritten
-    "config.json",                   # rewritten (drop stale quantization_config)
+    "config.json",                   # rewritten (mark hybrid FP8 + NVFP4 MoE)
     ".cache",                        # HF download sidecars referencing old shards
 }
 # Subdir names to skip anywhere in the walk.
 _SKIP_SUBDIR_NAMES = {"__pycache__"}
 
 
+def _link_or_copy(src: Path, dst: Path) -> None:
+    try:
+        os.link(src, dst)
+    except OSError as e:
+        if e.errno != errno.EXDEV:
+            raise
+        shutil.copy2(src, dst)
+
+
 def _hard_link_aux(src: Path, dst: Path) -> None:
-    """Hard-link everything that isn't a shard file, rewritten metadata, or
+    """Link everything that isn't a shard file, rewritten metadata, or
     a cache/__pycache__ directory. Recurses into legit subdirectories
-    (``encoding/``, ``inference/`` etc.) preserving structure."""
-    assert os.stat(src).st_dev == os.stat(dst).st_dev, (
-        "hard links require same filesystem"
-    )
+    (``encoding/``, ``inference/`` etc.) preserving structure.
+
+    Falls back to copying when source and destination are on different
+    filesystems, which is common with container mounts.
+    """
     for item in src.iterdir():
         if item.name in _SKIP_TOP_LEVEL:
             continue
@@ -300,7 +314,7 @@ def _hard_link_aux(src: Path, dst: Path) -> None:
         if item.is_file():
             if target.exists():
                 target.unlink()
-            os.link(item, target)
+            _link_or_copy(item, target)
         elif item.is_dir():
             target.mkdir(exist_ok=True)
             for root, dirs, files in os.walk(item):
@@ -315,19 +329,28 @@ def _hard_link_aux(src: Path, dst: Path) -> None:
                     dst_f = target / rel / fname
                     if dst_f.exists():
                         dst_f.unlink()
-                    os.link(src_f, dst_f)
+                    _link_or_copy(src_f, dst_f)
 
 
 def _rewrite_config_json(src_dir: Path, dst_dir: Path) -> None:
-    """Copy ``config.json`` to the output with the stale ``quantization_config``
-    stanza removed (it described the source FP8+UE8M0 format; the output is
-    mixed NVFP4 experts + unchanged-elsewhere, with the real per-layer info
-    in ``hf_quant_config.json``). Matches V3's
-    ``remove_quantization_config_from_original_config`` pattern."""
+    """Copy ``config.json`` to the output and mark the MoE branch as NVFP4.
+
+    DeepSeek-V4 mixed checkpoints remain FP8 for dense/attention paths. vLLM
+    and SGLang detect the hybrid expert format from
+    ``quantization_config.moe_quant_algo == "NVFP4"`` and read the per-layer
+    NVFP4 metadata from ``hf_quant_config.json``.
+    """
     src = src_dir / "config.json"
     dst = dst_dir / "config.json"
     cfg = json.loads(src.read_text())
-    cfg.pop("quantization_config", None)
+    quant_cfg = cfg.get("quantization_config")
+    if not isinstance(quant_cfg, dict):
+        quant_cfg = {}
+    quant_cfg.setdefault("activation_scheme", "dynamic")
+    quant_cfg["quant_method"] = "fp8"
+    quant_cfg.setdefault("weight_block_size", [128, 128])
+    quant_cfg["moe_quant_algo"] = "NVFP4"
+    cfg["quantization_config"] = quant_cfg
     dst.write_text(json.dumps(cfg, indent=2, sort_keys=True) + "\n")
 
 
@@ -357,12 +380,11 @@ def _write_index_and_manifest(
             "version": "dsv4-nvfp4-experts",
         },
         "quantization": {
-            # Mixed precision — top-level algo is None and consumers must
-            # consult quantized_layers / exclude_modules for specifics.
-            "quant_algo": None,
+            "quant_algo": "MIXED_PRECISION",
             "kv_cache_quant_algo": None,
+            "group_size": 16,
             "quantized_layers": {
-                name: {"quant_algo": "NVFP4", "awq_block_size": 16}
+                name: {"quant_algo": "NVFP4", "group_size": 16}
                 for name in quantized_layer_names
             },
             "exclude_modules": [
@@ -446,9 +468,9 @@ def main():
                 quantized.add(a[: -len(".input_scale")])
 
     _write_index_and_manifest(args.output_ckpt, src_index, shard_updates, sorted(quantized))
-    _log(f"[config] rewriting config.json (dropping stale quantization_config)")
+    _log(f"[config] rewriting config.json (marking moe_quant_algo=NVFP4)")
     _rewrite_config_json(args.source_ckpt, args.output_ckpt)
-    _log(f"[aux] hard-linking ancillary files from {args.source_ckpt}")
+    _log(f"[aux] linking ancillary files from {args.source_ckpt}")
     _hard_link_aux(args.source_ckpt, args.output_ckpt)
     _log(f"[done] {args.output_ckpt}  ({len(quantized)} quantized expert layers)")
 

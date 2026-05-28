@@ -306,7 +306,7 @@ def _build_nvfp4_experts_cfg() -> dict:
     }
 
 
-def ptq(model, tokenizer, batch_size: int, calib_size: int):
+def ptq(model, tokenizer, batch_size: int, calib_size: int, calib_datasets: list[str]):
     world_size = int(os.getenv("WORLD_SIZE", "1"))
     rank = int(os.getenv("RANK", "0"))
 
@@ -317,10 +317,10 @@ def ptq(model, tokenizer, batch_size: int, calib_size: int):
     device = next(model.parameters()).device
     _trace(f"device={device}, building calib dataloader")
     calib_dataset = get_dataset_dataloader(
-        dataset_name=["cnn_dailymail", "nemotron-post-training-dataset-v2"],
+        dataset_name=calib_datasets,
         tokenizer=tokenizer,
         batch_size=batch_size,
-        num_samples=[calib_size, calib_size],
+        num_samples=[calib_size] * len(calib_datasets),
         device=device,
     )
     _trace("calib dataloader ready")
@@ -446,6 +446,17 @@ def main():
     p.add_argument("--output_path", required=True, help="where to dump amax + hf_quant_config.json")
     p.add_argument("--batch_size", type=int, default=4)
     p.add_argument("--calib_size", type=int, default=64)
+    p.add_argument(
+        "--calib_dataset",
+        dest="calib_datasets",
+        nargs="+",
+        default=["cnn_dailymail", "nemotron-post-training-dataset-v2"],
+        metavar="NAME",
+        help=(
+            "calibration dataset names accepted by "
+            "modelopt.torch.utils.dataset_utils.get_dataset_dataloader"
+        ),
+    )
     p.add_argument("--trust_remote_code", action="store_true")
     p.add_argument(
         "--dummy_weights",
@@ -468,7 +479,7 @@ def main():
         args.config, args.model_path, args.batch_size, dummy_weights=args.dummy_weights
     )
     tokenizer = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=args.trust_remote_code)
-    model = ptq(model, tokenizer, args.batch_size, args.calib_size)
+    model = ptq(model, tokenizer, args.batch_size, args.calib_size, args.calib_datasets)
     save_amax_and_quant_config(model, args.output_path)
 
     if args.run_generate is not None:
