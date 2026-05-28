@@ -45,11 +45,9 @@ calibration (common in V4's first ``n_hash_layers`` with deterministic
 when MTP is inactive). For those:
   * ``weight_amax`` is synthesized from the dequantized BF16 weight
     (``bf16.abs().max()``).
-  * ``input_amax`` falls back to the max observed on any other expert in the
-    same ``(block, projection)`` bucket.
-  * If an entire bucket has no observation (e.g. inactive MTP), the fallback
-    is the max input amax observed for the same projection across calibrated
-    experts. If no calibrated input amax exists, export fails.
+  * ``input_amax`` falls back to the max observed on calibrated routed experts
+    for the same projection. If no calibrated expert exists for that
+    projection, export fails.
 
 Usage (single compute node, CPU-default; dequant+requant math is cheap
 relative to shard I/O):
@@ -135,7 +133,7 @@ def _fuse_w1_w3_amax(merged: dict[str, torch.Tensor], which: str) -> int:
 
 def _load_merged_amax(
     amax_path: Path, world_size: int | None = None,
-) -> tuple[dict[str, torch.Tensor], dict[tuple[str, str], torch.Tensor]]:
+) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
     """Union-merge amax across ranks, fuse w1/w3 amax per expert, and compute
     input-amax fallbacks from calibrated experts."""
     mp = world_size if world_size is not None else _discover_mp_from_amax_dir(amax_path)
@@ -158,29 +156,17 @@ def _load_merged_amax(
     _log(f"[load] fused w1/w3 input amax on {input_fused} experts")
     _log(f"[load] fused w1/w3 weight amax on {weight_fused} experts")
 
-    buckets: dict[tuple[str, str], list[torch.Tensor]] = defaultdict(list)
-    proj_buckets: dict[str, list[torch.Tensor]] = defaultdict(list)
-    all_input_amax: list[torch.Tensor] = []
+    input_by_proj: dict[str, list[torch.Tensor]] = defaultdict(list)
     for k, v in merged.items():
         m = _AMAX_KEY_RE.match(k)
         assert m is not None
         if m.group("which") == "input":
-            buckets[(m.group("block"), m.group("proj"))].append(v)
-            proj_buckets[m.group("proj")].append(v)
-            all_input_amax.append(v)
+            input_by_proj[m.group("proj")].append(v)
     input_fallback = {
-        key: torch.stack([t.reshape(-1) for t in vals]).flatten().max()
-        for key, vals in buckets.items()
+        proj: torch.stack([t.reshape(-1) for t in vals]).flatten().max()
+        for proj, vals in input_by_proj.items()
     }
-    input_fallback.update({
-        ("*", proj): torch.stack([t.reshape(-1) for t in vals]).flatten().max()
-        for proj, vals in proj_buckets.items()
-    })
-    if all_input_amax:
-        input_fallback[("*", "*")] = torch.stack(
-            [t.reshape(-1) for t in all_input_amax]
-        ).flatten().max()
-    _log(f"[load] input-fallback buckets: {len(input_fallback)} populated")
+    _log(f"[load] input-fallback projections: {len(input_fallback)} populated")
     return merged, input_fallback
 
 
@@ -188,20 +174,6 @@ def _lookup_amax(
     amax: dict[str, torch.Tensor], expert_path: str, which: str
 ) -> torch.Tensor | None:
     return amax.get(f"{expert_path}_{which}_quantizer._amax")
-
-
-def _lookup_input_fallback(
-    input_fallback: dict[tuple[str, str], torch.Tensor],
-    block: str,
-    proj: str,
-) -> tuple[torch.Tensor | None, str | None]:
-    if (block, proj) in input_fallback:
-        return input_fallback[(block, proj)], "block"
-    if ("*", proj) in input_fallback:
-        return input_fallback[("*", proj)], "projection"
-    if ("*", "*") in input_fallback:
-        return input_fallback[("*", "*")], "global"
-    return None, None
 
 
 def _dequantize_mxfp4_to_bf16(
@@ -216,7 +188,9 @@ def _dequantize_mxfp4_to_bf16(
 def _synthesize_weight_amax(
     mxfp4_weight: torch.Tensor, mxfp4_scale: torch.Tensor, device: str
 ) -> torch.Tensor:
-    return _dequantize_mxfp4_to_bf16(mxfp4_weight, mxfp4_scale, device).abs().max().cpu()
+    return _dequantize_mxfp4_to_bf16(
+        mxfp4_weight, mxfp4_scale, device
+    ).abs().max().cpu()
 
 
 def _quantize_weight_nvfp4(
@@ -240,7 +214,6 @@ def _quantize_weight_nvfp4(
 
 def _build_w13_weight_amax_overrides(
     f,
-    all_keys: set[str],
     expert_weight_keys: list[str],
     amax: dict[str, torch.Tensor],
     device: str,
@@ -255,18 +228,8 @@ def _build_w13_weight_amax_overrides(
 
     overrides: dict[str, torch.Tensor] = {}
     synthesized_paths: set[str] = set()
-    for base, paths in groups.items():
-        if set(paths) != {"w1", "w3"}:
-            for expert_path in paths.values():
-                weight_amax = _lookup_amax(amax, expert_path, "weight")
-                if weight_amax is None:
-                    missing = sorted({"w1", "w3"} - set(paths))
-                    present = ", ".join(sorted(paths))
-                    raise RuntimeError(
-                        f"cannot synthesize fused w1/w3 weight amax for {base}: "
-                        f"missing {missing}, present projections: {present}"
-                    )
-                overrides[expert_path] = weight_amax
+    for paths in groups.values():
+        if "w1" not in paths or "w3" not in paths:
             continue
 
         values: list[torch.Tensor] = []
@@ -274,15 +237,10 @@ def _build_w13_weight_amax_overrides(
             expert_path = paths[proj]
             weight_amax = _lookup_amax(amax, expert_path, "weight")
             if weight_amax is None:
-                key = expert_path + ".weight"
-                scale_key = expert_path + ".scale"
-                if key not in all_keys or scale_key not in all_keys:
-                    raise RuntimeError(
-                        f"cannot synthesize missing weight amax for {expert_path}; "
-                        "paired weight/scale tensors are not in the same shard"
-                    )
                 weight_amax = _synthesize_weight_amax(
-                    f.get_tensor(key), f.get_tensor(scale_key), device
+                    f.get_tensor(expert_path + ".weight"),
+                    f.get_tensor(expert_path + ".scale"),
+                    device,
                 )
                 synthesized_paths.add(expert_path)
             values.append(weight_amax.reshape(()))
@@ -297,21 +255,20 @@ def convert_shard(
     src_shard: Path,
     dst_shard: Path,
     amax: dict[str, torch.Tensor],
-    input_fallback: dict[tuple[str, str], torch.Tensor],
+    input_fallback: dict[str, torch.Tensor],
     device: str,
     stats: dict[str, int],
-) -> tuple[list[str], list[str], int]:
-    """Rewrite one HF-style shard and return index deltas plus tensor bytes."""
+) -> tuple[list[str], list[str]]:
+    """Rewrite one HF-style shard and return index deltas."""
     out: dict[str, torch.Tensor] = {}
     added: list[str] = []
     removed: list[str] = []
 
     with safe_open(str(src_shard), framework="pt", device="cpu") as f:
         all_keys = list(f.keys())
-        all_key_set = set(all_keys)
         expert_weight_keys = [k for k in all_keys if _EXPERT_WEIGHT_RE.match(k)]
         w13_weight_amax, w13_synth_paths = _build_w13_weight_amax_overrides(
-            f, all_key_set, expert_weight_keys, amax, device
+            f, expert_weight_keys, amax, device
         )
         scale_siblings = {
             k[: -len(".weight")] + ".scale"
@@ -345,11 +302,10 @@ def convert_shard(
                 if expert_path in w13_weight_amax:
                     weight_amax = w13_weight_amax[expert_path]
                 input_amax = _lookup_amax(amax, expert_path, "input")
-                input_fallback_scope = None
+                used_fallback_input = False
                 if input_amax is None:
-                    input_amax, input_fallback_scope = _lookup_input_fallback(
-                        input_fallback, block, proj
-                    )
+                    input_amax = input_fallback.get(proj)
+                    used_fallback_input = input_amax is not None
                 if input_amax is None:
                     raise RuntimeError(
                         f"missing input amax for {expert_path} and no calibrated "
@@ -377,15 +333,14 @@ def convert_shard(
                 stats[f"experts_{block_kind}"] += 1
                 if weight_synth or expert_path in w13_synth_paths:
                     stats[f"weight_synth_{block_kind}"] += 1
-                if input_fallback_scope is not None:
-                    stats[f"input_fallback_{input_fallback_scope}_{block_kind}"] += 1
+                if used_fallback_input:
+                    stats[f"input_fallback_{block_kind}"] += 1
             else:
                 out[key] = f.get_tensor(key)
                 stats["passthrough"] += 1
 
-    shard_nbytes = sum(t.numel() * t.element_size() for t in out.values())
     save_file(out, str(dst_shard))
-    return added, removed, shard_nbytes
+    return added, removed
 
 
 # Top-level names never hard-linked from source (rewritten or excluded).
@@ -474,23 +429,18 @@ def _rewrite_config_json(src_dir: Path, dst_dir: Path) -> None:
 def _write_index_and_manifest(
     output_ckpt: Path,
     src_index: dict,
-    shard_updates: dict[str, tuple[list[str], list[str], int]],
+    shard_updates: dict[str, tuple[list[str], list[str]]],
     quantized_layer_names: list[str],
 ) -> None:
     """Update ``model.safetensors.index.json`` with dropped ``.scale`` keys
     and added NVFP4 scale keys. Write the modelopt-style manifest."""
     weight_map = dict(src_index["weight_map"])
-    for shard_name, (added, removed, _shard_nbytes) in shard_updates.items():
+    for shard_name, (added, removed) in shard_updates.items():
         for k in removed:
             weight_map.pop(k, None)
         for k in added:
             weight_map[k] = shard_name
-    metadata = dict(src_index.get("metadata", {}))
-    if "total_size" in metadata:
-        metadata["total_size"] = sum(
-            shard_nbytes for _added, _removed, shard_nbytes in shard_updates.values()
-        )
-    new_index = {"metadata": metadata, "weight_map": weight_map}
+    new_index = {"metadata": src_index.get("metadata", {}), "weight_map": weight_map}
     (output_ckpt / "model.safetensors.index.json").write_text(
         json.dumps(new_index, indent=2)
     )
@@ -602,15 +552,13 @@ def main():
 
     stats: dict[str, int] = defaultdict(int)
     stats["_n_hash_layers"] = args.n_hash_layers
-    shard_updates: dict[str, tuple[list[str], list[str], int]] = {}
+    shard_updates: dict[str, tuple[list[str], list[str]]] = {}
 
     for idx, src in enumerate(shards):
         dst = args.output_ckpt / src.name
         _log(f"[shard {idx + 1}/{len(shards)}] {src.name}")
-        added, removed, shard_nbytes = convert_shard(
-            src, dst, amax, input_fallback, args.device, stats
-        )
-        shard_updates[src.name] = (added, removed, shard_nbytes)
+        added, removed = convert_shard(src, dst, amax, input_fallback, args.device, stats)
+        shard_updates[src.name] = (added, removed)
 
     stats.pop("_n_hash_layers", None)
     _log("[stats]")
@@ -618,7 +566,7 @@ def main():
         _log(f"  {k:40s} {stats[k]}")
 
     quantized: set[str] = set()
-    for _added, _removed, _shard_nbytes in shard_updates.values():
+    for _added, _removed in shard_updates.values():
         for a in _added:
             if a.endswith(".input_scale"):
                 quantized.add(a[: -len(".input_scale")])
