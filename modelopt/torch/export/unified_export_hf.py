@@ -520,6 +520,33 @@ def _export_quantized_weight(
 
     The export includes converting weight tensor to correct quantized values and quantized dtype,
     and registering scaling factors.
+
+    Tied-weight identity preservation
+    --------------------------------
+    HF ``tie_weights()`` makes two modules' ``.weight`` attributes reference
+    the same :class:`nn.Parameter`. Downstream of this function the
+    state_dict dedup in ``postprocess_state_dict`` drops duplicates by
+    ``data_ptr()`` identity, which catches the tie cleanly — until quantized
+    paths below ``setattr`` to a fresh ``nn.Parameter`` around the packed
+    weight. That replacement breaks the tie: encoder's ``.weight`` becomes
+    a new allocation, decoder's still points at the old shared Parameter,
+    they each pack independently, and downstream dedup misses bit-identical
+    duplicates.
+
+    To preserve dedup we capture ``weight.data_ptr()`` at the top of this
+    function (before any tensor-creating operation), and consult a
+    function-local cache at the end. On a cache hit (a previously-processed
+    module shared the same source weight memory), the bit-identical
+    ``weight``, ``weight_scale``, ``weight_scale_2`` are re-pointed at the
+    prior module's tensors so the existing data_ptr dedup catches them.
+    ``input_scale`` is left per-side — encoder and decoder paths legitimately
+    have different activation amaxes (see Q2 analysis in the northbloom
+    repo) and forcing them to share would compress whichever side has the
+    narrower true range.
+
+    Model-agnostic: uses memory identity only, no name regex or
+    ``_tied_weights_keys`` lookup. Cache miss falls through to the
+    unchanged path, so non-tied modules are unaffected.
     """
     quantization_format = get_quantization_format(sub_module)
     if quantization_format == QUANTIZATION_NONE:
@@ -528,6 +555,13 @@ def _export_quantized_weight(
     block_size = get_weight_block_size(sub_module, weight_name)
     quantizer_attrs = quantizer_attr_names(weight_name)
     weight: nn.Parameter = getattr(sub_module, weight_name)
+
+    # Capture source identity BEFORE any tensor-creating operation below.
+    # For HF-tied weights this matches across all modules sharing the
+    # underlying Parameter; the cache lookup at the end of this function
+    # uses it to detect ties whose Python identity is about to be broken
+    # by the setattr on `weight_name` further down.
+    _tied_source_data_ptr = weight.data_ptr()
     weight_quantizer: TensorQuantizer | SequentialQuantizer = getattr(
         sub_module, quantizer_attrs.weight_quantizer
     )
@@ -702,6 +736,34 @@ def _export_quantized_weight(
     # Register the corrected weight_scale as a buffer
     if weight_scale is not None:
         sub_module.register_buffer(quantizer_attrs.weight_scale, weight_scale)
+
+    # Tied-weight dedup: if a previously-processed module shared the same
+    # source weight memory, alias the bit-identical packed weight and scale
+    # buffers from that prior module so downstream data_ptr-based dedup in
+    # postprocess_state_dict can collapse the duplicates. Per-side
+    # input_scale is intentionally NOT aliased — activation amaxes
+    # legitimately differ across tied modules whose forward paths see
+    # different distributions.
+    _cache = _export_quantized_weight.__dict__.setdefault("_tied_weight_alias_cache", {})
+    _prior = _cache.get(_tied_source_data_ptr)
+    if _prior is not None and _prior is not sub_module:
+        # Alias the packed weight (same nn.Parameter -> same data_ptr).
+        if hasattr(_prior, weight_name):
+            setattr(sub_module, weight_name, getattr(_prior, weight_name))
+        # Alias bit-identical scale buffers (NOT input_scale).
+        for _attr in (
+            quantizer_attrs.weight_scale,
+            quantizer_attrs.weight_scale_2,
+        ):
+            if _attr is None or not hasattr(_prior, _attr):
+                continue
+            if _attr in sub_module._buffers:
+                del sub_module._buffers[_attr]
+            elif hasattr(sub_module, _attr):
+                delattr(sub_module, _attr)
+            sub_module.register_buffer(_attr, getattr(_prior, _attr))
+    else:
+        _cache[_tied_source_data_ptr] = sub_module
 
     torch.cuda.empty_cache()
 
