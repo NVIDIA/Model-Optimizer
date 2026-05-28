@@ -47,6 +47,9 @@ execution:
   walltime: "04:00:00"
   mounts:
     mount_home: false
+  auto_export:
+    destinations:
+      - mlflow
 deployment:
   env_vars:
     HF_TOKEN: host:HF_TOKEN
