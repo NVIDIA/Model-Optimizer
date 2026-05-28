@@ -1,7 +1,7 @@
 # Nemotron-Nano-9B-v2: Prune + Distill + Quantize + vLLM Deployment
 
 > [!TIP]
-> Checkout a more advanced and tutorial for a newer model [Nemotron-3-Nano-30B-A3B-BF16](../NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/README.md) which also covers long context training and tool calling.
+> Checkout a more advanced tutorial for a newer model [Nemotron-3-Nano-30B-A3B-BF16](../NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/README.md) which also covers long context training and tool calling.
 
 End-to-end optimization of [Nemotron-Nano-9B-v2](https://huggingface.co/nvidia/NVIDIA-Nemotron-Nano-9B-v2) demonstrating how ModelOpt techniques stack: Minitron structured pruning to 7B → Megatron-Bridge knowledge distillation to recover accuracy → FP8 quantization → vLLM deployment and throughput benchmarking. This document covers:
 
@@ -11,8 +11,6 @@ End-to-end optimization of [Nemotron-Nano-9B-v2](https://huggingface.co/nvidia/N
 4. **[Evaluation](#4-evaluation)** — benchmarking with NeMo Evaluator across MMLU Pro, GPQA Diamond, AIME, and more
 5. **[Quantization](#5-quantization)** — FP8 PTQ on the distilled checkpoint using ModelOpt's `examples/llm_ptq/hf_ptq.py` script
 6. **[vLLM Inference Benchmarking](#6-vllm-inference-benchmarking)** — throughput comparison of BF16 vs FP8 on a single H100
-
-**Environment:** Container `nvcr.io/nvidia/nemo:26.02`, ModelOpt 0.44.0. See the [Megatron-Bridge README](../../../megatron_bridge/README.md) for environment setup (including ModelOpt mount path) and container usage.
 
 ## Results
 
@@ -60,6 +58,8 @@ Distillation uses the **30% Pretraining (Code 5, General 20, MATH 5) + 70% Post-
 
 ## Steps to Reproduce
 
+**Environment:** Container `nvcr.io/nvidia/nemo:26.02`, ModelOpt 0.44.0. See the [Megatron-Bridge README](../../../megatron_bridge/README.md) for environment setup (including ModelOpt mount path) and container usage.
+
 ### 1. Data Preparation
 
 See [examples/dataset/MEGATRON_DATA_PREP.md](../../../dataset/MEGATRON_DATA_PREP.md) for tokenization commands for all datasets used in this blend.
@@ -82,8 +82,8 @@ For this experiment: `TOKENIZER=nvidia/NVIDIA-Nemotron-Nano-9B-v2`, `OUTPUT_DIR=
 | Nemotron-Post-Training-Dataset-v1 / stem (5M samples) | 20B | 10 | Broad STEM |
 | Nemotron-Science-v1 / MCQ | 0.5B | 3 | GPQA MCQ format alignment |
 | Nemotron-Science-v1 / RQA | 0.3B | 2 | GPQA format diversity |
-| Nemotron-SFT-IF-Chat-v2 / reasoning_on | 2B | 3 | Instruction following (thinking on) |
-| Nemotron-SFT-IF-Chat-v2 / reasoning_off | 1B | 2 | Instruction following (thinking off) |
+| Nemotron-SFT-Instruction-Following-Chat-v2 / reasoning_on | 2B | 3 | Instruction following (thinking on) |
+| Nemotron-SFT-Instruction-Following-Chat-v2 / reasoning_off | 1B | 2 | Instruction following (thinking off) |
 
 <details>
 <summary>Data blend for distillation (click to expand)</summary>
@@ -198,7 +198,7 @@ Pruned hybrid_override_pattern: M-M-M-MM-M-M-M*-M-M-M*-M-M-M-M*-M-M-M-M*-MMMM-M-
 Run on **96 nodes × 8x H100 (768 GPUs total)**. ~600 H100 GPU-hours per 1k steps (~6.3B tokens), i.e. ~45 min wall-clock per 1k steps. Full 80B token run (~13k steps) takes ~9k H100 GPU-hours (~10 hours wall-clock).
 
 >[!TIP]
-> While we use 96 nodes here for faster training, you can also run with 1 node. If you dont want to do full distillation run, you can stop earlier and take intermediate checkpoints as well. See results for intermediate checkpoints at the top of this README.
+> While we use 96 nodes here for faster training, you can also run with 1 node. If you don't want to do full distillation run, you can stop earlier and take intermediate checkpoints as well. See results for intermediate checkpoints at the top of this README.
 
 <details>
 <summary>Distillation command (click to expand)</summary>
@@ -344,7 +344,8 @@ The quantized checkpoint is directly deployable with [vLLM](https://github.com/v
 
 Benchmark throughput using [vLLM](https://github.com/vllm-project/vllm) on a single H100 GPU. Run the command once for each HuggingFace checkpoint. vLLM automatically detects FP8 quantization from the embedded `quantization_config` in `config.json` and applies it with no extra flags needed.
 
-Results on a single H100 (ISL=32768, OSL=1024):
+<details>
+<summary>vLLM benchmark command on a single H100 (ISL=32768, OSL=1024) (click to expand)</summary>
 
 ```bash
 vllm bench throughput \
@@ -356,6 +357,8 @@ vllm bench throughput \
     --kv-cache-dtype fp8 \
     --load-format safetensors
 ```
+
+</details>
 
 | Checkpoint | Model loading memory | Output tokens/s | Speedup vs Nemotron-Nano-9B-v2 BF16 |
 | --- | --- | --- | --- |

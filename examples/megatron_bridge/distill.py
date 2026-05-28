@@ -161,14 +161,14 @@ def get_args():
         "--recompute_granularity",
         type=str,
         default=None,
-        choices=[None, "selective", "full"],
-        help="Activation recomputation: None (off), 'selective' (attn only), 'full' (whole layers)",
+        choices=["selective", "full"],
+        help="Activation recomputation: omit (off), 'selective' (attn only), 'full' (whole layers)",
     )
     parser.add_argument(
         "--recompute_method",
         type=str,
         default=None,
-        choices=[None, "uniform", "block"],
+        choices=["uniform", "block"],
         help="Activation recomputation method (only used when --recompute_granularity=full)",
     )
     parser.add_argument(
