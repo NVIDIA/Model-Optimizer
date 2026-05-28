@@ -1,5 +1,4 @@
-# Base config for EAGLE3 training. A full modelopt recipe; override fields via
-# OmegaConf dotlist on the CLI (e.g. `model.model_name_or_path=...`).
+# EAGLE3 speculative-decoding training recipe. Override fields via OmegaConf dotlist on the CLI.
 
 metadata:
   recipe_type: speculative_eagle

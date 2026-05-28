@@ -15,6 +15,7 @@
 
 import argparse
 from collections import defaultdict
+from typing import Any
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -24,7 +25,7 @@ import modelopt.torch.quantization as mtq
 from modelopt.torch.utils import create_forward_loop
 from modelopt.torch.utils.dataset_utils import get_dataset_dataloader
 
-SUPPORT_QUANT_FORMAT = {
+SUPPORT_QUANT_FORMAT: dict[str, dict[str, Any]] = {
     "fp8": mtq.FP8_DEFAULT_CFG,
     "nvfp4": mtq.NVFP4_DEFAULT_CFG,
 }
@@ -87,7 +88,7 @@ def auto_quantize(
         data_loader=calib_dataloader,
         forward_step=lambda model, batch: model(**batch),
         loss_func=loss_func,
-        quantization_formats=[SUPPORT_QUANT_FORMAT[format] for format in qformat_list],
+        quantization_formats=[SUPPORT_QUANT_FORMAT[quant_format] for quant_format in qformat_list],
         num_calib_steps=len(calib_dataloader),
         num_score_steps=min(
             len(calib_dataloader), 128 // batch_size

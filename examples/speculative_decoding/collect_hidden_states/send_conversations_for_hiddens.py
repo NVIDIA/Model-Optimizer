@@ -130,7 +130,7 @@ async def main(args: argparse.Namespace) -> None:
             total=num_total_conversations,
         )
     ):
-        conversation_id = entry.get("conversation_id", "{:08d}".format(idx))
+        conversation_id = entry.get("conversation_id", f"{idx:08d}")
         conversations = entry["conversations"]
         if not conversations or not isinstance(conversations, list):
             num_invalid += 1

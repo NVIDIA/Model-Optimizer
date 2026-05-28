@@ -421,9 +421,7 @@ def _get_safetensor_slices(
                 rank_offset = ep_rank * per_rank_size
                 if shape[sharding_dim] % ep_size > 0:
                     raise ValueError(
-                        "{} {} @ dim {} is not a multiple of {}".format(
-                            key, shape, sharding_dim, ep_size
-                        )
+                        f"{key} {shape} @ dim {sharding_dim} is not a multiple of {ep_size}"
                     )
                 if len(shape) == 2:
                     tensor = tensor_slice[rank_offset : rank_offset + per_rank_size, :]
@@ -445,9 +443,7 @@ def _get_safetensor_slices(
 
                 if shape[sharding_dim] % tp_size > 0:
                     raise ValueError(
-                        "{} {} @ dim {} is not a multiple of {}".format(
-                            key, shape, sharding_dim, tp_size
-                        )
+                        f"{key} {shape} @ dim {sharding_dim} is not a multiple of {tp_size}"
                     )
                 if len(shape) == 2:
                     if sharding_dim in (1, -1):

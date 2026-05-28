@@ -50,8 +50,8 @@ Check logs for silent errors that may invalidate results:
 5. **Max model length**: Verify `max-model-len` = 131072 (leaderboard-recommended). Long context benchmarks (AA LCR, RULER) and agentic benchmarks may require a longer `max-model-len`.
 6. **RULER tasks**: Check thinking disabled, walltime=4h, rope-scaling for Qwen models
 7. **AA baseline comparison**: Compare results against Artificial Analysis published scores. Exact match not expected — flag significant deviations.
+8. **Model baseline comparison**: For quantized runs, compare results against the matching baseline model run when available. The baseline may be unquantized or simply less quantized (for example, FP8 as the baseline for NVFP4). Use the same benchmark version, task config, serving args, token limits, dataset setup, and infrastructure before treating the delta as a quantization effect.
 
 ## Step 4: Report findings
 
 Present key metrics from `results.yml` in a table and summarize the metrics from `eval_factory_metrics.json` in a concise manner (include only the most important metrics or anomalies). If multiple runs, include side-by-side comparison of metrics (e.g. accuracy, latency, tokens count, memory). Summarize any issues found. Recommend improvements if applicable.
-

@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Composed PTQ recipe for NVFP4 W4A4 model quantization with KV quantizers disabled and GPTQ calibration.
+
 imports:
   base_disable_all: configs/ptq/units/base_disable_all
   default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
@@ -21,7 +23,9 @@ imports:
 
 metadata:
   recipe_type: ptq
-  description: NVFP4 weight and activation (W4A4), gptq layerwise calibration.
+  description: >-
+    Applies NVFP4 W4A4 with static weight scales, dynamic inputs, KV quantizers disabled, and GPTQ
+    layerwise calibration.
 quantize:
   algorithm:
     method: gptq
