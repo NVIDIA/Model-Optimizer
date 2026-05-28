@@ -65,61 +65,11 @@ evaluation:
       api_endpoint:
         api_key_name: DUMMY_API_KEY
   tasks:
-  # Knowledge (chat endpoint, short)
-    - name: nemo_skills.ns_mmlu_pro
-      nemo_evaluator_config:
-        config:
-          params:
-            extra:
-              num_repeats: 1
-              args: ++prompt_config=eval/aai/mcq-10choices-boxed ++inference.tokens_to_generate=null
-        target:
-          api_endpoint:
-            adapter_config:
-              params_to_remove:
-                - max_new_tokens
-                - max_completion_tokens
-
-  # Reasoning (chat endpoint, 32 repeats, short)
+  # Reasoning (chat endpoint, 8 repeats, short)
     - name: ns_gpqa
       nemo_evaluator_config:
         config:
           params:
             extra:
               args: ++prompt_config=eval/aai/mcq-4choices
-              num_repeats: 32
-        target:
-          api_endpoint:
-            adapter_config:
-              params_to_remove:
-                - max_new_tokens
-                - max_completion_tokens
-
-  # Code (chat endpoint, 3 repeats, medium)
-    - name: ns_livecodebench
-      nemo_evaluator_config:
-        config:
-          params:
-            extra:
-              dataset_split: test_v6_2408_2505
-              num_repeats: 3
-        target:
-          api_endpoint:
-            adapter_config:
-              params_to_remove:
-                - max_new_tokens
-                - max_completion_tokens
-
-  # Instruction following (chat endpoint, 8 repeats, super short)
-    - name: ns_ifbench
-      nemo_evaluator_config:
-        config:
-          params:
-            extra:
               num_repeats: 8
-        target:
-          api_endpoint:
-            adapter_config:
-              params_to_remove:
-                - max_new_tokens
-                - max_completion_tokens
