@@ -2,8 +2,6 @@ defaults:
   - Llama-3_1-8B
   - _self_
 
-nccl_timeout_minutes: ${timedelta_minutes:90}
-
 # Input Hugging Face model to compress
 input_hf_model_path: /workspace/hf_models/meta-llama/Llama-3.1-8B-Instruct
 

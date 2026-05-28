@@ -171,9 +171,11 @@ def calc_runtime_for_subblocks(
     tokenizer_path: str,
     prefill_seq_len: int,
     generation_seq_len: int,
+    batch_size: int,
 ) -> tuple[dict[SubblockConfig, float], float]:
     """Benchmark each unique subblock and return per-subblock runtimes and no-block overhead."""
     repeat_block_n_times = 10
+
     runtime_config = RuntimeConfig(
         vocab_size,
         hidden_size,
@@ -183,6 +185,7 @@ def calc_runtime_for_subblocks(
         repeat_block_n_times,
         prefill_seq_len,
         generation_seq_len,
+        batch_size,
         runtime_stats_config.get("num_iters", 30),
         runtime_stats_config.get("num_warmup_iters", 10),
     )

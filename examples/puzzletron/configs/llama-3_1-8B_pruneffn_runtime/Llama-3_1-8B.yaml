@@ -19,9 +19,9 @@ build_replacement_library:
   add_attention_no_ops: true
 
 calc_subblock_stats:
-  batch_sizes: [64, 96, 128]
-  prefill_seq_len: 4096
-  generation_seq_len: 4096
+  batch_sizes: [1, 4]
+  prefill_seq_len: 1024
+  generation_seq_len: 1024
   num_active_tokens_override: # Optional override for sequence lengths
   prefill_queue_size: 0
   allocate_prefill_query: false
@@ -58,7 +58,7 @@ mip:
   bigger_is_better: false
 
   subblock_stats_args:
-    - batch_size: 96
+    - batch_size: 1
       weights_dtype: torch.bfloat16
 
   report_additional_costs:
@@ -95,6 +95,8 @@ realize_model:
   seed: 42
   shuffle_seed: 444
   dataset_path: ${dataset_path}
+
+nccl_timeout_minutes: ${timedelta_minutes:120}
 
 # This section redirects Hydra outputs
 hydra:

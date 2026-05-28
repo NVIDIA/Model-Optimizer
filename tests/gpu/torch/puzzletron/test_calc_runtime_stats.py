@@ -59,6 +59,7 @@ def test_calc_runtime_for_subblocks(tmp_path: Path):
         tokenizer_path=str(tokenizer_dir),
         prefill_seq_len=8,
         generation_seq_len=4,
+        batch_size=1,
     )
 
     assert set(runtime_by_subblock) == subblock_set

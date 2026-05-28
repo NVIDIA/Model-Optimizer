@@ -45,6 +45,7 @@ class RuntimeConfig:
     repeat_block_n_times: int
     prefill_seq_len: int
     generation_seq_len: int
+    batch_size: int
     num_iters: int
     num_warmup_iters: int
 

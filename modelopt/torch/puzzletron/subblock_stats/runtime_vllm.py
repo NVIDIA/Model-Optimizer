@@ -54,7 +54,7 @@ def run_vllm_latency_benchmark(model_path: Path, runtime_config: RuntimeConfig) 
         "--output-len",
         str(runtime_config.generation_seq_len),
         "--batch-size",
-        "1",
+        str(runtime_config.batch_size),
         "--output-json",
         str(output_json_path),
         "--max-model-len",

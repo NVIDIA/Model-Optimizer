@@ -19,7 +19,6 @@
 import copy
 import dataclasses
 import json
-import os
 import warnings
 from functools import partial
 from itertools import product
@@ -132,6 +131,7 @@ def calculate_subblock_stats(
             tokenizer_path=teacher_dir,
             prefill_seq_len=prefill_seq_len,
             generation_seq_len=generation_seq_len,
+            batch_size=batch_size,
         )
 
     sorted_subblock_config = sorted(
