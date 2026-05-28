@@ -18,6 +18,7 @@
 import logging
 import types
 import warnings
+from contextlib import contextmanager
 from typing import Any
 
 import megatron.core.parallel_state as mcore_parallel
@@ -45,6 +46,7 @@ from ..nn import QuantModule, QuantModuleRegistry, SequentialQuantizer, TensorQu
 from ..nn.modules.quant_linear import RealQuantLinear
 from ..qtensor import QTensorWrapper
 from ..utils import sync_moe_expert_amax
+from ..utils.layerwise_calib import LayerActivationCollector
 from .custom import CUSTOM_MODEL_PLUGINS, _ParallelLinear
 
 try:
@@ -785,3 +787,51 @@ if HAS_TE:
             # Affine KVCache Quant bias vector.
             state_dict = self.state_dict(prefix="", keep_vars=True)
             return make_sharded_tensors_for_checkpoint(state_dict, prefix, {}, sharded_offsets)
+
+
+def _is_supported_megatron_model(model: torch.nn.Module) -> bool:
+    return isinstance(model, MegatronModule)
+
+
+@contextmanager
+def _megatron_grad_ckpt_context(model: torch.nn.Module):
+    # Megatron configures activation recompute at model build time via TransformerConfig,
+    # so there is no runtime flag to flip here.
+    yield
+
+
+def _is_param_grad_enabled_for_megatron(pname: str, model: torch.nn.Module) -> bool:
+    return "weight" in pname
+
+
+_AUTOQUANT_SUPPORT_REGISTERED = False
+
+
+def register_megatron_autoquant_support() -> None:
+    """Register megatron AutoQuant hooks. Call from `auto_quantize` entry (lazy), not at module-load."""
+    global _AUTOQUANT_SUPPORT_REGISTERED
+    if _AUTOQUANT_SUPPORT_REGISTERED:
+        return
+    from ..algorithms import AutoQuantizeGradientSearcher
+
+    AutoQuantizeGradientSearcher.register_custom_support(
+        _is_supported_megatron_model,
+        _megatron_grad_ckpt_context,
+        _is_param_grad_enabled_for_megatron,
+    )
+    _AUTOQUANT_SUPPORT_REGISTERED = True
+
+
+# GPTQ layerwise calibration support
+def get_mcore_decoder_layers(model: torch.nn.Module) -> torch.nn.ModuleList | None:
+    layers = None
+    if hasattr(model, "decoder") and hasattr(model.decoder, "layers"):
+        layers = model.decoder.layers
+    if hasattr(model, "output_layer") and layers:
+        layers.append(model.output_layer)
+    return layers
+
+
+LayerActivationCollector.register_decoder_layer_support(
+    _is_supported_megatron_model, get_mcore_decoder_layers
+)
