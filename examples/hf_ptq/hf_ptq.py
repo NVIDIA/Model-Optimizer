@@ -520,6 +520,7 @@ def load_model(args: argparse.Namespace):
             ckpt_path=args.pyt_ckpt_path,
             device=args.device,
             rank=args.rank,
+            args=args,
             trust_remote_code=args.trust_remote_code,
         )
     elif args.specdec_offline_dataset is not None or not args.low_memory_mode:
@@ -970,6 +971,10 @@ def pre_quantize(
     # Generate preview before quantization
     if args.skip_generate:
         generated_ids_before_ptq = None
+    elif args.use_fsdp2:
+        # FSDP2 generation is slow cross-node (~seconds/token); 5 tokens is
+        # enough to sanity-check coherence.
+        generated_ids_before_ptq = full_model.generate(preview_input_ids, max_new_tokens=5)
     elif model_type == "deepseek":
         # DeepSeek generation may go OOM, so we skip it
         generated_ids_before_ptq = None
@@ -1498,8 +1503,8 @@ def parse_args() -> argparse.Namespace:
             "Run calibration under PyTorch FSDP2 (requires launching with torchrun). "
             "Takes precedence over --use_seq_device_map. "
             "v1 limitations: standard causal-LM only (no VILA / pack-quantized / speculative / "
-            "auto-quantize / sparsity / VLM); per-rank load memory ceiling is roughly model_size "
-            "(use multinode_ptq.py for models that don't fit on every rank)."
+            "auto-quantize / sparsity / VLM). Rank 0 holds the full model in CPU briefly "
+            "during the broadcast step; other ranks pay ~0 CPU."
         ),
     )
     parser.add_argument(
