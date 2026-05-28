@@ -38,6 +38,7 @@ from modelopt.torch.utils import atomic_print
 
 from .algorithms import AutoQuantizeGradientSearcher, AutoQuantizeKLDivSearcher, QuantRecipe
 from .algorithms import get_auto_quantize_config as _get_auto_quantize_config
+from ._auto_quantize_cost import normalize_auto_quantize_constraints
 from .config import QuantizeAlgoCfgType
 from .mode import QuantizeModeRegistry, get_modelike_from_algo_cfg
 from .nn import QuantModule, TensorQuantizer
@@ -265,112 +266,6 @@ _AUTO_QUANTIZE_SUPPORTED_ALGORITHMS = {
     "awq_clip",
 }
 
-_ACTIVE_MOE_TOP_K_ATTRS = (
-    "num_experts_per_tok",
-    "num_experts_per_token",
-    "moe_top_k",
-    "top_k",
-    "num_selected_experts",
-)
-_ACTIVE_MOE_NUM_EXPERTS_ATTRS = (
-    "num_experts",
-    "num_local_experts",
-    "n_routed_experts",
-    "moe_num_experts",
-    "num_routed_experts",
-)
-
-
-def _iter_model_configs(model: nn.Module):
-    seen = set()
-    for obj in (model, getattr(model, "model", None), getattr(model, "language_model", None)):
-        config = getattr(obj, "config", None)
-        if config is None or id(config) in seen:
-            continue
-        seen.add(id(config))
-        yield config
-        for nested_attr in ("text_config", "language_config"):
-            nested_config = getattr(config, nested_attr, None)
-            if nested_config is None or id(nested_config) in seen:
-                continue
-            seen.add(id(nested_config))
-            yield nested_config
-
-
-def _get_first_numeric_config_attr(config: Any, attr_names: tuple[str, ...]) -> float | None:
-    for attr_name in attr_names:
-        value = getattr(config, attr_name, None)
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
-            return float(value)
-    return None
-
-
-def _infer_active_moe_expert_ratio(model: nn.Module) -> float | None:
-    for config in _iter_model_configs(model):
-        num_active_experts = _get_first_numeric_config_attr(config, _ACTIVE_MOE_TOP_K_ATTRS)
-        num_experts = _get_first_numeric_config_attr(config, _ACTIVE_MOE_NUM_EXPERTS_ATTRS)
-        if num_active_experts is None or num_experts is None or num_experts <= 0:
-            continue
-        ratio = num_active_experts / num_experts
-        if ratio <= 0.0:
-            continue
-        return min(ratio, 1.0)
-    return None
-
-
-def _normalize_auto_quantize_constraints(
-    model: nn.Module, constraints: dict[str, Any] | None
-) -> dict[str, Any]:
-    constraints = {"effective_bits": 4.8} if constraints is None else dict(constraints)
-    cost_model = constraints.get("cost_model", "weight")
-    if cost_model not in ("weight", "active_moe"):
-        raise ValueError(
-            f"Invalid constraints['cost_model']: {cost_model}. "
-            "Valid options are 'weight' and 'active_moe'."
-        )
-
-    cost_constraints = constraints.get("cost", {})
-    if cost_constraints is None:
-        cost_constraints = {}
-    if not isinstance(cost_constraints, dict):
-        raise ValueError("constraints['cost'] must be a dict when provided.")
-    cost_constraints = dict(cost_constraints)
-
-    unknown_cost_keys = set(cost_constraints) - {"active_moe_expert_ratio"}
-    if unknown_cost_keys:
-        raise ValueError(f"Unsupported auto_quantize cost constraints: {unknown_cost_keys}.")
-
-    active_moe_expert_ratio = cost_constraints.get("active_moe_expert_ratio")
-    if active_moe_expert_ratio is not None:
-        if not (
-            isinstance(active_moe_expert_ratio, (int, float))
-            and not isinstance(active_moe_expert_ratio, bool)
-            and 0.0 < active_moe_expert_ratio <= 1.0
-        ):
-            raise ValueError(
-                "constraints['cost']['active_moe_expert_ratio'] must be in (0.0, 1.0]."
-            )
-        cost_constraints["active_moe_expert_ratio"] = float(active_moe_expert_ratio)
-
-    if cost_model == "weight" and active_moe_expert_ratio is not None:
-        raise ValueError(
-            "constraints['cost']['active_moe_expert_ratio'] requires cost_model='active_moe'."
-        )
-    if cost_model == "active_moe" and active_moe_expert_ratio is None:
-        active_moe_expert_ratio = _infer_active_moe_expert_ratio(model)
-        if active_moe_expert_ratio is None:
-            raise ValueError(
-                "Could not infer active_moe_expert_ratio from model.config. "
-                "Pass it via constraints['cost']['active_moe_expert_ratio']."
-            )
-        cost_constraints["active_moe_expert_ratio"] = active_moe_expert_ratio
-
-    constraints["cost_model"] = cost_model
-    if cost_constraints or cost_model == "active_moe":
-        constraints["cost"] = cost_constraints
-    return constraints
-
-
 def auto_quantize(
     model: nn.Module,
     constraints: dict[str, Any] | None = None,
@@ -407,16 +302,16 @@ def auto_quantize(
     Args:
         model: A pytorch model with quantizer modules.
         constraints: Constraints for the search. ``effective_bits`` specifies the effective number
-            of bits for the quantized model. ``cost_model`` selects the metric used for the
-            effective-bits constraint and currently supports ``"weight"`` (default) and
-            ``"active_moe"``. Additional cost-model parameters are provided through the nested
+            of bits for the quantized model and defaults to 4.8. ``cost_model`` selects the metric
+            used for the effective-bits constraint and currently supports ``"weight"`` (default)
+            and ``"active_moe"``. Additional cost-model parameters are provided through the nested
             ``cost`` dict.
 
             Here is an example for valid ``effective_bits`` argument:
 
             .. code-block:: python
 
-                # For an effective quantization bits of 4.8
+                # For the default AutoQuantize effective-bits target
                 constraints = {"effective_bits": 4.8}
 
                 # For active-MoE accounting where 2 of 8 routed experts are active per token
@@ -629,7 +524,7 @@ def auto_quantize(
     else:
         raise ValueError(f"Invalid method: {method}. Valid options are 'gradient' or 'kl_div'.")
 
-    constraints = _normalize_auto_quantize_constraints(model, constraints)
+    constraints = normalize_auto_quantize_constraints(model, constraints)
 
     model = apply_mode(
         model,

@@ -30,8 +30,8 @@ from modelopt.torch.quantization.algorithms import (
     QuantRecipeHparam,
     estimate_quant_compression,
 )
+from modelopt.torch.quantization._auto_quantize_cost import infer_active_moe_expert_ratio
 from modelopt.torch.quantization.config import _base_disable_all, _default_disabled_quantizer_cfg
-from modelopt.torch.quantization.model_quant import _infer_active_moe_expert_ratio
 from modelopt.torch.utils import safe_load
 from modelopt.torch.utils.distributed import DistributedProcessGroup
 
@@ -199,7 +199,7 @@ def test_active_moe_ratio_requires_single_config_object():
         text_config=SimpleNamespace(num_experts=8),
     )
 
-    assert _infer_active_moe_expert_ratio(model) is None
+    assert infer_active_moe_expert_ratio(model) is None
 
 
 def test_active_moe_search_prefers_budget_lower_bound():

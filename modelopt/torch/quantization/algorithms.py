@@ -40,30 +40,18 @@ from modelopt.torch.utils.distributed import DistributedProcessGroup, ParallelSt
 
 from . import config as mtq_config
 from . import model_calib
+from ._auto_quantize_cost import (
+    ACTIVE_MOE_EXPERT_RATIO_KEY,
+    AUTO_QUANTIZE_CONSTRAINT_KEYS,
+    COST_MODEL_ACTIVE_MOE,
+    COST_MODEL_WEIGHT,
+    get_auto_quantize_cost_model,
+    normalize_auto_quantize_constraints,
+)
 from .config import QuantizeConfig, QuantizerAttributeConfig, QuantizerCfgEntry
 from .conversion import set_quantizer_by_cfg
 from .nn import QuantLinearConvBase, QuantModule, SequentialQuantizer, TensorQuantizer
 from .utils import is_quantized_linear
-
-_ROUTED_MOE_EXPERT_NAME_RE = re.compile(r"(^|\.)experts(\.|$)")
-_AUTO_QUANTIZE_CONSTRAINT_KEYS = {"effective_bits", "cost_model", "cost"}
-_AUTO_QUANTIZE_COST_CONSTRAINT_KEYS = {"active_moe_expert_ratio"}
-
-
-def _is_routed_moe_module_name(name: str) -> bool:
-    """Return True for routed MoE expert modules, excluding shared experts."""
-    return "shared_expert" not in name and _ROUTED_MOE_EXPERT_NAME_RE.search(name) is not None
-
-
-def _get_active_moe_cost_weight(
-    module_names: Sequence[str], active_moe_expert_ratio: float | None
-) -> float:
-    """Return cost multiplier for the active-MoE cost model."""
-    if active_moe_expert_ratio is None:
-        return 1.0
-    if any(_is_routed_moe_module_name(n) for n in module_names):
-        return active_moe_expert_ratio
-    return 1.0
 
 
 def estimate_quant_compression(quant_cfg: QuantizeConfig) -> float:
@@ -436,53 +424,6 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         )
         return config
 
-    def _get_cost_constraints(self) -> tuple[str, float | None]:
-        unexpected_constraint_keys = set(self.constraints) - _AUTO_QUANTIZE_CONSTRAINT_KEYS
-        if unexpected_constraint_keys:
-            raise ValueError(
-                f"Unsupported auto_quantize constraints: {unexpected_constraint_keys}. "
-                "Supported constraints are 'effective_bits', 'cost_model', and 'cost'."
-            )
-
-        cost_model = self.constraints.get("cost_model", "weight")
-        if not isinstance(cost_model, str) or cost_model not in ("weight", "active_moe"):
-            raise ValueError(
-                f"Invalid constraints['cost_model']: {cost_model}. "
-                "Valid options are 'weight' and 'active_moe'."
-            )
-
-        cost_constraints = self.constraints.get("cost", {})
-        if cost_constraints is None:
-            cost_constraints = {}
-        if not isinstance(cost_constraints, dict):
-            raise ValueError("constraints['cost'] must be a dict when provided.")
-        unknown_cost_keys = set(cost_constraints) - _AUTO_QUANTIZE_COST_CONSTRAINT_KEYS
-        if unknown_cost_keys:
-            raise ValueError(f"Unsupported auto_quantize cost constraints: {unknown_cost_keys}.")
-
-        active_moe_expert_ratio = cost_constraints.get("active_moe_expert_ratio")
-        if active_moe_expert_ratio is not None:
-            if not (
-                isinstance(active_moe_expert_ratio, (int, float))
-                and not isinstance(active_moe_expert_ratio, bool)
-                and 0.0 < active_moe_expert_ratio <= 1.0
-            ):
-                raise ValueError(
-                    "constraints['cost']['active_moe_expert_ratio'] must be in (0.0, 1.0]."
-                )
-            active_moe_expert_ratio = float(active_moe_expert_ratio)
-
-        if cost_model == "weight" and active_moe_expert_ratio is not None:
-            raise ValueError(
-                "constraints['cost']['active_moe_expert_ratio'] requires cost_model='active_moe'."
-            )
-        if cost_model == "active_moe" and active_moe_expert_ratio is None:
-            raise ValueError(
-                "constraints['cost']['active_moe_expert_ratio'] must be set when using "
-                "active_moe cost accounting."
-            )
-        return cost_model, active_moe_expert_ratio
-
     def load_search_checkpoint(self) -> bool:
         return super().load_search_checkpoint(strict=False)
 
@@ -568,9 +509,7 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             )
             return quant_module
 
-    def insert_hparams_after_merge_rules(
-        self, model, quant_recipes, disabled_layers=None, active_moe_expert_ratio=None
-    ):
+    def insert_hparams_after_merge_rules(self, model, quant_recipes, disabled_layers=None):
         """Restrict the search space using the merge rules and insert the hparams for the model."""
         # TRTLLM fuses linear layers such as q_proj, k_proj, v_proj into same layer
         # Hence we need to restrict the search space so that all these layers share the same recipe
@@ -626,7 +565,9 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             disabled = any(disabled for _, _, disabled, _ in module_info_list)
             score_modules = [score_module for _, _, _, score_module in module_info_list]
             quant_module_names = [name for _, name, _, _ in module_info_list]
-            cost_weight = _get_active_moe_cost_weight(quant_module_names, active_moe_expert_ratio)
+            cost_weight = self._cost_model.module_cost_weight(
+                quant_module_names, self.config["cost"]
+            )
 
             _quant_recipes = None if disabled else quant_recipes
             hparam = QuantRecipeHparam(
@@ -669,14 +610,11 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
 
             formats, scores, costs, active_costs = [], [], [], []
             prev_score = float("inf")
-            constraint_cost_weight = (
-                hparam.cost_weight if self.config["cost_model"] == "active_moe" else 1.0
-            )
             for recipe in hparam.choices:
                 formats.append(recipe)
 
                 score = hparam.get_score(recipe)  # type: ignore [arg-type]
-                cost = hparam.get_cost(recipe, cost_weight=constraint_cost_weight)  # type: ignore [arg-type]
+                cost = hparam.get_cost(recipe)  # type: ignore [arg-type]
                 active_cost = hparam.get_cost(recipe, cost_weight=hparam.cost_weight)  # type: ignore [arg-type]
 
                 score = min(score, prev_score)  # TODO: Should we get rid of this?
@@ -709,9 +647,13 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         from .utils import get_quantizer_state_dict, set_quantizer_state_dict
 
         super().before_search()
-        self.config["cost_model"], self.config["active_moe_expert_ratio"] = (
-            self._get_cost_constraints()
+        self.constraints = normalize_auto_quantize_constraints(self.model, self.constraints)
+        self.config["cost_model"] = self.constraints["cost_model"]
+        self.config["cost"] = self.constraints.get("cost", {})
+        self.config["active_moe_expert_ratio"] = self.config["cost"].get(
+            ACTIVE_MOE_EXPERT_RATIO_KEY
         )
+        cost_model = get_auto_quantize_cost_model(self.config["cost_model"])
         restored_method = getattr(self, "method", None)
         if self.candidate_stats and restored_method not in (None, self.method_name):
             raise ValueError(
@@ -737,11 +679,9 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
 
         search_recipes = self._get_search_recipes(self.config["quantization_formats"])
         self._verify_constraint(search_recipes)
+        self._cost_model = cost_model
         self.insert_hparams_after_merge_rules(
-            self.model,
-            search_recipes,
-            self.config["disabled_layers"],
-            self.config["active_moe_expert_ratio"],
+            self.model, search_recipes, self.config["disabled_layers"]
         )
 
         QuantRecipe.disable_folding_pqs_to_weights()
@@ -831,17 +771,6 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             for module in modules
         )
 
-    @staticmethod
-    def _get_total_weight_size_from_named_modules(named_modules, active_moe_expert_ratio=None):
-        total_weight_size = 0.0
-        for name, module in named_modules:
-            if not _AutoQuantizeBaseSearcher._is_auto_quantize_module(module):
-                continue
-            total_weight_size += module.weight.numel() * _get_active_moe_cost_weight(
-                [name], active_moe_expert_ratio
-            )
-        return total_weight_size
-
     def _get_constraints_for_search(self, max_weight_size, lower_bound=None):
         constraints = {
             "weight_size_after_compression": (
@@ -853,7 +782,7 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
 
     def _get_search_lower_bounds(self):
         cost_model = getattr(self, "cost_model", getattr(self, "config", {}).get("cost_model"))
-        if cost_model == "active_moe":
+        if cost_model == COST_MODEL_ACTIVE_MOE:
             return [0.99, 0.90, None]
         return [None, 0.99, 0.90]
 
@@ -865,19 +794,16 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         """Search for the best per-layer quantization configuration and return the best model and configuration."""
         verbose = self.config["verbose"]
         assert "effective_bits" in self.constraints and (
-            set(self.constraints) <= _AUTO_QUANTIZE_CONSTRAINT_KEYS
+            set(self.constraints) <= AUTO_QUANTIZE_CONSTRAINT_KEYS
         ), (
             "`constraints` must contain 'effective_bits' and may contain 'cost_model' and 'cost'. "
             f"Got {self.constraints.keys()}."
         )
 
         compression = self._get_formatted_weight_compression_constraint()
-        if self.config["cost_model"] == "active_moe":
-            total_weight_size = self._get_total_weight_size_from_named_modules(
-                self.model.named_modules(), self.config["active_moe_expert_ratio"]
-            )
-        else:
-            total_weight_size = self._get_total_weight_size(self.model.modules())
+        total_weight_size = self._cost_model.total_weight_size(
+            self.model.named_modules(), self._is_auto_quantize_module, self.config["cost"]
+        )
         self.cost_denominator = total_weight_size
         max_weight_size = total_weight_size * compression
         if verbose:
@@ -886,7 +812,7 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                 f"{self.config['cost_model']}"
                 + (
                     f" (active_moe_expert_ratio={self.config['active_moe_expert_ratio']})"
-                    if self.config["cost_model"] == "active_moe"
+                    if self.config["cost_model"] == COST_MODEL_ACTIVE_MOE
                     else ""
                 )
             )
@@ -1539,7 +1465,7 @@ def _resolve_best_recipe(search_state, constraints, verbose=False):
         )
 
     searcher.candidate_stats = candidate_stats
-    searcher.cost_model = search_state.get("cost_model", "weight")
+    searcher.cost_model = search_state.get("cost_model", COST_MODEL_WEIGHT)
     searcher.config = {"cost_model": searcher.cost_model}
     best_recipe_info, _ = searcher.run_search_with_stats(max_weight_size, verbose=verbose)
 
