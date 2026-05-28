@@ -51,11 +51,6 @@ try:
             f"transformers {_transformers_version} is not tested with current version of modelopt and may cause issues."
             " Please install recommended version with `pip install -U nvidia-modelopt[hf]` if working with HF models.",
         )
-    elif _Version(_transformers_version) >= _Version("5.0"):
-        _warnings.warn(
-            "transformers>=5.0 support is experimental. Unified Hugging Face checkpoint export for quantized "
-            "checkpoints may not work for some models yet.",
-        )
 except ImportError:
     pass
 
