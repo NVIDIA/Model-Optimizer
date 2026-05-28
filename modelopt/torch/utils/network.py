@@ -21,7 +21,7 @@ import warnings
 from collections import abc, deque
 from collections.abc import Callable, Iterable
 from contextlib import contextmanager
-from typing import Any, Union
+from typing import Any, TypeAlias
 
 import torch
 import torch.distributed.fsdp
@@ -81,8 +81,8 @@ except:  # noqa: E722
 
 if DeepSpeedEngine is not None:
     SUPPORTED_WRAPPERS[DeepSpeedEngine] = "module"
-ModelLike = Union[nn.Module, type[nn.Module], tuple, Callable]  # noqa: UP007
-ConstructorLike = Callable | tuple
+ModelLike: TypeAlias = nn.Module | type[nn.Module] | tuple | Callable
+ConstructorLike: TypeAlias = Callable | tuple
 
 
 def is_parallel(model: nn.Module) -> bool:

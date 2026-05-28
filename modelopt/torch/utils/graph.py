@@ -17,7 +17,7 @@
 
 import itertools
 from collections.abc import Callable, Sequence
-from typing import Union
+from typing import TypeAlias
 
 import torch
 from torch import nn
@@ -25,7 +25,7 @@ from torch.fx import Node, symbolic_trace
 
 __all__ = ["match"]
 
-NodeTarget = Union[nn.Module, Callable]  # noqa: UP007
+NodeTarget: TypeAlias = nn.Module | Callable
 
 
 def _get_node_target(node: Node, root: nn.Module) -> NodeTarget | None:
