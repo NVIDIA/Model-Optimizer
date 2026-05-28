@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,8 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Re-export modelopt's version so configuration.json's `specdec_bench_version`
-# tracks the parent package without a separate semver source of truth.
-# Breaking schema/methodology changes are recorded in commit messages and
-# fingerprinted by `specdec_bench_sha` in configuration.json.
-from modelopt import __version__
+# Make examples/specdec_bench/specdec_bench/ + upload_to_s3.py importable from
+# these tests. Anchored on the repo root via parents[3]:
+#   __file__ = <repo>/tests/examples/specdec_bench/conftest.py
+#   parents[3] = <repo>
+import sys
+from pathlib import Path
+
+_PKG_ROOT = Path(__file__).resolve().parents[3] / "examples" / "specdec_bench"
+if str(_PKG_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PKG_ROOT))

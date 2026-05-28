@@ -36,7 +36,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        example: [llm_distill, llm_qat, llm_sparsity, diffusers_sparsity]
+        example: [llm_distill, llm_qat, llm_sparsity, diffusers_sparsity, specdec_bench]
         include:
           - example: speculative_decoding
             docker_image: "26.01"
