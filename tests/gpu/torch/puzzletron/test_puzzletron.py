@@ -166,8 +166,8 @@ def _test_puzzletron_multiprocess_job(
                     f"Expected {solution_dir / 'solutions.json'} to exist",
                 )
 
-            # Validate lm_loss
-            errors.extend(_check_lm_loss(puzzle_dir, hf_model_name))
+            # Validate lm_loss — wider tolerance for MoE expert-routing non-determinism
+            errors.extend(_check_lm_loss(puzzle_dir, hf_model_name, tolerance=0.01))
         else:
             # assertions for the score_pruning_activations step 1 (FFN pruning)
             errors.extend(_check_score_pruning_activations(puzzle_dir, hf_model_name))
@@ -290,11 +290,13 @@ def _check_score_pruning_activations(puzzle_dir: Path, hf_model_name: str) -> li
     return errors
 
 
-def _check_lm_loss(puzzle_dir: Path, hf_model_name: str, tolerance: float = 0.15) -> list[str]:
+def _check_lm_loss(puzzle_dir: Path, hf_model_name: str, tolerance: float = 0.001) -> list[str]:
     """Validate lm_loss for a model solution.
 
-    Tolerance is wide (0.15) to absorb cross-GPU numerical drift — empirically up to ~0.10
-    between RTX 6000 Ada and RTX Pro 6000 Blackwell; transformers-version drift is negligible.
+    Tight tolerance (0.001): non-MoE models are essentially bit-deterministic under
+    fp32 + TF32-disabled. Hybrid mamba+MoE models (e.g., Nemotron-3-Nano) are excluded
+    from EXPECTED_LM_LOSS because selective-scan + expert routing produce ~0.06 run-to-run
+    noise — wide enough that any tolerance accommodating it would defeat the check.
     """
     errors: list[str] = []
     solution_0_path = (
@@ -311,7 +313,6 @@ def _check_lm_loss(puzzle_dir: Path, hf_model_name: str, tolerance: float = 0.15
     if expected_lm_loss is not None:
         if abs(actual_lm_loss - expected_lm_loss) >= tolerance:
             errors.append(f"lm_loss mismatch: expected {expected_lm_loss}, got {actual_lm_loss}")
-    # TODO: not reproducible in CI, skipping for now
     elif hf_model_name != "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16":
         errors.append(
             f"Expected lm_loss values not found for {hf_model_name}! Observed value: {actual_lm_loss}"
@@ -341,44 +342,44 @@ def _check_mip_solutions(puzzle_dir: Path, hf_model_name: str) -> list[str]:
 # channels of the actual run — tolerant to cross-GPU / transformers-version rank shifts.
 EXPECTED_FFN_PRUNING_VALUES = {
     "meta-llama/Llama-3.1-8B-Instruct": [
-        {"least_important": 267, "most_important": 227},
-        {"least_important": 444, "most_important": 240},
+        {"least_important": 183, "most_important": 227},
+        {"least_important": 297, "most_important": 240},
     ],
     "meta-llama/Llama-3.2-3B-Instruct": [
-        {"least_important": 267, "most_important": 227},
-        {"least_important": 444, "most_important": 240},
+        {"least_important": 183, "most_important": 227},
+        {"least_important": 297, "most_important": 240},
     ],
     "mistralai/Mistral-Small-24B-Instruct-2501": [
-        {"least_important": 267, "most_important": 227},
-        {"least_important": 444, "most_important": 240},
+        {"least_important": 183, "most_important": 227},
+        {"least_important": 297, "most_important": 240},
     ],
     # NemotronH with pattern "*-" has only 1 FFN layer (the "-" layer)
     "nvidia/NVIDIA-Nemotron-Nano-12B-v2": [
-        {"least_important": 316, "most_important": 253},
+        {"least_important": 502, "most_important": 196},
     ],
     "Qwen/Qwen2.5-7B-Instruct": [
-        {"least_important": 173, "most_important": 293},
+        {"least_important": 113, "most_important": 293},
         {"least_important": 44, "most_important": 163},
     ],
     "Qwen/Qwen3-8B": [
-        {"least_important": 307, "most_important": 247},
-        {"least_important": 84, "most_important": 262},
+        {"least_important": 63, "most_important": 247},
+        {"least_important": 191, "most_important": 262},
     ],
 }
 
 
-# Expected lm_loss values per model
+# Expected lm_loss values per model.
 EXPECTED_LM_LOSS = {
-    "meta-llama/Llama-3.1-8B-Instruct": 4.823750,
-    "meta-llama/Llama-3.2-3B-Instruct": 4.871174,
-    "mistralai/Mistral-Small-24B-Instruct-2501": 4.822941,
-    # TODO: not reproducible in CI, skipping for now
-    # "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16": 5.068373,
-    "nvidia/NVIDIA-Nemotron-Nano-12B-v2": 5.027153,
-    "openai/gpt-oss-20b": 4.898407,
-    "Qwen/Qwen2.5-7B-Instruct": 4.860205,
-    "Qwen/Qwen3-8B": 4.826773,
-    "Qwen/Qwen3-VL-30B-A3B-Instruct": 5.0625,
+    "meta-llama/Llama-3.1-8B-Instruct": 4.830112,
+    "meta-llama/Llama-3.2-3B-Instruct": 4.861398,
+    "mistralai/Mistral-Small-24B-Instruct-2501": 4.830872,
+    # Nemotron-3-Nano-30B-A3B (hybrid mamba+MoE) intentionally excluded — see _check_lm_loss.
+    "nvidia/NVIDIA-Nemotron-Nano-12B-v2": 5.034576,
+    "openai/gpt-oss-20b": 4.898024,
+    "Qwen/Qwen2.5-7B-Instruct": 4.865112,
+    "Qwen/Qwen3-8B": 4.832244,
+    # Qwen3-VL lm_loss is 5.03125 on transformers 5.6+ but ~4.92 on 4.57 (known cross-major drift)
+    "Qwen/Qwen3-VL-30B-A3B-Instruct": 5.03125,
 }
 
 
