@@ -34,6 +34,7 @@ Requirements::
 import argparse
 import csv
 import copy
+import gc
 import os
 import sys
 import time
@@ -205,10 +206,14 @@ def run_accuracy_sweep(pipe, model_id, kernels, resolutions, prompt_indices,
         for kernel in kernels:
             is_inplace = kernel in MODELOPT_KERNELS
             if is_inplace:
-                # Reload pipeline for in-place kernels
+                # Reload pipeline for in-place kernels — must fully free GPU memory first
                 print(f"\n[{kernel}] Reloading pipeline for in-place kernel...")
+                pipe.to("cpu")
                 del pipe
+                gc.collect()
                 torch.cuda.empty_cache()
+                mem = torch.cuda.memory_allocated() / 1e9
+                print(f"  GPU memory after cleanup: {mem:.1f} GB")
                 pipe = load_pipeline(model_id)
 
             apply_kernel(pipe, kernel)
@@ -294,7 +299,9 @@ def run_speed_sweep(pipe, model_id, kernels, resolutions, prompt_indices,
             is_inplace = kernel in MODELOPT_KERNELS
             if is_inplace:
                 print(f"\n[{kernel}] Reloading pipeline...")
+                pipe.to("cpu")
                 del pipe
+                gc.collect()
                 torch.cuda.empty_cache()
                 pipe = load_pipeline(model_id)
 
