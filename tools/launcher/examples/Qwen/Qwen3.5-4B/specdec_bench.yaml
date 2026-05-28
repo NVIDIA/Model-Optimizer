@@ -1,12 +1,22 @@
-# SPEED-bench smoke run for Qwen3.5-4B via vLLM (autoregressive baseline).
+# SPEED-bench run for Qwen3.5-4B via vLLM (autoregressive baseline).
 #
-# Reads nvidia/SPEED-Bench-Internal/qualitative through Qwen/Qwen3.5-4B with
-# --speculative_algorithm NONE (no draft model) and writes timing.json +
-# aa_timing.json + acceptance_rate.json + specbench_responses.jsonl +
-# specbench_results.json to /scratchspace/specdec_bench/.
+# Three-task pipeline:
+#   task_0  Quantitative quality split (nvidia/SPEED-Bench-Internal/qualitative)
+#   task_1  Long-context throughput split (nvidia/SPEED-Bench-Internal/throughput_32k)
+#   task_2  Upload results from both splits to S3 in sweep layout
+#
+# All three use --speculative_algorithm NONE (no draft model) — this is the
+# autoregressive baseline that the MTP variant in specdec_bench_mtp.yaml is
+# compared against.
 #
 # The qwen3_5 model_type needs transformers >= 4.58, which is NOT in
 # vllm/vllm-openai:latest yet — use the qwen3_5-cu130 tag instead.
+#
+# task_2 uploads /scratchspace/specdec_bench/ as a sweep dir; both
+# qualitative/ and throughput_32k/ subdirs land under
+# s3://team-specdec-workgroup/results/specdec_bench/<split>/. S3 credentials
+# are picked up from S3_ENDPOINT / S3_KEY_ID / S3_SECRET env vars; --skip-existing
+# lets re-runs land alongside the prior upload instead of failing.
 #
 # Local run:
 #   uv run launch.py --yaml examples/Qwen/Qwen3.5-4B/specdec_bench.yaml \
@@ -21,6 +31,7 @@ pipeline:
   global_vars:
     hf_model: /hf-local/Qwen/Qwen3.5-4B
 
+  # Step 1: qualitative split — quality / acceptance-rate numbers
   task_0:
     script: common/specdec_bench/run.sh
     args:
@@ -31,14 +42,53 @@ pipeline:
       - --tp_size 1
       - --ep_size 1
       - --concurrency 1
-      - --num_requests 80
       - --output_length 4096
       - --aa_timing
       - --show_progress
-      - --save_dir /scratchspace/specdec_bench
+      - --save_dir /scratchspace/specdec_bench/qualitative
     environment:
       - HF_MODEL_CKPT: <<global_vars.hf_model>>
       - HF_LOCAL: /hf-local
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 1
+      container: vllm/vllm-openai:qwen3_5-cu130
+
+  # Step 2: throughput_32k split — long-context throughput
+  task_1:
+    script: common/specdec_bench/run.sh
+    args:
+      - --dataset speed
+      - --dataset_path /hf-local/nvidia/SPEED-Bench-Internal/throughput_32k
+      - --engine VLLM
+      - --speculative_algorithm NONE
+      - --tp_size 1
+      - --ep_size 1
+      - --concurrency 1
+      - --output_length 4096
+      - --aa_timing
+      - --show_progress
+      - --save_dir /scratchspace/specdec_bench/throughput_32k
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+      - HF_LOCAL: /hf-local
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 1
+      container: vllm/vllm-openai:qwen3_5-cu130
+
+  # Step 3: upload both splits to S3 in sweep layout
+  task_2:
+    script: common/specdec_bench/upload_to_s3.sh
+    args:
+      - /scratchspace/specdec_bench
+      - s3://team-specdec-workgroup/results
+      - --skip-existing
+      - --allow-incomplete-provenance
     slurm_config:
       _factory_: "slurm_factory"
       nodes: 1
