@@ -166,11 +166,22 @@ def compute_metrics(frames_ref, frames_quant):
 # Main sweep
 # ---------------------------------------------------------------------------
 
+ACCURACY_FIELDS = ["kernel", "resolution", "prompt_id", "lpips", "psnr", "ssim", "mae_pct", "cos_sim"]
+TIMING_FIELDS = ["kernel", "resolution", "prompt_id", "elapsed_s", "speedup"]
+
+
 def run_accuracy_sweep(pipe, model_id, kernels, resolutions, prompt_indices,
                        output_dir, num_steps, seed):
     """Run accuracy sweep: baseline + each kernel, compute metrics per prompt."""
     video_dir = output_dir / "videos"
     video_dir.mkdir(parents=True, exist_ok=True)
+
+    # Incremental CSV files (appended per-result, survives timeouts)
+    accuracy_incr = output_dir / "accuracy.csv"
+    timing_incr = output_dir / "timing.csv"
+    # Remove stale incrementals from previous runs
+    accuracy_incr.unlink(missing_ok=True)
+    timing_incr.unlink(missing_ok=True)
 
     accuracy_rows = []
     timing_rows = []
@@ -194,13 +205,15 @@ def run_accuracy_sweep(pipe, model_id, kernels, resolutions, prompt_indices,
             print(f"  {elapsed:.1f}s -> {video_path}")
             baselines[p["id"]] = (elapsed, frames)
 
-            timing_rows.append({
+            t_row = {
                 "kernel": "baseline",
                 "resolution": res_name,
                 "prompt_id": p["id"],
                 "elapsed_s": f"{elapsed:.2f}",
                 "speedup": "1.00",
-            })
+            }
+            timing_rows.append(t_row)
+            append_csv_row(timing_incr, t_row, TIMING_FIELDS)
 
         # --- Run each kernel ---
         for kernel in kernels:
@@ -216,7 +229,14 @@ def run_accuracy_sweep(pipe, model_id, kernels, resolutions, prompt_indices,
                 print(f"  GPU memory after cleanup: {mem:.1f} GB")
                 pipe = load_pipeline(model_id)
 
-            apply_kernel(pipe, kernel)
+            try:
+                apply_kernel(pipe, kernel)
+            except Exception as e:
+                print(f"  WARNING: kernel {kernel} failed to apply: {e}")
+                print(f"  Skipping {kernel}.")
+                if not is_inplace:
+                    cleanup_kernel(kernel)
+                continue
 
             for pi in prompt_indices:
                 p = PROMPT_SUITE[pi]
@@ -238,7 +258,7 @@ def run_accuracy_sweep(pipe, model_id, kernels, resolutions, prompt_indices,
                 ssim_str = f"{metrics['ssim']:.4f}"
                 print(f"  LPIPS={lpips_str}  PSNR={psnr_str}dB  SSIM={ssim_str}")
 
-                accuracy_rows.append({
+                a_row = {
                     "kernel": kernel,
                     "resolution": res_name,
                     "prompt_id": p["id"],
@@ -247,15 +267,19 @@ def run_accuracy_sweep(pipe, model_id, kernels, resolutions, prompt_indices,
                     "ssim": ssim_str,
                     "mae_pct": f"{metrics['mae_pct']:.4f}",
                     "cos_sim": f"{metrics['cos_sim']:.6f}",
-                })
+                }
+                accuracy_rows.append(a_row)
+                append_csv_row(accuracy_incr, a_row, ACCURACY_FIELDS)
 
-                timing_rows.append({
+                t_row = {
                     "kernel": kernel,
                     "resolution": res_name,
                     "prompt_id": p["id"],
                     "elapsed_s": f"{elapsed:.2f}",
                     "speedup": f"{speedup:.2f}",
-                })
+                }
+                timing_rows.append(t_row)
+                append_csv_row(timing_incr, t_row, TIMING_FIELDS)
 
             if not is_inplace:
                 cleanup_kernel(kernel)
@@ -340,6 +364,17 @@ def write_csv(path: Path, rows: list[dict], fieldnames: list[str]):
         w.writeheader()
         w.writerows(rows)
     print(f"[CSV] Wrote {len(rows)} rows -> {path}")
+
+
+def append_csv_row(path: Path, row: dict, fieldnames: list[str]):
+    """Append a single row, writing header if file doesn't exist."""
+    write_header = not path.exists()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=fieldnames)
+        if write_header:
+            w.writeheader()
+        w.writerow(row)
 
 
 def compute_accuracy_summary(rows: list[dict]) -> list[dict]:
