@@ -45,9 +45,21 @@ Test that `nel` is installed with `nel --version`. If not, instruct the user to 
 If the user already has a config file (e.g., "run this config", "evaluate with my-config.yaml"), skip to Step 8. Optionally review it for common issues (missing `???` values, quantization flags) before running.
 
 **Shortcut: use task references.** For named benchmarks, read the matching
-`recipes/tasks/<name>.md` before creating or editing the config. Available:
-mmlu_pro, mmmu_pro, gpqa, aime2025, livecodebench, ifbench, scicode,
-aa_lcr, ns_hle_aa, tau2_bench_telecom.
+recipe before creating or editing the config. Available:
+
+- `recipes/tasks/mmlu_pro.md`, `recipes/tasks/aime_2025.md`,
+  `recipes/tasks/livecodebench.md`
+- Artificial Analysis Index v2 suite (default for quantized-checkpoint
+  validation, see `references/quantization-benchmarks.md`):
+  `recipes/tasks/aa/gpqa_diamond.md`, `recipes/tasks/aa/hle.md`,
+  `recipes/tasks/aa/lcr.md`, `recipes/tasks/aa/scicode.md`,
+  `recipes/tasks/aa/ifbench.md`, `recipes/tasks/aa/mmmu_pro.md`,
+  `recipes/tasks/aa/tau2_bench_telecom.md`
+
+If the user mentions "AA" or "Artificial Analysis" (e.g., "run the AA
+benchmarks", "AA Index v2", "artificial analysis suite"), generate **only**
+the tasks under `recipes/tasks/aa/`. Do not add `mmlu_pro`, `aime2025`, or
+`livecodebench` unless the user explicitly asks for them.
 
 1. Read the task reference(s) the user wants.
 2. Use `recipes/examples/example_eval.yaml` as the base config template

@@ -1,4 +1,4 @@
-# HLE AA
+# HLE
 
 ## Task Details
 

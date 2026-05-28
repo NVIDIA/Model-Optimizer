@@ -1,4 +1,4 @@
-# AA-LCR
+# LCR
 
 ## Task Details
 
