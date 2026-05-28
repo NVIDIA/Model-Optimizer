@@ -48,7 +48,8 @@ when MTP is inactive). For those:
   * ``input_amax`` falls back to the max observed on any other expert in the
     same ``(block, projection)`` bucket.
   * If an entire bucket has no observation (e.g. inactive MTP), the fallback
-    is the constant ``1.0`` and the case is logged.
+    is the max input amax observed for the same projection across calibrated
+    experts. If no calibrated input amax exists, export fails.
 
 Usage (single compute node, CPU-default; dequant+requant math is cheap
 relative to shard I/O):
@@ -119,11 +120,24 @@ def _discover_mp_from_amax_dir(amax_path: Path) -> int:
     return mps.pop()
 
 
+def _fuse_w1_w3_amax(merged: dict[str, torch.Tensor], which: str) -> int:
+    fused = 0
+    for k in list(merged.keys()):
+        if k.endswith(f"w1_{which}_quantizer._amax"):
+            k3 = k.replace(f"w1_{which}", f"w3_{which}")
+            if k3 in merged:
+                shared = torch.maximum(merged[k], merged[k3])
+                merged[k] = shared
+                merged[k3] = shared
+                fused += 1
+    return fused
+
+
 def _load_merged_amax(
     amax_path: Path, world_size: int | None = None,
 ) -> tuple[dict[str, torch.Tensor], dict[tuple[str, str], torch.Tensor]]:
-    """Union-merge amax across ranks, fuse w1/w3 input amax per expert, and
-    compute a per-``(block, proj)`` input-amax fallback."""
+    """Union-merge amax across ranks, fuse w1/w3 amax per expert, and compute
+    input-amax fallbacks from calibrated experts."""
     mp = world_size if world_size is not None else _discover_mp_from_amax_dir(amax_path)
     _log(f"[load] using MP={mp} ({'explicit --world_size' if world_size else 'auto-detected'})")
 
@@ -138,28 +152,34 @@ def _load_merged_amax(
             merged[k] = v
     _log(f"[load] merged {len(merged)} amax entries")
 
-    # w1/w3 share the same input x → fuse per expert.
-    fused = 0
-    for k in list(merged.keys()):
-        if k.endswith("w1_input_quantizer._amax"):
-            k3 = k.replace("w1_input", "w3_input")
-            if k3 in merged:
-                shared = torch.maximum(merged[k], merged[k3])
-                merged[k] = shared
-                merged[k3] = shared
-                fused += 1
-    _log(f"[load] fused w1/w3 input amax on {fused} experts")
+    # w1/w3 share the same input x and vLLM consumes one fused GEMM1 weight scale.
+    input_fused = _fuse_w1_w3_amax(merged, "input")
+    weight_fused = _fuse_w1_w3_amax(merged, "weight")
+    _log(f"[load] fused w1/w3 input amax on {input_fused} experts")
+    _log(f"[load] fused w1/w3 weight amax on {weight_fused} experts")
 
     buckets: dict[tuple[str, str], list[torch.Tensor]] = defaultdict(list)
+    proj_buckets: dict[str, list[torch.Tensor]] = defaultdict(list)
+    all_input_amax: list[torch.Tensor] = []
     for k, v in merged.items():
         m = _AMAX_KEY_RE.match(k)
         assert m is not None
         if m.group("which") == "input":
             buckets[(m.group("block"), m.group("proj"))].append(v)
+            proj_buckets[m.group("proj")].append(v)
+            all_input_amax.append(v)
     input_fallback = {
         key: torch.stack([t.reshape(-1) for t in vals]).flatten().max()
         for key, vals in buckets.items()
     }
+    input_fallback.update({
+        ("*", proj): torch.stack([t.reshape(-1) for t in vals]).flatten().max()
+        for proj, vals in proj_buckets.items()
+    })
+    if all_input_amax:
+        input_fallback[("*", "*")] = torch.stack(
+            [t.reshape(-1) for t in all_input_amax]
+        ).flatten().max()
     _log(f"[load] input-fallback buckets: {len(input_fallback)} populated")
     return merged, input_fallback
 
@@ -170,6 +190,35 @@ def _lookup_amax(
     return amax.get(f"{expert_path}_{which}_quantizer._amax")
 
 
+def _lookup_input_fallback(
+    input_fallback: dict[tuple[str, str], torch.Tensor],
+    block: str,
+    proj: str,
+) -> tuple[torch.Tensor | None, str | None]:
+    if (block, proj) in input_fallback:
+        return input_fallback[(block, proj)], "block"
+    if ("*", proj) in input_fallback:
+        return input_fallback[("*", proj)], "projection"
+    if ("*", "*") in input_fallback:
+        return input_fallback[("*", "*")], "global"
+    return None, None
+
+
+def _dequantize_mxfp4_to_bf16(
+    mxfp4_weight: torch.Tensor, mxfp4_scale: torch.Tensor, device: str
+) -> torch.Tensor:
+    return MXFP4QTensor.dequantize_packed(
+        mxfp4_weight.to(device), mxfp4_scale.to(device),
+        block_size=32, dtype=torch.bfloat16,
+    )
+
+
+def _synthesize_weight_amax(
+    mxfp4_weight: torch.Tensor, mxfp4_scale: torch.Tensor, device: str
+) -> torch.Tensor:
+    return _dequantize_mxfp4_to_bf16(mxfp4_weight, mxfp4_scale, device).abs().max().cpu()
+
+
 def _quantize_weight_nvfp4(
     mxfp4_weight: torch.Tensor,
     mxfp4_scale: torch.Tensor,
@@ -178,10 +227,7 @@ def _quantize_weight_nvfp4(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, bool]:
     """MXFP4 + UE8M0 → BF16 → NVFP4 packed. Synthesizes ``weight_amax`` from
     the dequantized BF16 tensor when ``None`` is passed."""
-    bf16 = MXFP4QTensor.dequantize_packed(
-        mxfp4_weight.to(device), mxfp4_scale.to(device),
-        block_size=32, dtype=torch.bfloat16,
-    )
+    bf16 = _dequantize_mxfp4_to_bf16(mxfp4_weight, mxfp4_scale, device)
     synthesized = weight_amax is None
     if synthesized:
         weight_amax = bf16.abs().max()
@@ -192,6 +238,61 @@ def _quantize_weight_nvfp4(
     return q_tensor._quantized_data, weight_scale, weight_scale_2, synthesized
 
 
+def _build_w13_weight_amax_overrides(
+    f,
+    all_keys: set[str],
+    expert_weight_keys: list[str],
+    amax: dict[str, torch.Tensor],
+    device: str,
+) -> tuple[dict[str, torch.Tensor], set[str]]:
+    """Return shared w1/w3 amax overrides so fused GEMM1 has one scale."""
+    groups: dict[str, dict[str, str]] = defaultdict(dict)
+    for key in expert_weight_keys:
+        expert_path = key[: -len(".weight")]
+        base, proj = expert_path.rsplit(".", 1)
+        if proj in {"w1", "w3"}:
+            groups[base][proj] = expert_path
+
+    overrides: dict[str, torch.Tensor] = {}
+    synthesized_paths: set[str] = set()
+    for base, paths in groups.items():
+        if set(paths) != {"w1", "w3"}:
+            for expert_path in paths.values():
+                weight_amax = _lookup_amax(amax, expert_path, "weight")
+                if weight_amax is None:
+                    missing = sorted({"w1", "w3"} - set(paths))
+                    present = ", ".join(sorted(paths))
+                    raise RuntimeError(
+                        f"cannot synthesize fused w1/w3 weight amax for {base}: "
+                        f"missing {missing}, present projections: {present}"
+                    )
+                overrides[expert_path] = weight_amax
+            continue
+
+        values: list[torch.Tensor] = []
+        for proj in ("w1", "w3"):
+            expert_path = paths[proj]
+            weight_amax = _lookup_amax(amax, expert_path, "weight")
+            if weight_amax is None:
+                key = expert_path + ".weight"
+                scale_key = expert_path + ".scale"
+                if key not in all_keys or scale_key not in all_keys:
+                    raise RuntimeError(
+                        f"cannot synthesize missing weight amax for {expert_path}; "
+                        "paired weight/scale tensors are not in the same shard"
+                    )
+                weight_amax = _synthesize_weight_amax(
+                    f.get_tensor(key), f.get_tensor(scale_key), device
+                )
+                synthesized_paths.add(expert_path)
+            values.append(weight_amax.reshape(()))
+
+        shared = torch.maximum(values[0], values[1])
+        overrides[paths["w1"]] = shared
+        overrides[paths["w3"]] = shared
+    return overrides, synthesized_paths
+
+
 def convert_shard(
     src_shard: Path,
     dst_shard: Path,
@@ -199,16 +300,19 @@ def convert_shard(
     input_fallback: dict[tuple[str, str], torch.Tensor],
     device: str,
     stats: dict[str, int],
-) -> tuple[list[str], list[str]]:
-    """Rewrite one HF-style shard. Returns ``(added_keys, removed_keys)`` so
-    the caller can update ``model.safetensors.index.json``."""
+) -> tuple[list[str], list[str], int]:
+    """Rewrite one HF-style shard and return index deltas plus tensor bytes."""
     out: dict[str, torch.Tensor] = {}
     added: list[str] = []
     removed: list[str] = []
 
     with safe_open(str(src_shard), framework="pt", device="cpu") as f:
         all_keys = list(f.keys())
+        all_key_set = set(all_keys)
         expert_weight_keys = [k for k in all_keys if _EXPERT_WEIGHT_RE.match(k)]
+        w13_weight_amax, w13_synth_paths = _build_w13_weight_amax_overrides(
+            f, all_key_set, expert_weight_keys, amax, device
+        )
         scale_siblings = {
             k[: -len(".weight")] + ".scale"
             for k in expert_weight_keys
@@ -238,14 +342,19 @@ def convert_shard(
                 )
 
                 weight_amax = _lookup_amax(amax, expert_path, "weight")
+                if expert_path in w13_weight_amax:
+                    weight_amax = w13_weight_amax[expert_path]
                 input_amax = _lookup_amax(amax, expert_path, "input")
-                used_fallback_input = False
+                input_fallback_scope = None
                 if input_amax is None:
-                    input_amax = input_fallback.get((block, proj))
-                    used_fallback_input = input_amax is not None
+                    input_amax, input_fallback_scope = _lookup_input_fallback(
+                        input_fallback, block, proj
+                    )
                 if input_amax is None:
-                    input_amax = torch.tensor(1.0)
-                    stats[f"input_total_fallback_{block_kind}"] += 1
+                    raise RuntimeError(
+                        f"missing input amax for {expert_path} and no calibrated "
+                        "input fallback is available"
+                    )
 
                 w = f.get_tensor(key)
                 s = f.get_tensor(scale_key)
@@ -266,16 +375,17 @@ def convert_shard(
 
                 stats["experts_total"] += 1
                 stats[f"experts_{block_kind}"] += 1
-                if weight_synth:
+                if weight_synth or expert_path in w13_synth_paths:
                     stats[f"weight_synth_{block_kind}"] += 1
-                if used_fallback_input:
-                    stats[f"input_fallback_{block_kind}"] += 1
+                if input_fallback_scope is not None:
+                    stats[f"input_fallback_{input_fallback_scope}_{block_kind}"] += 1
             else:
                 out[key] = f.get_tensor(key)
                 stats["passthrough"] += 1
 
+    shard_nbytes = sum(t.numel() * t.element_size() for t in out.values())
     save_file(out, str(dst_shard))
-    return added, removed
+    return added, removed, shard_nbytes
 
 
 # Top-level names never hard-linked from source (rewritten or excluded).
@@ -292,7 +402,14 @@ def _link_or_copy(src: Path, dst: Path) -> None:
     try:
         os.link(src, dst)
     except OSError as e:
-        if e.errno != errno.EXDEV:
+        copy_errnos = {
+            errno.EXDEV,
+            errno.EPERM,
+            errno.EACCES,
+            getattr(errno, "EOPNOTSUPP", errno.EXDEV),
+            getattr(errno, "ENOTSUP", errno.EXDEV),
+        }
+        if e.errno not in copy_errnos:
             raise
         shutil.copy2(src, dst)
 
@@ -357,18 +474,23 @@ def _rewrite_config_json(src_dir: Path, dst_dir: Path) -> None:
 def _write_index_and_manifest(
     output_ckpt: Path,
     src_index: dict,
-    shard_updates: dict[str, tuple[list[str], list[str]]],
+    shard_updates: dict[str, tuple[list[str], list[str], int]],
     quantized_layer_names: list[str],
 ) -> None:
     """Update ``model.safetensors.index.json`` with dropped ``.scale`` keys
     and added NVFP4 scale keys. Write the modelopt-style manifest."""
     weight_map = dict(src_index["weight_map"])
-    for shard_name, (added, removed) in shard_updates.items():
+    for shard_name, (added, removed, _shard_nbytes) in shard_updates.items():
         for k in removed:
             weight_map.pop(k, None)
         for k in added:
             weight_map[k] = shard_name
-    new_index = {"metadata": src_index.get("metadata", {}), "weight_map": weight_map}
+    metadata = dict(src_index.get("metadata", {}))
+    if "total_size" in metadata:
+        metadata["total_size"] = sum(
+            shard_nbytes for _added, _removed, shard_nbytes in shard_updates.values()
+        )
+    new_index = {"metadata": metadata, "weight_map": weight_map}
     (output_ckpt / "model.safetensors.index.json").write_text(
         json.dumps(new_index, indent=2)
     )
@@ -407,6 +529,32 @@ def _write_index_and_manifest(
     (output_ckpt / "hf_quant_config.json").write_text(json.dumps(cfg, indent=2))
 
 
+def _validate_paths(source_ckpt: Path, output_ckpt: Path) -> None:
+    source_resolved = source_ckpt.resolve()
+    output_resolved = output_ckpt.resolve()
+    if output_resolved == source_resolved or source_resolved in output_resolved.parents:
+        raise ValueError(
+            f"--output_ckpt must not be inside --source_ckpt: {output_ckpt} under {source_ckpt}"
+        )
+
+
+def _prepare_output_dir(output_ckpt: Path, overwrite: bool) -> None:
+    if output_ckpt.exists():
+        if not output_ckpt.is_dir():
+            raise ValueError(f"--output_ckpt exists and is not a directory: {output_ckpt}")
+        if any(output_ckpt.iterdir()):
+            if not overwrite:
+                raise ValueError(
+                    f"--output_ckpt is not empty: {output_ckpt}; pass --overwrite to replace it"
+                )
+            for item in output_ckpt.iterdir():
+                if item.is_dir() and not item.is_symlink():
+                    shutil.rmtree(item)
+                else:
+                    item.unlink()
+    output_ckpt.mkdir(parents=True, exist_ok=True)
+
+
 def main():
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -429,9 +577,14 @@ def main():
         "--n_hash_layers", type=int, default=3,
         help="diagnostic only — labels hash-routed layers in stats",
     )
+    p.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="replace an existing non-empty output checkpoint directory",
+    )
     args = p.parse_args()
 
-    args.output_ckpt.mkdir(parents=True, exist_ok=True)
+    _validate_paths(args.source_ckpt, args.output_ckpt)
 
     src_index_path = args.source_ckpt / "model.safetensors.index.json"
     assert src_index_path.exists(), (
@@ -444,17 +597,20 @@ def main():
 
     shards = sorted(args.source_ckpt.glob("model-*-of-*.safetensors"))
     assert shards, f"no HF-style shards in {args.source_ckpt}"
+    _prepare_output_dir(args.output_ckpt, args.overwrite)
     _log(f"[config] {len(shards)} input shards  device={args.device}")
 
     stats: dict[str, int] = defaultdict(int)
     stats["_n_hash_layers"] = args.n_hash_layers
-    shard_updates: dict[str, tuple[list[str], list[str]]] = {}
+    shard_updates: dict[str, tuple[list[str], list[str], int]] = {}
 
     for idx, src in enumerate(shards):
         dst = args.output_ckpt / src.name
         _log(f"[shard {idx + 1}/{len(shards)}] {src.name}")
-        added, removed = convert_shard(src, dst, amax, input_fallback, args.device, stats)
-        shard_updates[src.name] = (added, removed)
+        added, removed, shard_nbytes = convert_shard(
+            src, dst, amax, input_fallback, args.device, stats
+        )
+        shard_updates[src.name] = (added, removed, shard_nbytes)
 
     stats.pop("_n_hash_layers", None)
     _log("[stats]")
@@ -462,7 +618,7 @@ def main():
         _log(f"  {k:40s} {stats[k]}")
 
     quantized: set[str] = set()
-    for _added, _removed in shard_updates.values():
+    for _added, _removed, _shard_nbytes in shard_updates.values():
         for a in _added:
             if a.endswith(".input_scale"):
                 quantized.add(a[: -len(".input_scale")])

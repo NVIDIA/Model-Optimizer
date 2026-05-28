@@ -257,7 +257,12 @@ def load_deepseek_v4(model_config: str, model_path: str, batch_size: int, dummy_
     else:
         ckpt = os.path.join(model_path, f"model{rank}-mp{world_size}.safetensors")
         print(f"[rank {rank}] loading {ckpt}")
-        load_model(model, ckpt, strict=False)
+        missing, unexpected = load_model(model, ckpt, strict=False)
+        if missing or unexpected:
+            raise RuntimeError(
+                f"checkpoint key mismatch while loading {ckpt}: "
+                f"missing={missing}, unexpected={unexpected}"
+            )
         print(f"[rank {rank}] loaded")
     # Match generate.py: default device to this rank's CUDA so that any
     # torch.empty(...) / torch.zeros(...) inside the V4 forward (TileLang
@@ -443,7 +448,11 @@ def main():
         default=_DEFAULT_V4_DIR,
         help="dir containing DS-V4 inference/ model.py + kernel.py",
     )
-    p.add_argument("--output_path", required=True, help="where to dump amax + hf_quant_config.json")
+    p.add_argument(
+        "--output_path",
+        required=True,
+        help="where to dump amax files and quantized_layers_manifest.json",
+    )
     p.add_argument("--batch_size", type=int, default=4)
     p.add_argument("--calib_size", type=int, default=64)
     p.add_argument(
