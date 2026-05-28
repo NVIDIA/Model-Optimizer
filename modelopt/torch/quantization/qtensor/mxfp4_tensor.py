@@ -146,8 +146,22 @@ class MXFP4QTensor(BaseQuantizedTensor):
     # Signed E2M1 lookup, indexed by the full 4-bit pattern.
     # Bit 3 is the sign; bits 2..0 index the 8-entry magnitude table.
     _E2M1_SIGNED_VALUES = [
-        0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
-        0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0,
+        0.0,
+        0.5,
+        1.0,
+        1.5,
+        2.0,
+        3.0,
+        4.0,
+        6.0,
+        0.0,
+        -0.5,
+        -1.0,
+        -1.5,
+        -2.0,
+        -3.0,
+        -4.0,
+        -6.0,
     ]
     _e2m1_signed_cache: dict = {}
 
@@ -206,11 +220,11 @@ class MXFP4QTensor(BaseQuantizedTensor):
         assert b.shape[:-1] == scales.shape[:-1], (
             f"Prefix shapes must match: blocks {tuple(b.shape)} vs scales {tuple(scales.shape)}"
         )
-        K_half = b.shape[-1]
-        G = scales.shape[-1]
-        assert 2 * K_half == G * block_size, (
-            f"Incompatible shapes: 2 * blocks.shape[-1] ({2 * K_half}) != "
-            f"scales.shape[-1] * block_size ({G * block_size})"
+        k_half = b.shape[-1]
+        num_groups = scales.shape[-1]
+        assert 2 * k_half == num_groups * block_size, (
+            f"Incompatible shapes: 2 * blocks.shape[-1] ({2 * k_half}) != "
+            f"scales.shape[-1] * block_size ({num_groups * block_size})"
         )
 
         lut = cls._get_signed_e2m1_lut(b.device, dtype)
@@ -218,12 +232,12 @@ class MXFP4QTensor(BaseQuantizedTensor):
         low = (b & 0x0F).long()
         high = (b >> 4).long()
 
-        out = torch.empty(*b.shape[:-1], 2 * K_half, dtype=dtype, device=b.device)
+        out = torch.empty(*b.shape[:-1], 2 * k_half, dtype=dtype, device=b.device)
         out[..., 0::2] = lut[low]
         out[..., 1::2] = lut[high]
 
         # Expose the per-group axis, apply the UE8M0 exponent via ldexp, then fold back.
-        out = out.unflatten(-1, (G, block_size))
+        out = out.unflatten(-1, (num_groups, block_size))
         exp = scales.contiguous().view(torch.uint8).to(torch.int32) - 127
         out = torch.ldexp(out, exp.unsqueeze(-1))
         return out.flatten(-2)

@@ -1,5 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Apply calibrated amax to produce an NVFP4 DS-V4 checkpoint in the
 **original HF 64-shard release layout**.
@@ -76,11 +88,8 @@ from safetensors.torch import save_file
 
 from modelopt.torch.quantization.qtensor import MXFP4QTensor, NVFP4QTensor
 
-
 # Routed-expert weights in both regular MoE layers and the MTP block(s).
-_EXPERT_WEIGHT_RE = re.compile(
-    r"^(?:mtp\.\d+|layers\.\d+)\.ffn\.experts\.\d+\.w[123]\.weight$"
-)
+_EXPERT_WEIGHT_RE = re.compile(r"^(?:mtp\.\d+|layers\.\d+)\.ffn\.experts\.\d+\.w[123]\.weight$")
 
 _AMAX_KEY_RE = re.compile(
     r"^(?P<block>(?:mtp\.\d+|layers\.\d+))\.ffn\.experts\.(?P<eid>\d+)\.(?P<proj>w[123])"
@@ -132,7 +141,8 @@ def _fuse_w1_w3_amax(merged: dict[str, torch.Tensor], which: str) -> int:
 
 
 def _load_merged_amax(
-    amax_path: Path, world_size: int | None = None,
+    amax_path: Path,
+    world_size: int | None = None,
 ) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
     """Union-merge amax across ranks, fuse w1/w3 amax per expert, and compute
     input-amax fallbacks from calibrated experts."""
@@ -180,17 +190,17 @@ def _dequantize_mxfp4_to_bf16(
     mxfp4_weight: torch.Tensor, mxfp4_scale: torch.Tensor, device: str
 ) -> torch.Tensor:
     return MXFP4QTensor.dequantize_packed(
-        mxfp4_weight.to(device), mxfp4_scale.to(device),
-        block_size=32, dtype=torch.bfloat16,
+        mxfp4_weight.to(device),
+        mxfp4_scale.to(device),
+        block_size=32,
+        dtype=torch.bfloat16,
     )
 
 
 def _synthesize_weight_amax(
     mxfp4_weight: torch.Tensor, mxfp4_scale: torch.Tensor, device: str
 ) -> torch.Tensor:
-    return _dequantize_mxfp4_to_bf16(
-        mxfp4_weight, mxfp4_scale, device
-    ).abs().max().cpu()
+    return _dequantize_mxfp4_to_bf16(mxfp4_weight, mxfp4_scale, device).abs().max().cpu()
 
 
 def _quantize_weight_nvfp4(
@@ -205,6 +215,7 @@ def _quantize_weight_nvfp4(
     synthesized = weight_amax is None
     if synthesized:
         weight_amax = bf16.abs().max()
+    assert weight_amax is not None
     weight_scale_2 = _amax_to_nvfp4_scale_2(weight_amax.to(device))
     q_tensor, weight_scale, _ = NVFP4QTensor.quantize(
         bf16, 16, None, weight_scale_2, try_tensorrt=False
@@ -294,7 +305,8 @@ def convert_shard(
                 block = m.group("block")
                 proj = m.group("proj")
                 block_kind = (
-                    "mtp" if block.startswith("mtp")
+                    "mtp"
+                    if block.startswith("mtp")
                     else ("hash" if int(block.split(".")[1]) < stats["_n_hash_layers"] else "score")
                 )
 
@@ -323,11 +335,13 @@ def convert_shard(
                 out[expert_path + ".weight_scale"] = weight_scale.cpu()
                 out[expert_path + ".weight_scale_2"] = weight_scale_2.cpu()
                 out[expert_path + ".input_scale"] = input_scale.cpu()
-                added.extend([
-                    expert_path + ".weight_scale",
-                    expert_path + ".weight_scale_2",
-                    expert_path + ".input_scale",
-                ])
+                added.extend(
+                    [
+                        expert_path + ".weight_scale",
+                        expert_path + ".weight_scale_2",
+                        expert_path + ".input_scale",
+                    ]
+                )
 
                 stats["experts_total"] += 1
                 stats[f"experts_{block_kind}"] += 1
@@ -346,8 +360,8 @@ def convert_shard(
 # Top-level names never hard-linked from source (rewritten or excluded).
 _SKIP_TOP_LEVEL = {
     "model.safetensors.index.json",  # rewritten
-    "config.json",                   # rewritten (mark hybrid FP8 + NVFP4 MoE)
-    ".cache",                        # HF download sidecars referencing old shards
+    "config.json",  # rewritten (mark hybrid FP8 + NVFP4 MoE)
+    ".cache",  # HF download sidecars referencing old shards
 }
 # Subdir names to skip anywhere in the walk.
 _SKIP_SUBDIR_NAMES = {"__pycache__"}
@@ -441,9 +455,7 @@ def _write_index_and_manifest(
         for k in added:
             weight_map[k] = shard_name
     new_index = {"metadata": src_index.get("metadata", {}), "weight_map": weight_map}
-    (output_ckpt / "model.safetensors.index.json").write_text(
-        json.dumps(new_index, indent=2)
-    )
+    (output_ckpt / "model.safetensors.index.json").write_text(json.dumps(new_index, indent=2))
     _log(f"[index] wrote model.safetensors.index.json ({len(weight_map)} keys)")
 
     cfg = {
@@ -456,23 +468,28 @@ def _write_index_and_manifest(
             "kv_cache_quant_algo": None,
             "group_size": 16,
             "quantized_layers": {
-                name: {"quant_algo": "NVFP4", "group_size": 16}
-                for name in quantized_layer_names
+                name: {"quant_algo": "NVFP4", "group_size": 16} for name in quantized_layer_names
             },
             "exclude_modules": [
                 # Attention path
-                "*.attn.*", "*.attn_norm.*",
+                "*.attn.*",
+                "*.attn_norm.*",
                 # Shared expert + router (untouched FP8)
-                "*.ffn.shared_experts.*", "*.ffn.gate.*",
+                "*.ffn.shared_experts.*",
+                "*.ffn.gate.*",
                 "*.ffn_norm.*",
                 # Embeddings + head
-                "embed.weight", "head.weight",
+                "embed.weight",
+                "head.weight",
                 # Hyper-connection params
                 "*.hc_*",
                 # MTP auxiliary projections/norms (non-expert)
-                "*.h_proj.*", "*.e_proj.*",
-                "*.enorm.*", "*.hnorm.*",
-                "mtp.*.norm.*", "norm.weight",
+                "*.h_proj.*",
+                "*.e_proj.*",
+                "*.enorm.*",
+                "*.hnorm.*",
+                "mtp.*.norm.*",
+                "norm.weight",
             ],
         },
     }
@@ -511,20 +528,27 @@ def main():
     )
     p.add_argument("--amax_path", type=Path, required=True)
     p.add_argument(
-        "--source_ckpt", type=Path, required=True,
+        "--source_ckpt",
+        type=Path,
+        required=True,
         help="original HF 64-shard release (e.g. /.../DeepSeek-V4-Pro/) — NOT the MP derivative",
     )
     p.add_argument("--output_ckpt", type=Path, required=True)
     p.add_argument(
-        "--world_size", type=int, default=None,
+        "--world_size",
+        type=int,
+        default=None,
         help="override MP auto-detect (useful if multiple-MP dumps exist in the amax dir)",
     )
     p.add_argument(
-        "--device", default="cpu",
+        "--device",
+        default="cpu",
         help="device for MXFP4 dequant + NVFP4 quant ('cpu' safe; 'cuda' faster)",
     )
     p.add_argument(
-        "--n_hash_layers", type=int, default=3,
+        "--n_hash_layers",
+        type=int,
+        default=3,
         help="diagnostic only — labels hash-routed layers in stats",
     )
     p.add_argument(
@@ -572,7 +596,7 @@ def main():
                 quantized.add(a[: -len(".input_scale")])
 
     _write_index_and_manifest(args.output_ckpt, src_index, shard_updates, sorted(quantized))
-    _log(f"[config] rewriting config.json (marking moe_quant_algo=NVFP4)")
+    _log("[config] rewriting config.json (marking moe_quant_algo=NVFP4)")
     _rewrite_config_json(args.source_ckpt, args.output_ckpt)
     _log(f"[aux] linking ancillary files from {args.source_ckpt}")
     _hard_link_aux(args.source_ckpt, args.output_ckpt)

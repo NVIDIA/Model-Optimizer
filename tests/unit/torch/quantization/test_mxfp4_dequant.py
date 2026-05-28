@@ -6,6 +6,12 @@
 # You may obtain a copy of the License at
 #
 # http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Tests for the standalone MXFP4-packed -> BF16 dequantization entry point.
 
@@ -31,8 +37,24 @@ import torch
 from modelopt.torch.quantization.qtensor.mxfp4_tensor import MXFP4QTensor
 
 # Signed E2M1 value table indexed by 4-bit pattern (bit 3 = sign, bits 2..0 = magnitude).
-E2M1_SIGNED = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
-               0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0]
+E2M1_SIGNED = [
+    0.0,
+    0.5,
+    1.0,
+    1.5,
+    2.0,
+    3.0,
+    4.0,
+    6.0,
+    0.0,
+    -0.5,
+    -1.0,
+    -1.5,
+    -2.0,
+    -3.0,
+    -4.0,
+    -6.0,
+]
 
 
 def _pack_fp4(indices: torch.Tensor) -> torch.Tensor:
@@ -98,31 +120,31 @@ class TestMathematicalCorrectness:
 class TestLayoutCorrectness:
     def test_ds_2d_expert_layout(self):
         """Canonical DS V4 expert-weight input: (M, K//2) bytes + (M, K//32) scales."""
-        M, K, block_size = 4, 128, 32
+        m, k, block_size = 4, 128, 32
         torch.manual_seed(0)
-        indices = torch.randint(0, 16, (M, K), dtype=torch.uint8)
+        indices = torch.randint(0, 16, (m, k), dtype=torch.uint8)
         blocks = _pack_fp4(indices)
-        scales = torch.randint(100, 151, (M, K // block_size), dtype=torch.uint8)
+        scales = torch.randint(100, 151, (m, k // block_size), dtype=torch.uint8)
         out = MXFP4QTensor.dequantize_packed(blocks, scales, block_size=block_size)
-        assert out.shape == (M, K)
+        assert out.shape == (m, k)
         assert out.dtype == torch.bfloat16
 
     def test_rank_agnostic_prefix(self):
         """3D prefix gives same result as 2D-flattened call on reshaped inputs."""
-        E, M, K, block_size = 3, 4, 64, 32
+        e, m, k, block_size = 3, 4, 64, 32
         torch.manual_seed(1)
-        indices = torch.randint(0, 16, (E, M, K), dtype=torch.uint8)
+        indices = torch.randint(0, 16, (e, m, k), dtype=torch.uint8)
         blocks = _pack_fp4(indices)
-        scales = torch.randint(100, 151, (E, M, K // block_size), dtype=torch.uint8)
+        scales = torch.randint(100, 151, (e, m, k // block_size), dtype=torch.uint8)
 
         out_3d = MXFP4QTensor.dequantize_packed(blocks, scales, block_size=block_size)
         out_flat = MXFP4QTensor.dequantize_packed(
-            blocks.reshape(E * M, K // 2),
-            scales.reshape(E * M, K // block_size),
+            blocks.reshape(e * m, k // 2),
+            scales.reshape(e * m, k // block_size),
             block_size=block_size,
         )
-        assert out_3d.shape == (E, M, K)
-        assert torch.equal(out_3d.reshape(E * M, K), out_flat)
+        assert out_3d.shape == (e, m, k)
+        assert torch.equal(out_3d.reshape(e * m, k), out_flat)
 
 
 class TestCrossValidationWithTransformers:
@@ -132,8 +154,9 @@ class TestCrossValidationWithTransformers:
     @staticmethod
     def _transformers_reference(blocks_gptoss_layout, scales):
         """Run transformers' reference but strip the GPT-OSS-specific trailing transpose."""
-        transformers = pytest.importorskip("transformers")
+        pytest.importorskip("transformers")
         from transformers.integrations.mxfp4 import _convert_moe_packed_tensors
+
         out = _convert_moe_packed_tensors(blocks_gptoss_layout, scales, dtype=torch.bfloat16)
         # transformers returns shape (..., M, K) but with a final transpose(1,2) already
         # applied — so for input (E, M, G, 16) it outputs (E, K, M). Undo it.
@@ -141,22 +164,22 @@ class TestCrossValidationWithTransformers:
 
     def test_matches_transformers_on_random_inputs(self):
         """Bit-identical match against transformers on random MXFP4 inputs."""
-        transformers = pytest.importorskip("transformers")
+        pytest.importorskip("transformers")
         from transformers.integrations.mxfp4 import _convert_moe_packed_tensors  # noqa: F401
 
-        E, M, K, block_size = 2, 8, 256, 32
-        G = K // block_size
+        e, m, k, block_size = 2, 8, 256, 32
+        num_groups = k // block_size
         torch.manual_seed(42)
         # GPT-OSS-style storage: (E, M, G, 16) packed bytes + (E, M, G) scales.
-        blocks_4d = torch.randint(0, 256, (E, M, G, 16), dtype=torch.uint8)
-        scales_3d = torch.randint(100, 151, (E, M, G), dtype=torch.uint8)
+        blocks_4d = torch.randint(0, 256, (e, m, num_groups, 16), dtype=torch.uint8)
+        scales_3d = torch.randint(100, 151, (e, m, num_groups), dtype=torch.uint8)
 
         ref = self._transformers_reference(blocks_4d, scales_3d)  # (E, M, K)
         # DS layout: flatten group+pack axes into one trailing dim.
-        blocks_ds = blocks_4d.reshape(E, M, G * 16)
+        blocks_ds = blocks_4d.reshape(e, m, num_groups * 16)
         out = MXFP4QTensor.dequantize_packed(blocks_ds, scales_3d, block_size=block_size)
 
-        assert out.shape == ref.shape == (E, M, K)
+        assert out.shape == ref.shape == (e, m, k)
         assert torch.equal(out, ref)
 
     def test_matches_transformers_on_2d_ds_shape(self):
@@ -164,15 +187,15 @@ class TestCrossValidationWithTransformers:
         pytest.importorskip("transformers")
         from transformers.integrations.mxfp4 import _convert_moe_packed_tensors
 
-        M, K, block_size = 16, 128, 32
-        G = K // block_size
+        m, k, block_size = 16, 128, 32
+        num_groups = k // block_size
         torch.manual_seed(7)
-        blocks_2d = torch.randint(0, 256, (M, G * 16), dtype=torch.uint8)
-        scales_2d = torch.randint(100, 151, (M, G), dtype=torch.uint8)
+        blocks_2d = torch.randint(0, 256, (m, num_groups * 16), dtype=torch.uint8)
+        scales_2d = torch.randint(100, 151, (m, num_groups), dtype=torch.uint8)
 
         # To feed transformers we promote to (1, M, G, 16) and undo the trailing transpose.
-        blocks_4d = blocks_2d.reshape(1, M, G, 16)
-        scales_3d = scales_2d.reshape(1, M, G)
+        blocks_4d = blocks_2d.reshape(1, m, num_groups, 16)
+        scales_3d = scales_2d.reshape(1, m, num_groups)
         ref = _convert_moe_packed_tensors(blocks_4d, scales_3d, dtype=torch.bfloat16)
         ref = ref.transpose(-1, -2).contiguous().squeeze(0)  # -> (M, K)
 
@@ -214,13 +237,13 @@ class TestCrossValidationWithDeepSeekConvert:
 
         # Smallest sizes satisfying convert.py's divisibility constraints
         out_dim, in_dim = 128, 256
-        G32 = in_dim // 32
+        groups32 = in_dim // 32
         torch.manual_seed(11)
         # DS layout: int8 packed, shape (out_dim, in_dim // 2)
         blocks = torch.randint(-128, 128, (out_dim, in_dim // 2), dtype=torch.int8)
         # Keep scales in a narrow range so that within every 128-block the 4 fp4-group scales
         # span < 2^6 -> no underflow, paths are bit-identical.
-        scale_bytes = 127 + torch.randint(-3, 4, (out_dim, G32), dtype=torch.int32)
+        scale_bytes = 127 + torch.randint(-3, 4, (out_dim, groups32), dtype=torch.int32)
         scale_bytes = scale_bytes.clamp(1, 254).to(torch.uint8)
         scales_e8m0 = scale_bytes.view(torch.float8_e8m0fnu)
 

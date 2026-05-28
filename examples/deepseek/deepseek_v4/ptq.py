@@ -6,6 +6,12 @@
 # You may obtain a copy of the License at
 #
 # http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """DeepSeek-V4 PTQ — NVFP4 on the routed experts only, everything else native.
 
@@ -62,12 +68,12 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 from safetensors.torch import load_model
-from tqdm import tqdm
 from transformers import AutoTokenizer
 
 import modelopt.torch.quantization as mtq
@@ -76,33 +82,33 @@ from modelopt.torch.quantization.qtensor.mxfp4_tensor import MXFP4QTensor
 from modelopt.torch.utils.dataset_utils import get_dataset_dataloader
 from modelopt.torch.utils.distributed import ParallelState
 
-
 _DEFAULT_V4_DIR = Path("DeepSeek-V4-Pro/inference")
 
 
 def _inject_v4_module(v4_inference_dir: Path) -> None:
     assert v4_inference_dir.exists(), (
-        f"DeepSeek-V4 inference dir not found at {v4_inference_dir}; "
-        "pass --dsv4_inference_dir"
+        f"DeepSeek-V4 inference dir not found at {v4_inference_dir}; pass --dsv4_inference_dir"
     )
     sys.path.insert(0, str(v4_inference_dir))
 
 
 # Populated by ``install_quant_registry`` once DS-V4's ``model`` is importable.
-deekseep_v4_model = None  # type: ignore[assignment]
+deekseep_v4_model: Any = None
 
 
-def _fp8_ue8m0_blockwise_to_bf16(weight: torch.Tensor, scale: torch.Tensor, block: int = 128) -> torch.Tensor:
+def _fp8_ue8m0_blockwise_to_bf16(
+    weight: torch.Tensor, scale: torch.Tensor, block: int = 128
+) -> torch.Tensor:
     """FP8 E4M3 × UE8M0 128x128 block-scale → BF16 (V4 native FP8 layout).
 
     Same math as ``scripts/convert_dsv4_to_bf16.py``'s helper; ModelOpt's
     triton ``weight_dequant`` expects FP32 scales and cannot consume UE8M0
     directly, so we dequant inline.
     """
-    M, N = weight.shape
-    assert M % block == 0 and N % block == 0, f"FP8 weight shape {(M, N)} not divisible by {block}"
-    assert scale.shape == (M // block, N // block), (
-        f"FP8 scale shape {tuple(scale.shape)} != expected ({M // block}, {N // block})"
+    m, n = weight.shape
+    assert m % block == 0 and n % block == 0, f"FP8 weight shape {(m, n)} not divisible by {block}"
+    assert scale.shape == (m // block, n // block), (
+        f"FP8 scale shape {tuple(scale.shape)} != expected ({m // block}, {n // block})"
     )
     exp = scale.contiguous().view(torch.uint8).to(torch.int32) - 127
     exp = exp.repeat_interleave(block, 0).repeat_interleave(block, 1)
@@ -131,7 +137,7 @@ def _dequantize_linear_weight(linear_module) -> torch.Tensor:
 def install_quant_registry() -> None:
     """Import DS-V4's ``model`` module and register minimal Quant wrappers."""
     global deekseep_v4_model
-    import model as _m  # noqa: PLC0415
+    import model as _m
 
     deekseep_v4_model = _m
 
@@ -180,7 +186,7 @@ def install_quant_registry() -> None:
             w = weight_quantizer(w)
             return F.linear(x, w, linear_module.bias)
 
-        def forward(self, x, weights=None):  # type: ignore[override]
+        def forward(self, x, weights=None):
             dtype = x.dtype
             gate = self._qlinear(
                 x, self.w1, self.w1_input_quantizer, self.w1_weight_quantizer
@@ -217,7 +223,7 @@ def install_quant_registry() -> None:
         def _setup(self):
             pass
 
-        def forward(self, x, input_ids):  # type: ignore[override]
+        def forward(self, x, input_ids):
             gate = self.gate
             orig_topk = gate.topk
             gate.topk = self.n_routed_experts
@@ -237,7 +243,9 @@ def install_quant_registry() -> None:
         mtq.register(original_cls=deekseep_v4_model.MoE, quantized_cls=CalibMoE)
 
 
-def load_deepseek_v4(model_config: str, model_path: str, batch_size: int, dummy_weights: bool = False):
+def load_deepseek_v4(
+    model_config: str, model_path: str, batch_size: int, dummy_weights: bool = False
+):
     world_size = int(os.getenv("WORLD_SIZE", "1"))
     rank = int(os.getenv("RANK", "0"))
     local_rank = int(os.getenv("LOCAL_RANK", "0"))
@@ -253,7 +261,9 @@ def load_deepseek_v4(model_config: str, model_path: str, batch_size: int, dummy_
         model = deekseep_v4_model.Transformer(margs)
 
     if dummy_weights:
-        print(f"[rank {rank}] --dummy-weights: skipping load_model; params remain at torch.empty values")
+        print(
+            f"[rank {rank}] --dummy-weights: skipping load_model; params remain at torch.empty values"
+        )
     else:
         ckpt = os.path.join(model_path, f"model{rank}-mp{world_size}.safetensors")
         print(f"[rank {rank}] loading {ckpt}")
@@ -332,6 +342,7 @@ def ptq(model, tokenizer, batch_size: int, calib_size: int, calib_datasets: list
 
     def calibrate_loop(model):
         import time as _time
+
         _trace("calibrate_loop: entering")
         t_loop = _time.time()
         for i, data in enumerate(calib_dataset):
@@ -357,9 +368,9 @@ def ptq(model, tokenizer, batch_size: int, calib_size: int, calib_datasets: list
 
 
 def save_amax_and_quant_config(model, output_path: str):
-    import sys as _sys
     def _trace(msg):
-        print(f"[rank {os.getenv('RANK','0')}] SAVE: {msg}", flush=True)
+        print(f"[rank {os.getenv('RANK', '0')}] SAVE: {msg}", flush=True)
+
     _trace("entered")
     """Save routed-expert quantizer state + a manifest enumerating the
     quantized layer paths. The manifest is built by scanning the model for
@@ -390,9 +401,7 @@ def save_amax_and_quant_config(model, output_path: str):
     full_sd = model.state_dict()
     _trace(f"full state_dict size={len(full_sd)}")
     state = {
-        k: v
-        for k, v in full_sd.items()
-        if expert_re.search(k) and ("amax" in k or "quant" in k)
+        k: v for k, v in full_sd.items() if expert_re.search(k) and ("amax" in k or "quant" in k)
     }
     _trace(f"filtered state size={len(state)}, saving")
     torch.save(state, os.path.join(output_path, f"amax_dict_rank{rank}-mp{world_size}.pt"))
@@ -487,7 +496,9 @@ def main():
     model = load_deepseek_v4(
         args.config, args.model_path, args.batch_size, dummy_weights=args.dummy_weights
     )
-    tokenizer = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=args.trust_remote_code)
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.model_path, trust_remote_code=args.trust_remote_code
+    )
     model = ptq(model, tokenizer, args.batch_size, args.calib_size, args.calib_datasets)
     save_amax_and_quant_config(model, args.output_path)
 
@@ -499,11 +510,12 @@ def _run_quantized_generate(model, tokenizer, prompt: str, max_new_tokens: int):
     """Smoke-test: generate tokens from a prompt through the calibrated+quantized
     model. If the output decodes to coherent text, the quantized forward works
     end-to-end."""
-    world_size = int(os.getenv("WORLD_SIZE", "1"))
     rank = int(os.getenv("RANK", "0"))
 
     input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to("cuda")
-    tokens = torch.full((1, input_ids.shape[1] + max_new_tokens), -1, dtype=torch.long, device="cuda")
+    tokens = torch.full(
+        (1, input_ids.shape[1] + max_new_tokens), -1, dtype=torch.long, device="cuda"
+    )
     tokens[0, : input_ids.shape[1]] = input_ids[0]
     prev_pos = 0
     with torch.inference_mode():
@@ -513,7 +525,7 @@ def _run_quantized_generate(model, tokenizer, prompt: str, max_new_tokens: int):
             tokens[:, cur_pos] = next_token
             prev_pos = cur_pos
     if rank == 0:
-        out = tokens[0, input_ids.shape[1]:].tolist()
+        out = tokens[0, input_ids.shape[1] :].tolist()
         text = tokenizer.decode(out, skip_special_tokens=False)
         print(f"\n[generate] prompt: {prompt!r}\n[generate] completion: {text!r}\n", flush=True)
 
