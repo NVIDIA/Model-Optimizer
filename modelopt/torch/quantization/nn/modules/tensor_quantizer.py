@@ -1353,6 +1353,23 @@ class NVFP4StaticQuantizer(TensorQuantizer):
         else:
             self._global_amax.data.copy_(value.clone().detach().to(self._global_amax.device))
 
+    def sync_global_amax_across_distributed_group(self, parallel_group: DistributedProcessGroup):
+        """All-reduce ``_global_amax`` (MAX) across the given group.
+
+        ``_global_amax`` is computed locally from each rank's shard of ``_amax`` at
+        promotion time, so for TP/EP it must be reconciled across ranks before it is
+        used as the upper level of the two-level NVFP4 scale.
+        """
+        if parallel_group.is_initialized() and getattr(self, "_global_amax", None) is not None:
+            try:
+                dist.all_reduce(self._global_amax, op=dist.ReduceOp.MAX, group=parallel_group.group)
+            except RuntimeError as e:
+                warnings.warn(
+                    f"Failed to synchronize _global_amax: {e}, probably because the tensor "
+                    "is on a device which is not supported by the current distributed backend. "
+                    "This warning can be ignored if happening during modelopt restore."
+                )
+
     def _fake_quantize(self, inputs):
         """Fake quantization using two-level scaling with _amax and _global_amax."""
         if self.amax is not None:

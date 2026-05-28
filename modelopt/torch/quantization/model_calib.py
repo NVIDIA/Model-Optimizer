@@ -291,6 +291,13 @@ def max_calibrate(
         if getattr(quantizer, "_amax", None) is not None:
             quantizer.sync_amax_across_distributed_group(parallel_state.data_parallel_group)
             quantizer.sync_amax_across_distributed_group(parallel_state.expert_model_parallel_group)
+        # NVFP4StaticQuantizer._global_amax is computed locally during promotion, so for
+        # MoE EP (different experts per rank) it diverges across ranks. Reconcile it
+        # alongside the per-block _amax sync.
+        if isinstance(quantizer, NVFP4StaticQuantizer):
+            quantizer.sync_global_amax_across_distributed_group(
+                parallel_state.expert_model_parallel_group
+            )
         # TODO: create sync_bias_across_distributed_group
 
     # Step 2:Sync amax across data parallelism
@@ -340,6 +347,15 @@ def max_calibrate(
 
         if quantizer.axis in axes_for_sync and quantizer.amax is not None:
             quantizer.sync_amax_across_distributed_group(parallel_state.tensor_parallel_group)
+
+        # Reconcile NVFP4StaticQuantizer._global_amax across TP. The buffer is set
+        # locally during promotion from this rank's shard of _amax, so each TP rank
+        # otherwise carries a different value and the two-level NVFP4 scale becomes
+        # TP-layout-dependent.
+        if isinstance(quantizer, NVFP4StaticQuantizer):
+            quantizer.sync_global_amax_across_distributed_group(
+                parallel_state.tensor_parallel_group
+            )
 
     # Step 2: Sync amax across relevant parallelism (such as TP / EP)
     for name, module in model.named_modules():
