@@ -131,7 +131,7 @@ deployment:
   checkpoint_path:
   hf_model_handle: <org>/<model>
   served_model_name: <served_name>
-  image: vllm/vllm-openai:latest   # or pinned per recipe
+  image: vllm/vllm-openai:v0.19.1  # default; bump if recipe requires higher (see below)
   command: >-
     vllm serve /checkpoint
     --host 0.0.0.0
@@ -143,6 +143,8 @@ deployment:
 ```
 
 Conventions: always start `vllm serve /checkpoint` (NEL mounts here); always `--host 0.0.0.0 --port ${deployment.port}`; use folded scalar (`>-`) for one flag per line. Example fallback `--max-model-len 131072` covers AA-LCR (~120K + 16K gen) and SciCode (≥ 65536) — prefer `config.json` / recipe value.
+
+**Image / vLLM version.** Default `image: vllm/vllm-openai:v0.19.1` (pinned for reproducibility). If `recipes.vllm.ai` states a higher minimum version for the chosen variant (e.g. "vLLM >= 0.20.0"), bump the image tag accordingly (e.g. `v0.20.0`) — do **not** stay on `0.19.1` when the recipe explicitly requires newer. Do **not** use `:latest` (drifts across re-runs, breaks reproducibility). The version is part of the cross-check: surface to the user when bumping.
 
 #### vLLM-backend defaults — always include unless the recipe *contradicts*
 
@@ -248,7 +250,7 @@ Default images:
 
 | Framework | Image | Registry |
 | --- | --- | --- |
-| vLLM | `vllm/vllm-openai:latest` | DockerHub |
+| vLLM | `vllm/vllm-openai:v0.19.1` (bump per recipe; never `:latest`) | DockerHub |
 | SGLang | `lmsysorg/sglang:latest` | DockerHub |
 | TRT-LLM | `nvcr.io/nvidia/tensorrt-llm/release:...` | NGC |
 | Eval tasks | `nvcr.io/nvidia/eval-factory/*:26.03` | NGC |
