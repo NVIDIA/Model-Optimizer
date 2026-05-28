@@ -90,6 +90,7 @@ from modelopt.torch.quantization.qtensor import MXFP4QTensor, NVFP4QTensor
 
 # Routed-expert weights in both regular MoE layers and the MTP block(s).
 _EXPERT_WEIGHT_RE = re.compile(r"^(?:mtp\.\d+|layers\.\d+)\.ffn\.experts\.\d+\.w[123]\.weight$")
+_EXPERT_PROJ_RE = re.compile(r"^(?P<experts>(?:mtp\.\d+|layers\.\d+)\.ffn\.experts)\.\d+\.w[123]$")
 
 _AMAX_KEY_RE = re.compile(
     r"^(?P<block>(?:mtp\.\d+|layers\.\d+))\.ffn\.experts\.(?P<eid>\d+)\.(?P<proj>w[123])"
@@ -496,6 +497,12 @@ def _write_index_and_manifest(
     (output_ckpt / "hf_quant_config.json").write_text(json.dumps(cfg, indent=2))
 
 
+def _routed_experts_prefix(expert_proj: str) -> str:
+    match = _EXPERT_PROJ_RE.match(expert_proj)
+    assert match is not None, f"unexpected expert projection path: {expert_proj}"
+    return match.group("experts")
+
+
 def _validate_paths(source_ckpt: Path, output_ckpt: Path) -> None:
     source_resolved = source_ckpt.resolve()
     output_resolved = output_ckpt.resolve()
@@ -593,14 +600,14 @@ def main():
     for _added, _removed in shard_updates.values():
         for a in _added:
             if a.endswith(".input_scale"):
-                quantized.add(a[: -len(".input_scale")])
+                quantized.add(_routed_experts_prefix(a[: -len(".input_scale")]))
 
     _write_index_and_manifest(args.output_ckpt, src_index, shard_updates, sorted(quantized))
     _log("[config] rewriting config.json (marking moe_quant_algo=NVFP4)")
     _rewrite_config_json(args.source_ckpt, args.output_ckpt)
     _log(f"[aux] linking ancillary files from {args.source_ckpt}")
     _hard_link_aux(args.source_ckpt, args.output_ckpt)
-    _log(f"[done] {args.output_ckpt}  ({len(quantized)} quantized expert layers)")
+    _log(f"[done] {args.output_ckpt}  ({len(quantized)} quantized routed-expert modules)")
 
 
 if __name__ == "__main__":
