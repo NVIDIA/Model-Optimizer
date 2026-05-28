@@ -677,8 +677,8 @@ def test_remote_run_scp_then_ssh_trtexec_safe(remote_bench, tmp_path):
         latency = remote_bench.run(str(tmp_path / "m.onnx"))
 
     assert latency == pytest.approx(3.42)
-    assert run_mock.call_count == 3
-    trtexec_cmd, scp_cmd, ssh_cmd = (c.args[0] for c in run_mock.call_args_list)
+    assert run_mock.call_count == 4
+    trtexec_cmd, scp_cmd, ssh_cmd, cleanup_cmd = (c.args[0] for c in run_mock.call_args_list)
     assert trtexec_cmd[0] == "trtexec"
     # The remote URL in this test carries a password, so scp/ssh are prefixed with sshpass.
     assert "scp" in scp_cmd
@@ -689,6 +689,8 @@ def test_remote_run_scp_then_ssh_trtexec_safe(remote_bench, tmp_path):
     remote_cmd_str = ssh_cmd[-1]
     assert "trtexec_safe" in remote_cmd_str
     assert "--loadEngine=" in remote_cmd_str
+    print(cleanup_cmd)
+    assert "rm -f trtexec_benchmark_model.trt" in cleanup_cmd
 
 
 def test_remote_run_uses_sshpass_when_password_set(remote_bench, tmp_path):
@@ -700,9 +702,10 @@ def test_remote_run_uses_sshpass_when_password_set(remote_bench, tmp_path):
     with patch("subprocess.run", side_effect=[trtexec_proc, scp_proc, ssh_proc]) as run_mock:
         remote_bench.run(str(tmp_path / "m.onnx"))
 
-    _, scp_cmd, ssh_cmd = (c.args[0] for c in run_mock.call_args_list)
+    _, scp_cmd, ssh_cmd, cleanup_cmd = (c.args[0] for c in run_mock.call_args_list)
     assert scp_cmd[:3] == ["sshpass", "-p", "s3cret"]
     assert ssh_cmd[:3] == ["sshpass", "-p", "s3cret"]
+    assert "rm -f trtexec_benchmark_model.trt" in cleanup_cmd
 
 
 def test_remote_run_scp_failure_returns_inf(remote_bench, tmp_path):
@@ -732,7 +735,7 @@ def test_remote_run_falls_back_to_trtexec_safe_flag(remote_bench, tmp_path):
         latency = remote_bench.run(str(tmp_path / "m.onnx"))
 
     assert latency == pytest.approx(5.55)
-    fallback_cmd = run_mock.call_args_list[-1].args[0]
+    fallback_cmd = run_mock.call_args_list[-2].args[0]
     remote_cmd_str = fallback_cmd[-1]
     assert "trtexec --safe" in remote_cmd_str
     assert "trtexec_safe" not in remote_cmd_str
