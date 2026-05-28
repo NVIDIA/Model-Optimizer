@@ -20,13 +20,14 @@ import io
 import os
 import time
 from collections.abc import Callable
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from datetime import timedelta
 from typing import Any
 from warnings import warn
 
 import torch
 import torch.distributed
+import torch.nn as nn
 from torch.distributed.tensor import DTensor
 
 __all__ = [
@@ -37,6 +38,7 @@ __all__ = [
     "barrier",
     "fsdp2_shard",
     "fsdp2_wrap",
+    "init_params_on_meta",
     "is_available",
     "is_initialized",
     "is_master",
@@ -225,7 +227,12 @@ def cleanup():
 # ---------------------------------------------------------------------------
 
 
-def fsdp2_wrap(model, override_cls_name: str | None = None, mp_policy=None):
+def fsdp2_wrap(
+    model,
+    override_cls_name: str | None = None,
+    mp_policy=None,
+    device=None,
+):
     """Apply FSDP2 ``fully_shard`` to each decoder layer of ``model``.
 
     Decoder layers are auto-detected via
@@ -234,9 +241,17 @@ def fsdp2_wrap(model, override_cls_name: str | None = None, mp_policy=None):
     ``mp_policy`` (a ``torch.distributed.fsdp.MixedPrecisionPolicy``) to control
     compute / reduce dtype; default ``None`` means no upcast / downcast.
 
-    The root module is intentionally not sharded so embeddings / lm_head stay as
-    plain tensors (avoids DTensor / plain-tensor mismatches with modelopt's
-    layerwise forward patching).
+    Pass ``device`` to stream each layer to that device just before sharding it
+    (avoids holding the full model on GPU simultaneously). When ``device`` is
+    ``None``, layers are sharded on whatever device they're already on.
+
+    The root module is intentionally NOT sharded — ``embed_tokens`` and
+    ``lm_head`` stay as plain replicated tensors. This costs ~few-GiB per rank
+    (full copies of embed + lm_head) but unifies the layerwise and non-layerwise
+    code paths: a DTensor-wrapped ``embed_tokens.weight`` raises a "mixed Tensor
+    / DTensor" error when modelopt's layerwise calibration passes plain
+    ``input_ids`` into the embedding lookup, and FSDP2's root pre-forward hook
+    doesn't auto-wrap LongTensor inputs.
     """
     from torch.distributed.fsdp import fully_shard
 
@@ -256,41 +271,102 @@ def fsdp2_wrap(model, override_cls_name: str | None = None, mp_policy=None):
     if mp_policy is not None:
         fsdp_kwargs["mp_policy"] = mp_policy
     for layer in layers:
+        if device is not None:
+            layer.to(device)
         fully_shard(layer, **fsdp_kwargs)
     return model
 
 
-def fsdp2_shard(model, device, rank, mp_policy=None):
-    """Shard a loaded model across the current process group.
+@contextmanager
+def init_params_on_meta():
+    """Replicate ``accelerate.init_empty_weights(include_buffers=False)``.
 
-    Expects rank 0 to pass a real CPU model and other ranks to pass a meta
-    skeleton with matching structure. After this call every rank holds its
-    per-rank GPU shard, populated from rank 0's source.
+    Inside this context, ``nn.Module.register_parameter`` is patched so newly
+    registered parameters land on the ``meta`` device (zero CPU bytes). Buffer
+    registration is NOT patched — buffers are computed normally on CPU during
+    ``__init__`` (e.g. ``Qwen2RotaryEmbedding.__init__`` produces a real CPU
+    ``inv_freq`` from config).
 
-    Steps: stash ``_original_architectures`` (FSDP2 may mutate
-    ``model.config.architectures``); capture rank-0's state_dict; ``fsdp2_wrap``
-    per decoder layer; ``to_empty`` allocates per-rank GPU shard storage;
-    ``set_model_state_dict(broadcast_from_rank0=True)`` streams the data; freeze
-    params (needed by ``patch_fsdp_mp_dtypes``' trainable-only check).
+    Use around ``from_config(...)`` on non-rank-0 ranks to build a meta-skeleton
+    that ``fsdp2_shard`` will materialize via ``set_model_state_dict``
+    broadcast from rank 0.
+    """
+    original = nn.Module.register_parameter
+
+    def patched(self, name, param):
+        original(self, name, param)
+        if param is not None:
+            p = self._parameters[name]
+            self._parameters[name] = nn.Parameter(p.to("meta"), requires_grad=p.requires_grad)
+
+    nn.Module.register_parameter = patched
+    try:
+        yield
+    finally:
+        nn.Module.register_parameter = original
+
+
+def fsdp2_shard(model, device, rank, src_state_dict=None, mp_policy=None):
+    """Shard a model across the current process group (accelerate-style rank-0 load).
+
+    Caller contract: ``model`` is built on every rank with params on ``meta`` and
+    buffers on CPU (use ``init_params_on_meta`` around ``from_config``). Rank 0
+    additionally passes ``src_state_dict`` captured from a real CPU model loaded
+    via ``from_pretrained``; other ranks pass ``None`` or ``{}``.
+
+    Root is never sharded (see ``fsdp2_wrap`` docstring). embed_tokens and
+    lm_head stay as plain replicated tensors on every rank.
+
+    Steps (each timed and logged per-rank for diagnostics):
+    1. ``fsdp2_wrap`` — apply ``fully_shard`` to decoder layers.
+    2. Materialize: meta params → empty GPU storage; real CPU buffers → GPU
+       (preserves their values; ``to_empty`` is NOT used because it would wipe
+       buffers).
+    3. ``set_model_state_dict(broadcast_from_rank0=True)`` — fills params and
+       persistent buffers from rank 0.
+    4. ``model.tie_weights()`` — restore tied embeddings (no-op for untied).
+    5. Freeze params (so ``patch_fsdp_mp_dtypes`` trainable-only check passes).
     """
     from torch.distributed.checkpoint.state_dict import StateDictOptions, set_model_state_dict
 
-    model._original_architectures = list(model.config.architectures or [])
-    cpu_state_dict = model.state_dict() if rank == 0 else {}
+    def _log(msg):
+        print(f"[rank {rank}] [fsdp2_shard] {msg}", flush=True)
 
+    model._original_architectures = list(model.config.architectures or [])
+
+    t0 = time.perf_counter()
     fsdp2_wrap(model, mp_policy=mp_policy)
-    model.to_empty(device=device)
-    set_model_state_dict(
-        model,
-        cpu_state_dict,
-        options=StateDictOptions(full_state_dict=True, broadcast_from_rank0=True),
-    )
-    # TODO(temp workaround): FSDP2's _init_mp_dtypes asserts uniform dtype across
-    # trainable params. patch_fsdp_mp_dtypes narrows the check to trainable-only;
-    # freezing here makes trainable empty so mixed-dtype models (Nemotron-H, etc.)
-    # pass. PTQ doesn't need gradients anyway.
+    _log(f"fsdp2_wrap (decoders) took {time.perf_counter() - t0:.1f}s")
+
+    def _materialize(t):
+        is_meta_dtensor = isinstance(t, DTensor) and t._local_tensor.is_meta
+        if is_meta_dtensor or (not isinstance(t, DTensor) and t.is_meta):
+            # empty_like preserves DTensor-ness (returns DTensor with empty local).
+            return torch.empty_like(t, device=device)
+        return t.to(device)
+
+    t0 = time.perf_counter()
+    model._apply(_materialize)
+    _log(f"materialize (meta→GPU, CPU buf→GPU) took {time.perf_counter() - t0:.1f}s")
+
+    if src_state_dict is not None:
+        t0 = time.perf_counter()
+        set_model_state_dict(
+            model,
+            src_state_dict,
+            options=StateDictOptions(full_state_dict=True, broadcast_from_rank0=True),
+        )
+        _log(f"set_model_state_dict broadcast took {time.perf_counter() - t0:.1f}s")
+
+    if hasattr(model, "tie_weights"):
+        t0 = time.perf_counter()
+        model.tie_weights()
+        _log(f"tie_weights took {time.perf_counter() - t0:.1f}s")
+
+    t0 = time.perf_counter()
     for p in model.parameters():
         p.requires_grad_(False)
+    _log(f"freeze params took {time.perf_counter() - t0:.1f}s")
     return model
 
 
