@@ -1,0 +1,192 @@
+# Qwen-Image DMD2 — formal real-data training YAML.
+#
+# All Phase-2 features (4-step student, CFG, GAN + R1) are enabled here so the
+# runtime config matches FastGen's Qwen-Image DMD2 reference as closely as
+# possible. This is the canonical Qwen-Image training config; the mock-data
+# wiring smoke uses ``dmd2_qwen_image_smoke.yaml``.
+#
+# Sister files:
+#
+#   - dmd2_wan22_5b.yaml          — mock-data smoke for Wan 2.2 5B (T2V)
+#   - dmd2_qwen_image_smoke.yaml  — mock-data smoke for Qwen-Image (T2I)
+#   - dmd2_qwen_image.yaml        — THIS FILE; real-data formal Qwen-Image run
+#
+# Reproduce a long run via experiments/dmd2_qwen_image/launch.sh — this YAML
+# is the launcher's CONFIG default, so no override is needed for the canonical
+# real-data run:
+#
+#   EXTRA_ARGS='--step_scheduler.max_steps=5000 \
+#               --step_scheduler.ckpt_every_steps=500' \
+#     RUN_ID=formal_5k_v0 \
+#     NODES=32 \
+#     TIME=04:00:00 \
+#     bash /lustre/fsw/coreai_dlalgo_modelopt/users/jingyux/dmd2/experiments/dmd2_qwen_image/launch.sh
+#
+# To run the mock-data smoke instead, override
+#   CONFIG=examples/diffusers/fastgen/configs/dmd2_qwen_image_smoke.yaml.
+# Short smokes also override max_steps / ckpt_every_steps and may set
+# ``--checkpoint.enabled=false`` via EXTRA_ARGS.
+
+seed: 42
+
+wandb:
+  project: fastgen-dmd2-qwen-image
+  mode: online
+  name: qwen_image_dmd2
+
+dist_env:
+  backend: nccl
+  timeout_minutes: 60
+
+model:
+  pretrained_model_name_or_path: /lustre/fsw/coreai_dlalgo_modelopt/users/jingyux/dmd2/models/Qwen-Image
+  mode: finetune
+
+step_scheduler:
+  # Must be divisible by local_batch_size * dp_size. For the canonical
+  # 32-node GB200 run below, dp_size=128 and local_batch_size=1, so GBS=128
+  # gives one micro-batch per rank and no gradient accumulation.
+  global_batch_size: 128
+  local_batch_size: 1
+  ckpt_every_steps: 500
+  # With 40K cached samples and GBS=128, one epoch is ~313 optimizer steps.
+  # 16 epochs gives >=5000 optimizer steps; max_steps below stops exactly at 5000.
+  num_epochs: 16
+  log_every: 1
+  # Production placeholder; CLI override expected for the long run.
+  max_steps: 5000
+
+# ─── DMD2 block ─────────────────────────────────────────────────────────────────
+# ``recipe_path`` is required by ``_resolve_dmd_config`` in dmd2_recipe.py.
+# Every actual DMDConfig knob is explicitly pinned below so this YAML is the
+# single source of truth for the formal run — the recipe defaults at
+# ``modelopt_recipes/general/distillation/dmd2_qwen_image.yaml`` are NOT
+# consulted for anything set here. Pydantic's ``model_copy(update=...)`` is
+# a shallow merge, so when overriding any ``sample_t_cfg`` or ``ema``
+# sub-field we re-list every field in that block to avoid silent drops.
+dmd2:
+  recipe_path: general/distillation/dmd2_qwen_image
+  pipeline_plugin: qwen_image
+  qwen_image_guidance: null
+
+  # ── DMD2 method core ──
+  pred_type: flow                  # Qwen-Image is rectified flow
+  num_train_timesteps: null        # continuous t ∈ [0, 1]; QwenImageDMDPipeline forwards t verbatim
+  guidance_scale: 4.0              # CFG strength on teacher during the student update
+  student_sample_steps: 4          # 4-step student (Phase 2)
+  student_sample_type: ode         # Euler integration when unrolling the student
+  # Default keeps FastGen Qwen parity: train each rung from noised real latents.
+  # Override with ``--dmd2.backward_simulation=true`` to no-grad unroll the
+  # current student from the first rung before training the selected rung.
+  backward_simulation: false
+  student_update_freq: 5           # one student step per 5 fake-score / discriminator steps
+  fake_score_pred_type: x0         # fake_score regresses x0; teacher/student live in flow space
+
+  # ── GAN branch (Phase 2) ──
+  gan_loss_weight_gen: 0.03        # generator weight in student loss
+  gan_use_same_t_noise: true       # share (t, noise) between generator + discriminator updates
+  gan_r1_reg_weight: 0.1           # R1 gradient penalty on real samples
+  gan_r1_reg_alpha: 0.1            # R1 EMA coefficient
+
+  # ── Optimizer LRs (student LR comes from ``optim.learning_rate`` below) ──
+  fake_score_lr: 2.0e-6
+  discriminator_lr: 2.0e-6
+
+  # ── GAN discriminator placement & dim ──
+  gan_feature_indices: [30]        # tap transformer_blocks[30] for the feature head
+  gan_num_blocks: 60               # Qwen-Image has 60 transformer blocks total
+  gan_inner_dim: 3072              # Qwen-Image hidden_size (matches FastGen reference)
+
+  # ── 4-step student timestep schedule ──
+  # Exact ``torch.linspace(max_t=0.999, 0.0, 5).tolist()``, which is also the
+  # inference pipeline's default schedule when no t_list is passed (see
+  # ``inference_dmd2_qwen_image.py:259``). Training draws t uniformly from
+  # t_list[:-1], so the 4 trained timesteps exactly match the 4 inference
+  # sample points. The earlier ``[0.999, 0.75, 0.5, 0.25, 0.0]`` was
+  # ``linspace(1.0, 0, 5)`` with t=1 shaved to 0.999, leaving a silent ~0.3%
+  # train↔inference skew on each non-endpoint timestep.
+  sample_t_cfg:
+    # ``time_dist_type`` governs the *perturbation* timestep ``t`` that gets
+    # sampled on every loss path — VSD perturbation in compute_student_loss
+    # (dmd.py:417), fake-score DSM perturbation in compute_fake_score_loss
+    # (dmd.py:529), and GAN/discriminator perturbation in
+    # compute_discriminator_loss (dmd.py:605). All three call
+    # ``self.sample_timesteps`` → ``sample_t`` → reads ``time_dist_type``.
+    #
+    # It does NOT govern the student's *starting* timestep ``t_student``:
+    # under student_sample_steps > 1, ``_build_student_input`` calls
+    # ``sample_from_t_list`` (dmd.py:346) which samples uniformly from
+    # ``t_list[:-1]`` regardless of ``time_dist_type``.
+    #
+    # ``logitnormal`` concentrates ``t`` toward the middle of [min_t, max_t];
+    # FastGen's reference Qwen DMD2 config uses ``uniform`` instead, so for
+    # parity launches override with ``--dmd2.sample_t_cfg.time_dist_type=uniform``.
+    time_dist_type: logitnormal
+    min_t: 0.001
+    max_t: 0.999
+    p_mean: 0.0
+    p_std: 1.0
+    t_list: [0.999, 0.74925, 0.4995, 0.24975, 0.0]
+
+  # ── Student EMA ──
+  ema:
+    decay: 0.9999
+    type: constant
+    start_iter: 0
+    fsdp2: true
+    mode: full_tensor
+
+optim:
+  learning_rate: 2.0e-6
+  optimizer:
+    weight_decay: 0.01
+    betas: [0.9, 0.999]
+
+lr_scheduler:
+  lr_decay_style: constant
+  lr_warmup_steps: 0
+  min_lr: 2.0e-6
+
+fsdp:
+  tp_size: 1
+  cp_size: 1
+  pp_size: 1
+  dp_replicate_size: 1
+  dp_size: 128                # 32 nodes × 4 GPUs/node = 128 GPUs
+  activation_checkpointing: true
+
+# Real cached latents (40K items, 1024x1024). Negative-prompt embedding for
+# CFG is loaded inside the dataloader via ``negative_prompt_embedding_path``.
+data:
+  dataloader:
+    _target_: nemo_automodel.components.datasets.diffusion.build_text_to_image_multiresolution_dataloader
+    cache_dir: /lustre/fsw/coreai_dlalgo_modelopt/users/jingyux/dmd2/data/processed/qwen_image_1024p
+    base_resolution: [1024, 1024]
+    batch_size: 1
+    drop_last: false
+    shuffle: true
+    num_workers: 0
+    negative_prompt_embedding_path: /lustre/fsw/coreai_dlalgo_modelopt/users/jingyux/dmd2/data/processed/qwen_image_1024p/negative_prompt_embedding.pt
+
+# Inference-loadable safetensors saves so checkpoints are usable without a
+# secondary export pass.
+checkpoint:
+  enabled: true
+  # The launcher overrides this to point at the per-run output dir under
+  # experiments/dmd2_qwen_image/train/output/<RUN_ID>/checkpoints/.
+  checkpoint_dir: /lustre/fsw/coreai_dlalgo_modelopt/users/jingyux/dmd2/experiments/dmd2_qwen_image/train/output/PLACEHOLDER_RUN_ID/checkpoints
+  model_save_format: safetensors
+  save_consolidated: true
+  v4_compatible: true
+  diffusers_compatible: true
+  # Auto-resume from the most recent checkpoint in checkpoint_dir if one
+  # exists; start fresh if not. This lets you re-launch the same RUN_ID to
+  # continue training without editing the YAML. The parent recipe
+  # (Automodel base_recipe.py:524-527) warns and starts fresh when LATEST
+  # has no underlying checkpoint, and our DMD2 sidecar restore
+  # (_resolve_extras_dir → None) is a graceful no-op in the same case, so
+  # this is safe on first launch. To start over with the same RUN_ID,
+  # delete <RUN_DIR>/checkpoints/ or use a different RUN_ID. To pin a
+  # specific epoch, override on the CLI:
+  #   --checkpoint.restore_from=epoch_0_step_500
+  restore_from: LATEST

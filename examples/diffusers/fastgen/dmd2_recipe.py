@@ -13,31 +13,54 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""DMD2 distillation recipe for Wan 2.2 5B built on NeMo AutoModel.
+"""DMD2 distillation recipe built on NeMo AutoModel.
 
 This recipe subclasses :class:`nemo_automodel.recipes.diffusion.train.TrainDiffusionRecipe`
 so it inherits AutoModel's student + optimizer + dataloader + checkpoint plumbing, then
-drives ``modelopt.torch.fastgen.DMDPipeline`` through the three-phase DMD2 alternation
-(student update / fake-score update / EMA step). Phase 1 targets the
-``Wan-AI/Wan2.2-TI2V-5B-Diffusers`` checkpoint under FSDP2 multi-GPU and deliberately
-disables the discriminator and CFG branches so the end-to-end VSD + DSM + EMA path can
-be debugged on a minimal surface.
+drives ``modelopt.torch.fastgen.DMDPipeline`` (or a plugin subclass) through the
+three-phase DMD2 alternation (student update / fake-score update / EMA step).
+
+Supported backbones:
+
+* **Wan 2.2 5B** (``Wan-AI/Wan2.2-TI2V-5B-Diffusers``) — 5D ``video_latents``,
+  base :class:`DMDPipeline`. Config: ``configs/dmd2_wan22_5b.yaml`` (mock-data
+  wiring smoke).
+* **Qwen-Image** (``Qwen/Qwen-Image``) — 4D ``image_latents``,
+  :class:`QwenImageDMDPipeline` handles 2x2 patch packing / img_shapes / unpacking.
+  Configs: ``configs/dmd2_qwen_image.yaml`` for the canonical real-data
+  formal run (4-step + CFG + GAN, points at the qwen_image_1024p cache);
+  ``configs/dmd2_qwen_image_smoke.yaml`` for the mock-data wiring smoke
+  (used by §6 / §7 tests + the §8-§14 mock-data smokes).
 
 Launch::
 
+    # Real-data formal training (canonical).
+    torchrun --nproc-per-node=8 \\
+        examples/diffusers/fastgen/dmd2_finetune.py \\
+        --config examples/diffusers/fastgen/configs/dmd2_qwen_image.yaml
+    # Mock-data wiring smoke (no real cache required).
+    torchrun --nproc-per-node=8 \\
+        examples/diffusers/fastgen/dmd2_finetune.py \\
+        --config examples/diffusers/fastgen/configs/dmd2_qwen_image_smoke.yaml
+    # Wan 2.2 5B smoke.
     torchrun --nproc-per-node=8 \\
         examples/diffusers/fastgen/dmd2_finetune.py \\
         --config examples/diffusers/fastgen/configs/dmd2_wan22_5b.yaml
 
-See ``examples/diffusers/fastgen/README.md`` for the full usage guide, the three-phase
-alternation diagram, the Phase 2 roadmap (GAN + CFG + real-data path), and the
-troubleshooting notes.
+See ``examples/diffusers/fastgen/checklists.md`` (§15 / §19) for the
+per-feature enablement evidence and the formal-run gate;
+``examples/diffusers/fastgen/HANDOFF.md`` for the file-pointer map; and
+``examples/diffusers/fastgen/README.md`` for the three-phase alternation
+diagram + troubleshooting notes.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import re
+import shutil
 from typing import Any
 
 import torch
@@ -53,12 +76,27 @@ from torch import nn
 
 import modelopt.torch.fastgen as mtf
 from modelopt.torch.fastgen.config import DMDConfig
+from modelopt.torch.fastgen.discriminators import Discriminator_ImageDiT
+from modelopt.torch.fastgen.methods.dmd import DMDPipeline
+from modelopt.torch.fastgen.plugins import qwen_image as qwen_image_plugin
 
 # Keys under the ``dmd2:`` YAML block that shadow fields on :class:`DMDConfig`. The
 # recipe applies these as a Pydantic ``model_copy(update=...)`` on top of the loaded
 # built-in recipe so users can tweak DMD2 hyperparameters without editing the shared
 # ``modelopt_recipes/general/distillation/dmd2_wan22_5b.yaml`` file.
 _DMD_CONFIG_OVERRIDE_KEYS = frozenset(DMDConfig.model_fields.keys())
+
+# Auto-detect substrings (matched case-insensitively against ``model_id``) that map to
+# DMDPipeline plugin subclasses. Keep this list small — adding a new entry is only the
+# right move when the model has a non-diffusers transformer signature that requires a
+# pack/unpack wrapper. Models with the standard ``(hidden_states, timestep,
+# encoder_hidden_states)`` signature work with the base :class:`DMDPipeline`.
+_PIPELINE_PLUGIN_BY_MODEL_SUBSTR = (
+    ("qwen-image", "qwen_image"),
+    ("qwen_image", "qwen_image"),
+)
+
+_DMD_COMPLETE_MARKER = "dmd2_complete.marker"
 
 
 class DMD2DiffusionRecipe(TrainDiffusionRecipe):
@@ -133,15 +171,28 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
         #    all three optimizers.
         self.__dict__["_fake_score_optimizer"] = self._build_fake_score_optimizer()
 
-        # 7. DMDPipeline. Phase 1: discriminator=None. Asserts in the constructor would
-        #    fire if ``gan_loss_weight_gen > 0`` without a discriminator — the YAML
-        #    forces it to 0.0 for Phase 1.
-        self.__dict__["_dmd_pipeline"] = mtf.DMDPipeline(
+        # 7. Optional GAN discriminator. Built when ``gan_loss_weight_gen > 0`` so the
+        #    DMDPipeline constructor's assert is satisfied. Phase 2 wires this up for
+        #    Qwen-Image; other backbones still get ``discriminator=None`` and the
+        #    existing assert fires if their YAML enables GAN before they're ported.
+        self.__dict__["_discriminator"] = self._build_discriminator()
+        self.__dict__["_discriminator_optimizer"] = self._build_discriminator_optimizer()
+        if self._discriminator is not None:
+            self._attach_gan_feature_capture()
+
+        # 8. DMDPipeline.
+        #
+        #    Dispatch to a plugin subclass when the backbone needs a non-diffusers call
+        #    signature (e.g. Qwen-Image's packed-latents path). Default = base pipeline.
+        pipeline_cls = self._resolve_pipeline_cls()
+        pipeline_kwargs = self._resolve_pipeline_kwargs(pipeline_cls)
+        self.__dict__["_dmd_pipeline"] = pipeline_cls(
             student=self.model,
             teacher=self._teacher,
             fake_score=self._fake_score,
             config=self._dmd_config,
-            discriminator=None,
+            discriminator=self._discriminator,
+            **pipeline_kwargs,
         )
 
         # 8. Drop the parent's flow_matching_pipeline — we replace the training loop,
@@ -154,10 +205,11 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
         # 9. Extend the student-only restore that super().setup() already ran: also
         #    restore the fake_score / fake_score_optimizer / EMA / DMD state from the
         #    same checkpoint directory.
-        self._restore_dmd_extras(self.restore_from)
+        self._restore_dmd_extras(getattr(self, "_dmd2_resolved_restore_from", self.restore_from))
 
         if is_main_process():
             logging.info("[DMD2] recipe initialized: %s", self._dmd_config_summary())
+            logging.info("[DMD2] full configuration:\n%s", self._dmd_full_config_log())
 
     # ------------------------------------------------------------------ #
     #  Training loop                                                     #
@@ -178,7 +230,19 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
         dmd = self._dmd_pipeline
         cfg = self._dmd_config
 
-        logging.info("[DMD2] Starting DMD2 training on Wan 2.2 5B")
+        logging.info(
+            "[DMD2] Starting DMD2 training on %s (pipeline=%s)",
+            self.model_id,
+            type(self._dmd_pipeline).__name__,
+        )
+        # Dataloader target (mock vs real cache) is non-obvious from the per-step
+        # logs; surface it explicitly here so §16's "mock or real dataloader
+        # target" bullet is checkable from the startup log.
+        try:
+            dl_target = type(self.dataloader.dataset).__name__
+            logging.info("[DMD2] Dataloader dataset class: %s", dl_target)
+        except Exception:
+            pass
         logging.info(
             "[DMD2] Global batch size: %s; local batch size: %s; DP size: %s",
             self.global_batch_size,
@@ -200,11 +264,21 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
             if self.sampler is not None and hasattr(self.sampler, "set_epoch"):
                 self.sampler.set_epoch(epoch)
 
+            # On resume, the diffusion sampler's load_state_dict primes
+            # ``_batches_to_skip`` so the next ``__iter__`` skips already-yielded
+            # batches. Forward that to tqdm's ``initial=`` so the progress bar
+            # reads e.g. ``187/313`` instead of the misleading ``0/313`` (the
+            # sampler resets the counter to 0 on the next ``__iter__`` call,
+            # so reading it here is a one-shot for the resumed epoch only).
+            tqdm_initial = int(getattr(self.sampler, "_batches_to_skip", 0) or 0)
+
             if is_main_process():
                 from tqdm import tqdm
 
                 self.step_scheduler.dataloader = tqdm(
-                    self.dataloader, desc=f"Epoch {epoch + 1}/{self.num_epochs}"
+                    self.dataloader,
+                    desc=f"Epoch {epoch + 1}/{self.num_epochs}",
+                    initial=tqdm_initial,
                 )
             else:
                 self.step_scheduler.dataloader = self.dataloader
@@ -226,17 +300,23 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
 
                 micro_losses: list[float] = []
                 micro_vsd_losses: list[float] = []
+                micro_disc_losses: list[float] = []
                 for micro_batch in batch_group:
-                    latents, noise, text_embeds = self._prepare_micro_batch(micro_batch)
+                    latents, noise, text_embeds, neg_text_embeds = self._prepare_micro_batch(
+                        micro_batch
+                    )
 
                     if is_student_phase:
+                        # ``compute_student_loss`` reads ``guidance_scale`` from the
+                        # DMDConfig when this kwarg is None. We pass the negative
+                        # embedding unconditionally — the function ignores it when
+                        # CFG is disabled, and raises a clear ValueError when CFG
+                        # is enabled but no negative was supplied.
                         losses = dmd.compute_student_loss(
                             latents,
                             noise,
                             encoder_hidden_states=text_embeds,
-                            # Phase 1: no CFG. guidance_scale=None short-circuits the
-                            # negative-conditioning branch inside compute_student_loss.
-                            negative_encoder_hidden_states=None,
+                            negative_encoder_hidden_states=neg_text_embeds,
                             guidance_scale=None,
                         )
                         micro_vsd_losses.append(float(losses["vsd"].item()))
@@ -249,6 +329,34 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
 
                     (losses["total"] / len(batch_group)).backward()
                     micro_losses.append(float(losses["total"].item()))
+
+                    # GAN: in the fake-score phase, also update the discriminator
+                    # on the same batch (FastGen pattern:
+                    # _fake_score_discriminator_update_step).
+                    if (
+                        not is_student_phase
+                        and self._discriminator is not None
+                        and self._discriminator_optimizer is not None
+                    ):
+                        self._discriminator_optimizer.zero_grad(set_to_none=True)
+                        disc_losses = dmd.compute_discriminator_loss(
+                            latents,
+                            noise,
+                            encoder_hidden_states=text_embeds,
+                        )
+                        (disc_losses["total"] / len(batch_group)).backward()
+                        # Manual gradient all-reduce across DP ranks (the
+                        # discriminator is replicated, not FSDP-sharded).
+                        if dist.is_initialized():
+                            for p in self._discriminator.parameters():
+                                if p.grad is not None:
+                                    dist.all_reduce(p.grad, op=dist.ReduceOp.AVG)
+                        torch.nn.utils.clip_grad_norm_(
+                            self._discriminator.parameters(),
+                            max_norm=self.clip_grad_max_norm,
+                        )
+                        self._discriminator_optimizer.step()
+                        micro_disc_losses.append(float(disc_losses["total"].item()))
 
                 # Grad clip on whichever module is the active trainable.
                 if is_student_phase:
@@ -294,6 +402,9 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
                         vsd_loss=(sum(micro_vsd_losses) / len(micro_vsd_losses))
                         if micro_vsd_losses
                         else None,
+                        disc_loss=(sum(micro_disc_losses) / len(micro_disc_losses))
+                        if micro_disc_losses
+                        else None,
                     )
 
                 if self.step_scheduler.is_ckpt_step:
@@ -318,12 +429,44 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
                     fake_score_steps,
                 )
 
+        if torch.cuda.is_available():
+            peak = torch.cuda.max_memory_allocated() / (1024**3)
+            reserved = torch.cuda.max_memory_reserved() / (1024**3)
+            rank = dist.get_rank() if dist.is_initialized() else 0
+            logging.info(
+                "[DMD2] PEAK_MEM rank=%d max_allocated=%.2fGiB max_reserved=%.2fGiB",
+                rank,
+                peak,
+                reserved,
+            )
+
         if is_main_process():
             logging.info("[DMD2] Training complete. Final step: %s", global_step)
 
     # ------------------------------------------------------------------ #
     #  Checkpoint save / restore (sidecars next to student DCP)          #
     # ------------------------------------------------------------------ #
+
+    def load_checkpoint(self, restore_from: str | None = None):
+        """Load only from checkpoints whose DMD2 sidecars are complete.
+
+        ``TrainDiffusionRecipe.setup()`` calls this before the DMD2-only objects exist,
+        so this method only resolves the path and delegates the student restore to the
+        parent. The sidecars are restored later by ``_restore_dmd_extras``.
+        """
+        resolved = self._resolve_complete_dmd_checkpoint(restore_from)
+        self.__dict__["_dmd2_resolved_restore_from"] = resolved
+
+        if resolved is None:
+            if restore_from is not None and str(restore_from).upper() == "LATEST" and is_main_process():
+                logging.warning(
+                    "[DMD2] restore_from=LATEST but no complete DMD2 checkpoint was found in %s. "
+                    "Starting fresh.",
+                    self.checkpointer.config.checkpoint_dir,
+                )
+            return
+
+        super().load_checkpoint(resolved)
 
     def save_checkpoint(
         self,
@@ -334,14 +477,51 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
         best_metric_key: str = "default",
     ) -> None:
         """Delegate student save to ``super()``, then sidecar the DMD2 extras."""
+        # Recover from a partial save from a previous run (e.g. SLURM time
+        # limit killed the job between super().save_checkpoint() — which writes
+        # the model + step_scheduler + dataloader — and our DMD2 sidecar
+        # writes below). The parent's save_checkpoint refuses to overwrite an
+        # existing directory and raises FileExistsError, so without this we'd
+        # need a manual cleanup every time a SLURM kill landed mid-save.
+        path = os.path.join(self.checkpointer.config.checkpoint_dir, f"epoch_{epoch}_step_{step}")
+        if is_main_process() and self.checkpointer.config.enabled and os.path.exists(path):
+            if not self._is_dmd_checkpoint_complete(path):
+                logging.warning(
+                    "[DMD2] cleaning up incomplete checkpoint directory left by a previous run: %s",
+                    path,
+                )
+                shutil.rmtree(path)
+        if dist.is_initialized():
+            dist.barrier()
+
+        previous_complete = None
+        if self.checkpointer.config.enabled:
+            previous_complete = self._find_latest_complete_dmd_checkpoint(self.checkpointer.config.checkpoint_dir)
+
         super().save_checkpoint(epoch, step, train_loss, val_loss, best_metric_key)
 
         if not self.checkpointer.config.enabled:
             return
 
-        path = os.path.join(self.checkpointer.config.checkpoint_dir, f"epoch_{epoch}_step_{step}")
+        # The parent save updates LATEST before DMD2 sidecars exist. Until the marker is
+        # written below, keep LATEST on the previous complete DMD2 checkpoint.
+        if is_main_process():
+            if previous_complete is not None:
+                self._update_latest_symlink(previous_complete)
+            else:
+                self._remove_checkpoint_pointer("LATEST")
+        if dist.is_initialized():
+            dist.barrier()
+
         self._save_dmd_extras(path)
 
+        if dist.is_initialized():
+            dist.barrier()
+
+        if is_main_process():
+            self._write_dmd_complete_marker(path)
+            self._update_checkpoint_symlink("DMD2_LATEST", path)
+            self._update_latest_symlink(path)
         if dist.is_initialized():
             dist.barrier()
 
@@ -369,23 +549,54 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
         # materialises full tensors via ``DTensor.full_tensor()`` under FSDP2 full_tensor
         # mode, so this is a single unsharded file.
         if is_main_process():
+            logging.info("[DMD2] saved fake_score weights -> %s", fs_weights_dir)
+            logging.info("[DMD2] saved fake_score optimizer -> %s", fs_opt_dir)
             if self._dmd_pipeline.ema is not None:
                 ema_path = os.path.join(path, "ema_shadow.pt")
                 torch.save(self._dmd_pipeline.ema.state_dict(), ema_path)
+                logging.info("[DMD2] saved ema_shadow -> %s", ema_path)
             state_path = os.path.join(path, "dmd_state.pt")
             torch.save({"iteration": self._dmd_pipeline._iteration}, state_path)
+            logging.info(
+                "[DMD2] saved dmd_state (iteration=%d) -> %s",
+                int(self._dmd_pipeline._iteration),
+                state_path,
+            )
+            # Discriminator + its optimizer — replicated across ranks (no FSDP),
+            # so rank-0 torch.save of the canonical state_dict suffices.
+            if self._discriminator is not None:
+                disc_path = os.path.join(path, "discriminator.pt")
+                torch.save(self._discriminator.state_dict(), disc_path)
+                logging.info("[DMD2] saved discriminator -> %s", disc_path)
+            if self._discriminator_optimizer is not None:
+                disc_opt_path = os.path.join(path, "discriminator_optimizer.pt")
+                torch.save(self._discriminator_optimizer.state_dict(), disc_opt_path)
+                logging.info("[DMD2] saved discriminator optimizer -> %s", disc_opt_path)
+
+    def _write_dmd_complete_marker(self, path: str) -> None:
+        marker_path = os.path.join(path, _DMD_COMPLETE_MARKER)
+        payload = {
+            "checkpoint": os.path.basename(os.path.realpath(path)),
+            "dmd_iteration": int(self._dmd_pipeline._iteration),
+        }
+        with open(marker_path, "w") as f:
+            json.dump(payload, f)
+            f.write("\n")
+        logging.info("[DMD2] marked checkpoint complete -> %s", marker_path)
+
+    def _remove_checkpoint_pointer(self, link_name: str) -> None:
+        ckpt_root = self.checkpointer.config.checkpoint_dir
+        for path in (os.path.join(ckpt_root, link_name), os.path.join(ckpt_root, f"{link_name}.txt")):
+            if os.path.lexists(path):
+                os.remove(path)
 
     def _restore_dmd_extras(self, restore_from: str | None) -> None:
         """Restore fake_score + fake_score optimizer + EMA + DMD scalar state.
 
-        No-op when no checkpoint is being restored. Uses the superclass's path resolver
-        so ``"LATEST"`` and relative names behave the same way they do for the student.
+        No-op when no checkpoint is being restored. ``load_checkpoint`` resolves
+        ``LATEST`` to the latest complete DMD2 checkpoint before this method runs.
         """
         if restore_from is None:
-            # Auto-detect only kicks in if the parent's load_checkpoint chose a dir — here
-            # we mirror that logic by peeking at the checkpoint_dir for the latest.
-            # For Phase 1 we keep it simple: no auto-detect of extras. Users who need
-            # resume must pass ``checkpoint.restore_from`` explicitly.
             return
 
         ckpt_dir = self._resolve_extras_dir(restore_from)
@@ -404,18 +615,69 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
         fs_weights_model_dir = os.path.join(fs_weights_dir, "model")
         if os.path.isdir(fs_weights_model_dir):
             self.checkpointer.load_model(model=self._fake_score, model_path=fs_weights_model_dir)
+            if is_main_process():
+                logging.info("[DMD2] restored fake_score weights <- %s", fs_weights_model_dir)
+        elif is_main_process():
+            logging.info(
+                "[DMD2] WARN: fake_score weights dir missing at %s -- skipping",
+                fs_weights_model_dir,
+            )
         # load_optimizer, in contrast, appends ``optim/`` internally — pass the base dir.
         if os.path.isdir(os.path.join(fs_opt_dir, "optim")):
             self.checkpointer.load_optimizer(
                 self._fake_score_optimizer, self._fake_score, fs_opt_dir, None
             )
+            if is_main_process():
+                logging.info("[DMD2] restored fake_score optimizer <- %s", fs_opt_dir)
+        elif is_main_process():
+            logging.info(
+                "[DMD2] WARN: fake_score optimizer dir missing at %s -- skipping",
+                fs_opt_dir,
+            )
 
         if os.path.isfile(ema_path) and self._dmd_pipeline.ema is not None:
             ema_state = torch.load(ema_path, map_location="cpu", weights_only=False)
             self._dmd_pipeline.ema.load_state_dict(ema_state)
+            if is_main_process():
+                logging.info("[DMD2] restored ema_shadow <- %s", ema_path)
         if os.path.isfile(state_path):
             state = torch.load(state_path, map_location="cpu", weights_only=False)
             self._dmd_pipeline._iteration = int(state.get("iteration", 0))
+            if is_main_process():
+                logging.info(
+                    "[DMD2] restored dmd_state (iteration=%d) <- %s",
+                    self._dmd_pipeline._iteration,
+                    state_path,
+                )
+
+        # Discriminator + its optimizer.
+        if self._discriminator is not None:
+            disc_path = os.path.join(ckpt_dir, "discriminator.pt")
+            if os.path.isfile(disc_path):
+                disc_state = torch.load(disc_path, map_location="cpu", weights_only=False)
+                self._discriminator.load_state_dict(disc_state)
+                if is_main_process():
+                    logging.info("[DMD2] restored discriminator <- %s", disc_path)
+            elif is_main_process():
+                logging.info(
+                    "[DMD2] WARN: discriminator file missing at %s -- skipping", disc_path
+                )
+        if self._discriminator_optimizer is not None:
+            disc_opt_path = os.path.join(ckpt_dir, "discriminator_optimizer.pt")
+            if os.path.isfile(disc_opt_path):
+                disc_opt_state = torch.load(
+                    disc_opt_path, map_location="cpu", weights_only=False
+                )
+                self._discriminator_optimizer.load_state_dict(disc_opt_state)
+                if is_main_process():
+                    logging.info(
+                        "[DMD2] restored discriminator optimizer <- %s", disc_opt_path
+                    )
+            elif is_main_process():
+                logging.info(
+                    "[DMD2] WARN: discriminator optimizer file missing at %s -- skipping",
+                    disc_opt_path,
+                )
 
     def _resolve_extras_dir(self, restore_from: str) -> str | None:
         """Best-effort resolve of the checkpoint dir, matching BaseRecipe's convention.
@@ -432,6 +694,111 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
         if os.path.exists(candidate):
             return os.path.realpath(candidate)
         return None
+
+    def _resolve_complete_dmd_checkpoint(self, restore_from: str | None) -> str | None:
+        ckpt_root = self.checkpointer.config.checkpoint_dir
+
+        if restore_from is None or str(restore_from).upper() in {"LATEST", "DMD2_LATEST"}:
+            return self._find_latest_complete_dmd_checkpoint(ckpt_root)
+
+        if os.path.isabs(restore_from):
+            candidate = restore_from
+        else:
+            candidate = os.path.join(ckpt_root, restore_from)
+        candidate = os.path.realpath(candidate)
+
+        if not os.path.isdir(candidate):
+            return candidate
+        if not self._is_dmd_checkpoint_complete(candidate):
+            raise RuntimeError(
+                f"DMD2 checkpoint is incomplete and cannot be restored: {candidate}. "
+                "Use a complete older checkpoint or remove the partial directory."
+            )
+        return candidate
+
+    def _find_latest_complete_dmd_checkpoint(self, ckpt_root: str) -> str | None:
+        dmd2_latest = os.path.join(ckpt_root, "DMD2_LATEST")
+        for pointer in (dmd2_latest, os.path.join(ckpt_root, "LATEST")):
+            resolved = self._resolve_checkpoint_pointer(pointer)
+            if resolved is not None and self._is_dmd_checkpoint_complete(resolved):
+                return resolved
+
+        candidates = []
+        if os.path.isdir(ckpt_root):
+            for name in os.listdir(ckpt_root):
+                path = os.path.join(ckpt_root, name)
+                if os.path.isdir(path) and "_step_" in name and self._is_dmd_checkpoint_complete(path):
+                    candidates.append(os.path.realpath(path))
+        if not candidates:
+            return None
+        return max(candidates, key=self._checkpoint_step)
+
+    def _resolve_checkpoint_pointer(self, pointer: str) -> str | None:
+        resolved = None
+        if os.path.islink(pointer):
+            try:
+                resolved = os.readlink(pointer)
+            except OSError:
+                return None
+        elif os.path.isfile(pointer + ".txt"):
+            try:
+                with open(pointer + ".txt", "r") as f:
+                    resolved = f.read().strip()
+            except OSError:
+                return None
+        if not resolved:
+            return None
+        if not os.path.isabs(resolved):
+            resolved = os.path.abspath(os.path.join(os.path.dirname(pointer), resolved))
+        return os.path.realpath(resolved) if os.path.isdir(resolved) else None
+
+    def _is_dmd_checkpoint_complete(self, path: str) -> bool:
+        path = os.path.realpath(path)
+        if not os.path.isdir(path):
+            return False
+        if os.path.isfile(os.path.join(path, _DMD_COMPLETE_MARKER)):
+            return True
+
+        fs_model_dir = os.path.join(path, "fake_score", "model")
+        fs_opt_metadata = os.path.join(path, "fake_score_optimizer", "optim", ".metadata")
+        dmd_state = os.path.join(path, "dmd_state.pt")
+        complete = (
+            self._dir_has_regular_file(fs_model_dir)
+            and os.path.isfile(fs_opt_metadata)
+            and os.path.isfile(dmd_state)
+        )
+        if not complete:
+            return False
+
+        if self._cfg_gan_enabled():
+            return os.path.isfile(os.path.join(path, "discriminator.pt")) and os.path.isfile(
+                os.path.join(path, "discriminator_optimizer.pt")
+            )
+        return True
+
+    def _cfg_gan_enabled(self) -> bool:
+        cfg = getattr(self, "cfg", None)
+        if cfg is None:
+            return False
+        try:
+            return float(cfg.get("dmd2.gan_loss_weight_gen", 0.0) or 0.0) > 0
+        except (TypeError, ValueError):
+            return False
+
+    @staticmethod
+    def _dir_has_regular_file(path: str) -> bool:
+        if not os.path.isdir(path):
+            return False
+        try:
+            with os.scandir(path) as entries:
+                return any(entry.is_file() for entry in entries)
+        except OSError:
+            return False
+
+    @staticmethod
+    def _checkpoint_step(path: str) -> int:
+        match = re.search(r"_step_(\d+)$", os.path.basename(os.path.realpath(path)))
+        return int(match.group(1)) if match else -1
 
     # ------------------------------------------------------------------ #
     #  Helpers — teacher / fake_score loading, DMDConfig resolution      #
@@ -460,6 +827,114 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
         for p in teacher.parameters():
             p.requires_grad_(False)
         return teacher
+
+    def _build_discriminator(self) -> nn.Module | None:
+        """Construct the Discriminator_ImageDiT when GAN is enabled.
+
+        Returns ``None`` when ``dmd2.gan_loss_weight_gen`` is zero so the
+        DMDPipeline runs without a discriminator (Phase 1 / multi-step / CFG).
+        """
+        gan_weight = float(self.cfg.get("dmd2.gan_loss_weight_gen", 0.0) or 0.0)
+        if gan_weight <= 0.0:
+            return None
+
+        # GAN-specific knobs read directly from the YAML so callers don't have to
+        # touch the built-in DMDConfig recipe just to flip feature indices.
+        feature_indices = self.cfg.get(
+            "dmd2.gan_feature_indices", [30]
+        )  # middle of Qwen-Image's 60 blocks
+        num_blocks = int(self.cfg.get("dmd2.gan_num_blocks", 60))
+        inner_dim = int(self.cfg.get("dmd2.gan_inner_dim", 3072))
+
+        disc = Discriminator_ImageDiT(
+            feature_indices=set(int(i) for i in feature_indices),
+            num_blocks=num_blocks,
+            inner_dim=inner_dim,
+        )
+        disc.to(device=self.device, dtype=self.bf16)
+        disc.train()
+        for p in disc.parameters():
+            p.requires_grad_(True)
+        if is_main_process():
+            logging.info(
+                "[DMD2] Built discriminator: %s | num_features=%d num_blocks=%d inner_dim=%d "
+                "params=%d",
+                type(disc).__name__,
+                disc.num_features,
+                num_blocks,
+                inner_dim,
+                sum(p.numel() for p in disc.parameters()),
+            )
+        return disc
+
+    def _build_discriminator_optimizer(self) -> torch.optim.Optimizer | None:
+        """AdamW on the discriminator. No FSDP wrap — manual grad all-reduce keeps it simple."""
+        if self._discriminator is None:
+            return None
+        lr = float(self.cfg.get("dmd2.discriminator_lr", 1.0e-5) or 1.0e-5)
+        opt = torch.optim.AdamW(
+            self._discriminator.parameters(),
+            lr=lr,
+            weight_decay=0.01,
+            betas=(0.0, 0.999),  # FastGen default for the discriminator
+        )
+        if is_main_process():
+            logging.info("[DMD2] Built discriminator optimizer: AdamW lr=%g betas=(0.0, 0.999)", lr)
+        return opt
+
+    def _attach_gan_feature_capture(self) -> None:
+        """Install Qwen-Image feature-capture hooks on the teacher when GAN is enabled.
+
+        Reads the latent resolution from the dataloader so the hook can reshape
+        ``[B, num_image_patches, 3072]`` into ``[B, 3072, H_lat//2, W_lat//2]``.
+        Mock dataloader → spatial_h/spatial_w from the YAML. Real dataloader →
+        base_resolution / vae_scale.
+        """
+        feature_indices = list(self.cfg.get("dmd2.gan_feature_indices", [30]))
+
+        # Resolve h_lat / w_lat. Mock has it in the YAML; real cache uses the
+        # configured base_resolution divided by the VAE 8x downsample.
+        # Convert the dataloader subtree to a plain dict — AutoModel's ConfigNode
+        # doesn't expose deep dotted paths like ``data.dataloader.spatial_h``.
+        dl_node = self.cfg.get("data.dataloader", None)
+        if dl_node is not None and hasattr(dl_node, "to_dict"):
+            dl_dict = dl_node.to_dict()
+        elif dl_node is not None:
+            try:
+                dl_dict = dict(dl_node)
+            except (TypeError, ValueError):
+                dl_dict = {}
+        else:
+            dl_dict = {}
+
+        spatial_h = dl_dict.get("spatial_h")
+        spatial_w = dl_dict.get("spatial_w")
+        base_resolution = dl_dict.get("base_resolution")
+        if spatial_h is not None and spatial_w is not None:
+            h_lat = int(spatial_h)
+            w_lat = int(spatial_w)
+        elif base_resolution is not None:
+            h_lat = int(base_resolution[0]) // 8
+            w_lat = int(base_resolution[1]) // 8
+        else:
+            # Fallback: hope it's 64x64 (512px image). Smoke tests pin this explicitly.
+            h_lat, w_lat = 64, 64
+            if is_main_process():
+                logging.warning(
+                    "[DMD2] Could not infer h_lat/w_lat from data.dataloader; defaulting to 64x64."
+                )
+
+        qwen_image_plugin.attach_feature_capture(
+            self._teacher,
+            feature_indices=feature_indices,
+            h_lat=h_lat,
+            w_lat=w_lat,
+        )
+        if is_main_process():
+            logging.info(
+                "[DMD2] Attached GAN feature capture: indices=%s h_lat=%d w_lat=%d",
+                feature_indices, h_lat, w_lat,
+            )
 
     def _load_fake_score(self) -> nn.Module:
         """Load a third copy, trainable. Weights start identical to the teacher."""
@@ -531,6 +1006,45 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
             }
         }
 
+    def _resolve_pipeline_cls(self) -> type[DMDPipeline]:
+        """Pick the DMDPipeline subclass for the current backbone.
+
+        Resolution order:
+
+        1. ``dmd2.pipeline_plugin`` in the YAML (explicit override, ``null`` for base).
+        2. Substring match on ``model.pretrained_model_name_or_path``
+           (e.g. ``Qwen-Image`` -> ``qwen_image`` plugin).
+        3. Fall back to :class:`DMDPipeline`.
+        """
+        explicit = self.cfg.get("dmd2.pipeline_plugin", None)
+        if explicit is None:
+            model_id_lc = (self.model_id or "").lower()
+            for needle, plugin_name in _PIPELINE_PLUGIN_BY_MODEL_SUBSTR:
+                if needle in model_id_lc:
+                    explicit = plugin_name
+                    break
+        if explicit in (None, "base", "DMDPipeline"):
+            return DMDPipeline
+        if explicit == "qwen_image":
+            # Imported lazily so ``base`` users don't pay the import cost.
+            from modelopt.torch.fastgen.plugins.qwen_image import QwenImageDMDPipeline
+
+            return QwenImageDMDPipeline
+        raise ValueError(
+            f"Unknown dmd2.pipeline_plugin={explicit!r}. Supported: null/'base', 'qwen_image'."
+        )
+
+    def _resolve_pipeline_kwargs(self, pipeline_cls: type[DMDPipeline]) -> dict[str, Any]:
+        """Extra kwargs to forward to the pipeline subclass constructor (plugin-specific)."""
+        if pipeline_cls.__name__ == "QwenImageDMDPipeline":
+            # Optional ``guidance`` value passed to the transformer's guidance kwarg every
+            # call. Independent of DMDConfig.guidance_scale (which drives the negative-
+            # prompt CFG path on the teacher). Leave ``None`` to skip the embedding when
+            # the transformer was built with ``guidance_embeds=false`` (default for
+            # ``Qwen/Qwen-Image``).
+            return {"guidance": self.cfg.get("dmd2.qwen_image_guidance", None)}
+        return {}
+
     def _resolve_dmd_config(self) -> DMDConfig:
         """Load the built-in fastgen recipe, then apply inline YAML overrides."""
         dmd_cfg_node = self.cfg.get("dmd2", None)
@@ -558,7 +1072,13 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
         overrides = {k: v for k, v in dmd_dict.items() if k in _DMD_CONFIG_OVERRIDE_KEYS}
         if not overrides:
             return base_config
-        return base_config.model_copy(update=overrides)
+        # ``model_copy(update=...)`` is intentionally shallow and does not
+        # validate nested updates. Re-validate the merged dict so YAML blocks
+        # such as ``sample_t_cfg:`` and ``ema:`` become their Pydantic config
+        # objects instead of raw dicts.
+        merged = base_config.model_dump()
+        merged.update(overrides)
+        return DMDConfig.model_validate(merged)
 
     def _build_fake_score_optimizer(self) -> torch.optim.Optimizer:
         """AdamW on fake_score params. LR defaults to student LR; overridable via YAML."""
@@ -584,8 +1104,22 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
     def _set_grad_requirements(self, is_student_phase: bool) -> None:
         """Toggle train/eval + requires_grad across modules for the active phase.
 
-        Mirrors FastGen's ``_setup_grad_requirements`` (``dmd2.py`` lines 67-77). Called
-        every step; cheap enough that we don't bother caching the last state.
+        Mirrors FastGen's ``_setup_grad_requirements`` (``dmd2.py`` lines 67-77),
+        INCLUDING the discriminator toggle that was previously omitted.
+
+        Why the discriminator toggle matters: ``compute_student_loss`` calls
+        ``self.discriminator(fake_feat)`` for the ``gan_gen`` term, so the
+        discriminator is in the student-phase backward graph. With its params
+        left at ``requires_grad=True``, ``total.backward()`` allocates and
+        fills ``.grad`` for every discriminator parameter — gradients which
+        the student optimizer never consumes and which the next discriminator
+        ``zero_grad(set_to_none=True)`` simply wipes. Freezing the discriminator
+        during the student phase skips that wasted memory + backward compute
+        without changing any numerics (the student still receives the GAN
+        signal through the discriminator's input-side gradient, which doesn't
+        require the discriminator's own params to be in the autograd graph).
+
+        Called every step; cheap enough that we don't bother caching the last state.
         """
         if is_student_phase:
             self.model.train()
@@ -594,6 +1128,10 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
             self._fake_score.eval()
             for p in self._fake_score.parameters():
                 p.requires_grad_(False)
+            if self._discriminator is not None:
+                self._discriminator.eval()
+                for p in self._discriminator.parameters():
+                    p.requires_grad_(False)
         else:
             self.model.eval()
             for p in self.model.parameters():
@@ -601,18 +1139,45 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
             self._fake_score.train()
             for p in self._fake_score.parameters():
                 p.requires_grad_(True)
+            if self._discriminator is not None:
+                self._discriminator.train()
+                for p in self._discriminator.parameters():
+                    p.requires_grad_(True)
 
     def _prepare_micro_batch(
         self, micro_batch: dict[str, Any]
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Extract ``(latents, noise, text_embeds)`` from an AutoModel-format batch."""
-        latents = micro_batch["video_latents"].to(self.device, dtype=self.bf16)
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        """Extract ``(latents, noise, text_embeds, negative_text_embeds)`` from a batch.
+
+        Accepts both 5D ``video_latents`` (Wan / video) and 4D ``image_latents``
+        (Qwen-Image / Flux / SD3). Mirrors the key dispatch in
+        ``nemo_automodel.components.flow_matching.pipeline.FlowMatchingPipeline.step``.
+
+        ``negative_text_embeddings`` is optional — present when the dataloader
+        supplies it (mock T2I, real cache with precomputed empty-prompt
+        embedding) and consumed by ``compute_student_loss`` only when CFG is
+        enabled (``dmd2.guidance_scale is not None``).
+        """
+        if "image_latents" in micro_batch:
+            latents = micro_batch["image_latents"].to(self.device, dtype=self.bf16)
+        elif "video_latents" in micro_batch:
+            latents = micro_batch["video_latents"].to(self.device, dtype=self.bf16)
+        else:
+            raise KeyError(
+                "Batch must contain either 'image_latents' (4D) or 'video_latents' (5D). "
+                f"Got keys: {sorted(micro_batch.keys())}."
+            )
         text_embeds = micro_batch["text_embeddings"].to(self.device, dtype=self.bf16)
         if text_embeds.ndim == 2:
             text_embeds = text_embeds.unsqueeze(0)
+        negative_text_embeds = micro_batch.get("negative_text_embeddings")
+        if negative_text_embeds is not None:
+            negative_text_embeds = negative_text_embeds.to(self.device, dtype=self.bf16)
+            if negative_text_embeds.ndim == 2:
+                negative_text_embeds = negative_text_embeds.unsqueeze(0)
         # Fresh noise per micro-batch — DMD2 samples noise independently at each loss call.
         noise = torch.randn_like(latents)
-        return latents, noise, text_embeds
+        return latents, noise, text_embeds, negative_text_embeds
 
     def _log_step(
         self,
@@ -622,12 +1187,15 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
         group_loss: float,
         grad_norm: float,
         vsd_loss: float | None,
+        disc_loss: float | None = None,
     ) -> None:
         """Log a single step. Stdout always; wandb when the parent set it up."""
         phase = "student" if is_student_phase else "fake_score"
 
         # Stdout
         suffix = f" vsd={vsd_loss:.4f}" if vsd_loss is not None else ""
+        if disc_loss is not None:
+            suffix += f" disc={disc_loss:.4f}"
         logging.info(
             "[STEP %d] phase=%s loss=%.4f grad_norm=%.4f%s lr=%.2e",
             global_step,
@@ -652,6 +1220,8 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
                 }
                 if vsd_loss is not None:
                     log_dict["student/vsd"] = vsd_loss
+                if disc_loss is not None:
+                    log_dict["discriminator/loss"] = disc_loss
                 wandb.log(log_dict, step=global_step)
         except Exception:
             # wandb not installed or not initialised — silent no-op.
@@ -660,11 +1230,43 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
     def _dmd_config_summary(self) -> str:
         """Compact one-line summary of the active DMDConfig for startup logging."""
         cfg = self._dmd_config
+        t_list = (
+            cfg.sample_t_cfg.t_list if cfg.sample_t_cfg is not None else None
+        )
         return (
             f"pred_type={cfg.pred_type} fake_score_pred_type={cfg.fake_score_pred_type} "
             f"num_train_timesteps={cfg.num_train_timesteps} "
             f"student_update_freq={cfg.student_update_freq} "
             f"student_sample_steps={cfg.student_sample_steps} "
+            f"student_sample_type={cfg.student_sample_type} "
+            f"backward_simulation={cfg.backward_simulation} "
+            f"t_list={t_list} "
             f"gan_loss_weight_gen={cfg.gan_loss_weight_gen} "
             f"guidance_scale={cfg.guidance_scale} ema={'on' if cfg.ema is not None else 'off'}"
         )
+
+    def _dmd_full_config_log(self) -> str:
+        """Full multi-line dump of every DMD2 parameter for startup tracing.
+
+        Two sections: the resolved DMDConfig (every Pydantic field, including
+        nested ``sample_t_cfg`` and ``ema`` blocks) and the recipe-side keys
+        under ``dmd2:`` that aren't DMDConfig fields (e.g. ``fake_score_lr``,
+        ``gan_feature_indices``, ``pipeline_plugin``). Combined they cover
+        every knob that ends up driving the DMD2 method at runtime.
+        """
+        cfg = self._dmd_config
+        dmd_node = self.cfg.get("dmd2", {}) or {}
+        if hasattr(dmd_node, "to_dict"):
+            dmd_node = dmd_node.to_dict()
+        else:
+            dmd_node = dict(dmd_node)
+        recipe_extras = {
+            k: v
+            for k, v in dmd_node.items()
+            if k not in _DMD_CONFIG_OVERRIDE_KEYS and k != "recipe_path"
+        }
+        combined = {
+            "DMDConfig_resolved": cfg.model_dump(),
+            "recipe_side_extras": recipe_extras,
+        }
+        return json.dumps(combined, indent=2, default=str)

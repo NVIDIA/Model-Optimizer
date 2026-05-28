@@ -202,8 +202,8 @@ class DistillationConfig(ModeloptBaseConfig):
         title="Student sampling mode",
         description=(
             "Integrator used when unrolling the student over ``student_sample_steps > 1`` steps."
-            " Not read by DMDPipeline at training time — consumed by inference samplers that"
-            " unroll the student over ``student_sample_steps > 1`` steps."
+            " Consumed by inference samplers and by DMDPipeline when"
+            " ``DMDConfig.backward_simulation`` is enabled."
         ),
     )
     num_train_timesteps: int | None = ModeloptField(
@@ -240,6 +240,16 @@ class DMDConfig(DistillationConfig):
         description=(
             "Parameterization used when training the fake score. If ``None`` falls back to"
             " :attr:`DistillationConfig.pred_type`."
+        ),
+    )
+    backward_simulation: bool = ModeloptField(
+        default=False,
+        title="Backward simulation",
+        description=(
+            "When True for multi-step students, build the selected student input by"
+            " no-grad unrolling the current student from the first schedule rung through"
+            " earlier rungs, then re-noising the generated x0 at the selected rung."
+            " When False, use FastGen's Qwen-style noised-real latent path."
         ),
     )
     gan_loss_weight_gen: float = ModeloptField(
@@ -283,6 +293,15 @@ class DMDConfig(DistillationConfig):
             raise ValueError(
                 "gan_r1_reg_weight > 0 requires gan_loss_weight_gen > 0 (the discriminator must be enabled)."
             )
+        if self.backward_simulation:
+            if self.student_sample_steps <= 1:
+                raise ValueError(
+                    "backward_simulation=True requires student_sample_steps > 1."
+                )
+            if self.sample_t_cfg.t_list is None:
+                raise ValueError(
+                    "backward_simulation=True requires sample_t_cfg.t_list to be set."
+                )
         return self
 
     @classmethod

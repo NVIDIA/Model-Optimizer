@@ -39,6 +39,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 import torch
+import torch.distributed as dist
 from torch import nn
 
 from ..ema import ExponentialMovingAverage
@@ -313,17 +314,110 @@ class DMDPipeline(DistillationPipeline):
     #  Noise / timestep sampling                                         #
     # ================================================================== #
 
+    def _build_backward_simulated_student_input(
+        self,
+        noise: torch.Tensor,
+        encoder_hidden_states: torch.Tensor | None = None,
+        **model_kwargs: Any,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Build a multi-step student input by no-grad unrolling the student.
+
+        This mirrors the SDXL DMD2 ``--backward_simulation`` idea in RF space:
+        choose a schedule rung, generate an x0 distribution by running the current
+        student through all earlier rungs, then re-noise that generated x0 at the
+        selected rung. ``student_sample_type`` controls whether intermediate
+        transitions reuse the implied ODE noise or draw fresh SDE noise.
+        """
+        cfg = self.config
+        t_list = cfg.sample_t_cfg.t_list
+        if t_list is None:
+            raise ValueError(
+                "backward_simulation=True requires DMDConfig.sample_t_cfg.t_list to be set."
+            )
+        if len(t_list) != cfg.student_sample_steps + 1:
+            raise ValueError(
+                "backward_simulation=True expects len(sample_t_cfg.t_list) == "
+                "student_sample_steps + 1, got "
+                f"{len(t_list)} vs {cfg.student_sample_steps + 1}."
+            )
+
+        batch_size = noise.shape[0]
+        device = noise.device
+        dtype = noise.dtype
+        num_train_rungs = len(t_list) - 1
+        selected_idx_tensor = torch.randint(
+            0, num_train_rungs, (1,), device=device, dtype=torch.long
+        )
+        if dist.is_available() and dist.is_initialized():
+            dist.broadcast(selected_idx_tensor, src=0)
+        selected_idx = int(selected_idx_tensor.item())
+        t_student = torch.full(
+            (batch_size,), float(t_list[selected_idx]), device=device, dtype=torch.float32
+        )
+
+        # First rung is the initial RF noise state, matching inference's
+        # ``latents = noise * schedule[0]`` and SDXL's pure-noise special case.
+        if selected_idx == 0:
+            input_student = (noise.to(torch.float64) * float(t_list[0])).to(dtype)
+            return input_student, t_student
+
+        current = (torch.randn_like(noise).to(torch.float64) * float(t_list[0])).to(dtype)
+        generated_x0: torch.Tensor | None = None
+        with torch.no_grad():
+            for step_idx in range(selected_idx):
+                t_cur = torch.full(
+                    (batch_size,), float(t_list[step_idx]), device=device, dtype=torch.float32
+                )
+                generated_x0 = self._predict_x0(
+                    self.student,
+                    current,
+                    t_cur,
+                    encoder_hidden_states=encoder_hidden_states,
+                    **model_kwargs,
+                )
+
+                if step_idx == selected_idx - 1:
+                    break
+
+                t_next = torch.full(
+                    (batch_size,),
+                    float(t_list[step_idx + 1]),
+                    device=device,
+                    dtype=torch.float32,
+                )
+                if cfg.student_sample_type == "ode":
+                    step_noise = x0_to_eps(generated_x0, current, t_cur)
+                elif cfg.student_sample_type == "sde":
+                    step_noise = torch.randn_like(noise)
+                else:
+                    raise ValueError(
+                        "student_sample_type must be one of {'ode', 'sde'}, got "
+                        f"{cfg.student_sample_type!r}."
+                    )
+                current = add_noise(generated_x0, step_noise, t_next)
+
+        if generated_x0 is None:
+            raise RuntimeError("backward simulation did not produce a generated x0.")
+        input_student = add_noise(generated_x0.detach(), noise, t_student)
+        return input_student, t_student
+
     def _build_student_input(
         self,
         latents: torch.Tensor,
         noise: torch.Tensor,
+        encoder_hidden_states: torch.Tensor | None = None,
+        **model_kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Construct ``(input_student, t_student)`` for the student forward pass.
 
         - ``student_sample_steps == 1``: Use the maximum training timestep and set the
           student's input to ``sigma(max_t) * noise = max_t * noise`` (RF).
-        - ``student_sample_steps > 1``: Sample a random intermediate timestep from
-          ``config.sample_t_cfg.t_list`` and noise the real latents up to that timestep.
+        - ``student_sample_steps > 1`` and ``backward_simulation=False``: sample a
+          random intermediate timestep from ``config.sample_t_cfg.t_list`` and
+          noise the real latents up to that timestep.
+        - ``student_sample_steps > 1`` and ``backward_simulation=True``: no-grad
+          unroll the current student to the selected rung and noise that generated
+          x0, matching the SDXL DMD2 backward-simulation training regime.
         """
         cfg = self.config
         batch_size = latents.shape[0]
@@ -342,6 +436,12 @@ class DMDPipeline(DistillationPipeline):
             if cfg.sample_t_cfg.t_list is None:
                 raise ValueError(
                     "student_sample_steps > 1 requires DMDConfig.sample_t_cfg.t_list to be set."
+                )
+            if cfg.backward_simulation:
+                return self._build_backward_simulated_student_input(
+                    noise,
+                    encoder_hidden_states=encoder_hidden_states,
+                    **model_kwargs,
                 )
             t_student = sample_from_t_list(
                 batch_size,
@@ -402,7 +502,12 @@ class DMDPipeline(DistillationPipeline):
         gan_enabled = self.discriminator is not None and cfg.gan_loss_weight_gen > 0
 
         # 1. Student input.
-        input_student, t_student = self._build_student_input(latents, noise)
+        input_student, t_student = self._build_student_input(
+            latents,
+            noise,
+            encoder_hidden_states=encoder_hidden_states,
+            **model_kwargs,
+        )
 
         # 2. Student forward -> x0.
         gen_data = self._predict_x0(
@@ -513,7 +618,12 @@ class DMDPipeline(DistillationPipeline):
         device = latents.device
 
         # 1. Build student input.
-        input_student, t_student = self._build_student_input(latents, noise)
+        input_student, t_student = self._build_student_input(
+            latents,
+            noise,
+            encoder_hidden_states=encoder_hidden_states,
+            **model_kwargs,
+        )
 
         # 2. Generate data from student (no grad).
         with torch.no_grad():
@@ -591,7 +701,12 @@ class DMDPipeline(DistillationPipeline):
         device = latents.device
 
         # 1. Build student input and generate gen_data (no grad).
-        input_student, t_student = self._build_student_input(latents, noise)
+        input_student, t_student = self._build_student_input(
+            latents,
+            noise,
+            encoder_hidden_states=encoder_hidden_states,
+            **model_kwargs,
+        )
         with torch.no_grad():
             gen_data = self._predict_x0(
                 self.student,

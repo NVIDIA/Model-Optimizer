@@ -25,3 +25,6 @@ from modelopt.torch.utils import import_plugin
 
 with import_plugin("wan22"):
     from .wan22 import *
+
+with import_plugin("qwen_image"):
+    from .qwen_image import *
