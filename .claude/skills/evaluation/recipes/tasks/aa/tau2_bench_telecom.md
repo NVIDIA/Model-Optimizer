@@ -13,6 +13,13 @@ across comparable runs.
 For parallelism, we have to throttle to a smaller cap due to the test may be throttled by
 user and judger API rate limit. If frequent 429 errors are hit, the reported scores could be much lower.
 
+The `parallelism:` field is left as `???` — the right value depends on the
+judge and user-simulator endpoints' rate limits, which vary per deployment.
+Start with a conservative canary value (e.g. 32–128), watch the logs for 429
+errors from the judger/user endpoints, and ramp up if stable. The hard
+upper bound is 512. After choosing a value, recompute the deployment's
+`--max-num-seqs` per the rule in SKILL.md Step 3.
+
 ## YAML Fragment
 
 Use this inside the top-level `evaluation.tasks` list:
@@ -25,7 +32,7 @@ Use this inside the top-level `evaluation.tasks` list:
   nemo_evaluator_config:
     config:
       params:
-        parallelism: capped at 512 or maybe smaller
+        parallelism: ???   # required: see body above; cap 512; recompute --max-num-seqs after setting
         extra:
           cache:
             cache_dir: /results/native_cache
