@@ -126,12 +126,6 @@ Rewrite the build-config output into one `command:` field. Move all parallelism 
 
 ```yaml
 deployment:
-  env_vars:
-    HF_TOKEN: host:HF_TOKEN
-  checkpoint_path:
-  hf_model_handle: <org>/<model>
-  served_model_name: <served_name>
-  image: vllm/vllm-openai:v0.19.1  # default; bump if recipe requires higher (see below)
   command: >-
     vllm serve /checkpoint
     --host 0.0.0.0

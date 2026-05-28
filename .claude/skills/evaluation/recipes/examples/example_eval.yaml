@@ -53,7 +53,7 @@ deployment:
   checkpoint_path: ???
   hf_model_handle:
   served_model_name: ???
-  image: vllm/vllm-openai:latest
+  image: vllm/vllm-openai:v0.19.1
   # For MoE models, add `--enable-expert-parallel` to the command.
   # For models with custom code, add `--trust-remote-code` to the command.
   # After filling in evaluation `parallelism` values (top-level + per-task),
