@@ -147,7 +147,7 @@ class SPEEDBench(Dataset):
     ):
         if not_installed:
             raise ImportError(
-                "Additional packages are required to use SPEED-Bench. Please run `pip install -r requirements_speed.txt`"
+                "Additional packages are required to use SPEED-Bench. Please run `pip install -r requirements.txt`"
             )
         self.data: list[Request] = []
         self.num_samples = num_samples
