@@ -33,6 +33,9 @@ MODEL_NAME_TO_TYPE = {
     "Qwen3Next": "qwen3next",
     "QWen": "qwen",
     "RecurrentGemma": "recurrentgemma",
+    # DiffusionGemma must come before "Gemma" — get_model_type substring-matches
+    # in order, and "gemma" is a substring of "diffusiongemma".
+    "DiffusionGemma": "diffusion_gemma",
     "Gemma3": "gemma3",
     "Gemma2": "gemma2",
     "Gemma": "gemma",

@@ -1231,7 +1231,10 @@ def create_forward_loop(
 
 
 def model_type_is_enc_dec(model):
-    enc_dec_model_list = ["t5", "bart", "whisper"]
+    # Substring match against `model.__class__.__name__.lower()` — entries are
+    # the lowercased class-name form (no underscores). Calibration then uses
+    # `model.generate` to run the full denoising loop.
+    enc_dec_model_list = ["t5", "bart", "whisper", "diffusiongemma"]
     return any(model_name in model.__class__.__name__.lower() for model_name in enc_dec_model_list)
 
 
