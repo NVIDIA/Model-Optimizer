@@ -56,6 +56,7 @@ Changelog
 - In Megatron-Core only do EP amax sync for routed expert weights if ``sync_expert_weight_amax=True``. Previously EP amax sync would sync routed expert weights across EP ranks even when ``sync_expert_weight_amax`` was False.
 - Fix Megatron-Core HF importer to load fused ``TELayerNormColumnParallelLinear.layer_norm_weight`` from HF for GPT-family models (Qwen3 etc.) under ``--export-default-te-spec``. Importer now prefers per-context keys ``fused_input_layernorm`` / ``fused_pre_mlp_layernorm`` (fallback ``fused_norm`` for Nemotron-H backward compatibility); ``mcore_qwen.py`` provides the new rules. Without this fix, post-prune MMLU sat at chance.
 - Fix ONNX AutoCast ``keep_io_types=True`` sanity-check failure (``Unexpected type in I/O tensor ...``) when a network input/output is an empty tensor (a dimension of size 0). Such tensors were "fake-cast" (retyped in place) to the low precision type; because the value-info map aliases the ``graph.input``/``graph.output`` ``ValueInfoProto``, this silently changed the model's I/O type. AutoCast now inserts a real ``Cast`` for protected I/O tensors instead.
+- Fix INT8 entropy calibration of fp16 ONNX models raising ``ValueError: Too many bins for data range`` on numpy >= 2.0. ``_collect_value`` in ``modelopt.onnx.quantization.ort_patching`` now casts the histogram range endpoints to Python float so bin edges are computed in float64, instead of inheriting the fp16 dtype of an activation tensor with a small range (which collapsed the 128-bin linspace under NEP-50 promotion).
 
 **Deprecations**
 
