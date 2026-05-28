@@ -142,9 +142,7 @@ class LanguageDataCollator:
         """
         if not isinstance(tokenizer, transformers.PreTrainedTokenizerBase):
             raise ValueError(
-                "The tokenizer must be a transformers.PreTrainedTokenizerBase but got {}".format(
-                    type(tokenizer)
-                )
+                f"The tokenizer must be a transformers.PreTrainedTokenizerBase but got {type(tokenizer)}"
             )
         self.tokenizer = tokenizer
         self.train_len = train_len
@@ -278,7 +276,7 @@ class LanguageDataCollator:
 
         for example in examples:
             if not isinstance(example, dict):
-                raise ValueError("The sample must be a Dict but got {}".format(type(example)))
+                raise ValueError(f"The sample must be a Dict but got {type(example)}")
             text = example.get(self.json_key, None)
             if isinstance(text, str):
                 batch.append(text)

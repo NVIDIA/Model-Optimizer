@@ -47,9 +47,6 @@ class TritonSkipSoftmaxMethod(SparseAttentionMethod):
         super().__init__()
         method_config = method_config or {}
         self.skip_softmax_threshold = method_config.get("skip_softmax_threshold", 0.1)
-        self.skip_softmax_raw_threshold: float | None = method_config.get(
-            "skip_softmax_raw_threshold", None
-        )
         # Calibration state
         self._threshold_trials: list[float] | None = None
         # Runtime sparsity measurement
@@ -94,17 +91,12 @@ class TritonSkipSoftmaxMethod(SparseAttentionMethod):
         if self._measure_sparsity:
             backend_kwargs["measure_sparsity"] = True
 
-        # Priority: raw_threshold > scale_factor (calibrated) > static threshold
-        if self.skip_softmax_raw_threshold is not None:
-            self._set_triton_backends(
-                raw_threshold=self.skip_softmax_raw_threshold, **backend_kwargs
-            )
+        # Priority: calibrated dynamic threshold > static threshold.
+        scale_factor = self._get_scale_factor()
+        if scale_factor is not None:
+            self._set_triton_backends(scale_factor=scale_factor, **backend_kwargs)
         else:
-            scale_factor = self._get_scale_factor()
-            if scale_factor is not None:
-                self._set_triton_backends(scale_factor=scale_factor, **backend_kwargs)
-            else:
-                self._set_triton_backends(threshold=self.skip_softmax_threshold, **backend_kwargs)
+            self._set_triton_backends(threshold=self.skip_softmax_threshold, **backend_kwargs)
         with self._get_diffusers_backend_context():
             try:
                 yield

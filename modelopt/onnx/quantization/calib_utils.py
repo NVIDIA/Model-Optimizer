@@ -16,7 +16,7 @@
 """Provides basic calibration utils."""
 
 import struct
-from typing import Union
+from typing import TypeAlias
 
 import numpy as np
 import onnx
@@ -30,7 +30,7 @@ from modelopt.onnx.utils import (
     parse_shapes_spec,
 )
 
-CalibrationDataType = Union[np.ndarray, dict[str, np.ndarray]]  # noqa: UP007
+CalibrationDataType: TypeAlias = np.ndarray | dict[str, np.ndarray]
 
 
 class CalibrationDataProvider(CalibrationDataReader):

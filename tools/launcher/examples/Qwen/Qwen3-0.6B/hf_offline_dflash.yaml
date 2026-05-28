@@ -1,0 +1,59 @@
+# DFlash offline speculative decoding training for Qwen3-0.6B.
+#
+# Two-task pipeline: dump base-model hidden states once, then train DFlash on
+# the dump. Compare with hf_online_dflash.yaml, which streams the base model
+# forward at training time instead.
+#
+# Lightweight single-GPU regression. No external data dependencies — uses the
+# packaged synthetic_conversations_1k.jsonl.
+#
+# Reference: "DFlash: Block Diffusion for Flash Speculative Decoding" (arXiv:2602.06036)
+#
+# Usage:
+#   uv run launch.py --yaml examples/Qwen/Qwen3-0.6B/hf_offline_dflash.yaml --yes
+#   uv run launch.py --yaml examples/Qwen/Qwen3-0.6B/hf_offline_dflash.yaml hf_local=/mnt/hf-local --yes
+
+job_name: Qwen3-0.6B_DFlash_offline_regression
+pipeline:
+  global_vars:
+    hf_model: /hf-local/Qwen/Qwen3-0.6B
+
+  # Dump base-model hidden states via HuggingFace forward.
+  task_0:
+    script: common/eagle3/dump_offline_data_hf.sh
+    args:
+      - --input-data modules/Model-Optimizer/examples/dataset/synthetic_conversations_1k.jsonl
+      - --output-dir /scratchspace/dflash_qwen3_0.6b_hidden_states
+      # Must match the draft model's num_hidden_layers (recipe default: 5).
+      - --aux-layers dflash
+      - --answer-only-loss
+      - --chat-template examples/Qwen/Qwen3-0.6B/chat_template_train.jinja
+      - --debug-max-num-conversations 200
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 1
+
+  # Train DFlash on the dumped hidden states.
+  task_1:
+    script: common/specdec/dflash_online_training.sh
+    args:
+      - --config modules/Model-Optimizer/modelopt_recipes/general/speculative_decoding/dflash.yaml
+      - model.model_name_or_path=<<global_vars.hf_model>>
+      - data.offline_data_path=/scratchspace/dflash_qwen3_0.6b_hidden_states
+      - data.chat_template=examples/Qwen/Qwen3-0.6B/chat_template_train.jinja
+      - training.output_dir=/scratchspace/dflash_qwen3_0.6b_offline
+      - training.num_train_epochs=2
+      - training.training_seq_len=512
+      - training.logging_steps=50
+      - dflash.dflash_mask_token_id=151669
+    environment:
+      - MAX_FINAL_LOSS: "5.0"
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 1

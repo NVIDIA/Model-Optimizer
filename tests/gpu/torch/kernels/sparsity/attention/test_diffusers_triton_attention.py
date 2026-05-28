@@ -59,8 +59,8 @@ class TestDiffusersTritonAttention:
         out = diffusers_mod._diffusers_triton_attention(q, k, v)
         assert out.shape == q.shape
 
-    def test_raw_threshold_path(self):
-        diffusers_mod.set_triton_skip_softmax_config(raw_threshold=-10.0)
+    def test_small_threshold_path(self):
+        diffusers_mod.set_triton_skip_softmax_config(threshold=0.0009765625)
         q, k, v = self._make_qkv()
         out = diffusers_mod._diffusers_triton_attention(q, k, v)
         assert out.shape == q.shape
@@ -120,8 +120,8 @@ class TestLTXTritonAttention:
         assert out.shape == q.shape
         assert not torch.isnan(out).any()
 
-    def test_inference_with_raw_threshold(self):
-        ltx_mod.set_ltx_triton_context(active=True, raw_threshold=-10.0)
+    def test_inference_with_small_threshold(self):
+        ltx_mod.set_ltx_triton_context(active=True, threshold=0.0009765625)
         q, k, v = self._make_qkv()
         out = ltx_mod._ltx_triton_attention(q, k, v, heads=4)
         assert out.shape == q.shape

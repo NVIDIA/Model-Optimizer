@@ -28,7 +28,7 @@ pipeline:
       calib_dataset: abisee/cnn_dailymail
       calib_size: 32
       mmlu_dataset: cais/mmlu
-      mmlu_lower_bound: 0.68
+      mmlu_lower_bound: 0.75
       hf_local: /hf-local/
     slurm_config:
       _factory_: "slurm_factory"
