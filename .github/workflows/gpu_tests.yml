@@ -57,9 +57,11 @@ jobs:
     timeout-minutes: ${{ matrix.timeout }}
     container:
       image: ${{ matrix.container_image }}
+      # NGC creds only for ``nvcr.io/*`` images; ``docker.io/*`` is anonymous-pull.
+      # Empty username/password short-circuits the runner's ``docker login`` step.
       credentials:
-        username: $oauthtoken
-        password: ${{ secrets.NGC_API_KEY }}
+        username: ${{ startsWith(matrix.container_image, 'nvcr.io/') && '$oauthtoken' || '' }}
+        password: ${{ startsWith(matrix.container_image, 'nvcr.io/') && secrets.NGC_API_KEY || '' }}
       env:
         GIT_DEPTH: 1000 # For correct version
         PIP_CONSTRAINT: "" # Disable pip constraint for upgrading packages
