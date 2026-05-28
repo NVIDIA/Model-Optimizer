@@ -528,7 +528,7 @@ def mse_calibrate(
                         quant_func=partial(_mse_quant_func, quantizer=module),
                     )
 
-                if not fp8_scale_sweep:
+                else:
                     # Create MSE calibrator with quant_func
                     module._calibrator = MseCalibrator(
                         amax=initial_amax,
