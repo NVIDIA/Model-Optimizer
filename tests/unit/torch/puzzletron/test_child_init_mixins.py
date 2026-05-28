@@ -96,6 +96,8 @@ def test_resolve_pruning_mixin_accepts_names_instances_and_lists():
         _MAPPED_MIXIN,
         existing,
     ]
+
+
 def test_update_model_config_treats_null_overrides_as_leave_unchanged():
     config = SimpleNamespace(
         num_hidden_layers=1,

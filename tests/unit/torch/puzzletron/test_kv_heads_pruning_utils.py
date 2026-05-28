@@ -21,11 +21,7 @@ from modelopt.torch.puzzletron.pruning.kv_heads_pruning_mixin import (
     KVHeadsLayerDescriptor,
     KVHeadsPruningMixIn,
 )
-from modelopt.torch.puzzletron.pruning.pruning_utils import (
-    GQAInitMode,
-    LinearInitMode,
-    MlpInitMode,
-)
+from modelopt.torch.puzzletron.pruning.pruning_utils import GQAInitMode, LinearInitMode, MlpInitMode
 from modelopt.torch.puzzletron.tools.bypassed_training.child_init import _process_single_layer
 
 ATTN_PREFIX = "model.layers.0.self_attn"

@@ -24,6 +24,7 @@ from modelopt.torch.puzzletron.sewing_kit.utils import (
 )
 from modelopt.torch.puzzletron.utils.parsing import format_stitched_losses
 
+
 def test_vectorwise_normalized_mse_loss_matches_batched_last_dim():
     input_ = torch.arange(24, dtype=torch.float32).reshape(2, 3, 4)
     target = input_ + 1.0
