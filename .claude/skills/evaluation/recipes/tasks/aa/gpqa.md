@@ -2,7 +2,7 @@
 
 ## Task Details
 
-- Reference: <https://docs.nvidia.com/nemo/evaluator/latest/evaluation/benchmarks/catalog/all/harnesses/nemo_skills.html#nemo-skills-ns-gpqa>
+- Reference: <https://docs.nvidia.com/nemo/evaluator/latest/evaluation/benchmarks/catalog/all/harnesses/simple_evals.html#simple-evals-gpqa-diamond-aa-v3>
 
 ## Params
 
@@ -11,18 +11,17 @@
 Use this inside the top-level `evaluation.tasks` list:
 
 ```yaml
-- name: ns_gpqa
-  container: nvcr.io/nvidia/eval-factory/nemo-skills:26.03
+- name: gpqa_diamond_aa_v3
+  container: nvcr.io/nvidia/eval-factory/simple-evals:26.03
   nemo_evaluator_config:
     config:
       params:
         extra:
-          args: ++prompt_config=eval/aai/mcq-4choices
-          num_repeats: 16
+          n_samples: 16
 ```
 
 ## Score Extraction from mlflow
 
-Result (0-100): `gpqa_pass_at_1_avg-of-N_symbolic_correct`
+Result (0-100): `gpqa_diamond_score_micro_avg_of_N`
 
-N is the repeat count.  If the repeat count is unknown, use the highest available `avg-of-N`.
+N is the repeat count.  If the repeat count is unknown, use the highest available `avg_of_N`.
