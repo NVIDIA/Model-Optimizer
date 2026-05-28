@@ -316,6 +316,9 @@ def _build_nvfp4_experts_cfg() -> dict:
             # Belt-and-suspenders: shared expert lives under the same Expert
             # class; make sure it's disabled even if patterns above matched.
             {"quantizer_name": "*shared_experts*", "enable": False},
+            # MTP is a speculative decoding block. Leave it in the source
+            # format unless a dedicated MTP quantization path is added.
+            {"quantizer_name": "*mtp.*", "enable": False},
         ],
         "algorithm": "max",
     }
@@ -411,7 +414,7 @@ def save_amax_and_quant_config(model, output_path: str):
     # exactly which weights to replace with NVFP4 packed + scales.
     quantized_layers: set[str] = set()
     for name, module in model.named_modules():
-        if isinstance(module, TensorQuantizer) and expert_re.search(name):
+        if isinstance(module, TensorQuantizer) and module.is_enabled and expert_re.search(name):
             # Strip trailing ``._weight_quantizer`` / ``._input_quantizer`` and
             # the ``w1_/w2_/w3_`` prefix to get the DS-native Linear path.
             # e.g. ``layers.0.ffn.experts.5.w1_weight_quantizer`` →

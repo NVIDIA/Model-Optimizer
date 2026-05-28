@@ -47,6 +47,8 @@ Outputs:
   * ``config.json`` keeps the source FP8 quantization metadata and adds
     ``"moe_quant_algo": "NVFP4"`` for DeepSeek-V4 loaders.
   * An ``hf_quant_config.json`` manifest listing the NVFP4-quantized layers.
+    MTP expert weights are left in the source format by default; pass
+    ``--include_mtp_experts`` to convert them too.
   * Ancillary files (``tokenizer.json``, ``LICENSE``, ``encoding/``,
     ``inference/``, ...) are linked from the source when possible, with a
     copy fallback across filesystems.
@@ -88,7 +90,7 @@ from safetensors.torch import save_file
 
 from modelopt.torch.quantization.qtensor import MXFP4QTensor, NVFP4QTensor
 
-# Routed-expert weights in both regular MoE layers and the MTP block(s).
+# Routed-expert weights in regular MoE layers and optionally the MTP block(s).
 _EXPERT_WEIGHT_RE = re.compile(r"^(?:mtp\.\d+|layers\.\d+)\.ffn\.experts\.\d+\.w[123]\.weight$")
 _EXPERT_PROJ_RE = re.compile(r"^(?P<experts>(?:mtp\.\d+|layers\.\d+)\.ffn\.experts)\.\d+\.w[123]$")
 
@@ -270,6 +272,7 @@ def convert_shard(
     input_fallback: dict[str, torch.Tensor],
     device: str,
     stats: dict[str, int],
+    include_mtp_experts: bool,
 ) -> tuple[list[str], list[str]]:
     """Rewrite one HF-style shard and return index deltas."""
     out: dict[str, torch.Tensor] = {}
@@ -278,7 +281,12 @@ def convert_shard(
 
     with safe_open(str(src_shard), framework="pt", device="cpu") as f:
         all_keys = list(f.keys())
-        expert_weight_keys = [k for k in all_keys if _EXPERT_WEIGHT_RE.match(k)]
+        expert_weight_keys = [
+            k
+            for k in all_keys
+            if _EXPERT_WEIGHT_RE.match(k) and (include_mtp_experts or not k.startswith("mtp."))
+        ]
+        expert_weight_key_set = set(expert_weight_keys)
         w13_weight_amax, w13_synth_paths = _build_w13_weight_amax_overrides(
             f, expert_weight_keys, amax, device
         )
@@ -293,7 +301,7 @@ def convert_shard(
                 removed.append(key)
                 continue
 
-            if _EXPERT_WEIGHT_RE.match(key):
+            if key in expert_weight_key_set:
                 expert_path = key[: -len(".weight")]
                 scale_key = expert_path + ".scale"
                 assert scale_key in all_keys, f"no paired scale for {key}"
@@ -446,6 +454,7 @@ def _write_index_and_manifest(
     src_index: dict,
     shard_updates: dict[str, tuple[list[str], list[str]]],
     quantized_layer_names: list[str],
+    include_mtp_experts: bool,
 ) -> None:
     """Update ``model.safetensors.index.json`` with dropped ``.scale`` keys
     and added NVFP4 scale keys. Write the modelopt-style manifest."""
@@ -489,6 +498,7 @@ def _write_index_and_manifest(
                 "*.e_proj.*",
                 "*.enorm.*",
                 "*.hnorm.*",
+                *([] if include_mtp_experts else ["mtp.*"]),
                 "mtp.*.norm.*",
                 "norm.weight",
             ],
@@ -559,6 +569,11 @@ def main():
         help="diagnostic only — labels hash-routed layers in stats",
     )
     p.add_argument(
+        "--include_mtp_experts",
+        action="store_true",
+        help="also convert MTP routed-expert weights to NVFP4; default leaves MTP in source format",
+    )
+    p.add_argument(
         "--overwrite",
         action="store_true",
         help="replace an existing non-empty output checkpoint directory",
@@ -588,7 +603,15 @@ def main():
     for idx, src in enumerate(shards):
         dst = args.output_ckpt / src.name
         _log(f"[shard {idx + 1}/{len(shards)}] {src.name}")
-        added, removed = convert_shard(src, dst, amax, input_fallback, args.device, stats)
+        added, removed = convert_shard(
+            src,
+            dst,
+            amax,
+            input_fallback,
+            args.device,
+            stats,
+            include_mtp_experts=args.include_mtp_experts,
+        )
         shard_updates[src.name] = (added, removed)
 
     stats.pop("_n_hash_layers", None)
@@ -602,7 +625,13 @@ def main():
             if a.endswith(".input_scale"):
                 quantized.add(_routed_experts_prefix(a[: -len(".input_scale")]))
 
-    _write_index_and_manifest(args.output_ckpt, src_index, shard_updates, sorted(quantized))
+    _write_index_and_manifest(
+        args.output_ckpt,
+        src_index,
+        shard_updates,
+        sorted(quantized),
+        include_mtp_experts=args.include_mtp_experts,
+    )
     _log("[config] rewriting config.json (marking moe_quant_algo=NVFP4)")
     _rewrite_config_json(args.source_ckpt, args.output_ckpt)
     _log(f"[aux] linking ancillary files from {args.source_ckpt}")
