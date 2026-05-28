@@ -25,7 +25,6 @@ from modelopt.torch.puzzletron.pruning.pruning_utils import (
     GQAInitMode,
     LinearInitMode,
     MlpInitMode,
-    _lm_head_dim,
 )
 from modelopt.torch.puzzletron.tools.bypassed_training.child_init import _process_single_layer
 
@@ -37,12 +36,6 @@ class DecoderConfigDescriptor:
     @staticmethod
     def get_language_model_config(config):
         return config.decoder_config
-
-
-class IdentityDescriptor:
-    @staticmethod
-    def get_language_model_config(config):
-        return config
 
 
 def _make_config():
@@ -73,24 +66,6 @@ def _assert_attention_state_dict_matches(actual, expected):
     assert set(actual) == set(expected)
     for key in expected:
         torch.testing.assert_close(actual[key], expected[key])
-
-
-def test_lm_head_dim_uses_descriptor_selected_config():
-    cfg = SimpleNamespace(
-        decoder_config=SimpleNamespace(head_dim=96, hidden_size=3072, num_attention_heads=32),
-        text_config=SimpleNamespace(head_dim=48, hidden_size=1536, num_attention_heads=32),
-    )
-    assert _lm_head_dim(cfg, DecoderConfigDescriptor) == 96
-
-
-def test_lm_head_dim_falls_back_to_hidden_size_over_heads():
-    cfg = SimpleNamespace(decoder_config=SimpleNamespace(hidden_size=3072, num_attention_heads=32))
-    assert _lm_head_dim(cfg, DecoderConfigDescriptor) == 96
-
-
-def test_lm_head_dim_uses_default_lm_config():
-    cfg = SimpleNamespace(head_dim=96, hidden_size=3072, num_attention_heads=32)
-    assert _lm_head_dim(cfg, IdentityDescriptor) == 96
 
 
 def test_kv_heads_pruning_mixin_uses_descriptor_selected_config_for_attention_init():

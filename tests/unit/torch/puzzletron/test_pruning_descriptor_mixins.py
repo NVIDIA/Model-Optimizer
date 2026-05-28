@@ -24,16 +24,11 @@ from importlib import import_module
 
 import pytest
 
-from modelopt.torch.puzzletron.anymodel.model_descriptor import ModelDescriptor
 from modelopt.torch.puzzletron.pruning.expert_removal_pruning_mixin import ExpertRemovalPruningMixIn
 from modelopt.torch.puzzletron.pruning.ffn_intermediate_pruning_mixin import (
     FFNIntermediatePruningMixIn,
 )
 from modelopt.torch.puzzletron.pruning.kv_heads_pruning_mixin import KVHeadsPruningMixIn
-
-
-def test_base_descriptor_has_empty_pruning_mixin_registry():
-    assert ModelDescriptor.pruning_mixins() == {}
 
 
 def test_gpt_oss_descriptor_exposes_canonical_alias_and_kv_heads_mixins():

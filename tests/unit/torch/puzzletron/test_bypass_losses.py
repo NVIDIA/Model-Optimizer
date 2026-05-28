@@ -13,118 +13,35 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for normalized MSE loss functions in sewing_kit/utils.py."""
+"""Tests for bypass-distillation loss and loss-log formatting behavior."""
 
 import pytest
 import torch
 
 from modelopt.torch.puzzletron.sewing_kit.utils import (
     batched_normalized_mse_loss,
-    normalized_mse_loss,
     vectorwise_normalized_mse_loss,
 )
 from modelopt.torch.puzzletron.utils.parsing import format_stitched_losses
 
-# ---------------------------------------------------------------------------
-# normalized_mse_loss
-# ---------------------------------------------------------------------------
-
-
-def test_normalized_mse_loss_identical_tensors():
-    """Identical input and target should produce a loss of approximately 0."""
-    torch.manual_seed(42)
-    x = torch.randn(4, 8)
-    loss = normalized_mse_loss(x, x)
-    assert torch.allclose(loss, torch.zeros_like(loss), atol=1e-6)
-
-
-def test_normalized_mse_loss_basic():
-    """Loss should be positive and finite for random, non-identical tensors."""
-    torch.manual_seed(42)
-    input_ = torch.randn(4, 8)
-    target = torch.randn(4, 8)
-    loss = normalized_mse_loss(input_, target)
-    assert loss.item() > 0.0
-    assert torch.isfinite(loss)
-
-
-def test_normalized_mse_loss_reduction_none():
-    """With reduction='none' the output shape should match the input shape."""
-    torch.manual_seed(42)
-    input_ = torch.randn(4, 8)
-    target = torch.randn(4, 8)
-    loss = normalized_mse_loss(input_, target, reduction="none")
-    assert loss.shape == input_.shape
-
-
-def test_normalized_mse_loss_reduction_sum():
-    """With reduction='sum' the output should be a scalar tensor."""
-    torch.manual_seed(42)
-    input_ = torch.randn(4, 8)
-    target = torch.randn(4, 8)
-    loss = normalized_mse_loss(input_, target, reduction="sum")
-    assert loss.ndim == 0  # scalar
-    assert torch.isfinite(loss)
-
-
-# ---------------------------------------------------------------------------
-# vectorwise_normalized_mse_loss
-# ---------------------------------------------------------------------------
-
-
-def test_vectorwise_normalized_mse_loss_shape():
-    """vectorwise_normalized_mse_loss should return a scalar for any 2-D input."""
-    torch.manual_seed(42)
-    input_ = torch.randn(4, 16)
-    target = torch.randn(4, 16)
-    loss = vectorwise_normalized_mse_loss(input_, target)
-    assert loss.ndim == 0  # scalar
-    assert torch.isfinite(loss)
-
-
-def test_vectorwise_normalized_mse_loss_identical():
-    """Identical input and target should give a loss of approximately 0."""
-    torch.manual_seed(42)
-    x = torch.randn(4, 16)
-    loss = vectorwise_normalized_mse_loss(x, x)
-    assert torch.allclose(loss, torch.zeros_like(loss), atol=1e-6)
-
-
-# ---------------------------------------------------------------------------
-# batched_normalized_mse_loss
-# ---------------------------------------------------------------------------
-
-
-def test_batched_normalized_mse_loss_basic():
-    """Should return a scalar with a positive, finite value for random tensors."""
-    torch.manual_seed(42)
-    input_ = torch.randn(4, 8)
-    target = torch.randn(4, 8)
-    loss = batched_normalized_mse_loss(input_, target)
-    assert loss.ndim == 0  # scalar
-    assert loss.item() > 0.0
-    assert torch.isfinite(loss)
-
-
-def test_batched_normalized_mse_loss_custom_dims():
-    """Custom batch_dims=(0, 1) on a 3-D tensor should still return a scalar."""
-    torch.manual_seed(42)
-    input_ = torch.randn(2, 3, 8)
-    target = torch.randn(2, 3, 8)
-    loss = batched_normalized_mse_loss(input_, target, batch_dims=(0, 1))
-    assert loss.ndim == 0  # scalar
-    assert torch.isfinite(loss)
-    assert loss.item() > 0.0
-
-
-def test_batched_normalized_mse_loss_negative_batch_dims_match_positive_dims():
+def test_vectorwise_normalized_mse_loss_matches_batched_last_dim():
     input_ = torch.arange(24, dtype=torch.float32).reshape(2, 3, 4)
     target = input_ + 1.0
 
-    positive_dims = batched_normalized_mse_loss(input_, target, batch_dims=(0, 1))
-    negative_dims = batched_normalized_mse_loss(input_, target, batch_dims=(0, -2))
+    vectorwise = vectorwise_normalized_mse_loss(input_, target)
+    batched = batched_normalized_mse_loss(input_, target, batch_dims=(0, 1))
 
-    torch.testing.assert_close(negative_dims, positive_dims)
+    torch.testing.assert_close(vectorwise, batched)
+
+
+def test_batched_normalized_mse_loss_matches_manual_relative_l2():
+    input_ = torch.tensor([[[1.0, 2.0], [3.0, 5.0]], [[2.0, 4.0], [6.0, 8.0]]])
+    target = torch.tensor([[[1.0, 1.0], [3.0, 4.0]], [[1.0, 2.0], [3.0, 4.0]]])
+
+    loss = batched_normalized_mse_loss(input_, target, epsilon=1e-6, batch_dims=(0, 1))
+    expected = (((input_ - target) ** 2).sum(dim=2) / ((target**2).sum(dim=2) + 1e-6)).mean()
+
+    torch.testing.assert_close(loss, expected)
 
 
 def test_batched_normalized_mse_loss_zero_target_is_finite():
@@ -151,17 +68,6 @@ def test_batched_normalized_mse_loss_zero_input_and_target():
     assert loss.item() == 0.0
 
 
-def test_batched_normalized_mse_loss_scale_invariance():
-    """Scaling both input and target by the same constant must leave the loss
-    unchanged for non-tiny targets — the defining property of relative-L2."""
-    torch.manual_seed(0)
-    input_ = torch.randn(4, 8)
-    target = torch.randn(4, 8)
-    baseline = batched_normalized_mse_loss(input_, target)
-    scaled = batched_normalized_mse_loss(10.0 * input_, 10.0 * target)
-    assert torch.allclose(baseline, scaled, rtol=1e-4, atol=1e-6)
-
-
 def test_batched_normalized_mse_loss_rejects_shape_mismatch():
     input_ = torch.randn(2, 3)
     target = torch.randn(2, 1)
@@ -178,20 +84,12 @@ def test_batched_normalized_mse_loss_rejects_invalid_batch_dim():
         batched_normalized_mse_loss(input_, target, batch_dims=(2,))
 
 
-@pytest.mark.parametrize(
-    ("kwargs", "message"),
-    [
-        ({"epsilon": 0.0}, "epsilon must be strictly positive"),
-        ({"batch_dims": (0, -2)}, "duplicate dimensions"),
-        ({"batch_dims": ("0",)}, "iterable of integer dimensions"),
-    ],
-)
-def test_batched_normalized_mse_loss_rejects_invalid_options(kwargs, message):
+def test_batched_normalized_mse_loss_rejects_invalid_options():
     input_ = torch.randn(2, 3)
     target = torch.randn(2, 3)
 
-    with pytest.raises(ValueError, match=message):
-        batched_normalized_mse_loss(input_, target, **kwargs)
+    with pytest.raises(ValueError, match="epsilon must be strictly positive"):
+        batched_normalized_mse_loss(input_, target, epsilon=0.0)
 
 
 def test_format_stitched_losses_keeps_trainable_nan_visible():

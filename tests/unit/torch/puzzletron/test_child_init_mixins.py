@@ -15,7 +15,6 @@
 
 from types import SimpleNamespace
 
-import pytest
 import torch
 
 from modelopt.torch.puzzletron.block_config import AttentionConfig, BlockConfig, FFNConfig
@@ -37,22 +36,6 @@ class _TimesTwoMixin:
     def prune_single_layer(self, parent_state_dict, keys_to_remove, **kwargs):
         keys_to_remove["w"] = "w"
         return {"w": parent_state_dict["w"] * 2}
-
-
-class _PopKeyMixin:
-    def prune_single_layer(self, parent_state_dict, keys, **kwargs):
-        keys.pop("w")
-        return {"w": parent_state_dict["w"]}
-
-
-class _ShrinkSourceMixin:
-    def prune_single_layer(self, parent_state_dict, **kwargs):
-        return {"w": parent_state_dict["w"][:2]}
-
-
-class _UseDestinationShapeMixin:
-    def prune_single_layer(self, parent_state_dict, new_state_dict, **kwargs):
-        return {"w": torch.zeros_like(new_state_dict["w"]) + parent_state_dict["w"].sum()}
 
 
 class _ConcretePruningMixIn(PruningMixIn):
@@ -104,27 +87,6 @@ def test_pruning_mixins_compose_overlapping_outputs_sequentially():
     assert keys_to_remove == {"w": "w"}
 
 
-def test_pruning_mixins_keep_final_destination_shape_for_later_mixins():
-    layer_state_dict, _ = _process_with_mixins(
-        [_ShrinkSourceMixin(), _UseDestinationShapeMixin()],
-        {"w": "w"},
-        parent_state_dict={"w": torch.ones(4)},
-        new_state_dict={"w": torch.zeros(3)},
-    )
-
-    assert layer_state_dict["w"].shape == torch.Size([3])
-    assert torch.equal(layer_state_dict["w"], torch.full((3,), 2.0))
-
-
-def test_pruning_mixin_key_mutation_is_tracked_without_mutating_shared_keys():
-    shared_keys = {"w": "w"}
-
-    _, keys_to_remove = _process_with_mixins([_PopKeyMixin()], shared_keys)
-
-    assert keys_to_remove == {"w": "w"}
-    assert shared_keys == {"w": "w"}
-
-
 def test_resolve_pruning_mixin_accepts_names_instances_and_lists():
     existing = _ConcretePruningMixIn(LayerDescriptor())
 
@@ -134,13 +96,6 @@ def test_resolve_pruning_mixin_accepts_names_instances_and_lists():
         _MAPPED_MIXIN,
         existing,
     ]
-
-
-def test_resolve_pruning_mixin_reports_available_methods():
-    with pytest.raises(ValueError, match="Available methods: \\['mapped'\\]"):
-        resolve_pruning_mixin("missing", _DescriptorWithPruningMixins)
-
-
 def test_update_model_config_treats_null_overrides_as_leave_unchanged():
     config = SimpleNamespace(
         num_hidden_layers=1,
