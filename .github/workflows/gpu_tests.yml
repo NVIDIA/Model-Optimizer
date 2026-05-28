@@ -37,8 +37,6 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # ``container_image`` is the full image path so non-nvcr.io registries
-        # (e.g. docker.io/vllm) can be used alongside nvcr.io/nvidia images.
         include:
           - example: gpu
             timeout: 75
@@ -51,52 +49,51 @@ jobs:
             container_image: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc16
           - example: gpu_vllm
             timeout: 30
-            # Keep in sync with examples/vllm_serve/Dockerfile.
             container_image: docker.io/vllm/vllm-openai:v0.20.0
     runs-on: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && 'linux-amd64-gpu-rtxpro6000-latest-1' || 'linux-amd64-gpu-rtxpro6000-latest-2' }}
     timeout-minutes: ${{ matrix.timeout }}
     container:
       image: ${{ matrix.container_image }}
-      # NGC creds only for ``nvcr.io/*`` images; ``docker.io/*`` is anonymous-pull.
-      # Empty username/password short-circuits the runner's ``docker login`` step.
       credentials:
-        username: ${{ startsWith(matrix.container_image, 'nvcr.io/') && '$oauthtoken' || '' }}
-        password: ${{ startsWith(matrix.container_image, 'nvcr.io/') && secrets.NGC_API_KEY || '' }}
+        username: $oauthtoken
+        password: ${{ secrets.NGC_API_KEY }}
       env:
         GIT_DEPTH: 1000 # For correct version
         PIP_CONSTRAINT: "" # Disable pip constraint for upgrading packages
         HF_TOKEN: ${{ secrets.HF_TOKEN }}
     steps:
       - uses: actions/checkout@v6
-      - uses: nv-gha-runners/setup-proxy-cache@main
-      - name: Setup environment variables
-        run: |
-          echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}:/usr/include:/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
-      - name: Run gpu tests
-        env:
-          # Skip subprocess coverage for gpu_vllm — the hook deadlocks vLLM's engine-core IPC.
-          COVERAGE_PROCESS_START: ${{ matrix.example == 'gpu_vllm' && '' || format('{0}/pyproject.toml', github.workspace) }}
-          COVERAGE_FILE: ${{ github.workspace }}/.coverage
-        run: |
-          python3 -m pip install nox && nox -s ${{ matrix.example }}
-      - name: Upload GPU coverage to Codecov
-        # vLLM container has no ``git``, which codecov-action needs; gpu_vllm
-        # also runs without ``--cov`` so there's no coverage.xml to upload.
-        if: matrix.example != 'gpu_vllm'
-        uses: codecov/codecov-action@v5
+      - uses: ./.github/actions/gpu-test-run
         with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          files: coverage.xml
-          flags: gpu
-          fail_ci_if_error: false # test may be skipped if relevant file changes are not detected
-          verbose: true
+          example: ${{ matrix.example }}
+          codecov_token: ${{ secrets.CODECOV_TOKEN }}
+
+  # Docker Hub image: anonymous pull (no ``credentials:``) and no coverage
+  gpu-tests-vllm:
+    needs: [pr-gate]
+    if: needs.pr-gate.outputs.any_changed == 'true'
+    runs-on: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && 'linux-amd64-gpu-rtxpro6000-latest-1' || 'linux-amd64-gpu-rtxpro6000-latest-2' }}
+    timeout-minutes: 30
+    container:
+      # Keep in sync with examples/vllm_serve/Dockerfile.
+      image: docker.io/vllm/vllm-openai:v0.20.0
+      env:
+        GIT_DEPTH: 1000 # For correct version
+        PIP_CONSTRAINT: "" # Disable pip constraint for upgrading packages
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/gpu-test-run
+        with:
+          example: gpu_vllm
+          with_coverage: "false"
 
   gpu-pr-required-check:
-    # Run even if gpu-tests is skipped
+    # Run even if any of the gpu jobs is skipped
     if: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && always() }}
-    needs: [pr-gate, gpu-tests]
+    needs: [pr-gate, gpu-tests, gpu-tests-vllm]
     runs-on: ubuntu-latest
     steps:
       - name: Required GPU tests did not succeed
-        if: ${{ needs.pr-gate.result != 'success' || (needs.pr-gate.outputs.any_changed == 'true' && needs.gpu-tests.result != 'success') }}
+        if: ${{ needs.pr-gate.result != 'success' || (needs.pr-gate.outputs.any_changed == 'true' && (needs.gpu-tests.result != 'success' || needs.gpu-tests-vllm.result != 'success')) }}
         run: exit 1
