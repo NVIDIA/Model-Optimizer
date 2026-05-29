@@ -1,15 +1,13 @@
-# Example: Quantization Validation Suite
+# Example: AA-aligned eval template (single-task starting point)
 #
-# A balanced set of benchmarks for validating quantized model quality.
-# Copy this file and customize for your needs.
-# Task references in recipes/tasks/ define benchmark requirements and YAML
-# fragments — the agent composes them into a runnable config like this one.
+# Minimal config to validate a quantized model end-to-end against one AA-style
+# benchmark. The agent extends this template by copying additional task
+# fragments from recipes/tasks/aa/*.md into the `evaluation.tasks` list — task
+# references define benchmark requirements and YAML fragments, this file
+# defines the deployment + operational conventions.
 #
-# Includes:
-#   - MMLU-Pro (knowledge, completions)
-#   - GPQA Diamond (reasoning, chat, 32 repeats)
-#   - LiveCodeBench v6 (code, chat, 3 repeats)
-#   - IFBench (instruction following, chat, 8 repeats)
+# Includes (default): gpqa_diamond_aa_v3 (simple-evals harness, n_samples=16).
+# Add more AA tasks per recipes/tasks/aa/ and the AA suite rule in SKILL.md.
 #
 # Usage:
 #   nel run --config recipes/examples/example_eval.yaml \
@@ -30,7 +28,7 @@
 # container, and Hydra interpolates ${deployment.port} at run time.
 #
 # Run a single task:
-#   nel run --config ... -t ns_gpqa
+#   nel run --config ... -t gpqa_diamond_aa_v3
 #
 # Canary (2 samples): use this before a full run to validate logs and tune
 # parallelism.

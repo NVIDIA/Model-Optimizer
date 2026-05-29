@@ -45,7 +45,7 @@ Use this inside the top-level `evaluation.tasks` list:
             api_key: INFERENCE_API_KEY
           judger:
             model_id: <judger_gpt_oss_120b_model_id>
-            url: <openai_compatible_user_simulator_chat_completions_url>
+            url: <openai_compatible_judger_chat_completions_url>
             api_key: INFERENCE_API_KEY
 ```
 

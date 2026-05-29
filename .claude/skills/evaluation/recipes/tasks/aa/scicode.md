@@ -13,8 +13,10 @@ harvesting requirements beyond the task YAML fragment.
 
 ## Config Requirements
 
-- Use `--max-model-len 65536` for the deployment. Do not leave the generic
-  `32768` fallback in place; SciCode multi-step prompts can exceed 32K tokens.
+- **Deployment context length:** at least `--max-model-len 65536` (SciCode
+  multi-step prompts can exceed 32K). The example template's default of
+  `--max-model-len 131072` satisfies this and is preferred — do not lower
+  it unless you have a memory reason to.
 
 ## YAML Fragment
 

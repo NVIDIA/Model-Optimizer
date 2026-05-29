@@ -2,9 +2,16 @@
 
 When evaluating a quantized checkpoint, prioritize benchmarks that are sensitive
 to precision loss. The Artificial Analysis (AA) Index v2 suite under
-`recipes/tasks/aa/` is the default set for quantized-checkpoint validation;
-`recipes/tasks/*.md` covers the additional always-include benchmarks
-(MMLU-Pro, AIME 2025, LiveCodeBench).
+`recipes/tasks/aa/` is the default set for quantized-checkpoint validation.
+
+**Scope rule:**
+
+- **Default quant validation** (when the user just says "evaluate this
+  quantized checkpoint"): use the AA suite plus the three always-include
+  benchmarks at `recipes/tasks/*.md` (MMLU-Pro, AIME 2025, LiveCodeBench).
+- **Explicit AA request** ("AA" / "Artificial Analysis" / "AA Index v2"):
+  use **only** `recipes/tasks/aa/`. Do not add the three always-include
+  tasks unless the user asks. See the callout at the bottom of this file.
 
 ## Available task recipes
 

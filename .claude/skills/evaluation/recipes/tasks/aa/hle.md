@@ -2,7 +2,7 @@
 
 ## Task Details
 
-- Reference: <https://docs.nvidia.com/nemo/evaluator/nightly/evaluation/benchmarks/catalog/all/harnesses/nemo_skills.html#nemo-skills-ns-hle-aa>
+- Reference: <https://docs.nvidia.com/nemo/evaluator/latest/evaluation/benchmarks/catalog/all/harnesses/nemo_skills.html#nemo-skills-ns-hle-aa>
 
 ## Params
 
