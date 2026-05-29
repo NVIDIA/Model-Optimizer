@@ -749,6 +749,71 @@ def _export_quantized_weight(
     torch.cuda.empty_cache()
 
 
+def _collect_canonical_tied_patterns(model: nn.Module) -> list[re.Pattern]:
+    """Walk the model and collect canonical-side tied-weight patterns.
+
+    HF's ``_tied_weights_keys`` is declared per model class with paths
+    relative to that class. In nested models, each submodule may declare
+    its own ties (e.g. an outer wrapper ties ``lm_head.weight`` to
+    ``model.decoder.embed_tokens.weight``, while the inner
+    ``DiffusionGemma4Model`` at ``model.model`` declares the much larger
+    encoder↔decoder dict, with paths relative to itself such as
+    ``encoder.language_model.layers...weight`` ↔ ``decoder.layers...weight``).
+
+    To match against the root model's state_dict keys we must prefix each
+    submodule's patterns with its qualified path (``model.``). Without this
+    prefix, the inner dict's patterns (which lack the ``model.`` prefix)
+    silently fail to match real keys like
+    ``model.decoder.layers.0.self_attn.q_proj.weight``.
+
+    Returns a list of compiled regex patterns for the canonical side of
+    every dict-style ``_tied_weights_keys`` declaration found anywhere in
+    the module tree. List-style (legacy) declarations are skipped — they
+    carry no canonical/alias distinction.
+    """
+    patterns: list[re.Pattern] = []
+    for name, submodule in model.named_modules():
+        tied = getattr(submodule, "_tied_weights_keys", None)
+        if not isinstance(tied, dict) or not tied:
+            continue
+        prefix = f"{name}." if name else ""
+        patterns.extend(re.compile(prefix + p) for p in tied.values())
+    return patterns
+
+
+def _reorder_canonical_first(state_dict: dict, model: nn.Module) -> dict:
+    """Reorder ``state_dict`` so canonical-side tied keys iterate first.
+
+    For models that declare ``_tied_weights_keys`` as a ``{alias_pattern:
+    canonical_pattern}`` dict (newer HF style, e.g. ``DiffusionGemma4``),
+    HF designates one side of each tied pair as canonical and the other
+    as an alias. The downstream data_ptr dedup in
+    :func:`postprocess_state_dict` keeps whichever key it sees first per
+    ``data_ptr``, which by default is registration order — and that is
+    often the alias side, not the canonical side declared by HF.
+
+    This helper rebuilds the dict with canonical-pattern-matching keys
+    moved to the front (preserving original order within each partition),
+    so the existing first-wins dedup picks the canonical side.
+
+    No-op when the model declares no dict-style ``_tied_weights_keys``
+    anywhere in its module tree (i.e. only legacy list-of-strings
+    declarations, or no ties at all).
+    """
+    canonical_patterns = _collect_canonical_tied_patterns(model)
+    if not canonical_patterns:
+        return state_dict
+    head: dict = {}
+    tail: dict = {}
+    for k, v in state_dict.items():
+        if any(p.search(k) for p in canonical_patterns):
+            head[k] = v
+        else:
+            tail[k] = v
+    head.update(tail)
+    return head
+
+
 def _process_quantized_modules(
     model: nn.Module,
     dtype: torch.dtype,
@@ -865,7 +930,11 @@ def _process_quantized_modules(
 
 
 def _export_transformers_checkpoint(
-    model: nn.Module, dtype: torch.dtype | None = None, is_modelopt_qlora: bool = False, **kwargs
+    model: nn.Module,
+    dtype: torch.dtype | None = None,
+    is_modelopt_qlora: bool = False,
+    canonical_tied_naming: bool = False,
+    **kwargs,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Exports the torch model to the packed checkpoint with original HF naming.
 
@@ -1007,6 +1076,16 @@ def _export_transformers_checkpoint(
     # We define kv cache scale as amax / 448 for both FP8 and NVFP4 KV cache quantization.
     kv_cache_max_bound = 448
     kv_cache_format = quant_config["quantization"]["kv_cache_quant_algo"]
+
+    # Optionally reorder so canonical-side tied keys (per HF's
+    # _tied_weights_keys) iterate first into postprocess_state_dict's
+    # first-wins data_ptr dedup. Off by default to avoid renaming exported
+    # keys for models whose downstream consumers expect the legacy
+    # (registration-order) winner; opt in for models where matching HF's
+    # own naming convention matters (e.g. DiffusionGemma4 → decoder names).
+    if canonical_tied_naming:
+        quantized_state_dict = _reorder_canonical_first(quantized_state_dict, model)
+
     quantized_state_dict = postprocess_state_dict(
         quantized_state_dict, kv_cache_max_bound, kv_cache_format, is_modelopt_qlora
     )
@@ -1344,6 +1423,7 @@ def export_hf_checkpoint(
     components: list[str] | None = None,
     extra_state_dict: dict[str, torch.Tensor] | None = None,
     max_shard_size: int | str = "10GB",
+    canonical_tied_naming: bool = False,
     **kwargs,
 ):
     """Export quantized HuggingFace model checkpoint (transformers or diffusers).
@@ -1363,6 +1443,11 @@ def export_hf_checkpoint(
             to export. If None, all quantized components are exported.
         extra_state_dict: Extra state dictionary to add to the exported model.
         max_shard_size: Maximum size of each safetensors shard file. Defaults to "10GB".
+        canonical_tied_naming: If True, reorder the state_dict so tied-weight
+            aliases dedup to the canonical side declared in the model's HF
+            ``_tied_weights_keys`` (e.g. decoder-side for DiffusionGemma4).
+            Off by default to avoid renaming exported keys for models whose
+            downstream consumers expect the legacy (registration-order) winner.
         **kwargs: Runtime-specific post-processing options forwarded to
             :func:`_postprocess_safetensors` for diffusion model exports.
             See its docstring for supported keys.
@@ -1385,7 +1470,9 @@ def export_hf_checkpoint(
         return
 
     try:
-        post_state_dict, hf_quant_config = _export_transformers_checkpoint(model, dtype)
+        post_state_dict, hf_quant_config = _export_transformers_checkpoint(
+            model, dtype, canonical_tied_naming=canonical_tied_naming
+        )
 
         # Only treat the export as quantized when at least one quant_algo field is set.
         # get_quant_config always returns a dict (even for sparsity-only or unmodified models),
