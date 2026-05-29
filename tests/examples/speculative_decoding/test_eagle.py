@@ -265,6 +265,48 @@ def test_offline_eagle3_training(
     assert os.path.exists(output_subdir / "config.json")
 
 
+def test_eagle3_dry_run(tiny_llama_path, tmp_path, eagle_output_dir):
+    """Test --dry_run: load + mtsp.convert + save_pretrained, no training, then export.
+
+    Exercises the full dry-run pipeline (FakeBaseModel + skip-train + export) so users
+    can smoke-test convert→save→export plumbing without paying for an actual training run.
+    The exported checkpoint has untrained draft-head weights but a valid EAGLE3 structure.
+    """
+    output_subdir = eagle_output_dir / "eagle-tinyllama-dryrun"
+    export_subdir = eagle_output_dir / "eagle-tinyllama-dryrun-export"
+
+    overrides = [
+        f"model.model_name_or_path={tiny_llama_path}",
+        "model.use_fake_base_for_offline=true",
+        # offline_data_path is required to route into the FakeBaseModel path
+        # (use_offline_training=True), but is never actually read in --dry_run mode.
+        f"data.offline_data_path={tmp_path / 'dummy_offline'}",
+        f"training.output_dir={output_subdir}",
+        *_TINY_EAGLE_ARCH,
+    ]
+    run_example_command(
+        ["./launch_train.sh", "--config", EAGLE3_YAML, "--dry_run", *overrides],
+        "speculative_decoding",
+    )
+    assert (output_subdir / "modelopt_state.pth").exists()
+    assert (output_subdir / "config.json").exists()
+
+    # The dry-run checkpoint must be exportable to the deployment format.
+    run_example_command(
+        [
+            "python", "./scripts/export_hf_checkpoint.py",
+            "--model_path", output_subdir,
+            "--export_path", export_subdir,
+        ],
+        "speculative_decoding",
+    )
+    state_dict = safetensors.torch.load_file(export_subdir / "model.safetensors")
+    for required_key in LLAMA_EAGLE_SINGLE_LAYER["required"]:
+        assert f"{required_key}.weight" in state_dict, (
+            f"Missing key '{required_key}.weight' in state_dict"
+        )
+
+
 def test_offline_resume_training_kimi(tiny_daring_anteater_path, tmp_path, eagle_output_dir):
     """Test resume of offline Eagle3 training from a FakeBaseModel checkpoint (Kimi-K2.5).
 

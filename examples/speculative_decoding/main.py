@@ -79,8 +79,8 @@ HfTrainingArguments = dataclasses.make_dataclass(
 )
 
 
-def _parse_cli() -> tuple[str, list[str]]:
-    """Parse --config (required) from argv; return remaining args as dotlist overrides.
+def _parse_cli() -> tuple[str, bool, list[str]]:
+    """Parse --config (required) and --dry_run from argv; return remaining args as dotlist overrides.
 
     Extra positional args use dotlist syntax, e.g.
     ``model.model_name_or_path=meta-llama/Llama-3.2-1B training.output_dir=ckpts/test``.
@@ -94,8 +94,15 @@ def _parse_cli() -> tuple[str, list[str]]:
             "(speculative_eagle / speculative_dflash / speculative_medusa)."
         ),
     )
+    p.add_argument(
+        "--dry_run",
+        action="store_true",
+        help="Skip training: load base + mtsp.convert + save_pretrained, then exit. "
+        "Produces a ModelOpt HF checkpoint with untrained draft-head weights, suitable "
+        "for end-to-end plumbing tests (e.g. running scripts/export_hf_checkpoint.py).",
+    )
     args, overrides = p.parse_known_args()
-    return args.config, overrides
+    return args.config, args.dry_run, overrides
 
 
 def init_distributed_env(training_args: transformers.TrainingArguments) -> None:
@@ -139,7 +146,7 @@ def init_distributed_env(training_args: transformers.TrainingArguments) -> None:
 
 
 def train():
-    config_path, overrides = _parse_cli()
+    config_path, dry_run, overrides = _parse_cli()
     recipe = load_recipe(config_path, overrides=overrides)
     if not isinstance(recipe, ModelOptSpeculativeRecipeBase):
         raise ValueError(
@@ -152,7 +159,7 @@ def train():
     training_args = HfTrainingArguments(**recipe.training.model_dump())
     init_distributed_env(training_args)
 
-    if not recipe.data.data_path and not recipe.data.offline_data_path:
+    if not dry_run and not recipe.data.data_path and not recipe.data.offline_data_path:
         raise ValueError(
             "Either data.data_path or data.offline_data_path must be set in the config."
         )
@@ -226,6 +233,17 @@ def train():
             mtsp.convert(model, [("dflash", dflash_cfg)])
         else:
             raise ValueError(f"Unsupported speculative recipe type: {type(recipe).__name__}")
+
+    if dry_run:
+        if is_master():
+            os.makedirs(training_args.output_dir, exist_ok=True)
+            model.save_pretrained(training_args.output_dir)
+            tokenizer.save_pretrained(training_args.output_dir)
+            print_rank_0(
+                f"[dry-run] saved ModelOpt HF checkpoint (untrained draft head) to "
+                f"{training_args.output_dir}"
+            )
+        return
 
     # Move any remaining CPU buffers to CUDA so DDP (NCCL-only) can broadcast
     # them.  We iterate named_buffers and reassign via the owning module to
