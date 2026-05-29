@@ -32,8 +32,8 @@ Usage::
     import torch
 
     pipe = QwenImageDMDInferencePipeline.from_pretrained(
-        student_path="/lustre/.../qwen.10/safetensors/.../epoch_0_step_5/model/consolidated",
-        base_pipeline_path="/lustre/.../models/Qwen-Image",
+        student_path="/path/to/checkpoint/epoch_0_step_500/model/consolidated",
+        base_pipeline_path="Qwen/Qwen-Image",
         ema_path=None,                        # or "…/epoch_0_step_5/ema_shadow.pt"
         torch_dtype=torch.bfloat16,
     ).to("cuda")
@@ -106,7 +106,7 @@ class QwenImageDMDInferencePipeline:
                 and one or more ``*.safetensors`` shards. Loadable directly via
                 ``QwenImageTransformer2DModel.from_pretrained``.
             base_pipeline_path: The base Qwen-Image checkpoint (e.g.
-                ``/lustre/.../models/Qwen-Image``). Used only for the
+                ``Qwen/Qwen-Image`` or a local snapshot). Used only for the
                 ``vae`` / ``text_encoder`` / ``tokenizer`` / ``image_processor``;
                 the transformer is replaced.
             ema_path: Optional ``ema_shadow.pt`` produced by ``_save_dmd_extras``.
@@ -474,15 +474,18 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--student_path",
-        default="/lustre/fsw/coreai_dlalgo_modelopt/users/jingyux/dmd2/experiments/qwen.10/safetensors/checkpoints/epoch_0_step_5/model/consolidated",
+        required=True,
+        help="Path to the consolidated safetensors student checkpoint "
+        "(e.g. .../epoch_0_step_500/model/consolidated).",
     )
     parser.add_argument(
         "--base_pipeline_path",
-        default="/lustre/fsw/coreai_dlalgo_modelopt/users/jingyux/dmd2/models/Qwen-Image",
+        default="Qwen/Qwen-Image",
+        help="Base Qwen-Image pipeline (HF id or local snapshot) for the VAE / text-encoder / tokenizer.",
     )
     parser.add_argument(
         "--output_png",
-        default="/lustre/fsw/coreai_dlalgo_modelopt/users/jingyux/dmd2/experiments/qwen.12/dmd2_smoke.png",
+        default="./outputs/dmd2_sample.png",
     )
     parser.add_argument("--ema_path", default=None)
     parser.add_argument("--prompt", default="a small red cube on a white table")

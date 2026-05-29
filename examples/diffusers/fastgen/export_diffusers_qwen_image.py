@@ -32,9 +32,9 @@ checkpoint wastes disk. Use ``--copy`` if the output dir must be portable.
 Usage::
 
     python export_diffusers_qwen_image.py \\
-        --student_path     /lustre/.../epoch_0_step_5/model/consolidated \\
-        --base_pipeline_path /lustre/.../models/Qwen-Image \\
-        --output_dir       /lustre/.../epoch_0_step_5/qwen_image_dmd2 \\
+        --student_path     /path/to/checkpoint/epoch_0_step_500/model/consolidated \\
+        --base_pipeline_path Qwen/Qwen-Image \\
+        --output_dir       /path/to/output/qwen_image_dmd2 \\
         [--copy]
 
 Smoke test (``--verify``) loads the assembled dir via QwenImagePipeline and

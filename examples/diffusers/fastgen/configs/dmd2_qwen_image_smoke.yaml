@@ -1,16 +1,9 @@
 # DMD2 on Qwen-Image — mock-data wiring smoke (NOT for real training).
 #
-# Mirrors ``dmd2_wan22_5b.yaml`` for Qwen-Image: random tensors at the right
-# shapes/dtypes via ``build_mock_t2i_dataloader``. Useful for end-to-end
-# wiring tests (FSDP2, phase routing, checkpoint save/restore) but useless
-# for image quality — real training uses ``dmd2_qwen_image.yaml`` (real cache
-# + CFG + GAN).
-#
-# Sister files:
-#
-#   - dmd2_wan22_5b.yaml          — mock-data smoke for Wan 2.2 5B (T2V)
-#   - dmd2_qwen_image.yaml        — real-data formal Qwen-Image training
-#   - dmd2_qwen_image_smoke.yaml  — THIS FILE; mock-data Qwen smoke
+# Feeds random tensors at Qwen-Image's shapes/dtypes via
+# ``build_mock_t2i_dataloader``. Useful for end-to-end wiring tests (FSDP2,
+# phase routing, checkpoint save/restore) but useless for image quality — real
+# training uses ``dmd2_qwen_image.yaml`` (real cache + CFG + GAN).
 
 seed: 42
 
@@ -24,10 +17,9 @@ dist_env:
   timeout_minutes: 60
 
 model:
-  # Qwen-Image text-to-image checkpoint. Point at the local snapshot under
-  # dmd2/models/Qwen-Image (downloaded via containers/download_qwen_image.sh)
-  # to avoid hitting HF on every job.
-  pretrained_model_name_or_path: /lustre/fsw/coreai_dlalgo_modelopt/users/jingyux/dmd2/models/Qwen-Image
+  # Qwen-Image text-to-image checkpoint (HF id, or a local snapshot path to
+  # avoid hitting HF on every job).
+  pretrained_model_name_or_path: Qwen/Qwen-Image
   mode: finetune
 
 step_scheduler:
@@ -57,8 +49,8 @@ dmd2:
   # LR for the fake-score AdamW; matches the student LR below.
   fake_score_lr: 1.0e-5
 
-  # Explicit pipeline plugin selector. Auto-detect via model_id substring works for
-  # /lustre/.../Qwen-Image, but spelling it out keeps the choice visible in the YAML.
+  # Explicit pipeline plugin selector. Auto-detect via model_id substring works for a
+  # local Qwen-Image snapshot path, but spelling it out keeps the choice visible.
   pipeline_plugin: qwen_image
 
   # Optional guidance scalar forwarded to the transformer's ``guidance`` kwarg every
@@ -109,9 +101,7 @@ data:
 
 checkpoint:
   enabled: true
-  # Per the dev tree convention, runs land under experiments/dmd2_qwen_image/train/output/.
-  # The launcher in experiments/dmd2_qwen_image/launch.sh overrides this per run id.
-  checkpoint_dir: /lustre/fsw/coreai_dlalgo_modelopt/users/jingyux/dmd2/experiments/dmd2_qwen_image/train/output/default/checkpoints
+  checkpoint_dir: /path/to/output/qwen_image_dmd2_smoke/checkpoints
   model_save_format: torch_save
   save_consolidated: false
   diffusers_compatible: false
