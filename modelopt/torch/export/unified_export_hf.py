@@ -1096,11 +1096,47 @@ def _process_quantized_modules(
                         _export_quantized_weight(sub_module, dtype, weight_name)
 
 
+def _collapse_exclude_modules_to_wildcards(patterns: list[str]) -> list[str]:
+    """Reduce a per-module ``exclude_modules`` list to broad ``*<bare>*`` wildcards.
+
+    Used as an opt-in workaround for consumers that strip side prefixes
+    (e.g. vLLM's ``_remap_weights`` collapses ``model.encoder.language_model.``
+    and ``model.decoder.`` to ``model.``) before applying the exclude list.
+    The per-layer, side-prefixed patterns modelopt emits by default don't
+    match the consumer's post-remap layer names; a bare ``*mlp*`` wildcard
+    matches anywhere via ``fnmatch`` regardless of prefix.
+
+    Input:  ['lm_head', 'model.decoder.layers.0.mlp*',
+             'model.decoder.layers.0.self_attn*', ..., 90 more such, ...,
+             'model.encoder.language_model.layers.0.mlp*', ..., 90 more]
+    Output: ['lm_head', '*mlp*', '*self_attn*', '*router*', ...]
+
+    TODO: revisit once vLLM (or other downstream consumers) honors the
+    per-layer patterns through their prefix-remap, OR once modelopt's
+    consumer-side contract for tied-weight models has a single agreed
+    naming convention. Tracked alongside the Q-B canonical_tied_naming
+    work — both are workarounds for the same upstream gap.
+    """
+    bare_tokens: set[str] = set()
+    keep_as_is: list[str] = []
+    for pat in patterns:
+        # Leave bare names (no path separator, no trailing wildcard) as-is
+        # so ``lm_head`` survives the collapse.
+        if "*" not in pat and "." not in pat:
+            keep_as_is.append(pat)
+            continue
+        bare = pat.rstrip("*").rstrip(".").split(".")[-1]
+        if bare:
+            bare_tokens.add(f"*{bare}*")
+    return sorted(set(keep_as_is)) + sorted(bare_tokens)
+
+
 def _export_transformers_checkpoint(
     model: nn.Module,
     dtype: torch.dtype | None = None,
     is_modelopt_qlora: bool = False,
     canonical_tied_naming: bool = False,
+    quant_config_broad_wildcards: bool = False,
     **kwargs,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Exports the torch model to the packed checkpoint with original HF naming.
@@ -1208,6 +1244,23 @@ def _export_transformers_checkpoint(
             if pattern not in exclude_modules:
                 exclude_modules.append(pattern)
                 print(f"Adding MTP layer to quantization_config ignore: {pattern}")
+
+    # Optionally collapse the per-layer exclude_modules list to broad
+    # ``*<bare>*`` wildcards. Off by default to avoid changing the config
+    # file format for existing modelopt users; opt in when the downstream
+    # consumer remaps layer names in a way that breaks the per-layer
+    # side-prefixed patterns modelopt emits by default (e.g. vLLM's
+    # ``_remap_weights`` for tied encoder-decoder models like
+    # DiffusionGemma4). TODO: revisit — this is a workaround for an
+    # upstream naming-contract gap, not the long-term answer.
+    if quant_config_broad_wildcards:
+        original = quant_config["quantization"].get("exclude_modules", [])
+        collapsed = _collapse_exclude_modules_to_wildcards(original)
+        quant_config["quantization"]["exclude_modules"] = collapsed
+        print(
+            f"Collapsed exclude_modules from {len(original)} per-layer "
+            f"patterns to {len(collapsed)} broad wildcards: {collapsed}"
+        )
 
     # Safety net: sync any gate/up weight quantizer amaxes that
     # requantize_resmooth_fused_llm_layers did not reach (e.g. experts not
@@ -1587,6 +1640,7 @@ def export_hf_checkpoint(
     extra_state_dict: dict[str, torch.Tensor] | None = None,
     max_shard_size: int | str = "10GB",
     canonical_tied_naming: bool = False,
+    quant_config_broad_wildcards: bool = False,
     **kwargs,
 ):
     """Export quantized HuggingFace model checkpoint (transformers or diffusers).
@@ -1611,6 +1665,14 @@ def export_hf_checkpoint(
             ``_tied_weights_keys`` (e.g. decoder-side for DiffusionGemma4).
             Off by default to avoid renaming exported keys for models whose
             downstream consumers expect the legacy (registration-order) winner.
+        quant_config_broad_wildcards: If True, collapse the per-layer
+            ``exclude_modules`` list into broad ``*<bare>*`` wildcards
+            (e.g. ``*mlp*``, ``*self_attn*``). Off by default; opt in when
+            the downstream consumer remaps layer names in a way that breaks
+            the per-layer side-prefixed patterns modelopt emits by default
+            (e.g. vLLM's ``_remap_weights`` for tied encoder-decoder models
+            like DiffusionGemma4). TODO: revisit once the naming contract
+            with consumers is more stable.
         **kwargs: Runtime-specific post-processing options forwarded to
             :func:`_postprocess_safetensors` for diffusion model exports.
             See its docstring for supported keys.
@@ -1634,7 +1696,10 @@ def export_hf_checkpoint(
 
     try:
         post_state_dict, hf_quant_config = _export_transformers_checkpoint(
-            model, dtype, canonical_tied_naming=canonical_tied_naming
+            model,
+            dtype,
+            canonical_tied_naming=canonical_tied_naming,
+            quant_config_broad_wildcards=quant_config_broad_wildcards,
         )
 
         # Only treat the export as quantized when at least one quant_algo field is set.

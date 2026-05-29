@@ -775,6 +775,7 @@ def export_quantized(
                     export_dir=export_path,
                     extra_state_dict=mtp_state_dict,
                     canonical_tied_naming=args.canonical_tied_naming,
+                    quant_config_broad_wildcards=args.quant_config_broad_wildcards,
                 )
 
                 if args.qformat == "w4a16_nvfp4":
@@ -1257,6 +1258,22 @@ def parse_args() -> argparse.Namespace:
             "by default to avoid renaming exported keys for models whose "
             "downstream consumers expect the legacy (registration-order) "
             "winner."
+        ),
+    )
+    parser.add_argument(
+        "--quant_config_broad_wildcards",
+        type=lambda s: s.lower() in ("1", "true", "yes"),
+        default=False,
+        help=(
+            "If True, collapse the per-layer `exclude_modules` list in the "
+            "exported `hf_quant_config.json` / `config.json[quantization_config]` "
+            "to broad `*<bare>*` wildcards (e.g. `*mlp*`, `*self_attn*`). Off "
+            "by default to keep the config-file format stable for existing "
+            "modelopt users; opt in when a downstream consumer strips layer "
+            "prefixes via its weight-remap step and the per-layer patterns "
+            "stop matching (e.g. vLLM `_remap_weights` for tied encoder-"
+            "decoder models like DiffusionGemma4). TODO: revisit once the "
+            "naming contract with consumers is more stable."
         ),
     )
     parser.add_argument(
