@@ -121,6 +121,7 @@ def load_and_prepare_fsdp2_model(
     args=None,
     trust_remote_code: bool = False,
     mp_policy=None,
+    cpu_offload: bool = False,
 ):
     """Load and FSDP2-shard a causal LM (accelerate-style rank-0-only CPU load).
 
@@ -177,30 +178,10 @@ def load_and_prepare_fsdp2_model(
         rank,
         src_state_dict=src_state_dict,
         mp_policy=mp_policy,
+        cpu_offload=cpu_offload,
     )
     del src_model, src_state_dict
     return sharded
-
-
-def create_fsdp2_calibration_loop(model, dataloader, device):
-    """Calibration closure that forwards through the outer FSDP2-wrapped model.
-
-    Required because ``mtq.quantize`` unwraps the model before calling
-    ``forward_loop``; calling the unwrapped inner module skips FSDP2's pre/post
-    forward hooks and breaks the all-gather. The closure captures the outer
-    ``model`` and ignores the ``unwrapped_model`` argument.
-    """
-    from tqdm import tqdm
-
-    def calibrate(unwrapped_model):
-        for batch in tqdm(dataloader, desc="Calibrating"):
-            if isinstance(batch, dict):
-                batch = {
-                    k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()
-                }
-            model(**batch)
-
-    return calibrate
 
 
 def run_nemotron_vl_preview(
@@ -773,11 +754,6 @@ def get_model(
     # Note: Forcibly converting the model precision between bf16 and fp16 may introduce accuracy drop
     model_kwargs = config_kwargs.copy()
     model_kwargs.setdefault("dtype", "auto")
-    # Don't set torch_dtype for VILA models as they handle it explicitly in their builder.
-    # Use the legacy ``torch_dtype`` kwarg name — newer transformers forwards the ``dtype``
-    # kwarg through to the model class ``__init__``, which custom modeling code may reject.
-    if "vila" not in ckpt_path.lower():
-        model_kwargs.setdefault("torch_dtype", "auto")
 
     if use_seq_device_map:
         device_map = "sequential"
