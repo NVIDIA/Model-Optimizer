@@ -23,10 +23,13 @@ from torch import __version__ as _torch_version
 
 # Pre-initialize torch._dynamo to prevent double-registration with peft's torch.compile() call
 importlib.import_module("torch._dynamo")
+# isort: off
+# opt must precede distill/nas/etc.: they import modelopt.torch.opt at module load,
+# so importing opt first avoids a circular import when opt is the entry subpackage.
 from . import (  # noqa: E402
+    opt,
     distill,
     nas,
-    opt,
     peft,
     prune,
     quantization,
@@ -34,6 +37,7 @@ from . import (  # noqa: E402
     speculative,
     utils,
 )
+# isort: on
 
 if _Version(_torch_version) < _Version("2.9"):
     _warnings.warn(

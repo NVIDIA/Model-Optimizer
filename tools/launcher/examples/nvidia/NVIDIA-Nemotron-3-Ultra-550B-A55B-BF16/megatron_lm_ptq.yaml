@@ -18,7 +18,7 @@ job_name: Nemotron-3-Ultra_PTQ
 pipeline:
   skip: false
   allow_to_fail: false
-  note: "PTQ on Nemotron-3-Ultra-550B-A55B-BF16 (super-nvfp4-max-calib): quantize @ 4 nodes, export @ 3 nodes, vLLM generation test@ 1 node"
+  note: "PTQ on Nemotron-3-Ultra-550B-A55B-BF16 (nvfp4-max-calib): quantize @ 4 nodes, export @ 3 nodes, vLLM generation test@ 1 node"
 
   task_0:
     script: common/megatron_lm/quantize/quantize.sh
@@ -29,7 +29,7 @@ pipeline:
       - --calib-size 32
     environment:
       - MLM_MODEL_CFG: nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16
-      - QUANT_CFG: models/Nemotron-3-Super-120B-A12B/super-nvfp4-max-calib
+      - QUANT_CFG: huggingface/nemotron_h/Nemotron-3-Super-120B-A12B/ptq/nvfp4-max-calib
       - HF_MODEL_CKPT: /hf-local/nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16
       # MMLU + Export run as separate tasks; quantize.sh does quantize only.
       - RUN_MMLU: "false"
@@ -52,7 +52,7 @@ pipeline:
     script: common/megatron_lm/export/export.sh
     environment:
       - MLM_MODEL_CFG: nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16
-      - QUANT_CFG: models/Nemotron-3-Super-120B-A12B/super-nvfp4-max-calib
+      - QUANT_CFG: huggingface/nemotron_h/Nemotron-3-Super-120B-A12B/ptq/nvfp4-max-calib
       - HF_MODEL_CKPT: /hf-local/nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16
       - TP: "1"
       - PP: "12"
@@ -73,14 +73,14 @@ pipeline:
   task_2:
     script: common/vllm/query.sh
     args:
-      - --model /cicd/export/nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16_super-nvfp4-max-calib
+      - --model /cicd/export/nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16_nvfp4-max-calib
       - --tensor-parallel-size 4
       - --trust-remote-code
       - --
       - --data common/vllm/gpqa_sample.jsonl
       - --max-tokens 256
       - --num-shards 1
-      - --save /cicd/vllm/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16_super-nvfp4-max-calib
+      - --save /cicd/vllm/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16_nvfp4-max-calib
     slurm_config:
       _factory_: "slurm_factory"
       container: vllm/vllm-openai:v0.21.0
