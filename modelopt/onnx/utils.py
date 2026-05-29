@@ -35,6 +35,53 @@ from modelopt.onnx.logging_config import logger
 BASE_MIN_OPSET = 19
 
 
+def clear_stale_value_info(model: onnx.ModelProto) -> int:
+    """Clear stale type metadata that would otherwise trip ORT's type checker.
+
+    Walks every ``Cast`` node and forces the ``elem_type`` of any
+    ``graph.output`` entry produced by that Cast to match the Cast's ``to``
+    attribute (the spec-defined contract for a Cast's output dtype). Then
+    clears ``value_info`` wholesale so ORT/shape-inference re-derives
+    intermediate-tensor types from the operator graph during session setup.
+    Returns the total number of entries reconciled or cleared.
+
+    Some ONNX exporters (notably TF SavedModel → ONNX paths for
+    FP16-compressed models) emit declarations that disagree with what the
+    upstream node actually produces. ORT rejects such models on load with
+    errors of the form ``Type Error: Type (tensor(float16)) of output arg
+    X of node Y does not match expected type (tensor(float))``. Splitting
+    the fix into "reconcile graph.output by Cast `to`" + "clear value_info"
+    handles both the model-contract surface (where blanket-clear would lose
+    the user's I/O declarations) and the intermediate surface (where
+    selective reconciliation is unnecessary because ORT recomputes anyway).
+
+    Both autocast's ``ReferenceRunner`` (on a deep-copied throwaway model)
+    and quantization's ``_preprocess_onnx`` (before ``quantize_static``
+    reads the preprocessed file) call this helper for the same reason.
+    """
+    # Build Cast.output -> `to` lookup so we can reconcile graph.output
+    # entries that the user declares but whose producing Cast disagrees with.
+    cast_to_by_output = {}
+    for node in model.graph.node:
+        if node.op_type != "Cast":
+            continue
+        to_attr = next((a.i for a in node.attribute if a.name == "to"), None)
+        if to_attr is not None and node.output:
+            cast_to_by_output[node.output[0]] = to_attr
+
+    fixed_outputs = 0
+    for o in model.graph.output:
+        to_attr = cast_to_by_output.get(o.name)
+        if to_attr is not None and o.type.tensor_type.elem_type != to_attr:
+            o.type.tensor_type.elem_type = to_attr
+            fixed_outputs += 1
+
+    n_vi = len(model.graph.value_info)
+    if n_vi:
+        del model.graph.value_info[:]
+    return fixed_outputs + n_vi
+
+
 def get_input_names_from_bytes(model_bytes: bytes, external_inputs_only: bool = True) -> list[str]:
     """This function returns the inputs names of the given onnx model in bytes.
 
