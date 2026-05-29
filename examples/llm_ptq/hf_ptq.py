@@ -1011,7 +1011,8 @@ def quantize_main(
             return _is_layerwise(obj.quantize.algorithm)
         if isinstance(obj, list):
             return any(_is_layerwise(a) for a in obj)
-        return bool(getattr(obj, "layerwise", False))
+        layerwise = getattr(obj, "layerwise", None)
+        return bool(getattr(layerwise, "enable", False))
 
     is_layerwise = _is_layerwise(recipe)
 
@@ -1145,10 +1146,8 @@ def quantize_main(
                 print(f"Excluding MTP layer from quantization: {pattern}")
 
         if needs_checkpoint_path_update(quant_cfg):
-            quant_cfg = resolve_checkpoint_dir(quant_cfg, args.pyt_ckpt_path)
-            print(
-                f"Auto-resolved layerwise_checkpoint_dir: {quant_cfg['algorithm']['layerwise_checkpoint_dir']}"
-            )
+            quant_cfg, resolved_dir = resolve_checkpoint_dir(quant_cfg, args.pyt_ckpt_path)
+            print(f"Auto-resolved layerwise checkpoint_dir: {resolved_dir}")
 
         if args.cast_mxfp4_to_nvfp4:
             quant_cfg = copy.deepcopy(quant_cfg)

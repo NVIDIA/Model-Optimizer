@@ -155,7 +155,7 @@ import warnings
 from collections.abc import Mapping, Sequence
 from typing import Any, Literal
 
-from pydantic import AliasChoices, ValidationInfo, field_validator, model_validator
+from pydantic import AliasChoices, Field, ValidationInfo, field_validator, model_validator
 
 from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
 from modelopt.torch.opt.config_loader import load_config
@@ -634,6 +634,59 @@ class QuantizerAttributeConfig(ModeloptBaseConfig):
     )
 
 
+class LayerwiseConfig(ModeloptBaseConfig):
+    """Nested config for layer-by-layer calibration behavior."""
+
+    enable: bool = ModeloptField(
+        default=False,
+        title="Enable layerwise (layer-by-layer) calibration.",
+        description=(
+            "If True, the calibration algorithm is applied layer by layer. "
+            "Each layer's inputs are captured via a forward pass that reflects the "
+            "quantization of all preceding layers, incurring O(N) forward passes for N layers."
+        ),
+    )
+
+    get_qdq_activations_from_prev_layer: bool = ModeloptField(
+        default=False,
+        title="Cache next-layer inputs from QDQ outputs of prior layers.",
+        description=(
+            "If True (GPTQ default), layer N's calibration sees inputs carrying "
+            "the quantize-dequantize error of layers 0..N-1, so quantization "
+            "error compounds across layers. If False (max-calib default), "
+            "quantizers are temporarily disabled during the capture forward, so "
+            "layer N sees the same full-precision activations as a non-layerwise "
+            "calibration pass."
+        ),
+    )
+
+    checkpoint_dir: str | None = ModeloptField(
+        default=None,
+        title="Per-layer checkpoint directory (resume on restart).",
+        description=(
+            "If set, per-layer checkpoints are saved here during calibration. "
+            "On restart, calibration resumes from the last completed layer."
+        ),
+    )
+
+
+def _coerce_layerwise_input(value):
+    """Normalize a raw ``layerwise`` value to a dict; warn on deprecated bool."""
+    if isinstance(value, bool):
+        warnings.warn(
+            "Passing the layerwise field as a bool is deprecated; use a dict, "
+            "e.g. `{'enable': True}`.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return {"enable": value}
+    if value is None:
+        return {}
+    if isinstance(value, LayerwiseConfig):
+        return value.model_dump()
+    return value
+
+
 class QuantizeAlgorithmConfig(ModeloptBaseConfig):
     """Calibration algorithm config base."""
 
@@ -657,34 +710,55 @@ class QuantizeAlgorithmConfig(ModeloptBaseConfig):
         ),
     )
 
-    layerwise: bool = ModeloptField(
-        default=False,
+    layerwise: LayerwiseConfig = Field(
+        default_factory=LayerwiseConfig,
         validation_alias=AliasChoices("layerwise", "use_sequential"),
-        title="Enable layerwise (layer-by-layer) calibration.",
+        title="Layerwise calibration configuration.",
         description=(
-            "If True, the calibration algorithm is applied layer by layer. "
-            "Each layer's inputs are captured via a forward pass that reflects the "
-            "quantization of all preceding layers, incurring O(N) forward passes for N layers."
+            "Nested config controlling layer-by-layer calibration. Pass a dict, "
+            "e.g. ``{'enable': True, 'checkpoint_dir': '/path'}``. Bool input is "
+            "accepted for backward compatibility but deprecated."
         ),
     )
 
-    layerwise_checkpoint_dir: str | None = ModeloptField(
-        default=None,
-        title="Checkpoint directory for layerwise calibration.",
-        description=(
-            "If set together with layerwise=True, per-layer checkpoints are saved to this "
-            "directory during calibration. On restart, calibration resumes from the last "
-            "completed layer."
-        ),
-    )
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_layerwise_checkpoint_dir(cls, data):
+        """Merge the legacy flat ``layerwise_checkpoint_dir`` key into ``layerwise``.
+
+        Raises if both the flat key and a nested ``checkpoint_dir`` are set with conflicting values.
+        """
+        if not isinstance(data, dict) or "layerwise_checkpoint_dir" not in data:
+            return data
+        data = dict(data)
+        flat_dir = data.pop("layerwise_checkpoint_dir")
+        # Resolve the legacy ``use_sequential`` alias before writing ``layerwise``,
+        # otherwise the alias value is silently dropped when AliasChoices picks the
+        # newly-written ``layerwise`` key over ``use_sequential``.
+        raw_layerwise = data.pop("layerwise", data.pop("use_sequential", None))
+        layerwise = _coerce_layerwise_input(raw_layerwise)
+        existing = layerwise.get("checkpoint_dir")
+        if existing is not None and existing != flat_dir:
+            raise ValueError(
+                f"Conflicting checkpoint_dir: layerwise_checkpoint_dir={flat_dir!r} "
+                f"differs from layerwise.checkpoint_dir={existing!r}. Set only one."
+            )
+        data["layerwise"] = {**layerwise, "checkpoint_dir": flat_dir}
+        return data
+
+    @field_validator("layerwise", mode="before")
+    @classmethod
+    def _coerce_layerwise(cls, value):
+        """Coerce ``layerwise=bool/None`` to dict form; also handles the alias path."""
+        return _coerce_layerwise_input(value)
 
     @model_validator(mode="after")
     def validate_layerwise_checkpoint_dir(self):
-        """Raise if layerwise_checkpoint_dir is set but layerwise is False."""
-        if self.layerwise_checkpoint_dir is not None and not self.layerwise:
+        """Raise if layerwise.checkpoint_dir is set but layerwise.enable is False."""
+        if self.layerwise.checkpoint_dir is not None and not self.layerwise.enable:
             raise ValueError(
-                "layerwise_checkpoint_dir requires layerwise=True. "
-                "Set layerwise=True or remove layerwise_checkpoint_dir."
+                "layerwise.checkpoint_dir requires layerwise.enable=True. "
+                "Set layerwise.enable=True or remove layerwise.checkpoint_dir."
             )
         return self
 
@@ -1045,6 +1119,21 @@ class GPTQCalibConfig(QuantizeAlgorithmConfig):
         description="""When True, use a fused Triton kernel that combines quantization and
         per-column error propagation into one launch per GPTQ block.""",
     )
+
+    @model_validator(mode="after")
+    def _gptq_qdq_default(self):
+        """Inject ``get_qdq_activations_from_prev_layer=True`` unless the user set it.
+
+        GPTQ's Hessian correctness depends on prior-layer QDQ activations, so the
+        default differs from the base class. Uses ``model_fields_set`` to detect
+        whether the user explicitly set the field — covers every input shape
+        (empty constructor, bool, dict) without a per-shape special case.
+        """
+        if "get_qdq_activations_from_prev_layer" not in self.layerwise.model_fields_set:
+            self.layerwise = self.layerwise.model_copy(
+                update={"get_qdq_activations_from_prev_layer": True}
+            )
+        return self
 
 
 QuantizeQuantCfgType = list[QuantizerCfgEntry]

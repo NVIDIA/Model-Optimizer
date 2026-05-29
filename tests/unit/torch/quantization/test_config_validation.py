@@ -15,6 +15,8 @@
 
 """Test of quantization config validations."""
 
+import warnings
+
 import pytest
 from pydantic import ValidationError
 
@@ -26,6 +28,7 @@ from modelopt.torch.quantization.config import (
     INT4_AWQ_CFG,
     NVFP4_DEFAULT_CFG,
     W4A8_AWQ_BETA_CFG,
+    GPTQCalibConfig,
     MaxCalibConfig,
     QuantizeConfig,
     find_quant_cfg_entry_by_path,
@@ -574,32 +577,104 @@ class TestQuantizeConfigValidators:
 
 
 class TestLayerwiseUseSequentialAlias:
-    """`layerwise` accepts the legacy `use_sequential` name via validation_alias.
+    """`use_sequential` is the legacy alias for `layerwise` (pre-#1251 checkpoints)."""
 
-    Old PTQ checkpoints serialized the field as `use_sequential` before #1251 renamed
-    it to `layerwise`. AliasChoices lets those checkpoints load without a migration
-    validator while still serializing under the current name.
-    """
+    @pytest.mark.parametrize("value", [True, False])
+    def test_use_sequential_resolves_to_layerwise(self, value):
+        with pytest.warns(DeprecationWarning):
+            cfg = MaxCalibConfig(use_sequential=value)
+        assert cfg.layerwise.enable is value
 
-    def test_use_sequential_true_sets_layerwise(self):
-        cfg = MaxCalibConfig(use_sequential=True)
-        assert cfg.layerwise is True
-
-    def test_use_sequential_false_sets_layerwise(self):
-        cfg = MaxCalibConfig(use_sequential=False)
-        assert cfg.layerwise is False
-
-    def test_layerwise_name_still_accepted(self):
-        cfg = MaxCalibConfig(layerwise=True)
-        assert cfg.layerwise is True
-
-    def test_serializes_under_current_name(self):
-        """Dump must use `layerwise`, not the legacy alias."""
-        dumped = MaxCalibConfig(use_sequential=True).model_dump()
-        assert dumped["layerwise"] is True
+    def test_serializes_under_layerwise_not_alias(self):
+        with pytest.warns(DeprecationWarning):
+            dumped = MaxCalibConfig(use_sequential=True).model_dump()
+        assert dumped["layerwise"]["enable"] is True
         assert "use_sequential" not in dumped
 
-    def test_unknown_field_still_rejected(self):
-        """extra='forbid' must still reject unrelated unknown fields."""
-        with pytest.raises(ValidationError):
-            MaxCalibConfig(not_a_real_field=True)
+
+class TestLayerwiseNestedConfig:
+    """Layerwise expands from a bool to a nested ``LayerwiseConfig``.
+
+    Backward compatibility: bool input is coerced with a DeprecationWarning, and
+    the legacy flat ``layerwise_checkpoint_dir`` key is silently absorbed.
+    """
+
+    def test_nested_form_accepted(self):
+        cfg = MaxCalibConfig(layerwise={"enable": True, "checkpoint_dir": "/x"})
+        assert cfg.layerwise.enable is True
+        assert cfg.layerwise.checkpoint_dir == "/x"
+
+    def test_bool_form_deprecated_but_accepted(self):
+        with pytest.warns(DeprecationWarning, match="bool is deprecated"):
+            cfg = MaxCalibConfig(layerwise=True)
+        assert cfg.layerwise.enable is True
+
+    def test_dict_form_no_deprecation(self):
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            MaxCalibConfig(layerwise={"enable": True})
+
+    def test_flat_checkpoint_dir_migrated_to_nested(self):
+        with pytest.warns(DeprecationWarning):
+            cfg = MaxCalibConfig(layerwise=True, layerwise_checkpoint_dir="/x")
+        assert cfg.layerwise.checkpoint_dir == "/x"
+
+    def test_use_sequential_alias_survives_flat_checkpoint_migration(self):
+        """``use_sequential`` + flat ``layerwise_checkpoint_dir`` must not drop the alias value."""
+        with pytest.warns(DeprecationWarning):
+            cfg = MaxCalibConfig(use_sequential=True, layerwise_checkpoint_dir="/x")
+        assert cfg.layerwise.enable is True
+        assert cfg.layerwise.checkpoint_dir == "/x"
+
+    def test_conflicting_flat_and_nested_checkpoint_dir_raises(self):
+        with pytest.raises(ValidationError, match="Conflicting checkpoint_dir"):
+            MaxCalibConfig(
+                layerwise={"enable": True, "checkpoint_dir": "/a"},
+                layerwise_checkpoint_dir="/b",
+            )
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"layerwise": {"checkpoint_dir": "/x"}},
+            {"layerwise_checkpoint_dir": "/x"},
+        ],
+    )
+    def test_checkpoint_dir_requires_enable(self, kwargs):
+        with pytest.raises(ValidationError, match="requires layerwise.enable=True"):
+            MaxCalibConfig(**kwargs)
+
+    @pytest.mark.parametrize(
+        ("cfg_cls", "expected_qdq"),
+        [(MaxCalibConfig, False), (GPTQCalibConfig, True)],
+    )
+    def test_per_algorithm_qdq_default(self, cfg_cls, expected_qdq):
+        assert cfg_cls().layerwise.get_qdq_activations_from_prev_layer is expected_qdq
+
+    @pytest.mark.parametrize(
+        "layerwise",
+        [
+            {"enable": True},
+            pytest.param(True, marks=pytest.mark.filterwarnings("ignore::DeprecationWarning")),
+        ],
+    )
+    def test_gptq_qdq_default_survives_user_layerwise_input(self, layerwise):
+        """GPTQ must default qdq=True even when the user supplies a layerwise dict/bool."""
+        cfg = GPTQCalibConfig(layerwise=layerwise)
+        assert cfg.layerwise.get_qdq_activations_from_prev_layer is True
+
+    def test_gptq_user_explicit_qdq_false_wins(self):
+        """An explicit ``get_qdq_activations_from_prev_layer=False`` must override the GPTQ default."""
+        cfg = GPTQCalibConfig(
+            layerwise={"enable": True, "get_qdq_activations_from_prev_layer": False}
+        )
+        assert cfg.layerwise.get_qdq_activations_from_prev_layer is False
+
+    def test_default_dump_shape(self):
+        dumped = MaxCalibConfig().model_dump()
+        assert dumped["layerwise"] == {
+            "enable": False,
+            "get_qdq_activations_from_prev_layer": False,
+            "checkpoint_dir": None,
+        }
+        assert "layerwise_checkpoint_dir" not in dumped
