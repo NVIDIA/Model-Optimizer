@@ -543,7 +543,7 @@ def auto_quantize(
     }
     # Disable all quantizers; AutoQuantize will enable the needed ones
     set_quantizer_by_cfg(model, [{"quantizer_name": "*", "enable": False}])
-    search_constraints = cast(ConstraintsDict, constraints or {})
+    search_constraints = cast("ConstraintsDict", constraints or {})
     searcher.search(model, search_constraints, config=search_config)
 
     return model, searcher.state_dict()
