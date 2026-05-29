@@ -33,11 +33,12 @@ them into TRT precision layers.
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 import torch
 from datasets import load_dataset
-from transformers import AutoImageProcessor, ViTForImageClassification
+from transformers import AutoImageProcessor, ViTConfig, ViTForImageClassification
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
@@ -53,11 +54,30 @@ PRECISION_TO_RECIPE: dict[str, str] = {
 }
 
 
-def load_model_and_processor(model_id: str, device: torch.device, dtype: torch.dtype):
-    """Pull the HF ViT classifier and its preprocessor."""
-    print(f"Loading {model_id} (dtype={dtype})...")
+def load_model_and_processor(
+    model_id: str,
+    device: torch.device,
+    dtype: torch.dtype,
+    pretrained: bool = True,
+    config_overrides: dict | None = None,
+):
+    """Pull the HF ViT classifier and its preprocessor.
+
+    With ``pretrained=False`` the model is built from a config with random
+    weights (test path); ``config_overrides`` lets the caller shrink it
+    (e.g. ``{"num_hidden_layers": 1, "hidden_size": 64, ...}``). The
+    preprocessor is always loaded from ``model_id`` since it only carries
+    a small JSON config.
+    """
+    print(f"Loading {model_id} (dtype={dtype}, pretrained={pretrained})...")
     processor = AutoImageProcessor.from_pretrained(model_id)
-    model = ViTForImageClassification.from_pretrained(model_id, torch_dtype=dtype)
+    if pretrained:
+        model = ViTForImageClassification.from_pretrained(model_id, torch_dtype=dtype)
+    else:
+        config = ViTConfig.from_pretrained(model_id)
+        for k, v in (config_overrides or {}).items():
+            setattr(config, k, v)
+        model = ViTForImageClassification(config).to(dtype)
     model.eval().to(device)
     return model, processor
 
@@ -131,6 +151,13 @@ def compile_with_torch_tensorrt(model: torch.nn.Module, example_input: torch.Ten
     import torch_tensorrt
 
     print("Compiling with torch_tensorrt.compile (Dynamo IR)...")
+    # `aten.cat.default` is force-executed in PyTorch because torch_tensorrt
+    # 2.10's cat converter chokes on the cls-token + patch-embedding concat
+    # in HF ViT (BFloat16 path: `TypeError: Got unsupported ScalarType
+    # BFloat16`; FP16 path: rank-(-1) TRT tensor that trips the downstream
+    # `embeddings + position_embeddings` add). The cat is a tiny [1,1,H]
+    # + [1,N,H] concat that runs once per forward, so falling back to
+    # PyTorch costs essentially nothing.
     with export_torch_mode():
         trt_model = torch_tensorrt.compile(
             model,
@@ -138,6 +165,7 @@ def compile_with_torch_tensorrt(model: torch.nn.Module, example_input: torch.Ten
             arg_inputs=[example_input],
             min_block_size=1,
             truncate_double=True,
+            torch_executed_ops={torch.ops.aten.cat.default},
         )
     return trt_model
 
@@ -192,6 +220,20 @@ def main():
         help="Quantize + run the fake-quant model only; skip torch_tensorrt.compile. "
         "Useful for environments without torch_tensorrt installed.",
     )
+    parser.add_argument(
+        "--no_pretrained",
+        action="store_true",
+        help="Build the model from config with random weights instead of "
+        "downloading pretrained weights. Useful for fast e2e tests.",
+    )
+    parser.add_argument(
+        "--model_kwargs",
+        type=str,
+        default=None,
+        help="JSON string of ViTConfig overrides applied when --no_pretrained "
+        'is set (e.g. \'{"num_hidden_layers": 1, "hidden_size": 64, '
+        '"intermediate_size": 128, "num_attention_heads": 2}\').',
+    )
     args = parser.parse_args()
 
     if not torch.cuda.is_available():
@@ -199,7 +241,14 @@ def main():
     device = torch.device("cuda")
     dtype = torch.bfloat16
 
-    model, processor = load_model_and_processor(args.model_id, device, dtype)
+    config_overrides = json.loads(args.model_kwargs) if args.model_kwargs else None
+    model, processor = load_model_and_processor(
+        args.model_id,
+        device,
+        dtype,
+        pretrained=not args.no_pretrained,
+        config_overrides=config_overrides,
+    )
     image_size = model.config.image_size
     num_channels = model.config.num_channels
     example_input = torch.randn(
