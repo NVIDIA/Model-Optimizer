@@ -19,7 +19,7 @@
 # fingerprinted by `specdec_bench_sha` in configuration.json.
 try:
     from modelopt import __version__
-except Exception:  # vllm container does not have modelopt installed
+except ModuleNotFoundError:  # vllm container does not have modelopt installed
     from warnings import warn as _warn
 
     _warn("modelopt not found, using 0.0.0 as specdec_bench version")
