@@ -338,38 +338,29 @@ def _make_cast_model(cast_to, output_elem_type, with_value_info=False):
     inputs = [make_tensor_value_info("X", onnx.TensorProto.FLOAT16, [1, 4])]
     outputs = [make_tensor_value_info("Y", output_elem_type, [1, 4])]
     value_info = (
-        [make_tensor_value_info("Y", onnx.TensorProto.FLOAT16, [1, 4])]
-        if with_value_info
-        else []
+        [make_tensor_value_info("Y", onnx.TensorProto.FLOAT16, [1, 4])] if with_value_info else []
     )
     graph = make_graph(nodes, "cast_graph", inputs, outputs, value_info=value_info)
-    return make_model(
-        graph, producer_name="modelopt test", opset_imports=[make_opsetid("", 17)]
-    )
+    return make_model(graph, producer_name="modelopt test", opset_imports=[make_opsetid("", 17)])
 
 
-def test_clear_stale_value_info_reconciles_output_and_clears_value_info():
-    # graph.output declares FP16 but Cast.to=FLOAT — stale.
+@pytest.mark.parametrize(
+    ("output_elem_type", "with_value_info", "expected_count"),
+    [
+        (onnx.TensorProto.FLOAT16, True, 2),  # stale output + value_info: reconcile + clear
+        (onnx.TensorProto.FLOAT, False, 0),  # output already matches Cast.to: no-op
+    ],
+    ids=["stale_output_and_value_info", "no_op_when_matching"],
+)
+def test_clear_stale_value_info(output_elem_type, with_value_info, expected_count):
     model = _make_cast_model(
         cast_to=onnx.TensorProto.FLOAT,
-        output_elem_type=onnx.TensorProto.FLOAT16,
-        with_value_info=True,
+        output_elem_type=output_elem_type,
+        with_value_info=with_value_info,
     )
 
     count = clear_stale_value_info(model)
 
     assert model.graph.output[0].type.tensor_type.elem_type == onnx.TensorProto.FLOAT
     assert len(model.graph.value_info) == 0
-    assert count == 2  # 1 output reconciled + 1 value_info entry cleared
-
-
-def test_clear_stale_value_info_noop_when_output_matches_cast():
-    model = _make_cast_model(
-        cast_to=onnx.TensorProto.FLOAT,
-        output_elem_type=onnx.TensorProto.FLOAT,
-    )
-
-    count = clear_stale_value_info(model)
-
-    assert model.graph.output[0].type.tensor_type.elem_type == onnx.TensorProto.FLOAT
-    assert count == 0
+    assert count == expected_count
