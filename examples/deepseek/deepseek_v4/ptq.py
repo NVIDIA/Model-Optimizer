@@ -28,7 +28,7 @@ Design notes (in contrast to ``examples/deepseek/deepseek_v3/ptq.py`` which cove
     (``deekseep_v4_model.Expert``). That wrapper installs per-weight and per-
     input ``TensorQuantizer`` pairs for ``w1``, ``w2``, ``w3`` and redefines
     ``forward`` to dequantize each MXFP4-packed expert weight to BF16 on the
-    fly (via ``MXFP4QTensor.dequantize_packed``) before the ``F.linear`` call
+    fly (via ``MXFP4QTensor.dequantize``) before the ``F.linear`` call
     that the quantizers hook into.
 
   * The shared expert (``MoE.shared_experts``) is also an ``Expert`` instance,
@@ -128,7 +128,18 @@ def _dequantize_linear_weight(linear_module) -> torch.Tensor:
     """
     w = linear_module.weight
     if w.dtype == torch.float4_e2m1fn_x2:
-        return MXFP4QTensor.dequantize_packed(w, w.scale, block_size=32, dtype=torch.bfloat16)
+        block_size = 32
+        packed = w.contiguous().view(torch.uint8)
+        scale = w.scale.contiguous().view(torch.uint8)
+        original_shape = torch.Size((*packed.shape[:-1], packed.shape[-1] * 2))
+        assert packed.shape[:-1] == scale.shape[:-1] and (
+            2 * packed.shape[-1] == scale.shape[-1] * block_size
+        ), f"Incompatible MXFP4 shapes: weight {tuple(packed.shape)} vs scale {tuple(scale.shape)}"
+        return MXFP4QTensor(original_shape, torch.bfloat16, packed).dequantize(
+            dtype=torch.bfloat16,
+            scale=scale,
+            block_sizes=[block_size],
+        )
     if w.dtype == torch.float8_e4m3fn:
         return _fp8_ue8m0_blockwise_to_bf16(w, w.scale, block=128)
     return w

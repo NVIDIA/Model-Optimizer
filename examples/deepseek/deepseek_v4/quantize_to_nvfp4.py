@@ -192,11 +192,17 @@ def _lookup_amax(
 def _dequantize_mxfp4_to_bf16(
     mxfp4_weight: torch.Tensor, mxfp4_scale: torch.Tensor, device: str
 ) -> torch.Tensor:
-    return MXFP4QTensor.dequantize_packed(
-        mxfp4_weight.to(device),
-        mxfp4_scale.to(device),
-        block_size=32,
+    block_size = 32
+    packed = mxfp4_weight.to(device).contiguous().view(torch.uint8)
+    scale = mxfp4_scale.to(device).contiguous().view(torch.uint8)
+    original_shape = torch.Size((*packed.shape[:-1], packed.shape[-1] * 2))
+    assert packed.shape[:-1] == scale.shape[:-1] and (
+        2 * packed.shape[-1] == scale.shape[-1] * block_size
+    ), f"Incompatible MXFP4 shapes: weight {tuple(packed.shape)} vs scale {tuple(scale.shape)}"
+    return MXFP4QTensor(original_shape, torch.bfloat16, packed).dequantize(
         dtype=torch.bfloat16,
+        scale=scale,
+        block_sizes=[block_size],
     )
 
 
