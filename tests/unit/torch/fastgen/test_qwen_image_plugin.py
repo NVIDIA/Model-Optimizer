@@ -181,8 +181,7 @@ def test_build_img_shapes_inner_list_aliased():
     """Implementation uses ``[[...]] * B`` so the inner list is shared across
     batch entries. Safe as long as no caller mutates the nested list/tuple.
     This test documents the aliasing — if a future change makes the lists
-    independent, the assertion will fail and the doc/comment in checklists.md
-    should be updated.
+    independent, the assertion will fail and this test should be updated.
     """
     out = build_img_shapes(batch_size=2, h_lat=32, w_lat=32)
     assert out[0] is out[1]

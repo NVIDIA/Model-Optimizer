@@ -47,11 +47,8 @@ Launch::
         examples/diffusers/fastgen/dmd2_finetune.py \\
         --config examples/diffusers/fastgen/configs/dmd2_wan22_5b.yaml
 
-See ``examples/diffusers/fastgen/checklists.md`` (§15 / §19) for the
-per-feature enablement evidence and the formal-run gate;
-``examples/diffusers/fastgen/HANDOFF.md`` for the file-pointer map; and
-``examples/diffusers/fastgen/README.md`` for the three-phase alternation
-diagram + troubleshooting notes.
+See ``examples/diffusers/fastgen/README.md`` for the three-phase
+alternation diagram + troubleshooting notes.
 """
 
 from __future__ import annotations
