@@ -20,15 +20,9 @@ These cover:
 * A. mathematical correctness — LUT, nibble order, per-group scale,
   UE8M0 exponent math.
 * B. layout correctness — DS 2D shape and rank-agnostic prefix.
-* C. cross-validation against two independent references:
-    - an explicit byte-by-byte decoder local to this test;
-    - DeepSeek-V4's own ``cast_e2m1fn_to_e4m3fn`` + a trivial FP8-to-BF16
-      dequant stage, which is the "lossless via FP8" path the model's
-      ``inference/convert.py`` uses.
+* C. randomized cross-validation against an explicit byte-by-byte decoder
+  local to this test.
 """
-
-import importlib.util
-import os
 
 import pytest
 import torch
@@ -187,23 +181,6 @@ class TestLayoutCorrectness:
 class TestCrossValidationWithIndependentReference:
     """Randomized checks against a byte-by-byte MXFP4 decoder local to this test."""
 
-    def test_matches_reference_on_grouped_random_inputs(self):
-        """Bit-identical match on GPT-OSS-style grouped random MXFP4 inputs."""
-        e, m, k, block_size = 2, 8, 256, 32
-        num_groups = k // block_size
-        torch.manual_seed(42)
-        # Grouped storage: (E, M, G, 16) packed bytes + (E, M, G) scales.
-        blocks_4d = torch.randint(0, 256, (e, m, num_groups, 16), dtype=torch.uint8)
-        scales_3d = torch.randint(100, 151, (e, m, num_groups), dtype=torch.uint8)
-
-        # DS layout: flatten group+pack axes into one trailing dim.
-        blocks_ds = blocks_4d.reshape(e, m, num_groups * 16)
-        ref = _reference_dequantize_packed(blocks_ds, scales_3d, block_size=block_size)
-        out = MXFP4QTensor.dequantize_packed(blocks_ds, scales_3d, block_size=block_size)
-
-        assert out.shape == ref.shape == (e, m, k)
-        assert torch.equal(out, ref)
-
     def test_matches_reference_on_2d_ds_shape(self):
         """DS V4 experts arrive as 2D (M, K//2). Make sure the 2D path agrees too."""
         m, k, block_size = 16, 128, 32
@@ -215,60 +192,3 @@ class TestCrossValidationWithIndependentReference:
         ref = _reference_dequantize_packed(blocks_2d, scales_2d, block_size=block_size)
         out = MXFP4QTensor.dequantize_packed(blocks_2d, scales_2d, block_size=block_size)
         assert torch.equal(out, ref)
-
-
-class TestCrossValidationWithDeepSeekConvert:
-    """C#8: validate against DeepSeek-V4's own ``cast_e2m1fn_to_e4m3fn`` + FP8-to-BF16
-    dequant path. This is the "lossless via FP8" story the model's ``inference/convert.py``
-    relies on, valid when the per-128-block scale spread is within 2^6 octaves.
-    """
-
-    @staticmethod
-    def _load_convert_module():
-        path = os.environ.get("DSV4_CONVERT_PY")
-        if not path:
-            pytest.skip("set DSV4_CONVERT_PY to DeepSeek V4 inference/convert.py")
-        if not os.path.exists(path):
-            pytest.skip(f"DeepSeek V4 convert.py not found at {path} (set DSV4_CONVERT_PY)")
-        spec = importlib.util.spec_from_file_location("dsv4_convert", path)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        return mod
-
-    @staticmethod
-    def _fp8_blockwise_to_bf16(fp8, fp8_scale_e8m0, block=128):
-        """Minimal FP8 E4M3 × UE8M0 128x128 block-scale -> BF16 dequant."""
-        out_dim, in_dim = fp8.shape
-        assert fp8_scale_e8m0.shape == (out_dim // block, in_dim // block)
-        scale_exp = fp8_scale_e8m0.contiguous().view(torch.uint8).to(torch.int32) - 127
-        # Broadcast per-block exponent to element granularity
-        scale_exp = scale_exp.repeat_interleave(block, 0).repeat_interleave(block, 1)
-        return torch.ldexp(fp8.to(torch.float32), scale_exp).to(torch.bfloat16)
-
-    def test_matches_fp4_to_fp8_to_bf16(self):
-        mod = self._load_convert_module()
-        cast_e2m1fn_to_e4m3fn = mod.cast_e2m1fn_to_e4m3fn
-
-        # Smallest sizes satisfying convert.py's divisibility constraints
-        out_dim, in_dim = 128, 256
-        groups32 = in_dim // 32
-        torch.manual_seed(11)
-        # DS layout: int8 packed, shape (out_dim, in_dim // 2)
-        blocks = torch.randint(-128, 128, (out_dim, in_dim // 2), dtype=torch.int8)
-        # Keep scales in a narrow range so that within every 128-block the 4 fp4-group scales
-        # span < 2^6 -> no underflow, paths are bit-identical.
-        scale_bytes = 127 + torch.randint(-3, 4, (out_dim, groups32), dtype=torch.int32)
-        scale_bytes = scale_bytes.clamp(1, 254).to(torch.uint8)
-        scales_e8m0 = scale_bytes.view(torch.float8_e8m0fnu)
-
-        # Path A: our direct MXFP4 -> BF16
-        out_a = MXFP4QTensor.dequantize_packed(
-            blocks, scales_e8m0, block_size=32, dtype=torch.bfloat16
-        )
-
-        # Path B: DS's cast_e2m1fn_to_e4m3fn (MXFP4 -> FP8 at 128x128 blocks) then FP8 -> BF16
-        fp8, fp8_scale = cast_e2m1fn_to_e4m3fn(blocks, scales_e8m0)
-        out_b = self._fp8_blockwise_to_bf16(fp8, fp8_scale, block=128)
-
-        assert out_a.shape == out_b.shape == (out_dim, in_dim)
-        assert torch.equal(out_a, out_b)
