@@ -59,7 +59,7 @@ from modelopt.torch.speculative.plugins.hf_training_args import (
 )
 from modelopt.torch.speculative.utils import load_vlm_or_llm, patch_transformers5_params_loading
 from modelopt.torch.utils import print_rank_0
-from modelopt.torch.utils.distributed import is_master
+from modelopt.torch.utils.distributed import is_master, local_rank
 
 torch.manual_seed(0)
 mto.enable_huggingface_checkpointing()
@@ -235,7 +235,9 @@ def train():
             raise ValueError(f"Unsupported speculative recipe type: {type(recipe).__name__}")
 
     if dry_run:
-        if is_master():
+        # is_master() is unreliable here: we return before the HF Trainer inits torch.distributed,
+        # so use local_rank() (env-based) to keep a single writer to output_dir.
+        if local_rank() == 0:
             os.makedirs(training_args.output_dir, exist_ok=True)
             model.save_pretrained(training_args.output_dir)
             tokenizer.save_pretrained(training_args.output_dir)

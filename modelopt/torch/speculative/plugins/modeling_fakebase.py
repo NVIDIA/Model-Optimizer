@@ -24,7 +24,6 @@ import transformers
 from huggingface_hub import hf_hub_download
 from huggingface_hub.errors import EntryNotFoundError
 from safetensors import safe_open
-from safetensors.torch import load_file as safetensors_load_file
 from transformers import (
     AutoConfig,
     AutoModel,
@@ -220,10 +219,12 @@ class FakeBaseModel(PreTrainedModel):
             source, [weight_map[lm_head_key], weight_map[embed_tokens_key]]
         )
 
-        lm_head_state = safetensors_load_file(lm_head_path, device="cpu")
-        embed_tokens_state = safetensors_load_file(embed_tokens_path, device="cpu")
+        # Pull only the two tensors we need; avoids materializing the whole file.
+        def _read(path: str, key: str) -> torch.Tensor:
+            with safe_open(path, framework="pt", device="cpu") as h:
+                return h.get_tensor(key)
 
-        return lm_head_state[lm_head_key], embed_tokens_state[embed_tokens_key]
+        return _read(lm_head_path, lm_head_key), _read(embed_tokens_path, embed_tokens_key)
 
     def forward(self, *args, **kwargs):
         """Not implemented: FakeBaseModel omits full model weights and cannot run inference."""
