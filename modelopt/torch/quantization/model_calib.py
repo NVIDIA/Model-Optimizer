@@ -430,21 +430,23 @@ def _mse_quant_func(x, amax, quantizer):
     original_amax = quantizer._amax.clone() if hasattr(quantizer, "_amax") else None
     quantizer._amax = amax
 
-    with (
-        enable_quant(quantizer),
-        disable_calib(quantizer),
-        enable_fake_quant(quantizer),
-    ):
-        if hasattr(quantizer, "_original_shape"):
-            x = quantizer._reset_to_original_shape(x)
-        xq = quantizer(x)
-        if hasattr(quantizer, "_block_reshape_size"):
-            xq = xq.reshape(quantizer._block_reshape_size)
-
-    if original_amax is not None:
-        quantizer._amax = original_amax
-    else:
-        delattr(quantizer, "_amax")
+    try:
+        with (
+            enable_quant(quantizer),
+            disable_calib(quantizer),
+            enable_fake_quant(quantizer),
+        ):
+            if hasattr(quantizer, "_original_shape"):
+                x = quantizer._reset_to_original_shape(x)
+            xq = quantizer(x)
+            if hasattr(quantizer, "_block_reshape_size"):
+                # Reapply static block padding before returning to the calibration block layout.
+                xq = quantizer._process_for_blockquant(xq)
+    finally:
+        if original_amax is not None:
+            quantizer._amax = original_amax
+        else:
+            delattr(quantizer, "_amax")
 
     return xq
 
@@ -770,26 +772,7 @@ def local_hessian_calibrate(
         initial_amax = weight_quantizer._amax.clone().detach()
 
         def quant_func(x, amax, quantizer=weight_quantizer):
-            original_amax = quantizer._amax.clone() if hasattr(quantizer, "_amax") else None
-            quantizer._amax = amax
-
-            with (
-                enable_quant(quantizer),
-                disable_calib(quantizer),
-                enable_fake_quant(quantizer),
-            ):
-                if hasattr(quantizer, "_original_shape"):
-                    x = quantizer._reset_to_original_shape(x)
-                xq = quantizer(x)
-                if hasattr(quantizer, "_block_reshape_size"):
-                    xq = xq.reshape(quantizer._block_reshape_size)
-
-            if original_amax is not None:
-                quantizer._amax = original_amax
-            else:
-                delattr(quantizer, "_amax")
-
-            return xq
+            return _mse_quant_func(x, amax, quantizer)
 
         is_nvfp4_static = weight_quantizer.is_nvfp4_static
 

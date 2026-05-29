@@ -13,3 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Re-export modelopt's version so configuration.json's `specdec_bench_version`
+# tracks the parent package without a separate semver source of truth.
+# Breaking schema/methodology changes are recorded in commit messages and
+# fingerprinted by `specdec_bench_sha` in configuration.json.
+try:
+    from modelopt import __version__
+except ModuleNotFoundError:  # vllm container does not have modelopt installed
+    from warnings import warn as _warn
+
+    _warn("modelopt not found, using 0.0.0 as specdec_bench version")
+    __version__ = "0.0.0"
