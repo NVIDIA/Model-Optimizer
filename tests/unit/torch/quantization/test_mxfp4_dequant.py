@@ -29,26 +29,6 @@ import torch
 
 from modelopt.torch.quantization.qtensor.mxfp4_tensor import MXFP4QTensor
 
-# Signed E2M1 value table indexed by 4-bit pattern (bit 3 = sign, bits 2..0 = magnitude).
-E2M1_SIGNED = [
-    0.0,
-    0.5,
-    1.0,
-    1.5,
-    2.0,
-    3.0,
-    4.0,
-    6.0,
-    0.0,
-    -0.5,
-    -1.0,
-    -1.5,
-    -2.0,
-    -3.0,
-    -4.0,
-    -6.0,
-]
-
 
 def _pack_fp4(indices: torch.Tensor) -> torch.Tensor:
     """Pack ``(..., K)`` tensor of 4-bit nibble indices into ``(..., K//2)`` uint8.
@@ -61,6 +41,12 @@ def _pack_fp4(indices: torch.Tensor) -> torch.Tensor:
     low = indices[..., 0::2].to(torch.uint8) & 0x0F
     high = indices[..., 1::2].to(torch.uint8) & 0x0F
     return low | (high << 4)
+
+
+def _e2m1_value(index: int) -> float:
+    magnitude = MXFP4QTensor.E2M1_values[index & 0b0111]
+    sign = -1 if index & 0b1000 else 1
+    return sign * magnitude
 
 
 def _reference_dequantize_packed(
@@ -93,8 +79,8 @@ def _reference_dequantize_packed(
             start = group_idx * bytes_per_group
             end = start + bytes_per_group
             for byte in row_b[start:end].tolist():
-                row.append(E2M1_SIGNED[byte & 0x0F] * scale)
-                row.append(E2M1_SIGNED[(byte >> 4) & 0x0F] * scale)
+                row.append(_e2m1_value(byte & 0x0F) * scale)
+                row.append(_e2m1_value((byte >> 4) & 0x0F) * scale)
         rows.append(row)
 
     out = torch.tensor(rows, dtype=torch.float32).reshape(*b.shape[:-1], b.shape[-1] * 2)
@@ -109,7 +95,7 @@ class TestMathematicalCorrectness:
         blocks = _pack_fp4(indices)  # shape (16,)
         scales = torch.tensor([127], dtype=torch.uint8)  # UE8M0 byte 127 -> 2^0
         out = MXFP4QTensor.dequantize_packed(blocks, scales, block_size=32, dtype=torch.float32)
-        expected = torch.tensor([E2M1_SIGNED[i] for i in indices.tolist()], dtype=torch.float32)
+        expected = torch.tensor([_e2m1_value(i) for i in indices.tolist()], dtype=torch.float32)
         assert torch.equal(out, expected)
 
     def test_nibble_ordering_low_is_even(self):

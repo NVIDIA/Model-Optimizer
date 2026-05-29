@@ -143,35 +143,14 @@ class MXFP4QTensor(BaseQuantizedTensor):
         # Reshape back to the original shape
         return x_float.reshape(original_shape).to(dtype)
 
-    # Signed E2M1 lookup, indexed by the full 4-bit pattern.
-    # Bit 3 is the sign; bits 2..0 index the 8-entry magnitude table.
-    _E2M1_SIGNED_VALUES = [
-        0.0,
-        0.5,
-        1.0,
-        1.5,
-        2.0,
-        3.0,
-        4.0,
-        6.0,
-        0.0,
-        -0.5,
-        -1.0,
-        -1.5,
-        -2.0,
-        -3.0,
-        -4.0,
-        -6.0,
-    ]
     _e2m1_signed_cache: dict = {}
 
     @classmethod
     def _get_signed_e2m1_lut(cls, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
         key = (device, dtype)
         if key not in cls._e2m1_signed_cache:
-            cls._e2m1_signed_cache[key] = torch.tensor(
-                cls._E2M1_SIGNED_VALUES, dtype=dtype, device=device
-            )
+            magnitudes = torch.tensor(cls.E2M1_values, dtype=dtype, device=device)
+            cls._e2m1_signed_cache[key] = torch.cat((magnitudes, -magnitudes))
         return cls._e2m1_signed_cache[key]
 
     @classmethod
