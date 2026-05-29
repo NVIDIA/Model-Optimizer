@@ -38,7 +38,6 @@ from modelopt.torch.utils import atomic_print
 
 from .algorithms import AutoQuantizeGradientSearcher, AutoQuantizeKLDivSearcher, QuantRecipe
 from .algorithms import get_auto_quantize_config as _get_auto_quantize_config
-from ._auto_quantize_cost import normalize_auto_quantize_constraints
 from .config import QuantizeAlgoCfgType
 from .mode import QuantizeModeRegistry, get_modelike_from_algo_cfg
 from .nn import QuantModule, TensorQuantizer
@@ -523,8 +522,6 @@ def auto_quantize(
         searcher = AutoQuantizeKLDivSearcher()
     else:
         raise ValueError(f"Invalid method: {method}. Valid options are 'gradient' or 'kl_div'.")
-
-    constraints = normalize_auto_quantize_constraints(model, constraints)
 
     model = apply_mode(
         model,

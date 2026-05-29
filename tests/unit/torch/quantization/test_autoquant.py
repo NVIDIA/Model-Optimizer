@@ -189,7 +189,7 @@ def test_auto_quantize_active_moe_cost_model(num_experts_attr):
     assert shared_stats
     assert all(stats["cost_weight"] == pytest.approx(0.25) for stats in routed_stats)
     assert all(stats["cost_weight"] == pytest.approx(1.0) for stats in shared_stats)
-    assert all("active_costs" in stats for stats in search_history["candidate_stats"].values())
+    assert all("active_costs" not in stats for stats in search_history["candidate_stats"].values())
 
 
 def test_active_moe_ratio_requires_single_config_object():

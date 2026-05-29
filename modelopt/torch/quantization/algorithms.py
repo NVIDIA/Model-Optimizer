@@ -397,6 +397,9 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             "disabled_layers": None,
             "verbose": is_master(),
             "checkpoint": None,
+            "cost_model": COST_MODEL_WEIGHT,
+            "cost": {},
+            "active_moe_expert_ratio": None,
         }
 
     @property
@@ -405,6 +408,7 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         return {
             "method": self.method_name,
             "cost_model": "weight",
+            "cost": {},
             "active_moe_expert_ratio": None,
             "cost_denominator": None,
             "candidate_stats": defaultdict(dict),
@@ -608,25 +612,22 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             if not isinstance(hparam, QuantRecipeHparam):
                 continue
 
-            formats, scores, costs, active_costs = [], [], [], []
+            formats, scores, costs = [], [], []
             prev_score = float("inf")
             for recipe in hparam.choices:
                 formats.append(recipe)
 
                 score = hparam.get_score(recipe)  # type: ignore [arg-type]
                 cost = hparam.get_cost(recipe)  # type: ignore [arg-type]
-                active_cost = hparam.get_cost(recipe, cost_weight=hparam.cost_weight)  # type: ignore [arg-type]
 
                 score = min(score, prev_score)  # TODO: Should we get rid of this?
                 scores.append(score)
                 costs.append(cost)
-                active_costs.append(active_cost)
                 prev_score = score
 
             self.candidate_stats[name]["formats"] = formats
             self.candidate_stats[name]["scores"] = scores
             self.candidate_stats[name]["costs"] = costs
-            self.candidate_stats[name]["active_costs"] = active_costs
             self.candidate_stats[name]["module_names"] = hparam.quant_module_names
             self.candidate_stats[name]["cost_weight"] = hparam.cost_weight
 
@@ -674,6 +675,7 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             )
         self.method = self.method_name
         self.cost_model = self.config["cost_model"]
+        self.cost = self.config["cost"]
         self.active_moe_expert_ratio = self.config["active_moe_expert_ratio"]
         self.cost_denominator = getattr(self, "cost_denominator", None)
 
@@ -1466,7 +1468,20 @@ def _resolve_best_recipe(search_state, constraints, verbose=False):
 
     searcher.candidate_stats = candidate_stats
     searcher.cost_model = search_state.get("cost_model", COST_MODEL_WEIGHT)
-    searcher.config = {"cost_model": searcher.cost_model}
+    searcher.cost = search_state.get("cost", {})
+    searcher.active_moe_expert_ratio = search_state.get("active_moe_expert_ratio")
+    if (
+        searcher.cost_model == COST_MODEL_ACTIVE_MOE
+        and not searcher.cost
+        and searcher.active_moe_expert_ratio is not None
+    ):
+        searcher.cost = {ACTIVE_MOE_EXPERT_RATIO_KEY: searcher.active_moe_expert_ratio}
+    searcher.config = {
+        **searcher.default_search_config,
+        "cost_model": searcher.cost_model,
+        "cost": searcher.cost,
+        "active_moe_expert_ratio": searcher.active_moe_expert_ratio,
+    }
     best_recipe_info, _ = searcher.run_search_with_stats(max_weight_size, verbose=verbose)
 
     best_recipe = {name: info["format"] for name, info in best_recipe_info.items()}
