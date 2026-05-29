@@ -17,4 +17,10 @@
 # tracks the parent package without a separate semver source of truth.
 # Breaking schema/methodology changes are recorded in commit messages and
 # fingerprinted by `specdec_bench_sha` in configuration.json.
-from modelopt import __version__
+try:
+    from modelopt import __version__
+except Exception:  # vllm container does not have modelopt installed
+    from warnings import warn as _warn
+
+    _warn("modelopt not found, using 0.0.0 as specdec_bench version")
+    __version__ = "0.0.0"
