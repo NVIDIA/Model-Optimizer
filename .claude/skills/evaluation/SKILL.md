@@ -194,7 +194,17 @@ Reasoning models: prefer reasoning mode (highest scores). For lower variance / c
 - Find every `???` left. Ask the user only for what can't be inferred (SLURM hostname/account/output_dir, MLflow tracking URI, etc.). Don't propose defaults; let them give plain text.
 - Ask about other defaults they may want to change (partition, walltime, MLflow tags).
 
-**Walltime cap: 4 hours.** Always `execution.walltime: "04:00:00"`. Longer walltimes lower scheduler priority → longer queue. If a run won't fit in 4h, prefer: (1) lower `num_repeats` for canary first; (2) split heavy tasks (AA-LCR, SciCode) into separate jobs; (3) scale up `data_parallel_size` / `parallelism`. User can manually override if their cluster's policy makes long jobs cheap.
+**Walltime cap: 4 hours.** Always `execution.walltime: "04:00:00"`. Longer walltimes lower scheduler priority → longer queue.
+
+Evals that exceed 4h are handled by **NEL's built-in dependency-chain resume**, not by shrinking the eval. NEL submits the first SLURM job; if it hits walltime, a dependent follow-on job resumes from the response/result caches the first job wrote, then queues another follow-on. Long evals continue across walltime windows automatically. See `references/run-validation.md#nel-timeout-and-resume-behavior` for the full mechanism.
+
+Implications for the agent:
+
+- Do **not** lower `num_repeats`, split heavy tasks (AA-LCR, SciCode) into separate configs, or otherwise carve up the eval to fit inside 4h. Let NEL chain.
+- Do **not** treat a walltime timeout as a failed run. Check `nel status` / `nel info` and the dependent job's logs before declaring failure. `references/run-validation.md` covers what a real failure looks like vs an expected resume event.
+- Bumping `data_parallel_size` / `parallelism` to finish faster is fine when the goal is wall-clock latency, not a walltime workaround — but it's optional, not required, for runs longer than 4h.
+
+User can manually override the 4h cap if their cluster's queue policy makes long jobs cheap, but the generated default stays 4h.
 
 ---
 
