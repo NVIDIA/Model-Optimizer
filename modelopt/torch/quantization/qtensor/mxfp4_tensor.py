@@ -204,9 +204,8 @@ class MXFP4QTensor(BaseQuantizedTensor):
         result is in the natural ``(out, in)`` orientation, suitable for
         feeding a standard ``nn.Linear`` or a downstream weight quantizer.
 
-        UE8M0 note: per the OCP MX spec byte ``0xFF`` is NaN; we match
-        ``transformers.integrations.mxfp4._convert_moe_packed_tensors`` by
-        treating it as exponent ``+128``, which overflows bf16 to ``+Inf``.
+        UE8M0 note: per the OCP MX spec byte ``0xFF`` is NaN. This helper
+        treats it as exponent ``+128``, which overflows bf16 to ``+Inf``.
         Real MXFP4 checkpoints do not use ``0xFF``.
         """
         # Local tensor only — DTensor/other wrappers would bypass ``view(uint8)``'s

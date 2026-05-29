@@ -21,8 +21,7 @@ These cover:
   UE8M0 exponent math.
 * B. layout correctness — DS 2D shape and rank-agnostic prefix.
 * C. cross-validation against two independent references:
-    - ``transformers._convert_moe_packed_tensors`` (the MX convention used
-      by gpt-oss);
+    - an explicit byte-by-byte decoder local to this test;
     - DeepSeek-V4's own ``cast_e2m1fn_to_e4m3fn`` + a trivial FP8-to-BF16
       dequant stage, which is the "lossless via FP8" path the model's
       ``inference/convert.py`` uses.
@@ -68,6 +67,44 @@ def _pack_fp4(indices: torch.Tensor) -> torch.Tensor:
     low = indices[..., 0::2].to(torch.uint8) & 0x0F
     high = indices[..., 1::2].to(torch.uint8) & 0x0F
     return low | (high << 4)
+
+
+def _reference_dequantize_packed(
+    blocks: torch.Tensor,
+    scales: torch.Tensor,
+    *,
+    block_size: int = 32,
+    dtype: torch.dtype = torch.bfloat16,
+) -> torch.Tensor:
+    """Straight-line reference decoder independent of MXFP4QTensor internals.
+
+    It intentionally uses Python byte iteration instead of the vectorized implementation
+    under test: unpack low/high nibbles, look up signed E2M1 values, then multiply each
+    group by its UE8M0 power-of-two scale.
+    """
+    assert block_size % 2 == 0
+    b = blocks.contiguous().view(torch.uint8).cpu()
+    s = scales.contiguous().view(torch.uint8).cpu()
+    assert b.shape[:-1] == s.shape[:-1]
+    assert 2 * b.shape[-1] == s.shape[-1] * block_size
+
+    bytes_per_group = block_size // 2
+    flat_b = b.reshape(-1, b.shape[-1])
+    flat_s = s.reshape(-1, s.shape[-1])
+    rows: list[list[float]] = []
+    for row_b, row_s in zip(flat_b, flat_s):
+        row: list[float] = []
+        for group_idx, scale_byte in enumerate(row_s.tolist()):
+            scale = 2.0 ** (scale_byte - 127)
+            start = group_idx * bytes_per_group
+            end = start + bytes_per_group
+            for byte in row_b[start:end].tolist():
+                row.append(E2M1_SIGNED[byte & 0x0F] * scale)
+                row.append(E2M1_SIGNED[(byte >> 4) & 0x0F] * scale)
+        rows.append(row)
+
+    out = torch.tensor(rows, dtype=torch.float32).reshape(*b.shape[:-1], b.shape[-1] * 2)
+    return out.to(dtype)
 
 
 class TestMathematicalCorrectness:
@@ -147,58 +184,35 @@ class TestLayoutCorrectness:
         assert torch.equal(out_3d.reshape(e * m, k), out_flat)
 
 
-class TestCrossValidationWithTransformers:
-    """The important ones. The whole point of the helper is to agree with the
-    MX convention as implemented by ``transformers._convert_moe_packed_tensors``."""
+class TestCrossValidationWithIndependentReference:
+    """Randomized checks against a byte-by-byte MXFP4 decoder local to this test."""
 
-    @staticmethod
-    def _transformers_reference(blocks_gptoss_layout, scales):
-        """Run transformers' reference but strip the GPT-OSS-specific trailing transpose."""
-        pytest.importorskip("transformers")
-        from transformers.integrations.mxfp4 import _convert_moe_packed_tensors
-
-        out = _convert_moe_packed_tensors(blocks_gptoss_layout, scales, dtype=torch.bfloat16)
-        # transformers returns shape (..., M, K) but with a final transpose(1,2) already
-        # applied — so for input (E, M, G, 16) it outputs (E, K, M). Undo it.
-        return out.transpose(-1, -2).contiguous()
-
-    def test_matches_transformers_on_random_inputs(self):
-        """Bit-identical match against transformers on random MXFP4 inputs."""
-        pytest.importorskip("transformers")
-        from transformers.integrations.mxfp4 import _convert_moe_packed_tensors  # noqa: F401
-
+    def test_matches_reference_on_grouped_random_inputs(self):
+        """Bit-identical match on GPT-OSS-style grouped random MXFP4 inputs."""
         e, m, k, block_size = 2, 8, 256, 32
         num_groups = k // block_size
         torch.manual_seed(42)
-        # GPT-OSS-style storage: (E, M, G, 16) packed bytes + (E, M, G) scales.
+        # Grouped storage: (E, M, G, 16) packed bytes + (E, M, G) scales.
         blocks_4d = torch.randint(0, 256, (e, m, num_groups, 16), dtype=torch.uint8)
         scales_3d = torch.randint(100, 151, (e, m, num_groups), dtype=torch.uint8)
 
-        ref = self._transformers_reference(blocks_4d, scales_3d)  # (E, M, K)
         # DS layout: flatten group+pack axes into one trailing dim.
         blocks_ds = blocks_4d.reshape(e, m, num_groups * 16)
+        ref = _reference_dequantize_packed(blocks_ds, scales_3d, block_size=block_size)
         out = MXFP4QTensor.dequantize_packed(blocks_ds, scales_3d, block_size=block_size)
 
         assert out.shape == ref.shape == (e, m, k)
         assert torch.equal(out, ref)
 
-    def test_matches_transformers_on_2d_ds_shape(self):
+    def test_matches_reference_on_2d_ds_shape(self):
         """DS V4 experts arrive as 2D (M, K//2). Make sure the 2D path agrees too."""
-        pytest.importorskip("transformers")
-        from transformers.integrations.mxfp4 import _convert_moe_packed_tensors
-
         m, k, block_size = 16, 128, 32
         num_groups = k // block_size
         torch.manual_seed(7)
         blocks_2d = torch.randint(0, 256, (m, num_groups * 16), dtype=torch.uint8)
         scales_2d = torch.randint(100, 151, (m, num_groups), dtype=torch.uint8)
 
-        # To feed transformers we promote to (1, M, G, 16) and undo the trailing transpose.
-        blocks_4d = blocks_2d.reshape(1, m, num_groups, 16)
-        scales_3d = scales_2d.reshape(1, m, num_groups)
-        ref = _convert_moe_packed_tensors(blocks_4d, scales_3d, dtype=torch.bfloat16)
-        ref = ref.transpose(-1, -2).contiguous().squeeze(0)  # -> (M, K)
-
+        ref = _reference_dequantize_packed(blocks_2d, scales_2d, block_size=block_size)
         out = MXFP4QTensor.dequantize_packed(blocks_2d, scales_2d, block_size=block_size)
         assert torch.equal(out, ref)
 
