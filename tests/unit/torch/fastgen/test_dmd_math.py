@@ -1,3 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 # SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -43,16 +58,10 @@ from modelopt.torch.fastgen.flow_matching import (
     rf_sigma,
     x0_to_flow,
 )
-from modelopt.torch.fastgen.losses import (
-    dsm_loss,
-    gan_disc_loss,
-    gan_gen_loss,
-    vsd_loss,
-)
+from modelopt.torch.fastgen.losses import dsm_loss, gan_disc_loss, gan_gen_loss, vsd_loss
 from modelopt.torch.fastgen.methods import dmd as dmd_module
 from modelopt.torch.fastgen.methods.dmd import DMDPipeline
 from modelopt.torch.fastgen.utils import classifier_free_guidance
-
 
 # ---------------------------------------------------------------------------- #
 # FastGen reference impls (math only) — inlined verbatim                        #
@@ -160,7 +169,9 @@ def _student_input_pipeline(*, sample_steps: int, t_list=None) -> DMDPipeline:
             t_list=t_list,
         ),
     )
-    return DMDPipeline(student=nn.Identity(), teacher=nn.Identity(), fake_score=nn.Identity(), config=cfg)
+    return DMDPipeline(
+        student=nn.Identity(), teacher=nn.Identity(), fake_score=nn.Identity(), config=cfg
+    )
 
 
 def test_build_student_input_single_step_matches_max_t_noise():
@@ -306,7 +317,7 @@ def test_dsm_loss_matches_fastgen(pred_type):
     eps = torch.randn_like(x0)
     t = torch.tensor([0.4, 0.6], dtype=torch.float32)
     net_pred = torch.randn_like(x0)
-    kwargs = dict(x0=x0, eps=eps, t=t)
+    kwargs = {"x0": x0, "eps": eps, "t": t}
     if pred_type == "v":
         kwargs["alpha_fn"] = rf_alpha
         kwargs["sigma_fn"] = rf_sigma
@@ -425,7 +436,10 @@ def test_gan_disc_loss_matches_fastgen():
     fake_logits = torch.randn(8, 1)
     real_logits = torch.randn(8, 1)
     assert (
-        abs(gan_disc_loss(real_logits, fake_logits).item() - _fastgen_gan_disc(real_logits, fake_logits).item())
+        abs(
+            gan_disc_loss(real_logits, fake_logits).item()
+            - _fastgen_gan_disc(real_logits, fake_logits).item()
+        )
         < 1e-6
     )
 
@@ -438,4 +452,7 @@ def test_r1_loss_matches_fastgen():
     torch.manual_seed(7)
     real_logits = torch.randn(8, 1)
     perturbed = real_logits + 0.01 * torch.randn_like(real_logits)
-    assert abs(r1_loss(real_logits, perturbed).item() - _fastgen_r1(real_logits, perturbed).item()) < 1e-6
+    assert (
+        abs(r1_loss(real_logits, perturbed).item() - _fastgen_r1(real_logits, perturbed).item())
+        < 1e-6
+    )

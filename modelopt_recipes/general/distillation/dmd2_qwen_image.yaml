@@ -15,11 +15,11 @@ pred_type: flow
 # QwenImageAdapter.prepare_inputs: ``timesteps = context.timesteps / 1000``).
 # QwenImageDMDPipeline asserts num_train_timesteps is null so the continuous RF
 # time ``t ∈ [0, 1]`` is forwarded verbatim.
-num_train_timesteps: null
+num_train_timesteps:
 
 # Classifier-free guidance strength applied to the teacher during the student update.
 # null disables CFG (skips the negative-conditioning teacher forward).
-guidance_scale: null
+guidance_scale:
 
 # Phase 2: 4-step student to match FastGen's Qwen-Image DMD2 default
 # (config_dmd2.py:52). ``sample_t_cfg.t_list`` below pins the per-step schedule.

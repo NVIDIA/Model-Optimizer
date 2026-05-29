@@ -1,3 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 # SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -47,6 +62,7 @@ the diffusers ``[0, 1000]`` scale used for Wan / SD3 / Flux does NOT apply here)
 
 from __future__ import annotations
 
+import contextlib
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -106,9 +122,7 @@ def unpack_latents(packed: torch.Tensor, height: int, width: int) -> torch.Tenso
         )
     b, num_patches, c4 = packed.shape
     if c4 % 4:
-        raise ValueError(
-            f"unpack_latents expects last dim divisible by 4, got {c4}."
-        )
+        raise ValueError(f"unpack_latents expects last dim divisible by 4, got {c4}.")
     c = c4 // 4
     if height % 2 or width % 2:
         raise ValueError(
@@ -173,6 +187,7 @@ class QwenImageDMDPipeline(DMDPipeline):
         discriminator: nn.Module | None = None,
         guidance: float | None = None,
     ) -> None:
+        """Wrap the base DMD pipeline with Qwen-Image patch packing / guidance handling."""
         super().__init__(
             student=student,
             teacher=teacher,
@@ -378,7 +393,5 @@ def remove_feature_capture(teacher: nn.Module) -> None:
             h.remove()
     for attr in (_HANDLES_ATTR, _CAPTURED_ATTR, _INDICES_ATTR, _SHAPE_ATTR):
         if hasattr(teacher, attr):
-            try:
+            with contextlib.suppress(AttributeError):
                 delattr(teacher, attr)
-            except AttributeError:
-                pass

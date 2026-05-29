@@ -453,7 +453,11 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
         self.__dict__["_dmd2_resolved_restore_from"] = resolved
 
         if resolved is None:
-            if restore_from is not None and str(restore_from).upper() == "LATEST" and is_main_process():
+            if (
+                restore_from is not None
+                and str(restore_from).upper() == "LATEST"
+                and is_main_process()
+            ):
                 logging.warning(
                     "[DMD2] restore_from=LATEST but no complete DMD2 checkpoint was found in %s. "
                     "Starting fresh.",
@@ -491,7 +495,9 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
 
         previous_complete = None
         if self.checkpointer.config.enabled:
-            previous_complete = self._find_latest_complete_dmd_checkpoint(self.checkpointer.config.checkpoint_dir)
+            previous_complete = self._find_latest_complete_dmd_checkpoint(
+                self.checkpointer.config.checkpoint_dir
+            )
 
         super().save_checkpoint(epoch, step, train_loss, val_loss, best_metric_key)
 
@@ -581,7 +587,10 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
 
     def _remove_checkpoint_pointer(self, link_name: str) -> None:
         ckpt_root = self.checkpointer.config.checkpoint_dir
-        for path in (os.path.join(ckpt_root, link_name), os.path.join(ckpt_root, f"{link_name}.txt")):
+        for path in (
+            os.path.join(ckpt_root, link_name),
+            os.path.join(ckpt_root, f"{link_name}.txt"),
+        ):
             if os.path.lexists(path):
                 os.remove(path)
 
@@ -654,20 +663,14 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
                 if is_main_process():
                     logging.info("[DMD2] restored discriminator <- %s", disc_path)
             elif is_main_process():
-                logging.info(
-                    "[DMD2] WARN: discriminator file missing at %s -- skipping", disc_path
-                )
+                logging.info("[DMD2] WARN: discriminator file missing at %s -- skipping", disc_path)
         if self._discriminator_optimizer is not None:
             disc_opt_path = os.path.join(ckpt_dir, "discriminator_optimizer.pt")
             if os.path.isfile(disc_opt_path):
-                disc_opt_state = torch.load(
-                    disc_opt_path, map_location="cpu", weights_only=False
-                )
+                disc_opt_state = torch.load(disc_opt_path, map_location="cpu", weights_only=False)
                 self._discriminator_optimizer.load_state_dict(disc_opt_state)
                 if is_main_process():
-                    logging.info(
-                        "[DMD2] restored discriminator optimizer <- %s", disc_opt_path
-                    )
+                    logging.info("[DMD2] restored discriminator optimizer <- %s", disc_opt_path)
             elif is_main_process():
                 logging.info(
                     "[DMD2] WARN: discriminator optimizer file missing at %s -- skipping",
@@ -722,7 +725,11 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
         if os.path.isdir(ckpt_root):
             for name in os.listdir(ckpt_root):
                 path = os.path.join(ckpt_root, name)
-                if os.path.isdir(path) and "_step_" in name and self._is_dmd_checkpoint_complete(path):
+                if (
+                    os.path.isdir(path)
+                    and "_step_" in name
+                    and self._is_dmd_checkpoint_complete(path)
+                ):
                     candidates.append(os.path.realpath(path))
         if not candidates:
             return None
@@ -737,7 +744,7 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
                 return None
         elif os.path.isfile(pointer + ".txt"):
             try:
-                with open(pointer + ".txt", "r") as f:
+                with open(pointer + ".txt") as f:
                     resolved = f.read().strip()
             except OSError:
                 return None
@@ -842,7 +849,7 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
         inner_dim = int(self.cfg.get("dmd2.gan_inner_dim", 3072))
 
         disc = Discriminator_ImageDiT(
-            feature_indices=set(int(i) for i in feature_indices),
+            feature_indices={int(i) for i in feature_indices},
             num_blocks=num_blocks,
             inner_dim=inner_dim,
         )
@@ -928,7 +935,9 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
         if is_main_process():
             logging.info(
                 "[DMD2] Attached GAN feature capture: indices=%s h_lat=%d w_lat=%d",
-                feature_indices, h_lat, w_lat,
+                feature_indices,
+                h_lat,
+                w_lat,
             )
 
     def _load_fake_score(self) -> nn.Module:
@@ -1242,9 +1251,7 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
     def _dmd_config_summary(self) -> str:
         """Compact one-line summary of the active DMDConfig for startup logging."""
         cfg = self._dmd_config
-        t_list = (
-            cfg.sample_t_cfg.t_list if cfg.sample_t_cfg is not None else None
-        )
+        t_list = cfg.sample_t_cfg.t_list if cfg.sample_t_cfg is not None else None
         return (
             f"pred_type={cfg.pred_type} fake_score_pred_type={cfg.fake_score_pred_type} "
             f"num_train_timesteps={cfg.num_train_timesteps} "

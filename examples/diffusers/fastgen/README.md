@@ -24,7 +24,7 @@ DMD2 trains three networks together:
 The distribution-matching gradient pushes the student toward the teacher and away from
 the fake-score. Training alternates between two phases, controlled by `student_update_freq`:
 
-```
+```text
 each step:
   if step % student_update_freq == 0:   # student phase
       update the student (distribution-matching [+ optional GAN] loss)
@@ -158,7 +158,7 @@ student).
 ## Troubleshooting
 
 **`CUDA out of memory`.** Training holds three Qwen-Image transformers (student + teacher
-+ fake-score) plus optimizer state. Shard across more GPUs (raise `--fsdp.dp_size`),
+- fake-score) plus optimizer state. Shard across more GPUs (raise `--fsdp.dp_size`),
 enable `--fsdp.activation_checkpointing=true`, or use the mock smoke for wiring checks.
 
 **Loss is `NaN` on step 0.** Almost always an out-of-range timestep — confirm you haven't

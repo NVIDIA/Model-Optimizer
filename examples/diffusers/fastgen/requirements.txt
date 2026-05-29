@@ -5,8 +5,8 @@
 # NeMo AutoModel (parent recipe, dataloader, FSDP2 wrapping).
 # The diffusion extras install diffusers + accelerate with matching pins.
 nemo_automodel[diffusion]
+pyyaml
+tqdm
 
 # Optional but recommended for the smoke logs.
 wandb
-tqdm
-pyyaml

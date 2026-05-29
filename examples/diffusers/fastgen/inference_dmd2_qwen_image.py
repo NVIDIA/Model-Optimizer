@@ -1,3 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Inference pipeline for DMD2-trained Qwen-Image students.
 
 Loads the consolidated safetensors transformer (from a §10 checkpoint with
@@ -34,29 +49,34 @@ Usage::
     pipe = QwenImageDMDInferencePipeline.from_pretrained(
         student_path="/path/to/checkpoint/epoch_0_step_500/model/consolidated",
         base_pipeline_path="Qwen/Qwen-Image",
-        ema_path=None,                        # or "…/epoch_0_step_5/ema_shadow.pt"
+        ema_path=None,  # or "…/epoch_0_step_5/ema_shadow.pt"
         torch_dtype=torch.bfloat16,
     ).to("cuda")
 
     image = pipe(
         prompt="a small red cube on a white table",
         num_inference_steps=1,
-        height=512, width=512,
+        height=512,
+        width=512,
         generator=torch.Generator("cuda").manual_seed(42),
     ).images[0]
     image.save("dmd2_smoke.png")
 """
+
 from __future__ import annotations
 
+import itertools
 import logging
 import os
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Optional, Union
+from typing import TYPE_CHECKING
 
 import torch
 from diffusers import QwenImagePipeline, QwenImageTransformer2DModel
 from diffusers.utils.torch_utils import randn_tensor
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -92,12 +112,12 @@ class QwenImageDMDInferencePipeline:
     @classmethod
     def from_pretrained(
         cls,
-        student_path: Union[str, Path],
-        base_pipeline_path: Union[str, Path],
-        ema_path: Optional[Union[str, Path]] = None,
+        student_path: str | Path,
+        base_pipeline_path: str | Path,
+        ema_path: str | Path | None = None,
         torch_dtype: torch.dtype = torch.bfloat16,
         max_t: float = 0.999,
-    ) -> "QwenImageDMDInferencePipeline":
+    ) -> QwenImageDMDInferencePipeline:
         """Load the student + base Qwen-Image components.
 
         Args:
@@ -126,14 +146,14 @@ class QwenImageDMDInferencePipeline:
             raise FileNotFoundError(f"base_pipeline_path is not a directory: {base_pipeline_path}")
 
         logger.info("[DMD2-Inference] Loading trained student from %s", student_path)
-        student = QwenImageTransformer2DModel.from_pretrained(
-            student_path, torch_dtype=torch_dtype
-        )
+        student = QwenImageTransformer2DModel.from_pretrained(student_path, torch_dtype=torch_dtype)
 
         if ema_path is not None:
             logger.info("[DMD2-Inference] Overlaying EMA shadow from %s", ema_path)
             ema_state = torch.load(str(ema_path), map_location="cpu", weights_only=False)
-            shadow = ema_state.get("shadow", ema_state) if isinstance(ema_state, dict) else ema_state
+            shadow = (
+                ema_state.get("shadow", ema_state) if isinstance(ema_state, dict) else ema_state
+            )
             if not isinstance(shadow, dict):
                 raise ValueError(
                     f"ema_shadow.pt content has unexpected type {type(shadow).__name__}; "
@@ -143,12 +163,14 @@ class QwenImageDMDInferencePipeline:
             if unexpected:
                 logger.warning(
                     "[DMD2-Inference] EMA overlay had %d unexpected keys (first: %s)",
-                    len(unexpected), unexpected[:3],
+                    len(unexpected),
+                    unexpected[:3],
                 )
             if missing:
                 logger.warning(
                     "[DMD2-Inference] EMA overlay missed %d student keys (first: %s)",
-                    len(missing), missing[:3],
+                    len(missing),
+                    missing[:3],
                 )
 
         student.eval()
@@ -168,7 +190,7 @@ class QwenImageDMDInferencePipeline:
 
         return cls(base_pipeline=pipe, max_t=max_t)
 
-    def to(self, device: Union[str, torch.device]) -> "QwenImageDMDInferencePipeline":
+    def to(self, device: str | torch.device) -> QwenImageDMDInferencePipeline:
         self._pipe.to(device)
         return self
 
@@ -187,16 +209,16 @@ class QwenImageDMDInferencePipeline:
     @torch.no_grad()
     def __call__(
         self,
-        prompt: Union[str, list],
-        negative_prompt: Optional[Union[str, list]] = None,
+        prompt: str | list,
+        negative_prompt: str | list | None = None,
         num_inference_steps: int = 1,
         guidance_scale: float = 1.0,
         height: int = 1024,
         width: int = 1024,
         num_images_per_prompt: int = 1,
-        generator: Optional[torch.Generator] = None,
-        max_t: Optional[float] = None,
-        t_list: Optional[list] = None,
+        generator: torch.Generator | None = None,
+        max_t: float | None = None,
+        t_list: list | None = None,
         sample_type: str = "ode",
         output_type: str = "pil",
         max_sequence_length: int = 512,
@@ -240,23 +262,21 @@ class QwenImageDMDInferencePipeline:
         # ---- 1. Resolve t_list -----------------------------------------------
         if num_inference_steps == 1:
             schedule = [max_t, 0.0]
+        elif t_list is not None:
+            if len(t_list) != num_inference_steps + 1:
+                raise ValueError(
+                    f"t_list must have num_inference_steps+1 entries "
+                    f"(got {len(t_list)} for num_inference_steps={num_inference_steps})"
+                )
+            schedule = [float(t) for t in t_list]
+            if abs(schedule[-1]) > 1e-6:
+                raise ValueError(
+                    f"t_list must end at 0.0 (got {schedule[-1]}); the final step lands on x_0."
+                )
         else:
-            if t_list is not None:
-                if len(t_list) != num_inference_steps + 1:
-                    raise ValueError(
-                        f"t_list must have num_inference_steps+1 entries "
-                        f"(got {len(t_list)} for num_inference_steps={num_inference_steps})"
-                    )
-                schedule = [float(t) for t in t_list]
-                if abs(schedule[-1]) > 1e-6:
-                    raise ValueError(
-                        f"t_list must end at 0.0 (got {schedule[-1]}); "
-                        "the final step lands on x_0."
-                    )
-            else:
-                # Default: linear schedule from max_t to 0 (matches FastGen's
-                # torch.linspace(max_t, 0, sample_steps + 1) fallback).
-                schedule = torch.linspace(max_t, 0.0, num_inference_steps + 1).tolist()
+            # Default: linear schedule from max_t to 0 (matches FastGen's
+            # torch.linspace(max_t, 0, sample_steps + 1) fallback).
+            schedule = torch.linspace(max_t, 0.0, num_inference_steps + 1).tolist()
 
         # ---- 2. Encode prompt(s) ---------------------------------------------
         prompt_embeds, prompt_embeds_mask = pipe.encode_prompt(
@@ -275,9 +295,7 @@ class QwenImageDMDInferencePipeline:
                 max_sequence_length=max_sequence_length,
             )
         txt_seq_lens = (
-            prompt_embeds_mask.sum(dim=1).int().tolist()
-            if prompt_embeds_mask is not None
-            else None
+            prompt_embeds_mask.sum(dim=1).int().tolist() if prompt_embeds_mask is not None else None
         )
         neg_txt_seq_lens = (
             neg_prompt_embeds_mask.sum(dim=1).int().tolist()
@@ -308,7 +326,7 @@ class QwenImageDMDInferencePipeline:
 
         # ---- 4. DMD few-step unroll -----------------------------------------
         x_packed = latents_packed
-        for t_cur, t_next in zip(schedule[:-1], schedule[1:]):
+        for t_cur, t_next in itertools.pairwise(schedule):
             timestep = torch.tensor([t_cur], device=device, dtype=dtype).expand(batch_size)
             flow_packed = pipe.transformer(
                 hidden_states=x_packed,
@@ -344,7 +362,9 @@ class QwenImageDMDInferencePipeline:
                     * (flow_packed.to(torch.float64) - neg_flow_packed.to(torch.float64))
                 ).to(dtype)
             # RF identity: x_0 = x_t - t_cur * v (computed in fp64 for stability).
-            x0_packed = (x_packed.to(torch.float64) - float(t_cur) * flow_packed.to(torch.float64)).to(dtype)
+            x0_packed = (
+                x_packed.to(torch.float64) - float(t_cur) * flow_packed.to(torch.float64)
+            ).to(dtype)
 
             if t_next > 1e-6:
                 # Re-noise x_0 forward to t_next.
@@ -389,7 +409,7 @@ class QwenImageDMDInferencePipeline:
         # vae.decode returns 5D; the trailing [:, :, 0] drops the temporal dim
         # since Qwen-Image treats images as 1-frame videos.
         image_5d = pipe.vae.decode(x0_scaled, return_dict=False)[0]
-        image_4d = image_5d[:, :, 0]   # [B, C, H, W]
+        image_4d = image_5d[:, :, 0]  # [B, C, H, W]
 
         images = pipe.image_processor.postprocess(image_4d, output_type=output_type)
         return QwenImageDMDOutput(images=images)
@@ -402,11 +422,12 @@ class QwenImageDMDInferencePipeline:
 # tensor and the file writes successfully".                                    #
 # ---------------------------------------------------------------------------- #
 
+
 def _smoke_test(
     student_path: str,
     base_pipeline_path: str,
     output_png: str,
-    ema_path: Optional[str] = None,
+    ema_path: str | None = None,
     prompt: str = "a small red cube on a white table",
     height: int = 512,
     width: int = 512,
@@ -441,6 +462,7 @@ def _smoke_test(
 
     # PIL image; sanity-check shape + range.
     import numpy as np
+
     arr = np.array(image)
     stats = {
         "prompt": prompt,

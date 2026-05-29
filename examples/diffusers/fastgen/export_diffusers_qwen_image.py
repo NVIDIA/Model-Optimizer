@@ -1,3 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Export a DMD2 student as a full diffusers-loadable QwenImagePipeline dir.
 
 The §10 safetensors addendum produces a transformer-only dir:
@@ -40,6 +55,7 @@ Usage::
 Smoke test (``--verify``) loads the assembled dir via QwenImagePipeline and
 checks the transformer config matches the student's.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -48,8 +64,10 @@ import logging
 import os
 import shutil
 import sys
-from pathlib import Path
-from typing import Union
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -74,9 +92,9 @@ def _link_or_copy(src: str, dst: str, copy: bool) -> None:
 
 
 def export_diffusers(
-    student_path: Union[str, Path],
-    base_pipeline_path: Union[str, Path],
-    output_dir: Union[str, Path],
+    student_path: str | Path,
+    base_pipeline_path: str | Path,
+    output_dir: str | Path,
     copy: bool = False,
 ) -> None:
     student_path = str(student_path)
@@ -92,7 +110,9 @@ def export_diffusers(
         raise FileNotFoundError(f"base pipeline missing model_index.json: {base_index}")
 
     os.makedirs(output_dir, exist_ok=True)
-    logger.info("[Diffusers-Export] Output dir: %s (mode=%s)", output_dir, "copy" if copy else "symlink")
+    logger.info(
+        "[Diffusers-Export] Output dir: %s (mode=%s)", output_dir, "copy" if copy else "symlink"
+    )
 
     # 1. model_index.json — copy verbatim (the class registry is the same
     #    whether the transformer weights are live or DMD-distilled).
@@ -117,7 +137,9 @@ def export_diffusers(
         _link_or_copy(src, dst, copy=copy)
         logger.info("[Diffusers-Export] %s/ <- %s", comp, src)
 
-    logger.info("[Diffusers-Export] Done. Load via QwenImagePipeline.from_pretrained(%r)", output_dir)
+    logger.info(
+        "[Diffusers-Export] Done. Load via QwenImagePipeline.from_pretrained(%r)", output_dir
+    )
 
 
 def _verify(output_dir: str) -> dict:
@@ -162,7 +184,9 @@ if __name__ == "__main__":
         action="store_true",
         help="Copy components instead of symlinking. Off by default to save disk.",
     )
-    parser.add_argument("--verify", action="store_true", help="Re-load via QwenImagePipeline.from_pretrained")
+    parser.add_argument(
+        "--verify", action="store_true", help="Re-load via QwenImagePipeline.from_pretrained"
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")

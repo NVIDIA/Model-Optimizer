@@ -1,3 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 # SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -39,7 +54,6 @@ from modelopt.torch.fastgen.plugins.qwen_image import (
     pack_latents,
     unpack_latents,
 )
-
 
 # ---------------------------------------------------------------------------- #
 # §1.1 — pack / unpack inverse for representative latent sizes                 #
@@ -103,10 +117,10 @@ def test_unpack_rejects_odd_target(hw):
 
 
 def test_pack_parity_vs_automodel():
-    QwenImageAdapter = pytest.importorskip(
+    adapters = pytest.importorskip(
         "nemo_automodel.components.flow_matching.adapters.qwen_image",
-    ).QwenImageAdapter
-    adapter = QwenImageAdapter()
+    )
+    adapter = adapters.QwenImageAdapter()
     x = torch.randn(2, 16, 32, 32)
     am = adapter._pack_latents(x)
     mo = pack_latents(x)
@@ -119,10 +133,10 @@ def test_unpack_parity_vs_automodel():
     Both produce the same tensor for even latents — this test calls them with
     matched API conventions and asserts bit-exact equality.
     """
-    QwenImageAdapter = pytest.importorskip(
+    adapters = pytest.importorskip(
         "nemo_automodel.components.flow_matching.adapters.qwen_image",
-    ).QwenImageAdapter
-    adapter = QwenImageAdapter()
+    )
+    adapter = adapters.QwenImageAdapter()
     h_lat, w_lat = 32, 32
     x = torch.randn(2, 16, h_lat, w_lat)
     p = adapter._pack_latents(x)

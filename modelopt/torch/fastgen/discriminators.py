@@ -5,6 +5,21 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
 #     http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
@@ -26,8 +41,6 @@ lives in the per-model plugins (``plugins/qwen_image.py``, ``plugins/wan22.py``)
 """
 
 from __future__ import annotations
-
-from typing import List, Optional, Set
 
 import torch
 from torch import nn
@@ -55,15 +68,18 @@ def _get_optimal_groups(num_channels: int) -> int:
 class Discriminator(nn.Module):
     """Base class for DMD2 discriminators."""
 
-    def __init__(self, feature_indices: Optional[Set[int]] = None) -> None:
+    def __init__(self, feature_indices: set[int] | None = None) -> None:
+        """Store the teacher block indices whose features feed the discriminator."""
         super().__init__()
         self.feature_indices = feature_indices
 
-    def forward(self, feats: List[torch.Tensor]) -> torch.Tensor:
+    def forward(self, feats: list[torch.Tensor]) -> torch.Tensor:
+        """Map captured teacher features to discriminator logits (overridden by subclasses)."""
         raise NotImplementedError("Subclasses must implement forward()")
 
 
-class Discriminator_ImageDiT(Discriminator):
+# Class name kept verbatim from the FastGen reference implementation.
+class Discriminator_ImageDiT(Discriminator):  # noqa: N801
     """Image-DiT discriminator with one lightweight conv head per captured block.
 
     Input: list of feature tensors with shape ``[B, inner_dim, H, W]``, one per
@@ -79,10 +95,11 @@ class Discriminator_ImageDiT(Discriminator):
 
     def __init__(
         self,
-        feature_indices: Optional[Set[int]] = None,
+        feature_indices: set[int] | None = None,
         num_blocks: int = 57,
         inner_dim: int = 3072,
     ) -> None:
+        """Build one lightweight conv classification head per captured block."""
         super().__init__(feature_indices=feature_indices)
 
         if self.feature_indices is None:
@@ -119,7 +136,8 @@ class Discriminator_ImageDiT(Discriminator):
             )
             self.cls_pred_heads.append(head)
 
-    def forward(self, feats: List[torch.Tensor]) -> torch.Tensor:
+    def forward(self, feats: list[torch.Tensor]) -> torch.Tensor:
+        """Run each per-block conv head and concatenate their logits to ``[B, num_heads]``."""
         if not isinstance(feats, list) or len(feats) != self.num_features:
             raise ValueError(
                 f"Expected list of {self.num_features} feature tensors, "

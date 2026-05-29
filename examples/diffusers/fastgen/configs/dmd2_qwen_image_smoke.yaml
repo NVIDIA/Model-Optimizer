@@ -43,7 +43,7 @@ dmd2:
   # * CFG disabled — no negative-prompt embedding precompute yet; guidance_scale=null
   #   short-circuits the negative-conditioning branch inside compute_student_loss.
   gan_loss_weight_gen: 0.0
-  guidance_scale: null
+  guidance_scale:
 
   # Phase-1-only knobs (NOT on DMDConfig — consumed directly by the recipe):
   # LR for the fake-score AdamW; matches the student LR below.
@@ -57,7 +57,7 @@ dmd2:
   # call. The shipped ``Qwen/Qwen-Image`` checkpoint has guidance_embeds=false, so
   # leave this null. Set to e.g. 3.5 only if you've fine-tuned a guidance-embed
   # variant.
-  qwen_image_guidance: null
+  qwen_image_guidance:
 
 # Student LR + optimizer.
 optim:
@@ -106,4 +106,4 @@ checkpoint:
   save_consolidated: false
   diffusers_compatible: false
   # Set to LATEST or epoch_0_step_100 (etc.) to resume. Null = start fresh.
-  restore_from: null
+  restore_from:

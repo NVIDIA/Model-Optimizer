@@ -1,3 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 # SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -59,7 +74,9 @@ class _TinyTransformer(nn.Module):
         return (self.proj(x) + self.t_proj(t)).reshape_as(hidden_states)
 
 
-def _make_pipeline(*, with_ema: bool = True) -> tuple[DMDPipeline, _TinyTransformer, _TinyTransformer, _TinyTransformer]:
+def _make_pipeline(
+    *, with_ema: bool = True
+) -> tuple[DMDPipeline, _TinyTransformer, _TinyTransformer, _TinyTransformer]:
     torch.manual_seed(0)
     student = _TinyTransformer()
     teacher = _TinyTransformer()
@@ -73,10 +90,17 @@ def _make_pipeline(*, with_ema: bool = True) -> tuple[DMDPipeline, _TinyTransfor
         fake_score_pred_type="x0",
         gan_loss_weight_gen=0.0,
         guidance_scale=None,
-        sample_t_cfg=SampleTimestepConfig(time_dist_type="shifted", min_t=0.001, max_t=0.999, shift=1.0),
+        sample_t_cfg=SampleTimestepConfig(
+            time_dist_type="shifted", min_t=0.001, max_t=0.999, shift=1.0
+        ),
         ema=ema_cfg,
     )
-    return DMDPipeline(student=student, teacher=teacher, fake_score=fake_score, config=cfg), student, teacher, fake_score
+    return (
+        DMDPipeline(student=student, teacher=teacher, fake_score=fake_score, config=cfg),
+        student,
+        teacher,
+        fake_score,
+    )
 
 
 def _has_grad(module: nn.Module) -> bool:
@@ -163,10 +187,12 @@ def test_compute_fake_score_loss_routes_gradients_to_fake_score_only():
 
 
 @pytest.mark.parametrize(
-    "step, expected_phase",
-    [(0, "student")] + [(s, "fake_score") for s in range(1, 5)] +
-    [(5, "student")] + [(s, "fake_score") for s in range(6, 10)] +
-    [(10, "student")],
+    ("step", "expected_phase"),
+    [(0, "student")]
+    + [(s, "fake_score") for s in range(1, 5)]
+    + [(5, "student")]
+    + [(s, "fake_score") for s in range(6, 10)]
+    + [(10, "student")],
 )
 def test_phase_schedule_modulo_freq_5(step, expected_phase):
     """``step % student_update_freq == 0`` ⇒ student; else fake_score."""

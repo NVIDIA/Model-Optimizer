@@ -54,11 +54,11 @@ step_scheduler:
 dmd2:
   recipe_path: general/distillation/dmd2_qwen_image
   pipeline_plugin: qwen_image
-  qwen_image_guidance: null
+  qwen_image_guidance:
 
   # ── DMD2 method core ──
   pred_type: flow                  # Qwen-Image is rectified flow
-  num_train_timesteps: null        # continuous t ∈ [0, 1]; QwenImageDMDPipeline forwards t verbatim
+  num_train_timesteps:             # continuous t ∈ [0, 1]; QwenImageDMDPipeline forwards t verbatim
   guidance_scale: 4.0              # CFG strength on teacher during the student update
   student_sample_steps: 4          # 4-step student (Phase 2)
   student_sample_type: ode         # Euler integration when unrolling the student
