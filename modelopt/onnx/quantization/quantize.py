@@ -120,11 +120,7 @@ def _preprocess_onnx(
         intermediate_generated_files,
     )
 
-    # Some ONNX exporters emit stale value_info that disagrees with the dtype
-    # the upstream node actually produces. quantize_static's augmented_model
-    # inherits that bad metadata and ORT rejects it on load. Clear it now so
-    # the preprocessed model handed to quantize_static is clean for any
-    # downstream ORT consumer. See onnx_utils.clear_stale_value_info.
+    # Clear stale type metadata to prevent type check failures in ORT
     if clear_stale_value_info(onnx_model):
         onnx_path = os.path.join(output_dir, f"{model_name}_reconciled.onnx")
         save_onnx(onnx_model, onnx_path, use_external_data_format)

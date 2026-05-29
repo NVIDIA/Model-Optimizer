@@ -295,8 +295,7 @@ class ReferenceRunner:
         ort.set_default_logger_severity(3)
 
         model_copy = copy.deepcopy(self.model)
-        # Stale value_info from upstream exporters would otherwise trip ORT's
-        # graph type checker on load. See onnx_utils.clear_stale_value_info.
+        # Clear stale type metadata to prevent type check failures in ORT
         onnx_utils.clear_stale_value_info(model_copy)
         modify_outputs = ModifyOnnxOutputs(model_copy, outputs=constants.MARK_ALL)
 
