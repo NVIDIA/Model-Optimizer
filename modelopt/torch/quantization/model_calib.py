@@ -19,6 +19,7 @@ import math
 import time
 import warnings
 from collections.abc import Callable
+from contextlib import AbstractContextManager, nullcontext
 from functools import partial
 from typing import TypeAlias
 
@@ -1752,8 +1753,14 @@ def layerwise_calibrate(
     If ``checkpoint_dir`` is passed (via ``calib_kwargs``), per-layer checkpoints
     are saved after each layer completes. On restart, calibration resumes from
     the last completed layer.
+
+    ``get_qdq_activations_from_prev_layer`` (via ``calib_kwargs``) controls
+    whether the cached inputs handed to layer N+1 come from a forward through
+    the just-calibrated layer with quantizers active (True; e.g. GPTQ) or
+    temporarily disabled (False; matches non-layerwise max-calib semantics).
     """
     checkpoint_dir = calib_kwargs.pop("checkpoint_dir", None)
+    qdq_from_prev = calib_kwargs.pop("get_qdq_activations_from_prev_layer", False)
 
     if forward_loop is None:
         raise ValueError(
@@ -1814,7 +1821,20 @@ def layerwise_calibrate(
             # output_meta on the just-calibrated layer (via "run" mode).
             is_last = layer_idx + 1 >= num_layers
             if not is_last:
-                next_inputs = input_getter.cache_outputs_for_next_layer_calib(layer, forward_loop)
+                # When qdq_from_prev is False, temporarily disable every quantizer
+                # under the just-calibrated layer so the next layer sees full-precision
+                # activations (matches non-layerwise calibration semantics).
+                capture_ctx: AbstractContextManager = (
+                    nullcontext()
+                    if qdq_from_prev
+                    else set_quantizer_by_cfg_context(
+                        layer, [{"quantizer_name": "*", "enable": False}]
+                    )
+                )
+                with capture_ctx:
+                    next_inputs = input_getter.cache_outputs_for_next_layer_calib(
+                        layer, forward_loop
+                    )
             else:
                 next_inputs = None
 
@@ -1843,13 +1863,13 @@ def gptq(
 ):
     """GPTQ quantization.
 
-    Works in two modes depending on ``layerwise`` in the config:
+    Works in two modes depending on ``layerwise.enable`` in the config:
 
-    * **Layerwise** (``layerwise=True``): ``layerwise_calibrate`` calls this
-      function once per decoder layer with updated activations, producing more
-      accurate Hessian estimates.
-    * **Non-layerwise** (``layerwise=False``): called once on the full model.
-      All layers are quantized in parallel from the original activations.
+    * **Layerwise** (``layerwise.enable=True``): ``layerwise_calibrate`` calls
+      this function once per decoder layer with updated activations, producing
+      more accurate Hessian estimates.
+    * **Non-layerwise** (``layerwise.enable=False``): called once on the full
+      model. All layers are quantized in parallel from the original activations.
 
     Per-module steps:
 

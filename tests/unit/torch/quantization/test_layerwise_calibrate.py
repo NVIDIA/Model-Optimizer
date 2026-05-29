@@ -713,9 +713,64 @@ def test_mtq_quantize_layerwise_raises_for_unsupported_algorithm():
     config = _svdquant_layerwise_config()
     torch.manual_seed(0)
     model = _SimpleTransformerModel(n_layers=2, dim=16)
-    with pytest.raises(ValueError, match="does not support layerwise=True"):
+    with pytest.raises(ValueError, match="does not support layerwise.enable=True"):
         mtq.quantize(
             model,
             config,
             forward_loop=lambda m: m(torch.randint(0, 32, (2, 8))),
+        )
+
+
+def test_layerwise_no_qdq_matches_sequential_amax(monkeypatch):
+    """Layerwise + ``get_qdq_activations_from_prev_layer=False`` must produce the
+    same per-quantizer amax as the non-layerwise (sequential) max-calibration
+    flow. Both paths feed every layer full-precision activations, so the amax
+    statistics they collect must agree.
+    """
+    _register_test_discoverer(monkeypatch)
+
+    torch.manual_seed(0)
+    model_seq = _SimpleTransformerModel(n_layers=3, dim=16)
+    model_lw = copy.deepcopy(model_seq)
+    calib_data = [torch.randint(0, 32, (2, 8)) for _ in range(2)]
+
+    def fwd(m):
+        for batch in calib_data:
+            m(batch)
+
+    seq_cfg = _int8_layerwise_config({"method": "max"})
+    mtq.quantize(model_seq, seq_cfg, forward_loop=fwd)
+
+    lw_cfg = _int8_layerwise_config(
+        {
+            "method": "max",
+            "layerwise": {"enable": True, "get_qdq_activations_from_prev_layer": False},
+        }
+    )
+    mtq.quantize(model_lw, lw_cfg, forward_loop=fwd)
+
+    def collect_amax(model):
+        return {
+            name: q._amax.clone().detach()
+            for name, q in model.named_modules()
+            if isinstance(q, TensorQuantizer)
+            and q.is_enabled
+            and getattr(q, "_amax", None) is not None
+        }
+
+    seq_amax = collect_amax(model_seq)
+    lw_amax = collect_amax(model_lw)
+
+    assert seq_amax, "sequential calibration populated no amax values"
+    assert set(seq_amax) == set(lw_amax), (
+        f"Different quantizers populated: only-seq={set(seq_amax) - set(lw_amax)}, "
+        f"only-lw={set(lw_amax) - set(seq_amax)}"
+    )
+    for name in seq_amax:
+        torch.testing.assert_close(
+            lw_amax[name],
+            seq_amax[name],
+            rtol=1e-5,
+            atol=1e-6,
+            msg=f"amax mismatch at {name}: seq={seq_amax[name]}, lw={lw_amax[name]}",
         )
