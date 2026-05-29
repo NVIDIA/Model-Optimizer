@@ -32,7 +32,7 @@ pipeline:
     hf_model: /hf-local/Qwen/Qwen3.5-4B
 
   # Step 1: qualitative split — quality / acceptance-rate numbers.
-  # tp_size=2 + concurrency=8 trades aa_timing fidelity for ~10x wall-clock
+  # tp_size=2 + concurrency=32 trades aa_timing fidelity for ~30x wall-clock
   # speedup; acceptance-length (AL) is concurrency-independent and is the
   # primary metric we care about for this split.
   task_0:
@@ -44,7 +44,7 @@ pipeline:
       - --speculative_algorithm NONE
       - --tp_size 2
       - --ep_size 1
-      - --concurrency 8
+      - --concurrency 32
       - --output_length 4096
       - --aa_timing
       - --show_progress
@@ -60,10 +60,10 @@ pipeline:
       container: vllm/vllm-openai:qwen3_5-cu130
 
   # Step 2: throughput_32k split — long-context throughput.
-  # `--num_requests 20` caps the run at 20 samples (split has 1,536) so it fits
+  # `--num_requests 80` caps the run at 80 samples (split has 1,536) so it fits
   # in the 4h Slurm time-limit; each 32K-input sample takes ~60-90s.
-  # tp_size=2 doubles the KV-cache budget across 2 GPUs, making concurrency>1
-  # feasible at 32K prompts.
+  # tp_size=2 doubles the KV-cache budget across 2 GPUs; concurrency=8 keeps
+  # 8 * 32K = 256K tokens of in-flight KV under that doubled budget.
   task_1:
     script: common/specdec_bench/run.sh
     args:
@@ -73,8 +73,8 @@ pipeline:
       - --speculative_algorithm NONE
       - --tp_size 2
       - --ep_size 1
-      - --concurrency 4
-      - --num_requests 20
+      - --concurrency 8
+      - --num_requests 80
       - --output_length 4096
       - --runtime_params modules/Model-Optimizer/tools/launcher/common/specdec_bench/runtime_params_throughput_32k.yaml
       - --aa_timing
