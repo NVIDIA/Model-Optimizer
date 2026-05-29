@@ -12,6 +12,10 @@ model:
 
 # maps to DataArguments (main.py)
 data:
+  # online | offline | streaming. Leave unset to auto-derive: offline_data_path
+  # -> offline; streaming_server_url -> streaming; otherwise online. Set
+  # explicitly only to force a specific mode.
+  mode:
   data_path: input_conversations/train.jsonl
   offline_data_path:
   draft_vocab_cache:
@@ -47,7 +51,7 @@ training:
 
 # maps to EagleConfig (modelopt/torch/speculative/config.py).
 eagle:
-  # eagle_offline is derived from data.offline_data_path; do not set here.
+  # eagle_offline is derived from data.mode; do not set here.
   eagle_decoder_type: llama
   eagle_ttt_steps: 3
   eagle_mix_hidden_states: false

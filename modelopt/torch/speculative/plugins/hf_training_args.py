@@ -29,7 +29,9 @@ The module is pure Pydantic schema with no runtime dependencies on ``transformer
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class ModelArguments(BaseModel):
@@ -47,6 +49,11 @@ class DataArguments(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    # ``None`` is the sentinel "user did not set mode"; auto-promoted from
+    # offline_data_path / streaming_server_url. An explicit value (including ``"online"``)
+    # is always respected, even with stale mode-specific fields present. Always resolved
+    # to one of the three string literals by ``_check_mode_requirements`` before use.
+    mode: Literal["online", "offline", "streaming"] | None = None
     data_path: str | None = None
     offline_data_path: str | None = None
     lazy_preprocess: bool = True
@@ -55,6 +62,11 @@ class DataArguments(BaseModel):
     vlm_img_dir: str | None = None
     vlm_processor: str | None = None
     sample_size: int = -1
+    streaming_server_url: str | None = None
+    streaming_model_name: str | None = None
+    streaming_prefetch: int = Field(default=64, ge=1)
+    # Mirror of the vLLM connector's ``shared_storage_path``; trainer-side allowlist.
+    streaming_shared_storage_path: str | None = None
 
     @field_validator("sample_size")
     @classmethod
@@ -62,6 +74,34 @@ class DataArguments(BaseModel):
         if v == 0 or v < -1:
             raise ValueError("sample_size must be -1 (use all samples) or a positive integer")
         return v
+
+    @model_validator(mode="after")
+    def _check_mode_requirements(self) -> DataArguments:
+        # Auto-promote only when ``mode`` is unset by the user (sentinel ``None``). An
+        # explicit ``mode`` — including ``"online"`` — is always respected so stale
+        # ``streaming_server_url`` / ``offline_data_path`` leftovers can't silently flip it.
+        if self.mode is None:
+            has_offline = self.offline_data_path is not None
+            has_streaming = self.streaming_server_url is not None
+            if has_offline and has_streaming:
+                raise ValueError(
+                    "ambiguous: set data.mode explicitly when both offline_data_path "
+                    "and streaming_server_url are set"
+                )
+            self.mode = "offline" if has_offline else "streaming" if has_streaming else "online"
+        if self.mode == "offline" and not self.offline_data_path:
+            raise ValueError("data.mode='offline' requires data.offline_data_path")
+        if self.mode == "streaming" and not (
+            self.streaming_server_url
+            and self.streaming_model_name
+            and self.streaming_shared_storage_path
+        ):
+            raise ValueError(
+                "data.mode='streaming' requires data.streaming_server_url, "
+                "data.streaming_model_name, and data.streaming_shared_storage_path "
+                "(the trainer-side allowlist for paths returned by the vLLM server)"
+            )
+        return self
 
 
 class TrainingArguments(BaseModel):
