@@ -20,32 +20,22 @@ so it inherits AutoModel's student + optimizer + dataloader + checkpoint plumbin
 drives ``modelopt.torch.fastgen.DMDPipeline`` (or a plugin subclass) through the
 three-phase DMD2 alternation (student update / fake-score update / EMA step).
 
-Supported backbones:
-
-* **Wan 2.2 5B** (``Wan-AI/Wan2.2-TI2V-5B-Diffusers``) — 5D ``video_latents``,
-  base :class:`DMDPipeline`. Config: ``configs/dmd2_wan22_5b.yaml`` (mock-data
-  wiring smoke).
-* **Qwen-Image** (``Qwen/Qwen-Image``) — 4D ``image_latents``,
-  :class:`QwenImageDMDPipeline` handles 2x2 patch packing / img_shapes / unpacking.
-  Configs: ``configs/dmd2_qwen_image.yaml`` for the canonical real-data
-  formal run (4-step + CFG + GAN, points at the qwen_image_1024p cache);
-  ``configs/dmd2_qwen_image_smoke.yaml`` for the mock-data wiring smoke
-  (used by §6 / §7 tests + the §8-§14 mock-data smokes).
+Backbone: **Qwen-Image** (``Qwen/Qwen-Image``) — 4D ``image_latents``,
+:class:`QwenImageDMDPipeline` handles 2x2 patch packing / img_shapes /
+unpacking. Configs: ``configs/dmd2_qwen_image.yaml`` for the canonical
+real-data run (4-step + CFG + GAN); ``configs/dmd2_qwen_image_smoke.yaml``
+for the mock-data wiring smoke (no dataset required).
 
 Launch::
 
-    # Real-data formal training (canonical).
-    torchrun --nproc-per-node=8 \\
-        examples/diffusers/fastgen/dmd2_finetune.py \\
-        --config examples/diffusers/fastgen/configs/dmd2_qwen_image.yaml
     # Mock-data wiring smoke (no real cache required).
     torchrun --nproc-per-node=8 \\
         examples/diffusers/fastgen/dmd2_finetune.py \\
         --config examples/diffusers/fastgen/configs/dmd2_qwen_image_smoke.yaml
-    # Wan 2.2 5B smoke.
+    # Real-data formal training (canonical).
     torchrun --nproc-per-node=8 \\
         examples/diffusers/fastgen/dmd2_finetune.py \\
-        --config examples/diffusers/fastgen/configs/dmd2_wan22_5b.yaml
+        --config examples/diffusers/fastgen/configs/dmd2_qwen_image.yaml
 
 See ``examples/diffusers/fastgen/README.md`` for the three-phase
 alternation diagram + troubleshooting notes.
@@ -80,7 +70,7 @@ from modelopt.torch.fastgen.plugins import qwen_image as qwen_image_plugin
 # Keys under the ``dmd2:`` YAML block that shadow fields on :class:`DMDConfig`. The
 # recipe applies these as a Pydantic ``model_copy(update=...)`` on top of the loaded
 # built-in recipe so users can tweak DMD2 hyperparameters without editing the shared
-# ``modelopt_recipes/general/distillation/dmd2_wan22_5b.yaml`` file.
+# ``modelopt_recipes/general/distillation/dmd2_qwen_image.yaml`` file.
 _DMD_CONFIG_OVERRIDE_KEYS = frozenset(DMDConfig.model_fields.keys())
 
 # Auto-detect substrings (matched case-insensitively against ``model_id``) that map to
@@ -164,8 +154,7 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
         self.__dict__["_dmd_config"] = self._resolve_dmd_config()
 
         # 6. Optimizer for the fake-score phase. LR defaults to student LR when
-        #    ``dmd2.fake_score_lr`` isn't set; FastGen's Wan 2.2 5B config uses 1e-5 for
-        #    all three optimizers.
+        #    ``dmd2.fake_score_lr`` isn't set.
         self.__dict__["_fake_score_optimizer"] = self._build_fake_score_optimizer()
 
         # 7. Optional GAN discriminator. Built when ``gan_loss_weight_gen > 0`` so the
@@ -1058,7 +1047,7 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
             raise ValueError(
                 "Missing ``dmd2:`` block in the YAML config. Expected at minimum "
                 "``dmd2.recipe_path`` pointing at a fastgen DMDConfig recipe "
-                "(e.g. ``general/distillation/dmd2_wan22_5b``)."
+                "(e.g. ``general/distillation/dmd2_qwen_image``)."
             )
         dmd_dict = (
             dmd_cfg_node.to_dict() if hasattr(dmd_cfg_node, "to_dict") else dict(dmd_cfg_node)
@@ -1162,7 +1151,7 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
     ]:
         """Extract latents, noise, text conditioning, and optional masks from a batch.
 
-        Accepts both 5D ``video_latents`` (Wan / video) and 4D ``image_latents``
+        Accepts both 5D ``video_latents`` and 4D ``image_latents``
         (Qwen-Image / Flux / SD3). Mirrors the key dispatch in
         ``nemo_automodel.components.flow_matching.pipeline.FlowMatchingPipeline.step``.
 

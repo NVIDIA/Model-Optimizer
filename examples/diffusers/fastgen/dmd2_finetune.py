@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Entrypoint for the DMD2 Wan 2.2 5B AutoModel example.
+"""Entrypoint for the DMD2 Qwen-Image AutoModel example.
 
 Parses the YAML config + CLI overrides with AutoModel's argument parser, then hands
 control to :class:`DMD2DiffusionRecipe`.
@@ -26,7 +26,7 @@ from nemo_automodel.components.config._arg_parser import parse_args_and_load_con
 
 
 def main(
-    default_config_path: str = "examples/diffusers/fastgen/configs/dmd2_wan22_5b.yaml",
+    default_config_path: str = "examples/diffusers/fastgen/configs/dmd2_qwen_image_smoke.yaml",
 ) -> None:
     cfg = parse_args_and_load_config(default_config_path)
     recipe = DMD2DiffusionRecipe(cfg)

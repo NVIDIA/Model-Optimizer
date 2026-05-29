@@ -21,7 +21,7 @@ does not expect callers to hand-build Python dicts. Typical usage::
     from modelopt.torch.fastgen import DMDConfig, load_dmd_config
 
     # (a) Load a built-in recipe by relative path
-    cfg = load_dmd_config("general/distillation/dmd2_wan22_5b")
+    cfg = load_dmd_config("general/distillation/dmd2_qwen_image")
 
     # (b) Load a user-provided file
     cfg = load_dmd_config("/path/to/my_dmd.yaml")

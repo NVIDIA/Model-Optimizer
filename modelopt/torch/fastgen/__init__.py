@@ -27,7 +27,7 @@ Typical usage with a YAML-driven config::
     student, teacher = build_wan_student_and_teacher(...)
     fake_score = mtf.create_fake_score(teacher)
 
-    cfg = mtf.load_dmd_config("general/distillation/dmd2_wan22_5b")
+    cfg = mtf.load_dmd_config("general/distillation/dmd2_qwen_image")
 
     # If GAN is enabled, expose intermediate teacher features to the discriminator.
     if cfg.gan_loss_weight_gen > 0:
