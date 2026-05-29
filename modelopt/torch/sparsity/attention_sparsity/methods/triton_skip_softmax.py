@@ -47,9 +47,6 @@ class TritonSkipSoftmaxMethod(SparseAttentionMethod):
         super().__init__()
         method_config = method_config or {}
         self.skip_softmax_threshold = method_config.get("skip_softmax_threshold", 0.1)
-        self.skip_softmax_raw_threshold: float | None = method_config.get(
-            "skip_softmax_raw_threshold", None
-        )
         # Calibration state
         self._threshold_trials: list[float] | None = None
         # Runtime sparsity measurement
@@ -94,17 +91,12 @@ class TritonSkipSoftmaxMethod(SparseAttentionMethod):
         if self._measure_sparsity:
             backend_kwargs["measure_sparsity"] = True
 
-        # Priority: raw_threshold > scale_factor (calibrated) > static threshold
-        if self.skip_softmax_raw_threshold is not None:
-            self._set_triton_backends(
-                raw_threshold=self.skip_softmax_raw_threshold, **backend_kwargs
-            )
+        # Priority: calibrated dynamic threshold > static threshold.
+        scale_factor = self._get_scale_factor()
+        if scale_factor is not None:
+            self._set_triton_backends(scale_factor=scale_factor, **backend_kwargs)
         else:
-            scale_factor = self._get_scale_factor()
-            if scale_factor is not None:
-                self._set_triton_backends(scale_factor=scale_factor, **backend_kwargs)
-            else:
-                self._set_triton_backends(threshold=self.skip_softmax_threshold, **backend_kwargs)
+            self._set_triton_backends(threshold=self.skip_softmax_threshold, **backend_kwargs)
         with self._get_diffusers_backend_context():
             try:
                 yield
@@ -168,7 +160,9 @@ class TritonSkipSoftmaxMethod(SparseAttentionMethod):
     def _get_diffusers_backend_context():
         """Activate the modelopt_triton diffusers backend if registered."""
         try:
-            from ..kernels.diffusers_triton_attention import get_triton_attention_backend
+            from modelopt.torch.kernels.sparsity.attention.diffusers_triton_attention import (
+                get_triton_attention_backend,
+            )
 
             with get_triton_attention_backend():
                 yield
@@ -178,13 +172,17 @@ class TritonSkipSoftmaxMethod(SparseAttentionMethod):
     def _set_triton_backends(self, **kwargs):
         """Set config on both diffusers and LTX Triton backends."""
         try:
-            from ..kernels.diffusers_triton_attention import set_triton_skip_softmax_config
+            from modelopt.torch.kernels.sparsity.attention.diffusers_triton_attention import (
+                set_triton_skip_softmax_config,
+            )
 
             set_triton_skip_softmax_config(**kwargs)
         except ImportError:
             pass
         try:
-            from ..kernels.ltx_triton_attention import set_ltx_triton_context
+            from modelopt.torch.kernels.sparsity.attention.ltx_triton_attention import (
+                set_ltx_triton_context,
+            )
 
             set_ltx_triton_context(active=True, **kwargs)
         except ImportError:
@@ -193,13 +191,17 @@ class TritonSkipSoftmaxMethod(SparseAttentionMethod):
     def _clear_triton_backends(self):
         """Clear config on both Triton backends."""
         try:
-            from ..kernels.diffusers_triton_attention import clear_triton_skip_softmax_config
+            from modelopt.torch.kernels.sparsity.attention.diffusers_triton_attention import (
+                clear_triton_skip_softmax_config,
+            )
 
             clear_triton_skip_softmax_config()
         except ImportError:
             pass
         try:
-            from ..kernels.ltx_triton_attention import clear_ltx_triton_context
+            from modelopt.torch.kernels.sparsity.attention.ltx_triton_attention import (
+                clear_ltx_triton_context,
+            )
 
             clear_ltx_triton_context()
         except ImportError:
@@ -211,7 +213,7 @@ class TritonSkipSoftmaxMethod(SparseAttentionMethod):
         seq_k = None
 
         try:
-            from ..kernels.diffusers_triton_attention import (
+            from modelopt.torch.kernels.sparsity.attention.diffusers_triton_attention import (
                 get_calibration_counters,
                 get_calibration_seq_k,
             )
@@ -223,7 +225,7 @@ class TritonSkipSoftmaxMethod(SparseAttentionMethod):
 
         if counters is None:
             try:
-                from ..kernels.ltx_triton_attention import (
+                from modelopt.torch.kernels.sparsity.attention.ltx_triton_attention import (
                     get_calibration_counters,
                     get_calibration_seq_k,
                 )
@@ -288,7 +290,9 @@ class TritonSkipSoftmaxMethod(SparseAttentionMethod):
     def _collect_sparsity_counters(self) -> None:
         """Read runtime sparsity counters from the backend and accumulate."""
         try:
-            from ..kernels.diffusers_triton_attention import get_sparsity_counters
+            from modelopt.torch.kernels.sparsity.attention.diffusers_triton_attention import (
+                get_sparsity_counters,
+            )
 
             total, skipped = get_sparsity_counters()
             self._sparsity_total += total

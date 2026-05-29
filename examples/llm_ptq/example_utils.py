@@ -23,6 +23,7 @@ import os
 import shutil
 import sys
 import warnings
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
@@ -30,7 +31,7 @@ import torch
 import transformers
 from accelerate import infer_auto_device_map, init_empty_weights
 from accelerate.utils import get_max_memory
-from safetensors.torch import load_file
+from safetensors import safe_open
 from transformers import (
     AutoConfig,
     AutoModel,
@@ -45,8 +46,6 @@ try:
     from huggingface_hub import snapshot_download
 except ImportError:
     snapshot_download = None
-
-from modelopt.torch.utils.image_processor import BaseImageProcessor, MllamaImageProcessor
 
 logger = logging.getLogger(__name__)
 
@@ -204,10 +203,8 @@ def create_vlm_calibration_loop(full_model, calib_dataloader):
 
 
 def build_quant_cfg(
-    qformat,
     quant_cfg,
     awq_block_size,
-    model_type,
     moe_calib_experts_ratio: float | None = None,
 ) -> dict[str, Any]:
     quant_cfg = copy.deepcopy(quant_cfg)
@@ -224,10 +221,6 @@ def build_quant_cfg(
         if awq_block_size:
             weight_quantizer["block_sizes"][-1] = awq_block_size
 
-        # Coarser optimal scale search seems to resolve the overflow in TRT-LLM for some models
-        if qformat == "w4a8_awq" and model_type in ["gemma", "mpt"]:
-            quant_cfg["algorithm"] = {"method": "awq_lite", "alpha_step": 1}
-
     if moe_calib_experts_ratio:
         assert 0 < moe_calib_experts_ratio <= 1, "moe_calib_experts_ratio must be between 0 and 1"
         if isinstance(quant_cfg["algorithm"], str):
@@ -241,17 +234,6 @@ def build_quant_cfg(
             warnings.warn(
                 f"Quantization algorithm: {quant_cfg['algorithm']} does not support setting moe_calib_experts_ratio"
             )
-
-    # Gemma 7B has accuracy regression using alpha 1. We set 0.5 instead.
-    if model_type == "gemma" and "int8_sq" in qformat:
-        quant_cfg["algorithm"] = {"method": "smoothquant", "alpha": 0.5}
-
-    if model_type == "phi4mm":
-        # Only quantize the language model
-        quant_cfg["quant_cfg"].append({"quantizer_name": "*speech*", "enable": False})
-        quant_cfg["quant_cfg"].append({"quantizer_name": "*audio*", "enable": False})
-        quant_cfg["quant_cfg"].append({"quantizer_name": "*image*", "enable": False})
-        quant_cfg["quant_cfg"].append({"quantizer_name": "*vision*", "enable": False})
 
     return quant_cfg
 
@@ -285,13 +267,10 @@ def get_tokenizer(ckpt_path, trust_remote_code=False, **kwargs) -> PreTrainedTok
 def get_processor(
     ckpt_path,
     model_type,
-    device: torch.device = "auto",
     trust_remote_code=False,
     attn_implementation=None,
-) -> BaseImageProcessor | ProcessorMixin | None:
-    """
-    Returns a :class:`modelopt.torch.utils.image_processor.MllamaImageProcessor` object.
-    """
+) -> ProcessorMixin | None:
+    """Load a processor appropriate for the given model type."""
     model_kwargs = {"trust_remote_code": trust_remote_code}
     if attn_implementation is not None:
         model_kwargs["attn_implementation"] = attn_implementation
@@ -309,19 +288,6 @@ def get_processor(
         )
 
         return processor
-    elif model_type == "mllama":
-        processor = AutoProcessor.from_pretrained(
-            ckpt_path,
-            padding_side="left",
-            **model_kwargs,
-        )
-        if processor.tokenizer.pad_token is None:
-            processor.tokenizer.pad_token = processor.tokenizer.eos_token
-        assert processor.tokenizer.pad_token is not None, (
-            f"Pad token for {ckpt_path} cannot be set!"
-        )
-
-        return MllamaImageProcessor(processor, device)
     else:
         # Try to load AutoProcessor for other VL models (e.g., Nemotron-Parse)
         try:
@@ -333,100 +299,127 @@ def get_processor(
             return None
 
 
+def get_inlined_mtp_prefixes(config: Any) -> list[str]:
+    """Turn an HF config into the list of state-dict prefixes for inlined-MTP layers."""
+    # ``or 0``: some configs set num_nextn_predict_layers=None rather than omit it.
+    num_nextn = int(getattr(config, "num_nextn_predict_layers", 0) or 0)
+    if not num_nextn:
+        return []
+    num_hidden = config.num_hidden_layers
+    return [f"model.layers.{i}" for i in range(num_hidden, num_hidden + num_nextn)]
+
+
+def _keys_to_prefixes(keys: Iterable[str]) -> set[str]:
+    """Invert separate-file MTP keys into the prefixes the exporter needs for exclude_modules.
+    ``"mtp.fc.weight"`` → ``{"mtp"}``; ``"mtp.layers.0.q_proj.weight"`` →
+    ``{"mtp", "mtp.layers.0"}``. Caller must filter out inlined keys; otherwise
+    ``"model.layers.78.eh_proj.weight"`` would emit ``"model"`` as a prefix.
+    """
+    prefixes: set[str] = set()
+    for key in keys:
+        parts = key.split(".")
+        if parts:
+            prefixes.add(parts[0])
+        for i, part in enumerate(parts):
+            if part == "layers" and i + 1 < len(parts) and parts[i + 1].isdigit():
+                prefixes.add(".".join(parts[: i + 2]))
+                break
+    return prefixes
+
+
+def _load_tensors_matching(
+    model_dir: Path, predicate: Callable[[str], bool]
+) -> dict[str, torch.Tensor]:
+    """Stream tensors satisfying ``predicate(key)`` from every safetensors
+    source in ``model_dir`` (indexed shards + standalone files, each opened
+    at most once).
+    """
+    tensors: dict[str, torch.Tensor] = {}
+    seen_shards: set[str] = set()
+
+    index_file = model_dir / "model.safetensors.index.json"
+    if index_file.exists():
+        with open(index_file) as f:
+            weight_map = json.load(f)["weight_map"]
+        per_shard: dict[str, list[str]] = {}
+        for key, shard_name in weight_map.items():
+            if predicate(key):
+                per_shard.setdefault(shard_name, []).append(key)
+        for shard_name, keys in per_shard.items():
+            seen_shards.add(shard_name)
+            with safe_open(str(model_dir / shard_name), framework="pt", device="cpu") as f:
+                for k in keys:
+                    tensors[k] = f.get_tensor(k)
+
+    for shard in sorted(model_dir.glob("*.safetensors")):
+        if shard.name in seen_shards:
+            continue
+        with safe_open(str(shard), framework="pt", device="cpu") as f:
+            for k in f.keys():  # noqa: SIM118 - safe_open is not iterable
+                if predicate(k):
+                    tensors[k] = f.get_tensor(k)
+    return tensors
+
+
+def _apply_to_model_state_dict(
+    model: torch.nn.Module, tensors: dict[str, torch.Tensor]
+) -> dict[str, torch.Tensor]:
+    """Load tensors with a slot in ``model.state_dict()`` in-place; return the
+    rest as orphans for ``extra_state_dict``.
+    """
+    model_state = model.state_dict()
+    in_state_dict = {k: v for k, v in tensors.items() if k in model_state}
+    out_state_dict = {k: v for k, v in tensors.items() if k not in model_state}
+    if in_state_dict:
+        model.load_state_dict(in_state_dict, strict=False)
+    return out_state_dict
+
+
 def load_mtp_weights(
     model: torch.nn.Module, model_path: str
 ) -> tuple[list[str], dict[str, torch.Tensor]]:
-    """Load MTP weights from the model checkpoint.
+    """Detect and load MTP weights. Support matrix:
 
-    Some models store additional layers in separate safetensors files with non-standard
-    names (e.g., mtp.safetensors). HuggingFace's from_pretrained() may not load these
-    files even though they're referenced in model.safetensors.index.json.
+        Convention     Architectures             On-disk shape
+        -------------  ------------------------  -------------------------------
+        inlined        GLM-5.1 (``GlmMoeDsa``),  ``model.layers.{N}.*``
+                       DeepSeek-V3
+        separate-file  GLM-4.7                   standalone ``mtp.safetensors``
+        separate-file  Qwen3-Next                indexed ``mtp.*`` tail shard
 
-    This function detects such cases and explicitly loads the missing weights.
+    Inlined ``N`` in ``[num_hidden, num_hidden + num_nextn_predict_layers)``;
+    may be orphaned at ``from_pretrained`` time if the HF class only builds
+    ``num_hidden`` decoders.
 
-    Args:
-        model: The loaded model that may be missing weights
-        model_path: Path to the model directory
-
-    Returns:
-        List of layer prefixes that were loaded from non-standard safetensors files.
-        These layers should typically be excluded from quantization.
-        Empty list if no additional weights were loaded.
-        Dictionary of MTP weights that were not loaded into the model state dict.
+    Returns ``(prefixes, not_in_state_dict)``: ``prefixes`` populates
+    ``quantization_config.exclude_modules``; ``not_in_state_dict`` is fed to
+    ``export_hf_checkpoint(extra_state_dict=...)``.
     """
-    model_path = Path(model_path)
-    index_file = model_path / "model.safetensors.index.json"
+    model_dir = Path(model_path)
 
-    if not index_file.exists():
+    inlined_prefixes = set(get_inlined_mtp_prefixes(model.config))
+    inlined_tuple = tuple(p + "." for p in inlined_prefixes)
+
+    # Combined predicate covering both conventions in one pass.
+    def predicate(key: str) -> bool:
+        return key.startswith(inlined_tuple) or "mtp" in key
+
+    tensors = _load_tensors_matching(model_dir, predicate)
+    if not tensors:
         return [], {}
 
-    # Load the index to find all referenced safetensors files
-    index = json.load(open(index_file))
-    weight_map = index["weight_map"]
-    # Find all files in weight_map whose key or value contains "mtp"
-    mtp_weight_map = {}
-    for k, v in weight_map.items():
-        if "mtp" in k or "mtp" in v:
-            mtp_weight_map.setdefault(v, []).append(k)
+    separate_keys = [k for k in tensors if not k.startswith(inlined_tuple)]
+    prefixes = inlined_prefixes | _keys_to_prefixes(separate_keys)
 
-    if not mtp_weight_map:
-        return [], {}
+    not_in_state_dict = _apply_to_model_state_dict(model, tensors)
 
-    def _extract_layer_prefixes(keys):
-        mtp_layer_prefixes = set()
-        for key in keys:
-            parts = key.split(".")
-            # Capture the top-level MTP module prefix (e.g., "mtp" from "mtp.fc.weight")
-            # so that non-layer MTP weights like mtp.fc, mtp.norm are also excluded
-            if parts:
-                mtp_layer_prefixes.add(parts[0])
-            # Also capture specific layer prefixes (e.g., "mtp.layers.0")
-            for i, part in enumerate(parts):
-                if part == "layers" and i + 1 < len(parts) and parts[i + 1].isdigit():
-                    prefix = ".".join(parts[: i + 2])
-                    mtp_layer_prefixes.add(prefix)
-                    break
+    print(
+        f"✓ Detected {len(tensors)} MTP tensors under {sorted(prefixes)} "
+        f"(loaded into model: {len(tensors) - len(not_in_state_dict)}, "
+        f"orphaned: {len(not_in_state_dict)})"
+    )
 
-        return mtp_layer_prefixes
-
-    # Flatten mtp_weight_map.values() (list of list of str) to a single list of str
-    mtp_keys = [k for keys in mtp_weight_map.values() for k in keys]
-    mtp_layer_prefixes = _extract_layer_prefixes(mtp_keys)
-
-    # Check which non-standard files exist and have missing weights
-    model_state = model.state_dict()
-    total_loaded = 0
-
-    not_in_state_dict = {}
-
-    for filename, mtp_keys in mtp_weight_map.items():
-        filepath = model_path / filename
-        if not filepath.exists():
-            continue
-
-        print(f"Loading {len(mtp_keys)} mtp weights from {filename}...")
-        weights = load_file(str(filepath), device="cpu")
-        weights = {k: v for k, v in weights.items() if k in mtp_keys}
-        # Load the MTP weights to the model state dict
-        in_state_dict = {k: weights[k] for k in weights if k in model_state}
-        not_in_state_dict = not_in_state_dict | {
-            k: weights[k] for k in weights if k not in model_state
-        }
-
-        if in_state_dict:
-            model.load_state_dict(in_state_dict, strict=False)
-            total_loaded += len(in_state_dict)
-
-    if total_loaded > 0:
-        print(
-            f"✓ Successfully loaded {total_loaded} MTP weights, "
-            f"{len(not_in_state_dict)} MTP weights not in model.state_dict"
-        )
-
-    if mtp_layer_prefixes:
-        print(f"✓ Detected MTP layers to exclude from quantization: {mtp_layer_prefixes}")
-
-    return list(mtp_layer_prefixes), not_in_state_dict
+    return sorted(prefixes), not_in_state_dict
 
 
 def get_dtype(dtype):

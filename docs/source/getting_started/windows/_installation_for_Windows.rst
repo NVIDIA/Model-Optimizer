@@ -30,6 +30,10 @@ The following system requirements are necessary to install and use Model Optimiz
 
 The Model Optimizer - Windows can be used in following ways:
 
+.. note::
+   Model Optimizer will download and install additional third-party open source software projects.
+   Review the license terms of these open source projects before use.
+
 .. toctree::
    :glob:
    :maxdepth: 1

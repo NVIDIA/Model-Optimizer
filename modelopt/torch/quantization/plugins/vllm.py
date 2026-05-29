@@ -385,14 +385,19 @@ class _QuantFusedMoEBase(QuantModule):
             # First layer of expert
             A = self.w13_input_quantizer(A)  # noqa: N806
             if self.w13_weight_quantizer.is_enabled:  # pragma: no cover
-                original_weight, self.w13_weight = (
-                    self.w13_weight,
-                    self.w13_weight_quantizer(self.w13_weight),
-                )
-                # In case the weight quantizer isn't folded yet in vllm_serve_fakequant, pass the
-                # quantized weight to the kernel.
-                B = self.w13_weight  # noqa: N806
+                # Same pattern as FakeQuantMethod.apply: wrap as nn.Parameter if needed, swap
+                # w13_weight, call kernel, restore (tensor cannot stay assigned to nn.Parameter slot).
+                original_weight = self.w13_weight
+                quantized_tensor = self.w13_weight_quantizer(original_weight)
                 try:
+                    if isinstance(original_weight, torch.nn.Parameter) and not isinstance(
+                        quantized_tensor, torch.nn.Parameter
+                    ):
+                        quantized_tensor = torch.nn.Parameter(
+                            quantized_tensor, requires_grad=original_weight.requires_grad
+                        )
+                    self.w13_weight = quantized_tensor
+                    B = quantized_tensor  # noqa: N806
                     original_kernel(A, B, C, *args, **kwargs)
                 finally:
                     self.w13_weight = original_weight
@@ -403,14 +408,17 @@ class _QuantFusedMoEBase(QuantModule):
         elif B is self.w2_weight:
             A = self.w2_input_quantizer(A)  # noqa: N806
             if self.w2_weight_quantizer.is_enabled:  # pragma: no cover
-                original_weight, self.w2_weight = (
-                    self.w2_weight,
-                    self.w2_weight_quantizer(self.w2_weight),
-                )
-                # In case the weight quantizer isn't folded yet in vllm_serve_fakequant, pass the
-                # quantized weight to the kernel.
-                B = self.w2_weight  # noqa: N806
+                original_weight = self.w2_weight
+                quantized_tensor = self.w2_weight_quantizer(original_weight)
                 try:
+                    if isinstance(original_weight, torch.nn.Parameter) and not isinstance(
+                        quantized_tensor, torch.nn.Parameter
+                    ):
+                        quantized_tensor = torch.nn.Parameter(
+                            quantized_tensor, requires_grad=original_weight.requires_grad
+                        )
+                    self.w2_weight = quantized_tensor
+                    B = quantized_tensor  # noqa: N806
                     original_kernel(A, B, C, *args, **kwargs)
                 finally:
                     self.w2_weight = original_weight

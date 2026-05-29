@@ -23,6 +23,7 @@ Make sure you read and follow the [Security Best Practices](https://github.com/N
 - If you copied code from any other sources or added a new PIP dependency, did you follow guidance in `CONTRIBUTING.md`: ✅ / ❌ / N/A <!--- Mandatory -->
 - Did you write any new necessary tests?: ✅ / ❌ / N/A <!--- Mandatory for new features or examples. -->
 - Did you update [Changelog](https://github.com/NVIDIA/Model-Optimizer/blob/main/CHANGELOG.rst)?: ✅ / ❌ / N/A <!--- Only for new features, API changes, critical bug fixes or backward incompatible changes. -->
+- Did you get Claude approval on this PR?: ✅ / ❌ / N/A <!--- Run `/claude review`. NVIDIA org members can self-trigger for complex changes; orthogonal to CodeRabbit. -->
 
 ### Additional Information
 <!-- E.g. related issue. -->

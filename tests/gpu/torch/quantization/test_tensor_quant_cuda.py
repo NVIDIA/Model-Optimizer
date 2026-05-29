@@ -20,7 +20,7 @@ import torch
 from _test_utils.torch.quantization.quant_utils import quant
 from _test_utils.torch.quantization.tensor_quant_common import FakeTensorQuantTester
 
-import modelopt.torch.quantization.triton as triton_kernel
+import modelopt.torch.kernels.quantization.gemm as triton_kernel
 import modelopt.torch.quantization.utils as quant_utils
 from modelopt.torch.quantization import tensor_quant
 from modelopt.torch.quantization.extensions import get_cuda_ext, get_cuda_ext_mx

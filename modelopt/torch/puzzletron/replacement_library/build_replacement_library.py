@@ -509,13 +509,18 @@ def _build_layer_replacements_from_block_library(block_library_df: pd.DataFrame)
         weight_paths = []
         for subblock_name in ["attention", "ffn"]:
             checkpoint_dir = row[f"{subblock_name}_checkpoint_dir"]
-            if checkpoint_dir is not None:
-                subblock_path = (
-                    Path(checkpoint_dir)
-                    / SAFETENSORS_SUBBLOCKS_DIR_NAME
-                    / f"block_{block_idx}_{subblock_name}.safetensors"
-                )
-                weight_paths.append(subblock_path)
+            # pandas represents missing cells as float NaN (e.g. for no-op subblocks),
+            # so check for both None and NaN before constructing a Path.
+            if checkpoint_dir is None or (
+                isinstance(checkpoint_dir, float) and pd.isna(checkpoint_dir)
+            ):
+                continue
+            subblock_path = (
+                Path(checkpoint_dir)
+                / SAFETENSORS_SUBBLOCKS_DIR_NAME
+                / f"block_{block_idx}_{subblock_name}.safetensors"
+            )
+            weight_paths.append(subblock_path)
         weight_paths = sorted(set(weight_paths))
         layer_replacement = {
             "parent_layer_indices": [block_idx],

@@ -16,6 +16,7 @@
 """Calibrator that returns the MSE amax of all collected tensors."""
 
 import math
+import os
 from collections.abc import Callable
 
 import torch
@@ -172,7 +173,15 @@ class MseCalibrator(_Calibrator):
 
 
 class NVFP4MSECalibrator(MseCalibrator):
-    """Per-block FP8 scale sweep calibrator for NVFP4 static quantization."""
+    """Per-block FP8 scale sweep calibrator for NVFP4 static quantization.
+
+    Uses a fused Triton kernel as an internal fast path on the first ``collect`` call
+    when (a) ``error_func is None``, (b) the input tensor is on CUDA in the standard
+    blocked ``[n_blocks, block_size]`` layout, and (c) Triton + the kernel package are
+    importable. Falls back to the reference 126-step Python sweep otherwise (custom
+    ``error_func`` users, multi-``collect`` activation flows, CPU inputs, or when the
+    fast path is disabled via ``MODELOPT_NVFP4_TRITON_SWEEP=0``).
+    """
 
     def __init__(
         self,
@@ -185,6 +194,8 @@ class NVFP4MSECalibrator(MseCalibrator):
         """Initialize NVFP4 MSE calibrator with per-block and global amax."""
         super().__init__(amax=amax, axis=axis, quant_func=quant_func, error_func=error_func)
         self._global_amax = global_amax
+        # Set by the Triton fast path on its (one-shot) collect; consumed by compute_amax.
+        self._best_amax_fast: torch.Tensor | None = None
 
     def _compute_candidate_amax(self, candidates: torch.Tensor) -> torch.Tensor:
         if candidates.ndim != 0:  # Called during final compute amax
@@ -192,9 +203,77 @@ class NVFP4MSECalibrator(MseCalibrator):
         return torch.ones_like(self._initial_amax) * self._global_amax * candidates
 
     def _generate_candidates(self, device: torch.device) -> torch.Tensor:
-        """Generate 126 valid FP8 E4M3 scale candidates."""
-        uint8_values = torch.arange(0, 128, dtype=torch.uint8, device=device)
-        fp8_values = uint8_values.view(torch.float8_e4m3fn).float()
-        valid_mask = torch.isfinite(fp8_values) & (fp8_values > 0)
-        fp8_values = fp8_values[valid_mask]
-        return fp8_values / 448.0
+        """Generate the 126 valid FP8 E4M3 scale candidates."""
+        from modelopt.torch.kernels.quantization.gemm._fp8_scale_candidates import (
+            fp8_scale_candidates,
+        )
+
+        return fp8_scale_candidates(device)
+
+    def _can_use_triton_fast_path(self, x: torch.Tensor) -> bool:
+        """Whether the Triton fast path is usable for this ``collect`` input.
+
+        The kernel produces the final per-block amax in one shot, so it's only usable
+        when the caller wants the standard squared-error sweep on a single CUDA tensor
+        whose layout already matches the per-block amax.
+        """
+        if self._error_func is not None:
+            return False
+        if not x.is_cuda:
+            return False
+        if os.environ.get("MODELOPT_NVFP4_TRITON_SWEEP", "1") == "0":
+            return False
+        if self._initial_amax is None:
+            return False
+        if x.ndim != 2 or x.shape[0] != int(self._initial_amax.numel()):
+            return False
+        try:
+            from modelopt.torch.kernels.quantization.gemm import nvfp4_fp8_scale_sweep  # noqa: F401
+        except ImportError:
+            return False
+        return True
+
+    @torch.no_grad()
+    def collect(self, x: torch.Tensor):
+        """Collect input statistics. Uses the Triton fast path when eligible."""
+        if self._best_amax_fast is not None:
+            raise RuntimeError(
+                "NVFP4MSECalibrator: the Triton fast path produced a final amax on a "
+                "previous collect() call; multi-collect after the fast path is not "
+                "supported. Call reset() to start a fresh cycle, set "
+                "MODELOPT_NVFP4_TRITON_SWEEP=0, or pass a non-None error_func to force "
+                "the reference path for activation-style accumulation."
+            )
+        # Fast path is eligible only on the first call, before the reference accumulator
+        # has produced any state.
+        if self._losses_sum is None and self._can_use_triton_fast_path(x):
+            from modelopt.torch.kernels.quantization.gemm import nvfp4_fp8_scale_sweep
+
+            best_flat = nvfp4_fp8_scale_sweep(x.detach(), self._global_amax, block_size=x.shape[-1])
+            # Match the original shape/dtype of the initial amax so downstream
+            # load_calib_amax behaves identically to the reference path.
+            self._best_amax_fast = best_flat.reshape(self._initial_amax.shape).to(
+                self._initial_amax.dtype
+            )
+            return
+        super().collect(x)
+
+    @torch.no_grad()
+    def compute_amax(self, verbose: bool = False):
+        """Return the per-block amax — from the fast path if it ran, else from the reference sweep."""
+        if self._best_amax_fast is not None:
+            return self._best_amax_fast
+        return super().compute_amax(verbose=verbose)
+
+    def reset(self):
+        """Reset per-cycle state. Keep ``_initial_amax`` so the calibrator stays reusable.
+
+        ``MseCalibrator.reset()`` intentionally drops ``_initial_amax`` to free memory in
+        the multi-step search, but the NVFP4 per-block amax is shape ``[num_blocks]`` —
+        small enough to keep so a follow-up ``collect()`` can run again on the same
+        calibrator instance.
+        """
+        self._best_amax_fast = None
+        self._losses_sum = None
+        self._candidates = None
+        self._amax = None

@@ -1,0 +1,54 @@
+workflow:
+  auto_cancel:
+    on_new_commit: interruptible
+
+stages:
+  - build-sonar
+  - sonarqube-vulnerability-report
+
+default:
+  tags:
+    - type/docker
+    - os/linux
+    - cpu
+
+image:
+  name: sonarsource/sonar-scanner-cli:11
+  entrypoint: [""]
+
+variables:
+  SONAR_USER_HOME: "${CI_PROJECT_DIR}/.sonar"
+  GIT_DEPTH: "0" # Shallow clones should be disabled for a better relevancy of analysis
+
+build-sonar:
+  stage: build-sonar
+  interruptible: true
+  cache:
+    policy: pull-push
+    key: "sonar-cache-${CI_COMMIT_REF_SLUG}"
+    paths:
+      - "${SONAR_USER_HOME}/cache"
+      - sonar-scanner/
+  script:
+    - sonar-scanner -Dsonar.projectKey=EngHW_ModelOpt_ModelOpt_modelopt -Dsonar.sources=modelopt,modelopt_recipes,examples -Dsonar.host.url="${SONAR_HOST_URL}"
+      -Dsonar.token="${SONAR_TOKEN}"
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+    - if: $CI_PIPELINE_SOURCE == "web"
+    - if: $CI_COMMIT_BRANCH =~ /^(main|release\/.*)$/ && $CI_PIPELINE_SOURCE == "push"
+
+sonarqube-vulnerability-report:
+  stage: sonarqube-vulnerability-report
+  interruptible: true
+  script:
+    - 'curl --fail --silent --show-error -u "${SONAR_TOKEN}:" "${SONAR_HOST_URL}/api/issues/gitlab_sast_export?projectKey=EngHW_ModelOpt_ModelOpt_modelopt&branch=${CI_COMMIT_BRANCH}&pullRequest=${CI_MERGE_REQUEST_IID}"
+      -o gl-sast-sonar-report.json'
+    - 'test -s gl-sast-sonar-report.json'
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+    - if: $CI_PIPELINE_SOURCE == "web"
+    - if: $CI_COMMIT_BRANCH =~ /^(main|release\/.*)$/ && $CI_PIPELINE_SOURCE == "push"
+  artifacts:
+    expire_in: 1 day
+    reports:
+      sast: gl-sast-sonar-report.json

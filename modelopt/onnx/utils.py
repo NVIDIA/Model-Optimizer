@@ -1415,6 +1415,70 @@ def _bypass_cast_node(model: onnx.ModelProto, node: onnx.NodeProto) -> None:
                     consumer.input[i] = input_tensor
 
 
+_DQ_OPS = {"DequantizeLinear", "TRT_FP8DequantizeLinear"}
+_Q_OPS = {"QuantizeLinear", "TRT_FP8QuantizeLinear"}
+
+
+def _scale_fp32_to_fp16(scale_init: onnx.TensorProto) -> None:
+    """Convert a scalar Q/DQ scale initializer in-place from FP32 to FP16.
+
+    Warns if any non-zero scale saturates to 0/inf in FP16 (out of FP16 representable range).
+    """
+    if scale_init.data_type != onnx.TensorProto.FLOAT:
+        return
+    scale_data = np.frombuffer(scale_init.raw_data, dtype=np.float32)
+    if not scale_data.size:
+        scale_data = np.array(scale_init.float_data, dtype=np.float32)
+    fp16_data = scale_data.astype(np.float16)
+    if np.any(np.isinf(fp16_data)) or (np.any(fp16_data == 0) and np.any(scale_data != 0)):
+        logger.warning(f"Q/DQ scale '{scale_init.name}' overflows or underflows when cast to FP16")
+    scale_init.data_type = onnx.TensorProto.FLOAT16
+    scale_init.raw_data = fp16_data.tobytes()
+    del scale_init.float_data[:]
+
+
+def fold_q_fp16_to_fp32_casts(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
+    """Remove ``Cast(FP16→FP32) → Q`` patterns inserted by ``convert_float_to_float16``.
+
+    The Q scale is rewritten to FP16 so Q consumes the FP16 graph directly. Skipped for
+    opsets below ``BASE_MIN_OPSET`` since FP16 Q scales require opset >= 19.
+    """
+    if get_opset_version(onnx_model) < BASE_MIN_OPSET:
+        logger.debug(
+            f"Skipping fold_q_fp16_to_fp32_casts: opset < {BASE_MIN_OPSET} (FP16 Q scale unsupported)"
+        )
+        return onnx_model
+
+    consumer_map: dict[str, list[onnx.NodeProto]] = {}
+    for node in onnx_model.graph.node:
+        for inp in node.input:
+            consumer_map.setdefault(inp, []).append(node)
+    initializers = {init.name: init for init in onnx_model.graph.initializer}
+
+    to_remove = []
+    for node in onnx_model.graph.node:
+        if node.op_type != "Cast":
+            continue
+        cast_to = next((a.i for a in node.attribute if a.name == "to"), None)
+        if cast_to != onnx.TensorProto.FLOAT:
+            continue
+        consumers = consumer_map.get(node.output[0], [])
+        if not consumers or not all(c.op_type in _Q_OPS for c in consumers):
+            continue
+
+        for q_node in consumers:
+            if len(q_node.input) >= 2 and q_node.input[1] in initializers:
+                _scale_fp32_to_fp16(initializers[q_node.input[1]])
+
+        _bypass_cast_node(onnx_model, node)
+        to_remove.append(node)
+
+    logger.debug(f"Folded {len(to_remove)} Cast(FP16->FP32) -> Q patterns")
+    for node in to_remove:
+        onnx_model.graph.node.remove(node)
+    return onnx_model
+
+
 def _is_foldable_constant_cast_pattern(model: onnx.ModelProto, node: onnx.NodeProto) -> bool:
     """Check if a Constant -> Cast pattern can be folded."""
     assert node.op_type == "Cast"
@@ -1523,7 +1587,12 @@ def fold_dq_fp32_to_fp16_casts(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
     Returns:
         The ONNX model with Cast nodes removed and DQ outputs set to FP16.
     """
-    import numpy as np
+    if get_opset_version(onnx_model) < BASE_MIN_OPSET:
+        logger.debug(
+            f"Skipping fold_dq_fp32_to_fp16_casts: opset < {BASE_MIN_OPSET} "
+            "(FP16 DQ scale unsupported)"
+        )
+        return onnx_model
 
     dq_ops = {"DequantizeLinear", "TRT_FP8DequantizeLinear"}
 
@@ -1623,6 +1692,13 @@ def fold_qdq_scale_fp16_to_fp32_casts(onnx_model: onnx.ModelProto) -> onnx.Model
     Returns:
         The ONNX model with redundant scale-path casts removed.
     """
+    if get_opset_version(onnx_model) < BASE_MIN_OPSET:
+        logger.debug(
+            f"Skipping fold_qdq_scale_fp16_to_fp32_casts: opset < {BASE_MIN_OPSET} "
+            "(FP16 Q/DQ scale unsupported)"
+        )
+        return onnx_model
+
     qdq_ops = {
         "QuantizeLinear",
         "DequantizeLinear",

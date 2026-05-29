@@ -31,7 +31,6 @@ import importlib.util
 import os
 import re
 import shutil
-import subprocess  # nosec B404
 import tempfile
 import time
 from abc import ABC, abstractmethod
@@ -42,7 +41,7 @@ import numpy as np
 import torch
 
 from modelopt.onnx.logging_config import logger
-from modelopt.onnx.quantization.ort_utils import _check_for_trtexec
+from modelopt.onnx.quantization.ort_utils import _check_for_trtexec, _run_trtexec
 
 TRT_AVAILABLE = importlib.util.find_spec("tensorrt") is not None
 if TRT_AVAILABLE:
@@ -159,7 +158,6 @@ class TrtExecBenchmark(Benchmark):
         warmup_runs: int = 5,
         timing_runs: int = 10,
         plugin_libraries: list[str] | None = None,
-        trtexec_path: str = "trtexec",
         trtexec_args: list[str] | None = None,
     ):
         """Initialize the trtexec benchmark.
@@ -169,14 +167,11 @@ class TrtExecBenchmark(Benchmark):
             warmup_runs: See :meth:`Benchmark.__init__`.
             timing_runs: See :meth:`Benchmark.__init__`.
             plugin_libraries: See :meth:`Benchmark.__init__`.
-            trtexec_path: Path to trtexec binary. Defaults to 'trtexec' which
-                         looks for the binary in PATH.
             trtexec_args: Additional command-line arguments to pass to trtexec.
                          These are appended after the standard arguments.
                          Example: ['--fp16', '--workspace=4096', '--verbose']
         """
         super().__init__(timing_cache_file, warmup_runs, timing_runs, plugin_libraries)
-        self.trtexec_path = trtexec_path
         self.trtexec_args = trtexec_args if trtexec_args is not None else []
         self.temp_dir = tempfile.mkdtemp(prefix="trtexec_benchmark_")
         self.engine_path = os.path.join(self.temp_dir, "engine.trt")
@@ -186,7 +181,6 @@ class TrtExecBenchmark(Benchmark):
         self.latency_pattern = r"\[I\]\s+Latency:.*?median\s*=\s*([\d.]+)\s*ms"
 
         self._base_cmd = [
-            self.trtexec_path,
             f"--avgRuns={self.timing_runs}",
             f"--iterations={self.timing_runs}",
             f"--warmUp={self.warmup_runs}",
@@ -220,7 +214,6 @@ class TrtExecBenchmark(Benchmark):
                         "Remote autotuning requires '--skipInference' to be set. Adding it to trtexec arguments."
                     )
                     self.trtexec_args.append("--skipInference")
-                return
             except ImportError:
                 self.logger.warning(
                     "Remote autotuning is not supported with TensorRT version < 10.15. "
@@ -269,13 +262,14 @@ class TrtExecBenchmark(Benchmark):
                 self.logger.debug(f"Wrote model bytes to temporary file: {model_path}")
 
             cmd = [*self._base_cmd, f"--onnx={model_path}"]
-            self.logger.debug(f"Running: {' '.join(cmd)}")
-            result = subprocess.run(cmd, capture_output=True, text=True)  # nosec B603
+            full_cmd = ["trtexec", *cmd]
+            self.logger.debug(f"Running: {' '.join(full_cmd)}")
+            result = _run_trtexec(cmd)
             self._write_log_file(
                 log_file,
                 "\n".join(
                     [
-                        f"Command: {' '.join(cmd)}",
+                        f"Command: {' '.join(full_cmd)}",
                         f"Return code: {result.returncode}",
                         "=" * 80,
                         "STDOUT:",
@@ -302,8 +296,9 @@ class TrtExecBenchmark(Benchmark):
             self.logger.info(f"TrtExec benchmark (median): {latency:.2f} ms")
             return latency
         except FileNotFoundError:
-            self.logger.error(f"trtexec binary not found: {self.trtexec_path}")
-            self.logger.error("Please ensure TensorRT is installed and trtexec path is correct")
+            self.logger.error(
+                "'trtexec' binary not found. Please ensure TensorRT is installed and 'trtexec' is in PATH."
+            )
             return float("inf")
         except Exception as e:
             self.logger.error(f"Benchmark failed: {e}")

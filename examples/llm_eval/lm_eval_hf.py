@@ -38,19 +38,19 @@
 # limitations under the License.
 import contextlib
 import warnings
+from importlib.metadata import version
 
 import datasets
-import lm_eval
 from lm_eval import utils
-from lm_eval.__main__ import cli_evaluate, parse_eval_args, setup_parser
+from packaging.version import Version
 
-if not lm_eval.__version__.startswith("0.4.8"):
-    warnings.warn(
-        f"lm_eval_hf.py is tested with lm-eval 0.4.8; found {lm_eval.__version__}. "
-        "Later versions may have incompatible API changes."
-    )
+if Version(version("lm_eval")) < Version("0.4.10"):
+    raise ImportError(f"lm_eval_hf.py requires lm-eval >= 0.4.10; found {version('lm_eval')}.")
+
+from lm_eval._cli import HarnessCLI
 from lm_eval.api.model import T
 from lm_eval.models.huggingface import HFLM
+from lm_eval.utils import setup_logging
 from quantization_utils import quantize_model
 from sparse_attention_utils import sparsify_model
 
@@ -160,9 +160,24 @@ HFLM.create_from_arg_obj = classmethod(create_from_arg_obj)
 HFLM.create_from_arg_string = classmethod(create_from_arg_string)
 
 
-def setup_parser_with_modelopt_args():
-    """Extend the lm-eval argument parser with ModelOpt quantization and sparsity options."""
-    parser = setup_parser()
+# ModelOpt-specific args that we add to lm-eval's parser. After parsing, these are
+# moved out of the argparse namespace and into args.model_args so they reach
+# HFLM.create_from_arg_obj (and so lm-eval's own arg validation doesn't reject them).
+_MODELOPT_ARG_KEYS = (
+    "quant_cfg",
+    "calib_batch_size",
+    "calib_size",
+    "auto_quantize_bits",
+    "auto_quantize_method",
+    "auto_quantize_score_size",
+    "auto_quantize_checkpoint",
+    "compress",
+    "sparse_cfg",
+)
+
+
+def _add_modelopt_args(parser):
+    """Extend an lm-eval argument parser with ModelOpt quantization and sparsity options."""
     parser.add_argument(
         "--quant_cfg",
         type=str,
@@ -221,33 +236,45 @@ def setup_parser_with_modelopt_args():
         type=str,
         help="Sparse attention configuration (e.g., SKIP_SOFTMAX_DEFAULT, SKIP_SOFTMAX_CALIB)",
     )
-    return parser
 
 
-if __name__ == "__main__":
-    parser = setup_parser_with_modelopt_args()
-    args = parse_eval_args(parser)
-    model_args = utils.simple_parse_args_string(args.model_args)
+def _inject_modelopt_args_into_model_args(args):
+    """Move ModelOpt args from the argparse namespace into args.model_args.
 
-    if args.trust_remote_code:
+    args.model_args is a dict (parsed by lm-eval's MergeDictAction). The ModelOpt
+    keys must be removed from the namespace so EvaluatorConfig.from_cli doesn't
+    reject them as unknown kwargs.
+    """
+    model_args = dict(args.model_args) if args.model_args else {}
+
+    if getattr(args, "trust_remote_code", False):
+        # Propagate the user-provided --trust_remote_code flag (not hardcoded).
         datasets.config.HF_DATASETS_TRUST_REMOTE_CODE = True
         model_args["trust_remote_code"] = True
         args.trust_remote_code = None
 
-    model_args.update(
-        {
-            "quant_cfg": args.quant_cfg,
-            "auto_quantize_bits": args.auto_quantize_bits,
-            "auto_quantize_method": args.auto_quantize_method,
-            "auto_quantize_score_size": args.auto_quantize_score_size,
-            "auto_quantize_checkpoint": args.auto_quantize_checkpoint,
-            "calib_batch_size": args.calib_batch_size,
-            "calib_size": args.calib_size,
-            "compress": args.compress,
-            "sparse_cfg": args.sparse_cfg,
-        }
-    )
+    for key in _MODELOPT_ARG_KEYS:
+        if hasattr(args, key):
+            model_args[key] = getattr(args, key)
+            delattr(args, key)
 
     args.model_args = model_args
 
-    cli_evaluate(args)
+
+if __name__ == "__main__":
+    setup_logging()
+    cli = HarnessCLI()
+    # The `run` subcommand owns the model/task arguments; extend that parser.
+    # `_subparsers` is private API; guard so a future lm-eval refactor surfaces a
+    # clear error instead of an opaque AttributeError.
+    try:
+        run_parser = cli._subparsers.choices["run"]
+    except (AttributeError, KeyError) as e:
+        raise RuntimeError(
+            "Cannot locate lm-eval's `run` subparser; the HarnessCLI internals may "
+            f"have changed. Installed lm-eval version: {version('lm_eval')}."
+        ) from e
+    _add_modelopt_args(run_parser)
+    args = cli.parse_args()
+    _inject_modelopt_args_into_model_args(args)
+    cli.execute(args)

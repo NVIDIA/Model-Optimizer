@@ -30,6 +30,7 @@ __all__ = [
     "reduce_amax",
     "reduce_sum",
     "replace_function",
+    "representative_weight_quantizer",
     "update_quant_cfg_with_kv_cache_quant",
     "weight_attr_names",
 ]

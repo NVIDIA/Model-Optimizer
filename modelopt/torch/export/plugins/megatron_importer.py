@@ -39,6 +39,7 @@ with import_plugin("transformers", verbose=False):
 has_mcore = False
 with import_plugin("megatron"):
     from megatron.core.parallel_state import (
+        get_expert_model_parallel_rank,
         get_expert_tensor_parallel_world_size,
         get_tensor_model_parallel_world_size,
     )
@@ -237,8 +238,9 @@ class GPTModelImporter:
             else:
                 prefix = prefix.replace("model", "mtp")
 
-        weight = module.state_dict().get("weight", None)
-        weight_scale = module.state_dict().get("weight_quantizer._scale", None)
+        module_state_dict = module.state_dict()
+        weight = module_state_dict.get("weight", None)
+        weight_scale = module_state_dict.get("weight_quantizer._scale", None)
 
         state_dict = {}
 
@@ -272,6 +274,16 @@ class GPTModelImporter:
         else:
             state_dict["weight"] = tensor.to(self.dtype).to(device=weight.device)
 
+        # Preserve the fused LayerNorm weight + TE _extra_state already on the module so
+        # the strict load_state_dict below doesn't fail for TELayerNormColumnParallelLinear
+        # (fused under --export-default-te-spec). The actual HF norm tensor is loaded
+        # separately via the `fused_pre_mlp_layernorm` rule.
+        layer_norm_weight = module_state_dict.get("layer_norm_weight", None)
+        if layer_norm_weight is not None:
+            state_dict["layer_norm_weight"] = layer_norm_weight
+            if "_extra_state" in module_state_dict:
+                state_dict["_extra_state"] = module_state_dict["_extra_state"]
+
         module.load_state_dict(state_dict)
 
     def _grouped_mlp_merging(
@@ -294,9 +306,13 @@ class GPTModelImporter:
         assert module.num_gemms == num_local_experts, (
             "num_gemms must be equal to num_local_experts in TEGroupedMLP"
         )
-        for expert_id in range(init_expert_id, init_expert_id + num_local_experts):
-            tensor = self._get_safetensor(prefix.format(expert_id) + ".weight")
-            state_dict[f"weight{expert_id}"] = tensor
+        # init_expert_id is the global index of this rank's first local expert.
+        # TEGroupedMLP stores weights as weight0..weight{num_local-1} locally, so we
+        # map global expert_id -> local slot (expert_id - init_expert_id).
+        for local_id in range(num_local_experts):
+            global_expert_id = init_expert_id + local_id
+            tensor = self._get_safetensor(prefix.format(global_expert_id) + ".weight")
+            state_dict[f"weight{local_id}"] = tensor
             # TODO handle weight_scale
 
         module.load_state_dict(state_dict)
@@ -428,7 +444,13 @@ class GPTModelImporter:
         layer_norm_weight = module_state_dict.get("layer_norm_weight", None)
         if layer_norm_weight is not None:
             state_dict["layer_norm_weight"] = layer_norm_weight
-            state_dict["_extra_state"] = None  # for TE modules require _extra_state key
+            # Preserve the TE metadata struct (FP8 amax history, recipe version, etc.) —
+            # `load_state_dict(..., strict=True)` requires the key, but blanking it could
+            # zero out per-module FP8 bookkeeping on TE versions that populate it. Only
+            # forward through when the source actually has it, to avoid adding an
+            # unexpected `_extra_state=None` to TE variants that don't.
+            if "_extra_state" in module_state_dict:
+                state_dict["_extra_state"] = module_state_dict["_extra_state"]
 
         module.load_state_dict(state_dict)
 
@@ -594,14 +616,32 @@ class GPTModelImporter:
                     )
 
             # TE spec: input_layernorm is fused into linear_qkv (TELayerNormColumnParallelLinear).
-            # Load the fused layer_norm_weight from the HF norm path.
+            # Prefer the per-context key (`fused_input_layernorm`); fall back to the legacy
+            # single-key `fused_norm` for Nemotron-H style (one norm shared across slots).
+            # Missing both is a plugin misconfig — raise rather than silently random-init.
             if (
                 isinstance(layer.input_layernorm, IdentityOp)
                 and hasattr(attention, "linear_qkv")
                 and hasattr(attention.linear_qkv, "layer_norm_weight")
-                and "fused_norm" in self.rules
             ):
-                self.rules["fused_norm"](
+                fused_key = (
+                    "fused_input_layernorm"
+                    if "fused_input_layernorm" in self.rules
+                    else "fused_norm"
+                )
+                if fused_key not in self.rules:
+                    # Branch only fires when model uses fused TELayerNormColumnParallelLinear,
+                    # so missing rule is unambiguously a plugin misconfiguration; raise so it
+                    # doesn't silently ship a chance-accuracy checkpoint.
+                    raise KeyError(
+                        f"{self.arch} uses fused TELayerNormColumnParallelLinear for "
+                        "attention but neither `fused_input_layernorm` nor legacy "
+                        "`fused_norm` is in its import mapping; `linear_qkv.layer_norm_weight` "
+                        "would be left at random init. Add "
+                        '`fused_input_layernorm: NameRemapping("...input_layernorm.weight")` '
+                        f"to the {self.arch} import mapping."
+                    )
+                self.rules[fused_key](
                     attention.linear_qkv.layer_norm_weight, layer_id, is_mtp=is_mtp
                 )
 
@@ -653,10 +693,13 @@ class GPTModelImporter:
                         layer_pbar.set_description("Importing MoE grouped local experts")
                         num_local_experts = experts.num_local_experts
                         num_global_experts = experts.config.num_moe_experts
-                        assert num_local_experts == num_global_experts, (
-                            "num_local_experts must be equal to num_global_experts during MoE import"
+                        assert num_global_experts % num_local_experts == 0, (
+                            "num_global_experts must be divisible by num_local_experts "
+                            "during MoE import"
                         )
-                        init_index = 0
+                        # Each EP rank owns a contiguous slice of global experts:
+                        # [ep_rank * num_local_experts, (ep_rank + 1) * num_local_experts).
+                        init_index = get_expert_model_parallel_rank() * num_local_experts
 
                         self.rules["experts.linear_fc1"](
                             experts.linear_fc1,
@@ -699,14 +742,27 @@ class GPTModelImporter:
                 self.rules["linear_fc2"](layer.mlp.linear_fc2, layer_id, is_mtp=is_mtp)
 
                 # TE spec: pre_mlp_layernorm is fused into linear_fc1
-                # (TELayerNormColumnParallelLinear).
-                # Load the fused layer_norm_weight from the HF norm path.
-                if (
-                    isinstance(layer.pre_mlp_layernorm, IdentityOp)
-                    and hasattr(layer.mlp.linear_fc1, "layer_norm_weight")
-                    and "fused_norm" in self.rules
+                # (TELayerNormColumnParallelLinear). See input_layernorm path above for the
+                # rule-key fallback rationale.
+                if isinstance(layer.pre_mlp_layernorm, IdentityOp) and hasattr(
+                    layer.mlp.linear_fc1, "layer_norm_weight"
                 ):
-                    self.rules["fused_norm"](
+                    fused_key = (
+                        "fused_pre_mlp_layernorm"
+                        if "fused_pre_mlp_layernorm" in self.rules
+                        else "fused_norm"
+                    )
+                    if fused_key not in self.rules:
+                        raise KeyError(
+                            f"{self.arch} uses fused TELayerNormColumnParallelLinear for "
+                            "MLP but neither `fused_pre_mlp_layernorm` nor legacy "
+                            "`fused_norm` is in its import mapping; "
+                            "`linear_fc1.layer_norm_weight` would be left at random init. "
+                            "Add `fused_pre_mlp_layernorm: NameRemapping("
+                            '"...post_attention_layernorm.weight")` '
+                            f"to the {self.arch} import mapping."
+                        )
+                    self.rules[fused_key](
                         layer.mlp.linear_fc1.layer_norm_weight, layer_id, is_mtp=is_mtp
                     )
 

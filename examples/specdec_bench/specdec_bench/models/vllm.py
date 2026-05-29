@@ -63,6 +63,12 @@ class VLLMModel(Model):
                 "method": "mtp",
                 "num_speculative_tokens": kwargs.get("speculative_num_steps", 3),
             }
+        elif kwargs.get("speculative_algorithm") == "DFLASH":
+            specdec = {
+                "method": "dflash",
+                "model": kwargs.get("draft_model_dir"),
+                "num_speculative_tokens": kwargs.get("speculative_num_draft_tokens", 8),
+            }
         elif kwargs.get("speculative_algorithm") == "NONE":
             specdec = None
 

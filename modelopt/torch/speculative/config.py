@@ -15,11 +15,9 @@
 
 """Configurations for speculative decoding modes."""
 
-import warnings
 from copy import deepcopy
-from typing import Any
 
-from pydantic import ValidationInfo, model_validator
+from pydantic import model_validator
 
 from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
 
@@ -67,6 +65,14 @@ DFLASH_DEFAULT_CFG = {
 class DFlashConfig(ModeloptBaseConfig):
     """DFlash config for block-wise parallel speculative decoding."""
 
+    dflash_offline: bool = ModeloptField(
+        default=False,
+        description=(
+            "Whether to use detached DFlash (offline training from pre-computed hidden states). "
+            "Derived by ModelOptDFlashRecipe from data.offline_data_path; not user-configurable."
+        ),
+    )
+
     dflash_block_size: int = ModeloptField(
         default=8,
         description="Block size for parallel prediction. Draft predicts this many tokens per block.",
@@ -95,10 +101,12 @@ class DFlashConfig(ModeloptBaseConfig):
         default=True, description="Whether to report eval accuracy."
     )
 
-    dflash_mask_token_id: int = ModeloptField(
+    dflash_mask_token_id: int | None = ModeloptField(
         default=None,
-        description="Token ID used for masked (unknown) positions. "
-        "Set explicitly or auto-detected from tokenizer.mask_token_id in main.py.",
+        description=(
+            "Token ID used for masked (unknown) positions. Set explicitly in the recipe YAML, "
+            "or left unset to fall back to ``tokenizer.mask_token_id`` at training time."
+        ),
     )
 
     dflash_architecture_config: dict = ModeloptField(
@@ -129,7 +137,11 @@ class EagleConfig(ModeloptBaseConfig):
     """Eagle config."""
 
     eagle_offline: bool = ModeloptField(
-        default=False, description=("Whether to use detached Eagle.")
+        default=False,
+        description=(
+            "Whether to use detached Eagle. Derived by ModelOptEagleRecipe from "
+            "data.offline_data_path; not user-configurable."
+        ),
     )
 
     eagle_hidden_state_distillation: bool = ModeloptField(
@@ -247,16 +259,6 @@ class EagleConfig(ModeloptBaseConfig):
         ),
     )
 
-    @model_validator(mode="before")
-    @classmethod
-    def _derive_eagle_offline(cls, data: Any, info: ValidationInfo) -> Any:
-        """Derive ``eagle_offline`` from ``data_args.offline_data_path`` when provided in context."""
-        ctx = info.context if info.context else {}
-        data_args = ctx.get("data_args")
-        if data_args is not None and isinstance(data, dict):
-            data["eagle_offline"] = data_args.offline_data_path is not None
-        return data
-
     @model_validator(mode="after")
     def _check_rope_scaling_consistency(self) -> "EagleConfig":
         if not self.eagle_export_rope_scaling:
@@ -268,20 +270,5 @@ class EagleConfig(ModeloptBaseConfig):
                 f"eagle_export_rope_scaling is set but eagle_architecture_config has "
                 f"rope_type='{rope_type}'. Export rope overwrite is only valid when the "
                 f"training rope_type is 'default' (no scaling)."
-            )
-        return self
-
-    @model_validator(mode="after")
-    def _warn_rope_vs_training_seq_len(self, info: ValidationInfo) -> "EagleConfig":
-        ctx = info.context if info.context else {}
-        training_args = ctx.get("training_args")
-        if training_args is None:
-            return self
-        orig_max_pos = self.eagle_export_rope_scaling.get("original_max_position_embeddings")
-        if orig_max_pos is not None and orig_max_pos != training_args.training_seq_len:
-            warnings.warn(
-                f"eagle_export_rope_scaling.original_max_position_embeddings ({orig_max_pos}) "
-                f"differs from training_seq_len ({training_args.training_seq_len}). "
-                f"This may affect long-context inference quality."
             )
         return self

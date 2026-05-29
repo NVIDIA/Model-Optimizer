@@ -1,0 +1,46 @@
+[
+  {
+    "skills": ["launching-evals"],
+    "query": "Check the status of evaluation run <any running invocation id>",
+    "files": [],
+    "expected_behavior": [
+      "Runs `uv run nemo-evaluator-launcher status <invocation_id> --json` to check job status",
+      "Reports the Slurm job status (PENDING, RUNNING, SUCCESS, FAILED, KILLED)",
+      "Does NOT claim server is healthy just because status is RUNNING - acknowledges RUNNING only means Slurm job is running, not that vLLM server started successfully"
+    ]
+  },
+  {
+    "skills": ["launching-evals"],
+    "query": "Check the progress of <running TerminalBench invocation id> evaluation.",
+    "files": [],
+    "expected_behavior": [
+      "Reads the launching-evals skill to understand the evaluation workflow",
+      "Runs `nemo-evaluator-launcher status --json` to get the invocation ID, task name (terminal-bench-hard), and confirm the run is active",
+      "Reads the benchmark-specific documentation at `references/benchmarks/terminal-bench-general-info.md` to find the live progress monitoring command",
+      "Runs `nemo-evaluator-launcher info` to find the `output_dir` path on the cluster",
+      "SSHs to the cluster and runs the grep command from the benchmark docs to extract the live progress (e.g., 'Running tasks (133/144, Accuracy: 20.30%)')"
+    ]
+  },
+  {
+    "skills": ["launching-evals"],
+    "query": "Check the progress",
+    "files": [],
+    "expected_behavior": [
+      "Runs `uv run nemo-evaluator-launcher status <invocation_id> --json` first to check if job is still running",
+      "If status is RUNNING, proceeds to check benchmark-specific progress (e.g., grep 'Running tasks' from client logs)",
+      "If status is FAILED, immediately pivots to debugging: checks BOTH client logs AND server logs before diagnosing root cause",
+      "Does NOT stop at client log errors (e.g., 'unknown_agent_error') - always checks server logs for the underlying cause (e.g., vLLM validation errors, CUDA OOM, context overflow)"
+    ]
+  },
+  {
+    "skills": ["launching-evals"],
+    "query": "Check the status, is it running in deed?",
+    "files": [],
+    "expected_behavior": [
+      "Runs `uv run nemo-evaluator-launcher status <invocation_id> --json` to check job status",
+      "If status is FAILED, checks BOTH client logs AND server logs before diagnosing root cause",
+      "Does NOT conclude root cause from client logs alone - client logs often show symptoms (e.g., 'unknown_agent_error', 'failed_samples_policy') while server logs show the actual cause (e.g., CUDA OOM, context length overflow, vLLM validation errors)",
+      "Provides diagnosis only after reviewing both log sources to avoid misleading the user with incomplete information"
+    ]
+  }
+]

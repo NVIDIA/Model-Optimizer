@@ -10,3 +10,9 @@ config:
   MD036: false # no-emphasis-as-heading - allow **bold** as section markers
   MD041: false # first-line-heading
   MD059: false # no-hard-tabs
+
+# Vendored upstream skills — kept byte-identical to upstream via
+# .claude/scripts/sync-upstream-skills.sh; do not reformat.
+ignores:
+  - ".claude/skills/launching-evals/**"
+  - ".claude/skills/accessing-mlflow/**"

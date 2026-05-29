@@ -13,7 +13,7 @@ After download, inspect the model files on the target machine (use `remote_run` 
 1. **Read `README.md`** — often lists required transformers versions, dependencies, or `trust_remote_code` requirements
 2. **Check for `modeling_*.py` or `tokenization_*.py`** — custom code shipped with the model. If found, **always use `--trust_remote_code`** with `hf_ptq.py`, and `trust_remote_code=True` in any custom scripts. Without it, `AutoConfig`, `AutoTokenizer`, and `AutoModel` will fail to resolve custom classes.
 
-Write custom scripts locally (in `./workspaces/<model>/scripts/`), then sync to remote before running.
+Write custom scripts locally (in `./workspaces/<session_id>/<model>/scripts/`), then sync to remote before running.
 
 **Check transformers compatibility** (on the target machine):
 

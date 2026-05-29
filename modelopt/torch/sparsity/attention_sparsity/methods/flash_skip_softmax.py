@@ -384,7 +384,7 @@ class FlashSkipSoftmax(SparseAttentionMethod):
                 input = self.apply_sparsity(input, sparse_mask)
             return original_softmax(input, dim, *args, **kwargs)
 
-        from ..kernels import set_skip_softmax_context
+        from modelopt.torch.kernels.sparsity.attention import set_skip_softmax_context
 
         stack = ExitStack()
         set_skip_softmax_context(True)

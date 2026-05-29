@@ -29,12 +29,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, BinaryIO
 
 import torch
+import torch.distributed as tdist
 import transformers
 from safetensors.torch import save_file as safe_save_file
 from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig, PreTrainedModel
 from transformers.dynamic_module_utils import get_class_from_dynamic_module
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
+import modelopt.torch.utils.distributed as dist_utils
 from modelopt.torch.utils import json_dumps
 
 from ..block_config import maybe_cast_block_configs
@@ -51,6 +53,7 @@ __all__ = [
     "load_model_config",
     "init_model_from_config",
     "save_checkpoint",
+    "save_checkpoint_from_shards",
     "save_subblocks",
     "save_model_config",
 ]
@@ -198,6 +201,52 @@ def save_checkpoint(
     model: PreTrainedModel, checkpoint_dir: Path | str, descriptor: "ModelDescriptor"
 ) -> None:
     _save_checkpoint(model.config, model.state_dict(), checkpoint_dir, descriptor)
+
+
+def save_checkpoint_from_shards(
+    model: PreTrainedModel, checkpoint_dir: Path | str, descriptor: "ModelDescriptor"
+) -> None:
+    """
+    Save a checkpoint when the model's weights are sharded across distributed ranks.
+
+    Gathers each rank's partial state dictionary onto rank 0 and writes a complete checkpoint
+    (including the safetensors index and subblocks) from the merged weights. On a single-process
+    run, saves directly from the local state dict. Only rank 0 performs the filesystem write;
+    non-master ranks only participate in the gather.
+
+    Parameters:
+        model (PreTrainedModel): The model instance whose local state_dict contains this rank's
+        shard of weights.
+        checkpoint_dir (Path | str): Destination directory for the checkpoint files.
+        descriptor (ModelDescriptor): Descriptor used to partition weights into subblocks and build
+        the safetensors index.
+    """
+
+    local_sd = {k: v.cpu() for k, v in model.state_dict().items()}
+    if dist_utils.size() > 1:
+        save_err: str | None = None
+        if dist_utils.is_master():
+            gathered: list[dict] = [None] * dist_utils.size()
+            tdist.gather_object(local_sd, gathered, dst=0)
+            full_sd: dict[str, torch.Tensor] = {}
+            for shard_sd in gathered:
+                if shard_sd is None:
+                    continue
+                full_sd.update(shard_sd)
+            try:
+                _save_checkpoint(model.config, full_sd, checkpoint_dir, descriptor)
+            except Exception as e:
+                save_err = repr(e)
+        else:
+            tdist.gather_object(local_sd, dst=0)
+        err_box = [save_err]
+        tdist.broadcast_object_list(err_box, src=0)
+        # Barrier ensures all ranks wait until file I/O completes before continuing
+        dist_utils.barrier()
+        if err_box[0] is not None:
+            raise RuntimeError(f"Checkpoint save failed on rank 0: {err_box[0]}")
+    else:
+        _save_checkpoint(model.config, local_sd, checkpoint_dir, descriptor)
 
 
 def _save_checkpoint(

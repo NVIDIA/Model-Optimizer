@@ -15,6 +15,8 @@
 
 """Tests for sparse attention conversion and replacement."""
 
+import copy
+
 import pytest
 
 pytest.importorskip("transformers")
@@ -30,6 +32,7 @@ from _test_utils.torch.sparsity.sparse_attention_common import (
 
 import modelopt.torch.opt as mto
 import modelopt.torch.sparsity.attention_sparsity as sparse_attn
+from modelopt.torch.sparsity.attention_sparsity.config import SKIP_SOFTMAX_CALIB_SPARSE24
 from modelopt.torch.sparsity.attention_sparsity.conversion import (
     _set_attn_implementation,
     disable_sparse_attention,
@@ -270,7 +273,7 @@ class TestSetAttnImplementation:
             "*": {"method": "triton_skip_softmax", "backend": "triton"},
         }
         with patch(
-            "modelopt.torch.sparsity.attention_sparsity.kernels.register_triton_attention",
+            "modelopt.torch.kernels.sparsity.attention.register_triton_attention",
             MagicMock(return_value=True),
         ):
             _set_attn_implementation(model, config)
@@ -287,7 +290,7 @@ class TestSetAttnImplementation:
         config.sparse_cfg = {"*": {"method": "triton_skip_softmax", "backend": "triton"}}
         with (
             patch(
-                "modelopt.torch.sparsity.attention_sparsity.kernels.register_triton_attention",
+                "modelopt.torch.kernels.sparsity.attention.register_triton_attention",
                 MagicMock(return_value=False),
             ),
             pytest.raises(RuntimeError, match="Failed to register"),
@@ -305,7 +308,7 @@ class TestSetAttnImplementation:
         config.sparse_cfg = {"*": {"method": "triton_skip_softmax", "backend": "triton"}}
         with (
             patch(
-                "modelopt.torch.sparsity.attention_sparsity.kernels.register_triton_attention",
+                "modelopt.torch.kernels.sparsity.attention.register_triton_attention",
                 None,
             ),
             pytest.raises(ImportError, match="Triton backend requires"),
@@ -369,6 +372,10 @@ class TestExportSparseAttentionConfig:
                     "prefill": {"a": 3.14, "b": 7.5},
                     "decode": {"a": 0.5, "b": 9.0},
                 }
+                module._sparse_method_instance.target_sparse_ratio = {
+                    "prefill": 0.4,
+                    "decode": 0.6,
+                }
 
         out = export_sparse_attention_config(model)
         assert out is not None
@@ -376,4 +383,73 @@ class TestExportSparseAttentionConfig:
         tsf = out["threshold_scale_factor"]
         assert tsf["prefill"] == {"a": 3.14, "b": 7.5}
         assert tsf["decode"] == {"a": 0.5, "b": 9.0}
+        assert out["target_sparse_ratio"] == {"prefill": 0.4, "decode": 0.6}
         assert out["producer"]["name"] == "modelopt"
+
+    def test_exports_sparse_softmax_metadata(self):
+        """N:M sparse-softmax params are exported without calibration metadata."""
+        model = SimpleAttentionModel()
+        config = {
+            "sparse_cfg": {
+                "*attention*": {
+                    "method": "triton_sparse_softmax",
+                    "sparsity_n": 2,
+                    "sparsity_m": 4,
+                    "dense_sink_tokens": 4,
+                    "dense_recent_tokens": 128,
+                    "backend": "triton",
+                    "enable": True,
+                },
+                "default": {"enable": False},
+            }
+        }
+
+        with patch(
+            "modelopt.torch.kernels.sparsity.attention.register_triton_attention",
+            MagicMock(return_value=True),
+        ):
+            model = sparse_attn.sparsify(model, config)
+
+        out = export_sparse_attention_config(model)
+
+        assert out is not None
+        assert out["config_groups"]["group_0"]["sparse_algo"] == "sparse_softmax"
+        assert out["sparse_softmax"] == {
+            "sparsity_n": 2,
+            "sparsity_m": 4,
+            "dense_sink_tokens": 4,
+            "dense_recent_tokens": 128,
+        }
+        assert "threshold_scale_factor" not in out
+
+    def test_exports_calibrated_skip_softmax_with_sparse_softmax_overlay(self):
+        """Combined config exports both calibrated skip-softmax and N:M metadata."""
+        model = SimpleAttentionModel()
+        config = copy.deepcopy(SKIP_SOFTMAX_CALIB_SPARSE24)
+        config["sparse_cfg"].pop("calibration")
+        config["sparse_cfg"]["*attention*"] = config["sparse_cfg"].pop("*attn*")
+        model = sparse_attn.sparsify(model, config)
+
+        for module in model.modules():
+            if isinstance(module, SparseAttentionModule):
+                module._sparse_method_instance.calibration_params = {
+                    "prefill": {"a": 3.14, "b": 7.5},
+                }
+                module._sparse_method_instance.target_sparse_ratio = {
+                    "prefill": 0.4,
+                    "decode": 0.6,
+                }
+
+        out = export_sparse_attention_config(model)
+
+        assert out is not None
+        assert out["config_groups"]["group_0"]["sparse_algo"] == "softmax_skip"
+        assert out["config_groups"]["group_1"]["sparse_algo"] == "sparse_softmax"
+        assert out["threshold_scale_factor"]["prefill"] == {"a": 3.14, "b": 7.5}
+        assert out["target_sparse_ratio"] == {"prefill": 0.4, "decode": 0.6}
+        assert out["sparse_softmax"] == {
+            "sparsity_n": 2,
+            "sparsity_m": 4,
+            "dense_sink_tokens": 0,
+            "dense_recent_tokens": 64,
+        }

@@ -21,8 +21,8 @@ generation model (text-to-video). Four modes are supported:
 1. **Baseline** — pass ``--baseline`` for dense inference (default diffusers backend).
 2. **Triton baseline** — pass ``--triton-baseline`` for dense Triton FA kernel
    (no skip-softmax, same kernel as sparse runs for apples-to-apples comparison).
-3. **Fixed raw threshold** — pass ``--raw-threshold`` to supply a log2-space
-   threshold directly to the Triton kernel. No calibration data is needed.
+3. **Fixed skip-softmax threshold** — pass ``--skip-softmax-threshold`` to
+   supply the BLASST lambda threshold. No calibration data is needed.
 4. **Calibrated threshold** — pass ``--calibrate`` to run exponential-model
    calibration (``scale_factor = a * exp(b * target_sparsity)``).
 
@@ -40,8 +40,8 @@ Usage::
     python wan22_skip_softmax.py --baseline --prompt "A cat playing piano" \\
         --output baseline.mp4
 
-    # Fixed raw threshold (no calibration needed)
-    python wan22_skip_softmax.py --raw-threshold -5.0 --report-avg-sparsity \\
+    # Fixed skip-softmax threshold (no calibration needed)
+    python wan22_skip_softmax.py --skip-softmax-threshold 0.03125 --report-avg-sparsity \\
         --prompt "A cat playing piano" --output out.mp4
 
     # With calibration
@@ -150,12 +150,12 @@ def parse_args() -> argparse.Namespace:
         "apples-to-apples comparison with sparse runs)",
     )
     parser.add_argument(
-        "--raw-threshold",
+        "--skip-softmax-threshold",
         type=float,
         default=None,
-        help="Raw skip_threshold_log2 value passed directly to the Triton kernel. "
-        "Negative values (e.g., -5.0 means tile must be within 5 units of running max). "
-        "Bypasses calibration and lambda conversion. Typical range: -1 to -30.",
+        help="Fixed BLASST lambda threshold passed as skip_softmax_threshold. "
+        "Example: 0.03125 keeps tiles within 5 log2-score units of the running max. "
+        "Bypasses calibration. Typical range: 1e-6 to 0.5.",
     )
     parser.add_argument(
         "--skip-first-last",
@@ -214,8 +214,8 @@ def build_sparse_config(args: argparse.Namespace, num_blocks: int) -> dict:
     """Build sparse attention config from CLI args.
 
     Two modes:
-    - **Raw threshold**: ``--raw-threshold`` sets ``skip_softmax_raw_threshold``
-      directly on the Triton kernel — no calibration needed.
+    - **Fixed threshold**: ``--skip-softmax-threshold`` sets
+      ``skip_softmax_threshold`` directly — no calibration needed.
     - **Calibrated**: ``--calibrate`` collects multi-threshold sparsity statistics
       via the Triton calibration kernel, then fits an exponential model:
       ``scale_factor = a * exp(b * sparsity)``.
@@ -229,9 +229,9 @@ def build_sparse_config(args: argparse.Namespace, num_blocks: int) -> dict:
         "enable": True,
     }
 
-    # Raw threshold bypasses calibration and lambda conversion
-    if args.raw_threshold is not None:
-        attn_cfg["skip_softmax_raw_threshold"] = args.raw_threshold
+    # Fixed threshold bypasses calibration.
+    if args.skip_softmax_threshold is not None:
+        attn_cfg["skip_softmax_threshold"] = args.skip_softmax_threshold
 
     sparse_cfg: dict = {
         "*.attn1*": attn_cfg,  # Self-attention only
@@ -246,8 +246,8 @@ def build_sparse_config(args: argparse.Namespace, num_blocks: int) -> dict:
 
     config: dict = {"sparse_cfg": sparse_cfg}
 
-    # Add calibration config only when calibrating (not with raw threshold)
-    if args.calibrate and args.raw_threshold is None:
+    # Add calibration config only when calibrating (not with a fixed threshold)
+    if args.calibrate and args.skip_softmax_threshold is None:
         sparse_cfg["calibration"] = {
             "target_sparse_ratio": {"prefill": args.target_sparsity},
             "threshold_trials": DEFAULT_THRESHOLD_TRIALS,
@@ -407,10 +407,13 @@ def main() -> None:
     else:
         # Build calibration forward loop if needed
         forward_loop = None
-        if args.raw_threshold is not None:
-            print(f"Using fixed raw threshold: {args.raw_threshold} (skipping calibration)")
+        if args.skip_softmax_threshold is not None:
+            print(
+                f"Using fixed skip-softmax threshold: {args.skip_softmax_threshold} "
+                "(skipping calibration)"
+            )
             if args.calibrate:
-                print("Warning: --calibrate is ignored when --raw-threshold is set")
+                print("Warning: --calibrate is ignored when --skip-softmax-threshold is set")
         elif args.calibrate:
             forward_loop = build_calibration_forward_loop(
                 pipe,
@@ -426,7 +429,7 @@ def main() -> None:
             )
         else:
             print(
-                "Warning: neither --baseline, --raw-threshold, nor --calibrate specified; "
+                "Warning: neither --baseline, --skip-softmax-threshold, nor --calibrate specified; "
                 "using default static threshold"
             )
 

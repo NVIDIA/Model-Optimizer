@@ -22,6 +22,7 @@ from modelopt.torch.utils import load_cpp_extension
 __all__ = ["get_cuda_ext", "get_cuda_ext_fp8", "get_cuda_ext_mx", "precompile"]
 
 path = Path(__file__).parent
+kernels_gemm = path.parent / "kernels" / "quantization" / "gemm"
 
 
 def get_cuda_ext(raise_if_failed: bool = False):
@@ -29,7 +30,7 @@ def get_cuda_ext(raise_if_failed: bool = False):
     if not hasattr(get_cuda_ext, "extension"):
         get_cuda_ext.extension = load_cpp_extension(  # type:ignore[attr-defined]
             name="modelopt_cuda_ext",
-            sources=[path / "src/tensor_quant.cpp", path / "src/tensor_quant_gpu.cu"],
+            sources=[kernels_gemm / "tensor_quant.cpp", kernels_gemm / "tensor_quant_gpu.cu"],
             cuda_version_specifiers=">=11",
             raise_if_failed=raise_if_failed,
         )
@@ -41,7 +42,7 @@ def get_cuda_ext_fp8(raise_if_failed: bool = False):
     if not hasattr(get_cuda_ext_fp8, "extension"):
         get_cuda_ext_fp8.extension = load_cpp_extension(  # type:ignore[attr-defined]
             name="modelopt_cuda_ext_fp8",
-            sources=[path / "src/tensor_quant_gpu_fp8.cu"],
+            sources=[kernels_gemm / "tensor_quant_gpu_fp8.cu"],
             cuda_version_specifiers=">=11.8",
             fail_msg=(
                 "CUDA extension for FP8 quantization could not be built and loaded, FP8 simulated"
@@ -58,7 +59,7 @@ def get_cuda_ext_mx(raise_if_failed: bool = False):
         get_cuda_ext_mx.extension = load_cpp_extension(  # type:ignore[attr-defined]
             name="modelopt_cuda_ext_mx",
             sources=[
-                path / "src/tensor_quant_mx.cu",
+                kernels_gemm / "tensor_quant_mx.cu",
             ],
             cuda_version_specifiers=">=11.8",
             fail_msg=(

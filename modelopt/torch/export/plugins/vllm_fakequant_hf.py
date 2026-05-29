@@ -47,14 +47,18 @@ __all__ = [
     "merge_amax_tensors_for_group",
 ]
 
-# Matches ``…weight_quantizer``, ``…weight_quantizer.0``, ``…w13_weight_quantizer.0``, etc.
-_WEIGHT_QUANTIZER_STATE_KEY = re.compile(r"(?:^|\.)(?:\w+_)?weight_quantizer(?:\.\d+)*$")
+# Matches ``…weight_quantizer``, ``…weight_quantizer.0``, ``…w13_weight_quantizer.0``,
+# and the plural fused-experts form ``…weight_quantizers.0`` (per-expert ModuleList).
+_WEIGHT_QUANTIZER_STATE_KEY = re.compile(r"(?:^|\.)(?:\w+_)?weight_quantizers?(?:\.\d+)*$")
 
 
 def is_weight_quantizer_state_key(key: str) -> bool:
-    """Return True for weight-quantizer state keys, including SequentialQuantizer entries.
+    """Return True for weight-quantizer state keys.
 
-    Matches ``weight_quantizer``, ``w13_weight_quantizer``, ``weight_quantizer.0``, etc.
+    Includes ``SequentialQuantizer`` entries and fused-experts ``ModuleList``
+    entries (``*_weight_quantizers.<idx>``). Matches ``weight_quantizer``,
+    ``w13_weight_quantizer``, ``weight_quantizer.0``,
+    ``gate_up_proj_weight_quantizers.0``, etc.
     """
     return bool(_WEIGHT_QUANTIZER_STATE_KEY.search(key))
 
@@ -142,6 +146,56 @@ def disable_rotate(quantizer: TensorQuantizer):
     return False
 
 
+def _fakequant_fused_experts_weights(
+    module: nn.Module,
+    module_name: str,
+    state_dict: dict | None,
+    fakequant_weights: set,
+    inplace: bool,
+):
+    """Apply per-expert fake-quant to a ``_QuantFusedExperts`` module's 3-D weights.
+
+    The base loop in :func:`_fakequant_module_weights` only handles singular
+    ``*_weight_quantizer`` attrs (one TensorQuantizer per weight). Fused-experts
+    modules expose ``*_weight_quantizers`` (``nn.ModuleList`` with one entry per
+    expert) that the base loop skips, leaving the fused 3-D weight unquantized
+    in the export and breaking weight-fold round-trips.
+    """
+    for w_attr, q_attr in (
+        ("gate_up_proj", "gate_up_proj_weight_quantizers"),
+        ("down_proj", "down_proj_weight_quantizers"),
+    ):
+        quantizers = getattr(module, q_attr, None)
+        if not isinstance(quantizers, nn.ModuleList):
+            continue
+        if not any(
+            isinstance(q, TensorQuantizer) and q.fake_quant and q.is_enabled for q in quantizers
+        ):
+            continue
+        sd_key = f"{module_name}.{w_attr}" if module_name else w_attr
+        if sd_key in fakequant_weights:
+            raise RuntimeError(f"Weight {sd_key} has already been fakequantized")
+
+        if inplace:
+            w = getattr(module, w_attr)
+            for idx, q in enumerate(quantizers):
+                if not (isinstance(q, TensorQuantizer) and q.fake_quant and q.is_enabled):
+                    continue
+                slice_ = w.data[idx]
+                slice_.copy_(q(slice_.float()).to(w.dtype))
+        else:
+            if state_dict is None or sd_key not in state_dict:
+                continue
+            w_3d = state_dict[sd_key].clone()
+            for idx, q in enumerate(quantizers):
+                if not (isinstance(q, TensorQuantizer) and q.fake_quant and q.is_enabled):
+                    continue
+                slice_ = w_3d[idx]
+                w_3d[idx] = q(slice_.float()).to(slice_.dtype)
+            state_dict[sd_key] = w_3d.cpu()
+        fakequant_weights.add(sd_key)
+
+
 def _fakequant_module_weights(
     module: nn.Module,
     module_name: str,
@@ -159,6 +213,7 @@ def _fakequant_module_weights(
     """
     if not isinstance(module, QuantModule):
         return
+    _fakequant_fused_experts_weights(module, module_name, state_dict, fakequant_weights, inplace)
     for attr_name, quantizer in module.named_children():
         if not (
             attr_name.endswith("weight_quantizer")

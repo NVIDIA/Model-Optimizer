@@ -216,55 +216,35 @@ def _fp8_quantize(
     g: "GraphContext",
     inputs: torch.Value,
     scale_inv: float,
-    trt_high_precision_dtype: str,
 ):
     """Helper Function for Quantization."""
+    # Emit the scale in the native input dtype so no Cast is inserted between the
+    # graph and Q/DQ (Cast nodes block TRT from fusing DQ into the MatMul kernel).
     output_shape = sym_help._get_tensor_sizes(inputs)
-
-    # TRT StronglyType only supports FP16 QDQs
-    # custom ops, so cast the input if needed.
-    input_type = inputs.type().scalarType()
-    assert trt_high_precision_dtype in (input_type, "Float"), (
-        "TRT StronglyType requires both weights and amax to be in the BF16/FP16, or the QDQ in Float."
-    )
-    if trt_high_precision_dtype != input_type:
-        inputs = g.op("Cast", inputs, to_i=onnx_dtype_map[trt_high_precision_dtype])
-
     scale = g.op(
         "Constant",
-        value_t=torch.tensor(scale_inv).to(torch_dtype_map[trt_high_precision_dtype]),
+        value_t=torch.tensor(scale_inv).to(torch_dtype_map[inputs.type().scalarType()]),
     )
-    q_op = g.op("trt::TRT_FP8QuantizeLinear", inputs, scale).setType(
+    return g.op("trt::TRT_FP8QuantizeLinear", inputs, scale).setType(
         inputs.type().with_dtype(torch.uint8).with_sizes(output_shape)
     )
-    return q_op
 
 
 def _fp8_dequantize(
     g: "GraphContext",
     inputs: torch.Value,
     scale_inv: float,
-    trt_high_precision_dtype: str,
     otype: str | None = None,
 ):
     """Helper Function for Dequantization."""
     output_shape = sym_help._get_tensor_sizes(inputs)
-    assert trt_high_precision_dtype in (otype, "Float"), (
-        "TRT StronglyType requires both weights and amax to be in the BF16/FP16, or the QDQ in Float."
-    )
     scale = g.op(
         "Constant",
         value_t=torch.tensor(scale_inv, dtype=torch_dtype_map[otype]),  # type: ignore[index]
     )
-    out = g.op("trt::TRT_FP8DequantizeLinear", inputs, scale).setType(
-        inputs.type().with_dtype(torch_dtype_map[trt_high_precision_dtype]).with_sizes(output_shape)
+    return g.op("trt::TRT_FP8DequantizeLinear", inputs, scale).setType(
+        inputs.type().with_dtype(torch_dtype_map[otype]).with_sizes(output_shape)  # type: ignore[index]
     )
-
-    # DQ outputs are currently constrained to FP32 due to a similar limitation in ORT
-    # custom ops, so cast the output if needed.
-    if trt_high_precision_dtype != otype:
-        out = g.op("Cast", out, to_i=onnx_dtype_map[otype])  # type: ignore[index]
-    return out
 
 
 def export_fp8(
@@ -273,14 +253,17 @@ def export_fp8(
     amax: float,
     trt_high_precision_dtype: str | None,
 ):
-    """Export quantized model to FP8 ONNX."""
+    """Export quantized model to FP8 ONNX.
+
+    ``trt_high_precision_dtype`` is accepted for API compatibility but unused: Q/DQ now
+    emit scales in the native input dtype, so no intermediate Cast is required.
+    """
+    del trt_high_precision_dtype
     scale = 1.0 if amax is None else 448.0 / float(amax)
     otype = inputs.type().scalarType()
-    if trt_high_precision_dtype is None:
-        trt_high_precision_dtype = otype
 
-    q_tensor = _fp8_quantize(g, inputs, 1.0 / scale, trt_high_precision_dtype)
-    return _fp8_dequantize(g, q_tensor, 1.0 / scale, trt_high_precision_dtype, otype)
+    q_tensor = _fp8_quantize(g, inputs, 1.0 / scale)
+    return _fp8_dequantize(g, q_tensor, 1.0 / scale, otype)
 
 
 def scaled_dot_product_attention(
