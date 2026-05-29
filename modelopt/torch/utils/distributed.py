@@ -38,6 +38,7 @@ __all__ = [
     "barrier",
     "fsdp2_shard",
     "fsdp2_wrap",
+    "fsdp_aware_forward_loop",
     "init_params_on_meta",
     "is_available",
     "is_initialized",
@@ -232,6 +233,7 @@ def fsdp2_wrap(
     override_cls_name: str | None = None,
     mp_policy=None,
     device=None,
+    cpu_offload: bool = False,
 ):
     """Apply FSDP2 ``fully_shard`` to each decoder layer of ``model``.
 
@@ -244,6 +246,14 @@ def fsdp2_wrap(
     Pass ``device`` to stream each layer to that device just before sharding it
     (avoids holding the full model on GPU simultaneously). When ``device`` is
     ``None``, layers are sharded on whatever device they're already on.
+
+    Set ``cpu_offload=True`` to attach FSDP2's ``CPUOffloadPolicy`` to each
+    wrapped layer. Each rank's shard then lives on CPU between forward passes
+    and is streamed to GPU per-layer (H2D + all-gather + compute + reshard +
+    D2H). Useful when the per-rank decoder shard is the binding GPU constraint
+    (e.g., 200B+ models on tight GPU budgets) or when you want headroom for a
+    larger calibration batch. Adds PCIe traffic per layer per batch; on
+    setups where the model already fits comfortably it usually slows the run.
 
     The root module is intentionally NOT sharded — ``embed_tokens`` and
     ``lm_head`` stay as plain replicated tensors. This costs ~few-GiB per rank
@@ -270,6 +280,10 @@ def fsdp2_wrap(
     fsdp_kwargs: dict[str, Any] = {"reshard_after_forward": True}
     if mp_policy is not None:
         fsdp_kwargs["mp_policy"] = mp_policy
+    if cpu_offload:
+        from torch.distributed.fsdp import CPUOffloadPolicy
+
+        fsdp_kwargs["offload_policy"] = CPUOffloadPolicy()
     for layer in layers:
         if device is not None:
             layer.to(device)
@@ -306,13 +320,17 @@ def init_params_on_meta():
         nn.Module.register_parameter = original
 
 
-def fsdp2_shard(model, device, rank, src_state_dict=None, mp_policy=None):
+def fsdp2_shard(model, device, rank, src_state_dict=None, mp_policy=None, cpu_offload=False):
     """Shard a model across the current process group (accelerate-style rank-0 load).
 
     Caller contract: ``model`` is built on every rank with params on ``meta`` and
     buffers on CPU (use ``init_params_on_meta`` around ``from_config``). Rank 0
     additionally passes ``src_state_dict`` captured from a real CPU model loaded
     via ``from_pretrained``; other ranks pass ``None`` or ``{}``.
+
+    Set ``cpu_offload=True`` to attach FSDP2's ``CPUOffloadPolicy`` to wrapped
+    layers (each rank's shard lives on CPU between forwards). See
+    ``fsdp2_wrap`` docstring for the trade-off.
 
     Root is never sharded (see ``fsdp2_wrap`` docstring). embed_tokens and
     lm_head stay as plain replicated tensors on every rank.
@@ -335,19 +353,24 @@ def fsdp2_shard(model, device, rank, src_state_dict=None, mp_policy=None):
     model._original_architectures = list(model.config.architectures or [])
 
     t0 = time.perf_counter()
-    fsdp2_wrap(model, mp_policy=mp_policy)
+    fsdp2_wrap(model, mp_policy=mp_policy, cpu_offload=cpu_offload)
     _log(f"fsdp2_wrap (decoders) took {time.perf_counter() - t0:.1f}s")
+
+    # With CPU offload, FSDP2 requires DTensor params on CPU at lazy_init time
+    # (it streams them to GPU per-layer during forward). Also, set_model_state_dict
+    # rejects mixed-device models — so materialize everything on CPU first,
+    # broadcast, then promote non-DTensor params + buffers to GPU after.
+    materialize_device = torch.device("cpu") if cpu_offload else device
 
     def _materialize(t):
         is_meta_dtensor = isinstance(t, DTensor) and t._local_tensor.is_meta
         if is_meta_dtensor or (not isinstance(t, DTensor) and t.is_meta):
-            # empty_like preserves DTensor-ness (returns DTensor with empty local).
-            return torch.empty_like(t, device=device)
-        return t.to(device)
+            return torch.empty_like(t, device=materialize_device)
+        return t.to(materialize_device)
 
     t0 = time.perf_counter()
     model._apply(_materialize)
-    _log(f"materialize (meta→GPU, CPU buf→GPU) took {time.perf_counter() - t0:.1f}s")
+    _log(f"materialize (→{'CPU' if cpu_offload else 'GPU'}) took {time.perf_counter() - t0:.1f}s")
 
     if src_state_dict is not None:
         t0 = time.perf_counter()
@@ -357,6 +380,23 @@ def fsdp2_shard(model, device, rank, src_state_dict=None, mp_policy=None):
             options=StateDictOptions(full_state_dict=True, broadcast_from_rank0=True),
         )
         _log(f"set_model_state_dict broadcast took {time.perf_counter() - t0:.1f}s")
+
+    if cpu_offload:
+        # FSDP-managed (DTensor) params stay on CPU — FSDP2 streams them per layer.
+        # Move everything else (root-level plain params + all buffers) to GPU now.
+        t0 = time.perf_counter()
+        for module in model.modules():
+            for name, param in list(module._parameters.items()):
+                if param is None or isinstance(param, DTensor):
+                    continue
+                module._parameters[name] = nn.Parameter(
+                    param.data.to(device), requires_grad=param.requires_grad
+                )
+            for name, buf in list(module._buffers.items()):
+                if buf is None or isinstance(buf, DTensor):
+                    continue
+                module._buffers[name] = buf.to(device)
+        _log(f"promote non-DTensor → GPU took {time.perf_counter() - t0:.1f}s")
 
     if hasattr(model, "tie_weights"):
         t0 = time.perf_counter()
@@ -394,6 +434,36 @@ def shard_dataloader(loader, rank: int, world_size: int):
         num_workers=loader.num_workers,
         pin_memory=loader.pin_memory,
     )
+
+
+def fsdp_aware_forward_loop(wrapped_model, dataloader, device=None):
+    """Build an ``mtq.quantize`` ``forward_loop`` that respects FSDP wrapping.
+
+    ``mtq.quantize`` strips the FSDP wrapper before calling ``forward_loop``,
+    handing the user the unwrapped inner module. Calling the unwrapped module
+    bypasses FSDP's pre/post-forward hooks (no all-gather, no reshard), which
+    breaks calibration on FSDP2. The closure returned here captures the outer
+    *wrapped* model and ignores the ``unwrapped_model`` argument that
+    ``mtq.quantize`` passes in.
+
+    Used by ``examples/llm_ptq/hf_ptq.py`` under ``--use_fsdp2``.
+
+    TODO: ``modelopt/torch/quantization/plugins/transformers_trainer.py`` (the
+    QLoRA path) currently has the same logic inlined inside ``_quantize_model``.
+    Consolidate that call site to use this helper too.
+    """
+    from tqdm import tqdm
+
+    def calibrate(_unwrapped_model):
+        for batch in tqdm(dataloader, desc="Calibrating"):
+            if device is not None and isinstance(batch, dict):
+                batch = {
+                    k: (v.to(device) if isinstance(v, torch.Tensor) else v)
+                    for k, v in batch.items()
+                }
+            wrapped_model(**batch)
+
+    return calibrate
 
 
 class Fsdp2StateDictAdapter:

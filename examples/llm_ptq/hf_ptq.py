@@ -33,7 +33,6 @@ from example_utils import (
     build_quant_cfg,
     cleanup_distributed,
     copy_custom_model_files,
-    create_fsdp2_calibration_loop,
     create_vlm_calibration_loop,
     get_model,
     get_processor,
@@ -88,7 +87,11 @@ from modelopt.torch.utils.dataset_utils import (
     get_max_batch_size,
     get_supported_datasets,
 )
-from modelopt.torch.utils.distributed import Fsdp2StateDictAdapter, shard_dataloader
+from modelopt.torch.utils.distributed import (
+    Fsdp2StateDictAdapter,
+    fsdp_aware_forward_loop,
+    shard_dataloader,
+)
 from modelopt.torch.utils.memory_monitor import launch_memory_monitor
 from modelopt.torch.utils.speech_dataset_utils import get_speech_dataset_dataloader
 from modelopt.torch.utils.vlm_dataset_utils import get_vlm_dataset_dataloader
@@ -464,6 +467,7 @@ def load_model(args: argparse.Namespace):
             rank=args.rank,
             args=args,
             trust_remote_code=args.trust_remote_code,
+            cpu_offload=args.cpu_offload,
         )
     elif args.specdec_offline_dataset is not None or not args.low_memory_mode:
         full_model = get_model(
@@ -690,7 +694,7 @@ def mono_quantize(
             elif args.use_fsdp2:
                 # mtq.quantize passes the unwrapped inner module to forward_loop;
                 # FSDP2 needs hooks fired on the outer wrapped model.
-                calibrate_loop = create_fsdp2_calibration_loop(
+                calibrate_loop = fsdp_aware_forward_loop(
                     language_model, calib_dataloader, args.device
                 )
             else:
@@ -921,10 +925,6 @@ def pre_quantize(
     # Generate preview before quantization
     if args.skip_generate:
         generated_ids_before_ptq = None
-    elif args.use_fsdp2:
-        # FSDP2 generation is slow cross-node (~seconds/token); 5 tokens is
-        # enough to sanity-check coherence.
-        generated_ids_before_ptq = full_model.generate(preview_input_ids, max_new_tokens=5)
     elif model_type == "deepseek":
         # DeepSeek generation may go OOM, so we skip it
         generated_ids_before_ptq = None
@@ -1001,11 +1001,7 @@ def post_quantize(
         pass
     elif model_type != "llama4" and not is_nemotron_vl_model:
         # Our fake quantizer may not be fully compatible with torch.compile.
-        # FSDP2 cross-node generation is slow, so cap at 5 tokens for preview.
-        max_new_tokens = 5 if args.use_fsdp2 else 100
-        generated_ids_after_ptq = full_model.generate(
-            preview_input_ids, max_new_tokens=max_new_tokens
-        )
+        generated_ids_after_ptq = full_model.generate(preview_input_ids, max_new_tokens=100)
     elif is_nemotron_vl_model and tokenizer is not None:
         generated_ids_after_ptq = run_nemotron_vl_preview(
             full_model,
@@ -1439,6 +1435,17 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--cpu_offload",
+        action="store_true",
+        help=(
+            "Only valid with --use_fsdp2. Attach FSDP2's CPUOffloadPolicy so each "
+            "rank's decoder shard lives on CPU between forwards (streamed to GPU "
+            "per-layer). Frees GPU memory at the cost of PCIe traffic per layer per "
+            "batch. Worth it for trillion-param models or tight-GPU setups; usually "
+            "slows down runs where the model already fits comfortably."
+        ),
+    )
+    parser.add_argument(
         "--verbose",
         help="Print verbose output (e.g. quantization summary). Disable by --no-verbose.",
         default=True,
@@ -1547,6 +1554,8 @@ def parse_args() -> argparse.Namespace:
         args.use_seq_device_map = False
     if args.use_fsdp2 and os.environ.get("RANK") is None:
         parser.error("--use_fsdp2 requires launching with torchrun")
+    if args.cpu_offload and not args.use_fsdp2:
+        parser.error("--cpu_offload requires --use_fsdp2")
 
     return args
 
