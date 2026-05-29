@@ -1,176 +1,180 @@
-# DMD2 on Wan 2.2 5B — AutoModel integration (fastgen Phase 1)
+# DMD2 distillation for Qwen-Image
 
-> [!WARNING]
-> **Third-Party License Notice — Wan 2.2**
->
-> Wan 2.2 is a third-party model developed and provided by Wan-AI. It is **not**
-> covered by the Apache 2.0 license that governs NVIDIA Model Optimizer. By downloading
-> and using Wan 2.2 weights with Model Optimizer you must comply with Wan-AI's license.
-> Any derivative models or fine-tuned weights produced through DMD2 distillation remain
-> subject to Wan-AI's license and are **not** covered by Apache 2.0.
+Distill [`Qwen/Qwen-Image`](https://huggingface.co/Qwen/Qwen-Image) into a **few-step
+generator** with DMD2 (Distribution Matching Distillation). The distilled student
+produces images in as few as **1–4 sampling steps** while matching the base model's
+output distribution. Built on `modelopt.torch.fastgen` and NeMo AutoModel's
+[`TrainDiffusionRecipe`](https://github.com/NVIDIA-NeMo/Automodel/blob/main/nemo_automodel/recipes/diffusion/train.py).
 
-Distributed training example that exercises `modelopt.torch.fastgen.DMDPipeline`
-end-to-end on `Wan-AI/Wan2.2-TI2V-5B-Diffusers` under FSDP2. Intended target:
-**validate the DMD2 math in the real training environment** — once this loop runs
-clean we layer CFG, the discriminator, and the real-data path on top (Phase 2).
+> [!NOTE]
+> Qwen-Image is a third-party model with its own license terms. Review the
+> [Qwen-Image model card](https://huggingface.co/Qwen/Qwen-Image) before downloading or
+> redistributing weights or derivatives.
 
-This example subclasses
-[`TrainDiffusionRecipe`](https://github.com/NVIDIA-NeMo/Automodel/blob/main/nemo_automodel/recipes/diffusion/train.py)
-from NeMo AutoModel and swaps the flow-matching loss for
-[`DMDPipeline`](../../../modelopt/torch/fastgen/methods/dmd.py).
+## How DMD2 works
 
-## Scope — Phase 1 vs Phase 2
+DMD2 trains three networks together:
 
-| | Phase 1 (this directory) | Phase 2 (roadmap) |
-|---|---|---|
-| Student update | VSD only | VSD + CFG + GAN generator term |
-| Fake-score update | DSM | DSM (same) |
-| Discriminator update | **not run** (no discriminator) | toy multiscale MLP + R1 |
-| Data | mock (AutoModel `build_mock_dataloader`) | real preprocessed `.meta` cache |
-| CFG | `guidance_scale: null` | negative-prompt precompute + CFG |
-| Checkpointing | student DCP + fake_score DCP + EMA + DMD scalar state | + discriminator DCP |
+| Model | Role |
+|---|---|
+| **Student** | the few-step generator you keep |
+| **Fake-score** | a diffusion model that tracks the *student's* current output distribution |
+| **Teacher** | the frozen base Qwen-Image model (the *target* distribution) |
 
-## What the training loop does
-
-Each step:
+The distribution-matching gradient pushes the student toward the teacher and away from
+the fake-score. Training alternates between two phases, controlled by `student_update_freq`:
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│ if (global_step % student_update_freq == 0):   # student phase     │
-│     loss = compute_student_loss(latents, noise, text_embeds)       │
-│     loss["total"].backward()                                       │
-│     student_optimizer.step()                                        │
-│     dmd.update_ema()                                                │
-│ else:                                           # fake-score phase │
-│     loss = compute_fake_score_loss(latents, noise, text_embeds)    │
-│     loss["total"].backward()                                       │
-│     fake_score_optimizer.step()                                     │
-└─────────────────────────────────────────────────────────────────────┘
+each step:
+  if step % student_update_freq == 0:   # student phase
+      update the student (distribution-matching [+ optional GAN] loss)
+      update the student EMA
+  else:                                  # fake-score phase
+      update the fake-score network to track the student
 ```
 
-The YAML's `dmd2.recipe_path: general/distillation/dmd2_wan22_5b` pulls the
-canonical Wan 2.2 5B hyperparameters (`student_update_freq=5`,
-`num_train_timesteps=1000`, `fake_score_pred_type=x0`,
-`sample_t_cfg: shifted(5.0)`, `t_list=[0.999, 0.833, 0.0]`, etc.). Flat keys under
-the `dmd2:` block apply targeted overrides on top.
+The canonical config additionally enables **CFG** (classifier-free guidance on the
+teacher) and a lightweight **GAN** branch (a discriminator head on a teacher feature
+block, plus an R1 gradient penalty) for sharper samples.
 
 ## Install
 
 From the repo root:
 
 ```bash
-pip install -e ".[all]"                                  # ModelOpt + diffusers + torch
-pip install -r examples/diffusers/fastgen/requirements.txt  # nemo_automodel
+pip install -e ".[all]"                                      # ModelOpt + torch + diffusers
+pip install -r examples/diffusers/fastgen/requirements.txt   # nemo_automodel
 ```
 
-`nemo_automodel[diffusion]` pulls in `diffusers`, `accelerate`, the WAN
-preprocessing helpers, and the
-[`TrainDiffusionRecipe`](https://github.com/NVIDIA-NeMo/Automodel/blob/main/nemo_automodel/recipes/diffusion/train.py)
-we subclass here.
+`nemo_automodel[diffusion]` pulls in diffusers, accelerate, and the `TrainDiffusionRecipe`
+this example subclasses.
 
-## Quick start
+## Quick start — mock data (no dataset needed)
 
-### Target smoke — 8×H100, full Wan 2.2 5B latent shape, mock data
+The smoke config feeds random tensors at Qwen-Image's shapes, so it runs end-to-end with
+**no dataset to prepare** — it exercises the full training loop (FSDP2 sharding, phase
+alternation, checkpoint save/restore). Use it to validate your environment:
 
 ```bash
 torchrun --nproc-per-node=8 \
     examples/diffusers/fastgen/dmd2_finetune.py \
-    --config examples/diffusers/fastgen/configs/dmd2_wan22_5b.yaml
+    --config examples/diffusers/fastgen/configs/dmd2_qwen_image_smoke.yaml
 ```
 
-Expected behaviour:
-- 100 optimiser steps, `student_update_freq=5` so 20 student phases + 80 fake-score
-  phases (the first step fires on the student phase).
-- `[STEP 0] phase=student ...`, `[STEP 1..4] phase=fake_score ...`,
-  `[STEP 5] phase=student ...` in the logs.
-- Memory per H100 in the ~50–65 GiB range (three 5B transformers sharded 8-way +
-  activations + AdamW states for the trainable pair).
-- Checkpoint lands at step 100 under `/tmp/dmd2-wan22-5b-phase1/epoch_0_step_100/`.
+Scale `--fsdp.dp_size` to your GPU count. You'll see alternating `phase=student` /
+`phase=fake_score` log lines and a checkpoint written at the last step.
 
-### Fast iteration — 2 GPUs, shrunken mock latents, ~2 min
+> The mock loop validates wiring only — it does **not** produce meaningful images. For
+> that, train on real data (below).
 
-Same recipe but scale the mock latent tensor down so each forward is cheap:
+## Real-data training
 
-```bash
-torchrun --nproc-per-node=2 \
-    examples/diffusers/fastgen/dmd2_finetune.py \
-    --config examples/diffusers/fastgen/configs/dmd2_wan22_5b.yaml \
-    --step_scheduler.max_steps=20 \
-    --fsdp.dp_size=2 \
-    --data.mock.num_channels=8 \
-    --data.mock.num_frame_latents=4 \
-    --data.mock.spatial_h=16 \
-    --data.mock.spatial_w=16 \
-    --wandb.mode=offline
-```
+`configs/dmd2_qwen_image.yaml` is the canonical config: 4-step student, CFG, and the
+GAN + R1 branch, trained on a preprocessed latent cache. Before launching, provide:
 
-This is the "did my change compile and run" smoke loop. Runs the exact same DMD2
-code path as the full-scale recipe, so logic bugs surface here.
+- **A preprocessed Qwen-Image latent cache** — set `data.dataloader.cache_dir`.
+- **A precomputed negative-prompt embedding** (required for CFG) — set
+  `data.dataloader.negative_prompt_embedding_path`.
+- **An output directory** — set `checkpoint.checkpoint_dir`.
 
-### Resume from a checkpoint
-
-Point `checkpoint.restore_from` at an absolute path or a dir name relative to
-`checkpoint.checkpoint_dir`:
+The model path defaults to `Qwen/Qwen-Image`; point it at a local snapshot to avoid
+re-downloading on every job. Then:
 
 ```bash
 torchrun --nproc-per-node=8 \
     examples/diffusers/fastgen/dmd2_finetune.py \
-    --config examples/diffusers/fastgen/configs/dmd2_wan22_5b.yaml \
-    --checkpoint.restore_from=epoch_0_step_100 \
-    --step_scheduler.max_steps=200
+    --config examples/diffusers/fastgen/configs/dmd2_qwen_image.yaml \
+    --step_scheduler.max_steps=5000
 ```
 
-The recipe restores the student (via `TrainDiffusionRecipe`), plus the sidecar
-files this example writes: `fake_score/` (DCP), `fake_score_optimizer/` (DCP),
-`ema_shadow.pt`, and `dmd_state.pt` (carries the DMD iteration counter).
+Any `DMDConfig` field can be overridden on the CLI (e.g. `--dmd2.guidance_scale=3.5`).
+
+### Checkpoints & resuming
+
+Checkpoints land under `checkpoint.checkpoint_dir`. Alongside the student, the recipe
+saves the DMD2 sidecars needed to resume exactly: the fake-score model + optimizer, the
+student EMA (`ema_shadow.pt`), and the DMD iteration counter (`dmd_state.pt`). With
+`restore_from: LATEST` a re-launch auto-resumes from the newest checkpoint; pin a
+specific one with `--checkpoint.restore_from=epoch_0_step_500`.
+
+## Inference
+
+After training, sample from the distilled student. The pipeline loads your consolidated
+student transformer plus the base Qwen-Image VAE / text encoder / tokenizer:
+
+```python
+import torch
+from inference_dmd2_qwen_image import QwenImageDMDInferencePipeline
+
+pipe = QwenImageDMDInferencePipeline.from_pretrained(
+    student_path="/path/to/checkpoint/epoch_0_step_500/model/consolidated",
+    base_pipeline_path="Qwen/Qwen-Image",
+    ema_path=None,                      # or ".../ema_shadow.pt" to sample the EMA weights
+    torch_dtype=torch.bfloat16,
+).to("cuda")
+
+image = pipe(
+    prompt="a small red cube on a white table",
+    num_inference_steps=4,              # match the student_sample_steps you trained with
+    height=1024, width=1024,
+    generator=torch.Generator("cuda").manual_seed(42),
+).images[0]
+image.save("sample.png")
+```
+
+Or run the bundled CLI for a quick check:
+
+```bash
+python examples/diffusers/fastgen/inference_dmd2_qwen_image.py \
+    --student_path /path/to/checkpoint/.../model/consolidated \
+    --base_pipeline_path Qwen/Qwen-Image \
+    --prompt "a small red cube on a white table" \
+    --height 512 --width 512
+```
+
+Set `num_inference_steps` to the number of steps the student was trained for
+(`dmd2.student_sample_steps` — e.g. 4 for the canonical config, or 1 for a single-step
+student).
 
 ## Config reference
 
 | Section | Key | Role |
 |---|---|---|
-| `model` | `pretrained_model_name_or_path` | HF path. Defaults to `Wan-AI/Wan2.2-TI2V-5B-Diffusers`. |
-| `model` | `mode` | Must be `finetune` — loads the pretrained HF weights. |
-| `step_scheduler` | `global_batch_size`, `local_batch_size`, `max_steps`, `ckpt_every_steps`, `log_every` | Standard AutoModel knobs. |
-| `dmd2` | `recipe_path` | Built-in fastgen recipe to hydrate DMDConfig from. |
-| `dmd2` | `gan_loss_weight_gen`, `guidance_scale`, `fake_score_pred_type`, etc. | Any `DMDConfig` field can be overridden here. |
-| `dmd2` | `fake_score_lr` | Separate LR for the fake-score optimizer. Defaults to student LR. |
-| `optim` | `learning_rate`, `optimizer.weight_decay`, `optimizer.betas` | Student AdamW knobs; re-used for the fake_score optimizer unless `dmd2.fake_score_lr` overrides. |
-| `fsdp` | `dp_size`, `tp_size`, `cp_size`, `pp_size`, `activation_checkpointing` | Passed through to AutoModel's FSDP2Manager. |
-| `data` | `use_mock`, `mock.*` | Toggle AutoModel's mock dataloader. All `mock.*` fields feed `build_mock_dataloader`. |
-| `checkpoint` | `enabled`, `checkpoint_dir`, `model_save_format`, `restore_from` | Standard AutoModel Checkpointer. |
+| `model` | `pretrained_model_name_or_path` | Qwen-Image HF id or local snapshot. |
+| `model` | `mode` | `finetune` — loads the pretrained weights. |
+| `step_scheduler` | `global_batch_size`, `local_batch_size`, `max_steps`, `ckpt_every_steps`, `log_every` | Standard AutoModel scheduling knobs. |
+| `dmd2` | `recipe_path` | Built-in fastgen recipe to hydrate `DMDConfig` from (`general/distillation/dmd2_qwen_image`). |
+| `dmd2` | `pipeline_plugin` | `qwen_image` — selects `QwenImageDMDPipeline` (2×2 patch packing / img_shapes). |
+| `dmd2` | `student_sample_steps` | Number of student sampling steps (e.g. 4). |
+| `dmd2` | `guidance_scale` | CFG strength on the teacher (`null` disables CFG; requires a negative-prompt embedding when set). |
+| `dmd2` | `gan_loss_weight_gen`, `gan_r1_reg_weight`, `gan_feature_indices`, … | GAN branch (set `gan_loss_weight_gen: 0` to disable). |
+| `dmd2` | `fake_score_lr`, `discriminator_lr` | Separate LRs for the fake-score / discriminator optimizers. |
+| `dmd2` | `sample_t_cfg`, `ema` | Timestep sampling + student EMA settings. |
+| `optim` | `learning_rate`, `optimizer.*` | Student AdamW knobs. |
+| `fsdp` | `dp_size`, `tp_size`, `activation_checkpointing`, … | FSDP2 parallelism (set `dp_size` to your GPU count). |
+| `data` | `dataloader._target_`, `cache_dir`, `negative_prompt_embedding_path` | Real latent cache vs. `build_mock_t2i_dataloader`. |
+| `checkpoint` | `checkpoint_dir`, `model_save_format`, `restore_from` | Output dir, save format, resume behavior. |
 
 ## Troubleshooting
 
-**`CUDA out of memory` at fake_score load time.** Wan 2.2 5B is ~10 GiB bf16, and we
-hold student + teacher + fake_score. On 80 GiB cards, FSDP2-sharded 8-way across the
-three models fits comfortably; on 40 GiB cards you need more GPUs or a smaller dp_size.
-For the fastest iteration drop to the 2-GPU shrunken-latent smoke above.
+**`CUDA out of memory`.** Training holds three Qwen-Image transformers (student + teacher
++ fake-score) plus optimizer state. Shard across more GPUs (raise `--fsdp.dp_size`),
+enable `--fsdp.activation_checkpointing=true`, or use the mock smoke for wiring checks.
 
-**`RuntimeError: teacher._fastgen_captured is missing`.** This means the GAN branch
-of `compute_student_loss` fired without feature-capture hooks installed. In Phase 1
-`gan_loss_weight_gen` is pinned to 0.0, so if you see this error you have overridden
-`gan_loss_weight_gen` somewhere without attaching hooks — either revert the override or
-call `mtf.plugins.wan22.attach_feature_capture(teacher, feature_indices=[15, 22, 29])`
-in your fork of `setup()`.
+**Loss is `NaN` on step 0.** Almost always an out-of-range timestep — confirm you haven't
+overridden `dmd2.pred_type` away from `flow` (Qwen-Image is a rectified-flow model) or
+changed the timestep schedule.
 
-**`ValueError: guidance_scale is set but negative_encoder_hidden_states was not provided.`**
-Phase 1 deliberately leaves `negative_encoder_hidden_states=None`. If you override the
-YAML's `dmd2.guidance_scale` away from `null`, you also need to precompute a negative
-prompt embedding during `setup()` — wait for Phase 2 or do it yourself in your fork.
+**`guidance_scale is set but negative_encoder_hidden_states was not provided`.** CFG needs
+a precomputed negative-prompt embedding. Set `data.dataloader.negative_prompt_embedding_path`,
+or set `dmd2.guidance_scale: null` to disable CFG.
 
-**Dataloader yields empty batches.** Check `data.mock.length >= step_scheduler.local_batch_size * fsdp.dp_size`; `build_mock_dataloader` drops incomplete batches when using the distributed sampler.
-
-**Training loss is NaN on step 0 with mock data.** Mock latents are `torch.randn`,
-which is a reasonable prior. NaN on step 0 almost certainly means the transformer is
-receiving an out-of-range timestep — verify that `dmd2.num_train_timesteps` is `1000`
-(diffusers convention for Wan 2.2) and that you haven't overridden `pred_type` away
-from `flow`.
+**Dataloader yields empty batches.** Ensure your cache has at least
+`local_batch_size * fsdp.dp_size` items; the distributed sampler drops incomplete batches.
 
 ## Reference
 
 - Fastgen library: [`modelopt/torch/fastgen/`](../../../modelopt/torch/fastgen/)
-- Built-in recipe: [`modelopt_recipes/general/distillation/dmd2_wan22_5b.yaml`](../../../modelopt_recipes/general/distillation/dmd2_wan22_5b.yaml)
-- FastGen reference math: `FastGen/fastgen/methods/distribution_matching/dmd2.py`
-  (not shipped with Model-Optimizer)
-- AutoModel recipe we subclass:
+- Built-in recipe: [`modelopt_recipes/general/distillation/dmd2_qwen_image.yaml`](../../../modelopt_recipes/general/distillation/dmd2_qwen_image.yaml)
+- AutoModel recipe this example subclasses:
   [`nemo_automodel/recipes/diffusion/train.py`](https://github.com/NVIDIA-NeMo/Automodel/blob/main/nemo_automodel/recipes/diffusion/train.py)
