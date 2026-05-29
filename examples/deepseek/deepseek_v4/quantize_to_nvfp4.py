@@ -522,9 +522,14 @@ def _routed_experts_prefix(expert_proj: str) -> str:
 def _validate_paths(source_ckpt: Path, output_ckpt: Path) -> None:
     source_resolved = source_ckpt.resolve()
     output_resolved = output_ckpt.resolve()
-    if output_resolved == source_resolved or source_resolved in output_resolved.parents:
+    if (
+        output_resolved == source_resolved
+        or source_resolved in output_resolved.parents
+        or output_resolved in source_resolved.parents
+    ):
         raise ValueError(
-            f"--output_ckpt must not be inside --source_ckpt: {output_ckpt} under {source_ckpt}"
+            "--source_ckpt and --output_ckpt must be disjoint directories; "
+            f"got source={source_ckpt}, output={output_ckpt}"
         )
 
 
