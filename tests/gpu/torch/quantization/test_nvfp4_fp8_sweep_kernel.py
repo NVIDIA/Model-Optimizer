@@ -190,7 +190,7 @@ def test_reset_allows_recollect():
         cal = _make_calibrator(per_block_amax, global_amax)
         cal.collect(x)
         first = cal.compute_amax().clone()
-        assert cal._best_amax_fast is not None  # final amax was cached
+        assert cal._best_amax is not None  # final amax was cached
 
         # Second collect after a final amax is cached is not allowed without a reset.
         with pytest.raises(RuntimeError, match="multi-collect"):
@@ -239,7 +239,7 @@ def test_dispatch_fast_path_default():
         cal = _make_calibrator(per_block_amax, global_amax)
         cal.collect(x)
         # Fast path stashes the final amax directly; reference accumulator stays empty.
-        assert cal._best_amax_fast is not None
+        assert cal._best_amax is not None
         assert cal._losses_sum is None
 
 
@@ -269,7 +269,7 @@ def test_dispatch_custom_error_func_falls_back():
             error_func=hessian_like_error,
         )
         cal.collect(x)
-        assert cal._best_amax_fast is not None
+        assert cal._best_amax is not None
         assert cal._losses_sum is None
 
 

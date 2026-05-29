@@ -326,7 +326,7 @@ class TestNVFP4MSECalibrator:
         x = torch.randn(num_blocks, block_size, device=device)
         cal.collect(x)
 
-        assert cal._best_amax_fast is not None
+        assert cal._best_amax is not None
         assert cal._losses_sum is None
 
         amax = cal.compute_amax()
@@ -358,7 +358,7 @@ class TestNVFP4MSECalibrator:
 
         cal.collect(x1)
         first = cal.compute_amax().clone()
-        assert cal._best_amax_fast is not None
+        assert cal._best_amax is not None
         assert cal._losses_sum is None
 
         with pytest.raises(RuntimeError, match="multi-collect"):

@@ -194,7 +194,7 @@ class NVFP4MSECalibrator(MseCalibrator):
         super().__init__(amax=amax, axis=axis, quant_func=quant_func, error_func=error_func)
         self._global_amax = global_amax.to(dtype=torch.float32)
         # Set by collect() after either sweep path; consumed by compute_amax.
-        self._best_amax_fast: torch.Tensor | None = None
+        self._best_amax: torch.Tensor | None = None
 
     def _compute_candidate_amax(self, candidates: torch.Tensor) -> torch.Tensor:
         if candidates.ndim != 0:  # Called during final compute amax
@@ -237,7 +237,7 @@ class NVFP4MSECalibrator(MseCalibrator):
     @torch.no_grad()
     def collect(self, x: torch.Tensor):
         """Collect input statistics and cache the final per-block amax."""
-        if self._best_amax_fast is not None:
+        if self._best_amax is not None:
             raise RuntimeError(
                 "NVFP4MSECalibrator: a previous collect() call produced a final amax; "
                 "multi-collect is not supported. Call reset() to start a fresh cycle."
@@ -248,9 +248,7 @@ class NVFP4MSECalibrator(MseCalibrator):
             best_flat = nvfp4_fp8_scale_sweep(x.detach(), self._global_amax, block_size=x.shape[-1])
             # Store the selected amax in fp32; the fake-quant kernel still returns
             # tensors in the requested output dtype.
-            self._best_amax_fast = best_flat.reshape(self._initial_amax.shape).to(
-                dtype=torch.float32
-            )
+            self._best_amax = best_flat.reshape(self._initial_amax.shape).to(dtype=torch.float32)
             return
 
         self._run_reference_collect(x)
@@ -258,7 +256,7 @@ class NVFP4MSECalibrator(MseCalibrator):
     def _run_reference_collect(self, x: torch.Tensor):
         super().collect(x)
         best_amax = super().compute_amax(verbose=False)
-        self._best_amax_fast = best_amax.to(dtype=torch.float32) if best_amax is not None else None
+        self._best_amax = best_amax.to(dtype=torch.float32) if best_amax is not None else None
         self._losses_sum = None
         # Synchronize before calibrating another weight so reference MSE sweeps do
         # not overlap. _losses_sum stores one fp32 reduced loss per candidate per
@@ -270,7 +268,7 @@ class NVFP4MSECalibrator(MseCalibrator):
     @torch.no_grad()
     def compute_amax(self, verbose: bool = False):
         """Return the cached per-block amax."""
-        return self._best_amax_fast
+        return self._best_amax
 
     def reset(self):
         """Reset per-cycle state. Keep ``_initial_amax`` so the calibrator stays reusable.
@@ -280,7 +278,7 @@ class NVFP4MSECalibrator(MseCalibrator):
         small enough to keep so a follow-up ``collect()`` can run again on the same
         calibrator instance.
         """
-        self._best_amax_fast = None
+        self._best_amax = None
         self._losses_sum = None
         self._candidates = None
         self._amax = None
