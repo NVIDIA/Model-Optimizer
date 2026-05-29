@@ -492,18 +492,29 @@ def _layer_dir(checkpoint_dir: str, idx: int) -> str:
 def _save_layer(
     checkpoint_dir: str,
     idx: int,
-    weights: dict,
+    weights: dict | None,
     qstate: dict,
+    quantizer_buffers: dict | None,
     output_meta: tuple,
     next_inputs: list | None,
     num_layers: int,
 ) -> None:
-    """Save a single layer checkpoint and update the manifest atomically."""
+    """Save a single layer checkpoint and update the manifest atomically.
+
+    ``weights`` may be ``None`` when the caller opts into a quantizer-only save
+    (algorithms that do not mutate ``layer.weight``). In that case the per-
+    quantizer ``state_dict()`` slice — which carries ``_amax`` — is written to
+    ``quantizer_buffers.pt`` instead, so ``full_restore`` can still recover the
+    calibrated quantizer state without the full ``weights.pt``.
+    """
     d = _layer_dir(checkpoint_dir, idx)
     if os.path.isdir(d):
         shutil.rmtree(d)
     os.makedirs(d)
-    torch.save(weights, os.path.join(d, "weights.pt"))
+    if weights is not None:
+        torch.save(weights, os.path.join(d, "weights.pt"))
+    elif quantizer_buffers is not None:
+        torch.save(quantizer_buffers, os.path.join(d, "quantizer_buffers.pt"))
     torch.save(qstate, os.path.join(d, "quantizer_state.pt"))
     torch.save(output_meta, os.path.join(d, "output_meta.pt"))
     if next_inputs is not None:
@@ -541,7 +552,14 @@ class _CheckpointState:
         and broadcast restored state to all ranks during resume.
     """
 
-    def __init__(self, checkpoint_dir: str, num_layers: int, start_layer: int = 0):
+    def __init__(
+        self,
+        checkpoint_dir: str,
+        num_layers: int,
+        start_layer: int = 0,
+        save_every: int = 1,
+        save_quantizers_only: bool = False,
+    ):
         if dist.is_initialized() and dist.size() > 1:
             raise RuntimeError(
                 "Layerwise calibration checkpointing is not supported in "
@@ -552,9 +570,21 @@ class _CheckpointState:
         self.checkpoint_dir = checkpoint_dir
         self.num_layers = num_layers
         self.start_layer = start_layer
+        self.save_every = save_every
+        self.save_quantizers_only = save_quantizers_only
+        # Tracks the most recent saved layer so save() can window-save the layers
+        # since the last save event. Initialized to start_layer - 1 so the first
+        # save event after resume covers the new work only.
+        self._last_saved_layer = start_layer - 1
 
     @classmethod
-    def from_folder(cls, checkpoint_dir: str | None, num_layers: int) -> _CheckpointState | None:
+    def from_folder(
+        cls,
+        checkpoint_dir: str | None,
+        num_layers: int,
+        save_every: int = 1,
+        save_quantizers_only: bool = False,
+    ) -> _CheckpointState | None:
         """Create from folder. Detects resume point. Returns None if no checkpoint_dir."""
         if not checkpoint_dir:
             return None
@@ -572,7 +602,13 @@ class _CheckpointState:
             print_rank_0(
                 f"Checkpoint: resuming layerwise calibration from layer {start}/{num_layers}"
             )
-        return cls(checkpoint_dir, num_layers, start_layer=start)
+        return cls(
+            checkpoint_dir,
+            num_layers,
+            start_layer=start,
+            save_every=save_every,
+            save_quantizers_only=save_quantizers_only,
+        )
 
     def setup_resume(self, layers: nn.ModuleList) -> list | None:
         """Load output_meta for skip layers 0..K-1, return next_inputs for layer K.
@@ -609,7 +645,10 @@ class _CheckpointState:
         """Restore weights and quantizer state for layers 0..K-1 after the calibration loop."""
         from modelopt.torch.quantization.config import QuantizeConfig
         from modelopt.torch.quantization.conversion import restore_quantizer_state
-        from modelopt.torch.quantization.utils.core_utils import enable_weight_access_and_writeback
+        from modelopt.torch.quantization.utils.core_utils import (
+            enable_weight_access_and_writeback,
+            set_quantizer_state_dict,
+        )
 
         if self.start_layer == 0:
             return
@@ -630,55 +669,101 @@ class _CheckpointState:
                     map_location=layer_device,
                     weights_only=False,
                 )
-                weights = torch.load(
-                    os.path.join(d, "weights.pt"),
-                    map_location=layer_device,
-                    weights_only=False,
-                )
                 restore_quantizer_state(layer, dummy_config, {"quantizer_state": qstate})
-                layer.load_state_dict(weights, strict=False, assign=True)
+                weights_path = os.path.join(d, "weights.pt")
+                buffers_path = os.path.join(d, "quantizer_buffers.pt")
+                if os.path.isfile(weights_path):
+                    weights = torch.load(
+                        weights_path, map_location=layer_device, weights_only=False
+                    )
+                    layer.load_state_dict(weights, strict=False, assign=True)
+                elif os.path.isfile(buffers_path):
+                    # save_quantizers_only mode: restore just the TensorQuantizer
+                    # state_dict (carries _amax). The layer's other weights
+                    # weren't modified by the algorithm, so the in-memory values
+                    # already match what would have been saved.
+                    quantizer_buffers = torch.load(
+                        buffers_path, map_location=layer_device, weights_only=False
+                    )
+                    set_quantizer_state_dict(layer, quantizer_buffers)
 
         print_rank_0(f"Checkpoint: restored {self.start_layer} previously calibrated layers")
 
     def save(
         self,
         layer_idx: int,
-        layer: nn.Module,
         model: nn.Module,
         layers: nn.ModuleList,
         next_layer_inputs: list | None = None,
     ) -> None:
-        """Snapshot layer state and write checkpoint to disk in one step.
+        """Snapshot layer state and write checkpoint to disk.
+
+        With ``save_every == 1`` (default), this writes a single layer per call.
+        With ``save_every > 1``, the call is a no-op except at window boundaries
+        (every Nth layer plus the final layer); at a boundary, the full window
+        of layers since the last save is flushed to disk so ``setup_resume`` can
+        replay the skip layers correctly. The large ``next_inputs.pt`` is only
+        written for the final layer in the window — the layer the next resume
+        would restart from.
 
         Args:
             layer_idx: Index of the layer just calibrated.
-            layer: The layer module (weights may be on GPU or managed by accelerate/FSDP2).
             model: The full model (needed for ``enable_weight_access_and_writeback``).
-            layers: The decoder layer list (to read ``output_meta``).
-            next_layer_inputs: Inputs for the next layer (``None`` for the final layer).
+            layers: The decoder layer list.
+            next_layer_inputs: Inputs for the layer following ``layer_idx``
+                (``None`` for the final layer).
         """
         from modelopt.torch.quantization.conversion import quantizer_state
-        from modelopt.torch.quantization.utils.core_utils import enable_weight_access_and_writeback
+        from modelopt.torch.quantization.utils.core_utils import (
+            enable_weight_access_and_writeback,
+            get_quantizer_state_dict,
+        )
+
+        is_final = layer_idx + 1 == self.num_layers
+        is_window_end = (layer_idx + 1) % self.save_every == 0
+        if not (is_final or is_window_end):
+            return
 
         _cpu = torch.device("cpu")
-        with enable_weight_access_and_writeback(layer, model):
-            weights = _move_to_device(layer.state_dict(), _cpu)
-            qstate = _move_to_device(quantizer_state(layer), _cpu)
+        window_start = self._last_saved_layer + 1
+        for i in range(window_start, layer_idx + 1):
+            is_last_in_window = i == layer_idx
+            layer_i = layers[i]
+            with enable_weight_access_and_writeback(layer_i, model):
+                qstate = _move_to_device(quantizer_state(layer_i), _cpu)
+                if self.save_quantizers_only:
+                    # Save just the TensorQuantizer state_dict slice (carries _amax)
+                    # — the layer's other weights weren't modified by the algorithm.
+                    weights = None
+                    quantizer_buffers = _move_to_device(get_quantizer_state_dict(layer_i), _cpu)
+                else:
+                    weights = _move_to_device(layer_i.state_dict(), _cpu)
+                    quantizer_buffers = None
 
-        output_meta = getattr(layer._layerwise_calib, "output_meta", None)
-        if output_meta is None:
-            # Placeholder for the last layer: output_meta is never used for skip mode
-            # since there is no subsequent layer that needs a correctly shaped dummy output.
-            output_meta = LayerActivationCollector._extract_output_meta(torch.zeros(1))
+            output_meta = getattr(layer_i._layerwise_calib, "output_meta", None)
+            if output_meta is None:
+                # Placeholder for the final layer: output_meta is never used for
+                # skip mode since there is no subsequent layer that needs a
+                # correctly shaped dummy output.
+                output_meta = LayerActivationCollector._extract_output_meta(torch.zeros(1))
 
-        _save_layer(
-            self.checkpoint_dir,
-            layer_idx,
-            weights,
-            qstate,
-            _move_to_device(output_meta, _cpu),
-            _move_to_device(next_layer_inputs, _cpu) if next_layer_inputs is not None else None,
-            self.num_layers,
-        )
+            _save_layer(
+                self.checkpoint_dir,
+                i,
+                weights,
+                qstate,
+                quantizer_buffers,
+                _move_to_device(output_meta, _cpu),
+                _move_to_device(next_layer_inputs, _cpu)
+                if is_last_in_window and next_layer_inputs is not None
+                else None,
+                self.num_layers,
+            )
+
+        self._last_saved_layer = layer_idx
+        window_size = layer_idx - window_start + 1
         suffix = " (final)" if next_layer_inputs is None else ""
-        print_rank_0(f"Checkpoint: saved layer {layer_idx}{suffix}")
+        if window_size > 1:
+            print_rank_0(f"Checkpoint: saved layers {window_start}..{layer_idx}{suffix}")
+        else:
+            print_rank_0(f"Checkpoint: saved layer {layer_idx}{suffix}")

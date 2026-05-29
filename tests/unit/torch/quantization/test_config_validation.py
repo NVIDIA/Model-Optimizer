@@ -28,9 +28,13 @@ from modelopt.torch.quantization.config import (
     INT4_AWQ_CFG,
     NVFP4_DEFAULT_CFG,
     W4A8_AWQ_BETA_CFG,
+    AWQLiteCalibConfig,
     GPTQCalibConfig,
+    LocalHessianCalibConfig,
     MaxCalibConfig,
+    MseCalibConfig,
     QuantizeConfig,
+    SmoothQuantCalibConfig,
     find_quant_cfg_entry_by_path,
     need_calibration,
     normalize_quant_cfg_list,
@@ -652,23 +656,21 @@ class TestLayerwiseNestedConfig:
         assert cfg_cls().layerwise.get_qdq_activations_from_prev_layer is expected_qdq
 
     @pytest.mark.parametrize(
-        "layerwise",
+        ("layerwise_input", "expected_qdq"),
         [
-            {"enable": True},
-            pytest.param(True, marks=pytest.mark.filterwarnings("ignore::DeprecationWarning")),
+            # GPTQ default kicks in for user dict that doesn't mention qdq.
+            ({"enable": True}, True),
+            # GPTQ default kicks in for legacy bool form too.
+            pytest.param(
+                True, True, marks=pytest.mark.filterwarnings("ignore::DeprecationWarning")
+            ),
+            # User-explicit False overrides the GPTQ default.
+            ({"enable": True, "get_qdq_activations_from_prev_layer": False}, False),
         ],
     )
-    def test_gptq_qdq_default_survives_user_layerwise_input(self, layerwise):
-        """GPTQ must default qdq=True even when the user supplies a layerwise dict/bool."""
-        cfg = GPTQCalibConfig(layerwise=layerwise)
-        assert cfg.layerwise.get_qdq_activations_from_prev_layer is True
-
-    def test_gptq_user_explicit_qdq_false_wins(self):
-        """An explicit ``get_qdq_activations_from_prev_layer=False`` must override the GPTQ default."""
-        cfg = GPTQCalibConfig(
-            layerwise={"enable": True, "get_qdq_activations_from_prev_layer": False}
-        )
-        assert cfg.layerwise.get_qdq_activations_from_prev_layer is False
+    def test_gptq_qdq_default_respects_user_explicit_value(self, layerwise_input, expected_qdq):
+        cfg = GPTQCalibConfig(layerwise=layerwise_input)
+        assert cfg.layerwise.get_qdq_activations_from_prev_layer is expected_qdq
 
     def test_default_dump_shape(self):
         dumped = MaxCalibConfig().model_dump()
@@ -676,5 +678,28 @@ class TestLayerwiseNestedConfig:
             "enable": False,
             "get_qdq_activations_from_prev_layer": False,
             "checkpoint_dir": None,
+            "save_every": 1,
+            "save_quantizers_only": False,
         }
         assert "layerwise_checkpoint_dir" not in dumped
+
+    def test_save_every_must_be_positive(self):
+        with pytest.raises(ValidationError):
+            MaxCalibConfig(layerwise={"enable": True, "save_every": 0})
+
+    @pytest.mark.parametrize(
+        "cfg_cls",
+        [GPTQCalibConfig, AWQLiteCalibConfig, SmoothQuantCalibConfig],
+    )
+    def test_save_quantizers_only_rejected_for_weight_mutating_algorithms(self, cfg_cls):
+        """Whitelist: only amax-only algorithms (max/mse/local_hessian) may set
+        save_quantizers_only=True. Weight-mutating algorithms (GPTQ folds Hessian
+        updates, AWQ/SmoothQuant fold pre-quant scales) must reject the flag.
+        """
+        with pytest.raises(ValidationError, match="mutates layer weights in-place"):
+            cfg_cls(layerwise={"enable": True, "save_quantizers_only": True})
+
+    @pytest.mark.parametrize("cfg_cls", [MaxCalibConfig, MseCalibConfig, LocalHessianCalibConfig])
+    def test_save_quantizers_only_accepted_for_amax_only_algorithms(self, cfg_cls):
+        cfg = cfg_cls(layerwise={"enable": True, "save_quantizers_only": True})
+        assert cfg.layerwise.save_quantizers_only is True
