@@ -34,9 +34,6 @@ jobs:
     timeout-minutes: ${{ inputs.timeout_minutes }}
     container:
       image: ${{ inputs.docker_image }}
-      credentials:
-        username: $oauthtoken
-        password: ${{ secrets.NGC_API_KEY }}
       options: --shm-size=2gb # TRT-LLM tests on 2-GPU runner needs more shared memory
       env:
         PIP_CONSTRAINT: "" # Disable pip constraint for upgrading packages

@@ -54,11 +54,6 @@ jobs:
     timeout-minutes: ${{ matrix.timeout }}
     container:
       image: ${{ matrix.container_image }}
-      # nvcr.io images require NGC auth; public docker.io images (e.g. vllm) are pulled
-      # anonymously (the runner skips docker login when username/password are empty).
-      credentials:
-        username: ${{ startsWith(matrix.container_image, 'nvcr.io') && '$oauthtoken' || '' }}
-        password: ${{ startsWith(matrix.container_image, 'nvcr.io') && secrets.NGC_API_KEY || '' }}
       env:
         GIT_DEPTH: 1000 # For correct version
         PIP_CONSTRAINT: "" # Disable pip constraint for upgrading packages
