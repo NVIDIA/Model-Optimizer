@@ -719,22 +719,19 @@ def _export_quantized_weight(
         sub_module.register_buffer(quantizer_attrs.weight_scale, weight_scale)
 
     # Tied-weight dedup: if a previously-processed module shared the same
-    # source weight memory, alias the bit-identical packed weight and scale
-    # buffers from that prior module so downstream data_ptr-based dedup in
-    # postprocess_state_dict can collapse the duplicates. Per-side
-    # input_scale is intentionally NOT aliased — activation amaxes
-    # legitimately differ across tied modules whose forward paths see
-    # different distributions.
+    # source weight memory, alias the packed weight + scale buffers so the
+    # downstream data_ptr dedup in postprocess_state_dict can collapse them.
+    # input_scale is safe to alias because sync_tied_input_amax (earlier in
+    # this export) already max-merged the per-side amaxes.
     _cache = _export_quantized_weight.__dict__.setdefault("_tied_weight_alias_cache", {})
     _prior = _cache.get(_tied_source_data_ptr)
     if _prior is not None and _prior is not sub_module:
-        # Alias the packed weight (same nn.Parameter -> same data_ptr).
         if hasattr(_prior, weight_name):
             setattr(sub_module, weight_name, getattr(_prior, weight_name))
-        # Alias bit-identical scale buffers (NOT input_scale).
         for _attr in (
             quantizer_attrs.weight_scale,
             quantizer_attrs.weight_scale_2,
+            quantizer_attrs.input_scale,
         ):
             if _attr is None or not hasattr(_prior, _attr):
                 continue
@@ -749,69 +746,147 @@ def _export_quantized_weight(
     torch.cuda.empty_cache()
 
 
-def _collect_canonical_tied_patterns(model: nn.Module) -> list[re.Pattern]:
-    """Walk the model and collect canonical-side tied-weight patterns.
+def _collect_canonical_tied_patterns(
+    model: nn.Module,
+) -> tuple[list[re.Pattern], list[str]]:
+    """Walk the model and collect canonical-side tied-weight matchers.
 
-    HF's ``_tied_weights_keys`` is declared per model class with paths
-    relative to that class. In nested models, each submodule may declare
-    its own ties (e.g. an outer wrapper ties ``lm_head.weight`` to
-    ``model.decoder.embed_tokens.weight``, while the inner
-    ``DiffusionGemma4Model`` at ``model.model`` declares the much larger
-    encoder↔decoder dict, with paths relative to itself such as
-    ``encoder.language_model.layers...weight`` ↔ ``decoder.layers...weight``).
-
-    To match against the root model's state_dict keys we must prefix each
-    submodule's patterns with its qualified path (``model.``). Without this
-    prefix, the inner dict's patterns (which lack the ``model.`` prefix)
-    silently fail to match real keys like
-    ``model.decoder.layers.0.self_attn.q_proj.weight``.
-
-    Returns a list of compiled regex patterns for the canonical side of
-    every dict-style ``_tied_weights_keys`` declaration found anywhere in
-    the module tree. List-style (legacy) declarations are skipped — they
-    carry no canonical/alias distinction.
+    Patterns are submodule-prefixed regexes from each module's
+    ``_tied_weights_keys`` dict-style declaration (the prefix matters
+    for nested models where the dict lives on an inner submodule).
+    Side substrings are dot-separated tokens that appear only on the
+    canonical side of those declarations — needed because modelopt's
+    per-expert unpacking creates post-export keys (e.g.
+    ``…experts.Y.gate_proj.input_scale``) that HF's regexes never knew
+    about. List-style (legacy) declarations are skipped.
     """
     patterns: list[re.Pattern] = []
+    alias_token_set: set[str] = set()
+    canonical_token_set: set[str] = set()
+
+    def _tokens(s: str) -> set[str]:
+        """Identifiers in a regex string, with regex specials as separators."""
+        return {tok for tok in re.split(r"[^A-Za-z0-9_]+", s) if tok}
+
     for name, submodule in model.named_modules():
         tied = getattr(submodule, "_tied_weights_keys", None)
         if not isinstance(tied, dict) or not tied:
             continue
         prefix = f"{name}." if name else ""
-        patterns.extend(re.compile(prefix + p) for p in tied.values())
-    return patterns
+        for alias_pat, canonical_pat in tied.items():
+            patterns.append(re.compile(prefix + canonical_pat))
+            alias_token_set.update(_tokens(prefix + alias_pat))
+            canonical_token_set.update(_tokens(prefix + canonical_pat))
+
+    # Tokens unique to the canonical side become substring matchers.
+    side_substrings = sorted(canonical_token_set - alias_token_set)
+    return patterns, side_substrings
 
 
 def _reorder_canonical_first(state_dict: dict, model: nn.Module) -> dict:
-    """Reorder ``state_dict`` so canonical-side tied keys iterate first.
+    r"""Reorder ``state_dict`` so canonical-side tied keys iterate first.
 
-    For models that declare ``_tied_weights_keys`` as a ``{alias_pattern:
-    canonical_pattern}`` dict (newer HF style, e.g. ``DiffusionGemma4``),
-    HF designates one side of each tied pair as canonical and the other
-    as an alias. The downstream data_ptr dedup in
-    :func:`postprocess_state_dict` keeps whichever key it sees first per
-    ``data_ptr``, which by default is registration order — and that is
-    often the alias side, not the canonical side declared by HF.
-
-    This helper rebuilds the dict with canonical-pattern-matching keys
-    moved to the front (preserving original order within each partition),
-    so the existing first-wins dedup picks the canonical side.
-
-    No-op when the model declares no dict-style ``_tied_weights_keys``
-    anywhere in its module tree (i.e. only legacy list-of-strings
-    declarations, or no ties at all).
+    Lets the downstream first-wins data_ptr dedup keep canonical names.
+    Uses both regex patterns and substring matchers from
+    :func:`_collect_canonical_tied_patterns`. No-op when the model
+    declares no dict-style ``_tied_weights_keys``.
     """
-    canonical_patterns = _collect_canonical_tied_patterns(model)
-    if not canonical_patterns:
+    canonical_patterns, side_substrings = _collect_canonical_tied_patterns(model)
+    if not canonical_patterns and not side_substrings:
         return state_dict
+
+    def _has_side_substring(key: str) -> bool:
+        # Require the token to appear as a proper dot-separated path
+        # component, not just as a substring of an unrelated identifier.
+        for tok in side_substrings:
+            if (
+                f".{tok}." in key
+                or key.startswith(f"{tok}.")
+                or key.endswith(f".{tok}")
+                or key == tok
+            ):
+                return True
+        return False
+
     head: dict = {}
     tail: dict = {}
     for k, v in state_dict.items():
-        if any(p.search(k) for p in canonical_patterns):
+        if any(p.search(k) for p in canonical_patterns) or _has_side_substring(k):
             head[k] = v
         else:
             tail[k] = v
     head.update(tail)
     return head
+
+
+def sync_tied_input_amax(model: nn.Module) -> int:
+    """Max-merge input_quantizer amaxes across modules sharing a weight ``data_ptr``.
+
+    Closes the loop on ``input_scale`` for HF-tied modules whose forward
+    paths see different activation distributions (encoder vs decoder in
+    YOCO-style models). Must run BEFORE per-module export so the merged
+    amax flows into ``input_scale`` derivation. Handles both dense
+    Linears (keyed by ``weight.data_ptr()``) and fused MoE (keyed by
+    ``(gate_up_proj, down_proj)`` data_ptr tuple). Returns the number of
+    tied groups merged.
+    """
+    from collections import defaultdict
+
+    by_dp: dict = defaultdict(list)
+    for _, m in model.named_modules():
+        # Fused MoE: 3-D source tensors with shared input quantizers
+        if (
+            hasattr(m, "gate_up_proj_input_quantizer")
+            and hasattr(m, "gate_up_proj")
+            and hasattr(m, "down_proj")
+            and m.gate_up_proj.dim() == 3
+        ):
+            key = ("moe", m.gate_up_proj.data_ptr(), m.down_proj.data_ptr())
+            by_dp[key].append(m)
+        # Dense quantized Linear with an input_quantizer
+        elif (
+            hasattr(m, "input_quantizer")
+            and hasattr(m, "weight")
+            and isinstance(m.weight, torch.nn.Parameter)
+        ):
+            by_dp[("dense", m.weight.data_ptr())].append(m)
+
+    def _merge(quantizers: list) -> bool:
+        """Max-merge amaxes across the quantizer list. Returns True on merge."""
+        valid = [
+            q
+            for q in quantizers
+            if q is not None
+            and getattr(q, "is_enabled", False)
+            and getattr(q, "_amax", None) is not None
+            and not q._amax.is_meta
+        ]
+        if len(valid) < 2:
+            return False
+        # Require scalar (per-tensor) amax — matches preprocess_linear_fusion.
+        if any(q._amax.numel() != 1 for q in valid):
+            warnings.warn(
+                "sync_tied_input_amax: non-scalar input_quantizer amax encountered "
+                "in a tied group; skipping. Only per-tensor input quantizers are "
+                "supported for tied-modules merging."
+            )
+            return False
+        merged = torch.max(torch.stack([q.amax for q in valid]))
+        for q in valid:
+            q.amax = merged.clone()
+        return True
+
+    synced = 0
+    for key, modules in by_dp.items():
+        if len(modules) < 2:
+            continue
+        if key[0] == "moe":
+            for q_name in ("gate_up_proj_input_quantizer", "down_proj_input_quantizer"):
+                if _merge([getattr(m, q_name, None) for m in modules]):
+                    synced += 1
+        elif _merge([m.input_quantizer for m in modules]):
+            synced += 1
+    return synced
 
 
 def _process_quantized_modules(
@@ -1057,6 +1132,15 @@ def _export_transformers_checkpoint(
             f"weight_scale_2 after requantize_resmooth_fused_llm_layers. "
             f"This typically means the dummy forward did not activate these experts. "
             f"Taking element-wise max of amaxes for serving-engine fusion."
+        )
+
+    # Merge per-side input_quantizer amaxes BEFORE _process_quantized_modules,
+    # so the merged value flows into input_scale derivation downstream.
+    synced_input = sync_tied_input_amax(model)
+    if synced_input:
+        print(
+            f"sync_tied_input_amax: max-merged input_quantizer amaxes across "
+            f"{synced_input} tied module group(s)"
         )
 
     # Process all quantized modules and export weights

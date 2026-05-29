@@ -191,9 +191,11 @@ def _export_fused_experts(module: nn.Module, dtype: torch.dtype) -> None:
 
     # 5. Tied-experts dedup: if this module's source params have been seen
     # before, alias the bit-identical per-expert buffers (weight,
-    # weight_scale, weight_scale_2) to the previously-unpacked module.
-    # input_scale is left per-side so encoder/decoder calibration stays
-    # accurate where their activation distributions diverge.
+    # weight_scale, weight_scale_2, input_scale) to the previously-unpacked
+    # module. input_scale is safe to alias because sync_tied_input_amax
+    # runs earlier in _export_transformers_checkpoint and max-merges the
+    # shared input_quantizer amaxes across tied fused-experts modules, so
+    # both sides now derive bit-identical input_scale values.
     _cache = _export_fused_experts.__dict__.setdefault("_tied_unpacked_cache", {})
     _prior = _cache.get(_source_key)
     if _prior is not None and _prior is not module:
@@ -212,9 +214,11 @@ def _export_fused_experts(module: nn.Module, dtype: torch.dtype) -> None:
                 # in postprocess_state_dict will drop the duplicate.
                 if hasattr(_prior_proj, "weight"):
                     _cur_proj.weight = _prior_proj.weight
-                # Alias the bit-identical scale buffers. Re-register to
-                # ensure data_ptr() matches the prior side's tensor.
-                for _attr in ("weight_scale", "weight_scale_2"):
+                # Alias the bit-identical scale buffers (including
+                # input_scale, made safe by sync_tied_input_amax pre-export
+                # merging). Re-register to ensure data_ptr() matches the
+                # prior side's tensor.
+                for _attr in ("weight_scale", "weight_scale_2", "input_scale"):
                     if not hasattr(_prior_proj, _attr):
                         continue
                     if _attr in _cur_proj._buffers:
@@ -222,9 +226,6 @@ def _export_fused_experts(module: nn.Module, dtype: torch.dtype) -> None:
                     elif hasattr(_cur_proj, _attr):
                         delattr(_cur_proj, _attr)
                     _cur_proj.register_buffer(_attr, getattr(_prior_proj, _attr))
-                # input_scale intentionally NOT aliased — per-side amaxes
-                # are legitimately different (encoder vs decoder activation
-                # distributions diverge, sometimes >10x — see Q2 analysis).
     else:
         _cache[_source_key] = module
 
