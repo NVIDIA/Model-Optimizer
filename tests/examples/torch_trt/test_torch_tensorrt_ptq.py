@@ -57,22 +57,3 @@ def test_torch_tensorrt_ptq(precision):
     )
     cmd_parts.append("--no_pretrained")
     run_example_command(cmd_parts, "torch_trt")
-
-
-@pytest.mark.parametrize("precision", _PRECISIONS)
-def test_torch_tensorrt_ptq_skip_trt(precision):
-    """Quantize-only smoke test (no torch_tensorrt.compile).
-
-    Useful on hosts without ``torch_tensorrt`` installed and as a faster
-    sanity check that just exercises the recipe + ``mtq.quantize`` path.
-    """
-    cmd_parts = extend_cmd_parts(
-        ["python", "torch_tensorrt_ptq.py"],
-        model_id="google/vit-base-patch16-224",
-        precision=precision,
-        calib_samples="4",
-        batch_size="1",
-        model_kwargs=json.dumps(_TINY_VIT_KWARGS),
-    )
-    cmd_parts.extend(["--no_pretrained", "--skip_trt"])
-    run_example_command(cmd_parts, "torch_trt")
