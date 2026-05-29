@@ -495,14 +495,18 @@ def _make_weight_mse_calibrator(
         )
         if backend is not None and backend_factory is not None:
             return backend_factory(initial_amax, axis, quant_func)
-        elif _uses_modelopt_fp8_weight_scales(weight_quantizer):
+        if _uses_modelopt_fp8_weight_scales(weight_quantizer):
             return NVFP4MSECalibrator(
                 amax=initial_amax,
                 axis=axis,
                 global_amax=weight_quantizer.global_amax,
                 quant_func=quant_func,
             )
+        # fp8_scale_sweep covers only registered backends and static NVFP4 weights;
+        # skip MSE calibration for all other quantizers (no multiplier search).
+        return None
 
+    # fp8_scale_sweep disabled: multiplier-search MSE calibration for all quantizers.
     return MseCalibrator(
         amax=initial_amax,
         axis=axis,
@@ -537,10 +541,11 @@ def mse_calibrate(
         step_size: Step size for amax search (default: 0.1).
         start_multiplier: Starting multiplier for amax search (default: 0.25).
         stop_multiplier: Ending multiplier for amax search (default: 4.0).
-        fp8_scale_sweep: If True, use FP8 E4M3 scale-value sweep for supported
-            FP8-scale weight quantizers instead of multiplier search. Currently this
-            covers ModelOpt static NVFP4 weights and registered custom backends.
-            Other weight quantizers use the multiplier search.
+        fp8_scale_sweep: If True, only ModelOpt static NVFP4 weights and registered
+            custom backends are MSE-calibrated (via FP8 E4M3 scale-value sweep); all
+            other weight quantizers (INT8, plain FP8, unregistered backends, etc.) are
+            skipped and left at their max-calibrated amax. If False, all weight
+            quantizers use the multiplier search.
 
     See :class:`MseCalibConfig <modelopt.torch.quantization.config.MseCalibConfig>` for
     details on the remaining arguments.

@@ -624,13 +624,13 @@ class TestRegisterFP8SweepCalibrator:
 
         assert len(factory_calls) == 0
 
-    def test_unregistered_backend_uses_default_mse_calibrator(self):
-        """A quantizer with an unregistered backend falls through to MseCalibrator."""
+    def test_unregistered_backend_skipped_when_fp8_sweep_enabled(self):
+        """An unregistered backend is skipped under fp8_scale_sweep, leaving the max calibrator."""
         model = self._quantize_and_calibrate("_test_unregistered", fp8_scale_sweep=True)
         for module in model.modules():
             if isinstance(module, TensorQuantizer) and module.is_enabled:
                 if getattr(module, "_calibrator", None) is not None:
-                    assert isinstance(module._calibrator, calib.MseCalibrator)
+                    assert not isinstance(module._calibrator, calib.MseCalibrator)
 
     def test_modelopt_static_nvfp4_uses_fp8_scale_sweep(self):
         """Internal ModelOpt static NVFP4 weights use the FP8-scale MSE calibrator."""
@@ -656,8 +656,8 @@ class TestRegisterFP8SweepCalibrator:
 
         assert isinstance(cal, calib.NVFP4MSECalibrator)
 
-    def test_internal_int8_uses_multiplier_search_when_fp8_sweep_enabled(self):
-        """Internal formats without FP8 block scales keep the normal MSE calibrator."""
+    def test_internal_int8_skipped_when_fp8_sweep_enabled(self):
+        """INT8 is skipped under fp8_scale_sweep but uses the multiplier search otherwise."""
         q = TensorQuantizer(
             QuantizerAttributeConfig(num_bits=8, axis=None),
             amax=torch.tensor(2.0),
@@ -669,6 +669,16 @@ class TestRegisterFP8SweepCalibrator:
             start_multiplier=0.25,
             stop_multiplier=4.0,
             fp8_scale_sweep=True,
+        )
+
+        assert cal is None
+
+        cal = _make_weight_mse_calibrator(
+            q,
+            step_size=0.1,
+            start_multiplier=0.25,
+            stop_multiplier=4.0,
+            fp8_scale_sweep=False,
         )
 
         assert isinstance(cal, calib.MseCalibrator)
