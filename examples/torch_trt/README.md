@@ -28,18 +28,18 @@ the version pulled by `pip` must match your installed PyTorch.
 
 ```bash
 # FP8 / NVFP4 default model is google/vit-large-patch16-224
-python examples/torch_trt/quantize_and_compile_vit.py \
+python examples/torch_trt/torch_tensorrt_ptq.py \
     --precision fp8/nvfp4 \
     --calib_samples 128 \
     --batch_size 1
 
 # Quantize but don't TRT-compile (handy on a non-TRT host)
-python examples/torch_trt/quantize_and_compile_vit.py \
+python examples/torch_trt/torch_tensorrt_ptq.py \
     --precision fp8/nvfp4 \
     --skip_trt
 
 # Custom model + custom recipe
-python examples/torch_trt/quantize_and_compile_vit.py \
+python examples/torch_trt/torch_tensorrt_ptq.py \
     --model_id <huggingface/model-id> \
     --recipe <recipe-path-relative-to-modelopt_recipes-or-absolute-yaml>
 ```
@@ -53,8 +53,9 @@ python examples/torch_trt/quantize_and_compile_vit.py \
    [`modelopt_recipes/`](../../modelopt_recipes/). The default recipes
    target ViT; pass `--recipe <path>` to use a different one for a
    different model.
-4. Compiles the quantized model with `torch_tensorrt.compile` and prints a
-   median-latency benchmark against the BF16 eager baseline.
+4. Compiles the quantized model with `torch_tensorrt.compile` and verifies
+   that the compiled-model argmax matches the fake-quant argmax on a sample
+   input.
 
 ## ViT-specific recipes shipped with the example
 
@@ -80,7 +81,7 @@ enable rules means no `enable: false` carve-outs are needed.
 
 Older GPUs will still let `mtq.quantize` succeed (it emits fake-quant
 nodes in PyTorch), but `torch_tensorrt.compile` will not find a real
-low-precision kernel and the speedup column will be ~1×.
+low-precision kernel.
 
 ### Resuming from a saved checkpoint
 

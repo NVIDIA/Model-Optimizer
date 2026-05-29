@@ -13,32 +13,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Quantize a HuggingFace ViT model with ModelOpt and deploy it with Torch-TensorRT.
+"""Quantize a HuggingFace ViT model with ModelOpt and compile with Torch-TensorRT.
 
 Pipeline:
 
 1. Load ``google/vit-large-patch16-224`` (`ViTForImageClassification`) from HF.
-2. Build a calibration loader from `zh-plus/tiny-imagenet` (same pattern as the
-   `torch_onnx` example) so the recipe runs end-to-end without ImageNet access.
-3. Run ``mtq.quantize`` with one of the ViT-specific recipes
-   (`modelopt_recipes/huggingface/vit/ptq/`). Two non-default variants are
-   shipped:
+2. Build a calibration loader from `zh-plus/tiny-imagenet` so the recipe runs
+   end-to-end without ImageNet access.
+3. Run ``mtq.quantize`` with one of the ViT-specific recipes under
+   `modelopt_recipes/huggingface/vit/ptq/` (FP8 or NVFP4).
+4. Compile the quantized model with ``torch_tensorrt.compile(ir="dynamo",
+   min_block_size=1)`` and verify the compiled-model argmax matches the
+   fake-quant argmax on a sample input.
 
-   * ``fp8`` -> ``fp8_mha-classifier_skip``: W8A8 FP8 with an MHA-aware
-     LayerNorm output quantizer, FP8 attention BMM/softmax slots, and the
-     `classifier` head left in FP16.
-   * ``nvfp4`` -> ``nvfp4_linear-fp8_conv-classifier_skip``: NVFP4 W4A4 on
-     encoder Linear layers, FP8 override on the patch-embedding Conv2d (TRT
-     has no NVFP4 kernel for 4D Conv inputs), AWQ-lite calibration, and the
-     `classifier` head left in FP16.
-
-4. Compile the quantized model with ``torch_tensorrt.compile`` (Dynamo IR,
-   ``min_block_size=1``) and run an end-to-end sanity check + small benchmark
-   against the eager BF16 baseline.
-
-This script is intentionally CLI-driven and side-effect-free outside of the
-optional ``--save_dir`` checkpoint. The quantized graph keeps Q/DQ nodes; the
-TRT compile step is what turns them into TRT precision layers.
+The quantized graph keeps Q/DQ nodes; the TRT compile step is what turns
+them into TRT precision layers.
 """
 
 from __future__ import annotations
@@ -80,13 +69,7 @@ def build_calibration_loader(
     device: torch.device,
     dtype: torch.dtype,
 ):
-    """Build a calibration tensor stream from tiny-imagenet.
-
-    tiny-imagenet avoids the gated `ILSVRC/imagenet-1k` repo so this example
-    runs unauthenticated. Images go through the HF processor (resize + center
-    crop + ImageNet normalization), which is exactly the eval-time transform
-    used by the released `vit-large-patch16-224` checkpoint.
-    """
+    """Build a calibration tensor stream from tiny-imagenet."""
     print(f"Loading calibration data ({num_samples} samples)...")
     dataset = load_dataset("zh-plus/tiny-imagenet", split="train")
     dataset = dataset.shuffle(seed=42).select(range(num_samples))
@@ -96,7 +79,6 @@ def build_calibration_loader(
         image = sample["image"]
         if image.mode != "RGB":
             image = image.convert("RGB")
-        # HF image processors emit `pixel_values` of shape (1, 3, H, W).
         pixel_values = processor(images=image, return_tensors="pt")["pixel_values"]
         tensors.append(pixel_values.squeeze(0))
 
@@ -105,12 +87,7 @@ def build_calibration_loader(
 
 
 def quantize_with_recipe(model, recipe_path: str, calib_batches):
-    """Resolve the YAML recipe and run `mtq.quantize`.
-
-    Returns the quantized model. The graph still uses high-precision math at
-    this point — Q/DQ nodes have been inserted around weights and activations
-    and amax values populated, but no kernel substitution has happened yet.
-    """
+    """Resolve the YAML recipe and run `mtq.quantize`."""
     print(f"Loading recipe: {recipe_path}")
     recipe = load_recipe(recipe_path)
     if not isinstance(recipe, ModelOptPTQRecipe):
@@ -133,8 +110,7 @@ class ViTLogitsWrapper(torch.nn.Module):
 
     HF's `ViTForImageClassification.forward` returns an `ImageClassifierOutput`
     dataclass. `torch_tensorrt.compile` (and `torch.export`) need a tensor-tree
-    return, so we unwrap it here. The wrapper holds the quantized model as a
-    submodule; Q/DQ nodes flow through unchanged.
+    return, so we unwrap it here.
     """
 
     def __init__(self, vit_model: torch.nn.Module):
@@ -146,14 +122,11 @@ class ViTLogitsWrapper(torch.nn.Module):
 
 
 def compile_with_torch_tensorrt(model: torch.nn.Module, example_input: torch.Tensor):
-    """Compile the quantized model with Torch-TensorRT (Dynamo IR).
+    """Compile the quantized model with Torch-TensorRT (Dynamo IR, strongly-typed).
 
-    `min_block_size=1` follows the Torch-TRT quantization guide — it makes the
-    partitioner accept single-node TRT subgraphs, which is what we want so the
-    Q/DQ + matmul pairs become TRT precision layers instead of falling back to
-    eager. The compile step expects fake-quant operators in the graph; we run
-    it under `export_torch_mode` so modelopt's Q/DQ are exported in the
-    TRT-friendly form.
+    `min_block_size=1` follows the Torch-TRT quantization guide so single-node
+    Q/DQ + matmul subgraphs become TRT precision layers. `export_torch_mode`
+    makes modelopt emit Q/DQ in the TRT-friendly form during `torch.export`.
     """
     import torch_tensorrt
 
@@ -164,32 +137,9 @@ def compile_with_torch_tensorrt(model: torch.nn.Module, example_input: torch.Ten
             ir="dynamo",
             arg_inputs=[example_input],
             min_block_size=1,
-            # The recipes export weights in BF16; TRT picks the FP8/NVFP4
-            # kernel from the Q/DQ pattern, not from this list.
-            enabled_precisions={torch.bfloat16, torch.float16, torch.float32},
             truncate_double=True,
         )
     return trt_model
-
-
-def benchmark(model: torch.nn.Module, example_input: torch.Tensor, n_warmup: int, n_iters: int):
-    """Median-of-`n_iters` latency over `example_input`. CUDA-event timed."""
-    torch.cuda.synchronize()
-    with torch.no_grad():
-        for _ in range(n_warmup):
-            model(example_input)
-    torch.cuda.synchronize()
-
-    starts = [torch.cuda.Event(enable_timing=True) for _ in range(n_iters)]
-    ends = [torch.cuda.Event(enable_timing=True) for _ in range(n_iters)]
-    with torch.no_grad():
-        for i in range(n_iters):
-            starts[i].record()
-            model(example_input)
-            ends[i].record()
-    torch.cuda.synchronize()
-    times = sorted(s.elapsed_time(e) for s, e in zip(starts, ends))
-    return times[len(times) // 2]
 
 
 def _argmax_logits(out) -> torch.Tensor:
@@ -227,13 +177,7 @@ def main():
         "--batch_size",
         type=int,
         default=1,
-        help="Batch size for calibration / TRT compile / benchmarking.",
-    )
-    parser.add_argument(
-        "--benchmark_iters",
-        type=int,
-        default=50,
-        help="Number of timed iterations (after warmup) per benchmark phase.",
+        help="Batch size for calibration / TRT compile.",
     )
     parser.add_argument(
         "--save_dir",
@@ -245,7 +189,7 @@ def main():
     parser.add_argument(
         "--skip_trt",
         action="store_true",
-        help="Quantize + run the BF16-fake-quant model only; skip torch_tensorrt.compile. "
+        help="Quantize + run the fake-quant model only; skip torch_tensorrt.compile. "
         "Useful for environments without torch_tensorrt installed.",
     )
     args = parser.parse_args()
@@ -253,8 +197,6 @@ def main():
     if not torch.cuda.is_available():
         raise SystemExit("This example requires a CUDA-capable GPU.")
     device = torch.device("cuda")
-    # ViT-Large is a transformer in BF16 on the released checkpoint; the Q/DQ
-    # nodes operate on top of BF16 master weights either way.
     dtype = torch.bfloat16
 
     model, processor = load_model_and_processor(args.model_id, device, dtype)
@@ -264,16 +206,10 @@ def main():
         args.batch_size, num_channels, image_size, image_size, device=device, dtype=dtype
     )
 
-    # Baseline forward + benchmark for a comparison number that survives
-    # quantization. argmax preserves the predicted-class check below.
     print("\n=== Baseline (BF16) ===")
     with torch.no_grad():
         baseline_pred = _argmax_logits(model(example_input))
-    baseline_latency = benchmark(
-        lambda x: model(x), example_input, n_warmup=5, n_iters=args.benchmark_iters
-    )
     print(f"Baseline argmax class: {baseline_pred.tolist()}")
-    print(f"Baseline latency: {baseline_latency:.3f} ms (median over {args.benchmark_iters} iters)")
 
     calib_batches = build_calibration_loader(
         processor, args.calib_samples, args.batch_size, device, dtype
@@ -289,7 +225,7 @@ def main():
         mto.save(model, ckpt)
         print(f"Saved quantized modelopt state to {ckpt}")
 
-    print("\n=== Fake-quant (modelopt, BF16 math) ===")
+    print("\n=== Fake-quant (modelopt) ===")
     with torch.no_grad():
         fq_pred = _argmax_logits(model(example_input))
     fq_match = (fq_pred == baseline_pred).all().item()
@@ -306,11 +242,7 @@ def main():
     with torch.no_grad():
         trt_pred = trt_model(example_input).argmax(dim=-1)
     trt_match = (trt_pred == baseline_pred).all().item()
-    trt_latency = benchmark(trt_model, example_input, n_warmup=5, n_iters=args.benchmark_iters)
     print(f"TRT argmax class: {trt_pred.tolist()} (matches baseline: {trt_match})")
-    print(f"TRT latency: {trt_latency:.3f} ms (median over {args.benchmark_iters} iters)")
-    speedup = baseline_latency / trt_latency if trt_latency > 0 else float("inf")
-    print(f"\nSpeedup vs. BF16 baseline: {speedup:.2f}x")
 
 
 if __name__ == "__main__":
