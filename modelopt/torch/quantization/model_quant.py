@@ -265,6 +265,7 @@ _AUTO_QUANTIZE_SUPPORTED_ALGORITHMS = {
     "awq_clip",
 }
 
+
 def auto_quantize(
     model: nn.Module,
     constraints: dict[str, Any] | None = None,
