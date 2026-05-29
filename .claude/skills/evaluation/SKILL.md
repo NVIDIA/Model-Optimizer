@@ -14,7 +14,7 @@ You're an expert in NeMo Evaluator Launcher! Guide the user through creating pro
 
 ### Workspace and Pipeline Integration
 
-If `MODELOPT_WORKSPACE_ROOT` is set, read `skills/common/workspace-management.md`. Check for existing workspaces in the current session — especially if evaluating a model from a prior PTQ or deployment step. Reuse the existing workspace so you have access to the quantized checkpoint and any code modifications.
+If `MODELOPT_WORKSPACE_ROOT` is set, read `../common/workspace-management.md`. Check for existing workspaces in the current session — especially if evaluating a model from a prior PTQ or deployment step. Reuse the existing workspace so you have access to the quantized checkpoint and any code modifications.
 
 This skill is often the final stage of the PTQ → Deploy → Eval pipeline. If the model required runtime patches during deployment (transformers upgrade, framework source fixes), carry those patches into the NEL config via `deployment.command`.
 
@@ -239,7 +239,7 @@ NEL's default deployment images by framework:
 
 Before submitting, identify the exact deployment and evaluation-task images that will be pulled. If the images are public, skip the registry-authentication preflight; pyxis/enroot can pull public images without stored credentials. Do not require credentials just because the registry is DockerHub or NGC.
 
-Only verify cluster credentials when an image is private or access-restricted (private DockerHub repo, private NGC repo, internal registry, or user-provided image that is not known to be public). See `skills/common/slurm-setup.md` section 6 for the credential setup procedure.
+Only verify cluster credentials when an image is private or access-restricted (private DockerHub repo, private NGC repo, internal registry, or user-provided image that is not known to be public). See `../common/slurm-setup.md` section 6 for the credential setup procedure.
 
 ```bash
 ssh <host> "grep -E '^\s*machine\s+' ~/.config/enroot/.credentials 2>/dev/null"

@@ -38,7 +38,7 @@ The script handles: GPU detection, quantization flag auto-detection (FP8 vs FP4)
 
 ### 0. Check workspace (multi-user / Slack bot)
 
-If `MODELOPT_WORKSPACE_ROOT` is set, read `skills/common/workspace-management.md`. Before creating a new workspace, check the current session for existing model workspaces — especially if deploying a checkpoint from a prior PTQ run:
+If `MODELOPT_WORKSPACE_ROOT` is set, read `../common/workspace-management.md`. Before creating a new workspace, check the current session for existing model workspaces — especially if deploying a checkpoint from a prior PTQ run:
 
 ```bash
 ls "$MODELOPT_WORKSPACE_ROOT/<session_id>/" 2>/dev/null
@@ -79,7 +79,7 @@ Check the support matrix in `references/support-matrix.md` to confirm the model 
 
 ### 3. Check the environment
 
-Read `skills/common/environment-setup.md` for GPU detection, local vs remote, and SLURM/Docker/bare metal detection. After completing it you should know: GPU model/count, local or remote, and execution environment.
+Read `../common/environment-setup.md` for GPU detection, local vs remote, and SLURM/Docker/bare metal detection. After completing it you should know: GPU model/count, local or remote, and execution environment.
 
 Then check the **deployment framework** is installed:
 
@@ -174,7 +174,7 @@ All checks must pass before reporting success to the user.
 
 If a cluster config exists (`~/.config/modelopt/clusters.yaml` or `.claude/clusters.yaml`), or the user mentions running on a remote machine:
 
-0. **Check container registry auth** — before submitting any SLURM job with a container image, verify credentials exist on the cluster per `skills/common/slurm-setup.md` section 6. If credentials are missing for the image's registry, ask the user to fix auth or switch to an image on an authenticated registry (e.g., NGC). **Do not submit until auth is confirmed.**
+0. **Check container registry auth** — before submitting any SLURM job with a container image, verify credentials exist on the cluster per `../common/slurm-setup.md` section 6. If credentials are missing for the image's registry, ask the user to fix auth or switch to an image on an authenticated registry (e.g., NGC). **Do not submit until auth is confirmed.**
 
 1. **Source remote utilities:**
 
@@ -195,7 +195,7 @@ If a cluster config exists (`~/.config/modelopt/clusters.yaml` or `.claude/clust
 
 3. **Deploy based on remote environment:**
 
-   - **SLURM** — see `skills/common/slurm-setup.md` for job script templates (container setup, account/partition discovery). The server command inside the container is the same as Step 4 (e.g., `python -m vllm.entrypoints.openai.api_server --model <path> --quantization modelopt`). After submitting, register the job and set up monitoring per the **monitor skill**. Get the node hostname from `squeue -j $JOBID -o %N`.
+   - **SLURM** — see `../common/slurm-setup.md` for job script templates (container setup, account/partition discovery). The server command inside the container is the same as Step 4 (e.g., `python -m vllm.entrypoints.openai.api_server --model <path> --quantization modelopt`). After submitting, register the job and set up monitoring per the **monitor skill**. Get the node hostname from `squeue -j $JOBID -o %N`.
 
    - **Bare metal / Docker** — use `remote_run` to start the server directly:
 
