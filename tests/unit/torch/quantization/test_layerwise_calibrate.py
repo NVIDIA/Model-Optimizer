@@ -16,6 +16,7 @@
 """Unit tests for layerwise_calibrate and LayerActivationCollector."""
 
 import copy
+import json
 from collections import deque
 
 import pytest
@@ -773,4 +774,131 @@ def test_layerwise_no_qdq_matches_sequential_amax(monkeypatch):
             rtol=1e-5,
             atol=1e-6,
             msg=f"amax mismatch at {name}: seq={seq_amax[name]}, lw={lw_amax[name]}",
+        )
+
+
+def _layer_dir_names(checkpoint_dir):
+    return sorted(p.name for p in checkpoint_dir.iterdir() if p.name.startswith("layer_"))
+
+
+def test_layerwise_save_every_writes_next_inputs_only_at_window_boundaries(monkeypatch, tmp_path):
+    """With save_every=2 on a 4-layer model, every layer dir is still written
+    (so resume can replay skip layers), but ``next_inputs.pt`` — the large
+    activation cache — appears only at window boundaries.
+    """
+    _register_test_discoverer(monkeypatch)
+
+    config = _int8_layerwise_config(
+        {
+            "method": "max",
+            "layerwise": {
+                "enable": True,
+                "checkpoint_dir": str(tmp_path),
+                "save_every": 2,
+            },
+        }
+    )
+    torch.manual_seed(0)
+    model = _SimpleTransformerModel(n_layers=4, dim=16)
+    calib_data = [torch.randint(0, 32, (2, 8))]
+    mtq.quantize(model, config, forward_loop=lambda m: [m(b) for b in calib_data])
+
+    # Window boundaries are layer_idx 1 and 3 -> all 4 layer dirs exist (window-save).
+    assert _layer_dir_names(tmp_path) == [
+        "layer_0000",
+        "layer_0001",
+        "layer_0002",
+        "layer_0003",
+    ]
+    # next_inputs.pt is only at the boundary layers (the resume restart points).
+    assert not (tmp_path / "layer_0000" / "next_inputs.pt").exists()
+    assert (tmp_path / "layer_0001" / "next_inputs.pt").exists()
+    assert not (tmp_path / "layer_0002" / "next_inputs.pt").exists()
+    # Last layer never has next_inputs.pt (no subsequent layer).
+    assert not (tmp_path / "layer_0003" / "next_inputs.pt").exists()
+
+
+def test_layerwise_save_quantizers_only_resume_matches_one_shot_amax(monkeypatch, tmp_path):
+    """End-to-end resume with ``save_quantizers_only=True`` matches a one-shot run.
+
+    Run a full calibration with the flag enabled, then rewind the manifest to
+    ``last_completed_layer=0`` and re-run on a fresh model with the same
+    checkpoint dir. The resume path will:
+      1. ``setup_resume`` reads only ``output_meta`` (no weights.pt needed).
+      2. The main loop re-calibrates layers 1 and 2 from scratch.
+      3. ``full_restore`` reloads layer 0 from disk — no ``weights.pt``, just
+         ``quantizer_buffers.pt`` (which carries ``_amax``).
+    Also asserts the on-disk shape (weights.pt absent, quantizer_buffers.pt
+    present) so a regression in the file layout fails here too.
+    """
+    _register_test_discoverer(monkeypatch)
+
+    def collect_amax(model):
+        return {
+            name: q._amax.clone().detach()
+            for name, q in model.named_modules()
+            if isinstance(q, TensorQuantizer)
+            and q.is_enabled
+            and getattr(q, "_amax", None) is not None
+        }
+
+    def build_cfg(checkpoint_dir):
+        return _int8_layerwise_config(
+            {
+                "method": "max",
+                "layerwise": {
+                    "enable": True,
+                    "checkpoint_dir": str(checkpoint_dir),
+                    "save_quantizers_only": True,
+                },
+            }
+        )
+
+    calib_data = [torch.randint(0, 32, (2, 8))]
+    forward_loop = lambda m: [m(b) for b in calib_data]  # noqa: E731
+
+    # One-shot baseline (separate checkpoint dir so it doesn't interfere).
+    baseline_dir = tmp_path / "baseline"
+    torch.manual_seed(0)
+    baseline_model = _SimpleTransformerModel(n_layers=3, dim=16)
+    mtq.quantize(baseline_model, build_cfg(baseline_dir), forward_loop=forward_loop)
+    baseline_amax = collect_amax(baseline_model)
+    assert baseline_amax, "baseline produced no amax values"
+
+    # Full run into resume_dir, then rewind the manifest to simulate an
+    # interrupt after layer 0.
+    resume_dir = tmp_path / "resume"
+    torch.manual_seed(0)
+    setup_model = _SimpleTransformerModel(n_layers=3, dim=16)
+    mtq.quantize(setup_model, build_cfg(resume_dir), forward_loop=forward_loop)
+
+    # On-disk shape: no weights.pt, quantizer_buffers.pt present per layer.
+    for name in _layer_dir_names(resume_dir):
+        d = resume_dir / name
+        assert not (d / "weights.pt").exists(), (
+            f"{name}: weights.pt present but save_quantizers_only=True"
+        )
+        assert (d / "quantizer_buffers.pt").exists(), (
+            f"{name}: quantizer_buffers.pt missing under save_quantizers_only"
+        )
+
+    manifest_path = resume_dir / "manifest.json"
+    manifest_path.write_text(json.dumps({"last_completed_layer": 0, "num_layers": 3}))
+
+    # Resume: fresh model, same seed, same checkpoint dir. Resume reads
+    # output_meta + quantizer_state for layer 0 (no weights.pt) and
+    # re-calibrates layers 1, 2.
+    torch.manual_seed(0)
+    resumed_model = _SimpleTransformerModel(n_layers=3, dim=16)
+    mtq.quantize(resumed_model, build_cfg(resume_dir), forward_loop=forward_loop)
+
+    resumed_amax = collect_amax(resumed_model)
+    assert set(resumed_amax) == set(baseline_amax)
+    for name in baseline_amax:
+        torch.testing.assert_close(
+            resumed_amax[name],
+            baseline_amax[name],
+            rtol=1e-5,
+            atol=1e-6,
+            msg=f"amax mismatch after resume at {name}",
         )

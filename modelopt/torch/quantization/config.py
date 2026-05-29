@@ -152,7 +152,7 @@ the layer named ``lm_head``,  you can create a custom config and quantize your m
 
 import warnings
 from collections.abc import Mapping, Sequence
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 
 from pydantic import AliasChoices, Field, ValidationInfo, field_validator, model_validator
 
@@ -668,6 +668,28 @@ class LayerwiseConfig(ModeloptBaseConfig):
         ),
     )
 
+    save_every: int = ModeloptField(
+        default=1,
+        ge=1,
+        title="Flush resume metadata every N layers (final layer always flushes).",
+        description=(
+            "Only the boundary layer of each window writes the large "
+            "``next_inputs.pt`` activation cache; other per-layer files are "
+            "still written for every layer (resume needs them to replay skips). "
+            "Mid-window interrupts re-calibrate the unfinished window on resume."
+        ),
+    )
+
+    save_quantizers_only: bool = ModeloptField(
+        default=False,
+        title="Skip the per-layer weights blob; persist only quantizer state.",
+        description=(
+            "Only accepted by algorithms that update solely ``TensorQuantizer._amax`` "
+            "(max, mse, local_hessian). Rejected for weight-mutating algorithms "
+            "(GPTQ, AWQ, SmoothQuant) where it would silently lose updates on resume."
+        ),
+    )
+
 
 def _coerce_layerwise_input(value):
     """Normalize a raw ``layerwise`` value to a dict; warn on deprecated bool."""
@@ -688,6 +710,10 @@ def _coerce_layerwise_input(value):
 
 class QuantizeAlgorithmConfig(ModeloptBaseConfig):
     """Calibration algorithm config base."""
+
+    # Set True only for algorithms that update solely ``TensorQuantizer._amax``
+    # (no ``layer.weight`` mutation). Gates ``layerwise.save_quantizers_only``.
+    _supports_save_quantizers_only: ClassVar[bool] = False
 
     method: Literal[None] = ModeloptField(
         None,
@@ -761,6 +787,17 @@ class QuantizeAlgorithmConfig(ModeloptBaseConfig):
             )
         return self
 
+    @model_validator(mode="after")
+    def _validate_save_quantizers_only_supported(self):
+        """Enforce the ``_supports_save_quantizers_only`` whitelist."""
+        if self.layerwise.save_quantizers_only and not self._supports_save_quantizers_only:
+            raise ValueError(
+                f"Algorithm '{self.method}' mutates layer weights in-place; "
+                "save_quantizers_only=True would lose those updates on resume. "
+                "Only max/mse/local_hessian (amax-only) support this flag."
+            )
+        return self
+
 
 class MaxCalibConfig(QuantizeAlgorithmConfig):
     """The config for max calibration algorithm.
@@ -769,6 +806,8 @@ class MaxCalibConfig(QuantizeAlgorithmConfig):
     to set the quantization scaling factor.
     See `Integer Quantization <https://arxiv.org/pdf/2004.09602>`_ for the concepts.
     """
+
+    _supports_save_quantizers_only: ClassVar[bool] = True
 
     method: Literal["max"] = ModeloptField("max")
 
@@ -800,6 +839,8 @@ class MseCalibConfig(QuantizeAlgorithmConfig):
 
     When fp8_scale_sweep is enabled, step_size is ignored.
     """
+
+    _supports_save_quantizers_only: ClassVar[bool] = True
 
     method: Literal["mse"] = ModeloptField("mse")
 
@@ -852,6 +893,8 @@ class LocalHessianCalibConfig(QuantizeAlgorithmConfig):
     - ``H = X @ X.T`` is the local Hessian computed from input activations X
 
     """
+
+    _supports_save_quantizers_only: ClassVar[bool] = True
 
     method: Literal["local_hessian"] = ModeloptField("local_hessian")
 
