@@ -15,9 +15,13 @@
 
 """Tests for NVFP4StaticQuantizer and NVFP4MSECalibrator."""
 
+import copy
+
 import pytest
 import torch
+from torch import nn
 
+import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.calib import NVFP4MSECalibrator
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.nn import NVFP4StaticQuantizer, TensorQuantizer
@@ -138,9 +142,41 @@ class TestNVFP4StaticQuantizer:
 
         assert torch.allclose(output, expected)
 
+    def test_static_export_clamps_overflowing_fp8_block_scales(self, device):
+        """Static export should match fake quant clamping and never write NaN FP8 scales."""
+        cfg = QuantizerAttributeConfig(
+            num_bits=(2, 1),
+            block_sizes={-1: 16, "type": "static", "scale_bits": (4, 3)},
+        )
+        quantizer = NVFP4StaticQuantizer(quant_attribute_cfg=cfg).to(device)
+        quantizer.amax = torch.tensor([8.0], device=device)
+        quantizer.global_amax = torch.tensor(1.0, device=device)
+        weight = torch.ones(1, 16, device=device)
+
+        weight_scale, _ = NVFP4QTensor.get_weights_scaling_factor_from_quantizer(quantizer, weight)
+
+        assert weight_scale.dtype == torch.float8_e4m3fn
+        assert torch.isfinite(weight_scale.float()).all()
+        assert torch.equal(weight_scale.float(), torch.full_like(weight_scale.float(), 448.0))
+
 
 @pytest.mark.parametrize("device", ["cuda"])
 class TestNVFP4MSECalibrator:
+    def test_static_mse_reference_path_handles_padded_last_dim(self, device, monkeypatch):
+        """MSE calibration should compare tensors in the same padded block layout."""
+        monkeypatch.setenv("MODELOPT_NVFP4_TRITON_SWEEP", "0")
+        model = nn.Linear(60, 512, bias=False).eval().to(device=device, dtype=torch.bfloat16)
+        inputs = torch.randn(2, 60, device=device, dtype=torch.bfloat16)
+
+        mtq.quantize(
+            model,
+            copy.deepcopy(mtq.NVFP4_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG),
+            forward_loop=lambda model: model(inputs),
+        )
+
+        assert model.weight_quantizer.amax is not None
+        assert model.weight_quantizer.amax.numel() == 512 * 4
+
     def test_basic_initialization(self, device):
         """Test NVFP4MSECalibrator initialization."""
         num_blocks = 4

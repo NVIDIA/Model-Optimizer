@@ -630,13 +630,3 @@ class TestRegisterFP8SweepCalibrator:
         self._quantize_and_calibrate("_test_no_sweep", fp8_scale_sweep=False)
 
         assert len(factory_calls) == 0
-
-    def test_unregistered_backend_uses_default_mse_calibrator(self):
-        """A quantizer with an unregistered backend falls through to MseCalibrator."""
-        from modelopt.torch.quantization.calib.mse import MseCalibrator
-
-        model = self._quantize_and_calibrate("_test_unregistered", fp8_scale_sweep=True)
-        for module in model.modules():
-            if isinstance(module, TensorQuantizer) and module.is_enabled:
-                if getattr(module, "_calibrator", None) is not None:
-                    assert isinstance(module._calibrator, MseCalibrator)

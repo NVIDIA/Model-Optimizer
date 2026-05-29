@@ -27,5 +27,14 @@ class Model:
         """
         raise NotImplementedError
 
+    def get_serving_config(self):
+        """Return a JSON-serializable dict describing the engine's effective config.
+
+        Captured into configuration.json's `serving_config` for reproducibility.
+        Subclasses override to surface engine-specific defaults (max_model_len,
+        kv_cache_dtype, etc.) that don't appear in the CLI args. Default: empty.
+        """
+        return {}
+
     def stop(self):
         pass

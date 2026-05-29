@@ -28,6 +28,7 @@ from ....pruning.expert_removal_pruning_mixin import (
     ExpertRemovalLayerDescriptor,
     ExpertRemovalPruningMixIn,
 )
+from ....pruning.kv_heads_pruning_mixin import KVHeadsLayerDescriptor, KVHeadsPruningMixIn
 
 # Expert removal is supported for unquantized models (test models).
 # Production models use MXFP4 quantized MoE with combined tensors
@@ -37,7 +38,11 @@ from ....utils.dummy_modules import DummyBlock
 from ...model_descriptor import ModelDescriptor, ModelDescriptorFactory
 from ...puzzformer.no_op import MatchingZeros, Same, return_tuple_of_size
 
-__all__ = ["GptOssModelDescriptor", "GptOssExpertRemovalLayerDescriptor"]
+__all__ = [
+    "GptOssExpertRemovalLayerDescriptor",
+    "GptOssKVHeadsLayerDescriptor",
+    "GptOssModelDescriptor",
+]
 
 
 @ModelDescriptorFactory.register_decorator("gpt_oss")
@@ -173,7 +178,29 @@ class GptOssModelDescriptor(ModelDescriptor):
         Note: Expert removal works for unquantized models (test models).
         Production models use MXFP4 quantization which is not yet supported.
         """
-        return {"expert_removal": ExpertRemovalPruningMixIn(GptOssExpertRemovalLayerDescriptor())}
+        # Single instance shared between the canonical key and the legacy alias
+        # so resolve_pruning_mixin returns the same object regardless of which
+        # name a caller uses.
+        expert_mixin = ExpertRemovalPruningMixIn(GptOssExpertRemovalLayerDescriptor())
+        return {
+            "experts_removal": expert_mixin,
+            # Backward-compat alias: this key was "expert_removal" before the
+            # bypass branch standardised on "experts_removal" (matching the
+            # NemotronH descriptor). Kept so external scripts that still call
+            # `resolve_pruning_mixin("expert_removal", GptOssModelDescriptor)`
+            # continue to work. Remove after a deprecation cycle.
+            "expert_removal": expert_mixin,
+            "kv_heads": KVHeadsPruningMixIn(GptOssKVHeadsLayerDescriptor()),
+        }
+
+
+@dataclass
+class GptOssKVHeadsLayerDescriptor(KVHeadsLayerDescriptor):
+    o_proj_name: str = "self_attn.o_proj"
+    attn_prefix_name: str = "model.layers.{layer_idx}.self_attn"
+    qkvo_weight_names: List[str] = field(
+        default_factory=lambda: ["q_proj", "k_proj", "v_proj", "o_proj"]
+    )
 
 
 @dataclass

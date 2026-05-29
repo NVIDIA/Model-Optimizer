@@ -249,14 +249,28 @@ def data_tensor_context_parallel_test_helper(
         )
 
 
-def auto_quantize_helper(model):
+def auto_quantize_helper(
+    model,
+    data_loader=None,
+    forward_step=None,
+    forward_backward_step=None,
+    quantization_formats=None,
+):
+    if data_loader is None:
+        data_loader = [model.get_dummy_input().cuda() for _ in range(2)]
+    if forward_step is None:
+        forward_step = lambda model, batch: model(batch)  # noqa: E731
+    if forward_backward_step is None:
+        forward_backward_step = lambda model, batch: model(batch).sum().backward()  # noqa: E731
+    if quantization_formats is None:
+        quantization_formats = [mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG, mtq.INT8_DEFAULT_CFG]
     model, search_state = mtq.auto_quantize(
         model,
         constraints={"effective_bits": 8.0},
-        quantization_formats=[mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG, mtq.INT8_DEFAULT_CFG],
-        data_loader=[model.get_dummy_input().cuda() for _ in range(2)],
-        forward_step=lambda model, batch: model(batch),
-        forward_backward_step=lambda model, batch: model(batch).sum().backward(),
+        quantization_formats=quantization_formats,
+        data_loader=data_loader,
+        forward_step=forward_step,
+        forward_backward_step=forward_backward_step,
         num_calib_steps=2,
         num_score_steps=2,
         verbose=True,
