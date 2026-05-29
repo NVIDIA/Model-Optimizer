@@ -209,10 +209,13 @@ class QwenImageDMDPipeline(DMDPipeline):
 
         call_kwargs: dict[str, Any] = dict(model_kwargs)
         call_kwargs.pop("hidden_states", None)
-        call_kwargs.pop("encoder_hidden_states_mask", None)
+        encoder_hidden_states_mask = call_kwargs.pop("encoder_hidden_states_mask", None)
         call_kwargs.pop("img_shapes", None)
         call_kwargs.pop("guidance", None)
         call_kwargs.pop("return_dict", None)
+        txt_seq_lens = call_kwargs.pop("txt_seq_lens", None)
+        if txt_seq_lens is None and encoder_hidden_states_mask is not None:
+            txt_seq_lens = encoder_hidden_states_mask.sum(dim=1).int().tolist()
 
         guidance = None
         if self._guidance_value is not None:
@@ -227,8 +230,9 @@ class QwenImageDMDPipeline(DMDPipeline):
             hidden_states=packed,
             timestep=timestep,
             encoder_hidden_states=encoder_hidden_states,
-            encoder_hidden_states_mask=None,
+            encoder_hidden_states_mask=encoder_hidden_states_mask,
             img_shapes=img_shapes,
+            txt_seq_lens=txt_seq_lens,
             guidance=guidance,
             return_dict=False,
             **call_kwargs,

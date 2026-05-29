@@ -364,6 +364,51 @@ def test_classifier_free_guidance_matches_fastgen():
     assert torch.equal(classifier_free_guidance(cond, uncond, 4.0), _fastgen_cfg(cond, uncond, 4.0))
 
 
+class _RecordingFlow(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.masks: list[torch.Tensor | None] = []
+
+    def forward(self, hidden_states, timestep, encoder_hidden_states=None, **kwargs):
+        mask = kwargs.get("encoder_hidden_states_mask")
+        self.masks.append(mask.detach().clone() if torch.is_tensor(mask) else None)
+        return torch.zeros_like(hidden_states)
+
+
+def test_compute_student_loss_uses_separate_negative_cfg_mask():
+    cfg = DMDConfig(
+        pred_type="flow",
+        num_train_timesteps=None,
+        student_sample_steps=1,
+        guidance_scale=4.0,
+        sample_t_cfg=SampleTimestepConfig(time_dist_type="uniform", min_t=0.001, max_t=0.999),
+    )
+    student = _RecordingFlow()
+    teacher = _RecordingFlow()
+    fake_score = _RecordingFlow()
+    pipe = DMDPipeline(student=student, teacher=teacher, fake_score=fake_score, config=cfg)
+
+    torch.manual_seed(7)
+    latents = torch.randn(2, 16, 4, 4)
+    noise = torch.randn_like(latents)
+    text = torch.randn(2, 8, 4)
+    neg_text = torch.randn(2, 3, 4)
+    text_mask = torch.ones(2, 8, dtype=torch.long)
+    neg_mask = torch.ones(2, 3, dtype=torch.long)
+
+    pipe.compute_student_loss(
+        latents,
+        noise,
+        encoder_hidden_states=text,
+        encoder_hidden_states_mask=text_mask,
+        negative_encoder_hidden_states=neg_text,
+        negative_encoder_hidden_states_mask=neg_mask,
+    )
+
+    assert torch.equal(teacher.masks[0], text_mask)
+    assert torch.equal(teacher.masks[1], neg_mask)
+
+
 # ---------------------------------------------------------------------------- #
 # §2.10 — GAN gen/disc/R1 losses                                               #
 # ---------------------------------------------------------------------------- #

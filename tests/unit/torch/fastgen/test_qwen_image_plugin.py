@@ -228,8 +228,9 @@ def _make_pipeline(student: nn.Module) -> QwenImageDMDPipeline:
 def test_call_model_forwards_qwen_kwargs():
     """``_call_model`` must forward the exact Qwen signature (hidden_states packed
     to ``[B, num_patches, 64]``, encoder_hidden_states verbatim,
-    encoder_hidden_states_mask=None, img_shapes as ``[[(1, h//2, w//2)]] * B``,
-    guidance=None, return_dict=False, timestep verbatim with no /1000 rescale)."""
+    encoder_hidden_states_mask verbatim, txt_seq_lens derived from the mask,
+    img_shapes as ``[[(1, h//2, w//2)]] * B``, guidance=None, return_dict=False,
+    timestep verbatim with no /1000 rescale)."""
     b, c, h, w = 2, 16, 32, 32
     student = _CapturingModel(out_shape=(b, (h // 2) * (w // 2), c * 4), style="tensor")
     pipe = _make_pipeline(student)
@@ -237,13 +238,23 @@ def test_call_model_forwards_qwen_kwargs():
     hidden = torch.randn(b, c, h, w)
     t = torch.full((b,), 0.5, dtype=torch.float32)
     enc = torch.randn(b, 512, 3584)
+    mask = torch.zeros(b, 512, dtype=torch.long)
+    mask[0, :37] = 1
+    mask[1, :42] = 1
 
-    out = pipe._call_model(student, hidden, t, encoder_hidden_states=enc)
+    out = pipe._call_model(
+        student,
+        hidden,
+        t,
+        encoder_hidden_states=enc,
+        encoder_hidden_states_mask=mask,
+    )
 
     kw = student.last_kwargs
     assert tuple(kw["hidden_states"].shape) == (b, (h // 2) * (w // 2), c * 4)
     assert tuple(kw["encoder_hidden_states"].shape) == (b, 512, 3584)
-    assert kw["encoder_hidden_states_mask"] is None
+    assert torch.equal(kw["encoder_hidden_states_mask"], mask)
+    assert kw["txt_seq_lens"] == [37, 42]
     assert kw["img_shapes"] == [[(1, h // 2, w // 2)]] * b
     assert kw["guidance"] is None
     assert kw["return_dict"] is False

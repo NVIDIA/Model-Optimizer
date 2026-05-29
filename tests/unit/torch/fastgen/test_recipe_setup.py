@@ -187,6 +187,48 @@ def test_load_fake_score_trainable_and_train_mode(stub_recipe):
     assert all(p.requires_grad for p in fake_score.parameters())
 
 
+def test_fake_score_initializes_with_teacher_weights(stub_recipe, dmd2_recipe_module, monkeypatch):
+    base = _ToyTransformer(d=8)
+    base_state = {name: tensor.detach().clone() for name, tensor in base.state_dict().items()}
+
+    def _fake_from_pretrained(*_args, **_kwargs):
+        transformer = _ToyTransformer(d=8)
+        transformer.load_state_dict(base_state)
+        return _MockPipe(transformer=transformer), {}
+
+    monkeypatch.setattr(
+        dmd2_recipe_module.NeMoAutoDiffusionPipeline,
+        "from_pretrained",
+        _fake_from_pretrained,
+    )
+
+    teacher = stub_recipe._load_frozen_teacher()
+    fake_score = stub_recipe._load_fake_score()
+
+    assert teacher is not fake_score
+    assert teacher.state_dict().keys() == fake_score.state_dict().keys()
+    for name, teacher_tensor in teacher.state_dict().items():
+        assert torch.equal(teacher_tensor, fake_score.state_dict()[name]), name
+
+    assert teacher.training is False
+    assert not any(p.requires_grad for p in teacher.parameters())
+    assert fake_score.training is True
+    assert all(p.requires_grad for p in fake_score.parameters())
+
+
+def test_teacher_stays_frozen_across_phase_toggles(stub_recipe):
+    teacher = stub_recipe._load_frozen_teacher()
+    stub_recipe.__dict__["_teacher"] = teacher
+    stub_recipe.model = _ToyTransformer(d=8)
+    stub_recipe.__dict__["_fake_score"] = stub_recipe._load_fake_score()
+    stub_recipe.__dict__["_discriminator"] = None
+
+    for is_student_phase in (True, False, True):
+        stub_recipe._set_grad_requirements(is_student_phase)
+        assert teacher.training is False
+        assert not any(p.requires_grad for p in teacher.parameters())
+
+
 # ---------------------------------------------------------------------------- #
 # §7.c — _resolve_dmd_config returns DMDConfig with num_train_timesteps=None  #
 # ---------------------------------------------------------------------------- #

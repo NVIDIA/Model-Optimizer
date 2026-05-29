@@ -302,9 +302,14 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
                 micro_vsd_losses: list[float] = []
                 micro_disc_losses: list[float] = []
                 for micro_batch in batch_group:
-                    latents, noise, text_embeds, neg_text_embeds = self._prepare_micro_batch(
-                        micro_batch
-                    )
+                    (
+                        latents,
+                        noise,
+                        text_embeds,
+                        text_mask,
+                        neg_text_embeds,
+                        neg_text_mask,
+                    ) = self._prepare_micro_batch(micro_batch)
 
                     if is_student_phase:
                         # ``compute_student_loss`` reads ``guidance_scale`` from the
@@ -316,7 +321,9 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
                             latents,
                             noise,
                             encoder_hidden_states=text_embeds,
+                            encoder_hidden_states_mask=text_mask,
                             negative_encoder_hidden_states=neg_text_embeds,
+                            negative_encoder_hidden_states_mask=neg_text_mask,
                             guidance_scale=None,
                         )
                         micro_vsd_losses.append(float(losses["vsd"].item()))
@@ -325,6 +332,7 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
                             latents,
                             noise,
                             encoder_hidden_states=text_embeds,
+                            encoder_hidden_states_mask=text_mask,
                         )
 
                     (losses["total"] / len(batch_group)).backward()
@@ -343,6 +351,7 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
                             latents,
                             noise,
                             encoder_hidden_states=text_embeds,
+                            encoder_hidden_states_mask=text_mask,
                         )
                         (disc_losses["total"] / len(batch_group)).backward()
                         # Manual gradient all-reduce across DP ranks (the
@@ -876,10 +885,10 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
             self._discriminator.parameters(),
             lr=lr,
             weight_decay=0.01,
-            betas=(0.0, 0.999),  # FastGen default for the discriminator
+            betas=(0.9, 0.999),  # FastGen Qwen-Image DMD2 inherits BaseOptimizerConfig betas
         )
         if is_main_process():
-            logging.info("[DMD2] Built discriminator optimizer: AdamW lr=%g betas=(0.0, 0.999)", lr)
+            logging.info("[DMD2] Built discriminator optimizer: AdamW lr=%g betas=(0.9, 0.999)", lr)
         return opt
 
     def _attach_gan_feature_capture(self) -> None:
@@ -1146,8 +1155,15 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
 
     def _prepare_micro_batch(
         self, micro_batch: dict[str, Any]
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
-        """Extract ``(latents, noise, text_embeds, negative_text_embeds)`` from a batch.
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+    ]:
+        """Extract latents, noise, text conditioning, and optional masks from a batch.
 
         Accepts both 5D ``video_latents`` (Wan / video) and 4D ``image_latents``
         (Qwen-Image / Flux / SD3). Mirrors the key dispatch in
@@ -1170,14 +1186,24 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
         text_embeds = micro_batch["text_embeddings"].to(self.device, dtype=self.bf16)
         if text_embeds.ndim == 2:
             text_embeds = text_embeds.unsqueeze(0)
+        text_mask = micro_batch.get("text_embeddings_mask")
+        if text_mask is not None:
+            text_mask = text_mask.to(self.device)
+            if text_mask.ndim == 1:
+                text_mask = text_mask.unsqueeze(0)
         negative_text_embeds = micro_batch.get("negative_text_embeddings")
         if negative_text_embeds is not None:
             negative_text_embeds = negative_text_embeds.to(self.device, dtype=self.bf16)
             if negative_text_embeds.ndim == 2:
                 negative_text_embeds = negative_text_embeds.unsqueeze(0)
+        negative_text_mask = micro_batch.get("negative_text_embeddings_mask")
+        if negative_text_mask is not None:
+            negative_text_mask = negative_text_mask.to(self.device)
+            if negative_text_mask.ndim == 1:
+                negative_text_mask = negative_text_mask.unsqueeze(0)
         # Fresh noise per micro-batch — DMD2 samples noise independently at each loss call.
         noise = torch.randn_like(latents)
-        return latents, noise, text_embeds, negative_text_embeds
+        return latents, noise, text_embeds, text_mask, negative_text_embeds, negative_text_mask
 
     def _log_step(
         self,

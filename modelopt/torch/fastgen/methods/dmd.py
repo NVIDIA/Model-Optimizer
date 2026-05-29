@@ -463,6 +463,7 @@ class DMDPipeline(DistillationPipeline):
         encoder_hidden_states: torch.Tensor | None = None,
         *,
         negative_encoder_hidden_states: torch.Tensor | None = None,
+        negative_encoder_hidden_states_mask: torch.Tensor | None = None,
         guidance_scale: float | None = None,
         **model_kwargs: Any,
     ) -> dict[str, torch.Tensor]:
@@ -489,6 +490,9 @@ class DMDPipeline(DistillationPipeline):
             negative_encoder_hidden_states: Negative conditioning used by classifier-free
                 guidance. Required when ``guidance_scale`` (or :attr:`DMDConfig.guidance_scale`)
                 is not ``None``.
+            negative_encoder_hidden_states_mask: Optional negative-conditioning mask. Used
+                for models such as Qwen-Image whose positional embedding depends on the
+                real text sequence length.
             guidance_scale: Overrides :attr:`DMDConfig.guidance_scale` for this call.
                 ``None`` keeps the config-level value.
             **model_kwargs: Forwarded verbatim to ``student``, ``teacher``, and ``fake_score``.
@@ -573,12 +577,20 @@ class DMDPipeline(DistillationPipeline):
                     "guidance_scale is set but negative_encoder_hidden_states was not provided."
                 )
             with torch.no_grad():
+                negative_model_kwargs = dict(model_kwargs)
+                if negative_encoder_hidden_states_mask is not None:
+                    negative_model_kwargs["encoder_hidden_states_mask"] = (
+                        negative_encoder_hidden_states_mask
+                    )
+                else:
+                    negative_model_kwargs.pop("encoder_hidden_states_mask", None)
+                negative_model_kwargs.pop("txt_seq_lens", None)
                 teacher_x0_neg = self._predict_x0(
                     self.teacher,
                     perturbed,
                     t,
                     encoder_hidden_states=negative_encoder_hidden_states,
-                    **model_kwargs,
+                    **negative_model_kwargs,
                 )
             # Negative-branch features are never used for GAN — drain unconditionally so
             # the buffer stays clean for subsequent calls.

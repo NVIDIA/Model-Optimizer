@@ -118,10 +118,12 @@ dmd2:
     # ``sample_from_t_list`` (dmd.py:346) which samples uniformly from
     # ``t_list[:-1]`` regardless of ``time_dist_type``.
     #
-    # ``logitnormal`` concentrates ``t`` toward the middle of [min_t, max_t];
-    # FastGen's reference Qwen DMD2 config uses ``uniform`` instead, so for
-    # parity launches override with ``--dmd2.sample_t_cfg.time_dist_type=uniform``.
-    time_dist_type: logitnormal
+    # ``uniform`` matches FastGen's reference Qwen DMD2 config. Earlier formal
+    # runs used ``logitnormal`` (concentrates ``t`` toward the middle of
+    # [min_t, max_t]) to follow Automodel's Qwen finetune reference; we now
+    # default to uniform here to keep launchers parity-aligned without an
+    # EXTRA_ARGS override. Flip to ``logitnormal`` on the CLI for an ablation.
+    time_dist_type: uniform
     min_t: 0.001
     max_t: 0.999
     p_mean: 0.0
