@@ -86,7 +86,7 @@ pipeline:
       - --concurrency 8
       - --num_requests 80
       - --output_length 4096
-      - --runtime_params modules/Model-Optimizer/tools/launcher/common/specdec_bench/runtime_params_throughput_32k.yaml
+      - --runtime_params common/specdec_bench/runtime_params_throughput_32k.yaml
       - --aa_timing
       - --show_progress
       - --save_dir /scratchspace/specdec_bench_mtp/throughput_32k
