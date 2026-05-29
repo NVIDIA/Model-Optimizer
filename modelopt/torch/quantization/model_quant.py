@@ -20,14 +20,14 @@ import inspect
 import os
 import warnings
 from collections.abc import Callable, Iterable
-from typing import Any
+from typing import Any, cast
 
 import torch
 import torch.nn as nn
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.opt import apply_mode
-from modelopt.torch.opt.searcher import ForwardLoop
+from modelopt.torch.opt.searcher import ConstraintsDict, ForwardLoop
 from modelopt.torch.opt.utils import forward_with_reshard
 from modelopt.torch.quantization.config import QuantizeConfig
 from modelopt.torch.quantization.conversion import (
@@ -543,7 +543,8 @@ def auto_quantize(
     }
     # Disable all quantizers; AutoQuantize will enable the needed ones
     set_quantizer_by_cfg(model, [{"quantizer_name": "*", "enable": False}])
-    searcher.search(model, constraints, config=search_config)
+    search_constraints = cast(ConstraintsDict, constraints or {})
+    searcher.search(model, search_constraints, config=search_config)
 
     return model, searcher.state_dict()
 

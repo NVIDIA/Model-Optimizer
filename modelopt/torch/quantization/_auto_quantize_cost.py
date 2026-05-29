@@ -181,8 +181,7 @@ def get_auto_quantize_cost_model(name: str) -> AutoQuantizeCostModel:
         return _COST_MODELS[name]
     except KeyError as e:
         raise ValueError(
-            f"Invalid constraints['cost_model']: {name}. "
-            f"Valid options are {tuple(_COST_MODELS)}."
+            f"Invalid constraints['cost_model']: {name}. Valid options are {tuple(_COST_MODELS)}."
         ) from e
 
 

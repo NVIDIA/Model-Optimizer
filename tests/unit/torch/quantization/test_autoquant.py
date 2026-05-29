@@ -24,13 +24,13 @@ from _test_utils.torch.quantization.models import SimpleConv, SimpleConvLinear, 
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
+from modelopt.torch.quantization._auto_quantize_cost import infer_active_moe_expert_ratio
 from modelopt.torch.quantization.algorithms import (
     AutoQuantizeGradientSearcher,
     QuantRecipe,
     QuantRecipeHparam,
     estimate_quant_compression,
 )
-from modelopt.torch.quantization._auto_quantize_cost import infer_active_moe_expert_ratio
 from modelopt.torch.quantization.config import _base_disable_all, _default_disabled_quantizer_cfg
 from modelopt.torch.utils import safe_load
 from modelopt.torch.utils.distributed import DistributedProcessGroup
