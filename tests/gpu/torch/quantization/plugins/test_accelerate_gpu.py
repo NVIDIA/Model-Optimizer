@@ -25,11 +25,83 @@ from accelerate import init_empty_weights, load_checkpoint_and_dispatch
 from transformers import AutoConfig, AutoModelForCausalLM
 
 import modelopt.torch.quantization as mtq
+from modelopt.torch.quantization.extensions import get_cuda_ext_mx
+from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.quantization.utils import (
     enable_weight_access_and_writeback,
     is_quantized_linear,
 )
 from modelopt.torch.quantization.utils.layerwise_calib import _layer_dir
+
+NVFP4_WEIGHT_MSE_FP8_SWEEP_CFG = {
+    "quant_cfg": [
+        {
+            "quantizer_name": "*weight_quantizer",
+            "cfg": {
+                "num_bits": (2, 1),
+                "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
+                "axis": None,
+            },
+            "enable": True,
+        },
+        {"quantizer_name": "*input_quantizer", "enable": False},
+    ],
+    "algorithm": {
+        "method": "mse",
+        "fp8_scale_sweep": True,
+    },
+}
+
+
+def _nvfp4_static_amax_dtypes(model):
+    amax_dtypes = {}
+    for name, module in model.named_modules():
+        if (
+            isinstance(module, TensorQuantizer)
+            and module.is_nvfp4_static
+            and module.amax is not None
+        ):
+            amax_dtypes[name] = module.amax.dtype
+    return amax_dtypes
+
+
+def _assert_nvfp4_static_amaxes_fp32(amax_dtypes, model_dtype, label):
+    assert amax_dtypes, f"{label}: expected NVFP4 static amaxes for model dtype {model_dtype}"
+    assert all(amax_dtype == torch.float32 for amax_dtype in amax_dtypes.values()), (
+        f"{label}: expected all NVFP4 static amaxes to be fp32 for model dtype {model_dtype}, "
+        f"got {amax_dtypes}"
+    )
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_transformers_mse_calibrate_fp32_amax_save_restore(tmp_path, dtype):
+    if get_cuda_ext_mx() is None:
+        pytest.skip("cuda_ext_mx is not available")
+
+    tiny_llama_dir = create_tiny_llama_dir(tmp_path, dtype=dtype)
+    model = AutoModelForCausalLM.from_pretrained(tiny_llama_dir, torch_dtype=dtype).cuda()
+    input_ids = torch.randint(0, model.config.vocab_size, (1, 4), device="cuda")
+    cfg = copy.deepcopy(NVFP4_WEIGHT_MSE_FP8_SWEEP_CFG)
+
+    mtq.quantize(model, cfg, lambda model: model(input_ids))
+    amax_dtypes = _nvfp4_static_amax_dtypes(model)
+    _assert_nvfp4_static_amaxes_fp32(amax_dtypes, dtype, "mse calibrated")
+
+    with torch.no_grad():
+        output = model(input_ids).logits.detach().clone()
+    assert output.dtype == dtype
+
+    ckpt_path = tmp_path / f"transformers_mse_{str(dtype).rpartition('.')[-1]}"
+    model.save_pretrained(ckpt_path)
+    assert os.path.exists(ckpt_path / "modelopt_state.pth")
+    restored_model = AutoModelForCausalLM.from_pretrained(ckpt_path, torch_dtype=dtype).cuda()
+    restored_amax_dtypes = _nvfp4_static_amax_dtypes(restored_model)
+    _assert_nvfp4_static_amaxes_fp32(restored_amax_dtypes, dtype, "restored")
+
+    with torch.no_grad():
+        restored_output = restored_model(input_ids).logits.detach().clone()
+    assert restored_output.dtype == dtype
+    assert torch.equal(output, restored_output)
 
 
 def test_cpu_offloaded_tinyllama(tmp_path):

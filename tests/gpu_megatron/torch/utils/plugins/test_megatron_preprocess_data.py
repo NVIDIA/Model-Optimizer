@@ -152,6 +152,51 @@ def test_megatron_preprocess_data_with_gzip_input(tmp_path):
     assert Path(prefixes[0] + ".bin").stat().st_size > 0
 
 
+def test_megatron_preprocess_data_tool_calls_arguments_normalized(tmp_path):
+    # Both top-level `arguments` (str) and nested `function.arguments` (str) must be
+    # coerced to dicts so the chat template's `|items` filter doesn't crash on a string.
+    sample = {
+        "messages": [
+            {"role": "user", "content": "What is the weather in NYC?"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "arguments": '{"city": "NYC"}',
+                        },
+                    },
+                    {
+                        "id": "call_2",
+                        "type": "function",
+                        "name": "get_time",
+                        "arguments": '{"tz": "EST"}',
+                    },
+                ],
+            },
+        ]
+    }
+    jsonl_path = tmp_path / "tool_calls.jsonl"
+    jsonl_path.write_text(json.dumps(sample) + "\n", encoding="utf-8")
+
+    prefixes = megatron_preprocess_data(
+        jsonl_paths=jsonl_path,
+        output_dir=tmp_path,
+        tokenizer_name_or_path="Qwen/Qwen3-0.6B",
+        json_keys=["messages"],
+        workers=1,
+    )
+
+    assert len(prefixes) == 1
+    assert Path(prefixes[0] + ".bin").stat().st_size > 0, (
+        "tool_calls with string `arguments` should tokenize without crashing"
+    )
+
+
 def test_megatron_preprocess_data_hf_streaming_warning(tmp_path):
     # hf_streaming without hf_max_samples_per_split should warn and fall back to non-streaming
     with pytest.warns(UserWarning, match="hf_streaming"):

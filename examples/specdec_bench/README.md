@@ -64,7 +64,7 @@ python3 run.py \
 
 ### Running [SPEED-Bench](https://huggingface.co/datasets/nvidia/SPEED-Bench) on Llama 3.3 70B + Eagle 3
 
-1. Install the requirements file using `pip install -r requirements_speed.txt`
+1. Install the requirements file using `pip install -r requirements.txt`
 
 2. Prepare the data using the provided script:
 
@@ -144,6 +144,33 @@ python3 run.py \
     --show_progress \
     --runtime_params runtime_args_long_context.yaml
 ```
+
+## Uploading results to S3
+
+Each `run.py` invocation writes a result directory containing `configuration.json`,
+`timing.json`, `acceptance_rate.json`, and (when applicable) `mtbench.json` / `specbench.json`.
+`upload_to_s3.py` is a single-file, drop-in tool that uploads one run — or an entire sweep —
+to any S3-compatible bucket:
+
+```bash
+python upload_to_s3.py /path/to/run_or_sweep_dir s3://your-bucket/some/prefix \
+    --endpoint https://your-s3-endpoint \
+    --key-id YOUR_KEY_ID \
+    --secret YOUR_SECRET
+```
+
+`--endpoint`, `--key-id`, and `--secret` default to the `S3_ENDPOINT`, `S3_KEY_ID`, and
+`S3_SECRET` environment variables. Omit `--endpoint` (or set `S3_ENDPOINT=""`) to use AWS S3's
+default endpoint. Use `--dry-run` to preview the upload plan, and `--skip-existing` to skip
+runs already present at the destination instead of failing.
+
+The tool handles two directory layouts and mirrors them into S3:
+
+- **Flat** — `LOCAL_DIR/run_name/{configuration,timing,...}.json`
+- **Sweep** — `LOCAL_DIR/sweep_name/run_name/{configuration,timing,...}.json`
+
+`LOCAL_DIR`'s basename is preserved in the destination prefix, so re-uploads from the same
+source land in the same place.
 
 ## Notes
 

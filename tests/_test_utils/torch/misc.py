@@ -47,6 +47,9 @@ def set_seed(seed_value=42):
         torch.cuda.manual_seed_all(seed_value)  # For multi-GPU setups
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
+        # Disable TF32 so fp32 matmuls produce bit-identical results across GPU vendors
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
     random.seed(seed_value)
 
 
