@@ -46,7 +46,8 @@ Outputs:
   * An updated ``model.safetensors.index.json`` reflecting dropped/added keys.
   * ``config.json`` keeps the source FP8 quantization metadata, adds
     ``"moe_quant_algo": "NVFP4"`` for DeepSeek-V4 loaders, and embeds the
-    same NVFP4 MoE layer manifest emitted to ``hf_quant_config.json``.
+    NVFP4 MoE layer manifest using the HF ``ignore`` spelling for excluded
+    modules.
   * An ``hf_quant_config.json`` manifest listing the NVFP4-quantized layers.
     MTP expert weights are left in the source format by default; pass
     ``--include_mtp_experts`` to convert them too.
@@ -521,7 +522,7 @@ def _rewrite_config_json(
     quant_cfg["group_size"] = moe_quantization["group_size"]
     quant_cfg["config_groups"] = _build_nvfp4_config_groups()
     quant_cfg["quantized_layers"] = moe_quantization["quantized_layers"]
-    quant_cfg["exclude_modules"] = moe_quantization["exclude_modules"]
+    quant_cfg.pop("exclude_modules", None)
     quant_cfg["ignore"] = moe_quantization["exclude_modules"]
     cfg["quantization_config"] = quant_cfg
     dst.write_text(json.dumps(cfg, indent=2, sort_keys=True) + "\n")
