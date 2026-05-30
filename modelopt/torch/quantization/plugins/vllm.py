@@ -105,59 +105,6 @@ _moe_fakequant_active: contextvars.ContextVar[bool] = contextvars.ContextVar(
 )
 
 
-def _enum_name(value) -> str:
-    """Return a stable upper-case name for enum-like vLLM backend values."""
-    return str(getattr(value, "name", value)).upper()
-
-
-def _moe_fakequant_enabled(quantizers: tuple[TensorQuantizer, ...]) -> bool:
-    return any(q.is_enabled for q in quantizers)
-
-
-def _requires_triton_fakequant_backend(module: torch.nn.Module) -> bool:
-    """Whether ModelOpt needs a decomposed expert backend to run expert fakequant."""
-    return _moe_fakequant_enabled(
-        (
-            module.w13_input_quantizer,
-            module.w2_input_quantizer,
-            module.w13_weight_quantizer,
-            module.w2_weight_quantizer,
-        )
-    )
-
-
-def _ensure_supported_moe_fakequant_backend(module: torch.nn.Module) -> None:
-    """Use a vLLM MoE backend where ModelOpt can observe both expert GEMMs.
-
-    vLLM's FlashInfer CUTLASS BF16 MoE backend fuses both expert GEMMs behind a
-    single call, so ModelOpt cannot calibrate/apply the w2 input quantizer on
-    that path. Select Triton through vLLM config before model construction so
-    vLLM also uses the matching weight post-processing path.
-    """
-    if not _requires_triton_fakequant_backend(module):
-        return
-
-    quant_method = getattr(module, "quant_method", None)
-    if quant_method is None:
-        return
-
-    moe_kernel = getattr(quant_method, "moe_kernel", None)
-    if moe_kernel is None:
-        return
-
-    backend_name = _enum_name(getattr(quant_method, "unquantized_backend", None))
-    if backend_name in {"TRITON", "BATCHED_TRITON"}:
-        return
-
-    raise RuntimeError(
-        "ModelOpt vLLM fakequant cannot calibrate/apply FusedMoE expert "
-        f"quantizers with vLLM MoE backend {backend_name!r}. Configure vLLM "
-        "with moe_backend='triton' before model construction, for example "
-        "`--moe-backend triton`, so vLLM selects a decomposed backend and the "
-        "matching weight layout."
-    )
-
-
 @contextmanager
 def disable_compilation(model):
     """Disable compilation for a model.
@@ -483,7 +430,6 @@ class _QuantFusedMoEBase(QuantModule):
             raise ValueError("Cannot determine first or second layer of expert")
 
     def forward(self, hidden_states: torch.Tensor, router_logits: torch.Tensor):
-        _ensure_supported_moe_fakequant_backend(self)
         # This is again due to the bad coding of vLLM
         # fused_moe submodule is overwritten by the fused_moe function
         # so we need to import the fused_moe module explicitly
