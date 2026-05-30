@@ -47,11 +47,12 @@ Design notes (in contrast to ``examples/deepseek/deepseek_v3/ptq.py`` which cove
   * A ``CalibMoE`` wrapper overrides ``MoE.forward`` during calibration to
     route every token through every local routed expert (top_k =
     n_routed_experts), so every expert's quantizers see calibration data.
-    It then re-runs with the real top_k for downstream outputs.
+    Calibration output is discarded, so this uses one all-expert pass and
+    restores top_k after the call.
 
 Usage (single node, 4 GPUs, MP=4):
 
-    torchrun --nproc-per-node 4 --master_port 12346 ptq.py \\
+    torchrun --nproc-per-node 4 --master_port 12346 deepseek_v4/ptq.py \\
         --model_path  /path/to/DeepSeek-V4-Pro-mp4-mxfp4 \\
         --config      /path/to/DeepSeek-V4-Pro/inference/config.json \\
         --output_path /path/to/amax_dump
@@ -66,7 +67,9 @@ import argparse
 import copy
 import json
 import os
+import re
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -145,7 +148,7 @@ def _dequantize_linear_weight(linear_module) -> torch.Tensor:
     return w
 
 
-def install_quant_registry() -> None:
+def install_quant_registry(calib_all_experts: bool = False) -> None:
     """Import DS-V4's ``model`` module and register minimal Quant wrappers."""
     global deekseep_v4_model
     import model as _m
@@ -220,12 +223,11 @@ def install_quant_registry() -> None:
         token routes to every local routed expert and all
         ``w*_{input,weight}_quantizer`` instances see data.
 
-        We do NOT do a second "real" forward pass — MoE has an internal
-        ``dist.all_reduce(y)`` and the double-forward form kept collectives
-        misaligned when TileLang JIT compile times varied across ranks,
-        producing 10-minute NCCL timeouts. Calibration output is discarded
-        by ``calibrate_loop`` anyway so a single all-expert forward is
-        sufficient.
+        Calibration uses one all-expert forward pass only. MoE has an internal
+        ``dist.all_reduce(y)``, and an earlier double-forward calibration shape
+        could leave collectives misaligned when TileLang JIT compile times
+        varied across ranks. Calibration output is discarded by
+        ``calibrate_loop``, so the all-expert pass is sufficient.
 
         Empty ``_setup`` because this wrapper installs no quantizer state;
         it exists solely to override ``forward``. ``DynamicModule.convert``
@@ -244,13 +246,11 @@ def install_quant_registry() -> None:
                 gate.topk = orig_topk
 
     mtq.register(original_cls=deekseep_v4_model.Expert, quantized_cls=QuantExpert)
-    # CalibMoE registration is skipped for first-sanity runs — see
-    # --calib_all_experts flag below. Registering it forces every token
-    # through every local expert which populates amax on all experts but
-    # multiplies per-batch work ~64x and surfaces NCCL-timing issues on
-    # multi-node runs. Default behavior: natural top-k routing, fewer
-    # experts observed per batch.
-    if os.environ.get("CALIB_ALL_EXPERTS", "0") == "1":
+    # CalibMoE registration is skipped by default. Registering it forces every
+    # token through every local expert, which populates amax on all experts but
+    # multiplies per-batch work ~64x and can surface NCCL timing issues on
+    # multi-node runs. Default behavior: natural top-k routing.
+    if calib_all_experts or os.environ.get("CALIB_ALL_EXPERTS", "0") == "1":
         mtq.register(original_cls=deekseep_v4_model.MoE, quantized_cls=CalibMoE)
 
 
@@ -355,16 +355,14 @@ def ptq(model, tokenizer, batch_size: int, calib_size: int, calib_datasets: list
     _trace("calib dataloader ready")
 
     def calibrate_loop(model):
-        import time as _time
-
         _trace("calibrate_loop: entering")
-        t_loop = _time.time()
+        t_loop = time.time()
         for i, data in enumerate(calib_dataset):
-            t0 = _time.time()
+            t0 = time.time()
             model(data["input_ids"])
-            dt = _time.time() - t0
+            dt = time.time() - t0
             _trace(f"calibrate_loop: batch {i} shape={tuple(data['input_ids'].shape)} dt={dt:.2f}s")
-        _trace(f"calibrate_loop: exited after {_time.time() - t_loop:.1f}s")
+        _trace(f"calibrate_loop: exited after {time.time() - t_loop:.1f}s")
 
     if world_size > 1:
         _trace("pre-calib barrier")
@@ -382,10 +380,6 @@ def ptq(model, tokenizer, batch_size: int, calib_size: int, calib_datasets: list
 
 
 def save_amax_and_quant_config(model, output_path: str):
-    def _trace(msg):
-        print(f"[rank {os.getenv('RANK', '0')}] SAVE: {msg}", flush=True)
-
-    _trace("entered")
     """Save routed-expert quantizer state + a manifest enumerating the
     quantized layer paths. The manifest is built by scanning the model for
     ``TensorQuantizer`` instances whose path contains ``.experts.<n>.w``
@@ -397,8 +391,11 @@ def save_amax_and_quant_config(model, output_path: str):
     (``quantize_to_nvfp4.py``) uses this manifest as ground truth for which
     tensor paths to replace with NVFP4 packed weight + scales.
     """
-    import re as _re
 
+    def _trace(msg):
+        print(f"[rank {os.getenv('RANK', '0')}] SAVE: {msg}", flush=True)
+
+    _trace("entered")
     world_size = int(os.getenv("WORLD_SIZE", "1"))
     rank = int(os.getenv("RANK", "0"))
     if rank == 0:
@@ -411,7 +408,7 @@ def save_amax_and_quant_config(model, output_path: str):
     # Dump only routed-expert quantizer state (skip any stray shared_experts
     # or other quantizer state attached by mtq's pattern matcher).
     _trace("building filtered state dict")
-    expert_re = _re.compile(r"\.experts\.\d+\.w[123]_")
+    expert_re = re.compile(r"\.experts\.\d+\.w[123]_")
     full_sd = model.state_dict()
     _trace(f"full state_dict size={len(full_sd)}")
     state = {
@@ -496,6 +493,12 @@ def main():
         help="skip load_model (fast iteration on wiring; weights are uninitialized)",
     )
     p.add_argument(
+        "--calib_all_experts",
+        action="store_true",
+        help="force every calibration token through every local routed expert; "
+        "also enabled by CALIB_ALL_EXPERTS=1",
+    )
+    p.add_argument(
         "--run_generate",
         type=str,
         default=None,
@@ -506,7 +509,7 @@ def main():
     args = p.parse_args()
 
     _inject_v4_module(args.dsv4_inference_dir)
-    install_quant_registry()
+    install_quant_registry(args.calib_all_experts)
     model = load_deepseek_v4(
         args.config, args.model_path, args.batch_size, dummy_weights=args.dummy_weights
     )

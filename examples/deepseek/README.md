@@ -85,7 +85,7 @@ during calibration (slower, ~2x forwards, no post-calibration sync) — pass
 `--calib_all_experts`:
 
 ```bash
-torchrun --nproc-per-node 8 --master_port=12346 ptq.py --model_path $DS_CKPT --config DeepSeek-V3.2-Exp/inference/config_671B_v3.2.json --quant_cfg NVFP4_DEFAULT_CFG --output_path $FP4_QUANT_PATH --calib_all_experts
+torchrun --nproc-per-node 8 --master_port=12346 deepseek_v3/ptq.py --model_path $DS_CKPT --config DeepSeek-V3.2-Exp/inference/config_671B_v3.2.json --quant_cfg NVFP4_DEFAULT_CFG --output_path $FP4_QUANT_PATH --calib_all_experts
 ```
 
 A summary of every TensorQuantizer is written to `$FP4_QUANT_PATH/.quant_summary.txt`.
