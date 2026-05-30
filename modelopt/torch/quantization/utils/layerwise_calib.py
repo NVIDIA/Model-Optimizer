@@ -473,13 +473,24 @@ def _read_manifest(checkpoint_dir: str) -> dict | None:
         return None
 
 
-def _write_manifest(checkpoint_dir: str, last_completed_layer: int, num_layers: int) -> None:
-    """Atomically write manifest.json."""
+def _write_manifest(
+    checkpoint_dir: str,
+    last_completed_layer: int,
+    num_layers: int,
+    save_every: int,
+    save_quantizers_only: bool,
+) -> None:
+    """Atomically write manifest.json. Config keys are persisted so resume can detect drift."""
     path = os.path.join(checkpoint_dir, "manifest.json")
     tmp = path + ".tmp"
     with open(tmp, "w") as f:
         json.dump(
-            {"last_completed_layer": last_completed_layer, "num_layers": num_layers},
+            {
+                "last_completed_layer": last_completed_layer,
+                "num_layers": num_layers,
+                "save_every": save_every,
+                "save_quantizers_only": save_quantizers_only,
+            },
             f,
         )
     os.replace(tmp, path)
@@ -489,23 +500,21 @@ def _layer_dir(checkpoint_dir: str, idx: int) -> str:
     return os.path.join(checkpoint_dir, f"layer_{idx:04d}")
 
 
-def _save_layer(
+def _save_layer_files(
     checkpoint_dir: str,
     idx: int,
     weights: dict | None,
     qstate: dict,
     quantizer_buffers: dict | None,
     output_meta: tuple,
-    next_inputs: list | None,
-    num_layers: int,
 ) -> None:
-    """Save a single layer checkpoint and update the manifest atomically.
+    """Write the per-layer files for layer *idx*.
 
-    ``weights`` may be ``None`` when the caller opts into a quantizer-only save
-    (algorithms that do not mutate ``layer.weight``). In that case the per-
-    quantizer ``state_dict()`` slice — which carries ``_amax`` — is written to
-    ``quantizer_buffers.pt`` instead, so ``full_restore`` can still recover the
-    calibrated quantizer state without the full ``weights.pt``.
+    Exactly one of ``weights`` (full layer state_dict) or ``quantizer_buffers``
+    (just the TensorQuantizer state_dict slice, used by ``save_quantizers_only``)
+    is written; ``full_restore`` falls back to whichever is present.
+    ``next_inputs.pt`` and ``manifest.json`` are deferred to window boundaries
+    in :meth:`_CheckpointState.save`.
     """
     d = _layer_dir(checkpoint_dir, idx)
     if os.path.isdir(d):
@@ -517,9 +526,6 @@ def _save_layer(
         torch.save(quantizer_buffers, os.path.join(d, "quantizer_buffers.pt"))
     torch.save(qstate, os.path.join(d, "quantizer_state.pt"))
     torch.save(output_meta, os.path.join(d, "output_meta.pt"))
-    if next_inputs is not None:
-        torch.save(next_inputs, os.path.join(d, "next_inputs.pt"))
-    _write_manifest(checkpoint_dir, idx, num_layers)
 
 
 def detect_resume_point(checkpoint_dir: str) -> tuple[int, dict] | None:
@@ -591,12 +597,20 @@ class _CheckpointState:
         os.makedirs(checkpoint_dir, exist_ok=True)
         info = detect_resume_point(checkpoint_dir)
         if info is not None:
-            manifest_num_layers = info[1].get("num_layers")
-            if manifest_num_layers is not None and manifest_num_layers != num_layers:
-                raise ValueError(
-                    f"Checkpoint num_layers mismatch: manifest has {manifest_num_layers} "
-                    f"but model has {num_layers}. Use a fresh checkpoint directory."
-                )
+            manifest = info[1]
+            # Pre-0.45 manifests omit save_every / save_quantizers_only; skip the
+            # check for keys absent from the on-disk manifest.
+            for key, new_value in (
+                ("num_layers", num_layers),
+                ("save_every", save_every),
+                ("save_quantizers_only", save_quantizers_only),
+            ):
+                ckpt_value = manifest.get(key)
+                if ckpt_value is not None and ckpt_value != new_value:
+                    raise ValueError(
+                        f"Checkpoint {key} mismatch: manifest has {ckpt_value!r} but "
+                        f"new run uses {new_value!r}. Use a fresh checkpoint directory."
+                    )
         start = info[0] if info else 0
         if start > 0:
             print_rank_0(
@@ -696,22 +710,14 @@ class _CheckpointState:
         layers: nn.ModuleList,
         next_layer_inputs: list | None = None,
     ) -> None:
-        """Snapshot layer state and write checkpoint to disk.
+        """Snapshot the just-calibrated layer; commit the window at boundaries.
 
-        With ``save_every == 1`` (default), this writes a single layer per call.
-        With ``save_every > 1``, the call is a no-op except at window boundaries
-        (every Nth layer plus the final layer); at a boundary, the full window
-        of layers since the last save is flushed to disk so ``setup_resume`` can
-        replay the skip layers correctly. The large ``next_inputs.pt`` is only
-        written for the final layer in the window — the layer the next resume
-        would restart from.
-
-        Args:
-            layer_idx: Index of the layer just calibrated.
-            model: The full model (needed for ``enable_weight_access_and_writeback``).
-            layers: The decoder layer list.
-            next_layer_inputs: Inputs for the layer following ``layer_idx``
-                (``None`` for the final layer).
+        Each call reads state from ``layers[layer_idx]`` *before* the next
+        iteration's capture forward swaps it to a ``_SkipLayer``, so state is
+        always read from the real calibrated layer. Per-layer files are written
+        every call; ``next_inputs.pt`` and the manifest are deferred to window
+        boundaries so a mid-window crash leaves the manifest pointing at the
+        previous boundary.
         """
         from modelopt.torch.quantization.conversion import quantizer_state
         from modelopt.torch.quantization.utils.core_utils import (
@@ -719,51 +725,54 @@ class _CheckpointState:
             get_quantizer_state_dict,
         )
 
+        _cpu = torch.device("cpu")
+        layer = layers[layer_idx]
+        with enable_weight_access_and_writeback(layer, model):
+            qstate = _move_to_device(quantizer_state(layer), _cpu)
+            if self.save_quantizers_only:
+                weights = None
+                quantizer_buffers = _move_to_device(get_quantizer_state_dict(layer), _cpu)
+            else:
+                weights = _move_to_device(layer.state_dict(), _cpu)
+                quantizer_buffers = None
+
+        output_meta = getattr(layer._layerwise_calib, "output_meta", None)
+        if output_meta is None:
+            # Final-layer placeholder: never consumed by skip mode (no successor).
+            output_meta = LayerActivationCollector._extract_output_meta(torch.zeros(1))
+
+        _save_layer_files(
+            self.checkpoint_dir,
+            layer_idx,
+            weights,
+            qstate,
+            quantizer_buffers,
+            _move_to_device(output_meta, _cpu),
+        )
+
         is_final = layer_idx + 1 == self.num_layers
         is_window_end = (layer_idx + 1) % self.save_every == 0
         if not (is_final or is_window_end):
             return
 
-        _cpu = torch.device("cpu")
-        window_start = self._last_saved_layer + 1
-        for i in range(window_start, layer_idx + 1):
-            is_last_in_window = i == layer_idx
-            layer_i = layers[i]
-            with enable_weight_access_and_writeback(layer_i, model):
-                qstate = _move_to_device(quantizer_state(layer_i), _cpu)
-                if self.save_quantizers_only:
-                    # Save just the TensorQuantizer state_dict slice (carries _amax)
-                    # — the layer's other weights weren't modified by the algorithm.
-                    weights = None
-                    quantizer_buffers = _move_to_device(get_quantizer_state_dict(layer_i), _cpu)
-                else:
-                    weights = _move_to_device(layer_i.state_dict(), _cpu)
-                    quantizer_buffers = None
-
-            output_meta = getattr(layer_i._layerwise_calib, "output_meta", None)
-            if output_meta is None:
-                # Placeholder for the final layer: output_meta is never used for
-                # skip mode since there is no subsequent layer that needs a
-                # correctly shaped dummy output.
-                output_meta = LayerActivationCollector._extract_output_meta(torch.zeros(1))
-
-            _save_layer(
-                self.checkpoint_dir,
-                i,
-                weights,
-                qstate,
-                quantizer_buffers,
-                _move_to_device(output_meta, _cpu),
-                _move_to_device(next_layer_inputs, _cpu)
-                if is_last_in_window and next_layer_inputs is not None
-                else None,
-                self.num_layers,
+        # Window boundary: write next_inputs.pt + manifest to commit the window.
+        if next_layer_inputs is not None:
+            torch.save(
+                _move_to_device(next_layer_inputs, _cpu),
+                os.path.join(_layer_dir(self.checkpoint_dir, layer_idx), "next_inputs.pt"),
             )
-
+        _write_manifest(
+            self.checkpoint_dir,
+            layer_idx,
+            self.num_layers,
+            save_every=self.save_every,
+            save_quantizers_only=self.save_quantizers_only,
+        )
+        window_start = self._last_saved_layer + 1
         self._last_saved_layer = layer_idx
         window_size = layer_idx - window_start + 1
         suffix = " (final)" if next_layer_inputs is None else ""
         if window_size > 1:
-            print_rank_0(f"Checkpoint: saved layers {window_start}..{layer_idx}{suffix}")
+            print_rank_0(f"Checkpoint: committed window {window_start}..{layer_idx}{suffix}")
         else:
-            print_rank_0(f"Checkpoint: saved layer {layer_idx}{suffix}")
+            print_rank_0(f"Checkpoint: committed layer {layer_idx}{suffix}")

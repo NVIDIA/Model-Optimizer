@@ -29,6 +29,7 @@ from modelopt.torch.quantization.config import (
     W4A8_AWQ_BETA_CFG,
     AWQLiteCalibConfig,
     GPTQCalibConfig,
+    LayerwiseConfig,
     LocalHessianCalibConfig,
     MaxCalibConfig,
     MseCalibConfig,
@@ -617,9 +618,13 @@ class TestLayerwiseNestedConfig:
             warnings.simplefilter("error", DeprecationWarning)
             MaxCalibConfig(layerwise={"enable": True})
 
-    def test_flat_checkpoint_dir_migrated_to_nested(self):
-        with pytest.warns(DeprecationWarning):
-            cfg = MaxCalibConfig(layerwise=True, layerwise_checkpoint_dir="/x")
+    def test_flat_checkpoint_dir_migrated_with_deprecation(self):
+        """Legacy ``layerwise_checkpoint_dir`` is migrated into the nested config
+        and emits a deprecation warning naming the flat key (independent of the
+        bool-form deprecation tested above).
+        """
+        with pytest.warns(DeprecationWarning, match="layerwise_checkpoint_dir.*deprecated"):
+            cfg = MaxCalibConfig(layerwise={"enable": True}, layerwise_checkpoint_dir="/x")
         assert cfg.layerwise.checkpoint_dir == "/x"
 
     def test_use_sequential_alias_survives_flat_checkpoint_migration(self):
@@ -665,6 +670,14 @@ class TestLayerwiseNestedConfig:
             ),
             # User-explicit False overrides the GPTQ default.
             ({"enable": True, "get_qdq_activations_from_prev_layer": False}, False),
+            # ``LayerwiseConfig`` instance: ``_coerce_layerwise_input`` must
+            # preserve ``model_fields_set`` so the GPTQ default still kicks in
+            # for fields the user didn't explicitly set.
+            (LayerwiseConfig(enable=True), True),
+            (
+                LayerwiseConfig(enable=True, get_qdq_activations_from_prev_layer=False),
+                False,
+            ),
         ],
     )
     def test_gptq_qdq_default_respects_user_explicit_value(self, layerwise_input, expected_qdq):

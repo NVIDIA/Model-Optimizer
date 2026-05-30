@@ -722,11 +722,33 @@ def test_mtq_quantize_layerwise_raises_for_unsupported_algorithm():
         )
 
 
+def _collect_amax(model):
+    return {
+        name: q._amax.clone().detach()
+        for name, q in model.named_modules()
+        if isinstance(q, TensorQuantizer) and q.is_enabled and getattr(q, "_amax", None) is not None
+    }
+
+
+def _assert_amax_close(actual, expected, label):
+    assert set(actual) == set(expected), (
+        f"Different quantizers populated for {label}: "
+        f"missing={set(expected) - set(actual)}, extra={set(actual) - set(expected)}"
+    )
+    for name in expected:
+        torch.testing.assert_close(
+            actual[name],
+            expected[name],
+            rtol=1e-5,
+            atol=1e-6,
+            msg=f"{label}: amax mismatch at {name}",
+        )
+
+
 def test_layerwise_no_qdq_matches_sequential_amax(monkeypatch):
     """Layerwise + ``get_qdq_activations_from_prev_layer=False`` must produce the
     same per-quantizer amax as the non-layerwise (sequential) max-calibration
-    flow. Both paths feed every layer full-precision activations, so the amax
-    statistics they collect must agree.
+    flow. Both paths feed every layer full-precision activations.
     """
     _register_test_discoverer(monkeypatch)
 
@@ -739,42 +761,21 @@ def test_layerwise_no_qdq_matches_sequential_amax(monkeypatch):
         for batch in calib_data:
             m(batch)
 
-    seq_cfg = _int8_layerwise_config({"method": "max"})
-    mtq.quantize(model_seq, seq_cfg, forward_loop=fwd)
-
-    lw_cfg = _int8_layerwise_config(
-        {
-            "method": "max",
-            "layerwise": {"enable": True, "get_qdq_activations_from_prev_layer": False},
-        }
+    mtq.quantize(model_seq, _int8_layerwise_config({"method": "max"}), forward_loop=fwd)
+    mtq.quantize(
+        model_lw,
+        _int8_layerwise_config(
+            {
+                "method": "max",
+                "layerwise": {"enable": True, "get_qdq_activations_from_prev_layer": False},
+            }
+        ),
+        forward_loop=fwd,
     )
-    mtq.quantize(model_lw, lw_cfg, forward_loop=fwd)
 
-    def collect_amax(model):
-        return {
-            name: q._amax.clone().detach()
-            for name, q in model.named_modules()
-            if isinstance(q, TensorQuantizer)
-            and q.is_enabled
-            and getattr(q, "_amax", None) is not None
-        }
-
-    seq_amax = collect_amax(model_seq)
-    lw_amax = collect_amax(model_lw)
-
+    seq_amax = _collect_amax(model_seq)
     assert seq_amax, "sequential calibration populated no amax values"
-    assert set(seq_amax) == set(lw_amax), (
-        f"Different quantizers populated: only-seq={set(seq_amax) - set(lw_amax)}, "
-        f"only-lw={set(lw_amax) - set(seq_amax)}"
-    )
-    for name in seq_amax:
-        torch.testing.assert_close(
-            lw_amax[name],
-            seq_amax[name],
-            rtol=1e-5,
-            atol=1e-6,
-            msg=f"amax mismatch at {name}: seq={seq_amax[name]}, lw={lw_amax[name]}",
-        )
+    _assert_amax_close(_collect_amax(model_lw), seq_amax, "layerwise vs sequential")
 
 
 def _layer_dir_names(checkpoint_dir):
@@ -818,87 +819,169 @@ def test_layerwise_save_every_writes_next_inputs_only_at_window_boundaries(monke
     assert not (tmp_path / "layer_0003" / "next_inputs.pt").exists()
 
 
-def test_layerwise_save_quantizers_only_resume_matches_one_shot_amax(monkeypatch, tmp_path):
-    """End-to-end resume with ``save_quantizers_only=True`` matches a one-shot run.
+@pytest.mark.parametrize(
+    ("scenario", "n_layers", "save_every", "save_quantizers_only", "rewind_to"),
+    [
+        # Pins the quantizer_buffers.pt restore path (no weights.pt on disk).
+        ("quantizers_only", 3, 1, True, 0),
+        # Pins the per-call snapshot fix: each save() captures the
+        # just-calibrated layer's state before the next-layer capture forward
+        # swaps it to _SkipLayer.
+        ("save_every", 4, 2, False, 1),
+    ],
+)
+def test_layerwise_checkpoint_resume_matches_one_shot_amax(
+    monkeypatch, tmp_path, scenario, n_layers, save_every, save_quantizers_only, rewind_to
+):
+    """Full run → rewind manifest → fresh resume reproduces one-shot ``_amax``.
 
-    Run a full calibration with the flag enabled, then rewind the manifest to
-    ``last_completed_layer=0`` and re-run on a fresh model with the same
-    checkpoint dir. The resume path will:
-      1. ``setup_resume`` reads only ``output_meta`` (no weights.pt needed).
-      2. The main loop re-calibrates layers 1 and 2 from scratch.
-      3. ``full_restore`` reloads layer 0 from disk — no ``weights.pt``, just
-         ``quantizer_buffers.pt`` (which carries ``_amax``).
-    Also asserts the on-disk shape (weights.pt absent, quantizer_buffers.pt
-    present) so a regression in the file layout fails here too.
+    Single test covering both checkpoint optimizations. For the
+    ``save_quantizers_only`` case also asserts the on-disk shape (no
+    ``weights.pt``, ``quantizer_buffers.pt`` present per layer).
     """
     _register_test_discoverer(monkeypatch)
 
-    def collect_amax(model):
-        return {
-            name: q._amax.clone().detach()
-            for name, q in model.named_modules()
-            if isinstance(q, TensorQuantizer)
-            and q.is_enabled
-            and getattr(q, "_amax", None) is not None
-        }
+    calib_data = [torch.randint(0, 32, (2, 8))]
+    forward_loop = lambda m: [m(b) for b in calib_data]  # noqa: E731
 
-    def build_cfg(checkpoint_dir):
+    def build_cfg(ckpt_dir):
         return _int8_layerwise_config(
             {
                 "method": "max",
                 "layerwise": {
                     "enable": True,
-                    "checkpoint_dir": str(checkpoint_dir),
-                    "save_quantizers_only": True,
+                    "checkpoint_dir": str(ckpt_dir),
+                    "save_every": save_every,
+                    "save_quantizers_only": save_quantizers_only,
                 },
             }
         )
 
-    calib_data = [torch.randint(0, 32, (2, 8))]
-    forward_loop = lambda m: [m(b) for b in calib_data]  # noqa: E731
-
-    # One-shot baseline (separate checkpoint dir so it doesn't interfere).
     baseline_dir = tmp_path / "baseline"
     torch.manual_seed(0)
-    baseline_model = _SimpleTransformerModel(n_layers=3, dim=16)
+    baseline_model = _SimpleTransformerModel(n_layers=n_layers, dim=16)
     mtq.quantize(baseline_model, build_cfg(baseline_dir), forward_loop=forward_loop)
-    baseline_amax = collect_amax(baseline_model)
-    assert baseline_amax, "baseline produced no amax values"
+    baseline_amax = _collect_amax(baseline_model)
+    assert baseline_amax
 
-    # Full run into resume_dir, then rewind the manifest to simulate an
-    # interrupt after layer 0.
     resume_dir = tmp_path / "resume"
     torch.manual_seed(0)
-    setup_model = _SimpleTransformerModel(n_layers=3, dim=16)
+    setup_model = _SimpleTransformerModel(n_layers=n_layers, dim=16)
     mtq.quantize(setup_model, build_cfg(resume_dir), forward_loop=forward_loop)
 
-    # On-disk shape: no weights.pt, quantizer_buffers.pt present per layer.
-    for name in _layer_dir_names(resume_dir):
-        d = resume_dir / name
-        assert not (d / "weights.pt").exists(), (
-            f"{name}: weights.pt present but save_quantizers_only=True"
-        )
-        assert (d / "quantizer_buffers.pt").exists(), (
-            f"{name}: quantizer_buffers.pt missing under save_quantizers_only"
-        )
+    if scenario == "quantizers_only":
+        for name in _layer_dir_names(resume_dir):
+            d = resume_dir / name
+            assert not (d / "weights.pt").exists()
+            assert (d / "quantizer_buffers.pt").exists()
 
-    manifest_path = resume_dir / "manifest.json"
-    manifest_path.write_text(json.dumps({"last_completed_layer": 0, "num_layers": 3}))
+    (resume_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "last_completed_layer": rewind_to,
+                "num_layers": n_layers,
+                "save_every": save_every,
+                "save_quantizers_only": save_quantizers_only,
+            }
+        )
+    )
 
-    # Resume: fresh model, same seed, same checkpoint dir. Resume reads
-    # output_meta + quantizer_state for layer 0 (no weights.pt) and
-    # re-calibrates layers 1, 2.
     torch.manual_seed(0)
-    resumed_model = _SimpleTransformerModel(n_layers=3, dim=16)
+    resumed_model = _SimpleTransformerModel(n_layers=n_layers, dim=16)
     mtq.quantize(resumed_model, build_cfg(resume_dir), forward_loop=forward_loop)
 
-    resumed_amax = collect_amax(resumed_model)
-    assert set(resumed_amax) == set(baseline_amax)
-    for name in baseline_amax:
-        torch.testing.assert_close(
-            resumed_amax[name],
-            baseline_amax[name],
-            rtol=1e-5,
-            atol=1e-6,
-            msg=f"amax mismatch after resume at {name}",
+    _assert_amax_close(_collect_amax(resumed_model), baseline_amax, f"{scenario} resume")
+
+
+def test_layerwise_save_every_mid_window_crash_recovers_at_prev_boundary(monkeypatch, tmp_path):
+    """A crash inside a window must not advance ``last_completed_layer``; resume
+    re-calibrates the unfinished window from the previous boundary.
+
+    Monkeypatches ``torch.save`` to raise on the second window's first per-layer
+    write (layer 2), then asserts the on-disk manifest still points at layer 1
+    (the previous boundary).
+    """
+    _register_test_discoverer(monkeypatch)
+
+    cfg = _int8_layerwise_config(
+        {
+            "method": "max",
+            "layerwise": {
+                "enable": True,
+                "checkpoint_dir": str(tmp_path),
+                "save_every": 2,
+            },
+        }
+    )
+    torch.manual_seed(0)
+    model = _SimpleTransformerModel(n_layers=4, dim=16)
+    calib_data = [torch.randint(0, 32, (2, 8))]
+
+    real_torch_save = torch.save
+    state = {"crashed": False}
+
+    def crashing_torch_save(obj, path, *args, **kwargs):
+        # Crash on the first per-layer file write for layer 2 (mid-window).
+        if not state["crashed"] and "layer_0002" in str(path):
+            state["crashed"] = True
+            raise RuntimeError("simulated crash during layer 2 save")
+        return real_torch_save(obj, path, *args, **kwargs)
+
+    monkeypatch.setattr(
+        "modelopt.torch.quantization.utils.layerwise_calib.torch.save",
+        crashing_torch_save,
+    )
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        mtq.quantize(model, cfg, forward_loop=lambda m: [m(b) for b in calib_data])
+
+    manifest = json.loads((tmp_path / "manifest.json").read_text())
+    assert manifest["last_completed_layer"] == 1, f"manifest leaked mid-window state: {manifest}"
+
+
+def test_layerwise_checkpoint_mismatch_save_every_raises(monkeypatch, tmp_path):
+    """Resuming with a different ``save_every`` than the checkpoint was produced
+    with must raise — the on-disk window layout assumes a fixed value.
+    """
+    _register_test_discoverer(monkeypatch)
+
+    cfg_first = _int8_layerwise_config(
+        {
+            "method": "max",
+            "layerwise": {
+                "enable": True,
+                "checkpoint_dir": str(tmp_path),
+                "save_every": 2,
+            },
+        }
+    )
+    torch.manual_seed(0)
+    model = _SimpleTransformerModel(n_layers=4, dim=16)
+    calib_data = [torch.randint(0, 32, (2, 8))]
+    mtq.quantize(model, cfg_first, forward_loop=lambda m: [m(b) for b in calib_data])
+
+    # Rewind manifest so the second run sees an in-progress resume,
+    # then change save_every to trigger the mismatch check.
+    (tmp_path / "manifest.json").write_text(
+        json.dumps(
+            {
+                "last_completed_layer": 1,
+                "num_layers": 4,
+                "save_every": 2,
+                "save_quantizers_only": False,
+            }
         )
+    )
+    cfg_mismatched = _int8_layerwise_config(
+        {
+            "method": "max",
+            "layerwise": {
+                "enable": True,
+                "checkpoint_dir": str(tmp_path),
+                "save_every": 4,
+            },
+        }
+    )
+    torch.manual_seed(0)
+    fresh_model = _SimpleTransformerModel(n_layers=4, dim=16)
+    with pytest.raises(ValueError, match="save_every mismatch"):
+        mtq.quantize(fresh_model, cfg_mismatched, forward_loop=lambda m: [m(b) for b in calib_data])
