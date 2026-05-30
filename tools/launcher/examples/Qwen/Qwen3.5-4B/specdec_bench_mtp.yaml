@@ -100,7 +100,11 @@ pipeline:
       gpus_per_node: 2
       container: vllm/vllm-openai:qwen3_5-cu130
 
-  # Step 3: upload both splits to S3 in sweep layout
+  # Step 3: upload both splits to S3 in sweep layout.
+  # CPU-only (boto3 file copy) — gpus_per_node=0 avoids reserving a full GPU
+  # for ~3s of CPU work. The container is the same vLLM image as the run
+  # tasks so we reuse the already-pulled image; Slurm still schedules on the
+  # default `batch` partition (no need for a separate cpu partition).
   task_2:
     script: common/specdec_bench/upload_to_s3.sh
     args:
@@ -112,5 +116,5 @@ pipeline:
       _factory_: "slurm_factory"
       nodes: 1
       ntasks_per_node: 1
-      gpus_per_node: 1
+      gpus_per_node: 0
       container: vllm/vllm-openai:qwen3_5-cu130
