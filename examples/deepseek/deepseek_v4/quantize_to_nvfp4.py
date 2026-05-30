@@ -446,26 +446,34 @@ def _build_moe_quantization(
             name: {"quant_algo": "NVFP4", "group_size": 16} for name in quantized_layer_names
         },
         "exclude_modules": [
-            # Attention path
-            "*.attn.*",
-            "*.attn_norm.*",
-            # Shared expert + router (untouched FP8)
-            "*.ffn.shared_experts.*",
-            "*.ffn.gate.*",
-            "*.ffn_norm.*",
-            # Embeddings + head
-            "embed.weight",
-            "head.weight",
-            # Hyper-connection params
-            "*.hc_*",
-            # MTP auxiliary projections/norms (non-expert)
-            "*.h_proj.*",
-            "*.e_proj.*",
-            "*.enorm.*",
-            "*.hnorm.*",
-            *([] if include_mtp_experts else ["mtp.*"]),
-            "mtp.*.norm.*",
-            "norm.weight",
+            # Attention Linears remain in the source FP8 format.
+            "*.attn.wq_a",
+            "*.attn.wq_b",
+            "*.attn.wkv",
+            "*.attn.wo_a",
+            "*.attn.wo_b",
+            "*.attn.compressor.wgate",
+            "*.attn.compressor.wkv",
+            "*.attn.indexer.wq_b",
+            "*.attn.indexer.weights_proj",
+            "*.attn.indexer.compressor.wgate",
+            "*.attn.indexer.compressor.wkv",
+            # Shared-expert Linears remain in the source FP8 format.
+            "*.ffn.shared_experts.w1",
+            "*.ffn.shared_experts.w2",
+            "*.ffn.shared_experts.w3",
+            # LM head is a Linear/ParallelLMHead and remains unconverted.
+            "head",
+            # MTP auxiliary Linears and routed experts remain in source format by default.
+            *(
+                []
+                if include_mtp_experts
+                else [
+                    "mtp.*.h_proj",
+                    "mtp.*.e_proj",
+                    "mtp.*.ffn.experts",
+                ]
+            ),
         ],
     }
 
