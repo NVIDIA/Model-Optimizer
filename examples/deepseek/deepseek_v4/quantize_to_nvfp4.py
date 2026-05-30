@@ -44,8 +44,9 @@ Outputs:
         <path>.input_scale     per-tensor activation scale (FP32 scalar)
 
   * An updated ``model.safetensors.index.json`` reflecting dropped/added keys.
-  * ``config.json`` keeps the source FP8 quantization metadata and adds
-    ``"moe_quant_algo": "NVFP4"`` for DeepSeek-V4 loaders.
+  * ``config.json`` keeps the source FP8 quantization metadata, adds
+    ``"moe_quant_algo": "NVFP4"`` for DeepSeek-V4 loaders, and embeds the
+    same NVFP4 MoE layer manifest emitted to ``hf_quant_config.json``.
   * An ``hf_quant_config.json`` manifest listing the NVFP4-quantized layers.
     MTP expert weights are left in the source format by default; pass
     ``--include_mtp_experts`` to convert them too.
@@ -83,6 +84,7 @@ import re
 import shutil
 from collections import defaultdict
 from pathlib import Path
+from typing import Any
 
 import torch
 from safetensors import safe_open
@@ -433,13 +435,85 @@ def _hard_link_aux(src: Path, dst: Path) -> None:
                     _link_or_copy(src_f, dst_f)
 
 
-def _rewrite_config_json(src_dir: Path, dst_dir: Path) -> None:
+def _build_moe_quantization(
+    quantized_layer_names: list[str], include_mtp_experts: bool
+) -> dict[str, Any]:
+    return {
+        "quant_algo": "MIXED_PRECISION",
+        "kv_cache_quant_algo": None,
+        "group_size": 16,
+        "quantized_layers": {
+            name: {"quant_algo": "NVFP4", "group_size": 16} for name in quantized_layer_names
+        },
+        "exclude_modules": [
+            # Attention path
+            "*.attn.*",
+            "*.attn_norm.*",
+            # Shared expert + router (untouched FP8)
+            "*.ffn.shared_experts.*",
+            "*.ffn.gate.*",
+            "*.ffn_norm.*",
+            # Embeddings + head
+            "embed.weight",
+            "head.weight",
+            # Hyper-connection params
+            "*.hc_*",
+            # MTP auxiliary projections/norms (non-expert)
+            "*.h_proj.*",
+            "*.e_proj.*",
+            "*.enorm.*",
+            "*.hnorm.*",
+            *([] if include_mtp_experts else ["mtp.*"]),
+            "mtp.*.norm.*",
+            "norm.weight",
+        ],
+    }
+
+
+def _build_hf_quant_config(
+    quantized_layer_names: list[str], include_mtp_experts: bool
+) -> dict[str, Any]:
+    return {
+        "producer": {
+            "name": "modelopt",
+            "version": "dsv4-nvfp4-experts",
+        },
+        "quantization": _build_moe_quantization(quantized_layer_names, include_mtp_experts),
+    }
+
+
+def _build_nvfp4_config_groups(quantized_layer_names: list[str]) -> dict[str, Any]:
+    return {
+        "group_0": {
+            "input_activations": {
+                "dynamic": False,
+                "num_bits": 4,
+                "type": "float",
+                "group_size": 16,
+            },
+            "weights": {
+                "dynamic": False,
+                "num_bits": 4,
+                "type": "float",
+                "group_size": 16,
+            },
+            "targets": quantized_layer_names,
+        }
+    }
+
+
+def _rewrite_config_json(
+    src_dir: Path,
+    dst_dir: Path,
+    quantized_layer_names: list[str],
+    include_mtp_experts: bool,
+) -> None:
     """Copy ``config.json`` to the output and mark the MoE branch as NVFP4.
 
-    DeepSeek-V4 mixed checkpoints remain FP8 for dense/attention paths. vLLM
-    and SGLang detect the hybrid expert format from
-    ``quantization_config.moe_quant_algo == "NVFP4"`` and read the per-layer
-    NVFP4 metadata from ``hf_quant_config.json``.
+    DeepSeek-V4 mixed checkpoints remain FP8 for dense/attention paths, so
+    ``quant_method`` must stay ``fp8``. The NVFP4 MoE manifest is duplicated
+    into ``quantization_config`` for loaders that prefer config.json over the
+    sibling ``hf_quant_config.json``.
     """
     src = src_dir / "config.json"
     dst = dst_dir / "config.json"
@@ -447,10 +521,21 @@ def _rewrite_config_json(src_dir: Path, dst_dir: Path) -> None:
     quant_cfg = cfg.get("quantization_config")
     if not isinstance(quant_cfg, dict):
         quant_cfg = {}
+
+    hf_quant_config = _build_hf_quant_config(quantized_layer_names, include_mtp_experts)
+    moe_quantization = hf_quant_config["quantization"]
     quant_cfg.setdefault("activation_scheme", "dynamic")
     quant_cfg["quant_method"] = "fp8"
     quant_cfg.setdefault("weight_block_size", [128, 128])
     quant_cfg["moe_quant_algo"] = "NVFP4"
+    quant_cfg["producer"] = hf_quant_config["producer"]
+    quant_cfg["quant_algo"] = moe_quantization["quant_algo"]
+    quant_cfg["kv_cache_quant_algo"] = moe_quantization["kv_cache_quant_algo"]
+    quant_cfg["group_size"] = moe_quantization["group_size"]
+    quant_cfg["config_groups"] = _build_nvfp4_config_groups(quantized_layer_names)
+    quant_cfg["quantized_layers"] = moe_quantization["quantized_layers"]
+    quant_cfg["exclude_modules"] = moe_quantization["exclude_modules"]
+    quant_cfg["ignore"] = moe_quantization["exclude_modules"]
     cfg["quantization_config"] = quant_cfg
     dst.write_text(json.dumps(cfg, indent=2, sort_keys=True) + "\n")
 
@@ -474,42 +559,7 @@ def _write_index_and_manifest(
     (output_ckpt / "model.safetensors.index.json").write_text(json.dumps(new_index, indent=2))
     _log(f"[index] wrote model.safetensors.index.json ({len(weight_map)} keys)")
 
-    cfg = {
-        "producer": {
-            "name": "modelopt",
-            "version": "dsv4-nvfp4-experts",
-        },
-        "quantization": {
-            "quant_algo": "MIXED_PRECISION",
-            "kv_cache_quant_algo": None,
-            "group_size": 16,
-            "quantized_layers": {
-                name: {"quant_algo": "NVFP4", "group_size": 16} for name in quantized_layer_names
-            },
-            "exclude_modules": [
-                # Attention path
-                "*.attn.*",
-                "*.attn_norm.*",
-                # Shared expert + router (untouched FP8)
-                "*.ffn.shared_experts.*",
-                "*.ffn.gate.*",
-                "*.ffn_norm.*",
-                # Embeddings + head
-                "embed.weight",
-                "head.weight",
-                # Hyper-connection params
-                "*.hc_*",
-                # MTP auxiliary projections/norms (non-expert)
-                "*.h_proj.*",
-                "*.e_proj.*",
-                "*.enorm.*",
-                "*.hnorm.*",
-                *([] if include_mtp_experts else ["mtp.*"]),
-                "mtp.*.norm.*",
-                "norm.weight",
-            ],
-        },
-    }
+    cfg = _build_hf_quant_config(quantized_layer_names, include_mtp_experts)
     (output_ckpt / "hf_quant_config.json").write_text(json.dumps(cfg, indent=2))
 
 
@@ -644,7 +694,12 @@ def main():
         include_mtp_experts=args.include_mtp_experts,
     )
     _log("[config] rewriting config.json (marking moe_quant_algo=NVFP4)")
-    _rewrite_config_json(args.source_ckpt, args.output_ckpt)
+    _rewrite_config_json(
+        args.source_ckpt,
+        args.output_ckpt,
+        sorted(quantized),
+        include_mtp_experts=args.include_mtp_experts,
+    )
     _log(f"[aux] linking ancillary files from {args.source_ckpt}")
     _hard_link_aux(args.source_ckpt, args.output_ckpt)
     _log(f"[done] {args.output_ckpt}  ({len(quantized)} quantized routed-expert modules)")
