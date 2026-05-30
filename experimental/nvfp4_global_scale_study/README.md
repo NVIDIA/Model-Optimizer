@@ -93,6 +93,37 @@ B_max  ≤  g_amax  ≤  28672 · B_min
 - Below it, subnormal starts at `28672·B_min` and the lower clamp at
   `229376·B_min` (`= 448·512 = 7·2^15`).
 
+#### Where 28672 comes from
+
+`28672` is not arbitrary — it is the **dynamic range of normal (non-subnormal)
+FP8-E4M3 values**, `max_normal / min_normal`. Derivation:
+
+1. The stored block scale (pre-clamp) is `x = b_amax · 448 / g_amax`, and the
+   well-conditioned regime requires `x` in normal FP8: `2^-6 ≤ x ≤ 448`.
+2. Substituting and solving for `g_amax`:
+
+   ```text
+   x ≤ 448    ->  g_amax ≥ b_amax
+   x ≥ 2^-6   ->  g_amax ≤ b_amax · 448 · 2^6
+   ```
+
+   so the window is `[b_amax, 448·2^6·b_amax]` and its width factor is
+   `448 · 64 = 28672`. Equivalently, since `x ∝ 1/g_amax`, the window width is
+   just the range of `x` that normal FP8 spans, `448 / 2^-6`.
+3. The two FP8-E4M3FN landmarks come from its bit layout (1 sign, 4 exponent,
+   3 mantissa, bias 7; value `(1 + m/8)·2^(e-7)` for normal `e ∈ [1,15]`):
+   - **min normal**: `e=1, m=0` → `2^(1-7) = 2^-6 = 0.015625`
+   - **max normal**: `e=15, m=6` (the "FN" variant reuses `e=15` for finite
+     values; only `S.1111.111` is NaN) → `(1+6/8)·2^8 = 1.75·256 = 448`
+
+So `28672 = 448 / 2^-6 = 1.75·2^8·2^6 = 1.75·2^14 = 7·2^12`.
+
+The sibling constant `229376` uses the smallest *subnormal* `2^-9` instead of
+the smallest normal: `448 / 2^-9 = 448·512 = 7·2^15 = 229376` — the edge of
+representability, below which the block scale floors and the block is zeroed.
+In short: the two magic numbers are simply FP8-E4M3's normal and full dynamic
+ranges, because the block scale is what is stored in FP8.
+
 ## 3. The regimes, in one curve: FP8 block-scale error vs. b_amax/g_amax
 
 ![block-scale error across regimes](./error_vs_ratio.png)
