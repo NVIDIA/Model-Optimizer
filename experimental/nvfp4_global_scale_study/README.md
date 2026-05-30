@@ -185,6 +185,56 @@ Calibration block amaxes span `B_min = 0.5`, `B_max = 1000`
 - avoid `g_amax = 1000` (zero headroom — likely saturation at inference) and
   avoid `g_amax = 14336` (zero subnormal cushion, no benefit).
 
+### Robustness when you can't predict B_max: anchor to B_min
+
+The recipe above anchors to `B_max`, but in practice **calibration rarely
+bounds the inference `B_max`** — it is outlier-driven and heavy-tailed, so real
+inputs routinely exceed it, causing saturation (the catastrophic failure). The
+*stable* end is `B_min`: the bulk/floor activation scale is governed by the
+preceding normalization layer and is far more consistent across data.
+
+So a more robust formulation **anchors the bottom edge of the normal window at
+`B_min`** and extends the full width upward, handing the format its entire
+dynamic range as outlier insurance — without predicting `B_max` at all:
+
+```text
+g_amax = rho · B_min,      rho up to 28672   (recommended ~16384)
+```
+
+- Larger `rho` → larger `g_amax` → more saturation headroom. Within the normal
+  window the element error is *flat*, so this costs nothing for blocks that stay
+  normal; it only trades **downward margin** (blocks below `B_min` tip into the
+  graceful subnormal regime).
+- `rho ≈ 16384` (just under the 28672 cliff) keeps a ~1.75× cushion so a
+  moderate inference drift in `B_min` doesn't immediately subnormal those blocks,
+  while still giving ~16000× upward headroom.
+
+Guardrails: use a robust low-percentile `B_min` (not the literal min, which can
+be ~0); keep `g_amax ≥ margin·B_max_calib` as a sanity floor; and if
+`B_max/B_min > 28672` the range exceeds the format — fix it with outlier
+mitigation, not `g_amax`.
+
+### Verifying it: robustness to unseen outliers
+
+![calibration strategy robustness](./calib_strategy.png)
+
+Part 4 of the script simulates a stable lognormal block-amax bulk plus outlier
+blocks that **grow by a factor `k` at inference** (unseen during calibration),
+and compares quantization MSE for `B_max`-anchored vs `B_min`-anchored `g_amax`
+against an oracle that knows the true inference `B_max`:
+
+| inference outlier growth `k` | MSE `B_max`-anchored | MSE `B_min`-anchored | MSE oracle |
+|---|---|---|---|
+| 1.0 | 0.0092 | 0.0093 | 0.0090 |
+| 3.2 | 0.139 | 0.0263 | 0.0259 |
+| 10 | **7.87** | 0.189 | 0.192 |
+| 32 | **156** | 1.96 | 1.86 |
+
+The `B_min`-anchored choice **tracks the oracle almost exactly** across the whole
+range, while the `B_max`-anchored choice saturates as soon as outliers grow and
+degrades by 40×+ — concrete confirmation that anchoring to the stable `B_min`
+and using the format's full window is the robust default for activations.
+
 ## Why this differs from INT8/FP8 per-tensor calibration
 
 For INT8/FP8 the per-tensor scale directly trades range vs. resolution, so its
@@ -197,9 +247,10 @@ remaining error is dominated by the irreducible e2m1 grid, not by `g_amax`.
 
 | File | Description |
 |---|---|
-| `nvfp4_global_scale_study.py` | Reproduces all numbers and both figures against the live `NVFP4QTensor` code path |
+| `nvfp4_global_scale_study.py` | Reproduces all numbers and figures against the live `NVFP4QTensor` code path |
 | `error_vs_gamax.png` | Signed error & relative FP8 block-scale error vs. `g_amax` (3×3 grid of `(e, b_amax)` cases) |
 | `error_vs_ratio.png` | Relative FP8 block-scale error vs. `b_amax/g_amax` (all four regimes in one curve) |
+| `calib_strategy.png` | Robustness to unseen outliers: `B_max`- vs `B_min`-anchored `g_amax` (MSE vs outlier growth) |
 
 ## References
 
