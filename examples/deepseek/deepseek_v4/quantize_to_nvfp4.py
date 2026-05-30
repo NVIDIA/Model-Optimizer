@@ -482,7 +482,7 @@ def _build_hf_quant_config(
     }
 
 
-def _build_nvfp4_config_groups(quantized_layer_names: list[str]) -> dict[str, Any]:
+def _build_nvfp4_config_groups() -> dict[str, Any]:
     return {
         "group_0": {
             "input_activations": {
@@ -497,7 +497,7 @@ def _build_nvfp4_config_groups(quantized_layer_names: list[str]) -> dict[str, An
                 "type": "float",
                 "group_size": 16,
             },
-            "targets": quantized_layer_names,
+            "targets": ["Linear"],
         }
     }
 
@@ -532,7 +532,7 @@ def _rewrite_config_json(
     quant_cfg["quant_algo"] = moe_quantization["quant_algo"]
     quant_cfg["kv_cache_quant_algo"] = moe_quantization["kv_cache_quant_algo"]
     quant_cfg["group_size"] = moe_quantization["group_size"]
-    quant_cfg["config_groups"] = _build_nvfp4_config_groups(quantized_layer_names)
+    quant_cfg["config_groups"] = _build_nvfp4_config_groups()
     quant_cfg["quantized_layers"] = moe_quantization["quantized_layers"]
     quant_cfg["exclude_modules"] = moe_quantization["exclude_modules"]
     quant_cfg["ignore"] = moe_quantization["exclude_modules"]
