@@ -12,9 +12,9 @@ model:
 
 # maps to DataArguments (main.py)
 data:
-  # online | offline | streaming. Leave unset to auto-derive: offline_data_path
-  # -> offline; streaming_server_url -> streaming; otherwise online. Set
-  # explicitly only to force a specific mode.
+  # Auto-derived from the data-source fields below (offline_data_path -> offline;
+  # streaming_server_url -> streaming; otherwise online); any value set here is
+  # recomputed from those fields, so leave it unset.
   mode:
   data_path: input_conversations/train.jsonl
   offline_data_path:

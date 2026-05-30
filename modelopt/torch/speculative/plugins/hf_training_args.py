@@ -49,10 +49,8 @@ class DataArguments(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    # ``None`` is the sentinel "user did not set mode"; auto-promoted from
-    # offline_data_path / streaming_server_url. An explicit value (including ``"online"``)
-    # is always respected, even with stale mode-specific fields present. Always resolved
-    # to one of the three string literals by ``_check_mode_requirements`` before use.
+    # Derived in ``_check_mode_requirements`` from the data-source fields; accepted as input
+    # only for backward compatibility (existing ``mode:`` keys / overrides), then overwritten.
     mode: Literal["online", "offline", "streaming"] | None = None
     data_path: str | None = None
     offline_data_path: str | None = None
@@ -77,24 +75,18 @@ class DataArguments(BaseModel):
 
     @model_validator(mode="after")
     def _check_mode_requirements(self) -> DataArguments:
-        # Auto-promote only when ``mode`` is unset by the user (sentinel ``None``). An
-        # explicit ``mode`` — including ``"online"`` — is always respected so stale
-        # ``streaming_server_url`` / ``offline_data_path`` leftovers can't silently flip it.
-        if self.mode is None:
-            has_offline = self.offline_data_path is not None
-            has_streaming = self.streaming_server_url is not None
-            if has_offline and has_streaming:
-                raise ValueError(
-                    "ambiguous: set data.mode explicitly when both offline_data_path "
-                    "and streaming_server_url are set"
-                )
-            self.mode = "offline" if has_offline else "streaming" if has_streaming else "online"
-        if self.mode == "offline" and not self.offline_data_path:
-            raise ValueError("data.mode='offline' requires data.offline_data_path")
+        # Always recompute from the data-source fields, never trust an incoming ``mode``: a
+        # value stored by an earlier validation can go stale across a recipe dump/reload +
+        # override round-trip and silently select the wrong training path.
+        has_offline = self.offline_data_path is not None
+        has_streaming = self.streaming_server_url is not None
+        if has_offline and has_streaming:
+            raise ValueError(
+                "ambiguous: set only one of data.offline_data_path / data.streaming_server_url"
+            )
+        self.mode = "offline" if has_offline else "streaming" if has_streaming else "online"
         if self.mode == "streaming" and not (
-            self.streaming_server_url
-            and self.streaming_model_name
-            and self.streaming_shared_storage_path
+            self.streaming_model_name and self.streaming_shared_storage_path
         ):
             raise ValueError(
                 "data.mode='streaming' requires data.streaming_server_url, "
