@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import asyncio
+import dataclasses
 import time
 
 from .base import Model
@@ -26,6 +27,24 @@ try:
 except ImportError:
     print("vllm is not installed.")
     vllm = None
+
+# kwargs that VLLMModel consumes itself (or maps onto explicit AsyncEngineArgs
+# parameters below) — these must NOT be forwarded a second time, or
+# AsyncEngineArgs will raise "got multiple values for keyword argument".
+_VLLM_CONSUMED_KWARGS = frozenset({
+    "tokenizer_path",
+    "trust_remote_code",
+    "tensor_parallel_size",
+    "moe_expert_parallel_size",
+    "prefix_cache",
+    "speculative_algorithm",
+    "speculative_num_steps",
+    "speculative_num_draft_tokens",
+    "draft_model_dir",
+    "parallel_draft_block_sizes",
+    "max_matching_ngram_size",
+    "async_scheduling",
+})
 
 
 class VLLMModel(Model):
@@ -76,6 +95,20 @@ class VLLMModel(Model):
             num_speculative_tokens = 1
         else:
             num_speculative_tokens = specdec.get("num_speculative_tokens", 3)
+
+        # Forward any AsyncEngineArgs field that the caller passed through
+        # `runtime_params.engine_args` (e.g. `max_model_len`, `dtype`,
+        # `gpu_memory_utilization`) but that VLLMModel doesn't explicitly
+        # consume. Without this forwarding, `runtime_params.engine_args`
+        # values are silently dropped — the same bug the
+        # `runtime_params_throughput_32k.yaml::max_model_len: 40960` override
+        # was meant to fix. See PR #1564 review.
+        _engine_arg_fields = {f.name for f in dataclasses.fields(AsyncEngineArgs)}
+        forwarded_engine_kwargs = {
+            k: v for k, v in kwargs.items()
+            if k in _engine_arg_fields and k not in _VLLM_CONSUMED_KWARGS
+        }
+
         engine_args = AsyncEngineArgs(
             model=model_dir,
             tokenizer=kwargs.get("tokenizer_path"),
@@ -88,6 +121,7 @@ class VLLMModel(Model):
             skip_tokenizer_init=False,
             async_scheduling=kwargs.get("async_scheduling", True),
             enforce_eager=False,
+            **forwarded_engine_kwargs,
         )
         self.engine_args = engine_args
         self.model = AsyncLLM.from_engine_args(engine_args)
