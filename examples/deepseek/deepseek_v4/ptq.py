@@ -44,12 +44,6 @@ Design notes (in contrast to ``examples/deepseek/deepseek_v3/ptq.py`` which cove
     which routes to ``fp4_gemm`` / ``fp8_gemm`` / ``F.linear`` based on the
     weight dtype on disk.
 
-  * A ``CalibMoE`` wrapper overrides ``MoE.forward`` during calibration to
-    route every token through every local routed expert (top_k =
-    n_routed_experts), so every expert's quantizers see calibration data.
-    Calibration output is discarded, so this uses one all-expert pass and
-    restores top_k after the call.
-
 Usage (single node, 4 GPUs, MP=4):
 
     torchrun --nproc-per-node 4 --master_port 12346 deepseek_v4/ptq.py \\
@@ -148,7 +142,7 @@ def _dequantize_linear_weight(linear_module) -> torch.Tensor:
     return w
 
 
-def install_quant_registry(calib_all_experts: bool = False) -> None:
+def install_quant_registry() -> None:
     """Import DS-V4's ``model`` module and register minimal Quant wrappers."""
     global deekseep_v4_model
     import model as _m
@@ -218,40 +212,7 @@ def install_quant_registry(calib_all_experts: bool = False) -> None:
                 y.to(dtype), self.w2, self.w2_input_quantizer, self.w2_weight_quantizer
             )
 
-    class CalibMoE(deekseep_v4_model.MoE):
-        """During calibration, force ``gate.topk = n_routed_experts`` so every
-        token routes to every local routed expert and all
-        ``w*_{input,weight}_quantizer`` instances see data.
-
-        Calibration uses one all-expert forward pass only. MoE has an internal
-        ``dist.all_reduce(y)``, and an earlier double-forward calibration shape
-        could leave collectives misaligned when TileLang JIT compile times
-        varied across ranks. Calibration output is discarded by
-        ``calibrate_loop``, so the all-expert pass is sufficient.
-
-        Empty ``_setup`` because this wrapper installs no quantizer state;
-        it exists solely to override ``forward``. ``DynamicModule.convert``
-        still requires the method to exist."""
-
-        def _setup(self):
-            pass
-
-        def forward(self, x, input_ids):
-            gate = self.gate
-            orig_topk = gate.topk
-            gate.topk = self.n_routed_experts
-            try:
-                return super().forward(x, input_ids)
-            finally:
-                gate.topk = orig_topk
-
     mtq.register(original_cls=deekseep_v4_model.Expert, quantized_cls=QuantExpert)
-    # CalibMoE registration is skipped by default. Registering it forces every
-    # token through every local expert, which populates amax on all experts but
-    # multiplies per-batch work ~64x and can surface NCCL timing issues on
-    # multi-node runs. Default behavior: natural top-k routing.
-    if calib_all_experts or os.environ.get("CALIB_ALL_EXPERTS", "0") == "1":
-        mtq.register(original_cls=deekseep_v4_model.MoE, quantized_cls=CalibMoE)
 
 
 def load_deepseek_v4(
@@ -493,12 +454,6 @@ def main():
         help="skip load_model (fast iteration on wiring; weights are uninitialized)",
     )
     p.add_argument(
-        "--calib_all_experts",
-        action="store_true",
-        help="force every calibration token through every local routed expert; "
-        "also enabled by CALIB_ALL_EXPERTS=1",
-    )
-    p.add_argument(
         "--run_generate",
         type=str,
         default=None,
@@ -509,7 +464,7 @@ def main():
     args = p.parse_args()
 
     _inject_v4_module(args.dsv4_inference_dir)
-    install_quant_registry(args.calib_all_experts)
+    install_quant_registry()
     model = load_deepseek_v4(
         args.config, args.model_path, args.batch_size, dummy_weights=args.dummy_weights
     )

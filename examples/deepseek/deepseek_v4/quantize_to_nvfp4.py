@@ -49,16 +49,14 @@ Outputs:
     NVFP4 MoE layer manifest using the HF ``ignore`` spelling for excluded
     modules.
   * An ``hf_quant_config.json`` manifest listing the NVFP4-quantized layers.
-    MTP expert weights are left in the source format by default; pass
-    ``--include_mtp_experts`` to convert them too.
+    MTP expert weights are left in the source format.
   * Ancillary files (``tokenizer.json``, ``LICENSE``, ``encoding/``,
     ``inference/``, ...) are linked from the source when possible, with a
     copy fallback across filesystems.
 
 Uncalibrated-expert handling: some routed experts receive zero tokens during
 calibration (common in V4's first ``n_hash_layers`` with deterministic
-``tid2eid`` routing, occasionally in score-routed layers, entire MTP block
-when MTP is inactive). For those:
+``tid2eid`` routing, occasionally in score-routed layers). For those:
   * ``weight_amax`` is synthesized from the dequantized BF16 weight
     (``bf16.abs().max()``).
   * ``input_amax`` falls back to the max observed on calibrated routed experts
@@ -93,9 +91,9 @@ from safetensors.torch import save_file
 
 from modelopt.torch.quantization.qtensor import MXFP4QTensor, NVFP4QTensor
 
-# Routed-expert weights in regular MoE layers and optionally the MTP block(s).
-_EXPERT_WEIGHT_RE = re.compile(r"^(?:mtp\.\d+|layers\.\d+)\.ffn\.experts\.\d+\.w[123]\.weight$")
-_EXPERT_PROJ_RE = re.compile(r"^(?P<experts>(?:mtp\.\d+|layers\.\d+)\.ffn\.experts)\.\d+\.w[123]$")
+# Routed-expert weights in regular MoE layers. MTP experts remain in source format.
+_EXPERT_WEIGHT_RE = re.compile(r"^layers\.\d+\.ffn\.experts\.\d+\.w[123]\.weight$")
+_EXPERT_PROJ_RE = re.compile(r"^(?P<experts>layers\.\d+\.ffn\.experts)\.\d+\.w[123]$")
 
 _AMAX_KEY_RE = re.compile(
     r"^(?P<block>(?:mtp\.\d+|layers\.\d+))\.ffn\.experts\.(?P<eid>\d+)\.(?P<proj>w[123])"
@@ -176,7 +174,7 @@ def _load_merged_amax(
     for k, v in merged.items():
         m = _AMAX_KEY_RE.match(k)
         assert m is not None
-        if m.group("which") == "input":
+        if m.group("which") == "input" and not m.group("block").startswith("mtp."):
             input_by_proj[m.group("proj")].append(v)
     input_fallback = {
         proj: torch.stack([t.reshape(-1) for t in vals]).flatten().max()
@@ -281,7 +279,6 @@ def convert_shard(
     input_fallback: dict[str, torch.Tensor],
     device: str,
     stats: dict[str, int],
-    include_mtp_experts: bool,
 ) -> tuple[list[str], list[str]]:
     """Rewrite one HF-style shard and return index deltas."""
     out: dict[str, torch.Tensor] = {}
@@ -290,11 +287,7 @@ def convert_shard(
 
     with safe_open(str(src_shard), framework="pt", device="cpu") as f:
         all_keys = list(f.keys())
-        expert_weight_keys = [
-            k
-            for k in all_keys
-            if _EXPERT_WEIGHT_RE.match(k) and (include_mtp_experts or not k.startswith("mtp."))
-        ]
+        expert_weight_keys = [k for k in all_keys if _EXPERT_WEIGHT_RE.match(k)]
         expert_weight_key_set = set(expert_weight_keys)
         w13_weight_amax, w13_synth_paths = _build_w13_weight_amax_overrides(
             f, expert_weight_keys, amax, device
@@ -316,16 +309,14 @@ def convert_shard(
                 assert scale_key in all_keys, f"no paired scale for {key}"
 
                 m = re.match(
-                    r"^(?P<block>(?:mtp\.\d+|layers\.\d+))\.ffn\.experts\.\d+\.(?P<proj>w[123])$",
+                    r"^(?P<block>layers\.\d+)\.ffn\.experts\.\d+\.(?P<proj>w[123])$",
                     expert_path,
                 )
                 assert m is not None
                 block = m.group("block")
                 proj = m.group("proj")
                 block_kind = (
-                    "mtp"
-                    if block.startswith("mtp")
-                    else ("hash" if int(block.split(".")[1]) < stats["_n_hash_layers"] else "score")
+                    "hash" if int(block.split(".")[1]) < stats["_n_hash_layers"] else "score"
                 )
 
                 weight_amax = _lookup_amax(amax, expert_path, "weight")
@@ -436,9 +427,7 @@ def _hard_link_aux(src: Path, dst: Path) -> None:
                     _link_or_copy(src_f, dst_f)
 
 
-def _build_moe_quantization(
-    quantized_layer_names: list[str], include_mtp_experts: bool
-) -> dict[str, Any]:
+def _build_moe_quantization(quantized_layer_names: list[str]) -> dict[str, Any]:
     return {
         "quant_algo": "MIXED_PRECISION",
         "kv_cache_quant_algo": None,
@@ -452,21 +441,19 @@ def _build_moe_quantization(
             "*.ffn.shared_experts.*",
             # LM head remains unconverted.
             "head",
-            # MTP remains in source format by default.
-            *([] if include_mtp_experts else ["mtp.*"]),
+            # MTP remains in source format.
+            "mtp.*",
         ],
     }
 
 
-def _build_hf_quant_config(
-    quantized_layer_names: list[str], include_mtp_experts: bool
-) -> dict[str, Any]:
+def _build_hf_quant_config(quantized_layer_names: list[str]) -> dict[str, Any]:
     return {
         "producer": {
             "name": "modelopt",
             "version": "dsv4-nvfp4-experts",
         },
-        "quantization": _build_moe_quantization(quantized_layer_names, include_mtp_experts),
+        "quantization": _build_moe_quantization(quantized_layer_names),
     }
 
 
@@ -494,7 +481,6 @@ def _rewrite_config_json(
     src_dir: Path,
     dst_dir: Path,
     quantized_layer_names: list[str],
-    include_mtp_experts: bool,
 ) -> None:
     """Copy ``config.json`` to the output and mark the MoE branch as NVFP4.
 
@@ -510,7 +496,7 @@ def _rewrite_config_json(
     if not isinstance(quant_cfg, dict):
         quant_cfg = {}
 
-    hf_quant_config = _build_hf_quant_config(quantized_layer_names, include_mtp_experts)
+    hf_quant_config = _build_hf_quant_config(quantized_layer_names)
     moe_quantization = hf_quant_config["quantization"]
     quant_cfg.setdefault("activation_scheme", "dynamic")
     quant_cfg["quant_method"] = "fp8"
@@ -533,7 +519,6 @@ def _write_index_and_manifest(
     src_index: dict,
     shard_updates: dict[str, tuple[list[str], list[str]]],
     quantized_layer_names: list[str],
-    include_mtp_experts: bool,
 ) -> None:
     """Update ``model.safetensors.index.json`` with dropped ``.scale`` keys
     and added NVFP4 scale keys. Write the modelopt-style manifest."""
@@ -547,7 +532,7 @@ def _write_index_and_manifest(
     (output_ckpt / "model.safetensors.index.json").write_text(json.dumps(new_index, indent=2))
     _log(f"[index] wrote model.safetensors.index.json ({len(weight_map)} keys)")
 
-    cfg = _build_hf_quant_config(quantized_layer_names, include_mtp_experts)
+    cfg = _build_hf_quant_config(quantized_layer_names)
     (output_ckpt / "hf_quant_config.json").write_text(json.dumps(cfg, indent=2))
 
 
@@ -618,11 +603,6 @@ def main():
         help="diagnostic only — labels hash-routed layers in stats",
     )
     p.add_argument(
-        "--include_mtp_experts",
-        action="store_true",
-        help="also convert MTP routed-expert weights to NVFP4; default leaves MTP in source format",
-    )
-    p.add_argument(
         "--overwrite",
         action="store_true",
         help="replace an existing non-empty output checkpoint directory",
@@ -659,7 +639,6 @@ def main():
             input_fallback,
             args.device,
             stats,
-            include_mtp_experts=args.include_mtp_experts,
         )
         shard_updates[src.name] = (added, removed)
 
@@ -679,14 +658,12 @@ def main():
         src_index,
         shard_updates,
         sorted(quantized),
-        include_mtp_experts=args.include_mtp_experts,
     )
     _log("[config] rewriting config.json (marking moe_quant_algo=NVFP4)")
     _rewrite_config_json(
         args.source_ckpt,
         args.output_ckpt,
         sorted(quantized),
-        include_mtp_experts=args.include_mtp_experts,
     )
     _log(f"[aux] linking ancillary files from {args.source_ckpt}")
     _hard_link_aux(args.source_ckpt, args.output_ckpt)
