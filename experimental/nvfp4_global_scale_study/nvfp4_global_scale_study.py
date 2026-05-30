@@ -18,7 +18,7 @@
 Reproduces the figures in this directory's README:
   Part 1: prove the hand-derived math matches the REAL NVFP4QTensor code path.
   Part 2: lock (e, b_amax), sweep g_amax, plot signed error dequant(quant(e)) - e.
-  Part 3: lock g_amax = b_amax, sweep the ratio r = e / b_amax (isolates the e2m1 grid).
+  Part 3: relative FP8 block-scale error vs. b_amax/g_amax (shows all regimes).
 
 Run from anywhere:  python nvfp4_global_scale_study.py
 """
@@ -234,53 +234,105 @@ for g in [0.01, 0.05, 0.1, b, 0.7, 1.0, 2.0, 10.0, 50.0, 100.0]:
     print(f"{g:>10.3f} {bs:>16.6f} {pr:>12.8f} {dr:>12.6f} {dr - e:>12.6f}")
 
 # ----------------------------------------------------------------------------
-# PART 3 — small e + large b_amax: error vs the ratio r = e/b_amax
-#          g_amax = b_amax (the "sweet spot"), so this isolates the e2m1 grid.
+# PART 3 — relative FP8 block-scale error vs the ratio b_amax / g_amax.
+#          block_scale (ideal) = b_amax*448/g_amax = 448 * (b_amax/g_amax), so the
+#          relative quant error depends ONLY on t = b_amax/g_amax -> one curve that
+#          cleanly shows every regime (saturation / normal / subnormal / underflow).
 # ----------------------------------------------------------------------------
 print()
 print("=" * 100)
-print("PART 3: relative error vs ratio r = e/b_amax  (g_amax = b_amax, isolates e2m1 grid)")
+print("PART 3: relative FP8 block-scale error  (fp8(bscale)-bscale)/bscale  vs  b_amax/g_amax")
 print("=" * 100)
 
-# scaled = e/(b_amax/6) = 6r ; an element at ratio r sits at 6r on the e2m1 grid.
-b_amax_fixed = 8.0
-ratios = torch.logspace(-3, 0, 600).tolist()  # r from 0.001 to 1.0
+# FP8-E4M3FN landmarks and the resulting regime boundaries in t = b_amax/g_amax.
+FP8_MAX = 448.0  # max normal
+FP8_MIN_NORMAL = 2.0**-6  # min normal
+FP8_MIN_SUBNORMAL = 2.0**-9  # min subnormal == lower clamp
+T_SAT = FP8_MAX / FP8_MAX  # = 1.0          : bscale hits 448 (upper clamp) for t > 1
+T_SUBNORMAL = FP8_MIN_NORMAL / FP8_MAX  # = 1/28672     : normal -> subnormal
+T_LOWER_CLAMP = FP8_MIN_SUBNORMAL / FP8_MAX  # = 1/229376    : subnormal -> lower clamp
 
-fig2, ax2 = plt.subplots(figsize=(9, 5.5))
-signed_errs = []
-for r in ratios:
-    e = r * b_amax_fixed
-    dr, _, _ = real_code_qdq(e, b_amax_fixed, b_amax_fixed)
-    signed_errs.append(dr - e)
 
-ax2.plot(
-    ratios,
-    signed_errs,
-    ".",
-    color="C3",
-    markersize=3,
-    label=f"b_amax={b_amax_fixed}, g_amax=b_amax",
-)
-# annotate the e2m1 grid points in scaled space: scaled=6r => r = grid/6
-for gridval in [0.5, 1, 1.5, 2, 3, 4, 6]:
-    ax2.axvline(gridval / 6.0, color="gray", ls=":", lw=0.7)
+def block_scale_rel_err(t: float) -> float:
+    """(fp8(bscale) - bscale)/bscale for ideal bscale = 448*t, using the library clamp+cast."""
+    bscale = FP8_MAX * t
+    fp8 = (
+        torch.tensor(bscale, dtype=torch.float32)
+        .clamp(min=FP8_MIN_SUBNORMAL, max=FP8_MAX)
+        .to(torch.float8_e4m3fn)
+        .float()
+        .item()
+    )
+    return (fp8 - bscale) / bscale
+
+
+t_grid = torch.logspace(-7, 2, 1500).tolist()  # b_amax/g_amax from 1e-7 to 1e2
+rel_errs = [block_scale_rel_err(t) for t in t_grid]
+
+fig2, ax2 = plt.subplots(figsize=(10, 5.5))
+ax2.plot(t_grid, rel_errs, ".", color="C0", markersize=2.5)
 ax2.axhline(0, color="black", lw=0.8)
+
+# Regime boundaries + shaded normal zone.
+for tb, lbl in [
+    (T_SAT, "t=1  (upper clamp)"),
+    (T_SUBNORMAL, "t=1/28672"),
+    (T_LOWER_CLAMP, "t=1/229376"),
+]:
+    ax2.axvline(tb, color="gray", ls="--", lw=0.9)
+    ax2.text(
+        tb,
+        0.92,
+        lbl,
+        rotation=90,
+        va="top",
+        ha="right",
+        fontsize=7,
+        transform=ax2.get_xaxis_transform(),
+        color="gray",
+    )
+ax2.axvspan(T_SUBNORMAL, T_SAT, color="green", alpha=0.07)
+# Regime labels.
+for xpos, txt in [
+    (3.0, "saturation\n(values clipped)"),
+    (3e-3, "normal FP8\n|rel err| <= 6.25%"),
+    (3e-6, "subnormal"),
+    (2e-7, "lower\nclamp"),
+]:
+    ax2.text(
+        xpos, 0.5, txt, ha="center", va="center", fontsize=7.5, transform=ax2.get_xaxis_transform()
+    )
+
 ax2.set_xscale("log")
-ax2.set_xlabel("ratio  r = e / b_amax   [log scale]")
-ax2.set_ylabel("deq - e  (signed error)")
-ax2.set_title("NVFP4 signed error for small e in a block with large b_amax")
-ax2.legend()
+ax2.set_yscale("symlog", linthresh=0.1)
+ax2.set_xlabel("b_amax / g_amax   [log scale]   (= 1 / rho)")
+ax2.set_ylabel("(fp8(bscale) - bscale) / bscale   [symlog]")
+ax2.set_title("NVFP4 relative FP8 block-scale quantization error across regimes")
 ax2.grid(True, which="both", ls="--", alpha=0.3)
 fig2.tight_layout()
 out2 = os.path.join(HERE, "error_vs_ratio.png")
 fig2.savefig(out2, dpi=130)
 print(f"saved plot -> {out2}")
 
-print(f"\nSample (b_amax={b_amax_fixed}, g_amax=b_amax):")
 print(
-    f"{'r=e/b_amax':>11} {'e':>10} {'scaled=6r':>10} {'deq_e':>12} {'signed_err':>11} {'rel_err':>10}"
+    f"\n{'b_amax/g_amax':>13} {'bscale=448t':>12} {'fp8(bscale)':>12} {'rel_err':>10} {'regime':>12}"
 )
-for r in [0.5, 0.25, 0.125, 1 / 12, 1 / 20, 1 / 24, 1 / 60, 1 / 100, 1 / 300]:
-    e = r * b_amax_fixed
-    dr, _, pr = real_code_qdq(e, b_amax_fixed, b_amax_fixed)
-    print(f"{r:>11.5f} {e:>10.5f} {6 * r:>10.4f} {dr:>12.6f} {dr - e:>11.6f} {(dr - e) / e:>10.4f}")
+for t in [1e2, 1e1, 1.0, 0.1, 1e-3, T_SUBNORMAL, 1e-5, T_LOWER_CLAMP, 1e-6, 1e-7]:
+    bscale = FP8_MAX * t
+    fp8 = (
+        torch.tensor(bscale)
+        .clamp(min=FP8_MIN_SUBNORMAL, max=FP8_MAX)
+        .to(torch.float8_e4m3fn)
+        .float()
+        .item()
+    )
+    rel = (fp8 - bscale) / bscale
+    if t > T_SAT:
+        regime = "saturation"
+    elif t >= T_SUBNORMAL:
+        regime = "normal"
+    elif t >= T_LOWER_CLAMP:
+        regime = "subnormal"
+    else:
+        regime = "lower-clamp"
+    print(f"{t:>13.3e} {bscale:>12.5g} {fp8:>12.5g} {rel:>10.4f} {regime:>12}")

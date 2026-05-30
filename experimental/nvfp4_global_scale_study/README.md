@@ -93,26 +93,43 @@ B_max  ≤  g_amax  ≤  28672 · B_min
 - Below it, subnormal starts at `28672·B_min` and the lower clamp at
   `229376·B_min` (`= 448·512 = 7·2^15`).
 
-## 3. Error vs. the ratio e/b_amax — the e2m1 grid + dead zone
+## 3. The regimes, in one curve: FP8 block-scale error vs. b_amax/g_amax
 
-![error vs ratio](./error_vs_ratio.png)
+![block-scale error across regimes](./error_vs_ratio.png)
 
-Locks `g_amax = b_amax` (so the block scale is ideal) and sweeps
-`r = e / b_amax`. This isolates the **4-bit e2m1 grid** error. Each "blade" is
-one quantization cell: the signed error ramps between adjacent grid levels and
-crosses zero exactly on a grid point.
+The ideal block scale is `bscale = b_amax·448/g_amax = 448·t` with
+`t = b_amax/g_amax = 1/ρ`, so the **relative** FP8 quantization error of the
+block scale, `(fp8(bscale) − bscale)/bscale`, depends **only on `t`** — a single
+curve that exposes every regime at once (y-axis is symlog):
 
-The flat region at small `r` is a hard **dead zone**: the smallest nonzero e2m1
-level is `0.5` (rounding boundary `0.25`), so
+| Region (`t = b_amax/g_amax`) | `ρ = g_amax/b_amax` | Behaviour |
+|---|---|---|
+| `t > 1` | `ρ < 1` | **Saturation** — `bscale` clamps to `448`; rel err → `−1` as the true scale runs away above the clamp. The block's large values get clipped. |
+| `1/28672 ≤ t ≤ 1` (shaded) | `1 ≤ ρ ≤ 28672` | **Normal FP8** — bounded relative error `≤ 6.25%` (the E4M3 mantissa step); touches 0 at exact E4M3 values. This is the well-conditioned zone. |
+| `1/229376 ≤ t < 1/28672` | `28672 < ρ ≤ 229376` | **Subnormal** — the "fan" of widening FP8 steps; rel err grows. |
+| `t < 1/229376` | `ρ > 229376` | **Lower clamp** — `bscale` floors at `2⁻⁹`; rel err → `+∞` (`+42×` at `t=1e-7`), block effectively zeroed. |
+
+This is the per-tensor view of the same boundaries derived in §2: the shaded
+band is exactly the `[B_max, 28672·B_min]` window mapped onto the block-amax
+ratio. It makes the asymmetry used in calibration (§4) visually obvious —
+saturation drives the error hard toward `−1` (catastrophic), while the
+subnormal side degrades gracefully until the lower clamp.
+
+### Aside: the e2m1 grid dead zone (independent of g_amax)
+
+Separately from the scale, the **4-bit e2m1 grid** imposes a hard floor on
+element error. With an ideal scale (`g_amax = b_amax`), an element sits at
+`scaled = 6·(e/b_amax)`; the smallest nonzero e2m1 level is `0.5` (rounding
+boundary `0.25`), so
 
 ```text
 |e| < b_amax / 24   ->   rounds to 0   (the element is annihilated)
 ```
 
-This is intrinsic to NVFP4 and **independent of `g_amax`**: per-block dynamic
-range is only ~24×. Any element more than 24× smaller than its block's max is
-lost — the core reason small blocks (16) and outlier handling matter, and why
-`g_amax` calibration cannot rescue small-`e`/large-`b_amax` loss.
+Per-block dynamic range is only ~24×: any element more than 24× smaller than its
+block's max is lost — independent of `g_amax`. This is the core reason small
+blocks (16) and outlier handling matter, and why `g_amax` calibration cannot
+rescue small-`e`/large-`b_amax` loss.
 
 ## 4. Calibrating g_amax (activations)
 
@@ -182,7 +199,7 @@ remaining error is dominated by the irreducible e2m1 grid, not by `g_amax`.
 |---|---|
 | `nvfp4_global_scale_study.py` | Reproduces all numbers and both figures against the live `NVFP4QTensor` code path |
 | `error_vs_gamax.png` | Signed error & relative FP8 block-scale error vs. `g_amax` (3×3 grid of `(e, b_amax)` cases) |
-| `error_vs_ratio.png` | Signed error vs. `r = e/b_amax` (e2m1 grid + dead zone) |
+| `error_vs_ratio.png` | Relative FP8 block-scale error vs. `b_amax/g_amax` (all four regimes in one curve) |
 
 ## References
 
