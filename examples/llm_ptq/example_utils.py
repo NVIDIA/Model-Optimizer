@@ -990,8 +990,9 @@ def resolve_checkpoint_dir(quant_cfg: dict, model_path: str) -> tuple[dict, str]
     resolved = os.path.join(base_dir, f"{name}_{config_hash}")
 
     quant_cfg = copy.deepcopy(quant_cfg)
-    if shape == "flat":
-        quant_cfg["algorithm"]["layerwise_checkpoint_dir"] = resolved
-    else:
-        quant_cfg["algorithm"]["layerwise"]["checkpoint_dir"] = resolved
+    algo = quant_cfg["algorithm"]
+    if "layerwise_checkpoint_dir" in algo:
+        algo["layerwise_checkpoint_dir"] = resolved
+    if isinstance(algo.get("layerwise"), dict) and "checkpoint_dir" in algo["layerwise"]:
+        algo["layerwise"]["checkpoint_dir"] = resolved
     return quant_cfg, resolved

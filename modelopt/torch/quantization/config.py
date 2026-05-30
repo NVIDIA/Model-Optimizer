@@ -705,7 +705,9 @@ def _coerce_layerwise_input(value):
     if value is None:
         return {}
     if isinstance(value, LayerwiseConfig):
-        return value.model_dump()
+        # ``exclude_unset=True`` so downstream ``model_fields_set`` reflects the
+        # user's actual input
+        return value.model_dump(exclude_unset=True)
     return value
 
 
@@ -756,6 +758,12 @@ class QuantizeAlgorithmConfig(ModeloptBaseConfig):
         """
         if not isinstance(data, dict) or "layerwise_checkpoint_dir" not in data:
             return data
+        warnings.warn(
+            "Passing `layerwise_checkpoint_dir` at the top level is deprecated; "
+            "nest it under `layerwise.checkpoint_dir` instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         data = dict(data)
         flat_dir = data.pop("layerwise_checkpoint_dir")
         # Resolve the legacy ``use_sequential`` alias before writing ``layerwise``,
