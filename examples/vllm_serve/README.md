@@ -38,6 +38,10 @@ Step 2: Run the following command, with all supported flag as `vllm serve`:
 python vllm_serve_fakequant.py <model_path> -tp 8 --host 0.0.0.0 --port 8000
 ```
 
+For vLLM versions that expose `--moe-backend`, this launcher defaults to `--moe-backend triton`.
+ModelOpt expert fakequant needs a decomposed MoE backend so both expert GEMMs are visible during
+calibration.
+
 Step 3: test the API server with curl:
 
 ```bash
