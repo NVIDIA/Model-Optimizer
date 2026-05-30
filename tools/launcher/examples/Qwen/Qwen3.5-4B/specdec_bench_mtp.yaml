@@ -10,10 +10,12 @@
 #   task_1  Long-context throughput split (nvidia/SPEED-Bench-Internal/throughput_32k)
 #   task_2  Upload both splits' results to S3 in sweep layout
 #
-# task_2 uploads /scratchspace/specdec_bench_mtp/ as a sweep dir; both
+# task_2 uploads /scratchspace/qwen35_4b_mtp_vllm/ as a sweep dir; both
 # qualitative/ and throughput_32k/ subdirs land under
-# s3://team-specdec-workgroup/results/specdec_bench_mtp/<split>/. S3 creds
-# are picked up from S3_ENDPOINT / S3_KEY_ID / S3_SECRET env vars.
+# s3://team-specdec-workgroup/results/qwen35_4b_mtp_vllm/<split>/.
+# Naming convention: <model>_<algorithm>_<engine> so multi-model / multi-engine
+# runs don't collide in S3. S3 creds are picked up from
+# SPECDEC_BENCH_S3_ENDPOINT / _KEY_ID / _SECRET env vars.
 #
 # Slurm run on cw_dfw:
 #   uv run slurm.py --yaml modules/Model-Optimizer/tools/launcher/examples/Qwen/Qwen3.5-4B/specdec_bench_mtp.yaml --yes
@@ -42,7 +44,7 @@ pipeline:
       - --output_length 4096
       - --aa_timing
       - --show_progress
-      - --save_dir /scratchspace/specdec_bench_mtp/qualitative
+      - --save_dir /scratchspace/qwen35_4b_mtp_vllm/qualitative
     environment:
       - HF_MODEL_CKPT: <<global_vars.hf_model>>
       - HF_LOCAL: /hf-local
@@ -89,7 +91,7 @@ pipeline:
       - --runtime_params common/specdec_bench/runtime_params_throughput_32k.yaml
       - --aa_timing
       - --show_progress
-      - --save_dir /scratchspace/specdec_bench_mtp/throughput_32k
+      - --save_dir /scratchspace/qwen35_4b_mtp_vllm/throughput_32k
     environment:
       - HF_MODEL_CKPT: <<global_vars.hf_model>>
       - HF_LOCAL: /hf-local
@@ -108,7 +110,7 @@ pipeline:
   task_2:
     script: common/specdec_bench/upload_to_s3.sh
     args:
-      - /scratchspace/specdec_bench_mtp
+      - /scratchspace/qwen35_4b_mtp_vllm
       - s3://team-specdec-workgroup/results
       - --skip-existing
       - --allow-incomplete-provenance

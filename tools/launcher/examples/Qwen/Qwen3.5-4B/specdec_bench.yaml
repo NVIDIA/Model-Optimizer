@@ -12,11 +12,13 @@
 # The qwen3_5 model_type needs transformers >= 4.58, which is NOT in
 # vllm/vllm-openai:latest yet — use the qwen3_5-cu130 tag instead.
 #
-# task_2 uploads /scratchspace/specdec_bench/ as a sweep dir; both
+# task_2 uploads /scratchspace/qwen35_4b_none_vllm/ as a sweep dir; both
 # qualitative/ and throughput_32k/ subdirs land under
-# s3://team-specdec-workgroup/results/specdec_bench/<split>/. S3 credentials
-# are picked up from S3_ENDPOINT / S3_KEY_ID / S3_SECRET env vars; --skip-existing
-# lets re-runs land alongside the prior upload instead of failing.
+# s3://team-specdec-workgroup/results/qwen35_4b_none_vllm/<split>/.
+# Naming convention: <model>_<algorithm>_<engine> so multi-model / multi-engine
+# runs don't collide in S3 (e.g., qwen35_4b_mtp_vllm vs qwen35_4b_eagle3_trtllm).
+# S3 credentials are picked up from SPECDEC_BENCH_S3_ENDPOINT / _KEY_ID / _SECRET
+# env vars; --skip-existing lets re-runs land alongside the prior upload.
 #
 # Local run:
 #   uv run launch.py --yaml examples/Qwen/Qwen3.5-4B/specdec_bench.yaml \
@@ -48,7 +50,7 @@ pipeline:
       - --output_length 4096
       - --aa_timing
       - --show_progress
-      - --save_dir /scratchspace/specdec_bench/qualitative
+      - --save_dir /scratchspace/qwen35_4b_none_vllm/qualitative
     environment:
       - HF_MODEL_CKPT: <<global_vars.hf_model>>
       - HF_LOCAL: /hf-local
@@ -79,7 +81,7 @@ pipeline:
       - --runtime_params common/specdec_bench/runtime_params_throughput_32k.yaml
       - --aa_timing
       - --show_progress
-      - --save_dir /scratchspace/specdec_bench/throughput_32k
+      - --save_dir /scratchspace/qwen35_4b_none_vllm/throughput_32k
     environment:
       - HF_MODEL_CKPT: <<global_vars.hf_model>>
       - HF_LOCAL: /hf-local
@@ -98,7 +100,7 @@ pipeline:
   task_2:
     script: common/specdec_bench/upload_to_s3.sh
     args:
-      - /scratchspace/specdec_bench
+      - /scratchspace/qwen35_4b_none_vllm
       - s3://team-specdec-workgroup/results
       - --skip-existing
       - --allow-incomplete-provenance
