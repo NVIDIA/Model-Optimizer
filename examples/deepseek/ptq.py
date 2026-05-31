@@ -353,6 +353,13 @@ def load_deepseek_model(
     return model
 
 
+def end_process():
+    world_size = int(os.getenv("WORLD_SIZE", "1"))
+    if world_size > 1:
+        if dist.is_initialized():
+            dist.destroy_process_group()
+
+
 def ptq(
     model,
     tokenizer,
@@ -592,3 +599,4 @@ if __name__ == "__main__":
         output_path=args.output_path,
     )
     save_amax_and_quant_config(model, args.output_path, not args.disable_fp8_kvcache)
+    end_process()
