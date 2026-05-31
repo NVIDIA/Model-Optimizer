@@ -43,7 +43,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Literal
+from typing import Optional, Literal
 
 import torch
 import torch.distributed as dist
@@ -92,6 +92,7 @@ def monkey_patch_deepseek_model(calib_all_experts: bool = False):
         bias: torch.Tensor | None = None,
         act_quantizer: TensorQuantizer | None = None,
         weight_quantizer: TensorQuantizer | None = None,
+        scale_fmt: Optional[str] = None,
     ) -> torch.Tensor:
         if weight.element_size() > 1:
             if act_quantizer is not None:
@@ -108,9 +109,7 @@ def monkey_patch_deepseek_model(calib_all_experts: bool = False):
 
             return F.linear(x, weight, bias)
         else:
-            assert weight_quantizer is None
-            assert act_quantizer is None
-            x, scale = act_quant(x, block_size)
+            x, scale = act_quant(x, block_size, scale_fmt)
             y = fp8_gemm(x, scale, weight, weight.scale)
             if bias is not None:
                 y += bias
@@ -187,6 +186,7 @@ def monkey_patch_deepseek_model(calib_all_experts: bool = False):
                 self.bias,
                 act_quantizer=self.input_quantizer,
                 weight_quantizer=self.weight_quantizer,
+                scale_fmt=self.scale_fmt,
             )
             return y
 
