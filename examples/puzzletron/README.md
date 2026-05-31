@@ -381,7 +381,7 @@ nccl_timeout_minutes: 90  # default is 10 if omitted
 
 This field is supported in any Puzzletron YAML config and overrides the default 10-minute distributed timeout.
 
-Due to non-linear extension of the runtime stats of single subblocks to the total runtime of the model, the `target_latency_seconds` value should be set to a value that is slightly lower than the desired latency. For example, in our experiments, the `target_latency_seconds` value of 21 resulted in a final model latency of 22.3 seconds.
+Due to non-linear extension of the runtime stats of single subblocks to the total runtime of the model, the `target_latency_seconds` value should be set to a value that is slightly lower than the desired latency. For example, in our experiments, the `target_latency_seconds` value of 5 resulted in a final model latency of 5.4 seconds.
 
 ## Advanced Usage
 

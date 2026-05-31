@@ -73,7 +73,7 @@ mip:
     - stats.attention_num_params
 
   human_constraints:
-    target_latency_seconds: 21
+    target_latency_seconds: 5
 
   mip_constraints:
   metric_overrides:
