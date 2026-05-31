@@ -26,6 +26,7 @@ from transformers import (
     AutoModelForQuestionAnswering,
     AutoTokenizer,
     BertConfig,
+    DeepseekV3Config,
     GptOssConfig,
     LlamaConfig,
     NemotronConfig,
@@ -204,6 +205,50 @@ def create_tiny_nemotron_dir(
         config_kwargs["vocab_size"] = tokenizer.vocab_size
     get_tiny_nemotron(**config_kwargs).save_pretrained(nemotron_dir)
     return nemotron_dir
+
+
+##### DeepSeek V3 #####
+def get_tiny_deepseek_v3(**config_kwargs) -> PreTrainedModel:
+    set_seed(SEED)
+    kwargs = {
+        "dtype": torch.bfloat16,
+        "vocab_size": 128,
+        "hidden_size": 128,
+        "intermediate_size": 256,
+        "moe_intermediate_size": 64,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 2,
+        "num_key_value_heads": 2,
+        "n_routed_experts": 4,
+        "num_experts_per_tok": 2,
+        "n_shared_experts": 1,
+        "first_k_dense_replace": 0,
+        "kv_lora_rank": 16,
+        "q_lora_rank": 32,
+        "qk_rope_head_dim": 16,
+        "qk_nope_head_dim": 16,
+        "v_head_dim": 16,
+        "max_position_embeddings": 128,
+        # Required so vLLM allocates ``gate.e_score_correction_bias`` (HF saves it unconditionally).
+        "topk_method": "noaux_tc",
+    }
+    kwargs.update(**config_kwargs)
+    cfg = DeepseekV3Config(**kwargs)
+    # Survive transformers versions that drop unknown kwargs from the dataclass.
+    cfg.topk_method = kwargs["topk_method"]
+    return AutoModelForCausalLM.from_config(cfg)
+
+
+def create_tiny_deepseek_v3_dir(
+    tmp_path: Path | str, with_tokenizer: bool = False, **config_kwargs
+) -> Path:
+    deepseek_dir = Path(tmp_path) / "tiny_deepseek_v3"
+    if with_tokenizer:
+        tokenizer = get_tiny_tokenizer()
+        tokenizer.save_pretrained(deepseek_dir)
+        config_kwargs["vocab_size"] = tokenizer.vocab_size
+    get_tiny_deepseek_v3(**config_kwargs).save_pretrained(deepseek_dir)
+    return deepseek_dir
 
 
 ##### GPT-OSS #####

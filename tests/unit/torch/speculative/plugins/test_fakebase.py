@@ -70,6 +70,39 @@ def test_fakebase_missing_index_raises(tmp_path, fake_config):
         FakeBaseModel.from_source(str(tmp_path))
 
 
+def test_fakebase_single_file_no_index(tmp_path, fake_config):
+    """Small models often ship a single ``model.safetensors`` without an index.json."""
+    tensors = {
+        "lm_head.weight": torch.zeros(_VOCAB_SIZE, _HIDDEN_SIZE),
+        "embed_tokens.weight": torch.zeros(_VOCAB_SIZE, _HIDDEN_SIZE),
+    }
+    safetensors.torch.save_file(tensors, tmp_path / "model.safetensors")
+    model = FakeBaseModel.from_source(str(tmp_path))
+    assert model.lm_head.weight.shape == torch.Size([_VOCAB_SIZE, _HIDDEN_SIZE])
+    assert model.embed_tokens.weight.shape == torch.Size([_VOCAB_SIZE, _HIDDEN_SIZE])
+
+
+def test_fakebase_tied_embeddings_falls_back_to_embed(tmp_path, fake_config):
+    """Tied-embeddings models (e.g. Llama-3.2-1B) omit ``lm_head`` from safetensors;
+    FakeBaseModel must reuse ``embed_tokens`` for both."""
+    fake_config.tie_word_embeddings = True
+    weight = torch.randn(_VOCAB_SIZE, _HIDDEN_SIZE)
+    safetensors.torch.save_file({"embed_tokens.weight": weight}, tmp_path / "model.safetensors")
+    model = FakeBaseModel.from_source(str(tmp_path))
+    torch.testing.assert_close(model.lm_head.weight, weight)
+    torch.testing.assert_close(model.embed_tokens.weight, weight)
+
+
+def test_fakebase_missing_lm_head_without_tying_raises(tmp_path, fake_config):
+    """Without ``tie_word_embeddings`` a missing ``lm_head`` is still an error."""
+    safetensors.torch.save_file(
+        {"embed_tokens.weight": torch.zeros(_VOCAB_SIZE, _HIDDEN_SIZE)},
+        tmp_path / "model.safetensors",
+    )
+    with pytest.raises(RuntimeError, match="lm_head"):
+        FakeBaseModel.from_source(str(tmp_path))
+
+
 def test_load_vlm_or_llm_returns_fakebase(fake_checkpoint):
     model = load_vlm_or_llm(str(fake_checkpoint), use_offline_training=True, use_fake_base=True)
     assert isinstance(model, FakeBaseModel)

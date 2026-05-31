@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import inspect
+import operator
 from contextlib import contextmanager
 from typing import (
     TYPE_CHECKING,
@@ -451,3 +452,95 @@ def _get_group_kwarg_if_necessary() -> dict:
         torch.distributed.distributed_c10d._object_to_tensor
     ).parameters.keys()
     return dict(group=None) if "group" in arg_names else dict()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Loss functions for bypass distillation (blockwise local knowledge distillation)
+# ──────────────────────────────────────────────────────────────────────────────
+
+# `normalized_mse_loss` already lives in tools.kd_model — re-export it here so
+# bypass-distillation imports stay co-located with the per-vector / per-batch
+# variants below, without duplicating the implementation. The `as
+# normalized_mse_loss` form is PEP 484's explicit re-export (mypy treats
+# `from X import Y` as a private import otherwise).
+from modelopt.torch.puzzletron.tools.kd_model import (  # noqa: E402
+    normalized_mse_loss as normalized_mse_loss,
+)
+
+
+def vectorwise_normalized_mse_loss(
+    input: torch.Tensor,
+    target: torch.Tensor,
+    epsilon: float = 1e-6,
+) -> torch.Tensor:
+    """Like normalized_mse_loss, but normalization is done per-vector (last dim), then averaged."""
+    return batched_normalized_mse_loss(input, target, epsilon, batch_dims=range(input.ndim - 1))
+
+
+def batched_normalized_mse_loss(
+    input: torch.Tensor,
+    target: torch.Tensor,
+    epsilon: float = 1e-6,
+    batch_dims: Sequence[int] = (0,),
+) -> torch.Tensor:
+    """Per-batch-element relative-L2 loss.
+
+    For each batch element, computes ``||input - target||^2 / (||target||^2 + eps)``
+    over the non-batch dims, then averages across batch elements. The additive
+    ``epsilon`` in the denominator handles all-zero target slices without a hard
+    clamp and makes the loss scale-invariant when ``||target||^2 >> eps``.
+    """
+    input_shape = tuple(input.shape)
+    target_shape = tuple(target.shape)
+
+    if epsilon <= 0:
+        raise ValueError(f"epsilon must be strictly positive, got {epsilon!r}")
+
+    try:
+        raw_batch_dims = tuple(operator.index(dim) for dim in batch_dims)
+    except TypeError as exc:
+        raise ValueError(
+            f"batch_dims must be an iterable of integer dimensions; got {batch_dims!r} "
+            f"for input shape {input_shape} and target shape {target_shape}"
+        ) from exc
+
+    resolved_batch_dims = []
+    for dim in raw_batch_dims:
+        if dim < -input.ndim or dim >= input.ndim:
+            raise ValueError(
+                f"batch_dims contains invalid dimension {dim} for input.ndim={input.ndim}; "
+                f"input shape={input_shape}, target shape={target_shape}, "
+                f"batch_dims={raw_batch_dims}, norm_dims=None"
+            )
+        resolved_batch_dims.append(dim % input.ndim)
+
+    if len(set(resolved_batch_dims)) != len(resolved_batch_dims):
+        raise ValueError(
+            f"batch_dims contains duplicate dimensions after normalization; "
+            f"input shape={input_shape}, target shape={target_shape}, "
+            f"batch_dims={tuple(resolved_batch_dims)}, norm_dims=None"
+        )
+
+    norm_dims = tuple(d for d in range(input.ndim) if d not in set(resolved_batch_dims))
+
+    if input.ndim != target.ndim:
+        raise ValueError(
+            f"input and target must have the same number of dimensions; "
+            f"input shape={input_shape}, target shape={target_shape}, "
+            f"batch_dims={tuple(resolved_batch_dims)}, norm_dims={norm_dims}"
+        )
+    if input_shape != target_shape:
+        mismatched_dims = tuple(
+            dim
+            for dim, (input_size, target_size) in enumerate(zip(input_shape, target_shape))
+            if input_size != target_size
+        )
+        raise ValueError(
+            f"input and target shapes must match exactly; mismatched_dims={mismatched_dims}, "
+            f"input shape={input_shape}, target shape={target_shape}, "
+            f"batch_dims={tuple(resolved_batch_dims)}, norm_dims={norm_dims}"
+        )
+
+    num = ((input - target) ** 2).sum(dim=norm_dims)
+    den = (target**2).sum(dim=norm_dims) + epsilon
+    return (num / den).mean()

@@ -351,6 +351,44 @@ def test_qkv_slicing_gqa_tp2(dist_workers_size_2, tmp_path):
     dist_workers_size_2.run(partial(_test_qkv_slicing_gqa_tp2, tmp_path))
 
 
+def test_qkv_slicing_records_hf_excludes_for_unquantized_fused_qkv():
+    """Unquantized fused MCore linear_qkv should become HF q/k/v excludes."""
+    exporter = object.__new__(GPTModelExporter)
+    exporter.dtype = torch.bfloat16
+    exporter.exclude_modules = ["backbone.layers.0.mixer"]
+    exporter.layer_config_dict = {}
+    exporter._state_dict = {}
+
+    hidden_size = 8
+    head_size = 4
+    num_attention_heads = 2
+    num_query_groups = 1
+    qkv_dim = num_attention_heads + 2 * num_query_groups
+    weight = torch.arange(qkv_dim * head_size * hidden_size, dtype=torch.bfloat16).reshape(
+        qkv_dim * head_size, hidden_size
+    )
+
+    module = torch.nn.Module()
+    module.config = type(
+        "Config",
+        (),
+        {
+            "hidden_size": hidden_size,
+            "num_query_groups": num_query_groups,
+            "num_attention_heads": num_attention_heads,
+            "kv_channels": head_size,
+        },
+    )()
+    exporter._get_quantized_state = lambda *args, **kwargs: ({"weight": weight}, None, 0)
+
+    exporter._qkv_slicing(module, "backbone.layers.0.mixer.")
+
+    assert "backbone.layers.0.mixer" not in exporter.exclude_modules
+    assert "backbone.layers.0.mixer.q_proj" in exporter.exclude_modules
+    assert "backbone.layers.0.mixer.k_proj" in exporter.exclude_modules
+    assert "backbone.layers.0.mixer.v_proj" in exporter.exclude_modules
+
+
 def _make_exporter_for_mtp(model_dir: Path) -> GPTModelExporter:
     """Create a minimal GPTModelExporter instance for testing _get_mtp_state_dict."""
     exporter = object.__new__(GPTModelExporter)

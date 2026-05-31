@@ -706,12 +706,12 @@ class MaxCalibConfig(QuantizeAlgorithmConfig):
 
     sync_expert_weight_amax: bool = ModeloptField(
         default=False,
-        title="Sync weight quantizer amax across MoE experts",
+        title="Share one weight amax across local experts in a SequentialMLP MoE layer.",
         description=(
-            "If True, the weight quantizer amax values are synchronized (max) across "
-            "local experts in SequentialMLP layers during calibration. This matches "
-            "TEGroupedMLP behavior where all experts share a single weight quantizer. "
-            "Only affects MoE models with SequentialMLP experts."
+            "If True, max-calibration synchronizes the weight quantizer amax across local "
+            "experts within each SequentialMLP layer, so all experts in that layer share "
+            "one effective weight amax. TEGroupedMLP already fuses experts into a single "
+            "GEMM with one weight quantizer, so this flag is irrelevant there."
         ),
     )
 
@@ -722,9 +722,9 @@ class MseCalibConfig(QuantizeAlgorithmConfig):
     Finds a scale s (via amax a, with s = a / q_max) that minimizes the
     reconstruction error of a tensor after uniform Q→DQ:
 
-        s* = argmin_s  E[(X - DQ(Q(X; s)))^2],   X ∈ {weights | activations}
+        s* = argmin_s  E[(W - DQ(Q(W; s)))^2],   W ∈ weights
 
-    When fp8_scale_sweep is enabled, step_size is ignored.
+    When fp8_scale_sweep is enabled for a supported FP8-scale format, step_size is ignored.
     """
 
     method: Literal["mse"] = ModeloptField("mse")
@@ -755,8 +755,8 @@ class MseCalibConfig(QuantizeAlgorithmConfig):
         default=False,
         title="Enable FP8 scale sweep for NVFP4 per-block quantization.",
         description="If True, sweep all 128 FP8 E4M3 scale values instead of using multipliers. "
-        "Only applies to NVFP4 weight quantization. When enabled, num_steps, step_size, "
-        "start_multiplier, and stop_multiplier are ignored.",
+        "Applies to ModelOpt static NVFP4 weight quantizers and registered custom backends with "
+        "FP8 sweep support. Other weight quantizers use the multiplier search.",
     )
 
     distributed_sync: bool | None = ModeloptField(

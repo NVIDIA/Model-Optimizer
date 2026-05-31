@@ -50,8 +50,6 @@ execution:
     mount_home: false
   deployment:
     n_tasks: 1
-  batch_comment: "{\"OccupiedIdleGPUsJobReaper\":{\"exemptIdleTimeMins\":\"1920\",\"reason\":\"benchmarking\",\"description\":\"Required data validation\
-    \ and evaluation\"}}"
 
 # Note: Only tp=1 works for Nano (Mamba-based architecture)
 deployment:

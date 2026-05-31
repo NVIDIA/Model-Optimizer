@@ -288,9 +288,25 @@ def _ensure_weight_quantizer_calibrated(
         module_name: Optional module name for better warning messages
     """
     if isinstance(weight_quantizer, NVFP4StaticQuantizer):
-        need_per_block = not hasattr(weight_quantizer, "_amax") or weight_quantizer._amax is None
+
+        def _amax_is_invalid(t: torch.Tensor | None) -> bool:
+            # MCore distcp may register but not fill amax — treat missing/non-finite/negative as recompute.
+            if t is None:
+                return True
+            t = t.detach()
+            if not torch.is_floating_point(t):
+                return False
+            return bool((~torch.isfinite(t) | (t < 0)).any().item())
+
+        need_per_block = (
+            not hasattr(weight_quantizer, "_amax")
+            or weight_quantizer._amax is None
+            or _amax_is_invalid(weight_quantizer._amax)
+        )
         need_global = (
-            not hasattr(weight_quantizer, "_global_amax") or weight_quantizer.global_amax is None
+            not hasattr(weight_quantizer, "_global_amax")
+            or weight_quantizer.global_amax is None
+            or _amax_is_invalid(weight_quantizer.global_amax)
         )
         if not (need_per_block or need_global):
             return
