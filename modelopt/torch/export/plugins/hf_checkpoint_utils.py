@@ -59,11 +59,15 @@ def copy_hf_ckpt_remote_code(
 
 def load_multimodal_components(
     pretrained_model_path: str | os.PathLike,
+    prefixes: tuple[str, ...] = ("multi_modal_projector", "vision_model"),
 ) -> dict[str, torch.Tensor]:
     """Load multimodal components from safetensors file.
 
     Args:
         pretrained_model_path: Path to the pretrained model.
+        prefixes: Tensor key prefixes to select.  Defaults to the LLaVA-style
+            ``multi_modal_projector`` / ``vision_model`` prefixes.  Pass
+            ``("model.visual.",)`` for Qwen3-VL checkpoints.
 
     Returns:
         A dictionary of multimodal components.
@@ -85,7 +89,7 @@ def load_multimodal_components(
             multimodal_keys = [
                 key
                 for key in f.keys()  # noqa: SIM118
-                if key.startswith(("multi_modal_projector", "vision_model"))
+                if key.startswith(prefixes)
             ]
             for key in tqdm(multimodal_keys, desc="Loading multimodal tensors"):
                 multimodal_state_dict[key] = f.get_tensor(key)
@@ -95,28 +99,13 @@ def load_multimodal_components(
         with open(safetensors_index_file) as f:
             safetensors_index = json.load(f)
 
-        # For multimodal models, vision_model and multi_modal_projector are in the first shard
         all_shard_files = sorted(set(safetensors_index["weight_map"].values()))
-        first_shard_file = all_shard_files[0]  # e.g., "model-00001-of-00050.safetensors"
-
-        # Load multimodal components from the first shard file
-        safetensors_filepath = Path(hf_checkpoint_path) / first_shard_file
-        print(f"Loading multimodal components from {first_shard_file}")
-
-        with safe_open(safetensors_filepath, framework="pt") as f:
-            shard_keys = list(f.keys())
-            multimodal_keys_in_shard = [
-                k for k in shard_keys if k.startswith(("multi_modal_projector", "vision_model"))
-            ]
-
-            if multimodal_keys_in_shard:
-                print(
-                    f"Found {len(multimodal_keys_in_shard)} multimodal tensors in {first_shard_file}"
-                )
-                for key in tqdm(multimodal_keys_in_shard, desc="Loading multimodal tensors"):
-                    multimodal_state_dict[key] = f.get_tensor(key)
-            else:
-                print(f"No multimodal components found in {first_shard_file}")
+        for shard_file in all_shard_files:
+            safetensors_filepath = Path(hf_checkpoint_path) / shard_file
+            with safe_open(safetensors_filepath, framework="pt") as f:
+                for key in f.keys():  # noqa: SIM118
+                    if key.startswith(prefixes):
+                        multimodal_state_dict[key] = f.get_tensor(key)
 
     else:
         print(f"Warning: No safetensors files found in {hf_checkpoint_path}")

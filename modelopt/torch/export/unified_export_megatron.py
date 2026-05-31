@@ -349,6 +349,11 @@ class GPTModelExporter:
         if is_first_stage_main_rank and self.is_multimodal:
             multimodal_state_dict = load_multimodal_components(pretrained_model_name_or_path)
             layer_state_dicts[0].update(multimodal_state_dict)
+        elif is_first_stage_main_rank and self.arch == "Qwen3VLForConditionalGeneration":
+            vision_state_dict = load_multimodal_components(
+                pretrained_model_name_or_path, prefixes=("model.visual.",)
+            )
+            layer_state_dicts[0].update(vision_state_dict)
 
         # Barrier to ensure the export_dir has been created.
         torch.distributed.barrier()

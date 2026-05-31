@@ -75,23 +75,6 @@ def _verify_model_quant_config(
             assert quant_config_dict["kv_cache_quant_algo"] == KV_CACHE_FP8
 
 
-def _merge_vision_weights(src_dir: Path, dst_dir: Path) -> None:
-    """Copy model.visual.* tensors from src safetensors into dst_dir.
-
-    The mcore export only writes language-model weights.  To produce a complete
-    Qwen3-VL checkpoint the vision-encoder weights must be merged from the
-    original pretrained checkpoint.
-    """
-    vision_tensors = {}
-    for sf in sorted(src_dir.glob("*.safetensors")):
-        with safe_open(str(sf), framework="pt", device="cpu") as f:
-            for key in f.keys():  # noqa: SIM118
-                if key.startswith("model.visual."):
-                    vision_tensors[key] = f.get_tensor(key)
-    if vision_tensors:
-        save_file(vision_tensors, str(dst_dir / "model-vision.safetensors"))
-
-
 def _test_unified_export_megatron(
     tmp_path,
     model_type,
@@ -181,33 +164,28 @@ def _test_unified_export_megatron(
     if quant_config:
         _verify_model_quant_config(tmp_export_dir, quant_config, kv_cache_quant_cfg)
 
-    if model_type == "qwen3vl":
-        torch.distributed.barrier()
-        if rank == 0:
-            _merge_vision_weights(Path(model_dir), tmp_export_dir)
-            # sanity check that the vision encoder weights were merged
-            keys = []
-            for sf in sorted(tmp_export_dir.glob("*.safetensors")):
-                with safe_open(str(sf), framework="pt", device="cpu") as f:
-                    keys.extend(f.keys())
-            assert any(k.startswith("model.language_model.") for k in keys), (
-                "language model keys missing from combined export"
-            )
-            assert any(k.startswith("model.visual.") for k in keys), (
-                "vision encoder keys missing from combined export"
-            )
-            # try to load the model and run a forward pass
-            from transformers.models.qwen3_vl.modeling_qwen3_vl import (
-                Qwen3VLForConditionalGeneration,
-            )
+    if model_type == "qwen3vl" and rank == 0:
+        # sanity check that vision weights were merged by export_mcore_gpt_to_hf
+        keys = []
+        for sf in sorted(tmp_export_dir.glob("*.safetensors")):
+            with safe_open(str(sf), framework="pt", device="cpu") as f:
+                keys.extend(f.keys())
+        assert any(k.startswith("model.language_model.") for k in keys), (
+            "language model keys missing from export"
+        )
+        assert any(k.startswith("model.visual.") for k in keys), (
+            "vision encoder keys missing from export"
+        )
+        # try to load the model and run a forward pass
+        from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLForConditionalGeneration
 
-            vl_model = Qwen3VLForConditionalGeneration.from_pretrained(
-                tmp_export_dir, torch_dtype=torch.bfloat16
-            ).cuda()
-            input_ids = torch.zeros(1, 4, dtype=torch.long).cuda()
-            with torch.no_grad():
-                out = vl_model(input_ids=input_ids)
-            assert out.logits.shape[-1] == vl_model.config.text_config.vocab_size
+        vl_model = Qwen3VLForConditionalGeneration.from_pretrained(
+            tmp_export_dir, torch_dtype=torch.bfloat16
+        ).cuda()
+        input_ids = torch.zeros(1, 4, dtype=torch.long).cuda()
+        with torch.no_grad():
+            out = vl_model(input_ids=input_ids)
+        assert out.logits.shape[-1] == vl_model.config.text_config.vocab_size
 
 
 @pytest.mark.parametrize(
