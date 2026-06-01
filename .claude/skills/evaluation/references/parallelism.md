@@ -272,6 +272,35 @@ AA-LCR (~120K input). **Never inherit a short task's `parallelism` for a long on
   the top-level and all per-task overrides (the deployment must support the busiest
   task), even though long-context tasks themselves run at a lower `parallelism`.
 
+## Running a suite: `parallelism` is per-task, not per-run
+
+A benchmark suite (e.g. AA) runs tasks with **different bottlenecks** against one
+deployment, so a single suite-wide `parallelism` is wrong. Set a top-level **default**
+for the model/GPU-bound short tasks, then **override the outliers**:
+
+| Bottleneck | Example AA tasks | Set `parallelism` by |
+| --- | --- | --- |
+| Model / GPU KV (short in) | `gpqa_diamond_aa_v3`, `ns_ifbench` | top-level default (preemption-free KV-fit) |
+| **Long-context KV** (~120K in) | `ns_aa_lcr` | **LOW** per-task override — prefill thrash; model-dependent (MLA ≫ GQA) |
+| **Judge / user-sim rate limit** | `ns_hle_aa`, `ns_aa_lcr`, `tau2_bench_telecom` | the judge endpoint (429s), **not** your model |
+| **Sandbox execution** | `ns_scicode` | concurrent sandbox slots |
+
+Rules:
+
+- **Judge/sandbox-bound tasks bottleneck *before* the model** — over-parallelizing
+  them yields 429s/retries (the timeout cascade), not speed. Cap to the endpoint and
+  tune by *its* errors, independent of GPU KV.
+- **Long-context tasks (AA-LCR) are KV-bound** — give them an explicit **low**
+  per-task `parallelism` (see Balanced sizing); never inherit the short-task default.
+- `--max-num-seqs` is sized off the **max** `parallelism` across all tasks (the
+  deployment must serve the busiest one), even though the long-context / judge-bound
+  tasks themselves run lower.
+- **Canary each bottleneck class separately** (model-only / judge-scored / sandbox)
+  and tune that task by its own signal — preemption, judge 429s, or sandbox saturation.
+
+Tasks whose `parallelism` is endpoint- or context-dependent ship with the field as
+`???` in their recipe (`ns_aa_lcr`, `tau2_bench_telecom`) so it's a conscious choice.
+
 ---
 
 ## Worked examples
