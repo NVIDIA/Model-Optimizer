@@ -33,6 +33,23 @@ Use this default for edge or memory-pressure scenarios where the goal is minimiz
 
 If the user needs both, keep two tables or explicitly define a weighted score.
 
+## Delegating To Existing Skills
+
+Do not reimplement workflows that existing skills own:
+
+| Need | Use |
+| --- | --- |
+| Generate/check a quantized checkpoint | `ptq` |
+| Serve a checkpoint or test backend flags | `deployment` |
+| Create or submit NEL configs | `evaluation` |
+| Resume/debug/analyze live eval runs | `launching-evals` |
+| Track active Slurm/NEL jobs | `monitor` |
+| Fetch MLflow artifacts | `accessing-mlflow` |
+| Compute baseline-vs-candidate deltas | `compare-results` |
+
+This skill should provide the experiment strategy and next-candidate decision,
+then delegate execution to the appropriate skill.
+
 ## Working With The ModelOpt PTQ Skill
 
 This skill should orchestrate the recipe loop; the ModelOpt `ptq` skill should produce and validate checkpoints.
@@ -50,7 +67,7 @@ Use this skill for:
 - Choosing the success metric.
 - Selecting baseline recipes and manual deltas.
 - Deciding which evals to run next.
-- Updating accuracy, verbosity, and provenance tables.
+- Maintaining the high-level recipe portfolio table.
 - Interpreting sensitivity and benchmark tradeoffs.
 
 Before launching PTQ in a ModelOpt repo, read the current PTQ skill from `.claude/skills/ptq/SKILL.md`; if possible, compare it with latest `origin/main` because recipe paths and validation gates may change.

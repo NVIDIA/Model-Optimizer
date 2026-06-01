@@ -1,18 +1,30 @@
 ---
 name: quant-recipe-loop
-description: Use when building or iterating quantization recipes for LLM/VLM checkpoints, including AutoQuant/PTQ, manual mixed-precision recipe creation, sensitivity analysis, active-memory accounting, sanity checks, and accuracy/verbosity evaluation tables.
+description: Use when planning or steering a multi-candidate quantization recipe iteration loop: choose compute-vs-memory success metrics, select ModelOpt recipe baselines, design AutoQuant/manual recipe deltas, interpret sensitivity, and decide next candidates. Do NOT use for a single PTQ run (use ptq), serving (use deployment), creating/running evals (use evaluation or launching-evals), monitoring jobs (use monitor), MLflow browsing (use accessing-mlflow), or comparing completed baseline-vs-candidate scores only (use compare-results).
 ---
 
 # Quant Recipe Loop
 
-Use this skill to run quantization as an iteration loop: define the objective, generate candidate recipes, sanity-gate the checkpoint, evaluate accuracy and verbosity, update the results table, and choose the next candidate.
+Use this skill to steer quantization as a portfolio loop. It is an orchestration layer: it decides what to try next and which existing skill should do the execution.
+
+## Skill Boundaries
+
+- Use `ptq` to produce and validate checkpoints.
+- Use `deployment` to serve checkpoints and debug serving-specific flags.
+- Use `evaluation` to create NEL configs and submit evals.
+- Use `launching-evals` to run, resume, debug, and analyze NEL runs.
+- Use `monitor` for active job tracking.
+- Use `accessing-mlflow` for MLflow artifact lookup.
+- Use `compare-results` for validated baseline-vs-candidate deltas and score-field comparability.
+
+Do not duplicate those workflows here. This skill should leave the user with a clear recipe portfolio, success metric, experiment sequence, and next decision.
 
 ## Core Loop
 
 1. **Recover state**
-   - Read existing result tables, run logs, state files, and experiment notes before launching anything.
-   - Check active jobs and avoid duplicates.
-   - Resume interrupted evaluator jobs from their output folder when possible; restart only when the config/checkpoint is wrong.
+   - Read existing result tables, recipe logs, state files, and experiment notes before proposing new candidates.
+   - Ask `monitor` / `launching-evals` to check active jobs when needed.
+   - Use `compare-results` when existing baseline/candidate evals need a formal comparability check.
 
 2. **Define the target**
    - Ask the user what makes the compression successful before choosing formats or recipes.
@@ -32,21 +44,22 @@ Use this skill to run quantization as an iteration loop: define the objective, g
    - Use manual recipes for controlled ablations by module family.
    - Change one major axis at a time: weight format, activation format, calibration method, excluded modules, backend, or serving flags.
 
-4. **Sanity-gate before full eval**
-   - Verify checkpoint export/load.
-   - Run short generation probes and inspect the actual output.
-   - Check server logs to confirm the intended quantization config, kernel/backend, KV-cache dtype, parser/tool settings, and CUDA graph/eager mode.
-   - Fail fast on corrupt output, wrong backend, missing scales, bad tensor naming, or mismatched conversion metadata.
+4. **Gate before scaling**
+   - Ask `ptq` to validate checkpoint coverage and metadata after generation.
+   - Ask `deployment` or `evaluation` for a pipe-clean run when serving flags, kernels, or conversion formats are new.
+   - Promote only candidates that pass checkpoint validation and serving sanity.
 
 5. **Evaluate in stages**
-   - Run cheap screen benchmarks first, chosen to expose likely failure modes for the model/domain.
-   - Promote only promising recipes to the full benchmark table.
+   - Pick cheap screen benchmarks that expose likely failure modes for the model/domain.
+   - Ask `evaluation` to create or modify configs and submit runs.
+   - Ask `launching-evals` / `monitor` to track, resume, and debug runs.
+   - Ask `compare-results` to validate comparability and compute deltas.
    - Use consistent sampling, parser, tool-call, token-cap, and backend settings within a comparison table.
 
 6. **Refresh tables**
-   - Maintain an accuracy table and a verbosity table.
-   - Store output path, evaluator config, server/client logs, checkpoint path, conversion path, git branch/commit, image, and launch command for each row.
-   - Mark partial, resumed, failed, and generation-only results explicitly.
+   - Maintain a recipe portfolio table, not a replacement for evaluator artifacts.
+   - Include recipe name, objective, active-cost estimate, checkpoint path, eval/comparison reference, accuracy summary, verbosity summary, and decision.
+   - Link to `compare-results` / `launching-evals` artifacts for exact metric extraction and provenance.
 
 7. **Decide next iteration**
    - If accuracy drops, inspect the most sensitive module families first.
@@ -65,5 +78,4 @@ Use this skill to run quantization as an iteration loop: define the objective, g
 ## References
 
 - For recipe design, sensitivity, and active-cost accounting, read `references/recipe_iteration.md`.
-- For metric extraction, verbosity, table hygiene, and evaluator resume rules, read `references/eval_tracking.md`.
 - For a concrete prior case study, read `references/qwen36_case_study.md` only when Qwen3.5/Qwen3.6 details are relevant.
