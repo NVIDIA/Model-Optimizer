@@ -48,7 +48,7 @@ Run `nel --version`; if missing, instruct `pip install nemo-evaluator-launcher`.
 1. Read the task reference file(s).
 2. Use `recipes/examples/example_eval.yaml` as the base.
 3. Copy the YAML fragment(s) into `evaluation.tasks`, applying any per-task notes.
-4. **MLflow auto-export is on by default** — copy the `export.mlflow` block from `example_eval.yaml` verbatim. The defaults inside that block (Hydra-interpolated `experiment_name`, `description`, `tags`) only need `tracking_uri` filled in Step 4. See `example_eval.yaml` for the canonical block.
+4. **MLflow auto-export is on by default** — it needs **two** pieces, both in `example_eval.yaml`: (a) the **trigger** `execution.auto_export.destinations: [mlflow]` (without it the run is *not* uploaded), and (b) the `export.mlflow` block that configures it. In the `export.mlflow` block use **literal** values for `experiment_name` / `description` / `tags` — substitute the actual `served_model_name` and sampling params. Do **not** use `${deployment.*}` / `${evaluation.*}` cross-references: with auto-export on, NEL resolves the export block at submit time in a scope without those nodes and fails with `Interpolation key '...' not found` (`${oc.env:USER}` is fine — it's an env var). Fill `tracking_uri` in Step 4.
 5. Proceed to Step 3, then Step 4, then Step 7.5/8. Skip Step 2's 5-question flow.
 
 ---
