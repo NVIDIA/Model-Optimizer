@@ -407,7 +407,29 @@ def quantize_model(model, args, tokenizer=None, calibration_forward_loop=None):
         quant_cfg = copy.deepcopy(mtq.NVFP4_DEFAULT_CFG)
     else:
         raise RuntimeError("Unsupported quantization format")
-    quant_cfg["quant_cfg"].append({"quantizer_name": "*vlm.model.visual*", "enable": False})
+    # Keep the entire vision tower in high precision. We must clear the NVFP4 quantizer
+    # *type* here, not merely disable it: the QuantConv3d in the vision patch-embed routes to
+    # a JIT-compiled implicit-GEMM CUDA kernel whenever its quantizers are NVFP4-typed (num_bits
+    # == (2, 1) with a dynamic block config) -- even when `enable=False`. That path requires
+    # CUDA_HOME (kernel compilation) and would also fake-quantize the vision weights we intend to
+    # leave untouched. Passing a non-NVFP4 cfg (num_bits=8) together with enable=False keeps these
+    # modules on the plain, unquantized forward path. Harmless for FP8 (already disabled there).
+    quant_cfg["quant_cfg"].append(
+        {"quantizer_name": "*vlm.model.visual*", "enable": False, "cfg": {"num_bits": 8}}
+    )
+
+    if args.quant_format == "nvfp4":
+        # NVFP4 packs weights in blocks of 16 along the input (K) dimension. A Linear whose
+        # in_features is not a multiple of 16 gets K-padded when its weight is packed, and
+        # ModelOpt's packed-weight dequantize path cannot reshape the padded buffer back to the
+        # logical shape (it raises e.g. "shape '[512, 60]' is invalid for input of size 32768").
+        # Such layers also never satisfy the real-quant GEMM's K % 64 == 0 requirement, so they
+        # would only ever run on the (now-broken) dequantize fallback. Keep them in high precision.
+        # In AlpamayoR1 these are the small action-projection heads (e.g. the Fourier-feature
+        # encoder input), so the size/speed impact of leaving them unquantized is negligible.
+        for _name, _module in model.named_modules():
+            if isinstance(_module, torch.nn.Linear) and _module.in_features % 16 != 0:
+                quant_cfg["quant_cfg"].append({"quantizer_name": f"{_name}.*", "enable": False})
 
     model = mtq.quantize(model, quant_cfg, forward_loop=calibrate_loop)
     if args.debug:
@@ -534,7 +556,7 @@ def main():
         help="Directory to save the quantized HF checkpoint",
     )
     ap.add_argument(
-        "--qformat",
+        "--quantize",
         type=str,
         required=True,
         choices=["fp8", "nvfp4", "auto"],
@@ -558,7 +580,7 @@ def main():
     ap.add_argument("--max_generation_length", type=int, default=256)
     ap.add_argument("--num_traj_samples", type=int, default=6)
     ap.add_argument(
-        "--limit", type=int, default=644, help="How many clip_ids to use for calibration"
+        "--limit", type=int, default=16, help="How many clip_ids to use for calibration"
     )
     ap.add_argument(
         "--real-quant",
@@ -587,15 +609,15 @@ def main():
     processor = get_processor(model.tokenizer)
 
     # Quantize using existing recipe
-    print(f"Quantizing model ({args.qformat}) ...")
+    print(f"Quantizing model ({args.quantize}) ...")
     quantization_args = argparse.Namespace(
-        quant_format=args.qformat,
+        quant_format=args.quantize,
         quant_algo="max",
         weight_only=False,
         debug=True,
         auto_quantize_bits=args.auto_quantize_bits,
     )
-    if args.qformat == "auto":
+    if args.quantize == "auto":
         model = auto_quantize_model(
             model,
             quantization_args,
@@ -632,16 +654,25 @@ def main():
     print(f"Saving quantized checkpoint to {args.output_dir!r} ...")
 
     if args.real_quant:
-        # Persist processor + composite config first so export_hf_checkpoint's
-        # injected `quantization_config` in config.json is the one that wins.
+        # Real (packed) quantization. `mtq.compress` replaces the quantized linears with
+        # RealQuantLinear modules whose weights are packed into the low-precision storage
+        # format (NVFP4 = E2M1 nibbles + per-block FP8 scales) and enables ModelOpt's
+        # real-quant GEMM kernels, so inference runs on the hardware NVFP4 path rather than
+        # fake-quant fp16. We then save through the ModelOpt-patched `save_pretrained`, which
+        # writes the packed weights *and* a `modelopt_state.pth` recording the quantize +
+        # real_quantize modes (including the packed-tensor metadata/scales). Reloading via
+        # `AlpamayoR1.from_pretrained` with ModelOpt HF checkpointing enabled replays those
+        # modes and re-wraps the packed weights, so the checkpoint loads and runs real-quantized.
+        #
+        # NOTE: `export_hf_checkpoint` (the unified vLLM/TRT-LLM deployment format) is
+        # intentionally not used here: that format has no `modelopt_state.pth`, so a custom
+        # model class like AlpamayoR1 cannot reload it through `from_pretrained`.
+        mtq.compress(model)
+        model.eval()
+        with torch.inference_mode():
+            model.save_pretrained(args.output_dir)
         processor.save_pretrained(args.output_dir)
         model.config.save_pretrained(args.output_dir)
-        with torch.inference_mode():
-            export_hf_checkpoint(
-                model,
-                dtype=torch.float16,
-                export_dir=args.output_dir,
-            )
     else:
         with torch.inference_mode():
             model.save_pretrained(args.output_dir)
