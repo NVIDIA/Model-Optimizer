@@ -135,7 +135,7 @@ class LayerActivationCollector:
         """Replace decoder layer *idx* with a parameter-free dummy.
 
         ``output_meta`` is intentionally preserved on the original layer: the
-        ``_SkipLayer`` reads it to produce correctly shaped zero-filled outputs
+        ``_SkipLayer`` reads it to produce correctly shaped placeholder outputs
         for the parent forward pass.
         """
         assert self._decoder_layers is not None
@@ -188,11 +188,11 @@ class LayerActivationCollector:
 
     @staticmethod
     def _zeros_from_meta(meta):
-        """Reconstruct a zero-filled output from metadata produced by ``_extract_output_meta``."""
+        """Reconstruct placeholder output from metadata produced by ``_extract_output_meta``."""
         tag = meta[0]
         if tag == "tensor":
-            _, shape, dtype, device = meta
-            return torch.zeros(shape, dtype=dtype, device=device)
+            _, shape, dtype, _device = meta
+            return torch.empty(shape, dtype=dtype, device="meta")
         if tag == "tuple":
             return tuple(LayerActivationCollector._zeros_from_meta(m) for m in meta[1])
         if tag == "list":
@@ -420,7 +420,8 @@ class LayerActivationCollector:
 
         This puts *layer* into "run" mode (setting its ``output_meta``) and the
         next layer into "capture" mode, then runs *forward_loop*.  Returns the
-        captured inputs for the next layer.
+        captured inputs for the next layer.  Callers should keep *layer*
+        materialized for the duration when using offload frameworks.
 
         Must be called only when a next layer exists (i.e. *layer* is not the
         last decoder layer).
@@ -429,11 +430,9 @@ class LayerActivationCollector:
         layer_idx = self._layer_to_idx[layer]
         next_idx = layer_idx + 1
         assert next_idx < len(self._decoder_layers), "No next layer to capture inputs for."
-        from .core_utils import persistent_materialization
 
         next_layer = self._decoder_layers[next_idx]
-        with persistent_materialization(layer):
-            return self.get_input_activations(next_layer, forward_loop)
+        return self.get_input_activations(next_layer, forward_loop)
 
 
 def _move_to_device(obj: Any, device: torch.device) -> Any:

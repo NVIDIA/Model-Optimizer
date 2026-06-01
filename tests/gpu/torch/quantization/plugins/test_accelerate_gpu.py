@@ -395,8 +395,11 @@ class _TupleUnpackingModel(torch.nn.Module):
 
 def test_skip_dummy_has_no_hf_hook(monkeypatch):
     """Dummies must not carry _hf_hook from the original layer."""
+    from contextlib import nullcontext
+
     from accelerate.hooks import AlignDevicesHook, add_hook_to_module
 
+    from modelopt.torch.quantization.utils import persistent_materialization
     from modelopt.torch.quantization.utils.layerwise_calib import (
         LayerActivationCollector,
         _SkipLayer,
@@ -422,8 +425,12 @@ def test_skip_dummy_has_no_hf_hook(monkeypatch):
     collector = LayerActivationCollector(model)
     collector._patch_all_layers()
     try:
-        for layer in list(model.layers):
-            collector.get_input_activations(layer, forward_loop)
+        for i, layer in enumerate(list(model.layers)):
+            run_layer_context = (
+                persistent_materialization(model.layers[i - 1]) if i > 0 else nullcontext()
+            )
+            with run_layer_context:
+                collector.get_input_activations(layer, forward_loop)
 
         for i in range(2):
             dummy = model.layers[i]
@@ -431,6 +438,26 @@ def test_skip_dummy_has_no_hf_hook(monkeypatch):
             assert not hasattr(dummy, "_hf_hook"), f"Dummy at {i} should not have _hf_hook"
     finally:
         collector._unpatch_all_layers()
+
+
+def _assert_persistent_materialization_bypasses_top_hook(layer):
+    from modelopt.torch.quantization.utils import persistent_materialization
+
+    assert hasattr(layer, "_hf_hook")
+    original_old_forward = layer._old_forward
+
+    def sentinel_forward(*args, **kwargs):
+        return "unhooked"
+
+    layer._old_forward = sentinel_forward
+    try:
+        with persistent_materialization(layer):
+            assert layer.forward is sentinel_forward
+            assert layer("unused") == "unhooked"
+
+        assert layer.forward is not sentinel_forward
+    finally:
+        layer._old_forward = original_old_forward
 
 
 def test_persistent_materialization_cpu_offloaded(tmp_path):
@@ -445,6 +472,8 @@ def test_persistent_materialization_cpu_offloaded(tmp_path):
 
     # Verify offloaded (meta device)
     assert all(p.device.type == "meta" for p in offloaded_layer.parameters())
+
+    _assert_persistent_materialization_bypasses_top_hook(offloaded_layer)
 
     # Save reference weight
     linear = None
@@ -563,6 +592,8 @@ def test_persistent_materialization_disk_offloaded(tmp_path):
 
     # Verify offloaded (meta device)
     assert all(p.device.type == "meta" for p in offloaded_layer.parameters())
+
+    _assert_persistent_materialization_bypasses_top_hook(offloaded_layer)
 
     # Save reference weight
     linear = None
