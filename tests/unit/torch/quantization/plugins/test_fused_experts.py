@@ -651,6 +651,60 @@ class TestFusedExpertsCalibration:
 
         self._cleanup_registry(expert_type)
 
+    def test_local_hessian_calibrates_per_expert_weights(self):
+        """local_hessian builds a per-expert Hessian (from each expert's routed inputs)
+        and refines every expert's weight amax via the shared MSE calibration loop."""
+        import modelopt.torch.quantization as mtq
+        from modelopt.torch.quantization.model_calib import local_hessian_calibrate
+
+        model = _TinyMoEModel()
+        expert_type = type(model.moe.experts)
+        self._cleanup_registry(expert_type)
+
+        quant_cfg = {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {
+                    "quantizer_name": "*gate_up_proj_weight_quantizer",
+                    "cfg": {"num_bits": 8, "axis": 0},
+                },
+                {
+                    "quantizer_name": "*down_proj_weight_quantizer",
+                    "cfg": {"num_bits": 8, "axis": 0},
+                },
+            ],
+            "algorithm": "max",
+        }
+
+        def forward_loop(m):
+            torch.manual_seed(0)
+            for _ in range(3):
+                m(torch.randn(1, 8, HIDDEN_DIM))
+
+        mtq.quantize(model, quant_cfg, forward_loop=forward_loop)
+        experts = model.moe.experts
+        expert_quantizers = list(experts.gate_up_proj_weight_quantizers) + list(
+            experts.down_proj_weight_quantizers
+        )
+        max_amax = {id(q): q.amax.clone() for q in expert_quantizers if q.amax is not None}
+
+        local_hessian_calibrate(model, forward_loop, fp8_scale_sweep=False, debug=True)
+
+        # At least one expert's routed activations produced a per-block Hessian.
+        accumulators = model._local_hessian_accumulators
+        assert any(acc.num_samples > 0 for acc in accumulators.values()), (
+            "no per-expert Hessian captured — F.linear hook likely bypassed."
+        )
+
+        refined = False
+        for q in expert_quantizers:
+            assert q.amax is not None and torch.isfinite(q.amax).all()
+            if id(q) in max_amax and not torch.allclose(q.amax, max_amax[id(q)]):
+                refined = True
+        assert refined, "local_hessian did not refine any expert weight amax"
+
+        self._cleanup_registry(expert_type)
+
     def test_max_calibrate_populates_dead_static_nvfp4_expert_quantizers(self):
         """max calibration fills static NVFP4 ``_amax`` on experts the forward never routed to.
 
