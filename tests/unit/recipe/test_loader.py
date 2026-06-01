@@ -20,7 +20,9 @@ from importlib.resources import files
 
 import pytest
 
+import modelopt.torch.quantization as mtq
 from modelopt.recipe.config import (
+    ModelOptAutoQuantizeRecipe,
     ModelOptDFlashRecipe,
     ModelOptEagleRecipe,
     ModelOptPTQRecipe,
@@ -241,6 +243,115 @@ def test_load_recipe_dir_missing_quantize_raises(tmp_path):
     (tmp_path / "metadata.yml").write_text("recipe_type: ptq\n")
     with pytest.raises(ValueError, match="quantize"):
         load_recipe(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# load_recipe — AutoQuantize recipes
+# ---------------------------------------------------------------------------
+
+
+_AQ_MINIMAL_BODY = (
+    "metadata:\n"
+    "  recipe_type: auto_quantize\n"
+    "auto_quantize:\n"
+    "  constraints:\n"
+    "    effective_bits: 4.8\n"
+    "  candidate_formats:\n"
+    "    - algorithm: max\n"
+    "      quant_cfg: []\n"
+    "    - algorithm: max\n"
+    "      quant_cfg: []\n"
+)
+
+
+def test_load_recipe_autoquantize_builtin():
+    """load_recipe loads the built-in AutoQuantize recipe."""
+    recipe = load_recipe("general/auto_quantize/nvfp4_fp8_at_4p8bits-kv_fp8_cast")
+    assert recipe.recipe_type == RecipeType.AUTO_QUANTIZE
+    assert isinstance(recipe, ModelOptAutoQuantizeRecipe)
+    aq = recipe.auto_quantize
+    assert aq.constraints.effective_bits == 4.8
+    assert len(aq.candidate_formats) == 2
+    # kv_cache is a full QuantizeConfig now (not a hardcoded qformat string).
+    assert aq.kv_cache is not None
+    assert aq.kv_cache.algorithm == "max"
+    assert len(aq.kv_cache.quant_cfg) >= 1
+
+
+def test_load_recipe_autoquantize_defaults():
+    """Optional AutoQuantize fields use Pydantic defaults when omitted."""
+    recipe = load_recipe("general/auto_quantize/nvfp4_fp8_at_4p8bits-kv_fp8_cast")
+    aq = recipe.auto_quantize
+    assert aq.method == "gradient"
+    assert aq.num_score_steps == 128
+
+
+def test_load_recipe_autoquantize_candidates_match_presets():
+    """Built-in AutoQuantize recipe's $imported candidates equal preset + inline override."""
+    recipe = load_recipe("general/auto_quantize/nvfp4_fp8_at_4p8bits-kv_fp8_cast")
+    candidates = recipe.auto_quantize.candidate_formats
+
+    # NVFP4 candidate = canonical preset + inline effective_bits override.
+    expected_nvfp4 = {**mtq.NVFP4_DEFAULT_CFG, "effective_bits": 4.5}
+    assert candidates[0].model_dump(exclude_unset=True) == expected_nvfp4
+
+    # FP8 candidate = canonical preset exactly (no override).
+    assert candidates[1].model_dump(exclude_unset=True) == mtq.FP8_DEFAULT_CFG
+
+
+def test_load_recipe_autoquantize_missing_section_raises(tmp_path):
+    """An AutoQuantize recipe missing the ``auto_quantize`` section is rejected
+    with the clean loader-level error (not the generic pydantic missing-field one)."""
+    bad = tmp_path / "bad.yml"
+    bad.write_text("metadata:\n  recipe_type: auto_quantize\n")
+    with pytest.raises(
+        ValueError, match=r"AUTO_QUANTIZE recipe file .* must contain 'auto_quantize'"
+    ):
+        load_recipe(bad)
+
+
+def test_load_recipe_autoquantize_too_few_candidates_raises(tmp_path):
+    """candidate_formats with fewer than 2 entries is rejected."""
+    bad = tmp_path / "bad.yml"
+    bad.write_text(
+        "metadata:\n"
+        "  recipe_type: auto_quantize\n"
+        "auto_quantize:\n"
+        "  constraints:\n"
+        "    effective_bits: 4.8\n"
+        "  candidate_formats:\n"
+        "    - algorithm: max\n"
+        "      quant_cfg: []\n"
+    )
+    with pytest.raises(ValueError, match="at least 2"):
+        load_recipe(bad)
+
+
+def test_load_recipe_autoquantize_effective_bits_out_of_range_raises(tmp_path):
+    """effective_bits outside (0, 16] is rejected."""
+    bad = tmp_path / "bad.yml"
+    bad.write_text(_AQ_MINIMAL_BODY.replace("effective_bits: 4.8", "effective_bits: 20"))
+    with pytest.raises(ValueError, match="effective_bits"):
+        load_recipe(bad)
+
+
+def test_load_recipe_autoquantize_kv_cache_optional(tmp_path):
+    """kv_cache is optional; recipes without it parse fine and aq.kv_cache is None."""
+    recipe_file = tmp_path / "aq.yml"
+    recipe_file.write_text(_AQ_MINIMAL_BODY)
+    recipe = load_recipe(recipe_file)
+    assert recipe.auto_quantize.kv_cache is None
+
+
+def test_load_recipe_autoquantize_effective_bits_inline_override():
+    """Inline $import + sibling effective_bits merge applied per candidate."""
+    recipe = load_recipe("general/auto_quantize/nvfp4_fp8_at_4p8bits-kv_fp8_cast")
+    candidates = recipe.auto_quantize.candidate_formats
+
+    # NVFP4 candidate carries the override.
+    assert candidates[0].effective_bits == 4.5
+    # FP8 candidate has no override; heuristic still applies.
+    assert candidates[1].effective_bits is None
 
 
 # ---------------------------------------------------------------------------

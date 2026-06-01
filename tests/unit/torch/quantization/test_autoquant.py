@@ -375,6 +375,32 @@ def test_estimate_quant_compression():
     assert estimate_quant_compression(fp8_affine_kv_cfg) == 0.5
 
 
+def test_estimate_quant_compression_effective_bits_override():
+    """``QuantizeConfig.effective_bits`` overrides the per-quantizer num_bits heuristic.
+
+    Validates two things:
+      1. The override path returns ``effective_bits / 16`` and bypasses the heuristic.
+      2. Without the override, the heuristic returns the unchanged baseline value.
+    """
+    # NVFP4 — heuristic returns 4.0 bits / 16 = 0.25, but true effective bits is 4.5.
+    nvfp4_cfg = mtq.config.QuantizeConfig(**mtq.NVFP4_DEFAULT_CFG)
+    assert nvfp4_cfg.effective_bits is None
+    assert estimate_quant_compression(nvfp4_cfg) == 0.25  # heuristic baseline
+
+    nvfp4_cfg_overridden = mtq.config.QuantizeConfig(**mtq.NVFP4_DEFAULT_CFG, effective_bits=4.5)
+    assert estimate_quant_compression(nvfp4_cfg_overridden) == 4.5 / 16.0
+
+    # Override can also represent a higher cost (e.g., conservative for a sensitive recipe).
+    nvfp4_cfg_high = mtq.config.QuantizeConfig(**mtq.NVFP4_DEFAULT_CFG, effective_bits=16.0)
+    assert estimate_quant_compression(nvfp4_cfg_high) == 1.0
+
+    # Out-of-range values are rejected by the Pydantic validator.
+    with pytest.raises(ValueError, match="effective_bits must be in"):
+        mtq.config.QuantizeConfig(**mtq.NVFP4_DEFAULT_CFG, effective_bits=0.0)
+    with pytest.raises(ValueError, match="effective_bits must be in"):
+        mtq.config.QuantizeConfig(**mtq.NVFP4_DEFAULT_CFG, effective_bits=17.0)
+
+
 @pytest.mark.parametrize("method", ["gradient", "kl_div"])
 def test_auto_quantize_checkpoint_resume(method, tmp_path, capsys):
     """Test that checkpoint can be used to resume an interrupted search."""

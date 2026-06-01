@@ -19,8 +19,9 @@ from __future__ import annotations
 
 import warnings
 from enum import Enum
+from typing import Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 
 from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
 from modelopt.torch.quantization.config import QuantizeConfig  # noqa: TC001
@@ -36,6 +37,7 @@ class RecipeType(str, Enum):
     """List of recipe types. See ``RECIPE_TYPE_TO_CLASS`` at the bottom for the schema mapping."""
 
     PTQ = "ptq"
+    AUTO_QUANTIZE = "auto_quantize"
     SPECULATIVE_EAGLE = "speculative_eagle"
     SPECULATIVE_DFLASH = "speculative_dflash"
     SPECULATIVE_MEDUSA = "speculative_medusa"
@@ -101,6 +103,93 @@ class ModelOptPTQRecipe(ModelOptRecipeBase):
         description="PTQ config containing quant_cfg and algorithm. Required: a PTQ "
         "recipe without a ``quantize`` section is rejected so that a missing section "
         "can't silently fall back to the default INT8 config.",
+    )
+
+
+class AutoQuantizeConstraints(ModeloptBaseConfig):
+    """Constraints passed to ``mtq.auto_quantize`` (matches its dict shape).
+
+    Today only ``effective_bits`` is supported upstream. When new constraint
+    keys land (e.g., ``cost_model`` / ``cost`` from PR #1497), add them as
+    fields here so ``.model_dump(exclude_none=True)`` produces the dict
+    upstream expects.
+    """
+
+    effective_bits: float = ModeloptField(
+        default=4.8,
+        title="Effective bits per weight",
+        description="Average weight-storage bits target for the LP, in (0, 16].",
+    )
+
+    @field_validator("effective_bits")
+    @classmethod
+    def _validate_effective_bits(cls, v: float) -> float:
+        if not (0 < v <= 16):
+            raise ValueError(f"effective_bits must be in (0, 16], got {v}")
+        return v
+
+
+class AutoQuantizeConfig(ModeloptBaseConfig):
+    """Schema for the ``auto_quantize`` block in an AutoQuantize recipe."""
+
+    constraints: AutoQuantizeConstraints = Field(
+        title="Search constraints + cost model",
+        description="LP budget and cost model.",
+    )
+
+    candidate_formats: list[QuantizeConfig] = ModeloptField(
+        default=[],
+        title="Candidate quantization formats",
+        description="Per-layer search space; each entry is a full QuantizeConfig. "
+        "At least 2 entries required.",
+    )
+
+    method: Literal["gradient", "kl_div"] = ModeloptField(
+        default="gradient",
+        title="Sensitivity scoring method",
+        description="'gradient' (Taylor + Fisher, needs labels) or 'kl_div' (no labels).",
+    )
+
+    num_score_steps: int = ModeloptField(
+        default=128,
+        title="Phase-3 scoring sample count",
+        description="Number of batches for sensitivity scoring.",
+    )
+
+    disabled_layers: list[str] = ModeloptField(
+        default=[],
+        title="Excluded layer patterns",
+        description="Glob patterns; matching layers are excluded from the search.",
+    )
+
+    kv_cache: QuantizeConfig | None = ModeloptField(
+        default=None,
+        title="KV cache QuantizeConfig (optional)",
+        description="Optional full QuantizeConfig applied as a uniform post-step after the "
+        "LP search. Typically uses ``$import: configs/ptq/units/kv_*`` for a built-in KV "
+        "preset, or inlines a custom config. If omitted, the runtime --kv_cache_qformat "
+        "CLI flag is used as a fallback.",
+    )
+
+    @field_validator("candidate_formats")
+    @classmethod
+    def _at_least_two_candidates(cls, v: list[QuantizeConfig]) -> list[QuantizeConfig]:
+        if len(v) < 2:
+            raise ValueError(
+                "auto_quantize requires at least 2 candidate_formats. "
+                "For uniform quantization, use a PTQ recipe instead."
+            )
+        return v
+
+
+class ModelOptAutoQuantizeRecipe(ModelOptRecipeBase):
+    """Our config class for AutoQuantize recipes."""
+
+    metadata: RecipeMetadataConfig = _metadata_field(RecipeType.AUTO_QUANTIZE)
+
+    auto_quantize: AutoQuantizeConfig = Field(
+        title="AutoQuantize config",
+        description="AutoQuantize search configuration. Required.",
     )
 
 
@@ -199,6 +288,7 @@ class ModelOptMedusaRecipe(ModelOptSpeculativeRecipeBase):
 # uses this for typed-list ``$import`` resolution; add a new entry when introducing a recipe.
 RECIPE_TYPE_TO_CLASS: dict[RecipeType, type[ModelOptRecipeBase]] = {
     RecipeType.PTQ: ModelOptPTQRecipe,
+    RecipeType.AUTO_QUANTIZE: ModelOptAutoQuantizeRecipe,
     RecipeType.SPECULATIVE_EAGLE: ModelOptEagleRecipe,
     RecipeType.SPECULATIVE_DFLASH: ModelOptDFlashRecipe,
     RecipeType.SPECULATIVE_MEDUSA: ModelOptMedusaRecipe,

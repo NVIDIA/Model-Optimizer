@@ -1,0 +1,48 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# AutoQuantize recipe: mixed NVFP4 + FP8 per-layer search at 4.8 effective bits,
+# FP8 KV cache (cast mode). Gradient-based sensitivity scoring; weight cost model.
+
+imports:
+  nvfp4: configs/ptq/presets/model/nvfp4
+  fp8: configs/ptq/presets/model/fp8
+  kv_fp8_cast: configs/ptq/units/kv_fp8_cast
+
+metadata:
+  recipe_type: auto_quantize
+  description: Mixed NVFP4 + FP8 at 4.8 effective bits with FP8 KV cache (cast).
+
+auto_quantize:
+  constraints:
+    effective_bits: 4.8
+
+  candidate_formats:
+    # NVFP4 true effective bits = 4 value bits + 8-bit FP8 scale per 16-element block
+    # = 4 + 0.5 = 4.5 bits/element. Override the heuristic's 4.0 so the LP cost is accurate.
+    - $import: nvfp4
+      effective_bits: 4.5
+    # FP8 effective bits = 8 (heuristic is correct, per-tensor scale is negligible).
+    - $import: fp8
+
+  kv_cache:
+    quant_cfg:
+      - $import: kv_fp8_cast
+
+  method: gradient
+  num_score_steps: 128
+
+  disabled_layers:
+    - "*lm_head*"

@@ -1160,6 +1160,25 @@ class QuantizeConfig(ModeloptBaseConfig):
         validate_default=True,
     )
 
+    effective_bits: float | None = ModeloptField(
+        default=None,
+        title="Effective bits per element (autoquant cost override)",
+        description=(
+            "Optional override for the autoquant LP cost model. If set, replaces the "
+            "heuristic estimate derived from ``num_bits``. Mainly useful for block-quantized "
+            "formats where the heuristic under-counts due to per-block scale overhead "
+            "(e.g., NVFP4 actual=4.5 vs heuristic=4.0). Must be in (0, 16] when set. "
+            "Read only by autoquant; other quantization paths ignore this field."
+        ),
+    )
+
+    @field_validator("effective_bits")
+    @classmethod
+    def _validate_effective_bits(cls, v: float | None) -> float | None:
+        if v is not None and not (0 < v <= 16):
+            raise ValueError(f"effective_bits must be in (0, 16], got {v}")
+        return v
+
     @field_validator("quant_cfg", mode="before")
     @classmethod
     def normalize_quant_cfg(
