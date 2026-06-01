@@ -4,15 +4,15 @@ This is an optional example, not the generic rule.
 
 ## Main Lesson
 
-For Qwen3.6-35B-A3B, AutoQuant was useful for exploration but did not find the best benchmark frontier by itself. Manual module-family ablations found the deployable frontier.
+For Qwen3.6-35B-A3B, AutoQuant was useful for exploration but did not find the best benchmark frontier by itself. Manual module-family ablations found the best recipe frontier.
 
 The strongest recipe pattern was:
 
 - NVFP4: routed MoE experts and `lm_head`.
 - FP8: self-attention and large linear-attention projections.
 - BF16/no quant: linear-attention A/B, conv-style pieces, routers/gates, shared-expert gate, and VLM/MTP siblings.
-- Export artifact used for evaluation: W4A16 for NVFP4 tensors and W8A8 for FP8 tensors in compressed-tensors form.
-- Native ModelOpt artifact used for comparison: W4A4+W8A8 equivalent in the PR42566 stack.
+- Final evaluation artifact: native ModelOpt W4A4+W8A8 served with vLLM.
+- Compressed-tensors W4A16/W8A8 was an explored/exported variant, not the final case-study evaluation target.
 
 ## Sensitivity Findings
 
