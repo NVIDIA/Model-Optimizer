@@ -232,7 +232,38 @@ See [examples/pruning/](../pruning/README.md#tutorials--results) for distillatio
 
 ## Post-Training Quantization
 
-Checkout Quantization scripts for LLMs and VLMs in the Megatron-Bridge repository [here](https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/main/examples/quantization).
+This section shows how to quantize a HuggingFace model using ModelOpt in the Megatron-Bridge framework. Quantization is a two-step flow:
+
+1. [quantize.py](quantize.py) applies post-training quantization (PTQ) with calibration and saves a **Megatron checkpoint** (with ModelOpt state). Tensor / pipeline / expert parallelism are all supported, and the checkpoint can be reloaded for further training (Quantization Aware Training / Quantization Aware Distillation).
+2. [export.py](export.py) converts that Megatron checkpoint to a **HuggingFace (unified) checkpoint** that deploys directly with TensorRT-LLM, vLLM, or SGLang.
+
+`quantize.py` supports the following formats via `--quant_cfg` (e.g. `fp8`, `nvfp4`, `int8_sq`, `int4_awq`, `w4a8_awq`, ...). You can also pass any full config name exposed by ModelOpt (e.g. `FP8_DEFAULT_CFG`) or a YAML `--recipe` (e.g. `general/ptq/fp8_default-kv_fp8`, authoritative for quant_cfg + algorithm + KV-cache). KV-cache quantization can be enabled on top via `--kv_cache_quant` (e.g. `fp8`, `nvfp4`).
+
+**Step 1 — quantize** Qwen3-8B to FP8 on 2 GPUs (Tensor Parallelism = 2) using 1024 samples from [`nemotron-post-training-dataset-v2`](https://huggingface.co/datasets/nvidia/Nemotron-Post-Training-Dataset-v2) for calibration:
+
+```bash
+torchrun --nproc_per_node 2 quantize.py \
+    --hf_model_name_or_path Qwen/Qwen3-8B \
+    --quant_cfg fp8 \
+    --tp_size 2 \
+    --export_path /tmp/Qwen3-8B-FP8-megatron
+```
+
+**Step 2 — export** the Megatron checkpoint to a deployable HuggingFace checkpoint:
+
+```bash
+torchrun --nproc_per_node 1 export.py \
+    --hf_model_name_or_path Qwen/Qwen3-8B \
+    --megatron_path /tmp/Qwen3-8B-FP8-megatron \
+    --export_path /tmp/Qwen3-8B-FP8-hf
+```
+
+> [!NOTE]
+> The HuggingFace unified exporter does not gather tensor-parallel-sharded weights (Megatron-LM likewise forces TP=1 during its export step), so `export.py` always loads the checkpoint at `tensor_model_parallel_size=1`, re-sharding from whatever TP `quantize.py` used. Use `--pp_size` / `--ep_size` on `export.py` to shard a large model across GPUs for export.
+
+To see the full usage for advanced configurations, run `torchrun --nproc_per_node 1 quantize.py --help` (or `export.py --help`).
+
+For Quantization scripts covering VLMs, QAT, and resuming quantized checkpoints, see the Megatron-Bridge repository [here](https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/main/examples/quantization).
 
 ## Resources
 
