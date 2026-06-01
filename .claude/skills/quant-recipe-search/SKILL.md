@@ -1,11 +1,13 @@
 ---
-name: quant-recipe-loop
-description: Use when planning or steering a multi-candidate quantization recipe iteration loop: choose compute-vs-memory success metrics, select ModelOpt recipe baselines, design AutoQuant/manual recipe deltas, interpret sensitivity, and decide next candidates. Do NOT use for a single PTQ run (use ptq), serving (use deployment), creating/running evals (use evaluation or launching-evals), monitoring jobs (use monitor), MLflow browsing (use accessing-mlflow), or comparing completed baseline-vs-candidate scores only (use compare-results).
+name: quant-recipe-search
+description: Use when the user asks to find, search for, or optimize the best quantization recipe for a model, including direct requests like "find the best quantization recipe and generate a PTQ checkpoint." Guides the multi-candidate loop: choose compute-vs-memory success metrics, select ModelOpt recipe baselines, design AutoQuant/manual recipe deltas, interpret sensitivity, and decide next candidates. Do NOT use for a single known PTQ recipe run (use ptq), serving (use deployment), creating/running evals (use evaluation or launching-evals), monitoring jobs (use monitor), MLflow browsing (use accessing-mlflow), or comparing completed baseline-vs-candidate scores only (use compare-results).
 ---
 
-# Quant Recipe Loop
+# Quant Recipe Search
 
 Use this skill to steer quantization as a portfolio loop. It is an orchestration layer: it decides what to try next and which existing skill should do the execution.
+
+Users may ask for the outcome directly, for example: "find the best quantization recipe and generate a PTQ checkpoint for this model." Treat that as enough to start. Recover what can be inferred from the workspace, ask only for missing constraints that materially affect the search, then delegate checkpoint generation to `ptq`.
 
 ## Skill Boundaries
 
