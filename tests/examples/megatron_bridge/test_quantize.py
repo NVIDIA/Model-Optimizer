@@ -51,7 +51,7 @@ def test_quantize_export_and_vllm_deployment(tmp_path: Path, num_gpus):
         calib_num_samples=16,
         calib_batch_size=1,
         seq_length=32,
-        export_path=megatron_path,
+        export_megatron_path=megatron_path,
     )
     run_example_command(quantize_cmd, example_path="megatron_bridge", setup_free_port=True)
     assert (megatron_path / "latest_checkpointed_iteration.txt").exists()
@@ -61,7 +61,7 @@ def test_quantize_export_and_vllm_deployment(tmp_path: Path, num_gpus):
         ["torchrun", "--nproc_per_node=1", "export.py"],
         hf_model_name_or_path=hf_model_path,
         megatron_path=megatron_path,
-        export_path=hf_export_path,
+        export_unified_hf_path=hf_export_path,
     )
     run_example_command(export_cmd, example_path="megatron_bridge", setup_free_port=True)
 
@@ -100,7 +100,7 @@ def test_quantize_megatron_checkpoint_reload(tmp_path: Path, num_gpus):
         calib_num_samples=16,
         calib_batch_size=1,
         seq_length=32,
-        export_path=megatron_path,
+        export_megatron_path=megatron_path,
     )
     run_example_command(cmd_parts, example_path="megatron_bridge", setup_free_port=True)
 

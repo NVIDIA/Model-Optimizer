@@ -34,7 +34,7 @@ Example usage to quantize Qwen3-8B to FP8 on 2 GPUs (Tensor Parallelism = 2):
         --hf_model_name_or_path Qwen/Qwen3-8B \
         --quant_cfg fp8 \
         --tp_size 2 \
-        --export_path /tmp/Qwen3-8B-FP8-megatron
+        --export_megatron_path /tmp/Qwen3-8B-FP8-megatron
 
 Equivalent run using a YAML recipe (authoritative for quant_cfg + algorithm + KV-cache config):
 
@@ -42,7 +42,7 @@ Equivalent run using a YAML recipe (authoritative for quant_cfg + algorithm + KV
         --hf_model_name_or_path Qwen/Qwen3-8B \
         --recipe general/ptq/fp8_default-kv_fp8 \
         --tp_size 2 \
-        --export_path /tmp/Qwen3-8B-FP8-megatron
+        --export_megatron_path /tmp/Qwen3-8B-FP8-megatron
 
 To convert the saved Megatron checkpoint to a deployable HuggingFace checkpoint, run `export.py`.
 
@@ -92,7 +92,7 @@ def get_args() -> argparse.Namespace:
     parser.add_argument("--hf_model_name_or_path", type=str, required=True)
     parser.add_argument("--trust_remote_code", action="store_true")
     parser.add_argument(
-        "--export_path",
+        "--export_megatron_path",
         type=str,
         required=True,
         help="Path to save the quantized model in Megatron checkpoint format (with ModelOpt state).",
@@ -320,22 +320,23 @@ def main(args: argparse.Namespace):
     # Save the quantizer summary alongside the checkpoint for later inspection. Only the master
     # rank writes the file to avoid a multi-rank race on the same path.
     if dist.is_master():
-        mtq.print_quant_summary(unwrapped_model, args.export_path)
+        mtq.print_quant_summary(unwrapped_model, args.export_megatron_path)
 
-    print_rank_0(f"Saving quantized model to {args.export_path} in Megatron format...")
+    print_rank_0(f"Saving quantized model to {args.export_megatron_path} in Megatron format...")
     bridge.save_megatron_model(
         model,
-        args.export_path,
+        args.export_megatron_path,
         hf_tokenizer_path=args.hf_model_name_or_path,
         hf_tokenizer_kwargs={"trust_remote_code": args.trust_remote_code},
     )
-    print_rank_0(f"Saved quantized model to {args.export_path} in Megatron format")
+    print_rank_0(f"Saved quantized model to {args.export_megatron_path} in Megatron format")
     print_rank_0(
         "To deploy this model (TensorRT-LLM / vLLM / SGLang), convert it to a HuggingFace "
         f"checkpoint with export.py:\n"
         f"    torchrun --nproc_per_node <N> export.py "
         f"--hf_model_name_or_path {args.hf_model_name_or_path} "
-        f"--megatron_path {args.export_path} --export_path {args.export_path}_hf"
+        f"--megatron_path {args.export_megatron_path} "
+        f"--export_unified_hf_path {args.export_megatron_path}_hf"
     )
 
     # Sanity-check generation with the fake-quantized model.

@@ -246,7 +246,7 @@ torchrun --nproc_per_node 2 quantize.py \
     --hf_model_name_or_path Qwen/Qwen3-8B \
     --quant_cfg fp8 \
     --tp_size 2 \
-    --export_path /tmp/Qwen3-8B-FP8-megatron
+    --export_megatron_path /tmp/Qwen3-8B-FP8-megatron
 ```
 
 **Step 2 — export** the Megatron checkpoint to a deployable HuggingFace checkpoint:
@@ -255,7 +255,7 @@ torchrun --nproc_per_node 2 quantize.py \
 torchrun --nproc_per_node 1 export.py \
     --hf_model_name_or_path Qwen/Qwen3-8B \
     --megatron_path /tmp/Qwen3-8B-FP8-megatron \
-    --export_path /tmp/Qwen3-8B-FP8-hf
+    --export_unified_hf_path /tmp/Qwen3-8B-FP8-hf
 ```
 
 > [!NOTE]

@@ -29,7 +29,7 @@ Example usage to export an FP8 checkpoint produced by quantize.py:
     torchrun --nproc_per_node 1 export.py \
         --hf_model_name_or_path Qwen/Qwen3-8B \
         --megatron_path /tmp/Qwen3-8B-FP8-megatron \
-        --export_path /tmp/Qwen3-8B-FP8-hf
+        --export_unified_hf_path /tmp/Qwen3-8B-FP8-hf
 
 See `README.md` in this directory for more details.
 """
@@ -63,7 +63,7 @@ def get_args() -> argparse.Namespace:
         help="Path to the quantized Megatron checkpoint produced by quantize.py.",
     )
     parser.add_argument(
-        "--export_path",
+        "--export_unified_hf_path",
         type=str,
         required=True,
         help="Directory to write the exported HuggingFace (unified) checkpoint to.",
@@ -143,17 +143,19 @@ def main(args: argparse.Namespace):
     else:
         export_extra_modules = has_extra_modules and args.export_extra_modules
 
-    print_rank_0(f"Exporting to HuggingFace (unified) checkpoint at {args.export_path}...")
+    print_rank_0(
+        f"Exporting to HuggingFace (unified) checkpoint at {args.export_unified_hf_path}..."
+    )
     mtex.export_mcore_gpt_to_hf(
         unwrapped_model,
         args.hf_model_name_or_path,
         export_extra_modules=export_extra_modules,
         dtype=torch_dtype,
-        export_dir=args.export_path,
+        export_dir=args.export_unified_hf_path,
         moe_router_dtype=getattr(unwrapped_model.config, "moe_router_dtype", None),
         trust_remote_code=trust_remote_code,
     )
-    print_rank_0(f"Exported HuggingFace checkpoint to {args.export_path}")
+    print_rank_0(f"Exported HuggingFace checkpoint to {args.export_unified_hf_path}")
 
 
 if __name__ == "__main__":
