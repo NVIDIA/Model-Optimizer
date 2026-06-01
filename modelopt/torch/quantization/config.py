@@ -650,12 +650,10 @@ class LayerwiseConfig(ModeloptBaseConfig):
         default=False,
         title="Cache next-layer inputs from QDQ outputs of prior layers.",
         description=(
-            "If True (GPTQ default), layer N's calibration sees inputs carrying "
-            "the quantize-dequantize error of layers 0..N-1, so quantization "
-            "error compounds across layers. If False (max-calib default), "
-            "quantizers are temporarily disabled during the capture forward, so "
-            "layer N sees the same full-precision activations as a non-layerwise "
-            "calibration pass."
+            "If True (GPTQ default), capture each layer's next-layer inputs "
+            "after it is calibrated, so QDQ error and in-place weight updates "
+            "propagate forward. If False (max/mse default), capture before, so "
+            "the next layer sees the same FP activations as a non-layerwise pass."
         ),
     )
 

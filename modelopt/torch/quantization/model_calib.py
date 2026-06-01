@@ -19,7 +19,6 @@ import math
 import time
 import warnings
 from collections.abc import Callable
-from contextlib import AbstractContextManager, nullcontext
 from functools import partial
 from typing import TypeAlias
 
@@ -1821,28 +1820,31 @@ def layerwise_calibrate(
                             kwargs_input["past_key_values"] = None
                     m(*args, **kwargs_input)
 
-            with persistent_materialization(layer):
-                calib_func(layer, _layer_forward_loop, **calib_kwargs)
-
-            # Run one more forward to get next layer's inputs and set
-            # output_meta on the just-calibrated layer (via "run" mode).
             is_last = layer_idx + 1 >= num_layers
-            if not is_last:
-                # When qdq_from_prev is False, temporarily disable every quantizer
-                # under the just-calibrated layer so the next layer sees full-precision
-                # activations (matches non-layerwise calibration semantics).
-                capture_ctx: AbstractContextManager = (
-                    nullcontext()
-                    if qdq_from_prev
-                    else set_quantizer_by_cfg_context(
-                        layer, [{"quantizer_name": "*", "enable": False}]
-                    )
-                )
-                with capture_ctx:
+
+            # qdq_from_prev=False: capture before calib_func so the forward
+            # replay uses the original FP weights. Disable quantizers too in
+            # case any pre-calibration observer behavior would perturb the
+            # captured activations.
+            if not is_last and not qdq_from_prev:
+                with set_quantizer_by_cfg_context(
+                    layer, [{"quantizer_name": "*", "enable": False}]
+                ):
                     next_inputs = input_getter.cache_outputs_for_next_layer_calib(
                         layer, forward_loop
                     )
-            else:
+                # cache_outputs left this layer in "run" mode with an empty
+                # deque; reset so calib_func's replay hits the real forward.
+                layer._layerwise_calib.mode = "original"
+
+            with persistent_materialization(layer):
+                calib_func(layer, _layer_forward_loop, **calib_kwargs)
+
+            # qdq_from_prev=True: capture after calib_func so the next layer
+            # sees QDQ error and any in-place weight updates from this layer.
+            if not is_last and qdq_from_prev:
+                next_inputs = input_getter.cache_outputs_for_next_layer_calib(layer, forward_loop)
+            elif is_last:
                 next_inputs = None
 
             if ckpt:
