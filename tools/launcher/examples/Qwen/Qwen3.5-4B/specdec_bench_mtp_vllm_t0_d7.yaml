@@ -1,0 +1,63 @@
+# SPEED-bench MTP speculative-decoding cell for Qwen3.5-4B via vLLM.
+#
+# Slurm dry-run on cw_dfw:
+#   uv run slurm.py --yaml modules/Model-Optimizer/tools/launcher/examples/Qwen/Qwen3.5-4B/specdec_bench_mtp_vllm_t0_d7.yaml --dry-run --yes
+
+job_name: Qwen3.5-4B_specdec_bench_mtp_vllm_t0_d7
+
+pipeline:
+  global_vars:
+    hf_model: /hf-local/Qwen/Qwen3.5-4B
+
+  task_0:
+    script: common/specdec_bench/run.sh
+    args:
+      - --dataset speed
+      - --dataset_path /hf-local/nvidia/SPEED-Bench-Internal/qualitative
+      - --engine VLLM
+      - --speculative_algorithm MTP
+      - --draft_length 7
+      - --runtime_params common/specdec_bench/_cells/qwen35_4b_mtp_vllm_t0_d7.yaml
+      - --tp_size 2
+      - --ep_size 1
+      - --concurrency 32
+      - --output_length 4096
+      - --aa_timing
+      - --show_progress
+      - --save_dir /scratchspace/qwen35_4b_mtp_vllm_t0_d7/qualitative
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+      - HF_LOCAL: /hf-local
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 2
+      container: vllm/vllm-openai:qwen3_5-cu130
+
+  task_1:
+    script: common/specdec_bench/run.sh
+    args:
+      - --dataset speed
+      - --dataset_path /hf-local/nvidia/SPEED-Bench-Internal/throughput_32k
+      - --engine VLLM
+      - --speculative_algorithm MTP
+      - --draft_length 7
+      - --runtime_params common/specdec_bench/_cells/qwen35_4b_mtp_vllm_t0_d7.yaml
+      - --tp_size 2
+      - --ep_size 1
+      - --concurrency 8
+      - --num_requests 80
+      - --output_length 4096
+      - --aa_timing
+      - --show_progress
+      - --save_dir /scratchspace/qwen35_4b_mtp_vllm_t0_d7/throughput_32k
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+      - HF_LOCAL: /hf-local
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 2
+      container: vllm/vllm-openai:qwen3_5-cu130
