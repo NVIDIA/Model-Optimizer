@@ -691,7 +691,7 @@ class TestLayerwiseNestedConfig:
             "get_qdq_activations_from_prev_layer": False,
             "checkpoint_dir": None,
             "save_every": 1,
-            "save_quantizers_only": False,
+            "calib_mutates_weights": True,
         }
         assert "layerwise_checkpoint_dir" not in dumped
 
@@ -703,15 +703,15 @@ class TestLayerwiseNestedConfig:
         "cfg_cls",
         [GPTQCalibConfig, AWQLiteCalibConfig, SmoothQuantCalibConfig],
     )
-    def test_save_quantizers_only_rejected_for_weight_mutating_algorithms(self, cfg_cls):
+    def test_calib_mutates_weights_false_rejected_for_weight_mutating_algorithms(self, cfg_cls):
         """Whitelist: only amax-only algorithms (max/mse/local_hessian) may set
-        save_quantizers_only=True. Weight-mutating algorithms (GPTQ folds Hessian
+        calib_mutates_weights=False. Weight-mutating algorithms (GPTQ folds Hessian
         updates, AWQ/SmoothQuant fold pre-quant scales) must reject the flag.
         """
         with pytest.raises(ValidationError, match="mutates layer weights in-place"):
-            cfg_cls(layerwise={"enable": True, "save_quantizers_only": True})
+            cfg_cls(layerwise={"enable": True, "calib_mutates_weights": False})
 
     @pytest.mark.parametrize("cfg_cls", [MaxCalibConfig, MseCalibConfig, LocalHessianCalibConfig])
-    def test_save_quantizers_only_accepted_for_amax_only_algorithms(self, cfg_cls):
-        cfg = cfg_cls(layerwise={"enable": True, "save_quantizers_only": True})
-        assert cfg.layerwise.save_quantizers_only is True
+    def test_calib_mutates_weights_false_accepted_for_amax_only_algorithms(self, cfg_cls):
+        cfg = cfg_cls(layerwise={"enable": True, "calib_mutates_weights": False})
+        assert cfg.layerwise.calib_mutates_weights is False

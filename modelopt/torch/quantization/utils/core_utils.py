@@ -472,7 +472,24 @@ def _set_parameter(module: nn.Module, name: str, value: nn.Parameter):
 
 
 @contextmanager
-def fsdp2_weight_access_and_writeback_context(module: nn.Module, root_model: nn.Module):
+def _fsdp2_unshard_context(fsdp_module: FSDPModule):
+    """Unshard an FSDP2 module without replacing individual DTensor parameters."""
+    fsdp_param_group = fully_shard.state(fsdp_module)._fsdp_param_group
+    was_sharded = fsdp_param_group.is_sharded
+    if was_sharded:
+        fsdp_module.unshard()
+    try:
+        with _disable_fsdp_unshard_reshard(fsdp_module):
+            yield
+    finally:
+        if was_sharded:
+            fsdp_module.reshard()
+
+
+@contextmanager
+def fsdp2_weight_access_and_writeback_context(
+    module: nn.Module, root_model: nn.Module, writeback: bool = True
+):
     """Context manager for FSDP2 weight access and writeback.
 
     Gathers sharded DTensor parameters across FSDP/HSDP shards so they can be
@@ -487,6 +504,11 @@ def fsdp2_weight_access_and_writeback_context(module: nn.Module, root_model: nn.
     assert not hasattr(module, "_hf_hook"), "We dont support FSDP2 with HF accelerate hooks"
     fsdp_module = _get_enclosing_fsdp_module(module, root_model)
     assert fsdp_module is not None, "Module is not wrapped by FSDP"
+    if not writeback:
+        with _fsdp2_unshard_context(fsdp_module):
+            yield
+        return
+
     fsdp_device_mesh = _get_fsdp2_mesh(fsdp_module)
     fsdp_dim = fsdp_device_mesh.ndim
 
@@ -526,7 +548,9 @@ def fsdp2_weight_access_and_writeback_context(module: nn.Module, root_model: nn.
 
 
 @contextmanager
-def enable_weight_access_and_writeback(module, root_model, name_to_module: dict | None = None):
+def enable_weight_access_and_writeback(
+    module, root_model, name_to_module: dict | None = None, writeback: bool = True
+):
     """Enable weight access and writeback for a module.
 
     Useful for modules with weight not intact such as Linear layer in FSDP wrapped model or
@@ -540,16 +564,18 @@ def enable_weight_access_and_writeback(module, root_model, name_to_module: dict 
             total cost when called in a loop. This causes significant CPU overhead on large
             models, particularly Sparse MoE architectures where each expert is typically
             implemented as its own module.
+        writeback: Whether modified weights must be written back to the owning sharded/offload
+            representation when exiting the context.
     """
     if _get_enclosing_fsdp_module(module, root_model, name_to_module) is not None:
-        context = fsdp2_weight_access_and_writeback_context(module, root_model)
+        context = fsdp2_weight_access_and_writeback_context(module, root_model, writeback)
     elif is_quantized_parallel_linear(module) and hasattr(module, "_hf_tp_plan"):
         # HF transformers TP sharded linear layer
         context = module.enable_weight_access_and_writeback()
     elif hasattr(module, "_hf_hook"):
         from ..plugins.accelerate import weight_access_and_writeback_context
 
-        context = weight_access_and_writeback_context(module)
+        context = weight_access_and_writeback_context(module, writeback)
     else:
         context = nullcontext()
 
@@ -558,7 +584,7 @@ def enable_weight_access_and_writeback(module, root_model, name_to_module: dict 
 
 
 @contextmanager
-def persistent_materialization(layer):
+def persistent_materialization(layer, writeback: bool = True):
     """Keep all layer weights materialized on GPU for the duration.
 
     Suppresses per-forward weight transfers so that N calibration batches
@@ -572,7 +598,7 @@ def persistent_materialization(layer):
     """
     with (
         _disable_fsdp_unshard_reshard(layer),
-        enable_weight_access_and_writeback(layer, layer),
+        enable_weight_access_and_writeback(layer, layer, writeback=writeback),
         temporarily_remove_accelerate_hook(layer),
     ):
         yield

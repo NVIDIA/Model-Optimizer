@@ -610,6 +610,56 @@ def _int8_layerwise_config(algorithm: dict) -> dict:
     return cfg
 
 
+def test_layerwise_calibrate_uses_global_layer_tqdm(monkeypatch):
+    _register_test_discoverer(monkeypatch)
+
+    class _FakeTqdm:
+        instances = []
+
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
+            self.postfixes = []
+            self.updates = []
+            self.closed = False
+            _FakeTqdm.instances.append(self)
+
+        def set_postfix_str(self, status, refresh=True):
+            self.postfixes.append((status, refresh))
+
+        def update(self, n=1):
+            self.updates.append(n)
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr("modelopt.torch.quantization.model_calib.tqdm", _FakeTqdm)
+
+    torch.manual_seed(0)
+    model = _SimpleTransformerModel(n_layers=3, dim=16)
+    calib_data = [torch.randint(0, 32, (2, 8)) for _ in range(2)]
+
+    def forward_loop(m):
+        for batch in calib_data:
+            m(batch)
+
+    def calib_func(layer, layer_forward_loop):
+        layer_forward_loop(layer)
+
+    layerwise_calibrate(model, forward_loop, calib_func)
+
+    assert len(_FakeTqdm.instances) == 1
+    pbar = _FakeTqdm.instances[0]
+    assert pbar.kwargs["total"] == 3
+    assert pbar.kwargs["initial"] == 0
+    assert pbar.kwargs["desc"] == "Layerwise calibration"
+    assert pbar.kwargs["dynamic_ncols"] is True
+    assert pbar.updates == [1, 1, 1]
+    assert pbar.closed
+    assert any(status.startswith("Calibrating layer 1/3") for status, _ in pbar.postfixes)
+    assert any(status.startswith("Calibrating layer 3/3") for status, _ in pbar.postfixes)
+
+
 def _awq_layerwise_config() -> dict:
     """INT4 weight-only AWQ config sized for the _DecoderBlock test model."""
     cfg = copy.deepcopy(mtq.INT4_AWQ_CFG)
@@ -866,23 +916,23 @@ def test_layerwise_save_every_writes_next_inputs_only_at_window_boundaries(monke
 
 
 @pytest.mark.parametrize(
-    ("scenario", "n_layers", "save_every", "save_quantizers_only", "rewind_to"),
+    ("scenario", "n_layers", "save_every", "calib_mutates_weights", "rewind_to"),
     [
         # Pins the quantizer_buffers.pt restore path (no weights.pt on disk).
-        ("quantizers_only", 3, 1, True, 0),
+        ("non_mutating", 3, 1, False, 0),
         # Pins the per-call snapshot fix: each save() captures the
         # just-calibrated layer's state before the next-layer capture forward
         # swaps it to _SkipLayer.
-        ("save_every", 4, 2, False, 1),
+        ("save_every", 4, 2, True, 1),
     ],
 )
 def test_layerwise_checkpoint_resume_matches_one_shot_amax(
-    monkeypatch, tmp_path, scenario, n_layers, save_every, save_quantizers_only, rewind_to
+    monkeypatch, tmp_path, scenario, n_layers, save_every, calib_mutates_weights, rewind_to
 ):
     """Full run → rewind manifest → fresh resume reproduces one-shot ``_amax``.
 
     Single test covering both checkpoint optimizations. For the
-    ``save_quantizers_only`` case also asserts the on-disk shape (no
+    non-mutating calibration case also asserts the on-disk shape (no
     ``weights.pt``, ``quantizer_buffers.pt`` present per layer).
     """
     _register_test_discoverer(monkeypatch)
@@ -898,7 +948,7 @@ def test_layerwise_checkpoint_resume_matches_one_shot_amax(
                     "enable": True,
                     "checkpoint_dir": str(ckpt_dir),
                     "save_every": save_every,
-                    "save_quantizers_only": save_quantizers_only,
+                    "calib_mutates_weights": calib_mutates_weights,
                 },
             }
         )
@@ -915,7 +965,7 @@ def test_layerwise_checkpoint_resume_matches_one_shot_amax(
     setup_model = _SimpleTransformerModel(n_layers=n_layers, dim=16)
     mtq.quantize(setup_model, build_cfg(resume_dir), forward_loop=forward_loop)
 
-    if scenario == "quantizers_only":
+    if scenario == "non_mutating":
         for name in _layer_dir_names(resume_dir):
             d = resume_dir / name
             assert not (d / "weights.pt").exists()
@@ -927,7 +977,7 @@ def test_layerwise_checkpoint_resume_matches_one_shot_amax(
                 "last_completed_layer": rewind_to,
                 "num_layers": n_layers,
                 "save_every": save_every,
-                "save_quantizers_only": save_quantizers_only,
+                "calib_mutates_weights": calib_mutates_weights,
             }
         )
     )
@@ -1013,7 +1063,7 @@ def test_layerwise_checkpoint_mismatch_save_every_raises(monkeypatch, tmp_path):
                 "last_completed_layer": 1,
                 "num_layers": 4,
                 "save_every": 2,
-                "save_quantizers_only": False,
+                "calib_mutates_weights": True,
             }
         )
     )

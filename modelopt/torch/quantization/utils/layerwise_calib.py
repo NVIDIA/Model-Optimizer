@@ -42,6 +42,8 @@ from modelopt.torch.utils.network import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from modelopt.torch.opt.searcher import ForwardLoop
 
 
@@ -124,12 +126,13 @@ class LayerActivationCollector:
     _decoder_layer_support: list[tuple[Any, Any]] = []
     _LAYER_ATTR = "_layerwise_calib"
 
-    def __init__(self, model: nn.Module):
+    def __init__(self, model: nn.Module, status_callback: Callable[[str], None] | None = None):
         """Initialize the collector for the given model."""
         self.model = model
         self._decoder_layers: nn.ModuleList | None = None
         self._layer_to_idx: dict[nn.Module, int] = {}
         self._patched = False
+        self._status_callback = status_callback
 
     def _swap_to_dummy(self, idx: int):
         """Replace decoder layer *idx* with a parameter-free dummy.
@@ -188,11 +191,11 @@ class LayerActivationCollector:
 
     @staticmethod
     def _zeros_from_meta(meta):
-        """Reconstruct placeholder output from metadata produced by ``_extract_output_meta``."""
+        """Reconstruct a zero-filled output from metadata produced by ``_extract_output_meta``."""
         tag = meta[0]
         if tag == "tensor":
-            _, shape, dtype, _device = meta
-            return torch.empty(shape, dtype=dtype, device="meta")
+            _, shape, dtype, device = meta
+            return torch.zeros(shape, dtype=dtype, device=device)
         if tag == "tuple":
             return tuple(LayerActivationCollector._zeros_from_meta(m) for m in meta[1])
         if tag == "list":
@@ -322,8 +325,14 @@ class LayerActivationCollector:
         cur.mode = "capture"
         cur.collected_inputs = []
 
-    def _log_layer_summary(self, layer_idx: int):
-        """Log a one-line summary of layer modes for the current calibration step."""
+    def _emit_status(self, status: str):
+        if self._status_callback is None:
+            print_rank_0(status)
+        else:
+            self._status_callback(status)
+
+    def _layer_summary(self, layer_idx: int) -> str:
+        """Return a one-line summary of layer modes for the current calibration step."""
         assert self._decoder_layers is not None
         n = len(self._decoder_layers)
         groups: dict[str, list[int]] = {}
@@ -338,7 +347,10 @@ class LayerActivationCollector:
                 continue
             ids = groups[mode]
             parts.append(f"{mode}: {len(ids)}" if mode == "skip" else f"{mode}: {ids}")
-        print_rank_0(f"Calibrating layer {layer_idx + 1}/{n} | {' | '.join(parts)}")
+        return f"Calibrating layer {layer_idx + 1}/{n} | {' | '.join(parts)}"
+
+    def _log_layer_summary(self, layer_idx: int):
+        self._emit_status(self._layer_summary(layer_idx))
 
     @torch.no_grad()
     def get_input_activations(self, layer: torch.nn.Module, forward_loop: ForwardLoop) -> list:
@@ -402,7 +414,8 @@ class LayerActivationCollector:
         assert self._decoder_layers is not None
 
         if resumed_inputs is not None:
-            print_rank_0(f"Calibrating layer {start_layer + 1} (resumed)")
+            n = len(self._decoder_layers)
+            self._emit_status(f"Calibrating layer {start_layer + 1}/{n} | resumed")
             for i in range(start_layer):
                 self._swap_to_dummy(i)
             layer = self._decoder_layers[start_layer]
@@ -477,7 +490,7 @@ def _write_manifest(
     last_completed_layer: int,
     num_layers: int,
     save_every: int,
-    save_quantizers_only: bool,
+    calib_mutates_weights: bool,
 ) -> None:
     """Atomically write manifest.json. Config keys are persisted so resume can detect drift."""
     path = os.path.join(checkpoint_dir, "manifest.json")
@@ -488,7 +501,7 @@ def _write_manifest(
                 "last_completed_layer": last_completed_layer,
                 "num_layers": num_layers,
                 "save_every": save_every,
-                "save_quantizers_only": save_quantizers_only,
+                "calib_mutates_weights": calib_mutates_weights,
             },
             f,
         )
@@ -510,7 +523,7 @@ def _save_layer_files(
     """Write the per-layer files for layer *idx*.
 
     Exactly one of ``weights`` (full layer state_dict) or ``quantizer_buffers``
-    (just the TensorQuantizer state_dict slice, used by ``save_quantizers_only``)
+    (just the TensorQuantizer state_dict slice, used when calibration does not mutate weights)
     is written; ``full_restore`` falls back to whichever is present.
     ``next_inputs.pt`` and ``manifest.json`` are deferred to window boundaries
     in :meth:`_CheckpointState.save`.
@@ -563,7 +576,7 @@ class _CheckpointState:
         num_layers: int,
         start_layer: int = 0,
         save_every: int = 1,
-        save_quantizers_only: bool = False,
+        calib_mutates_weights: bool = True,
     ):
         if dist.is_initialized() and dist.size() > 1:
             raise RuntimeError(
@@ -576,7 +589,7 @@ class _CheckpointState:
         self.num_layers = num_layers
         self.start_layer = start_layer
         self.save_every = save_every
-        self.save_quantizers_only = save_quantizers_only
+        self.calib_mutates_weights = calib_mutates_weights
         # Tracks the most recent saved layer so save() can window-save the layers
         # since the last save event. Initialized to start_layer - 1 so the first
         # save event after resume covers the new work only.
@@ -588,7 +601,7 @@ class _CheckpointState:
         checkpoint_dir: str | None,
         num_layers: int,
         save_every: int = 1,
-        save_quantizers_only: bool = False,
+        calib_mutates_weights: bool = True,
     ) -> _CheckpointState | None:
         """Create from folder. Detects resume point. Returns None if no checkpoint_dir."""
         if not checkpoint_dir:
@@ -597,12 +610,10 @@ class _CheckpointState:
         info = detect_resume_point(checkpoint_dir)
         if info is not None:
             manifest = info[1]
-            # Pre-0.45 manifests omit save_every / save_quantizers_only; skip the
-            # check for keys absent from the on-disk manifest.
             for key, new_value in (
                 ("num_layers", num_layers),
                 ("save_every", save_every),
-                ("save_quantizers_only", save_quantizers_only),
+                ("calib_mutates_weights", calib_mutates_weights),
             ):
                 ckpt_value = manifest.get(key)
                 if ckpt_value is not None and ckpt_value != new_value:
@@ -620,7 +631,7 @@ class _CheckpointState:
             num_layers,
             start_layer=start,
             save_every=save_every,
-            save_quantizers_only=save_quantizers_only,
+            calib_mutates_weights=calib_mutates_weights,
         )
 
     def setup_resume(self, layers: nn.ModuleList) -> list | None:
@@ -691,10 +702,10 @@ class _CheckpointState:
                     )
                     layer.load_state_dict(weights, strict=False, assign=True)
                 elif os.path.isfile(buffers_path):
-                    # save_quantizers_only mode: restore just the TensorQuantizer
-                    # state_dict (carries _amax). The layer's other weights
-                    # weren't modified by the algorithm, so the in-memory values
-                    # already match what would have been saved.
+                    # Non-mutating calibration mode: restore just the TensorQuantizer
+                    # state_dict (carries _amax). The layer's other weights were not
+                    # modified, so the in-memory values already match what would have
+                    # been saved.
                     quantizer_buffers = torch.load(
                         buffers_path, map_location=layer_device, weights_only=False
                     )
@@ -726,14 +737,14 @@ class _CheckpointState:
 
         _cpu = torch.device("cpu")
         layer = layers[layer_idx]
-        with enable_weight_access_and_writeback(layer, model):
+        with enable_weight_access_and_writeback(layer, model, writeback=False):
             qstate = _move_to_device(quantizer_state(layer), _cpu)
-            if self.save_quantizers_only:
-                weights = None
-                quantizer_buffers = _move_to_device(get_quantizer_state_dict(layer), _cpu)
-            else:
+            if self.calib_mutates_weights:
                 weights = _move_to_device(layer.state_dict(), _cpu)
                 quantizer_buffers = None
+            else:
+                weights = None
+                quantizer_buffers = _move_to_device(get_quantizer_state_dict(layer), _cpu)
 
         output_meta = getattr(layer._layerwise_calib, "output_meta", None)
         if output_meta is None:
@@ -765,7 +776,7 @@ class _CheckpointState:
             layer_idx,
             self.num_layers,
             save_every=self.save_every,
-            save_quantizers_only=self.save_quantizers_only,
+            calib_mutates_weights=self.calib_mutates_weights,
         )
         window_start = self._last_saved_layer + 1
         self._last_saved_layer = layer_idx

@@ -34,7 +34,7 @@ from modelopt.torch.quantization.utils.layerwise_calib import (
     _CheckpointState,
 )
 from modelopt.torch.utils import print_rank_0
-from modelopt.torch.utils.distributed import DistributedProcessGroup, ParallelState
+from modelopt.torch.utils.distributed import DistributedProcessGroup, ParallelState, is_master
 from modelopt.torch.utils.network import bind_forward_method, unpatch_forward_method
 
 from .calib import MseCalibrator, NVFP4MSECalibrator, _Calibrator
@@ -1761,7 +1761,7 @@ def layerwise_calibrate(
     checkpoint_dir = calib_kwargs.pop("checkpoint_dir", None)
     qdq_from_prev = calib_kwargs.pop("get_qdq_activations_from_prev_layer", False)
     save_every = calib_kwargs.pop("save_every", 1)
-    save_quantizers_only = calib_kwargs.pop("save_quantizers_only", False)
+    calib_mutates_weights = calib_kwargs.pop("calib_mutates_weights", True)
 
     if forward_loop is None:
         raise ValueError(
@@ -1783,16 +1783,27 @@ def layerwise_calibrate(
         checkpoint_dir,
         num_layers,
         save_every=save_every,
-        save_quantizers_only=save_quantizers_only,
+        calib_mutates_weights=calib_mutates_weights,
     )
     start_layer = ckpt.start_layer if ckpt else 0
 
-    input_getter = LayerActivationCollector(model)
-    input_getter._patch_all_layers(decoder_layers=transformer_layers)
+    layer_pbar = tqdm(
+        total=num_layers,
+        initial=start_layer,
+        desc="Layerwise calibration",
+        disable=not is_master(),
+        dynamic_ncols=True,
+    )
 
-    resumed_inputs = ckpt.setup_resume(transformer_layers) if ckpt and start_layer > 0 else None
+    def _set_layer_status(status: str):
+        layer_pbar.set_postfix_str(status, refresh=True)
+
+    input_getter = LayerActivationCollector(model, status_callback=_set_layer_status)
 
     try:
+        input_getter._patch_all_layers(decoder_layers=transformer_layers)
+        resumed_inputs = ckpt.setup_resume(transformer_layers) if ckpt and start_layer > 0 else None
+
         # Bootstrap: get first layer's inputs (or use resumed inputs).
         layer_inputs = input_getter.get_first_layer_inputs(
             start_layer, resumed_inputs, forward_loop
@@ -1837,7 +1848,7 @@ def layerwise_calibrate(
                 # deque; reset so calib_func's replay hits the real forward.
                 layer._layerwise_calib.mode = "original"
 
-            with persistent_materialization(layer):
+            with persistent_materialization(layer, writeback=calib_mutates_weights):
                 calib_func(layer, _layer_forward_loop, **calib_kwargs)
 
             # qdq_from_prev=True: capture after calib_func so the next layer
@@ -1850,11 +1861,13 @@ def layerwise_calibrate(
             if ckpt:
                 ckpt.save(layer_idx, model, transformer_layers, next_inputs)
 
+            layer_pbar.update(1)
             del layer_inputs
             torch.cuda.empty_cache()
             layer_inputs = next_inputs  # noqa: F841 (used in next iteration's closure)
     finally:
         input_getter._unpatch_all_layers()
+        layer_pbar.close()
 
     if ckpt:
         ckpt.full_restore(transformer_layers, model)

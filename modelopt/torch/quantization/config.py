@@ -678,13 +678,14 @@ class LayerwiseConfig(ModeloptBaseConfig):
         ),
     )
 
-    save_quantizers_only: bool = ModeloptField(
-        default=False,
-        title="Skip the per-layer weights blob; persist only quantizer state.",
+    calib_mutates_weights: bool = ModeloptField(
+        default=True,
+        title="Whether layerwise calibration mutates layer weights.",
         description=(
-            "Only accepted by algorithms that update solely ``TensorQuantizer._amax`` "
-            "(max, mse, local_hessian). Rejected for weight-mutating algorithms "
-            "(GPTQ, AWQ, SmoothQuant) where it would silently lose updates on resume."
+            "Set to False only for algorithms that update solely "
+            "``TensorQuantizer._amax`` (max, mse, local_hessian). Rejected for "
+            "weight-mutating algorithms (GPTQ, AWQ, SmoothQuant) where it would "
+            "silently lose updates on resume."
         ),
     )
 
@@ -712,7 +713,7 @@ class QuantizeAlgorithmConfig(ModeloptBaseConfig):
     """Calibration algorithm config base."""
 
     # Set True only for algorithms that update solely ``TensorQuantizer._amax``
-    # (no ``layer.weight`` mutation). Gates ``layerwise.save_quantizers_only``.
+    # (no ``layer.weight`` mutation). Gates ``layerwise.calib_mutates_weights=False``.
     _supports_save_quantizers_only: ClassVar[bool] = False
 
     method: Literal[None] = ModeloptField(
@@ -794,12 +795,12 @@ class QuantizeAlgorithmConfig(ModeloptBaseConfig):
         return self
 
     @model_validator(mode="after")
-    def _validate_save_quantizers_only_supported(self):
-        """Enforce the ``_supports_save_quantizers_only`` whitelist."""
-        if self.layerwise.save_quantizers_only and not self._supports_save_quantizers_only:
+    def _validate_non_mutating_layerwise_supported(self):
+        """Enforce the ``calib_mutates_weights=False`` whitelist."""
+        if not self.layerwise.calib_mutates_weights and not self._supports_save_quantizers_only:
             raise ValueError(
                 f"Algorithm '{self.method}' mutates layer weights in-place; "
-                "save_quantizers_only=True would lose those updates on resume. "
+                "calib_mutates_weights=False would lose those updates on resume. "
                 "Only max/mse/local_hessian (amax-only) support this flag."
             )
         return self
