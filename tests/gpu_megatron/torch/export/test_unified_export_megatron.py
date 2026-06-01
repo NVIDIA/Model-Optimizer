@@ -170,9 +170,11 @@ def _test_unified_export_megatron(
         for sf in sorted(tmp_export_dir.glob("*.safetensors")):
             with safe_open(str(sf), framework="pt", device="cpu") as f:
                 keys.extend(f.keys())
-        assert any(k.startswith("model.language_model.") for k in keys), (
-            "language model keys missing from export"
-        )
+        # every decoder layer should be present, not just some
+        for i in range(num_layers):
+            assert any(k.startswith(f"model.language_model.layers.{i}.") for k in keys), (
+                f"language model layer {i} keys missing from export"
+            )
         assert any(k.startswith("model.visual.") for k in keys), (
             "vision encoder keys missing from export"
         )

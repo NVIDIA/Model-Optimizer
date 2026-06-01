@@ -382,14 +382,20 @@ class GPTModelExporter:
         # Add multimodal components to state_dict. Since only support decoder model quantization,
         # no changes will be made to the multimodal components. We copy the multimodal components
         # from the pretrained model directly to the state_dict to avoid implementing the export logic.
-        if is_first_stage_main_rank and self.is_multimodal:
-            multimodal_state_dict = load_multimodal_components(pretrained_model_name_or_path)
-            layer_state_dicts[0].update(multimodal_state_dict)
-        elif is_first_stage_main_rank and self.arch == "Qwen3VLForConditionalGeneration":
-            vision_state_dict = load_multimodal_components(
-                pretrained_model_name_or_path, prefixes=("model.visual.",)
-            )
-            layer_state_dicts[0].update(vision_state_dict)
+        if is_first_stage_main_rank:
+            # layer_state_dicts is keyed by layer_number (1-indexed), so the first
+            # decoder layer on this (first) PP stage is the smallest key, not 0.
+            # Merge the multimodal components into that shard so they land in a file
+            # the index builder picks up (it scans shards 1..num_layers).
+            first_layer_key = next(iter(layer_state_dicts))
+            if self.is_multimodal:
+                multimodal_state_dict = load_multimodal_components(pretrained_model_name_or_path)
+                layer_state_dicts[first_layer_key].update(multimodal_state_dict)
+            elif self.arch == "Qwen3VLForConditionalGeneration":
+                vision_state_dict = load_multimodal_components(
+                    pretrained_model_name_or_path, prefixes=("model.visual.",)
+                )
+                layer_state_dicts[first_layer_key].update(vision_state_dict)
 
         # Barrier to ensure the export_dir has been created.
         torch.distributed.barrier()
