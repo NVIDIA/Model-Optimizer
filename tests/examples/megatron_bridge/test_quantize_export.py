@@ -20,6 +20,11 @@ import pytest
 from _test_utils.examples.run_command import extend_cmd_parts, run_example_command
 from _test_utils.torch.transformers_models import create_tiny_qwen3_dir
 
+# Standalone helper (run as a subprocess) that loads the exported HF checkpoint with vLLM and runs
+# a short generation. Run out-of-process so vLLM's large footprint does not stack on the test
+# process's torch / Megatron imports and OOM-kill the runner.
+_VLLM_GENERATE = Path(__file__).parent / "_vllm_generate.py"
+
 
 def test_quantize_export_and_vllm_deployment(tmp_path: Path, num_gpus):
     """Quantize a tiny Qwen3 via a YAML recipe, export to HF with export.py, and load it with vLLM."""
@@ -75,14 +80,9 @@ def test_quantize_export_and_vllm_deployment(tmp_path: Path, num_gpus):
 
     # The exported unified checkpoint should be loadable and runnable by vLLM. Skip only this
     # deployment step (the quantization + export above is already validated) if vLLM is absent.
-    vllm = pytest.importorskip("vllm")
-    llm = vllm.LLM(
-        model=str(hf_export_path),
-        tensor_parallel_size=1,
-        enforce_eager=True,
-        gpu_memory_utilization=0.4,
-        max_model_len=128,
-        dtype="bfloat16",
+    # The helper asserts internally, so a non-zero exit (raised by run_example_command) fails here.
+    pytest.importorskip("vllm")
+    run_example_command(
+        ["python", str(_VLLM_GENERATE), str(hf_export_path)],
+        example_path="megatron_bridge",
     )
-    outputs = llm.generate(["Hello!"], vllm.SamplingParams(max_tokens=4))
-    assert outputs and outputs[0].outputs[0].text is not None
