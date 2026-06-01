@@ -194,10 +194,11 @@ speedup, and deep queues can trip `request_timeout`.
 | Situation | Set `parallelism` to | Why |
 | --- | --- | --- |
 | `total_requests ≤ serving_capacity` (small run) | `total_requests` (round up a little for uneven DP routing) | All requests dispatch at once → one wave → finishes in ~one generation-time. Higher is wasted. |
-| `total_requests ≫ serving_capacity` (large run) | `serving_capacity` (largest the GPUs sustain) | Throughput-bound: keep every decode slot full until the queue drains. Request count no longer matters. |
+| `total_requests ≫ serving_capacity` (large run) | the **preemption-free** capacity at the *task's* context — often *below* nominal `serving_capacity` (see Balanced sizing) | Throughput-bound: keep decode slots full *without thrashing*. Request count no longer matters; KV headroom does. |
 
-So "set it higher" is right **only up to the request count**; past that you just
-over-reserve KV.
+So "set it higher" is right **only up to the request count** for small runs; for
+large runs it's right **only up to the preemption-free point** — past that you don't
+just over-reserve KV, you *regress* (next section).
 
 ## Sizing `--max-num-seqs` against KV cache
 
@@ -220,11 +221,43 @@ Factors that **relax** the KV limit: small / low-precision weights (more HBM for
 KV), **KV-cache quantization** (`kv_cache_scheme` in `config.json`), and
 **hybrid / linear-attention** layers (near-constant state instead of growing KV).
 
-## Diminishing returns
+## Balanced sizing: bigger is not always faster (especially long context)
 
-Decode throughput saturates HBM bandwidth at some batch size; beyond that knee,
-more sequences add latency without adding tokens/sec. Goal = **largest batch with
-~zero preemption**, not the max the config accepts.
+Decode throughput first saturates HBM bandwidth (more sequences stop adding
+tokens/sec) and then, past the KV-fit point, **regresses** — and the regression is
+worst for long-context / long-output tasks. Three mechanisms:
+
+1. **Preemption thrash.** When admitted sequences exceed what KV holds, vLLM preempts
+   (recompute or swap). Recompute discards a partially-finished decode — and
+   re-running a ~120K-token prefill is enormous wasted work. A modest,
+   preemption-free concurrency finishes *sooner* than a high one that thrashes.
+2. **Prefill/decode contention.** Long inputs = huge prefills. With
+   `--max-num-batched-tokens` fixed, many concurrent long prefills split that budget
+   and starve decode — everything crawls.
+3. **Latency → timeout → retry cascade.** Too many in-flight requests shrink each
+   one's compute share; p99 latency climbs past `request_timeout`, triggering
+   `max_retries` resubmissions that pile *more* load onto an already-saturated server.
+
+**Sustainable concurrency is context-dependent.** vLLM's startup
+`Maximum concurrency for <max-model-len> tokens` is the *full-length floor*; at a
+task's actual working length you fit more (short tasks) — but for long-context tasks
+only a handful. So a `parallelism` that's ideal for GPQA (short prompt) will thrash
+AA-LCR (~120K input). **Never inherit a short task's `parallelism` for a long one.**
+
+**Balanced rule:**
+
+- Target `parallelism` ≈ **70–80% of the preemption-free KV-fit concurrency at the
+  task's working context** (prompt + expected generation) × DP — not the model's
+  nominal max. The 20–30% margin absorbs length variance and uneven DP routing.
+- **Per-task override for long-context / long-output tasks** (AA-LCR, big
+  `max_new_tokens` reasoning): set a *lower* `parallelism` under that task's `params`;
+  don't let the higher top-level value apply.
+- **Tune empirically (canary), raising only while ALL THREE hold:** throughput
+  (req/s) rises, preemption ≈ 0, and p99 latency stays within `request_timeout`. Stop
+  at the first that breaks — that's the knee; back off ~20%.
+- **When unsure, err low for long context.** A slightly-too-small `parallelism` only
+  mildly underutilizes the GPUs; a too-large one thrashes and can be *multiples*
+  slower. Goal = **largest batch with ~zero preemption**, not the max the config accepts.
 
 ## Non-GPU caps
 
@@ -232,8 +265,12 @@ more sequences add latency without adding tokens/sec. Goal = **largest batch wit
   often capped by the **judge's rate limit**, not the served model. Start
   conservative; raise only after judge logs are clean. Use a per-task `parallelism`
   override when its ceiling differs (e.g. Tau2 cap 512).
+- **Context length is itself a per-task cap.** Long-context / long-output tasks need
+  a *lower* `parallelism` than short ones on the same deployment — give them an
+  explicit per-task override (see Balanced sizing), don't reuse the top-level value.
 - **Per-task overrides:** size `--max-num-seqs` off the **max** `parallelism` across
-  the top-level and all per-task overrides.
+  the top-level and all per-task overrides (the deployment must support the busiest
+  task), even though long-context tasks themselves run at a lower `parallelism`.
 
 ---
 
@@ -243,8 +280,9 @@ more sequences add latency without adding tokens/sec. Goal = **largest batch wit
 with huge KV headroom → **TP=1, DP=8, no EP.** Concurrency: GPQA Diamond = 198
 questions; `n_samples=1` → 198 requests (request-bound) → `parallelism=256`,
 `max-num-seqs=ceil(256/8)=32`. `n_samples=8` → 1,584 requests (capacity-bound) →
-start `parallelism=512` (`max-num-seqs=64`), then tune from vLLM's max-concurrency
-- preemption (toward 768–1024 if KV has headroom).
+start `parallelism=512` (`max-num-seqs=64`), then tune up **only while preemption
+stays ≈ 0** — GPQA's reasoning outputs run to ~82K tokens, so the knee may sit well
+below 1024; watch the preemption counter rather than assuming KV headroom.
 
 **Dense ~70B BF16, 8×H100 (80 GB).** ~140 GB weights → won't fit one GPU; TP=2
 (~70 GB/GPU + KV) fits → **TP=2, DP=4, no EP.** `serving_capacity = max-num-seqs ×
