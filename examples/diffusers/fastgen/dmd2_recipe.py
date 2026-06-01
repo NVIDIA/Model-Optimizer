@@ -125,7 +125,7 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
     - ``self.checkpointer`` (DCP student weights + optimizer).
     - ``self.device`` / ``self.bf16`` / ``self.clip_grad_max_norm`` / etc.
 
-    What this recipe adds (Phase 1):
+    What this recipe adds:
 
     - A frozen teacher loaded via a second :meth:`NeMoAutoDiffusionPipeline.from_pretrained`
       call with the same ``parallel_scheme`` so it lands with the same FSDP2 sharding
@@ -137,9 +137,10 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
     - Sidecar checkpoint save / restore for fake-score weights, fake-score optimizer,
       EMA shadow, and DMDPipeline iteration counters.
 
-    Phase 1 scope — NOT implemented here: classifier-free guidance,
-    multiscale discriminator + GAN branch, real ``.meta`` dataset path. See the
-    ``Phase 2`` section of ``README.md`` for the roadmap.
+    Classifier-free guidance, the GAN discriminator branch, and real-data training are
+    configurable via the ``dmd2:`` / ``data:`` YAML blocks — all enabled in the canonical
+    ``configs/dmd2_qwen_image.yaml`` and off in the mock-data smoke. See
+    ``examples/diffusers/fastgen/README.md`` for details.
     """
 
     # ------------------------------------------------------------------ #
@@ -160,7 +161,7 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
         #    trailing call to self.load_checkpoint(self.restore_from) runs BEFORE our
         #    extras exist, so it only restores the student — that is intentional and safe.
         #
-        #    For the Phase 1 smoke, ``data.dataloader._target_`` in the YAML points at
+        #    For the mock-data smoke, ``data.dataloader._target_`` in the YAML points at
         #    ``nemo_automodel.components.datasets.diffusion.build_mock_dataloader`` so the
         #    parent wires up the mock dataloader for us — no swap needed.
         super().setup()
@@ -184,9 +185,8 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
         self.__dict__["_fake_score_optimizer"] = self._build_fake_score_optimizer()
 
         # 7. Optional GAN discriminator. Built when ``gan_loss_weight_gen > 0`` so the
-        #    DMDPipeline constructor's assert is satisfied. Phase 2 wires this up for
-        #    Qwen-Image; other backbones still get ``discriminator=None`` and the
-        #    existing assert fires if their YAML enables GAN before they're ported.
+        #    DMDPipeline constructor's assert is satisfied; otherwise ``discriminator=None``
+        #    and that assert fires if a YAML enables GAN for an unsupported backbone.
         self.__dict__["_discriminator"] = self._build_discriminator()
         self.__dict__["_discriminator_optimizer"] = self._build_discriminator_optimizer()
         if self._discriminator is not None:
@@ -233,8 +233,8 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
         Each outer iteration picks either the student or fake-score phase based on
         ``global_step % student_update_freq``. The student phase runs
         ``compute_student_loss`` + ``update_ema``. The fake-score phase runs
-        ``compute_fake_score_loss``. Phase 1 never enters the discriminator phase
-        because ``gan_loss_weight_gen`` is pinned to 0 in the YAML.
+        ``compute_fake_score_loss`` and, when a discriminator is configured
+        (``gan_loss_weight_gen > 0``), ``compute_discriminator_loss``.
 
         Mirrors the gating in ``FastGen/fastgen/methods/distribution_matching/dmd2.py``
         (``_student_update_step`` / ``_fake_score_discriminator_update_step``).
@@ -707,7 +707,7 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
         """Best-effort resolve of the checkpoint dir, matching BaseRecipe's convention.
 
         For explicit paths we pass through; for ``"LATEST"`` we look under
-        ``checkpointer.config.checkpoint_dir``. Phase 1 keeps this simple and delegates
+        ``checkpointer.config.checkpoint_dir``. This keeps resolution simple and delegates
         the hard cases (async symlinks, cross-node shared filesystems) to the user.
         """
         if os.path.isabs(restore_from):
@@ -860,7 +860,7 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
         """Construct the Discriminator_ImageDiT when GAN is enabled.
 
         Returns ``None`` when ``dmd2.gan_loss_weight_gen`` is zero so the
-        DMDPipeline runs without a discriminator (Phase 1 / multi-step / CFG).
+        DMDPipeline runs without a discriminator (any run with the GAN branch disabled).
         """
         gan_weight = float(self.cfg.get("dmd2.gan_loss_weight_gen", 0.0) or 0.0)
         if gan_weight <= 0.0:
