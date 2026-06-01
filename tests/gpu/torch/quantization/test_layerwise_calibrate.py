@@ -331,8 +331,10 @@ def test_run_layer_reflects_weight_updates(monkeypatch):
     assert torch.allclose(actual, expected)
 
 
-def test_skip_placeholder_uses_meta_device():
-    meta = ("tensor", torch.Size([2, 3]), torch.float32, torch.device("cpu"))
+def test_skip_placeholder_uses_recorded_device():
+    device = torch.device("cpu")
+    meta = ("tensor", torch.Size([2, 3]), torch.float32, device)
 
     out = LayerActivationCollector._zeros_from_meta(meta)
-    assert out.device.type == "meta"
+    assert out.device == device
+    assert torch.count_nonzero(out) == 0

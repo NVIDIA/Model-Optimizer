@@ -66,15 +66,22 @@ def _writeback_params_to_weights_map(module, align_hook):
             # on-disk version.  OffloadedWeightsLoader.__getitem__ gives
             # state_dict priority over index, so this is sufficient.
             w_map[key] = tensor.detach().cpu()
+            warnings.warn(
+                "Accelerate disk-offload writeback is currently kept in CPU state_dict; "
+                "writing updates back to disk offload files is TODO.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
 
 
 @contextmanager
-def weight_access_and_writeback_context(module):
+def weight_access_and_writeback_context(module, writeback: bool = True):
     """Context manager for weight access and writeback for modules managed by accelerate.
 
     Handles CPU-offloaded and disk-offloaded models. Iterates over the module and all
-    its descendants, materializing weights from any offload hook found and writing them
-    back on exit. ``pre_forward`` is skipped on modules whose weights are already
+    its descendants, materializing weights from any offload hook found. If ``writeback``
+    is True, writes materialized tensors back on exit. ``pre_forward`` is skipped on
+    modules whose weights are already
     materialized (not on meta) to avoid overwriting them with stale CPU copies.
     """
     assert hasattr(module, "_hf_hook")
@@ -99,7 +106,8 @@ def weight_access_and_writeback_context(module):
     finally:
         for mod, hook, was_materialized in materialized:
             hook.offload = True
-            _writeback_params_to_weights_map(mod, hook)
+            if writeback:
+                _writeback_params_to_weights_map(mod, hook)
             if was_materialized:
                 hook.post_forward(mod, None)
 

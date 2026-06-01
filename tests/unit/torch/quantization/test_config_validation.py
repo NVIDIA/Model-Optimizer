@@ -28,10 +28,14 @@ from modelopt.torch.quantization.config import (
     INT4_AWQ_CFG,
     NVFP4_DEFAULT_CFG,
     W4A8_AWQ_BETA_CFG,
+    AWQLiteCalibConfig,
     GPTQCalibConfig,
     LayerwiseConfig,
+    LocalHessianCalibConfig,
     MaxCalibConfig,
+    MseCalibConfig,
     QuantizeConfig,
+    SmoothQuantCalibConfig,
     find_quant_cfg_entry_by_path,
     need_calibration,
     normalize_quant_cfg_list,
@@ -688,9 +692,27 @@ class TestLayerwiseNestedConfig:
             "get_qdq_activations_from_prev_layer": False,
             "checkpoint_dir": None,
             "save_every": 1,
+            "calib_mutates_weights": True,
         }
         assert "layerwise_checkpoint_dir" not in dumped
 
     def test_save_every_must_be_positive(self):
         with pytest.raises(ValidationError):
             MaxCalibConfig(layerwise={"enable": True, "save_every": 0})
+
+    @pytest.mark.parametrize(
+        "cfg_cls",
+        [GPTQCalibConfig, AWQLiteCalibConfig, SmoothQuantCalibConfig],
+    )
+    def test_calib_mutates_weights_false_rejected_for_weight_mutating_algorithms(self, cfg_cls):
+        """Whitelist: only amax-only algorithms (max/mse/local_hessian) may set
+        calib_mutates_weights=False. Weight-mutating algorithms (GPTQ folds Hessian
+        updates, AWQ/SmoothQuant fold pre-quant scales) must reject the flag.
+        """
+        with pytest.raises(ValidationError, match="mutates layer weights in-place"):
+            cfg_cls(layerwise={"enable": True, "calib_mutates_weights": False})
+
+    @pytest.mark.parametrize("cfg_cls", [MaxCalibConfig, MseCalibConfig, LocalHessianCalibConfig])
+    def test_calib_mutates_weights_false_accepted_for_amax_only_algorithms(self, cfg_cls):
+        cfg = cfg_cls(layerwise={"enable": True, "calib_mutates_weights": False})
+        assert cfg.layerwise.calib_mutates_weights is False

@@ -188,7 +188,10 @@ def _test_layerwise_calibrate_fsdp2(rank, size):
         # Reference: non-FSDP layerwise calibration
         ref_model = copy.deepcopy(model)
         seq_cfg = copy.deepcopy(mtq.INT8_DEFAULT_CFG)
-        seq_cfg["algorithm"] = {"method": "max", "layerwise": True}
+        seq_cfg["algorithm"] = {
+            "method": "max",
+            "layerwise": {"enable": True, "calib_mutates_weights": False},
+        }
         mtq.quantize(ref_model, seq_cfg, lambda m: m(inputs))
         output_ref = ref_model(inputs)
 
@@ -254,6 +257,13 @@ def _test_persistent_materialization(rank, size):
     # Verify modification persisted
     with enable_weight_access_and_writeback(layer[0], model):
         assert torch.allclose(layer[0].weight, ref_weight + 1.0)
+
+    with persistent_materialization(layer, writeback=False):
+        assert not isinstance(layer[0].weight, DTensor)
+        assert layer[0].weight.device.type == "cuda"
+        layer(inputs)
+
+    assert isinstance(next(iter(layer.parameters())), DTensor)
 
 
 def test_persistent_materialization(dist_workers):
