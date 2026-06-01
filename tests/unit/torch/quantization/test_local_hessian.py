@@ -180,6 +180,16 @@ class TestActivationCaptureExtensionPoint:
         mtq.quantize(conv, INT8_WEIGHT_CFG, forward_loop=lambda m: m(SimpleConv.get_input()))
         assert conv.net[0].register_calibration_input_hooks(lambda *a: None) == []  # 4-D weight
 
+    def test_sequential_quantizer_weight_not_hooked(self):
+        from modelopt.torch.quantization.nn import SequentialQuantizer
+
+        torch.manual_seed(0)
+        model = SimpleLinear()
+        mtq.quantize(model, INT8_WEIGHT_CFG, forward_loop=_make_forward_loop())
+        linear = model.net[0]
+        linear.weight_quantizer = SequentialQuantizer(TensorQuantizer(), TensorQuantizer())
+        assert linear.register_calibration_input_hooks(lambda *a: None) == []  # unsupported
+
     def test_block_size_mismatch_warns_only_on_mismatch(self):
         def q(block):
             return TensorQuantizer(

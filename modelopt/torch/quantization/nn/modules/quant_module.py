@@ -260,9 +260,18 @@ class QuantLinearConvBase(QuantInputBase):
         self._register_dynamic_attribute("weight", self._get_quantized_weight)
 
     def register_calibration_input_hooks(self, callback):
-        """Pair the weight quantizer with the forward input (linear only; conv falls back)."""
+        """Pair the weight quantizer with the forward input.
+
+        Only a 2-D weight with an enabled ``TensorQuantizer`` is hooked; conv (4-D) and
+        ``SequentialQuantizer`` weights are unsupported and fall back to plain calibration.
+        """
         weight = getattr(self, "weight", None)
-        if weight is None or weight.dim() != 2 or not self.weight_quantizer.is_enabled:
+        if (
+            weight is None
+            or weight.dim() != 2
+            or not isinstance(self.weight_quantizer, TensorQuantizer)
+            or not self.weight_quantizer.is_enabled
+        ):
             return []
 
         def _pre_hook(module, args):

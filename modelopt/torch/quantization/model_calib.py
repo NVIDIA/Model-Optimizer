@@ -618,14 +618,20 @@ class _LocalHessianAccumulator:
             self.hessian_per_block += hessian_batch
         self.num_samples += input_tensor.numel() // self.cin
 
-    def build_error_func(self) -> Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None:
-        """Hessian-weighted error function (``None`` if no samples); frees the raw buffer."""
+    def build_error_func(
+        self, keep_buffer: bool = False
+    ) -> Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None:
+        """Hessian-weighted error function (``None`` if no samples).
+
+        Frees the raw Hessian buffer unless ``keep_buffer`` (kept for debug inspection).
+        """
         if self.hessian_per_block is None or self.num_samples == 0:
             return None
         cout = self.cout
         bs = self.block_size
         hessian = self.hessian_per_block / self.num_samples
-        self.hessian_per_block = None
+        if not keep_buffer:
+            self.hessian_per_block = None
 
         def local_hessian_error(x: torch.Tensor, xq: torch.Tensor) -> torch.Tensor:
             original_shape = x.shape
@@ -679,12 +685,13 @@ def local_hessian_calibrate(
     """Calibrate weight quantizers by minimizing the Hessian-weighted error.
 
     Minimizes ``(W - Wq)ᵀ H (W - Wq)`` with per-block Hessian ``H = ΣXᵀX`` (approximating the
-    output error ``||WX - WqX||²``), built from a full-precision forward and fed to
-    :func:`mse_calibrate`'s weight search via a custom ``error_func``.
+    output error ``||WX - WqX||²``), built from a forward with weight fake-quant disabled
+    (input quantizers untouched) and fed to :func:`mse_calibrate`'s weight search via ``error_func``.
 
-    Like :func:`mse_calibrate`, every weight quantizer is calibrated; the Hessian metric is
-    applied only where a weight can be paired with its input activations (dense linears and
-    HF fused-MoE experts). All other weights fall back to plain MSE.
+    Like :func:`mse_calibrate`, TensorQuantizer weights are calibrated — with the Hessian
+    metric where a weight pairs with its input activations (dense linears and HF fused-MoE
+    experts), plain MSE otherwise. Other quantizer types (e.g. SequentialQuantizer) are
+    unsupported and left at their max-calibrated scale.
 
     Args:
         model: Model to be calibrated.
@@ -724,8 +731,8 @@ def local_hessian_calibrate(
             accumulators[id(weight_quantizer)] = acc
         acc.accumulate(input_local)
 
-    # Phase 2: register capture hooks, silence weight quant (full-precision activations),
-    # run one forward to accumulate Hessians. Hooks live only for this forward.
+    # Phase 2: register capture hooks, disable weight fake-quant (input quantizers left as-is,
+    # matching prior behavior), run one forward to accumulate Hessians. Hooks live only for it.
     handles: list = []
     silenced_weight_quantizers: list[TensorQuantizer] = []
     warned: set = set()
@@ -738,14 +745,28 @@ def local_hessian_calibrate(
             captures = module.register_calibration_input_hooks(capture)
             handles.extend(captures)
             for weight, weight_quantizer in module.iter_weights_for_calibration():
-                # Only TensorQuantizer weights are calibrated (matches mse_calibrate), so only
-                # those are silenced.
-                if (
-                    isinstance(weight_quantizer, TensorQuantizer)
-                    and weight_quantizer.is_enabled
-                    and weight_quantizer._if_quant
-                ):
-                    silenced_weight_quantizers.append(weight_quantizer)
+                # Silence weight fake-quant (incl. SequentialQuantizer leaves) so the capture
+                # forward uses full-precision weights and downstream Hessians aren't corrupted.
+                leaves = (
+                    list(weight_quantizer)
+                    if isinstance(weight_quantizer, SequentialQuantizer)
+                    else [weight_quantizer]
+                )
+                silenced_weight_quantizers.extend(
+                    q
+                    for q in leaves
+                    if isinstance(q, TensorQuantizer) and q.is_enabled and q._if_quant
+                )
+                # Only TensorQuantizer weights are refined (same as mse_calibrate); other types
+                # (e.g. SequentialQuantizer) are unsupported and left at their max-cal scale.
+                if not isinstance(weight_quantizer, TensorQuantizer):
+                    if weight_quantizer.is_enabled and "unsupported" not in warned:
+                        warned.add("unsupported")
+                        warn_rank_0(
+                            "local_hessian: only TensorQuantizer weights are calibrated; other "
+                            "types (e.g. SequentialQuantizer) stay at their max-calibrated scale."
+                        )
+                    continue
                 if captures:
                     _warn_local_hessian_fallback(name, weight, weight_quantizer, block_size, warned)
 
@@ -769,7 +790,9 @@ def local_hessian_calibrate(
         )
 
     # Phase 3: build error funcs and run the shared MSE weight loop.
-    error_funcs = {qid: acc.build_error_func() for qid, acc in accumulators.items()}
+    error_funcs = {
+        qid: acc.build_error_func(keep_buffer=debug) for qid, acc in accumulators.items()
+    }
     print_rank_0("local_hessian: Running MSE calibration with local Hessian loss...")
     _mse_calibrate_weights(
         model,
