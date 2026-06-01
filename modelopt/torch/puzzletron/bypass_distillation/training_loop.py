@@ -53,6 +53,7 @@ from modelopt.torch.puzzletron.tools.checkpoint_utils_hf import load_model_confi
 from modelopt.torch.puzzletron.tools.logger import aprint, mprint
 from modelopt.torch.puzzletron.tools.sharded_checkpoint_utils import load_and_shard_model
 from modelopt.torch.puzzletron.utils.parsing import format_global_config, format_stitched_losses
+from modelopt.torch.utils.logging import print_rank_0
 from modelopt.torch.utils.robust_json import json_load
 
 from .bypass_checkpoint_utils import find_latest_run_dir, load_local_state, save_bypass_checkpoint
@@ -123,6 +124,60 @@ def _get_resume_state_path(cfg: DictConfig, resume_checkpoint_path: Optional[str
             )
         return None
     return resume_checkpoint_path
+
+
+def _get_resume_skip_first_batches(saved_skip: int, resume_iter_num: int) -> int:
+    return saved_skip + max(0, resume_iter_num - 1)
+
+
+def _finalize_bypass_run(cfg: DictConfig) -> None:
+    """Realize and mark a completed bypass run when a checkpoint exists."""
+    if cfg.bypass.get("disable_checkpoint_save", False):
+        mprint(
+            "Bypass checkpoint saving is disabled; skipping checkpoint realization "
+            "and completion marker"
+        )
+        return
+
+    if not dist.is_master():
+        return
+
+    mprint("Realizing bypass checkpoints")
+    try:
+        realized_checkpoint, ckpts_symlink = realize_bypass_checkpoints(cfg)
+    except FileNotFoundError as err:
+        mprint(f"{err}; skipping bypass completion marker")
+        return
+    mark_bypass_run_completed(cfg, realized_checkpoint, ckpts_symlink)
+
+
+def _clip_stitched_module_grads(
+    stitched_module: StitchedModule, grad_clip: float, grad_clip_type: str
+) -> int:
+    params_with_grads = [p for p in stitched_module.parameters() if p.grad is not None]
+    if not params_with_grads:
+        return 0
+
+    device = params_with_grads[0].device
+    clipped_count = torch.zeros((), dtype=torch.int64, device=device)
+    if grad_clip_type == "norm":
+        grad_norm = torch.nn.utils.clip_grad_norm_(
+            parameters=params_with_grads,
+            max_norm=grad_clip,
+        )
+        grad_norm = torch.as_tensor(grad_norm, device=device)
+        clipped_count += (grad_norm > grad_clip).to(torch.int64)
+    elif grad_clip_type == "value":
+        max_abs_grad = torch.stack([p.grad.detach().abs().max() for p in params_with_grads]).max()
+        clipped_count += (max_abs_grad > grad_clip).to(torch.int64)
+        torch.nn.utils.clip_grad_value_(
+            parameters=params_with_grads,
+            clip_value=grad_clip,
+        )
+    else:
+        raise RuntimeError(f"Invalid {grad_clip_type}")
+
+    return int(clipped_count.item())
 
 
 def launch_bypass_distillation(hydra_cfg: DictConfig) -> None:
@@ -507,35 +562,11 @@ def train(
                 if optimizer is not None:
                     grad_clip = cfg.bypass.training.grad_clip
                     if grad_clip is not None:
-                        if cfg.bypass.training.grad_clip_type == "norm":
-                            grad_norm = torch.nn.utils.clip_grad_norm_(
-                                parameters=stitched_module.parameters(),
-                                max_norm=grad_clip,
-                            )
-                            if grad_norm > grad_clip:
-                                cfg.bypass.training.clipping_count += 1
-                        elif cfg.bypass.training.grad_clip_type == "value":
-                            # Stack per-param maxes into a single GPU tensor and
-                            # reduce before `.item()` so we sync once per block
-                            # instead of once per parameter (see per-block batching
-                            # rationale at lines 301-304).
-                            grad_maxes = [
-                                p.grad.abs().max()
-                                for p in stitched_module.parameters()
-                                if p.grad is not None
-                            ]
-                            if grad_maxes:
-                                max_abs_grad = torch.stack(grad_maxes).max().item()
-                            else:
-                                max_abs_grad = 0.0
-                            if max_abs_grad > grad_clip:
-                                cfg.bypass.training.clipping_count += 1
-                                torch.nn.utils.clip_grad_value_(
-                                    parameters=stitched_module.parameters(),
-                                    clip_value=grad_clip,
-                                )
-                        else:
-                            raise RuntimeError(f"Invalid {cfg.bypass.training.grad_clip_type}")
+                        cfg.bypass.training.clipping_count += _clip_stitched_module_grads(
+                            stitched_module=stitched_module,
+                            grad_clip=grad_clip,
+                            grad_clip_type=cfg.bypass.training.grad_clip_type,
+                        )
 
                     assert grad_scaler is not None
                     grad_scaler.step(optimizer)
@@ -822,8 +853,11 @@ def run_bypassed_training(cfg: DictConfig):
 
     set_experiment_id(cfg)
     set_experiment_dir(cfg)
-    if bypass_run_is_complete(cfg):
-        mprint(f"Bypass run {cfg.bypass.experiment_id} is already complete, skipping")
+    dist.barrier()
+    bypass_complete = bypass_run_is_complete(cfg) if dist.is_master() else None
+    bypass_complete = dist.broadcast(bypass_complete, src=0)
+    if bypass_complete:
+        print_rank_0(f"Bypass run {cfg.bypass.experiment_id} is already complete, skipping")
         return
 
     descriptor = ModelDescriptorFactory.get(cfg.descriptor)
@@ -903,7 +937,9 @@ def run_bypassed_training(cfg: DictConfig):
             saved_skip = resume_cfg.training.get(
                 "skip_first_batches", cfg.bypass.training.skip_first_batches
             )
-            resume_skip_first_batches = saved_skip + resume_cfg.iter_num
+            resume_skip_first_batches = _get_resume_skip_first_batches(
+                saved_skip, resume_cfg.iter_num
+            )
             if "data" in resume_cfg and "shuffle_train_data_seed" in resume_cfg.data:
                 cfg.bypass.data.shuffle_train_data_seed = resume_cfg.data.shuffle_train_data_seed
             if "seed" in resume_cfg:
@@ -1228,10 +1264,7 @@ def run_bypassed_training(cfg: DictConfig):
         raise
 
     dist.barrier()
-    if dist.is_master():
-        mprint("Realizing bypass checkpoints")
-        realized_checkpoint, ckpts_symlink = realize_bypass_checkpoints(cfg)
-        mark_bypass_run_completed(cfg, realized_checkpoint, ckpts_symlink)
+    _finalize_bypass_run(cfg)
     dist.barrier()
 
 

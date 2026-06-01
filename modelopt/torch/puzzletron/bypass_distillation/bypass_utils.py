@@ -81,11 +81,18 @@ def normalize_keys_to_learn(keys_to_learn: Any) -> dict[str, Any]:
             raise ValueError(
                 f"keys_to_learn supports only subblock keys in v1; invalid entries: {invalid!r}"
             )
-        if "entire_block" in values and len(set(values)) > 1:
+        subblocks = tuple(sorted(set(values)))
+        if "entire_block" in subblocks and len(subblocks) > 1:
             raise ValueError("keys_to_learn cannot mix 'entire_block' with other subblock keys")
-        return {"mode": "subblocks", "subblocks": tuple(dict.fromkeys(values))}
+        return {"mode": "subblocks", "subblocks": subblocks}
 
     raise TypeError(f"Unsupported keys_to_learn={keys_to_learn!r}")
+
+
+def _canonical_keys_to_learn(keys_to_learn: Any) -> tuple[str, ...] | None:
+    if keys_to_learn is None:
+        return None
+    return normalize_keys_to_learn(keys_to_learn)["subblocks"]
 
 
 def learned_subblocks_from_keys_to_learn(keys_to_learn: Any) -> list[str]:
@@ -112,14 +119,24 @@ def _slug(value: Any) -> str:
     return slug or "custom"
 
 
+def _teacher_dir_identity(cfg: DictConfig) -> str | None:
+    teacher_dir = cfg.get("teacher_dir", None)
+    if teacher_dir is None:
+        return None
+    teacher_dir = str(teacher_dir)
+    if teacher_dir.startswith("~"):
+        return str(Path(teacher_dir).expanduser())
+    return teacher_dir
+
+
 def get_bypass_run_identity(cfg: DictConfig) -> dict[str, Any]:
     """Return the config subset that defines a bypass output.
 
     The full Hydra config carries mutable runtime counters, checkpoint paths and
     logging fields.  Those should not decide whether a completed bypass run can
-    be reused.  This identity intentionally keeps architecture, training budget,
-    data shape and learning-target fields, because changing any of them changes
-    the produced checkpoint.
+    be reused.  This identity intentionally keeps teacher source, architecture,
+    training budget, data shape and learning-target fields, because changing any
+    of them changes the produced checkpoint.
     """
     bypass = _to_plain_container(cfg.bypass)
     training = bypass.get("training", {})
@@ -127,6 +144,10 @@ def get_bypass_run_identity(cfg: DictConfig) -> dict[str, Any]:
     model = bypass.get("model", {})
     model_factory = bypass.get("model_factory", {})
     return {
+        "teacher": {
+            "teacher_dir": _teacher_dir_identity(cfg),
+            "descriptor": cfg.get("descriptor", None),
+        },
         "model": {
             "student_weights_dtype": model.get("student_weights_dtype"),
             "model_config_overrides": model.get("model_config_overrides"),
@@ -139,7 +160,7 @@ def get_bypass_run_identity(cfg: DictConfig) -> dict[str, Any]:
             "mlp_init_config": model_factory.get("mlp_init_config"),
             "linear_init_mode": model_factory.get("linear_init_mode"),
             "submodule_for_loss_calculation": model_factory.get("submodule_for_loss_calculation"),
-            "keys_to_learn": model_factory.get("keys_to_learn"),
+            "keys_to_learn": _canonical_keys_to_learn(model_factory.get("keys_to_learn")),
         },
         "training": {
             "learning_rate": training.get("learning_rate"),
@@ -189,15 +210,16 @@ def get_bypass_config_fingerprint(cfg: DictConfig) -> str:
 
 
 def get_bypass_experiment_fingerprint(cfg: DictConfig) -> str:
-    """Return a stable ID fingerprint for the architecture and learning target.
+    """Return a stable ID fingerprint for the teacher, architecture and learning target.
 
     Training budget and data settings are deliberately excluded so a longer
-    rerun can resume the same architecture from its previous final checkpoint.
+    rerun can resume the same teacher and architecture from its previous final checkpoint.
     The full config fingerprint is still recorded in bypass_state.json and used
     for skip-if-complete decisions.
     """
     identity = get_bypass_run_identity(cfg)
     experiment_identity = {
+        "teacher": identity["teacher"],
         "model": identity["model"],
         "model_factory": {
             "factory": identity["model_factory"]["factory"],
@@ -244,9 +266,9 @@ def set_experiment_id(cfg: DictConfig) -> None:
         ):
             parts.append(f"heads_{attn_override['num_key_value_heads']}")
 
-    keys_to_learn = cfg.bypass.model_factory.get("keys_to_learn", None)
-    if keys_to_learn not in (None, "entire_block"):
-        parts.append(_slug(keys_to_learn))
+    keys_to_learn = _canonical_keys_to_learn(cfg.bypass.model_factory.get("keys_to_learn", None))
+    if keys_to_learn is not None and keys_to_learn != ("entire_block",):
+        parts.append(_slug("_".join(keys_to_learn)))
 
     if not parts:
         parts.append("custom")
@@ -354,6 +376,7 @@ def expected_bypass_runs(cfg: DictConfig) -> list[dict[str, Any]]:
         run_cfg = OmegaConf.create(
             {
                 "puzzle_dir": cfg.puzzle_dir,
+                "teacher_dir": cfg.get("teacher_dir", None),
                 "dataset_path": cfg.get("dataset_path", None),
                 "descriptor": cfg.get("descriptor", None),
                 "bypass": OmegaConf.to_container(cfg.bypass, resolve=True),

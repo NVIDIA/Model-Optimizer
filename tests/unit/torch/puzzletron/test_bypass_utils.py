@@ -117,10 +117,11 @@ def test_pipeline_ownership_context_rejects_idle_rank():
         get_pipeline_ownership_context([0, 0, 1], rank=2)
 
 
-def _experiment_cfg(keys_to_learn: str):
+def _experiment_cfg(keys_to_learn):
     return OmegaConf.create(
         {
             "descriptor": "test_descriptor",
+            "teacher_dir": "/tmp/teacher_a",
             "dataset_path": "/tmp/dataset_a",
             "bypass": {
                 "experiment_id": None,
@@ -214,10 +215,55 @@ def test_config_fingerprint_changes_with_shuffle_seed():
     assert get_bypass_config_fingerprint(cfg) != original
 
 
+def test_config_fingerprint_changes_with_teacher_dir():
+    cfg = _experiment_cfg("subblock_attention")
+    original = get_bypass_config_fingerprint(cfg)
+    cfg.teacher_dir = "/tmp/teacher_b"
+    assert get_bypass_config_fingerprint(cfg) != original
+
+
+def test_config_fingerprint_changes_with_descriptor():
+    cfg = _experiment_cfg("subblock_attention")
+    original = get_bypass_config_fingerprint(cfg)
+    cfg.descriptor = "other_descriptor"
+    assert get_bypass_config_fingerprint(cfg) != original
+
+
+def test_config_fingerprint_canonicalizes_single_keys_to_learn():
+    cfg_a = _experiment_cfg("entire_block")
+    cfg_b = _experiment_cfg(["entire_block"])
+
+    assert get_bypass_config_fingerprint(cfg_a) == get_bypass_config_fingerprint(cfg_b)
+
+
+def test_config_fingerprint_canonicalizes_keys_to_learn_order():
+    cfg_a = _experiment_cfg(["subblock_ffn", "subblock_attention"])
+    cfg_b = _experiment_cfg(["subblock_attention", "subblock_ffn"])
+
+    assert get_bypass_config_fingerprint(cfg_a) == get_bypass_config_fingerprint(cfg_b)
+
+
 def test_experiment_id_does_not_change_with_dataset_path():
     cfg_a = _experiment_cfg("subblock_attention")
     cfg_b = _experiment_cfg("subblock_attention")
     cfg_b.dataset_path = "/tmp/dataset_b"
+    set_experiment_id(cfg_a)
+    set_experiment_id(cfg_b)
+    assert cfg_a.bypass.experiment_id == cfg_b.bypass.experiment_id
+
+
+def test_experiment_id_changes_with_teacher_source():
+    cfg_a = _experiment_cfg("subblock_attention")
+    cfg_b = _experiment_cfg("subblock_attention")
+    cfg_b.teacher_dir = "/tmp/teacher_b"
+    set_experiment_id(cfg_a)
+    set_experiment_id(cfg_b)
+    assert cfg_a.bypass.experiment_id != cfg_b.bypass.experiment_id
+
+
+def test_experiment_id_canonicalizes_keys_to_learn_order():
+    cfg_a = _experiment_cfg(["subblock_ffn", "subblock_attention"])
+    cfg_b = _experiment_cfg(["subblock_attention", "subblock_ffn"])
     set_experiment_id(cfg_a)
     set_experiment_id(cfg_b)
     assert cfg_a.bypass.experiment_id == cfg_b.bypass.experiment_id

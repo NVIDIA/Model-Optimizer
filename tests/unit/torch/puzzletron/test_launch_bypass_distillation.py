@@ -28,6 +28,7 @@ test (no GPU, no real training).
 import json
 from pathlib import Path
 
+import torch
 from omegaconf import OmegaConf
 
 import modelopt.torch.puzzletron.bypass_distillation.training_loop as tl
@@ -213,6 +214,12 @@ def test_resume_state_used_when_no_init_checkpoint_path():
     assert tl._get_resume_state_path(cfg, "/tmp/resume-ckpt") == "/tmp/resume-ckpt"
 
 
+def test_resume_skip_first_batches_uses_completed_iter_count():
+    assert tl._get_resume_skip_first_batches(saved_skip=10, resume_iter_num=0) == 10
+    assert tl._get_resume_skip_first_batches(saved_skip=10, resume_iter_num=1) == 10
+    assert tl._get_resume_skip_first_batches(saved_skip=10, resume_iter_num=7) == 16
+
+
 def test_flush_loss_buffer_single_rank_without_process_group():
     local_buffer = {1: {"block_0": 0.25}}
     stitched_losses_history = {}
@@ -220,6 +227,129 @@ def test_flush_loss_buffer_single_rank_without_process_group():
     tl._flush_loss_buffer(local_buffer, stitched_losses_history)
 
     assert stitched_losses_history == local_buffer
+
+
+def test_run_bypassed_training_broadcasts_completion_skip(monkeypatch, tmp_path):
+    cfg = _base_cfg(tmp_path)
+    cfg.bypass.experiment_id = None
+    checks = []
+    broadcasts = []
+    messages = []
+
+    def fail(*args, **kwargs):
+        raise AssertionError("training setup should not run after completed bypass check")
+
+    monkeypatch.setattr(tl.dist, "local_rank", lambda: 0)
+    monkeypatch.setattr(tl.dist, "barrier", lambda: None)
+    monkeypatch.setattr(tl.dist, "is_master", lambda: True)
+    monkeypatch.setattr(
+        tl.dist, "broadcast", lambda value, src: broadcasts.append((value, src)) or value
+    )
+    monkeypatch.setattr(
+        tl, "bypass_run_is_complete", lambda cfg_arg: checks.append(cfg_arg) or True
+    )
+    monkeypatch.setattr(tl, "print_rank_0", lambda *args, **kwargs: messages.append(args[0]))
+    monkeypatch.setattr(tl.ModelDescriptorFactory, "get", fail)
+
+    tl.run_bypassed_training(cfg)
+
+    assert checks == [cfg]
+    assert broadcasts == [(True, 0)]
+    assert messages == [f"Bypass run {cfg.bypass.experiment_id} is already complete, skipping"]
+
+
+def test_run_bypassed_training_non_master_uses_broadcasted_completion(monkeypatch, tmp_path):
+    cfg = _base_cfg(tmp_path)
+    cfg.bypass.experiment_id = None
+
+    def fail(*args, **kwargs):
+        raise AssertionError("non-master should not evaluate completion or continue setup")
+
+    monkeypatch.setattr(tl.dist, "local_rank", lambda: 0)
+    monkeypatch.setattr(tl.dist, "barrier", lambda: None)
+    monkeypatch.setattr(tl.dist, "is_master", lambda: False)
+    monkeypatch.setattr(tl.dist, "broadcast", lambda value, src: True)
+    monkeypatch.setattr(tl, "bypass_run_is_complete", fail)
+    monkeypatch.setattr(tl.ModelDescriptorFactory, "get", fail)
+
+    tl.run_bypassed_training(cfg)
+
+
+def test_clip_stitched_module_grads_norm_counts_clipped_block():
+    module = torch.nn.Linear(2, 1, bias=False)
+    module.weight.grad = torch.full_like(module.weight, 10.0)
+
+    assert tl._clip_stitched_module_grads(module, grad_clip=0.1, grad_clip_type="norm") == 1
+    assert torch.linalg.vector_norm(module.weight.grad) <= 0.1 + 1e-6
+
+
+def test_clip_stitched_module_grads_value_counts_clipped_block():
+    module = torch.nn.Linear(2, 1, bias=False)
+    module.weight.grad = torch.tensor([[0.05, 2.0]])
+
+    assert tl._clip_stitched_module_grads(module, grad_clip=0.5, grad_clip_type="value") == 1
+    assert module.weight.grad.abs().max() <= 0.5
+
+
+def test_clip_stitched_module_grads_returns_zero_when_below_threshold():
+    module = torch.nn.Linear(2, 1, bias=False)
+    module.weight.grad = torch.full_like(module.weight, 0.01)
+
+    assert tl._clip_stitched_module_grads(module, grad_clip=1.0, grad_clip_type="value") == 0
+
+
+def test_finalize_bypass_run_skips_realization_when_checkpoint_saving_disabled(monkeypatch):
+    cfg = OmegaConf.create({"bypass": {"disable_checkpoint_save": True}})
+
+    def fail(*args, **kwargs):
+        raise AssertionError("checkpoint realization should be skipped")
+
+    monkeypatch.setattr(tl.dist, "is_master", lambda: True)
+    monkeypatch.setattr(tl, "realize_bypass_checkpoints", fail)
+    monkeypatch.setattr(tl, "mark_bypass_run_completed", fail)
+
+    tl._finalize_bypass_run(cfg)
+
+
+def test_finalize_bypass_run_skips_completion_when_no_checkpoint_exists(monkeypatch):
+    cfg = OmegaConf.create({"bypass": {"disable_checkpoint_save": False}})
+    completed = False
+
+    def missing_checkpoint(_cfg):
+        raise FileNotFoundError("missing checkpoint")
+
+    def mark_completed(*args, **kwargs):
+        nonlocal completed
+        completed = True
+
+    monkeypatch.setattr(tl.dist, "is_master", lambda: True)
+    monkeypatch.setattr(tl, "realize_bypass_checkpoints", missing_checkpoint)
+    monkeypatch.setattr(tl, "mark_bypass_run_completed", mark_completed)
+
+    tl._finalize_bypass_run(cfg)
+
+    assert completed is False
+
+
+def test_finalize_bypass_run_marks_realized_checkpoint(monkeypatch):
+    cfg = OmegaConf.create({"bypass": {"disable_checkpoint_save": False}})
+    realized = Path("/tmp/realized")
+    symlink = Path("/tmp/ckpts/run_0")
+    completed = {}
+
+    monkeypatch.setattr(tl.dist, "is_master", lambda: True)
+    monkeypatch.setattr(tl, "realize_bypass_checkpoints", lambda _cfg: (realized, symlink))
+    monkeypatch.setattr(
+        tl,
+        "mark_bypass_run_completed",
+        lambda cfg_arg, realized_arg, symlink_arg: completed.update(
+            cfg=cfg_arg, realized=realized_arg, symlink=symlink_arg
+        ),
+    )
+
+    tl._finalize_bypass_run(cfg)
+
+    assert completed == {"cfg": cfg, "realized": realized, "symlink": symlink}
 
 
 def test_realize_bypass_checkpoints_uses_resolved_symlink_target(monkeypatch, tmp_path: Path):
