@@ -39,9 +39,11 @@ Do not duplicate those workflows here. This skill should leave the user with a c
 
 2. **Define the target**
    - Ask the user what makes the compression successful before choosing recipes.
-   - If the user does not specify, use one of two default objectives:
+   - If the user did not provide an optimization objective, stop and ask them to choose before planning candidates. Do not infer or default silently.
+   - Offer these default objective choices:
      - **Compute / throughput:** typical data-center target. Prefer recipes with activation quantization such as NVFP4 or FP8 when the downstream stack can use fast kernels.
      - **Memory / latency:** typical edge target. Minimize activated memory per forward pass to reduce latency; prefer weight-only or W4A16-style recipes when they preserve accuracy.
+     - **Custom:** user-provided objective, such as checkpoint size, throughput at a fixed batch size, decode latency, prefill latency, or a product-specific memory budget.
    - Default acceptance goal: find the recipe with the best performance for the chosen objective while keeping each benchmark's accuracy loss under 1 percentage point versus the matching baseline.
    - Treat near-threshold or noisy benchmark deltas as inconclusive until reruns confirm whether the drop is a real regression.
    - Record recipe-selection criteria: target active bytes/token, acceptable accuracy loss, calibration budget, and any user-provided throughput/latency goal.
@@ -80,7 +82,7 @@ Do not duplicate those workflows here. This skill should leave the user with a c
 
 ## Practical Defaults
 
-- Ask whether the primary success metric is compute/throughput or memory/latency. Do not assume.
+- Ask whether the primary success metric is compute/throughput, memory/latency, or a custom objective. Do not assume, and do not proceed to candidate planning until the objective is explicit.
 - Default to a `<1pp` per-benchmark accuracy-loss constraint versus the matching baseline unless the user gives another threshold.
 - Prefer active runtime cost over checkpoint size when optimizing routed or sparsely activated models.
 - Always compare against BF16/FP16 and a near-lossless FP8/W8A8 baseline.
