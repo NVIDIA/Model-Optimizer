@@ -99,8 +99,14 @@ export:
   # With auto_export enabled (above), NEL resolves this block at SUBMIT time in a
   # scope that does NOT include `deployment` / `evaluation`, so cross-references
   # fail hard: "Interpolation key 'deployment.served_model_name' not found".
-  # `${oc.env:USER}` (an env-var interpolation) is fine. When generating a config,
-  # substitute the actual served_model_name and the sampling params from above.
+  # `${oc.env:USER}` (an env-var interpolation) is fine.
+  #
+  # CAUTION — these literals can drift. temperature / top_p / max_new_tokens are the
+  # ONLY queryable record of the sampling config in MLflow (NEL does not log them as
+  # run params), so keep them — but because they can't be interpolated, they MUST be
+  # kept EQUAL to evaluation.nemo_evaluator_config.config.params above. When you
+  # change the sampling params (or served_model_name), update these literals in the
+  # SAME edit, or MLflow will misreport the run.
   mlflow:
     tracking_uri: ???
     experiment_name: ${oc.env:USER}/CHANGEME-served-model-name
