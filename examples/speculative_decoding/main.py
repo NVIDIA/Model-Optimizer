@@ -312,12 +312,13 @@ def train():
         "label_smoother is not supported in speculative decoding!"
     )
 
-    if is_master():
-        dtypes = {}
-        for name, p in trainer.model.named_parameters():
-            dtypes.setdefault(str(p.dtype), []).append(name)
-        for dt, names in dtypes.items():
-            print(f"[dtype_check] {dt}: {len(names)} params (e.g. {names[0]})")
+    rank = int(os.environ.get("RANK", 0))
+    dtypes = {}
+    for name, p in trainer.model.named_parameters():
+        dt_key = str(p.dtype) if not hasattr(p, "_local_tensor") else str(p._local_tensor.dtype)
+        dtypes.setdefault(dt_key, []).append(name)
+    for dt, names in dtypes.items():
+        print(f"[dtype_check rank={rank}] {dt}: {len(names)} params (e.g. {names[0]})")
 
     print_rank_0("Start training...")
     trainer.train(resume_from_checkpoint=checkpoint)
