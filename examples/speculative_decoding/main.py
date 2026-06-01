@@ -64,6 +64,11 @@ from modelopt.torch.utils.distributed import is_master, local_rank
 torch.manual_seed(0)
 mto.enable_huggingface_checkpointing()
 
+if os.environ.get("PATCH_FSDP2_BUFFERS") == "1":
+    import fsdp2_buffer_patch
+
+    fsdp2_buffer_patch.apply()
+
 
 # HF-compatible TrainingArguments with our speculative-decoding extensions, auto-derived
 # from :class:`SpecTrainingArgs` so its field set can't drift from the Pydantic recipe schema.
@@ -181,7 +186,14 @@ def train():
 
     use_offline_training = recipe.data.mode != "online"
 
-    if checkpoint:
+    # Check if checkpoint has HF-format model files (compatible with from_pretrained).
+    # FSDP distributed checkpoints (pytorch_model_fsdp_*) don't — load base model instead.
+    _hf_ckpt_files = ("model.safetensors", "pytorch_model.bin", "model.safetensors.index.json")
+    checkpoint_is_hf = checkpoint and any(
+        os.path.isfile(os.path.join(checkpoint, f)) for f in _hf_ckpt_files
+    )
+
+    if checkpoint_is_hf:
         with patch_transformers5_params_loading():
             model = load_vlm_or_llm(
                 checkpoint, dtype="auto", trust_remote_code=recipe.model.trust_remote_code
@@ -190,6 +202,11 @@ def train():
             checkpoint, trust_remote_code=recipe.model.trust_remote_code
         )
     else:
+        if checkpoint:
+            print_rank_0(
+                f"Checkpoint {checkpoint} is not in HF format (FSDP distributed checkpoint). "
+                f"Loading base model and resuming via Trainer."
+            )
         model_name_or_path = recipe.model.model_name_or_path
         if model_name_or_path is None:
             raise ValueError(
@@ -224,7 +241,10 @@ def train():
             if recipe.dflash.dflash_mask_token_id is None:
                 mask_token = "<|mask|>"
                 tokenizer.add_special_tokens({"mask_token": mask_token})
+                orig_dtype = model.dtype
                 model.resize_token_embeddings(len(tokenizer))
+                if model.dtype != orig_dtype:
+                    model.to(orig_dtype)
                 recipe.dflash.dflash_mask_token_id = tokenizer.mask_token_id
                 print_rank_0(
                     f"Added {mask_token} (ID={tokenizer.mask_token_id}), "
@@ -247,20 +267,6 @@ def train():
                 f"{training_args.output_dir}"
             )
         return
-
-    # Move any remaining CPU buffers to CUDA so DDP (NCCL-only) can broadcast
-    # them.  We iterate named_buffers and reassign via the owning module to
-    # keep the module tree consistent.  Parameters are left on CPU — the HF
-    # Trainer will move them during init.
-    if torch.cuda.is_available():
-        _target_dev = torch.device("cuda", 0)
-        for name, buf in list(model.named_buffers()):
-            if buf.device.type == "cpu":
-                parts = name.split(".")
-                mod = model
-                for p in parts[:-1]:
-                    mod = getattr(mod, p)
-                setattr(mod, parts[-1], buf.to(_target_dev))
 
     print_rank_0("Loading dataset...")
     is_dflash = isinstance(recipe, ModelOptDFlashRecipe)
@@ -296,12 +302,22 @@ def train():
         **data_module,
     )
 
+    if os.environ.get("PATCH_FSDP2_BUFFERS") == "1":
+        fsdp2_buffer_patch.patch_accelerator(trainer.accelerator)
+
     # Manually enable this to return loss in eval
     trainer.can_return_loss = True
     # Make sure label_smoother is None
     assert trainer.label_smoother is None, (
         "label_smoother is not supported in speculative decoding!"
     )
+
+    if is_master():
+        dtypes = {}
+        for name, p in trainer.model.named_parameters():
+            dtypes.setdefault(str(p.dtype), []).append(name)
+        for dt, names in dtypes.items():
+            print(f"[dtype_check] {dt}: {len(names)} params (e.g. {names[0]})")
 
     print_rank_0("Start training...")
     trainer.train(resume_from_checkpoint=checkpoint)
