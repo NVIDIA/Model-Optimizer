@@ -12,6 +12,13 @@
 
 Ask the user what success means before designing recipes.
 
+Default recipe-search goal:
+
+- Maximize performance for the chosen objective.
+- Keep every benchmark's accuracy loss below 1 percentage point versus the matching baseline.
+- If a benchmark is noisy or the observed delta is near the threshold, require reruns before labeling it a true regression.
+- If the user gives a different threshold or priority benchmark, use that instead and record it in the recipe portfolio.
+
 ### Compute / Throughput
 
 Use this default for data-center serving when the workload is compute bound, especially at large batch size.
