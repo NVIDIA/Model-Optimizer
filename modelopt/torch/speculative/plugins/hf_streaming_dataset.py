@@ -76,6 +76,7 @@ def _tokenize_with_loss_mask(
     """
     out = tokenizer.apply_chat_template(
         conversations,
+        tokenize=True,
         return_tensors="pt",
         return_dict=True,
         return_assistant_tokens_mask=answer_only_loss,

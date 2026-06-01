@@ -2,12 +2,14 @@
 #
 # 3-step pipeline:
 #   task_0: Build input conversations (jsonl)
-#   task_1: Streaming train — vllm serve + trainer co-located on one node;
-#           hidden states are fetched per sample over HTTP (no on-disk dump)
+#   task_1: Streaming train — vllm serve + trainer; hidden states are fetched
+#           per sample over HTTP (no on-disk dump)
 #   task_2: Benchmark — evaluate speculative decoding speedup via VLLM
 #
-# task_1 runs vllm serve on GPU 0 (TP=1) and the trainer on GPUs 1-7. All tasks
-# share /scratchspace to pass artifacts between steps.
+# task_1 here uses the multi-node split (nodes=2): node 0 runs vllm serve, node 1
+# runs the trainer; they rendezvous via the shared /scratchspace mount. (Set
+# nodes=1 to co-locate both on one node instead.) All tasks share /scratchspace
+# to pass artifacts between steps.
 #
 # Usage:
 #   uv run launch.py --yaml examples/Qwen/Qwen3-8B/hf_streaming_eagle3.yaml --yes
@@ -52,19 +54,18 @@ pipeline:
       - training.disable_tqdm=true
       - training.ar_validate_steps=500000
       - training.num_train_epochs=1
+      - eagle.eagle_use_torch_compile=false
     environment:
       - HF_MODEL_CKPT: <<global_vars.hf_model>>
       # No spaces: nemo_run emits `export FOO=value` without quotes, so a
       # space-separated value would be split by the shell.
       - EAGLE_CAPTURE_IDS: "[2,18,33,36]"
-      - SERVE_GPU: "0"
       - SERVE_TP: "1"
-      - SERVE_GPU_MEM_UTIL: "0.4"
     slurm_config:
       _factory_: "slurm_factory"
-      nodes: 1
+      nodes: 2
       ntasks_per_node: 1
-      gpus_per_node: 8
+      gpus_per_node: 1
       container: vllm/vllm-openai:latest
 
   # Step 3: Benchmark speculative decoding (VLLM backend)
