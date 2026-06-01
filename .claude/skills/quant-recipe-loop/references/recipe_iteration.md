@@ -6,7 +6,7 @@
 - **Auto search:** AutoQuant/PTQ search over formats and excluded modules.
 - **Manual ablation:** explicit module-family recipes, changing one major choice at a time.
 - **Calibration variants:** MSE, GPTQ, KL-div, gradient/search-based, calibration dataset changes.
-- **Serving variants:** CT/native format, kernel/backend, KV-cache dtype, CUDA graph/eager, parser/tool-call settings.
+- **Runtime controls:** parser, KV-cache dtype, backend, CUDA graph/eager, and similar settings are not recipe axes; keep them fixed or delegate runtime studies to `deployment`, `evaluation`, and `compare-results`.
 
 ## Target Selection
 
@@ -16,10 +16,10 @@ Ask the user what success means before designing recipes.
 
 Use this default for data-center serving when the workload is compute bound, especially at large batch size.
 
-- Favor activation quantization with fast kernels, such as NVFP4 or FP8.
-- Measure throughput and latency at the target batch/concurrency, not just checkpoint size.
+- Favor activation quantization such as NVFP4 or FP8 when the downstream runtime can exploit it.
+- Ask the runtime/evaluation skills to measure throughput and latency at the target batch/concurrency when those numbers are part of the success metric.
 - Keep memory accounting, but do not let weight-only memory savings override a throughput regression.
-- Sanity-check backend selection because a recipe only helps compute if the serving stack uses the intended kernels.
+- Treat backend selection as a delegated deployment/evaluation check, not a recipe-loop decision.
 
 ### Memory / Latency
 
@@ -105,7 +105,7 @@ For each candidate, record:
 - Explicit exclusions and why they are excluded.
 - Calibration method, dataset, sample count, and batch settings.
 - Active bytes/token estimate including scales.
-- Checkpoint path, converted checkpoint path, and serving backend.
+- Checkpoint reference and any conversion/export reference needed for downstream skills.
 
 Build manual candidates as controlled deltas:
 
@@ -130,4 +130,4 @@ Checkpoint size is not always the right objective.
 - A low sensitivity score is a hint, not proof. Validate with benchmarks.
 - If a benchmark drops while aggregate sensitivity looked safe, run module-family ablations.
 - If a candidate has good accuracy but high verbosity, inspect output samples and generation stats before accepting it.
-- If serving output is corrupt, prioritize loader/export/backend issues before recipe tuning.
+- If delegated runtime checks show corrupt output, pause recipe tuning until `ptq`, `deployment`, or `evaluation` has isolated the export/runtime issue.

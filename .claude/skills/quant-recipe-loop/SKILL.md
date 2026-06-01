@@ -27,12 +27,11 @@ Do not duplicate those workflows here. This skill should leave the user with a c
    - Use `compare-results` when existing baseline/candidate evals need a formal comparability check.
 
 2. **Define the target**
-   - Ask the user what makes the compression successful before choosing formats or recipes.
+   - Ask the user what makes the compression successful before choosing recipes.
    - If the user does not specify, use one of two default objectives:
-     - **Compute / throughput:** typical data-center target. Optimize large-batch throughput by using activation quantization such as NVFP4 or FP8 where the serving stack has fast kernels.
+     - **Compute / throughput:** typical data-center target. Prefer recipes with activation quantization such as NVFP4 or FP8 when the downstream stack can use fast kernels.
      - **Memory / latency:** typical edge target. Minimize activated memory per forward pass to reduce latency; prefer weight-only or W4A16-style recipes when they preserve accuracy.
-   - State the deployment format: native framework, compressed-tensors, TensorRT-LLM, etc.
-   - Track the real deployment objective: active bytes/token, latency, memory, checkpoint size, or a weighted combination.
+   - Record recipe-selection criteria: target active bytes/token, acceptable accuracy loss, calibration budget, and any user-provided throughput/latency goal.
    - Include quantization metadata such as scale storage in size estimates.
    - Keep accuracy and verbosity/token usage as separate first-class metrics.
 
@@ -42,23 +41,23 @@ Do not duplicate those workflows here. This skill should leave the user with a c
    - Let the ModelOpt `ptq` skill own checkpoint generation and PTQ validation; use this skill to choose the objective, sequence recipes, compare results, and decide the next iteration.
    - Use AutoQuant or sensitivity tooling for broad search and module ranking.
    - Use manual recipes for controlled ablations by module family.
-   - Change one major axis at a time: weight format, activation format, calibration method, excluded modules, backend, or serving flags.
+   - Change one major recipe axis at a time: weight format, activation format, quantization granularity, calibration method, excluded modules, or module family.
 
 4. **Gate before scaling**
    - Ask `ptq` to validate checkpoint coverage and metadata after generation.
-   - Ask `deployment` or `evaluation` for a pipe-clean run when serving flags, kernels, or conversion formats are new.
-   - Promote only candidates that pass checkpoint validation and serving sanity.
+   - Ask `deployment` or `evaluation` for runtime sanity only when execution behavior is needed to qualify the recipe.
+   - Promote only candidates that pass checkpoint validation and the required delegated sanity checks.
 
 5. **Evaluate in stages**
    - Pick cheap screen benchmarks that expose likely failure modes for the model/domain.
    - Ask `evaluation` to create or modify configs and submit runs.
    - Ask `launching-evals` / `monitor` to track, resume, and debug runs.
    - Ask `compare-results` to validate comparability and compute deltas.
-   - Use consistent sampling, parser, tool-call, token-cap, and backend settings within a comparison table.
+   - Treat sampling, parser, token-cap, and runtime/backend changes as non-recipe variables unless the user explicitly asks to study them.
 
 6. **Refresh tables**
    - Maintain a recipe portfolio table, not a replacement for evaluator artifacts.
-   - Include recipe name, objective, active-cost estimate, checkpoint path, eval/comparison reference, accuracy summary, verbosity summary, and decision.
+   - Include recipe name, objective, active-cost estimate, calibration notes, checkpoint reference, comparison reference, accuracy summary, verbosity summary, and decision.
    - Link to `compare-results` / `launching-evals` artifacts for exact metric extraction and provenance.
 
 7. **Decide next iteration**
@@ -72,8 +71,8 @@ Do not duplicate those workflows here. This skill should leave the user with a c
 - Prefer active runtime cost over checkpoint size when optimizing routed or sparsely activated models.
 - Always compare against BF16/FP16 and a near-lossless FP8/W8A8 baseline.
 - Treat benchmark variance as real: run repeat sweeps for close decisions.
-- Do not mix parser/no-parser, FP8-KV/BF16-KV, backend, or sampling changes in a single row unless the row name says so.
-- Keep a small pipe-clean config for every new task/backend/checkpoint family before launching full runs.
+- Do not mix parser/no-parser, FP8-KV/BF16-KV, runtime/backend, or sampling changes into recipe conclusions unless they are explicitly part of the experiment.
+- Use delegated pipe-clean checks for new checkpoint families before full evals.
 
 ## References
 

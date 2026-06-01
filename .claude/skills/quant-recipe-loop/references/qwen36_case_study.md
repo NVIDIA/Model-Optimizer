@@ -11,8 +11,8 @@ The strongest recipe pattern was:
 - NVFP4: routed MoE experts and `lm_head`.
 - FP8: self-attention and large linear-attention projections.
 - BF16/no quant: linear-attention A/B, conv-style pieces, routers/gates, shared-expert gate, and VLM/MTP siblings.
-- CT deployment: W4A16 for NVFP4 tensors and W8A8 for FP8 tensors.
-- Native ModelOpt packaging: W4A4+W8A8 equivalent for PR42566-style serving.
+- Export artifact used for evaluation: W4A16 for NVFP4 tensors and W8A8 for FP8 tensors in compressed-tensors form.
+- Native ModelOpt artifact used for comparison: W4A4+W8A8 equivalent in the PR42566 stack.
 
 ## Sensitivity Findings
 
@@ -21,10 +21,10 @@ The strongest recipe pattern was:
 - `lm_head` NVFP4 was worthwhile because it was a large active decode cost.
 - Self-attention NVFP4 hurt LCB for modest active-byte savings.
 - Linear attention was sensitive and needed targeted ablation.
-- Shared experts were low active-byte value and created serving/coherence risk in early mixed checkpoints.
+- Shared experts were low active-byte value and created runtime/coherence risk in early mixed checkpoints.
 
 ## Operational Findings
 
 - LCB was the best early-warning benchmark; GPQA could look recovered while LCB remained low.
 - Active GiB/token was a better optimization objective than checkpoint BPE.
-- Parser, FP8-KV, backend, and token caps affected both accuracy and verbosity, so row names had to encode those settings.
+- Runtime settings such as parser, FP8-KV, backend, and token caps affected both accuracy and verbosity, so they had to be tracked separately from recipe changes.
