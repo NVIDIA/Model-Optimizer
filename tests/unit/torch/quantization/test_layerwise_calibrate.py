@@ -778,6 +778,52 @@ def test_layerwise_no_qdq_matches_sequential_amax(monkeypatch):
     _assert_amax_close(_collect_amax(model_lw), seq_amax, "layerwise vs sequential")
 
 
+def test_layerwise_no_qdq_captures_inputs_before_calib_func_mutates_weights(monkeypatch):
+    """A destructive ``calib_func`` (zeros weights) must not affect what is
+    captured for downstream layers under ``qdq_from_prev=False`` — otherwise
+    weight-mutating algorithms (GPTQ/AWQ/SmoothQuant) silently propagate
+    updates forward and break the "identical to non-layerwise pass" contract.
+    """
+    _register_test_discoverer(monkeypatch)
+    calib_data = [torch.randint(0, 32, (2, 8))]
+
+    def run_and_capture(calib_func):
+        torch.manual_seed(0)
+        model = _SimpleTransformerModel(n_layers=3, dim=16)
+        captured: dict[int, torch.Tensor] = {}
+        real = LayerActivationCollector.cache_outputs_for_next_layer_calib
+
+        def spy(self, layer, fwd):
+            result = real(self, layer, fwd)
+            captured[self._layer_to_idx[layer] + 1] = result[0][0][0].clone().detach()
+            return result
+
+        with monkeypatch.context() as m:
+            m.setattr(LayerActivationCollector, "cache_outputs_for_next_layer_calib", spy)
+            layerwise_calibrate(
+                model,
+                forward_loop=lambda mm: [mm(b) for b in calib_data],
+                calib_func=calib_func,
+                get_qdq_activations_from_prev_layer=False,
+            )
+        return captured
+
+    def identity(layer, fwd, **_):
+        fwd(layer)
+
+    def destructive(layer, fwd, **_):
+        fwd(layer)
+        for sub in layer.modules():
+            if isinstance(sub, nn.Linear):
+                sub.weight.data.zero_()
+
+    benign = run_and_capture(identity)
+    mutated = run_and_capture(destructive)
+
+    for i in (1, 2):
+        torch.testing.assert_close(mutated[i], benign[i], rtol=1e-5, atol=1e-6)
+
+
 def _layer_dir_names(checkpoint_dir):
     return sorted(p.name for p in checkpoint_dir.iterdir() if p.name.startswith("layer_"))
 
