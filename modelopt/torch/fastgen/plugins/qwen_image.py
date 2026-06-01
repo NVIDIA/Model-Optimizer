@@ -257,10 +257,9 @@ class QwenImageDMDPipeline(DMDPipeline):
 #  GAN feature capture                                                          #
 # ---------------------------------------------------------------------------- #
 
-# Attribute names match :mod:`modelopt.torch.fastgen.plugins.wan22` so the shared
+# These attribute names are what the shared
 # :func:`~modelopt.torch.fastgen.methods.dmd._drain_if_hooked` /
-# :func:`~modelopt.torch.fastgen.methods.dmd._require_hooked` helpers work
-# without modification.
+# :func:`~modelopt.torch.fastgen.methods.dmd._require_hooked` helpers look for.
 _CAPTURED_ATTR = "_fastgen_captured"
 _HANDLES_ATTR = "_fastgen_capture_handles"
 _INDICES_ATTR = "_fastgen_capture_indices"

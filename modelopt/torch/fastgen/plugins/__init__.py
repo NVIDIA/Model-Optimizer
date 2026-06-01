@@ -15,16 +15,13 @@
 
 """Optional plugins for the fastgen subpackage (gated via ``import_plugin``).
 
-``wan22`` holds the forward-hook helpers for exposing intermediate teacher activations
-to the DMD2 GAN discriminator on Wan 2.2 models. The module itself only depends on
-``torch`` at runtime, but we still gate the import so environments that choose not to
-install any optional fastgen dependencies see a clean package import.
+``qwen_image`` holds the Qwen-Image pipeline plus the forward-hook helpers that expose
+intermediate teacher activations to the DMD2 GAN discriminator. The import is gated so
+environments that choose not to install the optional fastgen dependencies still see a
+clean package import.
 """
 
 from modelopt.torch.utils import import_plugin
-
-with import_plugin("wan22"):
-    from .wan22 import *
 
 with import_plugin("qwen_image"):
     from .qwen_image import *

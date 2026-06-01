@@ -15,7 +15,7 @@
 
 """YAML-driven configuration loading for fastgen distillation pipelines.
 
-YAML is the first-class entry point for DMD-on-Wan configurations — the fastgen library
+YAML is the first-class entry point for DMD configurations — the fastgen library
 does not expect callers to hand-build Python dicts. Typical usage::
 
     from modelopt.torch.fastgen import DMDConfig, load_dmd_config

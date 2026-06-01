@@ -64,7 +64,7 @@ __all__ = ["DMDPipeline"]
 
 
 # ---------------------------------------------------------------------------- #
-#  Feature capture helper (duck-typed so tests can bypass the wan22 plugin)    #
+#  Feature capture helper (duck-typed so tests can bypass the capture plugin)  #
 # ---------------------------------------------------------------------------- #
 
 
@@ -76,8 +76,7 @@ def _drain_if_hooked(module: nn.Module) -> list[torch.Tensor] | None:
     call sites can drain unconditionally after every teacher forward — this prevents
     the buffer from growing across steps when hooks are attached but the GAN branch is
     disabled (e.g. an ablation). Callers that need the strict "did you forget to attach
-    hooks?" failure mode should call :func:`_require_hooked` on the result, or use
-    :func:`modelopt.torch.fastgen.plugins.wan22.pop_captured_features` directly.
+    hooks?" failure mode should call :func:`_require_hooked` on the result.
     """
     captured = getattr(module, "_fastgen_captured", None)
     if captured is None:
@@ -106,7 +105,7 @@ def _require_hooked(
         raise RuntimeError(
             f"Feature-capture hooks are required on the teacher ({which} branch): "
             "teacher._fastgen_captured is missing. Call "
-            "modelopt.torch.fastgen.plugins.wan22.attach_feature_capture(teacher, ...) "
+            "modelopt.torch.fastgen.plugins.qwen_image.attach_feature_capture(teacher, ...) "
             "before running this loss."
         )
     return features
@@ -127,7 +126,7 @@ class DMDPipeline(DistillationPipeline):
             object with a ``.sample`` attribute.
         teacher: Frozen reference module with the same call signature. If ``discriminator``
             is provided, feature-capture hooks must be attached to ``teacher`` before
-            calling ``compute_*_loss`` — see :func:`modelopt.torch.fastgen.plugins.wan22.attach_feature_capture`.
+            calling ``compute_*_loss`` — see :func:`modelopt.torch.fastgen.plugins.qwen_image.attach_feature_capture`.
         fake_score: Trainable auxiliary module (same signature as teacher/student). Used to
             approximate the student's generated distribution for the VSD gradient.
         config: :class:`~modelopt.torch.fastgen.config.DMDConfig` with the hyperparameters.

@@ -22,7 +22,7 @@ without a FastGen dependency. The discriminator is **model-agnostic**: it takes
 a list of spatial feature tensors ``[B, C, H, W]`` and returns concatenated
 logits ``[B, num_heads]``. The model-specific work of producing those tensors
 (installing forward hooks, reshaping packed-token streams into spatial maps)
-lives in the per-model plugins (``plugins/qwen_image.py``, ``plugins/wan22.py``).
+lives in the per-model plugins (``plugins/qwen_image.py``).
 """
 
 from __future__ import annotations

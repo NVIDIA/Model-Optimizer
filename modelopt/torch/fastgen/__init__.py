@@ -31,7 +31,7 @@ Typical usage with a YAML-driven config::
 
     # If GAN is enabled, expose intermediate teacher features to the discriminator.
     if cfg.gan_loss_weight_gen > 0:
-        mtf.plugins.wan22.attach_feature_capture(teacher, feature_indices=[15, 22, 29])
+        mtf.plugins.qwen_image.attach_feature_capture(teacher, feature_indices=[30])
 
     pipeline = mtf.DMDPipeline(student, teacher, fake_score, cfg, discriminator=disc)
 
@@ -62,7 +62,7 @@ from .methods.dmd import DMDPipeline
 from .pipeline import DistillationPipeline
 
 # isort: off
-# Plugins must be imported after the core exports so the wan22 hooks can reference
+# Plugins must be imported after the core exports so the plugin hooks can reference
 # DMDPipeline if needed in the future; also matches the ordering used by
 # modelopt.torch.distill.
 from . import plugins
