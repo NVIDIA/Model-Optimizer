@@ -20,10 +20,6 @@ import pytest
 from _test_utils.examples.run_command import extend_cmd_parts, run_example_command
 from _test_utils.torch.transformers_models import create_tiny_qwen3_dir
 
-# Standalone helper (run under torchrun) that reloads a quantized Megatron checkpoint and asserts
-# the ModelOpt quantizers were restored.
-_MEGATRON_LOADER = Path(__file__).parent / "_load_megatron_quantized.py"
-
 
 def test_quantize_export_and_vllm_deployment(tmp_path: Path, num_gpus):
     """Quantize a tiny Qwen3 via a YAML recipe, export to HF with export.py, and load it with vLLM."""
@@ -41,7 +37,8 @@ def test_quantize_export_and_vllm_deployment(tmp_path: Path, num_gpus):
     megatron_path = tmp_path / "qwen3_fp8_megatron"
     hf_export_path = tmp_path / "qwen3_fp8_hf"
 
-    # Step 1: quantize (tensor parallelism is supported here) and save a Megatron checkpoint.
+    # Step 1: quantize (tensor parallelism is supported here) and save a Megatron checkpoint. The
+    # checkpoint must carry the ModelOpt state so it can be reloaded (for export or further QAT/QAD).
     quantize_cmd = extend_cmd_parts(
         ["torchrun", f"--nproc_per_node={num_gpus}", "quantize.py", "--skip_generate"],
         hf_model_name_or_path=hf_model_path,
@@ -55,8 +52,12 @@ def test_quantize_export_and_vllm_deployment(tmp_path: Path, num_gpus):
     )
     run_example_command(quantize_cmd, example_path="megatron_bridge", setup_free_port=True)
     assert (megatron_path / "latest_checkpointed_iteration.txt").exists()
+    assert list(megatron_path.rglob("modelopt_state")), (
+        "Expected modelopt_state in the Megatron checkpoint"
+    )
 
-    # Step 2: export to HF (re-shards to TP=1) on a single rank.
+    # Step 2: export to HF (re-shards to TP=1) on a single rank. export.py reloads the quantized
+    # Megatron checkpoint (restoring the ModelOpt quantizers) before converting to HF.
     export_cmd = extend_cmd_parts(
         ["torchrun", "--nproc_per_node=1", "export.py"],
         hf_model_name_or_path=hf_model_path,
@@ -66,6 +67,8 @@ def test_quantize_export_and_vllm_deployment(tmp_path: Path, num_gpus):
     run_example_command(export_cmd, example_path="megatron_bridge", setup_free_port=True)
 
     # HF (unified) quantized checkpoint exists with the exported quantization config + weights.
+    # hf_quant_config.json is only written when the reloaded model is actually quantized, so its
+    # presence also confirms export.py restored the ModelOpt quantizers from the checkpoint.
     assert (hf_export_path / "config.json").exists()
     assert (hf_export_path / "hf_quant_config.json").exists()
     assert list(hf_export_path.glob("*.safetensors")), "Expected exported safetensors weights"
@@ -83,44 +86,3 @@ def test_quantize_export_and_vllm_deployment(tmp_path: Path, num_gpus):
     )
     outputs = llm.generate(["Hello!"], vllm.SamplingParams(max_tokens=4))
     assert outputs and outputs[0].outputs[0].text is not None
-
-
-def test_quantize_megatron_checkpoint_reload(tmp_path: Path, num_gpus):
-    """Quantize a tiny Qwen3 to FP8, save in Megatron format, and reload to check quantizers."""
-    hf_model_path = create_tiny_qwen3_dir(tmp_path, with_tokenizer=True)
-    megatron_path = tmp_path / "qwen3_fp8_megatron"
-
-    cmd_parts = extend_cmd_parts(
-        ["torchrun", f"--nproc_per_node={num_gpus}", "quantize.py", "--skip_generate"],
-        hf_model_name_or_path=hf_model_path,
-        quant_cfg="fp8",
-        tp_size=num_gpus,
-        pp_size=1,
-        calib_dataset_name="cnn_dailymail",
-        calib_num_samples=16,
-        calib_batch_size=1,
-        seq_length=32,
-        export_megatron_path=megatron_path,
-    )
-    run_example_command(cmd_parts, example_path="megatron_bridge", setup_free_port=True)
-
-    # Megatron checkpoint exists and carries the quantization (modelopt) state.
-    assert (megatron_path / "latest_checkpointed_iteration.txt").exists()
-    assert list(megatron_path.rglob("modelopt_state")), (
-        "Expected modelopt_state in the Megatron checkpoint"
-    )
-
-    # Reload the checkpoint via the bridge and assert the quantizers were restored. The loader
-    # asserts internally, so a non-zero exit (raised by run_example_command) fails this test.
-    run_example_command(
-        [
-            "torchrun",
-            f"--nproc_per_node={num_gpus}",
-            str(_MEGATRON_LOADER),
-            str(hf_model_path),
-            str(megatron_path),
-            str(num_gpus),
-        ],
-        example_path="megatron_bridge",
-        setup_free_port=True,
-    )
