@@ -761,6 +761,17 @@ class LayerwiseConfig(ModeloptBaseConfig):
         ),
     )
 
+    calib_mutates_weights: bool = ModeloptField(
+        default=True,
+        title="Whether layerwise calibration mutates layer weights.",
+        description=(
+            "Set to False only for algorithms that update solely "
+            "``TensorQuantizer._amax`` (max, mse, local_hessian). Rejected for "
+            "weight-mutating algorithms (GPTQ, AWQ, SmoothQuant) where it would "
+            "silently lose updates on resume."
+        ),
+    )
+
 
 def _coerce_layerwise_input(value):
     """Normalize a raw ``layerwise`` value to a dict; warn on deprecated bool."""
@@ -783,6 +794,10 @@ def _coerce_layerwise_input(value):
 
 class QuantizeAlgorithmConfig(ModeloptBaseConfig):
     """Calibration algorithm config base."""
+
+    # Set True only for algorithms that update solely ``TensorQuantizer._amax``
+    # (no ``layer.weight`` mutation). Gates ``layerwise.calib_mutates_weights=False``.
+    _supports_save_quantizers_only: ClassVar[bool] = False
 
     method: Literal[None] = ModeloptField(
         None,
@@ -862,6 +877,17 @@ class QuantizeAlgorithmConfig(ModeloptBaseConfig):
             )
         return self
 
+    @model_validator(mode="after")
+    def _validate_non_mutating_layerwise_supported(self):
+        """Enforce the ``calib_mutates_weights=False`` whitelist."""
+        if not self.layerwise.calib_mutates_weights and not self._supports_save_quantizers_only:
+            raise ValueError(
+                f"Algorithm '{self.method}' mutates layer weights in-place; "
+                "calib_mutates_weights=False would lose those updates on resume. "
+                "Only max/mse/local_hessian (amax-only) support this flag."
+            )
+        return self
+
 
 class _SharedStatesConfig(ModeloptBaseConfig):
     """The ``shared_states`` grouping knob, shared by max / mse / local_hessian calibration."""
@@ -920,6 +946,8 @@ class MaxCalibConfig(_SharedStatesConfig, QuantizeAlgorithmConfig):
     See `Integer Quantization <https://arxiv.org/pdf/2004.09602>`_ for the concepts.
     """
 
+    _supports_save_quantizers_only: ClassVar[bool] = True
+
     method: Literal["max"] = ModeloptField("max")
 
     distributed_sync: bool | None = ModeloptField(
@@ -967,6 +995,8 @@ class MseCalibConfig(_SharedStatesConfig, QuantizeAlgorithmConfig):
 
     When fp8_scale_sweep is enabled for a supported FP8-scale format, step_size is ignored.
     """
+
+    _supports_save_quantizers_only: ClassVar[bool] = True
 
     method: Literal["mse"] = ModeloptField("mse")
 
@@ -1019,6 +1049,8 @@ class LocalHessianCalibConfig(_SharedStatesConfig, QuantizeAlgorithmConfig):
     - ``H = X @ X.T`` is the local Hessian computed from input activations X
 
     """
+
+    _supports_save_quantizers_only: ClassVar[bool] = True
 
     method: Literal["local_hessian"] = ModeloptField("local_hessian")
 
