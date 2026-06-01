@@ -45,9 +45,9 @@ execution:
   walltime: "04:00:00"
   mounts:
     mount_home: false
-  auto_export:
-    destinations:
-      - mlflow
+  auto_export:          # REQUIRED trigger for auto-export. Without this, the
+    destinations:       # export.mlflow block below is ignored and the run is
+      - mlflow          # NOT uploaded — you'd have to `nel export` it by hand.
 deployment:
   env_vars:
     HF_TOKEN: host:HF_TOKEN
@@ -95,18 +95,29 @@ evaluation:
               n_samples: 16
 
 export:
+  # Use LITERAL values below — NOT ${deployment.*} / ${evaluation.*} cross-refs.
+  # With auto_export enabled (above), NEL resolves this block at SUBMIT time in a
+  # scope that does NOT include `deployment` / `evaluation`, so cross-references
+  # fail hard: "Interpolation key 'deployment.served_model_name' not found".
+  # `${oc.env:USER}` (an env-var interpolation) is fine.
+  #
+  # CAUTION — these literals can drift. temperature / top_p / max_new_tokens are the
+  # ONLY queryable record of the sampling config in MLflow (NEL does not log them as
+  # run params), so keep them — but because they can't be interpolated, they MUST be
+  # kept EQUAL to evaluation.nemo_evaluator_config.config.params above. When you
+  # change the sampling params (or served_model_name), update these literals in the
+  # SAME edit, or MLflow will misreport the run.
   mlflow:
     tracking_uri: ???
-    experiment_name: ${oc.env:USER}/${deployment.served_model_name}
-    description: '${oc.env:USER}/${deployment.served_model_name} | T=${evaluation.nemo_evaluator_config.config.params.temperature}, top_p=${evaluation.nemo_evaluator_config.config.params.top_p},
-      max_new_tokens=${evaluation.nemo_evaluator_config.config.params.max_new_tokens}'
+    experiment_name: ${oc.env:USER}/CHANGEME-served-model-name
+    description: 'CHANGEME-served-model-name | T=1.0, top_p=0.95, max_new_tokens=65536'
     log_logs: true
     log_artifacts: true
     only_required: false
     skip_existing: false
     tags:
       framework: vllm
-      model: ${deployment.served_model_name}
-      temperature: '${evaluation.nemo_evaluator_config.config.params.temperature}'
-      top_p: '${evaluation.nemo_evaluator_config.config.params.top_p}'
-      max_new_tokens: '${evaluation.nemo_evaluator_config.config.params.max_new_tokens}'
+      model: CHANGEME-served-model-name
+      temperature: '1.0'
+      top_p: '0.95'
+      max_new_tokens: '65536'
