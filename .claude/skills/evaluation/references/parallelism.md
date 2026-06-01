@@ -218,8 +218,13 @@ During the canary, watch:
 - **`GPU KV cache usage`** well below 100% with zero preemption ⇒ headroom; raise.
 
 Factors that **relax** the KV limit: small / low-precision weights (more HBM for
-KV), **KV-cache quantization** (`kv_cache_scheme` in `config.json`), and
-**hybrid / linear-attention** layers (near-constant state instead of growing KV).
+KV); **KV-cache quantization** — either baked into the checkpoint (`kv_cache_scheme`
+in `config.json`) **or enabled at serve time** with vLLM's `--kv-cache-dtype fp8`
+(or `fp8_e4m3` / `fp8_e5m2`), which roughly halves KV vs bf16/fp16 → ~2× the
+sustainable concurrency / context; and **hybrid / linear-attention** layers
+(near-constant state instead of growing KV). Serve-time KV quantization is a knob
+you can turn in `deployment.command` to fit more sequences when KV is the bottleneck
+(verify the model/recipe supports it — it can slightly affect accuracy).
 
 ## Balanced sizing: bigger is not always faster (especially long context)
 
