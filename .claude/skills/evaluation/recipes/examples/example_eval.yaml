@@ -43,6 +43,9 @@ execution:
   account: ???
   output_dir: ???
   walltime: "04:00:00"
+  # gres defaults to gpu:8. Set it to the cluster's per-node GPU count (and what
+  # the QOS allows) or sbatch fails "Requested node configuration is not available".
+  # gres: gpu:4   # e.g. GB300 nodes (4 GPUs); also drop --data-parallel-size to match
   mounts:
     mount_home: false
   auto_export:          # REQUIRED trigger for auto-export. Without this, the
@@ -55,6 +58,16 @@ deployment:
   hf_model_handle:
   served_model_name: ???
   image: vllm/vllm-openai:v0.19.1
+  # NVFP4 on Blackwell (B200/B300/GB200/GB300, sm_100/sm_103): the v0.19.1 and
+  # any cu129 builds have NO sm_103 FP4 kernels (deploy dies with CUDA
+  # "no kernel image is available"). Use the CUDA-13 nightly instead:
+  #   image: vllm/vllm-openai:cu130-nightly-x86_64    # or -aarch64 on Grace
+  # (vLLM-recipe-recommended Blackwell image; see recipes.vllm.ai ?hardware=b300).
+  # For multimodal models on sm_103 also add `--mm-encoder-attn-backend TRITON_ATTN`.
+  #
+  # `--served-model-name ${deployment.served_model_name}` (in command below) is
+  # REQUIRED: without it vLLM registers the model as `/checkpoint` and every eval
+  # request 404s ("The model `<served_model_name>` does not exist.").
   # For MoE models, add `--enable-expert-parallel` to the command.
   # For models with custom code, add `--trust-remote-code` to the command.
   # After filling in evaluation `parallelism` values (top-level + per-task),
@@ -62,6 +75,7 @@ deployment:
   # N = ceil(max_parallelism / data_parallel_size).
   command: >-
     vllm serve /checkpoint
+    --served-model-name ${deployment.served_model_name}
     --host 0.0.0.0
     --port ${deployment.port}
     --tensor-parallel-size 1
@@ -72,6 +86,12 @@ deployment:
 evaluation:
   env_vars:
     HF_TOKEN: host:HF_TOKEN
+    # nemo-skills tasks (ns_*) hard-require the served-endpoint api key env var
+    # (api_key_name below) to be set WITH A VALUE inside the eval container.
+    # A shell `export DUMMY_API_KEY=dummy` does NOT reach the SLURM container —
+    # it must be declared here. Omit it and ns_* tasks die with
+    # "api_key_env_var=DUMMY_API_KEY but the value is not set".
+    DUMMY_API_KEY: lit:dummy
   nemo_evaluator_config:
     config:
       params:

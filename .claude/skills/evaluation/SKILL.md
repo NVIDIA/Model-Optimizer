@@ -136,11 +136,13 @@ deployment:
     <... rest of cross-checked flags ...>
 ```
 
-Conventions: always start `vllm serve /checkpoint` (NEL mounts here); always `--host 0.0.0.0 --port ${deployment.port}`; use folded scalar (`>-`) for one flag per line. Example fallback `--max-model-len 131072` covers AA-LCR (~120K + 16K gen) and SciCode (≥ 65536) — prefer `config.json` / recipe value.
+Conventions: always start `vllm serve /checkpoint` (NEL mounts here); always `--served-model-name ${deployment.served_model_name}` (**required** — without it vLLM registers the model under the path `/checkpoint`, and every eval request 404s with "The model `<served_model_name>` does not exist."); always `--host 0.0.0.0 --port ${deployment.port}`; use folded scalar (`>-`) for one flag per line. Example fallback `--max-model-len 131072` covers AA-LCR (~120K + 16K gen) and SciCode (≥ 65536) — prefer `config.json` / recipe value.
 
 For how to choose `--tensor-parallel-size` / `--data-parallel-size` / `--pipeline-parallel-size` (and EP) from the model size and your GPU count, read `references/parallelism.md` — cross-check the layout against `recipes.vllm.ai`, then adapt to the GPUs you actually have via the fit math there.
 
 **Image / vLLM version.** Default `image: vllm/vllm-openai:v0.19.1` (pinned for reproducibility). If `recipes.vllm.ai` states a higher minimum version for the chosen variant (e.g. "vLLM >= 0.20.0"), bump the image tag accordingly (e.g. `v0.20.0`) — do **not** stay on `0.19.1` when the recipe explicitly requires newer. Do **not** use `:latest` (drifts across re-runs, breaks reproducibility). The version is part of the cross-check: surface to the user when bumping.
+
+> **NVFP4 on Blackwell needs the CUDA-13 build.** Serving an NVFP4 checkpoint on Blackwell (B200/B300/GB200/GB300, compute capability sm_100/sm_103) requires `vllm/vllm-openai:cu130-nightly-<arch>` (`-x86_64`, or `-aarch64` on Grace). The pinned `v0.19.1` and **all** `cu129` (CUDA 12.9) builds lack sm_103 FP4 kernels — the server loads the checkpoint then dies at engine init with `CUDA error: no kernel image is available for execution on the device` (true for the `flashinfer` *and* `cutlass` NVFP4 backends; `marlin` separately fails on non-64-divisible layer dims). This is the vLLM-recipe-recommended Blackwell image — confirm via `recipes.vllm.ai/<org>/<model>?hardware=b300` (and since that page is JS-rendered, fetch the raw markdown at `github.com/vllm-project/recipes/blob/main/<org>/<model>.md`). For **multimodal** models on sm_103, also add `--mm-encoder-attn-backend TRITON_ATTN` — the default CuTe ViT flash-attn kernel asserts "Only SM 10.x and 11.x are supported" on sm_103.
 
 #### vLLM-backend defaults — always include unless the recipe *contradicts*
 
@@ -196,6 +198,7 @@ Reasoning models: prefer reasoning mode (highest scores). For lower variance / c
 - Find every `???` left. Ask the user only for what can't be inferred (SLURM hostname/account/output_dir, MLflow tracking URI, etc.). Don't propose defaults; let them give plain text.
 - **`parallelism`** — size it yourself from the run shape (total requests = `dataset_size × repeats` vs GPU serving capacity), and set `--max-num-seqs` to match. Read `references/parallelism.md` for the decision rule and worked examples; only ask the user if a non-GPU cap (e.g. judge rate limit) is unknown.
 - Ask about other defaults they may want to change (partition, walltime, MLflow tags).
+- **`execution.gres`** — NEL defaults to `gpu:8`. Set it to the cluster's per-node GPU count (and what the QOS permits), and match `--data-parallel-size`/`--tensor-parallel-size` to it. A mismatch makes `sbatch` reject the job with *"Requested node configuration is not available"* (e.g. `gpu:8` on 4-GPU GB300 nodes → set `gres: gpu:4`). Confirm the node GPU count with `sinfo -o '%P %G'` on the target cluster.
 
 **Walltime cap: 4 hours.** Always `execution.walltime: "04:00:00"`. The cluster does not schedule jobs longer than 4h — this is a hard limit, not a preference.
 
@@ -229,15 +232,21 @@ Implications for the agent:
 
 **Tasks that call an external judge / user-simulator / scoring endpoint.** Treat this as a general pattern, not a fixed list — HLE, AA-LCR, and Tau2 need one today, but other benchmarks may too (check each task's recipe). Their `model_id` / `url` are **config, not secrets**: substitute the **literal** values the user keeps in `.env` (keys per the task's recipe + `recipes/env.example`) into the task's `<VAR>` placeholders. Do **not** emit `${oc.env:...}` for these (it silently fails unless the var was exported with `set -a`). Only `api_key` stays an env-var *name* (e.g. `INFERENCE_API_KEY`), exported and read by the harness.
 
-**Known issue — nemo-skills self-deployment:** If using `nemo_skills.*` tasks with self-deployment (vLLM/SGLang/NIM), add at top level:
+**Known issue — nemo-skills self-deployment:** If using `nemo_skills.*` tasks (`ns_*`) with self-deployment (vLLM/SGLang/NIM), you need **both** of these:
 
 ```yaml
-target:
-  api_endpoint:
-    api_key_name: DUMMY_API_KEY
+evaluation:
+  env_vars:
+    DUMMY_API_KEY: lit:dummy   # MUST be set here — see below
+  nemo_evaluator_config:
+    target:
+      api_endpoint:
+        api_key_name: DUMMY_API_KEY
 ```
 
-External-deployment configs already define `api_key_name`. Export of `DUMMY_API_KEY` is handled in Step 8.
+`api_key_name` only names the env var; the nemo-skills client **hard-fails if that var has no value inside the eval container** (`ValueError: api_key_env_var=DUMMY_API_KEY but the value is not set`). On SLURM, a shell `export DUMMY_API_KEY=dummy` (Step 8) does **NOT** propagate into the container — NEL only injects vars declared in `env_vars`. So declare `DUMMY_API_KEY: lit:dummy` under `evaluation.env_vars` (note the `lit:` prefix — see below). The shell export only helps for local/Docker runs. External-deployment configs already define `api_key_name`.
+
+**NEL env-var value prefixes (required):** every value in an `env_vars` map needs an explicit prefix — `host:VAR` (read from the submitting shell's env at submit time), `lit:value` (literal string), or `runtime:VAR` (read in the job at run time). A bare value (e.g. `DUMMY_API_KEY: dummy`) hard-errors: *"Env var value '…' must have an explicit prefix."* Use `lit:` for constants like `DUMMY_API_KEY` and `VLLM_*` backend selectors, `host:` for secrets like `HF_TOKEN` / `INFERENCE_API_KEY`.
 
 ---
 
@@ -258,9 +267,12 @@ Default images:
 | Framework | Image | Registry |
 | --- | --- | --- |
 | vLLM | `vllm/vllm-openai:v0.19.1` (bump per recipe; never `:latest`) | DockerHub |
+| vLLM (NVFP4 on Blackwell) | `vllm/vllm-openai:cu130-nightly-x86_64` (or `-aarch64`) | DockerHub |
 | SGLang | `lmsysorg/sglang:latest` | DockerHub |
 | TRT-LLM | `nvcr.io/nvidia/tensorrt-llm/release:...` | NGC |
 | Eval tasks | `nvcr.io/nvidia/eval-factory/*:26.03` | NGC |
+
+> NVFP4 checkpoints on Blackwell (sm_100/sm_103) need the `cu130-nightly` image — cu129/v0.19.1 lack sm_103 FP4 kernels (see the "NVFP4 on Blackwell" note in Step 3).
 
 Public images → submit without preflight. Private/restricted → check credentials:
 
@@ -284,8 +296,10 @@ set -a && source .env && set +a
 
 # If pre_cmd/post_cmd in config (review pre_cmd first — runs arbitrary commands):
 export NEMO_EVALUATOR_TRUST_PRE_CMD=1
-# If nemo_skills.* + self-deployment:
+# If nemo_skills.* + self-deployment, for LOCAL/Docker runs only:
 export DUMMY_API_KEY=dummy
+# On SLURM this shell export does NOT reach the container — instead declare
+# `DUMMY_API_KEY: lit:dummy` under evaluation.env_vars (see Step 5).
 ```
 
 **Step 8.1 — Dry-run** (config validation):
