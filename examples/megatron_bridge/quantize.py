@@ -297,8 +297,8 @@ def main(args: argparse.Namespace):
             num_samples=args.calib_num_samples,
             seq_length=args.seq_length,
             batch_size=args.calib_batch_size,
-            # pack=True uses Megatron-LM pretraining-style global-stream document packing
-            # Leave to False for backward compatibility
+            # Calibrate on unpacked sequences. pack=True is Megatron pretraining-style global-stream
+            # document packing, which changes the per-sample calibration statistics.
             pack=False,
         )
     else:
@@ -307,9 +307,13 @@ def main(args: argparse.Namespace):
 
     if hasattr(unwrapped_model, "calibration_mode"):
         # Some model wrappers (e.g. distillation/speculative) gate calibration behind a flag.
+        # Reset it in a finally so a failure mid-calibration doesn't leave the flag set for the
+        # subsequent compress / save calls.
         unwrapped_model.calibration_mode = True
-        mtq.quantize(unwrapped_model, mtq_config, forward_loop)
-        unwrapped_model.calibration_mode = False
+        try:
+            mtq.quantize(unwrapped_model, mtq_config, forward_loop)
+        finally:
+            unwrapped_model.calibration_mode = False
     else:
         mtq.quantize(unwrapped_model, mtq_config, forward_loop)
 
