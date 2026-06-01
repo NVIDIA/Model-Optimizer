@@ -1,6 +1,15 @@
 ---
 name: quant-recipe-search
-description: Use when the user asks to find, search for, or optimize the best quantization recipe for a model, including direct requests like "find the best quantization recipe and generate a PTQ checkpoint." Guides the multi-candidate loop: choose compute-vs-memory success metrics, select ModelOpt recipe baselines, design AutoQuant/manual recipe deltas, interpret sensitivity, and decide next candidates. Do NOT use for a single known PTQ recipe run (use ptq), serving (use deployment), creating/running evals (use evaluation or launching-evals), monitoring jobs (use monitor), MLflow browsing (use accessing-mlflow), or comparing completed baseline-vs-candidate scores only (use compare-results).
+description: >-
+  Use when the user asks to find, search for, or optimize the best quantization
+  recipe for a model, including direct requests like "find the best quantization
+  recipe and generate a PTQ checkpoint." Guides the multi-candidate loop:
+  choose compute-vs-memory success metrics, select ModelOpt recipe baselines,
+  design AutoQuant/manual recipe deltas, interpret sensitivity, and decide next
+  candidates. Do NOT use for a single known PTQ recipe run (use ptq), serving
+  (use deployment), creating/running evals (use evaluation or launching-evals),
+  monitoring jobs (use monitor), MLflow browsing (use accessing-mlflow), or
+  comparing completed baseline-vs-candidate scores only (use compare-results).
 ---
 
 # Quant Recipe Search
