@@ -34,7 +34,7 @@ from modelopt.torch.quantization.model_calib import (
     local_hessian_calibrate,
     mse_calibrate,
 )
-from modelopt.torch.quantization.nn import TensorQuantizer
+from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
 from modelopt.torch.quantization.nn.modules.tensor_quantizer import (
     _QUANT_FUNCTIONAL_BACKENDS,
     register_quant_backend,
@@ -181,8 +181,6 @@ class TestActivationCaptureExtensionPoint:
         assert conv.net[0].register_calibration_input_hooks(lambda *a: None) == []  # 4-D weight
 
     def test_sequential_quantizer_weight_not_hooked(self):
-        from modelopt.torch.quantization.nn import SequentialQuantizer
-
         torch.manual_seed(0)
         model = SimpleLinear()
         mtq.quantize(model, INT8_WEIGHT_CFG, forward_loop=_make_forward_loop())
