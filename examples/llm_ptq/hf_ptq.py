@@ -1418,7 +1418,9 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Routed MoE expert active ratio for --auto_quantize_cost_model active_moe. "
             "For top-k MoE this is top_k / num_experts. If omitted, common model config "
-            "fields such as num_experts_per_tok and num_experts are used when available."
+            "fields such as num_experts_per_tok and num_experts are used when available. "
+            "This only affects AutoQuant cost accounting and does not change calibration "
+            "routing; use --moe_calib_experts_ratio to control calibration expert coverage."
         ),
     )
     parser.add_argument(
