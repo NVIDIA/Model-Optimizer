@@ -15,9 +15,12 @@
 
 """Tests for local Hessian-weighted MSE calibration (CPU)."""
 
+import warnings
+
 import pytest
 import torch
-from _test_utils.torch.quantization.models import SimpleLinear
+import torch.nn as nn
+from _test_utils.torch.quantization.models import SimpleConv, SimpleLinear
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization import calib
@@ -27,6 +30,7 @@ from modelopt.torch.quantization.model_calib import (
     _LocalHessianAccumulator,
     _make_weight_mse_calibrator,
     _register_fp8_sweep_calibrator,
+    _warn_if_block_size_mismatch,
     local_hessian_calibrate,
     mse_calibrate,
 )
@@ -36,7 +40,7 @@ from modelopt.torch.quantization.nn.modules.tensor_quantizer import (
     register_quant_backend,
 )
 
-# Weight-only INT8 per-channel config; calibration is re-run explicitly per test.
+# Weight-only INT8 per-channel; calibration is re-run explicitly per test.
 INT8_WEIGHT_CFG = {
     "quant_cfg": [
         {"quantizer_name": "*", "enable": False},
@@ -46,188 +50,151 @@ INT8_WEIGHT_CFG = {
 }
 
 
+def _weight_amaxes(model):
+    return {
+        n: m.amax
+        for n, m in model.named_modules()
+        if isinstance(m, TensorQuantizer) and m.is_enabled and m.amax is not None
+    }
+
+
+def _make_forward_loop(seed=0):
+    def forward_loop(model):
+        torch.manual_seed(seed)
+        for _ in range(3):
+            x = torch.randn(8, 16)
+            x[:, 0] *= 40.0  # skew so the Hessian is non-trivial vs plain weight MSE
+            model(x)
+
+    return forward_loop
+
+
 class TestLocalHessianAccumulator:
-    def test_shape_samples_and_buffer_release(self):
+    def test_accumulate_shape_samples_fp32_buffer(self):
         torch.manual_seed(0)
-        cout, cin, bs = 8, 32, 16
-        acc = _LocalHessianAccumulator(cout, cin, bs)
+        acc = _LocalHessianAccumulator(8, 32, 16)
         assert acc.is_enabled
-
-        x = torch.randn(10, cin)
-        acc.accumulate(x)
-        assert acc.hessian_per_block.shape == (cin // bs, bs, bs)
-        assert acc.num_samples == 10
-
-        # A second batch accumulates (sum over samples).
-        acc.accumulate(torch.randn(5, cin))
+        acc.accumulate(torch.randn(10, 32, dtype=torch.bfloat16))
+        assert acc.hessian_per_block.shape == (2, 16, 16)
+        assert acc.hessian_per_block.dtype == torch.float32  # fp32 despite bf16 input
+        acc.accumulate(torch.randn(5, 32))
         assert acc.num_samples == 15
-
-        error_func = acc.build_error_func()
-        assert error_func is not None
-        # build_error_func releases the raw accumulator (keeps only the normalized copy).
-        assert acc.hessian_per_block is None
+        assert acc.build_error_func() is not None
+        assert acc.hessian_per_block is None  # raw buffer freed
 
     def test_error_func_matches_explicit_hessian_weighted_loss(self):
         torch.manual_seed(1)
         cout, cin, bs = 4, 32, 16
         n_blocks = cin // bs
         acc = _LocalHessianAccumulator(cout, cin, bs)
-
         x = torch.randn(7, cin)
         acc.accumulate(x)
-        num_samples = acc.num_samples
         error_func = acc.build_error_func()
 
-        # Reference normalized per-block Hessian.
         xb = x.reshape(-1, cin).T.reshape(n_blocks, bs, -1)
-        hessian = (xb @ xb.transpose(-1, -2)) / num_samples
-
-        total_blocks = cout * n_blocks
-        w = torch.randn(total_blocks, bs)
+        hessian = (xb @ xb.transpose(-1, -2)) / acc.num_samples
+        w = torch.randn(cout * n_blocks, bs)
         wq = w + 0.05 * torch.randn_like(w)
-        err = error_func(w, wq)
+        err = error_func(w, wq).view(-1, bs)
 
-        assert err.shape == w.shape
-        # The per-block scalar loss is broadcast across the block's bs entries.
-        err_blocks = err.view(-1, bs)
-        assert torch.allclose(err_blocks, err_blocks[:, :1].expand(-1, bs))
-
+        assert err.shape == (cout * n_blocks, bs)
+        assert torch.allclose(err, err[:, :1].expand(-1, bs))  # per-block scalar broadcast
         dw = (w - wq).view(cout, n_blocks, bs)
         expected = torch.einsum("cnb,nbd,cnd->cn", dw, hessian, dw).reshape(-1)
-        assert torch.allclose(err_blocks[:, 0], expected, atol=1e-5)
+        assert torch.allclose(err[:, 0], expected, atol=1e-5)
 
-    def test_disabled_when_cin_not_divisible(self):
-        acc = _LocalHessianAccumulator(8, 30, 16)
-        assert not acc.is_enabled
-        acc.accumulate(torch.randn(4, 30))  # no-op
-        assert acc.hessian_per_block is None
-        assert acc.build_error_func() is None
-
-    def test_no_samples_returns_none(self):
-        acc = _LocalHessianAccumulator(8, 32, 16)
-        assert acc.build_error_func() is None
-
-    def test_accumulates_in_fp32_for_low_precision_input(self):
-        acc = _LocalHessianAccumulator(4, 16, 16)
-        acc.accumulate(torch.randn(8, 16, dtype=torch.bfloat16))
-        assert acc.hessian_per_block.dtype == torch.float32
-
-
-class TestBlockSizeMismatchWarning:
-    def _block_quantizer(self, block):
-        cfg = QuantizerAttributeConfig(
-            num_bits=(2, 1), block_sizes={-1: block, "type": "static", "scale_bits": (4, 3)}
-        )
-        return TensorQuantizer(quant_attribute_cfg=cfg)
-
-    def test_warns_on_mismatch(self):
-        from modelopt.torch.quantization.model_calib import _warn_if_block_size_mismatch
-
-        with pytest.warns(UserWarning, match="will not align"):
-            _warn_if_block_size_mismatch(self._block_quantizer(32), 16, "layer")
-
-    def test_silent_when_matching_or_no_block_sizes(self):
-        import warnings
-
-        from modelopt.torch.quantization.model_calib import _warn_if_block_size_mismatch
-
-        with warnings.catch_warnings():
-            warnings.simplefilter("error")
-            _warn_if_block_size_mismatch(self._block_quantizer(16), 16, "layer")
-            per_channel = TensorQuantizer(QuantizerAttributeConfig(num_bits=8, axis=0))
-            _warn_if_block_size_mismatch(per_channel, 16, "layer")
-
-
-def _make_forward_loop(seed=0, skew=True):
-    def forward_loop(model):
-        torch.manual_seed(seed)
-        for _ in range(3):
-            x = torch.randn(8, 16)
-            if skew:
-                # Skew one input feature so the activation Hessian is non-trivial and
-                # the Hessian-weighted optimum diverges from the plain weight MSE.
-                x[:, 0] *= 40.0
-            model(x)
-
-    return forward_loop
+    def test_returns_none_when_disabled_or_no_samples(self):
+        not_divisible = _LocalHessianAccumulator(8, 30, 16)
+        assert not not_divisible.is_enabled
+        not_divisible.accumulate(torch.randn(4, 30))  # no-op
+        assert not_divisible.build_error_func() is None
+        assert _LocalHessianAccumulator(8, 32, 16).build_error_func() is None  # no samples
 
 
 class TestLocalHessianCalibrateDense:
-    def test_runs_and_refines_amax(self):
-        torch.manual_seed(0)
-        model = SimpleLinear()
+    def test_refines_amax_beyond_max_and_plain_mse(self):
         forward_loop = _make_forward_loop()
-        mtq.quantize(model, INT8_WEIGHT_CFG, forward_loop=forward_loop)
-
-        # Snapshot the post-max-calibration amax for each weight quantizer.
-        max_amax = {
-            name: module.amax.clone()
-            for name, module in model.named_modules()
-            if isinstance(module, TensorQuantizer) and module.is_enabled and module.amax is not None
-        }
-        assert max_amax, "expected enabled weight quantizers after quantize"
-
-        local_hessian_calibrate(model, forward_loop, fp8_scale_sweep=False, debug=True)
-
-        # Every enabled weight quantizer got a Hessian accumulator with collected samples.
-        accumulators = model._local_hessian_accumulators
-        assert accumulators
-        assert all(acc.num_samples > 0 for acc in accumulators.values())
-
-        # The Hessian-weighted search moved at least one amax away from the max value.
-        changed = False
-        for name, module in model.named_modules():
-            if name in max_amax:
-                assert torch.isfinite(module.amax).all() and (module.amax > 0).all()
-                if not torch.allclose(module.amax, max_amax[name]):
-                    changed = True
-        assert changed, "local_hessian did not refine any amax away from max-calibration"
-
-    def test_differs_from_plain_mse(self):
-        forward_loop = _make_forward_loop(seed=3)
-
         torch.manual_seed(0)
         model_lh = SimpleLinear()
         mtq.quantize(model_lh, INT8_WEIGHT_CFG, forward_loop=forward_loop)
-        local_hessian_calibrate(model_lh, forward_loop, fp8_scale_sweep=False)
+        max_amax = {n: a.clone() for n, a in _weight_amaxes(model_lh).items()}
+        local_hessian_calibrate(model_lh, forward_loop, fp8_scale_sweep=False, debug=True)
 
         torch.manual_seed(0)
         model_mse = SimpleLinear()
         mtq.quantize(model_mse, INT8_WEIGHT_CFG, forward_loop=forward_loop)
         mse_calibrate(model_mse, forward_loop, fp8_scale_sweep=False)
 
-        lh = {
-            n: m.amax
-            for n, m in model_lh.named_modules()
-            if isinstance(m, TensorQuantizer) and m.is_enabled and m.amax is not None
-        }
-        mse = {
-            n: m.amax
-            for n, m in model_mse.named_modules()
-            if isinstance(m, TensorQuantizer) and m.is_enabled and m.amax is not None
-        }
-        assert lh.keys() == mse.keys()
-        # Hessian weighting should change the chosen scale for at least one quantizer.
-        assert any(not torch.allclose(lh[n], mse[n]) for n in lh)
+        accs = model_lh._local_hessian_accumulators
+        assert accs and all(a.num_samples > 0 for a in accs.values())
+        lh, mse = _weight_amaxes(model_lh), _weight_amaxes(model_mse)
+        assert all(torch.isfinite(a).all() and (a > 0).all() for a in lh.values())
+        assert any(not torch.allclose(lh[n], max_amax[n]) for n in lh)  # refined past max-cal
+        assert any(not torch.allclose(lh[n], mse[n]) for n in lh)  # Hessian changed the choice
+
+    def test_warns_with_module_name_when_cin_not_divisible(self):
+        class _OddModel(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.odd = nn.Linear(24, 32)  # 24 not divisible by block_size 16
+
+            def forward(self, x):
+                return self.odd(x)
+
+        torch.manual_seed(0)
+        model = _OddModel()
+        forward_loop = lambda m: m(torch.randn(4, 24))  # noqa: E731
+        mtq.quantize(model, INT8_WEIGHT_CFG, forward_loop=forward_loop)
+        with pytest.warns(UserWarning, match=r"odd input features \(24\) not divisible"):
+            local_hessian_calibrate(model, forward_loop, fp8_scale_sweep=False)
 
     def test_no_forward_loop_is_skipped(self):
         torch.manual_seed(0)
         model = SimpleLinear()
         mtq.quantize(model, INT8_WEIGHT_CFG, forward_loop=_make_forward_loop())
-        before = {
-            n: m.amax.clone()
-            for n, m in model.named_modules()
-            if isinstance(m, TensorQuantizer) and m.is_enabled and m.amax is not None
-        }
+        before = {n: a.clone() for n, a in _weight_amaxes(model).items()}
         with pytest.warns(UserWarning, match="forward_loop must be provided"):
             local_hessian_calibrate(model, forward_loop=None)
-        after = {
-            n: m.amax
-            for n, m in model.named_modules()
-            if isinstance(m, TensorQuantizer) and m.is_enabled and m.amax is not None
-        }
-        for n in before:
-            assert torch.equal(before[n], after[n])
+        assert all(torch.equal(before[n], a) for n, a in _weight_amaxes(model).items())
+
+
+class TestActivationCaptureExtensionPoint:
+    """The extension point that decouples local-Hessian capture from module type."""
+
+    def test_dense_captures_and_conv_falls_back(self):
+        torch.manual_seed(0)
+        model = SimpleLinear()
+        mtq.quantize(model, INT8_WEIGHT_CFG, forward_loop=_make_forward_loop())
+        captured = []
+        handles = model.net[0].register_calibration_input_hooks(
+            lambda wq, w, x: captured.append((tuple(w.shape), x.shape[-1]))
+        )
+        assert len(handles) == 1
+        with torch.no_grad():
+            model(torch.randn(2, 16))
+        for h in handles:
+            h.remove()
+        assert captured and captured[0] == ((32, 16), 16)  # cin from activation matches weight
+
+        conv = SimpleConv()
+        mtq.quantize(conv, INT8_WEIGHT_CFG, forward_loop=lambda m: m(SimpleConv.get_input()))
+        assert conv.net[0].register_calibration_input_hooks(lambda *a: None) == []  # 4-D weight
+
+    def test_block_size_mismatch_warns_only_on_mismatch(self):
+        def q(block):
+            return TensorQuantizer(
+                QuantizerAttributeConfig(
+                    num_bits=(2, 1), block_sizes={-1: block, "type": "static", "scale_bits": (4, 3)}
+                )
+            )
+
+        with pytest.warns(UserWarning, match="will not align"):
+            _warn_if_block_size_mismatch(q(32), 16, "layer")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            _warn_if_block_size_mismatch(q(16), 16, "layer")  # matching block
+            per_channel = TensorQuantizer(QuantizerAttributeConfig(num_bits=8, axis=0))
+            _warn_if_block_size_mismatch(per_channel, 16, "layer")  # no block_sizes
 
 
 class TestMakeWeightMseCalibratorErrorFunc:
@@ -242,16 +209,14 @@ class TestMakeWeightMseCalibratorErrorFunc:
         _QUANT_FUNCTIONAL_BACKENDS.update(self._orig_quant_backends)
 
     def _make_quantizer(self, backend=None):
-        cfg = QuantizerAttributeConfig(num_bits=8, axis=None, backend=backend)
-        q = TensorQuantizer(quant_attribute_cfg=cfg)
+        q = TensorQuantizer(QuantizerAttributeConfig(num_bits=8, axis=None, backend=backend))
         q.amax = torch.tensor(1.0)
         return q
 
     def test_error_func_threaded_to_mse_calibrator(self):
-        q = self._make_quantizer()
         marker = lambda x, xq: (x - xq) ** 2  # noqa: E731
         cal = _make_weight_mse_calibrator(
-            q, 0.1, 0.25, 4.0, fp8_scale_sweep=False, error_func=marker
+            self._make_quantizer(), 0.1, 0.25, 4.0, fp8_scale_sweep=False, error_func=marker
         )
         assert isinstance(cal, calib.MseCalibrator)
         assert cal._error_func is marker

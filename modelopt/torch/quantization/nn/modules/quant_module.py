@@ -17,6 +17,7 @@
 
 import contextlib
 import warnings
+from collections.abc import Callable
 from typing import Any
 
 import torch
@@ -126,6 +127,17 @@ class QuantModule(DynamicModule):
         for weight_name in weight_attr_names(self):
             weight_quantizer = getattr(self, quantizer_attr_names(weight_name).weight_quantizer)
             yield getattr(self, weight_name), weight_quantizer
+
+    def register_calibration_input_hooks(
+        self, callback: Callable[[TensorQuantizer, torch.Tensor, torch.Tensor], None]
+    ) -> list:
+        """Register forward hooks calling ``callback(weight_quantizer, weight, input)`` per weight.
+
+        Activation-side counterpart to :meth:`iter_weights_for_calibration`, used by
+        activation-aware calibration (e.g. local-Hessian). Returns removable handles; the base
+        default is ``[]`` (no pairing available -> plain weight calibration). Override per module.
+        """
+        return []
 
     def fold_weight(self, keep_attrs: bool = False):
         """Fold the weight for faster eval."""
@@ -246,6 +258,18 @@ class QuantLinearConvBase(QuantInputBase):
         )
         self._register_temp_attribute("_enable_weight_quantization", False)
         self._register_dynamic_attribute("weight", self._get_quantized_weight)
+
+    def register_calibration_input_hooks(self, callback):
+        """Pair the weight quantizer with the forward input (linear only; conv falls back)."""
+        weight = getattr(self, "weight", None)
+        if weight is None or weight.dim() != 2 or not self.weight_quantizer.is_enabled:
+            return []
+
+        def _pre_hook(module, args):
+            if args:
+                callback(module.weight_quantizer, module.weight, args[0])
+
+        return [self.register_forward_pre_hook(_pre_hook)]
 
 
 class _LegacyQuantInputBaseMixin:

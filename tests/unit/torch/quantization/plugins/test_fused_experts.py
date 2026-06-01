@@ -651,9 +651,9 @@ class TestFusedExpertsCalibration:
 
         self._cleanup_registry(expert_type)
 
-    def test_local_hessian_calibrates_per_expert_weights(self):
-        """local_hessian builds a per-expert Hessian (from each expert's routed inputs)
-        and refines every expert's weight amax via the shared MSE calibration loop."""
+    def test_local_hessian_per_expert_capture_and_refinement(self):
+        """The plugin's extension point pairs each per-expert weight quantizer with its routed
+        input, and local_hessian uses that to refine every expert's weight amax."""
         import modelopt.torch.quantization as mtq
         from modelopt.torch.quantization.model_calib import local_hessian_calibrate
 
@@ -661,17 +661,12 @@ class TestFusedExpertsCalibration:
         expert_type = type(model.moe.experts)
         self._cleanup_registry(expert_type)
 
+        weight_quant = {"num_bits": 8, "axis": 0}
         quant_cfg = {
             "quant_cfg": [
                 {"quantizer_name": "*", "enable": False},
-                {
-                    "quantizer_name": "*gate_up_proj_weight_quantizer",
-                    "cfg": {"num_bits": 8, "axis": 0},
-                },
-                {
-                    "quantizer_name": "*down_proj_weight_quantizer",
-                    "cfg": {"num_bits": 8, "axis": 0},
-                },
+                {"quantizer_name": "*gate_up_proj_weight_quantizer", "cfg": weight_quant},
+                {"quantizer_name": "*down_proj_weight_quantizer", "cfg": weight_quant},
             ],
             "algorithm": "max",
         }
@@ -686,22 +681,33 @@ class TestFusedExpertsCalibration:
         expert_quantizers = list(experts.gate_up_proj_weight_quantizers) + list(
             experts.down_proj_weight_quantizers
         )
-        max_amax = {id(q): q.amax.clone() for q in expert_quantizers if q.amax is not None}
 
-        local_hessian_calibrate(model, forward_loop, fp8_scale_sweep=False, debug=True)
-
-        # At least one expert's routed activations produced a per-block Hessian.
-        accumulators = model._local_hessian_accumulators
-        assert any(acc.num_samples > 0 for acc in accumulators.values()), (
-            "no per-expert Hessian captured — F.linear hook likely bypassed."
+        # Extension point captures per-expert (weight_quantizer, weight_slice, cin).
+        captured = []
+        handles = experts.register_calibration_input_hooks(
+            lambda wq, w, x: captured.append((id(wq), tuple(w.shape), x.shape[-1]))
+        )
+        assert len(handles) == 2  # one pre-hook per shared input quantizer (gate_up, down)
+        with torch.no_grad():
+            model(torch.randn(1, 8, HIDDEN_DIM))
+        for h in handles:
+            h.remove()
+        valid_ids = {id(q) for q in expert_quantizers}
+        shapes = {(2 * INTERMEDIATE_DIM, HIDDEN_DIM), (HIDDEN_DIM, INTERMEDIATE_DIM)}
+        assert captured and all(
+            wq_id in valid_ids and shape in shapes and cin == shape[1]
+            for wq_id, shape, cin in captured
         )
 
-        refined = False
-        for q in expert_quantizers:
-            assert q.amax is not None and torch.isfinite(q.amax).all()
-            if id(q) in max_amax and not torch.allclose(q.amax, max_amax[id(q)]):
-                refined = True
-        assert refined, "local_hessian did not refine any expert weight amax"
+        # End-to-end: local_hessian refines per-expert weight amax via that capture.
+        max_amax = {id(q): q.amax.clone() for q in expert_quantizers if q.amax is not None}
+        local_hessian_calibrate(model, forward_loop, fp8_scale_sweep=False, debug=True)
+        assert any(a.num_samples > 0 for a in model._local_hessian_accumulators.values())
+        assert all(q.amax is not None and torch.isfinite(q.amax).all() for q in expert_quantizers)
+        assert any(
+            id(q) in max_amax and not torch.allclose(q.amax, max_amax[id(q)])
+            for q in expert_quantizers
+        )
 
         self._cleanup_registry(expert_type)
 
