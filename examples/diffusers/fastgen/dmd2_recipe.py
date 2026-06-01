@@ -53,12 +53,19 @@ from typing import Any
 import torch
 import torch.distributed as dist
 
-# Direct imports — any failure here stops the module load with a real stack, which
-# is what we want at runtime. A previous try/except gate made the subclass fall
-# back to ``object``, which silently masked missing nemo_automodel deps and
-# surfaced as a downstream ``TypeError: takes no arguments``.
-from nemo_automodel._diffusers.auto_diffusion_pipeline import NeMoAutoDiffusionPipeline
-from nemo_automodel.recipes.diffusion.train import TrainDiffusionRecipe, is_main_process
+# nemo_automodel is required to run this example (installed via requirements.txt). Wrap
+# the import in a clear, actionable error, but still re-raise so it fails loudly with a
+# real stack — a previous gate that fell back to ``object`` silently masked missing deps
+# and surfaced as a downstream ``TypeError: takes no arguments``.
+try:
+    from nemo_automodel._diffusers.auto_diffusion_pipeline import NeMoAutoDiffusionPipeline
+    from nemo_automodel.recipes.diffusion.train import TrainDiffusionRecipe, is_main_process
+except ImportError as exc:
+    raise ImportError(
+        "The DMD2 fastgen example requires `nemo_automodel`. Install the example "
+        "dependencies with:\n"
+        "    pip install -r examples/diffusers/fastgen/requirements.txt"
+    ) from exc
 from torch import nn
 
 import modelopt.torch.fastgen as mtf
@@ -68,10 +75,29 @@ from modelopt.torch.fastgen.methods.dmd import DMDPipeline
 from modelopt.torch.fastgen.plugins import qwen_image as qwen_image_plugin
 
 # Keys under the ``dmd2:`` YAML block that shadow fields on :class:`DMDConfig`. The
-# recipe applies these as a Pydantic ``model_copy(update=...)`` on top of the loaded
-# built-in recipe so users can tweak DMD2 hyperparameters without editing the shared
+# recipe deep-merges these on top of the loaded built-in recipe so users can tweak DMD2
+# hyperparameters without editing the shared
 # ``modelopt_recipes/general/distillation/dmd2_qwen_image.yaml`` file.
 _DMD_CONFIG_OVERRIDE_KEYS = frozenset(DMDConfig.model_fields.keys())
+
+
+def _deep_merge_dicts(base: dict, override: dict) -> dict:
+    """Recursively merge ``override`` onto ``base`` and return a new dict.
+
+    Nested dicts (e.g. the ``sample_t_cfg`` / ``ema`` sub-configs) are merged key-by-key
+    rather than replaced wholesale, so a YAML block that overrides a single sub-field
+    keeps the recipe's other sub-fields instead of silently resetting them to
+    :class:`DMDConfig` defaults.
+    """
+    merged = dict(base)
+    for key, value in override.items():
+        existing = merged.get(key)
+        if isinstance(value, dict) and isinstance(existing, dict):
+            merged[key] = _deep_merge_dicts(existing, value)
+        else:
+            merged[key] = value
+    return merged
+
 
 # Auto-detect substrings (matched case-insensitively against ``model_id``) that map to
 # DMDPipeline plugin subclasses. Keep this list small — adding a new entry is only the
@@ -1076,12 +1102,12 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
         overrides = {k: v for k, v in dmd_dict.items() if k in _DMD_CONFIG_OVERRIDE_KEYS}
         if not overrides:
             return base_config
-        # ``model_copy(update=...)`` is intentionally shallow and does not
-        # validate nested updates. Re-validate the merged dict so YAML blocks
-        # such as ``sample_t_cfg:`` and ``ema:`` become their Pydantic config
+        # Deep-merge so a YAML block that overrides a single ``sample_t_cfg`` / ``ema``
+        # sub-field keeps the recipe's other sub-fields — a shallow ``dict.update`` would
+        # replace the whole sub-config and silently reset its siblings to defaults.
+        # Re-validate the merged dict so the nested blocks become their Pydantic config
         # objects instead of raw dicts.
-        merged = base_config.model_dump()
-        merged.update(overrides)
+        merged = _deep_merge_dicts(base_config.model_dump(), overrides)
         return DMDConfig.model_validate(merged)
 
     def _build_fake_score_optimizer(self) -> torch.optim.Optimizer:
