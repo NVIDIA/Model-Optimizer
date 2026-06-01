@@ -6,8 +6,12 @@
 
 ## Params
 
-This is the text-only HLE task with params aligned to Artificial Analysis Index
-v2. HLE is judge-scored and requires judge credentials.
+Text-only HLE, params aligned to Artificial Analysis Index v2; judge-scored.
+Substitute the judge `model_id`/`url` with the literal values you keep in `.env`
+(`HLE_JUDGE_MODEL_ID` rec. **GPT-4o**, `NS_JUDGE_URL`; see `recipes/env.example`) —
+they're config, not secrets, so they don't need exporting. Only `api_key`
+(`INFERENCE_API_KEY`) is exported and read by the harness. Keep the judge fixed
+across comparable runs.
 
 ## YAML Fragment
 
@@ -23,9 +27,9 @@ Use this inside the top-level `evaluation.tasks` list:
       params:
         extra:
           judge:
-            model_id: <hle_aa_judge_model_id>
-            url: <openai_compatible_judge_chat_completions_url>
-            api_key: INFERENCE_API_KEY
+            model_id: <HLE_JUDGE_MODEL_ID>   # from .env; recommended GPT-4o
+            url: <NS_JUDGE_URL>              # from .env (/v1 base)
+            api_key: INFERENCE_API_KEY       # env-var name; exported, read by harness
 ```
 
 ## Score Extraction from mlflow

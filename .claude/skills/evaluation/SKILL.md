@@ -227,6 +227,8 @@ Implications for the agent:
 
 4. Apply, show updated list, ask "Final, or more changes?" Loop until confirmed.
 
+**Tasks that call an external judge / user-simulator / scoring endpoint.** Treat this as a general pattern, not a fixed list — HLE, AA-LCR, and Tau2 need one today, but other benchmarks may too (check each task's recipe). Their `model_id` / `url` are **config, not secrets**: substitute the **literal** values the user keeps in `.env` (keys per the task's recipe + `recipes/env.example`) into the task's `<VAR>` placeholders. Do **not** emit `${oc.env:...}` for these (it silently fails unless the var was exported with `set -a`). Only `api_key` stays an env-var *name* (e.g. `INFERENCE_API_KEY`), exported and read by the harness.
+
 **Known issue — nemo-skills self-deployment:** If using `nemo_skills.*` tasks with self-deployment (vLLM/SGLang/NIM), add at top level:
 
 ```yaml

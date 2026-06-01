@@ -6,8 +6,10 @@
 
 ## Params
 
-Recommended judge: use Qwen3 235B as an OpenAI-compatible equality-checker
-judge, and keep the same judge across comparable runs.
+Judge-scored (equality checker). Substitute the judge `model_id`/`url` with the
+literal values you keep in `.env` (`LCR_JUDGE_MODEL_ID` rec. **Qwen3 235B**,
+`NS_JUDGE_URL`; see `recipes/env.example`) — config, not secrets, so no export
+needed; only `api_key` (`INFERENCE_API_KEY`) is exported. Keep the judge fixed.
 
 AA-LCR needs long context: plan for roughly 120K input tokens plus 16K
 generation tokens. Set deployment `--max-model-len` to at least `131072`, and
@@ -52,9 +54,9 @@ block. Per SKILL.md Step 3, the deployment flag must live inside
         extra:
           num_repeats: 16
           judge:
-            model_id: <qwen3_235b_judge_model_id>
-            url: <openai_compatible_judge_chat_completions_url>
-            api_key: INFERENCE_API_KEY
+            model_id: <LCR_JUDGE_MODEL_ID>   # from .env; recommended Qwen3 235B
+            url: <NS_JUDGE_URL>              # from .env (/v1 base)
+            api_key: INFERENCE_API_KEY       # env-var name; exported, read by harness
 ```
 
 ## Score Extraction from mlflow
