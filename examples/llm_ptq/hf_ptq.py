@@ -15,7 +15,6 @@
 
 import argparse
 import copy
-import json
 import os
 import random
 import time
@@ -25,7 +24,6 @@ from typing import Any
 
 import numpy as np
 import torch
-import torch.distributed as dist
 from accelerate.hooks import remove_hook_from_module
 from cast_mxfp4_to_nvfp4 import apply_to_model as apply_cast_mxfp4_to_nvfp4
 from cast_mxfp4_to_nvfp4 import force_weight_quantizers_static
@@ -71,9 +69,7 @@ from modelopt.torch.export import (
     has_spec_opt,
     save_expert_token_count_table,
 )
-from modelopt.torch.export.convert_hf_config import convert_hf_quant_config_format
 from modelopt.torch.export.model_utils import get_language_model_from_vl, is_multimodal_model
-from modelopt.torch.export.unified_export_hf import _export_transformers_checkpoint
 from modelopt.torch.quantization.config import _default_disabled_quantizer_cfg, need_calibration
 from modelopt.torch.quantization.plugins.accelerate import init_quantized_weights
 from modelopt.torch.quantization.utils import is_quantized, patch_fsdp_mp_dtypes
@@ -304,7 +300,6 @@ def make_calib_dataloader(
             include_labels=include_labels,
         )
     if args.use_fsdp2 and calib_dataloader is not None and isinstance(calib_dataloader, DataLoader):
-        # Each rank sees a disjoint shard of the calibration set.
         calib_dataloader = shard_dataloader(calib_dataloader, args.rank, args.world_size)
     return calib_dataloader, first_text_speech_dataset
 
@@ -695,8 +690,6 @@ def mono_quantize(
             if args.calib_with_images and is_nemotron_vl_model:
                 calibrate_loop = create_vlm_calibration_loop(full_model, calib_dataloader)
             elif args.use_fsdp2:
-                # mtq.quantize passes the unwrapped inner module to forward_loop;
-                # FSDP2 needs hooks fired on the outer wrapped model.
                 calibrate_loop = fsdp_aware_forward_loop(
                     language_model, calib_dataloader, args.device
                 )
@@ -724,41 +717,6 @@ def mono_quantize(
 
     else:
         warnings.warn("Skipping quantization: model is already quantized.")
-
-
-def _export_fsdp2_hf_checkpoint(args: argparse.Namespace, full_model, export_path: str) -> None:
-    """FSDP2-aware HF checkpoint export.
-
-    ``_export_transformers_checkpoint`` detects the FSDP2 wrap internally and
-    gathers a full unsharded state dict (CPU-offloaded). Rank 0 then writes the
-    safetensors and patches the saved config with quantization metadata and the
-    original (pre-FSDP-prefix) architectures list.
-    """
-    post_state_dict, hf_quant_config = _export_transformers_checkpoint(full_model, torch.bfloat16)
-
-    if args.is_main:
-        export_dir = Path(export_path)
-        export_dir.mkdir(parents=True, exist_ok=True)
-        # Save hf_quant_config.json for backward compatibility.
-        with open(f"{export_dir}/hf_quant_config.json", "w") as f:
-            json.dump(hf_quant_config, f, indent=4)
-        hf_quant_config = convert_hf_quant_config_format(hf_quant_config)
-        full_model.save_pretrained(
-            export_dir, state_dict=post_state_dict, save_modelopt_state=False
-        )
-        original_config = f"{export_dir}/config.json"
-        with open(original_config) as f:
-            config_data = json.load(f)
-        config_data["quantization_config"] = hf_quant_config
-        # Strip FSDP-prefixed architectures and restore the original list captured pre-wrap.
-        original_archs = getattr(
-            full_model, "_original_architectures", full_model.config.architectures
-        )
-        if original_archs:
-            config_data["architectures"] = original_archs
-        with open(original_config, "w") as f:
-            json.dump(config_data, f, indent=4)
-    dist.barrier()
 
 
 def export_quantized(
@@ -854,7 +812,12 @@ def export_quantized(
                     full_model, export_dir=export_path, inplace_mem_efficient=True
                 )
             elif args.use_fsdp2:
-                _export_fsdp2_hf_checkpoint(args, full_model, export_path)
+                export_hf_checkpoint(
+                    full_model,
+                    torch.bfloat16,
+                    export_dir=export_path,
+                    architectures_override=getattr(full_model, "_original_architectures", None),
+                )
             else:
                 mtp_layer_prefixes, mtp_state_dict = load_mtp_weights(
                     full_model, args.pyt_ckpt_path
@@ -876,7 +839,6 @@ def export_quantized(
                     )
 
         # Restore default padding and export the tokenizer as well.
-        # Under FSDP2 only rank 0 writes to disk.
         if tokenizer is not None:
             tokenizer.padding_side = default_padding_side
             if default_pad_token is not None:
@@ -945,7 +907,7 @@ def pre_quantize(
             trust_remote_code=args.trust_remote_code,
         )
     else:
-        generated_ids_before_ptq = full_model.generate(preview_input_ids, max_new_tokens=10)
+        generated_ids_before_ptq = full_model.generate(preview_input_ids, max_new_tokens=100)
 
     return preview_input_ids, generated_ids_before_ptq
 
@@ -1002,7 +964,7 @@ def post_quantize(
         pass
     elif model_type != "llama4" and not is_nemotron_vl_model:
         # Our fake quantizer may not be fully compatible with torch.compile.
-        generated_ids_after_ptq = full_model.generate(preview_input_ids, max_new_tokens=10)
+        generated_ids_after_ptq = full_model.generate(preview_input_ids, max_new_tokens=100)
     elif is_nemotron_vl_model and tokenizer is not None:
         generated_ids_after_ptq = run_nemotron_vl_preview(
             full_model,
@@ -1568,8 +1530,6 @@ def main(args: argparse.Namespace):
     random.seed(RAND_SEED)
     np.random.seed(RAND_SEED)
 
-    # Populate args.rank / world_size / device / is_main. When --use_fsdp2 is off,
-    # these default to single-process values so downstream helpers can use them uniformly.
     setup_distributed_args(args)
 
     # launch a memory monitor to read the currently used GPU memory.
@@ -1638,6 +1598,5 @@ if __name__ == "__main__":
                 "(multi-format auto-quantize)."
             )
 
-    # patch_fsdp_mp_dtypes is a no-op when no FSDP2 wrap is applied; safe unconditionally.
     with patch_fsdp_mp_dtypes():
         main(args)

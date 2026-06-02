@@ -477,10 +477,6 @@ def fsdp2_weight_access_and_writeback_context(module: nn.Module, root_model: nn.
     TP DTensor under this context.
     """
     assert not hasattr(module, "_hf_hook"), "We dont support FSDP2 with HF accelerate hooks"
-    # Note: ``root_model`` need not itself be an ``FSDPModule``. ``fsdp2_wrap`` shards
-    # only the decoder layers and leaves the root unsharded (see its docstring), so the
-    # real precondition is that ``module`` is *under* FSDP2 — enforced by the assert
-    # below, since ``_get_enclosing_fsdp_module`` only ever returns ``FSDPModule`` instances.
     fsdp_module = _get_enclosing_fsdp_module(module, root_model)
     assert fsdp_module is not None, "Module is not wrapped by FSDP2"
     fsdp_device_mesh = _get_fsdp2_mesh(fsdp_module)
@@ -502,9 +498,7 @@ def fsdp2_weight_access_and_writeback_context(module: nn.Module, root_model: nn.
             device_mesh=original_device_mesh,
         )
         local_replicated = collected.to_local()
-        # With FSDP2 CPUOffloadPolicy, the DTensor's local shard lives on CPU, so the
-        # gathered local tensor is also on CPU. Mirror it onto the current GPU so
-        # calibration forwards (activations on GPU) see a same-device weight.
+        # cpu_offload: gathered shard is on CPU; mirror to GPU for forward.
         if local_replicated.device.type == "cpu" and torch.cuda.is_available():
             working_local = local_replicated.to(torch.cuda.current_device())
             originals[name] = (
@@ -539,8 +533,6 @@ def fsdp2_weight_access_and_writeback_context(module: nn.Module, root_model: nn.
         gpu_working,
     ) in originals.items():
         if cpu_local is not None:
-            # Mirror GPU-resident modifications back into the CPU-resident DTensor local shard
-            # so the subsequent redistribute-back sees the up-to-date values.
             cpu_local.data.copy_(gpu_working.data.to(cpu_local.device))
         original_param.to_local().data.copy_(
             collected.redistribute(

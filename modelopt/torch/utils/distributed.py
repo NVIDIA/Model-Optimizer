@@ -222,11 +222,6 @@ def cleanup():
         torch.distributed.destroy_process_group()
 
 
-# ---------------------------------------------------------------------------
-# FSDP2 helpers — used by examples/llm_ptq to run PTQ calibration under FSDP2.
-# ---------------------------------------------------------------------------
-
-
 def fsdp2_wrap(
     model,
     override_cls_name: str | None = None,
@@ -261,7 +256,7 @@ def fsdp2_wrap(
             raise RuntimeError(f"No modules of class {override_cls_name!r} found in model")
     else:
         layers = LayerActivationCollector.get_decoder_layers(model)
-        if not layers:
+        if layers is None:
             raise RuntimeError(
                 "Could not auto-detect decoder layers; pass override_cls_name explicitly."
             )
@@ -317,10 +312,6 @@ def fsdp2_shard(model, device, src_state_dict=None, mp_policy=None, cpu_offload=
 
     fsdp2_wrap(model, mp_policy=mp_policy, cpu_offload=cpu_offload)
 
-    # With CPU offload, FSDP2 requires DTensor params on CPU at lazy_init time
-    # (it streams them to GPU per-layer during forward). Also, set_model_state_dict
-    # rejects mixed-device models — so materialize everything on CPU first,
-    # broadcast, then promote non-DTensor params + buffers to GPU after.
     _materialize_meta_model(model, torch.device("cpu") if cpu_offload else device)
 
     if src_state_dict is not None:
@@ -347,6 +338,9 @@ def shard_dataloader(loader, rank: int, world_size: int):
     ``drop_last=False`` keeps per-rank batch counts equal (else a rank exits
     calibration early and hangs the others on FSDP2 collectives), at the cost of the
     sampler repeating up to ``world_size - 1`` samples to pad the even split.
+
+    Forwards all non-sampler DataLoader settings from ``loader`` (workers, pinning,
+    prefetch, init fn, generator, ...).
     """
     from torch.utils.data import DataLoader
     from torch.utils.data.distributed import DistributedSampler
@@ -365,6 +359,13 @@ def shard_dataloader(loader, rank: int, world_size: int):
         collate_fn=loader.collate_fn,
         num_workers=loader.num_workers,
         pin_memory=loader.pin_memory,
+        timeout=loader.timeout,
+        worker_init_fn=loader.worker_init_fn,
+        multiprocessing_context=loader.multiprocessing_context,
+        generator=loader.generator,
+        prefetch_factor=loader.prefetch_factor,
+        persistent_workers=loader.persistent_workers,
+        pin_memory_device=getattr(loader, "pin_memory_device", ""),
     )
 
 
@@ -520,9 +521,7 @@ def _load_via_parallel_read(
     hf_config = AutoConfig.from_pretrained(ckpt_path, **config_kwargs)
     dtype = getattr(hf_config, "torch_dtype", None) or torch.bfloat16
 
-    # Phase A: meta skeleton on every rank. include_buffers=False so computed
-    # buffers (e.g. rotary inv_freq, often non-persistent) are built for real on
-    # CPU here rather than stranded on meta with nothing to materialize them.
+    # include_buffers=False keeps computed buffers (rotary inv_freq, etc.) real on CPU.
     with init_empty_weights(include_buffers=False):
         model = AutoModelForCausalLM.from_config(
             hf_config, torch_dtype=dtype, trust_remote_code=trust_remote_code
@@ -531,7 +530,6 @@ def _load_via_parallel_read(
     if hasattr(model, "config") and hasattr(model.config, "use_cache"):
         model.config.use_cache = False
 
-    # Phase B: wrap decoder layers (root NOT wrapped). Discover prefixes.
     decoder_layers = LayerActivationCollector.get_decoder_layers(model)
     if decoder_layers is None:
         raise RuntimeError("Could not auto-detect decoder layers for parallel-read loader.")
@@ -541,11 +539,9 @@ def _load_via_parallel_read(
 
     fsdp2_wrap(model, mp_policy=mp_policy, cpu_offload=cpu_offload)
 
-    # Phase C: materialize meta → empty tensors. With cpu_offload, DTensor shards
-    # land on CPU (FSDP2 streams them to GPU per-layer during forward).
     _materialize_meta_model(model, torch.device("cpu") if cpu_offload else device)
 
-    # Phase D: each rank reads its owned layers from disk in parallel.
+    # Each rank reads only its owned layers from disk.
     owned: dict[int, dict] = {}
     for layer_idx in range(len(decoder_layers)):
         if layer_idx % world_size == rank:
@@ -556,9 +552,7 @@ def _load_via_parallel_read(
 
             owned[layer_idx] = _read_safetensors_state_dict(ckpt_path, weight_map, _has_prefix)
 
-    # Phase E: per-layer broadcast + shard. Broadcasts run on GPU (NCCL requires
-    # CUDA tensors); with cpu_offload we copy back to CPU before writing into the
-    # CPU-resident DTensor shard.
+    # Per-layer broadcast from owner, then shard locally.
     for layer_idx, layer in enumerate(decoder_layers):
         src = layer_idx % world_size
         layer_state_full = broadcast_state_dict(owned.get(layer_idx), src=src, device=device)
@@ -566,8 +560,6 @@ def _load_via_parallel_read(
         stripped = {k[len(prefix) :]: v for k, v in layer_state_full.items()}
         if cpu_offload:
             stripped = {k: v.cpu() for k, v in stripped.items()}
-        # Slice each rank's local DTensor shard from the full tensor it already holds
-        # (broadcast_from_rank0=False → no collective needed).
         set_model_state_dict(
             layer,
             stripped,
@@ -577,7 +569,7 @@ def _load_via_parallel_read(
             del owned[layer_idx]
         del layer_state_full, stripped
 
-    # Phase F: non-decoder params (embed, lm_head, norm) — rank 0 reads + broadcasts.
+    # Non-decoder params (embed, lm_head, norm): rank 0 reads + broadcasts.
     layer_prefix_tuple = tuple(layer_prefixes)
     non_layer = (
         _read_safetensors_state_dict(
@@ -599,7 +591,6 @@ def _load_via_parallel_read(
     if cpu_offload:
         _promote_non_dtensor_to_gpu(model, device)
 
-    # Phase G: tie weights, freeze.
     if hasattr(model, "tie_weights"):
         model.tie_weights()
     model.requires_grad_(False)
@@ -638,8 +629,7 @@ def load_fsdp2_causal_lm(
     from accelerate import init_empty_weights
     from transformers import AutoConfig, AutoModelForCausalLM
 
-    # Resolve ckpt_path: local dir as-is, otherwise HF Hub ID — rank 0 downloads,
-    # others wait at the barrier so we don't contend on the cache lock.
+    # HF Hub ID: rank 0 downloads, others wait at the barrier.
     resolved_path: str | None = ckpt_path
     if not os.path.isdir(ckpt_path):
         try:
@@ -696,8 +686,6 @@ def load_fsdp2_causal_lm(
         src_model = None
         src_state_dict = {}
 
-    # Meta skeleton on every rank; include_buffers=False keeps computed buffers
-    # (e.g. rotary inv_freq) real on CPU instead of stranded on meta.
     with init_empty_weights(include_buffers=False):
         model = AutoModelForCausalLM.from_config(
             hf_config, torch_dtype=dtype, trust_remote_code=trust_remote_code

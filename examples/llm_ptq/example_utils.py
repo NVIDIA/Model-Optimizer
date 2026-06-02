@@ -51,11 +51,6 @@ logger = logging.getLogger(__name__)
 SPECULATIVE_MODEL_LIST = ["Eagle", "Medusa"]
 
 
-# ---------------------------------------------------------------------------
-# FSDP2 helpers (opt-in via --use_fsdp2 in hf_ptq.py).
-# ---------------------------------------------------------------------------
-
-
 def setup_distributed_args(args):
     """Populate ``args.rank`` / ``world_size`` / ``device`` / ``is_main``.
 
@@ -74,8 +69,6 @@ def setup_distributed_args(args):
     else:
         args.rank = 0
         args.world_size = 1
-        # Leave ``args.device`` as parsed from ``--device`` (e.g. "cuda", "cpu");
-        # downstream helpers (``get_model`` etc.) consume it directly.
         args.is_main = True
 
 
