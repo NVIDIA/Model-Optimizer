@@ -193,6 +193,17 @@ Reasoning models: prefer reasoning mode (highest scores). For lower variance / c
 
 ### Step 4 — Fill remaining ??? values
 
+**Predefined cluster execution config (check this FIRST — it removes several `???`s).** Some NEL installs ship ready-made per-cluster execution configs as an `internal/slurm/<cluster>` group (via the optional `nemo_evaluator_launcher_internal` package). When present, prefer the matching one over `slurm/default` — it pre-fills the cluster's `hostname` / `partition` / `gres` (and node-exclusivity), so the user only sets `account`, `output_dir`, and `walltime`. Discover what's available (names/hostnames come from the install at runtime — nothing cluster-specific is hardcoded here):
+
+```bash
+python3 -c 'import nemo_evaluator_launcher_internal' 2>/dev/null && \
+PKG=$(python3 -c 'import nemo_evaluator_launcher_internal as m,os;print(os.path.dirname(m.__file__))') && \
+for f in "$PKG"/configs/execution/internal/slurm/*.yaml; do \
+  echo "$(basename "$f" .yaml) -> $(grep -E '^hostname:' "$f" | awk '{print $2}')"; done
+```
+
+If a listed hostname matches the target SLURM cluster, set `defaults: - execution: internal/slurm/<cluster>` (replacing `slurm/default`), and remove any now-redundant `execution.hostname` (keep `account` / `output_dir` / `walltime` overrides). Confirm it resolves with a `--dry-run`. If the package isn't installed or nothing matches, keep `slurm/default` and fill `hostname` / `account` / `output_dir` manually.
+
 - Find every `???` left. Ask the user only for what can't be inferred (SLURM hostname/account/output_dir, MLflow tracking URI, etc.). Don't propose defaults; let them give plain text.
 - **`parallelism`** — size it yourself from the run shape (total requests = `dataset_size × repeats` vs GPU serving capacity), and set `--max-num-seqs` to match. Read `references/parallelism.md` for the decision rule and worked examples; only ask the user if a non-GPU cap (e.g. judge rate limit) is unknown.
 - Ask about other defaults they may want to change (partition, walltime, MLflow tags).

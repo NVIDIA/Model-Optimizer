@@ -34,6 +34,9 @@
 # parallelism.
 #   nel run --config ... -o ++evaluation.nemo_evaluator_config.config.params.limit_samples=2
 defaults:
+  # slurm/default works on any SLURM cluster. If your NEL install ships a
+  # predefined per-cluster config (an internal/slurm/<cluster> group), prefer it —
+  # it pre-fills hostname/partition/gres. See SKILL.md Step 4 for the discovery check.
   - execution: slurm/default
   - deployment: vllm
   - _self_
