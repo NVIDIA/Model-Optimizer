@@ -46,14 +46,23 @@ Do not duplicate those workflows here. This skill should leave the user with a c
      - **Compute / throughput:** typical data-center target. Prefer recipes with activation quantization such as NVFP4 or FP8 when the downstream stack can use fast kernels.
      - **Memory / latency:** typical edge target. Minimize activated memory per forward pass to reduce latency; prefer weight-only or W4A16-style recipes when they preserve accuracy.
      - **Custom:** user-provided objective, such as checkpoint size, throughput at a fixed batch size, decode latency, prefill latency, or a product-specific memory budget.
+   - Ask for the primary quantization format or search family before choosing recipes.
+   - If the user did not provide a primary quantization format, stop and ask them to choose. Do not silently choose FP8/W8A8 because it is likely lossless.
+   - Offer common format choices:
+     - **NVFP4 / NVFP4_MSE:** low-bit Blackwell-oriented search family.
+     - **W4A16 NVFP4:** weight-only NVFP4 family, often useful for memory/latency targets.
+     - **FP8 / W8A8:** near-lossless baseline or primary target if the user explicitly chooses FP8.
+     - **INT4 / AWQ:** weight-only INT4 family for low-batch memory/latency use cases.
+     - **Custom / mixed:** user-provided format set, such as `nvfp4,fp8`, `w4a16_nvfp4+fp8_attn`, or model-specific recipe constraints.
    - Default acceptance goal: find the recipe with the best performance for the chosen objective while keeping each benchmark's accuracy loss under 1 percentage point versus the matching baseline.
    - Treat near-threshold or noisy benchmark deltas as inconclusive until reruns confirm whether the drop is a real regression.
-   - Record recipe-selection criteria: target active bytes/token, acceptable accuracy loss, calibration budget, and any user-provided throughput/latency goal.
+   - Record recipe-selection criteria: optimization objective, primary quantization format/search family, target active bytes/token, acceptable accuracy loss, calibration budget, and any user-provided throughput/latency goal.
    - Include quantization metadata such as scale storage in size estimates.
    - Keep accuracy and verbosity/token usage as separate first-class metrics.
 
 3. **Generate candidates**
    - Start with baselines: BF16/FP16, all-FP8 or W8A8, and one conservative low-bit recipe.
+   - Treat all-FP8/W8A8 as a near-lossless baseline unless the user selected FP8/W8A8 as the primary format. Do not end the search at FP8 just because it has the smallest accuracy drop.
    - If using ModelOpt, start from `modelopt_recipes` rather than inventing patterns from scratch. Prefer model-specific recipes first, then general PTQ presets/fragments.
    - Let the ModelOpt `ptq` skill own checkpoint generation and PTQ validation; use this skill to choose the objective, sequence recipes, compare results, and decide the next iteration.
    - Generate PTQ checkpoints only as candidates. Do not call a candidate "best" until it has passed the evaluation and comparison stages below.
@@ -89,6 +98,7 @@ Do not duplicate those workflows here. This skill should leave the user with a c
 ## Practical Defaults
 
 - Ask whether the primary success metric is compute/throughput, memory/latency, or a custom objective. Do not assume, and do not proceed to candidate planning until the objective is explicit.
+- Ask for the primary quantization format/search family, such as NVFP4, W4A16 NVFP4, FP8/W8A8, INT4/AWQ, or a custom mixed set. Do not assume, and do not silently select FP8 as the final recipe.
 - Default to a `<1pp` per-benchmark accuracy-loss constraint versus the matching baseline unless the user gives another threshold.
 - A generated PTQ checkpoint is a candidate artifact, not the final answer to a "best recipe" request. Evaluation and comparison are required before final selection.
 - Prefer active runtime cost over checkpoint size when optimizing routed or sparsely activated models.
