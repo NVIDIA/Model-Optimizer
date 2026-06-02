@@ -232,9 +232,10 @@ def _chatml_assistant_mask(input_ids: list[int], tokenizer: PreTrainedTokenizerB
                 if skip_remaining == 0:
                     skip_newline = True
                 continue
-            if skip_newline and tid == newline_id:
+            if skip_newline:
                 skip_newline = False
-                continue
+                if tid == newline_id:
+                    continue  # eat the single role-trailing newline
             masks[i] = 1
 
     return masks
