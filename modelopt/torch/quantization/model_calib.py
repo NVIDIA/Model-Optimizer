@@ -804,6 +804,15 @@ def local_hessian_calibrate(
         error_func_for=lambda q: error_funcs.get(id(q)),
     )
 
+    # Free the per-block Hessians (pinned by error_func closures) and the sweep's cached
+    # allocations so export starts from a defragmented allocator.
+    error_funcs.clear()
+    for module in name_to_module.values():
+        if isinstance(module, TensorQuantizer) and isinstance(module._calibrator, MseCalibrator):
+            module._calibrator._error_func = None
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
     if debug:
         model._local_hessian_accumulators = accumulators
 
