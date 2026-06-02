@@ -19,7 +19,7 @@ Clone Alpamayo and install it into the current environment so `alpamayo_r1` is
 importable:
 
 ```bash
-git clone https://github.com/nvlabs/alpamayo
+git clone https://github.com/nvlabs/alpamayo  # tested @ 4cda35d
 pip install ./alpamayo
 ```
 

@@ -14,9 +14,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-
 """Quantize AlpamayoR1 and export as an HF-style checkpoint.
 
 Usage:
@@ -28,7 +25,6 @@ import argparse
 import collections.abc
 import copy
 import json
-import logging
 import os
 from pathlib import Path
 from typing import Any
@@ -42,22 +38,10 @@ from alpamayo_r1.models.token_utils import to_special_token
 from tqdm import tqdm
 from transformers import AutoProcessor, AutoTokenizer
 
+import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
-from modelopt.torch.export import export_hf_checkpoint
 from modelopt.torch.export.quant_utils import get_quant_config
-from modelopt.torch.opt.plugins.huggingface import (
-    _LIBRARY_CLASSES_FOR_PATCHING,
-    _PATCHED_CLASSES,
-    patch_pretrained_methods,
-)
 from modelopt.torch.utils.dataset_utils import create_forward_loop, get_dataset_dataloader
-
-logger = logging.getLogger(__name__)
-
-try:
-    assert torch.ops.tensorrt.quantize_op.default
-except Exception:
-    logger.warning("Unable to import quantization op. Please install modelopt library")
 
 MIN_PIXELS = 163840
 MAX_PIXELS = 196608
@@ -137,25 +121,6 @@ def to_device(
         return [to_device(elem, device=device, dtype=dtype) for elem in data]
     else:
         return data
-
-
-def enable_huggingface_checkpointing_patch() -> None:
-    """Patch PreTrainedModel.from_pretrained / save_pretrained to save/restore ModelOpt state.
-
-    Must be called before AlpamayoR1.from_pretrained() when loading a quantized (FP8/NVFP4)
-    checkpoint so that modelopt_state.pth is restored and _amax scaling factors are applied.
-    """
-    for name, (classes, methods_list) in _LIBRARY_CLASSES_FOR_PATCHING.items():
-        for cls, patch_methods in zip(classes, methods_list):
-            if cls in _PATCHED_CLASSES:
-                continue
-            patch_methods = [m for m in patch_methods if m[0] != "_from_config"]
-            patch_pretrained_methods(cls, patch_methods)
-            _PATCHED_CLASSES.add(cls)
-        print(f"ModelOpt save/restore enabled for `{name}` library.")
-
-
-enable_huggingface_checkpointing_patch()
 
 
 def _teacher_forced_flow_loss_forward(
@@ -345,7 +310,7 @@ def make_joint_calibration_forward_loop(
 
 def read_clip_ids_from_parquet(parquet_path: str) -> list[str]:
     """
-    Reads clip_ids from parquet. Tries common column names; falls back to index if needed.
+    Reads clip_ids from the parquet's "key" column.
     Returns clip_ids as a list of strings (unique, preserving first occurrence order).
     """
     parquet_path = str(parquet_path)
@@ -375,7 +340,7 @@ def quantize_model(model, args, tokenizer=None, calibration_forward_loop=None):
         - nvfp4: 4-bit NVIDIA floating point quantization
     Args:
         model: PyTorch model to quantize. Must be in evaluation mode.
-        args: Command line arguments containing quant_format and debug.
+        args: Command line arguments containing quant_format.
         tokenizer: Hugging Face tokenizer for creating calibration data.
             Required only when `calibration_forward_loop` is not provided.
         calibration_forward_loop: Optional callable taking `model` and running
@@ -424,9 +389,9 @@ def quantize_model(model, args, tokenizer=None, calibration_forward_loop=None):
                 quant_cfg["quant_cfg"].append({"quantizer_name": f"{_name}.*", "enable": False})
 
     model = mtq.quantize(model, quant_cfg, forward_loop=calibrate_loop)
-    if args.debug:
-        print("================== quantize_model summary ==================")
-        mtq.print_quant_summary(model)
+
+    print("================== quantize_model summary ==================")
+    mtq.print_quant_summary(model)
 
     return model
 
@@ -438,27 +403,23 @@ def auto_quantize_model(
     clip_ids,
     processor,
     t0_us: int,
-    top_p: float,
-    temperature: float,
-    max_generation_length: int,
-    calibration_traj_samples: int,
     device: str,
 ):
     """
     Quantize a PyTorch model using ModelOpt's AutoQuantize API.
 
     Searches per-layer across [NVFP4_DEFAULT_CFG, FP8_DEFAULT_CFG] under the
-    effective-bits budget in args.auto_quantize_bits. Calibration data is built
-    from the same joint VLM + diffusion rollout used by
-    alpamayo_r1.eval.make_joint_calibration_forward_loop.
+    effective-bits budget in args.auto_quantize_bits. Calibration runs the
+    teacher-forced flow-matching forward (teacher_forced_flow_loss_forward) on
+    the calibration clips; the MSE between v_pred and v_target is the search loss.
 
     Args:
         model: PyTorch model to quantize. Must be in eval mode.
-        args: Namespace with `auto_quantize_bits` (float) and `debug` (bool).
+        args: Namespace with `auto_quantize_bits` (float).
         clip_ids: Iterable of clip_ids for calibration.
         processor: HF processor used for chat-template tokenization.
-        t0_us, top_p, temperature, max_generation_length, calibration_traj_samples,
-        device: Same semantics as make_joint_calibration_forward_loop.
+        t0_us: Trajectory anchor timestamp passed to load_physical_aiavdataset.
+        device: Device to place calibration tensors on.
 
     Returns:
         Quantized model (the search_state from mtq.auto_quantize is discarded).
@@ -535,9 +496,8 @@ def auto_quantize_model(
     print("================== auto_quantize search_state ==================")
     print(search_state)
 
-    if args.debug:
-        print("================== auto_quantize_model summary ==================")
-        mtq.print_quant_summary(model)
+    print("================== auto_quantize_model summary ==================")
+    mtq.print_quant_summary(model)
 
     return model
 
@@ -575,7 +535,12 @@ def main():
         default="0417_16rows_train_set_for_calibration_25.10.parquet",
         help="Parquet file with clip_ids for calibration",
     )
-    ap.add_argument("--t0_us", type=int, default=5_100_000)
+    ap.add_argument(
+        "--t0_us",
+        type=int,
+        default=5_100_000,
+        help="Trajectory anchor timestamp passed to load_physical_aiavdataset",
+    )
     ap.add_argument("--top_p", type=float, default=0.98)
     ap.add_argument("--temperature", type=float, default=0.6)
     ap.add_argument("--max_generation_length", type=int, default=256)
@@ -600,6 +565,10 @@ def main():
         clip_ids = clip_ids[: args.limit]
     print(f"Loaded {len(clip_ids)} clip_ids from: {parquet_path}")
 
+    # Patch PreTrainedModel.from_pretrained / save_pretrained so ModelOpt state is saved with the
+    # checkpoint (and restored when AlpamayoR1.from_pretrained later loads the quantized weights).
+    mto.enable_huggingface_checkpointing()
+
     device = "cuda"
     print(f"Loading model from {args.ckpt!r} ...")
     model = AlpamayoR1.from_pretrained(args.ckpt, dtype=torch.float16).to(
@@ -615,7 +584,6 @@ def main():
         quant_format=args.quantize,
         quant_algo="max",
         weight_only=False,
-        debug=True,
         auto_quantize_bits=args.auto_quantize_bits,
         real_quant=args.real_quant,
     )
@@ -626,10 +594,6 @@ def main():
             clip_ids=clip_ids,
             processor=processor,
             t0_us=args.t0_us,
-            top_p=args.top_p,
-            temperature=args.temperature,
-            max_generation_length=args.max_generation_length,
-            calibration_traj_samples=args.num_traj_samples,
             device=device,
         )
     else:
