@@ -69,9 +69,7 @@ def get_quant_config(precision, lm_head_precision="fp16"):
     else:
         raise ValueError(f"Unsupported precision: {precision}")
 
-    quant_cfg_list: list = [
-        e for e in quant_cfg["quant_cfg"] if isinstance(e, dict) and "quantizer_name" in e
-    ]
+    quant_cfg_list: list = [e for e in quant_cfg["quant_cfg"] if "quantizer_name" in e]
 
     if lm_head_precision == "fp8":
         quant_cfg_list.append(

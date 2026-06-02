@@ -25,6 +25,7 @@ from modelopt.torch.quantization.config import (
     INT4_AWQ_CFG,
     NVFP4_DEFAULT_CFG,
     W4A8_AWQ_BETA_CFG,
+    MaxCalibConfig,
     QuantizeConfig,
     find_quant_cfg_entry_by_path,
     need_calibration,
@@ -80,7 +81,7 @@ class TestNormalizeQuantCfgList:
         result = normalize_quant_cfg_list(raw)
         assert len(result) == 1
         assert result[0]["quantizer_name"] == "*weight_quantizer"
-        assert result[0]["cfg"] == {"num_bits": 8, "axis": 0}
+        assert result[0]["cfg"].model_dump(exclude_unset=True) == {"num_bits": 8, "axis": 0}
         assert result[0]["enable"] is True  # defaulted
 
     def test_new_format_enable_false(self):
@@ -102,7 +103,7 @@ class TestNormalizeQuantCfgList:
         raw = [{"*weight_quantizer": {"num_bits": 8, "axis": 0}}]
         result = normalize_quant_cfg_list(raw)
         assert result[0]["quantizer_name"] == "*weight_quantizer"
-        assert result[0]["cfg"] == {"num_bits": 8, "axis": 0}
+        assert result[0]["cfg"].model_dump(exclude_unset=True) == {"num_bits": 8, "axis": 0}
         assert result[0]["enable"] is True  # defaulted
 
     def test_legacy_single_key_dict_with_enable(self):
@@ -165,57 +166,101 @@ class TestNormalizeQuantCfgList:
 
     def test_error_on_empty_cfg_dict_implicit_enable(self):
         """Entry with cfg={} and implicit enable=True is rejected."""
-        with pytest.raises(ValueError, match="non-empty dict"):
+        with pytest.raises(ValueError, match=r"at least one quantizer attribute"):
             normalize_quant_cfg_list([{"quantizer_name": "*weight_quantizer", "cfg": {}}])
 
     def test_error_on_empty_cfg_dict_explicit_enable_true(self):
         """Entry with cfg={} and explicit enable=True is rejected."""
-        with pytest.raises(ValueError, match="non-empty dict"):
+        with pytest.raises(ValueError, match=r"at least one quantizer attribute"):
             normalize_quant_cfg_list(
                 [{"quantizer_name": "*weight_quantizer", "cfg": {}, "enable": True}]
             )
 
     def test_error_on_empty_cfg_list_enable_true(self):
         """Entry with cfg=[] and enable=True is rejected."""
-        with pytest.raises(ValueError, match="non-empty dict"):
+        with pytest.raises(ValueError, match=r"at least one quantizer attribute"):
             normalize_quant_cfg_list(
                 [{"quantizer_name": "*weight_quantizer", "cfg": [], "enable": True}]
             )
 
     def test_error_on_non_dict_non_list_cfg_enable_true(self):
-        """Entry with cfg of invalid type (e.g. int) and enable=True is rejected."""
-        with pytest.raises(ValueError, match="non-empty dict"):
+        """Entry with cfg of invalid type (e.g. int) and enable=True is rejected.
+
+        Two error paths are acceptable here, and the assertion accepts either:
+        pydantic's field-type check (``cfg`` must be a dict or list) fires first when
+        ``cfg`` is the wrong python type, while ``QuantizerCfgEntry``'s model validator
+        emits the "non-empty dict" message when ``cfg`` is the right type but empty.
+        Either way the message must implicate the ``cfg`` field, not just any
+        ``ValueError``.
+        """
+        with pytest.raises(ValueError, match=r"(?s)cfg.*(non-empty|valid dictionary|valid list)"):
             normalize_quant_cfg_list(
                 [{"quantizer_name": "*weight_quantizer", "cfg": 42, "enable": True}]
             )
 
     def test_error_on_cfg_list_with_empty_dict_enable_true(self):
         """Entry with cfg=[{}] and enable=True is rejected (empty dict element)."""
-        with pytest.raises(ValueError, match="non-empty dict"):
+        with pytest.raises(ValueError, match=r"at least one quantizer attribute"):
             normalize_quant_cfg_list(
                 [{"quantizer_name": "*weight_quantizer", "cfg": [{}], "enable": True}]
             )
 
     def test_error_on_cfg_list_with_non_dict_element_enable_true(self):
-        """Entry with cfg=[42] and enable=True is rejected (non-dict element)."""
-        with pytest.raises(ValueError, match="non-empty dict"):
+        """Entry with cfg=[42] and enable=True is rejected.
+
+        Same dual-path acceptance as :meth:`test_error_on_non_dict_non_list_cfg_enable_true`:
+        pydantic may report a list-element type error, or the model validator may report
+        "non-empty dict"; the assertion accepts either as long as the message names the
+        ``cfg`` field.
+        """
+        with pytest.raises(ValueError, match=r"(?s)cfg.*(non-empty|valid dictionary|valid list)"):
             normalize_quant_cfg_list(
                 [{"quantizer_name": "*weight_quantizer", "cfg": [42], "enable": True}]
             )
 
-    def test_empty_cfg_dict_enable_false_accepted(self):
-        """Entry with cfg={} and enable=False is allowed (disable-only entry)."""
+    def test_empty_cfg_dict_enable_false_normalized_to_none(self):
+        """Entry with cfg={} and enable=False is normalised to cfg=None (disable-only).
+
+        A non-``None`` cfg is applied as a full quantizer-attribute replacement, so an
+        empty cfg paired with enable=False would silently reset the quantizer's
+        attributes.  Normalisation to ``None`` makes the entry behave like a pure
+        disable, preserving the existing attribute config.
+        """
         result = normalize_quant_cfg_list(
             [{"quantizer_name": "*input_quantizer", "cfg": {}, "enable": False}]
         )
         assert result[0]["enable"] is False
+        assert result[0]["cfg"] is None
 
-    def test_empty_cfg_list_enable_false_accepted(self):
-        """Entry with cfg=[] and enable=False is allowed (disable-only entry)."""
+    def test_empty_cfg_list_enable_false_normalized_to_none(self):
+        """Entry with cfg=[] and enable=False is normalised to cfg=None."""
         result = normalize_quant_cfg_list(
             [{"quantizer_name": "*input_quantizer", "cfg": [], "enable": False}]
         )
         assert result[0]["enable"] is False
+        assert result[0]["cfg"] is None
+
+    def test_cfg_list_of_empty_dicts_enable_false_normalized_to_none(self):
+        """Entry with cfg=[{}] and enable=False is normalised to cfg=None."""
+        result = normalize_quant_cfg_list(
+            [{"quantizer_name": "*input_quantizer", "cfg": [{}], "enable": False}]
+        )
+        assert result[0]["enable"] is False
+        assert result[0]["cfg"] is None
+
+    def test_nonempty_cfg_enable_false_preserved(self):
+        """Entry with a non-empty cfg and enable=False keeps the cfg (disable+replace)."""
+        result = normalize_quant_cfg_list(
+            [
+                {
+                    "quantizer_name": "*input_quantizer",
+                    "cfg": {"num_bits": 4},
+                    "enable": False,
+                }
+            ]
+        )
+        assert result[0]["enable"] is False
+        assert result[0]["cfg"].model_dump(exclude_unset=True) == {"num_bits": 4}
 
     def test_new_format_with_list_cfg(self):
         """cfg can be a list of dicts for SequentialQuantizer."""
@@ -230,7 +275,7 @@ class TestNormalizeQuantCfgList:
         ]
         result = normalize_quant_cfg_list(raw)
         assert len(result) == 1
-        assert result[0]["cfg"] == raw[0]["cfg"]
+        assert [c.model_dump(exclude_unset=True) for c in result[0]["cfg"]] == raw[0]["cfg"]
         assert result[0]["enable"] is True
 
     def test_legacy_flat_dict_conversion(self):
@@ -242,7 +287,7 @@ class TestNormalizeQuantCfgList:
         assert result[0]["enable"] is False
         assert result[0]["cfg"] is None
         assert result[1]["quantizer_name"] == "*weight_quantizer"
-        assert result[1]["cfg"] == {"num_bits": 8, "axis": 0}
+        assert result[1]["cfg"].model_dump(exclude_unset=True) == {"num_bits": 8, "axis": 0}
         assert result[1]["enable"] is True
 
     def test_legacy_enable_only_produces_cfg_none(self):
@@ -273,7 +318,7 @@ class TestNormalizeQuantCfgList:
         raw = [{"default": {"num_bits": 8, "axis": None}}]
         result = normalize_quant_cfg_list(raw)
         assert result[0]["quantizer_name"] == "*"
-        assert result[0]["cfg"] == {"num_bits": 8, "axis": None}
+        assert result[0]["cfg"].model_dump(exclude_unset=True) == {"num_bits": 8, "axis": None}
         assert result[0]["enable"] is True
 
     def test_legacy_flat_dict_with_default_key(self):
@@ -308,7 +353,7 @@ class TestNormalizeQuantCfgList:
         assert len(result) == 1
         assert result[0]["parent_class"] == "nn.Linear"
         assert result[0]["quantizer_name"] == "*weight_quantizer"
-        assert result[0]["cfg"] == {"num_bits": 4, "axis": 0}
+        assert result[0]["cfg"].model_dump(exclude_unset=True) == {"num_bits": 4, "axis": 0}
         assert result[0]["enable"] is True
 
     def test_legacy_list_valued_cfg(self):
@@ -342,7 +387,7 @@ class TestFindQuantCfgEntry:
             ]
         )
         result = find_quant_cfg_entry_by_path(entries, "*weight_quantizer")
-        assert result["cfg"] == {"num_bits": 4}
+        assert result["cfg"].model_dump(exclude_unset=True) == {"num_bits": 4}
 
     def test_exact_match_only(self):
         """Does not do fnmatch — only exact string equality on quantizer_name."""
@@ -399,7 +444,7 @@ class TestMatchQuantizerCfg:
             [{"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8}}]
         )
         matched, enable = _match_quantizer_cfg(quant_cfg, "weight_quantizer")
-        assert matched == {"num_bits": 8}
+        assert matched.model_dump(exclude_unset=True) == {"num_bits": 8}
         assert enable is True
 
     def test_star_matches_any_bare_name(self):
@@ -419,7 +464,7 @@ class TestMatchQuantizerCfg:
             [{"quantizer_name": "*mlp*weight_quantizer", "cfg": {"num_bits": 4}}]
         )
         matched, enable = _match_quantizer_cfg(quant_cfg, "weight_quantizer")
-        assert matched == {"num_bits": 4}
+        assert matched.model_dump(exclude_unset=True) == {"num_bits": 4}
 
     def test_path_scoped_pattern_does_not_match_different_suffix(self):
         """'*mlp*weight_quantizer' does NOT match bare 'input_quantizer'."""
@@ -443,7 +488,7 @@ class TestMatchQuantizerCfg:
             ]
         )
         matched, _ = _match_quantizer_cfg(quant_cfg, "weight_quantizer")
-        assert matched == {"num_bits": 4}
+        assert matched.model_dump(exclude_unset=True) == {"num_bits": 4}
 
     def test_no_match_returns_none(self):
         """No matching entry returns (None, None)."""
@@ -525,3 +570,35 @@ class TestQuantizeConfigValidators:
             algorithm="max",
         )
         assert len(cfg.quant_cfg) == 2
+
+
+class TestLayerwiseUseSequentialAlias:
+    """`layerwise` accepts the legacy `use_sequential` name via validation_alias.
+
+    Old PTQ checkpoints serialized the field as `use_sequential` before #1251 renamed
+    it to `layerwise`. AliasChoices lets those checkpoints load without a migration
+    validator while still serializing under the current name.
+    """
+
+    def test_use_sequential_true_sets_layerwise(self):
+        cfg = MaxCalibConfig(use_sequential=True)
+        assert cfg.layerwise is True
+
+    def test_use_sequential_false_sets_layerwise(self):
+        cfg = MaxCalibConfig(use_sequential=False)
+        assert cfg.layerwise is False
+
+    def test_layerwise_name_still_accepted(self):
+        cfg = MaxCalibConfig(layerwise=True)
+        assert cfg.layerwise is True
+
+    def test_serializes_under_current_name(self):
+        """Dump must use `layerwise`, not the legacy alias."""
+        dumped = MaxCalibConfig(use_sequential=True).model_dump()
+        assert dumped["layerwise"] is True
+        assert "use_sequential" not in dumped
+
+    def test_unknown_field_still_rejected(self):
+        """extra='forbid' must still reject unrelated unknown fields."""
+        with pytest.raises(ValidationError):
+            MaxCalibConfig(not_a_real_field=True)

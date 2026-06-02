@@ -141,8 +141,8 @@ class TestSparseNM:
         [(2, 4), (4, 8)],
         ids=["2:4", "4:8"],
     )
-    def test_dense_window_preserves_local(self, n, m):
-        """Large dense_window_size makes sparse output closer to dense."""
+    def test_dense_recent_tokens_preserves_local(self, n, m):
+        """Large dense_recent_tokens makes sparse output closer to dense."""
         q, k, v, locs, lens = self._make_inputs(seq_len=256)
         scale = 1.0 / (64**0.5)
         out_dense = attention(q, k, v, locs, lens, 256, softmax_scale=scale)
@@ -156,7 +156,7 @@ class TestSparseNM:
             softmax_scale=scale,
             sparsity_n=n,
             sparsity_m=m,
-            dense_window_size=64,
+            dense_recent_tokens=64,
         )
         out_large = attention(
             q,
@@ -168,7 +168,7 @@ class TestSparseNM:
             softmax_scale=scale,
             sparsity_n=n,
             sparsity_m=m,
-            dense_window_size=100000,
+            dense_recent_tokens=100000,
         )
         err_small = (out_small - out_dense).abs().mean().item()
         err_large = (out_large - out_dense).abs().mean().item()
@@ -179,8 +179,8 @@ class TestSparseNM:
         [(2, 4), (4, 8)],
         ids=["2:4", "4:8"],
     )
-    def test_sink_tokens_preserve_early_kv(self, n, m):
-        """num_sink_tokens keeps early KV positions dense, reducing error vs fully sparse."""
+    def test_dense_sink_tokens_preserve_early_kv(self, n, m):
+        """dense_sink_tokens keeps early KV positions dense, reducing error vs fully sparse."""
         q, k, v, locs, lens = self._make_inputs(seq_len=512)
         scale = 1.0 / (64**0.5)
         out_dense = attention(q, k, v, locs, lens, 512, softmax_scale=scale)
@@ -194,7 +194,7 @@ class TestSparseNM:
             softmax_scale=scale,
             sparsity_n=n,
             sparsity_m=m,
-            num_sink_tokens=0,
+            dense_sink_tokens=0,
         )
         out_with_sink = attention(
             q,
@@ -206,13 +206,60 @@ class TestSparseNM:
             softmax_scale=scale,
             sparsity_n=n,
             sparsity_m=m,
-            num_sink_tokens=128,
+            dense_sink_tokens=128,
         )
         err_no_sink = (out_no_sink - out_dense).abs().mean().item()
         err_with_sink = (out_with_sink - out_dense).abs().mean().item()
         assert err_with_sink < err_no_sink, (
             f"Sink tokens should reduce error: no_sink={err_no_sink:.6f}, with_sink={err_with_sink:.6f}"
         )
+
+    def test_sparse_nm_with_skip_softmax(self):
+        """N:M sparse softmax and skip-softmax can run in the same prefill launch."""
+        batch, seq_len = 1, 4096
+        num_kv_heads, head_dim = 4, 64
+        total = batch * seq_len
+        scale = 1.0 / (head_dim**0.5)
+
+        torch.manual_seed(123)
+        k = torch.randn(total, num_kv_heads, head_dim, device="cuda", dtype=torch.float16)
+        v = torch.randn(total, num_kv_heads, head_dim, device="cuda", dtype=torch.float16)
+        q = k.clone()
+        locs, lens = make_varlen_meta([seq_len] * batch)
+
+        out = attention(
+            q,
+            k,
+            v,
+            locs,
+            lens,
+            seq_len,
+            is_causal=False,
+            softmax_scale=scale,
+            sparsity_n=2,
+            sparsity_m=4,
+            skip_softmax_threshold=0.99,
+            measure_sparsity=True,
+        )
+
+        assert out.shape == q.shape
+        assert not torch.isnan(out).any()
+        assert not torch.isinf(out).any()
+        assert out._sparsity_total > 0
+        assert out._sparsity_skipped > 0
+
+        out_skip_only = attention(
+            q,
+            k,
+            v,
+            locs,
+            lens,
+            seq_len,
+            is_causal=False,
+            softmax_scale=scale,
+            skip_softmax_threshold=0.99,
+        )
+        assert not torch.allclose(out, out_skip_only, atol=1e-3, rtol=1e-3)
 
     # NOTE: N:M sparse attention is for prefill only, not decode.
 
@@ -397,15 +444,15 @@ class TestSparseNMIntegration:
             logits_dense = model_dense(input_ids=ids).logits
         del model_dense
 
-        # Sparse via mtsa.sparsify() with dense_window_size=0 to force sparsity on all tiles
+        # Sparse via mtsa.sparsify() with dense_recent_tokens=0 to force sparsity on all tiles
         sparse_cfg = {
             "sparse_cfg": {
                 "*attn*": {
                     "method": "triton_sparse_softmax",
                     "sparsity_n": 2,
                     "sparsity_m": 4,
-                    "num_sink_tokens": 0,
-                    "dense_window_size": 0,
+                    "dense_sink_tokens": 0,
+                    "dense_recent_tokens": 0,
                     "backend": "triton",
                     "enable": True,
                 },

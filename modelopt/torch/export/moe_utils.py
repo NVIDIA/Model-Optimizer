@@ -62,6 +62,29 @@ def _export_fused_experts(module: nn.Module, dtype: torch.dtype) -> None:
     for idx in range(n):
         expert = nn.Module()
 
+        # If the gate_up source quantizer was never calibrated (rare expert
+        # that received no calibration tokens), derive its amax once from the
+        # FUSED tensor so gate and up share the same weight_scale_2 below.
+        # Why: vLLM fuses W1 (gate) and W3 (up) at load time and asserts a
+        # single per-tensor scale across the fusion. The per-projection
+        # fallback further down would otherwise compute amax independently from
+        # each half — gate's max and up's max generally differ — producing
+        # mismatched weight_scale_2 and garbled MoE output at inference.
+        gate_up_q = module.gate_up_proj_weight_quantizers[idx]
+        if getattr(gate_up_q, "is_enabled", False) and (
+            not hasattr(gate_up_q, "_amax")
+            or gate_up_q._amax is None
+            or torch.all(gate_up_q._amax == 0)
+        ):
+            gate_up_q.amax = gate_up[idx].abs().amax().to(torch.float32)
+            warnings.warn(
+                f"Expert {idx} gate_up_proj weight quantizer was not calibrated "
+                f"(amax missing or zero). Using fused-tensor amax as fallback "
+                f"(shared by gate and up so weight_scale_2 stays consistent). "
+                f"Consider increasing calibration size to activate all experts.",
+                stacklevel=2,
+            )
+
         projections = [
             ("gate_proj", gate_up[idx, :expert_dim, :], 0, fused_dim0, True),
             ("up_proj", gate_up[idx, expert_dim:, :], expert_dim, fused_dim0, True),
@@ -87,11 +110,19 @@ def _export_fused_experts(module: nn.Module, dtype: torch.dtype) -> None:
                 and w_quantizer._amax.dim() >= 1
             ):
                 amax = w_quantizer._amax
+                # Per-block _amax (NVFP4 static) collapses the row axis we want
+                # to slice on; restore it so dim-0 slicing splits gate/up.
+                if amax.numel() != fused_total and amax.numel() % fused_total == 0:
+                    amax = amax.contiguous().view(fused_total, amax.numel() // fused_total)
                 amax_dim0 = amax.shape[0]
                 if fused_total % amax_dim0 == 0:
                     slice_start = fused_start * amax_dim0 // fused_total
                     slice_end = (fused_start + weight_slice.shape[0]) * amax_dim0 // fused_total
-                    w_quantizer.amax = amax[slice_start:slice_end].contiguous()
+                    sliced = amax[slice_start:slice_end].contiguous()
+                    # The amax setter refuses shape changes; drop _amax first.
+                    if hasattr(w_quantizer, "_amax"):
+                        delattr(w_quantizer, "_amax")
+                    w_quantizer.amax = sliced
                 else:
                     warnings.warn(
                         f"Expert {idx} {proj_name}: fused amax dim0 ({amax_dim0}) does not "

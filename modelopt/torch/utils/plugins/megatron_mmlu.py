@@ -60,6 +60,7 @@ def megatron_mmlu(
     few_shots: int = 0,
     fraction: float = 0.05,
     batch_size: int = 1,
+    mmlu_dataset: str = "cais/mmlu",
 ) -> float:
     """Evaluate the model on MMLU using log-likelihood scoring over batched prefill passes.
 
@@ -73,6 +74,8 @@ def megatron_mmlu(
         few_shots: The number of few-shot examples to use.
         fraction: The fraction of the test set to evaluate on.
         batch_size: Number of examples to process in one forward pass.
+        mmlu_dataset: HF dataset name or local MMLU dataset path passed to `datasets.load_dataset`.
+            Defaults to ``cais/mmlu``.
     """
     print_rank_0(
         f"\nMMLU ({fraction * 100}%, {few_shots}-shot, Batch Size: {batch_size}) evaluation started...\n"
@@ -104,8 +107,8 @@ def megatron_mmlu(
 
     # Load all subjects in two dataset calls instead of 2x num_subjects calls.
     # The "all" config includes a "subject" field for per-subject reporting.
-    test_dataset = load_dataset("cais/mmlu", "all", split="test")
-    dev_dataset = load_dataset("cais/mmlu", "all", split="dev") if few_shots > 0 else None
+    test_dataset = load_dataset(mmlu_dataset, "all", split="test")
+    dev_dataset = load_dataset(mmlu_dataset, "all", split="dev") if few_shots > 0 else None
 
     # Group dev examples by subject for few-shot prompt construction.
     dev_by_subject: dict = {}

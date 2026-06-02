@@ -1860,3 +1860,37 @@ def change_casts_to_fp16(model: onnx.ModelProto, target_op_types: list[str]) -> 
                 break
 
     return model
+
+
+def clear_stale_value_info(model: onnx.ModelProto) -> int:
+    """Clear stale type metadata that would otherwise trip ORT's type checker.
+
+    Walks every ``Cast`` node and forces the ``elem_type`` of any
+    ``graph.output`` entry produced by that Cast to match the Cast's ``to``
+    attribute (the spec-defined contract for a Cast's output dtype). Then
+    clears ``value_info`` wholesale so ORT/shape-inference re-derives
+    intermediate-tensor types from the operator graph during session setup.
+
+    Args:
+        model: Loaded in-memory onnx ModelProto.
+
+    Returns:
+        Total number of entries reconciled or cleared.
+    """
+    cast_to_by_output = {
+        node.output[0]: get_cast_to_type(node)
+        for node in model.graph.node
+        if node.op_type == "Cast" and node.output
+    }
+
+    fixed_outputs = 0
+    for o in model.graph.output:
+        to_attr = cast_to_by_output.get(o.name)
+        if to_attr is not None and o.type.tensor_type.elem_type != to_attr:
+            o.type.tensor_type.elem_type = to_attr
+            fixed_outputs += 1
+
+    n_vi = len(model.graph.value_info)
+    if n_vi:
+        del model.graph.value_info[:]
+    return fixed_outputs + n_vi

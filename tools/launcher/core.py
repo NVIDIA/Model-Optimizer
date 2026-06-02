@@ -142,6 +142,7 @@ class GlobalVariables:
     hf_model: str = None
     hf_data: str = None
     hf_local: str = None
+    output_dir: str = None
 
 
 @dataclass
@@ -263,6 +264,7 @@ def build_slurm_executor(
     executor = run.SlurmExecutor(
         account=slurm_config.account,
         partition=slurm_config.partition,
+        qos=slurm_config.qos,
         ntasks_per_node=slurm_config.ntasks_per_node,
         gpus_per_node=slurm_config.gpus_per_node,
         nodes=slurm_config.nodes,

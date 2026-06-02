@@ -94,7 +94,7 @@ class QuantizeModeDescriptor(ModeDescriptor):
     @property
     def next_prohibited_modes(self) -> set[str] | None:
         """Modes that should not be applied after this mode."""
-        return {"sparsity", "autonas", "fastnas", "gradnas"}
+        return {"sparsity", "autonas", "fastnas"}
 
     @property
     def export_mode(self) -> str | None:
@@ -372,6 +372,8 @@ def get_modelike_from_algo_cfg(algo_cfg: QuantizeAlgoCfgType) -> ModeConfigList:
             f"Nested lists received as config! config: {algo_cfg}"
         )
         return [get_modelike_from_algo_cfg(c)[0] for c in algo_cfg]
+    if isinstance(algo_cfg, QuantizeAlgorithmConfig):
+        algo_cfg = algo_cfg.model_dump()
     if algo_cfg is None or isinstance(algo_cfg, str):
         algo_name, algo_cfg = algo_cfg, {}
     elif isinstance(algo_cfg, dict):

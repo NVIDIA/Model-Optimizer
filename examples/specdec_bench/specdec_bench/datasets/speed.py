@@ -147,7 +147,7 @@ class SPEEDBench(Dataset):
     ):
         if not_installed:
             raise ImportError(
-                "Additional packages are required to use SPEED-Bench. Please run `pip install -r requirements_speed.txt`"
+                "Additional packages are required to use SPEED-Bench. Please run `pip install -r requirements.txt`"
             )
         self.data: list[Request] = []
         self.num_samples = num_samples
@@ -730,11 +730,7 @@ her fear and anger)."""
                 # Strip HF metadata from the schema to avoid Feature parsing errors
                 schema = table.schema
                 if schema.metadata and b"huggingface" in schema.metadata:
-                    new_meta = {
-                        k: v
-                        for k, v in schema.metadata.items()
-                        if k != b"huggingface"
-                    }
+                    new_meta = {k: v for k, v in schema.metadata.items() if k != b"huggingface"}
                     table = table.replace_schema_metadata(new_meta or None)
                 dataset = HFDataset(table)
         if self.num_samples is not None and self.num_samples < len(dataset):

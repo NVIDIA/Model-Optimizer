@@ -52,6 +52,7 @@ class MlpInitMode(Enum):
     PruneByActivationsLog = "PruneByActivationsLog"
     ExpertRemoval = "ExpertRemoval"
     ConcatExpertsIntoDenseFFN = "ConcatExpertsIntoDenseFFN"
+    MoEChannelPruning = "MoEChannelPruning"
 
 
 class LinearInitMode(Enum):
@@ -64,6 +65,14 @@ class HiddenSizeInitMode(Enum):
     Truncate = "Truncate"
     PruneByChannelRanking = "PruneByChannelRanking"
     CopyAsIs = "CopyAsIs"
+
+
+def _lm_head_dim(config, descriptor: Type[ModelDescriptor]) -> int:
+    lm_config = descriptor.get_language_model_config(config)
+    head_dim = getattr(lm_config, "head_dim", None)
+    if head_dim is not None:
+        return head_dim
+    return lm_config.hidden_size // lm_config.num_attention_heads
 
 
 def resolve_pruning_mixin(
@@ -214,6 +223,7 @@ def _init_attention_weights(
     layer_idx,
     new_state_dict,
     new_config,
+    descriptor,
     original_state_dict,
     q_key,
     k_key,
@@ -224,10 +234,13 @@ def _init_attention_weights(
     head_size,
     mlp_init_config,
 ):
-    assert new_config.num_attention_heads == original_config.num_attention_heads, (
-        f"({new_config.num_attention_heads=}) != ({original_config.num_attention_heads=})"
+    new_lm = descriptor.get_language_model_config(new_config)
+    orig_lm = descriptor.get_language_model_config(original_config)
+    assert new_lm.num_attention_heads == orig_lm.num_attention_heads, (
+        f"({new_lm.num_attention_heads=}) != ({orig_lm.num_attention_heads=})"
     )
-    num_q_heads = new_config.num_attention_heads
+    num_q_heads = new_lm.num_attention_heads
+    # block_configs lives on the outer puzzletron-converted config, not on text_config.
     num_kv_heads = new_config.block_configs[layer_idx].attention.num_key_value_heads
     orig_num_kv_heads = original_config.block_configs[layer_idx].attention.num_key_value_heads
 
@@ -362,6 +375,7 @@ def _init_attention_biases(
     layer_idx,
     new_state_dict,
     new_config,
+    descriptor,
     original_state_dict,
     q_key,
     k_key,
@@ -372,17 +386,29 @@ def _init_attention_biases(
     head_size,
     mlp_init_config,
 ):
-    assert new_config.num_attention_heads == original_config.num_attention_heads, (
-        f"({new_config.num_attention_heads=}) != ({original_config.num_attention_heads=})"
+    new_lm = descriptor.get_language_model_config(new_config)
+    orig_lm = descriptor.get_language_model_config(original_config)
+    assert new_lm.num_attention_heads == orig_lm.num_attention_heads, (
+        f"({new_lm.num_attention_heads=}) != ({orig_lm.num_attention_heads=})"
     )
-    num_q_heads = new_config.num_attention_heads
+    num_q_heads = new_lm.num_attention_heads
+    # block_configs lives on the outer puzzletron-converted config, not on text_config.
     num_kv_heads = new_config.block_configs[layer_idx].attention.num_key_value_heads
     orig_num_kv_heads = original_config.block_configs[layer_idx].attention.num_key_value_heads
     n_heads_in_group = num_q_heads // num_kv_heads
     orig_n_heads_in_group = num_q_heads // orig_num_kv_heads
 
-    o_proj_bias = new_config.o_proj_bias
-    attention_bias = new_config.attention_bias
+    # Some HF native configs (e.g. GptOssConfig) don't expose o_proj_bias / attention_bias as
+    # top-level attributes the way puzzletron's DeciLM-style configs do. Fall back to probing
+    # the new state dict for the actual bias keys only when the attribute is omitted.
+    # KVHeadsPruningMixIn only calls this helper after filtering to keys present in
+    # new_state_dict, so the probe mirrors the caller's already-selected bias tensors.
+    o_proj_bias = getattr(new_config, "o_proj_bias", None)
+    if o_proj_bias is None:
+        o_proj_bias = o_key in new_state_dict
+    attention_bias = getattr(new_config, "attention_bias", None)
+    if attention_bias is None:
+        attention_bias = any(key in new_state_dict for key in (q_key, k_key, v_key))
 
     # If no biases
     if not (o_proj_bias or attention_bias):
@@ -438,8 +464,8 @@ def _init_attention_biases(
         assert not is_original_mha, (
             "Degrouping can only be done on original models that are GQA themselves."
         )
-        n_groups = new_config.num_attention_heads // n_heads_in_group
-        orig_n_groups = original_config.num_attention_heads // orig_n_heads_in_group
+        n_groups = new_lm.num_attention_heads // n_heads_in_group
+        orig_n_groups = orig_lm.num_attention_heads // orig_n_heads_in_group
         assert n_groups % orig_n_groups == 0, f"{n_groups=} must be a divisor of {orig_n_groups=}"
         n_repeats = n_groups // orig_n_groups
         if n_repeats > 1:

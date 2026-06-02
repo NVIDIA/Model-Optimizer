@@ -15,6 +15,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# HuggingFace backend for offline hidden-states dump. Sibling of
+# dump_offline_data.sh (TRT-LLM backend). Use this when the downstream training
+# needs --answer-only-loss / --chat-template and a loss_mask in the dump,
+# which the TRT-LLM backend does not produce.
+
+
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 
 source ${SCRIPT_DIR}/../service_utils.sh

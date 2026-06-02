@@ -18,8 +18,8 @@
 native_mpi_rank=$OMPI_COMM_WORLD_RANK
 native_mpi_local_rank=$OMPI_COMM_WORLD_LOCAL_RANK
 # Works with Slurm launching with `--mpi=pmix`
-mpi_rank=${PMIX_RANK:-$native_mpi_rank}
-mpi_local_rank=${PMIX_LOCAL_RANK:-$native_mpi_local_rank}
+mpi_rank=${PMIX_RANK:-${native_mpi_rank:-${SLURM_PROCID:-0}}}
+mpi_local_rank=${PMIX_LOCAL_RANK:-${native_mpi_local_rank:-${SLURM_LOCALID:-0}}}
 
 FAIL=0
 FAIL_EXIT=0
@@ -48,8 +48,35 @@ function report_result {
 }
 
 function util_install_extra_dep {
+    local _marker=/tmp/.nmm_extra_dep_installed
+    if [[ -f "$_marker" ]]; then
+        return 0
+    fi
     if [[ "$mpi_local_rank" -eq 0 ]]; then
-        pip install diskcache
+        if ! pip install diskcache; then
+            report_result "FAIL: util_install_extra_dep: pip install diskcache failed"
+            exit 1
+        fi
+        # Megatron-LM asserts nvrx >= 0.6.0 on import. nemo containers ship
+        # nvrx in two Python envs; `pip` targets the system one, `python -m
+        # pip` the uv venv. Uninstall from both, install into the venv.
+        pip uninstall -y nvidia-resiliency-ext 2>/dev/null || true
+        python -m pip uninstall -y nvidia-resiliency-ext 2>/dev/null || true
+        if ! python -m pip install --upgrade "nvidia-resiliency-ext>=0.6.0"; then
+            report_result "FAIL: util_install_extra_dep: pip install nvidia-resiliency-ext failed"
+            exit 1
+        fi
+        touch "$_marker"
+    else
+        local _waited=0
+        while [[ ! -f "$_marker" && $_waited -lt 600 ]]; do
+            sleep 1
+            _waited=$((_waited + 1))
+        done
+        if [[ ! -f "$_marker" ]]; then
+            report_result "FAIL: util_install_extra_dep: timed out waiting for rank-0 install marker"
+            exit 1
+        fi
     fi
 }
 

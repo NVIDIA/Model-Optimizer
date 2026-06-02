@@ -28,6 +28,22 @@ e2m1_values = torch.tensor([0, 0.5, 1, 1.5, 2, 3, 4, 6, 0, -0.5, -1, -1.5, -2, -
 __all__ = ["NVFP4QTensor"]
 
 
+def _cast_per_block_scale_to_fp8(
+    per_block_scale: torch.Tensor,
+    per_block_scale_max: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Clamp to FP8 E4M3FN range [2**-9, 448] and cast — avoids underflow→0 / overflow→NaN.
+
+    When ``per_block_scale_max`` is provided, first rescales as
+    ``per_block_scale.float() * 448 / per_block_scale_max`` — the static-export
+    path needs this because the ``[==0]=1.0`` safety net combined with a small
+    ``global_amax`` can drive the rescaled value above 448 (see PR #1397).
+    """
+    if per_block_scale_max is not None:
+        per_block_scale = per_block_scale.float() * 448.0 / per_block_scale_max
+    return per_block_scale.clamp(min=2**-9, max=448.0).to(torch.float8_e4m3fn)
+
+
 class NVFP4QTensor(BaseQuantizedTensor):
     """Implements the INT4 quantization on tensors for more efficient storage or computation.
 
@@ -55,7 +71,16 @@ class NVFP4QTensor(BaseQuantizedTensor):
     @classmethod
     def _is_static_quantizer(cls, weight_quantizer) -> bool:
         """Check if the weight quantizer is a static NVFP4 quantizer with pre-computed amax."""
-        return hasattr(weight_quantizer, "global_amax") and weight_quantizer.global_amax is not None
+        global_amax = cls._get_static_global_amax(weight_quantizer)
+        return global_amax is not None
+
+    @classmethod
+    def _get_static_global_amax(cls, weight_quantizer):
+        """Return global amax from live or restored static NVFP4 quantizers."""
+        global_amax = getattr(weight_quantizer, "global_amax", None)
+        if global_amax is None:
+            global_amax = getattr(weight_quantizer, "_global_amax", None)
+        return global_amax
 
     @classmethod
     def get_weights_scaling_factor_2_from_quantizer(cls, weight_quantizer):
@@ -70,8 +95,9 @@ class NVFP4QTensor(BaseQuantizedTensor):
         Returns:
             The global scaling factor as a float tensor.
         """
-        if cls._is_static_quantizer(weight_quantizer):
-            return weight_quantizer.global_amax.float() / (6.0 * 448.0)
+        global_amax = cls._get_static_global_amax(weight_quantizer)
+        if global_amax is not None:
+            return global_amax.float() / (6.0 * 448.0)
         else:
             assert hasattr(weight_quantizer, "_amax"), (
                 "Weight quantizer does not have attribute amax"
@@ -109,7 +135,7 @@ class NVFP4QTensor(BaseQuantizedTensor):
 
         if cls._is_static_quantizer(weight_quantizer):
             # Static path: use pre-computed per-block amax values from quantizer
-            global_amax = weight_quantizer.global_amax.float()
+            global_amax = cls._get_static_global_amax(weight_quantizer).float()
             per_block_amax = weight_quantizer._amax.float()
 
             # Compute scales in float
@@ -122,17 +148,8 @@ class NVFP4QTensor(BaseQuantizedTensor):
             expected_shape = (*weight.shape[:-1], num_blocks_per_row)
             per_block_scale = per_block_scale.view(expected_shape)
 
-            # Quantize scales to FP8. Saturate to the fp8_e4m3fn max (448) before the
-            # cast: when the [==0]=1.0 safety net above fires (per_block_amax was zero
-            # for an all-zero weight block) and global_amax is small, the pre-cast value
-            # explodes to ``1.0 * 448 / (global_amax/6)``. fp8_e4m3fn has no Inf, so any
-            # value >= 480 casts to NaN — clamp first to keep the stored byte finite.
             if not keep_high_precision:
-                per_block_scale = (
-                    (per_block_scale * 448.0 / per_block_scale_max)
-                    .clamp_(max=448.0)
-                    .to(torch.float8_e4m3fn)
-                )
+                per_block_scale = _cast_per_block_scale_to_fp8(per_block_scale, per_block_scale_max)
             return per_block_scale, weights_scaling_factor_2
         else:
             # Dynamic path: compute from weight tensor
@@ -171,9 +188,8 @@ class NVFP4QTensor(BaseQuantizedTensor):
         )
         # Set all zero values in scale to 1.0
         per_block_scale[per_block_scale == 0] = 1.0
-        # Convert to torch.float8_e4m3fn
         if not keep_high_precision:
-            per_block_scale = per_block_scale.to(torch.float8_e4m3fn)
+            per_block_scale = _cast_per_block_scale_to_fp8(per_block_scale)
         return per_block_scale, weights_scaling_factor_2
 
     @classmethod

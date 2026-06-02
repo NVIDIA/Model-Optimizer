@@ -15,12 +15,12 @@
 
 """Tests for EagleConfig model validators."""
 
-import types
 import warnings
 
 import pytest
 from pydantic import ValidationError
 
+from modelopt.recipe.config import ModelOptEagleRecipe
 from modelopt.torch.speculative.config import EagleConfig
 
 # --- rope scaling consistency validator tests ---
@@ -73,57 +73,44 @@ def test_rope_consistency_ok_empty_export_rope():
     EagleConfig.model_validate(cfg)
 
 
-# --- rope vs training_seq_len warning tests ---
+# --- rope vs training_seq_len warning tests (on ModelOptEagleRecipe, where the validator lives) ---
 
 
-def _make_training_args(training_seq_len: int):
-    return types.SimpleNamespace(training_seq_len=training_seq_len)
+_RopeMismatchMsg = "differs from training"
+
+
+def _yarn_rope(orig_max_pos: int) -> dict:
+    return {
+        "rope_type": "yarn",
+        "factor": 32.0,
+        "original_max_position_embeddings": orig_max_pos,
+    }
 
 
 def test_warn_rope_mismatch():
-    """Warning should fire when original_max_position_embeddings != training_seq_len."""
-    cfg = {
-        "eagle_export_rope_scaling": {
-            "rope_type": "yarn",
-            "factor": 32.0,
-            "original_max_position_embeddings": 2048,
-        },
-    }
-    with pytest.warns(UserWarning, match="differs from training_seq_len"):
-        EagleConfig.model_validate(cfg, context={"training_args": _make_training_args(4096)})
+    """Warning fires when original_max_position_embeddings != training.training_seq_len."""
+    with pytest.warns(UserWarning, match=_RopeMismatchMsg):
+        ModelOptEagleRecipe(
+            eagle={"eagle_export_rope_scaling": _yarn_rope(2048)},
+            training={"training_seq_len": 4096},
+        )
 
 
 def test_no_warn_rope_match():
-    """No warning when original_max_position_embeddings == training_seq_len."""
-    cfg = {
-        "eagle_export_rope_scaling": {
-            "rope_type": "yarn",
-            "factor": 32.0,
-            "original_max_position_embeddings": 2048,
-        },
-    }
+    """No warning when original_max_position_embeddings == training.training_seq_len."""
     with warnings.catch_warnings():
-        warnings.simplefilter("error")
-        EagleConfig.model_validate(cfg, context={"training_args": _make_training_args(2048)})
-
-
-def test_no_warn_without_context():
-    """No warning when context is not provided (e.g. inside convert chain)."""
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")
-        EagleConfig.model_validate({})
+        warnings.simplefilter("error", UserWarning)
+        ModelOptEagleRecipe(
+            eagle={"eagle_export_rope_scaling": _yarn_rope(2048)},
+            training={"training_seq_len": 2048},
+        )
 
 
 def test_no_warn_missing_orig_max_pos():
     """No warning when original_max_position_embeddings is absent from rope scaling config."""
-    cfg = {"eagle_export_rope_scaling": {}}
     with warnings.catch_warnings():
-        warnings.simplefilter("error")
-        EagleConfig.model_validate(cfg, context={"training_args": _make_training_args(4096)})
-
-
-def test_no_warn_empty_context():
-    """No warning when context dict has no training_args key."""
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")
-        EagleConfig.model_validate({}, context={})
+        warnings.simplefilter("error", UserWarning)
+        ModelOptEagleRecipe(
+            eagle={"eagle_export_rope_scaling": {}},
+            training={"training_seq_len": 4096},
+        )

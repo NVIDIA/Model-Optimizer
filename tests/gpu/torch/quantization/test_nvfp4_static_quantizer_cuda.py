@@ -15,9 +15,13 @@
 
 """Tests for NVFP4StaticQuantizer and NVFP4MSECalibrator."""
 
+import copy
+
 import pytest
 import torch
+from torch import nn
 
+import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.calib import NVFP4MSECalibrator
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.nn import NVFP4StaticQuantizer, TensorQuantizer
@@ -37,13 +41,17 @@ class TestNVFP4StaticQuantizer:
             block_sizes={-1: 16, "type": "static", "scale_bits": (4, 3)},
         )
         tq = TensorQuantizer(quant_attribute_cfg=cfg).to(device)
-        tq.amax = torch.tensor([1.0, 2.0, 3.0, 4.0], device=device)
+        tq.amax = torch.tensor([1.0, 2.0, 3.0, 4.0], device=device, dtype=torch.float16)
 
         nvfp4_quantizer = NVFP4StaticQuantizer.from_tensor_quantizer(tq)
 
         assert nvfp4_quantizer.global_amax is None
         assert nvfp4_quantizer._num_bits == (2, 1)
-        assert torch.allclose(nvfp4_quantizer._amax, tq._amax)
+        assert nvfp4_quantizer._amax.dtype == torch.float32
+        torch.testing.assert_close(
+            nvfp4_quantizer._amax,
+            torch.tensor([1.0, 2.0, 3.0, 4.0], device=device),
+        )
 
     def test_global_amax_property(self, device):
         """Test global_amax property getter/setter."""
@@ -55,15 +63,108 @@ class TestNVFP4StaticQuantizer:
 
         assert quantizer.global_amax is None
 
-        quantizer.global_amax = torch.tensor(5.0, device=device)
+        quantizer.global_amax = torch.tensor(5.0, device=device, dtype=torch.float16)
         assert quantizer.global_amax is not None
+        assert quantizer.global_amax.dtype == torch.float32
         assert torch.isclose(quantizer.global_amax, torch.tensor(5.0, device=device))
 
         quantizer.global_amax = 10.0
+        assert quantizer.global_amax.dtype == torch.float32
         assert torch.isclose(quantizer.global_amax, torch.tensor(10.0, device=device))
 
         quantizer.global_amax = None
         assert quantizer.global_amax is None
+
+    def test_dtype_cast_preserves_fp32_scale_state(self, device):
+        """Casting the module dtype should not demote static scale state."""
+        cfg = QuantizerAttributeConfig(
+            num_bits=(2, 1),
+            block_sizes={-1: 16, "type": "static", "scale_bits": (4, 3)},
+        )
+        quantizer = NVFP4StaticQuantizer(quant_attribute_cfg=cfg).to(device)
+        expected_amax = torch.tensor(
+            [1.0001, 1.0002, 1.0003, 1.0004], device=device, dtype=torch.float32
+        )
+        expected_global_amax = torch.tensor(4.0003, device=device, dtype=torch.float32)
+        quantizer.amax = expected_amax
+        quantizer.global_amax = expected_global_amax
+
+        assert quantizer.amax.dtype == torch.float32
+        assert quantizer.global_amax.dtype == torch.float32
+
+        quantizer = quantizer.half()
+
+        assert quantizer.amax.dtype == torch.float32
+        assert quantizer.global_amax.dtype == torch.float32
+        torch.testing.assert_close(quantizer.amax, expected_amax)
+        torch.testing.assert_close(quantizer.global_amax, expected_global_amax)
+
+        quantizer = quantizer.to(dtype=torch.bfloat16)
+
+        assert quantizer.amax.dtype == torch.float32
+        assert quantizer.global_amax.dtype == torch.float32
+        torch.testing.assert_close(quantizer.amax, expected_amax)
+        torch.testing.assert_close(quantizer.global_amax, expected_global_amax)
+
+    def test_load_calib_amax_preserves_fp32_result_dtype(self, device):
+        """Loading NVFP4 MSE amax should leave static scale state in fp32."""
+        cfg = QuantizerAttributeConfig(
+            num_bits=(2, 1),
+            block_sizes={-1: 16, "type": "static", "scale_bits": (4, 3)},
+        )
+        quantizer = NVFP4StaticQuantizer(quant_attribute_cfg=cfg).to(device)
+        quantizer.register_buffer("_amax", torch.ones(4, device=device, dtype=torch.float16))
+        expected = torch.arange(1, 5, device=device, dtype=torch.float32)
+
+        class Calibrator:
+            def compute_amax(self):
+                return expected
+
+        quantizer._calibrator = Calibrator()
+        quantizer.load_calib_amax()
+
+        assert quantizer.amax.dtype == torch.float32
+        torch.testing.assert_close(quantizer.amax, expected)
+
+    def test_load_state_dict_preserves_fp32_scale_state(self, device):
+        """Loading lower-precision state should keep NVFP4 static scale buffers fp32."""
+        cfg = QuantizerAttributeConfig(
+            num_bits=(2, 1),
+            block_sizes={-1: 16, "type": "static", "scale_bits": (4, 3)},
+        )
+        source = NVFP4StaticQuantizer(quant_attribute_cfg=cfg).to(device)
+        source.amax = torch.arange(1, 5, device=device, dtype=torch.float32)
+        source.global_amax = torch.tensor(5.0, device=device)
+        state_dict = source.state_dict()
+        state_dict["_amax"] = state_dict["_amax"].to(dtype=torch.float16)
+        state_dict["_global_amax"] = state_dict["_global_amax"].to(dtype=torch.float16)
+
+        target = NVFP4StaticQuantizer(quant_attribute_cfg=cfg).to(device)
+        target.amax = torch.zeros(4, device=device)
+        target.global_amax = torch.tensor(0.0, device=device)
+        target.load_state_dict(state_dict)
+
+        assert target.amax.dtype == torch.float32
+        assert target.global_amax.dtype == torch.float32
+        torch.testing.assert_close(target.amax, source.amax)
+        torch.testing.assert_close(target.global_amax, source.global_amax)
+
+    def test_modelopt_state_restore_uses_fp32_scale_metadata(self, device):
+        """ModelOpt metadata restore should use the saved fp32 static scale metadata."""
+        cfg = QuantizerAttributeConfig(
+            num_bits=(2, 1),
+            block_sizes={-1: 16, "type": "static", "scale_bits": (4, 3)},
+        )
+        quantizer = NVFP4StaticQuantizer(quant_attribute_cfg=cfg).to(device)
+        quantizer.amax = torch.arange(1, 5, device=device, dtype=torch.float32)
+        quantizer.global_amax = torch.tensor(5.0, device=device)
+        modelopt_state = quantizer.get_modelopt_state()
+
+        restored = NVFP4StaticQuantizer(quant_attribute_cfg=cfg)
+        restored.set_from_modelopt_state(modelopt_state)
+
+        assert restored.amax.dtype == torch.float32
+        assert restored.global_amax.dtype == torch.float32
 
     def test_export_fp8_scale_no_nan_for_zero_amax_block(self, device):
         """Regression: export must not emit fp8 NaN bytes for an all-zero block.
@@ -138,9 +239,41 @@ class TestNVFP4StaticQuantizer:
 
         assert torch.allclose(output, expected)
 
+    def test_static_export_clamps_overflowing_fp8_block_scales(self, device):
+        """Static export should match fake quant clamping and never write NaN FP8 scales."""
+        cfg = QuantizerAttributeConfig(
+            num_bits=(2, 1),
+            block_sizes={-1: 16, "type": "static", "scale_bits": (4, 3)},
+        )
+        quantizer = NVFP4StaticQuantizer(quant_attribute_cfg=cfg).to(device)
+        quantizer.amax = torch.tensor([8.0], device=device)
+        quantizer.global_amax = torch.tensor(1.0, device=device)
+        weight = torch.ones(1, 16, device=device)
+
+        weight_scale, _ = NVFP4QTensor.get_weights_scaling_factor_from_quantizer(quantizer, weight)
+
+        assert weight_scale.dtype == torch.float8_e4m3fn
+        assert torch.isfinite(weight_scale.float()).all()
+        assert torch.equal(weight_scale.float(), torch.full_like(weight_scale.float(), 448.0))
+
 
 @pytest.mark.parametrize("device", ["cuda"])
 class TestNVFP4MSECalibrator:
+    def test_static_mse_reference_path_handles_padded_last_dim(self, device, monkeypatch):
+        """MSE calibration should compare tensors in the same padded block layout."""
+        monkeypatch.setenv("MODELOPT_NVFP4_TRITON_SWEEP", "0")
+        model = nn.Linear(60, 512, bias=False).eval().to(device=device, dtype=torch.bfloat16)
+        inputs = torch.randn(2, 60, device=device, dtype=torch.bfloat16)
+
+        mtq.quantize(
+            model,
+            copy.deepcopy(mtq.NVFP4_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG),
+            forward_loop=lambda model: model(inputs),
+        )
+
+        assert model.weight_quantizer.amax is not None
+        assert model.weight_quantizer.amax.numel() == 512 * 4
+
     def test_basic_initialization(self, device):
         """Test NVFP4MSECalibrator initialization."""
         num_blocks = 4
@@ -150,6 +283,15 @@ class TestNVFP4MSECalibrator:
 
         assert cal._losses_sum is None
         assert cal._amax is None
+
+    def test_compute_amax_before_collect_returns_none(self, device):
+        """Test that compute_amax returns None before a final amax is cached."""
+        num_blocks = 4
+        amax = torch.ones(num_blocks, device=device)
+        global_amax = torch.tensor(10.0, device=device)
+        cal = NVFP4MSECalibrator(amax=amax, global_amax=global_amax)
+
+        assert cal.compute_amax() is None
 
     def test_fp8_candidates_generation(self, device):
         """Test that 126 valid FP8 candidates are generated."""
@@ -164,8 +306,9 @@ class TestNVFP4MSECalibrator:
         assert torch.all(torch.isfinite(candidates))
         assert torch.all(candidates > 0)
 
-    def test_collect_and_compute_amax(self, device):
-        """Test collect and compute_amax workflow."""
+    def test_collect_and_compute_amax(self, device, monkeypatch):
+        """Test reference-path collect caches the final amax immediately."""
+        monkeypatch.setenv("MODELOPT_NVFP4_TRITON_SWEEP", "0")
         num_blocks = 8
         block_size = 16
         per_block_amax = torch.ones(num_blocks, device=device)
@@ -183,8 +326,8 @@ class TestNVFP4MSECalibrator:
         x = torch.randn(num_blocks, block_size, device=device)
         cal.collect(x)
 
-        assert cal._losses_sum is not None
-        assert len(cal._losses_sum) == 126
+        assert cal._best_amax is not None
+        assert cal._losses_sum is None
 
         amax = cal.compute_amax()
 
@@ -193,8 +336,9 @@ class TestNVFP4MSECalibrator:
         assert torch.all(torch.isfinite(amax))
         assert torch.all(amax > 0)
 
-    def test_multiple_collections(self, device):
-        """Test that multiple collections accumulate correctly."""
+    def test_reference_path_reset_allows_recollect(self, device, monkeypatch):
+        """Test that reference fallback is one-shot until reset."""
+        monkeypatch.setenv("MODELOPT_NVFP4_TRITON_SWEEP", "0")
         num_blocks = 4
         block_size = 16
         per_block_amax = torch.ones(num_blocks, device=device)
@@ -213,13 +357,16 @@ class TestNVFP4MSECalibrator:
         x2 = torch.randn(num_blocks, block_size, device=device)
 
         cal.collect(x1)
-        losses_after_first = [loss.clone() for loss in cal._losses_sum]
+        first = cal.compute_amax().clone()
+        assert cal._best_amax is not None
+        assert cal._losses_sum is None
 
-        cal.collect(x2)
-        losses_after_second = cal._losses_sum
+        with pytest.raises(RuntimeError, match="multi-collect"):
+            cal.collect(x2)
 
-        for loss1, loss2 in zip(losses_after_first, losses_after_second):
-            assert torch.all(loss2 >= loss1 - 1e-6)
+        cal.reset()
+        cal.collect(x1)
+        assert torch.equal(first, cal.compute_amax())
 
     def test_per_block_independent_optimization(self, device):
         """Test that each block is optimized independently.

@@ -4,13 +4,22 @@ Use WebSearch to find the model card (HuggingFace, build.nvidia.com). Read it ca
 
 - Sampling params (`temperature`, `top_p`)
 - Context length (`deployment.extra_args: "--max-model-len <value>"`)
+- **Output length (`max_new_tokens`) — mandatory extraction.** Scan the
+  card for any `max_tokens` / `max_new_tokens` / "output length"
+  recommendation. Cards often list two values (e.g., Qwen3.x: `32768`
+  thinking-general + `81920` math/coding). **Pick the highest value** and
+  apply at the top level (no per-task overrides). If the card is genuinely
+  silent on output length, note that explicitly and fall back to the
+  generic default (64K reasoning / 16K non-reasoning) — never write a
+  config with "card not yet checked" + generic default. See SKILL.md
+  Step 3 "`max_new_tokens` — pick a single top-level value" for the full
+  rule.
 - TP/DP settings (to set them appropriately, AskUserQuestion on how many GPUs the model will be deployed)
 - Reasoning config (if applicable):
   - reasoning on/off: use either:
     - `adapter_config.custom_system_prompt` (like `/think`, `/no_think`) and no `adapter_config.params_to_add` (leave `params_to_add` unrelated to reasoning untouched)
     - `adapter_config.params_to_add` for payload modifier (like `"chat_template_kwargs": {"enable_thinking": true/false}`) and no `adapter_config.custom_system_prompt` and `adapter_config.use_system_prompt: false` (leave `custom_system_prompt` and `use_system_prompt` unrelated to reasoning untouched).
   - reasoning effort/budget (if it's configurable, AskUserQuestion what reasoning effort they want)
-  - higher `max_new_tokens`
   - etc.
 - Deployment-specific `extra_args` for vLLM/SGLang (look for the vLLM/SGLang deployment command)
 - Deployment-specific vLLM/SGLang versions (by default we use latest docker images, but you can control it with `deployment.image` e.g. vLLM above `vllm/vllm-openai:v0.11.0` stopped supporting `rope-scaling` arg used by Qwen models)

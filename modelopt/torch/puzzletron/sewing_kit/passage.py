@@ -45,6 +45,7 @@ __all__ = [
     "PassageOutput",
     "Predicate",
     "always_false_predicate",
+    "always_true_predicate",
     "Passage",
     "patch_module",
 ]
