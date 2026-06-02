@@ -1,0 +1,91 @@
+# Nemotron-3-Super-120B-A12B-BF16 PTQ quantization + export + vLLM smoke.
+# Tested on B200 Blackwell GPUs.
+#
+# Pipeline:
+#   task_0 (quantize): 1 node x 4 GPUs = 4 ranks, TP=1 PP=1 EP=4 ETP=1.
+#                      Loads HF weights from /hf-local, saves PTQ ckpt to /cicd.
+#   task_1 (export):   1 node x 4 GPUs = 4 ranks, TP=1 PP=4 EP=1 ETP=1.
+#                      88 layers / PP=4 = 22 layers/stage.
+#   task_2 (smoke):    1 node x 4 GPUs. Serve exported NVFP4 ckpt with vLLM and
+#                      answer 8 GPQA-style questions.
+#
+# Usage:
+#   source .env-slurm
+#   cd tools/launcher
+#   uv run launch.py --yaml examples/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16/megatron_lm_ptq.yaml --yes
+
+job_name: Nemotron-3-Super-120B_PTQ
+pipeline:
+  skip: false
+  allow_to_fail: false
+  note: "PTQ on Nemotron-3-Super-120B (super-nvfp4): quantize + export + vLLM smoke, 1 node x 4 GPUs"
+
+  task_0:
+    script: common/megatron_lm/quantize/quantize.sh
+    args:
+      - --seq-length 4096 --max-position-embeddings 4096
+      - --skip-generate
+      # Fast calibration. Bump (e.g. --calib-size 512) for production.
+      - --calib-size 32
+    environment:
+      - MLM_MODEL_CFG: nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16
+      - QUANT_CFG: models/Nemotron-3-Super-120B-A12B/super-nvfp4
+      - HF_MODEL_CKPT: /hf-local/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16
+      # MMLU + Export run as separate tasks; quantize.sh does quantize only.
+      - RUN_MMLU: "false"
+      - RUN_EXPORT: "false"
+      - TP: "1"
+      - PP: "1"
+      - EP: "4"
+      - ETP: "1"
+    slurm_config:
+      _factory_: "slurm_factory"
+      container: nvcr.io/nvidia/nemo:26.04
+      modelopt_install_path: /opt/venv/lib/python3.12/site-packages/modelopt
+      partition: batch
+      nodes: 1
+      ntasks_per_node: 4
+      gpus_per_node: 4
+      time: "04:00:00"
+
+  task_1:
+    script: common/megatron_lm/export/export.sh
+    environment:
+      - MLM_MODEL_CFG: nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16
+      - QUANT_CFG: models/Nemotron-3-Super-120B-A12B/super-nvfp4
+      - HF_MODEL_CKPT: /hf-local/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16
+      - TP: "1"
+      - PP: "4"
+      - EP: "1"
+      - ETP: "1"
+    slurm_config:
+      _factory_: "slurm_factory"
+      container: nvcr.io/nvidia/nemo:26.04
+      modelopt_install_path: /opt/venv/lib/python3.12/site-packages/modelopt
+      partition: batch
+      nodes: 1
+      ntasks_per_node: 4
+      gpus_per_node: 4
+      time: "02:00:00"
+
+  # vLLM generation test: serve the exported HF NVFP4 ckpt and answer 8
+  # GPQA-style questions. Inspect responses at /cicd/vllm/<model>.jsonl.
+  task_2:
+    script: common/vllm/query.sh
+    args:
+      - --model /cicd/export/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16_super-nvfp4
+      - --tensor-parallel-size 4
+      - --trust-remote-code
+      - --
+      - --data common/vllm/gpqa_smoke.jsonl
+      - --max-tokens 256
+      - --num-shards 1
+      - --save /cicd/vllm/NVIDIA-Nemotron-3-Super-120B-A12B-BF16_super-nvfp4.jsonl
+    slurm_config:
+      _factory_: "slurm_factory"
+      container: vllm/vllm-openai:v0.21.0
+      partition: batch
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 4
+      time: "01:00:00"
