@@ -560,6 +560,7 @@ def train(
 
             if not is_accumulating:
                 if optimizer is not None:
+                    assert grad_scaler is not None
                     grad_clip = cfg.bypass.training.grad_clip
                     if grad_clip is not None:
                         grad_scaler.unscale_(optimizer)
@@ -569,7 +570,6 @@ def train(
                             grad_clip_type=cfg.bypass.training.grad_clip_type,
                         )
 
-                    assert grad_scaler is not None
                     grad_scaler.step(optimizer)
                     grad_scaler.update()
                     optimizer.zero_grad(set_to_none=True)
