@@ -216,8 +216,8 @@ def test_resume_state_used_when_no_init_checkpoint_path():
 
 def test_resume_skip_first_batches_uses_completed_iter_count():
     assert tl._get_resume_skip_first_batches(saved_skip=10, resume_iter_num=0) == 10
-    assert tl._get_resume_skip_first_batches(saved_skip=10, resume_iter_num=1) == 10
-    assert tl._get_resume_skip_first_batches(saved_skip=10, resume_iter_num=7) == 16
+    assert tl._get_resume_skip_first_batches(saved_skip=10, resume_iter_num=1) == 11
+    assert tl._get_resume_skip_first_batches(saved_skip=10, resume_iter_num=7) == 17
 
 
 def test_flush_loss_buffer_single_rank_without_process_group():

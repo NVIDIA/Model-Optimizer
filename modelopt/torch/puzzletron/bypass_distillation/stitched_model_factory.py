@@ -124,6 +124,8 @@ def _param_names_for_subblock_key(
     block_configs = getattr(model.config, "block_configs", None) or getattr(
         lm_config, "block_configs", None
     )
+    if subblock_key == "subblock_mamba" and block_configs is None:
+        raise ValueError("keys_to_learn='subblock_mamba' requires model config block_configs")
 
     collected: list[str] = []
     for group_name in group_names:

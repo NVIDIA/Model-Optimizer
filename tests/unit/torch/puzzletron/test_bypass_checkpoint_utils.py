@@ -21,7 +21,7 @@ marker silently restarts training from the wrong iteration.
 
 What's covered here (CPU-only, codecov-visible):
     * ``find_latest_run_dir`` — every branch of the regex/scan/symlink logic.
-    * ``_save_local_file`` — overwrite/skip semantics.
+    * ``_save_local_file`` — checkpoint-local file writes.
     * ``_save_local_state`` — same three save-path assertions as the GPU file
       (state_dict / optimizer / grad_scaler), but on CPU so codecov picks them
       up. The GPU file's ``test_load_local_state_*`` cases stay there because
@@ -196,18 +196,9 @@ def test_save_local_file_writes_object_to_disk(tmp_path: Path):
 def test_save_local_file_overwrite_true_replaces_contents(tmp_path: Path):
     target = tmp_path / "blob.pth"
     bcu._save_local_file({"v": torch.tensor([1])}, target)
-    bcu._save_local_file({"v": torch.tensor([99])}, target, overwrite=True)
+    bcu._save_local_file({"v": torch.tensor([99])}, target)
     loaded = torch.load(target, weights_only=True)
     assert torch.equal(loaded["v"], torch.tensor([99]))
-
-
-def test_save_local_file_overwrite_false_skips_existing(tmp_path: Path):
-    target = tmp_path / "blob.pth"
-    bcu._save_local_file({"v": torch.tensor([1])}, target)
-    # Second save should be a no-op.
-    bcu._save_local_file({"v": torch.tensor([99])}, target, overwrite=False)
-    loaded = torch.load(target, weights_only=True)
-    assert torch.equal(loaded["v"], torch.tensor([1]))
 
 
 # ---------------------------------------------------------------------------
@@ -224,6 +215,23 @@ def test_save_local_state_writes_optimizer_and_grad_scaler(tmp_path: Path, bcu_n
     stitched = tmp_path / "stitched"
     assert (stitched / "block_0.optimizer_state.pth").exists()
     assert (stitched / "block_0.grad_scaler.pth").exists()
+
+
+def test_save_local_state_overwrites_optimizer_and_grad_scaler(tmp_path: Path, bcu_no_dist):
+    descriptors = OrderedDict([("block_0", _make_descriptor())])
+    bcu_no_dist._save_local_state(descriptors, tmp_path)
+    stitched = tmp_path / "stitched"
+    stale_optimizer_state = {"stale": torch.tensor([1])}
+    stale_scaler_state = {"stale": torch.tensor([1])}
+    torch.save(stale_optimizer_state, stitched / "block_0.optimizer_state.pth")
+    torch.save(stale_scaler_state, stitched / "block_0.grad_scaler.pth")
+
+    bcu_no_dist._save_local_state(descriptors, tmp_path)
+
+    optimizer_state = torch.load(stitched / "block_0.optimizer_state.pth", weights_only=True)
+    grad_scaler_state = torch.load(stitched / "block_0.grad_scaler.pth", weights_only=True)
+    assert "stale" not in optimizer_state
+    assert "stale" not in grad_scaler_state
 
 
 def test_save_local_state_does_not_write_weights_state_dict(tmp_path: Path, bcu_no_dist):

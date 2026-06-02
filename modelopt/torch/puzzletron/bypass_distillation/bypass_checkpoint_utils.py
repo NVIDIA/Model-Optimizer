@@ -150,19 +150,14 @@ def load_local_state(
                 del loaded_scaler_state
 
 
-def _save_local_file(obj, save_path: Path | str, overwrite=True):
+def _save_local_file(obj, save_path: Path | str):
     save_path = Path(save_path)
-    if save_path.exists():
-        if not overwrite:
-            mprint(f'WARNING: Local save path "{save_path}" already exists. Skipping')
-            return
     torch.save(obj, save_path)
 
 
 def _save_local_state(
     stitched_module_descriptors: OrderedDict[str, StitchedModuleDescriptor],
     checkpoint_dir: Path | str,
-    overwrite=True,
 ) -> None:
     """Persist optimizer and grad-scaler state for each stitched module.
 
@@ -193,7 +188,7 @@ def _save_local_state(
             aprint(
                 f"Saving optimizer state for module {stitched_module_name} to {optimizer_state_path}"
             )
-            _save_local_file(optimizer.state_dict(), optimizer_state_path, overwrite=overwrite)
+            _save_local_file(optimizer.state_dict(), optimizer_state_path)
 
         # Persist GradScaler state. Required for correct resume when
         # use_grad_scaling=True (state dict carries running scale + growth tracker).
@@ -206,7 +201,7 @@ def _save_local_state(
                 f"Saving grad_scaler state for module {stitched_module_name} "
                 f"to {grad_scaler_state_path}"
             )
-            _save_local_file(grad_scaler.state_dict(), grad_scaler_state_path, overwrite=overwrite)
+            _save_local_file(grad_scaler.state_dict(), grad_scaler_state_path)
 
     dist.barrier()
 
@@ -229,7 +224,6 @@ def save_bypass_checkpoint(
     _save_local_state(
         stitched_module_descriptors=stitched_module_descriptors,
         checkpoint_dir=checkpoint_dir,
-        overwrite=cfg.bypass.model.model_overrides.delete_old_checkpoints,
     )
     # Save as HF checkpoint. Must use the gather-aware variant: bypass training is
     # pipeline-parallel so each rank's `model.state_dict()` only carries its own

@@ -127,7 +127,7 @@ def _get_resume_state_path(cfg: DictConfig, resume_checkpoint_path: Optional[str
 
 
 def _get_resume_skip_first_batches(saved_skip: int, resume_iter_num: int) -> int:
-    return saved_skip + max(0, resume_iter_num - 1)
+    return saved_skip + max(0, resume_iter_num)
 
 
 def _finalize_bypass_run(cfg: DictConfig) -> None:

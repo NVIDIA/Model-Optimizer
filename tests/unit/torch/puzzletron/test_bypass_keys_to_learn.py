@@ -131,6 +131,13 @@ def test_subblock_attention_trains_only_self_attn():
     assert not any(".mlp." in n for n in trainable), trainable
 
 
+def test_subblock_mamba_without_block_configs_is_rejected():
+    model = _make_dense_model(num_layers=2)
+    descriptor = _make_descriptor(num_layers=2)
+    with pytest.raises(ValueError, match="subblock_mamba.*block_configs"):
+        _set_keys_to_learn(model, descriptor, "subblock_mamba")
+
+
 def test_entire_block_trains_attention_and_mlp():
     model = _make_dense_model(num_layers=2)
     descriptor = _make_descriptor(num_layers=2)
