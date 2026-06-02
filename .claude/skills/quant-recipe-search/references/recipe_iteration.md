@@ -40,6 +40,56 @@ Use this default for edge or memory-pressure scenarios where the goal is minimiz
 
 If the user needs both, keep two tables or explicitly define a weighted score.
 
+## Search Space
+
+Before launching PTQ, write down the search space. Keep axes separate so the
+agent does not conclude from one safe FP8 run or one failed low-bit run.
+
+### Numeric Formats
+
+Use the user's requested primary format/search family as the center of the
+search, with BF16/FP16 and FP8/W8A8 as baselines unless FP8 is itself the target.
+
+- FP8/W8A8: usually near-lossless and useful as a baseline or explicit primary target.
+- NVFP4/W4A4: low-bit Blackwell-oriented candidate family when activation quantization is part of the goal.
+- W4A16 NVFP4: weight-only NVFP4 family for accuracy-preserving memory/latency searches.
+- INT4/AWQ: weight-only low-bit family for low-batch memory/latency targets.
+- Mixed formats: examples include NVFP4+FP8, W4A16 NVFP4 with FP8 attention, or model-specific recipe fragments.
+- KV/cache formats: FP8 or other KV-cache formats are runtime/eval controls unless the user makes them part of the recipe objective.
+
+### Calibration And Optimization Algorithms
+
+Treat the calibration/search algorithm as a recipe axis independent from numeric format.
+
+- Max calibration: fast baseline for many FP8/NVFP4 formats.
+- MSE calibration: try when max calibration loses accuracy for low-bit weights or sensitive layers.
+- GPTQ: try for weight-quantized candidates where second-order correction is affordable.
+- AWQ: try for INT4/weight-only candidates, especially low-batch memory/latency targets.
+- AutoQuant scoring: use KL-divergence or gradient-based scoring when available to rank layers/modules.
+- Calibration data: dataset mix, sample count, sequence length, and batch size can change results; vary deliberately and record them.
+
+### Quantized-Module Selection
+
+Choose which modules get which format by one of these methods:
+
+- Manual/heuristic: use prior experience and module family cost, then validate by ablation.
+- Sensitivity-guided manual: generate or recover an AutoQuant sensitivity report, then hand-build recipes around the least/most sensitive module families.
+- AutoQuant search: let AutoQuant choose per-layer/per-module formats under constraints such as effective bits, active-cost objective, or allowed formats.
+- Hybrid: start from AutoQuant, then override known runtime constraints or known-sensitive fused groups manually.
+
+Always record the selection method. A candidate selected manually and a candidate
+selected by AutoQuant are different experiments even if they use the same numeric
+formats.
+
+### Module Families And Runtime Fusion Groups
+
+Search by module family, but respect runtime fused modules:
+
+- Attention projections, MLP projections, MoE experts, routers/gates, embeddings, `lm_head`, adapters, and vision encoders are separate logical families.
+- For vLLM Qwen linear attention, treat `linear_attn.in_proj_qkv` and `linear_attn.in_proj_z` as a coupled group when the runtime fuses them into `linear_attn.in_proj_qkvz`.
+- For fused MoE, treat coupled expert projections such as gate/up (`w1`/`w3`, or equivalent fused names) as one recipe unit unless the runtime supports mixed formats inside the fused expert.
+- Do not mix quantization algorithms inside a fused runtime group unless the deployment skill confirms support.
+
 ## Delegating To Existing Skills
 
 Do not reimplement workflows that existing skills own:
