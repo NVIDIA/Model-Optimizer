@@ -46,7 +46,6 @@ import re
 import torch
 from megatron.bridge import AutoBridge
 from megatron.bridge.models.mamba.mamba_provider import MambaModelProvider
-from megatron.bridge.models.nemotronh.nemotron_h_provider import NemotronHModelProvider
 from transformers import AutoConfig, AutoModelForCausalLM
 
 import modelopt.torch.opt as mto
@@ -407,8 +406,9 @@ def main(args: argparse.Namespace):
             f"Saved pruned model to {args.output_megatron_path} in Megatron checkpoint format"
         )
 
-        # NOTE: Issue with NemotronH tokenizer's len() hence using use_fast=True as a WAR
-        use_fast_tokenizer = isinstance(provider, NemotronHModelProvider)
+        # NOTE: Issue with NemotronH tokenizer's len() hence using use_fast=True as a WAR.
+        architectures = getattr(bridge.hf_pretrained.config, "architectures", None) or []
+        use_fast_tokenizer = "NemotronHForCausalLM" in architectures
         bridge.save_megatron_model(
             model,
             args.output_megatron_path,
