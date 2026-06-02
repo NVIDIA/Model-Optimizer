@@ -7,9 +7,9 @@ This directory contains examples of using Model Optimizer with [NeMo Megatron-Br
 | **Section** | **Description** | **Link** |
 | :------------: | :------------: | :------------: |
 | Pre-Requisites | Development environment setup | \[[Link](#pre-requisites)\] |
-| Post-Training Quantization | Examples of quantizing a model | \[[Link](#post-training-quantization)\] |
-| Distillation | Examples of distillation a pruned or quantized model | \[[Link](#distillation)\] |
-| Pruning | Examples of pruning a model using Minitron algorithm | \[[Link](#pruning)\] |
+| Post-Training Quantization | Quantizing a model | \[[Link](#post-training-quantization)\] |
+| Distillation | Distilling a pruned or quantized model | \[[Link](#distillation)\] |
+| Pruning | Pruning a model using Minitron algorithm | \[[Link](#pruning)\] |
 | Resources | Extra links to relevant resources | \[[Link](#resources)\] |
 
 </div>

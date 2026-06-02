@@ -103,10 +103,10 @@ def main(args: argparse.Namespace):
         args.hf_model_name_or_path, trust_remote_code=trust_remote_code
     )
     provider = bridge.to_megatron_provider(load_weights=False)
-    provider.tensor_model_parallel_size = 1
+    provider.tensor_model_parallel_size = 1  # Tensor parallelism is not supported
     provider.pipeline_model_parallel_size = args.pp_size
-    provider.expert_model_parallel_size = 1
-    provider.expert_tensor_parallel_size = 1
+    provider.expert_model_parallel_size = 1  # Expert parallelism is not supported
+    provider.expert_tensor_parallel_size = 1  # Expert tensor parallelism is not supported
     provider.pipeline_dtype = torch_dtype
     provider.finalize()
     provider.initialize_model_parallel(seed=0)
