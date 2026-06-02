@@ -13,15 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-
 """Unit tests for SharedQuantState — group-level quantization state on parent modules.
 
 These tests use a hand-built CPU model with Q/K/V siblings under a dummy
@@ -33,8 +24,9 @@ import pytest
 import torch
 import torch.nn as nn
 
+import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
-from modelopt.torch.quantization.config import QuantizerAttributeConfig
+from modelopt.torch.quantization.config import MaxCalibConfig, QuantizerAttributeConfig
 from modelopt.torch.quantization.model_calib import max_calibrate
 from modelopt.torch.quantization.nn import NVFP4StaticQuantizer, TensorQuantizer
 from modelopt.torch.quantization.utils import (
@@ -43,6 +35,7 @@ from modelopt.torch.quantization.utils import (
     attach_shared_quant_states,
     find_shared_input_groups,
     populate_shared_state,
+    promote_nvfp4_static_quantizers,
     quantizer_attr_names,
     reduce_amax,
 )
@@ -186,8 +179,6 @@ class TestSharedQuantStateBasics:
         run. If the owning ``_shared_quant_state`` is not within the promotion root, the
         quantizer must fall back to its OWN amax, not the stale group value.
         """
-        from modelopt.torch.quantization.utils import promote_nvfp4_static_quantizers
-
         attn = _DummyAttention()
         mtq.replace_quant_module(attn)
         cfg = _make_nvfp4_static_cfg()
@@ -384,8 +375,6 @@ class TestMaxCalibrateEndToEnd:
         ``QuantLinear``), and (b) the shared buffer must be non-persistent (else
         ``load_state_dict`` on the fresh, submodule-less model fails on the unexpected key).
         """
-        import modelopt.torch.opt as mto
-
         cfg = {
             "quant_cfg": [
                 {"enable": False, "quantizer_name": "*"},
@@ -447,8 +436,6 @@ class TestMaxCalibrateEndToEnd:
 
     def test_config_rejects_invalid_shared_patterns(self):
         """Bad keys and bad regexes are rejected when the config is parsed, not at calib time."""
-        from modelopt.torch.quantization.config import MaxCalibConfig
-
         MaxCalibConfig(shared_patterns={"weight": [r"(?:(.*)\.)?(?:q_proj|k_proj)"]})  # valid
         MaxCalibConfig(shared_patterns={"weight": []})  # empty list is valid (disables grouping)
         with pytest.raises(ValueError, match="unsupported quantizer kind"):
