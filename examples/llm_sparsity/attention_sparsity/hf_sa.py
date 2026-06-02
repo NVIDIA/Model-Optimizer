@@ -31,6 +31,7 @@ from modelopt.torch.export import export_hf_checkpoint
 from modelopt.torch.sparsity.attention_sparsity.config import (
     SKIP_SOFTMAX_CALIB,
     SKIP_SOFTMAX_CALIB_SPARSE24,
+    SKIP_SOFTMAX_TRITON_CALIB,
     SPARSE_SOFTMAX_DEFAULT,
 )
 from modelopt.torch.utils.memory_monitor import launch_memory_monitor
@@ -44,6 +45,7 @@ mto.enable_huggingface_checkpointing()
 SPARSE_ATTN_CFG_CHOICES = {
     "skip_softmax_calib": SKIP_SOFTMAX_CALIB,
     "skip_softmax_calib_sparse24": SKIP_SOFTMAX_CALIB_SPARSE24,
+    "skip_softmax_triton_calib": SKIP_SOFTMAX_TRITON_CALIB,
     "sparse_softmax": SPARSE_SOFTMAX_DEFAULT,
 }
 
@@ -186,6 +188,15 @@ def main(args):
             calib["max_seqlen"] = args.calib_max_seqlen
         if args.calib_chunk_size is not None:
             calib["chunk_size"] = args.calib_chunk_size
+        # Point RULER calibration at the data downloaded by download_ruler_data.sh
+        # (next to this script) unless the user overrides it. The NIAH essay
+        # haystack requires this directory.
+        calib.setdefault(
+            "data_dir",
+            args.calib_data_dir
+            if args.calib_data_dir is not None
+            else str(Path(__file__).parent / "data"),
+        )
 
     model = mtsa.sparsify(model, config=sparse_config)
     print("Sparse attention applied successfully!")
@@ -301,6 +312,14 @@ if __name__ == "__main__":
         type=int,
         default=None,
         help="Chunk size for calibration prefill. Overrides config value.",
+    )
+    parser.add_argument(
+        "--calib_data_dir",
+        type=str,
+        default=None,
+        help="Path to RULER calibration data (contains an 'essays' subdir). "
+        "Defaults to the 'data' directory next to this script "
+        "(populated by download_ruler_data.sh).",
     )
 
     args = parser.parse_args()

@@ -556,6 +556,36 @@ SKIP_SOFTMAX_CALIB = {
 }
 
 
+# RULER calibration via the fused Triton calibration kernel (prefill only).
+# Computes the same exponential-model calibration as SKIP_SOFTMAX_CALIB but
+# measures tile-skip statistics with the Triton ``attention_calibrate`` kernel
+# (the way the Triton inference kernel actually skips tiles) instead of the
+# PyTorch F.softmax-patching block path. Faster on GPU since it avoids
+# materializing per-block tensors.
+SKIP_SOFTMAX_TRITON_CALIB = {
+    "sparse_cfg": {
+        "calibration": {
+            # Prefill only: omitting "decode" leaves its target at 0.0, which
+            # skips decode calibration (the Triton calibration kernel is
+            # prefill-oriented).
+            "target_sparse_ratio": {"prefill": 0.5},
+            "samples": 64,
+            "max_seqlen": 16384,
+            # Full prefill (seq_q == seq_k, uniform batch=1) — what
+            # attention_calibrate was validated against. Chunked prefill would
+            # exercise an untested KV-cache causal-offset path in the kernel.
+            "chunk_size": -1,
+        },
+        "*attn*": {
+            "method": "triton_skip_softmax",
+            "backend": "triton",
+            "enable": True,
+        },
+        "default": {"enable": False},
+    },
+}
+
+
 class VSAAttributeConfig(ModeloptBaseConfig):
     """Video Sparse Attention (VSA) attribute configuration.
 
@@ -748,6 +778,7 @@ __all__ = [
     "SKIP_SOFTMAX_CALIB",
     "SKIP_SOFTMAX_CALIB_SPARSE24",
     "SKIP_SOFTMAX_DEFAULT",
+    "SKIP_SOFTMAX_TRITON_CALIB",
     "SKIP_SOFTMAX_TRITON_DEFAULT",
     "SPARSE_SOFTMAX_DEFAULT",
     "VSA_DEFAULT",
