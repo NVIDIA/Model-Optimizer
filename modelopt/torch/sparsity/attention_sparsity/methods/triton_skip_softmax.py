@@ -170,7 +170,7 @@ class TritonSkipSoftmaxMethod(SparseAttentionMethod):
             yield
 
     def _set_triton_backends(self, **kwargs):
-        """Set config on both diffusers and LTX Triton backends."""
+        """Set config on the diffusers, LTX, and HF (modelopt_triton) Triton backends."""
         try:
             from modelopt.torch.kernels.sparsity.attention.diffusers_triton_attention import (
                 set_triton_skip_softmax_config,
@@ -187,9 +187,17 @@ class TritonSkipSoftmaxMethod(SparseAttentionMethod):
             set_ltx_triton_context(active=True, **kwargs)
         except ImportError:
             pass
+        try:
+            from modelopt.torch.kernels.common.attention.hf_triton_attention import (
+                set_hf_triton_skip_softmax_config,
+            )
+
+            set_hf_triton_skip_softmax_config(**kwargs)
+        except ImportError:
+            pass
 
     def _clear_triton_backends(self):
-        """Clear config on both Triton backends."""
+        """Clear config on the diffusers, LTX, and HF Triton backends."""
         try:
             from modelopt.torch.kernels.sparsity.attention.diffusers_triton_attention import (
                 clear_triton_skip_softmax_config,
@@ -204,6 +212,14 @@ class TritonSkipSoftmaxMethod(SparseAttentionMethod):
             )
 
             clear_ltx_triton_context()
+        except ImportError:
+            pass
+        try:
+            from modelopt.torch.kernels.common.attention.hf_triton_attention import (
+                clear_hf_triton_skip_softmax_config,
+            )
+
+            clear_hf_triton_skip_softmax_config()
         except ImportError:
             pass
 
@@ -226,6 +242,18 @@ class TritonSkipSoftmaxMethod(SparseAttentionMethod):
         if counters is None:
             try:
                 from modelopt.torch.kernels.sparsity.attention.ltx_triton_attention import (
+                    get_calibration_counters,
+                    get_calibration_seq_k,
+                )
+
+                counters = get_calibration_counters()
+                seq_k = get_calibration_seq_k()
+            except ImportError:
+                pass
+
+        if counters is None:
+            try:
+                from modelopt.torch.kernels.common.attention.hf_triton_attention import (
                     get_calibration_counters,
                     get_calibration_seq_k,
                 )
