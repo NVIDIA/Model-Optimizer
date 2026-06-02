@@ -265,11 +265,7 @@ def max_calibrate(
     """
     # Always run weight calibration on the weight tensor directly so every weight
     # quantizer gets ``_amax``, regardless of MoE routing. Downstream algorithms
-    # (MSE, AWQ, export) then no longer need to patch in a missing ``_amax``. Weight
-    # quantizers also exercised by ``forward_loop`` see the same weight twice;
-    # MaxCalibrator's reduction is idempotent (max of identical values), so the extra
-    # pass is a no-op for their stats. Disabled weight quantizers (e.g. AWQ's, which
-    # call this with weight quantizers disabled) are skipped by ``weight_only_quantize``.
+    # (MSE, AWQ, export) then no longer need to patch in a missing ``_amax``.
     enable_stats_collection(model)
     weight_only_quantize(model)
     if forward_loop is not None:
