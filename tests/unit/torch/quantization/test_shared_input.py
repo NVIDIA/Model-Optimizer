@@ -38,6 +38,7 @@ from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.model_calib import max_calibrate
 from modelopt.torch.quantization.nn import NVFP4StaticQuantizer, TensorQuantizer
 from modelopt.torch.quantization.utils import (
+    DEFAULT_WEIGHT_SHARED_PATTERNS,
     SharedQuantState,
     attach_shared_quant_states,
     find_shared_input_groups,
@@ -46,15 +47,11 @@ from modelopt.torch.quantization.utils import (
     reduce_amax,
 )
 
-# Test-only patterns: lists of regexes (the per-kind value of ``shared_patterns``,
-# e.g. the ``"weight"`` list). ``re.fullmatch``-ed against module FQNs; capture groups
-# define the grouping key. ``(?:(.*)\.)?`` captures the immediate parent (or None at the
+# The production default patterns (q/k/v, gate/up, w1/w3) are exactly what these tests
+# need; reuse them so the tests also exercise the real default. ``re.fullmatch``-ed
+# against module FQNs; ``(?:(.*)\.)?`` captures the immediate parent (or None at the
 # model root, since these test models hold roles directly) -> per-parent / per-expert.
-SIBLING_PATTERNS = [
-    r"(?:(.*)\.)?(?:q_proj|k_proj|v_proj)",
-    r"(?:(.*)\.)?(?:gate_proj|up_proj)",
-    r"(?:(.*)\.)?(?:w1|w3)",
-]
+SIBLING_PATTERNS = DEFAULT_WEIGHT_SHARED_PATTERNS
 
 
 NVFP4_BLOCK = 16
@@ -129,28 +126,34 @@ class TestSharedQuantStateBasics:
         groups = find_shared_input_groups(m, patterns=SIBLING_PATTERNS)
         assert groups == [], "single sibling must not form a group"
 
-    def test_patterns_override_hooks(self):
-        """When patterns are given, hooks are skipped (patterns are the sole source)."""
-        attn = _DummyAttention()
-        mtq.replace_quant_module(attn)
+    def test_default_patterns_skip_non_fusible_gate(self):
+        """A gate sharing the block input but never fused (e.g. ``shared_expert_gate``)
+        must NOT be grouped with the gate_proj/up_proj pair.
+
+        This is why grouping is name/pattern-based, not shared-input-hook-based: a hook
+        would lump ``shared_expert_gate`` in with the GLU pair (same input tensor) and
+        wrongly unify its global_amax. The default patterns match only the fused roles.
+        """
+
+        class _MLPWithGate(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.gate_proj = nn.Linear(32, 32, bias=False)
+                self.up_proj = nn.Linear(32, 32, bias=False)
+                self.shared_expert_gate = nn.Linear(32, 1, bias=False)  # shares input, not fused
+
+        m = _MLPWithGate()
+        mtq.replace_quant_module(m)
         cfg = _make_nvfp4_static_cfg()
-        for proj in (attn.q_proj, attn.k_proj, attn.v_proj):
-            proj.weight_quantizer.set_from_attribute_config(cfg)
-            _populate_amax(proj, value=1.0)
+        for lin in (m.gate_proj, m.up_proj, m.shared_expert_gate):
+            lin.weight_quantizer.set_from_attribute_config(cfg)
+            _populate_amax(lin, value=1.0)
 
-        def fwd(m):
-            x = torch.randn(2, 32)
-            for proj in (m.q_proj, m.k_proj, m.v_proj):
-                proj(x)
-
-        # Hooks alone would group all three (shared input). A q/k-only pattern must
-        # win — v_proj absent proves hooks are skipped when patterns are provided.
-        groups = find_shared_input_groups(
-            attn, forward_loop=fwd, patterns=[r"(?:(.*)\.)?(?:q_proj|k_proj)"]
-        )
+        groups = find_shared_input_groups(m, patterns=DEFAULT_WEIGHT_SHARED_PATTERNS)
         assert len(groups) == 1
         _parent, members = groups[0]
-        assert len(members) == 2 and attn.v_proj not in members
+        assert set(members) == {m.gate_proj, m.up_proj}
+        assert m.shared_expert_gate not in members
 
     def test_populate_writes_max_across_siblings(self):
         attn = _DummyAttention()
@@ -348,72 +351,3 @@ class TestMaxCalibrateEndToEnd:
         assert loaded["_shared_quant_state.weight_global_amax"].item() == pytest.approx(
             sd["_shared_quant_state.weight_global_amax"].item()
         )
-
-
-class _AttnQKV(nn.Module):
-    """Attention-like module whose q/k/v consume the same input tensor."""
-
-    def __init__(self, hidden: int = 16) -> None:
-        super().__init__()
-        self.q_proj = nn.Linear(hidden, hidden, bias=False)
-        self.k_proj = nn.Linear(hidden, hidden, bias=False)
-        self.v_proj = nn.Linear(hidden, hidden, bias=False)
-
-    def forward(self, x):
-        return self.q_proj(x) + self.k_proj(x) + self.v_proj(x)
-
-
-class _GLUExpert(nn.Module):
-    """Expert whose w1/w3 consume the same (per-expert) input tensor."""
-
-    def __init__(self, hidden: int = 16) -> None:
-        super().__init__()
-        self.w1 = nn.Linear(hidden, hidden, bias=False)
-        self.w3 = nn.Linear(hidden, hidden, bias=False)
-
-    def forward(self, x):
-        return self.w1(x) * self.w3(x)
-
-
-class _AttnMoE(nn.Module):
-    """q/k/v attention + MoE experts; each expert gets a distinct input slice."""
-
-    def __init__(self, n_experts: int = 2, hidden: int = 16) -> None:
-        super().__init__()
-        self.self_attn = _AttnQKV(hidden)
-        self.experts = nn.ModuleList(_GLUExpert(hidden) for _ in range(n_experts))
-
-    def forward(self, x):
-        a = self.self_attn(x)
-        for i, expert in enumerate(self.experts):
-            expert(a[i : i + 1])  # distinct slice per expert -> per-expert hook grouping
-        return a
-
-
-class TestHookPatternEquivalence:
-    """The sibling regex patterns reproduce exactly what hook discovery finds."""
-
-    def test_hooks_match_sibling_patterns(self):
-        model = _AttnMoE(n_experts=2, hidden=16)
-        mtq.replace_quant_module(model)
-        cfg = _make_nvfp4_static_cfg()
-        linears = [model.self_attn.q_proj, model.self_attn.k_proj, model.self_attn.v_proj]
-        for expert in model.experts:
-            linears += [expert.w1, expert.w3]
-        for lin in linears:
-            lin.weight_quantizer.set_from_attribute_config(cfg)
-            _populate_amax(lin, value=1.0)
-
-        def fwd(m):
-            m(torch.randn(2, 16))
-
-        hook_groups = find_shared_input_groups(model, forward_loop=fwd)
-        pattern_groups = find_shared_input_groups(model, patterns=SIBLING_PATTERNS)
-
-        def normalize(groups):
-            # Group identity = (parent module, set of member modules), order-independent.
-            return {(id(parent), frozenset(id(m) for m in members)) for parent, members in groups}
-
-        assert normalize(hook_groups) == normalize(pattern_groups)
-        # Sanity: one q/k/v group + one w1/w3 group per expert (per-expert, not cross).
-        assert len(hook_groups) == 3

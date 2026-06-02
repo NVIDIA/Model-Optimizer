@@ -720,14 +720,16 @@ class MaxCalibConfig(QuantizeAlgorithmConfig):
         title="Regex patterns for groups that share quantization state",
         description=(
             "Optional dict keyed by quantizer kind (``'weight'`` and/or ``'input'``), each a list "
-            "of regexes matched (full-match) against module fully-qualified names. For a kind, when "
-            "patterns are given they are the sole discovery source (hook-based discovery is skipped), "
-            "so they must list every group you want. Modules whose match yields the same capture-group "
+            "of regexes matched (full-match) against module fully-qualified names. They must list "
+            "every group you want for that kind. Modules whose match yields the same capture-group "
             "tuple form one group; the capture boundary chooses granularity: capture the immediate "
             "parent for per-parent / per-expert groups (e.g. ``r'(.*)\\.(?:q_proj|k_proj|v_proj)'``, "
             "``r'(.*)\\.(?:w1|w3)'``); leave the expert index uncaptured for one cross-expert group "
             "(``r'(.*)\\.experts\\.\\d+\\.(?:w1|w3)'``). Only ``'weight'`` is used today; ``'input'`` is "
-            "reserved for future input-quantizer sharing. Default None -> hook-based discovery."
+            "reserved for future input-quantizer sharing. When the ``'weight'`` list is omitted, "
+            "the default fusible patterns (q/k/v, gate/up, w1/w3) are used — these match exactly "
+            "the sibling groups export fuses, avoiding the over-grouping a shared-input heuristic "
+            "would cause (e.g. a ``shared_expert_gate`` that reads the same input but is not fused)."
         ),
     )
 

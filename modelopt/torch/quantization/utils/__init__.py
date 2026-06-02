@@ -19,18 +19,18 @@
 from .core_utils import *
 from .layerwise_calib import LayerActivationCollector
 from .shared_input import (
+    DEFAULT_WEIGHT_SHARED_PATTERNS,
     SharedQuantState,
     attach_shared_quant_states,
-    collect_shared_input_modules,
     find_shared_input_groups,
     populate_shared_state,
 )
 
 __all__ = [
+    "DEFAULT_WEIGHT_SHARED_PATTERNS",
     "EXPORT_MODE",
     "SharedQuantState",
     "attach_shared_quant_states",
-    "collect_shared_input_modules",
     "convert_quantization_axis_to_reduce_axis",
     "export_torch_mode",
     "find_shared_input_groups",

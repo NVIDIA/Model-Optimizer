@@ -13,24 +13,29 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Discovery and per-group shared state for modules that consume the same input.
+"""Per-group shared quantization state for fusible sibling modules.
 
-- :func:`collect_shared_input_modules` runs a probe forward with hooks and
-  returns the modules that received the same input tensor. Used by both
-  calibration (here) and export (``unified_export_hf``).
-- :class:`SharedQuantState` is an ``nn.Module`` attached to a sibling group's
-  parent so its tensors ride along in ``state_dict``. Holds only
-  ``weight_global_amax`` today; designed to grow (act scales, LoRA factors, ...).
+Weight ``global_amax`` must be unified across modules that get **fused** at export
+(q/k/v -> qkv, gate/up -> gate_up) so they quantize with one per-tensor scale.
+:func:`find_shared_input_groups` discovers these groups by regex over module FQNs;
+:data:`DEFAULT_WEIGHT_SHARED_PATTERNS` covers the standard q/k/v, gate/up and w1/w3
+names, and callers may override per quantizer kind via ``MaxCalibConfig.shared_patterns``.
 
-:func:`find_shared_input_groups` (hooks + name patterns) produces the
-``(parent, members)`` tuples consumed by :func:`attach_shared_quant_states` and
-:func:`populate_shared_state`.
+Discovery is name/pattern-based (not input-hook-based) on purpose: "shares an input
+tensor" is broader than "gets fused" — e.g. a ``shared_expert_gate`` reads the same
+hidden states as the GLU pair but is never fused with it, so a hook would over-group
+it. Patterns match exactly the roles export fuses.
+
+:class:`SharedQuantState` is an ``nn.Module`` attached to a group's parent so its
+tensors ride along in ``state_dict``. Holds only ``weight_global_amax`` today;
+designed to grow (act scales, LoRA factors, ...). The ``(parent, members)`` tuples
+from :func:`find_shared_input_groups` are consumed by
+:func:`attach_shared_quant_states` and :func:`populate_shared_state`.
 """
 
 import re
 import warnings
-from collections import defaultdict
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 
 import torch
 import torch.distributed as dist
@@ -38,90 +43,26 @@ import torch.nn as nn
 
 from modelopt.torch.utils.distributed import ParallelState
 
-from .core_utils import is_quantized_linear, quantizer_attr_names, reduce_amax
-
-ForwardLoop = Callable[[nn.Module], None]
+from .core_utils import quantizer_attr_names, reduce_amax
 
 __all__ = [
+    "DEFAULT_WEIGHT_SHARED_PATTERNS",
     "SharedQuantState",
     "attach_shared_quant_states",
-    "collect_shared_input_modules",
     "find_shared_input_groups",
     "populate_shared_state",
 ]
 
-
-# ---------------------------------------------------------------------------
-# Discovery primitive
-# ---------------------------------------------------------------------------
-
-
-def collect_shared_input_modules(
-    model: nn.Module,
-    forward_fn: Callable[[], None],
-    module_filter: Callable[[nn.Module], bool] | None = None,
-    output_filter: Callable[[nn.Module], bool] | None = None,
-) -> tuple[dict, dict | None]:
-    """Hook the model, run a probe forward, group modules by shared input tensor.
-
-    Args:
-        model: model to probe.
-        forward_fn: zero-arg callable running a forward pass on ``model``;
-            quantizers are disabled during it so probe outputs aren't perturbed.
-        module_filter: which modules to hook on input (default
-            :func:`is_quantized_linear`).
-        output_filter: optional, which modules to hook on output. AWQ export uses
-            it to map a layernorm's output to itself so the pre_quant_scale can be
-            folded into the layernorm; ``None`` skips output tracking.
-
-    Returns:
-        ``(input_to_modules, output_to_modules)``: input tensor -> modules that
-        received it (the shared-input group), and output tensor -> producing
-        module (``None`` when ``output_filter`` is not given).
-    """
-    # Inline import to avoid a cycle (conversion/dataset_utils import from utils);
-    # safe because this runs at calibration/export time, not module load.
-    from modelopt.torch.quantization.conversion import set_quantizer_by_cfg_context
-    from modelopt.torch.utils.dataset_utils import _disable_use_cache
-
-    if module_filter is None:
-        module_filter = is_quantized_linear
-
-    input_to_modules: dict = defaultdict(list)
-    output_to_modules: dict | None = defaultdict(lambda: None) if output_filter else None
-
-    def _input_hook(module, args, output):
-        if len(args) > 0 and isinstance(args[0], torch.Tensor):
-            input_to_modules[args[0]].append(module)
-
-    def _output_hook(module, args, output):
-        if output_to_modules is not None and isinstance(output, torch.Tensor):
-            output_to_modules[output] = module
-
-    handles = []
-    for name, module in model.named_modules():
-        if output_filter is not None and output_filter(module):
-            module.name = name
-            handles.append(module.register_forward_hook(_output_hook))
-        elif module_filter(module):
-            module.name = name
-            handles.append(module.register_forward_hook(_input_hook))
-
-    if not handles:
-        return input_to_modules, output_to_modules
-
-    try:
-        with (
-            torch.no_grad(),
-            set_quantizer_by_cfg_context(model, [{"quantizer_name": "*", "enable": False}]),
-            _disable_use_cache(model),
-        ):
-            forward_fn()
-    finally:
-        for handle in handles:
-            handle.remove()
-
-    return input_to_modules, output_to_modules
+# Default fusible-sibling patterns for WEIGHT global_amax — the groups export fuses:
+# q/k/v -> qkv, gate/up (incl. Mixtral w1/w3) -> gate_up. These reproduce the legacy
+# name-based grouping exactly. Regexes are ``re.fullmatch``-ed against module FQNs;
+# ``(?:(.*)\.)?`` captures the immediate parent so grouping is per-parent (per-expert
+# for MoE experts). Override per quantizer kind via ``MaxCalibConfig.shared_patterns``.
+DEFAULT_WEIGHT_SHARED_PATTERNS = [
+    r"(?:(.*)\.)?(?:q_proj|k_proj|v_proj)",
+    r"(?:(.*)\.)?(?:gate_proj|up_proj)",
+    r"(?:(.*)\.)?(?:w1|w3)",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -178,7 +119,7 @@ class SharedQuantState(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# Group discovery (hook + pattern) → (parent, members) tuples
+# Group discovery (regex over FQNs) → (parent, members) tuples
 # ---------------------------------------------------------------------------
 
 
@@ -253,61 +194,31 @@ def _lowest_common_ancestor(
     return fallback
 
 
-def _groups_from_hooks(
+def find_shared_input_groups(
     model: nn.Module,
-    forward_loop: ForwardLoop,
+    patterns: Sequence[str] | None = None,
 ) -> list[tuple[nn.Module, list[nn.Module]]]:
-    """Discover sibling groups from a hook-based probe forward.
+    r"""Find fusible sibling groups by regex over module FQNs; capture groups define the key.
 
-    Modules whose first input is the same tensor object form a group, parented at
-    their LCA. Only catches the *literal same tensor*, so cross-expert MoE sharing
-    (one input per expert) is missed — patterns cover that.
-    """
-    input_to_modules, _ = collect_shared_input_modules(
-        model, forward_fn=lambda: forward_loop(model)
-    )
-    if not input_to_modules:
-        return []
+    Each pattern is ``re.fullmatch``-ed against every quantized module's fully-qualified
+    name; modules whose match yields the same capture-group tuple form one group, parented
+    at their LCA. Granularity is set by *what you capture*:
 
-    parent_map = _build_parent_map(model)
-    wq_attr = quantizer_attr_names("weight").weight_quantizer
-    groups: list[tuple[nn.Module, list[nn.Module]]] = []
-    for members in input_to_modules.values():
-        # Dedup (a module may be hooked twice) and keep calibrated members only.
-        unique: list[nn.Module] = []
-        seen: set[int] = set()
-        for m in members:
-            if id(m) in seen:
-                continue
-            if not _has_calibratable_weight_quantizer(m, wq_attr):
-                continue
-            seen.add(id(m))
-            unique.append(m)
-        if len(unique) >= 2:
-            parent = _lowest_common_ancestor(unique, parent_map, fallback=model)
-            groups.append((parent, unique))
-    return groups
-
-
-def _groups_from_patterns(
-    model: nn.Module,
-    patterns: Sequence[str],
-) -> list[tuple[nn.Module, list[nn.Module]]]:
-    r"""Discover groups by regex over module FQNs; capture groups define the grouping key.
-
-    Each pattern is a regex ``re.fullmatch``-ed against every quantized module's
-    fully-qualified name; modules whose match yields the same capture-group tuple form
-    one group, parented at their LCA. Granularity is set by *what you capture*:
-
-    - Capture the immediate parent -> per-parent grouping: q/k/v per attention block,
-      and **per-expert** ``w1``/``w3`` (each expert is the immediate parent), e.g.
+    - Capture the immediate parent -> per-parent grouping: q/k/v per attention block, and
+      **per-expert** ``w1``/``w3`` (each expert is the immediate parent), e.g.
       ``r"(.*)\.(?:w1|w3)$"``.
-    - Capture only a level above the expert index, leaving the index uncaptured ->
-      one **cross-expert** group, e.g. ``r"(.*)\.experts\.\d+\.(?:w1|w3)$"``.
+    - Capture only a level above the expert index, leaving the index uncaptured -> one
+      **cross-expert** group, e.g. ``r"(.*)\.experts\.\d+\.(?:w1|w3)$"``.
 
-    Roles to fuse together go in a non-capturing alternation ``(?:w1|w3)`` so they
-    don't split the key; what you wrap in ``(...)`` is the group boundary.
+    Roles to fuse together go in a non-capturing alternation ``(?:w1|w3)`` so they don't
+    split the key; what you wrap in ``(...)`` is the group boundary. Pass
+    :data:`DEFAULT_WEIGHT_SHARED_PATTERNS` for the standard q/k/v + gate/up groups, or
+    override via ``MaxCalibConfig.shared_patterns``. The caller selects which quantizer
+    these groups apply to (today only the weight quantizer). Returns ``(parent, members)``
+    tuples; empty when no patterns are given.
     """
+    if not patterns:
+        return []
     wq_attr = quantizer_attr_names("weight").weight_quantizer
     compiled = [re.compile(p) for p in patterns]
     buckets: dict[tuple, list[nn.Module]] = {}
@@ -318,10 +229,8 @@ def _groups_from_patterns(
         for pattern_idx, regex in enumerate(compiled):
             match = regex.fullmatch(name)
             if match is not None:
-                key = (
-                    pattern_idx,
-                    match.groups(),
-                )  # include pattern_idx in case 1+ partterns collide.
+                # include pattern_idx in case 2+ patterns yield the same capture tuple
+                key = (pattern_idx, match.groups())
                 if key not in buckets:
                     buckets[key] = []
                     order.append(key)
@@ -337,33 +246,6 @@ def _groups_from_patterns(
     return groups
 
 
-def find_shared_input_groups(
-    model: nn.Module,
-    forward_loop: ForwardLoop | None = None,
-    patterns: Sequence[str] | None = None,
-) -> list[tuple[nn.Module, list[nn.Module]]]:
-    """Find sibling groups from regex patterns if given, else from a hook probe.
-
-    Patterns and hooks are mutually exclusive: when ``patterns`` is set it is the
-    sole source (and must list every group you want); otherwise hook discovery runs
-    on the ``forward_loop`` probe.
-
-    - ``patterns`` — regexes over module FQNs whose capture groups define the grouping
-      key (see :func:`_groups_from_patterns`); the capture boundary chooses per-expert
-      vs cross-expert granularity. The caller selects which quantizer these groups apply
-      to (today only the weight quantizer; see ``MaxCalibConfig.shared_patterns``).
-    - ``forward_loop`` — hook probe grouping modules that receive the *literal same
-      tensor* (Q/K/V, gate/up within one block/expert; per-expert for MoE).
-
-    Returns ``(parent, members)`` tuples.
-    """
-    if patterns:
-        return _groups_from_patterns(model, patterns)
-    if forward_loop is not None:
-        return _groups_from_hooks(model, forward_loop)
-    return []
-
-
 # ---------------------------------------------------------------------------
 # Attach / populate lifecycle
 # ---------------------------------------------------------------------------
@@ -371,26 +253,24 @@ def find_shared_input_groups(
 
 def attach_shared_quant_states(
     model: nn.Module,
-    forward_loop: ForwardLoop | None = None,
     patterns: Sequence[str] | None = None,
 ) -> int:
     """Create ``SharedQuantState`` on each group's parent and link members.
 
-    The parent owns the state under ``_shared_quant_state`` (normal setattr → a
-    registered submodule, so its buffer rides along in ``state_dict``). Each
-    member's weight quantizer — the only consumer, via
-    ``promote_nvfp4_static_quantizers`` — gets a back-reference under the distinct
-    name ``_shared_quant_state_ref`` set with ``object.__setattr__`` (not a
-    submodule, so the buffer isn't duplicated per member). The distinct names let
+    Groups are discovered by ``patterns`` (regexes over module FQNs; see
+    :func:`find_shared_input_groups`). The parent owns the state under
+    ``_shared_quant_state`` (normal setattr → a registered submodule, so its buffer
+    rides along in ``state_dict``). Each member's weight quantizer — the only consumer,
+    via ``promote_nvfp4_static_quantizers`` — gets a back-reference under the distinct
+    name ``_shared_quant_state_ref`` set with ``object.__setattr__`` (not a submodule,
+    so the buffer isn't duplicated per member). The distinct names let
     ``populate_shared_state`` select owners with a plain ``getattr``.
 
     Idempotent (reuses an existing parent state). Returns the number created.
     """
     n_created = 0
     wq_attr = quantizer_attr_names("weight").weight_quantizer
-    for parent, members in find_shared_input_groups(
-        model, forward_loop=forward_loop, patterns=patterns
-    ):
+    for parent, members in find_shared_input_groups(model, patterns=patterns):
         if not hasattr(parent, "_shared_quant_state"):
             parent._shared_quant_state = SharedQuantState()
             n_created += 1

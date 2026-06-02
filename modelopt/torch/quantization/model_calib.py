@@ -43,6 +43,7 @@ from .calib import MseCalibrator, NVFP4MSECalibrator, _Calibrator
 from .conversion import create_and_replace_svdquant_linear_on_the_fly, set_quantizer_by_cfg_context
 from .nn import NVFP4StaticQuantizer, QuantModule, SequentialQuantizer, TensorQuantizer
 from .utils import (
+    DEFAULT_WEIGHT_SHARED_PATTERNS,
     attach_shared_quant_states,
     disable_calib,
     enable_fake_quant,
@@ -206,11 +207,12 @@ def max_calibrate(
         sync_expert_weight_amax: SequentialMLP only — share one weight amax across all experts
             in a MoE layer (within-rank sync + EP all-reduce when EP>1).
         shared_patterns: Optional dict keyed by quantizer kind (``"weight"``/``"input"``), each a
-            list of regexes over module FQNs. For a kind, when patterns are given they are the sole
-            discovery source (hooks skipped). Modules whose regex match yields the same capture-group
-            tuple form one group — capture the immediate parent for per-parent (per-expert) grouping,
-            or leave the expert index uncaptured for cross-expert. Only ``"weight"`` is used today;
-            ``"input"`` is reserved for future input-quantizer sharing.
+            list of regexes over module FQNs. When the ``"weight"`` list is omitted,
+            :data:`DEFAULT_WEIGHT_SHARED_PATTERNS` (q/k/v, gate/up, w1/w3) is used. Modules whose
+            regex match yields the same capture-group tuple form one group — capture the immediate
+            parent for per-parent (per-expert) grouping, or leave the expert index uncaptured for
+            cross-expert. Only ``"weight"`` is used today; ``"input"`` is reserved for future
+            input-quantizer sharing.
 
     See :class:`MaxCalibConfig <modelopt.torch.quantization.config.MaxCalibConfig>` for
     details on the remaining arguments.
@@ -232,11 +234,11 @@ def max_calibrate(
     # Fail fast on NVFP4 static-block with TP>1 (sharded_state_dict treats _amax as replicated).
     _check_nvfp4_static_tp_supported(model)
 
-    # Discover sibling groups (forward_loop hooks, or the "weight" regexes when given)
-    # and attach shared state; populated below, after any cross-rank _amax sync.
-    # Only "weight" patterns are consumed today; "input" is reserved for the future.
-    weight_patterns = shared_patterns.get("weight") if shared_patterns else None
-    attach_shared_quant_states(model, forward_loop=forward_loop, patterns=weight_patterns)
+    # Discover fusible sibling groups by name regex (default q/k/v + gate/up, or the
+    # caller's "weight" patterns) and attach shared state; populated below, after any
+    # cross-rank _amax sync. Only "weight" is consumed today; "input" is reserved.
+    weight_patterns = (shared_patterns or {}).get("weight") or DEFAULT_WEIGHT_SHARED_PATTERNS
+    attach_shared_quant_states(model, patterns=weight_patterns)
 
     if not distributed_sync:
         # Single-process: _amax is final — aggregate shared global_amax, then promote.
