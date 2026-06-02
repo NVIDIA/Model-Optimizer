@@ -363,6 +363,8 @@ def _attn_fwd(
             skip_tile = _skip_softmax_decision(
                 scores,
                 row_max,
+                q_pos,
+                seq_len_q,
                 SKIP_THRESHOLD_LOG2,
                 Sparsity_total,
                 Sparsity_skipped,

@@ -252,8 +252,12 @@ def attention_calibrate(
     sm_scale = 1.0 / (HEAD_DIM**0.5) if softmax_scale is None else softmax_scale
     qk_scale = sm_scale * LOG2E
     BLOCK_D = triton.next_power_of_2(HEAD_DIM)
+    # Pinned to match flash_skip_softmax's (br, bc) = (128, 128) and the
+    # measure_sparsity path's _MEASURE_BLOCK_M / _MEASURE_BLOCK_N. Keeping all
+    # three fixed configs identical so calibration sparsity == kernel runtime
+    # counters == PyTorch path measurements.
     BLOCK_M = 128
-    BLOCK_N = 64
+    BLOCK_N = 128
 
     if b_seq_len_k is None:
         b_seq_len_k = b_seq_len
