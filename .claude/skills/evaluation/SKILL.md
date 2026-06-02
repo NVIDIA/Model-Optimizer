@@ -144,7 +144,7 @@ For how to choose `--tensor-parallel-size` / `--data-parallel-size` / `--pipelin
 
 **Image / vLLM version.** Default `image: vllm/vllm-openai:v0.19.1` (pinned for reproducibility). If `recipes.vllm.ai` states a higher minimum version for the chosen variant (e.g. "vLLM >= 0.20.0"), bump the image tag accordingly (e.g. `v0.20.0`) — do **not** stay on `0.19.1` when the recipe explicitly requires newer. Do **not** use `:latest` (drifts across re-runs, breaks reproducibility). The version is part of the cross-check: surface to the user when bumping.
 
-> **NVFP4 on Blackwell needs the CUDA-13 build.** Serving an NVFP4 checkpoint on Blackwell (B200/B300/GB200/GB300, compute capability sm_100/sm_103) requires `vllm/vllm-openai:cu130-nightly-<arch>` (`-x86_64`, or `-aarch64` on Grace). The pinned `v0.19.1` and **all** `cu129` (CUDA 12.9) builds lack sm_103 FP4 kernels — the server loads the checkpoint then dies at engine init with `CUDA error: no kernel image is available for execution on the device` (true for the `flashinfer` *and* `cutlass` NVFP4 backends; `marlin` separately fails on non-64-divisible layer dims). This is the vLLM-recipe-recommended Blackwell image — confirm via `recipes.vllm.ai/<org>/<model>?hardware=b300` (and since that page is JS-rendered, fetch the raw markdown at `github.com/vllm-project/recipes/blob/main/<org>/<model>.md`). For **multimodal** models on sm_103, also add `--mm-encoder-attn-backend TRITON_ATTN` — the default CuTe ViT flash-attn kernel asserts "Only SM 10.x and 11.x are supported" on sm_103.
+> **NVFP4 on Blackwell needs a CUDA-13 vLLM build.** On B200/B300/GB200/GB300 (sm_100/sm_103) the pinned `v0.19.1` and all `cu129` builds lack sm_103 FP4 kernels — engine init dies with `CUDA error: no kernel image is available for execution on the device`. Use `vllm/vllm-openai:v0.19.1-cu130` (pinned, matches the default image), and bump to `cu130-nightly-<arch>` only if it lacks the model's arch (Qwen3.5-9B's `qwen3_5` needed the nightly). Multimodal on sm_103 also needs `--mm-encoder-attn-backend TRITON_ATTN` (ViT flash-attn workaround). Full note + the `recipes.vllm.ai ?hardware=b300` lookup are in `recipes/examples/example_eval.yaml`.
 
 #### vLLM-backend defaults — always include unless the recipe *contradicts*
 
@@ -269,7 +269,7 @@ Default images:
 | Framework | Image | Registry |
 | --- | --- | --- |
 | vLLM | `vllm/vllm-openai:v0.19.1` (bump per recipe; never `:latest`) | DockerHub |
-| vLLM (NVFP4 on Blackwell) | `vllm/vllm-openai:cu130-nightly-x86_64` (or `-aarch64`) | DockerHub |
+| vLLM (NVFP4 on Blackwell) | `vllm/vllm-openai:v0.19.1-cu130` (bump to `cu130-nightly-<arch>` for new archs) | DockerHub |
 | SGLang | `lmsysorg/sglang:latest` | DockerHub |
 | TRT-LLM | `nvcr.io/nvidia/tensorrt-llm/release:...` | NGC |
 | Eval tasks | `nvcr.io/nvidia/eval-factory/*:26.03` | NGC |
