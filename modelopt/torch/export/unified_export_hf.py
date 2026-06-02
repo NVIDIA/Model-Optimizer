@@ -51,6 +51,7 @@ try:
 except ImportError:
     HAS_DIFFUSERS = False
 
+from torch.distributed.checkpoint.state_dict import StateDictOptions, get_model_state_dict
 from torch.distributed.fsdp import FSDPModule
 
 from modelopt.torch.quantization import set_quantizer_by_cfg_context
@@ -840,7 +841,6 @@ def _export_transformers_checkpoint(
     Args:
         model: the full torch model to export. The actual quantized model may be a submodule.
         dtype: the weights data type to export the unquantized layers or the default model data type if None.
-        accelerator: the accelerator instance in case of distributed export setup.
 
     Returns:
         post_state_dict: Dict containing quantized weights
@@ -853,8 +853,6 @@ def _export_transformers_checkpoint(
             f"Model's original dtype ({model.config.torch_dtype}) differs from target dtype "
             f"({dtype}), which may lead to numerical errors."
         )
-
-    accelerator = kwargs.get("accelerator")
 
     # Handle input quantizers of experts that are not calibrated. Each MoE block is
     # dispatched by its experts container to the matching preparation handler.
@@ -925,9 +923,12 @@ def _export_transformers_checkpoint(
 
     _reconstruct_fused_moe_linear(model)
 
-    if accelerator is not None:
-        # Gather state_dict from all ranks
-        quantized_state_dict = accelerator.get_state_dict(model)
+    if any(isinstance(m, FSDPModule) for m in model.modules()):
+        # FSDP2-sharded model: gather full state_dict from all ranks (with CPU
+        # offload to bound peak GPU memory during the gather).
+        quantized_state_dict = get_model_state_dict(
+            model, options=StateDictOptions(full_state_dict=True, cpu_offload=True)
+        )
     else:
         quantized_state_dict = model.state_dict()
 
