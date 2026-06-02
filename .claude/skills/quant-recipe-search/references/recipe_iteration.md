@@ -82,7 +82,9 @@ Choose which modules get which format by one of these methods:
 - Sensitivity-guided manual: generate or recover an AutoQuant sensitivity report,
   then protect sensitive families or quantize low-sensitivity high-cost families.
 - AutoQuant: search per-layer/per-module selections under constraints such as
-  target bits, active-cost objective, or allowed formats.
+  target bits, active-cost objective, or allowed formats. When AutoQuant is
+  available, include at least one AutoQuant-generated candidate in the portfolio
+  so its trade-off can be compared against manual recipes.
 - Hybrid: start from AutoQuant, then override known runtime constraints or
   known-sensitive fused groups manually.
 
@@ -108,7 +110,11 @@ Choose which modules get which format by one of these methods:
    - Start from `modelopt_recipes` when ModelOpt is available.
    - Prefer model-specific recipes, then general PTQ presets, then recipe
      fragments.
-   - Add one conservative low-bit candidate in the requested primary family.
+   - Add one AutoQuant candidate in the requested primary family when AutoQuant
+     is available. Treat it as the expected best-search path, but validate it.
+   - Add at least one manual or sensitivity-guided candidate for comparison and
+     as a fallback if AutoQuant misses the benchmark frontier or produces a
+     runtime-incompatible recipe.
 
 5. Generate and validate:
    - Delegate checkpoint generation and validation to `ptq`.
@@ -159,6 +165,13 @@ Use this loop after each candidate:
 7. If AutoQuant gives repeated recipes:
    - Check achieved bits and recipe hashes.
    - Adjust objective, allowed formats, or constraints before larger sweeps.
+8. If AutoQuant underperforms manual recipes:
+   - Compare the AutoQuant sensitivity report against manual ablation results.
+   - Check whether AutoQuant protected high-active-cost modules, excluded the
+     wrong families, optimized checkpoint size instead of active cost, or hit
+     runtime-fusion constraints.
+   - Keep the manual recipe in the table and use AutoQuant sensitivity to design
+     the next hybrid/manual candidate.
 
 Promote a recipe only when validated comparison shows it satisfies the user's
 objective and benchmark threshold.
@@ -208,6 +221,8 @@ For every candidate, record:
 - Numeric formats and module-family coverage.
 - Calibration/search algorithm and calibration data budget.
 - Selection method: manual, sensitivity-guided, AutoQuant, or hybrid.
+- Whether the candidate came from AutoQuant, manual ablation, or a hybrid
+  override, so AutoQuant and manual trade-offs can be compared directly.
 - Runtime fusion assumptions.
 - Active bytes/token estimate including scales.
 - Checkpoint path and eval/log paths.

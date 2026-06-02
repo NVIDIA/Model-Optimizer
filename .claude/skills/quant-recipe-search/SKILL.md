@@ -97,14 +97,19 @@ Do not collapse the search to one dimension such as numeric format only. Read
      itself is the target.
    - For ModelOpt work, start from `modelopt_recipes`: model-specific recipes
      first, then general PTQ presets or recipe fragments.
-   - Add one conservative low-bit candidate in the requested primary family.
+   - Add an AutoQuant candidate in the requested primary family when AutoQuant
+     is available. Expect AutoQuant to find a better trade-off than a first
+     manual recipe, but validate that assumption with the same evals.
+   - Add at least one manual or sensitivity-guided candidate so AutoQuant can be
+     compared against controlled ablations and there is a fallback if AutoQuant
+     misses the best frontier or hits runtime constraints.
 
 4. **Generate candidates**
    - Delegate checkpoint generation and PTQ validation to `ptq`.
    - Change one major axis at a time: format, calibration algorithm, module
      selection, granularity, exclusions, or calibration data.
-   - Use AutoQuant or sensitivity reports for broad ranking; use manual recipes
-     for controlled module-family ablations.
+   - Use AutoQuant for broad candidate generation and sensitivity reports; use
+     manual recipes for controlled module-family ablations and overrides.
 
 5. **Gate before scaling**
    - Validate checkpoint coverage and metadata.
@@ -124,6 +129,9 @@ Do not collapse the search to one dimension such as numeric format only. Read
      or use AutoQuant sensitivity to choose overrides.
    - Poor performance/cost: quantize the next high-cost active family, adjust
      active-cost objective, or try a more aggressive format.
+   - AutoQuant underperforms manual recipes: inspect sensitivity reports,
+     achieved bits, excluded modules, and runtime-fusion constraints; keep the
+     manual recipe in the portfolio instead of forcing the AutoQuant result.
    - Runtime incompatibility: rewrite around fused groups or isolate deployment
      support from checkpoint quality.
    - Repeated AutoQuant recipes: inspect achieved bits and recipe hashes, then
