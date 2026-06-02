@@ -52,12 +52,7 @@ SPECULATIVE_MODEL_LIST = ["Eagle", "Medusa"]
 
 
 def setup_distributed_args(args):
-    """Populate ``args.rank`` / ``world_size`` / ``device`` / ``is_main``.
-
-    When ``--use_fsdp2`` is set, initializes the distributed process group and
-    pins this rank's CUDA device. When the flag is off, fills no-op values so
-    downstream helpers can use ``args.is_main`` and ``args.rank`` uniformly.
-    """
+    """Set ``args.rank``/``world_size``/``device``/``is_main`` (single-process if FSDP2 off)."""
     from modelopt.torch.utils import distributed as dist_utils
 
     if getattr(args, "use_fsdp2", False):
@@ -73,20 +68,37 @@ def setup_distributed_args(args):
 
 
 def cleanup_distributed(args):
-    """Tear down the distributed process group if FSDP2 set it up."""
+    """Destroy the process group if ``--use_fsdp2`` set it up."""
     from modelopt.torch.utils import distributed as dist_utils
 
     if getattr(args, "use_fsdp2", False):
         dist_utils.cleanup()
 
 
-def validate_fsdp2_supported(args, config):
-    """Raise NotImplementedError if the model config is not FSDP2-supported in v1.
+def _checkpoint_has_mtp_weights(model_path: str) -> bool:
+    """Return True if the checkpoint's safetensors index advertises MTP weights."""
+    candidates = [Path(model_path) / "model.safetensors.index.json"]
+    try:
+        from huggingface_hub import try_to_load_from_cache
 
-    Called after ``AutoConfig.from_pretrained`` (cheap) and before any heavy
-    loading work, so unsupported configurations fail fast with a clear message
-    instead of crashing later inside a DTensor traceback.
-    """
+        cached = try_to_load_from_cache(model_path, "model.safetensors.index.json")
+    except ImportError:
+        cached = None
+    if cached:
+        candidates.append(Path(cached))
+    for index_file in candidates:
+        if not index_file.exists():
+            continue
+        try:
+            weight_map = json.load(open(index_file)).get("weight_map", {})
+        except (OSError, json.JSONDecodeError):
+            continue
+        return any("mtp" in k or "mtp" in v for k, v in weight_map.items())
+    return False
+
+
+def validate_fsdp2_supported(args, config):
+    """Raise ``NotImplementedError`` for model/CLI combos the FSDP2 path doesn't support yet."""
     issues = []
     if "vila" in args.pyt_ckpt_path.lower():
         issues.append("VILA (custom builder + non-standard layer layout)")
@@ -98,6 +110,11 @@ def validate_fsdp2_supported(args, config):
         issues.append("speculative decoding (--specdec_offline_dataset)")
     if getattr(args, "low_memory_mode", False):
         issues.append("--low_memory_mode (redundant with FSDP2)")
+    if _checkpoint_has_mtp_weights(args.pyt_ckpt_path):
+        issues.append(
+            "MTP (Multi-Token Prediction) weights — the FSDP2 loader doesn't "
+            "carry them through; the exported checkpoint would be missing MTP layers"
+        )
     if issues:
         raise NotImplementedError(
             "--use_fsdp2 does not support:\n  - "
@@ -117,15 +134,7 @@ def load_and_prepare_fsdp2_model(
     cpu_offload: bool = False,
     attn_implementation: str | None = None,
 ):
-    """CLI-side FSDP2 loader: validate against CLI constraints, then delegate to core.
-
-    Runs :func:`validate_fsdp2_supported` to enforce example-script policy (VILA,
-    multimodal/VL, ``--low_memory_mode``, ``--specdec_offline_dataset``, etc.),
-    then calls :func:`modelopt.torch.utils.distributed.load_fsdp2_causal_lm`.
-
-    The core loader is fully reusable (no argparse coupling); this wrapper exists
-    to keep the CLI policy at the example edge.
-    """
+    """Validate CLI constraints, then delegate to :func:`load_fsdp2_causal_lm`."""
     from modelopt.torch.utils.distributed import load_fsdp2_causal_lm
 
     if args is not None:

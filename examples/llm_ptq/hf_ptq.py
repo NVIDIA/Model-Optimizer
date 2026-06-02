@@ -105,13 +105,6 @@ def _set_kv_cache_constant_amax(quant_cfg: list) -> None:
         break
 
 
-def _nvfp4_max_cfg(*, layerwise: bool) -> dict[str, Any]:
-    """NVFP4 quant config with explicit max calibration and a layerwise toggle."""
-    cfg = copy.deepcopy(mtq.NVFP4_DEFAULT_CFG)
-    cfg["algorithm"] = {"method": "max", "layerwise": layerwise}
-    return cfg
-
-
 QUANT_CFG_CHOICES: dict[str, dict[str, Any]] = {
     "int8": mtq.INT8_DEFAULT_CFG,
     "int8_sq": mtq.INT8_SMOOTHQUANT_CFG,
@@ -120,8 +113,6 @@ QUANT_CFG_CHOICES: dict[str, dict[str, Any]] = {
     "int4_awq": mtq.INT4_AWQ_CFG,
     "w4a8_awq": mtq.W4A8_AWQ_BETA_CFG,
     "nvfp4": mtq.NVFP4_DEFAULT_CFG,
-    "nvfp4_max": _nvfp4_max_cfg(layerwise=False),
-    "nvfp4_max_layerwise": _nvfp4_max_cfg(layerwise=True),
     "nvfp4_awq": mtq.NVFP4_AWQ_LITE_CFG,
     "nvfp4_mse": mtq.NVFP4_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG,
     "fp8_pb_wo": mtq.FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG,
@@ -811,20 +802,14 @@ def export_quantized(
                 export_hf_vllm_fq_checkpoint(
                     full_model, export_dir=export_path, inplace_mem_efficient=True
                 )
-            elif args.use_fsdp2:
-                export_hf_checkpoint(
-                    full_model,
-                    torch.bfloat16,
-                    export_dir=export_path,
-                    architectures_override=getattr(full_model, "_original_architectures", None),
-                )
             else:
-                mtp_layer_prefixes, mtp_state_dict = load_mtp_weights(
-                    full_model, args.pyt_ckpt_path
-                )
-
-                if mtp_layer_prefixes:
-                    full_model._mtp_layer_prefixes = mtp_layer_prefixes
+                mtp_state_dict = None
+                if not args.use_fsdp2:
+                    mtp_layer_prefixes, mtp_state_dict = load_mtp_weights(
+                        full_model, args.pyt_ckpt_path
+                    )
+                    if mtp_layer_prefixes:
+                        full_model._mtp_layer_prefixes = mtp_layer_prefixes
 
                 export_hf_checkpoint(
                     full_model,

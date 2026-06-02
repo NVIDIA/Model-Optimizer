@@ -1173,7 +1173,6 @@ def export_hf_checkpoint(
     components: list[str] | None = None,
     extra_state_dict: dict[str, torch.Tensor] | None = None,
     max_shard_size: int | str = "10GB",
-    architectures_override: list[str] | None = None,
     **kwargs,
 ):
     """Export quantized HuggingFace model checkpoint (transformers or diffusers).
@@ -1197,9 +1196,6 @@ def export_hf_checkpoint(
             to export. If None, all quantized components are exported.
         extra_state_dict: Extra state dictionary to add to the exported model.
         max_shard_size: Maximum size of each safetensors shard file. Defaults to "10GB".
-        architectures_override: If set, written into ``config.json`` as
-            ``architectures``. Use this to restore the original architectures list
-            after FSDP2 wrapping, which prefixes class names.
         **kwargs: Internal-only keyword arguments. Supported key: merged_base_safetensor_path
             (str, optional). When provided, merges the exported diffusion transformer
             weights with non-transformer components (VAE, vocoder, text encoders, etc.)
@@ -1303,9 +1299,6 @@ def export_hf_checkpoint(
             sparse_attn_config = export_sparse_attention_config(model)
             if sparse_attn_config is not None:
                 config_data["sparse_attention_config"] = sparse_attn_config
-
-        if architectures_override:
-            config_data["architectures"] = architectures_override
 
         with open(original_config, "w") as file:
             json.dump(config_data, file, indent=4)
