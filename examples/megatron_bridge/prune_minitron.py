@@ -280,7 +280,8 @@ def main(args: argparse.Namespace):
         hf_model_name_or_path=args.hf_model_name_or_path,
         trust_remote_code=args.trust_remote_code,
         provider_overrides={
-            "tensor_model_parallel_size": 1,
+            "tensor_model_parallel_size": 1,  # Tensor parallelism is not supported
+            "expert_tensor_parallel_size": 1,  # Expert tensor parallelism is not supported
             "pipeline_model_parallel_size": args.pp_size,
             "num_layers_in_first_pipeline_stage": args.num_layers_in_first_pipeline_stage,
             "num_layers_in_last_pipeline_stage": args.num_layers_in_last_pipeline_stage,

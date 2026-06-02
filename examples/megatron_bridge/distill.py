@@ -112,7 +112,6 @@ def get_args():
     parser.add_argument("--pp_size", type=int, default=1, help="Pipeline parallel size")
     parser.add_argument("--cp_size", type=int, default=1, help="Context parallel size")
     parser.add_argument("--ep_size", type=int, default=1, help="Expert parallel size")
-    parser.add_argument("--etp_size", type=int, default=1, help="Expert tensor parallel size")
 
     # Dataset arguments
     parser.add_argument(
@@ -249,7 +248,7 @@ def main(args: argparse.Namespace):
         provider.pipeline_dtype = torch.bfloat16
         provider.context_parallel_size = args.cp_size
         provider.expert_model_parallel_size = args.ep_size
-        provider.expert_tensor_parallel_size = args.etp_size
+        provider.expert_tensor_parallel_size = 1  # Expert tensor parallelism is not supported
         provider.seq_length = args.seq_length
         if args.recompute_granularity is not None:
             provider.recompute_granularity = args.recompute_granularity
