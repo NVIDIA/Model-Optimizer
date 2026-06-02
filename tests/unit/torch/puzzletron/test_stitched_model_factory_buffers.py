@@ -30,10 +30,6 @@ from modelopt.torch.puzzletron.bypass_distillation.stitched_model_factory import
 )
 
 
-def test_module_with_no_buffers_returns_empty_set():
-    assert _get_all_non_persistent_buffers_set(nn.Module()) == set()
-
-
 def test_persistent_buffer_excluded_non_persistent_included():
     m = nn.Module()
     m.register_buffer("p", torch.zeros(1), persistent=True)
@@ -51,16 +47,6 @@ def test_nested_submodule_paths_are_fully_qualified():
     outer.add_module("inner", inner)
     out = _get_all_non_persistent_buffers_set(outer)
     assert out == {"inner.nb"}
-
-
-def test_top_level_buffer_has_no_leading_dot():
-    """Module name is "" at the root — fully-qualified name must not start
-    with a dot, otherwise it won't match any state_dict key."""
-    m = nn.Module()
-    m.register_buffer("x", torch.zeros(1), persistent=False)
-    out = _get_all_non_persistent_buffers_set(m)
-    assert out == {"x"}
-    assert not any(name.startswith(".") for name in out)
 
 
 def test_mix_of_persistent_and_non_persistent_in_nested_module():

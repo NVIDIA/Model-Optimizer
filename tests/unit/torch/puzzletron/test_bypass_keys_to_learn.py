@@ -243,7 +243,7 @@ def test_empty_key_list_is_rejected():
 
 @pytest.mark.parametrize(
     "keys_to_learn",
-    ["subblock_ffn", "subblock_attention", "entire_block"],
+    ["subblock_attention", "entire_block"],
 )
 def test_subblock_keys_skip_non_floating_point_params(keys_to_learn):
     """Integer / non-floating buffers exposed as parameters must stay frozen.

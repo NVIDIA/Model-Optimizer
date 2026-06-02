@@ -38,6 +38,8 @@ import datasets
 import torch
 import transformers
 from omegaconf import DictConfig, OmegaConf
+from torch.amp.grad_scaler import GradScaler
+from torch.optim import Optimizer
 from torch.utils.data.dataloader import DataLoader
 from transformers import AutoTokenizer, PretrainedConfig, PreTrainedTokenizerBase
 
@@ -178,6 +180,28 @@ def _clip_stitched_module_grads(
         raise RuntimeError(f"Invalid {grad_clip_type}")
 
     return int(clipped_count.item())
+
+
+def _step_stitched_module_optimizer(
+    stitched_module: StitchedModule,
+    optimizer: Optimizer,
+    grad_scaler: GradScaler,
+    grad_clip: Optional[float],
+    grad_clip_type: str,
+) -> int:
+    clipped_count = 0
+    if grad_clip is not None:
+        grad_scaler.unscale_(optimizer)
+        clipped_count = _clip_stitched_module_grads(
+            stitched_module=stitched_module,
+            grad_clip=grad_clip,
+            grad_clip_type=grad_clip_type,
+        )
+
+    grad_scaler.step(optimizer)
+    grad_scaler.update()
+    optimizer.zero_grad(set_to_none=True)
+    return clipped_count
 
 
 def launch_bypass_distillation(hydra_cfg: DictConfig) -> None:
@@ -561,18 +585,13 @@ def train(
             if not is_accumulating:
                 if optimizer is not None:
                     assert grad_scaler is not None
-                    grad_clip = cfg.bypass.training.grad_clip
-                    if grad_clip is not None:
-                        grad_scaler.unscale_(optimizer)
-                        cfg.bypass.training.clipping_count += _clip_stitched_module_grads(
-                            stitched_module=stitched_module,
-                            grad_clip=grad_clip,
-                            grad_clip_type=cfg.bypass.training.grad_clip_type,
-                        )
-
-                    grad_scaler.step(optimizer)
-                    grad_scaler.update()
-                    optimizer.zero_grad(set_to_none=True)
+                    cfg.bypass.training.clipping_count += _step_stitched_module_optimizer(
+                        stitched_module=stitched_module,
+                        optimizer=optimizer,
+                        grad_scaler=grad_scaler,
+                        grad_clip=cfg.bypass.training.grad_clip,
+                        grad_clip_type=cfg.bypass.training.grad_clip_type,
+                    )
 
         # Single GPU→CPU sync for all per-block losses collected above. Stacking
         # into a 1-D tensor lets us issue exactly one ``.to("cpu")`` instead of

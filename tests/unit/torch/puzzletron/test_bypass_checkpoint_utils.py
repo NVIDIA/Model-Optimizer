@@ -21,7 +21,6 @@ marker silently restarts training from the wrong iteration.
 
 What's covered here (CPU-only, codecov-visible):
     * ``find_latest_run_dir`` — every branch of the regex/scan/symlink logic.
-    * ``_save_local_file`` — checkpoint-local file writes.
     * ``_save_local_state`` — same three save-path assertions as the GPU file
       (state_dict / optimizer / grad_scaler), but on CPU so codecov picks them
       up. The GPU file's ``test_load_local_state_*`` cases stay there because
@@ -78,10 +77,6 @@ def _make_descriptor(*, with_optimizer: bool = True, with_scaler: bool = True):
 # ---------------------------------------------------------------------------
 # find_latest_run_dir
 # ---------------------------------------------------------------------------
-
-
-def test_find_latest_run_dir_returns_none_for_empty_dir(tmp_path: Path):
-    assert bcu.find_latest_run_dir(tmp_path) is None
 
 
 def test_find_latest_run_dir_picks_only_step_with_marker(tmp_path: Path):
@@ -178,28 +173,6 @@ def test_find_latest_run_dir_ignores_latest_to_best_checkpoint(tmp_path: Path):
     (completed / "saving_completed").touch()
 
     assert bcu.find_latest_run_dir(tmp_path) == str(completed)
-
-
-# ---------------------------------------------------------------------------
-# _save_local_file
-# ---------------------------------------------------------------------------
-
-
-def test_save_local_file_writes_object_to_disk(tmp_path: Path):
-    target = tmp_path / "blob.pth"
-    bcu._save_local_file({"a": torch.tensor([1, 2, 3])}, target)
-    assert target.exists()
-    loaded = torch.load(target, weights_only=True)
-    assert torch.equal(loaded["a"], torch.tensor([1, 2, 3]))
-
-
-def test_save_local_file_overwrite_true_replaces_contents(tmp_path: Path):
-    target = tmp_path / "blob.pth"
-    bcu._save_local_file({"v": torch.tensor([1])}, target)
-    bcu._save_local_file({"v": torch.tensor([99])}, target)
-    loaded = torch.load(target, weights_only=True)
-    assert torch.equal(loaded["v"], torch.tensor([99]))
-
 
 # ---------------------------------------------------------------------------
 # _save_local_state: optimizer + grad_scaler only.

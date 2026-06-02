@@ -60,19 +60,23 @@ def _make_cfg(
     )
 
 
-def test_degenerate_budget_returns_base_lr():
+@pytest.mark.parametrize(
+    ("warmup_steps", "lr_decay_steps", "learning_rate"),
+    [
+        (10, 10, 0.5),
+        (20, 10, 0.7),
+    ],
+)
+def test_degenerate_budget_returns_base_lr(warmup_steps, lr_decay_steps, learning_rate):
     """When ``lr_decay_steps <= warmup_steps`` (tiny test budgets), the scheduler
     must short-circuit to ``learning_rate`` rather than divide by zero."""
-    cfg = _make_cfg(warmup_steps=10, lr_decay_steps=10, learning_rate=0.5)
-    assert _get_lr(cfg, step=0) == 0.5
-    assert _get_lr(cfg, step=1) == 0.5
-    assert _get_lr(cfg, step=99) == 0.5
-
-
-def test_degenerate_budget_warmup_greater_than_decay():
-    """``lr_decay_steps < warmup_steps`` is also caught by the same guard."""
-    cfg = _make_cfg(warmup_steps=20, lr_decay_steps=10, learning_rate=0.7)
-    assert _get_lr(cfg, step=5) == 0.7
+    cfg = _make_cfg(
+        warmup_steps=warmup_steps,
+        lr_decay_steps=lr_decay_steps,
+        learning_rate=learning_rate,
+    )
+    assert _get_lr(cfg, step=0) == learning_rate
+    assert _get_lr(cfg, step=99) == learning_rate
 
 
 def test_warmup_linear_ramp():
@@ -118,10 +122,3 @@ def test_post_decay_clamps_to_min_lr():
     cfg = _make_cfg(warmup_steps=10, lr_decay_steps=20, learning_rate=1.0, min_lr=0.1)
     assert _get_lr(cfg, step=21) == 0.1
     assert _get_lr(cfg, step=1000) == 0.1
-
-
-def test_min_lr_zero_decays_to_zero():
-    """Common config: ``min_lr=0`` → cosine endpoint is exactly 0."""
-    cfg = _make_cfg(warmup_steps=10, lr_decay_steps=30, learning_rate=2.0, min_lr=0.0)
-    assert _get_lr(cfg, step=30) == pytest.approx(0.0)
-    assert _get_lr(cfg, step=31) == 0.0

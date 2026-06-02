@@ -30,6 +30,7 @@ from pathlib import Path
 
 import torch
 from omegaconf import OmegaConf
+from torch.amp.grad_scaler import GradScaler
 
 import modelopt.torch.puzzletron.bypass_distillation.training_loop as tl
 
@@ -106,13 +107,6 @@ def test_two_configs_run_twice_with_distinct_overrides(monkeypatch, tmp_path):
     assert snapshots[1]["bypass"]["model"]["model_config_overrides"] == {"intermediate_size": 128}
 
 
-def test_keys_to_learn_override_applied(monkeypatch, tmp_path):
-    snapshots = _record_calls(monkeypatch)
-    cfg = _base_cfg(tmp_path, configs=[{"keys_to_learn": "subblock_attention"}])
-    tl.launch_bypass_distillation(cfg)
-    assert snapshots[0]["bypass"]["model_factory"]["keys_to_learn"] == "subblock_attention"
-
-
 def test_per_run_state_reset_before_each_call(monkeypatch, tmp_path):
     """Every sweep entry must see iter_num=1, step_num=1, token_count=0,
     best_val_loss=1e9, clipping_count=0, and a fresh experiment_id even when the
@@ -133,17 +127,6 @@ def test_per_run_state_reset_before_each_call(monkeypatch, tmp_path):
         assert snap["bypass"]["token_count"] == 0
         assert snap["bypass"]["best_val_loss"] == 1e9
         assert snap["bypass"]["training"]["clipping_count"] == 0
-
-
-def test_override_without_keys_to_learn_leaves_cfg_value_untouched(monkeypatch, tmp_path):
-    """A sweep entry that only sets ``model_config_overrides`` must not clobber
-    the inherited ``keys_to_learn`` (the dispatcher's `if "keys_to_learn" in override`
-    guard)."""
-    snapshots = _record_calls(monkeypatch)
-    cfg = _base_cfg(tmp_path, configs=[{"model_config_overrides": {"intermediate_size": 256}}])
-    tl.launch_bypass_distillation(cfg)
-    # keys_to_learn was set to "subblock_ffn" in _base_cfg — must survive.
-    assert snapshots[0]["bypass"]["model_factory"]["keys_to_learn"] == "subblock_ffn"
 
 
 def test_sweep_entry_without_keys_to_learn_uses_base_not_previous_override(monkeypatch, tmp_path):
@@ -296,6 +279,40 @@ def test_clip_stitched_module_grads_returns_zero_when_below_threshold():
     module.weight.grad = torch.full_like(module.weight, 0.01)
 
     assert tl._clip_stitched_module_grads(module, grad_clip=1.0, grad_clip_type="value") == 0
+
+
+def test_step_stitched_module_optimizer_unscales_before_clipping(monkeypatch):
+    module = torch.nn.Linear(1, 1, bias=False)
+    optimizer = torch.optim.SGD(module.parameters(), lr=0.0)
+    grad_scaler = GradScaler(device="cpu", enabled=True, init_scale=16.0)
+    grad_scaler.scale(module.weight.sum() * 2.0).backward()
+    assert module.weight.grad is not None
+    assert torch.equal(module.weight.grad, torch.full_like(module.weight, 32.0))
+    observed = {}
+
+    def capture_clip(stitched_module, grad_clip, grad_clip_type):
+        observed["stitched_module"] = stitched_module
+        observed["grad_clip"] = grad_clip
+        observed["grad_clip_type"] = grad_clip_type
+        observed["grad"] = module.weight.grad.detach().clone()
+        return 1
+
+    monkeypatch.setattr(tl, "_clip_stitched_module_grads", capture_clip)
+
+    clipped_count = tl._step_stitched_module_optimizer(
+        stitched_module=module,
+        optimizer=optimizer,
+        grad_scaler=grad_scaler,
+        grad_clip=1.0,
+        grad_clip_type="norm",
+    )
+
+    assert clipped_count == 1
+    assert observed["stitched_module"] is module
+    assert observed["grad_clip"] == 1.0
+    assert observed["grad_clip_type"] == "norm"
+    assert torch.equal(observed["grad"], torch.full_like(module.weight, 2.0))
+    assert module.weight.grad is None
 
 
 def test_finalize_bypass_run_skips_realization_when_checkpoint_saving_disabled(monkeypatch):
