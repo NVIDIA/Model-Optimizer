@@ -15,6 +15,7 @@
 
 """Utility functions for logging."""
 
+import argparse
 import contextlib
 import os
 import re
@@ -37,6 +38,7 @@ __all__ = [
     "capture_io",
     "no_stdout",
     "num2hrb",
+    "print_args",
     "print_rank_0",
     "silence_matched_warnings",
     "warn_rank_0",
@@ -108,6 +110,15 @@ def print_rank_0(*args, **kwargs):
     kwargs.setdefault("flush", True)
     if dist.is_master():
         print(*args, **kwargs)
+
+
+def print_args(args: argparse.Namespace, title: str = "Arguments") -> None:
+    """Pretty-print an ``argparse.Namespace`` (one entry per line) on rank 0."""
+    header = f"{'=' * 20} {title} {'=' * 20}"
+    print_rank_0(f"\n{header}")
+    for key, value in vars(args).items():
+        print_rank_0(f"{key:<35} {value}")
+    print_rank_0("=" * len(header) + "\n")
 
 
 def warn_rank_0(message, *args, **kwargs):

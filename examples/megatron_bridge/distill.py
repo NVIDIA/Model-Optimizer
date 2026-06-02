@@ -51,7 +51,7 @@ from megatron.core.distributed import DistributedDataParallelConfig
 from transformers import AutoConfig
 
 import modelopt.torch.utils.distributed as dist
-from modelopt.torch.utils import print_rank_0
+from modelopt.torch.utils import print_args, print_rank_0
 
 with contextlib.suppress(ModuleNotFoundError):
     import modelopt.torch.puzzletron.plugins.mbridge  # noqa: F401
@@ -224,10 +224,7 @@ def get_args():
     if args.hf_export_path and not args.student_hf_model:
         raise ValueError("Must provide --student_hf_model if --hf_export_path is provided.")
 
-    print_rank_0("\n==================== Arguments ====================")
-    for k, v in args.__dict__.items():
-        print_rank_0(f"{k:<35} {v}")
-    print_rank_0("===================================================\n")
+    print_args(args)
 
     return args
 

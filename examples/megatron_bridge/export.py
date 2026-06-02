@@ -22,7 +22,7 @@ The process is as follows:
 
 The HuggingFace unified exporter does not gather tensor-parallel-sharded weights, so this script
 always loads the checkpoint at tensor_model_parallel_size=1 (re-sharding from whatever TP was used
-during quantization). Use --pp_size / --ep_size to shard a large model across GPUs for export.
+during quantization). Use --pp_size to shard a large model across GPUs for export.
 
 Example usage to export an FP8 checkpoint produced by quantize.py:
 
@@ -43,7 +43,7 @@ from megatron.core.utils import unwrap_model
 
 import modelopt.torch.export as mtex
 import modelopt.torch.utils.distributed as dist
-from modelopt.torch.utils import print_rank_0
+from modelopt.torch.utils import print_args, print_rank_0
 
 _DTYPE_MAP = {"bfloat16": torch.bfloat16, "float16": torch.float16, "float32": torch.float32}
 
@@ -70,10 +70,8 @@ def get_args() -> argparse.Namespace:
     )
     parser.add_argument("--trust_remote_code", action="store_true")
 
-    # Tensor parallelism is forced to 1 for HF export (the unified exporter does not gather
-    # tensor-parallel shards). Use pipeline / expert parallelism to shard across GPUs instead.
+    # Only Pipeline parallelism is supported for export
     parser.add_argument("--pp_size", type=int, default=1, help="Pipeline parallel size")
-    parser.add_argument("--ep_size", type=int, default=1, help="Expert parallel size")
     parser.add_argument(
         "--dtype",
         type=str,
@@ -89,10 +87,7 @@ def get_args() -> argparse.Namespace:
 
     args = parser.parse_args()
 
-    print_rank_0("\n==================== Arguments ====================")
-    for k, v in args.__dict__.items():
-        print_rank_0(f"{k:<35} {v}")
-    print_rank_0("===================================================\n")
+    print_args(args)
 
     return args
 
@@ -110,7 +105,7 @@ def main(args: argparse.Namespace):
     provider = bridge.to_megatron_provider(load_weights=False)
     provider.tensor_model_parallel_size = 1
     provider.pipeline_model_parallel_size = args.pp_size
-    provider.expert_model_parallel_size = args.ep_size
+    provider.expert_model_parallel_size = 1
     provider.expert_tensor_parallel_size = 1
     provider.pipeline_dtype = torch_dtype
     provider.finalize()
@@ -124,7 +119,7 @@ def main(args: argparse.Namespace):
         mp_overrides={
             "tensor_model_parallel_size": 1,
             "pipeline_model_parallel_size": args.pp_size,
-            "expert_model_parallel_size": args.ep_size,
+            "expert_model_parallel_size": 1,
             "expert_tensor_parallel_size": 1,
         },
         wrap_with_ddp=False,

@@ -60,7 +60,7 @@ import torch
 import modelopt.torch.quantization as mtq
 import modelopt.torch.utils.distributed as dist
 from modelopt.recipe import ModelOptPTQRecipe, load_recipe
-from modelopt.torch.utils import print_rank_0, warn_rank_0
+from modelopt.torch.utils import print_args, print_rank_0, warn_rank_0
 from modelopt.torch.utils.plugins.mbridge import load_mbridge_model_from_hf
 from modelopt.torch.utils.plugins.megatron_calibration import get_megatron_calibration_forward_loop
 from modelopt.torch.utils.plugins.megatron_generate import megatron_generate
@@ -192,10 +192,7 @@ def get_args() -> argparse.Namespace:
     if args.moe_calib_experts_ratio is not None and not (0.0 < args.moe_calib_experts_ratio <= 1.0):
         parser.error("--moe_calib_experts_ratio must be in the range (0.0, 1.0].")
 
-    print_rank_0("\n==================== Arguments ====================")
-    for k, v in args.__dict__.items():
-        print_rank_0(f"{k:<35} {v}")
-    print_rank_0("===================================================\n")
+    print_args(args)
 
     return args
 

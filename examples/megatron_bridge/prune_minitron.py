@@ -52,7 +52,7 @@ from transformers import AutoConfig, AutoModelForCausalLM
 import modelopt.torch.opt as mto
 import modelopt.torch.prune as mtp
 import modelopt.torch.utils.distributed as dist
-from modelopt.torch.utils import get_supported_datasets, print_rank_0, warn_rank_0
+from modelopt.torch.utils import get_supported_datasets, print_args, print_rank_0, warn_rank_0
 from modelopt.torch.utils.plugins.mbridge import load_mbridge_model_from_hf
 from modelopt.torch.utils.plugins.megatron_calibration import get_megatron_calibration_forward_loop
 from modelopt.torch.utils.plugins.megatron_mmlu import megatron_mmlu
@@ -256,10 +256,7 @@ def get_args() -> argparse.Namespace:
             raise ValueError("--prune_export_config must parse to a dictionary.")
         args.prune_export_config = prune_export_config
 
-    print_rank_0("\n==================== Arguments ====================")
-    for k, v in args.__dict__.items():
-        print_rank_0(f"{k:<35} {v}")
-    print_rank_0("===================================================\n")
+    print_args(args)
 
     return args
 
