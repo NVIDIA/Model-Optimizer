@@ -805,5 +805,8 @@ class DMDPipeline(DistillationPipeline):
         if iteration is not None:
             self._iteration = iteration
         else:
+            # Counter starts at 0 and pre-increments, so the first auto call passes 1.
+            # With start_iter=0 the shadow is therefore first initialised via EMA.update's
+            # ``not self._initialized`` arm, not the ``iteration == start_iter`` one.
             self._iteration += 1
         self._ema.update(self.student, iteration=self._iteration)

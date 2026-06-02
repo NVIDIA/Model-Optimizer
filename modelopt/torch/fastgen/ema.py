@@ -170,6 +170,11 @@ class ExponentialMovingAverage:
         if iteration < self.config.start_iter:
             return
 
+        # (Re-)initialise the shadow from the live weights. Both arms are intentional:
+        # ``iteration == start_iter`` inits exactly at start when start_iter > 0 (earlier
+        # iterations are skipped above), while ``not self._initialized`` covers start_iter
+        # == 0 — where the auto-incremented counter never passes 0 — plus the first call
+        # after a resume.
         if iteration == self.config.start_iter or not self._initialized:
             self._copy_from_model(model)
             self._initialized = True
