@@ -46,7 +46,7 @@ YAML_PATH = "examples/diffusers/fastgen/configs/dmd2_qwen_image_smoke.yaml"
 
 # The recipe file isn't a regular package — import it via path. ``dmd2_recipe`` is
 # what ``dmd2_finetune.py`` does too (``from dmd2_recipe import DMD2DiffusionRecipe``).
-RECIPE_DIR = Path(__file__).resolve().parents[4] / "examples" / "diffusers" / "fastgen"
+RECIPE_DIR = Path(__file__).resolve().parents[3] / "examples" / "diffusers" / "fastgen"
 
 
 @pytest.fixture
