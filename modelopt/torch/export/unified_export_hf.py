@@ -924,10 +924,12 @@ def _export_transformers_checkpoint(
     _reconstruct_fused_moe_linear(model)
 
     if any(isinstance(m, FSDPModule) for m in model.modules()):
-        # FSDP2-sharded model: gather full state_dict from all ranks (with CPU
-        # offload to bound peak GPU memory during the gather).
+        # FSDP2: gather full state_dict to CPU on rank 0 only.
         quantized_state_dict = get_model_state_dict(
-            model, options=StateDictOptions(full_state_dict=True, cpu_offload=True)
+            model,
+            options=StateDictOptions(
+                full_state_dict=True, cpu_offload=True, broadcast_from_rank0=True
+            ),
         )
     else:
         quantized_state_dict = model.state_dict()
@@ -1391,12 +1393,17 @@ def export_hf_checkpoint(
     components: list[str] | None = None,
     extra_state_dict: dict[str, torch.Tensor] | None = None,
     max_shard_size: int | str = "10GB",
+    architectures_override: list[str] | None = None,
     **kwargs,
 ):
     """Export quantized HuggingFace model checkpoint (transformers or diffusers).
 
     This function automatically detects whether the model is from transformers
     or diffusers and applies the appropriate export logic.
+
+    Under ``torch.distributed`` (e.g. FSDP2), all ranks participate in the
+    collective state-dict gather inside ``_export_transformers_checkpoint``;
+    only rank 0 writes files. A final barrier syncs the other ranks.
 
     Args:
         model: The full torch model to export. The actual quantized model may be a submodule.
@@ -1410,6 +1417,9 @@ def export_hf_checkpoint(
             to export. If None, all quantized components are exported.
         extra_state_dict: Extra state dictionary to add to the exported model.
         max_shard_size: Maximum size of each safetensors shard file. Defaults to "10GB".
+        architectures_override: If set, written into ``config.json`` as
+            ``architectures``. Use this to restore the original architectures list
+            after FSDP2 wrapping, which prefixes class names.
         **kwargs: Runtime-specific post-processing options forwarded to
             :func:`_postprocess_safetensors` for diffusion model exports.
             See its docstring for supported keys.
@@ -1461,6 +1471,28 @@ def export_hf_checkpoint(
                 f"Quant-aware reverse weight conversion skipped ({exc}); exported tensor "
                 "names may not match the original HF hub checkpoint."
             )
+
+        # Under torch.distributed: only rank 0 writes; others sync at the barrier below.
+        is_distributed = torch.distributed.is_available() and torch.distributed.is_initialized()
+        if is_distributed:
+            rank = torch.distributed.get_rank()
+            populated = bool(post_state_dict)
+            if rank == 0 and not populated:
+                raise RuntimeError(
+                    "Expected rank 0 to receive a populated state_dict from "
+                    "_export_transformers_checkpoint under FSDP2 export; got empty. "
+                    "Check that StateDictOptions(broadcast_from_rank0=True) is honored "
+                    "by this PyTorch's get_model_state_dict."
+                )
+            if rank != 0 and populated:
+                raise RuntimeError(
+                    f"Expected rank {rank} to receive an empty state_dict from "
+                    "_export_transformers_checkpoint under FSDP2 export (broadcast_from_rank0=True); "
+                    "got populated. PyTorch's get_model_state_dict semantics may have changed."
+                )
+            if rank != 0:
+                torch.distributed.barrier()
+                return
 
         # Only treat the export as quantized when at least one quant_algo field is set.
         # get_quant_config always returns a dict (even for sparsity-only or unmodified models),
@@ -1517,6 +1549,9 @@ def export_hf_checkpoint(
             if sparse_attn_config is not None:
                 config_data["sparse_attention_config"] = sparse_attn_config
 
+        if architectures_override:
+            config_data["architectures"] = architectures_override
+
         with open(original_config, "w") as file:
             json.dump(config_data, file, indent=4)
 
@@ -1526,3 +1561,6 @@ def export_hf_checkpoint(
             " can be saved with torch.save for further inspection."
         )
         raise e
+
+    if is_distributed:
+        torch.distributed.barrier()
