@@ -451,6 +451,11 @@ def auto_quantize(
         "Auto Quantization is not supported for pipeline parallel size > 1"
     )
 
+    assert not (args.auto_quantize_bits and args.use_fsdp2), (
+        "Auto Quantization is not supported with --use_fsdp2: mtq.auto_quantize "
+        "is invoked after fsdp2_shard has frozen every parameter."
+    )
+
     inputs = _mtq_inputs_from_auto_quantize_config(
         aq_config, args, fixed_quantize_config=fixed_quantize_config
     )
@@ -552,6 +557,7 @@ def load_model(args: argparse.Namespace):
             args=args,
             trust_remote_code=args.trust_remote_code,
             cpu_offload=args.cpu_offload,
+            attn_implementation=args.attn_implementation,
         )
     elif args.specdec_offline_dataset is not None or not args.low_memory_mode:
         full_model = get_model(
