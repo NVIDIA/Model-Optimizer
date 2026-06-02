@@ -131,17 +131,19 @@ def main(args: argparse.Namespace):
     )
     unwrapped_model = unwrap_model(megatron_model[0])
 
-    # Extra modules (Medusa / EAGLE / MTP) only exist on the last pipeline stage; broadcast the
-    # decision from the last rank so all ranks agree.
+    # Extra modules (Medusa / EAGLE / MTP) only exist on the last pipeline stage. Use an all-reduce
+    # MAX over all ranks (rather than a broadcast from a hard-coded source rank) so the decision is
+    # correct regardless of pipeline placement / global rank ordering.
     has_extra_modules = hasattr(unwrapped_model, "eagle_module") or hasattr(
         unwrapped_model, "medusa_heads"
     )
     if torch.distributed.is_initialized():
-        flags = [has_extra_modules]
-        torch.distributed.broadcast_object_list(flags, src=torch.distributed.get_world_size() - 1)
-        export_extra_modules = flags[0] and args.export_extra_modules
-    else:
-        export_extra_modules = has_extra_modules and args.export_extra_modules
+        flag = torch.tensor(
+            [int(has_extra_modules)], dtype=torch.int, device=torch.cuda.current_device()
+        )
+        torch.distributed.all_reduce(flag, op=torch.distributed.ReduceOp.MAX)
+        has_extra_modules = bool(flag.item())
+    export_extra_modules = has_extra_modules and args.export_extra_modules
 
     print_rank_0(
         f"Exporting to HuggingFace (unified) checkpoint at {args.export_unified_hf_path}..."

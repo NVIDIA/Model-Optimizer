@@ -86,6 +86,10 @@ KV_QUANT_CFG_CHOICES = {
     "nvfp4_affine": "NVFP4_AFFINE_KV_CFG",
 }
 
+# TODO: Add AutoQuantize (mtq.auto_quantize) support to automatically search a per-layer mix of
+# quantization formats that meets a target compression / accuracy constraint, instead of applying a
+# single fixed --quant_cfg / --recipe to the whole model.
+
 
 def get_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
@@ -238,10 +242,7 @@ def get_quant_config(args: argparse.Namespace) -> dict:
     if args.weight_only:
         mtq_config["quant_cfg"].append({"quantizer_name": "*input_quantizer", "enable": False})
 
-    # KV-cache quantization is incompatible with weight compression.
     if args.kv_cache_quant != "none":
-        if args.compress:
-            raise ValueError("--kv_cache_quant cannot be combined with --compress.")
         kv_cache_quant_cfg = getattr(mtq, KV_QUANT_CFG_CHOICES[args.kv_cache_quant])["quant_cfg"]
         mtq_config = mtq.utils.update_quant_cfg_with_kv_cache_quant(mtq_config, kv_cache_quant_cfg)
 
@@ -281,6 +282,16 @@ def main(args: argparse.Namespace):
     )
 
     mtq_config = get_quant_config(args)
+
+    # KV-cache quantization is incompatible with weight compression. Validate on the *resolved*
+    # config (KV-cache quantizers are named ``*[kv]_bmm_quantizer``) so this also covers
+    # recipe-driven KV-cache configs, not just the --kv_cache_quant flag.
+    if args.compress and any(
+        isinstance(entry, dict) and "bmm_quantizer" in str(entry.get("quantizer_name", ""))
+        for entry in mtq.normalize_quant_cfg_list(mtq_config["quant_cfg"])
+    ):
+        raise ValueError("--compress cannot be combined with KV-cache quantization.")
+
     print_rank_0(f"Quantizing the model with: {args.recipe or args.quant_cfg}")
     if "awq" in str(mtq_config.get("algorithm")):
         print_rank_0(
@@ -343,8 +354,14 @@ def main(args: argparse.Namespace):
         f"--export_unified_hf_path {args.export_megatron_path}_hf"
     )
 
-    # Sanity-check generation with the fake-quantized model.
-    if not args.skip_generate:
+    # Sanity-check generation with the fake-quantized model. Skipped when --compress is set: the
+    # weights are now real low-bit and megatron_generate may not support compressed forward for
+    # every quant format.
+    if args.compress and not args.skip_generate:
+        warn_rank_0(
+            "Skipping the post-quantization generation sanity check because --compress is set."
+        )
+    if not args.skip_generate and not args.compress:
         print_rank_0("Testing quantized model with custom prompts...")
         unwrapped_model.eval()
         for idx, prompt in enumerate(args.prompts.split("|")):
