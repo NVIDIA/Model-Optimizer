@@ -78,6 +78,8 @@ Do not duplicate those workflows here. This skill should leave the user with a c
    - Ask `ptq` to validate checkpoint coverage and metadata after generation.
    - Add a fused-layer compatibility check before deployment/eval: if the target runtime fuses multiple checkpoint tensors into one module, verify the fused group has one supported quantization algorithm. Reject or rewrite recipes that would trigger errors like `Mixed quant_algo within fused layer`.
    - Ask `deployment` or `evaluation` for runtime sanity only when execution behavior is needed to qualify the recipe.
+   - If checkpoint validation passes but deployment fails due to runtime support gaps, do not reject the recipe immediately. Classify the issue as checkpoint-quality, recipe/runtime compatibility, or deployment implementation.
+   - For deployment implementation issues, delegate to `deployment` / `debug` and try narrowly scoped patches or flags, such as metadata parsing fixes, fused-layer support fixes, backend selection fixes, or checkpoint-loading shims. Keep these patches separate from recipe changes.
    - Promote only candidates that pass checkpoint validation and the required delegated sanity checks.
 
 5. **Evaluate in stages**
@@ -109,6 +111,7 @@ Do not duplicate those workflows here. This skill should leave the user with a c
 - Prefer active runtime cost over checkpoint size when optimizing routed or sparsely activated models.
 - Always compare against BF16/FP16 and a near-lossless FP8/W8A8 baseline.
 - Respect inference-library fused modules when designing recipes. Do not mix quantization formats inside fused groups such as vLLM `linear_attn.in_proj_qkvz` or fused MoE expert projections.
+- Do not discard a validated checkpoint solely because the current inference library lacks support. First try bounded deployment patches or flags, then rerun a pipe-clean check before deciding whether the recipe is viable.
 - Treat benchmark variance as real: run repeat sweeps for close decisions.
 - Do not mix parser/no-parser, FP8-KV/BF16-KV, runtime/backend, or sampling changes into recipe conclusions unless they are explicitly part of the experiment.
 - Use delegated pipe-clean checks for new checkpoint families before full evals.
