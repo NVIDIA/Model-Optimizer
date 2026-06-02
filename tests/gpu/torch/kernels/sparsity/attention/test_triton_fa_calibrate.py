@@ -319,7 +319,9 @@ print(f"TOTAL={out._sparsity_total}")
         assert result.returncode == 0, result.stderr
         totals = [line for line in result.stdout.splitlines() if line.startswith("TOTAL=")]
         assert totals, result.stdout
-        assert int(totals[-1].split("=", maxsplit=1)[1]) == 8
+        # seq_len=256, _MEASURE_BLOCK_M = _MEASURE_BLOCK_N = 128, non-causal:
+        # Q tiles = ceil(256/128) = 2, KV tiles = ceil(256/128) = 2, total = 4.
+        assert int(totals[-1].split("=", maxsplit=1)[1]) == 4
 
     def test_measure_sparsity_without_skip_is_noop(self):
         """Without skip-softmax, measure_sparsity doesn't attach counters."""
