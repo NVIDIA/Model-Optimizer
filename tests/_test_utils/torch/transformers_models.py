@@ -290,7 +290,6 @@ def get_tiny_gemma3(**config_kwargs) -> PreTrainedModel:
     set_seed(SEED)
 
     # head_dim is independent of hidden_size / num_attention_heads in Gemma3.
-    # query_pre_attn_scalar must match head_dim (used for attention scaling).
     # layer_types is left to auto-generate (all `sliding_attention` for tiny layer
     # counts) so the sliding/full attention layer_types code path is still exercised.
     kwargs = {
@@ -301,12 +300,15 @@ def get_tiny_gemma3(**config_kwargs) -> PreTrainedModel:
         "num_attention_heads": 16,
         "num_key_value_heads": 2,
         "head_dim": 8,
-        "query_pre_attn_scalar": 8,
         "max_position_embeddings": 32,
         "sliding_window": 16,
         "vocab_size": 32,
     }
     kwargs.update(**config_kwargs)
+    # query_pre_attn_scalar sets the attention scale (1/sqrt(query_pre_attn_scalar)); default it
+    # to head_dim (Gemma3's convention for all sizes except 27B) unless the caller overrides it,
+    # so overriding head_dim alone stays consistent.
+    kwargs.setdefault("query_pre_attn_scalar", kwargs["head_dim"])
     return AutoModelForCausalLM.from_config(Gemma3TextConfig(**kwargs))
 
 
