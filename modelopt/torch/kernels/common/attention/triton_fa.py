@@ -80,7 +80,10 @@ if "PYTEST_VERSION" in __import__("os").environ:
     _FWD_CONFIGS = [triton.Config({"BLOCK_M": 128, "BLOCK_N": 64}, num_stages=1, num_warps=4)]
 
 _MEASURE_BLOCK_M = 128
-_MEASURE_BLOCK_N = 64
+# 128 so the kernel sparsity-measurement block matches the PyTorch
+# flash_skip_softmax calibration block (br = bc = 128) and the Triton
+# calibration kernel; otherwise the two measure at different granularities.
+_MEASURE_BLOCK_N = 128
 _MEASURE_NUM_STAGES = 1
 _MEASURE_NUM_WARPS = 4
 

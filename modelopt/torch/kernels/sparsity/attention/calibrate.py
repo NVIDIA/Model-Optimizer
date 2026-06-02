@@ -111,7 +111,17 @@ def _attn_fwd_calibrate(
     local_skipped = tl.zeros([PADDED_THRESHOLDS], dtype=tl.int32)
     num_tiles = 0
 
-    kv_bound = seq_len_kv if not IS_CAUSAL else tl.minimum((tile_q + 1) * BLOCK_M, seq_len_kv)
+    # Causal bound: when Q is a suffix of KV (decode: seq_len_q == 1 against a
+    # long cache; or chunked prefill), the visible KV extends to
+    # causal_offset + (tile_q + 1) * BLOCK_M. Without the offset the loop stops
+    # at the first BLOCK_M KV tokens, so decode would only ever measure the
+    # start of the cache instead of the whole thing.
+    causal_offset = seq_len_kv - seq_len_q
+    kv_bound = (
+        seq_len_kv
+        if not IS_CAUSAL
+        else tl.minimum(causal_offset + (tile_q + 1) * BLOCK_M, seq_len_kv)
+    )
 
     for kv_start in range(0, kv_bound, BLOCK_N):
         kv_start = tl.multiple_of(kv_start, BLOCK_N)
@@ -262,8 +272,10 @@ def attention_calibrate(
     sm_scale = 1.0 / (HEAD_DIM**0.5) if softmax_scale is None else softmax_scale
     qk_scale = sm_scale * LOG2E
     BLOCK_D = triton.next_power_of_2(HEAD_DIM)
+    # 128x128 to match the PyTorch flash_skip_softmax calibration block (br = bc = 128),
+    # so Triton-kernel and PyTorch calibration measure sparsity at the same granularity.
     BLOCK_M = 128
-    BLOCK_N = 64
+    BLOCK_N = 128
 
     if b_seq_len_k is None:
         b_seq_len_k = b_seq_len
