@@ -347,14 +347,9 @@ def fsdp2_shard(model, device, rank, src_state_dict=None, mp_policy=None, cpu_of
     """
     from torch.distributed.checkpoint.state_dict import StateDictOptions, set_model_state_dict
 
-    def _log(msg):
-        print(f"[rank {rank}] [fsdp2_shard] {msg}", flush=True)
-
     model._original_architectures = list(model.config.architectures or [])
 
-    t0 = time.perf_counter()
     fsdp2_wrap(model, mp_policy=mp_policy, cpu_offload=cpu_offload)
-    _log(f"fsdp2_wrap (decoders) took {time.perf_counter() - t0:.1f}s")
 
     # With CPU offload, FSDP2 requires DTensor params on CPU at lazy_init time
     # (it streams them to GPU per-layer during forward). Also, set_model_state_dict
@@ -368,23 +363,18 @@ def fsdp2_shard(model, device, rank, src_state_dict=None, mp_policy=None, cpu_of
             return torch.empty_like(t, device=materialize_device)
         return t.to(materialize_device)
 
-    t0 = time.perf_counter()
     model._apply(_materialize)
-    _log(f"materialize (→{'CPU' if cpu_offload else 'GPU'}) took {time.perf_counter() - t0:.1f}s")
 
     if src_state_dict is not None:
-        t0 = time.perf_counter()
         set_model_state_dict(
             model,
             src_state_dict,
             options=StateDictOptions(full_state_dict=True, broadcast_from_rank0=True),
         )
-        _log(f"set_model_state_dict broadcast took {time.perf_counter() - t0:.1f}s")
 
     if cpu_offload:
         # FSDP-managed (DTensor) params stay on CPU — FSDP2 streams them per layer.
         # Move everything else (root-level plain params + all buffers) to GPU now.
-        t0 = time.perf_counter()
         for module in model.modules():
             for name, param in list(module._parameters.items()):
                 if param is None or isinstance(param, DTensor):
@@ -396,17 +386,13 @@ def fsdp2_shard(model, device, rank, src_state_dict=None, mp_policy=None, cpu_of
                 if buf is None or isinstance(buf, DTensor):
                     continue
                 module._buffers[name] = buf.to(device)
-        _log(f"promote non-DTensor → GPU took {time.perf_counter() - t0:.1f}s")
 
     if hasattr(model, "tie_weights"):
-        t0 = time.perf_counter()
         model.tie_weights()
-        _log(f"tie_weights took {time.perf_counter() - t0:.1f}s")
 
-    t0 = time.perf_counter()
     for p in model.parameters():
         p.requires_grad_(False)
-    _log(f"freeze params took {time.perf_counter() - t0:.1f}s")
+
     return model
 
 
@@ -464,6 +450,58 @@ def fsdp_aware_forward_loop(wrapped_model, dataloader, device=None):
             wrapped_model(**batch)
 
     return calibrate
+
+
+def broadcast_state_dict(
+    state_dict_or_none: dict | None,
+    src: int,
+    device: torch.device,
+    pg=None,
+) -> dict:
+    """Broadcast a dict of CPU tensors from rank ``src`` to all ranks.
+
+    Two phases: (1) broadcast metadata (key list + shape/dtype) via
+    ``broadcast_object_list``, (2) broadcast each tensor via ``dist.broadcast``.
+    Source rank passes the populated dict; non-source ranks pass ``None``.
+    Returns a dict of tensors on ``device`` on every rank.
+    """
+    is_src = torch.distributed.get_rank() == src
+    meta: list[Any] = (
+        [{name: (tuple(t.shape), t.dtype) for name, t in state_dict_or_none.items()}]
+        if is_src and state_dict_or_none is not None
+        else [None]
+    )
+    torch.distributed.broadcast_object_list(meta, src=src, group=pg)
+    meta_dict = meta[0]
+    assert meta_dict is not None
+
+    src_state_dict = state_dict_or_none or {}
+    out: dict[str, torch.Tensor] = {}
+    for name, (shape, dtype) in meta_dict.items():
+        if is_src:
+            t = src_state_dict[name].to(device, non_blocking=True)
+        else:
+            t = torch.empty(shape, dtype=dtype, device=device)
+        torch.distributed.broadcast(t, src=src, group=pg)
+        out[name] = t
+    return out
+
+
+def load_state_dict_into_fsdp2_layer(layer: nn.Module, full_state_dict: dict) -> None:
+    """Load full (replicated) tensors into an FSDP2-wrapped layer's DTensor local shards.
+
+    Each rank already has the full tensor; we just need to shard locally.
+    Uses ``set_model_state_dict(broadcast_from_rank0=False)`` — each rank holds the
+    full tensor in ``full_state_dict``, so no collective is needed; the helper just
+    slices each rank's local shard from the full tensor.
+    """
+    from torch.distributed.checkpoint.state_dict import StateDictOptions, set_model_state_dict
+
+    set_model_state_dict(
+        layer,
+        full_state_dict,
+        options=StateDictOptions(full_state_dict=True, broadcast_from_rank0=False),
+    )
 
 
 class Fsdp2StateDictAdapter:

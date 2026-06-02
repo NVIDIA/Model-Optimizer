@@ -552,6 +552,7 @@ def load_model(args: argparse.Namespace):
             ckpt_path=args.pyt_ckpt_path,
             device=args.device,
             rank=args.rank,
+            world_size=args.world_size,
             args=args,
             trust_remote_code=args.trust_remote_code,
             cpu_offload=args.cpu_offload,
