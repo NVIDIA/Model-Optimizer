@@ -2,188 +2,218 @@
 name: evaluation
 description: Evaluates accuracy of quantized or unquantized LLMs using NeMo Evaluator Launcher (NEL). Triggers on "evaluate model", "benchmark accuracy", "run MMLU", "evaluate quantized model", "run nel". Handles deployment, config generation, and evaluation execution. Not for quantizing models (use ptq), deploying/serving models (use deployment), or comparing completed baseline-vs-quantized results (use compare-results).
 license: Apache-2.0
-# Based on nel-assistant skill from NeMo Evaluator Launcher (commit f1fa073)
+# Based on nel-assistant skill from NeMo Evaluator Launcher (commit f1fa073).
 # https://github.com/NVIDIA-NeMo/Evaluator/tree/f1fa073/packages/nemo-evaluator-launcher/.claude/skills/nel-assistant
-# Modifications: renamed to evaluation, added workspace management (Step 0),
-# auto-detect ModelOpt quantization format, quantization-aware benchmark defaults.
 ---
 
 ## NeMo Evaluator Launcher Assistant
 
-You're an expert in NeMo Evaluator Launcher! Guide the user through creating production-ready YAML configurations, running evaluations, and monitoring progress via an interactive workflow specified below.
+Guide the user through creating NEL YAML configs, running evaluations, and monitoring progress.
 
-### Workspace and Pipeline Integration
+### Workspace integration
 
-If `MODELOPT_WORKSPACE_ROOT` is set, read `skills/common/workspace-management.md`. Check for existing workspaces in the current session — especially if evaluating a model from a prior PTQ or deployment step. Reuse the existing workspace so you have access to the quantized checkpoint and any code modifications.
-
-This skill is often the final stage of the PTQ → Deploy → Eval pipeline. If the model required runtime patches during deployment (transformers upgrade, framework source fixes), carry those patches into the NEL config via `deployment.command`.
+If `MODELOPT_WORKSPACE_ROOT` is set, read `skills/common/workspace-management.md` and reuse existing workspaces (this skill is usually the final stage of PTQ → Deploy → Eval; carry any deployment-time patches into `deployment.command`).
 
 ### Workflow
 
 ```text
-Config Generation Progress:
-- [ ] Step 0: Check workspace (if MODELOPT_WORKSPACE_ROOT is set)
-- [ ] Step 1: Check if nel is installed and if user has existing config
-- [ ] Step 2: Build the base config file
-- [ ] Step 3: Configure model path and parameters
-- [ ] Step 4: Fill in remaining missing values
+- [ ] Step 0: Check workspace (if MODELOPT_WORKSPACE_ROOT set)
+- [ ] Step 1: Check `nel` install + existing config
+- [ ] Step 2: Build base config (5-question flow OR shortcut)
+- [ ] Step 3: Configure deployment (model path, params, cross-check)
+- [ ] Step 4: Fill remaining ??? values
 - [ ] Step 5: Confirm tasks (iterative)
-- [ ] Step 6: Advanced - Multi-node (Data Parallel)
-- [ ] Step 7: Advanced - Interceptors
-- [ ] Step 7.5: Check container registry auth for private images (SLURM only)
-- [ ] Step 8: Run the evaluation
-  - [ ] Step 8.1: Dry-run / NEL CLI config validation
-  - [ ] Step 8.2: Limited-samples canary
-  - [ ] Step 8.3: Full evaluation
-- [ ] Step 9: Verify completed evaluation run
+- [ ] Step 6: Multi-node (if needed)
+- [ ] Step 7: Interceptors (if needed)
+- [ ] Step 7.5: Container auth (SLURM private images)
+- [ ] Step 8: Dry-run → canary → full run
+- [ ] Step 9: Verify completed run
 ```
 
-**Step 1: Check prerequisites**
+---
 
-Test that `nel` is installed with `nel --version`. If not, instruct the user to `pip install nemo-evaluator-launcher`.
+### Step 1 — Prerequisites
 
-If the user already has a config file (e.g., "run this config", "evaluate with my-config.yaml"), skip to Step 8. Optionally review it for common issues (missing `???` values, quantization flags) before running.
+Run `nel --version`; if missing, instruct `pip install nemo-evaluator-launcher`. If user has an existing config, skip to Step 8 (optionally review for `???` and quantization flags first).
 
-**Shortcut: use task references.** For named benchmarks, read the matching
-`recipes/tasks/<name>.md` before creating or editing the config. Available:
-mmlu_pro, mmmu_pro, gpqa, aime2025, livecodebench, ifbench, scicode,
-aa_lcr, ns_hle_aa, tau2_bench_telecom.
+**Task recipes** (always read before editing the relevant task in the config):
 
-1. Read the task reference(s) the user wants.
-2. Use `recipes/examples/example_eval.yaml` as the base config template
-3. Copy the selected YAML fragment(s) into `evaluation.tasks`.
-4. Apply any notes from the reference.
-5. Do Step 3, Step 4, then Step 7.5/8.
+- AA Index v2 suite (default for quantized-checkpoint validation, see `references/quantization-benchmarks.md`): `recipes/tasks/aa/{gpqa_diamond,hle,lcr,scicode,ifbench,mmmu_pro,tau2_bench_telecom}.md`
+- Optional: `recipes/tasks/mmlu_pro.md`, `recipes/tasks/aime_2025.md`, `recipes/tasks/livecodebench.md`
 
-**Step 2: Build the base config file**
+**AA rule:** If the user mentions "AA" / "Artificial Analysis", generate **only** tasks under `recipes/tasks/aa/`. Do not add MMLU-Pro, AIME 2025, or LiveCodeBench unless explicitly asked.
 
-Prompt the user with "I'll ask you 5 questions to build the base config we'll adjust in the next steps". Guide the user through the 5 questions using AskUserQuestion:
+**Shortcut path** (when task list is known up front, e.g. "run AA"):
 
-1. Execution:
+1. Read the task reference file(s).
+2. Use `recipes/examples/example_eval.yaml` as the base.
+3. Copy the YAML fragment(s) into `evaluation.tasks`, applying any per-task notes.
+4. **MLflow auto-export is on by default** — it needs **two** pieces, both in `example_eval.yaml`: (a) the **trigger** `execution.auto_export.destinations: [mlflow]` (without it the run is *not* uploaded), and (b) the `export.mlflow` block that configures it. In the `export.mlflow` block use **literal** values for `experiment_name` / `description` / `tags` — substitute the actual `served_model_name` and sampling params. Do **not** use `${deployment.*}` / `${evaluation.*}` cross-references: with auto-export on, NEL resolves the export block at submit time in a scope without those nodes and fails with `Interpolation key '...' not found` (`${oc.env:USER}` is fine — it's an env var). Because these literals can't interpolate, keep the `temperature` / `top_p` / `max_new_tokens` tags **equal to** the top-level `params` and update both in the same edit — they're the only queryable record of sampling in MLflow (NEL doesn't log them as run params), so a stale tag silently misreports the run. Fill `tracking_uri` in Step 4.
+5. Proceed to Step 3, then Step 4, then Step 7.5/8. Skip Step 2's 5-question flow.
 
-- Local
-- SLURM
+---
 
-2. Deployment:
+### Step 2 — Build base config (when not using shortcut)
 
-- None (External)
-- vLLM
-- SGLang
-- NIM
-- TRT-LLM
+Ask the 5 questions via AskUserQuestion (categories must match `nel skills build-config --help` — **run that first** to confirm the current option names; CLI options override this list).
 
-Prefer vLLM for NEL self-deployment unless the user explicitly asks for another runtime, the model card requires another runtime, or the evaluation targets an already-running endpoint (`deployment: none`).
+1. **Execution:** Local / SLURM
+2. **Deployment:** None (External) / vLLM / SGLang / NIM / TRT-LLM. Prefer vLLM unless the user/card says otherwise.
+3. **Auto-export:** None / MLflow / wandb
+4. **Model type:** Base / Chat / Reasoning
+5. **Benchmarks** (multi-select): standard / code / math_reasoning / safety / multilingual
 
-3. Auto-export:
-
-- None (auto-export disabled)
-- MLflow
-- wandb
-
-4. Model type
-
-- Base
-- Chat
-- Reasoning
-
-5. Benchmarks:
-  Allow for multiple choices in this question.
-1. Standard LLM Benchmarks (like MMLU, IFEval, GSM8K, ...)
-2. Code Evaluation (like HumanEval, MBPP, and LiveCodeBench)
-3. Math & Reasoning (like AIME, GPQA, MATH-500, ...)
-4. Safety & Security (like Garak and Safety Harness)
-5. Multilingual (like MMATH, Global MMLU, MMLU-Prox)
-
-Only accept options from the categories listed above (Execution, Deployment, Auto-export, Model type, Benchmarks). YOU HAVE TO GATHER THE ANSWERS for the 5 questions before you can build the base config.
-
-> **Note:** These categories come from NEL's `build-config` CLI. **Always run `nel skills build-config --help` first** to get the current options — they may differ from this list (e.g., `chat_reasoning` instead of separate `chat`/`reasoning`, `general_knowledge` instead of `standard`). When the CLI's current options differ from this list, prefer the CLI's options.
-
-When you have all the answers, run the script to build the base config:
+Build the base:
 
 ```bash
-nel skills build-config --execution <local|slurm> --deployment <none|vllm|sglang|nim|trtllm> --model_type <base|chat|reasoning> --benchmarks <standard|code|math_reasoning|safety|multilingual> [--export <none|mlflow|wandb>] [--output <OUTPUT>]
+nel skills build-config --execution <...> --deployment <...> --model_type <...> --benchmarks <...> [--export <...>] [--output <...>]
 ```
 
-Where `--output` depends on what the user provides:
+(`--output` omitted = cwd auto-named; directory = dir + auto-name; `*.yaml` = exact path. Never overwrites.)
 
-- Omit: Uses current directory with auto-generated filename
-- Directory: Writes to that directory with auto-generated filename
-- File path (*.yaml): Writes to that specific file
+---
 
-It never overwrites existing files.
+### Step 3 — Configure deployment
 
-**Step 3: Configure model path and parameters**
+**Model path.** Checkpoint path (`/`, `./`, `../`, `~`, or exists on disk) → set `deployment.checkpoint_path`, leave `hf_model_handle: null`. Else HF handle (one `/`, not on disk) → set `deployment.hf_model_handle`, leave `checkpoint_path: null`.
 
-Ask for model path. Determine type:
+**Auto-detect ModelOpt quantization** (checkpoint paths). Check `config.json` for `quantization_config` (or legacy `hf_quant_config.json`):
 
-- Checkpoint path (local directory — starts with `/`, `./`, `../`, `~`, or contains no `/` but exists on disk) → set `deployment.checkpoint_path: <path>` and `deployment.hf_model_handle: null`
-- HF handle (e.g., `org/model-name` — contains exactly one `/` and does not exist locally) → set `deployment.hf_model_handle: <handle>` and `deployment.checkpoint_path: null`
+- **vLLM:** no `--quantization` flag by default — vLLM auto-detects from `quantization_config` / `hf_quant_config.json`. Add only when the card, vLLM version, or dry-run error requires it.
+- **SGLang:** may need `--quantization modelopt_fp8` / `modelopt_fp4` / `modelopt` — verify against installed version.
 
-**Auto-detect ModelOpt quantization format** (checkpoint paths only):
+Some models need extra env vars (e.g. `VLLM_NVFP4_GEMM_BACKEND=marlin` for Nemotron Super) — discovered via model card research.
 
-Check `config.json` first for a `quantization_config` section with `quant_method: "modelopt"`. If absent, check the legacy/backward-compatible `hf_quant_config.json`:
+**Auto-detect from `config.json`:**
 
-```bash
-cat <checkpoint_path>/config.json 2>/dev/null
-cat <checkpoint_path>/hf_quant_config.json 2>/dev/null
-```
-
-If ModelOpt quantization is detected, read the quantization algorithm from `quantization_config.quant_algo` or `quantization.quant_algo`.
-
-- **vLLM:** Do not add a `--quantization` flag by default. Recent vLLM reads `quantization_config` / `hf_quant_config.json` and selects the ModelOpt backend automatically; adding a stale or mismatched flag can cause a config mismatch. Only add an explicit flag if the model card, vLLM version, or dry-run error requires it.
-- **SGLang:** Use SGLang-specific docs/model-card guidance. For offline ModelOpt checkpoints, recent SGLang can parse the config in many cases; if an explicit flag is required, common values are `--quantization modelopt_fp8` for FP8 and `--quantization modelopt_fp4` for NVFP4. Some exported ModelOpt flows document `--quantization modelopt`; verify against the installed SGLang version.
-
-If neither file contains a ModelOpt quantization config, treat the checkpoint as unquantized — no quantization flag needed.
-
-> **Note:** Some models require additional env vars for deployment (e.g., `VLLM_NVFP4_GEMM_BACKEND=marlin` for Nemotron Super). These may not be in the quantization config files — they are discovered during model card research below.
-
-**Auto-detect deployment settings from checkpoint:**
-
-Read `config.json` from the checkpoint (or HF model card) and build `deployment.extra_args` dynamically:
-
-```bash
-cat <checkpoint_path>/config.json 2>/dev/null
-```
-
-| Field in `config.json` | What to set | Example |
-| --- | --- | --- |
-| `max_position_embeddings` | `--max-model-len <value>` | `131072` → `--max-model-len 131072` |
-| `auto_map` exists | `--trust-remote-code` | Only add if model has custom code |
-
-Then use WebSearch to check the model card (HuggingFace page) for deployment-specific settings:
-
-| Model card signal | What to set |
+| Field | Flag |
 | --- | --- |
-| Reasoning model (thinking/CoT) | `--reasoning-parser` and `--reasoning-parser-plugin` if a custom parser is provided |
-| Tool-calling support | `--enable-auto-tool-choice --tool-call-parser <parser>` |
-| Custom vLLM flags documented | Add as specified (e.g., `--mamba_ssm_cache_dtype float32`) |
+| `max_position_embeddings` | `--max-model-len <value>` |
+| `auto_map` exists | `--trust-remote-code` |
 
-Combine all detected flags into a single `deployment.extra_args` override. The recipe's default `--max-model-len 32768` is a fallback — always prefer the value from `config.json`.
+#### Cross-check both sources for vLLM (mandatory, neither replaces the other)
 
-**Quantization-aware benchmark defaults:**
+**Source 1 — `recipes.vllm.ai/<org>/<model>`** (curated vLLM recipes; authoritative for parallelism, family-specific flags like `--reasoning-parser` / `--tool-call-parser` / `--mm-encoder-tp-mode`, vLLM version, spec-decoding, GPU count). Pin variants via query params (e.g. `?variant=fp8&strategy=single_node_tep`).
 
-When a quantized checkpoint is detected, read `references/quantization-benchmarks.md` for benchmark sensitivity rankings and recommended sets. Present recommendations to the user and ask which to include.
+> **WebFetch caveat — triage the summary:**
+>
+> 1. **"No `vllm serve` commands found" / "page is a usage guide":** JS-rendering miss. recipes.vllm.ai pages always have ≥1 command. Ask the user to paste it or share the variant URL.
+> 2. **Single recipe returned** for a model with known multiple variants → retry with variant-pinned URL. Axis names differ per model (Qwen: `?variant=&strategy=`; Kimi: `?advanced=`; others vary — no fixed pattern).
+> 3. **Variant label contradicts the command** (e.g. label "TEP" but command shows DP+EP) → summarizer conflated variants; ask user.
+>
+> For non-trivial deployments (≥120B, multi-node, novel arch), ask the user which variant *before* fetching.
 
-Read `references/model-card-research.md` for the full extraction checklist (sampling params, reasoning config, ARM64 compatibility, pre_cmd, etc.). Use WebSearch to research the model card, present findings, and ask the user to confirm.
+**Source 2 — HF model card + `config.json`** (authoritative for):
 
-For reasoning-capable models, prefer reasoning mode for evaluation because it usually produces the highest task scores; configure the model-card-specific on/off control and any reasoning budget or effort setting. If the user wants lower variance/noise, lower latency/cost, or an apples-to-apples comparison against non-reasoning baselines, also consider a non-reasoning companion run.
+| Signal | Flag |
+| --- | --- |
+| `max_position_embeddings` | `--max-model-len <value>` |
+| `auto_map` | `--trust-remote-code` |
+| Reasoning/CoT documented | `--reasoning-parser` (and `--reasoning-parser-plugin` if custom) |
+| Tool-calling documented | `--enable-auto-tool-choice --tool-call-parser <parser>` |
+| Custom flags in card | Add as specified (e.g. `--mamba_ssm_cache_dtype float32`) |
 
-**Step 4: Fill in remaining missing values**
+**Cross-check rules:**
 
-- Find all remaining `???` missing values in the config.
-- Ask the user only for values that couldn't be auto-discovered from the model card (e.g., SLURM hostname, account, output directory, MLflow/wandb tracking URI). Don't propose any defaults here. Let the user give you the values in plain text.
-- Ask the user if they want to change any other defaults e.g. execution partition or walltime (if running on SLURM) or add MLflow/wandb tags (if auto-export enabled).
+1. Read both sources before composing the command.
+2. Agree → use with confidence.
+3. Disagree → **do not silently pick one.** Surface both values to the user. Common conflicts: stale cards, parser rename between generations (Qwen2.5 `hermes` → Qwen3 `qwen3_coder`), recipe-only flags like `--language-model-only`, ARM64-specific card notes.
+4. Resolve in Step 3 — don't defer to dry-run.
 
-**Step 5: Confirm tasks (iterative)**
+#### vLLM deployment command structure — single `command:` field
 
-Show tasks in the current config. Loop until the user confirms the task list is final:
+Rewrite the build-config output into one `command:` field. Move all parallelism (`--tensor-parallel-size`, `--data-parallel-size`, `--pipeline-parallel-size`) into the command; do not keep separate `tensor_parallel_size` / `data_parallel_size` / `extra_args` YAML fields.
 
-1. Tell the user: "Run `nel ls tasks` to see all available tasks".
-2. If the task list includes a benchmark with a reference in `recipes/tasks/`,
-   read it before editing the config and prefer its YAML fragment unless the user
-   asks for different settings. Keep the reference repeat counts.
-3. Ask if they want to add/remove tasks or add/remove/modify task-specific parameter overrides.
-   To add per-task `nemo_evaluator_config` as specified by the user, e.g.:
+```yaml
+deployment:
+  command: >-
+    vllm serve /checkpoint
+    --host 0.0.0.0
+    --port ${deployment.port}
+    --tensor-parallel-size <N>
+    --data-parallel-size <M>
+    --max-model-len <value>
+    <... rest of cross-checked flags ...>
+```
+
+Conventions: always start `vllm serve /checkpoint` (NEL mounts here); always `--host 0.0.0.0 --port ${deployment.port}`; use folded scalar (`>-`) for one flag per line. Example fallback `--max-model-len 131072` covers AA-LCR (~120K + 16K gen) and SciCode (≥ 65536) — prefer `config.json` / recipe value.
+
+For how to choose `--tensor-parallel-size` / `--data-parallel-size` / `--pipeline-parallel-size` (and EP) from the model size and your GPU count, read `references/parallelism.md` — cross-check the layout against `recipes.vllm.ai`, then adapt to the GPUs you actually have via the fit math there.
+
+**Image / vLLM version.** Default `image: vllm/vllm-openai:v0.19.1` (pinned for reproducibility). If `recipes.vllm.ai` states a higher minimum version for the chosen variant (e.g. "vLLM >= 0.20.0"), bump the image tag accordingly (e.g. `v0.20.0`) — do **not** stay on `0.19.1` when the recipe explicitly requires newer. Do **not** use `:latest` (drifts across re-runs, breaks reproducibility). The version is part of the cross-check: surface to the user when bumping.
+
+#### vLLM-backend defaults — always include unless the recipe *contradicts*
+
+Silence is not contradiction. Drop/override only when the recipe sets a different value for the same setting (e.g. recipe pins `--max-num-batched-tokens 16384` → use 16384).
+
+- `--max-num-batched-tokens 8192` — caps per-step batched tokens; prevents long-prefill stalls.
+- `--enable-chunked-prefill` — interleaves long prefills with decode steps (required for AA-LCR's ~120K input). Modern vLLM defaults this on for many models; set explicitly to avoid drift.
+- `--enable-expert-parallel` — **MoE-only default.** Detect MoE from handle suffix (`-A10B`, `-A3B`, etc.), `num_experts` / `num_local_experts` / `n_routed_experts` in `config.json`, or card. No-op when TP=DP=1, safe to always include for MoE. Do not add for dense models. See `references/parallelism.md` for what EP does and the DP-attention + EP-MoE throughput pattern.
+- `--max-num-seqs N` — **omit at generation time** (top-level `parallelism` is `???`). Add this comment above `command:`:
+
+  ```text
+  # After filling in `parallelism` values (top-level + per-task overrides),
+  # append `--max-num-seqs N` where N = ceil(max_parallelism / data_parallel_size).
+  ```
+
+  In Step 4 compute and append. Example: top-level=16, Tau2=128, DP=8 → `ceil(128/8)=16`. Too small → request queuing; too large → wasted KV reservation. For how to choose the `parallelism` it derives from, read `references/parallelism.md`.
+
+#### Evaluation params template (top-level params)
+
+The top-level `nemo_evaluator_config.config.params` must contain **exactly these six fields** — no `top_k` / `presence_penalty` / `repetition_penalty` / `min_p`:
+
+```yaml
+nemo_evaluator_config:
+  config:
+    params:
+      parallelism: ???    # Required — size per references/parallelism.md (bounded by total request count vs GPU serving capacity); ask user in Step 4 if still unclear
+      request_timeout: 3600
+      max_retries: 10
+      max_new_tokens: 65536  # see rule below
+      temperature: 1.0    # from model card (reasoning); adjust
+      top_p: 0.95         # from model card (reasoning); adjust
+```
+
+Per-task `max_new_tokens` overrides are forbidden — set one top-level ceiling everywhere.
+
+#### `max_new_tokens` — mandatory model-card lookup
+
+1. **Fetch the HF model card before writing the value.** Not optional.
+2. Scan for any `max_tokens` / `max_new_tokens` / "output length" recommendation. Pick the **highest** value the card mentions (Qwen3.6: 32768 general + 81920 math-coding → use **81920**). Annotate with a citing comment.
+3. If the card is genuinely silent after a thorough read, fall back to: **65536** (reasoning), **16384** (non-reasoning); surface the silence to the user.
+4. **Forbidden:** writing `max_new_tokens: <generic_default>` with a "card not yet checked" comment. Either fetch and apply, or fetch and confirm silence.
+
+#### Quantization-aware benchmark defaults
+
+For quantized checkpoints, read `references/quantization-benchmarks.md` for sensitivity rankings and recommended sets; present and ask which to include. Read `references/model-card-research.md` for the full extraction checklist (sampling, reasoning config, ARM64, `pre_cmd`, output length — see the dedicated bullet there).
+
+Reasoning models: prefer reasoning mode (highest scores). For lower variance / cost / apples-to-apples vs non-reasoning baselines, also consider a non-reasoning companion run.
+
+---
+
+### Step 4 — Fill remaining ??? values
+
+- Find every `???` left. Ask the user only for what can't be inferred (SLURM hostname/account/output_dir, MLflow tracking URI, etc.). Don't propose defaults; let them give plain text.
+- **`parallelism`** — size it yourself from the run shape (total requests = `dataset_size × repeats` vs GPU serving capacity), and set `--max-num-seqs` to match. Read `references/parallelism.md` for the decision rule and worked examples; only ask the user if a non-GPU cap (e.g. judge rate limit) is unknown.
+- Ask about other defaults they may want to change (partition, walltime, MLflow tags).
+
+**Walltime cap: 4 hours.** Always `execution.walltime: "04:00:00"`. The cluster does not schedule jobs longer than 4h — this is a hard limit, not a preference.
+
+Evals that exceed 4h of wall-clock time are handled by **NEL's built-in dependency-chain resume**, not by shrinking the eval. NEL submits the first SLURM job; if it hits walltime, a dependent follow-on job resumes from the response/result caches the first job wrote, then queues another follow-on. Long evals continue across walltime windows automatically. See `references/run-validation.md#nel-timeout-and-resume-behavior` for the full mechanism.
+
+Implications for the agent:
+
+- Do **not** lower `num_repeats`, split heavy tasks (AA-LCR, SciCode) into separate configs, or otherwise carve up the eval to fit inside 4h. Let NEL chain.
+- Do **not** treat a walltime timeout as a failed run. Check `nel status` / `nel info` and the dependent job's logs before declaring failure. `references/run-validation.md` covers what a real failure looks like vs an expected resume event.
+- Bumping `data_parallel_size` / `parallelism` to finish faster is fine when the goal is wall-clock latency, not a walltime workaround — but it's optional, not required, for runs longer than 4h.
+
+---
+
+### Step 5 — Confirm tasks (iterative)
+
+1. Tell user: "Run `nel ls tasks` for the full task list."
+2. For any task with a `recipes/tasks/` reference, read it and prefer its YAML fragment + repeat counts.
+3. Ask about add/remove/modify. Per-task overrides under task's `nemo_evaluator_config.config.params`:
 
    ```yaml
    tasks:
@@ -192,188 +222,112 @@ Show tasks in the current config. Loop until the user confirms the task list is 
          config:
            params:
              temperature: <value>
-             max_new_tokens: <value>
              ...
    ```
 
-4. Apply changes.
-5. Show updated list and ask: "Is the task list final, or do you want to make more changes?"
+4. Apply, show updated list, ask "Final, or more changes?" Loop until confirmed.
 
-**Known Issues**
+**Known issue — nemo-skills self-deployment:** If using `nemo_skills.*` tasks with self-deployment (vLLM/SGLang/NIM), add at top level:
 
-- NeMo-Skills workaround (self-deployment only): If using `nemo_skills.*` tasks with self-deployment (vLLM/SGLang/NIM), add at top level:
+```yaml
+target:
+  api_endpoint:
+    api_key_name: DUMMY_API_KEY
+```
 
-  ```yaml
-  target:
-    api_endpoint:
-      api_key_name: DUMMY_API_KEY
-  ```
+External-deployment configs already define `api_key_name`. Export of `DUMMY_API_KEY` is handled in Step 8.
 
-  For the None (External) deployment the `api_key_name` should be already defined. The `DUMMY_API_KEY` export is handled in Step 8.
+---
 
-**Step 6: Advanced - Multi-node**
+### Step 6 — Multi-node
 
-If the user needs multi-node evaluation (model >120B, or more throughput), read `references/multi-node.md` for the configuration patterns (HAProxy multi-instance, Ray TP/PP, or combined).
+For models > ~120B or higher throughput needs, read `references/multi-node.md` for HAProxy multi-instance / Ray TP/PP / combined patterns.
 
-**Step 7: Advanced - Interceptors**
+### Step 7 — Interceptors
 
-- Tell the user they should see: <https://docs.nvidia.com/nemo/evaluator/latest/libraries/nemo-evaluator/interceptors/index.html> .
-- DON'T provide any general information about what interceptors typically do in API frameworks without reading the docs. If the user asks about interceptors, only then read the webpage to provide precise information.
-- If the user asks you to configure some interceptor, then read the webpage of this interceptor and configure it according to the `--overrides` syntax but put the values in the YAML config under `evaluation.nemo_evaluator_config.config.target.api_endpoint.adapter_config` (NOT under `target.api_endpoint.adapter_config`) instead of using CLI overrides.
-  By defining `interceptors` list you'd override the full chain of interceptors which can have unintended consequences like disabling default interceptors. That's why use the fields specified in the `CLI Configuration` section after the `--overrides` keyword to configure interceptors in the YAML config.
+Direct user to <https://docs.nvidia.com/nemo/evaluator/latest/libraries/nemo-evaluator/interceptors/index.html>. Do not provide generic interceptor info — read the specific interceptor's page if asked, then configure via `evaluation.nemo_evaluator_config.config.target.api_endpoint.adapter_config` (NOT under `target.api_endpoint.adapter_config`). Use the per-field syntax from the CLI Configuration section, not a full `interceptors:` list (that overrides the default chain).
 
-**Documentation Errata**
+**Errata:** Logging field names are `max_logged_requests` / `max_logged_responses` (NOT `max_saved_*` / `max_*` as some docs show).
 
-- The docs may show incorrect parameter names for logging. Use `max_logged_requests` and `max_logged_responses` (NOT `max_saved_*` or `max_*`).
+### Step 7.5 — Container registry auth (SLURM private images only)
 
-**Step 7.5: Check container registry authentication for private images (SLURM only)**
+Default images:
 
-NEL's default deployment images by framework:
-
-| Framework | Default image | Registry |
+| Framework | Image | Registry |
 | --- | --- | --- |
-| vLLM | `vllm/vllm-openai:latest` | DockerHub |
+| vLLM | `vllm/vllm-openai:v0.19.1` (bump per recipe; never `:latest`) | DockerHub |
 | SGLang | `lmsysorg/sglang:latest` | DockerHub |
 | TRT-LLM | `nvcr.io/nvidia/tensorrt-llm/release:...` | NGC |
-| Evaluation tasks | `nvcr.io/nvidia/eval-factory/*:26.03` | NGC |
+| Eval tasks | `nvcr.io/nvidia/eval-factory/*:26.03` | NGC |
 
-Before submitting, identify the exact deployment and evaluation-task images that will be pulled. If the images are public, skip the registry-authentication preflight; pyxis/enroot can pull public images without stored credentials. Do not require credentials just because the registry is DockerHub or NGC.
-
-Only verify cluster credentials when an image is private or access-restricted (private DockerHub repo, private NGC repo, internal registry, or user-provided image that is not known to be public). See `skills/common/slurm-setup.md` section 6 for the credential setup procedure.
+Public images → submit without preflight. Private/restricted → check credentials:
 
 ```bash
 ssh <host> "grep -E '^\s*machine\s+' ~/.config/enroot/.credentials 2>/dev/null"
 ```
 
-**Decision flow (check before submitting):**
-1. If the selected images are public → submit without an auth preflight
-2. If any selected image is private or access-restricted → check for credentials for that image's registry (see command above)
-3. If credentials exist → use the selected image and submit
-4. If credentials are missing but can be added → add them (see `slurm-setup.md` section 6), then submit
-5. If credentials cannot be added → switch to a public image when a compatible one exists, for example:
-
-   ```yaml
-   deployment:
-     image: nvcr.io/nvidia/vllm:<YY.MM>-py3  # check https://catalog.ngc.nvidia.com/orgs/nvidia/containers/vllm for latest tag
-   ```
-
-6. **Do not retry more than once** after an auth failure without fixing credentials or switching images
-
-**Step 8: Run the evaluation**
-
-Use a gated `dry-run -> canary -> full-run` sequence. Run the commands directly
-when the user has asked you to launch evals; otherwise, ask before submitting jobs.
-Do not submit the full run until the dry-run and limited-samples canary both pass.
-
-**Important**: Export required environment variables based on your config. If any tokens or keys are missing, point the user to `recipes/env.example` — it lists all possible keys with notes on which tasks need them. Ask the user to copy it, fill in their keys, and source it:
-
-```bash
-cp recipes/env.example .env
-# Edit .env with your keys
-set -a && source .env && set +a
-```
-
-```bash
-# If using pre_cmd or post_cmd (review pre_cmd content before enabling — it runs arbitrary commands):
-export NEMO_EVALUATOR_TRUST_PRE_CMD=1
-
-# If using nemo_skills.* tasks with self-deployment:
-export DUMMY_API_KEY=dummy
-```
-
-**Step 8.1: Dry-run / NEL CLI config validation** (validates config without running):
-
-```bash
-nel run --config <config_path> --dry-run
-```
-
-Check the NEL output before launching anything. Fix unresolved `???` values,
-bad Hydra overrides, missing env var references, invalid mounts, image/container
-problems, sbatch issues, and obvious deployment argument errors before moving on.
-
-**Step 8.2: Limited-samples canary** (operational validation before production):
-
-```bash
-nel run --config <config_path> -o ++evaluation.nemo_evaluator_config.config.params.limit_samples=10
-```
-
-Use the canary to tune parallelism and catch runtime failures that the dry-run
-cannot catch: judge API auth/rate-limit errors, evaluation container failures,
-code-execution sandbox/container errors, vLLM health/OOM issues, bad request
-formatting, log path problems, and unexpectedly low evaluated-sample counts.
-Inspect logs before accepting the canary, not just result files:
-
-```bash
-nel status <canary_invocation_id>
-nel info <canary_invocation_id> --logs
-ssh <user>@<host> "grep -i 'traceback\|exception\|error\|failed\|oom\|killed\|timeout\|unauthorized\|rate limit\|sandbox\|container\|judge\|parse\|scoring' <log_path>/*.log"
-```
-
-If the benchmark set mixes different dependency profiles, canary each risky
-class or task: LLM-judge tasks, code-execution tasks, and ordinary model-only
-tasks can fail for different reasons. For evals that depend on inference judges
-or code execution containers, start with conservative `parallelism` and raise it
-only after the canary logs show those dependencies are healthy. Do not over-raise
-parallelism just to saturate the model server; judge services and code containers
-often become the bottleneck or failure point first.
-
-**Single-task rerun** (useful for canary debugging or re-testing after config changes):
-
-```bash
-nel run --config <config_path> -t <task_name>
-```
-
-Combine with `-o` for limited samples: `nel run --config <config_path> -t <task_name> -o ++evaluation.nemo_evaluator_config.config.params.limit_samples=10`
-
-**Step 8.3: Full evaluation** (production run after the canary passes):
-
-```bash
-nel run --config <config_path>
-```
-
-Before the full run, remove the `limit_samples` override and keep only the
-parallelism/settings that the canary validated. If the canary fails, fix the
-config, credentials, image/container, judge setup, code-execution environment, or
-parallelism, then rerun the canary before launching the full evaluation.
-
-**Monitoring Progress**
-
-After job submission, register the job per the **monitor skill** for durable
-cross-session tracking. For one-off queries (live status, debugging a failed
-run, analyzing results) use the **launching-evals skill**; for querying past
-runs in MLflow use **accessing-mlflow**. If a NEL job times out or resumes,
-read `references/run-validation.md` before treating the run as failed.
-
-**Step 9: Verify completed evaluation run**
-
-Before pulling/reporting scores, validate the completed run itself. Read
-`references/run-validation.md` for NEL timeout/resume behavior, completed-run
-validation, diagnostics, score-harvesting guidance, and the handoff to
-`compare-results` for baseline-vs-candidate deltas.
+Add credentials per `skills/common/slurm-setup.md` §6 if missing. If you can't add, switch to a compatible public image (e.g. `nvcr.io/nvidia/vllm:<YY.MM>-py3` — check catalog.ngc.nvidia.com). **Do not retry more than once** after an auth failure.
 
 ---
 
-Direct users with issues to:
+### Step 8 — Run evaluation (gated dry-run → canary → full)
 
-- **GitHub Issues:** <https://github.com/NVIDIA-NeMo/Evaluator/issues>
-- **GitHub Discussions:** <https://github.com/NVIDIA-NeMo/Evaluator/discussions>
+Run directly when the user asked to launch; otherwise ask before submitting.
 
-Now, copy this checklist and track your progress:
+**Env setup:** Copy `recipes/env.example` → `.env`, fill, source:
 
-```text
-Config Generation Progress:
-- [ ] Step 0: Check workspace (if MODELOPT_WORKSPACE_ROOT is set)
-- [ ] Step 1: Check if nel is installed and if user has existing config
-- [ ] Step 2: Build the base config file
-- [ ] Step 3: Configure model path and parameters
-- [ ] Step 4: Fill in remaining missing values
-- [ ] Step 5: Confirm tasks (iterative)
-- [ ] Step 6: Advanced - Multi-node (Data Parallel)
-- [ ] Step 7: Advanced - Interceptors
-- [ ] Step 7.5: Check container registry auth for private images (SLURM only)
-- [ ] Step 8: Run the evaluation
-  - [ ] Step 8.1: Dry-run / NEL CLI config validation
-  - [ ] Step 8.2: Limited-samples canary
-  - [ ] Step 8.3: Full evaluation
-- [ ] Step 9: Verify completed evaluation run
+```bash
+cp recipes/env.example .env
+set -a && source .env && set +a
+
+# If pre_cmd/post_cmd in config (review pre_cmd first — runs arbitrary commands):
+export NEMO_EVALUATOR_TRUST_PRE_CMD=1
+# If nemo_skills.* + self-deployment:
+export DUMMY_API_KEY=dummy
 ```
+
+**Step 8.1 — Dry-run** (config validation):
+
+```bash
+nel run --config <path> --dry-run
+```
+
+Fix unresolved `???`, bad Hydra overrides, missing env vars, invalid mounts, image issues, sbatch errors, obvious deployment errors before proceeding.
+
+**Step 8.2 — Canary** (limited-samples, validates everything dry-run can't):
+
+```bash
+nel run --config <path> -o ++evaluation.nemo_evaluator_config.config.params.limit_samples=10
+```
+
+Catches judge auth/rate-limits, container failures, sandbox issues, OOM, bad request formatting, low evaluated counts. Always inspect logs:
+
+```bash
+nel status <id>
+nel info <id> --logs
+ssh <user>@<host> "grep -i 'traceback\|exception\|error\|failed\|oom\|killed\|timeout\|unauthorized\|rate limit\|sandbox\|container\|judge\|parse\|scoring' <log_path>/*.log"
+```
+
+Canary each risky task class separately (judge-scored, code-execution, model-only). Start `parallelism` conservatively; raise only after judge/sandbox logs are clean — they bottleneck before the model. For capacity-bound runs, tune `parallelism`/`--max-num-seqs` here against vLLM's reported max concurrency + preemption — see `references/parallelism.md`.
+
+Single-task rerun: `nel run --config <path> -t <task_name>` (combine with `-o ++...limit_samples=10` for canary).
+
+**Step 8.3 — Full run** (after canary passes):
+
+```bash
+nel run --config <path>
+```
+
+Remove `limit_samples` overrides; keep canary-validated parallelism. If the canary fails, fix and rerun the canary — don't skip to full.
+
+**Monitoring:** Register the job per the **monitor** skill for cross-session tracking. One-off live status / debugging → **launching-evals** skill. Past-run MLflow queries → **accessing-mlflow** skill. NEL timeout/resume → read `references/run-validation.md` before treating the run as failed.
+
+---
+
+### Step 9 — Verify completed run
+
+Before pulling/reporting scores, validate the run. Read `references/run-validation.md` for NEL timeout/resume behavior, completed-run validation, diagnostics, score harvesting, and the handoff to `compare-results` for baseline-vs-candidate deltas.
+
+---
+
+Issues: <https://github.com/NVIDIA-NeMo/Evaluator/issues> · <https://github.com/NVIDIA-NeMo/Evaluator/discussions>

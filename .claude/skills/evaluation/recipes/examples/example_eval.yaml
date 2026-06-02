@@ -1,15 +1,13 @@
-# Example: Quantization Validation Suite
+# Example: AA-aligned eval template (single-task starting point)
 #
-# A balanced set of benchmarks for validating quantized model quality.
-# Copy this file and customize for your needs.
-# Task references in recipes/tasks/ define benchmark requirements and YAML
-# fragments — the agent composes them into a runnable config like this one.
+# Minimal config to validate a quantized model end-to-end against one AA-style
+# benchmark. The agent extends this template by copying additional task
+# fragments from recipes/tasks/aa/*.md into the `evaluation.tasks` list — task
+# references define benchmark requirements and YAML fragments, this file
+# defines the deployment + operational conventions.
 #
-# Includes:
-#   - MMLU-Pro (knowledge, completions)
-#   - GPQA Diamond (reasoning, chat, 32 repeats)
-#   - LiveCodeBench v6 (code, chat, 3 repeats)
-#   - IFBench (instruction following, chat, 8 repeats)
+# Includes (default): gpqa_diamond_aa_v3 (simple-evals harness, n_samples=16).
+# Add more AA tasks per recipes/tasks/aa/ and the AA suite rule in SKILL.md.
 #
 # Usage:
 #   nel run --config recipes/examples/example_eval.yaml \
@@ -22,10 +20,15 @@
 # For quantized checkpoints, do not add a vLLM quantization flag by default.
 # Recent vLLM reads ModelOpt quantization metadata from the checkpoint. Only add
 # an explicit flag if the model card, vLLM version, or dry-run error requires it.
-#   -o 'deployment.extra_args=--max-model-len 32768 --trust-remote-code'
+#
+# Deployment uses a single `command:` field instead of separate
+# `tensor_parallel_size` / `data_parallel_size` / `extra_args` fields — the full
+# `vllm serve` invocation lives in the command string. NEL mounts the resolved
+# model (from checkpoint_path or hf_model_handle) at /checkpoint inside the
+# container, and Hydra interpolates ${deployment.port} at run time.
 #
 # Run a single task:
-#   nel run --config ... -t ns_gpqa
+#   nel run --config ... -t gpqa_diamond_aa_v3
 #
 # Canary (2 samples): use this before a full run to validate logs and tune
 # parallelism.
@@ -42,84 +45,79 @@ execution:
   walltime: "04:00:00"
   mounts:
     mount_home: false
+  auto_export:          # REQUIRED trigger for auto-export. Without this, the
+    destinations:       # export.mlflow block below is ignored and the run is
+      - mlflow          # NOT uploaded — you'd have to `nel export` it by hand.
 deployment:
   env_vars:
     HF_TOKEN: host:HF_TOKEN
   checkpoint_path: ???
   hf_model_handle:
   served_model_name: ???
-  tensor_parallel_size: 1
-  data_parallel_size: 1
-  # For models with custom code, add: --trust-remote-code
-  extra_args: --max-model-len 32768
+  image: vllm/vllm-openai:v0.19.1
+  # For MoE models, add `--enable-expert-parallel` to the command.
+  # For models with custom code, add `--trust-remote-code` to the command.
+  # After filling in evaluation `parallelism` values (top-level + per-task),
+  # append `--max-num-seqs N` to the command where
+  # N = ceil(max_parallelism / data_parallel_size).
+  command: >-
+    vllm serve /checkpoint
+    --host 0.0.0.0
+    --port ${deployment.port}
+    --tensor-parallel-size 1
+    --data-parallel-size 1
+    --max-model-len 131072
+    --max-num-batched-tokens 8192
+    --enable-chunked-prefill
 evaluation:
   env_vars:
     HF_TOKEN: host:HF_TOKEN
   nemo_evaluator_config:
     config:
       params:
+        parallelism: ???  # Number of concurrent requests per each benchmark
         request_timeout: 3600
         max_retries: 10
-        parallelism: 16
+        max_new_tokens: 65536  # 64K for reasoning models; use 16384 (16K) for non-reasoning; prefer model card value
+        temperature: 1.0       # from model card (reasoning mode); adjust per card
+        top_p: 0.95            # from model card (reasoning mode); adjust per card
     target:
       api_endpoint:
         api_key_name: DUMMY_API_KEY
   tasks:
-  # Knowledge (chat endpoint, short)
-    - name: nemo_skills.ns_mmlu_pro
+  # Reasoning (chat endpoint, 8 repeats, short)
+    - name: gpqa_diamond_aa_v3
+      container: nvcr.io/nvidia/eval-factory/simple-evals:26.03
       nemo_evaluator_config:
         config:
           params:
             extra:
-              num_repeats: 1
-              args: ++prompt_config=eval/aai/mcq-10choices-boxed ++inference.tokens_to_generate=null
-        target:
-          api_endpoint:
-            adapter_config:
-              params_to_remove:
-                - max_new_tokens
-                - max_completion_tokens
+              n_samples: 16
 
-  # Reasoning (chat endpoint, 32 repeats, short)
-    - name: ns_gpqa
-      nemo_evaluator_config:
-        config:
-          params:
-            extra:
-              args: ++prompt_config=eval/aai/mcq-4choices
-              num_repeats: 32
-        target:
-          api_endpoint:
-            adapter_config:
-              params_to_remove:
-                - max_new_tokens
-                - max_completion_tokens
-
-  # Code (chat endpoint, 3 repeats, medium)
-    - name: ns_livecodebench
-      nemo_evaluator_config:
-        config:
-          params:
-            extra:
-              dataset_split: test_v6_2408_2505
-              num_repeats: 3
-        target:
-          api_endpoint:
-            adapter_config:
-              params_to_remove:
-                - max_new_tokens
-                - max_completion_tokens
-
-  # Instruction following (chat endpoint, 8 repeats, super short)
-    - name: ns_ifbench
-      nemo_evaluator_config:
-        config:
-          params:
-            extra:
-              num_repeats: 8
-        target:
-          api_endpoint:
-            adapter_config:
-              params_to_remove:
-                - max_new_tokens
-                - max_completion_tokens
+export:
+  # Use LITERAL values below — NOT ${deployment.*} / ${evaluation.*} cross-refs.
+  # With auto_export enabled (above), NEL resolves this block at SUBMIT time in a
+  # scope that does NOT include `deployment` / `evaluation`, so cross-references
+  # fail hard: "Interpolation key 'deployment.served_model_name' not found".
+  # `${oc.env:USER}` (an env-var interpolation) is fine.
+  #
+  # CAUTION — these literals can drift. temperature / top_p / max_new_tokens are the
+  # ONLY queryable record of the sampling config in MLflow (NEL does not log them as
+  # run params), so keep them — but because they can't be interpolated, they MUST be
+  # kept EQUAL to evaluation.nemo_evaluator_config.config.params above. When you
+  # change the sampling params (or served_model_name), update these literals in the
+  # SAME edit, or MLflow will misreport the run.
+  mlflow:
+    tracking_uri: ???
+    experiment_name: ${oc.env:USER}/CHANGEME-served-model-name
+    description: 'CHANGEME-served-model-name | T=1.0, top_p=0.95, max_new_tokens=65536'
+    log_logs: true
+    log_artifacts: true
+    only_required: false
+    skip_existing: false
+    tags:
+      framework: vllm
+      model: CHANGEME-served-model-name
+      temperature: '1.0'
+      top_p: '0.95'
+      max_new_tokens: '65536'

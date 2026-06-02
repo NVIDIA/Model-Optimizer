@@ -15,7 +15,7 @@ fallback_version = "0.0.0"
 [project]
 name = "nvidia-modelopt"
 dynamic = ["version"]
-description = "Nvidia Model Optimizer: a unified model optimization and deployment toolkit."
+description = "Nvidia Model Optimizer: A unified library of SOTA model optimization techniques like quantization, pruning, Neural Architecture Search (NAS), distillation, speculative decoding, etc. It compresses deep learning models for downstream deployment frameworks like TensorRT-LLM, TensorRT, vLLM, etc. to optimize inference speed."
 readme = { text = "Checkout https://github.com/nvidia/Model-Optimizer for more information.", content-type = "text/markdown" }
 license = "Apache-2.0"
 license-files = ["LICENSE_HEADER"]
@@ -82,7 +82,7 @@ hf = [
     "peft>=0.17.0",
     "sentencepiece>=0.2.1",                                                           # Also implicitly used in test_unified_export_megatron, test_vllm_fakequant_megatron_export
     "tiktoken",
-    "transformers>=4.56,<5.8",                                                        # Should match modelopt/torch/__init__.py and noxfile.py
+    "transformers>=4.56,<5.10",                                                       # Should match modelopt/torch/__init__.py and noxfile.py
     "wonderwords",
 ]
 
@@ -201,7 +201,6 @@ extend-ignore = [
     "SIM102",
     "SIM108",
     "SIM115",
-    "UP032",
     "UP038",
 ]
 

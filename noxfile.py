@@ -38,10 +38,11 @@ TORCH_VERSIONS = {
     "torch_29": "torchvision~=0.24.0",
     "torch_210": "torchvision~=0.25.0",
     "torch_211": "torchvision~=0.26.0",
+    "torch_212": "torchvision~=0.27.0",
 }
 
 TRANSFORMERS_VERSIONS = {
-    "tf_latest": "transformers~=5.7.0",
+    "tf_latest": "transformers~=5.9.0",
     "tf_min": "transformers~=4.56.0",
 }
 
@@ -124,6 +125,8 @@ def gpu(session):
 def gpu_megatron(session):
     # nemo:26.04 has transformers 5.x but system-wide installed trtllm 1.2.0 which does not support it causing import errors
     session.run("pip", "uninstall", "-y", "tensorrt_llm")
+    # Pre-installed nvidia-modelopt shadows the editable install
+    session.run("pip", "uninstall", "-y", "nvidia-modelopt")
     session.run("python", "-m", "pip", "install", "-e", ".[hf,dev-test]")
     session.run("python", "-m", "pytest", "tests/gpu_megatron", *_cov_args())
 
@@ -133,6 +136,14 @@ def gpu_megatron(session):
 def gpu_trtllm(session):
     session.run("python", "-m", "pip", "install", "-e", ".[hf,dev-test]")
     session.run("python", "-m", "pytest", "tests/gpu_trtllm", *_cov_args())
+
+
+# Container: docker.io/vllm/vllm-openai (the published image ships vLLM + CUDA + torch).
+# Pin must stay in sync with examples/vllm_serve/Dockerfile.
+@nox.session(venv_backend="none")
+def gpu_vllm(session):
+    session.run("python3", "-m", "pip", "install", "-e", ".[hf,dev-test]")
+    session.run("python3", "-m", "pytest", "tests/gpu_vllm", *_cov_args())
 
 
 # Container: nvcr.io/nvidia/pytorch:26.01-py3 or later

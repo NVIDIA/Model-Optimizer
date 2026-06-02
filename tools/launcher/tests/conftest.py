@@ -29,16 +29,12 @@ import sys
 
 import pytest
 
-
-@pytest.fixture(autouse=True)
-def add_launcher_to_path():
-    """Add the launcher directory to sys.path so core.py and slurm_config.py can be imported."""
-    launcher_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    if launcher_dir not in sys.path:
-        sys.path.insert(0, launcher_dir)
-    yield
-    if launcher_dir in sys.path:
-        sys.path.remove(launcher_dir)
+# Make the launcher dir importable so test modules can `import core`, `import slurm_config`,
+# etc. at module-load time. conftest.py is imported by pytest before any test module, so
+# this mutation is in effect before the first test-module import resolves.
+_LAUNCHER_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _LAUNCHER_DIR not in sys.path:
+    sys.path.insert(0, _LAUNCHER_DIR)
 
 
 @pytest.fixture

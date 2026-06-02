@@ -18,7 +18,7 @@
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager
-from typing import Union
+from typing import TypeAlias
 
 import torch
 
@@ -49,7 +49,7 @@ class CustomHPType(ABC):
         """Return True if self is equal to other."""
 
 
-HPType = tuple[int, ...] | int | float | CustomHPType
+HPType: TypeAlias = tuple[int, ...] | int | float | CustomHPType
 
 
 # NOTE: Hparam class should be picklable for distributed broadcasting of hparams for Megatron pruning.
@@ -59,9 +59,9 @@ class Hparam:
     Keeps track of hyperparameter values and their importance, which can be used for search algorithms.
     """
 
-    Importance = Union[torch.Tensor, None]  # noqa: UP007
-    ImportanceEstimator = Callable[[], Importance]
-    ActiveSlice = Union[slice, torch.LongTensor]  # noqa: UP007
+    Importance: TypeAlias = torch.Tensor | None
+    ImportanceEstimator: TypeAlias = Callable[[], Importance]
+    ActiveSlice: TypeAlias = slice | torch.LongTensor
 
     def __init__(self, choices: Sequence[HPType], original: HPType | None = None) -> None:
         """Initializes Hparam with original value and choices."""

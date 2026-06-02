@@ -22,13 +22,16 @@ Coverage:
       SLURM_HF_LOCAL), return type
 """
 
+import importlib
+
+import slurm_config
+from slurm_config import SlurmConfig, slurm_factory
+
 
 class TestSlurmConfig:
     """Tests for the SlurmConfig dataclass."""
 
     def test_defaults(self):
-        from slurm_config import SlurmConfig
-
         cfg = SlurmConfig()
         assert cfg.host is None
         assert cfg.port == 22
@@ -44,8 +47,6 @@ class TestSlurmConfig:
         assert cfg.array is None
 
     def test_custom_values(self):
-        from slurm_config import SlurmConfig
-
         cfg = SlurmConfig(
             host="login.example.com",
             account="my_account",
@@ -66,54 +67,38 @@ class TestSlurmFactory:
     """Tests for the slurm_factory function."""
 
     def test_default_returns_slurm_config(self):
-        from slurm_config import slurm_factory
-
         cfg = slurm_factory()
         # slurm_factory with @run.autoconvert returns a nemo-run Config wrapper
         assert "SlurmConfig" in repr(cfg)
 
     def test_default_container(self):
-        from slurm_config import slurm_factory
-
         cfg = slurm_factory()
         assert "tensorrt-llm" in cfg.container
 
     def test_default_srun_args(self):
-        from slurm_config import slurm_factory
-
         cfg = slurm_factory()
         assert cfg.srun_args == ["--no-container-mount-home"]
 
     def test_default_container_mounts_from_env(self, monkeypatch):
         monkeypatch.setenv("SLURM_HF_LOCAL", "/custom/hf-local")
-        # Need to re-import to pick up the env var in the default
-        # The factory reads SLURM_HF_LOCAL at call time via the default arg
-        import importlib
-
-        import slurm_config
-
+        # Reload to pick up the env var — slurm_factory reads SLURM_HF_LOCAL at module-import
+        # time via a default arg, so the qualified slurm_config.slurm_factory call below is
+        # required (the top-level `from slurm_config import slurm_factory` still points at
+        # the pre-reload function).
         importlib.reload(slurm_config)
         cfg = slurm_config.slurm_factory()
         assert any("/custom/hf-local:/hf-local" in m for m in cfg.container_mounts)
 
     def test_override_nodes(self):
-        from slurm_config import slurm_factory
-
         cfg = slurm_factory(nodes=8)
         assert cfg.nodes == 8
 
     def test_override_partition(self):
-        from slurm_config import slurm_factory
-
         cfg = slurm_factory(partition="gpu")
         assert cfg.partition == "gpu"
 
     def test_env_var_host(self, monkeypatch):
         monkeypatch.setenv("SLURM_HOST", "test-host.example.com")
-        import importlib
-
-        import slurm_config
-
         importlib.reload(slurm_config)
         cfg = slurm_config.slurm_factory()
         assert cfg.host == "test-host.example.com"

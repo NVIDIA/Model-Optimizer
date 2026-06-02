@@ -1,0 +1,56 @@
+# SPEED-bench MTP speculative-decoding run for Qwen3.5-4B via vLLM.
+#
+# Companion to specdec_bench.yaml (the NONE/autoregressive baseline). This
+# variant exercises Qwen3.5-4B's built-in MTP head (text_config.mtp_num_hidden_layers=1)
+# with draft_length=3 to produce real acceptance-rate numbers instead of the
+# trivial AR=1 that NONE yields.
+#
+# Slurm run on cw_dfw:
+#   uv run slurm.py --yaml modules/Model-Optimizer/tools/launcher/examples/Qwen/Qwen3.5-4B/specdec_bench_mtp.yaml --yes
+
+job_name: Qwen3.5-4B_specdec_bench_mtp
+
+pipeline:
+  global_vars:
+    hf_model: /hf-local/Qwen/Qwen3.5-4B
+
+  task_0:
+    script: common/specdec_bench/run.sh
+    args:
+      - --dataset speed
+      - --dataset_path /hf-local/nvidia/SPEED-Bench-Internal/qualitative
+      - --engine VLLM
+      - --speculative_algorithm MTP
+      - --draft_length 3
+      - --tp_size 1
+      - --ep_size 1
+      - --concurrency 1
+      - --num_requests 80
+      - --output_length 4096
+      - --aa_timing
+      - --show_progress
+      - --save_dir /scratchspace/specdec_bench_mtp
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+      - HF_LOCAL: /hf-local
+      # dump_env() in examples/specdec_bench/run.py reads provenance from these
+      # env vars when present; they are intentionally NOT set here. Hardcoded
+      # SHAs in a committed YAML would stale-lie about the build that's
+      # actually running. Set them in the harness (planned for Phase 2 in
+      # OMNIML-4788, where slurm.py / launch.py will compute and inject them
+      # at launch time):
+      #
+      #   SPECDEC_BENCH_SHA  = git rev-parse HEAD:examples/specdec_bench
+      #   MODELOPT_SHA       = git -C modules/Model-Optimizer rev-parse HEAD
+      #   MODELOPT_VERSION   = modelopt.__version__ (or git describe --tags)
+      #   NMM_SANDBOX_SHA    = git -C nmm-sandbox rev-parse HEAD
+      #   CONTAINER_IMAGE    = slurm_config.container (the image:tag below)
+      #
+      # When run standalone (without the harness), dump_env falls back to
+      # git rev-parse / module imports on the host filesystem.
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 1
+      container: vllm/vllm-openai:qwen3_5-cu130
