@@ -84,6 +84,24 @@ evaluation:
     target:
       api_endpoint:
         api_key_name: DUMMY_API_KEY
+        # Adapter (interceptor) config. `use_reasoning` strips reasoning/CoT
+        # traces before scoring — see SKILL.md "Reasoning adapter config" for
+        # when to enable it (reasoning models only; instruct models -> false)
+        # and how to force thinking on via chat_template_kwargs.
+        adapter_config:
+          use_caching: true
+          use_request_logging: true
+          max_logged_requests: 2
+          use_response_logging: true
+          max_logged_responses: 2
+          use_reasoning: true            # true for reasoning models; false for instruct
+          log_failed_requests: true
+          params_to_add:
+            # Forces thinking on for hybrid models that can run both modes.
+            # Drop this block for pure-instruct models.
+            chat_template_kwargs:
+              thinking: true
+              enable_thinking: true
   tasks:
   # Reasoning (chat endpoint, 8 repeats, short)
     - name: gpqa_diamond_aa_v3

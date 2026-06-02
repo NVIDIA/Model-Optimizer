@@ -189,6 +189,26 @@ For quantized checkpoints, read `references/quantization-benchmarks.md` for sens
 
 Reasoning models: prefer reasoning mode (highest scores). For lower variance / cost / apples-to-apples vs non-reasoning baselines, also consider a non-reasoning companion run.
 
+#### Reasoning adapter config (`use_reasoning`)
+
+The `evaluation.nemo_evaluator_config.target.api_endpoint.adapter_config` block in
+`example_eval.yaml` controls request/response logging and reasoning handling.
+`use_reasoning: true` makes the adapter strip the model's reasoning/CoT trace
+before the response is scored, so the harness grades only the final answer.
+
+Set it per model type:
+
+1. **Instruct (non-reasoning) models → `use_reasoning: false`.** There is no
+   reasoning trace to strip; leaving it on can mangle plain responses. Also drop
+   the `params_to_add.chat_template_kwargs` thinking block.
+2. **Reasoning models → `use_reasoning: true`.** This is especially important
+   when the deployment command sets a `--reasoning-parser` (vLLM emits a separate
+   reasoning channel that must be stripped before scoring).
+3. **Hybrid models (can run with reasoning on *or* off) → always turn reasoning
+   ON** by forcing the thinking flags inside `params_to_add.chat_template_kwargs`
+   (`thinking: true` / `enable_thinking: true`), and keep `use_reasoning: true`.
+   Reasoning mode yields the highest scores, so default hybrids to it.
+
 ---
 
 ### Step 4 — Fill remaining ??? values
