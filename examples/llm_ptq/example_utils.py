@@ -74,7 +74,8 @@ def setup_distributed_args(args):
     else:
         args.rank = 0
         args.world_size = 1
-        args.device = None
+        # Leave ``args.device`` as parsed from ``--device`` (e.g. "cuda", "cpu");
+        # downstream helpers (``get_model`` etc.) consume it directly.
         args.is_main = True
 
 
@@ -121,6 +122,7 @@ def load_and_prepare_fsdp2_model(
     trust_remote_code: bool = False,
     mp_policy=None,
     cpu_offload: bool = False,
+    attn_implementation: str | None = None,
 ):
     """CLI-side FSDP2 loader: validate against CLI constraints, then delegate to core.
 
@@ -145,6 +147,7 @@ def load_and_prepare_fsdp2_model(
         trust_remote_code=trust_remote_code,
         mp_policy=mp_policy,
         cpu_offload=cpu_offload,
+        attn_implementation=attn_implementation,
     )
 
 

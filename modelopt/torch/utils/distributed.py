@@ -498,6 +498,7 @@ def _load_via_parallel_read(
     mp_policy,
     cpu_offload: bool,
     weight_map: dict,
+    attn_implementation: str | None = None,
 ):
     """Parallel-read path: each rank reads its share of decoder layers from disk.
 
@@ -513,7 +514,10 @@ def _load_via_parallel_read(
 
     from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 
-    hf_config = AutoConfig.from_pretrained(ckpt_path, trust_remote_code=trust_remote_code)
+    config_kwargs: dict[str, Any] = {"trust_remote_code": trust_remote_code}
+    if attn_implementation is not None:
+        config_kwargs["attn_implementation"] = attn_implementation
+    hf_config = AutoConfig.from_pretrained(ckpt_path, **config_kwargs)
     dtype = getattr(hf_config, "torch_dtype", None) or torch.bfloat16
 
     # Phase A: meta skeleton on every rank. include_buffers=False so computed
@@ -612,6 +616,7 @@ def load_fsdp2_causal_lm(
     trust_remote_code: bool = False,
     mp_policy=None,
     cpu_offload: bool = False,
+    attn_implementation: str | None = None,
 ):
     """Load and FSDP2-shard a HuggingFace causal LM.
 
@@ -666,19 +671,25 @@ def load_fsdp2_causal_lm(
             mp_policy=mp_policy,
             cpu_offload=cpu_offload,
             weight_map=weight_map,
+            attn_implementation=attn_implementation,
         )
 
     # Fallback: rank-0 from_pretrained + broadcast via fsdp2_shard.
-    hf_config = AutoConfig.from_pretrained(ckpt_path, trust_remote_code=trust_remote_code)
+    config_kwargs: dict[str, Any] = {"trust_remote_code": trust_remote_code}
+    if attn_implementation is not None:
+        config_kwargs["attn_implementation"] = attn_implementation
+    hf_config = AutoConfig.from_pretrained(ckpt_path, **config_kwargs)
     dtype = getattr(hf_config, "torch_dtype", None) or torch.bfloat16
 
     if rank == 0:
-        src_model = AutoModelForCausalLM.from_pretrained(
-            ckpt_path,
-            torch_dtype="auto",
-            trust_remote_code=trust_remote_code,
-            low_cpu_mem_usage=True,
-        )
+        model_kwargs: dict[str, Any] = {
+            "torch_dtype": "auto",
+            "trust_remote_code": trust_remote_code,
+            "low_cpu_mem_usage": True,
+        }
+        if attn_implementation is not None:
+            model_kwargs["attn_implementation"] = attn_implementation
+        src_model = AutoModelForCausalLM.from_pretrained(ckpt_path, **model_kwargs)
         src_model.eval()
         src_state_dict = src_model.state_dict()
     else:
