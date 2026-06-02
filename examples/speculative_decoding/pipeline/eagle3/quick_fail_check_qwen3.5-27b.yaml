@@ -1,4 +1,3 @@
----
 # EAGLE3 quick-fail pipeline for Qwen/Qwen3.5-27B
 #
 # Qwen3.5-27B is a 27B dense VLM (text + vision). EAGLE3 uses only the text path.

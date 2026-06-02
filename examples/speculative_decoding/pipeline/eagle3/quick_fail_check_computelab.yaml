@@ -1,4 +1,3 @@
----
 # This pipeline is a dry-run on 100 samples to quickly check the possible failure points
 # over the all 4-step.
 #
@@ -106,7 +105,7 @@ task_3:
     - --draft_length 3
     - --output_length 4096
     - --engine VLLM
-    - --tp_size 1 
+    - --tp_size 1
     - --ep_size 1
     - --runtime_params services/specdec_bench/tensorrt_llm_runtiime_params.yaml
     - --speculative_algorithm EAGLE3

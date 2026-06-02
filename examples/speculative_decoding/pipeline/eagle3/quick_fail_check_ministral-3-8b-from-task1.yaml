@@ -1,4 +1,3 @@
----
 # EAGLE3 quick-fail pipeline for mistralai/Ministral-3-8B-Instruct-2512-BF16
 # Starts from task_1 (hidden state dump), reusing data from cicd_1779208014.
 #

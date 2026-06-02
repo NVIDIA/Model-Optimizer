@@ -1,4 +1,3 @@
----
 # EAGLE3 quick-fail pipeline for moonshotai/Kimi-K2.5
 #
 # Kimi-K2.5 is a 1T-parameter MoE VLM (32B active, 384 experts, 8 selected, MLA attention).

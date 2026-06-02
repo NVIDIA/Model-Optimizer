@@ -1,4 +1,3 @@
----
 # EAGLE3 quick-fail pipeline for mistralai/Ministral-3-8B-Instruct-2512-BF16
 # Uses HF-based hidden state dump (more stable than speculators/vLLM internals).
 # Reuses task_0 data from cicd_1779208014.

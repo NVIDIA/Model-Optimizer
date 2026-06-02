@@ -40,8 +40,13 @@ _EMBED_TOKENS_PATHS = [
     "backbone.embeddings",
     "language_model.backbone.embeddings",
     "model.language_model.embed_tokens",
+    "tok_embeddings",  # Mistral native checkpoints (consolidated.safetensors)
 ]
-_LM_HEAD_PATHS = ["lm_head", "language_model.lm_head"]
+_LM_HEAD_PATHS = [
+    "lm_head",
+    "language_model.lm_head",
+    "output",  # Mistral native checkpoints (consolidated.safetensors)
+]
 _BASE_MODEL_PATHS = [
     "language_model.model",
     "model.language_model",
@@ -51,7 +56,9 @@ _BASE_MODEL_PATHS = [
 ]
 _VLM_CONFIG_ATTRS = ["text_config", "llm_config"]
 _SAFETENSORS_INDEX_FILENAME = "model.safetensors.index.json"
-_SAFETENSORS_SINGLE_FILENAME = "model.safetensors"
+# Single-file safetensors names to try, in order.  Mistral native checkpoints
+# use ``consolidated.safetensors`` instead of the HF-standard ``model.safetensors``.
+_SAFETENSORS_SINGLE_FILENAMES = ["model.safetensors", "consolidated.safetensors"]
 
 
 class FakeBaseConfig(PretrainedConfig):
@@ -182,11 +189,12 @@ class FakeBaseModel(PreTrainedModel):
         if (index_path := _try_fetch(_SAFETENSORS_INDEX_FILENAME)) is not None:
             with open(index_path) as f:
                 return json.load(f).get("weight_map", {})
-        if (single_path := _try_fetch(_SAFETENSORS_SINGLE_FILENAME)) is not None:
-            with safe_open(single_path, framework="pt") as h:
-                return dict.fromkeys(h.keys(), _SAFETENSORS_SINGLE_FILENAME)
+        for single_name in _SAFETENSORS_SINGLE_FILENAMES:
+            if (single_path := _try_fetch(single_name)) is not None:
+                with safe_open(single_path, framework="pt") as h:
+                    return dict.fromkeys(h.keys(), single_name)
         raise FileNotFoundError(
-            f"No {_SAFETENSORS_INDEX_FILENAME} or {_SAFETENSORS_SINGLE_FILENAME} found at "
+            f"No {_SAFETENSORS_INDEX_FILENAME} or {_SAFETENSORS_SINGLE_FILENAMES} found at "
             f"{source!r}. FakeBaseModel only supports safetensors checkpoints; "
             "pytorch_model.bin is not supported."
         )
@@ -219,28 +227,12 @@ class FakeBaseModel(PreTrainedModel):
             source, [weight_map[lm_head_key], weight_map[embed_tokens_key]]
         )
 
-        def _read(path: str, key: str, role: str = "") -> torch.Tensor:
-            """Pull a single tensor; falls back to consolidated.safetensors for Mistral."""
-            try:
-                with safe_open(path, framework="pt", device="cpu") as h:
-                    return h.get_tensor(key)
-            except FileNotFoundError:
-                _aliases = {
-                    "embed_tokens": ["tok_embeddings.weight"],
-                    "lm_head": ["output.weight"],
-                }
-                consolidated = os.path.join(os.path.dirname(path), "consolidated.safetensors")
-                if os.path.isfile(consolidated):
-                    with safe_open(consolidated, framework="pt", device="cpu") as h:
-                        for alias in _aliases.get(role, []):
-                            if alias in h.keys():
-                                return h.get_tensor(alias)
-                raise
+        # Pull only the two tensors we need; avoids materializing the whole file.
+        def _read(path: str, key: str) -> torch.Tensor:
+            with safe_open(path, framework="pt", device="cpu") as h:
+                return h.get_tensor(key)
 
-        return (
-            _read(lm_head_path, lm_head_key, "lm_head"),
-            _read(embed_tokens_path, embed_tokens_key, "embed_tokens"),
-        )
+        return _read(lm_head_path, lm_head_key), _read(embed_tokens_path, embed_tokens_key)
 
     def forward(self, *args, **kwargs):
         """Not implemented: FakeBaseModel omits full model weights and cannot run inference."""

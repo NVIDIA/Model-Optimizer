@@ -1,4 +1,3 @@
----
 # EAGLE3 quick-fail pipeline for mistralai/Ministral-3-14B-Instruct-2512-BF16
 #
 # Ministral-3-14B is a 14B dense model (model type: mistral3, multimodal but

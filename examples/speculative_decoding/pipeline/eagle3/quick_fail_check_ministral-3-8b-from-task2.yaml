@@ -1,4 +1,3 @@
----
 # EAGLE3 quick-fail pipeline for mistralai/Ministral-3-8B-Instruct-2512-BF16
 # Starts from training, reusing hidden states from cicd_1779312692.
 

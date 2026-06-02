@@ -1,4 +1,3 @@
----
 # Standalone task_1: HF hidden state dump for Ministral-3-8B
 # Uses partial data from cicd_1779208014 task_0 (330 samples)
 

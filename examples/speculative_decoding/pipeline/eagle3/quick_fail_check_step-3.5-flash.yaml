@@ -1,4 +1,3 @@
----
 # EAGLE3 quick-fail pipeline for stepfun-ai/Step-3.5-Flash
 #
 # Step-3.5-Flash is a 197B MoE (11B active, 288 experts + 1 shared, top-8).

@@ -1,4 +1,3 @@
----
 # EAGLE3 quick-fail-check pipeline for Qwen3-8B.
 #
 # Dry-run on 100 samples to quickly check the possible failure points

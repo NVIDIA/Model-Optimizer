@@ -1,4 +1,3 @@
----
 # EAGLE3 quick-fail pipeline for mistralai/Ministral-3-8B-Instruct-2512-BF16
 #
 # Ministral-3-8B is an 8B dense model (model type: mistral3, multimodal but

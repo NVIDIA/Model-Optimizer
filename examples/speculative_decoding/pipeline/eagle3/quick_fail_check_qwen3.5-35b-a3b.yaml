@@ -1,4 +1,3 @@
----
 # EAGLE3 quick-fail pipeline for Qwen/Qwen3.5-35B-A3B
 #
 # Qwen3.5-35B-A3B is a 35B MoE VLM (3B active, 256 experts, top-8, shared expert).

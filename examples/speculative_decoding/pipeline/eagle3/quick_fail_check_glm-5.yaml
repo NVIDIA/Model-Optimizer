@@ -1,4 +1,3 @@
----
 # EAGLE3 quick-fail pipeline for zai-org/GLM-5
 #
 # GLM-5 is a 744B MoE (40B active, 256 experts, top-8). DeepSeek Sparse Attention.
