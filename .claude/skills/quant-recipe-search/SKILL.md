@@ -18,6 +18,8 @@ Use this skill to steer quantization as a portfolio loop. It is an orchestration
 
 Users may ask for the outcome directly, for example: "find the best quantization recipe and generate a PTQ checkpoint for this model." Treat that as enough to start. Recover what can be inferred from the workspace, ask only for missing constraints that materially affect the search, then delegate checkpoint generation to `ptq`.
 
+A "best recipe" request is not complete after checkpoint generation. It requires evaluation and baseline comparison before recommending or promoting a checkpoint. If benchmark tasks or baseline results are missing, ask for them or delegate to `evaluation` to create the matching baseline/candidate runs.
+
 ## Skill Boundaries
 
 - Use `ptq` to produce and validate checkpoints.
@@ -54,6 +56,7 @@ Do not duplicate those workflows here. This skill should leave the user with a c
    - Start with baselines: BF16/FP16, all-FP8 or W8A8, and one conservative low-bit recipe.
    - If using ModelOpt, start from `modelopt_recipes` rather than inventing patterns from scratch. Prefer model-specific recipes first, then general PTQ presets/fragments.
    - Let the ModelOpt `ptq` skill own checkpoint generation and PTQ validation; use this skill to choose the objective, sequence recipes, compare results, and decide the next iteration.
+   - Generate PTQ checkpoints only as candidates. Do not call a candidate "best" until it has passed the evaluation and comparison stages below.
    - Use AutoQuant or sensitivity tooling for broad search and module ranking.
    - Use manual recipes for controlled ablations by module family.
    - Change one major recipe axis at a time: weight format, activation format, quantization granularity, calibration method, excluded modules, or module family.
@@ -64,7 +67,9 @@ Do not duplicate those workflows here. This skill should leave the user with a c
    - Promote only candidates that pass checkpoint validation and the required delegated sanity checks.
 
 5. **Evaluate in stages**
+   - For any request that says "best", "search", or "optimize", run or recover evaluations for the baseline and every candidate that reaches this stage. Do not stop at PTQ checkpoint generation unless the user explicitly asks to pause before eval.
    - Pick cheap screen benchmarks that expose likely failure modes for the model/domain.
+   - If the benchmark set is missing, ask the user which benchmark suite defines success; use the `<1pp` default acceptance goal only after a benchmark set exists.
    - Ask `evaluation` to create or modify configs and submit runs.
    - Ask `launching-evals` / `monitor` to track, resume, and debug runs.
    - Ask `compare-results` to validate comparability and compute deltas.
@@ -76,6 +81,7 @@ Do not duplicate those workflows here. This skill should leave the user with a c
    - Link to `compare-results` / `launching-evals` artifacts for exact metric extraction and provenance.
 
 7. **Decide next iteration**
+   - Promote a recipe only after `compare-results` shows the candidate is comparable to the baseline and satisfies the accuracy-loss constraint for the chosen benchmark set.
    - If accuracy drops, inspect the most sensitive module families first.
    - If verbosity grows, compare parser settings, token caps, failed samples, backend changes, and sampling config before blaming quantization numerics.
    - If AutoQuant produces identical recipes for multiple budgets, inspect recipe hashes and achieved bits; adjust constraints/objective before launching a bigger sweep.
@@ -84,6 +90,7 @@ Do not duplicate those workflows here. This skill should leave the user with a c
 
 - Ask whether the primary success metric is compute/throughput, memory/latency, or a custom objective. Do not assume, and do not proceed to candidate planning until the objective is explicit.
 - Default to a `<1pp` per-benchmark accuracy-loss constraint versus the matching baseline unless the user gives another threshold.
+- A generated PTQ checkpoint is a candidate artifact, not the final answer to a "best recipe" request. Evaluation and comparison are required before final selection.
 - Prefer active runtime cost over checkpoint size when optimizing routed or sparsely activated models.
 - Always compare against BF16/FP16 and a near-lossless FP8/W8A8 baseline.
 - Treat benchmark variance as real: run repeat sweeps for close decisions.
