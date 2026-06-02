@@ -18,7 +18,7 @@
 import math
 import time
 import warnings
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from functools import partial
 from typing import TypeAlias
 
@@ -43,6 +43,7 @@ from .calib import MseCalibrator, NVFP4MSECalibrator, _Calibrator
 from .conversion import create_and_replace_svdquant_linear_on_the_fly, set_quantizer_by_cfg_context
 from .nn import NVFP4StaticQuantizer, QuantModule, SequentialQuantizer, TensorQuantizer
 from .utils import (
+    attach_shared_quant_states,
     disable_calib,
     enable_fake_quant,
     enable_quant,
@@ -51,8 +52,10 @@ from .utils import (
     is_quantized_linear,
     is_quantized_row_parallel_linear,
     persistent_materialization,
+    populate_shared_state,
     promote_nvfp4_static_quantizers,
     quantizer_attr_names,
+    reduce_amax,
 )
 from .utils.calib_utils import _GPTQ_HELPER_REGISTRY, GPTQHelper
 
@@ -75,67 +78,8 @@ __all__ = [
 ]
 
 
-def _is_calibrated_nvfp4_static(q) -> bool:
-    """True iff ``q`` is an enabled NVFP4-static weight quantizer with ``_amax`` set."""
-    return (
-        isinstance(q, NVFP4StaticQuantizer)
-        and not q._disabled
-        and q.is_nvfp4_static
-        and getattr(q, "_amax", None) is not None
-    )
-
-
-def _collect_grouped_linears(model: nn.Module) -> list[list[nn.Module]]:
-    """Collect sibling groups (Q/K/V, gate/up) with calibrated NVFP4-static weight quantizers."""
-    # Inline: layer_utils → quant_utils → model_calib cycle.
-    from modelopt.torch.export.layer_utils import _GATE_UP_PAIRS
-
-    # Reuses the existing gate/up pairs and adds Q/K/V (no equivalent constant
-    # in export). Single source for the gate/up half avoids parallel lists.
-    patterns: tuple[tuple[str, ...], ...] = (("q_proj", "k_proj", "v_proj"), *_GATE_UP_PAIRS)
-    groups: list[list[nn.Module]] = []
-    wq_attr = quantizer_attr_names("weight").weight_quantizer
-    for parent in model.modules():
-        for sibling_names in patterns:
-            members = [
-                child
-                for child in (getattr(parent, n, None) for n in sibling_names)
-                if child is not None and _is_calibrated_nvfp4_static(getattr(child, wq_attr, None))
-            ]
-            if len(members) >= 2:
-                groups.append(members)
-    return groups
-
-
 def _collect_weight_stats(quantizer: nn.Module, weight: torch.Tensor) -> None:
     quantizer(weight)
-
-
-@torch.no_grad()
-def _sync_grouped_weight_global_amax(model: nn.Module) -> int:
-    """Unify NVFP4 ``global_amax`` across Q/K/V and gate/up sibling weight quantizers.
-
-    Run after ``max_calibrate``. Sibling discovery is name-based via
-    ``_collect_grouped_linears``; non-matching architectures (wqkv, fused
-    qkv_proj, DeepSeek variants, single-Linear fused gate_up_proj) silently
-    fall back to per-module global_amax. Fused-experts containers already
-    share a single quantizer across gate/up halves and need no sync.
-    """
-    # quant_utils imports back from this module; top-level would cycle.
-    from modelopt.torch.export.quant_utils import preprocess_linear_fusion
-
-    n_groups = 0
-    for group in _collect_grouped_linears(model):
-        preprocess_linear_fusion(group)
-        n_groups += 1
-    return n_groups
-
-
-@torch.no_grad()
-def _promote_nvfp4_static_quantizers_with_global_amax_sync(model: nn.Module) -> None:
-    """Promote static NVFP4 weight quantizers and sync grouped global amax."""
-    promote_nvfp4_static_quantizers(model)
-    _sync_grouped_weight_global_amax(model)
 
 
 CalibratorFactory: TypeAlias = Callable[
@@ -250,6 +194,7 @@ def max_calibrate(
     forward_loop: ForwardLoop | None = None,
     distributed_sync=True,
     sync_expert_weight_amax=False,
+    shared_patterns: Mapping[str, Sequence[str]] | None = None,
 ):
     """Calibrate the model using max.
 
@@ -260,6 +205,12 @@ def max_calibrate(
         distributed_sync: Whether to sync input_quantizer amax across distributed processes.
         sync_expert_weight_amax: SequentialMLP only — share one weight amax across all experts
             in a MoE layer (within-rank sync + EP all-reduce when EP>1).
+        shared_patterns: Optional dict keyed by quantizer kind (``"weight"``/``"input"``), each a
+            list of regexes over module FQNs. For a kind, when patterns are given they are the sole
+            discovery source (hooks skipped). Modules whose regex match yields the same capture-group
+            tuple form one group — capture the immediate parent for per-parent (per-expert) grouping,
+            or leave the expert index uncaptured for cross-expert. Only ``"weight"`` is used today;
+            ``"input"`` is reserved for future input-quantizer sharing.
 
     See :class:`MaxCalibConfig <modelopt.torch.quantization.config.MaxCalibConfig>` for
     details on the remaining arguments.
@@ -281,14 +232,16 @@ def max_calibrate(
     # Fail fast on NVFP4 static-block with TP>1 (sharded_state_dict treats _amax as replicated).
     _check_nvfp4_static_tp_supported(model)
 
-    # Promote eligible static-block NVFP4 weight quantizers to NVFP4StaticQuantizer so
-    # the static blockwise fake-quant path is used in forward and export picks up the
-    # two-level (per-block + global) scaling. Run before the ``distributed_sync`` early
-    # return so single-process callers also get the promotion. No-op for dynamic-block
-    # / non-NVFP4 configs.
-    _promote_nvfp4_static_quantizers_with_global_amax_sync(model)
+    # Discover sibling groups (forward_loop hooks, or the "weight" regexes when given)
+    # and attach shared state; populated below, after any cross-rank _amax sync.
+    # Only "weight" patterns are consumed today; "input" is reserved for the future.
+    weight_patterns = shared_patterns.get("weight") if shared_patterns else None
+    attach_shared_quant_states(model, forward_loop=forward_loop, patterns=weight_patterns)
 
     if not distributed_sync:
+        # Single-process: _amax is final — aggregate shared global_amax, then promote.
+        populate_shared_state(model)
+        promote_nvfp4_static_quantizers(model)
         return
 
     # Check MoE calibration completeness before sync
@@ -404,6 +357,11 @@ def max_calibrate(
                     quantizer.sync_amax_across_distributed_group(
                         module.parallel_state.tensor_parallel_group
                     )
+
+    # _amax is now cross-rank consistent — aggregate shared global_amax then
+    # promote, so siblings read the unified value instead of their own _amax.
+    populate_shared_state(model)
+    promote_nvfp4_static_quantizers(model)
 
 
 def _mse_quant_func(x, amax, quantizer):

@@ -54,11 +54,12 @@ except ImportError:
 
 from torch.distributed.fsdp import FSDPModule
 
-from modelopt.torch.quantization import set_quantizer_by_cfg_context
 from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
 from modelopt.torch.quantization.qtensor import MXFP8QTensor, NVFP4QTensor
+from modelopt.torch.quantization.utils import (
+    collect_shared_input_modules as _collect_shared_input_modules,
+)
 from modelopt.torch.quantization.utils import fsdp2_aware_weight_update, quantizer_attr_names
-from modelopt.torch.utils.dataset_utils import _disable_use_cache
 
 try:
     from modelopt.torch.sparsity.attention_sparsity.conversion import export_sparse_attention_config
@@ -255,68 +256,20 @@ def collect_shared_input_modules(
 ) -> tuple[dict, dict | None]:
     """Collect modules that share the same input using forward hooks.
 
-    This is a common helper for both LLM and diffusion model fusion.
-
-    Args:
-        model: The model to analyze.
-        dummy_forward_fn: A callable that runs a dummy forward pass on the model.
-            Should be a function that takes no arguments.
-        collect_layernorms: If True, also collect layernorm output mappings (for AWQ).
-
-    Returns:
-        A tuple of (input_to_linear, output_to_layernorm).
-        input_to_linear: Dict mapping input tensor to list of modules sharing that input.
-        output_to_layernorm: Dict mapping layernorm output to the layernorm module (or None).
+    Thin wrapper around
+    :func:`modelopt.torch.quantization.utils.collect_shared_input_modules`,
+    parameterized for the export use case: hooks every ``is_quantlinear``
+    module with at least one enabled quantizer, and optionally tracks
+    layernorm outputs when ``collect_layernorms=True`` (for AWQ
+    pre_quant_scale folding into the preceding layernorm).
     """
-    input_to_linear: dict = defaultdict(list)
-    output_to_layernorm: dict | None = defaultdict(lambda: None) if collect_layernorms else None
-
-    def _input_hook(module, input, output):
-        """Update dictionary with list of all modules that share the same input."""
-        if len(input) > 0 and isinstance(input[0], torch.Tensor):
-            # TODO: Handle DBRX MoE case
-            input_to_linear[input[0]].append(module)
-
-    def _output_hook(module, input, output):
-        """Update dictionary with mapping of layernorms and their outputs."""
-        if output_to_layernorm is not None and isinstance(output, torch.Tensor):
-            output_to_layernorm[output] = module
-
-    handles = []
-
-    # Register hooks on all quantized linear modules (and optionally layernorms)
-    for name, module in model.named_modules():
-        if collect_layernorms and is_layernorm(module):
-            module.name = name
-            handle = module.register_forward_hook(_output_hook)
-            handles.append(handle)
-        elif is_quantlinear(module) and (
-            _is_enabled_quantizer(module.input_quantizer)
-            or _is_enabled_quantizer(module.weight_quantizer)
-        ):
-            module.name = name
-            handle = module.register_forward_hook(_input_hook)
-            handles.append(handle)
-
-    if not handles:
-        return input_to_linear, output_to_layernorm
-
-    # Run dummy forward pass to collect modules sharing same input.
-    # `_disable_use_cache` keeps the probe forward working on configs that don't
-    # set `use_cache` (e.g., stepfun-ai/Step-3.5-Flash's Step3p5Config).
-    try:
-        with (
-            torch.no_grad(),
-            set_quantizer_by_cfg_context(model, [{"quantizer_name": "*", "enable": False}]),
-            _disable_use_cache(model),
-        ):
-            dummy_forward_fn()
-    finally:
-        # Always remove hooks
-        for handle in handles:
-            handle.remove()
-
-    return input_to_linear, output_to_layernorm
+    return _collect_shared_input_modules(
+        model,
+        dummy_forward_fn,
+        module_filter=lambda m: is_quantlinear(m)
+        and (_is_enabled_quantizer(m.input_quantizer) or _is_enabled_quantizer(m.weight_quantizer)),
+        output_filter=is_layernorm if collect_layernorms else None,
+    )
 
 
 def _fuse_shared_input_modules(

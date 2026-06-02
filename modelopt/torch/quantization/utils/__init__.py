@@ -18,15 +18,27 @@
 
 from .core_utils import *
 from .layerwise_calib import LayerActivationCollector
+from .shared_input import (
+    SharedQuantState,
+    attach_shared_quant_states,
+    collect_shared_input_modules,
+    find_shared_input_groups,
+    populate_shared_state,
+)
 
 __all__ = [
     "EXPORT_MODE",
+    "SharedQuantState",
+    "attach_shared_quant_states",
+    "collect_shared_input_modules",
     "convert_quantization_axis_to_reduce_axis",
     "export_torch_mode",
+    "find_shared_input_groups",
     "is_quantized",
     "is_quantized_column_parallel_linear",
     "is_quantized_linear",
     "is_quantized_row_parallel_linear",
+    "populate_shared_state",
     "reduce_amax",
     "reduce_sum",
     "replace_function",

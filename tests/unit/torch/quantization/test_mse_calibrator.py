@@ -23,7 +23,6 @@ from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.model_calib import (
     _FP8_SWEEP_CALIBRATOR_REGISTRY,
     _make_weight_mse_calibrator,
-    _promote_nvfp4_static_quantizers_with_global_amax_sync,
     _register_fp8_sweep_calibrator,
     mse_calibrate,
 )
@@ -32,7 +31,12 @@ from modelopt.torch.quantization.nn.modules.tensor_quantizer import (
     _QUANT_FUNCTIONAL_BACKENDS,
     register_quant_backend,
 )
-from modelopt.torch.quantization.utils import enable_fake_quant, promote_nvfp4_static_quantizers
+from modelopt.torch.quantization.utils import (
+    attach_shared_quant_states,
+    enable_fake_quant,
+    populate_shared_state,
+    promote_nvfp4_static_quantizers,
+)
 
 
 # TODO: avoid code duplication in this file
@@ -644,7 +648,7 @@ class TestRegisterFP8SweepCalibrator:
         )
         model = torch.nn.Module()
         model.weight_quantizer = q
-        _promote_nvfp4_static_quantizers_with_global_amax_sync(model)
+        promote_nvfp4_static_quantizers(model)
 
         cal = _make_weight_mse_calibrator(
             q,
@@ -750,7 +754,7 @@ class TestStaticNVFP4Promotion:
     def test_standalone_static_nvfp4_quantizer_is_promoted(self):
         model = self._LinearLike(torch.tensor([1.0, 5.0]))
 
-        _promote_nvfp4_static_quantizers_with_global_amax_sync(model)
+        promote_nvfp4_static_quantizers(model)
 
         assert isinstance(model.weight_quantizer, NVFP4StaticQuantizer)
         assert torch.equal(model.weight_quantizer.global_amax, torch.tensor(5.0))
@@ -770,7 +774,9 @@ class TestStaticNVFP4Promotion:
         model.k_proj = self._LinearLike(torch.tensor([3.0, 4.0]))
         model.v_proj = self._LinearLike(torch.tensor([5.0, 6.0]))
 
-        _promote_nvfp4_static_quantizers_with_global_amax_sync(model)
+        attach_shared_quant_states(model, patterns=[r"(?:(.*)\.)?(?:q_proj|k_proj|v_proj)"])
+        populate_shared_state(model)
+        promote_nvfp4_static_quantizers(model)
 
         for child in (model.q_proj, model.k_proj, model.v_proj):
             assert isinstance(child.weight_quantizer, NVFP4StaticQuantizer)

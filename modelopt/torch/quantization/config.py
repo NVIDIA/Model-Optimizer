@@ -715,6 +715,22 @@ class MaxCalibConfig(QuantizeAlgorithmConfig):
         ),
     )
 
+    shared_patterns: dict[str, list[str]] | None = ModeloptField(
+        default=None,
+        title="Regex patterns for groups that share quantization state",
+        description=(
+            "Optional dict keyed by quantizer kind (``'weight'`` and/or ``'input'``), each a list "
+            "of regexes matched (full-match) against module fully-qualified names. For a kind, when "
+            "patterns are given they are the sole discovery source (hook-based discovery is skipped), "
+            "so they must list every group you want. Modules whose match yields the same capture-group "
+            "tuple form one group; the capture boundary chooses granularity: capture the immediate "
+            "parent for per-parent / per-expert groups (e.g. ``r'(.*)\\.(?:q_proj|k_proj|v_proj)'``, "
+            "``r'(.*)\\.(?:w1|w3)'``); leave the expert index uncaptured for one cross-expert group "
+            "(``r'(.*)\\.experts\\.\\d+\\.(?:w1|w3)'``). Only ``'weight'`` is used today; ``'input'`` is "
+            "reserved for future input-quantizer sharing. Default None -> hook-based discovery."
+        ),
+    )
+
 
 class MseCalibConfig(QuantizeAlgorithmConfig):
     """Configuration for per-tensor MSE calibration.

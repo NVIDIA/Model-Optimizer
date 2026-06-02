@@ -954,6 +954,10 @@ def promote_nvfp4_static_quantizers(model: nn.Module) -> int:
     need to be promoted so they use the two-level scaling path (global amax +
     per-block amax) instead of the generic E4M3 path.
 
+    If the quantizer has a ``_shared_quant_state_ref`` with a populated
+    ``weight_global_amax`` (sibling group), that shared value is used instead of
+    this quantizer's own ``_amax`` reduction, keeping siblings on a common FP8 grid.
+
     Returns the number of quantizers converted.
     """
     from modelopt.torch.quantization.nn import NVFP4StaticQuantizer, TensorQuantizer
@@ -968,8 +972,14 @@ def promote_nvfp4_static_quantizers(model: nn.Module) -> int:
         if amax is None:
             continue
 
+        # Grouped siblings share one ``weight_global_amax`` (common FP8 grid);
+        # otherwise fall back to this quantizer's own per-block amax.
         already_promoted = isinstance(module, NVFP4StaticQuantizer)
-        global_amax = reduce_amax(amax.clone().detach(), axis=None)
+        shared = getattr(module, "_shared_quant_state_ref", None)
+        if shared is not None and shared.weight_global_amax is not None:
+            global_amax = shared.weight_global_amax
+        else:
+            global_amax = reduce_amax(amax.clone().detach(), axis=None)
         NVFP4StaticQuantizer.from_tensor_quantizer(module, global_amax=global_amax)
         if not already_promoted:
             converted += 1
