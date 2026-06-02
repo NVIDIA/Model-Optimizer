@@ -26,16 +26,17 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from gate_compare import evaluate_comparison  # noqa: E402
-from gate_ptq import evaluate_checkpoint  # noqa: E402
-from gate_run import evaluate_run  # noqa: E402
-
+from gate_compare import evaluate_comparison
+from gate_ptq import evaluate_checkpoint
+from gate_run import evaluate_run
 
 # ── gate_compare ──────────────────────────────────────────────────────
 
+
 def test_compare_accept_within_threshold():
-    r = evaluate_comparison({"gpqa": 50.0, "scicode": 30.0},
-                            {"gpqa": 49.5, "scicode": 29.8}, threshold=0.01)
+    r = evaluate_comparison(
+        {"gpqa": 50.0, "scicode": 30.0}, {"gpqa": 49.5, "scicode": 29.8}, threshold=0.01
+    )
     assert r["pass"] and r["decision"] == "ACCEPT"
 
 
@@ -68,9 +69,15 @@ def test_compare_relative_threshold():
 
 # ── gate_run ──────────────────────────────────────────────────────────
 
+
 def _task(**kw):
-    base = {"status": "SUCCESS", "expected_samples": 100, "scored_samples": 100,
-            "score": 42.0, "errors": []}
+    base = {
+        "status": "SUCCESS",
+        "expected_samples": 100,
+        "scored_samples": 100,
+        "score": 42.0,
+        "errors": [],
+    }
     base.update(kw)
     return base
 
@@ -107,13 +114,18 @@ def test_run_no_tasks():
 
 # ── gate_ptq ──────────────────────────────────────────────────────────
 
+
 def _ckpt(**kw):
     base = {
         "source_bytes": 16_000_000_000,
         "output_bytes": 8_000_000_000,
         "recipe": "nvfp4",
-        "layer_precision_counts": {"NVFP4": 224, "BF16_or_excluded": 3,
-                                   "unexpected_unquantized": 0, "declaration_mismatch": 0},
+        "layer_precision_counts": {
+            "NVFP4": 224,
+            "BF16_or_excluded": 3,
+            "unexpected_unquantized": 0,
+            "declaration_mismatch": 0,
+        },
         "metadata_diffs": [],
     }
     base.update(kw)
@@ -130,14 +142,28 @@ def test_ptq_not_smaller():
 
 
 def test_ptq_zero_coverage_is_model_unsupported():
-    r = evaluate_checkpoint(_ckpt(
-        layer_precision_counts={"NVFP4": 0, "unexpected_unquantized": 0, "declaration_mismatch": 0}))
+    r = evaluate_checkpoint(
+        _ckpt(
+            layer_precision_counts={
+                "NVFP4": 0,
+                "unexpected_unquantized": 0,
+                "declaration_mismatch": 0,
+            }
+        )
+    )
     assert not r["pass"] and r["failure_class"] == "MODEL_UNSUPPORTED"
 
 
 def test_ptq_unexpected_unquantized():
-    r = evaluate_checkpoint(_ckpt(
-        layer_precision_counts={"NVFP4": 200, "unexpected_unquantized": 24, "declaration_mismatch": 0}))
+    r = evaluate_checkpoint(
+        _ckpt(
+            layer_precision_counts={
+                "NVFP4": 200,
+                "unexpected_unquantized": 24,
+                "declaration_mismatch": 0,
+            }
+        )
+    )
     assert not r["pass"] and r["failure_class"] == "QUANT_COVERAGE_FAILURE"
 
 

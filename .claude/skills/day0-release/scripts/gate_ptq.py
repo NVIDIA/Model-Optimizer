@@ -64,8 +64,12 @@ def evaluate_checkpoint(summary):
     Returns dict ``{pass, failure_class, detail, checks}``.
     """
     if not summary:
-        return {"pass": False, "failure_class": "USER_CONFIG_ERROR",
-                "detail": "empty validation summary", "checks": {}}
+        return {
+            "pass": False,
+            "failure_class": "USER_CONFIG_ERROR",
+            "detail": "empty validation summary",
+            "checks": {},
+        }
 
     src = summary.get("source_bytes")
     out = summary.get("output_bytes")
@@ -84,8 +88,9 @@ def evaluate_checkpoint(summary):
         ratio = out / src
         checks["size"] = f"{out}/{src} = {ratio:.3f}x"
         if ratio >= 1.0:
-            failures.append(("QUANT_COVERAGE_FAILURE",
-                             f"output not smaller than source (ratio {ratio:.3f})"))
+            failures.append(
+                ("QUANT_COVERAGE_FAILURE", f"output not smaller than source (ratio {ratio:.3f})")
+            )
 
     # Check 2 — coverage.
     expected_bucket = _RECIPE_EXPECTED_PRECISION.get(recipe)
@@ -96,29 +101,43 @@ def evaluate_checkpoint(summary):
         covered = counts.get(expected_bucket, 0)
         unexpected = counts.get("unexpected_unquantized", 0)
         mismatch = counts.get("declaration_mismatch", 0)
-        checks["coverage"] = (f"{expected_bucket}={covered}, "
-                              f"unexpected_unquantized={unexpected}, "
-                              f"declaration_mismatch={mismatch}")
+        checks["coverage"] = (
+            f"{expected_bucket}={covered}, "
+            f"unexpected_unquantized={unexpected}, "
+            f"declaration_mismatch={mismatch}"
+        )
         if covered == 0:
-            failures.append(("MODEL_UNSUPPORTED",
-                             f"recipe {recipe} targets {expected_bucket} but 0 layers covered "
-                             "(wildcard likely missed the module names)"))
+            failures.append(
+                (
+                    "MODEL_UNSUPPORTED",
+                    f"recipe {recipe} targets {expected_bucket} but 0 layers covered "
+                    "(wildcard likely missed the module names)",
+                )
+            )
         if unexpected > 0:
-            failures.append(("QUANT_COVERAGE_FAILURE",
-                             f"{unexpected} layer(s) unexpectedly unquantized"))
+            failures.append(
+                ("QUANT_COVERAGE_FAILURE", f"{unexpected} layer(s) unexpectedly unquantized")
+            )
         if mismatch > 0:
-            failures.append(("QUANT_COVERAGE_FAILURE",
-                             f"{mismatch} layer(s) with precision/declaration mismatch"))
+            failures.append(
+                (
+                    "QUANT_COVERAGE_FAILURE",
+                    f"{mismatch} layer(s) with precision/declaration mismatch",
+                )
+            )
 
     # Check 3 — metadata.
     checks["metadata"] = "clean" if not metadata_diffs else f"{len(metadata_diffs)} diff(s)"
     if metadata_diffs:
-        failures.append(("QUANT_COVERAGE_FAILURE",
-                         f"unexpected metadata diffs: {metadata_diffs}"))
+        failures.append(("QUANT_COVERAGE_FAILURE", f"unexpected metadata diffs: {metadata_diffs}"))
 
     if not failures:
-        return {"pass": True, "failure_class": None,
-                "detail": "size, coverage, and metadata all pass", "checks": checks}
+        return {
+            "pass": True,
+            "failure_class": None,
+            "detail": "size, coverage, and metadata all pass",
+            "checks": checks,
+        }
 
     # Surface the most actionable failure_class first: MODEL_UNSUPPORTED >
     # QUANT_COVERAGE_FAILURE > USER_CONFIG_ERROR.
@@ -133,6 +152,7 @@ def evaluate_checkpoint(summary):
 
 
 def main(argv=None):
+    """CLI entry point: read a validation-summary JSON and print the verdict."""
     p = argparse.ArgumentParser(description="Day-0 post-quantization checkpoint gate")
     p.add_argument("--summary", help="validation-summary JSON (see module docstring)")
     p.add_argument("--checkpoint", help="(reserved) checkpoint dir; v1 expects --summary")
@@ -141,11 +161,16 @@ def main(argv=None):
     args = p.parse_args(argv)
 
     if not args.summary:
-        print(json.dumps({
-            "pass": False, "failure_class": "USER_CONFIG_ERROR",
-            "detail": "v1 requires --summary <validation-summary.json>; "
-                      "produce it from the exported checkpoint (size scan + hf_ptq quant summary)",
-        }))
+        print(
+            json.dumps(
+                {
+                    "pass": False,
+                    "failure_class": "USER_CONFIG_ERROR",
+                    "detail": "v1 requires --summary <validation-summary.json>; "
+                    "produce it from the exported checkpoint (size scan + hf_ptq quant summary)",
+                }
+            )
+        )
         return 2
 
     try:

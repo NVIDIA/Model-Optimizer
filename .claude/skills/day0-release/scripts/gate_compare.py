@@ -87,8 +87,8 @@ def evaluate_comparison(baseline, candidate, threshold=0.01, relative=False):
             drop = (b - c) / b if b else 0.0
             limit = threshold
         else:
-            drop = b - c                 # percentage points
-            limit = threshold * 100.0    # threshold is a fraction of the 0-100 scale
+            drop = b - c  # percentage points
+            limit = threshold * 100.0  # threshold is a fraction of the 0-100 scale
         within = drop <= limit
         if c - b > _IMPLAUSIBLE_GAIN:
             anomalies.append(f"{task}: candidate exceeds baseline by {c - b:.2f} pts (implausible)")
@@ -127,6 +127,7 @@ def evaluate_comparison(baseline, candidate, threshold=0.01, relative=False):
 
 
 def main(argv=None):
+    """CLI entry point: read baseline/candidate score JSON and print the verdict."""
     p = argparse.ArgumentParser(description="Day-0 compare gate")
     p.add_argument("--baseline", required=True, help="baseline score JSON {task: score}")
     p.add_argument("--candidate", required=True, help="candidate score JSON {task: score}")

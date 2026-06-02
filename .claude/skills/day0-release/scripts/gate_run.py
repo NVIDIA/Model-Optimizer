@@ -128,6 +128,7 @@ def evaluate_run(summary):
 
 
 def main(argv=None):
+    """CLI entry point: read a run-summary JSON and print the verdict."""
     p = argparse.ArgumentParser(description="Day-0 evaluation-run gate")
     p.add_argument("--run", required=True, help="run-summary JSON (see module docstring)")
     args = p.parse_args(argv)
