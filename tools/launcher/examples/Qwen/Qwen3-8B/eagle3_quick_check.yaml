@@ -3,23 +3,11 @@
 # Dry-run on 100 samples to quickly check the possible failure points
 # over the all 4-step.
 #
-# Container mount:
-#   /lustre:/lustre
-#   ${job_dir}/cicd/${experiment_id}:/scratchspace
-#   ${local_huggingface_hub}:/hf-local
-#
-# Note:
-#   All these tasks share the same workspace ${job_dir}/cicd/${experiment_id}. That is,
-#   /scratchspace is the best place if you want to pass the artifact around. You will
-#   see we use /scratchspace/... to specify input and output a lot.
-#
-#   You can comment out any task below to skip it. For example, If the data has been
-#   synthesized in ${job_dir}/cicd/${prev_experiment_id}/data, then you can skip
-#   task_0. However, you will need to change task_1's --input-data from /scratchspace/data
-#   to the absolute path above.
+# All tasks share /scratchspace to pass artifacts between steps.
 #
 # Usage:
-#   uv run slurm.py --yaml services/pipeline/eagle3/quick_fail_check.yaml --yes
+#   uv run launch.py --yaml examples/Qwen/Qwen3-8B/eagle3_quick_check.yaml --yes
+#   uv run slurm.py --yaml modules/Model-Optimizer/tools/launcher/examples/Qwen/Qwen3-8B/eagle3_quick_check.yaml --yes
 
 job_name: Qwen3-8B_EAGLE3_quick_fail_check
 pipeline:
@@ -33,7 +21,7 @@ pipeline:
   # Step 1: Data synthesis via TRT-LLM server
   # Args before "--" go to trtllm-serve; args after "--" go to tools/query.py.
   task_0:
-    script: services/tensorrt-llm/query.sh
+    script: common/tensorrt_llm/query.sh
     args:
       - --model <<global_vars.hf_model>>
       - --tp_size 4
@@ -48,13 +36,14 @@ pipeline:
     environment:
       - HF_LOCAL: /hf-local
     slurm_config:
-      _factory_: "oci_hsg_slurm_factory"
+      _factory_: "slurm_factory"
       nodes: 1
+      gpus_per_node: 4
       container: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc2
 
   # Step 2: Dump hidden states from target model
   task_1:
-    script: services/pipeline/eagle3/dump_offline_data.sh
+    script: common/eagle3/dump_offline_data.sh
     args:
       - --input-data /scratchspace/data
       - --output-dir /scratchspace/offline_hidden_states
@@ -64,32 +53,31 @@ pipeline:
     environment:
       - HF_MODEL_CKPT: <<global_vars.hf_model>>
     slurm_config:
-      _factory_: "oci_hsg_slurm_factory"
+      _factory_: "slurm_factory"
       nodes: 1
+      gpus_per_node: 4
       container: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc2
 
   # Step 3: Train EAGLE3 draft head (offline, single task)
   task_2:
-    script: services/pipeline/eagle3/offline_training.sh
+    script: common/eagle3/train_eagle.sh
     args:
-      - --offline-data /scratchspace/offline_hidden_states
-      - --data_path None
-      - --mode eagle3
-      - --num_epochs 1
-      - --lr 3e-4
-      - --save_steps 500000
-      - --output_dir /scratchspace/eagle3
-      - --train_bs 8
-      - --training_seq_len 4096
-      - --eagle_config modules/Model-Optimizer/examples/speculative_decoding/eagle_config.json
-      - --disable_tqdm True
-      - --ar_validate_steps 500000
-    environment:
-      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+      - --config modules/Model-Optimizer/modelopt_recipes/general/speculative_decoding/eagle3.yaml
+      - model.model_name_or_path=<<global_vars.hf_model>>
+      - data.offline_data_path=/scratchspace/offline_hidden_states
+      - training.output_dir=/scratchspace/eagle3
+      - training.num_epochs=1
+      - training.lr=3e-4
+      - training.save_steps=500000
+      - training.train_bs=8
+      - training.training_seq_len=4096
+      - training.disable_tqdm=true
+      - training.ar_validate_steps=500000
     slurm_config:
-      _factory_: "oci_hsg_slurm_factory"
+      _factory_: "slurm_factory"
       nodes: 1
       ntasks_per_node: 1
+      gpus_per_node: 4
       container: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc2
 
   # Step 4: Benchmark speculative decoding (VLLM backend)
@@ -113,7 +101,7 @@ pipeline:
   #   container: lmsysorg/sglang:v0.5.9
   #
   task_3:
-    script: services/specdec_bench/quick_check.sh
+    script: common/specdec_bench/quick_check.sh
     args:
       - --draft_model_dir /scratchspace/export
       - --draft_length 3
@@ -121,14 +109,14 @@ pipeline:
       - --engine VLLM
       - --tp_size 4
       - --ep_size 1
-      - --runtime_params services/specdec_bench/tensorrt_llm_runtiime_params.yaml
       - --speculative_algorithm EAGLE3
       - --mtbench /hf-local/HuggingFaceH4/mt_bench_prompts/raw/question.jsonl
       - --concurrency 1
     environment:
       - HF_MODEL_CKPT: <<global_vars.hf_model>>
     slurm_config:
-      _factory_: "oci_hsg_slurm_factory"
+      _factory_: "slurm_factory"
       nodes: 1
       ntasks_per_node: 1
+      gpus_per_node: 4
       container: vllm/vllm-openai:latest

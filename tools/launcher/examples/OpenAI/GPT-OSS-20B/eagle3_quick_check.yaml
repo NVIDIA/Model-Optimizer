@@ -1,12 +1,16 @@
-# EAGLE3 quick-fail pipeline for openai/gpt-oss-20b
+# EAGLE3 quick-fail pipeline for openai/gpt-oss-20b.
 #
 # GPT-OSS-20B is a 20B dense model.
 # BF16 weights: ~40 GB — fits easily on a single GB200 node (4 × 192 GB).
 #
-# Container mount:
-#   /lustre:/lustre
-#   ${job_dir}/cicd/${experiment_id}:/scratchspace
-#   ${local_huggingface_hub}:/hf-local
+# Special requirements:
+#   - TIKTOKEN_RS_CACHE_DIR required for the GPT tokenizer
+#
+# All tasks share /scratchspace to pass artifacts between steps.
+#
+# Usage:
+#   uv run launch.py --yaml examples/OpenAI/GPT-OSS-20B/eagle3_quick_check.yaml --yes
+#   uv run slurm.py --yaml modules/Model-Optimizer/tools/launcher/examples/OpenAI/GPT-OSS-20B/eagle3_quick_check.yaml --yes
 
 job_name: gpt-oss-20b_EAGLE3_quick_fail_check
 pipeline:
@@ -17,8 +21,9 @@ pipeline:
   global_vars:
     hf_model: /hf-local/openai/gpt-oss-20b
 
+  # Step 1: Data synthesis via vLLM server
   task_0:
-    script: services/vllm/query.sh
+    script: common/vllm/query.sh
     args:
       - --model <<global_vars.hf_model>>
       - --tensor-parallel-size 4
@@ -30,14 +35,15 @@ pipeline:
       - HF_LOCAL: /hf-local
       - TIKTOKEN_RS_CACHE_DIR: /hf-local/tiktoken_cache
     slurm_config:
-      _factory_: "oci_hsg_slurm_factory"
+      _factory_: "slurm_factory"
       nodes: 1
       ntasks_per_node: 1
       gpus_per_node: 4
       container: vllm/vllm-openai:latest
 
+  # Step 2: Dump hidden states from target model
   task_1:
-    script: services/pipeline/eagle3/dump_offline_data_vllm.sh
+    script: common/eagle3/dump_offline_data_vllm.sh
     args:
       - --input-data /scratchspace/data
       - --output-dir /scratchspace/offline_hidden_states
@@ -45,42 +51,43 @@ pipeline:
     environment:
       - HF_MODEL_CKPT: <<global_vars.hf_model>>
     slurm_config:
-      _factory_: "oci_hsg_slurm_factory"
+      _factory_: "slurm_factory"
       nodes: 1
       ntasks_per_node: 1
       gpus_per_node: 4
       container: vllm/vllm-openai:latest
 
+  # Step 3: Train EAGLE3 draft head (offline, single task)
   task_2:
-    script: services/pipeline/eagle3/offline_training.sh
+    script: common/eagle3/train_eagle.sh
     args:
-      - --offline-data /scratchspace/offline_hidden_states
-      - --data_path None
-      - --mode eagle3
-      - --num_epochs 1
-      - --lr 3e-4
-      - --save_steps 500000
-      - --output_dir /scratchspace/eagle3
-      - --train_bs 8
-      - --training_seq_len 4096
-      - --eagle_config modules/Model-Optimizer/examples/speculative_decoding/eagle_config.json
-      - --disable_tqdm True
-      - --ar_validate_steps 500000
-    environment:
-      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+      - --config modules/Model-Optimizer/modelopt_recipes/general/speculative_decoding/eagle3.yaml
+      - model.model_name_or_path=<<global_vars.hf_model>>
+      - data.offline_data_path=/scratchspace/offline_hidden_states
+      - training.output_dir=/scratchspace/eagle3
+      - training.num_epochs=1
+      - training.lr=3e-4
+      - training.save_steps=500000
+      - training.train_bs=8
+      - training.training_seq_len=4096
+      - training.disable_tqdm=true
+      - training.ar_validate_steps=500000
     slurm_config:
-      _factory_: "oci_hsg_slurm_factory"
+      _factory_: "slurm_factory"
       nodes: 1
       ntasks_per_node: 1
+      gpus_per_node: 4
       container: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc10
 
+  # Step 4: Benchmark speculative decoding (VLLM backend)
   task_3:
-    script: services/specdec_bench/quick_check.sh
+    script: common/specdec_bench/quick_check.sh
     args:
       - --draft_model_dir /scratchspace/export
       - --draft_length 3
       - --output_length 4096
       - --engine VLLM
+      - --trust-remote-code
       - --tp_size 4
       - --ep_size 1
       - --speculative_algorithm EAGLE3
@@ -89,8 +96,10 @@ pipeline:
     environment:
       - HF_LOCAL: /hf-local
       - HF_MODEL_CKPT: <<global_vars.hf_model>>
+      - TIKTOKEN_RS_CACHE_DIR: /hf-local/tiktoken_cache
     slurm_config:
-      _factory_: "oci_hsg_slurm_factory"
+      _factory_: "slurm_factory"
       nodes: 1
       ntasks_per_node: 1
+      gpus_per_node: 4
       container: vllm/vllm-openai:latest
