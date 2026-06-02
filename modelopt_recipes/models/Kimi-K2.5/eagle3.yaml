@@ -1,0 +1,30 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Per-model EAGLE3 offline training recipe for Kimi-K2.5.
+# Mirrors examples/speculative_decoding/scripts/train_kimi_k25_offline.sh.
+
+metadata:
+  recipe_type: speculative_eagle
+  description: EAGLE3 offline training recipe for Kimi-K2.5.
+
+imports:
+  eagle_default: configs/speculative_decoding/eagle/default
+  eagle_training_default: configs/speculative_decoding/eagle/training_default
+
+model:
+  model_name_or_path: moonshotai/Kimi-K2.5
+  trust_remote_code: true
+  use_fake_base_for_offline: true
+
+data:
+  offline_data_path: <path to offline data>
+
+training:
+  $import: eagle_training_default
+  output_dir: ckpts/kimi-k25-eagle3
+  training_seq_len: 4096
+
+eagle:
+  $import: eagle_default
+  eagle_decoder_type: kimik2
