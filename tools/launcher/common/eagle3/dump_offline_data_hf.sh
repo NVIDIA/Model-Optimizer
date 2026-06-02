@@ -37,25 +37,30 @@ source ${SCRIPT_DIR}/../service_utils.sh
 #   --input-data, --output-dir, --max-seq-len, etc.
 ###################################################################################################
 
-pip install datasets 2>/dev/null || true
+pip install datasets
 
-if [ -z ${SLURM_ARRAY_TASK_ID} ]; then
+if [ -z "${HF_MODEL_CKPT:-}" ]; then
+    echo "ERROR: HF_MODEL_CKPT environment variable is not set"
+    exit 1
+fi
+
+if [ -z "${SLURM_ARRAY_TASK_ID:-}" ]; then
     TASK_ID=0
 else
     echo "SLURM_ARRAY_TASK_ID ${SLURM_ARRAY_TASK_ID}"
-    TASK_ID=${SLURM_ARRAY_TASK_ID}
+    TASK_ID="${SLURM_ARRAY_TASK_ID}"
 fi
 
-if [ -z ${SLURM_ARRAY_TASK_COUNT} ]; then
+if [ -z "${SLURM_ARRAY_TASK_COUNT:-}" ]; then
     TASK_COUNT=1
 else
     echo "SLURM_ARRAY_TASK_COUNT ${SLURM_ARRAY_TASK_COUNT}"
-    TASK_COUNT=${SLURM_ARRAY_TASK_COUNT}
+    TASK_COUNT="${SLURM_ARRAY_TASK_COUNT}"
 fi
 
 python3 modules/Model-Optimizer/examples/speculative_decoding/collect_hidden_states/compute_hidden_states_hf.py \
-    --model ${HF_MODEL_CKPT} \
-    --dp-rank ${TASK_ID} \
-    --dp-world-size ${TASK_COUNT} \
+    --model "${HF_MODEL_CKPT}" \
+    --dp-rank "${TASK_ID}" \
+    --dp-world-size "${TASK_COUNT}" \
     --trust_remote_code \
-    ${@}
+    "$@"

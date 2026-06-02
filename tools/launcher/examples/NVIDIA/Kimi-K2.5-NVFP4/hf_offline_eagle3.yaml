@@ -104,6 +104,7 @@ pipeline:
       - --draft_length 3
       - --output_length 4096
       - --engine VLLM
+      - --trust-remote-code
       - --tp_size 4
       - --ep_size 1
       - --speculative_algorithm EAGLE3

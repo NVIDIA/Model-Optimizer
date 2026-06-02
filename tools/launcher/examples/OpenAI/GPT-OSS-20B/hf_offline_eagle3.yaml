@@ -93,6 +93,7 @@ pipeline:
       - --draft_length 3
       - --output_length 4096
       - --engine VLLM
+      - --trust-remote-code
       - --tp_size 4
       - --ep_size 1
       - --speculative_algorithm EAGLE3
@@ -101,6 +102,7 @@ pipeline:
     environment:
       - HF_LOCAL: /hf-local
       - HF_MODEL_CKPT: <<global_vars.hf_model>>
+      - TIKTOKEN_RS_CACHE_DIR: /hf-local/tiktoken_cache
     slurm_config:
       _factory_: "slurm_factory"
       nodes: 1
