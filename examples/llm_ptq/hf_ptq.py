@@ -465,6 +465,7 @@ def load_model(args: argparse.Namespace):
             ckpt_path=args.pyt_ckpt_path,
             device=args.device,
             rank=args.rank,
+            world_size=args.world_size,
             args=args,
             trust_remote_code=args.trust_remote_code,
             cpu_offload=args.cpu_offload,
@@ -944,7 +945,7 @@ def pre_quantize(
             trust_remote_code=args.trust_remote_code,
         )
     else:
-        generated_ids_before_ptq = full_model.generate(preview_input_ids, max_new_tokens=100)
+        generated_ids_before_ptq = full_model.generate(preview_input_ids, max_new_tokens=10)
 
     return preview_input_ids, generated_ids_before_ptq
 
@@ -1001,7 +1002,7 @@ def post_quantize(
         pass
     elif model_type != "llama4" and not is_nemotron_vl_model:
         # Our fake quantizer may not be fully compatible with torch.compile.
-        generated_ids_after_ptq = full_model.generate(preview_input_ids, max_new_tokens=100)
+        generated_ids_after_ptq = full_model.generate(preview_input_ids, max_new_tokens=10)
     elif is_nemotron_vl_model and tokenizer is not None:
         generated_ids_after_ptq = run_nemotron_vl_preview(
             full_model,

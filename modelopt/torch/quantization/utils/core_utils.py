@@ -507,8 +507,31 @@ def fsdp2_weight_access_and_writeback_context(module: nn.Module, root_model: nn.
             placements=[Replicate()] * fsdp_dim + list(original_placements[fsdp_dim:]),
             device_mesh=original_device_mesh,
         )
-        originals[name] = (param, collected, original_placements, original_device_mesh)
-        _set_parameter(module, name, nn.Parameter(collected.to_local()))
+        local_replicated = collected.to_local()
+        # With FSDP2 CPUOffloadPolicy, the DTensor's local shard lives on CPU, so the
+        # gathered local tensor is also on CPU. Mirror it onto the current GPU so
+        # calibration forwards (activations on GPU) see a same-device weight.
+        if local_replicated.device.type == "cpu" and torch.cuda.is_available():
+            working_local = local_replicated.to(torch.cuda.current_device())
+            originals[name] = (
+                param,
+                collected,
+                original_placements,
+                original_device_mesh,
+                local_replicated,
+                working_local,
+            )
+            _set_parameter(module, name, nn.Parameter(working_local))
+        else:
+            originals[name] = (
+                param,
+                collected,
+                original_placements,
+                original_device_mesh,
+                None,
+                None,
+            )
+            _set_parameter(module, name, nn.Parameter(local_replicated))
 
     yield
 
@@ -518,7 +541,13 @@ def fsdp2_weight_access_and_writeback_context(module: nn.Module, root_model: nn.
         collected,
         original_placements,
         original_device_mesh,
+        cpu_local,
+        gpu_working,
     ) in originals.items():
+        if cpu_local is not None:
+            # Mirror GPU-resident modifications back into the CPU-resident DTensor local shard
+            # so the subsequent redistribute-back sees the up-to-date values.
+            cpu_local.data.copy_(gpu_working.data.to(cpu_local.device))
         original_param.to_local().data.copy_(
             collected.redistribute(
                 placements=original_placements, device_mesh=original_device_mesh
