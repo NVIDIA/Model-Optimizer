@@ -23,9 +23,16 @@
 #
 # Deployment uses a single `command:` field instead of separate
 # `tensor_parallel_size` / `data_parallel_size` / `extra_args` fields — the full
-# `vllm serve` invocation lives in the command string. NEL mounts the resolved
-# model (from checkpoint_path or hf_model_handle) at /checkpoint inside the
-# container, and Hydra interpolates ${deployment.port} at run time.
+# `vllm serve` invocation lives in the command string. NEL mounts a
+# `checkpoint_path` at /checkpoint inside the container, and Hydra interpolates
+# ${deployment.port} at run time.
+#
+# PREFER `checkpoint_path` (a path already on the cluster) over `hf_model_handle`.
+# `hf_model_handle` is NOT reliably mounted at /checkpoint in current NEL — the
+# `vllm serve /checkpoint` command then makes vLLM treat "/checkpoint" as a HF
+# repo id and the deploy dies with `HFValidationError: Repo id must use ...`.
+# To eval an un-staged HF model, first download it to the cluster (e.g.
+# `huggingface_hub.snapshot_download`) and point `checkpoint_path` at it.
 #
 # Run a single task:
 #   nel run --config ... -t gpqa_diamond_aa_v3
