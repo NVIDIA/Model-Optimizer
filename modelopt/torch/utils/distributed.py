@@ -265,10 +265,15 @@ def fsdp2_wrap(
         fsdp_kwargs["mp_policy"] = mp_policy
     if cpu_offload:
         fsdp_kwargs["offload_policy"] = CPUOffloadPolicy()
+    # Snapshot and restore config.architectures around fully_shard, in case the
+    # wrap mutates the class name that downstream save_pretrained reads.
+    original_architectures = list(getattr(model.config, "architectures", []) or [])
     for layer in layers:
         if device is not None:
             layer.to(device)
         fully_shard(layer, **fsdp_kwargs)
+    if original_architectures:
+        model.config.architectures = original_architectures
     return model
 
 
@@ -285,9 +290,6 @@ def fsdp2_shard(model, device, src_state_dict=None, mp_policy=None, cpu_offload=
     participate in the broadcast. ``src_state_dict=None`` skips the broadcast entirely
     and must therefore be ``None`` on *all* ranks (e.g. sharding a model that will be
     loaded later) — mixing ``None`` with a populated dict across ranks will hang.
-
-    Also sets ``model._original_architectures`` (FSDP2 wrapping can clobber
-    ``config.architectures``, which export reads back).
 
     Set ``cpu_offload=True`` to attach FSDP2's ``CPUOffloadPolicy`` to wrapped
     layers (each rank's shard lives on CPU between forwards). See
@@ -307,8 +309,6 @@ def fsdp2_shard(model, device, src_state_dict=None, mp_policy=None, cpu_offload=
     5. Freeze params (so ``patch_fsdp_mp_dtypes`` trainable-only check passes).
     """
     from torch.distributed.checkpoint.state_dict import StateDictOptions, set_model_state_dict
-
-    model._original_architectures = list(model.config.architectures or [])
 
     fsdp2_wrap(model, mp_policy=mp_policy, cpu_offload=cpu_offload)
 
@@ -535,7 +535,6 @@ def _load_via_parallel_read(
         raise RuntimeError("Could not auto-detect decoder layers for parallel-read loader.")
     module_to_name = {m: n for n, m in model.named_modules()}
     layer_prefixes = [module_to_name[layer] + "." for layer in decoder_layers]
-    model._original_architectures = list(model.config.architectures or [])
 
     fsdp2_wrap(model, mp_policy=mp_policy, cpu_offload=cpu_offload)
 

@@ -1393,7 +1393,6 @@ def export_hf_checkpoint(
     components: list[str] | None = None,
     extra_state_dict: dict[str, torch.Tensor] | None = None,
     max_shard_size: int | str = "10GB",
-    architectures_override: list[str] | None = None,
     **kwargs,
 ):
     """Export quantized HuggingFace model checkpoint (transformers or diffusers).
@@ -1548,9 +1547,6 @@ def export_hf_checkpoint(
             sparse_attn_config = export_sparse_attention_config(model)
             if sparse_attn_config is not None:
                 config_data["sparse_attention_config"] = sparse_attn_config
-
-        if architectures_override:
-            config_data["architectures"] = architectures_override
 
         with open(original_config, "w") as file:
             json.dump(config_data, file, indent=4)
