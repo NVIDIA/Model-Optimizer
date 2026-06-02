@@ -29,6 +29,7 @@ from transformers import (
     DeepseekV3Config,
     GptOssConfig,
     LlamaConfig,
+    NemotronConfig,
     PreTrainedModel,
     Qwen3Config,
     Qwen3MoeConfig,
@@ -119,6 +120,91 @@ def create_tiny_qwen3_moe_dir(
         config_kwargs["vocab_size"] = tokenizer.vocab_size
     get_tiny_qwen3_moe(**config_kwargs).save_pretrained(qwen3_moe_dir)
     return qwen3_moe_dir
+
+
+##### Qwen3-VL #####
+def get_tiny_qwen3vl(**config_kwargs) -> PreTrainedModel:
+    # Lazy imports — Qwen3VL classes live under transformers.models.qwen3_vl which
+    # may not exist in older transformers builds, and this module is imported by
+    # every test that uses transformers_models.py.
+    from transformers import Qwen3VLConfig
+    from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLForConditionalGeneration
+
+    set_seed(SEED)
+
+    # Defaults: hidden_size=num_attention_heads*head_dim (e.g. 4*8=32).
+    # Pass config_kwargs to override for multi-GPU tests (e.g. num_attention_heads=num_gpus,
+    # num_key_value_heads=num_gpus, hidden_size=num_gpus*head_dim).
+    text_kwargs = {
+        "hidden_size": 32,
+        "intermediate_size": 32,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "head_dim": 8,
+        "max_position_embeddings": 32,
+        "vocab_size": 32,
+    }
+    text_kwargs.update(config_kwargs)
+    # Pass as dicts — transformers 5.3.0 Qwen3VLConfig.__init__ only handles
+    # vision_config/text_config when they are dicts or None, not instances.
+    vision_kwargs = {
+        "depth": 1,
+        "hidden_size": 16,
+        "intermediate_size": 16,
+        "num_heads": 2,
+        "in_channels": 3,
+        "patch_size": 4,
+        "spatial_merge_size": 1,
+        "temporal_patch_size": 1,
+        "out_hidden_size": text_kwargs["hidden_size"],  # must match text hidden_size
+    }
+    cfg = Qwen3VLConfig(text_config=text_kwargs, vision_config=vision_kwargs)
+    return Qwen3VLForConditionalGeneration(cfg)
+
+
+def create_tiny_qwen3vl_dir(
+    tmp_path: Path | str, with_tokenizer: bool = False, **config_kwargs
+) -> Path:
+    qwen3vl_dir = Path(tmp_path) / "tiny_qwen3vl"
+    if with_tokenizer:
+        tokenizer = get_tiny_tokenizer()
+        tokenizer.save_pretrained(qwen3vl_dir)
+        config_kwargs["vocab_size"] = tokenizer.vocab_size
+    get_tiny_qwen3vl(**config_kwargs).save_pretrained(qwen3vl_dir)
+    return qwen3vl_dir
+
+
+##### NEMOTRON #####
+def get_tiny_nemotron(**config_kwargs) -> PreTrainedModel:
+    set_seed(SEED)
+
+    # hidden_size=64, ffn_hidden_size=128: relu2 activation needs non-trivial dims
+    # to avoid all-zero activations (scaling factor 0) in NVFP4 quantization.
+    kwargs = {
+        "dtype": torch.bfloat16,
+        "hidden_size": 64,
+        "intermediate_size": 128,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 8,
+        "num_key_value_heads": 1,
+        "max_position_embeddings": 32,
+        "vocab_size": 32,
+    }
+    kwargs.update(**config_kwargs)
+    return AutoModelForCausalLM.from_config(NemotronConfig(**kwargs))
+
+
+def create_tiny_nemotron_dir(
+    tmp_path: Path | str, with_tokenizer: bool = False, **config_kwargs
+) -> Path:
+    nemotron_dir = Path(tmp_path) / "tiny_nemotron"
+    if with_tokenizer:
+        tokenizer = get_tiny_tokenizer()
+        tokenizer.save_pretrained(nemotron_dir)
+        config_kwargs["vocab_size"] = tokenizer.vocab_size
+    get_tiny_nemotron(**config_kwargs).save_pretrained(nemotron_dir)
+    return nemotron_dir
 
 
 ##### DeepSeek V3 #####

@@ -48,7 +48,7 @@ Run `nel --version`; if missing, instruct `pip install nemo-evaluator-launcher`.
 1. Read the task reference file(s).
 2. Use `recipes/examples/example_eval.yaml` as the base.
 3. Copy the YAML fragment(s) into `evaluation.tasks`, applying any per-task notes.
-4. **MLflow auto-export is on by default** — copy the `export.mlflow` block from `example_eval.yaml` verbatim. The defaults inside that block (Hydra-interpolated `experiment_name`, `description`, `tags`) only need `tracking_uri` filled in Step 4. See `example_eval.yaml` for the canonical block.
+4. **MLflow auto-export is on by default** — it needs **two** pieces, both in `example_eval.yaml`: (a) the **trigger** `execution.auto_export.destinations: [mlflow]` (without it the run is *not* uploaded), and (b) the `export.mlflow` block that configures it. In the `export.mlflow` block use **literal** values for `experiment_name` / `description` / `tags` — substitute the actual `served_model_name` and sampling params. Do **not** use `${deployment.*}` / `${evaluation.*}` cross-references: with auto-export on, NEL resolves the export block at submit time in a scope without those nodes and fails with `Interpolation key '...' not found` (`${oc.env:USER}` is fine — it's an env var). Because these literals can't interpolate, keep the `temperature` / `top_p` / `max_new_tokens` tags **equal to** the top-level `params` and update both in the same edit — they're the only queryable record of sampling in MLflow (NEL doesn't log them as run params), so a stale tag silently misreports the run. Fill `tracking_uri` in Step 4.
 5. Proceed to Step 3, then Step 4, then Step 7.5/8. Skip Step 2's 5-question flow.
 
 ---
@@ -138,6 +138,8 @@ deployment:
 
 Conventions: always start `vllm serve /checkpoint` (NEL mounts here); always `--host 0.0.0.0 --port ${deployment.port}`; use folded scalar (`>-`) for one flag per line. Example fallback `--max-model-len 131072` covers AA-LCR (~120K + 16K gen) and SciCode (≥ 65536) — prefer `config.json` / recipe value.
 
+For how to choose `--tensor-parallel-size` / `--data-parallel-size` / `--pipeline-parallel-size` (and EP) from the model size and your GPU count, read `references/parallelism.md` — cross-check the layout against `recipes.vllm.ai`, then adapt to the GPUs you actually have via the fit math there.
+
 **Image / vLLM version.** Default `image: vllm/vllm-openai:v0.19.1` (pinned for reproducibility). If `recipes.vllm.ai` states a higher minimum version for the chosen variant (e.g. "vLLM >= 0.20.0"), bump the image tag accordingly (e.g. `v0.20.0`) — do **not** stay on `0.19.1` when the recipe explicitly requires newer. Do **not** use `:latest` (drifts across re-runs, breaks reproducibility). The version is part of the cross-check: surface to the user when bumping.
 
 #### vLLM-backend defaults — always include unless the recipe *contradicts*
@@ -146,7 +148,7 @@ Silence is not contradiction. Drop/override only when the recipe sets a differen
 
 - `--max-num-batched-tokens 8192` — caps per-step batched tokens; prevents long-prefill stalls.
 - `--enable-chunked-prefill` — interleaves long prefills with decode steps (required for AA-LCR's ~120K input). Modern vLLM defaults this on for many models; set explicitly to avoid drift.
-- `--enable-expert-parallel` — **MoE-only default.** Detect MoE from handle suffix (`-A10B`, `-A3B`, etc.), `num_experts` / `num_local_experts` / `n_routed_experts` in `config.json`, or card. No-op when TP=DP=1, safe to always include for MoE. Do not add for dense models.
+- `--enable-expert-parallel` — **MoE-only default.** Detect MoE from handle suffix (`-A10B`, `-A3B`, etc.), `num_experts` / `num_local_experts` / `n_routed_experts` in `config.json`, or card. No-op when TP=DP=1, safe to always include for MoE. Do not add for dense models. See `references/parallelism.md` for what EP does and the DP-attention + EP-MoE throughput pattern.
 - `--max-num-seqs N` — **omit at generation time** (top-level `parallelism` is `???`). Add this comment above `command:`:
 
   ```text
@@ -154,7 +156,7 @@ Silence is not contradiction. Drop/override only when the recipe sets a differen
   # append `--max-num-seqs N` where N = ceil(max_parallelism / data_parallel_size).
   ```
 
-  In Step 4 compute and append. Example: top-level=16, Tau2=128, DP=8 → `ceil(128/8)=16`. Too small → request queuing; too large → wasted KV reservation.
+  In Step 4 compute and append. Example: top-level=16, Tau2=128, DP=8 → `ceil(128/8)=16`. Too small → request queuing; too large → wasted KV reservation. For how to choose the `parallelism` it derives from, read `references/parallelism.md`.
 
 #### Evaluation params template (top-level params)
 
@@ -164,7 +166,7 @@ The top-level `nemo_evaluator_config.config.params` must contain **exactly these
 nemo_evaluator_config:
   config:
     params:
-      parallelism: ???    # Required — ask user in Step 4 (depends on cluster + judge rate limits)
+      parallelism: ???    # Required — size per references/parallelism.md (bounded by total request count vs GPU serving capacity); ask user in Step 4 if still unclear
       request_timeout: 3600
       max_retries: 10
       max_new_tokens: 65536  # see rule below
@@ -192,6 +194,7 @@ Reasoning models: prefer reasoning mode (highest scores). For lower variance / c
 ### Step 4 — Fill remaining ??? values
 
 - Find every `???` left. Ask the user only for what can't be inferred (SLURM hostname/account/output_dir, MLflow tracking URI, etc.). Don't propose defaults; let them give plain text.
+- **`parallelism`** — size it yourself from the run shape (total requests = `dataset_size × repeats` vs GPU serving capacity), and set `--max-num-seqs` to match. Read `references/parallelism.md` for the decision rule and worked examples; only ask the user if a non-GPU cap (e.g. judge rate limit) is unknown.
 - Ask about other defaults they may want to change (partition, walltime, MLflow tags).
 
 **Walltime cap: 4 hours.** Always `execution.walltime: "04:00:00"`. The cluster does not schedule jobs longer than 4h — this is a hard limit, not a preference.
@@ -223,6 +226,8 @@ Implications for the agent:
    ```
 
 4. Apply, show updated list, ask "Final, or more changes?" Loop until confirmed.
+
+**Tasks that call an external judge / user-simulator / scoring endpoint.** Treat this as a general pattern, not a fixed list — HLE, AA-LCR, and Tau2 need one today, but other benchmarks may too (check each task's recipe). Their `model_id` / `url` are **config, not secrets**: substitute the **literal** values the user keeps in `.env` (keys per the task's recipe + `recipes/env.example`) into the task's `<VAR>` placeholders. Do **not** emit `${oc.env:...}` for these (it silently fails unless the var was exported with `set -a`). Only `api_key` stays an env-var *name* (e.g. `INFERENCE_API_KEY`), exported and read by the harness.
 
 **Known issue — nemo-skills self-deployment:** If using `nemo_skills.*` tasks with self-deployment (vLLM/SGLang/NIM), add at top level:
 
@@ -305,7 +310,7 @@ nel info <id> --logs
 ssh <user>@<host> "grep -i 'traceback\|exception\|error\|failed\|oom\|killed\|timeout\|unauthorized\|rate limit\|sandbox\|container\|judge\|parse\|scoring' <log_path>/*.log"
 ```
 
-Canary each risky task class separately (judge-scored, code-execution, model-only). Start `parallelism` conservatively; raise only after judge/sandbox logs are clean — they bottleneck before the model.
+Canary each risky task class separately (judge-scored, code-execution, model-only). Start `parallelism` conservatively; raise only after judge/sandbox logs are clean — they bottleneck before the model. For capacity-bound runs, tune `parallelism`/`--max-num-seqs` here against vLLM's reported max concurrency + preemption — see `references/parallelism.md`.
 
 Single-task rerun: `nel run --config <path> -t <task_name>` (combine with `-o ++...limit_samples=10` for canary).
 

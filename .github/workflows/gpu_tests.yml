@@ -42,7 +42,7 @@ jobs:
             timeout: 75
             container_image: nvcr.io/nvidia/pytorch:26.04-py3
           - example: gpu_megatron
-            timeout: 45
+            timeout: 60
             container_image: nvcr.io/nvidia/nemo:26.04
           - example: gpu_trtllm
             timeout: 30

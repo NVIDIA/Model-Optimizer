@@ -99,7 +99,7 @@ mkdir -p "$CMD_DIR" "$RESULT_DIR"
 
 # Ensure modelopt is editable-installed from WORKDIR
 check_modelopt_local() {
-    python -c "
+    python3 -c "
 import modelopt, os, sys
 actual = os.path.realpath(modelopt.__path__[0])
 expected = os.path.realpath('$WORKDIR')
@@ -112,11 +112,11 @@ if os.path.commonpath([actual, expected]) != expected:
 if check_modelopt_local >/dev/null 2>&1; then
     echo "[server] modelopt already editable-installed from $WORKDIR, skipping pip install."
 else
-    echo "[server] Installing modelopt (pip install -e .[dev]) ..."
-    (cd "$WORKDIR" && pip install -e ".[dev]")
+    echo "[server] Installing modelopt (python3 -m pip install -e .[dev]) ..."
+    (cd "$WORKDIR" && python3 -m pip install -e ".[dev]")
     if ! check_modelopt_local; then
         echo "[server] ERROR: modelopt is not running from the local folder ($WORKDIR)."
-        echo "[server] Try: pip install -e '.[dev]' inside the container, then restart the server."
+        echo "[server] Try: python3 -m pip install -e '.[dev]' inside the container, then restart the server."
         exit 1
     fi
     echo "[server] Install done."
