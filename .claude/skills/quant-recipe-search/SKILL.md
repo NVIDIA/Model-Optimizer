@@ -14,11 +14,15 @@ description: >-
 
 # Quant Recipe Search
 
-Use this skill to steer quantization as a portfolio loop. It is an orchestration layer: it decides what to try next and which existing skill should do the execution.
+Use this skill when quantization is an iterative recipe search, not a one-off
+PTQ run. The skill owns strategy: define success, choose the search space,
+sequence candidates, and decide the next iteration. It delegates checkpoint
+generation, serving, evaluation, monitoring, and metric comparison to the
+existing execution skills.
 
-Users may ask for the outcome directly, for example: "find the best quantization recipe and generate a PTQ checkpoint for this model." Treat that as enough to start. Recover what can be inferred from the workspace, ask only for missing constraints that materially affect the search, then delegate checkpoint generation to `ptq`.
-
-A "best recipe" request is not complete after checkpoint generation. It requires evaluation and baseline comparison before recommending or promoting a checkpoint. If benchmark tasks or baseline results are missing, ask for them or delegate to `evaluation` to create the matching baseline/candidate runs.
+Treat a direct request such as "find the best quantization recipe and generate a
+PTQ checkpoint for this model" as enough to start. Recover local state first,
+then ask only for missing decisions that change the search.
 
 ## Skill Boundaries
 
@@ -32,99 +36,108 @@ A "best recipe" request is not complete after checkpoint generation. It requires
 
 Do not duplicate those workflows here. This skill should leave the user with a clear recipe portfolio, success metric, experiment sequence, and next decision.
 
-## Core Loop
+## Problem
+
+The task is to find the best recipe for a user-defined target, not merely to
+produce a quantized checkpoint. A generated PTQ checkpoint is only a candidate.
+It becomes a recommended recipe only after evaluation and comparison against the
+matching baseline.
+
+Required inputs before planning candidates:
+
+- **Optimization goal:** compute/throughput, memory/latency, or a custom metric.
+- **Primary quantization family:** for example NVFP4, W4A16 NVFP4, FP8/W8A8,
+  INT4/AWQ, or a custom mixed set.
+- **Benchmark set or baseline results:** the user-defined acceptance surface.
+
+If any of these are missing, ask for them. Do not silently default to FP8/W8A8
+or call a checkpoint "best" before evaluation.
+
+Default success rule: maximize the chosen performance objective while keeping
+each benchmark within 1 percentage point of the matching BF16/FP16 baseline.
+Near-threshold or noisy regressions require reruns before making a decision.
+
+## Search Space
+
+Keep the search space explicit. A candidate recipe is a tuple across these axes:
+
+- **Numeric format:** FP8/W8A8, NVFP4/W4A4, W4A16 NVFP4, INT4/AWQ, or mixed
+  formats such as NVFP4+FP8.
+- **Calibration/search algorithm:** max calibration, MSE calibration, GPTQ,
+  AWQ, AutoQuant scoring, and calibration dataset or sample-count variants.
+- **Selection method:** manual/heuristic rules, sensitivity-guided manual
+  recipes, AutoQuant selection, or a hybrid of AutoQuant plus manual overrides.
+- **Module family:** attention, MLP, MoE experts, routers/gates, embeddings,
+  `lm_head`, adapters, vision encoders, and model-specific modules.
+- **Runtime fusion constraints:** modules fused by the inference library must
+  use compatible quantization. Examples: vLLM Qwen `linear_attn.in_proj_qkvz`
+  and fused MoE expert projections such as gate/up (`w1`/`w3`).
+- **Calibration budget:** dataset mix, sample count, sequence length, and batch
+  settings.
+
+Do not collapse the search to one dimension such as numeric format only. Read
+`references/recipe_iteration.md` when choosing concrete axes or candidates.
+
+## Design Workflow
 
 1. **Recover state**
-   - Read existing result tables, recipe logs, state files, and experiment notes before proposing new candidates.
-   - Ask `monitor` / `launching-evals` to check active jobs when needed.
-   - Use `compare-results` when existing baseline/candidate evals need a formal comparability check.
+   - Read result tables, recipe logs, AutoQuant states, sensitivity reports, and
+     experiment notes before proposing new work.
+   - Ask `monitor`, `launching-evals`, or `compare-results` to recover active
+     job state and completed metrics when needed.
 
 2. **Define the target**
-   - Ask the user what makes the compression successful before choosing recipes.
-   - If the user did not provide an optimization objective, stop and ask them to choose before planning candidates. Do not infer or default silently.
-   - Offer these default objective choices:
-     - **Compute / throughput:** typical data-center target. Prefer recipes with activation quantization such as NVFP4 or FP8 when the downstream stack can use fast kernels.
-     - **Memory / latency:** typical edge target. Minimize activated memory per forward pass to reduce latency; prefer weight-only or W4A16-style recipes when they preserve accuracy.
-     - **Custom:** user-provided objective, such as checkpoint size, throughput at a fixed batch size, decode latency, prefill latency, or a product-specific memory budget.
-   - Ask for the primary quantization format or search family before choosing recipes.
-   - If the user did not provide a primary quantization format, stop and ask them to choose. Do not silently choose FP8/W8A8 because it is likely lossless.
-   - Offer common format choices:
-     - **NVFP4 / NVFP4_MSE:** low-bit Blackwell-oriented search family.
-     - **W4A16 NVFP4:** weight-only NVFP4 family, often useful for memory/latency targets.
-     - **FP8 / W8A8:** near-lossless baseline or primary target if the user explicitly chooses FP8.
-     - **INT4 / AWQ:** weight-only INT4 family for low-batch memory/latency use cases.
-     - **Custom / mixed:** user-provided format set, such as `nvfp4,fp8`, `w4a16_nvfp4+fp8_attn`, or model-specific recipe constraints.
-   - Default acceptance goal: find the recipe with the best performance for the chosen objective while keeping each benchmark's accuracy loss under 1 percentage point versus the matching baseline.
-   - Treat near-threshold or noisy benchmark deltas as inconclusive until reruns confirm whether the drop is a real regression.
-   - Record recipe-selection criteria: optimization objective, primary quantization format/search family, target active bytes/token, acceptable accuracy loss, calibration budget, and any user-provided throughput/latency goal.
-   - Include quantization metadata such as scale storage in size estimates.
-   - Keep accuracy and verbosity/token usage as separate first-class metrics.
+   - Confirm the optimization goal, primary quantization family, benchmark set,
+     accuracy-loss threshold, calibration budget, and cost metric.
+   - Include quantization metadata such as scale storage in active-cost or size
+     estimates.
 
-3. **Define the search space**
-   - Explicitly list the dimensions to explore before launching jobs: numeric formats, calibration algorithms, module selection strategy, module families, runtime fusion groups, and calibration data/budget.
-   - Numeric format examples: FP8/W8A8, NVFP4/W4A4, W4A16 NVFP4, INT4/AWQ, or mixed sets such as NVFP4+FP8.
-   - Calibration/optimization algorithm examples: max calibration, MSE calibration, GPTQ, AWQ, KL-div or gradient-based AutoQuant scoring, and calibration dataset or sample-count variants.
-   - Quantization selection methods: manual/heuristic selection from prior experience, sensitivity-report-guided manual recipes, or AutoQuant search over allowed formats and constraints.
-   - For details, read `references/recipe_iteration.md` section "Search Space".
+3. **Pick baselines and first candidates**
+   - Always include BF16/FP16 and a near-lossless FP8/W8A8 baseline unless FP8
+     itself is the target.
+   - For ModelOpt work, start from `modelopt_recipes`: model-specific recipes
+     first, then general PTQ presets or recipe fragments.
+   - Add one conservative low-bit candidate in the requested primary family.
 
 4. **Generate candidates**
-   - Start with baselines: BF16/FP16, all-FP8 or W8A8, and one conservative low-bit recipe.
-   - Treat all-FP8/W8A8 as a near-lossless baseline unless the user selected FP8/W8A8 as the primary format. Do not end the search at FP8 just because it has the smallest accuracy drop.
-   - If using ModelOpt, start from `modelopt_recipes` rather than inventing patterns from scratch. Prefer model-specific recipes first, then general PTQ presets/fragments.
-   - Let the ModelOpt `ptq` skill own checkpoint generation and PTQ validation; use this skill to choose the objective, sequence recipes, compare results, and decide the next iteration.
-   - Generate PTQ checkpoints only as candidates. Do not call a candidate "best" until it has passed the evaluation and comparison stages below.
-   - Before proposing mixed-precision rules inside a layer family, account for target inference-library fusion. All modules that become one fused runtime module must use compatible quantization formats.
-   - Known fusion constraints:
-     - **vLLM Qwen linear attention:** `linear_attn.in_proj_qkv` and `linear_attn.in_proj_z` can be fused into `linear_attn.in_proj_qkvz`; do not mix quantization algorithms such as W4A16 NVFP4 and FP8 across those shards.
-     - **Fused MoE experts:** grouped expert projections inside a fused MoE kernel must use compatible quantization. Treat coupled expert projections such as gate/up (`w1`/`w3`, or equivalent fused names) as one recipe unit unless the target runtime explicitly supports mixed formats inside the fused expert.
-   - Use AutoQuant or sensitivity tooling for broad search and module ranking.
-   - Use manual recipes for controlled ablations by module family.
-   - Change one major recipe axis at a time: weight format, activation format, quantization granularity, calibration method, excluded modules, or module family.
+   - Delegate checkpoint generation and PTQ validation to `ptq`.
+   - Change one major axis at a time: format, calibration algorithm, module
+     selection, granularity, exclusions, or calibration data.
+   - Use AutoQuant or sensitivity reports for broad ranking; use manual recipes
+     for controlled module-family ablations.
 
 5. **Gate before scaling**
-   - Ask `ptq` to validate checkpoint coverage and metadata after generation.
-   - Add a fused-layer compatibility check before deployment/eval: if the target runtime fuses multiple checkpoint tensors into one module, verify the fused group has one supported quantization algorithm. Reject or rewrite recipes that would trigger errors like `Mixed quant_algo within fused layer`.
-   - Ask `deployment` or `evaluation` for runtime sanity only when execution behavior is needed to qualify the recipe.
-   - If checkpoint validation passes but deployment fails due to runtime support gaps, do not reject the recipe immediately. Classify the issue as checkpoint-quality, recipe/runtime compatibility, or deployment implementation.
-   - For deployment implementation issues, delegate to `deployment` / `debug` and try narrowly scoped patches or flags, such as metadata parsing fixes, fused-layer support fixes, backend selection fixes, or checkpoint-loading shims. Keep these patches separate from recipe changes.
-   - Promote only candidates that pass checkpoint validation and the required delegated sanity checks.
+   - Validate checkpoint coverage and metadata.
+   - Reject or rewrite recipes that mix quantization algorithms inside a fused
+     runtime group.
+   - If the checkpoint is valid but serving fails due to runtime support, do not
+     reject the recipe immediately. Delegate to `deployment` / `debug` for small
+     patches or flags, then rerun a pipe-clean check.
 
-6. **Evaluate in stages**
-   - For any request that says "best", "search", or "optimize", run or recover evaluations for the baseline and every candidate that reaches this stage. Do not stop at PTQ checkpoint generation unless the user explicitly asks to pause before eval.
-   - Pick cheap screen benchmarks that expose likely failure modes for the model/domain.
-   - If the benchmark set is missing, ask the user which benchmark suite defines success; use the `<1pp` default acceptance goal only after a benchmark set exists.
-   - Ask `evaluation` to create or modify configs and submit runs.
-   - Ask `launching-evals` / `monitor` to track, resume, and debug runs.
-   - Ask `compare-results` to validate comparability and compute deltas.
-   - Treat sampling, parser, token-cap, and runtime/backend changes as non-recipe variables unless the user explicitly asks to study them.
+## Iteration Loop
 
-7. **Refresh tables**
-   - Maintain a recipe portfolio table, not a replacement for evaluator artifacts.
-   - Include recipe name, objective, active-cost estimate, calibration notes, checkpoint reference, comparison reference, accuracy summary, verbosity summary, and decision.
-   - Link to `compare-results` / `launching-evals` artifacts for exact metric extraction and provenance.
+1. Run cheap screen evals for every candidate that passes the gates.
+2. Compare accuracy, verbosity/token usage, and active cost against baselines.
+3. Rerun noisy or near-threshold results before labeling a regression.
+4. Decide the next candidate:
+   - Accuracy drop: protect or ablate sensitive module families, try MSE/GPTQ,
+     or use AutoQuant sensitivity to choose overrides.
+   - Poor performance/cost: quantize the next high-cost active family, adjust
+     active-cost objective, or try a more aggressive format.
+   - Runtime incompatibility: rewrite around fused groups or isolate deployment
+     support from checkpoint quality.
+   - Repeated AutoQuant recipes: inspect achieved bits and recipe hashes, then
+     adjust constraints before launching a larger sweep.
+5. Promote only when `compare-results` shows the candidate is comparable to the
+   baseline and satisfies the user-defined goal.
 
-8. **Decide next iteration**
-   - Promote a recipe only after `compare-results` shows the candidate is comparable to the baseline and satisfies the accuracy-loss constraint for the chosen benchmark set.
-   - If accuracy drops, inspect the most sensitive module families first.
-   - If verbosity grows, compare parser settings, token caps, failed samples, backend changes, and sampling config before blaming quantization numerics.
-   - If AutoQuant produces identical recipes for multiple budgets, inspect recipe hashes and achieved bits; adjust constraints/objective before launching a bigger sweep.
-
-## Practical Defaults
-
-- Ask whether the primary success metric is compute/throughput, memory/latency, or a custom objective. Do not assume, and do not proceed to candidate planning until the objective is explicit.
-- Ask for the primary quantization format/search family, such as NVFP4, W4A16 NVFP4, FP8/W8A8, INT4/AWQ, or a custom mixed set. Do not assume, and do not silently select FP8 as the final recipe.
-- Treat numeric format, calibration algorithm, and quantized-module selection as separate recipe axes. Do not collapse search to one dimension such as format-only.
-- Default to a `<1pp` per-benchmark accuracy-loss constraint versus the matching baseline unless the user gives another threshold.
-- A generated PTQ checkpoint is a candidate artifact, not the final answer to a "best recipe" request. Evaluation and comparison are required before final selection.
-- Prefer active runtime cost over checkpoint size when optimizing routed or sparsely activated models.
-- Always compare against BF16/FP16 and a near-lossless FP8/W8A8 baseline.
-- Respect inference-library fused modules when designing recipes. Do not mix quantization formats inside fused groups such as vLLM `linear_attn.in_proj_qkvz` or fused MoE expert projections.
-- Do not discard a validated checkpoint solely because the current inference library lacks support. First try bounded deployment patches or flags, then rerun a pipe-clean check before deciding whether the recipe is viable.
-- Treat benchmark variance as real: run repeat sweeps for close decisions.
-- Do not mix parser/no-parser, FP8-KV/BF16-KV, runtime/backend, or sampling changes into recipe conclusions unless they are explicitly part of the experiment.
-- Use delegated pipe-clean checks for new checkpoint families before full evals.
+Maintain a recipe portfolio table with recipe name, objective, active-cost
+estimate, calibration notes, checkpoint path, eval/log references, accuracy,
+verbosity, and decision.
 
 ## References
 
-- For recipe design, sensitivity, and active-cost accounting, read `references/recipe_iteration.md`.
-- For a concrete prior case study, read `references/qwen36_case_study.md` only when Qwen3.5/Qwen3.6 details are relevant.
+- For recipe design, search-space details, sensitivity, and active-cost
+  accounting, read `references/recipe_iteration.md`.
+- For a concrete prior case study, read `references/qwen36_case_study.md` only
+  when Qwen3.5/Qwen3.6 details are relevant.
