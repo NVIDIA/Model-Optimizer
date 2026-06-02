@@ -27,6 +27,7 @@ from transformers import (
     AutoTokenizer,
     BertConfig,
     DeepseekV3Config,
+    Gemma3TextConfig,
     GptOssConfig,
     LlamaConfig,
     NemotronConfig,
@@ -282,6 +283,48 @@ def create_tiny_gpt_oss_dir(
         config_kwargs["vocab_size"] = tokenizer.vocab_size
     get_tiny_gpt_oss(**config_kwargs).save_pretrained(gpt_oss_dir)
     return gpt_oss_dir
+
+
+##### Gemma3 #####
+def get_tiny_gemma3(**config_kwargs) -> PreTrainedModel:
+    set_seed(SEED)
+
+    # head_dim is independent of hidden_size / num_attention_heads in Gemma3.
+    # query_pre_attn_scalar must match head_dim (used for attention scaling).
+    # layer_types is left to auto-generate (all `sliding_attention` for tiny layer
+    # counts) so the sliding/full attention layer_types code path is still exercised.
+    kwargs = {
+        "dtype": torch.bfloat16,
+        "hidden_size": 32,
+        "intermediate_size": 32,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 16,
+        "num_key_value_heads": 2,
+        "head_dim": 8,
+        "query_pre_attn_scalar": 8,
+        "max_position_embeddings": 32,
+        "sliding_window": 16,
+        "vocab_size": 32,
+    }
+    kwargs.update(**config_kwargs)
+    return AutoModelForCausalLM.from_config(Gemma3TextConfig(**kwargs))
+
+
+def create_tiny_gemma3_dir(
+    tmp_path: Path | str, with_tokenizer: bool = False, return_model: bool = False, **config_kwargs
+) -> Path | tuple[Path, PreTrainedModel]:
+    gemma3_dir = Path(tmp_path) / "tiny_gemma3"
+    if with_tokenizer:
+        tokenizer = get_tiny_tokenizer()
+        tokenizer.save_pretrained(gemma3_dir)
+        config_kwargs["vocab_size"] = tokenizer.vocab_size
+    tiny_gemma3 = get_tiny_gemma3(**config_kwargs)
+    tiny_gemma3.save_pretrained(gemma3_dir)
+
+    if return_model:
+        return gemma3_dir, tiny_gemma3
+    else:
+        return gemma3_dir
 
 
 ##### LLAMA #####

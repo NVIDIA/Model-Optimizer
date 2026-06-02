@@ -16,13 +16,22 @@
 
 from pathlib import Path
 
+import pytest
 from _test_utils.examples.run_command import extend_cmd_parts, run_example_command
-from _test_utils.torch.transformers_models import create_tiny_qwen3_dir
+from _test_utils.torch.transformers_models import create_tiny_gemma3_dir, create_tiny_qwen3_dir
 from transformers import AutoModelForCausalLM
 
 
-def test_prune_minitron(tmp_path: Path, num_gpus):
-    teacher_hf_path, teacher_model = create_tiny_qwen3_dir(
+@pytest.mark.parametrize(
+    "create_tiny_model_dir",
+    [
+        create_tiny_qwen3_dir,
+        # Gemma3 exercises the sliding/full attention ``layer_types`` pruning path.
+        create_tiny_gemma3_dir,
+    ],
+)
+def test_prune_minitron(tmp_path: Path, num_gpus, create_tiny_model_dir):
+    teacher_hf_path, teacher_model = create_tiny_model_dir(
         tmp_path, with_tokenizer=True, return_model=True, num_hidden_layers=num_gpus
     )
     teacher_params = sum(p.numel() for p in teacher_model.parameters())
