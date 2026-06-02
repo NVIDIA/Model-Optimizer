@@ -174,6 +174,7 @@ def test_find_latest_run_dir_ignores_latest_to_best_checkpoint(tmp_path: Path):
 
     assert bcu.find_latest_run_dir(tmp_path) == str(completed)
 
+
 # ---------------------------------------------------------------------------
 # _save_local_state: optimizer + grad_scaler only.
 # Weights deliberately do NOT land here — the HF checkpoint at the same
