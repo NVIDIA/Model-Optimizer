@@ -556,7 +556,7 @@ SKIP_SOFTMAX_CALIB = {
 }
 
 
-# RULER calibration via the fused Triton calibration kernel (prefill only).
+# RULER calibration via the fused Triton calibration kernel (prefill + decode).
 # Computes the same exponential-model calibration as SKIP_SOFTMAX_CALIB but
 # measures tile-skip statistics with the Triton ``attention_calibrate`` kernel
 # (the way the Triton inference kernel actually skips tiles) instead of the
@@ -565,10 +565,9 @@ SKIP_SOFTMAX_CALIB = {
 SKIP_SOFTMAX_TRITON_CALIB = {
     "sparse_cfg": {
         "calibration": {
-            # Prefill only: omitting "decode" leaves its target at 0.0, which
-            # skips decode calibration (the Triton calibration kernel is
-            # prefill-oriented).
-            "target_sparse_ratio": {"prefill": 0.5},
+            # Prefill calibration uses full-prefill forwards; decode calibration
+            # runs SDPA prefill followed by Triton-backend decode steps.
+            "target_sparse_ratio": {"prefill": 0.5, "decode": 0.5},
             "samples": 64,
             "max_seqlen": 16384,
             # Full prefill (seq_q == seq_k, uniform batch=1) — what

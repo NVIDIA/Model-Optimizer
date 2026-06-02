@@ -49,6 +49,13 @@ class TritonSkipSoftmaxMethod(SparseAttentionMethod):
         self.skip_softmax_threshold = method_config.get("skip_softmax_threshold", 0.1)
         # Calibration state
         self._threshold_trials: list[float] | None = None
+        # HF (modelopt_triton) backend calibration outputs, accumulated across
+        # attention calls in one forward pass and read back in
+        # ``_collect_calibration_stats``. The HF backend reads/writes these
+        # directly on the method instance (no thread-local needed).
+        self._hf_calibration_counters: torch.Tensor | None = None
+        self._hf_calibration_seq_k: int | None = None
+        self._hf_calibration_is_decode: bool = False
         # Runtime sparsity measurement
         self._measure_sparsity: bool = False
         self._sparsity_total: int = 0
@@ -111,6 +118,11 @@ class TritonSkipSoftmaxMethod(SparseAttentionMethod):
     def _triton_calibration_context(self, module):
         """Calibration: collect multi-threshold sparsity stats via Triton kernel."""
         module._apply_skip_softmax = True
+        # Reset the HF-backend calibration accumulators for this forward pass.
+        # (The diffusers/LTX backends reset their own state in ``_set_triton_backends``.)
+        self._hf_calibration_counters = None
+        self._hf_calibration_seq_k = None
+        self._hf_calibration_is_decode = False
         self._set_triton_backends(calibration_mode=True, threshold_trials=self._threshold_trials)
         with self._get_diffusers_backend_context():
             try:
@@ -170,7 +182,12 @@ class TritonSkipSoftmaxMethod(SparseAttentionMethod):
             yield
 
     def _set_triton_backends(self, **kwargs):
-        """Set config on the diffusers, LTX, and HF (modelopt_triton) Triton backends."""
+        """Set config on the diffusers and LTX Triton backends.
+
+        The HF (modelopt_triton) backend reads its calibration config directly
+        from this method instance during ``triton_attention_forward``, so it
+        needs no separate configuration here.
+        """
         try:
             from modelopt.torch.kernels.sparsity.attention.diffusers_triton_attention import (
                 set_triton_skip_softmax_config,
@@ -187,17 +204,9 @@ class TritonSkipSoftmaxMethod(SparseAttentionMethod):
             set_ltx_triton_context(active=True, **kwargs)
         except ImportError:
             pass
-        try:
-            from modelopt.torch.kernels.common.attention.hf_triton_attention import (
-                set_hf_triton_skip_softmax_config,
-            )
-
-            set_hf_triton_skip_softmax_config(**kwargs)
-        except ImportError:
-            pass
 
     def _clear_triton_backends(self):
-        """Clear config on the diffusers, LTX, and HF Triton backends."""
+        """Clear config on the diffusers and LTX Triton backends."""
         try:
             from modelopt.torch.kernels.sparsity.attention.diffusers_triton_attention import (
                 clear_triton_skip_softmax_config,
@@ -214,19 +223,14 @@ class TritonSkipSoftmaxMethod(SparseAttentionMethod):
             clear_ltx_triton_context()
         except ImportError:
             pass
-        try:
-            from modelopt.torch.kernels.common.attention.hf_triton_attention import (
-                clear_hf_triton_skip_softmax_config,
-            )
-
-            clear_hf_triton_skip_softmax_config()
-        except ImportError:
-            pass
 
     def _collect_calibration_stats(self, module):
         """Read Triton calibration counters and store as stats on the module."""
         counters = None
         seq_k = None
+        # Diffusers/LTX (video) backends are prefill-only; only the HF backend
+        # reports a phase, for decode-step calibration.
+        phase = "prefill"
 
         try:
             from modelopt.torch.kernels.sparsity.attention.diffusers_triton_attention import (
@@ -252,16 +256,12 @@ class TritonSkipSoftmaxMethod(SparseAttentionMethod):
                 pass
 
         if counters is None:
-            try:
-                from modelopt.torch.kernels.common.attention.hf_triton_attention import (
-                    get_calibration_counters,
-                    get_calibration_seq_k,
-                )
-
-                counters = get_calibration_counters()
-                seq_k = get_calibration_seq_k()
-            except ImportError:
-                pass
+            # HF (modelopt_triton) backend accumulates counters on this method
+            # instance (``module._sparse_method_instance is self``).
+            counters = self._hf_calibration_counters
+            seq_k = self._hf_calibration_seq_k
+            if counters is not None and self._hf_calibration_is_decode:
+                phase = "decode"
 
         if counters is None or self._threshold_trials is None:
             return
@@ -279,7 +279,7 @@ class TritonSkipSoftmaxMethod(SparseAttentionMethod):
         module._last_stats = {
             "sparsity": sparsity_list,
             "sample_length": sample_length,
-            "phase": "prefill",
+            "phase": phase,
         }
 
     def get_threshold_info(self) -> dict:

@@ -132,7 +132,16 @@ def _attn_fwd_calibrate(
         # A tile is skipped iff ALL Q rows satisfy: tile_row_max < row_max + thresh.
         # Equivalently: max(tile_row_max - row_max) < thresh (worst-case row
         # must still be below threshold for the tile to be skippable).
-        max_gap = tl.max(tile_row_max - row_max)  # scalar
+        #
+        # Exclude padding Q rows (q_pos >= seq_len_q) from the reduction. Their Q is
+        # loaded as zeros, so their tile_row_max is ~0 (not -inf), which would
+        # otherwise dominate the max and force max_gap >= 0 — making every tile
+        # un-skippable. This matters most for decode (seq_len_q == 1, so 127/128
+        # rows are padding) and also fixes the last partial Q tile in prefill when
+        # seq_len_q is not a multiple of BLOCK_M.
+        gap = tile_row_max - row_max
+        gap = tl.where(q_pos < seq_len_q, gap, -float("inf"))
+        max_gap = tl.max(gap)  # scalar
         skip_mask = (max_gap < thresholds).to(tl.int32)  # [PADDED_THRESHOLDS]
         local_skipped += skip_mask
         num_tiles += 1
@@ -283,38 +292,43 @@ def attention_calibrate(
         num_programs * num_thresholds, dtype=torch.int32, device=q.device
     )
 
-    _attn_fwd_calibrate[grid](
-        q,
-        k,
-        v,
-        qk_scale,
-        b_start_loc,
-        b_seq_len,
-        b_start_loc_k,
-        b_seq_len_k,
-        o,
-        q.stride(0),
-        q.stride(1),
-        k.stride(0),
-        k.stride(1),
-        v.stride(0),
-        v.stride(1),
-        o.stride(0),
-        o.stride(1),
-        threshold_tensor,
-        per_program_totals,
-        per_program_skipped,
-        kv_group_num=kv_group_num,
-        BLOCK_M=BLOCK_M,
-        BLOCK_D=BLOCK_D,
-        BLOCK_N=BLOCK_N,
-        IS_CAUSAL=is_causal,
-        HEAD_DIM=HEAD_DIM,
-        NUM_THRESHOLDS=num_thresholds,
-        PADDED_THRESHOLDS=triton.next_power_of_2(num_thresholds),
-        num_warps=4,
-        num_stages=1,
-    )
+    # Triton launches on torch.cuda.current_device(), which is not necessarily
+    # the device the tensors live on (e.g. under accelerate device_map="auto"
+    # sharding). Activate the tensor's device so the kernel dereferences the
+    # right pointers instead of triggering an illegal memory access.
+    with torch.cuda.device(q.device):
+        _attn_fwd_calibrate[grid](
+            q,
+            k,
+            v,
+            qk_scale,
+            b_start_loc,
+            b_seq_len,
+            b_start_loc_k,
+            b_seq_len_k,
+            o,
+            q.stride(0),
+            q.stride(1),
+            k.stride(0),
+            k.stride(1),
+            v.stride(0),
+            v.stride(1),
+            o.stride(0),
+            o.stride(1),
+            threshold_tensor,
+            per_program_totals,
+            per_program_skipped,
+            kv_group_num=kv_group_num,
+            BLOCK_M=BLOCK_M,
+            BLOCK_D=BLOCK_D,
+            BLOCK_N=BLOCK_N,
+            IS_CAUSAL=is_causal,
+            HEAD_DIM=HEAD_DIM,
+            NUM_THRESHOLDS=num_thresholds,
+            PADDED_THRESHOLDS=triton.next_power_of_2(num_thresholds),
+            num_warps=4,
+            num_stages=1,
+        )
 
     # Reduce across programs: sum per-program counts → [num_thresholds]
     totals = per_program_totals.view(num_programs, num_thresholds).sum(dim=0).to(torch.int64)
