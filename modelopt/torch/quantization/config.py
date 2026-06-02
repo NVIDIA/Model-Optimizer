@@ -150,6 +150,7 @@ the layer named ``lm_head``,  you can create a custom config and quantize your m
 
 """
 
+import re
 import warnings
 from collections.abc import Mapping, Sequence
 from typing import Any, Literal
@@ -732,6 +733,32 @@ class MaxCalibConfig(QuantizeAlgorithmConfig):
             "would cause (e.g. a ``shared_expert_gate`` that reads the same input but is not fused)."
         ),
     )
+
+    @field_validator("shared_patterns")
+    @classmethod
+    def validate_shared_patterns(cls, v):
+        """Reject unknown quantizer kinds and invalid regexes at the config boundary."""
+        if v is None:
+            return v
+        supported = {"weight", "input"}
+        unknown = set(v) - supported
+        if unknown:
+            raise ValueError(
+                f"shared_patterns has unsupported quantizer kind(s) {sorted(unknown)}; "
+                f"expected keys from {sorted(supported)}."
+            )
+        offending = ("", "")  # (kind, pattern) of the last regex tried; set before each compile
+        try:
+            for kind, patterns in v.items():
+                for pattern in patterns:
+                    offending = (kind, pattern)
+                    re.compile(pattern)
+        except re.error as e:
+            bad_kind, bad_pattern = offending
+            raise ValueError(
+                f"shared_patterns[{bad_kind!r}] has an invalid regex {bad_pattern!r}: {e}"
+            ) from e
+        return v
 
 
 class MseCalibConfig(QuantizeAlgorithmConfig):

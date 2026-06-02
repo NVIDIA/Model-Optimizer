@@ -74,6 +74,9 @@ class _DummyAttention(nn.Module):
         self.k_proj = nn.Linear(in_features, out_features, bias=False)
         self.v_proj = nn.Linear(in_features, out_features, bias=False)
 
+    def forward(self, x):
+        return self.q_proj(x) + self.k_proj(x) + self.v_proj(x)
+
 
 def _populate_amax(linear: nn.Module, value: float) -> None:
     """Directly set ``_amax`` on a linear's weight_quantizer for deterministic testing."""
@@ -174,6 +177,33 @@ class TestSharedQuantStateBasics:
         shared = attn._shared_quant_state.weight_global_amax
         assert shared is not None
         assert torch.isclose(shared, torch.tensor(3.0)), f"expected 3.0, got {shared.item()}"
+
+    def test_promote_ignores_shared_state_outside_root(self):
+        """Promoting a submodule must ignore a back-ref whose owning state is outside it.
+
+        ``promote_nvfp4_static_quantizers`` also runs on submodules/individual linears; a
+        quantizer may still carry ``_shared_quant_state_ref`` from an earlier full-model
+        run. If the owning ``_shared_quant_state`` is not within the promotion root, the
+        quantizer must fall back to its OWN amax, not the stale group value.
+        """
+        from modelopt.torch.quantization.utils import promote_nvfp4_static_quantizers
+
+        attn = _DummyAttention()
+        mtq.replace_quant_module(attn)
+        cfg = _make_nvfp4_static_cfg()
+        for proj, val in ((attn.q_proj, 1.0), (attn.k_proj, 3.0), (attn.v_proj, 2.0)):
+            proj.weight_quantizer.set_from_attribute_config(cfg)
+            _populate_amax(proj, value=val)
+        # Group on the parent → shared weight_global_amax = max = 3.0.
+        attach_shared_quant_states(attn, patterns=SIBLING_PATTERNS)
+        populate_shared_state(attn)
+        assert torch.isclose(attn._shared_quant_state.weight_global_amax, torch.tensor(3.0))
+
+        # Promote with q_proj as the root: it does NOT contain attn._shared_quant_state
+        # (that lives on the parent), so the stale ref is ignored → own amax (1.0), not 3.0.
+        promote_nvfp4_static_quantizers(attn.q_proj)
+        ga = attn.q_proj.weight_quantizer.global_amax
+        assert torch.isclose(ga, torch.tensor(1.0)), f"expected own amax 1.0, got {ga.item()}"
 
 
 class _MoEExpert(nn.Module):
@@ -316,8 +346,14 @@ class TestMaxCalibrateEndToEnd:
         expected = reduce_amax(m.proj.weight_quantizer._amax, axis=None).item()
         assert m.proj.weight_quantizer.global_amax.item() == pytest.approx(expected)
 
-    def test_shared_state_survives_state_dict_round_trip(self, tmp_path):
-        """``SharedQuantState`` is an nn.Module; its buffer must round-trip through state_dict."""
+    def test_shared_state_buffer_is_non_persistent(self):
+        """The shared buffer is a calibration-time artifact and must NOT be in state_dict.
+
+        The scale is carried by each member's promoted quantizer (``_global_amax``), which
+        IS serialized. If the shared buffer were persistent it would add
+        ``_shared_quant_state.weight_global_amax`` keys that restore can't match (the
+        submodule isn't re-created on load) — the regression covered end-to-end below.
+        """
         attn = self._setup_attention()
 
         def fwd(m):
@@ -328,26 +364,94 @@ class TestMaxCalibrateEndToEnd:
 
         max_calibrate(attn, forward_loop=fwd, distributed_sync=False)
 
-        # Shared state survives — its buffer lives in the parent's state_dict
-        # under ``_shared_quant_state.weight_global_amax`` exactly once.
-        assert hasattr(attn, "_shared_quant_state")
+        assert hasattr(attn, "_shared_quant_state")  # exists at runtime (calibration artifact)
         sd = attn.state_dict()
-        shared_buffer_keys = [k for k in sd if k.endswith("_shared_quant_state.weight_global_amax")]
-        assert shared_buffer_keys == ["_shared_quant_state.weight_global_amax"], (
-            f"buffer should appear exactly once on the parent, got {shared_buffer_keys}"
-        )
-
-        # Each weight_quantizer holds the back-reference (via object.__setattr__)
-        # but it does NOT register as a child submodule — otherwise the buffer
-        # would be duplicated under each member's prefix.
-        for proj in (attn.q_proj, attn.k_proj, attn.v_proj):
+        # Non-persistent: the shared buffer must NOT appear in state_dict.
+        assert not [k for k in sd if k.endswith("_shared_quant_state.weight_global_amax")]
+        # The value lives on each member's quantizer (``_global_amax``), which IS persisted,
+        # and the runtime back-reference is set (but not as a child submodule).
+        for role in ("q_proj", "k_proj", "v_proj"):
+            proj = getattr(attn, role)
             assert proj.weight_quantizer._shared_quant_state_ref is attn._shared_quant_state
             assert "_shared_quant_state_ref" not in proj.weight_quantizer._modules
+            assert f"{role}.weight_quantizer._global_amax" in sd
 
-        # state_dict round-trips under ``weights_only=True``.
-        path = tmp_path / "sd.pt"
-        torch.save(sd, path)
-        loaded = torch.load(path, weights_only=True)
-        assert loaded["_shared_quant_state.weight_global_amax"].item() == pytest.approx(
-            sd["_shared_quant_state.weight_global_amax"].item()
+    def test_modelopt_save_restore_with_shared_state(self, tmp_path):
+        """``mtq.quantize`` -> ``mto.save`` -> ``mto.restore`` on a FRESH model round-trips.
+
+        Regression for two save/restore bugs the shared state introduced: (a) the runtime
+        back-ref must be excluded from ``get_modelopt_state`` (else save pickles a live
+        ``QuantLinear``), and (b) the shared buffer must be non-persistent (else
+        ``load_state_dict`` on the fresh, submodule-less model fails on the unexpected key).
+        """
+        import modelopt.torch.opt as mto
+
+        cfg = {
+            "quant_cfg": [
+                {"enable": False, "quantizer_name": "*"},
+                {
+                    "cfg": {
+                        "num_bits": (2, 1),
+                        "block_sizes": {-1: NVFP4_BLOCK, "type": "static", "scale_bits": (4, 3)},
+                    },
+                    "quantizer_name": "*weight_quantizer",
+                },
+            ],
+            "algorithm": "max",
+        }
+        attn = _DummyAttention()  # fresh (un-quantized) — mtq.quantize rejects re-quantizing
+        mtq.quantize(attn, cfg, lambda m: m(torch.randn(2, 32)))
+
+        # Grouping happened, and each member carries its own promoted global_amax.
+        assert hasattr(attn, "_shared_quant_state")
+        expected = {
+            role: getattr(attn, role).weight_quantizer.global_amax.item()
+            for role in ("q_proj", "k_proj", "v_proj")
+        }
+
+        # Save must not raise (pickling metadata.quantizer_state).
+        path = tmp_path / "model.pth"
+        mto.save(attn, path)
+
+        # Restore into a fresh model must not raise (no _shared_quant_state.* key to match).
+        restored = _DummyAttention()
+        mto.restore(restored, path)
+
+        for role in ("q_proj", "k_proj", "v_proj"):
+            wq = getattr(restored, role).weight_quantizer
+            assert isinstance(wq, NVFP4StaticQuantizer)
+            assert wq.global_amax.item() == pytest.approx(expected[role])
+
+    def test_empty_weight_patterns_disable_grouping(self):
+        """``shared_patterns={"weight": []}`` disables grouping (key presence, not truthiness)."""
+        attn = self._setup_attention(scales=(0.5, 2.0, 1.0))  # distinct per-proj amaxes
+
+        def fwd(m):
+            x = torch.randn(2, 32)
+            m.q_proj(x)
+            m.k_proj(x)
+            m.v_proj(x)
+
+        max_calibrate(
+            attn, forward_loop=fwd, distributed_sync=False, shared_patterns={"weight": []}
         )
+
+        # No sibling group: no shared state, and each proj keeps its OWN global_amax.
+        assert not hasattr(attn, "_shared_quant_state")
+        gas = []
+        for proj in (attn.q_proj, attn.k_proj, attn.v_proj):
+            assert isinstance(proj.weight_quantizer, NVFP4StaticQuantizer)
+            assert not hasattr(proj.weight_quantizer, "_shared_quant_state_ref")
+            gas.append(proj.weight_quantizer.global_amax.item())
+        assert len(set(gas)) > 1, f"grouping should be disabled, but global_amax all equal: {gas}"
+
+    def test_config_rejects_invalid_shared_patterns(self):
+        """Bad keys and bad regexes are rejected when the config is parsed, not at calib time."""
+        from modelopt.torch.quantization.config import MaxCalibConfig
+
+        MaxCalibConfig(shared_patterns={"weight": [r"(?:(.*)\.)?(?:q_proj|k_proj)"]})  # valid
+        MaxCalibConfig(shared_patterns={"weight": []})  # empty list is valid (disables grouping)
+        with pytest.raises(ValueError, match="unsupported quantizer kind"):
+            MaxCalibConfig(shared_patterns={"weigth": [r".*"]})  # typo'd key
+        with pytest.raises(ValueError, match="invalid regex"):
+            MaxCalibConfig(shared_patterns={"weight": ["("]})  # unbalanced paren

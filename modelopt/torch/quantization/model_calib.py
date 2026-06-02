@@ -234,10 +234,14 @@ def max_calibrate(
     # Fail fast on NVFP4 static-block with TP>1 (sharded_state_dict treats _amax as replicated).
     _check_nvfp4_static_tp_supported(model)
 
-    # Discover fusible sibling groups by name regex (default q/k/v + gate/up, or the
-    # caller's "weight" patterns) and attach shared state; populated below, after any
-    # cross-rank _amax sync. Only "weight" is consumed today; "input" is reserved.
-    weight_patterns = (shared_patterns or {}).get("weight") or DEFAULT_WEIGHT_SHARED_PATTERNS
+    # Discover fusible sibling groups by name regex and attach shared state; populated
+    # below, after any cross-rank _amax sync. Default to q/k/v + gate/up when no "weight"
+    # key is given; an explicit (possibly empty) list overrides it — key presence, not
+    # truthiness, so {"weight": []} disables grouping. Only "weight" is consumed today.
+    if shared_patterns is not None and "weight" in shared_patterns:
+        weight_patterns = list(shared_patterns["weight"])
+    else:
+        weight_patterns = DEFAULT_WEIGHT_SHARED_PATTERNS
     attach_shared_quant_states(model, patterns=weight_patterns)
 
     if not distributed_sync:

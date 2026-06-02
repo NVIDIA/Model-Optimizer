@@ -172,6 +172,10 @@ class TensorQuantizer(nn.Module):
         "pre_bwd_fn",
         # quantizer cache for custom backends, like luts
         "_quantizer_cache",
+        # Runtime-only back-reference to a sibling group's SharedQuantState; it is
+        # re-established during calibration and must not be serialized (it points to a
+        # live module whose dynamic QuantLinear members are not picklable).
+        "_shared_quant_state_ref",
     }
 
     def __init__(

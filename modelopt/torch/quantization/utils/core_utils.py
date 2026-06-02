@@ -955,12 +955,24 @@ def promote_nvfp4_static_quantizers(model: nn.Module) -> int:
     per-block amax) instead of the generic E4M3 path.
 
     If the quantizer has a ``_shared_quant_state_ref`` with a populated
-    ``weight_global_amax`` (sibling group), that shared value is used instead of
-    this quantizer's own ``_amax`` reduction, keeping siblings on a common FP8 grid.
+    ``weight_global_amax`` (sibling group) whose owning state lives within ``model``,
+    that shared value is used instead of this quantizer's own ``_amax`` reduction,
+    keeping siblings on a common FP8 grid.
 
     Returns the number of quantizers converted.
     """
     from modelopt.torch.quantization.nn import NVFP4StaticQuantizer, TensorQuantizer
+
+    # Shared states owned within THIS promotion root. This function also runs on
+    # submodules / individual linears; a quantizer may still carry a back-reference from
+    # an earlier full-model calibration whose owning ``_shared_quant_state`` is outside
+    # ``model``. Only trust refs reachable here — otherwise the global_amax would come
+    # from an unrelated prior run; fall back to the quantizer's own amax instead.
+    valid_shared_states = {
+        id(state)
+        for owner in model.modules()
+        if (state := getattr(owner, "_shared_quant_state", None)) is not None
+    }
 
     converted = 0
     for _name, module in list(model.named_modules()):
@@ -976,7 +988,11 @@ def promote_nvfp4_static_quantizers(model: nn.Module) -> int:
         # otherwise fall back to this quantizer's own per-block amax.
         already_promoted = isinstance(module, NVFP4StaticQuantizer)
         shared = getattr(module, "_shared_quant_state_ref", None)
-        if shared is not None and shared.weight_global_amax is not None:
+        if (
+            shared is not None
+            and id(shared) in valid_shared_states
+            and shared.weight_global_amax is not None
+        ):
             global_amax = shared.weight_global_amax
         else:
             global_amax = reduce_amax(amax.clone().detach(), axis=None)

@@ -34,7 +34,6 @@ from :func:`find_shared_input_groups` are consumed by
 """
 
 import re
-import warnings
 from collections.abc import Sequence
 
 import torch
@@ -74,21 +73,27 @@ class SharedQuantState(nn.Module):
     """State shared across a sibling group of quantized modules.
 
     Attached to the group's parent (e.g. ``self_attn``, ``block_sparse_moe``) as a
-    registered submodule so its buffers ride along in ``state_dict``. Members that
-    quantize the same input resolve shared values here instead of computing them
-    independently and reconciling at export.
+    submodule, but its buffers are **non-persistent**: this is a calibration-time
+    artifact, not part of the checkpoint. Members that quantize the same input resolve
+    shared values here during calibration; the resolved value is then baked into each
+    member's promoted quantizer (``NVFP4StaticQuantizer._global_amax``, which *is*
+    serialized). So the scale survives save/restore via the members, and restore need
+    not re-create this submodule (it isn't in ``state_dict``) — see
+    :func:`attach_shared_quant_states`.
 
-    Holds only ``weight_global_amax`` today; new tensor fields (act scales, AWQ
-    ``pre_quant_scale``, SVDQuant/FlatQuant factors) should use ``register_buffer``
-    so they serialize too.
+    Holds only ``weight_global_amax`` today, and it is mirrored onto every member. Any
+    future field that is **not** mirrored on a member would not survive save/restore as
+    a non-persistent buffer and would need its own restore path.
     """
 
     def __init__(self) -> None:
         """Initialize with an unset ``weight_global_amax`` and no registered members."""
         super().__init__()
         # NVFP4 two-level FP8 grid scale = max over members' per-block ``_amax``.
-        # Unset for non-NVFP4 configs.
-        self.register_buffer("weight_global_amax", None)
+        # Non-persistent: a calibration-time artifact. The resolved value is baked into
+        # each member's ``NVFP4StaticQuantizer._global_amax`` (which IS serialized), so
+        # restore rebuilds scales from members and need not re-create this submodule.
+        self.register_buffer("weight_global_amax", None, persistent=False)
         # Back-references to member modules. ``object.__setattr__`` keeps them out of
         # ``_modules`` so members' params don't re-enter our ``state_dict``.
         object.__setattr__(self, "_members", [])
@@ -98,7 +103,8 @@ class SharedQuantState(nn.Module):
 
         Weights are DP-replicated (no DP sync needed). EP sync is required since
         ranks hold different experts; TP sync guards against per-child ``_amax`` TP
-        sync skipping block-quantized weights.
+        sync skipping block-quantized weights. Raises on a failed all-reduce: a silent
+        failure would leave ranks with different scales and still promote/export them.
         """
         if self.weight_global_amax is None or parallel_state is None:
             return
@@ -115,7 +121,7 @@ class SharedQuantState(nn.Module):
                     group=group.group,
                 )
             except RuntimeError as e:
-                warnings.warn(f"Failed to sync shared weight_global_amax: {e}")
+                raise RuntimeError("Failed to sync shared weight_global_amax") from e
 
 
 # ---------------------------------------------------------------------------
@@ -150,6 +156,9 @@ def _climb_past_modulelist(
     Attaching ``SharedQuantState`` to a ``ModuleList`` registers it in that
     container's ``_modules`` and corrupts its iteration/length (the state shows up
     alongside the experts), so attach to the first non-ModuleList ancestor.
+
+    Only ``nn.ModuleList`` is handled today. It can be extended in the future to include modules
+    like nn.ModuleDict``.
     """
     cur = module
     while isinstance(cur, nn.ModuleList):
