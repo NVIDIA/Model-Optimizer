@@ -20,7 +20,7 @@ import io
 import os
 import time
 from collections.abc import Callable
-from contextlib import contextmanager, suppress
+from contextlib import suppress
 from datetime import timedelta
 from typing import Any
 from warnings import warn
@@ -32,17 +32,16 @@ from torch.distributed.tensor import DTensor
 
 __all__ = [
     "DistributedProcessGroup",
-    "Fsdp2StateDictAdapter",
     "ParallelState",
     "backend",
     "barrier",
     "fsdp2_shard",
     "fsdp2_wrap",
     "fsdp_aware_forward_loop",
-    "init_params_on_meta",
     "is_available",
     "is_initialized",
     "is_master",
+    "load_fsdp2_causal_lm",
     "rank",
     "shard_dataloader",
     "size",
@@ -237,33 +236,22 @@ def fsdp2_wrap(
 ):
     """Apply FSDP2 ``fully_shard`` to each decoder layer of ``model``.
 
-    Decoder layers are auto-detected via
-    ``modelopt.torch.quantization.utils.layerwise_calib.LayerActivationCollector.get_decoder_layers``.
-    Pass ``override_cls_name`` to force a specific transformer block class. Pass
-    ``mp_policy`` (a ``torch.distributed.fsdp.MixedPrecisionPolicy``) to control
-    compute / reduce dtype; default ``None`` means no upcast / downcast.
+    Decoder layers are auto-detected via ``LayerActivationCollector.get_decoder_layers``;
+    pass ``override_cls_name`` to force a specific block class instead.
 
-    Pass ``device`` to stream each layer to that device just before sharding it
-    (avoids holding the full model on GPU simultaneously). When ``device`` is
-    ``None``, layers are sharded on whatever device they're already on.
+    Args:
+        mp_policy: ``MixedPrecisionPolicy`` for compute/reduce dtype (``None`` = no cast).
+        device: stream each layer here just before sharding (avoids holding the full
+            model on GPU at once); ``None`` shards in place.
+        cpu_offload: attach ``CPUOffloadPolicy`` so each shard lives on CPU between
+            forwards and streams to GPU per-layer. Trades PCIe traffic for GPU memory;
+            use only when the per-rank shard is the binding constraint.
 
-    Set ``cpu_offload=True`` to attach FSDP2's ``CPUOffloadPolicy`` to each
-    wrapped layer. Each rank's shard then lives on CPU between forward passes
-    and is streamed to GPU per-layer (H2D + all-gather + compute + reshard +
-    D2H). Useful when the per-rank decoder shard is the binding GPU constraint
-    (e.g., 200B+ models on tight GPU budgets) or when you want headroom for a
-    larger calibration batch. Adds PCIe traffic per layer per batch; on
-    setups where the model already fits comfortably it usually slows the run.
-
-    The root module is intentionally NOT sharded — ``embed_tokens`` and
-    ``lm_head`` stay as plain replicated tensors. This costs ~few-GiB per rank
-    (full copies of embed + lm_head) but unifies the layerwise and non-layerwise
-    code paths: a DTensor-wrapped ``embed_tokens.weight`` raises a "mixed Tensor
-    / DTensor" error when modelopt's layerwise calibration passes plain
-    ``input_ids`` into the embedding lookup, and FSDP2's root pre-forward hook
-    doesn't auto-wrap LongTensor inputs.
+    The root is intentionally NOT sharded — ``embed_tokens``/``lm_head`` stay plain
+    replicated tensors, since a DTensor ``embed_tokens.weight`` breaks the embedding
+    lookup on plain ``input_ids`` during layerwise calibration.
     """
-    from torch.distributed.fsdp import fully_shard
+    from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard
 
     from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 
@@ -273,7 +261,7 @@ def fsdp2_wrap(
             raise RuntimeError(f"No modules of class {override_cls_name!r} found in model")
     else:
         layers = LayerActivationCollector.get_decoder_layers(model)
-        if layers is None:
+        if not layers:
             raise RuntimeError(
                 "Could not auto-detect decoder layers; pass override_cls_name explicitly."
             )
@@ -281,8 +269,6 @@ def fsdp2_wrap(
     if mp_policy is not None:
         fsdp_kwargs["mp_policy"] = mp_policy
     if cpu_offload:
-        from torch.distributed.fsdp import CPUOffloadPolicy
-
         fsdp_kwargs["offload_policy"] = CPUOffloadPolicy()
     for layer in layers:
         if device is not None:
@@ -291,42 +277,22 @@ def fsdp2_wrap(
     return model
 
 
-@contextmanager
-def init_params_on_meta():
-    """Replicate ``accelerate.init_empty_weights(include_buffers=False)``.
-
-    Inside this context, ``nn.Module.register_parameter`` is patched so newly
-    registered parameters land on the ``meta`` device (zero CPU bytes). Buffer
-    registration is NOT patched — buffers are computed normally on CPU during
-    ``__init__`` (e.g. ``Qwen2RotaryEmbedding.__init__`` produces a real CPU
-    ``inv_freq`` from config).
-
-    Use around ``from_config(...)`` on non-rank-0 ranks to build a meta-skeleton
-    that ``fsdp2_shard`` will materialize via ``set_model_state_dict``
-    broadcast from rank 0.
-    """
-    original = nn.Module.register_parameter
-
-    def patched(self, name, param):
-        original(self, name, param)
-        if param is not None:
-            p = self._parameters[name]
-            self._parameters[name] = nn.Parameter(p.to("meta"), requires_grad=p.requires_grad)
-
-    nn.Module.register_parameter = patched
-    try:
-        yield
-    finally:
-        nn.Module.register_parameter = original
-
-
-def fsdp2_shard(model, device, rank, src_state_dict=None, mp_policy=None, cpu_offload=False):
+def fsdp2_shard(model, device, src_state_dict=None, mp_policy=None, cpu_offload=False):
     """Shard a model across the current process group (accelerate-style rank-0 load).
 
     Caller contract: ``model`` is built on every rank with params on ``meta`` and
-    buffers on CPU (use ``init_params_on_meta`` around ``from_config``). Rank 0
-    additionally passes ``src_state_dict`` captured from a real CPU model loaded
-    via ``from_pretrained``; other ranks pass ``None`` or ``{}``.
+    buffers on CPU (use ``init_empty_weights(include_buffers=False)`` around
+    ``from_config``). Rank 0 additionally passes ``src_state_dict`` captured from a
+    real CPU model loaded via ``from_pretrained``; other ranks pass ``{}``.
+
+    ``set_model_state_dict(broadcast_from_rank0=True)`` (step 3) is a collective, so
+    every rank must reach it: non-rank-0 ranks pass ``{}`` (empty, not ``None``) to
+    participate in the broadcast. ``src_state_dict=None`` skips the broadcast entirely
+    and must therefore be ``None`` on *all* ranks (e.g. sharding a model that will be
+    loaded later) — mixing ``None`` with a populated dict across ranks will hang.
+
+    Also sets ``model._original_architectures`` (FSDP2 wrapping can clobber
+    ``config.architectures``, which export reads back).
 
     Set ``cpu_offload=True`` to attach FSDP2's ``CPUOffloadPolicy`` to wrapped
     layers (each rank's shard lives on CPU between forwards). See
@@ -335,7 +301,7 @@ def fsdp2_shard(model, device, rank, src_state_dict=None, mp_policy=None, cpu_of
     Root is never sharded (see ``fsdp2_wrap`` docstring). embed_tokens and
     lm_head stay as plain replicated tensors on every rank.
 
-    Steps (each timed and logged per-rank for diagnostics):
+    Steps:
     1. ``fsdp2_wrap`` — apply ``fully_shard`` to decoder layers.
     2. Materialize: meta params → empty GPU storage; real CPU buffers → GPU
        (preserves their values; ``to_empty`` is NOT used because it would wipe
@@ -355,15 +321,7 @@ def fsdp2_shard(model, device, rank, src_state_dict=None, mp_policy=None, cpu_of
     # (it streams them to GPU per-layer during forward). Also, set_model_state_dict
     # rejects mixed-device models — so materialize everything on CPU first,
     # broadcast, then promote non-DTensor params + buffers to GPU after.
-    materialize_device = torch.device("cpu") if cpu_offload else device
-
-    def _materialize(t):
-        is_meta_dtensor = isinstance(t, DTensor) and t._local_tensor.is_meta
-        if is_meta_dtensor or (not isinstance(t, DTensor) and t.is_meta):
-            return torch.empty_like(t, device=materialize_device)
-        return t.to(materialize_device)
-
-    model._apply(_materialize)
+    _materialize_meta_model(model, torch.device("cpu") if cpu_offload else device)
 
     if src_state_dict is not None:
         set_model_state_dict(
@@ -373,25 +331,12 @@ def fsdp2_shard(model, device, rank, src_state_dict=None, mp_policy=None, cpu_of
         )
 
     if cpu_offload:
-        # FSDP-managed (DTensor) params stay on CPU — FSDP2 streams them per layer.
-        # Move everything else (root-level plain params + all buffers) to GPU now.
-        for module in model.modules():
-            for name, param in list(module._parameters.items()):
-                if param is None or isinstance(param, DTensor):
-                    continue
-                module._parameters[name] = nn.Parameter(
-                    param.data.to(device), requires_grad=param.requires_grad
-                )
-            for name, buf in list(module._buffers.items()):
-                if buf is None or isinstance(buf, DTensor):
-                    continue
-                module._buffers[name] = buf.to(device)
+        _promote_non_dtensor_to_gpu(model, device)
 
     if hasattr(model, "tie_weights"):
         model.tie_weights()
 
-    for p in model.parameters():
-        p.requires_grad_(False)
+    model.requires_grad_(False)
 
     return model
 
@@ -399,8 +344,9 @@ def fsdp2_shard(model, device, rank, src_state_dict=None, mp_policy=None, cpu_of
 def shard_dataloader(loader, rank: int, world_size: int):
     """Wrap a DataLoader with a DistributedSampler so each rank sees a unique shard.
 
-    Preserves the input loader's ``batch_size``, ``collate_fn``, ``num_workers``,
-    and ``pin_memory``.
+    ``drop_last=False`` keeps per-rank batch counts equal (else a rank exits
+    calibration early and hangs the others on FSDP2 collectives), at the cost of the
+    sampler repeating up to ``world_size - 1`` samples to pad the even split.
     """
     from torch.utils.data import DataLoader
     from torch.utils.data.distributed import DistributedSampler
@@ -425,24 +371,19 @@ def shard_dataloader(loader, rank: int, world_size: int):
 def fsdp_aware_forward_loop(wrapped_model, dataloader, device=None):
     """Build an ``mtq.quantize`` ``forward_loop`` that respects FSDP wrapping.
 
-    ``mtq.quantize`` strips the FSDP wrapper before calling ``forward_loop``,
-    handing the user the unwrapped inner module. Calling the unwrapped module
-    bypasses FSDP's pre/post-forward hooks (no all-gather, no reshard), which
-    breaks calibration on FSDP2. The closure returned here captures the outer
-    *wrapped* model and ignores the ``unwrapped_model`` argument that
-    ``mtq.quantize`` passes in.
+    ``mtq.quantize`` hands ``forward_loop`` the *unwrapped* inner module, and calling
+    that bypasses FSDP's pre/post-forward hooks (no all-gather/reshard) — breaking
+    calibration. This closure ignores that argument and calls the captured *wrapped*
+    model instead.
 
-    Used by ``examples/llm_ptq/hf_ptq.py`` under ``--use_fsdp2``.
-
-    TODO: ``modelopt/torch/quantization/plugins/transformers_trainer.py`` (the
-    QLoRA path) currently has the same logic inlined inside ``_quantize_model``.
-    Consolidate that call site to use this helper too.
+    TODO: ``transformers_trainer.py`` (QLoRA path) has the same logic inlined in
+    ``_quantize_model``; consolidate it onto this helper.
     """
     from tqdm import tqdm
 
     def calibrate(_unwrapped_model):
-        for batch in tqdm(dataloader, desc="Calibrating"):
-            if device is not None and isinstance(batch, dict):
+        for batch in tqdm(dataloader, desc="Calibrating", disable=not is_master()):
+            if device is not None:
                 batch = {
                     k: (v.to(device) if isinstance(v, torch.Tensor) else v)
                     for k, v in batch.items()
@@ -473,7 +414,7 @@ def broadcast_state_dict(
     )
     torch.distributed.broadcast_object_list(meta, src=src, group=pg)
     meta_dict = meta[0]
-    assert meta_dict is not None
+    assert meta_dict is not None, f"src rank {src} passed no state dict to broadcast"
 
     src_state_dict = state_dict_or_none or {}
     out: dict[str, torch.Tensor] = {}
@@ -487,40 +428,282 @@ def broadcast_state_dict(
     return out
 
 
-def load_state_dict_into_fsdp2_layer(layer: nn.Module, full_state_dict: dict) -> None:
-    """Load full (replicated) tensors into an FSDP2-wrapped layer's DTensor local shards.
+def _read_safetensors_state_dict(
+    ckpt_path: str,
+    weight_map: dict,
+    select: Callable[[str], bool],
+) -> dict:
+    """Read tensors whose name satisfies ``select`` from safetensors files.
 
-    Each rank already has the full tensor; we just need to shard locally.
-    Uses ``set_model_state_dict(broadcast_from_rank0=False)`` — each rank holds the
-    full tensor in ``full_state_dict``, so no collective is needed; the helper just
-    slices each rank's local shard from the full tensor.
+    Groups param names by file to avoid re-opening. Returns CPU tensors.
+    Uses ``safe_open`` so only the requested tensors' bytes are read.
     """
+    from safetensors import safe_open
+
+    by_file: dict[str, list[str]] = {}
+    for name, file in weight_map.items():
+        if select(name):
+            by_file.setdefault(file, []).append(name)
+
+    state: dict[str, torch.Tensor] = {}
+    for file, names in by_file.items():
+        with safe_open(os.path.join(ckpt_path, file), framework="pt", device="cpu") as f:
+            for name in names:
+                state[name] = f.get_tensor(name)
+    return state
+
+
+def _materialize_meta_model(model: nn.Module, materialize_device: torch.device) -> None:
+    """Replace meta-device params/buffers with empty tensors on ``materialize_device``.
+
+    Triggers FSDP2's ``_apply`` override on wrapped modules, which calls
+    ``reset_sharded_param`` to refresh FSDP's internal state.
+    """
+
+    def _fn(t):
+        is_meta_dtensor = isinstance(t, DTensor) and t._local_tensor.is_meta
+        if is_meta_dtensor or (not isinstance(t, DTensor) and t.is_meta):
+            return torch.empty_like(t, device=materialize_device)
+        return t.to(materialize_device)
+
+    model._apply(_fn)
+
+
+def _promote_non_dtensor_to_gpu(model: nn.Module, device: torch.device) -> None:
+    """Move all non-DTensor params + buffers in ``model`` to ``device`` in-place.
+
+    Used after CPU-offload loading: decoder DTensor shards stay on CPU (FSDP2
+    streams them to GPU per layer), while root-level plain params and buffers
+    need to live on GPU so forwards work.
+    """
+    for module in model.modules():
+        for name, param in list(module._parameters.items()):
+            if param is None or isinstance(param, DTensor):
+                continue
+            module._parameters[name] = nn.Parameter(
+                param.data.to(device), requires_grad=param.requires_grad
+            )
+        for name, buf in list(module._buffers.items()):
+            if buf is None or isinstance(buf, DTensor):
+                continue
+            module._buffers[name] = buf.to(device)
+
+
+def _load_via_parallel_read(
+    ckpt_path: str,
+    device: torch.device,
+    rank: int,
+    world_size: int,
+    trust_remote_code: bool,
+    mp_policy,
+    cpu_offload: bool,
+    weight_map: dict,
+):
+    """Parallel-read path: each rank reads its share of decoder layers from disk.
+
+    Phase D: each rank reads its owned layers from disk in parallel.
+    Phase E: per-layer broadcast from owner to all ranks; shard locally into the
+    FSDP2 DTensor via ``set_model_state_dict(broadcast_from_rank0=False)``.
+    Phase F: rank 0 reads + broadcasts non-decoder params; loaded into the
+    unwrapped root.
+    """
+    from accelerate import init_empty_weights
     from torch.distributed.checkpoint.state_dict import StateDictOptions, set_model_state_dict
+    from transformers import AutoConfig, AutoModelForCausalLM
 
-    set_model_state_dict(
-        layer,
-        full_state_dict,
-        options=StateDictOptions(full_state_dict=True, broadcast_from_rank0=False),
-    )
+    from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 
+    hf_config = AutoConfig.from_pretrained(ckpt_path, trust_remote_code=trust_remote_code)
+    dtype = getattr(hf_config, "torch_dtype", None) or torch.bfloat16
 
-class Fsdp2StateDictAdapter:
-    """Adapter exposing ``.get_state_dict(model)`` for FSDP2-sharded models.
-
-    Satisfies the ``accelerator=`` kwarg of
-    ``modelopt.torch.export.unified_export_hf._export_transformers_checkpoint``.
-    Backed by ``get_model_state_dict`` which materializes a full unsharded state
-    dict on every rank (with CPU offload to bound peak GPU memory during gather).
-    """
-
-    def get_state_dict(self, model):
-        """Return the full unsharded state dict gathered from FSDP2 shards (CPU-offloaded)."""
-        from torch.distributed.checkpoint.state_dict import StateDictOptions, get_model_state_dict
-
-        return get_model_state_dict(
-            model,
-            options=StateDictOptions(full_state_dict=True, cpu_offload=True),
+    # Phase A: meta skeleton on every rank. include_buffers=False so computed
+    # buffers (e.g. rotary inv_freq, often non-persistent) are built for real on
+    # CPU here rather than stranded on meta with nothing to materialize them.
+    with init_empty_weights(include_buffers=False):
+        model = AutoModelForCausalLM.from_config(
+            hf_config, torch_dtype=dtype, trust_remote_code=trust_remote_code
         )
+    model.eval()
+    if hasattr(model, "config") and hasattr(model.config, "use_cache"):
+        model.config.use_cache = False
+
+    # Phase B: wrap decoder layers (root NOT wrapped). Discover prefixes.
+    decoder_layers = LayerActivationCollector.get_decoder_layers(model)
+    if decoder_layers is None:
+        raise RuntimeError("Could not auto-detect decoder layers for parallel-read loader.")
+    module_to_name = {m: n for n, m in model.named_modules()}
+    layer_prefixes = [module_to_name[layer] + "." for layer in decoder_layers]
+    model._original_architectures = list(model.config.architectures or [])
+
+    fsdp2_wrap(model, mp_policy=mp_policy, cpu_offload=cpu_offload)
+
+    # Phase C: materialize meta → empty tensors. With cpu_offload, DTensor shards
+    # land on CPU (FSDP2 streams them to GPU per-layer during forward).
+    _materialize_meta_model(model, torch.device("cpu") if cpu_offload else device)
+
+    # Phase D: each rank reads its owned layers from disk in parallel.
+    owned: dict[int, dict] = {}
+    for layer_idx in range(len(decoder_layers)):
+        if layer_idx % world_size == rank:
+            prefix = layer_prefixes[layer_idx]
+
+            def _has_prefix(n: str, p: str = prefix) -> bool:
+                return n.startswith(p)
+
+            owned[layer_idx] = _read_safetensors_state_dict(ckpt_path, weight_map, _has_prefix)
+
+    # Phase E: per-layer broadcast + shard. Broadcasts run on GPU (NCCL requires
+    # CUDA tensors); with cpu_offload we copy back to CPU before writing into the
+    # CPU-resident DTensor shard.
+    for layer_idx, layer in enumerate(decoder_layers):
+        src = layer_idx % world_size
+        layer_state_full = broadcast_state_dict(owned.get(layer_idx), src=src, device=device)
+        prefix = layer_prefixes[layer_idx]
+        stripped = {k[len(prefix) :]: v for k, v in layer_state_full.items()}
+        if cpu_offload:
+            stripped = {k: v.cpu() for k, v in stripped.items()}
+        # Slice each rank's local DTensor shard from the full tensor it already holds
+        # (broadcast_from_rank0=False → no collective needed).
+        set_model_state_dict(
+            layer,
+            stripped,
+            options=StateDictOptions(full_state_dict=True, broadcast_from_rank0=False),
+        )
+        if src == rank:
+            del owned[layer_idx]
+        del layer_state_full, stripped
+
+    # Phase F: non-decoder params (embed, lm_head, norm) — rank 0 reads + broadcasts.
+    layer_prefix_tuple = tuple(layer_prefixes)
+    non_layer = (
+        _read_safetensors_state_dict(
+            ckpt_path, weight_map, lambda n: not n.startswith(layer_prefix_tuple)
+        )
+        if rank == 0
+        else None
+    )
+    non_layer = broadcast_state_dict(non_layer, src=0, device=device)
+    if cpu_offload:
+        non_layer = {k: v.cpu() for k, v in non_layer.items()}
+    missing, unexpected = model.load_state_dict(non_layer, strict=False, assign=False)
+    real_missing = [k for k in missing if not k.startswith(layer_prefix_tuple)]
+    if real_missing:
+        warn(f"Missing non-layer keys on rank {rank}: {real_missing[:5]}...")
+    if unexpected:
+        warn(f"Unexpected keys in non-layer state dict on rank {rank}: {unexpected[:3]}...")
+
+    if cpu_offload:
+        _promote_non_dtensor_to_gpu(model, device)
+
+    # Phase G: tie weights, freeze.
+    if hasattr(model, "tie_weights"):
+        model.tie_weights()
+    model.requires_grad_(False)
+
+    return model
+
+
+def load_fsdp2_causal_lm(
+    ckpt_path: str,
+    device: torch.device,
+    rank: int,
+    world_size: int = 1,
+    *,
+    trust_remote_code: bool = False,
+    mp_policy=None,
+    cpu_offload: bool = False,
+):
+    """Load and FSDP2-shard a HuggingFace causal LM.
+
+    Reusable loader with no dependency on argparse / CLI semantics.
+
+    Default path: **parallel read** — each rank reads its share of decoder
+    layers from disk in parallel, broadcasts to other ranks. Eliminates the
+    rank-0 disk bottleneck. Handles ``cpu_offload`` internally.
+
+    Fallback path (when no ``model.safetensors.index.json`` exists): rank-0
+    ``from_pretrained`` + ``set_model_state_dict`` broadcast via
+    :func:`fsdp2_shard`.
+
+    Both paths produce identical sharded models (same FSDP2 wrap layout, root
+    unsharded, decoder layers DTensor-sharded across the FSDP mesh).
+    """
+    import json
+
+    from accelerate import init_empty_weights
+    from transformers import AutoConfig, AutoModelForCausalLM
+
+    # Resolve ckpt_path: local dir as-is, otherwise HF Hub ID — rank 0 downloads,
+    # others wait at the barrier so we don't contend on the cache lock.
+    resolved_path: str | None = ckpt_path
+    if not os.path.isdir(ckpt_path):
+        try:
+            from huggingface_hub import snapshot_download
+        except ImportError:
+            snapshot_download = None
+        if snapshot_download is not None:
+            if rank == 0:
+                resolved_path = snapshot_download(ckpt_path)
+            if is_initialized():
+                barrier()
+            if rank != 0:
+                resolved_path = snapshot_download(ckpt_path)
+        else:
+            resolved_path = None
+
+    index_path = (
+        os.path.join(resolved_path, "model.safetensors.index.json") if resolved_path else None
+    )
+    if resolved_path is not None and index_path is not None and os.path.exists(index_path):
+        with open(index_path) as f:
+            weight_map = json.load(f)["weight_map"]
+        return _load_via_parallel_read(
+            ckpt_path=resolved_path,
+            device=device,
+            rank=rank,
+            world_size=world_size,
+            trust_remote_code=trust_remote_code,
+            mp_policy=mp_policy,
+            cpu_offload=cpu_offload,
+            weight_map=weight_map,
+        )
+
+    # Fallback: rank-0 from_pretrained + broadcast via fsdp2_shard.
+    hf_config = AutoConfig.from_pretrained(ckpt_path, trust_remote_code=trust_remote_code)
+    dtype = getattr(hf_config, "torch_dtype", None) or torch.bfloat16
+
+    if rank == 0:
+        src_model = AutoModelForCausalLM.from_pretrained(
+            ckpt_path,
+            torch_dtype="auto",
+            trust_remote_code=trust_remote_code,
+            low_cpu_mem_usage=True,
+        )
+        src_model.eval()
+        src_state_dict = src_model.state_dict()
+    else:
+        src_model = None
+        src_state_dict = {}
+
+    # Meta skeleton on every rank; include_buffers=False keeps computed buffers
+    # (e.g. rotary inv_freq) real on CPU instead of stranded on meta.
+    with init_empty_weights(include_buffers=False):
+        model = AutoModelForCausalLM.from_config(
+            hf_config, torch_dtype=dtype, trust_remote_code=trust_remote_code
+        )
+    model.eval()
+    if hasattr(model, "config") and hasattr(model.config, "use_cache"):
+        model.config.use_cache = False
+
+    sharded = fsdp2_shard(
+        model,
+        device,
+        src_state_dict=src_state_dict,
+        mp_policy=mp_policy,
+        cpu_offload=cpu_offload,
+    )
+    del src_model, src_state_dict
+    return sharded
 
 
 class DistributedProcessGroup:

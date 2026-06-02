@@ -261,3 +261,53 @@ def _test_persistent_materialization(rank, size):
 
 def test_persistent_materialization(dist_workers):
     dist_workers.run(_test_persistent_materialization)
+
+
+def _test_writeback_root_unwrapped(rank, size):
+    """Writeback works when only the decoder layers are wrapped and the root is left
+    unsharded -- the layout ``fsdp2_wrap`` produces (root deliberately not wrapped) and
+    the one ``layerwise_calib`` save()/full_restore() rely on via
+    ``enable_weight_access_and_writeback(layer, model)``.
+
+    Regression guard for the stale ``isinstance(root_model, FSDPModule)`` assert that
+    previously required the root itself to be FSDP-wrapped.
+    """
+    from torch.distributed.tensor import DTensor
+
+    from modelopt.torch.quantization.utils import enable_weight_access_and_writeback
+
+    dim = 32
+    torch.manual_seed(1)
+    # Root is a plain container; model[0] stands in for a decoder layer.
+    model = nn.Sequential(nn.Sequential(nn.Linear(dim, dim), nn.Linear(dim, dim))).cuda(rank)
+    synchronize_state_dict(model)
+
+    # Wrap ONLY the "decoder layer" -- intentionally NO ``fully_shard(model)`` on the root,
+    # mirroring fsdp2_wrap. ``root_model`` (model) is therefore not an FSDPModule.
+    fully_shard(model[0])
+    layer = model[0]
+    inputs = torch.randn(2, dim).cuda(rank)
+
+    # Warmup forward to trigger FSDP2's lazy_init (mirrors layerwise calibration).
+    model(inputs)
+
+    # Sharded before the context.
+    assert isinstance(next(iter(layer.parameters())), DTensor)
+
+    # This is the exact call save()/full_restore() make. Before the fix it tripped the
+    # ``assert isinstance(root_model, FSDPModule)`` because the root is unwrapped.
+    with enable_weight_access_and_writeback(layer[0], model):
+        assert not isinstance(layer[0].weight, DTensor)  # gathered to a local replicated tensor
+        ref_weight = layer[0].weight.clone()
+        layer[0].weight.data.add_(1.0)  # mutate -> exercises the writeback path
+
+    # Restored to a sharded DTensor on exit.
+    assert isinstance(next(iter(layer.parameters())), DTensor)
+
+    # Modification was written back into the shards.
+    with enable_weight_access_and_writeback(layer[0], model):
+        assert torch.allclose(layer[0].weight, ref_weight + 1.0)
+
+
+def test_writeback_root_unwrapped(dist_workers):
+    dist_workers.run(_test_writeback_root_unwrapped)

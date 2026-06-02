@@ -87,11 +87,7 @@ from modelopt.torch.utils.dataset_utils import (
     get_max_batch_size,
     get_supported_datasets,
 )
-from modelopt.torch.utils.distributed import (
-    Fsdp2StateDictAdapter,
-    fsdp_aware_forward_loop,
-    shard_dataloader,
-)
+from modelopt.torch.utils.distributed import fsdp_aware_forward_loop, shard_dataloader
 from modelopt.torch.utils.memory_monitor import launch_memory_monitor
 from modelopt.torch.utils.speech_dataset_utils import get_speech_dataset_dataloader
 from modelopt.torch.utils.vlm_dataset_utils import get_vlm_dataset_dataloader
@@ -727,14 +723,12 @@ def mono_quantize(
 def _export_fsdp2_hf_checkpoint(args: argparse.Namespace, full_model, export_path: str) -> None:
     """FSDP2-aware HF checkpoint export.
 
-    Gathers the full state dict from FSDP2 shards via ``Fsdp2StateDictAdapter``,
-    saves it on rank 0 only, then patches the saved config with quantization
-    metadata and the original (pre-FSDP-prefix) architectures list.
+    ``_export_transformers_checkpoint`` detects the FSDP2 wrap internally and
+    gathers a full unsharded state dict (CPU-offloaded). Rank 0 then writes the
+    safetensors and patches the saved config with quantization metadata and the
+    original (pre-FSDP-prefix) architectures list.
     """
-    adapter = Fsdp2StateDictAdapter()
-    post_state_dict, hf_quant_config = _export_transformers_checkpoint(
-        full_model, torch.bfloat16, accelerator=adapter
-    )
+    post_state_dict, hf_quant_config = _export_transformers_checkpoint(full_model, torch.bfloat16)
 
     if args.is_main:
         export_dir = Path(export_path)

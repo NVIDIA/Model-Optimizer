@@ -399,26 +399,18 @@ def is_pow2(n):
 
 
 def _get_fsdp2_mesh(module: nn.Module):
-    """Get the mesh info of the model.
-
-    Prefers ``post_forward_mesh_info`` (set when ``reshard_after_forward=True``);
-    falls back to ``mesh_info`` if it's None (observed under some PyTorch FSDP2
-    configurations: eval mode + all-frozen params at the time ``persistent
-    _materialization`` queries the state — the mesh itself is still valid).
-    """
+    """Get the mesh info of the model."""
     try:
         from torch.distributed._composable_state import _get_module_state
     except ImportError:
         return None
 
     fsdp_state = _get_module_state(module)
-    pg = getattr(fsdp_state, "_fsdp_param_group", None)
-    if pg is None:
-        return None
-    info = pg.post_forward_mesh_info or pg.mesh_info
-    if info is None:
-        return None
-    return info.mesh
+    if (
+        fsdp_state._fsdp_param_group
+        and fsdp_state._fsdp_param_group.post_forward_mesh_info is not None
+    ):
+        return fsdp_state._fsdp_param_group.post_forward_mesh_info.mesh
 
 
 def _get_module_name(module: nn.Module, root_model: nn.Module, name_to_module: dict | None = None):
@@ -484,11 +476,13 @@ def fsdp2_weight_access_and_writeback_context(module: nn.Module, root_model: nn.
     If TP is implemented with DTensor, the weight will be a local tensor of the
     TP DTensor under this context.
     """
-    assert isinstance(root_model, torch.distributed.fsdp.FSDPModule), "We only support FSDP2"
-
     assert not hasattr(module, "_hf_hook"), "We dont support FSDP2 with HF accelerate hooks"
+    # Note: ``root_model`` need not itself be an ``FSDPModule``. ``fsdp2_wrap`` shards
+    # only the decoder layers and leaves the root unsharded (see its docstring), so the
+    # real precondition is that ``module`` is *under* FSDP2 — enforced by the assert
+    # below, since ``_get_enclosing_fsdp_module`` only ever returns ``FSDPModule`` instances.
     fsdp_module = _get_enclosing_fsdp_module(module, root_model)
-    assert fsdp_module is not None, "Module is not wrapped by FSDP"
+    assert fsdp_module is not None, "Module is not wrapped by FSDP2"
     fsdp_device_mesh = _get_fsdp2_mesh(fsdp_module)
     fsdp_dim = fsdp_device_mesh.ndim
 
@@ -557,7 +551,11 @@ def fsdp2_weight_access_and_writeback_context(module: nn.Module, root_model: nn.
 
 
 @contextmanager
-def enable_weight_access_and_writeback(module, root_model, name_to_module: dict | None = None):
+def enable_weight_access_and_writeback(
+    module,
+    root_model,
+    name_to_module: dict | None = None,
+):
     """Enable weight access and writeback for a module.
 
     Useful for modules with weight not intact such as Linear layer in FSDP wrapped model or
