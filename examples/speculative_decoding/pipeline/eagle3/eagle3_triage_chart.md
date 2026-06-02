@@ -90,6 +90,7 @@ error, root cause, and resolution.
 ### Per-Model Test Results
 
 #### Model: Ministral-3-8B-Instruct-2512-BF16
+
 - **Date tested:** 2026-05-26
 - **Config:** `examples/speculative_decoding/pipeline/eagle3/quick_fail_check_ministral-3-8b-from-task2.yaml`
 - **Experiments:** `cicd_1779312692` (dump), `cicd_1779829129` (train+bench), `cicd_1779901409` (retry w/ fixes)
@@ -117,6 +118,7 @@ error, root cause, and resolution.
 ---
 
 #### Model: gpt-oss-20b
+
 - **Date tested:** 2026-04-15
 - **Config:** `examples/speculative_decoding/pipeline/eagle3/quick_fail_check_gpt-oss-20b.yaml`
 - **Experiment:** `cicd_1776272530`
@@ -127,6 +129,7 @@ error, root cause, and resolution.
 - **Blocker:** Tokenizer loading. Needs special tokenizer setup or newer vLLM with OpenAI model support.
 
 #### Model: Qwen3.5-35B-A3B
+
 - **Date tested:** 2026-04-15
 - **Config:** `examples/speculative_decoding/pipeline/eagle3/quick_fail_check_qwen3.5-35b-a3b.yaml`
 - **Experiment:** `cicd_1776272531`
@@ -137,6 +140,7 @@ error, root cause, and resolution.
 - **Blocker:** Data synthesis too slow. Needs longer wall time or reduced dataset size. Server itself works.
 
 #### Model: Step-3.5-Flash
+
 - **Date tested:** 2026-04-15
 - **Config:** `examples/speculative_decoding/pipeline/eagle3/quick_fail_check_step-3.5-flash.yaml`
 - **Experiment:** `cicd_1776272532`
@@ -147,6 +151,7 @@ error, root cause, and resolution.
 - **Blocker:** Data synthesis hit time limit. Needs investigation of whether server started successfully.
 
 #### Model: MiniMax-M2.5
+
 - **Date tested:** 2026-04-15
 - **Config:** `examples/speculative_decoding/pipeline/eagle3/quick_fail_check_minimax-m2.5.yaml`
 - **Experiment:** `cicd_1776272524`
@@ -157,6 +162,7 @@ error, root cause, and resolution.
 - **Blocker:** Time limit on data synth + `trust_remote_code` needed for benchmark.
 
 #### Model: Ministral-3-14B
+
 - **Date tested:** 2026-04-15
 - **Config:** `examples/speculative_decoding/pipeline/eagle3/quick_fail_check_ministral-3-14b.yaml`
 - **Experiment:** `cicd_1776272522`
@@ -167,6 +173,7 @@ error, root cause, and resolution.
 - **Blocker:** vLLM engine fails to initialize. Same `mistral3` model type issue as 8B variant. Needs newer vLLM + transformers.
 
 #### Model: DeepSeek-V3.2
+
 - **Date tested:** 2026-04-15
 - **Config:** `examples/speculative_decoding/pipeline/eagle3/quick_fail_check_deepseek-v3.2.yaml`
 - **Experiment:** `cicd_1776275945`
@@ -178,7 +185,7 @@ error, root cause, and resolution.
 
 ---
 
-_Use the following template for additional models:_
+*Use the following template for additional models:*
 
 ```markdown
 #### Model: <name>

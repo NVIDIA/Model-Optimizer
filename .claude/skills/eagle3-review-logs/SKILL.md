@@ -54,6 +54,7 @@ For each task log, check:
 Output a structured markdown report:
 
 ### Summary
+
 - Overall status: PASSED / FAILED / MIXED / PARTIAL
 - Task breakdown: e.g., task_0 TIMEOUT, task_1 FAIL, task_2 skipped, task_3 skipped
 
@@ -68,6 +69,7 @@ For each task (0–3):
 - Suggested fix: actionable step
 
 ### Warnings
+
 Non-fatal issues worth noting (near-OOM, tokenizer warnings, slow throughput).
 
 ## Step 4 — Suggest next steps
@@ -75,6 +77,7 @@ Non-fatal issues worth noting (near-OOM, tokenizer warnings, slow throughput).
 Based on results:
 
 - If a task failed due to a known issue, suggest the fix and how to re-run from that task:
+
   ```bash
   uv run launch.py --yaml examples/<Org>/<Model>/hf_offline_eagle3.yaml \
       pipeline.task_0.skip=true \

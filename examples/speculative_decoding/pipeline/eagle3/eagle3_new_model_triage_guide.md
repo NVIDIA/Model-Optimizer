@@ -41,6 +41,7 @@ Experiment ID is printed as `cicd_<timestamp>`.
 ## Step 3: Check experiment output
 
 Experiment directory:
+
 ```
 experiments/cicd/cicd_<id>/
 ```
@@ -50,6 +51,7 @@ Each task has a directory `<JobName>_<N>/` containing:
 - `code/` — snapshot of the code at submission time
 
 Check logs:
+
 ```bash
 tail -100 experiments/cicd/cicd_<id>/<JobName>_<N>/sbatch_*.out
 ```
@@ -86,6 +88,7 @@ Common issues:
 ## Step 5: Applying fixes
 
 ### Repo fixes (for merged modelopt)
+
 Edit files in `/home/yeyu/Documents/TensorRT-Model-Optimizer/modelopt/torch/speculative/`.
 The key files:
 - `utils.py` — `load_vlm_or_llm()` for model loading
@@ -95,6 +98,7 @@ The key files:
 - `../export/plugins/hf_spec_export.py` — export logic
 
 ### Container patches (for pipeline)
+
 The TRT-LLM container has a pre-installed modelopt that can't be easily upgraded (CUDA build issues).
 Instead, runtime patches are applied in `offline_training.sh` using Python heredocs that find-and-replace
 exact code patterns in the installed library files. This is the same pattern used for speculators patches.
