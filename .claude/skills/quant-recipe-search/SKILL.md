@@ -66,12 +66,17 @@ Do not duplicate those workflows here. This skill should leave the user with a c
    - If using ModelOpt, start from `modelopt_recipes` rather than inventing patterns from scratch. Prefer model-specific recipes first, then general PTQ presets/fragments.
    - Let the ModelOpt `ptq` skill own checkpoint generation and PTQ validation; use this skill to choose the objective, sequence recipes, compare results, and decide the next iteration.
    - Generate PTQ checkpoints only as candidates. Do not call a candidate "best" until it has passed the evaluation and comparison stages below.
+   - Before proposing mixed-precision rules inside a layer family, account for target inference-library fusion. All modules that become one fused runtime module must use compatible quantization formats.
+   - Known fusion constraints:
+     - **vLLM Qwen linear attention:** `linear_attn.in_proj_qkv` and `linear_attn.in_proj_z` can be fused into `linear_attn.in_proj_qkvz`; do not mix quantization algorithms such as W4A16 NVFP4 and FP8 across those shards.
+     - **Fused MoE experts:** grouped expert projections inside a fused MoE kernel must use compatible quantization. Treat coupled expert projections such as gate/up (`w1`/`w3`, or equivalent fused names) as one recipe unit unless the target runtime explicitly supports mixed formats inside the fused expert.
    - Use AutoQuant or sensitivity tooling for broad search and module ranking.
    - Use manual recipes for controlled ablations by module family.
    - Change one major recipe axis at a time: weight format, activation format, quantization granularity, calibration method, excluded modules, or module family.
 
 4. **Gate before scaling**
    - Ask `ptq` to validate checkpoint coverage and metadata after generation.
+   - Add a fused-layer compatibility check before deployment/eval: if the target runtime fuses multiple checkpoint tensors into one module, verify the fused group has one supported quantization algorithm. Reject or rewrite recipes that would trigger errors like `Mixed quant_algo within fused layer`.
    - Ask `deployment` or `evaluation` for runtime sanity only when execution behavior is needed to qualify the recipe.
    - Promote only candidates that pass checkpoint validation and the required delegated sanity checks.
 
@@ -103,6 +108,7 @@ Do not duplicate those workflows here. This skill should leave the user with a c
 - A generated PTQ checkpoint is a candidate artifact, not the final answer to a "best recipe" request. Evaluation and comparison are required before final selection.
 - Prefer active runtime cost over checkpoint size when optimizing routed or sparsely activated models.
 - Always compare against BF16/FP16 and a near-lossless FP8/W8A8 baseline.
+- Respect inference-library fused modules when designing recipes. Do not mix quantization formats inside fused groups such as vLLM `linear_attn.in_proj_qkvz` or fused MoE expert projections.
 - Treat benchmark variance as real: run repeat sweeps for close decisions.
 - Do not mix parser/no-parser, FP8-KV/BF16-KV, runtime/backend, or sampling changes into recipe conclusions unless they are explicitly part of the experiment.
 - Use delegated pipe-clean checks for new checkpoint families before full evals.
