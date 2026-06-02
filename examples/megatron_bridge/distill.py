@@ -343,7 +343,7 @@ def main(args: argparse.Namespace):
             load=checkpoint_dir,  # Resume from this directory (if exists)
             most_recent_k=5,  # Keeps 5 most recent checkpoints (not metric-based)
             ckpt_format="torch_dist",
-            async_save=True,
+            async_save=False,
             fully_parallel_save=True,
         ),
         rng=RNGConfig(seed=args.seed),

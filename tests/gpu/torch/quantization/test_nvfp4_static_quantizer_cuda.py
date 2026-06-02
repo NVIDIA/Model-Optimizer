@@ -15,9 +15,13 @@
 
 """Tests for NVFP4StaticQuantizer and NVFP4MSECalibrator."""
 
+import copy
+
 import pytest
 import torch
+from torch import nn
 
+import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.calib import NVFP4MSECalibrator
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.nn import NVFP4StaticQuantizer, TensorQuantizer
@@ -158,6 +162,21 @@ class TestNVFP4StaticQuantizer:
 
 @pytest.mark.parametrize("device", ["cuda"])
 class TestNVFP4MSECalibrator:
+    def test_static_mse_reference_path_handles_padded_last_dim(self, device, monkeypatch):
+        """MSE calibration should compare tensors in the same padded block layout."""
+        monkeypatch.setenv("MODELOPT_NVFP4_TRITON_SWEEP", "0")
+        model = nn.Linear(60, 512, bias=False).eval().to(device=device, dtype=torch.bfloat16)
+        inputs = torch.randn(2, 60, device=device, dtype=torch.bfloat16)
+
+        mtq.quantize(
+            model,
+            copy.deepcopy(mtq.NVFP4_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG),
+            forward_loop=lambda model: model(inputs),
+        )
+
+        assert model.weight_quantizer.amax is not None
+        assert model.weight_quantizer.amax.numel() == 512 * 4
+
     def test_basic_initialization(self, device):
         """Test NVFP4MSECalibrator initialization."""
         num_blocks = 4

@@ -1,4 +1,9 @@
-block_size: 8192
+# Use fp32 for test forward passes: avoids cross-GPU bf16 numerical drift that would otherwise
+# completely reshuffle close-in-magnitude FFN importance scores on small (hidden=256) test models.
+# Also reduce block_size: SDPA's flash attention doesn't support fp32, so it materializes the full
+# (batch × heads × seq²) attention matrix; seq=8192 OOMs, seq=2048 fits.
+autocast_dtype: torch.float32
+block_size: 2048
 bos_rate: 0.5
 data_column: conversation
 val_dataset_name: train
