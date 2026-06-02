@@ -87,9 +87,12 @@ torchrun --nproc_per_node 1 export.py \
 > [!NOTE]
 > The HuggingFace unified exporter does not gather tensor-parallel-sharded weights. Use `--pp_size` on `export.py` to shard a large model with pipeline parallelism across GPUs for export.
 
+> [!TIP]
+> To recover the accuracy lost during quantization, fine-tune the quantized Megatron checkpoint (from step 1) with [Quantization Aware Distillation (QAD)](#quantization-aware-distillation-qad) before running the step 2 export.
+
 To see the full usage for advanced configurations, run `torchrun --nproc_per_node 1 quantize.py --help` (or `export.py --help`).
 
-For Quantization scripts covering VLMs, QAT, and resuming quantized checkpoints, see the Megatron-Bridge repository [here](https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/main/examples/quantization).
+For VLM (vision-language model) quantization, see the Megatron-Bridge repository [here](https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/main/examples/quantization).
 
 ## Distillation
 
@@ -98,6 +101,8 @@ This section shows how to distill a student model from a teacher model in the Me
 This can be used stand-alone or after [Pruning](#pruning) / [Post-Training Quantization](#post-training-quantization) to recover accuracy of the model by distilling from the original model (teacher).
 
 The [distill.py](distill.py) script supports both standard HuggingFace checkpoints and [Puzzletron AnyModel](../puzzletron/README.md) checkpoints as student/teacher inputs. Just pass the checkpoint path via `--student_hf_path` / `--teacher_hf_path`. The distilled model is saved to `<output_dir>/checkpoints` in Megatron distributed checkpoint format.
+
+To distill a student whose weights live in a **Megatron checkpoint** (e.g. a quantized checkpoint from [quantize.py](quantize.py) for [Quantization Aware Distillation](#quantization-aware-distillation-qad), or a pruned checkpoint), additionally pass `--student_megatron_path` — `--student_hf_path` is still required to build the student architecture.
 
 ### Data Preparation
 
@@ -158,6 +163,25 @@ torchrun --nproc_per_node 8 distill.py \
     --eval_iters 4 \
     --output_dir /tmp/test_distill
 ```
+
+### Quantization Aware Distillation (QAD)
+
+To recover the accuracy lost during [Post-Training Quantization](#post-training-quantization), distill the quantized model (student) from the original, unquantized model (teacher). Pass the quantized **Megatron checkpoint** produced by `quantize.py` via `--student_megatron_path` (the ModelOpt quantizers are restored automatically, so distillation trains the fake-quantized student), while `--student_hf_path` provides the student architecture and `--teacher_hf_path` points to the original unquantized model:
+
+```bash
+torchrun --nproc_per_node 8 distill.py \
+    --tp_size 8 \
+    --teacher_hf_path Qwen/Qwen3-8B \
+    --student_hf_path Qwen/Qwen3-8B \
+    --student_megatron_path /tmp/Qwen3-8B-FP8-megatron \
+    --data_paths 1.0 tokenized_qwen3/data_text_document \
+    --data_path_to_cache /path/to/cache/dataset_indices_qwen3 \
+    --seq_length 8192 \
+    --train_iters 1000 \
+    --output_dir /output/qwen3_8b_qad
+```
+
+The distilled checkpoint retains the ModelOpt quantization state, so it can be converted to a deployable HuggingFace checkpoint with [export.py](export.py) (point `--megatron_path` at `<output_dir>/checkpoints`), exactly like the PTQ checkpoint in [step 2 above](#post-training-quantization).
 
 ### Slurm Usage
 
